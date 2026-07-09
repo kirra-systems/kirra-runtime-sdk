@@ -1,6 +1,6 @@
-use parko_kirra::KirraGovernor;
 use parko_core::commands::ControlCommand;
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
+use parko_kirra::KirraGovernor;
 
 #[test]
 fn nominal_governor_allows_low_velocity_command() {

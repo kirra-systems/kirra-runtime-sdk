@@ -87,7 +87,8 @@ pub fn validate_trajectory_time_spacing(
 /// `Some(index)` if a non-finite field is found at pose `index`.
 pub fn validate_trajectory_poses_finite(trajectory: &[TrajectoryPoint]) -> Option<usize> {
     for (i, point) in trajectory.iter().enumerate() {
-        if !pose_is_finite(&point.pose) || !point.velocity_mps.is_finite()
+        if !pose_is_finite(&point.pose)
+            || !point.velocity_mps.is_finite()
             || !point.time_from_start_s.is_finite()
         {
             return Some(i);
@@ -167,10 +168,7 @@ pub fn validate_odom_freshness(
 /// - `remaining_m > 10,000 m` (extreme visibility) ⇒ precision loss in the sqrt subtraction.
 ///
 /// Both cases fail conservatively (underestimate safe speed).
-pub fn assured_clear_distance_speed_cap_safe(
-    remaining_m: f64,
-    brake_decel_mps2: f64,
-) -> f64 {
+pub fn assured_clear_distance_speed_cap_safe(remaining_m: f64, brake_decel_mps2: f64) -> f64 {
     const RSS_REACTION_TIME_S: f64 = 0.5;
     const MIN_DECEL_MPS2: f64 = 0.1; // Minimum braking to maintain physical model
 
@@ -216,11 +214,7 @@ pub fn assured_clear_distance_speed_cap_safe(
 ///
 /// In debug builds, asserts `heading_rad ∈ [-π, π]`.
 /// In release builds, assumes it (for performance); integrators MUST normalize.
-pub fn ego_frame_projection_safe(
-    heading_rad: f64,
-    dx: f64,
-    dy: f64,
-) -> (f64, f64) {
+pub fn ego_frame_projection_safe(heading_rad: f64, dx: f64, dy: f64) -> (f64, f64) {
     // Precondition: heading in [-π, π]
     debug_assert!(
         heading_rad.abs() <= std::f64::consts::PI + 1e-6,
@@ -230,8 +224,8 @@ pub fn ego_frame_projection_safe(
 
     let cos_h = heading_rad.cos();
     let sin_h = heading_rad.sin();
-    let dx_ego = cos_h * dx + sin_h * dy;      // longitudinal
-    let dy_ego = -sin_h * dx + cos_h * dy;     // lateral
+    let dx_ego = cos_h * dx + sin_h * dy; // longitudinal
+    let dy_ego = -sin_h * dx + cos_h * dy; // lateral
     (dx_ego, dy_ego)
 }
 
@@ -326,17 +320,29 @@ mod tests {
     fn trajectory_monotonicity_rejects_plateau() {
         let traj = vec![
             TrajectoryPoint {
-                pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: AdapterPose {
+                    x_m: 0.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 1.0,
                 time_from_start_s: 0.0,
             },
             TrajectoryPoint {
-                pose: AdapterPose { x_m: 1.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: AdapterPose {
+                    x_m: 1.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 1.0,
                 time_from_start_s: 0.1,
             },
             TrajectoryPoint {
-                pose: AdapterPose { x_m: 2.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: AdapterPose {
+                    x_m: 2.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 1.0,
                 time_from_start_s: 0.1, // Plateau: violation
             },
@@ -348,12 +354,20 @@ mod tests {
     fn trajectory_spacing_detects_large_gaps() {
         let traj = vec![
             TrajectoryPoint {
-                pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: AdapterPose {
+                    x_m: 0.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 1.0,
                 time_from_start_s: 0.0,
             },
             TrajectoryPoint {
-                pose: AdapterPose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: AdapterPose {
+                    x_m: 5.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 1.0,
                 time_from_start_s: 1.5, // Gap of 1.5s, exceeds 0.5s tolerance
             },
@@ -369,17 +383,29 @@ mod tests {
     fn trajectory_spacing_accepts_within_tolerance() {
         let traj = vec![
             TrajectoryPoint {
-                pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: AdapterPose {
+                    x_m: 0.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 1.0,
                 time_from_start_s: 0.0,
             },
             TrajectoryPoint {
-                pose: AdapterPose { x_m: 0.5, y_m: 0.0, heading_rad: 0.0 },
+                pose: AdapterPose {
+                    x_m: 0.5,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 1.0,
                 time_from_start_s: 0.1,
             },
             TrajectoryPoint {
-                pose: AdapterPose { x_m: 1.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: AdapterPose {
+                    x_m: 1.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 1.0,
                 time_from_start_s: 0.2,
             },
@@ -391,12 +417,20 @@ mod tests {
     fn trajectory_poses_finiteness_accepts_all_finite() {
         let traj = vec![
             TrajectoryPoint {
-                pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: AdapterPose {
+                    x_m: 0.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 1.0,
                 time_from_start_s: 0.0,
             },
             TrajectoryPoint {
-                pose: AdapterPose { x_m: 1.0, y_m: 2.0, heading_rad: 0.5 },
+                pose: AdapterPose {
+                    x_m: 1.0,
+                    y_m: 2.0,
+                    heading_rad: 0.5,
+                },
                 velocity_mps: 2.5,
                 time_from_start_s: 0.1,
             },
@@ -406,37 +440,43 @@ mod tests {
 
     #[test]
     fn trajectory_poses_finiteness_rejects_nan_x() {
-        let traj = vec![
-            TrajectoryPoint {
-                pose: AdapterPose { x_m: f64::NAN, y_m: 0.0, heading_rad: 0.0 },
-                velocity_mps: 1.0,
-                time_from_start_s: 0.0,
+        let traj = vec![TrajectoryPoint {
+            pose: AdapterPose {
+                x_m: f64::NAN,
+                y_m: 0.0,
+                heading_rad: 0.0,
             },
-        ];
+            velocity_mps: 1.0,
+            time_from_start_s: 0.0,
+        }];
         assert_eq!(validate_trajectory_poses_finite(&traj), Some(0));
     }
 
     #[test]
     fn trajectory_poses_finiteness_rejects_inf_velocity() {
-        let traj = vec![
-            TrajectoryPoint {
-                pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
-                velocity_mps: f64::INFINITY,
-                time_from_start_s: 0.0,
+        let traj = vec![TrajectoryPoint {
+            pose: AdapterPose {
+                x_m: 0.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
             },
-        ];
+            velocity_mps: f64::INFINITY,
+            time_from_start_s: 0.0,
+        }];
         assert_eq!(validate_trajectory_poses_finite(&traj), Some(0));
     }
 
     #[test]
     fn trajectory_poses_finiteness_rejects_inf_time() {
-        let traj = vec![
-            TrajectoryPoint {
-                pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
-                velocity_mps: 1.0,
-                time_from_start_s: f64::INFINITY,
+        let traj = vec![TrajectoryPoint {
+            pose: AdapterPose {
+                x_m: 0.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
             },
-        ];
+            velocity_mps: 1.0,
+            time_from_start_s: f64::INFINITY,
+        }];
         assert_eq!(validate_trajectory_poses_finite(&traj), Some(0));
     }
 
@@ -504,22 +544,37 @@ mod tests {
         let angles = [0.0, 0.5, 1.0, -1.5, std::f64::consts::PI - 0.1];
         for angle in angles {
             let normalized = normalize_heading(angle);
-            assert!((normalized - angle).abs() < 1e-9, "small angles should be unchanged");
+            assert!(
+                (normalized - angle).abs() < 1e-9,
+                "small angles should be unchanged"
+            );
         }
     }
 
     #[test]
     fn ego_frame_projection_safe_at_zero_heading() {
         let (dx_ego, dy_ego) = ego_frame_projection_safe(0.0, 10.0, 5.0);
-        assert!((dx_ego - 10.0).abs() < 1e-9, "at heading 0, dx projects to dx");
-        assert!((dy_ego - 5.0).abs() < 1e-9, "at heading 0, dy projects to dy");
+        assert!(
+            (dx_ego - 10.0).abs() < 1e-9,
+            "at heading 0, dx projects to dx"
+        );
+        assert!(
+            (dy_ego - 5.0).abs() < 1e-9,
+            "at heading 0, dy projects to dy"
+        );
     }
 
     #[test]
     fn ego_frame_projection_safe_at_pi_over_2_heading() {
         let (dx_ego, dy_ego) = ego_frame_projection_safe(std::f64::consts::PI / 2.0, 10.0, 5.0);
-        assert!((dx_ego - 5.0).abs() < 1e-9, "at heading π/2, dx projects to dy");
-        assert!((dy_ego + 10.0).abs() < 1e-9, "at heading π/2, dy projects to -dx");
+        assert!(
+            (dx_ego - 5.0).abs() < 1e-9,
+            "at heading π/2, dx projects to dy"
+        );
+        assert!(
+            (dy_ego + 10.0).abs() < 1e-9,
+            "at heading π/2, dy projects to -dx"
+        );
     }
 
     #[test]
@@ -535,31 +590,50 @@ mod tests {
         assert!(
             (dx_before - dx_after).abs() < 1.0 && (dy_before - dy_after).abs() < 1.0,
             "projection should be continuous across heading wrap: ({}, {}) vs ({}, {})",
-            dx_before, dy_before, dx_after, dy_after
+            dx_before,
+            dy_before,
+            dx_after,
+            dy_after
         );
     }
 
     #[test]
     fn pose_is_finite_accepts_all_finite() {
-        let pose = AdapterPose { x_m: 1.0, y_m: 2.0, heading_rad: 0.5 };
+        let pose = AdapterPose {
+            x_m: 1.0,
+            y_m: 2.0,
+            heading_rad: 0.5,
+        };
         assert!(pose_is_finite(&pose));
     }
 
     #[test]
     fn pose_is_finite_rejects_nan_x() {
-        let pose = AdapterPose { x_m: f64::NAN, y_m: 2.0, heading_rad: 0.5 };
+        let pose = AdapterPose {
+            x_m: f64::NAN,
+            y_m: 2.0,
+            heading_rad: 0.5,
+        };
         assert!(!pose_is_finite(&pose));
     }
 
     #[test]
     fn pose_is_finite_rejects_inf_y() {
-        let pose = AdapterPose { x_m: 1.0, y_m: f64::INFINITY, heading_rad: 0.5 };
+        let pose = AdapterPose {
+            x_m: 1.0,
+            y_m: f64::INFINITY,
+            heading_rad: 0.5,
+        };
         assert!(!pose_is_finite(&pose));
     }
 
     #[test]
     fn pose_is_finite_rejects_neg_inf_heading() {
-        let pose = AdapterPose { x_m: 1.0, y_m: 2.0, heading_rad: f64::NEG_INFINITY };
+        let pose = AdapterPose {
+            x_m: 1.0,
+            y_m: 2.0,
+            heading_rad: f64::NEG_INFINITY,
+        };
         assert!(!pose_is_finite(&pose));
     }
 }

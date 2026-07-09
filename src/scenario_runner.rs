@@ -48,13 +48,13 @@
 //      at the same timestamp have been processed AND recalculate_and_broadcast
 //      has returned, not after a yield.
 
-use std::sync::Arc;
-use crate::verifier::{AppState, FleetPosture, NodeTrustState};
+use crate::clock::{Clock, VirtualClock};
 use crate::posture_cache::SharedPostureCache;
 use crate::posture_engine::recalculate_and_broadcast;
 use crate::posture_engine_v2::apply_rss_state;
 use crate::recovery_hysteresis::{evaluate_recovery_report, HysteresisDecision};
-use crate::clock::{Clock, VirtualClock};
+use crate::verifier::{AppState, FleetPosture, NodeTrustState};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -76,10 +76,7 @@ pub enum ScenarioEvent {
     /// Directly marks a node Untrusted with a given reason, bypassing confidence
     /// floor evaluation. Use for simulating abrupt hardware failures, manual
     /// operator lockouts, or watchdog timeout events.
-    MarkUntrusted {
-        node_id: String,
-        reason: String,
-    },
+    MarkUntrusted { node_id: String, reason: String },
 
     /// Advances the virtual clock by the given duration without processing any
     /// other events. Use to simulate time passing (watchdog timeout windows,
@@ -237,7 +234,10 @@ impl ScenarioRunner {
 
     async fn run_inner(self, panic_on_failure: bool) -> Vec<AssertionResult> {
         // Collect all unique timestamps from events and assertions.
-        let mut milestones: Vec<u64> = self.events.iter().map(|e| e.0)
+        let mut milestones: Vec<u64> = self
+            .events
+            .iter()
+            .map(|e| e.0)
             .chain(self.assertions.iter().map(|a| a.0))
             .collect();
         milestones.sort_unstable();
@@ -261,15 +261,23 @@ impl ScenarioRunner {
             let mut needs_recalc = false;
 
             // Collect events at this milestone (borrow checker: collect first, iterate)
-            let active_events: Vec<ScenarioEvent> = self.events.iter()
+            let active_events: Vec<ScenarioEvent> = self
+                .events
+                .iter()
                 .filter(|e| e.0 == milestone)
                 .map(|e| e.1.clone())
                 .collect();
 
             for event in active_events {
                 match event {
-                    ScenarioEvent::TelemetryReport { ref node_id, confidence, hw_fault } => {
-                        let floor = self.app.store
+                    ScenarioEvent::TelemetryReport {
+                        ref node_id,
+                        confidence,
+                        hw_fault,
+                    } => {
+                        let floor = self
+                            .app
+                            .store
                             .with(|store| store.load_av_confidence_floor(node_id))
                             .unwrap_or(None)
                             .unwrap_or(self.default_confidence_floor);
@@ -284,8 +292,14 @@ impl ScenarioRunner {
                             };
 
                             // Disk-first: reset streak before memory mutation
-                            let _ = self.app.store.with(|store| store.reset_recovery_streak(node_id, ts));
-                            let _ = self.app.store.with(|store| store.touch_av_telemetry_timestamp(node_id, ts));
+                            let _ = self
+                                .app
+                                .store
+                                .with(|store| store.reset_recovery_streak(node_id, ts));
+                            let _ = self
+                                .app
+                                .store
+                                .with(|store| store.touch_av_telemetry_timestamp(node_id, ts));
 
                             if let Some(mut node) = self.app.nodes.get_mut(node_id) {
                                 node.status = NodeTrustState::Untrusted(reason.to_string());
@@ -293,7 +307,9 @@ impl ScenarioRunner {
                             needs_recalc = true;
                         } else {
                             // Health report — check if node is currently untrusted
-                            let currently_untrusted = self.app.nodes
+                            let currently_untrusted = self
+                                .app
+                                .nodes
                                 .get(node_id)
                                 .map(|n| matches!(n.status, NodeTrustState::Untrusted(_)))
                                 .unwrap_or(false);
@@ -316,10 +332,17 @@ impl ScenarioRunner {
                                         if let Some(mut node) = self.app.nodes.get_mut(node_id) {
                                             node.status = NodeTrustState::Trusted;
                                         }
-                                        let _ = self.app.store.with(|store| store.reset_recovery_streak(node_id, ts));
+                                        let _ = self
+                                            .app
+                                            .store
+                                            .with(|store| store.reset_recovery_streak(node_id, ts));
                                         needs_recalc = true;
                                     }
-                                    HysteresisDecision::StreakBuilding { current, required, .. } => {
+                                    HysteresisDecision::StreakBuilding {
+                                        current,
+                                        required,
+                                        ..
+                                    } => {
                                         tracing::debug!(
                                             node_id = %node_id,
                                             current = current, required = required,
@@ -337,18 +360,28 @@ impl ScenarioRunner {
                                         // No posture change
                                     }
                                     HysteresisDecision::NotApplicable => {
-                                        let _ = self.app.store
-                                            .with(|store| store.touch_av_telemetry_timestamp(node_id, ts));
+                                        let _ = self.app.store.with(|store| {
+                                            store.touch_av_telemetry_timestamp(node_id, ts)
+                                        });
                                     }
                                 }
                             } else {
-                                let _ = self.app.store.with(|store| store.touch_av_telemetry_timestamp(node_id, ts));
+                                let _ = self
+                                    .app
+                                    .store
+                                    .with(|store| store.touch_av_telemetry_timestamp(node_id, ts));
                             }
                         }
                     }
 
-                    ScenarioEvent::MarkUntrusted { ref node_id, ref reason } => {
-                        let _ = self.app.store.with(|store| store.reset_recovery_streak(node_id, ts));
+                    ScenarioEvent::MarkUntrusted {
+                        ref node_id,
+                        ref reason,
+                    } => {
+                        let _ = self
+                            .app
+                            .store
+                            .with(|store| store.reset_recovery_streak(node_id, ts));
                         if let Some(mut node) = self.app.nodes.get_mut(node_id) {
                             node.status = NodeTrustState::Untrusted(reason.clone());
                         }
@@ -377,7 +410,9 @@ impl ScenarioRunner {
             // ------------------------------------------------------------------
             // Evaluate all assertions scheduled at this timestamp.
             // ------------------------------------------------------------------
-            let active_assertions: Vec<(usize, PostureAssertion)> = self.assertions.iter()
+            let active_assertions: Vec<(usize, PostureAssertion)> = self
+                .assertions
+                .iter()
                 .enumerate()
                 .filter(|(_, (t, _))| *t == milestone)
                 .map(|(i, (_, a))| (i, a.clone()))
@@ -392,7 +427,8 @@ impl ScenarioRunner {
                     &self.app,
                     &self.posture_cache,
                     &self.clock,
-                ).await;
+                )
+                .await;
 
                 let passed = result.passed;
                 let description = result.description.clone();
@@ -431,56 +467,48 @@ async fn evaluate_assertion(
             match guard.as_ref() {
                 Some(cached) => {
                     let ok = cached.posture == *expected;
-                    let desc = format!(
-                        "FleetPostureIs({expected:?}): got {:?}", cached.posture
-                    );
+                    let desc = format!("FleetPostureIs({expected:?}): got {:?}", cached.posture);
                     (ok, desc)
                 }
                 None => (
                     false,
-                    format!("FleetPostureIs({expected:?}): cache is None")
+                    format!("FleetPostureIs({expected:?}): cache is None"),
                 ),
             }
         }
 
-        PostureAssertion::NodeTrustIs(node_id, expected) => {
-            match app.nodes.get(node_id) {
-                Some(node) => {
-                    let ok = node.status == *expected;
-                    let desc = format!(
-                        "NodeTrustIs({node_id}, {expected:?}): got {:?}", node.status
-                    );
-                    (ok, desc)
-                }
-                None => (false, format!("NodeTrustIs({node_id}, ...): node not found")),
+        PostureAssertion::NodeTrustIs(node_id, expected) => match app.nodes.get(node_id) {
+            Some(node) => {
+                let ok = node.status == *expected;
+                let desc = format!(
+                    "NodeTrustIs({node_id}, {expected:?}): got {:?}",
+                    node.status
+                );
+                (ok, desc)
             }
-        }
+            None => (
+                false,
+                format!("NodeTrustIs({node_id}, ...): node not found"),
+            ),
+        },
 
-        PostureAssertion::NodeIsUntrusted(node_id) => {
-            match app.nodes.get(node_id) {
-                Some(node) => {
-                    let ok = matches!(node.status, NodeTrustState::Untrusted(_));
-                    let desc = format!(
-                        "NodeIsUntrusted({node_id}): got {:?}", node.status
-                    );
-                    (ok, desc)
-                }
-                None => (false, format!("NodeIsUntrusted({node_id}): node not found")),
+        PostureAssertion::NodeIsUntrusted(node_id) => match app.nodes.get(node_id) {
+            Some(node) => {
+                let ok = matches!(node.status, NodeTrustState::Untrusted(_));
+                let desc = format!("NodeIsUntrusted({node_id}): got {:?}", node.status);
+                (ok, desc)
             }
-        }
+            None => (false, format!("NodeIsUntrusted({node_id}): node not found")),
+        },
 
-        PostureAssertion::NodeIsTrusted(node_id) => {
-            match app.nodes.get(node_id) {
-                Some(node) => {
-                    let ok = matches!(node.status, NodeTrustState::Trusted);
-                    let desc = format!(
-                        "NodeIsTrusted({node_id}): got {:?}", node.status
-                    );
-                    (ok, desc)
-                }
-                None => (false, format!("NodeIsTrusted({node_id}): node not found")),
+        PostureAssertion::NodeIsTrusted(node_id) => match app.nodes.get(node_id) {
+            Some(node) => {
+                let ok = matches!(node.status, NodeTrustState::Trusted);
+                let desc = format!("NodeIsTrusted({node_id}): got {:?}", node.status);
+                (ok, desc)
             }
-        }
+            None => (false, format!("NodeIsTrusted({node_id}): node not found")),
+        },
 
         PostureAssertion::CacheIsPopulated => {
             let guard = cache.read().unwrap();
@@ -501,12 +529,20 @@ async fn evaluate_assertion(
                     );
                     (ok, desc)
                 }
-                None => (true, "CacheIsStale: cache is None (fail-closed)".to_string()),
+                None => (
+                    true,
+                    "CacheIsStale: cache is None (fail-closed)".to_string(),
+                ),
             }
         }
     };
 
-    AssertionResult { timestamp_ms, assertion_index: index, passed, description }
+    AssertionResult {
+        timestamp_ms,
+        assertion_index: index,
+        passed,
+        description,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -516,9 +552,9 @@ async fn evaluate_assertion(
 #[cfg(test)]
 mod scenario_runner_tests {
     use super::*;
+    use crate::clock::VirtualClock;
     use crate::posture_cache::CachedFleetPosture;
     use crate::verifier::FleetPosture;
-    use crate::clock::VirtualClock;
 
     // -----------------------------------------------------------------------
     // Clock injection tests — verify that virtual time is actually used
@@ -543,8 +579,10 @@ mod scenario_runner_tests {
 
         // Advance virtual clock past TTL
         clock.advance_ms(POSTURE_CACHE_TTL_MS + 1);
-        assert!(entry.is_stale(clock.now_ms()),
-            "entry must be stale after virtual clock advances past TTL");
+        assert!(
+            entry.is_stale(clock.now_ms()),
+            "entry must be stale after virtual clock advances past TTL"
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
 use crate::posture_cache::now_ms;
 use crate::store_handle::StoreHandle;
 use crate::verifier_store::VerifierStore;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Max number of entries returned by a single causal-log export page (#87).
 /// Bounds the response so a forensic export can never load an unbounded ledger.
@@ -46,21 +46,20 @@ fn generate_entry_id(asset_id: &str, event_type: &str, timestamp_ms: u64) -> Str
     hasher.update(event_type.as_bytes());
     hasher.update(timestamp_ms.to_le_bytes());
     // Add sub-millisecond entropy from the entry count placeholder
-    hasher.update(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos()
-        .to_le_bytes());
+    hasher.update(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+            .to_le_bytes(),
+    );
     hex::encode(&hasher.finalize()[..16])
 }
 
 impl FabricCausalLog {
     /// Build over a SHARED [`StoreHandle`] so causal rows land in the same DB
     /// the rest of the service uses. Entries are durably persisted + chained.
-    pub fn new(
-        store: StoreHandle,
-        signing_key: Option<ed25519_dalek::SigningKey>,
-    ) -> Self {
+    pub fn new(store: StoreHandle, signing_key: Option<ed25519_dalek::SigningKey>) -> Self {
         Self { store, signing_key }
     }
 
@@ -186,7 +185,14 @@ mod tests {
     #[test]
     fn test_record_entry_with_causal_predecessors() {
         let log = FabricCausalLog::new_in_memory(None);
-        let id = log.record("asset_01", "FAULT_DETECTED", "{}", vec![], vec!["asset_02".to_string()], 1);
+        let id = log.record(
+            "asset_01",
+            "FAULT_DETECTED",
+            "{}",
+            vec![],
+            vec!["asset_02".to_string()],
+            1,
+        );
         assert!(!id.is_empty());
         assert_eq!(log.len(), 1);
     }
@@ -194,13 +200,33 @@ mod tests {
     #[test]
     fn test_causal_chain_traversal() {
         let log = FabricCausalLog::new_in_memory(None);
-        let root_id = log.record("gcs01", "GCS_FAULT", "{}", vec![], vec!["drone01".to_string()], 1);
-        let child_id = log.record("drone01", "DRONE_DEGRADED", "{}", vec![root_id.clone()], vec![], 1);
+        let root_id = log.record(
+            "gcs01",
+            "GCS_FAULT",
+            "{}",
+            vec![],
+            vec!["drone01".to_string()],
+            1,
+        );
+        let child_id = log.record(
+            "drone01",
+            "DRONE_DEGRADED",
+            "{}",
+            vec![root_id.clone()],
+            vec![],
+            1,
+        );
 
         let chain = log.causal_chain(&child_id);
         let ids: Vec<&str> = chain.iter().map(|e| e.entry_id.as_str()).collect();
-        assert!(ids.contains(&root_id.as_str()), "chain must contain root: {ids:?}");
-        assert!(ids.contains(&child_id.as_str()), "chain must contain child: {ids:?}");
+        assert!(
+            ids.contains(&root_id.as_str()),
+            "chain must contain root: {ids:?}"
+        );
+        assert!(
+            ids.contains(&child_id.as_str()),
+            "chain must contain child: {ids:?}"
+        );
     }
 
     #[test]
@@ -226,8 +252,12 @@ mod tests {
     fn test_cross_asset_causality_recorded() {
         let log = FabricCausalLog::new_in_memory(None);
         let id = log.record(
-            "infra01", "INFRA_LOCKOUT", "{}",
-            vec![], vec!["robot01".to_string(), "robot02".to_string()], 5
+            "infra01",
+            "INFRA_LOCKOUT",
+            "{}",
+            vec![],
+            vec!["robot01".to_string(), "robot02".to_string()],
+            5,
         );
         let entries = log.export(0, u64::MAX);
         let entry = entries.iter().find(|e| e.entry_id == id).unwrap();
@@ -242,7 +272,10 @@ mod tests {
         for i in 0..6 {
             log.record("a", &format!("EVT_{i}"), "{}", vec![], vec![], i);
         }
-        let r = log.store.with(|store| store.verify_causal_chain_integrity(None)).unwrap();
+        let r = log
+            .store
+            .with(|store| store.verify_causal_chain_integrity(None))
+            .unwrap();
         assert_eq!(r.total_entries, 6);
         assert!(r.chain_intact, "unsigned chain must be intact");
         assert!(r.head_verified, "head must verify: {}", r.head_status);
@@ -256,7 +289,10 @@ mod tests {
         let root = log.record("a", "ROOT", "{}", vec![], vec!["x".to_string()], 1);
         log.record("b", "CHILD", "{}", vec![root], vec![], 1);
 
-        let r = log.store.with(|store| store.verify_causal_chain_integrity(Some(&vk))).unwrap();
+        let r = log
+            .store
+            .with(|store| store.verify_causal_chain_integrity(Some(&vk)))
+            .unwrap();
         assert!(r.chain_intact);
         assert!(r.signature_valid, "all signatures must verify");
         assert!(r.head_verified, "head must verify: {}", r.head_status);

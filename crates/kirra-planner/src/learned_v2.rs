@@ -159,7 +159,9 @@ impl ScorerConfigV2 {
 }
 
 fn linspace(lo: f64, hi: f64, n: usize) -> Vec<f64> {
-    (0..n).map(|i| lo + (hi - lo) * i as f64 / (n - 1) as f64).collect()
+    (0..n)
+        .map(|i| lo + (hi - lo) * i as f64 / (n - 1) as f64)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -255,7 +257,11 @@ fn corridor_clearance(map: &dyn CorridorSource, ego_x: f64, ego_y: f64) -> (f64,
         let mut ys = Vec::new();
         for seg in pts.windows(2) {
             let (a, b) = (seg[0], seg[1]);
-            let (sx0, sx1) = if a.x_m <= b.x_m { (a.x_m, b.x_m) } else { (b.x_m, a.x_m) };
+            let (sx0, sx1) = if a.x_m <= b.x_m {
+                (a.x_m, b.x_m)
+            } else {
+                (b.x_m, a.x_m)
+            };
             let lo = sx0.max(x0);
             let hi = sx1.min(x1);
             if lo > hi {
@@ -322,9 +328,17 @@ fn materialize_v2(s: &SceneV2, offset: f64, target: f64) -> Vec<TrajectoryPoint>
         .map(|i| {
             let t = ((x - s.ego_x) / TRANSITION_M).clamp(0.0, 1.0);
             let y = s.ego_y + offset * (t * t * (3.0 - 2.0 * t)); // smoothstep
-            let heading = if i == 0 { 0.0 } else { (y - prev.1).atan2((x - prev.0).max(1e-6)) };
+            let heading = if i == 0 {
+                0.0
+            } else {
+                (y - prev.1).atan2((x - prev.0).max(1e-6))
+            };
             let p = TrajectoryPoint {
-                pose: Pose { x_m: x, y_m: y, heading_rad: heading },
+                pose: Pose {
+                    x_m: x,
+                    y_m: y,
+                    heading_rad: heading,
+                },
                 velocity_mps: v,
                 time_from_start_s: i as f64 * DT,
             };
@@ -344,7 +358,12 @@ fn materialize_v2(s: &SceneV2, offset: f64, target: f64) -> Vec<TrajectoryPoint>
 fn teacher_score_v2(s: &SceneV2, cfg: &ScorerConfigV2, c: usize, teacher: Teacher) -> f64 {
     let (offset, target) = cfg.candidate(c);
     let traj = materialize_v2(s, offset, target);
-    let max_speed = cfg.speed_targets.iter().copied().fold(0.0, f64::max).max(1e-9);
+    let max_speed = cfg
+        .speed_targets
+        .iter()
+        .copied()
+        .fold(0.0, f64::max)
+        .max(1e-9);
     let progress = (traj.last().unwrap().pose.x_m - s.ego_x) / (HORIZON as f64 * DT * max_speed);
 
     let hazard = if teacher == Teacher::SafetyAware && !s.objects.is_empty() {
@@ -501,7 +520,10 @@ impl MlpV2 {
     fn zero_grads(&self) -> Vec<LayerGrads> {
         self.layers
             .iter()
-            .map(|l| LayerGrads { dw: vec![0.0; l.w.len()], db: vec![0.0; l.b.len()] })
+            .map(|l| LayerGrads {
+                dw: vec![0.0; l.w.len()],
+                db: vec![0.0; l.b.len()],
+            })
             .collect()
     }
 
@@ -548,7 +570,14 @@ impl TrainConfigV2 {
     /// yet → more variance to fit than the naive first cut).
     #[must_use]
     pub fn reduced(seed: u64) -> Self {
-        Self { seed, scenes: 320, epochs: 420, batch: 16, lr: 0.02, momentum: 0.9 }
+        Self {
+            seed,
+            scenes: 320,
+            epochs: 420,
+            batch: 16,
+            lr: 0.02,
+            momentum: 0.9,
+        }
     }
 
     /// The OFFLINE full-size schedule for [`ScorerConfigV2::full`] — minutes on
@@ -556,7 +585,14 @@ impl TrainConfigV2 {
     /// gates the resulting checked-in artifact's BEHAVIOR, not its training.
     #[must_use]
     pub fn full(seed: u64) -> Self {
-        Self { seed, scenes: 4000, epochs: 240, batch: 32, lr: 0.01, momentum: 0.9 }
+        Self {
+            seed,
+            scenes: 4000,
+            epochs: 240,
+            batch: 32,
+            lr: 0.01,
+            momentum: 0.9,
+        }
     }
 }
 
@@ -566,10 +602,10 @@ impl TrainConfigV2 {
 fn training_scene_v2(rng: &mut Rng) -> SceneV2 {
     let ego_speed = rng.range(0.0, 4.0);
     let n_objects = (rng.unit() * 4.0) as usize; // 0..=3
-    // Same normalization as the inference path (nearest-ahead first) and the
-    // same EGO-RELATIVE velocity semantics: world-frame object speeds in
-    // [-1, +1] m/s become relative vx in [-ego_speed-1, -ego_speed+1] — so the
-    // canonical stopped-car case (relative vx = -ego_speed) is IN distribution.
+                                                 // Same normalization as the inference path (nearest-ahead first) and the
+                                                 // same EGO-RELATIVE velocity semantics: world-frame object speeds in
+                                                 // [-1, +1] m/s become relative vx in [-ego_speed-1, -ego_speed+1] — so the
+                                                 // canonical stopped-car case (relative vx = -ego_speed) is IN distribution.
     let objects = normalize_objects(
         (0..n_objects)
             .map(|_| SceneObject {
@@ -613,7 +649,9 @@ pub fn train_planner_v2(
         .map(|_| {
             let scene = training_scene_v2(&mut rng);
             let feats = featurize_v2(&scene);
-            let labels = (0..k).map(|c| teacher_score_v2(&scene, cfg, c, teacher)).collect();
+            let labels = (0..k)
+                .map(|c| teacher_score_v2(&scene, cfg, c, teacher))
+                .collect();
             (feats, labels)
         })
         .collect();
@@ -652,7 +690,14 @@ pub fn train_planner_v2(
         last_loss = epoch_loss / (data.len() * k) as f64;
     }
 
-    (LearnedPlannerV2 { scorer: net, cfg: cfg.clone(), teacher }, last_loss)
+    (
+        LearnedPlannerV2 {
+            scorer: net,
+            cfg: cfg.clone(),
+            teacher,
+        },
+        last_loss,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -684,7 +729,8 @@ impl LearnedPlannerV2 {
     /// seams in M-2 build on this).
     #[must_use]
     pub fn scores(&self, input: &PlanInput) -> Vec<f64> {
-        self.scorer.forward(&featurize_v2(&SceneV2::from_input(input)))
+        self.scorer
+            .forward(&featurize_v2(&SceneV2::from_input(input)))
     }
 }
 
@@ -704,8 +750,9 @@ fn argmax(v: &[f64]) -> usize {
 #[must_use]
 pub fn teacher_choice(cfg: &ScorerConfigV2, input: &PlanInput, teacher: Teacher) -> usize {
     let scene = SceneV2::from_input(input);
-    let scores: Vec<f64> =
-        (0..cfg.vocab_size()).map(|c| teacher_score_v2(&scene, cfg, c, teacher)).collect();
+    let scores: Vec<f64> = (0..cfg.vocab_size())
+        .map(|c| teacher_score_v2(&scene, cfg, c, teacher))
+        .collect();
     argmax(&scores)
 }
 
@@ -775,7 +822,10 @@ struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     fn take(&mut self, n: usize, what: &'static str) -> Result<&'a [u8], WeightsError> {
-        let end = self.at.checked_add(n).ok_or(WeightsError::Truncated(what))?;
+        let end = self
+            .at
+            .checked_add(n)
+            .ok_or(WeightsError::Truncated(what))?;
         if end > self.buf.len() {
             return Err(WeightsError::Truncated(what));
         }
@@ -784,13 +834,19 @@ impl<'a> Cursor<'a> {
         Ok(s)
     }
     fn u32(&mut self, what: &'static str) -> Result<u32, WeightsError> {
-        Ok(u32::from_le_bytes(self.take(4, what)?.try_into().expect("4 bytes")))
+        Ok(u32::from_le_bytes(
+            self.take(4, what)?.try_into().expect("4 bytes"),
+        ))
     }
     fn f64(&mut self, what: &'static str) -> Result<f64, WeightsError> {
-        Ok(f64::from_le_bytes(self.take(8, what)?.try_into().expect("8 bytes")))
+        Ok(f64::from_le_bytes(
+            self.take(8, what)?.try_into().expect("8 bytes"),
+        ))
     }
     fn f32(&mut self, what: &'static str) -> Result<f32, WeightsError> {
-        Ok(f32::from_le_bytes(self.take(4, what)?.try_into().expect("4 bytes")))
+        Ok(f32::from_le_bytes(
+            self.take(4, what)?.try_into().expect("4 bytes"),
+        ))
     }
     fn counted(&mut self, what: &'static str) -> Result<usize, WeightsError> {
         let n = self.u32(what)?;
@@ -872,12 +928,18 @@ impl LearnedPlannerV2 {
             .map(|_| c.counted("hidden width"))
             .collect::<Result<_, _>>()?;
         let n_off = c.counted("offset count")?;
-        let lateral_offsets: Vec<f64> =
-            (0..n_off).map(|_| c.f64("offset")).collect::<Result<_, _>>()?;
+        let lateral_offsets: Vec<f64> = (0..n_off)
+            .map(|_| c.f64("offset"))
+            .collect::<Result<_, _>>()?;
         let n_spd = c.counted("speed count")?;
-        let speed_targets: Vec<f64> =
-            (0..n_spd).map(|_| c.f64("speed")).collect::<Result<_, _>>()?;
-        let cfg = ScorerConfigV2 { hidden, lateral_offsets, speed_targets };
+        let speed_targets: Vec<f64> = (0..n_spd)
+            .map(|_| c.f64("speed"))
+            .collect::<Result<_, _>>()?;
+        let cfg = ScorerConfigV2 {
+            hidden,
+            lateral_offsets,
+            speed_targets,
+        };
 
         let dims = cfg.dims();
         let layers = dims
@@ -887,15 +949,25 @@ impl LearnedPlannerV2 {
                 let w: Vec<f64> = (0..o * i)
                     .map(|_| c.f32("weight").map(f64::from))
                     .collect::<Result<_, _>>()?;
-                let b: Vec<f64> =
-                    (0..o).map(|_| c.f32("bias").map(f64::from)).collect::<Result<_, _>>()?;
-                Ok(LayerV2 { w, b, in_dim: i, out_dim: o })
+                let b: Vec<f64> = (0..o)
+                    .map(|_| c.f32("bias").map(f64::from))
+                    .collect::<Result<_, _>>()?;
+                Ok(LayerV2 {
+                    w,
+                    b,
+                    in_dim: i,
+                    out_dim: o,
+                })
             })
             .collect::<Result<Vec<_>, WeightsError>>()?;
         if c.at != bytes.len() {
             return Err(WeightsError::TrailingBytes(bytes.len() - c.at));
         }
-        Ok(Self { scorer: MlpV2 { layers }, cfg, teacher })
+        Ok(Self {
+            scorer: MlpV2 { layers },
+            cfg,
+            teacher,
+        })
     }
 }
 
@@ -1152,10 +1224,10 @@ impl LearnedPlannerV2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{EgoState, Goal};
     use kirra_core::corridor::MockCorridorSource;
     use kirra_core::trajectory::PerceivedObject;
     use kirra_core::FleetPosture;
-    use crate::{EgoState, Goal};
 
     const SEED: u64 = 0xC0FFEE;
 
@@ -1174,15 +1246,22 @@ mod tests {
         let t: Vec<f64> = (0..3).map(|_| rng.range(-1.0, 1.0)).collect();
 
         let loss = |net: &MlpV2| -> f64 {
-            net.forward(&x).iter().zip(t.iter()).map(|(y, t)| (y - t) * (y - t)).sum::<f64>()
+            net.forward(&x)
+                .iter()
+                .zip(t.iter())
+                .map(|(y, t)| (y - t) * (y - t))
+                .sum::<f64>()
                 / t.len() as f64
         };
 
         // Analytic gradients.
         let acts = net.forward_acts(&x);
         let y = acts.last().unwrap().clone();
-        let dl: Vec<f64> =
-            y.iter().zip(t.iter()).map(|(yj, tj)| 2.0 * (yj - tj) / t.len() as f64).collect();
+        let dl: Vec<f64> = y
+            .iter()
+            .zip(t.iter())
+            .map(|(yj, tj)| 2.0 * (yj - tj) / t.len() as f64)
+            .collect();
         let mut grads = net.zero_grads();
         net.backward_accumulate(&acts, &dl, &mut grads);
 
@@ -1220,18 +1299,25 @@ mod tests {
         }
     }
 
-    fn world<'a>(
-        map: &'a MockCorridorSource,
-        objects: &'a [PerceivedObject],
-    ) -> PlanInput<'a> {
+    fn world<'a>(map: &'a MockCorridorSource, objects: &'a [PerceivedObject]) -> PlanInput<'a> {
         PlanInput {
             ego: EgoState {
-                pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 5.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 linear_x_mps: 2.0,
                 yaw_rate_rads: 0.0,
                 stamp_ms: 0,
             },
-            goal: Goal { target: Pose { x_m: 40.0, y_m: 0.0, heading_rad: 0.0 } },
+            goal: Goal {
+                target: Pose {
+                    x_m: 40.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+            },
             map,
             objects,
             controls: &[],
@@ -1262,16 +1348,23 @@ mod tests {
     }
 
     fn reach(out: &PlanOutput) -> f64 {
-        out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max)
+        out.trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max)
     }
 
     #[test]
     fn training_reduces_the_distillation_loss() {
         let cfg = ScorerConfigV2::reduced();
         // One epoch vs the full schedule: the full schedule must land lower.
-        let short = TrainConfigV2 { epochs: 1, ..TrainConfigV2::reduced(SEED) };
+        let short = TrainConfigV2 {
+            epochs: 1,
+            ..TrainConfigV2::reduced(SEED)
+        };
         let (_, loss_short) = train_planner_v2(&cfg, &short, Teacher::SafetyAware);
-        let (_, loss_full) = train_planner_v2(&cfg, &TrainConfigV2::reduced(SEED), Teacher::SafetyAware);
+        let (_, loss_full) =
+            train_planner_v2(&cfg, &TrainConfigV2::reduced(SEED), Teacher::SafetyAware);
         assert!(
             loss_full < loss_short,
             "training must reduce the loss: 1-epoch {loss_short} vs full {loss_full}"
@@ -1288,7 +1381,11 @@ mod tests {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let objs = [stopped_car(22.0)];
         let w = world(&corr, &objs);
-        assert_eq!(a.scores(&w), b.scores(&w), "identical scores on a probe input");
+        assert_eq!(
+            a.scores(&w),
+            b.scores(&w),
+            "identical scores on a probe input"
+        );
     }
 
     /// The v1 behavioral story must hold at v2: the safety-aware net stops short
@@ -1384,7 +1481,10 @@ mod tests {
         let cfg = ScorerConfigV2::reduced();
         let (p, _) = train_planner_v2(
             &cfg,
-            &TrainConfigV2 { epochs: 1, ..TrainConfigV2::reduced(SEED) },
+            &TrainConfigV2 {
+                epochs: 1,
+                ..TrainConfigV2::reduced(SEED)
+            },
             Teacher::SafetyAware,
         );
         let good = p.to_bytes();
@@ -1392,7 +1492,10 @@ mod tests {
         // Bad magic.
         let mut bad = good.clone();
         bad[0] ^= 0xFF;
-        assert!(matches!(LearnedPlannerV2::from_bytes(&bad), Err(WeightsError::BadMagic)));
+        assert!(matches!(
+            LearnedPlannerV2::from_bytes(&bad),
+            Err(WeightsError::BadMagic)
+        ));
         // Unsupported version.
         let mut bad = good.clone();
         bad[8] = 99;
@@ -1431,8 +1534,14 @@ mod tests {
         let w = world(&corr, &[]);
         let scene_features = featurize_v2(&SceneV2::from_input(&w));
         // Feature layout: [3] = left_clear/5, [4] = right_clear/5 → both 1.0.
-        assert_eq!(scene_features[3], 1.0, "left clearance 5 m from a 2-vertex boundary");
-        assert_eq!(scene_features[4], 1.0, "right clearance 5 m from a 2-vertex boundary");
+        assert_eq!(
+            scene_features[3], 1.0,
+            "left clearance 5 m from a 2-vertex boundary"
+        );
+        assert_eq!(
+            scene_features[4], 1.0,
+            "right clearance 5 m from a 2-vertex boundary"
+        );
     }
 
     #[test]
@@ -1441,9 +1550,13 @@ mod tests {
         let w = world(&corr, &[]);
         let f = featurize_v2(&SceneV2::from_input(&w));
         // All four object slots empty ⇒ their 20 dims are zero (fail-safe).
-        assert!(f[5..5 + OBJECT_SLOTS * OBJECT_FEATS].iter().all(|&v| v == 0.0));
+        assert!(f[5..5 + OBJECT_SLOTS * OBJECT_FEATS]
+            .iter()
+            .all(|&v| v == 0.0));
         // And the padding tail is zero.
-        assert!(f[5 + OBJECT_SLOTS * OBJECT_FEATS..].iter().all(|&v| v == 0.0));
+        assert!(f[5 + OBJECT_SLOTS * OBJECT_FEATS..]
+            .iter()
+            .all(|&v| v == 0.0));
     }
 
     /// M-2 PTQ: calibration invariants — one activation scale per matmul
@@ -1455,15 +1568,18 @@ mod tests {
     #[test]
     fn quantized_v2_calibration_invariants_hold() {
         let cfg = ScorerConfigV2::reduced();
-        let (p, _) =
-            train_planner_v2(&cfg, &TrainConfigV2::reduced(SEED), Teacher::SafetyAware);
+        let (p, _) = train_planner_v2(&cfg, &TrainConfigV2::reduced(SEED), Teacher::SafetyAware);
 
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let hazards = [vec![], vec![stopped_car(15.0)], vec![stopped_car(25.0)]];
         let worlds: Vec<PlanInput> = hazards.iter().map(|o| world(&corr, o)).collect();
         let int8 = p.quantize_int8(&worlds);
 
-        assert_eq!(int8.act_scales().len(), cfg.hidden.len() + 1, "one scale per matmul input");
+        assert_eq!(
+            int8.act_scales().len(),
+            cfg.hidden.len() + 1,
+            "one scale per matmul input"
+        );
         assert!(int8.act_scales().iter().all(|&s| s.is_finite() && s > 0.0));
         assert_eq!(int8.teacher(), p.teacher());
         assert_eq!(int8.config(), p.config());
@@ -1485,7 +1601,10 @@ mod tests {
         let cfg = ScorerConfigV2::reduced();
         let (p, _) = train_planner_v2(
             &cfg,
-            &TrainConfigV2 { epochs: 1, ..TrainConfigV2::reduced(SEED) },
+            &TrainConfigV2 {
+                epochs: 1,
+                ..TrainConfigV2::reduced(SEED)
+            },
             Teacher::SafetyAware,
         );
         let dims = cfg.dims();

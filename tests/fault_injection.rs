@@ -43,11 +43,7 @@ fn test_safety_goal_sg_006_unknown_command_denial() {
     ] {
         // Cache generated at now_ms → not stale; isolates the Unknown
         // early-return from the staleness fail-closed path.
-        let cache = Some(CachedFleetPosture::new_with_generation(
-            posture,
-            0,
-            now_ms,
-        ));
+        let cache = Some(CachedFleetPosture::new_with_generation(posture, 0, now_ms));
 
         let routed = should_route_command(&cache, now_ms, OperationalCommand::Unknown);
         assert!(
@@ -181,8 +177,9 @@ fn test_safety_goal_sg_014_federation_report_replay_prevention() {
 
 #[test]
 fn test_safety_goal_sg_016_dds_actuator_volatile_durability() {
-    let source = std::fs::read_to_string("src/dds_bridge.rs")
-        .expect("read src/dds_bridge.rs from crate root (cwd should be the kirra-runtime-sdk crate root)");
+    let source = std::fs::read_to_string("src/dds_bridge.rs").expect(
+        "read src/dds_bridge.rs from crate root (cwd should be the kirra-runtime-sdk crate root)",
+    );
 
     assert!(
         source.contains("durability: DdsDurability::Volatile"),
@@ -237,11 +234,11 @@ fn test_safety_goal_sg_016_dds_actuator_volatile_durability() {
 
 #[test]
 fn test_safety_goal_sg_007_cross_asset_lockout_propagation() {
-    use std::collections::HashMap;
     use kirra_verifier::fabric::asset::{
         AssetPosture, AssetType, FabricAsset, KinematicProfileType,
     };
     use kirra_verifier::fabric::router::FabricRouter;
+    use std::collections::HashMap;
 
     fn convoy_asset(id: &str, role: &str) -> FabricAsset {
         let mut metadata = HashMap::new();

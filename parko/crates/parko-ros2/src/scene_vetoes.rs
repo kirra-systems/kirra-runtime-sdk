@@ -186,7 +186,11 @@ mod tests {
 
     fn outcome(linear: f64) -> TickOutcome {
         TickOutcome {
-            twist: OutgoingTwist { linear_x_mps: linear, angular_z_rads: 0.0, stamp_ms: 7 },
+            twist: OutgoingTwist {
+                linear_x_mps: linear,
+                angular_z_rads: 0.0,
+                stamp_ms: 7,
+            },
             error: None,
             degraded: false,
         }
@@ -224,11 +228,17 @@ mod tests {
     fn occlusion_limited_caps_overspeed() {
         // A short sightline yields a small cap; a 5 m/s ego must stop.
         let s = stamped(
-            OcclusionScene::Limited { d_sight_m: 2.0, v_emerge_max_mps: 1.5 },
+            OcclusionScene::Limited {
+                d_sight_m: 2.0,
+                v_emerge_max_mps: 1.5,
+            },
             100,
         );
         let out = apply_occlusion_gate(outcome(5.0), Some(&s), &params(), 500, 100);
-        assert_eq!(out.twist.linear_x_mps, 0.0, "overspeed past the occlusion cap must stop");
+        assert_eq!(
+            out.twist.linear_x_mps, 0.0,
+            "overspeed past the occlusion cap must stop"
+        );
         assert_eq!(out.error, Some(TickError::OcclusionBreach));
     }
 
@@ -237,11 +247,18 @@ mod tests {
         // A generous sightline admits a slow ego (the creep-into-blind-junction
         // behaviour: the cap binds speed, it does not forbid motion).
         let s = stamped(
-            OcclusionScene::Limited { d_sight_m: 50.0, v_emerge_max_mps: 1.0 },
+            OcclusionScene::Limited {
+                d_sight_m: 50.0,
+                v_emerge_max_mps: 1.0,
+            },
             100,
         );
         let out = apply_occlusion_gate(outcome(0.3), Some(&s), &params(), 500, 100);
-        assert!(out.error.is_none(), "slow ego under a long sightline passes; got {:?}", out.error);
+        assert!(
+            out.error.is_none(),
+            "slow ego under a long sightline passes; got {:?}",
+            out.error
+        );
     }
 
     #[test]
@@ -257,7 +274,10 @@ mod tests {
         // A KnownClear scene older than the budget is a gap, not a verdict.
         let s = stamped(OcclusionScene::KnownClear, 100);
         let out = apply_occlusion_gate(outcome(0.2), Some(&s), &params(), 500, 2_000);
-        assert_eq!(out.twist.linear_x_mps, 0.0, "stale sightline must fail closed");
+        assert_eq!(
+            out.twist.linear_x_mps, 0.0,
+            "stale sightline must fail closed"
+        );
         assert_eq!(out.error, Some(TickError::OcclusionBreach));
     }
 
@@ -268,7 +288,10 @@ mod tests {
         // fresh: beyond the skew budget it is treated as stale → fail closed.
         let s = stamped(OcclusionScene::KnownClear, 100_000);
         let out = apply_occlusion_gate(outcome(0.2), Some(&s), &params(), 500, 100);
-        assert_eq!(out.twist.linear_x_mps, 0.0, "future-stamped sightline must fail closed, not read fresh");
+        assert_eq!(
+            out.twist.linear_x_mps, 0.0,
+            "future-stamped sightline must fail closed, not read fresh"
+        );
         assert_eq!(out.error, Some(TickError::OcclusionBreach));
     }
 
@@ -277,9 +300,15 @@ mod tests {
         // #770 F4 — a stamp a few ms ahead (ordinary jitter, within the skew
         // budget) is tolerated as fresh, so the fix doesn't over-reject.
         let s = stamped(OcclusionScene::KnownClear, 110);
-        assert!(s.is_fresh(100, 500), "a stamp within the skew budget must stay fresh");
+        assert!(
+            s.is_fresh(100, 500),
+            "a stamp within the skew budget must stay fresh"
+        );
         let out = apply_occlusion_gate(outcome(0.2), Some(&s), &params(), 500, 100);
-        assert!(out.error.is_none(), "within-skew-budget KnownClear must pass");
+        assert!(
+            out.error.is_none(),
+            "within-skew-budget KnownClear must pass"
+        );
     }
 
     // ---- water --------------------------------------------------------------
@@ -287,7 +316,13 @@ mod tests {
     #[test]
     fn water_clear_passes() {
         let s = stamped(WaterScene::Clear, 100);
-        let out = apply_water_gate(outcome(1.0), Some(&s), &WaterVetoConfig::default(), 500, 100);
+        let out = apply_water_gate(
+            outcome(1.0),
+            Some(&s),
+            &WaterVetoConfig::default(),
+            500,
+            100,
+        );
         assert!(out.error.is_none());
         assert!((out.twist.linear_x_mps - 1.0).abs() < 1e-9);
     }
@@ -295,15 +330,27 @@ mod tests {
     #[test]
     fn water_unknown_scene_stops() {
         let s = stamped(WaterScene::Unknown, 100);
-        let out = apply_water_gate(outcome(1.0), Some(&s), &WaterVetoConfig::default(), 500, 100);
-        assert_eq!(out.twist.linear_x_mps, 0.0, "Unknown water must veto (stop short of water)");
+        let out = apply_water_gate(
+            outcome(1.0),
+            Some(&s),
+            &WaterVetoConfig::default(),
+            500,
+            100,
+        );
+        assert_eq!(
+            out.twist.linear_x_mps, 0.0,
+            "Unknown water must veto (stop short of water)"
+        );
         assert_eq!(out.error, Some(TickError::WaterVeto));
     }
 
     #[test]
     fn water_missing_scene_fails_closed() {
         let out = apply_water_gate(outcome(1.0), None, &WaterVetoConfig::default(), 500, 100);
-        assert_eq!(out.twist.linear_x_mps, 0.0, "armed-but-silent water channel must veto");
+        assert_eq!(
+            out.twist.linear_x_mps, 0.0,
+            "armed-but-silent water channel must veto"
+        );
         assert_eq!(out.error, Some(TickError::WaterVeto));
     }
 
@@ -323,7 +370,10 @@ mod tests {
         let s = stamped(CommitZoneScene::Unknown, 100);
         let out =
             apply_commit_zone_gate(outcome(1.0), Some(&s), &CommitZoneCfg::default(), 500, 100);
-        assert_eq!(out.twist.linear_x_mps, 0.0, "an Unknown map must veto (reject from map alone)");
+        assert_eq!(
+            out.twist.linear_x_mps, 0.0,
+            "an Unknown map must veto (reject from map alone)"
+        );
         assert_eq!(out.error, Some(TickError::CommitZoneVeto));
     }
 
@@ -348,7 +398,11 @@ mod tests {
         let out = apply_occlusion_gate(stopped.clone(), None, &params(), 500, 100);
         let out = apply_water_gate(out, None, &WaterVetoConfig::default(), 500, 100);
         let out = apply_commit_zone_gate(out, None, &CommitZoneCfg::default(), 500, 100);
-        assert_eq!(out.error, Some(TickError::ObjectRssBreach), "upstream provenance preserved");
+        assert_eq!(
+            out.error,
+            Some(TickError::ObjectRssBreach),
+            "upstream provenance preserved"
+        );
         assert_eq!(out.twist, OutgoingTwist::stopped(7));
     }
 }

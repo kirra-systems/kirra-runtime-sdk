@@ -31,8 +31,8 @@
 // "incident X → a, b, c → resolved".
 
 use std::fmt::Write as _;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::verifier::{AppState, FleetPosture};
 
@@ -90,7 +90,8 @@ fn new_correlation_id(ts: u64, generation: u64) -> String {
 }
 
 fn note_failure(app: &AppState, event_type: &str, why: &str) {
-    app.post_incident_write_failures.fetch_add(1, Ordering::SeqCst);
+    app.post_incident_write_failures
+        .fetch_add(1, Ordering::SeqCst);
     tracing::error!(
         event_type,
         error = %why,
@@ -261,13 +262,31 @@ mod tests {
 
         // OPEN: Nominal → LockedOut (entry to the fail-closed safe posture).
         record_posture_transition(
-            &app, Some(&FleetPosture::Nominal), &FleetPosture::LockedOut, true, 10, 1_000);
+            &app,
+            Some(&FleetPosture::Nominal),
+            &FleetPosture::LockedOut,
+            true,
+            10,
+            1_000,
+        );
         // EVENT: LockedOut → Degraded (recovery progress, same incident).
         record_posture_transition(
-            &app, Some(&FleetPosture::LockedOut), &FleetPosture::Degraded, true, 11, 2_000);
+            &app,
+            Some(&FleetPosture::LockedOut),
+            &FleetPosture::Degraded,
+            true,
+            11,
+            2_000,
+        );
         // CLOSE: Degraded → Nominal (resolved to Active).
         record_posture_transition(
-            &app, Some(&FleetPosture::Degraded), &FleetPosture::Nominal, true, 12, 3_000);
+            &app,
+            Some(&FleetPosture::Degraded),
+            &FleetPosture::Nominal,
+            true,
+            12,
+            3_000,
+        );
 
         assert_eq!(write_failures(&app), 0, "all three writes must land");
         // The incident is closed → no open state remains.
@@ -280,8 +299,15 @@ mod tests {
             (v, events)
         });
         assert!(v.chain_intact, "post-incident events must be hash-chained");
-        assert!(v.signature_valid, "post-incident events must verify under the signing key");
-        assert!(v.signed_entries >= 3, "all three sequence events must be signed, got {}", v.signed_entries);
+        assert!(
+            v.signature_valid,
+            "post-incident events must verify under the signing key"
+        );
+        assert!(
+            v.signed_entries >= 3,
+            "all three sequence events must be signed, got {}",
+            v.signed_entries
+        );
 
         // All three events carry the SAME correlation id.
         let opened = body_of(&events, POST_INCIDENT_SEQUENCE_OPENED);
@@ -290,8 +316,16 @@ mod tests {
 
         let cid = opened["correlation_id"].as_str().expect("correlation id");
         assert!(cid.starts_with("inc-"), "correlation id format, got {cid}");
-        assert_eq!(event["correlation_id"].as_str(), Some(cid), "EVENT links to the incident id");
-        assert_eq!(closed["correlation_id"].as_str(), Some(cid), "CLOSED links to the incident id");
+        assert_eq!(
+            event["correlation_id"].as_str(),
+            Some(cid),
+            "EVENT links to the incident id"
+        );
+        assert_eq!(
+            closed["correlation_id"].as_str(),
+            Some(cid),
+            "CLOSED links to the incident id"
+        );
 
         assert_eq!(opened["phase"], "OPENED");
         assert_eq!(opened["incident_posture"], "LockedOut");
@@ -305,11 +339,21 @@ mod tests {
     fn non_lockout_transition_opens_no_incident() {
         let (app, _vk) = app_with_key();
         record_posture_transition(
-            &app, Some(&FleetPosture::Nominal), &FleetPosture::Degraded, true, 1, 100);
+            &app,
+            Some(&FleetPosture::Nominal),
+            &FleetPosture::Degraded,
+            true,
+            1,
+            100,
+        );
         assert!(app.current_incident.lock().unwrap().is_none());
-        let events = app.store.with(|store| store.load_all_posture_events().expect("load"));
+        let events = app
+            .store
+            .with(|store| store.load_all_posture_events().expect("load"));
         assert!(
-            !events.iter().any(|e| e["event_type"] == POST_INCIDENT_SEQUENCE_OPENED),
+            !events
+                .iter()
+                .any(|e| e["event_type"] == POST_INCIDENT_SEQUENCE_OPENED),
             "a non-lockout transition must not open a post-incident sequence"
         );
     }
@@ -319,7 +363,13 @@ mod tests {
     fn non_transition_emits_nothing() {
         let (app, _vk) = app_with_key();
         record_posture_transition(
-            &app, Some(&FleetPosture::LockedOut), &FleetPosture::LockedOut, false, 1, 100);
+            &app,
+            Some(&FleetPosture::LockedOut),
+            &FleetPosture::LockedOut,
+            false,
+            1,
+            100,
+        );
         let is_empty = app
             .store
             .with(|store| store.load_all_posture_events().expect("load").is_empty());
@@ -332,20 +382,43 @@ mod tests {
         let (app, _vk) = app_with_key();
         // First incident: open then resolve.
         record_posture_transition(
-            &app, Some(&FleetPosture::Nominal), &FleetPosture::LockedOut, true, 1, 100);
+            &app,
+            Some(&FleetPosture::Nominal),
+            &FleetPosture::LockedOut,
+            true,
+            1,
+            100,
+        );
         record_posture_transition(
-            &app, Some(&FleetPosture::LockedOut), &FleetPosture::Nominal, true, 2, 200);
+            &app,
+            Some(&FleetPosture::LockedOut),
+            &FleetPosture::Nominal,
+            true,
+            2,
+            200,
+        );
         // Second incident.
         record_posture_transition(
-            &app, Some(&FleetPosture::Nominal), &FleetPosture::LockedOut, true, 3, 300);
+            &app,
+            Some(&FleetPosture::Nominal),
+            &FleetPosture::LockedOut,
+            true,
+            3,
+            300,
+        );
 
-        let events = app.store.with(|store| store.load_all_posture_events().expect("load"));
+        let events = app
+            .store
+            .with(|store| store.load_all_posture_events().expect("load"));
         let opens: Vec<String> = events
             .iter()
             .filter(|e| e["event_type"] == POST_INCIDENT_SEQUENCE_OPENED)
             .map(|e| e["posture"]["correlation_id"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(opens.len(), 2, "two incidents opened");
-        assert_ne!(opens[0], opens[1], "each incident must get a distinct correlation id");
+        assert_ne!(
+            opens[0], opens[1],
+            "each incident must get a distinct correlation id"
+        );
     }
 }

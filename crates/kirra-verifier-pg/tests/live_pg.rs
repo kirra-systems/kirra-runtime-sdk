@@ -71,7 +71,9 @@ fn isolated_store(test: &str) -> Option<(String, String, PgVerifierStore)> {
 
 #[test]
 fn migrations_install_stamp_and_are_idempotent_on_live_pg() {
-    let Some((url, schema, store)) = isolated_store("migrate") else { return };
+    let Some((url, schema, store)) = isolated_store("migrate") else {
+        return;
+    };
     // Fresh install stamped to the binary's target (the v2 step genuinely ran:
     // the console columns exist — proven by a full-field save below).
     assert_eq!(store.schema_version().unwrap(), PG_SCHEMA_VERSION);
@@ -87,31 +89,44 @@ fn migrations_install_stamp_and_are_idempotent_on_live_pg() {
         status: NodeTrustState::Trusted,
         registered_at_ms: 1111,
         last_trust_update_ms: 2222,
-        ak_public_pem: Some("-----BEGIN PUBLIC KEY-----\nMCow...\n-----END PUBLIC KEY-----".to_string()),
+        ak_public_pem: Some(
+            "-----BEGIN PUBLIC KEY-----\nMCow...\n-----END PUBLIC KEY-----".to_string(),
+        ),
         expected_pcr16_digest_hex: Some("ab".repeat(32)),
         site: Some("plant-3".to_string()),
         firmware_version: Some("2.4.1".to_string()),
     };
     reopened.save_node(&full).unwrap();
-    let got = reopened.load_node("orin-07").unwrap().expect("saved node present");
+    let got = reopened
+        .load_node("orin-07")
+        .unwrap()
+        .expect("saved node present");
     assert_eq!(got.node_id, full.node_id);
     assert_eq!(got.status, full.status);
     assert_eq!(got.registered_at_ms, full.registered_at_ms);
     assert_eq!(got.last_trust_update_ms, full.last_trust_update_ms);
     assert_eq!(got.ak_public_pem, full.ak_public_pem);
-    assert_eq!(got.expected_pcr16_digest_hex, full.expected_pcr16_digest_hex);
+    assert_eq!(
+        got.expected_pcr16_digest_hex,
+        full.expected_pcr16_digest_hex
+    );
     assert_eq!(got.site, full.site);
     assert_eq!(got.firmware_version, full.firmware_version);
 }
 
 #[test]
 fn a_future_schema_stamp_is_refused_fail_closed_on_live_pg() {
-    let Some((url, schema, store)) = isolated_store("future") else { return };
+    let Some((url, schema, store)) = isolated_store("future") else {
+        return;
+    };
     // Stamp the database NEWER than this binary supports…
     store.schema_version().unwrap();
     let mut c = raw_client_in_schema(&url, &schema);
-    c.execute("UPDATE kirra_schema_version SET version = $1 WHERE id = 1", &[&(PG_SCHEMA_VERSION + 7)])
-        .unwrap();
+    c.execute(
+        "UPDATE kirra_schema_version SET version = $1 WHERE id = 1",
+        &[&(PG_SCHEMA_VERSION + 7)],
+    )
+    .unwrap();
     // …and a reopen must REFUSE (the shared engine's downgrade guard), leaving
     // the stamp untouched.
     let err = PgVerifierStore::from_client(raw_client_in_schema(&url, &schema))
@@ -125,27 +140,39 @@ fn a_future_schema_stamp_is_refused_fail_closed_on_live_pg() {
         ),
         "expected FutureSchema, got: {err:?}"
     );
-    let row = c.query_one("SELECT version FROM kirra_schema_version WHERE id = 1", &[]).unwrap();
-    assert_eq!(row.get::<_, i64>(0), PG_SCHEMA_VERSION + 7, "refusal must not downgrade the stamp");
+    let row = c
+        .query_one("SELECT version FROM kirra_schema_version WHERE id = 1", &[])
+        .unwrap();
+    assert_eq!(
+        row.get::<_, i64>(0),
+        PG_SCHEMA_VERSION + 7,
+        "refusal must not downgrade the stamp"
+    );
 }
 
 #[test]
 fn live_pg_satisfies_the_epoch_fence_contract() {
-    let Some((_, _, mut store)) = isolated_store("fence") else { return };
+    let Some((_, _, mut store)) = isolated_store("fence") else {
+        return;
+    };
     // The SAME suite SQLite and the in-memory model pass in the root crate.
     assert_fence_contract(&mut store);
 }
 
 #[test]
 fn live_pg_satisfies_the_node_store_contract() {
-    let Some((_, _, store)) = isolated_store("nodes") else { return };
+    let Some((_, _, store)) = isolated_store("nodes") else {
+        return;
+    };
     // The SAME suite SQLite and the in-memory model pass in the root crate.
     assert_node_store_contract(&store);
 }
 
 #[test]
 fn a_corrupt_status_json_loads_as_unknown_not_a_panic() {
-    let Some((url, schema, store)) = isolated_store("corrupt") else { return };
+    let Some((url, schema, store)) = isolated_store("corrupt") else {
+        return;
+    };
     let mut c = raw_client_in_schema(&url, &schema);
     c.execute(
         "INSERT INTO nodes (node_id, status_json, registered_at_ms, last_trust_update_ms) \
@@ -155,7 +182,10 @@ fn a_corrupt_status_json_loads_as_unknown_not_a_panic() {
     .unwrap();
     // Identical fallback to the SQLite backend: undecodable → Unknown (fail
     // toward "not trusted"), never a panic or a skipped row.
-    assert_eq!(store.load_node("mangled").unwrap().unwrap().status, NodeTrustState::Unknown);
+    assert_eq!(
+        store.load_node("mangled").unwrap().unwrap().status,
+        NodeTrustState::Unknown
+    );
     assert_eq!(store.load_nodes().unwrap().len(), 1);
 }
 
@@ -166,7 +196,9 @@ fn two_connections_racing_the_cas_produce_exactly_one_winner() {
     // concurrently — the row lock serializes them and exactly one sees
     // `rows_affected == 1`. The loser is then fenced by the FOR-UPDATE
     // assertion while the winner passes.
-    let Some((url, schema, _store)) = isolated_store("race") else { return };
+    let Some((url, schema, _store)) = isolated_store("race") else {
+        return;
+    };
     let mk = || {
         PgVerifierStore::from_client(raw_client_in_schema(&url, &schema))
             .expect("open racer connection")
@@ -183,32 +215,54 @@ fn two_connections_racing_the_cas_produce_exactly_one_winner() {
         (ra == Some(1)) ^ (rb == Some(1)),
         "exactly one racer must win the CAS: A={ra:?} B={rb:?}"
     );
-    assert!(ra.is_none() || rb.is_none(), "the other must lose: A={ra:?} B={rb:?}");
+    assert!(
+        ra.is_none() || rb.is_none(),
+        "the other must lose: A={ra:?} B={rb:?}"
+    );
 
     // The winner holds the fence; the loser (never claimed → held 0) is fenced.
     let (mut winner, mut loser) = if ra == Some(1) { (a, b) } else { (b, a) };
     assert_eq!(winner.assert_actuator_epoch_held(1), Ok(()));
     assert_eq!(
         loser.assert_actuator_epoch_held(0),
-        Err(FenceError::EpochSuperseded { held: 0, durable: 1 })
+        Err(FenceError::EpochSuperseded {
+            held: 0,
+            durable: 1
+        })
     );
 
     // The loser now legitimately claims the NEXT epoch — and the old winner is
     // fenced in turn (the supersession chain the HA promotion path relies on).
-    assert_eq!(loser.try_claim_epoch(1, "racer-loser-promotes", 20).unwrap(), Some(2));
+    assert_eq!(
+        loser
+            .try_claim_epoch(1, "racer-loser-promotes", 20)
+            .unwrap(),
+        Some(2)
+    );
     assert_eq!(
         winner.assert_actuator_epoch_held(1),
-        Err(FenceError::EpochSuperseded { held: 1, durable: 2 })
+        Err(FenceError::EpochSuperseded {
+            held: 1,
+            durable: 2
+        })
     );
 }
 
 #[test]
 fn an_absent_ha_row_denies_the_fence_fail_closed() {
-    let Some((url, schema, mut store)) = isolated_store("wedge") else { return };
+    let Some((url, schema, mut store)) = isolated_store("wedge") else {
+        return;
+    };
     store.try_claim_epoch(0, "A", 1).unwrap();
     // Wedge the singleton (the live analogue of the SQLite / in-memory drills).
     let mut c = raw_client_in_schema(&url, &schema);
     c.execute("DELETE FROM ha_state WHERE id = 1", &[]).unwrap();
-    assert_eq!(store.assert_actuator_epoch_held(1), Err(FenceError::EpochUnreadable));
-    assert!(store.current_epoch().is_err(), "the read path is fail-closed too");
+    assert_eq!(
+        store.assert_actuator_epoch_held(1),
+        Err(FenceError::EpochUnreadable)
+    );
+    assert!(
+        store.current_epoch().is_err(),
+        "the read path is fail-closed too"
+    );
 }

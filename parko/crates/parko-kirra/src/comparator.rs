@@ -326,10 +326,7 @@ pub struct GovernorComparator<S: SafetyGovernor = DiverseKirraGovernor> {
 /// capped at the MRC ceiling, preserving the agreed direction. Direction
 /// disagreement (one positive, one negative, both nonzero) commands 0.
 pub(crate) fn reconcile(primary_vel: f64, shadow_vel: f64, mrc: f64) -> f64 {
-    if primary_vel.signum() != shadow_vel.signum()
-        && primary_vel != 0.0
-        && shadow_vel != 0.0
-    {
+    if primary_vel.signum() != shadow_vel.signum() && primary_vel != 0.0 && shadow_vel != 0.0 {
         return 0.0;
     }
     let sign = if primary_vel != 0.0 {
@@ -445,20 +442,20 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
         delta_time_s: f64,
         posture: SafetyPosture,
     ) -> EnforcementAction {
-        let primary_out = self.primary.evaluate(proposed, previous, delta_time_s, posture);
-        let shadow_out = self.shadow.evaluate(proposed, previous, delta_time_s, posture);
+        let primary_out = self
+            .primary
+            .evaluate(proposed, previous, delta_time_s, posture);
+        let shadow_out = self
+            .shadow
+            .evaluate(proposed, previous, delta_time_s, posture);
 
         // Two-axis divergence detection (CERT-006 v3): pre-v3 the
         // comparator compared only the linear axis, so yaw-axis
         // divergence was invisible. Detection now covers both.
-        let primary_lin =
-            effective_linear_velocity(&primary_out, proposed.linear_velocity);
-        let shadow_lin =
-            effective_linear_velocity(&shadow_out, proposed.linear_velocity);
-        let primary_ang =
-            effective_angular_velocity(&primary_out, proposed.angular_velocity);
-        let shadow_ang =
-            effective_angular_velocity(&shadow_out, proposed.angular_velocity);
+        let primary_lin = effective_linear_velocity(&primary_out, proposed.linear_velocity);
+        let shadow_lin = effective_linear_velocity(&shadow_out, proposed.linear_velocity);
+        let primary_ang = effective_angular_velocity(&primary_out, proposed.angular_velocity);
+        let shadow_ang = effective_angular_velocity(&shadow_out, proposed.angular_velocity);
         let delta_lin = (primary_lin - shadow_lin).abs();
         let delta_ang = (primary_ang - shadow_ang).abs();
 
@@ -510,14 +507,15 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
         let (accumulator, may_lockout, episode_peak_speed) = {
             let mut state = self.state.lock().expect("DivState mutex poisoned");
 
-            state.accumulator = (state.accumulator + DIVERGENCE_INC)
-                .min(DIVERGENCE_ACCUMULATOR_CEILING);
+            state.accumulator =
+                (state.accumulator + DIVERGENCE_INC).min(DIVERGENCE_ACCUMULATOR_CEILING);
             if state.first_divergence.is_none() {
                 state.first_divergence = Some(Instant::now());
             }
             // WS-0.4 F5 — HOLD the peak speed proxy for the divergence episode.
-            state.episode_peak_speed_mps =
-                state.episode_peak_speed_mps.max(current_speed_mps.unwrap_or(0.0));
+            state.episode_peak_speed_mps = state
+                .episode_peak_speed_mps
+                .max(current_speed_mps.unwrap_or(0.0));
 
             let persistent = state.accumulator >= DIVERGENCE_LOCKOUT_LEVEL;
             let may_lockout = match current_speed_mps {
@@ -528,9 +526,7 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
                             .first_divergence
                             .map(|t| {
                                 t.elapsed()
-                                    >= Duration::from_millis(
-                                        DIVERGENCE_LOCKOUT_MIN_DURATION_MS,
-                                    )
+                                    >= Duration::from_millis(DIVERGENCE_LOCKOUT_MIN_DURATION_MS)
                             })
                             .unwrap_or(false)
                 }
@@ -599,7 +595,11 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
             reconciled_lin: if may_lockout { 0.0 } else { reconciled_lin },
             reconciled_ang: if may_lockout { 0.0 } else { reconciled_ang },
             escalated_to_lockout: may_lockout,
-            recommended_posture: if may_lockout { "locked_out" } else { "degraded" },
+            recommended_posture: if may_lockout {
+                "locked_out"
+            } else {
+                "degraded"
+            },
         });
 
         // S-DG1b: every divergent tick is posture-significant; `escalated`
@@ -628,7 +628,6 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
             .map(|s| s.recommended_posture)
             .unwrap_or(SafetyPosture::LockedOut) // poisoned mutex → fail closed
     }
-
 }
 
 impl<S: RssAwareGovernor> GovernorComparator<S> {
@@ -695,9 +694,8 @@ mod tests {
         let primary_alone =
             KirraGovernor::new().evaluate(&proposed, Some(&prev), 0.05, SafetyPosture::Nominal);
         assert!(
-            (effective_linear_velocity(&out, 3.0)
-                - effective_linear_velocity(&primary_alone, 3.0))
-            .abs()
+            (effective_linear_velocity(&out, 3.0) - effective_linear_velocity(&primary_alone, 3.0))
+                .abs()
                 <= COMPARATOR_TOLERANCE,
             "Identical inputs must return primary output unchanged"
         );
@@ -889,10 +887,21 @@ mod tests {
         // the best-available speed proxy (the last commanded velocity, a stand-in
         // for the vehicle decelerating from highway — see `DivState::
         // episode_peak_speed_mps` for why the proxy is HELD across the episode).
-        let proposed = ControlCommand { linear_velocity: 5.0, angular_velocity: 3.0, timestamp_ms: 0 };
-        let prev = ControlCommand { linear_velocity: 30.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let proposed = ControlCommand {
+            linear_velocity: 5.0,
+            angular_velocity: 3.0,
+            timestamp_ms: 0,
+        };
+        let prev = ControlCommand {
+            linear_velocity: 30.0,
+            angular_velocity: 0.0,
+            timestamp_ms: 0,
+        };
         let out = comparator.evaluate(&proposed, Some(&prev), 0.05, SafetyPosture::Nominal);
-        assert!(matches!(out, EnforcementAction::ClampMotion { .. }), "expected a divergence ClampMotion, got {out:?}");
+        assert!(
+            matches!(out, EnforcementAction::ClampMotion { .. }),
+            "expected a divergence ClampMotion, got {out:?}"
+        );
 
         let ang = effective_angular_velocity(&out, proposed.angular_velocity).abs();
         let mrc = AngularVelocityBound::mrc(PlatformParams::conservative_default());
@@ -936,18 +945,33 @@ mod tests {
         primary.update_rss_state(safe_rss());
         let comparator = GovernorComparator::new(primary, FixedAngularClamp(0.5));
 
-        let proposed = ControlCommand { linear_velocity: 5.0, angular_velocity: 3.0, timestamp_ms: 0 };
+        let proposed = ControlCommand {
+            linear_velocity: 5.0,
+            angular_velocity: 3.0,
+            timestamp_ms: 0,
+        };
 
         // Tick 1: previous = 30 m/s establishes the episode peak.
-        let prev_hi = ControlCommand { linear_velocity: 30.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let prev_hi = ControlCommand {
+            linear_velocity: 30.0,
+            angular_velocity: 0.0,
+            timestamp_ms: 0,
+        };
         let _ = comparator.evaluate(&proposed, Some(&prev_hi), 0.05, SafetyPosture::Nominal);
 
         // Tick 2: previous has already collapsed to the 5 m/s MRC command — a
         // naive last-commanded proxy would loosen the cap here. The held episode
         // peak must keep it bound at ω_max(30).
-        let prev_lo = ControlCommand { linear_velocity: 5.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let prev_lo = ControlCommand {
+            linear_velocity: 5.0,
+            angular_velocity: 0.0,
+            timestamp_ms: 0,
+        };
         let out = comparator.evaluate(&proposed, Some(&prev_lo), 0.05, SafetyPosture::Nominal);
-        assert!(matches!(out, EnforcementAction::ClampMotion { .. }), "expected a divergence ClampMotion, got {out:?}");
+        assert!(
+            matches!(out, EnforcementAction::ClampMotion { .. }),
+            "expected a divergence ClampMotion, got {out:?}"
+        );
 
         let ang = effective_angular_velocity(&out, proposed.angular_velocity).abs();
         let mrc = AngularVelocityBound::mrc(PlatformParams::conservative_default());
@@ -994,13 +1018,23 @@ mod tests {
         let mut primary = KirraGovernor::new();
         primary.update_rss_state(safe_rss());
         let diverge = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let shadow = SwitchableClamp { diverge: Arc::clone(&diverge) };
+        let shadow = SwitchableClamp {
+            diverge: Arc::clone(&diverge),
+        };
         let comparator = GovernorComparator::new(primary, shadow);
 
-        let proposed = ControlCommand { linear_velocity: 5.0, angular_velocity: 3.0, timestamp_ms: 0 };
+        let proposed = ControlCommand {
+            linear_velocity: 5.0,
+            angular_velocity: 3.0,
+            timestamp_ms: 0,
+        };
 
         // Establish a HIGH episode peak (30 m/s) over one divergent tick.
-        let prev_hi = ControlCommand { linear_velocity: 30.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let prev_hi = ControlCommand {
+            linear_velocity: 30.0,
+            angular_velocity: 0.0,
+            timestamp_ms: 0,
+        };
         let _ = comparator.evaluate(&proposed, Some(&prev_hi), 0.05, SafetyPosture::Nominal);
 
         // Agree until the accumulator fully drains (DIVERGENCE_INC=2 added, so a
@@ -1009,14 +1043,21 @@ mod tests {
         for _ in 0..4 {
             let _ = comparator.evaluate(&cmd(3.0), Some(&cmd(3.0)), 0.05, SafetyPosture::Nominal);
         }
-        assert_eq!(comparator.recommended_posture(), SafetyPosture::Nominal,
-            "accumulator must have drained back to Nominal");
+        assert_eq!(
+            comparator.recommended_posture(),
+            SafetyPosture::Nominal,
+            "accumulator must have drained back to Nominal"
+        );
 
         // New divergence episode at a genuinely LOW speed proxy (5 m/s). The cap
         // must reflect ω_max(5), not the stale ω_max(30) peak from the prior
         // episode.
         diverge.store(true, Ordering::SeqCst);
-        let prev_lo = ControlCommand { linear_velocity: 5.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let prev_lo = ControlCommand {
+            linear_velocity: 5.0,
+            angular_velocity: 0.0,
+            timestamp_ms: 0,
+        };
         let out = comparator.evaluate(&proposed, Some(&prev_lo), 0.05, SafetyPosture::Nominal);
         let ang = effective_angular_velocity(&out, proposed.angular_velocity).abs();
 
@@ -1029,7 +1070,9 @@ mod tests {
             p.update_rss_state(safe_rss());
             // A diverge-locked SwitchableClamp is behaviorally identical to the
             // primed comparator's shadow on a divergent tick (ClampAngularVelocity(0.5)).
-            let s = SwitchableClamp { diverge: Arc::new(std::sync::atomic::AtomicBool::new(true)) };
+            let s = SwitchableClamp {
+                diverge: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            };
             let fresh = GovernorComparator::new(p, s);
             let out = fresh.evaluate(&proposed, Some(&prev_lo), 0.05, SafetyPosture::Nominal);
             effective_angular_velocity(&out, proposed.angular_velocity).abs()
@@ -1044,8 +1087,12 @@ mod tests {
         // And the low-speed cap is genuinely looser than the stale one — so the
         // equality above is a non-trivial release, not both being pinned low.
         let mrc = AngularVelocityBound::mrc(PlatformParams::conservative_default());
-        assert!(mrc.omega_max(5.0) > mrc.omega_max(30.0),
-            "precondition: ω_max(5)={} must exceed ω_max(30)={}", mrc.omega_max(5.0), mrc.omega_max(30.0));
+        assert!(
+            mrc.omega_max(5.0) > mrc.omega_max(30.0),
+            "precondition: ω_max(5)={} must exceed ω_max(30)={}",
+            mrc.omega_max(5.0),
+            mrc.omega_max(30.0)
+        );
     }
 
     /// WS-0.4 F5 (Copilot #781 follow-up) — a LockedOut escalation must NOT reset
@@ -1078,8 +1125,16 @@ mod tests {
         primary.update_rss_state(safe_rss());
         let comparator = GovernorComparator::new(primary, FixedAngularClamp(0.5));
 
-        let proposed = ControlCommand { linear_velocity: 5.0, angular_velocity: 3.0, timestamp_ms: 0 };
-        let prev_hi = ControlCommand { linear_velocity: 30.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let proposed = ControlCommand {
+            linear_velocity: 5.0,
+            angular_velocity: 3.0,
+            timestamp_ms: 0,
+        };
+        let prev_hi = ControlCommand {
+            linear_velocity: 30.0,
+            angular_velocity: 0.0,
+            timestamp_ms: 0,
+        };
 
         // Three high-speed divergent ticks drive the accumulator to the lockout
         // level (INC=2, LEVEL=6) and establish the 30 m/s episode peak; speed > the
@@ -1092,17 +1147,29 @@ mod tests {
 
         // A low-speed divergent tick (proxy 3 ≤ safe floor 5) with the accumulator
         // already ≥ LEVEL → may_lockout → hard-stop Deny. The peak must NOT reset here.
-        let prev_lockout = ControlCommand { linear_velocity: 3.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let prev_lockout = ControlCommand {
+            linear_velocity: 3.0,
+            angular_velocity: 0.0,
+            timestamp_ms: 0,
+        };
         let out = comparator.evaluate(&proposed, Some(&prev_lockout), 0.05, SafetyPosture::Nominal);
-        assert!(matches!(out, EnforcementAction::Deny { .. }),
-            "low-speed persistent divergence must escalate to LockedOut Deny, got {out:?}");
+        assert!(
+            matches!(out, EnforcementAction::Deny { .. }),
+            "low-speed persistent divergence must escalate to LockedOut Deny, got {out:?}"
+        );
 
         // Speed proxy rises just above the safe floor while still diverging → drops
         // back to ClampMotion. The held peak (30) must still bind the yaw cap.
-        let prev_recover = ControlCommand { linear_velocity: 6.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let prev_recover = ControlCommand {
+            linear_velocity: 6.0,
+            angular_velocity: 0.0,
+            timestamp_ms: 0,
+        };
         let out = comparator.evaluate(&proposed, Some(&prev_recover), 0.05, SafetyPosture::Nominal);
-        assert!(matches!(out, EnforcementAction::ClampMotion { .. }),
-            "speed above the safe floor must leave LockedOut for ClampMotion, got {out:?}");
+        assert!(
+            matches!(out, EnforcementAction::ClampMotion { .. }),
+            "speed above the safe floor must leave LockedOut for ClampMotion, got {out:?}"
+        );
 
         let ang = effective_angular_velocity(&out, proposed.angular_velocity).abs();
         let mrc = AngularVelocityBound::mrc(PlatformParams::conservative_default());
@@ -1125,9 +1192,17 @@ mod tests {
     #[test]
     fn agreement_recommends_nominal_posture() {
         let comparator = GovernorComparator::new(KirraGovernor::new(), KirraGovernor::new());
-        assert_eq!(comparator.recommended_posture(), SafetyPosture::Nominal, "a fresh comparator is Nominal");
+        assert_eq!(
+            comparator.recommended_posture(),
+            SafetyPosture::Nominal,
+            "a fresh comparator is Nominal"
+        );
         let _ = comparator.evaluate(&cmd(3.0), Some(&cmd(3.0)), 0.05, SafetyPosture::Nominal);
-        assert_eq!(comparator.recommended_posture(), SafetyPosture::Nominal, "agreement keeps the fleet Nominal");
+        assert_eq!(
+            comparator.recommended_posture(),
+            SafetyPosture::Nominal,
+            "agreement keeps the fleet Nominal"
+        );
     }
 
     #[test]
@@ -1137,8 +1212,15 @@ mod tests {
         // One divergent tick (the safe governor ramps off the stop, the unsafe one denies):
         // accumulator 2, below the lockout level → Degraded, not LockedOut.
         let out = comparator.evaluate(&cmd(3.0), Some(&cmd(0.0)), 0.05, SafetyPosture::Nominal);
-        assert!(matches!(out, EnforcementAction::ClampMotion { .. }), "a single divergence clamps, not denies");
-        assert_eq!(comparator.recommended_posture(), SafetyPosture::Degraded, "divergence drives the fleet to Degraded");
+        assert!(
+            matches!(out, EnforcementAction::ClampMotion { .. }),
+            "a single divergence clamps, not denies"
+        );
+        assert_eq!(
+            comparator.recommended_posture(),
+            SafetyPosture::Degraded,
+            "divergence drives the fleet to Degraded"
+        );
     }
 
     #[test]
@@ -1150,7 +1232,11 @@ mod tests {
         for _ in 0..6 {
             let _ = comparator.evaluate(&cmd(3.0), Some(&cmd(0.0)), 0.05, SafetyPosture::Nominal);
         }
-        assert_eq!(comparator.recommended_posture(), SafetyPosture::LockedOut, "persistent divergence → LockedOut");
+        assert_eq!(
+            comparator.recommended_posture(),
+            SafetyPosture::LockedOut,
+            "persistent divergence → LockedOut"
+        );
     }
 
     #[test]
@@ -1165,12 +1251,20 @@ mod tests {
         // The governors AGREE on a full-stop command (both emit 0). One agreeing tick decays the
         // accumulator but the posture stays Degraded (HYSTERESIS — no instant flip on one tick).
         let _ = comparator.evaluate(&cmd(0.0), Some(&cmd(0.0)), 0.05, SafetyPosture::Nominal);
-        assert_eq!(comparator.recommended_posture(), SafetyPosture::Degraded, "stays Degraded mid-drain");
+        assert_eq!(
+            comparator.recommended_posture(),
+            SafetyPosture::Degraded,
+            "stays Degraded mid-drain"
+        );
         // Enough agreeing ticks drain it fully → back to Nominal.
         for _ in 0..5 {
             let _ = comparator.evaluate(&cmd(0.0), Some(&cmd(0.0)), 0.05, SafetyPosture::Nominal);
         }
-        assert_eq!(comparator.recommended_posture(), SafetyPosture::Nominal, "fully drained → Nominal");
+        assert_eq!(
+            comparator.recommended_posture(),
+            SafetyPosture::Nominal,
+            "fully drained → Nominal"
+        );
     }
 
     /// KEY SAFETY PROPERTY: persistent divergence while the vehicle is
@@ -1187,12 +1281,7 @@ mod tests {
 
         let mut last = EnforcementAction::Allow;
         for _ in 0..50 {
-            last = comparator.evaluate(
-                &cmd(commanded),
-                Some(&prev),
-                0.05,
-                SafetyPosture::Nominal,
-            );
+            last = comparator.evaluate(&cmd(commanded), Some(&prev), 0.05, SafetyPosture::Nominal);
         }
 
         assert!(
@@ -1202,7 +1291,7 @@ mod tests {
         );
     }
 
-// ---- S-DG1b: PostureSignalSink emission mapping (test matrix rows) ----
+    // ---- S-DG1b: PostureSignalSink emission mapping (test matrix rows) ----
 
     /// Records every posture tick for assertion.
     #[derive(Default)]
@@ -1225,11 +1314,10 @@ mod tests {
     fn test_posture_sink_emission_mapping_over_episode() {
         let (primary, shadow) = diverging_pair();
         let sink = Arc::new(RecordingPostureSink::default());
-        let comparator =
-            GovernorComparator::new(primary, shadow).with_posture_sink(sink.clone());
+        let comparator = GovernorComparator::new(primary, shadow).with_posture_sink(sink.clone());
 
         let fast_prev = cmd(10.0); // above SAFE_LOCKOUT_SPEED — no lockout
-        // Two divergent ticks: significant, not escalated (at speed).
+                                   // Two divergent ticks: significant, not escalated (at speed).
         for _ in 0..2 {
             comparator.evaluate(&cmd(10.0), Some(&fast_prev), 0.05, SafetyPosture::Nominal);
         }
@@ -1241,10 +1329,21 @@ mod tests {
         }
 
         let ticks = sink.ticks.lock().unwrap().clone();
-        assert_eq!(ticks.len(), 8, "every evaluate tick emits exactly once: {ticks:?}");
-        assert_eq!(&ticks[..2], &[(true, false), (true, false)], "divergent ticks");
+        assert_eq!(
+            ticks.len(),
+            8,
+            "every evaluate tick emits exactly once: {ticks:?}"
+        );
+        assert_eq!(
+            &ticks[..2],
+            &[(true, false), (true, false)],
+            "divergent ticks"
+        );
         assert!(
-            ticks[2..].iter().take_while(|(s, _)| *s).all(|&(s, e)| s && !e),
+            ticks[2..]
+                .iter()
+                .take_while(|(s, _)| *s)
+                .all(|&(s, e)| s && !e),
             "draining agreement stays significant, never escalated: {ticks:?}"
         );
         assert_eq!(
@@ -1253,7 +1352,10 @@ mod tests {
             "a drained agreeing tick must emit the recovery signal: {ticks:?}"
         );
         // The drain boundary exists (some draining ticks, then recovered ones).
-        assert!(ticks[2..].iter().any(|&(s, _)| !s), "the accumulator must drain: {ticks:?}");
+        assert!(
+            ticks[2..].iter().any(|&(s, _)| !s),
+            "the accumulator must drain: {ticks:?}"
+        );
     }
 
     /// The comparator's own lockout escalation is mirrored on the sink.
@@ -1261,8 +1363,7 @@ mod tests {
     fn test_posture_sink_reports_escalation() {
         let (primary, shadow) = diverging_pair();
         let sink = Arc::new(RecordingPostureSink::default());
-        let comparator =
-            GovernorComparator::new(primary, shadow).with_posture_sink(sink.clone());
+        let comparator = GovernorComparator::new(primary, shadow).with_posture_sink(sink.clone());
         let slow_prev = cmd(3.0); // below SAFE_LOCKOUT_SPEED (5.0)
         for _ in 0..10 {
             comparator.evaluate(&cmd(10.0), Some(&slow_prev), 0.05, SafetyPosture::Nominal);
@@ -1272,10 +1373,13 @@ mod tests {
             ticks.iter().any(|&(s, e)| s && e),
             "the sink must mirror the comparator's escalated_to_lockout: {ticks:?}"
         );
-        assert!(ticks.iter().all(|&(s, _)| s), "all ticks in a divergence run are significant");
+        assert!(
+            ticks.iter().all(|&(s, _)| s),
+            "all ticks in a divergence run are significant"
+        );
     }
 
-        /// Persistent divergence once the vehicle is at a safe speed should
+    /// Persistent divergence once the vehicle is at a safe speed should
     /// escalate to LockedOut.
     #[test]
     fn test_persistent_divergence_when_slow_escalates_to_lockout() {
@@ -1351,12 +1455,7 @@ mod tests {
 
         // Two divergence ticks → accumulator=4 (below LOCKOUT_LEVEL).
         for _ in 0..2 {
-            let _ = comparator.evaluate(
-                &cmd(10.0),
-                Some(&slow_prev),
-                0.05,
-                SafetyPosture::Nominal,
-            );
+            let _ = comparator.evaluate(&cmd(10.0), Some(&slow_prev), 0.05, SafetyPosture::Nominal);
         }
 
         // Make primary and shadow agree by giving both safe RSS.
@@ -1366,12 +1465,7 @@ mod tests {
         // before this finishes.
         let mut last = EnforcementAction::Allow;
         for _ in 0..50 {
-            last = comparator.evaluate(
-                &cmd(3.0),
-                Some(&slow_prev),
-                0.05,
-                SafetyPosture::Nominal,
-            );
+            last = comparator.evaluate(&cmd(3.0), Some(&slow_prev), 0.05, SafetyPosture::Nominal);
         }
 
         // After drain, comparator returns primary unchanged. With Nominal
@@ -1415,8 +1509,11 @@ mod tests {
     fn test_divergence_emits_audit_event() {
         let (primary, shadow) = diverging_pair();
         let sink = Arc::new(InMemoryDivergenceSink::new());
-        let comparator =
-            GovernorComparator::with_sink(primary, shadow, sink.clone() as Arc<dyn DivergenceEventSink>);
+        let comparator = GovernorComparator::with_sink(
+            primary,
+            shadow,
+            sink.clone() as Arc<dyn DivergenceEventSink>,
+        );
 
         let commanded = 10.0;
         let prev = cmd(commanded);
@@ -1425,12 +1522,22 @@ mod tests {
         let _ = comparator.evaluate(&cmd(commanded), Some(&prev), 0.05, SafetyPosture::Nominal);
 
         let events = sink.events();
-        assert_eq!(events.len(), 1, "Expected exactly one audit event after one divergent tick");
+        assert_eq!(
+            events.len(),
+            1,
+            "Expected exactly one audit event after one divergent tick"
+        );
         let e = &events[0];
-        assert!(e.delta_lin > COMPARATOR_TOLERANCE, "linear delta should be flagged");
+        assert!(
+            e.delta_lin > COMPARATOR_TOLERANCE,
+            "linear delta should be flagged"
+        );
         assert_eq!(e.accumulator, DIVERGENCE_INC);
         assert_eq!(e.current_speed_mps, Some(10.0));
-        assert!(!e.escalated_to_lockout, "Single tick at speed must not escalate");
+        assert!(
+            !e.escalated_to_lockout,
+            "Single tick at speed must not escalate"
+        );
         assert!(
             e.reconciled_lin.abs() <= MRC_VELOCITY_CEILING_MPS + COMPARATOR_TOLERANCE,
             "Reconciled linear in event must respect MRC ceiling"
@@ -1514,9 +1621,7 @@ mod tests {
     /// zero motion on every axis.
     #[test]
     fn test_actions_same_physical_effect_not_flagged() {
-        let p = EnforcementAction::Deny {
-            reason: "x".into(),
-        };
+        let p = EnforcementAction::Deny { reason: "x".into() };
         let s = EnforcementAction::ClampLinearVelocity(0.0);
         let proposed = ControlCommand {
             linear_velocity: 5.0,
@@ -1576,8 +1681,7 @@ mod tests {
     /// and at a safe speed escalate to a fail-closed Deny (LockedOut).
     #[test]
     fn test_injected_fault_is_detected_and_escalates() {
-        let comparator =
-            GovernorComparator::new(KirraGovernor::new(), CeilingBlindShadow);
+        let comparator = GovernorComparator::new(KirraGovernor::new(), CeilingBlindShadow);
 
         // 40 m/s is above the 35 m/s ODD ceiling: primary → ClampLinear(35),
         // shadow → Allow(40). Previous = 3 m/s is below SAFE_LOCKOUT_SPEED.
@@ -1585,8 +1689,7 @@ mod tests {
         let slow_prev = cmd(3.0);
 
         // First tick already diverges and reconciles (no hard stop at speed).
-        let first =
-            comparator.evaluate(&commanded, Some(&slow_prev), 0.05, SafetyPosture::Nominal);
+        let first = comparator.evaluate(&commanded, Some(&slow_prev), 0.05, SafetyPosture::Nominal);
         assert!(
             matches!(first, EnforcementAction::ClampMotion { .. }),
             "First divergent tick must reconcile (ClampMotion), not hard stop. Got {first:?}"
@@ -1616,8 +1719,7 @@ mod tests {
     /// the fault, not by the pairing itself.
     #[test]
     fn test_injected_fault_silent_when_command_in_envelope() {
-        let comparator =
-            GovernorComparator::new(KirraGovernor::new(), CeilingBlindShadow);
+        let comparator = GovernorComparator::new(KirraGovernor::new(), CeilingBlindShadow);
         let in_env = cmd(3.0);
         let prev = cmd(3.0);
         let out = comparator.evaluate(&in_env, Some(&prev), 0.05, SafetyPosture::Nominal);

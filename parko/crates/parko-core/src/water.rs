@@ -166,8 +166,10 @@ mod tests {
     /// DISTINCT from Clear.
     #[test]
     fn test_unknown_fail_closed_veto_not_clear() {
-        assert!(water_untraversable_veto(&WaterScene::Unknown, &cfg()),
-            "a detector that did not look must NOT be read as clear water");
+        assert!(
+            water_untraversable_veto(&WaterScene::Unknown, &cfg()),
+            "a detector that did not look must NOT be read as clear water"
+        );
         assert_ne!(
             water_untraversable_veto(&WaterScene::Unknown, &cfg()),
             water_untraversable_veto(&WaterScene::Clear, &cfg()),
@@ -191,38 +193,70 @@ mod tests {
             flow_detected: false,
             geometry_confirmed: true,
         };
-        assert!(water_untraversable_veto(&s, &cfg()), "no visible dry exit is unbounded → veto");
+        assert!(
+            water_untraversable_veto(&s, &cfg()),
+            "no visible dry exit is unbounded → veto"
+        );
     }
 
     /// Extent beyond the bound → veto, even with a near exit / geometry / no flow.
     #[test]
     fn test_detected_large_extent_veto() {
-        let s = WaterScene::Detected { extent_m: 50.0, exit_distance_m: Some(4.0), flow_detected: false, geometry_confirmed: true };
-        assert!(water_untraversable_veto(&s, &cfg()), "extent beyond max_puddle_extent_m → veto");
+        let s = WaterScene::Detected {
+            extent_m: 50.0,
+            exit_distance_m: Some(4.0),
+            flow_detected: false,
+            geometry_confirmed: true,
+        };
+        assert!(
+            water_untraversable_veto(&s, &cfg()),
+            "extent beyond max_puddle_extent_m → veto"
+        );
     }
 
     /// flow_detected ALWAYS vetoes — even an otherwise bounded-safe scene (the
     /// creek-sweep guard). No config can relax it.
     #[test]
     fn test_flow_detected_always_veto() {
-        let s = WaterScene::Detected { extent_m: 2.0, exit_distance_m: Some(1.0), flow_detected: true, geometry_confirmed: true };
-        assert!(water_untraversable_veto(&s, &cfg()), "a detected current must always veto");
+        let s = WaterScene::Detected {
+            extent_m: 2.0,
+            exit_distance_m: Some(1.0),
+            flow_detected: true,
+            geometry_confirmed: true,
+        };
+        assert!(
+            water_untraversable_veto(&s, &cfg()),
+            "a detected current must always veto"
+        );
     }
 
     /// geometry_confirmed == false ALWAYS vetoes — even otherwise bounded-safe.
     #[test]
     fn test_geometry_unconfirmed_always_veto() {
-        let s = WaterScene::Detected { extent_m: 2.0, exit_distance_m: Some(1.0), flow_detected: false, geometry_confirmed: false };
-        assert!(water_untraversable_veto(&s, &cfg()), "unconfirmed road geometry must always veto");
+        let s = WaterScene::Detected {
+            extent_m: 2.0,
+            exit_distance_m: Some(1.0),
+            flow_detected: false,
+            geometry_confirmed: false,
+        };
+        assert!(
+            water_untraversable_veto(&s, &cfg()),
+            "unconfirmed road geometry must always veto"
+        );
     }
 
     /// EarnedTraversable overrides an otherwise-vetoing situation (explicit
     /// map/operator grant). Both evidence kinds.
     #[test]
     fn test_earned_traversable_overrides_vetoing_scene() {
-        for ev in [TraversalEvidence::MapKnownSafe, TraversalEvidence::OperatorAuthorized] {
-            assert!(!water_untraversable_veto(&WaterScene::EarnedTraversable { evidence: ev }, &cfg()),
-                "an explicit ford/operator grant overrides the untraversable default");
+        for ev in [
+            TraversalEvidence::MapKnownSafe,
+            TraversalEvidence::OperatorAuthorized,
+        ] {
+            assert!(
+                !water_untraversable_veto(&WaterScene::EarnedTraversable { evidence: ev }, &cfg()),
+                "an explicit ford/operator grant overrides the untraversable default"
+            );
         }
     }
 
@@ -230,18 +264,50 @@ mod tests {
     /// passes; one ulp beyond vetoes.
     #[test]
     fn test_exit_distance_boundary_inclusive() {
-        let at = WaterScene::Detected { extent_m: 2.0, exit_distance_m: Some(5.0), flow_detected: false, geometry_confirmed: true };
-        assert!(!water_untraversable_veto(&at, &cfg()), "exit exactly at max_exit_distance_m must NOT veto (inclusive)");
-        let beyond = WaterScene::Detected { extent_m: 2.0, exit_distance_m: Some(5.0 + 1e-6), flow_detected: false, geometry_confirmed: true };
-        assert!(water_untraversable_veto(&beyond, &cfg()), "exit just beyond max_exit_distance_m must veto");
+        let at = WaterScene::Detected {
+            extent_m: 2.0,
+            exit_distance_m: Some(5.0),
+            flow_detected: false,
+            geometry_confirmed: true,
+        };
+        assert!(
+            !water_untraversable_veto(&at, &cfg()),
+            "exit exactly at max_exit_distance_m must NOT veto (inclusive)"
+        );
+        let beyond = WaterScene::Detected {
+            extent_m: 2.0,
+            exit_distance_m: Some(5.0 + 1e-6),
+            flow_detected: false,
+            geometry_confirmed: true,
+        };
+        assert!(
+            water_untraversable_veto(&beyond, &cfg()),
+            "exit just beyond max_exit_distance_m must veto"
+        );
     }
 
     /// Non-finite / negative geometry fails closed (NaN-safe `≤`).
     #[test]
     fn test_nonfinite_inputs_fail_closed() {
-        let nan_exit = WaterScene::Detected { extent_m: 2.0, exit_distance_m: Some(f64::NAN), flow_detected: false, geometry_confirmed: true };
-        assert!(water_untraversable_veto(&nan_exit, &cfg()), "NaN exit distance must veto");
-        let nan_extent = WaterScene::Detected { extent_m: f64::NAN, exit_distance_m: Some(1.0), flow_detected: false, geometry_confirmed: true };
-        assert!(water_untraversable_veto(&nan_extent, &cfg()), "NaN extent must veto");
+        let nan_exit = WaterScene::Detected {
+            extent_m: 2.0,
+            exit_distance_m: Some(f64::NAN),
+            flow_detected: false,
+            geometry_confirmed: true,
+        };
+        assert!(
+            water_untraversable_veto(&nan_exit, &cfg()),
+            "NaN exit distance must veto"
+        );
+        let nan_extent = WaterScene::Detected {
+            extent_m: f64::NAN,
+            exit_distance_m: Some(1.0),
+            flow_detected: false,
+            geometry_confirmed: true,
+        };
+        assert!(
+            water_untraversable_veto(&nan_extent, &cfg()),
+            "NaN extent must veto"
+        );
     }
 }

@@ -183,7 +183,9 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, String> {
 /// peer presented no certificate (plain TLS, or mTLS not configured). The cert was
 /// already cryptographically verified by rustls at the handshake — this only
 /// derives the stable fingerprint used to pin it to a principal.
-fn peer_cert_fingerprint(tls_stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> Option<String> {
+fn peer_cert_fingerprint(
+    tls_stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+) -> Option<String> {
     use sha2::{Digest, Sha256};
     let (_io, conn) = tls_stream.get_ref();
     let leaf = conn.peer_certificates().and_then(|chain| chain.first())?;
@@ -306,7 +308,11 @@ mod tests {
     #[test]
     fn client_ca_enables_mtls_when_server_tls_on() {
         assert_eq!(
-            resolve_tls(Some("/c.pem".into()), Some("/k.pem".into()), Some("/ca.pem".into())),
+            resolve_tls(
+                Some("/c.pem".into()),
+                Some("/k.pem".into()),
+                Some("/ca.pem".into())
+            ),
             Ok(TlsResolution::Tls {
                 cert_path: PathBuf::from("/c.pem"),
                 key_path: PathBuf::from("/k.pem"),
@@ -338,13 +344,18 @@ mod tests {
     const CERT_B64: &str = include_str!("../../../tests/fixtures/tls/test_server_cert.pem.b64");
     const KEY_B64: &str = include_str!("../../../tests/fixtures/tls/test_server_key.pem.b64");
     // mTLS fixtures: a client CA, and a client identity (cert signed by that CA + key).
-    const CLIENT_CA_B64: &str = include_str!("../../../tests/fixtures/tls/test_client_ca_cert.pem.b64");
-    const CLIENT_CERT_B64: &str = include_str!("../../../tests/fixtures/tls/test_client_cert.pem.b64");
-    const CLIENT_KEY_B64: &str = include_str!("../../../tests/fixtures/tls/test_client_key.pem.b64");
+    const CLIENT_CA_B64: &str =
+        include_str!("../../../tests/fixtures/tls/test_client_ca_cert.pem.b64");
+    const CLIENT_CERT_B64: &str =
+        include_str!("../../../tests/fixtures/tls/test_client_cert.pem.b64");
+    const CLIENT_KEY_B64: &str =
+        include_str!("../../../tests/fixtures/tls/test_client_key.pem.b64");
 
     fn decode_b64(b64: &str) -> Vec<u8> {
         use base64::Engine;
-        base64::engine::general_purpose::STANDARD.decode(b64.trim()).expect("decode fixture")
+        base64::engine::general_purpose::STANDARD
+            .decode(b64.trim())
+            .expect("decode fixture")
     }
 
     fn write_b64(dir: &Path, name: &str, b64: &str) -> PathBuf {
@@ -354,7 +365,10 @@ mod tests {
     }
 
     fn write_fixture_pems(dir: &Path) -> (PathBuf, PathBuf) {
-        (write_b64(dir, "cert.pem", CERT_B64), write_b64(dir, "key.pem", KEY_B64))
+        (
+            write_b64(dir, "cert.pem", CERT_B64),
+            write_b64(dir, "key.pem", KEY_B64),
+        )
     }
 
     /// SHA-256 hex of the first cert in a PEM blob — the same value `serve_tls`
@@ -459,7 +473,11 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
-            serve_tls(listener, app, config, async move { let _ = rx.await; }).await.unwrap();
+            serve_tls(listener, app, config, async move {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
         });
 
         // Client trusts the server cert AND presents its CA-signed identity (cert+key).
@@ -482,8 +500,11 @@ mod tests {
         let seen_fp = resp.text().await.unwrap();
 
         // The server must have derived the client leaf's SHA-256 fingerprint.
-        assert_eq!(seen_fp, pem_leaf_fingerprint(&client_cert),
-            "server must inject the verified client's leaf fingerprint");
+        assert_eq!(
+            seen_fp,
+            pem_leaf_fingerprint(&client_cert),
+            "server must inject the verified client's leaf fingerprint"
+        );
 
         let _ = tx.send(());
         server.abort();
@@ -503,7 +524,11 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
-            serve_tls(listener, app, config, async move { let _ = rx.await; }).await.unwrap();
+            serve_tls(listener, app, config, async move {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
         });
 
         // Same trusted server cert, but NO client identity presented.
@@ -515,7 +540,10 @@ mod tests {
 
         let url = format!("https://127.0.0.1:{}/health", addr.port());
         let result = client.get(&url).send().await;
-        assert!(result.is_err(), "mTLS server must reject a client presenting no certificate");
+        assert!(
+            result.is_err(),
+            "mTLS server must reject a client presenting no certificate"
+        );
 
         let _ = tx.send(());
         server.abort();

@@ -55,16 +55,18 @@ fn require_ep() -> bool {
 }
 
 fn argmax(scores: &[f32]) -> usize {
-    scores
-        .iter()
-        .enumerate()
-        .fold(0usize, |best, (i, &s)| if s > scores[best] { i } else { best })
+    scores.iter().enumerate().fold(
+        0usize,
+        |best, (i, &s)| if s > scores[best] { i } else { best },
+    )
 }
 
 /// Deterministic NON-zero MNIST input — exercises fp32 matmul accumulation (so a
 /// TF32 mantissa-drop, if any, is observable). Pure function of the index.
 fn deterministic_input(n: usize) -> Vec<f32> {
-    (0..n).map(|i| ((i * 7 + 13) % 251) as f32 / 251.0).collect()
+    (0..n)
+        .map(|i| ((i * 7 + 13) % 251) as f32 / 251.0)
+        .collect()
 }
 
 /// Build the TRT backend and run one MNIST inference on the deterministic input.
@@ -78,9 +80,15 @@ fn run_once() -> Option<Vec<f32>> {
         return None;
     }
     // Distinct cache per TF32 state (child = override-off, parent = default).
-    let tag = if std::env::var(CHILD_MARKER).is_ok() { "tf32off" } else { "default" };
+    let tag = if std::env::var(CHILD_MARKER).is_ok() {
+        "tf32off"
+    } else {
+        "default"
+    };
     let cache = std::env::temp_dir().join(format!("parko_trt_tf32_probe_cache_{tag}"));
-    let cfg = TrtConfig { engine_cache_path: cache.to_string_lossy().into_owned() };
+    let cfg = TrtConfig {
+        engine_cache_path: cache.to_string_lossy().into_owned(),
+    };
 
     let trt = TrtBackend::with_config(model_path, &cfg).ok()?;
     let model = trt.load_model(model_path).ok()?;
@@ -89,7 +97,10 @@ fn run_once() -> Option<Vec<f32>> {
     let input = deterministic_input(total);
     let mut named = HashMap::new();
     named.insert(INPUT_NAME.to_string(), TensorStorage::Borrowed(&input));
-    let batch = TensorBatch { named_tensors: named, metadata: HashMap::new() };
+    let batch = TensorBatch {
+        named_tensors: named,
+        metadata: HashMap::new(),
+    };
 
     let out = trt.run(&model, &batch).ok()?;
     Some(out.named_tensors.get(OUTPUT_NAME)?.as_slice().to_vec())
@@ -101,7 +112,11 @@ fn trt_fp32_tf32_differential() {
     // print the logits for the parent to parse. Never spawns a grandchild.
     if std::env::var(CHILD_MARKER).is_ok() {
         if let Some(v) = run_once() {
-            let s = v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+            let s = v
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
             match std::env::var(CHILD_OUT) {
                 Ok(path) => std::fs::write(&path, s).expect("child write logits file"),
                 Err(_) => println!("{LOGITS_PREFIX}{s}"),
@@ -118,7 +133,9 @@ fn trt_fp32_tf32_differential() {
             "STRICT (PARKO_TRT_REQUIRE_EP): no loadable ORT runtime at ORT_DYLIB_PATH ({dylib:?}) — \
              refusing (fail-closed).",
         );
-        eprintln!("SKIP: ORT runtime lib not present ({dylib:?}) — TF32 probe needs a Jetson/TRT ORT.");
+        eprintln!(
+            "SKIP: ORT runtime lib not present ({dylib:?}) — TF32 probe needs a Jetson/TRT ORT."
+        );
         return;
     }
     let default_logits = match run_once() {
@@ -128,7 +145,9 @@ fn trt_fp32_tf32_differential() {
                 !require_ep(),
                 "STRICT (PARKO_TRT_REQUIRE_EP): TensorRT EP unavailable — refusing (fail-closed).",
             );
-            eprintln!("SKIP: TensorRT EP unavailable — TF32 probe asserts only on a Jetson/TRT ORT.");
+            eprintln!(
+                "SKIP: TensorRT EP unavailable — TF32 probe asserts only on a Jetson/TRT ORT."
+            );
             return;
         }
     };
@@ -137,10 +156,16 @@ fn trt_fp32_tf32_differential() {
     // only honored at CUDA init, hence a new process). ORT_DYLIB_PATH is inherited;
     // the child writes its logits to a temp file we read back.
     let exe = std::env::current_exe().expect("current_exe() for the TF32 child");
-    let out_file = std::env::temp_dir().join(format!("parko_tf32_child_{}.txt", std::process::id()));
+    let out_file =
+        std::env::temp_dir().join(format!("parko_tf32_child_{}.txt", std::process::id()));
     let _ = std::fs::remove_file(&out_file);
     let output = Command::new(&exe)
-        .args(["trt_fp32_tf32_differential", "--exact", "--nocapture", "--test-threads=1"])
+        .args([
+            "trt_fp32_tf32_differential",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_MARKER, "1")
         .env(CHILD_OUT, &out_file)
         .env("NVIDIA_TF32_OVERRIDE", "0")
@@ -163,7 +188,10 @@ fn trt_fp32_tf32_differential() {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             );
-            assert!(!require_ep(), "STRICT: TF32-off child failed to produce logits.");
+            assert!(
+                !require_ep(),
+                "STRICT: TF32-off child failed to produce logits."
+            );
             return;
         }
     };

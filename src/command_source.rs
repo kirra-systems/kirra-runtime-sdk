@@ -63,7 +63,8 @@ impl CommandSource {
 }
 
 fn note_failure(app: &AppState, why: &str) {
-    app.command_source_write_failures.fetch_add(1, Ordering::SeqCst);
+    app.command_source_write_failures
+        .fetch_add(1, Ordering::SeqCst);
     tracing::error!(
         error = %why,
         "COMMAND_SOURCE_HANDOFF audit write failed — provenance event missing from \
@@ -146,7 +147,11 @@ mod tests {
             "operator takeover requested",
             1_000,
         );
-        assert_eq!(write_failures(&app), 0, "the handoff must have been durably recorded");
+        assert_eq!(
+            write_failures(&app),
+            0,
+            "the handoff must have been durably recorded"
+        );
 
         let (v, events) = app.store.with(|store| {
             let v = store.verify_audit_chain_full(Some(&vk)).expect("verify");
@@ -154,8 +159,15 @@ mod tests {
             (v, events)
         });
         assert!(v.chain_intact, "handoff event must be hash-chained");
-        assert!(v.signature_valid, "handoff event must verify under the signing key");
-        assert!(v.signed_entries >= 1, "the handoff event must be signed, got {}", v.signed_entries);
+        assert!(
+            v.signature_valid,
+            "handoff event must verify under the signing key"
+        );
+        assert!(
+            v.signed_entries >= 1,
+            "the handoff event must be signed, got {}",
+            v.signed_entries
+        );
 
         let h = &events
             .iter()
@@ -179,7 +191,9 @@ mod tests {
             "source unattributable -> MRC safe-stop",
             2_000,
         );
-        let events = app.store.with(|store| store.load_all_posture_events().expect("load"));
+        let events = app
+            .store
+            .with(|store| store.load_all_posture_events().expect("load"));
         let h = &events
             .iter()
             .find(|e| e["event_type"] == COMMAND_SOURCE_HANDOFF)
@@ -206,7 +220,10 @@ mod tests {
                 assert_ne!(rendered[i], rendered[j], "variant strings must be distinct");
             }
         }
-        assert_eq!(CommandSource::StandbyController.as_str(), "StandbyController");
+        assert_eq!(
+            CommandSource::StandbyController.as_str(),
+            "StandbyController"
+        );
         assert_eq!(CommandSource::MrcSafeStop.as_str(), "MrcSafeStop");
     }
 }

@@ -10,24 +10,28 @@
 use kirra_ros2_adapter::{
     config::VehicleConfig,
     state::{
-        AcceptedTrajectory, AdaptorState, EgoOdom, Pose, TrajectoryPoint,
-        TrajectoryVerdict, DEFAULT_MAX_AGE_MS, SUBSCRIPTION_STALENESS_TIMEOUT_MS,
+        AcceptedTrajectory, AdaptorState, EgoOdom, Pose, TrajectoryPoint, TrajectoryVerdict,
+        DEFAULT_MAX_AGE_MS, SUBSCRIPTION_STALENESS_TIMEOUT_MS,
     },
     validation::{check_command_conforms, ConformanceVerdict, IncomingControl},
 };
 
 fn straight_pts(n: usize, v: f64, dt: f64) -> Vec<TrajectoryPoint> {
-    (0..n).map(|i| TrajectoryPoint {
-        pose: Pose { x_m: (i as f64) * v * dt, y_m: 0.0, heading_rad: 0.0 },
-        velocity_mps: v,
-        time_from_start_s: (i as f64) * dt,
-    }).collect()
+    (0..n)
+        .map(|i| TrajectoryPoint {
+            pose: Pose {
+                x_m: (i as f64) * v * dt,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+            velocity_mps: v,
+            time_from_start_s: (i as f64) * dt,
+        })
+        .collect()
 }
 
 fn fresh_accepted(promoted_at_ms: u64, pts: Vec<TrajectoryPoint>) -> AcceptedTrajectory {
-    AcceptedTrajectory::with_verdict(
-        "av_01", 1, pts, TrajectoryVerdict::Accept, promoted_at_ms,
-    )
+    AcceptedTrajectory::with_verdict("av_01", 1, pts, TrajectoryVerdict::Accept, promoted_at_ms)
 }
 
 // ---------------------------------------------------------------------------
@@ -39,20 +43,31 @@ fn test_conforming_command_passes() {
     // Trajectory promoted 50 ms ago at 5 m/s for 1 s. Command velocity
     // 5.0 m/s (== nearest), steering 0 → conforms.
     let promoted = 100_000;
-    let now = promoted + 50;  // 50 ms after promotion
+    let now = promoted + 50; // 50 ms after promotion
     let traj = fresh_accepted(promoted, straight_pts(10, 5.0, 0.1));
-    let cmd = IncomingControl { velocity_mps: 5.0, steering_rad: 0.0, stamp_ms: now };
+    let cmd = IncomingControl {
+        velocity_mps: 5.0,
+        steering_rad: 0.0,
+        stamp_ms: now,
+    };
     let cfg = VehicleConfig::default_urban();
-    let ego = EgoOdom { linear_x_mps: 5.0, yaw_rate_rads: 0.0, stamp_ms: now };
+    let ego = EgoOdom {
+        linear_x_mps: 5.0,
+        yaw_rate_rads: 0.0,
+        stamp_ms: now,
+    };
 
     let start = std::time::Instant::now();
     let verdict = check_command_conforms(&cmd, &traj, &ego, &cfg, now);
     let elapsed_us = start.elapsed().as_micros();
     eprintln!("conforming_command_passes elapsed_us = {elapsed_us}");
 
-    assert_eq!(verdict, ConformanceVerdict::Accept,
+    assert_eq!(
+        verdict,
+        ConformanceVerdict::Accept,
         "conforming command (cmd.v = nearest.v, steering in range, fresh trajectory) \
-         must Accept; got {verdict:?}");
+         must Accept; got {verdict:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -65,13 +80,20 @@ fn test_overspeed_command_mrcs() {
     let now = promoted + 50;
     let traj = fresh_accepted(promoted, straight_pts(10, 5.0, 0.1));
     // VELOCITY_TOLERANCE_MPS = 0.5 → 5.6 is 0.1 m/s past the tolerance.
-    let cmd = IncomingControl { velocity_mps: 5.6, steering_rad: 0.0, stamp_ms: now };
+    let cmd = IncomingControl {
+        velocity_mps: 5.6,
+        steering_rad: 0.0,
+        stamp_ms: now,
+    };
     let cfg = VehicleConfig::default_urban();
     let ego = EgoOdom::default();
 
     let verdict = check_command_conforms(&cmd, &traj, &ego, &cfg, now);
-    assert_eq!(verdict, ConformanceVerdict::MRCFallback,
-        "command velocity 5.6 m/s > nearest.v (5.0) + tolerance (0.5) must MRC; got {verdict:?}");
+    assert_eq!(
+        verdict,
+        ConformanceVerdict::MRCFallback,
+        "command velocity 5.6 m/s > nearest.v (5.0) + tolerance (0.5) must MRC; got {verdict:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -84,14 +106,21 @@ fn test_stale_trajectory_mrcs() {
     // now is past promoted + DEFAULT_MAX_AGE_MS (200 ms) → stale.
     let now = promoted + DEFAULT_MAX_AGE_MS + 50;
     let traj = fresh_accepted(promoted, straight_pts(10, 5.0, 0.1));
-    let cmd = IncomingControl { velocity_mps: 5.0, steering_rad: 0.0, stamp_ms: now };
+    let cmd = IncomingControl {
+        velocity_mps: 5.0,
+        steering_rad: 0.0,
+        stamp_ms: now,
+    };
     let cfg = VehicleConfig::default_urban();
     let ego = EgoOdom::default();
 
     let verdict = check_command_conforms(&cmd, &traj, &ego, &cfg, now);
-    assert_eq!(verdict, ConformanceVerdict::MRCFallback,
+    assert_eq!(
+        verdict,
+        ConformanceVerdict::MRCFallback,
         "trajectory aged past DEFAULT_MAX_AGE_MS must MRC even on a conforming command; \
-         got {verdict:?}");
+         got {verdict:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -106,15 +135,20 @@ fn test_no_trajectory_mrcs() {
     // exercise that path directly (snapshot returns None → MRC).
     let state = AdaptorState::new();
     let snap = state.snapshot("ghost_av");
-    assert!(snap.is_none(),
-        "AdaptorState with no install must return None for unknown asset");
+    assert!(
+        snap.is_none(),
+        "AdaptorState with no install must return None for unknown asset"
+    );
 
     // current_verdict (the fast-loop's other entry point) also collapses
     // to MRCFallback per the Phase 1 contract.
     let now = 100_000;
     let verdict = state.current_verdict("ghost_av", now);
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "AdaptorState::current_verdict on unknown asset must be MRCFallback; got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "AdaptorState::current_verdict on unknown asset must be MRCFallback; got {verdict:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -139,25 +173,33 @@ fn test_stale_subscription_mrcs() {
     let state = AdaptorState::new();
     // Cold start: nothing has been touched. Even with `now_ms = 0`,
     // the "0 sentinel = never seen" rule fires.
-    assert!(state.any_subscription_stale(0, SUBSCRIPTION_STALENESS_TIMEOUT_MS),
-        "cold-start AdaptorState (all last_*_ms = 0) must read as stale");
+    assert!(
+        state.any_subscription_stale(0, SUBSCRIPTION_STALENESS_TIMEOUT_MS),
+        "cold-start AdaptorState (all last_*_ms = 0) must read as stale"
+    );
 
     // Touch all three at t = 1_000. At t = 1_400 (400 ms later) nothing
     // is stale yet (under the 500 ms default).
     state.touch_trajectory(1_000);
     state.touch_objects(1_000);
     state.touch_odom(1_000);
-    assert!(!state.any_subscription_stale(1_400, SUBSCRIPTION_STALENESS_TIMEOUT_MS),
-        "subscriptions touched 400 ms ago must NOT be stale at 500 ms timeout");
+    assert!(
+        !state.any_subscription_stale(1_400, SUBSCRIPTION_STALENESS_TIMEOUT_MS),
+        "subscriptions touched 400 ms ago must NOT be stale at 500 ms timeout"
+    );
 
     // At t = 1_600 (600 ms later) the threshold is exceeded → stale.
-    assert!(state.any_subscription_stale(1_600, SUBSCRIPTION_STALENESS_TIMEOUT_MS),
-        "subscriptions touched 600 ms ago must be stale at 500 ms timeout");
+    assert!(
+        state.any_subscription_stale(1_600, SUBSCRIPTION_STALENESS_TIMEOUT_MS),
+        "subscriptions touched 600 ms ago must be stale at 500 ms timeout"
+    );
 
     // Asymmetric staleness: trajectory + objects fresh, odom stale.
     state.touch_trajectory(2_000);
     state.touch_objects(2_000);
     // odom last touched at 1_000, now at 2_000 → 1_000 ms stale.
-    assert!(state.any_subscription_stale(2_000, SUBSCRIPTION_STALENESS_TIMEOUT_MS),
-        "any single stale subscription must surface stale=true");
+    assert!(
+        state.any_subscription_stale(2_000, SUBSCRIPTION_STALENESS_TIMEOUT_MS),
+        "any single stale subscription must surface stale=true"
+    );
 }

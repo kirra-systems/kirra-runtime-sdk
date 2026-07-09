@@ -93,26 +93,47 @@ mod tests {
     #[test]
     fn register_then_resolve_by_hash() {
         let mut s = store();
-        s.register_api_principal("svc-a", "hash-a", "integrator", 1_000).unwrap();
-        let rec = s.load_api_principal_by_token_hash("hash-a").unwrap().expect("present");
+        s.register_api_principal("svc-a", "hash-a", "integrator", 1_000)
+            .unwrap();
+        let rec = s
+            .load_api_principal_by_token_hash("hash-a")
+            .unwrap()
+            .expect("present");
         assert_eq!(rec.principal_id, "svc-a");
         assert_eq!(rec.role, "integrator");
         assert!(rec.is_active());
-        assert!(s.load_api_principal_by_token_hash("nope").unwrap().is_none());
+        assert!(s
+            .load_api_principal_by_token_hash("nope")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn rotation_overwrites_hash_and_clears_revocation() {
         let mut s = store();
-        s.register_api_principal("svc-a", "hash-old", "integrator", 1_000).unwrap();
+        s.register_api_principal("svc-a", "hash-old", "integrator", 1_000)
+            .unwrap();
         assert!(s.revoke_api_principal("svc-a", 2_000).unwrap());
         // The old hash still resolves the (now revoked) record.
-        assert!(s.load_api_principal_by_token_hash("hash-old").unwrap().unwrap().revoked_at_ms.is_some());
+        assert!(s
+            .load_api_principal_by_token_hash("hash-old")
+            .unwrap()
+            .unwrap()
+            .revoked_at_ms
+            .is_some());
         // Re-register rotates the token and reactivates.
-        s.register_api_principal("svc-a", "hash-new", "auditor", 3_000).unwrap();
-        assert!(s.load_api_principal_by_token_hash("hash-old").unwrap().is_none(),
-            "the rotated-out hash no longer resolves");
-        let rec = s.load_api_principal_by_token_hash("hash-new").unwrap().unwrap();
+        s.register_api_principal("svc-a", "hash-new", "auditor", 3_000)
+            .unwrap();
+        assert!(
+            s.load_api_principal_by_token_hash("hash-old")
+                .unwrap()
+                .is_none(),
+            "the rotated-out hash no longer resolves"
+        );
+        let rec = s
+            .load_api_principal_by_token_hash("hash-new")
+            .unwrap()
+            .unwrap();
         assert_eq!(rec.role, "auditor");
         assert!(rec.is_active());
     }
@@ -120,18 +141,35 @@ mod tests {
     #[test]
     fn revoke_is_idempotent_and_reports_transition() {
         let mut s = store();
-        s.register_api_principal("svc-a", "h", "operator", 1_000).unwrap();
-        assert!(s.revoke_api_principal("svc-a", 2_000).unwrap(), "first revoke transitions");
-        assert!(!s.revoke_api_principal("svc-a", 3_000).unwrap(), "second revoke is a no-op");
-        assert!(!s.revoke_api_principal("absent", 3_000).unwrap(), "absent principal → false");
+        s.register_api_principal("svc-a", "h", "operator", 1_000)
+            .unwrap();
+        assert!(
+            s.revoke_api_principal("svc-a", 2_000).unwrap(),
+            "first revoke transitions"
+        );
+        assert!(
+            !s.revoke_api_principal("svc-a", 3_000).unwrap(),
+            "second revoke is a no-op"
+        );
+        assert!(
+            !s.revoke_api_principal("absent", 3_000).unwrap(),
+            "absent principal → false"
+        );
     }
 
     #[test]
     fn list_orders_by_id_and_hides_no_secret() {
         let mut s = store();
-        s.register_api_principal("svc-b", "hb", "auditor", 1_000).unwrap();
-        s.register_api_principal("svc-a", "ha", "integrator", 1_000).unwrap();
+        s.register_api_principal("svc-b", "hb", "auditor", 1_000)
+            .unwrap();
+        s.register_api_principal("svc-a", "ha", "integrator", 1_000)
+            .unwrap();
         let all = s.load_api_principals().unwrap();
-        assert_eq!(all.iter().map(|p| p.principal_id.as_str()).collect::<Vec<_>>(), ["svc-a", "svc-b"]);
+        assert_eq!(
+            all.iter()
+                .map(|p| p.principal_id.as_str())
+                .collect::<Vec<_>>(),
+            ["svc-a", "svc-b"]
+        );
     }
 }

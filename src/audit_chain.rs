@@ -1,8 +1,8 @@
 // src/audit_chain.rs
 
-use rusqlite::{params, Transaction, Result};
-use sha2::{Sha256, Digest};
 use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
+use rusqlite::{params, Result, Transaction};
+use sha2::{Digest, Sha256};
 
 /// Event payload written to the audit chain when an RSS safe-distance
 /// violation is detected. All fields are included in the SHA-256 hash.
@@ -37,7 +37,10 @@ pub fn canonical_signing_payload(
     event_type: &str,
     timestamp_ms: i64,
 ) -> String {
-    format!("{}:{}:{}:{}", prev_hash, entry_hash, event_type, timestamp_ms)
+    format!(
+        "{}:{}:{}:{}",
+        prev_hash, entry_hash, event_type, timestamp_ms
+    )
 }
 
 /// V2 canonical signing payload. Binds `sequence` and explicit version
@@ -50,9 +53,7 @@ pub fn canonical_signing_payload_v2(
     timestamp_ms: i64,
     sequence: u64,
 ) -> String {
-    format!(
-        "v2:{prev_hash}:{entry_hash}:{event_type}:{timestamp_ms}:{sequence}"
-    )
+    format!("v2:{prev_hash}:{entry_hash}:{event_type}:{timestamp_ms}:{sequence}")
 }
 
 /// Canonical signing payload for the audit anchor-HEAD high-water mark (#77).
@@ -236,7 +237,13 @@ impl AuditChainLinker {
     ) -> Result<()> {
         let json = serde_json::to_string(event)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        Self::append_audit_event_tx(tx, "RSS_VIOLATION", &json, event.timestamp_ms as i64, signing_key)
+        Self::append_audit_event_tx(
+            tx,
+            "RSS_VIOLATION",
+            &json,
+            event.timestamp_ms as i64,
+            signing_key,
+        )
     }
 
     /// Appends a Track-C perception-monitor derate event to the hash-chained
@@ -251,7 +258,13 @@ impl AuditChainLinker {
     ) -> Result<()> {
         let json = serde_json::to_string(event)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        Self::append_audit_event_tx(tx, &event.reason, &json, event.timestamp_ms as i64, signing_key)
+        Self::append_audit_event_tx(
+            tx,
+            &event.reason,
+            &json,
+            event.timestamp_ms as i64,
+            signing_key,
+        )
     }
 
     pub fn append_audit_event_tx(
@@ -306,8 +319,7 @@ impl AuditChainLinker {
         // metadata: tampering it makes the row verify under the WRONG key and
         // fail (no need to bind it into the existing signed payload, which keeps
         // v1/v2 signatures unchanged).
-        let key_id: Option<String> =
-            signing_key.map(|key| verifying_key_id(&key.verifying_key()));
+        let key_id: Option<String> = signing_key.map(|key| verifying_key_id(&key.verifying_key()));
 
         tx.execute(
             "INSERT INTO audit_log_chain
@@ -357,8 +369,8 @@ impl AuditChainLinker {
 #[cfg(test)]
 mod audit_signing_tests {
     use super::*;
+    use ed25519_dalek::{Signature, SigningKey, Verifier};
     use rusqlite::Connection;
-    use ed25519_dalek::{SigningKey, Verifier, Signature};
 
     fn setup_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -382,8 +394,9 @@ mod audit_signing_tests {
                 record_hash_hex TEXT NOT NULL,
                 signature_b64 TEXT,
                 key_id TEXT
-            );"
-        ).unwrap();
+            );",
+        )
+        .unwrap();
         conn
     }
 
@@ -399,18 +412,28 @@ mod audit_signing_tests {
         {
             let tx = conn.unchecked_transaction().unwrap();
             AuditChainLinker::append_audit_event_tx(
-                &tx, "TEST_EVENT", r#"{"test": true}"#, 1000, Some(&key),
-            ).unwrap();
+                &tx,
+                "TEST_EVENT",
+                r#"{"test": true}"#,
+                1000,
+                Some(&key),
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
 
-        let sig_b64: Option<String> = conn.query_row(
-            "SELECT signature_b64 FROM audit_log_chain ORDER BY id DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let sig_b64: Option<String> = conn
+            .query_row(
+                "SELECT signature_b64 FROM audit_log_chain ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
-        assert!(sig_b64.is_some(), "signature_b64 should be present when key is configured");
+        assert!(
+            sig_b64.is_some(),
+            "signature_b64 should be present when key is configured"
+        );
         assert!(!sig_b64.unwrap().is_empty());
     }
 
@@ -420,18 +443,28 @@ mod audit_signing_tests {
         {
             let tx = conn.unchecked_transaction().unwrap();
             AuditChainLinker::append_audit_event_tx(
-                &tx, "TEST_EVENT", r#"{"test": true}"#, 1000, None,
-            ).unwrap();
+                &tx,
+                "TEST_EVENT",
+                r#"{"test": true}"#,
+                1000,
+                None,
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
 
-        let sig_b64: Option<String> = conn.query_row(
-            "SELECT signature_b64 FROM audit_log_chain ORDER BY id DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let sig_b64: Option<String> = conn
+            .query_row(
+                "SELECT signature_b64 FROM audit_log_chain ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
-        assert!(sig_b64.is_none(), "signature_b64 should be NULL when no key is configured");
+        assert!(
+            sig_b64.is_none(),
+            "signature_b64 should be NULL when no key is configured"
+        );
     }
 
     #[test]
@@ -464,7 +497,10 @@ mod audit_signing_tests {
 
         assert_eq!(event_type, "DETECTION_RANGE_UNTRUSTED");
         assert!(event_json.contains("\"cap_mps\":0.0"));
-        assert!(sig_b64.is_some(), "perception-derate row must be signed when key configured");
+        assert!(
+            sig_b64.is_some(),
+            "perception-derate row must be signed when key configured"
+        );
     }
 
     #[test]
@@ -476,8 +512,13 @@ mod audit_signing_tests {
         {
             let tx = conn.unchecked_transaction().unwrap();
             AuditChainLinker::append_audit_event_tx(
-                &tx, "TEST_EVENT", r#"{"data": "value"}"#, 2000, Some(&key),
-            ).unwrap();
+                &tx,
+                "TEST_EVENT",
+                r#"{"data": "value"}"#,
+                2000,
+                Some(&key),
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
 
@@ -491,14 +532,21 @@ mod audit_signing_tests {
         ).unwrap();
 
         let payload = canonical_signing_payload_v2(
-            &prev_hash, &record_hash, "TEST_EVENT", created_at_ms, sequence as u64,
+            &prev_hash,
+            &record_hash,
+            "TEST_EVENT",
+            created_at_ms,
+            sequence as u64,
         );
         let sig_bytes = b64e.decode(&sig_b64).unwrap();
         let mut sig_arr = [0u8; 64];
         sig_arr.copy_from_slice(&sig_bytes);
         let sig = Signature::from_bytes(&sig_arr);
 
-        assert!(vk.verify(payload.as_bytes(), &sig).is_ok(), "signature should verify against v2 canonical payload");
+        assert!(
+            vk.verify(payload.as_bytes(), &sig).is_ok(),
+            "signature should verify against v2 canonical payload"
+        );
     }
 
     #[test]
@@ -510,8 +558,13 @@ mod audit_signing_tests {
         {
             let tx = conn.unchecked_transaction().unwrap();
             AuditChainLinker::append_audit_event_tx(
-                &tx, "TEST_EVENT", r#"{"tamper": false}"#, 3000, Some(&key),
-            ).unwrap();
+                &tx,
+                "TEST_EVENT",
+                r#"{"tamper": false}"#,
+                3000,
+                Some(&key),
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
 
@@ -520,7 +573,8 @@ mod audit_signing_tests {
         conn.execute(
             "UPDATE audit_log_chain SET signature_b64 = ?1",
             params![bad_sig],
-        ).unwrap();
+        )
+        .unwrap();
 
         // v2: rebuild the v2 payload (matches what append signs); a
         // zeroed signature still fails verification under either payload.
@@ -533,14 +587,21 @@ mod audit_signing_tests {
         ).unwrap();
 
         let payload = canonical_signing_payload_v2(
-            &prev_hash, &record_hash, "TEST_EVENT", created_at_ms, sequence as u64,
+            &prev_hash,
+            &record_hash,
+            "TEST_EVENT",
+            created_at_ms,
+            sequence as u64,
         );
         let sig_bytes = b64e.decode(&sig_b64).unwrap();
         let mut sig_arr = [0u8; 64];
         sig_arr.copy_from_slice(&sig_bytes);
         let sig = Signature::from_bytes(&sig_arr);
 
-        assert!(vk.verify(payload.as_bytes(), &sig).is_err(), "tampered signature should fail verification");
+        assert!(
+            vk.verify(payload.as_bytes(), &sig).is_err(),
+            "tampered signature should fail verification"
+        );
     }
 
     #[test]
@@ -551,35 +612,54 @@ mod audit_signing_tests {
         {
             let tx = conn.unchecked_transaction().unwrap();
             AuditChainLinker::append_audit_event_tx(
-                &tx, "SIGNED_EVENT", r#"{"signed": true}"#, 1000, Some(&key),
-            ).unwrap();
+                &tx,
+                "SIGNED_EVENT",
+                r#"{"signed": true}"#,
+                1000,
+                Some(&key),
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
         {
             let tx = conn.unchecked_transaction().unwrap();
             AuditChainLinker::append_audit_event_tx(
-                &tx, "UNSIGNED_EVENT", r#"{"signed": false}"#, 2000, None,
-            ).unwrap();
+                &tx,
+                "UNSIGNED_EVENT",
+                r#"{"signed": false}"#,
+                2000,
+                None,
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
         {
             let tx = conn.unchecked_transaction().unwrap();
             AuditChainLinker::append_audit_event_tx(
-                &tx, "SIGNED_EVENT_2", r#"{"signed": true}"#, 3000, Some(&key),
-            ).unwrap();
+                &tx,
+                "SIGNED_EVENT_2",
+                r#"{"signed": true}"#,
+                3000,
+                Some(&key),
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
 
-        let signed_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM audit_log_chain WHERE signature_b64 IS NOT NULL",
-            [],
-            |row| row.get(0),
-        ).unwrap();
-        let unsigned_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM audit_log_chain WHERE signature_b64 IS NULL",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let signed_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log_chain WHERE signature_b64 IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let unsigned_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log_chain WHERE signature_b64 IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         assert_eq!(signed_count, 2, "should have 2 signed entries");
         assert_eq!(unsigned_count, 1, "should have 1 unsigned entry");
@@ -594,18 +674,25 @@ mod audit_signing_tests {
         for ts in &timestamps {
             let tx = conn.unchecked_transaction().unwrap();
             AuditChainLinker::append_audit_event_tx(
-                &tx, "CHAIN_EVENT", &format!(r#"{{"ts": {}}}"#, ts), *ts, Some(&key),
-            ).unwrap();
+                &tx,
+                "CHAIN_EVENT",
+                &format!(r#"{{"ts": {}}}"#, ts),
+                *ts,
+                Some(&key),
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
 
         // Walk chain manually — post hash-v2: SELECT event_type + sequence,
         // recompute with compute_record_hash_v2.
-        let mut stmt = conn.prepare(
-            "SELECT event_type, event_json, previous_hash_hex, record_hash_hex, \
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_type, event_json, previous_hash_hex, record_hash_hex, \
              created_at_ms, sequence \
-             FROM audit_log_chain ORDER BY id ASC"
-        ).unwrap();
+             FROM audit_log_chain ORDER BY id ASC",
+            )
+            .unwrap();
 
         let mut expected_prev = "0".repeat(64);
         let mut rows = stmt.query([]).unwrap();
@@ -613,14 +700,19 @@ mod audit_signing_tests {
         while let Some(row) = rows.next().unwrap() {
             let event_type: String = row.get(0).unwrap();
             let event_json: String = row.get(1).unwrap();
-            let prev:       String = row.get(2).unwrap();
-            let record:     String = row.get(3).unwrap();
-            let ts:         i64    = row.get(4).unwrap();
-            let sequence:   i64    = row.get::<_, Option<i64>>(5).unwrap().unwrap_or(0);
+            let prev: String = row.get(2).unwrap();
+            let record: String = row.get(3).unwrap();
+            let ts: i64 = row.get(4).unwrap();
+            let sequence: i64 = row.get::<_, Option<i64>>(5).unwrap().unwrap_or(0);
 
             assert_eq!(prev, expected_prev, "hash chain should be intact");
             let recomputed = AuditChainLinker::compute_record_hash_v2(
-                &prev, &event_type, &event_json, ts, sequence as u64);
+                &prev,
+                &event_type,
+                &event_json,
+                ts,
+                sequence as u64,
+            );
             assert_eq!(recomputed, record, "v2 record hash should match");
             expected_prev = record;
         }
@@ -631,16 +723,28 @@ mod audit_signing_tests {
     #[test]
     fn test_causal_record_hash_is_deterministic() {
         let h1 = compute_causal_record_hash(&CausalRecordHashInput {
-            previous_hash: &"0".repeat(64), entry_id: "entry1", asset_id: "asset1",
-            event_type: "FAULT", payload: "{}",
-            caused_by: &["c1".to_string()], affects_assets: &["a1".to_string()],
-            timestamp_ms: 1000, fabric_generation: 5, sequence: 0,
+            previous_hash: &"0".repeat(64),
+            entry_id: "entry1",
+            asset_id: "asset1",
+            event_type: "FAULT",
+            payload: "{}",
+            caused_by: &["c1".to_string()],
+            affects_assets: &["a1".to_string()],
+            timestamp_ms: 1000,
+            fabric_generation: 5,
+            sequence: 0,
         });
         let h2 = compute_causal_record_hash(&CausalRecordHashInput {
-            previous_hash: &"0".repeat(64), entry_id: "entry1", asset_id: "asset1",
-            event_type: "FAULT", payload: "{}",
-            caused_by: &["c1".to_string()], affects_assets: &["a1".to_string()],
-            timestamp_ms: 1000, fabric_generation: 5, sequence: 0,
+            previous_hash: &"0".repeat(64),
+            entry_id: "entry1",
+            asset_id: "asset1",
+            event_type: "FAULT",
+            payload: "{}",
+            caused_by: &["c1".to_string()],
+            affects_assets: &["a1".to_string()],
+            timestamp_ms: 1000,
+            fabric_generation: 5,
+            sequence: 0,
         });
         assert_eq!(h1, h2, "causal record hash must be deterministic");
     }
@@ -648,78 +752,139 @@ mod audit_signing_tests {
     #[test]
     fn test_causal_record_hash_binds_caused_by_edge() {
         let base = compute_causal_record_hash(&CausalRecordHashInput {
-            previous_hash: &"0".repeat(64), entry_id: "e", asset_id: "a",
-            event_type: "T", payload: "{}",
-            caused_by: &["c1".to_string()], affects_assets: &["x".to_string()],
-            timestamp_ms: 1, fabric_generation: 1, sequence: 0,
+            previous_hash: &"0".repeat(64),
+            entry_id: "e",
+            asset_id: "a",
+            event_type: "T",
+            payload: "{}",
+            caused_by: &["c1".to_string()],
+            affects_assets: &["x".to_string()],
+            timestamp_ms: 1,
+            fabric_generation: 1,
+            sequence: 0,
         });
         let tampered = compute_causal_record_hash(&CausalRecordHashInput {
-            previous_hash: &"0".repeat(64), entry_id: "e", asset_id: "a",
-            event_type: "T", payload: "{}",
-            caused_by: &["c2".to_string()], affects_assets: &["x".to_string()],
-            timestamp_ms: 1, fabric_generation: 1, sequence: 0,
+            previous_hash: &"0".repeat(64),
+            entry_id: "e",
+            asset_id: "a",
+            event_type: "T",
+            payload: "{}",
+            caused_by: &["c2".to_string()],
+            affects_assets: &["x".to_string()],
+            timestamp_ms: 1,
+            fabric_generation: 1,
+            sequence: 0,
         });
-        assert_ne!(base, tampered, "changing caused_by MUST change the record hash");
+        assert_ne!(
+            base, tampered,
+            "changing caused_by MUST change the record hash"
+        );
     }
 
     #[test]
     fn test_causal_record_hash_binds_affects_assets_edge() {
         let base = compute_causal_record_hash(&CausalRecordHashInput {
-            previous_hash: &"0".repeat(64), entry_id: "e", asset_id: "a",
-            event_type: "T", payload: "{}",
-            caused_by: &[], affects_assets: &["x".to_string()],
-            timestamp_ms: 1, fabric_generation: 1, sequence: 0,
+            previous_hash: &"0".repeat(64),
+            entry_id: "e",
+            asset_id: "a",
+            event_type: "T",
+            payload: "{}",
+            caused_by: &[],
+            affects_assets: &["x".to_string()],
+            timestamp_ms: 1,
+            fabric_generation: 1,
+            sequence: 0,
         });
         let tampered = compute_causal_record_hash(&CausalRecordHashInput {
-            previous_hash: &"0".repeat(64), entry_id: "e", asset_id: "a",
-            event_type: "T", payload: "{}",
-            caused_by: &[], affects_assets: &["y".to_string()],
-            timestamp_ms: 1, fabric_generation: 1, sequence: 0,
+            previous_hash: &"0".repeat(64),
+            entry_id: "e",
+            asset_id: "a",
+            event_type: "T",
+            payload: "{}",
+            caused_by: &[],
+            affects_assets: &["y".to_string()],
+            timestamp_ms: 1,
+            fabric_generation: 1,
+            sequence: 0,
         });
-        assert_ne!(base, tampered, "changing affects_assets MUST change the record hash");
+        assert_ne!(
+            base, tampered,
+            "changing affects_assets MUST change the record hash"
+        );
     }
 
     #[test]
     fn test_causal_record_hash_binds_fabric_generation_edge() {
         let base = compute_causal_record_hash(&CausalRecordHashInput {
-            previous_hash: &"0".repeat(64), entry_id: "e", asset_id: "a",
-            event_type: "T", payload: "{}", caused_by: &[], affects_assets: &[],
-            timestamp_ms: 1, fabric_generation: 5, sequence: 0,
+            previous_hash: &"0".repeat(64),
+            entry_id: "e",
+            asset_id: "a",
+            event_type: "T",
+            payload: "{}",
+            caused_by: &[],
+            affects_assets: &[],
+            timestamp_ms: 1,
+            fabric_generation: 5,
+            sequence: 0,
         });
         let tampered = compute_causal_record_hash(&CausalRecordHashInput {
-            previous_hash: &"0".repeat(64), entry_id: "e", asset_id: "a",
-            event_type: "T", payload: "{}", caused_by: &[], affects_assets: &[],
-            timestamp_ms: 1, fabric_generation: 6, sequence: 0,
+            previous_hash: &"0".repeat(64),
+            entry_id: "e",
+            asset_id: "a",
+            event_type: "T",
+            payload: "{}",
+            caused_by: &[],
+            affects_assets: &[],
+            timestamp_ms: 1,
+            fabric_generation: 6,
+            sequence: 0,
         });
-        assert_ne!(base, tampered, "changing fabric_generation MUST change the record hash");
+        assert_ne!(
+            base, tampered,
+            "changing fabric_generation MUST change the record hash"
+        );
     }
 
     #[test]
     fn test_causal_record_hash_length_prefix_prevents_splicing() {
         // ("AB","C") vs ("A","BC") in the edge vectors must differ.
         let a = compute_causal_record_hash(&CausalRecordHashInput {
-            previous_hash: &"0".repeat(64), entry_id: "e", asset_id: "a",
-            event_type: "T", payload: "{}",
-            caused_by: &["AB".to_string(), "C".to_string()], affects_assets: &[],
-            timestamp_ms: 1, fabric_generation: 1, sequence: 0,
+            previous_hash: &"0".repeat(64),
+            entry_id: "e",
+            asset_id: "a",
+            event_type: "T",
+            payload: "{}",
+            caused_by: &["AB".to_string(), "C".to_string()],
+            affects_assets: &[],
+            timestamp_ms: 1,
+            fabric_generation: 1,
+            sequence: 0,
         });
         let b = compute_causal_record_hash(&CausalRecordHashInput {
-            previous_hash: &"0".repeat(64), entry_id: "e", asset_id: "a",
-            event_type: "T", payload: "{}",
-            caused_by: &["A".to_string(), "BC".to_string()], affects_assets: &[],
-            timestamp_ms: 1, fabric_generation: 1, sequence: 0,
+            previous_hash: &"0".repeat(64),
+            entry_id: "e",
+            asset_id: "a",
+            event_type: "T",
+            payload: "{}",
+            caused_by: &["A".to_string(), "BC".to_string()],
+            affects_assets: &[],
+            timestamp_ms: 1,
+            fabric_generation: 1,
+            sequence: 0,
         });
         assert_ne!(a, b, "length-prefixing must defeat edge field-splicing");
     }
 
     #[test]
     fn test_causal_signing_payload_format_is_stable() {
-        let p = canonical_causal_signing_payload(
-            &"0".repeat(64), &"a".repeat(64), "EVT", 1234, 7,
-        );
+        let p = canonical_causal_signing_payload(&"0".repeat(64), &"a".repeat(64), "EVT", 1234, 7);
         assert_eq!(
             p,
-            format!("kirra-causal:v1:{}:{}:EVT:1234:7", "0".repeat(64), "a".repeat(64)),
+            format!(
+                "kirra-causal:v1:{}:{}:EVT:1234:7",
+                "0".repeat(64),
+                "a".repeat(64)
+            ),
         );
     }
 
@@ -741,7 +906,10 @@ mod audit_signing_tests {
         let payload1 = canonical_signing_payload(&prev, &entry, event_type, ts);
         let payload2 = canonical_signing_payload(&prev, &entry, event_type, ts);
 
-        assert_eq!(payload1, payload2, "canonical payload must be deterministic");
+        assert_eq!(
+            payload1, payload2,
+            "canonical payload must be deterministic"
+        );
         assert_eq!(
             payload1,
             format!("{}:{}:{}:{}", prev, entry, event_type, ts),
@@ -762,15 +930,18 @@ mod audit_signing_tests {
                 r#"{"new_public_key_b64": "abc123", "reason": "scheduled", "rotated_at_ms": 5000}"#,
                 5000,
                 Some(&key),
-            ).unwrap();
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
 
-        let (event_type, sig_b64): (String, Option<String>) = conn.query_row(
-            "SELECT event_type, signature_b64 FROM audit_log_chain LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
+        let (event_type, sig_b64): (String, Option<String>) = conn
+            .query_row(
+                "SELECT event_type, signature_b64 FROM audit_log_chain LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
 
         assert_eq!(event_type, "KEY_ROTATION");
         assert!(sig_b64.is_some(), "KEY_ROTATION entry should be signed");
@@ -796,24 +967,29 @@ mod audit_signing_tests {
         for ts in &[1000i64, 2000, 3000, 4000] {
             let tx = conn.unchecked_transaction().unwrap();
             AuditChainLinker::append_audit_event_tx(
-                &tx, "POSTURE_EVENT", &format!(r#"{{"ts":{}}}"#, ts), *ts, None,
-            ).unwrap();
+                &tx,
+                "POSTURE_EVENT",
+                &format!(r#"{{"ts":{}}}"#, ts),
+                *ts,
+                None,
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
         {
             let tx = conn.unchecked_transaction().unwrap();
-            AuditChainLinker::append_rss_violation(
-                &tx, &sample_rss_event(5000), None,
-            ).unwrap();
+            AuditChainLinker::append_rss_violation(&tx, &sample_rss_event(5000), None).unwrap();
             tx.commit().unwrap();
         }
 
         // Walk chain and verify every v2 hash links correctly.
-        let mut stmt = conn.prepare(
-            "SELECT event_type, event_json, previous_hash_hex, record_hash_hex, \
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_type, event_json, previous_hash_hex, record_hash_hex, \
              created_at_ms, sequence \
-             FROM audit_log_chain ORDER BY id ASC"
-        ).unwrap();
+             FROM audit_log_chain ORDER BY id ASC",
+            )
+            .unwrap();
 
         let mut expected_prev = "0".repeat(64);
         let mut rows = stmt.query([]).unwrap();
@@ -822,17 +998,26 @@ mod audit_signing_tests {
         while let Some(row) = rows.next().unwrap() {
             let event_type: String = row.get(0).unwrap();
             let event_json: String = row.get(1).unwrap();
-            let prev:       String = row.get(2).unwrap();
-            let record:     String = row.get(3).unwrap();
-            let ts:         i64    = row.get(4).unwrap();
-            let sequence:   i64    = row.get::<_, Option<i64>>(5).unwrap().unwrap_or(0);
+            let prev: String = row.get(2).unwrap();
+            let record: String = row.get(3).unwrap();
+            let ts: i64 = row.get(4).unwrap();
+            let sequence: i64 = row.get::<_, Option<i64>>(5).unwrap().unwrap_or(0);
 
-            assert_eq!(prev, expected_prev,
-                "hash chain broken at entry {count}: prev_hash mismatch");
+            assert_eq!(
+                prev, expected_prev,
+                "hash chain broken at entry {count}: prev_hash mismatch"
+            );
             let recomputed = AuditChainLinker::compute_record_hash_v2(
-                &prev, &event_type, &event_json, ts, sequence as u64);
-            assert_eq!(recomputed, record,
-                "hash chain broken at entry {count}: record_hash mismatch");
+                &prev,
+                &event_type,
+                &event_json,
+                ts,
+                sequence as u64,
+            );
+            assert_eq!(
+                recomputed, record,
+                "hash chain broken at entry {count}: record_hash mismatch"
+            );
             expected_prev = record;
             count += 1;
         }
@@ -846,17 +1031,18 @@ mod audit_signing_tests {
 
         {
             let tx = conn.unchecked_transaction().unwrap();
-            AuditChainLinker::append_rss_violation(
-                &tx, &sample_rss_event(1000), None,
-            ).unwrap();
+            AuditChainLinker::append_rss_violation(&tx, &sample_rss_event(1000), None).unwrap();
             tx.commit().unwrap();
         }
 
         // Retrieve and corrupt the event_json (flip one character).
-        let original_json: String = conn.query_row(
-            "SELECT event_json FROM audit_log_chain LIMIT 1",
-            [], |row| row.get(0),
-        ).unwrap();
+        let original_json: String = conn
+            .query_row(
+                "SELECT event_json FROM audit_log_chain LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         let mut corrupted = original_json.clone().into_bytes();
         // Flip a byte somewhere in the middle of the JSON payload.
@@ -867,14 +1053,18 @@ mod audit_signing_tests {
         conn.execute(
             "UPDATE audit_log_chain SET event_json = ?1",
             params![corrupted_json],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Walk chain — recomputed hash must NOT match stored hash.
-        let (event_json, prev, record, ts): (String, String, String, i64) = conn.query_row(
-            "SELECT event_json, previous_hash_hex, record_hash_hex, created_at_ms \
+        let (event_json, prev, record, ts): (String, String, String, i64) = conn
+            .query_row(
+                "SELECT event_json, previous_hash_hex, record_hash_hex, created_at_ms \
              FROM audit_log_chain LIMIT 1",
-            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        ).unwrap();
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
 
         let recomputed = AuditChainLinker::compute_record_hash(&prev, &event_json, ts);
         assert_ne!(
@@ -893,16 +1083,20 @@ mod audit_signing_tests {
         {
             let tx = conn.unchecked_transaction().unwrap();
             AuditChainLinker::append_audit_event_tx(
-                &tx, "SIGNED_EVT", r#"{"a": 1}"#, 1000, Some(&key),
-            ).unwrap();
+                &tx,
+                "SIGNED_EVT",
+                r#"{"a": 1}"#,
+                1000,
+                Some(&key),
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
         // Write an unsigned entry
         {
             let tx = conn.unchecked_transaction().unwrap();
-            AuditChainLinker::append_audit_event_tx(
-                &tx, "UNSIGNED_EVT", r#"{"b": 2}"#, 2000, None,
-            ).unwrap();
+            AuditChainLinker::append_audit_event_tx(&tx, "UNSIGNED_EVT", r#"{"b": 2}"#, 2000, None)
+                .unwrap();
             tx.commit().unwrap();
         }
 
@@ -926,7 +1120,12 @@ mod audit_signing_tests {
                 None => "unsigned".to_string(),
                 Some(s) => {
                     let payload = canonical_signing_payload_v2(
-                        &prev_hash, &record_hash, &event_type, ts, sequence as u64);
+                        &prev_hash,
+                        &record_hash,
+                        &event_type,
+                        ts,
+                        sequence as u64,
+                    );
                     let bytes = b64e.decode(s).unwrap_or_default();
                     if bytes.len() == 64 {
                         let mut arr = [0u8; 64];

@@ -181,7 +181,13 @@ mod tests {
         VehicleKinematicsContract::nominal_reference_profile()
     }
 
-    fn cmd(linear: f64, current: f64, dt: f64, steer: f64, cur_steer: f64) -> ProposedVehicleCommand {
+    fn cmd(
+        linear: f64,
+        current: f64,
+        dt: f64,
+        steer: f64,
+        cur_steer: f64,
+    ) -> ProposedVehicleCommand {
         ProposedVehicleCommand {
             linear_velocity_mps: linear,
             current_velocity_mps: current,
@@ -199,13 +205,13 @@ mod tests {
         let c = contract();
         let platform = AckermannPlatform::new(c);
         let battery = [
-            cmd(5.0, 5.0, 0.1, 0.0, 0.0),        // clean → Allow
-            cmd(1000.0, 5.0, 0.1, 0.0, 0.0),     // over speed → Clamp/Deny
-            cmd(5.0, 5.0, 0.1, 90.0, 0.0),       // over steering
-            cmd(5.0, 5.0, 0.1, 10.0, 0.0),       // lateral-accel territory
-            cmd(f64::NAN, 5.0, 0.1, 0.0, 0.0),   // NaN → DenyBreach
-            cmd(5.0, 5.0, 0.0, 0.0, 0.0),        // dt=0 → DenyBreach
-            cmd(-3.0, -2.0, 0.1, -5.0, -5.0),    // reverse
+            cmd(5.0, 5.0, 0.1, 0.0, 0.0),      // clean → Allow
+            cmd(1000.0, 5.0, 0.1, 0.0, 0.0),   // over speed → Clamp/Deny
+            cmd(5.0, 5.0, 0.1, 90.0, 0.0),     // over steering
+            cmd(5.0, 5.0, 0.1, 10.0, 0.0),     // lateral-accel territory
+            cmd(f64::NAN, 5.0, 0.1, 0.0, 0.0), // NaN → DenyBreach
+            cmd(5.0, 5.0, 0.0, 0.0, 0.0),      // dt=0 → DenyBreach
+            cmd(-3.0, -2.0, 0.1, -5.0, -5.0),  // reverse
         ];
         for command in battery {
             assert_eq!(
@@ -240,7 +246,10 @@ mod tests {
         let platform = AckermannPlatform::new(c);
         let denied = platform.evaluate(&cmd(f64::NAN, 5.0, 0.1, 0.0, 0.0), &());
         assert!(!denied.is_admitted(), "a NaN command must not be admitted");
-        assert!(denied.deny_reason().is_some(), "a denied verdict must carry a reason token");
+        assert!(
+            denied.deny_reason().is_some(),
+            "a denied verdict must carry a reason token"
+        );
     }
 
     #[test]
@@ -295,18 +304,35 @@ mod tests {
         let mut right = Vec::with_capacity(n);
         for i in 0..n {
             let x = i as f64 * dx;
-            left.push(Point { x_m: x, y_m: half_w });
-            right.push(Point { x_m: x, y_m: -half_w });
+            left.push(Point {
+                x_m: x,
+                y_m: half_w,
+            });
+            right.push(Point {
+                x_m: x,
+                y_m: -half_w,
+            });
         }
         (left, right)
     }
 
     fn healthy_corridor<'a>(left: &'a [Point], right: &'a [Point]) -> Corridor<'a> {
-        Corridor { left, right, confidence: 0.95, age_ms: 10, min_confidence: 0.5, max_age_ms: 500 }
+        Corridor {
+            left,
+            right,
+            confidence: 0.95,
+            age_ms: 10,
+            min_confidence: 0.5,
+            max_age_ms: 500,
+        }
     }
 
     fn at(x: f64, y: f64) -> Pose {
-        Pose { x_m: x, y_m: y, heading_rad: 0.0 }
+        Pose {
+            x_m: x,
+            y_m: y,
+            heading_rad: 0.0,
+        }
     }
 
     /// THE thesis proof: the SAME seam + SAME corridor + SAME pose, two platforms.

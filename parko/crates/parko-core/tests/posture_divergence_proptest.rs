@@ -22,11 +22,11 @@
 
 use proptest::prelude::*;
 
-use parko_kirra::{KirraGovernor, MRC_VELOCITY_CEILING_MPS};
 use parko_core::{
     commands::ControlCommand,
     safety::{EnforcementAction, SafetyGovernor, SafetyPosture},
 };
+use parko_kirra::{KirraGovernor, MRC_VELOCITY_CEILING_MPS};
 
 const NOMINAL_CEILING_MPS: f64 = 35.0;
 

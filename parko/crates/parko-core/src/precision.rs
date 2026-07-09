@@ -64,7 +64,10 @@ impl PrecisionLadder {
     /// engaging one must be a deliberate, evidence-backed act.
     #[must_use]
     pub fn default_fp32() -> Self {
-        Self { rungs: vec![PrecisionMode::FP32], fp32_anchored: false }
+        Self {
+            rungs: vec![PrecisionMode::FP32],
+            fp32_anchored: false,
+        }
     }
 
     /// Parse a comma-separated ladder (`"int8,fp16,fp32"`; case-insensitive,
@@ -109,7 +112,10 @@ impl PrecisionLadder {
         if fp32_anchored {
             rungs.push(PrecisionMode::FP32);
         }
-        Ok(Self { rungs, fp32_anchored })
+        Ok(Self {
+            rungs,
+            fp32_anchored,
+        })
     }
 
     /// The env-routing logic, separated from the env read for testability
@@ -206,8 +212,10 @@ pub fn select_by_ladder<B>(
             Err(e) => rejected.push((rung, e)),
         }
     }
-    let detail: Vec<String> =
-        rejected.iter().map(|(p, e)| format!("{p:?}: {e}")).collect();
+    let detail: Vec<String> = rejected
+        .iter()
+        .map(|(p, e)| format!("{p:?}: {e}"))
+        .collect();
     Err(BackendError::InitializationError(format!(
         "no rung of the precision ladder could be built (fail-closed; nothing \
          outside the ladder is substituted): [{}]",
@@ -228,7 +236,11 @@ mod tests {
         let l = PrecisionLadder::parse("INT8, fp16 ,Fp32").unwrap();
         assert_eq!(
             l.rungs(),
-            &[PrecisionMode::INT8, PrecisionMode::FP16, PrecisionMode::FP32]
+            &[
+                PrecisionMode::INT8,
+                PrecisionMode::FP16,
+                PrecisionMode::FP32
+            ]
         );
         assert!(!l.fp32_anchored(), "fp32 was explicit — no anchor appended");
     }
@@ -238,7 +250,11 @@ mod tests {
         let l = PrecisionLadder::parse("int8,fp16").unwrap();
         assert_eq!(
             l.rungs(),
-            &[PrecisionMode::INT8, PrecisionMode::FP16, PrecisionMode::FP32],
+            &[
+                PrecisionMode::INT8,
+                PrecisionMode::FP16,
+                PrecisionMode::FP32
+            ],
             "fp32 availability anchor appended last"
         );
         assert!(l.fp32_anchored(), "the append is flagged, never silent");
@@ -249,7 +265,10 @@ mod tests {
         assert!(PrecisionLadder::parse("").is_err(), "empty ladder");
         assert!(PrecisionLadder::parse("int4").is_err(), "unknown precision");
         assert!(PrecisionLadder::parse("fp32,,int8").is_err(), "empty token");
-        assert!(PrecisionLadder::parse("int8,int8").is_err(), "duplicate rung");
+        assert!(
+            PrecisionLadder::parse("int8,int8").is_err(),
+            "duplicate rung"
+        );
     }
 
     #[test]
@@ -265,8 +284,8 @@ mod tests {
     fn non_utf8_env_value_fails_closed_not_default() {
         use std::os::unix::ffi::OsStringExt;
         let bad = std::ffi::OsString::from_vec(vec![0xFF, 0xFE]);
-        let err = PrecisionLadder::from_env_lookup(Err(std::env::VarError::NotUnicode(bad)))
-            .unwrap_err();
+        let err =
+            PrecisionLadder::from_env_lookup(Err(std::env::VarError::NotUnicode(bad))).unwrap_err();
         assert!(
             err.to_string().contains("non-UTF-8"),
             "a present-but-non-UTF-8 ladder must be a typed error, never the fp32 default"
@@ -318,10 +337,12 @@ mod tests {
     #[test]
     fn exhausted_ladder_is_a_typed_error_naming_every_rung() {
         let ladder = PrecisionLadder::parse("int8,fp32").unwrap();
-        let err = select_by_ladder::<()>(&ladder, |p| Err(fails(match p {
-            PrecisionMode::INT8 => "engine build failed",
-            _ => "model file missing",
-        })))
+        let err = select_by_ladder::<()>(&ladder, |p| {
+            Err(fails(match p {
+                PrecisionMode::INT8 => "engine build failed",
+                _ => "model file missing",
+            }))
+        })
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("INT8") && msg.contains("engine build failed"));

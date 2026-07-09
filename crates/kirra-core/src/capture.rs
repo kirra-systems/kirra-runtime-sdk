@@ -184,9 +184,10 @@ pub fn record_from_trajectory_verdict(
     let (outcome, deny_code) = match decision {
         TrajectoryDecision::Accept => (CaptureOutcome::Allow, None),
         TrajectoryDecision::Clamp => (CaptureOutcome::ClampLinear, None),
-        TrajectoryDecision::MrcFallback => {
-            (CaptureOutcome::Deny, Some("TRAJECTORY_MRC_FALLBACK".to_string()))
-        }
+        TrajectoryDecision::MrcFallback => (
+            CaptureOutcome::Deny,
+            Some("TRAJECTORY_MRC_FALLBACK".to_string()),
+        ),
     };
     CaptureRecord {
         decision_seq,
@@ -225,8 +226,8 @@ fn posture_token(p: FleetPosture) -> &'static str {
 /// the adapter, which has no `AppState`, can spawn its own writer too.
 pub fn spawn_capture_writer() -> mpsc::Sender<CaptureRecord> {
     let (tx, mut rx) = mpsc::channel::<CaptureRecord>(CAPTURE_QUEUE_BOUND);
-    let sink_path = std::env::var(CAPTURE_SINK_PATH_ENV)
-        .unwrap_or_else(|_| "kirra_capture.jsonl".to_string());
+    let sink_path =
+        std::env::var(CAPTURE_SINK_PATH_ENV).unwrap_or_else(|_| "kirra_capture.jsonl".to_string());
     tokio::task::spawn_blocking(move || {
         let mut sink = match std::fs::OpenOptions::new()
             .create(true)
@@ -316,25 +317,53 @@ mod tests {
     #[test]
     fn record_from_verdict_maps_each_arm() {
         let c = cmd();
-        let allow = record_from_verdict(0, 1000, &EnforceAction::Allow, FleetPosture::Nominal, &c, false);
+        let allow = record_from_verdict(
+            0,
+            1000,
+            &EnforceAction::Allow,
+            FleetPosture::Nominal,
+            &c,
+            false,
+        );
         assert_eq!(allow.outcome, CaptureOutcome::Allow);
         assert_eq!(allow.deny_code, None);
         assert_eq!(allow.safe_value, None);
         assert!(!allow.mrc);
         assert_eq!(allow.posture, "NOMINAL");
 
-        let cl = record_from_verdict(1, 1000, &EnforceAction::ClampLinear(5.0), FleetPosture::Nominal, &c, true);
+        let cl = record_from_verdict(
+            1,
+            1000,
+            &EnforceAction::ClampLinear(5.0),
+            FleetPosture::Nominal,
+            &c,
+            true,
+        );
         assert_eq!(cl.outcome, CaptureOutcome::ClampLinear);
         assert_eq!(cl.safe_value, Some(5.0));
         assert!(cl.derate_enabled);
 
-        let cs = record_from_verdict(2, 1000, &EnforceAction::ClampSteering(3.0), FleetPosture::Degraded, &c, false);
+        let cs = record_from_verdict(
+            2,
+            1000,
+            &EnforceAction::ClampSteering(3.0),
+            FleetPosture::Degraded,
+            &c,
+            false,
+        );
         assert_eq!(cs.outcome, CaptureOutcome::ClampSteering);
         assert_eq!(cs.safe_value, Some(3.0));
         assert!(cs.mrc, "Degraded → MRC envelope");
         assert_eq!(cs.posture, "DEGRADED");
 
-        let dn = record_from_verdict(3, 1000, &EnforceAction::DenyBreach(DenyCode::NanInfLinearVelocity), FleetPosture::Nominal, &c, false);
+        let dn = record_from_verdict(
+            3,
+            1000,
+            &EnforceAction::DenyBreach(DenyCode::NanInfLinearVelocity),
+            FleetPosture::Nominal,
+            &c,
+            false,
+        );
         assert_eq!(dn.outcome, CaptureOutcome::Deny);
         assert_eq!(dn.deny_code.as_deref(), Some("NAN_INF_LINEAR_VELOCITY"));
         assert_eq!(dn.safe_value, None);
@@ -344,7 +373,10 @@ mod tests {
         let cb = record_from_verdict(
             4,
             1000,
-            &EnforceAction::ClampBoth { linear: 6.25, steering: 1.5 },
+            &EnforceAction::ClampBoth {
+                linear: 6.25,
+                steering: 1.5,
+            },
             FleetPosture::Nominal,
             &c,
             false,
@@ -361,8 +393,16 @@ mod tests {
             objects_ms: 123_456,
             point_count: 12,
             object_count: 3,
-            first_pose: Some(PoseSnapshot { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 }),
-            last_pose: Some(PoseSnapshot { x_m: 5.0, y_m: 1.0, heading_rad: 0.1 }),
+            first_pose: Some(PoseSnapshot {
+                x_m: 0.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            }),
+            last_pose: Some(PoseSnapshot {
+                x_m: 5.0,
+                y_m: 1.0,
+                heading_rad: 0.1,
+            }),
             target_speed_mps: Some(8.0),
         }
     }
@@ -370,30 +410,57 @@ mod tests {
     #[test]
     fn record_from_trajectory_verdict_maps_each_decision() {
         let accept = record_from_trajectory_verdict(
-            0, 1000, TrajectoryDecision::Accept, FleetPosture::Nominal, traj_ext(), false);
+            0,
+            1000,
+            TrajectoryDecision::Accept,
+            FleetPosture::Nominal,
+            traj_ext(),
+            false,
+        );
         assert_eq!(accept.outcome, CaptureOutcome::Allow);
         assert_eq!(accept.deny_code, None);
         assert!(!accept.mrc);
         assert_eq!(accept.source, CaptureSource::SlowLoopTrajectory);
-        assert!(accept.proposed.is_none(), "trajectory record carries no command proposal");
+        assert!(
+            accept.proposed.is_none(),
+            "trajectory record carries no command proposal"
+        );
         assert_eq!(accept.traj.as_ref().unwrap().trajectory_id, 7);
         assert_eq!(accept.traj.as_ref().unwrap().objects_ms, 123_456);
 
         let clamp = record_from_trajectory_verdict(
-            1, 1000, TrajectoryDecision::Clamp, FleetPosture::Nominal, traj_ext(), true);
+            1,
+            1000,
+            TrajectoryDecision::Clamp,
+            FleetPosture::Nominal,
+            traj_ext(),
+            true,
+        );
         assert_eq!(clamp.outcome, CaptureOutcome::ClampLinear);
         assert_eq!(clamp.deny_code, None);
         assert!(clamp.derate_enabled);
 
         let mrc = record_from_trajectory_verdict(
-            2, 1000, TrajectoryDecision::MrcFallback, FleetPosture::Nominal, traj_ext(), false);
+            2,
+            1000,
+            TrajectoryDecision::MrcFallback,
+            FleetPosture::Nominal,
+            traj_ext(),
+            false,
+        );
         assert_eq!(mrc.outcome, CaptureOutcome::Deny);
         assert_eq!(mrc.deny_code.as_deref(), Some("TRAJECTORY_MRC_FALLBACK"));
         assert!(mrc.mrc, "MRCFallback → controlled stop");
 
         // Degraded posture forces mrc even on an Accept decision.
         let degraded = record_from_trajectory_verdict(
-            3, 1000, TrajectoryDecision::Accept, FleetPosture::Degraded, traj_ext(), false);
+            3,
+            1000,
+            TrajectoryDecision::Accept,
+            FleetPosture::Degraded,
+            traj_ext(),
+            false,
+        );
         assert!(degraded.mrc, "Degraded posture → MRC envelope");
         assert_eq!(degraded.posture, "DEGRADED");
     }
@@ -404,18 +471,33 @@ mod tests {
         // WITHOUT `traj` (skip_serializing_if). The trajectory record is the
         // mirror image. (The wire shape itself is pinned in the schema crate.)
         let gw = record_from_verdict(
-            0, 1, &EnforceAction::Allow, FleetPosture::Nominal, &cmd(), false);
+            0,
+            1,
+            &EnforceAction::Allow,
+            FleetPosture::Nominal,
+            &cmd(),
+            false,
+        );
         let gw_json = serde_json::to_string(&gw).unwrap();
         assert!(gw_json.contains("\"source\":\"COMMAND_GATEWAY\""));
         assert!(gw_json.contains("\"proposed\""));
         assert!(!gw_json.contains("\"traj\""), "gateway record omits traj");
 
         let tj = record_from_trajectory_verdict(
-            0, 1, TrajectoryDecision::Accept, FleetPosture::Nominal, traj_ext(), false);
+            0,
+            1,
+            TrajectoryDecision::Accept,
+            FleetPosture::Nominal,
+            traj_ext(),
+            false,
+        );
         let tj_json = serde_json::to_string(&tj).unwrap();
         assert!(tj_json.contains("\"source\":\"SLOW_LOOP_TRAJECTORY\""));
         assert!(tj_json.contains("\"traj\""));
-        assert!(!tj_json.contains("\"proposed\""), "trajectory record omits proposed");
+        assert!(
+            !tj_json.contains("\"proposed\""),
+            "trajectory record omits proposed"
+        );
     }
 
     #[test]
@@ -433,7 +515,14 @@ mod tests {
         // returns Full; the producer never blocks. Use a 1-slot channel with no
         // drain so it fills immediately.
         let (tx, _rx) = mpsc::channel::<CaptureRecord>(1);
-        let rec = record_from_verdict(0, 1, &EnforceAction::Allow, FleetPosture::Nominal, &cmd(), false);
+        let rec = record_from_verdict(
+            0,
+            1,
+            &EnforceAction::Allow,
+            FleetPosture::Nominal,
+            &cmd(),
+            false,
+        );
         assert!(tx.try_send(rec.clone()).is_ok());
         match tx.try_send(rec) {
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}

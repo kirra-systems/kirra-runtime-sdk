@@ -7,7 +7,9 @@
 use ed25519_dalek::SigningKey;
 
 use kirra_contract_channel::reference::InProcessRegion;
-use kirra_contract_channel::{publish, AcceptedWatermark, VehicleCommandPayload, MAX_SNAPSHOT_RETRIES};
+use kirra_contract_channel::{
+    publish, AcceptedWatermark, VehicleCommandPayload, MAX_SNAPSHOT_RETRIES,
+};
 use kirra_core::contract_consumer::{decide_cycle, GovernorOutcome};
 use kirra_core::kinematics_contract::VehicleKinematicsContract;
 use kirra_release_token::{issue_release_token, verify_release, ReleaseDenied};
@@ -36,7 +38,10 @@ fn actuator_releases_only_the_governor_signed_command() {
     let contract = VehicleKinematicsContract::nominal_reference_profile();
     let mut wm = AcceptedWatermark::new();
     let cycle = decide_cycle(&region, &mut wm, 0, &contract, MAX_SNAPSHOT_RETRIES);
-    assert!(matches!(cycle.outcome, GovernorOutcome::Actuate(_)), "in-envelope must actuate");
+    assert!(
+        matches!(cycle.outcome, GovernorOutcome::Actuate(_)),
+        "in-envelope must actuate"
+    );
     // `view_to_sign()` is the correct gate: Some only because the outcome is Actuate.
     let view = *cycle.view_to_sign().expect("actuatable → a view to sign");
     let token = issue_release_token(&view, &gov_key);
@@ -69,9 +74,15 @@ fn a_faulted_cycle_has_no_view_so_nothing_can_be_released() {
     let mut wm = AcceptedWatermark::new();
     let cycle = decide_cycle(&region, &mut wm, 5_000, &contract, MAX_SNAPSHOT_RETRIES);
     assert_eq!(cycle.outcome, GovernorOutcome::SafeStop);
-    assert!(cycle.view.is_none(), "a fault yields no view → there is nothing to sign or release");
+    assert!(
+        cycle.view.is_none(),
+        "a fault yields no view → there is nothing to sign or release"
+    );
     // And the correct gate agrees: no actuatable view to sign.
-    assert!(cycle.view_to_sign().is_none(), "SafeStop → view_to_sign() is None");
+    assert!(
+        cycle.view_to_sign().is_none(),
+        "SafeStop → view_to_sign() is None"
+    );
 }
 
 #[test]
@@ -92,8 +103,15 @@ fn a_denied_command_is_received_but_never_signable() {
     let contract = VehicleKinematicsContract::nominal_reference_profile();
     let mut wm = AcceptedWatermark::new();
     let cycle = decide_cycle(&region, &mut wm, 0, &contract, MAX_SNAPSHOT_RETRIES);
-    assert_eq!(cycle.outcome, GovernorOutcome::SafeStop, "over-envelope → SafeStop");
-    assert!(cycle.view.is_some(), "a command WAS received (transport/codec passed)");
+    assert_eq!(
+        cycle.outcome,
+        GovernorOutcome::SafeStop,
+        "over-envelope → SafeStop"
+    );
+    assert!(
+        cycle.view.is_some(),
+        "a command WAS received (transport/codec passed)"
+    );
     assert!(
         cycle.view_to_sign().is_none(),
         "…but a denied command is never signable for release"
@@ -126,7 +144,10 @@ fn a_clamped_command_signs_the_enforced_bytes_not_the_proposal() {
         GovernorOutcome::Actuate(c) => c.linear_velocity_mps,
         other => panic!("expected a clamp → Actuate, got {other:?}"),
     };
-    assert!(actuated_velocity < 1_000.0, "velocity must have been clamped");
+    assert!(
+        actuated_velocity < 1_000.0,
+        "velocity must have been clamped"
+    );
 
     // The signable view is the ENFORCED view: it decodes to the clamped command,
     // NOT the guest's 1000 m/s proposal.

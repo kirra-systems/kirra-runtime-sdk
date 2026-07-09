@@ -26,12 +26,19 @@ fn shipped_v2_artifact_is_checker_admissible_on_the_corpus() {
     let corpus = demo_corpus();
     let s = evaluate_corpus(&corpus, &p, &p);
 
-    assert_eq!(s.quality.argmax_agreement_rate(), 1.0, "self-agreement is definitionally 1.0");
+    assert_eq!(
+        s.quality.argmax_agreement_rate(),
+        1.0,
+        "self-agreement is definitionally 1.0"
+    );
     assert_eq!(
         s.admissibility.admissibility_rate(),
         1.0,
         "the shipped safety-aware v2 doer must be admitted on every demo scenario: {:?}",
         s.admissibility
     );
-    assert_eq!(s.admissibility.mrc, 0, "no MRC refusals for the shipped doer");
+    assert_eq!(
+        s.admissibility.mrc, 0,
+        "no MRC refusals for the shipped doer"
+    );
 }

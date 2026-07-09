@@ -375,7 +375,11 @@ mod service_tests {
     fn steady_low_speed_command_is_accepted() {
         let contract = VehicleKinematicsContract::nominal_reference_profile();
         let v = decide(&steady(1.0, 0.0), &contract);
-        assert_eq!(v.action, EnforceAction::Allow, "a steady 1 m/s straight command must pass");
+        assert_eq!(
+            v.action,
+            EnforceAction::Allow,
+            "a steady 1 m/s straight command must pass"
+        );
         assert_eq!(v.reason_code, 0);
         assert_eq!(v.seq, 1);
     }
@@ -405,10 +409,18 @@ mod service_tests {
         // The decode side of the wire (Proposal: Deserialize) must round-trip.
         let p = steady(2.5, 3.0);
         let bytes = bincode::serde::encode_to_vec(&p, wire_cfg()).expect("encode");
-        let back: Proposal = bincode::serde::decode_from_slice(&bytes, wire_cfg()).map(|(v,_)| v).expect("decode");
+        let back: Proposal = bincode::serde::decode_from_slice(&bytes, wire_cfg())
+            .map(|(v, _)| v)
+            .expect("decode");
         assert_eq!(back.seq, p.seq);
-        assert_eq!(back.command.linear_velocity_mps, p.command.linear_velocity_mps);
-        assert_eq!(back.command.steering_angle_deg, p.command.steering_angle_deg);
+        assert_eq!(
+            back.command.linear_velocity_mps,
+            p.command.linear_velocity_mps
+        );
+        assert_eq!(
+            back.command.steering_angle_deg,
+            p.command.steering_angle_deg
+        );
     }
 
     #[test]
@@ -428,7 +440,11 @@ mod service_tests {
         let mut wd = WatchdogState::new(None);
         let mut p = steady(1.0, 0.0);
         p.seq = 5;
-        assert_eq!(wd.observe(&p, 0), WatchdogVerdict::Fresh, "first observation is fresh");
+        assert_eq!(
+            wd.observe(&p, 0),
+            WatchdogVerdict::Fresh,
+            "first observation is fresh"
+        );
         p.seq = 4;
         assert_eq!(
             wd.observe(&p, 0),
@@ -442,7 +458,11 @@ mod service_tests {
             "an equal seq (re-sent datagram) is also a replay"
         );
         p.seq = 6;
-        assert_eq!(wd.observe(&p, 0), WatchdogVerdict::Fresh, "an advancing seq is fresh again");
+        assert_eq!(
+            wd.observe(&p, 0),
+            WatchdogVerdict::Fresh,
+            "an advancing seq is fresh again"
+        );
     }
 
     #[test]
@@ -501,17 +521,26 @@ mod service_tests {
         assert!(verify_mac(psk, &body, &tag), "a valid tag must verify");
 
         // Wrong key → reject.
-        assert!(!verify_mac(b"other-key", &body, &tag), "a tag under another key must fail");
+        assert!(
+            !verify_mac(b"other-key", &body, &tag),
+            "a tag under another key must fail"
+        );
 
         // Tampered body → reject.
         let mut tampered = body.clone();
         tampered[0] ^= 0xFF;
-        assert!(!verify_mac(psk, &tampered, &tag), "a tampered body must fail authentication");
+        assert!(
+            !verify_mac(psk, &tampered, &tag),
+            "a tampered body must fail authentication"
+        );
 
         // Tampered tag → reject.
         let mut bad_tag = tag;
         bad_tag[0] ^= 0xFF;
-        assert!(!verify_mac(psk, &body, &bad_tag), "a tampered tag must fail authentication");
+        assert!(
+            !verify_mac(psk, &body, &bad_tag),
+            "a tampered tag must fail authentication"
+        );
     }
 
     #[test]
@@ -521,7 +550,10 @@ mod service_tests {
         let framed = frame_response(psk, &verdict).expect("frame");
         assert!(framed.len() > MAC_LEN, "framed response carries tag + body");
         let (tag, body) = framed.split_at(MAC_LEN);
-        assert!(verify_mac(psk, body, tag), "the car must be able to authenticate the verdict");
+        assert!(
+            verify_mac(psk, body, tag),
+            "the car must be able to authenticate the verdict"
+        );
         // The body is the serialized verdict; reason_code is FrameIntegrityUntrusted (11).
         assert_eq!(verdict.reason_code, 11);
     }

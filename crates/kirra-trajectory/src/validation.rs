@@ -19,13 +19,13 @@
 use smallvec::SmallVec;
 
 use kirra_core::containment::{
-    self as containment, Corridor, Pose as KernelPose,
-    Point as KernelPoint, MAX_CORRIDOR_VERTICES, MAX_TRAJECTORY_HORIZON,
+    self as containment, Corridor, Point as KernelPoint, Pose as KernelPose, MAX_CORRIDOR_VERTICES,
+    MAX_TRAJECTORY_HORIZON,
 };
+use kirra_core::frame_integrity::FrameTrust;
 use kirra_core::kinematics_contract::{
     enforce_degraded_decel_to_stop, validate_vehicle_command, EnforceAction, ProposedVehicleCommand,
 };
-use kirra_core::frame_integrity::FrameTrust;
 use kirra_core::FleetPosture;
 use parko_core::rss::{
     lateral_safe_distance_split, longitudinal_safe_distance, opposite_direction_safe_distance,
@@ -36,8 +36,7 @@ use crate::config::VehicleConfig;
 use crate::corridor::{CorridorSource, Point};
 use crate::frenet::CenterlineFrenet;
 use crate::state::{
-    AcceptedTrajectory, EgoOdom, PerceivedObject, Pose, TrajectoryPoint,
-    TrajectoryVerdict,
+    AcceptedTrajectory, EgoOdom, PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict,
 };
 
 /// Minimum corridor confidence the slow loop accepts. Tracks the
@@ -187,7 +186,10 @@ fn rss_frenet_frame(
     traj_point: &TrajectoryPoint,
     obj: &PerceivedObject,
 ) -> Option<RssFrame> {
-    let ego = frenet.project(Point { x_m: traj_point.pose.x_m, y_m: traj_point.pose.y_m })?;
+    let ego = frenet.project(Point {
+        x_m: traj_point.pose.x_m,
+        y_m: traj_point.pose.y_m,
+    })?;
     let o = frenet.project(obj.pos)?;
     // Velocity resolves against the lane direction AT THE OBJECT — on a curve
     // the tangent rotates, and it is the object's local lane direction that
@@ -214,7 +216,15 @@ pub fn validate_trajectory_slow(
     // `validate_trajectory_slow_capped` with the resolved Track-C cap
     // (KIRRA-OCCY-PMON-003 slice-1).
     validate_trajectory_slow_capped(
-        trajectory, corridor, objects, config, latest_odom, posture, None, None, None,
+        trajectory,
+        corridor,
+        objects,
+        config,
+        latest_odom,
+        posture,
+        None,
+        None,
+        None,
         // WS-2: no VRU channel on the convenience wrapper → no-op (the node
         // passes the live pedestrian scene once its subscription lands).
         None,
@@ -292,24 +302,35 @@ pub fn validate_trajectory_slow_capped(
     // on the ~10 Hz slow-loop path; an over-bound input spills to the heap but is
     // rejected by the containment shape/horizon checks anyway, so the spill is
     // both rare and harmless.
-    let left_kernel: SmallVec<[KernelPoint; MAX_CORRIDOR_VERTICES]> =
-        corridor.left_boundary().iter().map(adapter_to_kernel_point).collect();
-    let right_kernel: SmallVec<[KernelPoint; MAX_CORRIDOR_VERTICES]> =
-        corridor.right_boundary().iter().map(adapter_to_kernel_point).collect();
+    let left_kernel: SmallVec<[KernelPoint; MAX_CORRIDOR_VERTICES]> = corridor
+        .left_boundary()
+        .iter()
+        .map(adapter_to_kernel_point)
+        .collect();
+    let right_kernel: SmallVec<[KernelPoint; MAX_CORRIDOR_VERTICES]> = corridor
+        .right_boundary()
+        .iter()
+        .map(adapter_to_kernel_point)
+        .collect();
     let kernel_corridor = Corridor {
-        left:           &left_kernel,
-        right:          &right_kernel,
-        confidence:     corridor.confidence(),
-        age_ms:         corridor.age_ms(),
+        left: &left_kernel,
+        right: &right_kernel,
+        confidence: corridor.confidence(),
+        age_ms: corridor.age_ms(),
         min_confidence: SLOW_LOOP_MIN_CORRIDOR_CONFIDENCE,
-        max_age_ms:     SLOW_LOOP_MAX_CORRIDOR_AGE_MS,
+        max_age_ms: SLOW_LOOP_MAX_CORRIDOR_AGE_MS,
     };
     let footprint = config.to_vehicle_footprint();
-    let poses: SmallVec<[KernelPose; MAX_TRAJECTORY_HORIZON]> =
-        trajectory.iter().map(|p| adapter_to_kernel_pose(&p.pose)).collect();
+    let poses: SmallVec<[KernelPose; MAX_TRAJECTORY_HORIZON]> = trajectory
+        .iter()
+        .map(|p| adapter_to_kernel_pose(&p.pose))
+        .collect();
 
     let containment_verdict = containment::validate_trajectory_containment(
-        &poses, &kernel_corridor, &footprint, frame_trust,
+        &poses,
+        &kernel_corridor,
+        &footprint,
+        frame_trust,
     );
     if !matches!(containment_verdict, EnforceAction::Allow) {
         return TrajectoryVerdict::MRCFallback;
@@ -338,7 +359,7 @@ pub fn validate_trajectory_slow_capped(
     // the remaining variants.
     let degraded = posture == FleetPosture::Degraded;
     let base_kinematics = match posture {
-        FleetPosture::Nominal  => config.to_kinematics_contract(),
+        FleetPosture::Nominal => config.to_kinematics_contract(),
         FleetPosture::Degraded => config.to_mrc_kinematics_contract(),
         FleetPosture::LockedOut => unreachable!("handled by the posture short-circuit above"),
     };
@@ -414,8 +435,7 @@ pub fn validate_trajectory_slow_capped(
                 // Normalize Δheading to [-π, π] so a heading wrap is not read
                 // as a huge yaw.
                 let raw = b.pose.heading_rad - a.pose.heading_rad;
-                let dheading =
-                    raw - std::f64::consts::TAU * (raw / std::f64::consts::TAU).round();
+                let dheading = raw - std::f64::consts::TAU * (raw / std::f64::consts::TAU).round();
                 let omega = dheading / dt;
                 // Conservative: the higher segment speed gives the tightest
                 // (smallest) rollover ω_max.
@@ -436,7 +456,8 @@ pub fn validate_trajectory_slow_capped(
                 // copy). Nominal carries no gate; Ackermann (`angular = None`)
                 // never reaches this block → byte-identical.
                 // SAFETY: SG8 | REQ: courier-angular-degraded-stop-and-hold | TEST: courier_degraded_angular_reinitiation_from_stop_mrcs,courier_degraded_angular_speed_increase_mrcs,courier_degraded_angular_converging_to_stop_is_admitted,courier_degraded_angular_gate_is_degraded_only,ackermann_degraded_has_no_angular_stop_gate
-                if degraded && degraded_angular_violation(prev_omega, omega, ab.stop_epsilon_rad_s) {
+                if degraded && degraded_angular_violation(prev_omega, omega, ab.stop_epsilon_rad_s)
+                {
                     return TrajectoryVerdict::MRCFallback;
                 }
                 prev_omega = omega;
@@ -459,11 +480,9 @@ pub fn validate_trajectory_slow_capped(
     // pre-EP-08 measurement, never a skip). The multi-modal PREDICTIVE pass
     // (§C2) keeps its tangent frame — extending Frenet to the time-matched
     // pass is the recorded follow-up.
-    let frenet = CenterlineFrenet::from_boundaries(
-        corridor.left_boundary(),
-        corridor.right_boundary(),
-    )
-    .filter(|f| !f.is_effectively_straight());
+    let frenet =
+        CenterlineFrenet::from_boundaries(corridor.left_boundary(), corridor.right_boundary())
+            .filter(|f| !f.is_effectively_straight());
 
     for obj in objects {
         // H-2 (fail-closed RSS): a non-finite object field would poison every
@@ -694,9 +713,9 @@ pub fn validate_trajectory_slow_capped(
         if crate::vru::pedestrian_breach(
             trajectory,
             scene,
-            kinematics.max_brake_mps2,   // #779 F3
-            config.max_accel_mps2,       // #779 F2 (RSS response-phase term)
-            ego_reach_m,                 // #779 F1
+            kinematics.max_brake_mps2, // #779 F3
+            config.max_accel_mps2,     // #779 F2 (RSS response-phase term)
+            ego_reach_m,               // #779 F1
         ) {
             return TrajectoryVerdict::MRCFallback;
         }
@@ -770,9 +789,11 @@ fn nearest_in_time(
     t: f64,
     tolerance_s: f64,
 ) -> Option<&TrajectoryPoint> {
-    let nearest = trajectory
-        .iter()
-        .min_by(|a, b| (a.time_from_start_s - t).abs().total_cmp(&(b.time_from_start_s - t).abs()))?;
+    let nearest = trajectory.iter().min_by(|a, b| {
+        (a.time_from_start_s - t)
+            .abs()
+            .total_cmp(&(b.time_from_start_s - t).abs())
+    })?;
     if (nearest.time_from_start_s - t).abs() <= tolerance_s {
         Some(nearest)
     } else {
@@ -858,9 +879,11 @@ fn predictive_rss_breach(
             let ovx = (b.pos.x_m - a.pos.x_m) / dt;
             let ovy = (b.pos.y_m - a.pos.y_m) / dt;
 
-            let Some(ego) =
-                nearest_in_time(trajectory, a.time_from_start_s, PREDICTIVE_TIME_MATCH_TOLERANCE_S)
-            else {
+            let Some(ego) = nearest_in_time(
+                trajectory,
+                a.time_from_start_s,
+                PREDICTIVE_TIME_MATCH_TOLERANCE_S,
+            ) else {
                 continue; // no ego pose within tolerance at this time — unevaluable
             };
             // Past both unevaluable gates: this window WAS evaluated (whatever the
@@ -991,12 +1014,12 @@ pub const VELOCITY_TOLERANCE_MPS: f64 = 0.5;
 /// callback lands) so the conformance check stays ROS-free.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IncomingControl {
-    pub velocity_mps:  f64,
-    pub steering_rad:  f64,
+    pub velocity_mps: f64,
+    pub steering_rad: f64,
     /// Message stamp in wall-clock ms. Phase 3 does not yet use this
     /// (the conformance check operates on `now_ms` directly), but it's
     /// carried for Phase 4 audit emission.
-    pub stamp_ms:      u64,
+    pub stamp_ms: u64,
 }
 
 // SAFETY: SG7 SG8 | REQ: fast-loop-trajectory-conformance | TEST: test_conforming_command_passes,test_overspeed_command_mrcs,test_stale_trajectory_mrcs,test_no_trajectory_mrcs
@@ -1016,11 +1039,11 @@ pub struct IncomingControl {
 /// bound consistency); Phase 3 uses it only to keep the signature
 /// stable across the planned extension surface.
 pub fn check_command_conforms(
-    cmd:        &IncomingControl,
+    cmd: &IncomingControl,
     trajectory: &AcceptedTrajectory,
-    _ego:       &EgoOdom,
-    config:     &VehicleConfig,
-    now_ms:     u64,
+    _ego: &EgoOdom,
+    config: &VehicleConfig,
+    now_ms: u64,
 ) -> ConformanceVerdict {
     // A. Staleness
     if trajectory.is_stale(now_ms) {
@@ -1032,7 +1055,9 @@ pub fn check_command_conforms(
     // (clock skew at promotion) treats elapsed = 0 — the first pose of
     // the trajectory.
     let elapsed_s = (now_ms.saturating_sub(trajectory.promoted_at_ms) as f64) / 1000.0;
-    let nearest = trajectory.points.iter()
+    let nearest = trajectory
+        .points
+        .iter()
         .find(|p| p.time_from_start_s >= elapsed_s);
     let nearest = match nearest {
         Some(p) => p,
@@ -1061,12 +1086,19 @@ pub fn check_command_conforms(
 
 #[inline]
 fn adapter_to_kernel_point(p: &Point) -> KernelPoint {
-    KernelPoint { x_m: p.x_m, y_m: p.y_m }
+    KernelPoint {
+        x_m: p.x_m,
+        y_m: p.y_m,
+    }
 }
 
 #[inline]
 fn adapter_to_kernel_pose(p: &Pose) -> KernelPose {
-    KernelPose { x_m: p.x_m, y_m: p.y_m, heading_rad: p.heading_rad }
+    KernelPose {
+        x_m: p.x_m,
+        y_m: p.y_m,
+        heading_rad: p.heading_rad,
+    }
 }
 
 /// Map a consecutive pose pair to a kernel `ProposedVehicleCommand`.
@@ -1112,10 +1144,10 @@ fn pose_pair_to_command(
         0.0
     };
     ProposedVehicleCommand {
-        linear_velocity_mps:        b.velocity_mps,
-        current_velocity_mps:       a.velocity_mps,
+        linear_velocity_mps: b.velocity_mps,
+        current_velocity_mps: a.velocity_mps,
         delta_time_s,
-        steering_angle_deg:         steering_rad.to_degrees(),
+        steering_angle_deg: steering_rad.to_degrees(),
         current_steering_angle_deg: current_steering_deg,
     }
 }
@@ -1133,11 +1165,10 @@ fn pose_pair_to_command(
 /// be more accurate; tracked as a Phase 4 follow-up.
 fn current_steering_deg_from_odom(odom: Option<&EgoOdom>, config: &VehicleConfig) -> f64 {
     match odom {
-        Some(o) if o.linear_x_mps.abs() > 0.1 => {
-            (o.yaw_rate_rads * config.wheelbase_m / o.linear_x_mps)
-                .atan()
-                .to_degrees()
-        }
+        Some(o) if o.linear_x_mps.abs() > 0.1 => (o.yaw_rate_rads * config.wheelbase_m
+            / o.linear_x_mps)
+            .atan()
+            .to_degrees(),
         _ => 0.0,
     }
 }
@@ -1187,12 +1218,22 @@ mod conversion_tests {
     fn pose_pair_zero_delta_heading_produces_zero_steering() {
         let cfg = VehicleConfig::default_urban();
         let a = TrajectoryPoint {
-            pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
-            velocity_mps: 10.0, time_from_start_s: 0.0,
+            pose: AdapterPose {
+                x_m: 0.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+            velocity_mps: 10.0,
+            time_from_start_s: 0.0,
         };
         let b = TrajectoryPoint {
-            pose: AdapterPose { x_m: 1.0, y_m: 0.0, heading_rad: 0.0 },
-            velocity_mps: 10.0, time_from_start_s: 0.1,
+            pose: AdapterPose {
+                x_m: 1.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+            velocity_mps: 10.0,
+            time_from_start_s: 0.1,
         };
         let cmd = pose_pair_to_command(&a, &b, &cfg, 0.0);
         assert!((cmd.steering_angle_deg).abs() < 1e-9);
@@ -1207,16 +1248,29 @@ mod conversion_tests {
         // 10° heading change over 0.5 s at 10 m/s → ~ atan2(0.1745*2.8,
         // 10*0.5) = atan2(0.4886, 5.0) ≈ 5.58° steering.
         let a = TrajectoryPoint {
-            pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
-            velocity_mps: 10.0, time_from_start_s: 0.0,
+            pose: AdapterPose {
+                x_m: 0.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+            velocity_mps: 10.0,
+            time_from_start_s: 0.0,
         };
         let b = TrajectoryPoint {
-            pose: AdapterPose { x_m: 5.0, y_m: 0.0, heading_rad: 10.0_f64.to_radians() },
-            velocity_mps: 10.0, time_from_start_s: 0.5,
+            pose: AdapterPose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: 10.0_f64.to_radians(),
+            },
+            velocity_mps: 10.0,
+            time_from_start_s: 0.5,
         };
         let cmd = pose_pair_to_command(&a, &b, &cfg, 0.0);
-        assert!(cmd.steering_angle_deg > 4.0 && cmd.steering_angle_deg < 7.0,
-            "expected ~5.6° steering, got {}", cmd.steering_angle_deg);
+        assert!(
+            cmd.steering_angle_deg > 4.0 && cmd.steering_angle_deg < 7.0,
+            "expected ~5.6° steering, got {}",
+            cmd.steering_angle_deg
+        );
     }
 
     #[test]
@@ -1228,12 +1282,22 @@ mod conversion_tests {
         // the short-arc direction (positive here).
         let cfg = VehicleConfig::default_urban();
         let a = TrajectoryPoint {
-            pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 3.10 },
-            velocity_mps: 10.0, time_from_start_s: 0.0,
+            pose: AdapterPose {
+                x_m: 0.0,
+                y_m: 0.0,
+                heading_rad: 3.10,
+            },
+            velocity_mps: 10.0,
+            time_from_start_s: 0.0,
         };
         let b = TrajectoryPoint {
-            pose: AdapterPose { x_m: 5.0, y_m: 0.0, heading_rad: -3.10 },
-            velocity_mps: 10.0, time_from_start_s: 0.5,
+            pose: AdapterPose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: -3.10,
+            },
+            velocity_mps: 10.0,
+            time_from_start_s: 0.5,
         };
         let cmd = pose_pair_to_command(&a, &b, &cfg, 0.0);
         assert!(cmd.steering_angle_deg > 0.0 && cmd.steering_angle_deg < 10.0,
@@ -1242,18 +1306,31 @@ mod conversion_tests {
 
         // And it matches the EQUIVALENT non-wrapping small turn (0.0 → +0.083 rad).
         let a2 = TrajectoryPoint {
-            pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
-            velocity_mps: 10.0, time_from_start_s: 0.0,
+            pose: AdapterPose {
+                x_m: 0.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+            velocity_mps: 10.0,
+            time_from_start_s: 0.0,
         };
         let short = (-3.10_f64) - 3.10 + std::f64::consts::TAU; // the wrapped Δ ≈ 0.0832
         let b2 = TrajectoryPoint {
-            pose: AdapterPose { x_m: 5.0, y_m: 0.0, heading_rad: short },
-            velocity_mps: 10.0, time_from_start_s: 0.5,
+            pose: AdapterPose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: short,
+            },
+            velocity_mps: 10.0,
+            time_from_start_s: 0.5,
         };
         let cmd2 = pose_pair_to_command(&a2, &b2, &cfg, 0.0);
-        assert!((cmd.steering_angle_deg - cmd2.steering_angle_deg).abs() < 1e-9,
+        assert!(
+            (cmd.steering_angle_deg - cmd2.steering_angle_deg).abs() < 1e-9,
             "the wrap-crossing turn must equal the equivalent short-arc turn: {} vs {}",
-            cmd.steering_angle_deg, cmd2.steering_angle_deg);
+            cmd.steering_angle_deg,
+            cmd2.steering_angle_deg
+        );
     }
 
     #[test]
@@ -1261,7 +1338,11 @@ mod conversion_tests {
         // A trajectory spanning [0.0, 1.0] s.
         let traj: Vec<TrajectoryPoint> = (0..=10)
             .map(|i| TrajectoryPoint {
-                pose: AdapterPose { x_m: i as f64, y_m: 0.0, heading_rad: 0.0 },
+                pose: AdapterPose {
+                    x_m: i as f64,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 10.0,
                 time_from_start_s: i as f64 * 0.1,
             })
@@ -1270,7 +1351,9 @@ mod conversion_tests {
         // A time WITHIN the span matches the closest pose.
         let m = nearest_in_time(&traj, 0.55, PREDICTIVE_TIME_MATCH_TOLERANCE_S)
             .expect("an in-span time matches");
-        assert!((m.time_from_start_s - 0.5).abs() < 1e-9 || (m.time_from_start_s - 0.6).abs() < 1e-9);
+        assert!(
+            (m.time_from_start_s - 0.5).abs() < 1e-9 || (m.time_from_start_s - 0.6).abs() < 1e-9
+        );
 
         // A time just past the last pose, but within tolerance, still matches it.
         assert!(
@@ -1301,10 +1384,16 @@ mod conversion_tests {
         let a = 4.5;
         let near = assured_clear_distance_speed_cap(5.0, a);
         let far = assured_clear_distance_speed_cap(30.0, a);
-        assert!(far > near, "more visibility ⇒ higher admissible speed: {near} vs {far}");
+        assert!(
+            far > near,
+            "more visibility ⇒ higher admissible speed: {near} vs {far}"
+        );
         // Sanity: the ego must be able to stop within what it sees, incl. reaction.
         let stop_dist = near * RSS_REACTION_TIME_S + near * near / (2.0 * a);
-        assert!(stop_dist <= 5.0 + 1e-6, "stopping distance {stop_dist} must fit in 5 m");
+        assert!(
+            stop_dist <= 5.0 + 1e-6,
+            "stopping distance {stop_dist} must fit in 5 m"
+        );
     }
 
     #[test]
@@ -1313,7 +1402,11 @@ mod conversion_tests {
         // Constant 10 m/s into 5 m → outruns.
         let fast: Vec<TrajectoryPoint> = (0..20)
             .map(|i| TrajectoryPoint {
-                pose: AdapterPose { x_m: i as f64 * 10.0 * dt, y_m: 0.0, heading_rad: 0.0 },
+                pose: AdapterPose {
+                    x_m: i as f64 * 10.0 * dt,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 10.0,
                 time_from_start_s: i as f64 * dt,
             })
@@ -1326,7 +1419,11 @@ mod conversion_tests {
         let stop: Vec<TrajectoryPoint> = (0..30)
             .map(|i| {
                 let p = TrajectoryPoint {
-                    pose: AdapterPose { x_m: x, y_m: 0.0, heading_rad: 0.0 },
+                    pose: AdapterPose {
+                        x_m: x,
+                        y_m: 0.0,
+                        heading_rad: 0.0,
+                    },
                     velocity_mps: v,
                     time_from_start_s: i as f64 * dt,
                 };
@@ -1378,8 +1475,8 @@ mod degraded_angular_gate_tests {
     fn converging_or_constant_is_admitted() {
         assert!(!degraded_angular_violation(0.30, 0.20, EPS)); // decreasing
         assert!(!degraded_angular_violation(0.30, 0.30, EPS)); // constant
-        assert!(!degraded_angular_violation(0.30, 0.0, EPS));  // decel to stop
-        // Decreasing magnitude on the negative side.
+        assert!(!degraded_angular_violation(0.30, 0.0, EPS)); // decel to stop
+                                                              // Decreasing magnitude on the negative side.
         assert!(!degraded_angular_violation(-0.30, -0.10, EPS));
     }
 
@@ -1405,7 +1502,11 @@ mod rss_frame_tests {
 
     fn traj_point(x: f64, y: f64, heading: f64) -> TrajectoryPoint {
         TrajectoryPoint {
-            pose: AdapterPose { x_m: x, y_m: y, heading_rad: heading },
+            pose: AdapterPose {
+                x_m: x,
+                y_m: y,
+                heading_rad: heading,
+            },
             velocity_mps: 0.0,
             time_from_start_s: 0.0,
         }
@@ -1429,11 +1530,30 @@ mod rss_frame_tests {
         let (cos_h, sin_h) = (h.cos(), h.sin());
         let (dx, dy) = (2.0_f64, 3.0_f64);
         let (vx, vy) = (1.0_f64, 4.0_f64);
-        let f = rss_tangent_frame(&traj_point(5.0, 7.0, h), &obj_at(5.0 + dx, 7.0 + dy, vx, vy));
-        assert!((f.lon_gap - (cos_h * dx + sin_h * dy)).abs() < 1e-9, "lon_gap {}", f.lon_gap);
-        assert!((f.lat_off - (-sin_h * dx + cos_h * dy)).abs() < 1e-9, "lat_off {}", f.lat_off);
-        assert!((f.obj_lon_v - (cos_h * vx + sin_h * vy)).abs() < 1e-9, "obj_lon_v {}", f.obj_lon_v);
-        assert!((f.obj_lat_v - (-sin_h * vx + cos_h * vy)).abs() < 1e-9, "obj_lat_v {}", f.obj_lat_v);
+        let f = rss_tangent_frame(
+            &traj_point(5.0, 7.0, h),
+            &obj_at(5.0 + dx, 7.0 + dy, vx, vy),
+        );
+        assert!(
+            (f.lon_gap - (cos_h * dx + sin_h * dy)).abs() < 1e-9,
+            "lon_gap {}",
+            f.lon_gap
+        );
+        assert!(
+            (f.lat_off - (-sin_h * dx + cos_h * dy)).abs() < 1e-9,
+            "lat_off {}",
+            f.lat_off
+        );
+        assert!(
+            (f.obj_lon_v - (cos_h * vx + sin_h * vy)).abs() < 1e-9,
+            "obj_lon_v {}",
+            f.obj_lon_v
+        );
+        assert!(
+            (f.obj_lat_v - (-sin_h * vx + cos_h * vy)).abs() < 1e-9,
+            "obj_lat_v {}",
+            f.obj_lat_v
+        );
         // Concrete values (independent of the formula above): with these inputs
         // lon_gap ≈ 3.232, lat_off ≈ 1.598 — a sign flip or product→sum mutant
         // lands elsewhere.
@@ -1451,8 +1571,14 @@ mod rss_frame_tests {
         let (tx, ty) = (h.cos(), h.sin());
         // Left/right boundaries offset ±2 m along the left normal (-sin, cos).
         let (nx, ny) = (-ty, tx);
-        let center = |s: f64| Point { x_m: tx * s, y_m: ty * s };
-        let off = |p: Point, k: f64| Point { x_m: p.x_m + k * nx, y_m: p.y_m + k * ny };
+        let center = |s: f64| Point {
+            x_m: tx * s,
+            y_m: ty * s,
+        };
+        let off = |p: Point, k: f64| Point {
+            x_m: p.x_m + k * nx,
+            y_m: p.y_m + k * ny,
+        };
         let left: Vec<Point> = (0..=20).map(|i| off(center(i as f64), 2.0)).collect();
         let right: Vec<Point> = (0..=20).map(|i| off(center(i as f64), -2.0)).collect();
         let frenet = CenterlineFrenet::from_boundaries(&left, &right).unwrap();
@@ -1473,8 +1599,16 @@ mod rss_frame_tests {
         assert!((f.lon_gap - 7.0).abs() < 1e-6, "lon_gap {}", f.lon_gap);
         assert!((f.lat_off - 1.5).abs() < 1e-6, "lat_off {}", f.lat_off);
         // Velocity resolved against the lane tangent at the object.
-        assert!((f.obj_lon_v - (tx * vx + ty * vy)).abs() < 1e-6, "obj_lon_v {}", f.obj_lon_v);
-        assert!((f.obj_lat_v - (-ty * vx + tx * vy)).abs() < 1e-6, "obj_lat_v {}", f.obj_lat_v);
+        assert!(
+            (f.obj_lon_v - (tx * vx + ty * vy)).abs() < 1e-6,
+            "obj_lon_v {}",
+            f.obj_lon_v
+        );
+        assert!(
+            (f.obj_lat_v - (-ty * vx + tx * vy)).abs() < 1e-6,
+            "obj_lat_v {}",
+            f.obj_lat_v
+        );
         // The lateral component is non-zero (≈ 1.598) — the sign/product mutants
         // in the `-ty*vx + tx*vy` resolution cannot hide.
         assert!(f.obj_lat_v.abs() > 1.0);
@@ -1486,8 +1620,23 @@ mod rss_frame_tests {
         // instead pin the None path via a non-finite object position: project
         // returns None → the caller uses the tangent frame for that pair.
         let (l, r) = (
-            vec![Point { x_m: 0.0, y_m: 2.0 }, Point { x_m: 40.0, y_m: 2.0 }],
-            vec![Point { x_m: 0.0, y_m: -2.0 }, Point { x_m: 40.0, y_m: -2.0 }],
+            vec![
+                Point { x_m: 0.0, y_m: 2.0 },
+                Point {
+                    x_m: 40.0,
+                    y_m: 2.0,
+                },
+            ],
+            vec![
+                Point {
+                    x_m: 0.0,
+                    y_m: -2.0,
+                },
+                Point {
+                    x_m: 40.0,
+                    y_m: -2.0,
+                },
+            ],
         );
         let frenet = CenterlineFrenet::from_boundaries(&l, &r).unwrap();
         let bad = obj_at(f64::NAN, 0.0, 1.0, 0.0);

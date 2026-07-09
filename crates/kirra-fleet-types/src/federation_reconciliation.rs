@@ -60,9 +60,9 @@
 // is additive and fail-safe (only ever adds caution) and advisory-only — it does
 // NOT feed the actuator-gating posture engine.
 
-use serde::{Deserialize, Serialize};
-use kirra_core::FleetPosture;
 use crate::federation::{FederatedTrustReport, ReportEvaluation};
+use kirra_core::FleetPosture;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Extended report type with generation field
@@ -105,7 +105,8 @@ pub fn canonical_federation_payload_v2(report: &FederatedTrustReportV2) -> Strin
             "expires_at_ms": report.expires_at_ms,
             "nonce_hex": report.nonce_hex,
             "source_generation": gen,
-        }).to_string(),
+        })
+        .to_string(),
         None => serde_json::json!({
             "source_controller_id": report.source_controller_id,
             "asset_id": report.asset_id,
@@ -113,7 +114,8 @@ pub fn canonical_federation_payload_v2(report: &FederatedTrustReportV2) -> Strin
             "issued_at_ms": report.issued_at_ms,
             "expires_at_ms": report.expires_at_ms,
             "nonce_hex": report.nonce_hex,
-        }).to_string(),
+        })
+        .to_string(),
     }
 }
 
@@ -124,18 +126,29 @@ pub fn verify_federated_report_signature_v2(
     use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
     use ed25519_dalek::{Signature, VerifyingKey};
 
-    let Ok(pk_bytes)  = b64.decode(public_key_b64)          else { return false; };
-    let Ok(sig_bytes) = b64.decode(&report.signature_b64)   else { return false; };
+    let Ok(pk_bytes) = b64.decode(public_key_b64) else {
+        return false;
+    };
+    let Ok(sig_bytes) = b64.decode(&report.signature_b64) else {
+        return false;
+    };
 
-    let Ok(pk_array)  = <[u8; 32]>::try_from(pk_bytes.as_slice())  else { return false; };
-    let Ok(sig_array) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else { return false; };
+    let Ok(pk_array) = <[u8; 32]>::try_from(pk_bytes.as_slice()) else {
+        return false;
+    };
+    let Ok(sig_array) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else {
+        return false;
+    };
 
-    let Ok(key) = VerifyingKey::from_bytes(&pk_array) else { return false; };
-    let sig     = Signature::from_bytes(&sig_array);
+    let Ok(key) = VerifyingKey::from_bytes(&pk_array) else {
+        return false;
+    };
+    let sig = Signature::from_bytes(&sig_array);
 
     // verify_strict rejects malleable / non-canonical signatures, consistent
     // with the v1 path and the rest of the crate's crypto. Fail-closed.
-    key.verify_strict(canonical_federation_payload_v2(report).as_bytes(), &sig).is_ok()
+    key.verify_strict(canonical_federation_payload_v2(report).as_bytes(), &sig)
+        .is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -152,8 +165,8 @@ pub enum ReconciliationOutcome {
 
 fn posture_severity(p: &FleetPosture) -> u8 {
     match p {
-        FleetPosture::Nominal   => 0,
-        FleetPosture::Degraded  => 1,
+        FleetPosture::Nominal => 0,
+        FleetPosture::Degraded => 1,
         FleetPosture::LockedOut => 2,
     }
 }
@@ -172,8 +185,12 @@ pub fn reconcile_reports(
 
     match (first.source_generation, second.source_generation) {
         (Some(g1), Some(g2)) => {
-            if g1 > g2 { return ReconciliationOutcome::PreferFirst; }
-            if g2 > g1 { return ReconciliationOutcome::PreferSecond; }
+            if g1 > g2 {
+                return ReconciliationOutcome::PreferFirst;
+            }
+            if g2 > g1 {
+                return ReconciliationOutcome::PreferSecond;
+            }
         }
         (Some(_), None) => return ReconciliationOutcome::PreferFirst,
         (None, Some(_)) => return ReconciliationOutcome::PreferSecond,
@@ -190,8 +207,12 @@ pub fn reconcile_reports(
     let s1 = posture_severity(&first.posture);
     let s2 = posture_severity(&second.posture);
 
-    if s1 > s2 { return ReconciliationOutcome::PreferFirst; }
-    if s2 > s1 { return ReconciliationOutcome::PreferSecond; }
+    if s1 > s2 {
+        return ReconciliationOutcome::PreferFirst;
+    }
+    if s2 > s1 {
+        return ReconciliationOutcome::PreferSecond;
+    }
 
     ReconciliationOutcome::FailClosed
 }
@@ -205,10 +226,12 @@ pub fn authoritative_posture<'a>(
 
     for next in iter {
         match reconcile_reports(current, next) {
-            ReconciliationOutcome::PreferFirst  => {}
-            ReconciliationOutcome::PreferSecond => { current = next; }
-            ReconciliationOutcome::Equivalent   => {}
-            ReconciliationOutcome::FailClosed   => {
+            ReconciliationOutcome::PreferFirst => {}
+            ReconciliationOutcome::PreferSecond => {
+                current = next;
+            }
+            ReconciliationOutcome::Equivalent => {}
+            ReconciliationOutcome::FailClosed => {
                 if posture_severity(&next.posture) > posture_severity(&current.posture) {
                     current = next;
                 }
@@ -305,97 +328,151 @@ mod federation_reconciliation_tests {
     fn test_higher_generation_wins_over_lower() {
         let r1 = degraded("ctrl-a", 1000, Some(412));
         let r2 = nominal("ctrl-b", 1000, Some(398));
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferFirst);
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::PreferFirst
+        );
     }
 
     #[test]
     fn test_lower_generation_loses_even_if_more_restrictive() {
         let r1 = nominal("ctrl-a", 1000, Some(500));
         let r2 = locked("ctrl-b", 1000, Some(100));
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferFirst);
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::PreferFirst
+        );
     }
 
     #[test]
     fn test_report_with_generation_preferred_over_report_without() {
         let r1 = degraded("ctrl-a", 1000, Some(412));
         let r2 = nominal("ctrl-b", 1000, None);
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferFirst);
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::PreferFirst
+        );
     }
 
     #[test]
     fn test_report_without_generation_loses_to_report_with_generation() {
         let r1 = nominal("ctrl-a", 1000, None);
         let r2 = degraded("ctrl-b", 1000, Some(412));
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferSecond);
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::PreferSecond
+        );
     }
 
     #[test]
     fn test_newer_timestamp_wins_when_no_generation() {
         let r1 = degraded("ctrl-a", 2000, None);
         let r2 = nominal("ctrl-b", 1000, None);
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferFirst);
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::PreferFirst
+        );
     }
 
     #[test]
     fn test_newer_timestamp_wins_when_equal_generation() {
         let r1 = degraded("ctrl-a", 2000, Some(100));
         let r2 = nominal("ctrl-b", 1000, Some(100));
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferFirst);
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::PreferFirst
+        );
     }
 
     #[test]
     fn test_older_timestamp_loses_when_no_generation() {
         let r1 = nominal("ctrl-a", 1000, None);
         let r2 = degraded("ctrl-b", 2000, None);
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferSecond);
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::PreferSecond
+        );
     }
 
     #[test]
     fn test_fail_closed_prefers_degraded_over_nominal() {
         let r1 = nominal("ctrl-a", 1000, Some(100));
         let r2 = degraded("ctrl-b", 1000, Some(100));
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferSecond);
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::PreferSecond
+        );
     }
 
     #[test]
     fn test_fail_closed_prefers_locked_out_over_degraded() {
         let r1 = degraded("ctrl-a", 1000, Some(100));
         let r2 = locked("ctrl-b", 1000, Some(100));
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferSecond);
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::PreferSecond
+        );
     }
 
     #[test]
     fn test_fail_closed_prefers_locked_out_over_nominal() {
         let r1 = nominal("ctrl-a", 1000, None);
         let r2 = locked("ctrl-b", 1000, None);
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferSecond);
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::PreferSecond
+        );
     }
 
     #[test]
     fn test_identical_postures_are_equivalent() {
         let r1 = degraded("ctrl-a", 1000, Some(412));
         let r2 = degraded("ctrl-b", 999, Some(1));
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::Equivalent);
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::Equivalent
+        );
     }
 
     #[test]
     fn test_same_posture_no_generation_is_equivalent() {
         let r1 = nominal("ctrl-a", 1000, None);
         let r2 = nominal("ctrl-b", 500, None);
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::Equivalent);
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::Equivalent
+        );
     }
 
     #[test]
     fn test_different_asset_ids_fail_closed() {
-        let r1 = report("ctrl-a", "lidar_front", FleetPosture::Nominal, 1000, Some(100));
-        let r2 = report("ctrl-b", "camera_front", FleetPosture::Degraded, 1000, Some(200));
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::FailClosed);
+        let r1 = report(
+            "ctrl-a",
+            "lidar_front",
+            FleetPosture::Nominal,
+            1000,
+            Some(100),
+        );
+        let r2 = report(
+            "ctrl-b",
+            "camera_front",
+            FleetPosture::Degraded,
+            1000,
+            Some(200),
+        );
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::FailClosed
+        );
     }
 
     #[test]
     fn test_single_report_returns_its_posture() {
         let reports = vec![degraded("ctrl-a", 1000, Some(100))];
-        assert_eq!(authoritative_posture(&reports), Some(FleetPosture::Degraded));
+        assert_eq!(
+            authoritative_posture(&reports),
+            Some(FleetPosture::Degraded)
+        );
     }
 
     #[test]
@@ -411,7 +488,10 @@ mod federation_reconciliation_tests {
             degraded("ctrl-b", 1000, Some(412)),
             nominal("ctrl-c", 1000, Some(200)),
         ];
-        assert_eq!(authoritative_posture(&reports), Some(FleetPosture::Degraded));
+        assert_eq!(
+            authoritative_posture(&reports),
+            Some(FleetPosture::Degraded)
+        );
     }
 
     #[test]
@@ -421,7 +501,10 @@ mod federation_reconciliation_tests {
             locked("ctrl-b", 1000, Some(100)),
             degraded("ctrl-c", 1000, Some(100)),
         ];
-        assert_eq!(authoritative_posture(&reports), Some(FleetPosture::LockedOut));
+        assert_eq!(
+            authoritative_posture(&reports),
+            Some(FleetPosture::LockedOut)
+        );
     }
 
     #[test]
@@ -430,7 +513,10 @@ mod federation_reconciliation_tests {
             nominal("ctrl-a", 2000, None),
             degraded("ctrl-b", 1000, Some(412)),
         ];
-        assert_eq!(authoritative_posture(&reports), Some(FleetPosture::Degraded));
+        assert_eq!(
+            authoritative_posture(&reports),
+            Some(FleetPosture::Degraded)
+        );
     }
 
     #[test]
@@ -472,7 +558,10 @@ mod federation_reconciliation_tests {
             r#"{"asset_id":"lidar_front","expires_at_ms":31000,"issued_at_ms":1000,"nonce_hex":"ctrl-a_1000","posture":"Nominal","source_controller_id":"ctrl-a"}"#
         );
         // And it equals the v1 canonical payload byte-for-byte (the compat contract).
-        assert_eq!(payload, crate::federation::canonical_federation_payload(&r.as_v1()));
+        assert_eq!(
+            payload,
+            crate::federation::canonical_federation_payload(&r.as_v1())
+        );
     }
 
     #[test]
@@ -512,7 +601,11 @@ mod federation_reconciliation_tests {
             source_generation: Some(412),
         };
         let result = evaluate_federated_report_v2(&r, now + 100);
-        assert!(result.accepted, "valid v2 report must be accepted: {}", result.reason);
+        assert!(
+            result.accepted,
+            "valid v2 report must be accepted: {}",
+            result.reason
+        );
     }
 
     #[test]
@@ -529,14 +622,24 @@ mod federation_reconciliation_tests {
             source_generation: None,
         };
         let result = evaluate_federated_report_v2(&r, now + 100);
-        assert!(result.accepted, "v1-compat report must be accepted: {}", result.reason);
+        assert!(
+            result.accepted,
+            "v1-compat report must be accepted: {}",
+            result.reason
+        );
     }
 
     #[test]
     fn test_posture_severity_ordering_is_correct() {
-        assert!(posture_severity(&FleetPosture::LockedOut) > posture_severity(&FleetPosture::Degraded));
-        assert!(posture_severity(&FleetPosture::Degraded) > posture_severity(&FleetPosture::Nominal));
-        assert!(posture_severity(&FleetPosture::LockedOut) > posture_severity(&FleetPosture::Nominal));
+        assert!(
+            posture_severity(&FleetPosture::LockedOut) > posture_severity(&FleetPosture::Degraded)
+        );
+        assert!(
+            posture_severity(&FleetPosture::Degraded) > posture_severity(&FleetPosture::Nominal)
+        );
+        assert!(
+            posture_severity(&FleetPosture::LockedOut) > posture_severity(&FleetPosture::Nominal)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -553,7 +656,11 @@ mod federation_reconciliation_tests {
             locked("ctrl-b", 1000, Some(100)),
         ];
         let auth = authoritative_posture(&reports).unwrap();
-        assert_eq!(auth, FleetPosture::Nominal, "gen-ordered authoritative is unchanged");
+        assert_eq!(
+            auth,
+            FleetPosture::Nominal,
+            "gen-ordered authoritative is unchanged"
+        );
         // Reports expire at 31_000 (issued + 30s); now=1_500 is within window.
         assert_eq!(
             dissenting_restriction(&reports, auth, 1_500),

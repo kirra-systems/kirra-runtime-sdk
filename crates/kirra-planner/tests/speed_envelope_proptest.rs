@@ -21,15 +21,33 @@ use kirra_trajectory::corridor::{CorridorSource, MockCorridorSource};
 use proptest::prelude::*;
 
 fn peak_speed(plan: &PlanOutput) -> f64 {
-    plan.trajectory.iter().map(|t| t.velocity_mps).fold(0.0, f64::max)
+    plan.trajectory
+        .iter()
+        .map(|t| t.velocity_mps)
+        .fold(0.0, f64::max)
 }
 
 /// A long straight corridor with a far-ahead goal and no objects, so the binding speed limit is
 /// the cruise target / posture envelope itself (not an obstacle, curvature, or the goal).
 fn world<'a>(map: &'a dyn CorridorSource, ego_v: f64, posture: FleetPosture) -> PlanInput<'a> {
     PlanInput {
-        ego: EgoState { pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: ego_v, yaw_rate_rads: 0.0, stamp_ms: 0 },
-        goal: Goal { target: Pose { x_m: 180.0, y_m: 0.0, heading_rad: 0.0 } },
+        ego: EgoState {
+            pose: Pose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+            linear_x_mps: ego_v,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        },
+        goal: Goal {
+            target: Pose {
+                x_m: 180.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+        },
         map,
         objects: &[],
         controls: &[],

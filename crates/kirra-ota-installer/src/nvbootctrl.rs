@@ -296,9 +296,9 @@ mod tests {
         assert_eq!(
             inst.boot_controller().runner().calls(),
             vec![
-                vec!["get-current-slot"],           // Installer::new seeds active
-                vec!["set-active-boot-slot", "1"],   // begin_trial arms B
-                vec!["mark-boot-successful"],        // healthy → commit
+                vec!["get-current-slot"],          // Installer::new seeds active
+                vec!["set-active-boot-slot", "1"], // begin_trial arms B
+                vec!["mark-boot-successful"],      // healthy → commit
             ]
         );
         std::fs::remove_file(&p).ok();

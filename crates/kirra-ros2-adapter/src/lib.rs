@@ -67,9 +67,9 @@ pub use crate::corridor::{CorridorSource, MockCorridorSource, Point};
 #[cfg(feature = "lanelet2")]
 pub use crate::corridor::{Lanelet2CorridorSource, Lanelet2Error};
 pub use crate::geometry::quat_to_yaw;
-pub use kirra_core::posture_tracker::{PostureTracker, POSTURE_STALENESS_TIMEOUT_MS};
 pub use crate::state::{
-    AcceptedTrajectory, AdaptorState, IncomingTrajectory, PerceivedObject, Pose,
-    TrajectoryPoint, TrajectoryVerdict,
+    AcceptedTrajectory, AdaptorState, IncomingTrajectory, PerceivedObject, Pose, TrajectoryPoint,
+    TrajectoryVerdict,
 };
 pub use crate::validation::validate_trajectory_slow;
+pub use kirra_core::posture_tracker::{PostureTracker, POSTURE_STALENESS_TIMEOUT_MS};

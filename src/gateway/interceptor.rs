@@ -5,7 +5,7 @@
 // import surface so that policy_layer doesn't need long cross-crate paths.
 
 pub use crate::posture_cache::{
-    CachedFleetPosture, SharedPostureCache, now_ms, should_route_command,
+    now_ms, should_route_command, CachedFleetPosture, SharedPostureCache,
 };
 // From the lean foundation, not the heavy `verifier` module (Stage 2) — same types.
 pub use kirra_core::{FleetPosture, NodeTrustState};

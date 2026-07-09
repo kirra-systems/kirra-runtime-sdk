@@ -323,22 +323,40 @@ impl DdsPublisherBridge {
 pub enum QosReadbackError {
     /// The negotiated writer is not Volatile (e.g. TransientLocal) → a
     /// reconnecting subscriber could replay the last command.
-    DurabilityRelaxed { requested: DdsDurability, negotiated: DdsDurability },
+    DurabilityRelaxed {
+        requested: DdsDurability,
+        negotiated: DdsDurability,
+    },
     /// History is no longer KeepLast(1) → a backed-up subscriber can drain
     /// stale commands.
-    HistoryRelaxed { requested: DdsHistory, negotiated: DdsHistory },
+    HistoryRelaxed {
+        requested: DdsHistory,
+        negotiated: DdsHistory,
+    },
     /// Reliability dropped (Reliable → BestEffort) → commands may be silently
     /// lost without the writer noticing.
-    ReliabilityRelaxed { requested: DdsReliability, negotiated: DdsReliability },
+    ReliabilityRelaxed {
+        requested: DdsReliability,
+        negotiated: DdsReliability,
+    },
     /// The negotiated lifespan is unbounded or LONGER than requested → a sample
     /// can outlive its validity horizon.
-    LifespanRelaxed { requested_ms: u32, negotiated_ms: u32 },
+    LifespanRelaxed {
+        requested_ms: u32,
+        negotiated_ms: u32,
+    },
     /// The negotiated deadline is unbounded or LONGER than requested → a missed
     /// publish (silent governor) goes undetected for longer.
-    DeadlineRelaxed { requested_ms: u32, negotiated_ms: u32 },
+    DeadlineRelaxed {
+        requested_ms: u32,
+        negotiated_ms: u32,
+    },
     /// The negotiated liveliness lease is LONGER than requested → writer loss is
     /// detected more slowly.
-    LivelinessLeaseRelaxed { requested_ms: u32, negotiated_ms: u32 },
+    LivelinessLeaseRelaxed {
+        requested_ms: u32,
+        negotiated_ms: u32,
+    },
 }
 
 impl QosReadbackError {
@@ -407,8 +425,12 @@ pub fn validate_qos_readback(
             negotiated_ms: negotiated.deadline_ms,
         });
     }
-    let DdsLiveliness::Automatic { lease_ms: req_lease } = requested.liveliness;
-    let DdsLiveliness::Automatic { lease_ms: neg_lease } = negotiated.liveliness;
+    let DdsLiveliness::Automatic {
+        lease_ms: req_lease,
+    } = requested.liveliness;
+    let DdsLiveliness::Automatic {
+        lease_ms: neg_lease,
+    } = negotiated.liveliness;
     if neg_lease == 0 || neg_lease > req_lease {
         return Err(QosReadbackError::LivelinessLeaseRelaxed {
             requested_ms: req_lease,
@@ -555,7 +577,9 @@ pub fn cyclone_params_to_qos(p: &CycloneQosParams) -> Option<DdsQosProfile> {
         reliability,
         durability,
         history,
-        liveliness: DdsLiveliness::Automatic { lease_ms: ns_to_ms(p.liveliness_lease_ns) },
+        liveliness: DdsLiveliness::Automatic {
+            lease_ms: ns_to_ms(p.liveliness_lease_ns),
+        },
         lifespan_ms: ns_to_ms(p.lifespan_ns),
         deadline_ms: ns_to_ms(p.deadline_ns),
     })
@@ -605,10 +629,22 @@ mod dds_qos_tests {
             let body: Vec<u8> = (0..len).map(|i| 0x10 + i).collect();
             let frame = DdsPublisherBridge::wrap_cdr_encapsulation(&body);
             let expected_pad = (4 - (len as usize % 4)) % 4;
-            assert_eq!(&frame[..3], &[0x00, 0x01, 0x00], "rep id CDR_LE for len {len}");
+            assert_eq!(
+                &frame[..3],
+                &[0x00, 0x01, 0x00],
+                "rep id CDR_LE for len {len}"
+            );
             assert_eq!(frame[3] as usize, expected_pad, "pad count for len {len}");
-            assert_eq!(frame.len() % 4, 0, "frame is a 4-byte multiple for len {len}");
-            assert_eq!(&frame[4..4 + len as usize], &body[..], "body preserved for len {len}");
+            assert_eq!(
+                frame.len() % 4,
+                0,
+                "frame is a 4-byte multiple for len {len}"
+            );
+            assert_eq!(
+                &frame[4..4 + len as usize],
+                &body[..],
+                "body preserved for len {len}"
+            );
             // The pad bytes are zero.
             assert!(frame[4 + len as usize..].iter().all(|&b| b == 0));
         }
@@ -623,8 +659,16 @@ mod dds_qos_tests {
         let body = enc.into_body();
         assert_eq!(body.len(), 8);
         assert_eq!(body[0], 0xAB);
-        assert_eq!(&body[1..4], &[0x00, 0x00, 0x00], "3 pad bytes align the u32");
-        assert_eq!(&body[4..8], &0x11223344u32.to_le_bytes(), "little-endian u32");
+        assert_eq!(
+            &body[1..4],
+            &[0x00, 0x00, 0x00],
+            "3 pad bytes align the u32"
+        );
+        assert_eq!(
+            &body[4..8],
+            &0x11223344u32.to_le_bytes(),
+            "little-endian u32"
+        );
     }
 
     #[test]
@@ -644,7 +688,11 @@ mod dds_qos_tests {
         let mut enc = CdrLeEncoder::new();
         enc.put_string("hi");
         let body = enc.into_body();
-        assert_eq!(&body[0..4], &3u32.to_le_bytes(), "length includes the NUL terminator");
+        assert_eq!(
+            &body[0..4],
+            &3u32.to_le_bytes(),
+            "length includes the NUL terminator"
+        );
         assert_eq!(&body[4..6], b"hi");
         assert_eq!(body[6], 0u8, "NUL terminator");
         assert_eq!(body.len(), 7);
@@ -657,7 +705,11 @@ mod dds_qos_tests {
         let mut enc = CdrLeEncoder::new();
         enc.put_u16(0xBEEF);
         let frame = enc.into_cdr_le();
-        assert_eq!(&frame[..4], &[0x00, 0x01, 0x00, 0x02], "pad count 2 for a 2-byte body");
+        assert_eq!(
+            &frame[..4],
+            &[0x00, 0x01, 0x00, 0x02],
+            "pad count 2 for a 2-byte body"
+        );
         assert_eq!(&frame[4..6], &0xBEEFu16.to_le_bytes());
         assert_eq!(&frame[6..8], &[0x00, 0x00]);
         assert_eq!(frame.len(), 8);
@@ -716,13 +768,18 @@ mod dds_qos_tests {
 
     impl LoopbackTestWriter {
         fn new(negotiated: DdsQosProfile) -> Self {
-            Self { negotiated, sent: std::cell::RefCell::new(Vec::new()) }
+            Self {
+                negotiated,
+                sent: std::cell::RefCell::new(Vec::new()),
+            }
         }
     }
 
     impl DdsActuatorWriter for LoopbackTestWriter {
         type Error = std::convert::Infallible;
-        fn negotiated_qos(&self) -> DdsQosProfile { self.negotiated }
+        fn negotiated_qos(&self) -> DdsQosProfile {
+            self.negotiated
+        }
         fn publish(&self, frame: &[u8]) -> Result<(), Self::Error> {
             self.sent.borrow_mut().push(frame.to_vec());
             Ok(())
@@ -733,13 +790,17 @@ mod dds_qos_tests {
     fn readback_accepts_exact_match_and_writer_round_trips() {
         let requested = DdsQosProfile::critical_actuator_profile();
         let writer = LoopbackTestWriter::new(requested);
-        assert_eq!(validate_qos_readback(&requested, &writer.negotiated_qos()), Ok(()));
+        assert_eq!(
+            validate_qos_readback(&requested, &writer.negotiated_qos()),
+            Ok(())
+        );
         // A 2-byte body is NOT 4-byte aligned, so `wrap_cdr_encapsulation`
         // appends `pad = (4 - 2 % 4) % 4 = 2` trailing zero bytes and advertises
         // that count in the options low byte (DDS-RTPS §10 / DDS-XTypes
         // §7.6.3.1.2). The full frame is therefore the header `[0x00,0x01,0x00,
         // 0x02]` (CDR_LE id + options-pad=2), the body, then the 2 pad bytes.
-        let frame = DdsPublisherBridge::publish_actuator_command(&[0xDE, 0xAD], &requested).unwrap();
+        let frame =
+            DdsPublisherBridge::publish_actuator_command(&[0xDE, 0xAD], &requested).unwrap();
         writer.publish(&frame).unwrap();
         let sent = writer.sent.borrow();
         assert_eq!(sent.len(), 1);
@@ -803,7 +864,10 @@ mod dds_qos_tests {
         z.lifespan_ms = 0;
         assert!(matches!(
             validate_qos_readback(&requested, &z),
-            Err(QosReadbackError::LifespanRelaxed { negotiated_ms: 0, .. })
+            Err(QosReadbackError::LifespanRelaxed {
+                negotiated_ms: 0,
+                ..
+            })
         ));
 
         // Longer deadline than requested.
@@ -830,10 +894,16 @@ mod dds_qos_tests {
         let p = DdsQosProfile::critical_actuator_profile();
         let params = qos_to_cyclone_params(&p);
         // Spot-check the C-API encoding.
-        assert_eq!(params.durability_kind, CycloneQosParams::DURABILITY_VOLATILE);
+        assert_eq!(
+            params.durability_kind,
+            CycloneQosParams::DURABILITY_VOLATILE
+        );
         assert_eq!(params.history_kind, CycloneQosParams::HISTORY_KEEP_LAST);
         assert_eq!(params.history_depth, 1);
-        assert_eq!(params.reliability_kind, CycloneQosParams::RELIABILITY_RELIABLE);
+        assert_eq!(
+            params.reliability_kind,
+            CycloneQosParams::RELIABILITY_RELIABLE
+        );
         assert_eq!(params.deadline_ns, 20 * 1_000_000, "20 ms → 20_000_000 ns");
         // Round-trips back to an equal profile and is read-back-admissible.
         let back = cyclone_params_to_qos(&params).expect("critical profile round-trips");
@@ -848,10 +918,16 @@ mod dds_qos_tests {
         // A writer that came back with an INFINITE lifespan.
         params.lifespan_ns = CycloneQosParams::INFINITY_NS;
         let back = cyclone_params_to_qos(&params).expect("kinds still valid");
-        assert_eq!(back.lifespan_ms, 0, "DDS_INFINITY → 0 ms (unbounded sentinel)");
+        assert_eq!(
+            back.lifespan_ms, 0,
+            "DDS_INFINITY → 0 ms (unbounded sentinel)"
+        );
         assert!(matches!(
             validate_qos_readback(&requested, &back),
-            Err(QosReadbackError::LifespanRelaxed { negotiated_ms: 0, .. })
+            Err(QosReadbackError::LifespanRelaxed {
+                negotiated_ms: 0,
+                ..
+            })
         ));
     }
 
@@ -860,8 +936,11 @@ mod dds_qos_tests {
         let mut params = qos_to_cyclone_params(&DdsQosProfile::critical_actuator_profile());
         // dds_durability_kind_t = 3 (PERSISTENT) — outside Kirra's actuator model.
         params.durability_kind = 3;
-        assert_eq!(cyclone_params_to_qos(&params), None,
-            "an unrepresentable durability kind must fail closed, not coerce");
+        assert_eq!(
+            cyclone_params_to_qos(&params),
+            None,
+            "an unrepresentable durability kind must fail closed, not coerce"
+        );
     }
 
     #[test]

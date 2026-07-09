@@ -214,17 +214,53 @@ pub fn int8_qdq_model(q: &QuantizedScorerWeights) -> Vec<u8> {
     let w2_t = transpose(&q.w2_codes, o, h); // [hidden, out]
     model("kirra_planner_scorer_int8_qdq", |g| {
         // Activation Q/DQ at the calibrated input scale…
-        node(g, "QuantizeLinear", "q_x", &[INPUT_NAME, "x_scale", "zp"], &["x_q"]);
-        node(g, "DequantizeLinear", "dq_x", &["x_q", "x_scale", "zp"], &["x_dq"]);
+        node(
+            g,
+            "QuantizeLinear",
+            "q_x",
+            &[INPUT_NAME, "x_scale", "zp"],
+            &["x_q"],
+        );
+        node(
+            g,
+            "DequantizeLinear",
+            "dq_x",
+            &["x_q", "x_scale", "zp"],
+            &["x_dq"],
+        );
         // …int8 weights dequantized at their per-tensor scale…
-        node(g, "DequantizeLinear", "dq_w1", &["W1_q", "w1_scale", "zp"], &["w1_dq"]);
+        node(
+            g,
+            "DequantizeLinear",
+            "dq_w1",
+            &["W1_q", "w1_scale", "zp"],
+            &["w1_dq"],
+        );
         node(g, "MatMul", "mm1", &["x_dq", "w1_dq"], &["mm1_out"]);
         node(g, "Add", "add1", &["mm1_out", "B1"], &["pre1"]);
         node(g, "Tanh", "tanh1", &["pre1"], &["hidden"]);
         // …hidden activations re-quantized at the calibrated hidden scale…
-        node(g, "QuantizeLinear", "q_h", &["hidden", "h_scale", "zp"], &["h_q"]);
-        node(g, "DequantizeLinear", "dq_h", &["h_q", "h_scale", "zp"], &["h_dq"]);
-        node(g, "DequantizeLinear", "dq_w2", &["W2_q", "w2_scale", "zp"], &["w2_dq"]);
+        node(
+            g,
+            "QuantizeLinear",
+            "q_h",
+            &["hidden", "h_scale", "zp"],
+            &["h_q"],
+        );
+        node(
+            g,
+            "DequantizeLinear",
+            "dq_h",
+            &["h_q", "h_scale", "zp"],
+            &["h_dq"],
+        );
+        node(
+            g,
+            "DequantizeLinear",
+            "dq_w2",
+            &["W2_q", "w2_scale", "zp"],
+            &["w2_dq"],
+        );
         node(g, "MatMul", "mm2", &["h_dq", "w2_dq"], &["mm2_out"]);
         node(g, "Add", "add2", &["mm2_out", "B2"], &[OUTPUT_NAME]);
         // Initializers: codes, scales (f32 scalars), shared zero-point, f32 biases.
@@ -259,7 +295,10 @@ pub fn int8_qdq_model(q: &QuantizedScorerWeights) -> Vec<u8> {
 /// hidden activations are `h1`…`h{n-1}`.
 #[must_use]
 pub fn fp32_model_chain(w: &ScorerWeightsV2) -> Vec<u8> {
-    assert!(!w.layers.is_empty(), "a scorer chain has at least one layer");
+    assert!(
+        !w.layers.is_empty(),
+        "a scorer chain has at least one layer"
+    );
     // Fail fast on an inconsistent chain — an ONNX graph with mismatched
     // matmul shapes would only error later, inside the backend.
     for win in w.layers.windows(2) {
@@ -270,7 +309,11 @@ pub fn fp32_model_chain(w: &ScorerWeightsV2) -> Vec<u8> {
         );
     }
     for l in &w.layers {
-        assert_eq!(l.w.len(), l.in_dim * l.out_dim, "weight tensor size mismatch");
+        assert_eq!(
+            l.w.len(),
+            l.in_dim * l.out_dim,
+            "weight tensor size mismatch"
+        );
         assert_eq!(l.b.len(), l.out_dim, "bias size mismatch");
     }
     let in_dim = w.layers[0].in_dim as u64;
@@ -281,9 +324,25 @@ pub fn fp32_model_chain(w: &ScorerWeightsV2) -> Vec<u8> {
         for idx in 0..n {
             let i = idx + 1;
             let last = i == n;
-            node(g, "MatMul", &format!("mm{i}"), &[&act, &format!("W{i}")], &[&format!("mm{i}_out")]);
-            let add_out = if last { OUTPUT_NAME.to_string() } else { format!("pre{i}") };
-            node(g, "Add", &format!("add{i}"), &[&format!("mm{i}_out"), &format!("B{i}")], &[&add_out]);
+            node(
+                g,
+                "MatMul",
+                &format!("mm{i}"),
+                &[&act, &format!("W{i}")],
+                &[&format!("mm{i}_out")],
+            );
+            let add_out = if last {
+                OUTPUT_NAME.to_string()
+            } else {
+                format!("pre{i}")
+            };
+            node(
+                g,
+                "Add",
+                &format!("add{i}"),
+                &[&format!("mm{i}_out"), &format!("B{i}")],
+                &[&add_out],
+            );
             if !last {
                 act = format!("h{i}");
                 node(g, "Tanh", &format!("tanh{i}"), &[&add_out], &[&act]);
@@ -292,7 +351,13 @@ pub fn fp32_model_chain(w: &ScorerWeightsV2) -> Vec<u8> {
         for (idx, l) in w.layers.iter().enumerate() {
             let i = idx + 1;
             let w_t = to_f32(&transpose(&l.w, l.out_dim, l.in_dim)); // [in, out]
-            f32_tensor(g, 5, &format!("W{i}"), &[l.in_dim as u64, l.out_dim as u64], &w_t);
+            f32_tensor(
+                g,
+                5,
+                &format!("W{i}"),
+                &[l.in_dim as u64, l.out_dim as u64],
+                &w_t,
+            );
             f32_tensor(g, 5, &format!("B{i}"), &[l.out_dim as u64], &to_f32(&l.b));
         }
         f32_value_info(g, 11, INPUT_NAME, &[1, in_dim]);
@@ -312,7 +377,10 @@ pub fn int8_qdq_model_chain(q: &QuantizedScorerWeightsV2) -> Vec<u8> {
         q.act_scales.len(),
         "one activation scale per matmul input"
     );
-    assert!(!q.layers.is_empty(), "a scorer chain has at least one layer");
+    assert!(
+        !q.layers.is_empty(),
+        "a scorer chain has at least one layer"
+    );
     // Fail fast on an inconsistent chain, as in `fp32_model_chain`.
     for win in q.layers.windows(2) {
         assert_eq!(
@@ -322,7 +390,11 @@ pub fn int8_qdq_model_chain(q: &QuantizedScorerWeightsV2) -> Vec<u8> {
         );
     }
     for l in &q.layers {
-        assert_eq!(l.codes.len(), l.in_dim * l.out_dim, "code tensor size mismatch");
+        assert_eq!(
+            l.codes.len(),
+            l.in_dim * l.out_dim,
+            "code tensor size mismatch"
+        );
         assert_eq!(l.b.len(), l.out_dim, "bias size mismatch");
     }
     let in_dim = q.layers[0].in_dim as u64;
@@ -336,8 +408,20 @@ pub fn int8_qdq_model_chain(q: &QuantizedScorerWeightsV2) -> Vec<u8> {
             let last = i == n;
             let (a_q, a_dq, a_scale) =
                 (format!("a{j}_q"), format!("a{j}_dq"), format!("a{j}_scale"));
-            node(g, "QuantizeLinear", &format!("q_a{j}"), &[&act, &a_scale, "zp"], &[&a_q]);
-            node(g, "DequantizeLinear", &format!("dq_a{j}"), &[&a_q, &a_scale, "zp"], &[&a_dq]);
+            node(
+                g,
+                "QuantizeLinear",
+                &format!("q_a{j}"),
+                &[&act, &a_scale, "zp"],
+                &[&a_q],
+            );
+            node(
+                g,
+                "DequantizeLinear",
+                &format!("dq_a{j}"),
+                &[&a_q, &a_scale, "zp"],
+                &[&a_dq],
+            );
             node(
                 g,
                 "DequantizeLinear",
@@ -345,9 +429,25 @@ pub fn int8_qdq_model_chain(q: &QuantizedScorerWeightsV2) -> Vec<u8> {
                 &[&format!("W{i}_q"), &format!("w{i}_scale"), "zp"],
                 &[&format!("w{i}_dq")],
             );
-            node(g, "MatMul", &format!("mm{i}"), &[&a_dq, &format!("w{i}_dq")], &[&format!("mm{i}_out")]);
-            let add_out = if last { OUTPUT_NAME.to_string() } else { format!("pre{i}") };
-            node(g, "Add", &format!("add{i}"), &[&format!("mm{i}_out"), &format!("B{i}")], &[&add_out]);
+            node(
+                g,
+                "MatMul",
+                &format!("mm{i}"),
+                &[&a_dq, &format!("w{i}_dq")],
+                &[&format!("mm{i}_out")],
+            );
+            let add_out = if last {
+                OUTPUT_NAME.to_string()
+            } else {
+                format!("pre{i}")
+            };
+            node(
+                g,
+                "Add",
+                &format!("add{i}"),
+                &[&format!("mm{i}_out"), &format!("B{i}")],
+                &[&add_out],
+            );
             if !last {
                 act = format!("h{i}");
                 node(g, "Tanh", &format!("tanh{i}"), &[&add_out], &[&act]);
@@ -356,7 +456,13 @@ pub fn int8_qdq_model_chain(q: &QuantizedScorerWeightsV2) -> Vec<u8> {
         for (idx, l) in q.layers.iter().enumerate() {
             let i = idx + 1;
             let codes_t = transpose(&l.codes, l.out_dim, l.in_dim); // [in, out]
-            i8_tensor(g, 5, &format!("W{i}_q"), &[l.in_dim as u64, l.out_dim as u64], &codes_t);
+            i8_tensor(
+                g,
+                5,
+                &format!("W{i}_q"),
+                &[l.in_dim as u64, l.out_dim as u64],
+                &codes_t,
+            );
             f32_tensor(g, 5, &format!("w{i}_scale"), &[], &[l.w_scale as f32]);
             f32_tensor(g, 5, &format!("B{i}"), &[l.out_dim as u64], &to_f32(&l.b));
         }
@@ -410,8 +516,14 @@ mod tests {
     fn model_bytes_look_like_onnx() {
         let p = LearnedPlanner::trained(0xC0FFEE, Teacher::SafetyAware);
         let bytes = fp32_model(&p.scorer_weights());
-        assert_eq!(&bytes[..2], &[0x08, IR_VERSION as u8], "ir_version field first");
-        let hay = bytes.windows(INPUT_NAME.len()).any(|w| w == INPUT_NAME.as_bytes());
+        assert_eq!(
+            &bytes[..2],
+            &[0x08, IR_VERSION as u8],
+            "ir_version field first"
+        );
+        let hay = bytes
+            .windows(INPUT_NAME.len())
+            .any(|w| w == INPUT_NAME.as_bytes());
         assert!(hay, "input name embedded");
     }
 }

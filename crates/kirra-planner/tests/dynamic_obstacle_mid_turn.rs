@@ -16,8 +16,8 @@
 //!     a safe maneuver, the checker bounding the unsafe alternative).
 
 use kirra_planner::{
-    EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneEdge, LaneGraph, LineType, MotionState,
-    PerceivedObject, PlanInput, Planner, Pose, ProposalKind, TrajectoryVerdict,
+    EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneEdge, LaneGraph, LineType,
+    MotionState, PerceivedObject, PlanInput, Planner, Pose, ProposalKind, TrajectoryVerdict,
 };
 use kirra_trajectory::corridor::Point;
 use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
@@ -28,7 +28,10 @@ fn quarter_arc(cx: f64, cy: f64, r: f64, start: f64, n: usize) -> Vec<Point> {
     (0..=n)
         .map(|i| {
             let t = start + std::f64::consts::FRAC_PI_2 * (i as f64 / n as f64);
-            Point { x_m: cx + r * t.cos(), y_m: cy + r * t.sin() }
+            Point {
+                x_m: cx + r * t.cos(),
+                y_m: cy + r * t.sin(),
+            }
         })
         .collect()
 }
@@ -39,19 +42,68 @@ fn left_turn(r: f64) -> LaneGraph {
     let line = LineType::Solid;
     let arc = quarter_arc(20.0, r, r, -std::f64::consts::FRAC_PI_2, 12);
     LaneGraph::new()
-        .with_lane(Lane::straight(1, 0.0, 0.0, 20.0, 3.0, line, line).with_edge(LaneEdge::Successor { to: 2 }))
-        .with_lane(Lane { id: 2, centerline: arc, half_width_m: 3.0, left_line: line, right_line: line, heading_rad: std::f64::consts::FRAC_PI_4, edges: vec![LaneEdge::Successor { to: 3 }], control: None })
-        .with_lane(Lane { id: 3, centerline: vec![Point { x_m: 20.0 + r, y_m: r }, Point { x_m: 20.0 + r, y_m: r + 20.0 }], half_width_m: 3.0, left_line: line, right_line: line, heading_rad: std::f64::consts::FRAC_PI_2, edges: Vec::new(), control: None })
+        .with_lane(
+            Lane::straight(1, 0.0, 0.0, 20.0, 3.0, line, line)
+                .with_edge(LaneEdge::Successor { to: 2 }),
+        )
+        .with_lane(Lane {
+            id: 2,
+            centerline: arc,
+            half_width_m: 3.0,
+            left_line: line,
+            right_line: line,
+            heading_rad: std::f64::consts::FRAC_PI_4,
+            edges: vec![LaneEdge::Successor { to: 3 }],
+            control: None,
+        })
+        .with_lane(Lane {
+            id: 3,
+            centerline: vec![
+                Point {
+                    x_m: 20.0 + r,
+                    y_m: r,
+                },
+                Point {
+                    x_m: 20.0 + r,
+                    y_m: r + 20.0,
+                },
+            ],
+            half_width_m: 3.0,
+            left_line: line,
+            right_line: line,
+            heading_rad: std::f64::consts::FRAC_PI_2,
+            edges: Vec::new(),
+            control: None,
+        })
 }
 
 const R: f64 = 12.0;
 
 /// The ego committed to the turn, low on the arc (heading part-way between east and north),
 /// driving toward a goal up the exit lane along the stitched route corridor.
-fn mid_turn_world<'a>(map: &'a dyn kirra_trajectory::corridor::CorridorSource, objects: &'a [PerceivedObject], motion: &'a [MotionState]) -> PlanInput<'a> {
+fn mid_turn_world<'a>(
+    map: &'a dyn kirra_trajectory::corridor::CorridorSource,
+    objects: &'a [PerceivedObject],
+    motion: &'a [MotionState],
+) -> PlanInput<'a> {
     PlanInput {
-        ego: EgoState { pose: Pose { x_m: 23.5, y_m: 1.0, heading_rad: 0.4 }, linear_x_mps: 3.0, yaw_rate_rads: 0.0, stamp_ms: 0 },
-        goal: Goal { target: Pose { x_m: 20.0 + R, y_m: R + 16.0, heading_rad: std::f64::consts::FRAC_PI_2 } },
+        ego: EgoState {
+            pose: Pose {
+                x_m: 23.5,
+                y_m: 1.0,
+                heading_rad: 0.4,
+            },
+            linear_x_mps: 3.0,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        },
+        goal: Goal {
+            target: Pose {
+                x_m: 20.0 + R,
+                y_m: R + 16.0,
+                heading_rad: std::f64::consts::FRAC_PI_2,
+            },
+        },
         map,
         objects,
         controls: &[],
@@ -71,14 +123,28 @@ fn mid_turn_world<'a>(map: &'a dyn kirra_trajectory::corridor::CorridorSource, o
     }
 }
 
-fn verdict(traj: &[kirra_planner::TrajectoryPoint], map: &dyn kirra_trajectory::corridor::CorridorSource, objs: &[PerceivedObject]) -> TrajectoryVerdict {
-    validate_trajectory_slow(traj, map, objs, &VehicleConfig::default_urban(), None, FleetPosture::Nominal)
+fn verdict(
+    traj: &[kirra_planner::TrajectoryPoint],
+    map: &dyn kirra_trajectory::corridor::CorridorSource,
+    objs: &[PerceivedObject],
+) -> TrajectoryVerdict {
+    validate_trajectory_slow(
+        traj,
+        map,
+        objs,
+        &VehicleConfig::default_urban(),
+        None,
+        FleetPosture::Nominal,
+    )
 }
 fn admitted(v: TrajectoryVerdict) -> bool {
     matches!(v, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp)
 }
 fn max_y(p: &kirra_planner::PlanOutput) -> f64 {
-    p.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max)
+    p.trajectory
+        .iter()
+        .map(|t| t.pose.y_m)
+        .fold(f64::MIN, f64::max)
 }
 fn terminal_v(p: &kirra_planner::PlanOutput) -> f64 {
     p.trajectory.last().map(|t| t.velocity_mps).unwrap_or(0.0)
@@ -94,22 +160,55 @@ fn a_dynamic_crosser_mid_turn_is_yielded_by_the_doer_and_bounded_by_kirra() {
     // Control: on a CLEAR turn the ego drives up through the junction past y=18 and KIRRA admits.
     let clear = occy.plan(&mid_turn_world(&map, &[], &[]));
     assert_eq!(clear.kind, ProposalKind::Motion);
-    assert!(max_y(&clear) > 18.0, "clear turn climbs through the junction, got max_y {}", max_y(&clear));
-    assert!(admitted(verdict(&clear.trajectory, &map, &[])), "KIRRA admits the clear turn");
+    assert!(
+        max_y(&clear) > 18.0,
+        "clear turn climbs through the junction, got max_y {}",
+        max_y(&clear)
+    );
+    assert!(
+        admitted(verdict(&clear.trajectory, &map, &[])),
+        "KIRRA admits the clear turn"
+    );
 
     // A vehicle crossing the EXIT lane westbound, lingering in the conflict band. At planning
     // time it sits 4 m right of the exit centerline → OUT of the stop-short lane band, so the
     // PREDICTIVE yield (rolling its motion forward onto the curved guide) is what must catch it.
-    let crosser = PerceivedObject { id: 7, pos: Point { x_m: 36.0, y_m: 18.0 }, velocity_mps: 1.5, heading_rad: std::f64::consts::PI, vel: Point { x_m: -1.5, y_m: 0.0 } };
+    let crosser = PerceivedObject {
+        id: 7,
+        pos: Point {
+            x_m: 36.0,
+            y_m: 18.0,
+        },
+        velocity_mps: 1.5,
+        heading_rad: std::f64::consts::PI,
+        vel: Point {
+            x_m: -1.5,
+            y_m: 0.0,
+        },
+    };
     let objs = [crosser];
-    let motion = [MotionState { id: 7, yaw_rate_rad_s: 0.0 }];
+    let motion = [MotionState {
+        id: 7,
+        yaw_rate_rad_s: 0.0,
+    }];
 
     // The doer YIELDS: predictive yield fires on the curved arc → the plan decelerates to a stop
     // SHORT of the crosser (well below the clear plan's reach), rather than driving into it.
     let yielded = occy.plan(&mid_turn_world(&map, &objs, &motion));
-    assert!(max_y(&yielded) < 15.0, "the doer stops short of the crossing hazard, got max_y {}", max_y(&yielded));
-    assert!(terminal_v(&yielded) < 0.5, "the yield is a decel-to-stop, terminal v {}", terminal_v(&yielded));
-    assert!(max_y(&yielded) < max_y(&clear) - 4.0, "the doer yields well short of the clear-turn reach");
+    assert!(
+        max_y(&yielded) < 15.0,
+        "the doer stops short of the crossing hazard, got max_y {}",
+        max_y(&yielded)
+    );
+    assert!(
+        terminal_v(&yielded) < 0.5,
+        "the yield is a decel-to-stop, terminal v {}",
+        terminal_v(&yielded)
+    );
+    assert!(
+        max_y(&yielded) < max_y(&clear) - 4.0,
+        "the doer yields well short of the clear-turn reach"
+    );
 
     // Doer-checker AGREEMENT (the predictive-yield-gap refinement): the doer's yield leaves the
     // checker's longitudinal-conflict distance before the crossing, so the stopped ego sits
@@ -141,16 +240,40 @@ fn a_dynamic_lead_mid_turn_is_followed_by_the_doer_and_kirra_admits_the_follow()
 
     // A slow vehicle moving NORTH up the exit lane ahead — same direction as the ego's exit. The
     // doer should treat it as a moving LEAD: follow at a gap (speed-matched), not blow past it.
-    let lead = PerceivedObject { id: 8, pos: Point { x_m: 20.0 + R, y_m: 18.0 }, velocity_mps: 1.5, heading_rad: std::f64::consts::FRAC_PI_2, vel: Point { x_m: 0.0, y_m: 1.5 } };
+    let lead = PerceivedObject {
+        id: 8,
+        pos: Point {
+            x_m: 20.0 + R,
+            y_m: 18.0,
+        },
+        velocity_mps: 1.5,
+        heading_rad: std::f64::consts::FRAC_PI_2,
+        vel: Point { x_m: 0.0, y_m: 1.5 },
+    };
     let objs = [lead];
-    let motion = [MotionState { id: 8, yaw_rate_rad_s: 0.0 }];
+    let motion = [MotionState {
+        id: 8,
+        yaw_rate_rad_s: 0.0,
+    }];
 
     // The doer FOLLOWS the dynamic lead: a motion plan that holds well back behind it (much less
     // reach than the clear turn) — and KIRRA ADMITS the follow (rear-end RSS satisfied on the arc).
     let follow = occy.plan(&mid_turn_world(&map, &objs, &motion));
-    assert_eq!(follow.kind, ProposalKind::Motion, "the doer follows the lead (motion), not a dead HOLD");
-    assert!(max_y(&follow) < max_y(&clear) - 5.0, "the follow holds back behind the lead, got max_y {} vs clear {}", max_y(&follow), max_y(&clear));
-    assert!(admitted(verdict(&follow.trajectory, &map, &objs)), "KIRRA admits the speed-matched follow through the turn");
+    assert_eq!(
+        follow.kind,
+        ProposalKind::Motion,
+        "the doer follows the lead (motion), not a dead HOLD"
+    );
+    assert!(
+        max_y(&follow) < max_y(&clear) - 5.0,
+        "the follow holds back behind the lead, got max_y {} vs clear {}",
+        max_y(&follow),
+        max_y(&clear)
+    );
+    assert!(
+        admitted(verdict(&follow.trajectory, &map, &objs)),
+        "KIRRA admits the speed-matched follow through the turn"
+    );
 
     // The payoff: the cruise-through plan (ignoring the lead) is refused — KIRRA bounds the
     // dynamic lead mid-turn even though the doer-followed alternative is admitted.

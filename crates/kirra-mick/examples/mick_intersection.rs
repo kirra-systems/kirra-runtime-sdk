@@ -29,12 +29,12 @@
 //! No Ollama? The driver fails closed — HOLD throughout, the safe default. The model can
 //! never make the car unsafe; this binary only shows the loop.
 
+use kirra_mick::OllamaClient;
 use kirra_planner::{
     EgoState, FastLoopTracker, FleetPosture, GeometricPlanner, Goal, Lane, LaneControl,
     LaneCorridor, LaneEdge, LaneGraph, LineType, LlmBrain, MickDecisionRecord, MickDriver,
     MickEvalLog, MickEvalSummary, PlanInput, PlanOutput, Pose, SignalState,
 };
-use kirra_mick::OllamaClient;
 use kirra_trajectory::corridor::{CorridorSource, Point};
 use kirra_trajectory::state::{PerceivedObject, TrajectoryVerdict};
 use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
@@ -59,14 +59,25 @@ fn junction() -> LaneGraph {
     let arc: Vec<Point> = (0..=12)
         .map(|i| {
             let t = -std::f64::consts::FRAC_PI_2 + std::f64::consts::FRAC_PI_2 * (i as f64 / 12.0);
-            Point { x_m: APPROACH_END + r * t.cos(), y_m: r + r * t.sin() }
+            Point {
+                x_m: APPROACH_END + r * t.cos(),
+                y_m: r + r * t.sin(),
+            }
         })
         .collect();
     LaneGraph::new()
         .with_lane(
-            Lane::straight(1, 0.0, 0.0, APPROACH_END, 3.0, LineType::Solid, LineType::Solid)
-                .with_control(LaneControl::TrafficLight)
-                .with_edge(LaneEdge::Successor { to: 2 }),
+            Lane::straight(
+                1,
+                0.0,
+                0.0,
+                APPROACH_END,
+                3.0,
+                LineType::Solid,
+                LineType::Solid,
+            )
+            .with_control(LaneControl::TrafficLight)
+            .with_edge(LaneEdge::Successor { to: 2 }),
         )
         .with_lane(Lane {
             id: 2,
@@ -80,7 +91,16 @@ fn junction() -> LaneGraph {
         })
         .with_lane(Lane {
             id: 5,
-            centerline: vec![Point { x_m: APPROACH_END + r, y_m: r }, Point { x_m: APPROACH_END + r, y_m: r + 20.0 }],
+            centerline: vec![
+                Point {
+                    x_m: APPROACH_END + r,
+                    y_m: r,
+                },
+                Point {
+                    x_m: APPROACH_END + r,
+                    y_m: r + 20.0,
+                },
+            ],
             half_width_m: 3.0,
             left_line: LineType::Solid,
             right_line: LineType::Solid,
@@ -126,14 +146,28 @@ fn world<'a>(
     }
 }
 
-fn verdict(plan: &PlanOutput, corr: &dyn CorridorSource, objs: &[PerceivedObject]) -> TrajectoryVerdict {
-    validate_trajectory_slow(&plan.trajectory, corr, objs, &VehicleConfig::default_urban(), None, FleetPosture::Nominal)
+fn verdict(
+    plan: &PlanOutput,
+    corr: &dyn CorridorSource,
+    objs: &[PerceivedObject],
+) -> TrajectoryVerdict {
+    validate_trajectory_slow(
+        &plan.trajectory,
+        corr,
+        objs,
+        &VehicleConfig::default_urban(),
+        None,
+        FleetPosture::Nominal,
+    )
 }
 
 fn main() {
     let client = OllamaClient::new();
     let url = std::env::var("KIRRA_OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".into());
-    println!("Mick intersection — model = {} @ {url}  (fast loop 10 Hz, Gemma ~2 Hz)", client.model());
+    println!(
+        "Mick intersection — model = {} @ {url}  (fast loop 10 Hz, Gemma ~2 Hz)",
+        client.model()
+    );
     println!("   signalized LEFT turn: HOLD on red → turn on green @ {:.1}s; right-of-way over a crosser; KIRRA bounds all.", GREEN_AT_MS as f64 / 1000.0);
 
     let mut driver = MickDriver::new(LlmBrain::new(client));
@@ -142,13 +176,38 @@ fn main() {
     let g = junction();
     // The reference path AND the KIRRA containment corridor: the full route through the turn.
     // The ego tracks it toward the cross-junction goal; the red light HOLDs it at the line.
-    let route: LaneCorridor = g.route(1, 5).and_then(|r| g.route_corridor(&r, 0.95, 5)).expect("route corridor");
+    let route: LaneCorridor = g
+        .route(1, 5)
+        .and_then(|r| g.route_corridor(&r, 0.95, 5))
+        .expect("route corridor");
     // A stationary vehicle in the crossing lane (id 7), off the left-turn path — the ego has
     // right-of-way over it; the cede is derived live and printed so you see #528 firing.
-    let objs = [PerceivedObject { id: 7, pos: Point { x_m: 33.0, y_m: -10.0 }, velocity_mps: 0.0, heading_rad: std::f64::consts::FRAC_PI_2, vel: Point { x_m: 0.0, y_m: 0.0 } }];
-    let goal = Pose { x_m: APPROACH_END + TURN_RADIUS, y_m: 28.0, heading_rad: std::f64::consts::FRAC_PI_2 };
+    let objs = [PerceivedObject {
+        id: 7,
+        pos: Point {
+            x_m: 33.0,
+            y_m: -10.0,
+        },
+        velocity_mps: 0.0,
+        heading_rad: std::f64::consts::FRAC_PI_2,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    }];
+    let goal = Pose {
+        x_m: APPROACH_END + TURN_RADIUS,
+        y_m: 28.0,
+        heading_rad: std::f64::consts::FRAC_PI_2,
+    };
 
-    let mut ego = EgoState { pose: Pose { x_m: 16.0, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: 5.0, yaw_rate_rads: 0.0, stamp_ms: 0 };
+    let mut ego = EgoState {
+        pose: Pose {
+            x_m: 16.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        },
+        linear_x_mps: 5.0,
+        yaw_rate_rads: 0.0,
+        stamp_ms: 0,
+    };
     // Dual-rate: the slow loop (System-2 → Occy → KIRRA) re-plans/validates every REPLAN_MS and
     // promotes only ADMITTED trajectories; the fast loop tracks the committed one each tick.
     let mut tracker = FastLoopTracker::new();
@@ -168,12 +227,17 @@ fn main() {
     for tick in 1..=TICKS {
         let now_ms = tick as u64 * FAST_DT_MS;
         // The live signal feed: RED until GREEN_AT_MS, then GREEN. Keyed by the governed lane.
-        let light = if now_ms < GREEN_AT_MS { SignalState::Red } else { SignalState::Green };
+        let light = if now_ms < GREEN_AT_MS {
+            SignalState::Red
+        } else {
+            SignalState::Green
+        };
         let signals = [(1u64, light)];
 
         // SLOW loop: re-ask the brain / re-ground / re-validate at the slow cadence or when the
         // committed trajectory is spent. Promote only what KIRRA admits.
-        let replan_due = tracker.is_exhausted(now_ms) || last_replan_ms.is_none_or(|t| now_ms.saturating_sub(t) >= REPLAN_MS);
+        let replan_due = tracker.is_exhausted(now_ms)
+            || last_replan_ms.is_none_or(|t| now_ms.saturating_sub(t) >= REPLAN_MS);
         if replan_due {
             let w = world(ego, &route, &objs, &signals, &g, goal);
             let plan = driver.drive_tick(&w, &mut occy, now_ms);
@@ -194,18 +258,34 @@ fn main() {
 
         // FAST loop: track the committed trajectory by elapsed time; MRC if none/exhausted.
         ego = match tracker.track(now_ms) {
-            Some(cmd) => EgoState { pose: cmd.pose, linear_x_mps: cmd.velocity_mps, yaw_rate_rads: 0.0, stamp_ms: now_ms },
+            Some(cmd) => EgoState {
+                pose: cmd.pose,
+                linear_x_mps: cmd.velocity_mps,
+                yaw_rate_rads: 0.0,
+                stamp_ms: now_ms,
+            },
             None => EgoState {
-                pose: ego.pose, linear_x_mps: (ego.linear_x_mps - MRC_DECEL * FAST_DT_S).max(0.0),
-                yaw_rate_rads: 0.0, stamp_ms: now_ms,
+                pose: ego.pose,
+                linear_x_mps: (ego.linear_x_mps - MRC_DECEL * FAST_DT_S).max(0.0),
+                yaw_rate_rads: 0.0,
+                stamp_ms: now_ms,
             },
         };
 
         let intent = driver.current_intent();
-        let light_s = if light == SignalState::Red { "RED " } else { "GREEN" };
+        let light_s = if light == SignalState::Red {
+            "RED "
+        } else {
+            "GREEN"
+        };
         println!(
             "{:>6.1}  {:>6.2} {:>6.2}  {:>5.2}   {light_s}   {:<22?}  {:>5?}   {last_v:?}",
-            now_ms as f64 / 1000.0, ego.pose.x_m, ego.pose.y_m, ego.linear_x_mps, intent, cedes,
+            now_ms as f64 / 1000.0,
+            ego.pose.x_m,
+            ego.pose.y_m,
+            ego.linear_x_mps,
+            intent,
+            cedes,
         );
     }
     println!(
@@ -220,6 +300,15 @@ fn main() {
 /// The cede set the junction's right-of-way grants the ego at its current pose — what
 /// `plan_for_intent` derives internally and feeds the planner (surfaced here for the trace).
 fn derived_cedes(w: &PlanInput<'_>) -> Vec<u64> {
-    let Some(g) = w.lane_graph else { return Vec::new() };
-    g.junction_context(Point { x_m: w.ego.pose.x_m, y_m: w.ego.pose.y_m }, w.objects).cedes_to_ego
+    let Some(g) = w.lane_graph else {
+        return Vec::new();
+    };
+    g.junction_context(
+        Point {
+            x_m: w.ego.pose.x_m,
+            y_m: w.ego.pose.y_m,
+        },
+        w.objects,
+    )
+    .cedes_to_ego
 }

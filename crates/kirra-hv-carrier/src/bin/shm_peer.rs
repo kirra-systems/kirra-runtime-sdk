@@ -11,7 +11,8 @@
 use std::process::ExitCode;
 
 use kirra_contract_channel::{
-    read_coherent_snapshot, validate, AcceptedWatermark, VehicleCommandPayload, MAX_SNAPSHOT_RETRIES,
+    read_coherent_snapshot, validate, AcceptedWatermark, VehicleCommandPayload,
+    MAX_SNAPSHOT_RETRIES,
 };
 use kirra_hv_carrier::PosixShmReader;
 
@@ -61,7 +62,8 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    if snapshot.sequence != expected_seq || (cmd.linear_velocity_mps - expected_linvel).abs() > 1e-9 {
+    if snapshot.sequence != expected_seq || (cmd.linear_velocity_mps - expected_linvel).abs() > 1e-9
+    {
         eprintln!(
             "shm_peer: mismatch: seq {} (want {expected_seq}), linvel {} (want {expected_linvel})",
             snapshot.sequence, cmd.linear_velocity_mps

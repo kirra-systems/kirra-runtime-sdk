@@ -108,7 +108,11 @@ pub fn sample_doer_corpus(seed: u64, n: usize) -> Vec<crate::EvalScenario> {
     use crate::{hazard, HazardKind};
     use kirra_core::corridor::MockCorridorSource;
 
-    let kinds = [HazardKind::Stopped, HazardKind::LeadMoving, HazardKind::Oncoming];
+    let kinds = [
+        HazardKind::Stopped,
+        HazardKind::LeadMoving,
+        HazardKind::Oncoming,
+    ];
     let mut rng = SplitMix64::new(seed ^ DOER_STREAM);
     let mut corpus = Vec::with_capacity(n);
     for i in 0..n {
@@ -167,7 +171,9 @@ pub fn sample_perception_corpus(seed: u64, n: usize) -> Vec<crate::PerceptionCas
                 lateral_min_m: lat_lo,
                 lateral_max_m: lat_lo + width,
             };
-            let detector = MockSemanticDetector { detections: vec![det] };
+            let detector = MockSemanticDetector {
+                detections: vec![det],
+            };
             cases.push(crate::PerceptionCase {
                 name: format!("mc_perc_{i}"),
                 corridor: crate::open_corridor(),
@@ -298,7 +304,13 @@ impl McKpiRow {
             Bound::CiUpperAtMost(m) => wilson.hi <= m,
             Bound::PointAtMost(m) => wilson.point <= m,
         };
-        Self { name, wilson, exact, bound, pass }
+        Self {
+            name,
+            wilson,
+            exact,
+            bound,
+            pass,
+        }
     }
 
     /// The bound direction/value for display (e.g. `ci.hi <= 0.0500`).
@@ -330,8 +342,14 @@ mod tests {
 
     #[test]
     fn generator_is_deterministic_by_seed() {
-        let a: Vec<String> = sample_doer_corpus(42, 64).into_iter().map(|s| s.name).collect();
-        let b: Vec<String> = sample_doer_corpus(42, 64).into_iter().map(|s| s.name).collect();
+        let a: Vec<String> = sample_doer_corpus(42, 64)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        let b: Vec<String> = sample_doer_corpus(42, 64)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
         assert_eq!(a, b, "same seed ⇒ identical corpus");
 
         // The world params (not just the names) must be identical too.
@@ -347,7 +365,10 @@ mod tests {
         // The object-count fingerprint differs across seeds (the clear/hazard
         // Bernoulli draws land differently).
         let counts = |seed| -> Vec<usize> {
-            sample_doer_corpus(seed, 128).iter().map(|s| s.objects().len()).collect()
+            sample_doer_corpus(seed, 128)
+                .iter()
+                .map(|s| s.objects().len())
+                .collect()
         };
         assert_ne!(counts(1), counts(2), "distinct seeds ⇒ distinct corpora");
     }
@@ -377,13 +398,27 @@ mod tests {
 
     #[test]
     fn mc_row_gates_on_the_right_side_of_the_interval() {
-        let ci = ConfidenceInterval { point: 0.5, lo: 0.4, hi: 0.6 };
+        let ci = ConfidenceInterval {
+            point: 0.5,
+            lo: 0.4,
+            hi: 0.6,
+        };
         assert!(McKpiRow::new("t", ci, ci, Bound::CiLowerAtLeast(0.35)).pass);
         assert!(!McKpiRow::new("t", ci, ci, Bound::CiLowerAtLeast(0.45)).pass);
         assert!(McKpiRow::new("t", ci, ci, Bound::CiUpperAtMost(0.65)).pass);
         assert!(!McKpiRow::new("t", ci, ci, Bound::CiUpperAtMost(0.55)).pass);
-        let zero = ConfidenceInterval { point: 0.0, lo: 0.0, hi: 0.02 };
-        assert!(McKpiRow::new("t", zero, zero, Bound::PointAtMost(0.0)).pass, "point 0 passes");
-        assert!(!McKpiRow::new("t", ci, ci, Bound::PointAtMost(0.0)).pass, "point 0.5 fails");
+        let zero = ConfidenceInterval {
+            point: 0.0,
+            lo: 0.0,
+            hi: 0.02,
+        };
+        assert!(
+            McKpiRow::new("t", zero, zero, Bound::PointAtMost(0.0)).pass,
+            "point 0 passes"
+        );
+        assert!(
+            !McKpiRow::new("t", ci, ci, Bound::PointAtMost(0.0)).pass,
+            "point 0.5 fails"
+        );
     }
 }

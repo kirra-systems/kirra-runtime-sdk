@@ -66,7 +66,9 @@ pub fn join_record(rec: &CaptureRecord, bag: &dyn BagReader, window_ms: u64) -> 
 mod tests {
     use super::*;
     use crate::bag::InMemoryBag;
-    use kirra_capture_schema::{CaptureOutcome, CaptureRecord, CaptureSource, TrajectoryCaptureExt};
+    use kirra_capture_schema::{
+        CaptureOutcome, CaptureRecord, CaptureSource, TrajectoryCaptureExt,
+    };
 
     fn gw(seq: u64, t_wall_ms: u64) -> CaptureRecord {
         CaptureRecord {
@@ -155,6 +157,9 @@ mod tests {
         let JoinOutcome::Joined(m) = join_record(&traj_rec(0, 1000, 42), &bag, 100) else {
             panic!("expected join");
         };
-        assert_eq!(m.bulk_ref, "right_keys", "key agreement must outrank time proximity");
+        assert_eq!(
+            m.bulk_ref, "right_keys",
+            "key agreement must outrank time proximity"
+        );
     }
 }

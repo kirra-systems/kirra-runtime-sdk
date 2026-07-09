@@ -95,7 +95,11 @@ impl<const BUCKETS: usize> WcetChannel<BUCKETS> {
     #[must_use]
     pub const fn new(bucket_width_ns: u64) -> Self {
         Self {
-            bucket_width_ns: if bucket_width_ns == 0 { 1 } else { bucket_width_ns },
+            bucket_width_ns: if bucket_width_ns == 0 {
+                1
+            } else {
+                bucket_width_ns
+            },
             buckets: [0; BUCKETS],
             overflow: 0,
             count: 0,
@@ -185,13 +189,16 @@ impl<const BUCKETS: usize> WcetChannel<BUCKETS> {
         }
         let n = self.count as u128;
         let mean = self.sum_ns / n; // integer-truncated (fine for the reported mean)
-        // Exact population variance = (n·Σx² − (Σx)²) / n². The division is
-        // deferred to the very end so it is NOT pre-truncated — the moment form
-        // (Σx²/n − (Σx/n)²) truncates BEFORE subtracting and under-estimates
-        // (e.g. samples [10,11] would read stddev 3 instead of ~0). Overflow-safe:
-        // for an extreme campaign size where n·Σx² or (Σx)² exceeds u128, fall
-        // back to the moment form (a conservative, slightly-low estimate).
-        let variance = match (self.sum_sq_ns.checked_mul(n), self.sum_ns.checked_mul(self.sum_ns)) {
+                                    // Exact population variance = (n·Σx² − (Σx)²) / n². The division is
+                                    // deferred to the very end so it is NOT pre-truncated — the moment form
+                                    // (Σx²/n − (Σx/n)²) truncates BEFORE subtracting and under-estimates
+                                    // (e.g. samples [10,11] would read stddev 3 instead of ~0). Overflow-safe:
+                                    // for an extreme campaign size where n·Σx² or (Σx)² exceeds u128, fall
+                                    // back to the moment form (a conservative, slightly-low estimate).
+        let variance = match (
+            self.sum_sq_ns.checked_mul(n),
+            self.sum_ns.checked_mul(self.sum_ns),
+        ) {
             (Some(n_sum_sq), Some(sum_squared)) => n_sum_sq.saturating_sub(sum_squared) / (n * n),
             _ => (self.sum_sq_ns / n).saturating_sub(mean * mean),
         };

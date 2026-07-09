@@ -37,7 +37,8 @@ fn gateway(seq: u64, t_wall_ms: u64, outcome: CaptureOutcome) -> CaptureRecord {
         }),
         traj: None,
         outcome,
-        deny_code: matches!(outcome, CaptureOutcome::Deny).then(|| "NAN_INF_LINEAR_VELOCITY".to_string()),
+        deny_code: matches!(outcome, CaptureOutcome::Deny)
+            .then(|| "NAN_INF_LINEAR_VELOCITY".to_string()),
         safe_value: matches!(outcome, CaptureOutcome::ClampLinear).then_some(35.0),
         mrc: false,
         posture: "NOMINAL".to_string(),
@@ -58,12 +59,21 @@ fn trajectory(seq: u64, t_wall_ms: u64, traj_id: u64, outcome: CaptureOutcome) -
             objects_ms: 500,
             point_count: 12,
             object_count: 3,
-            first_pose: Some(PoseSnapshot { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 }),
-            last_pose: Some(PoseSnapshot { x_m: 5.0, y_m: 1.0, heading_rad: 0.1 }),
+            first_pose: Some(PoseSnapshot {
+                x_m: 0.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            }),
+            last_pose: Some(PoseSnapshot {
+                x_m: 5.0,
+                y_m: 1.0,
+                heading_rad: 0.1,
+            }),
             target_speed_mps: Some(8.0),
         }),
         outcome,
-        deny_code: matches!(outcome, CaptureOutcome::Deny).then(|| "TRAJECTORY_MRC_FALLBACK".to_string()),
+        deny_code: matches!(outcome, CaptureOutcome::Deny)
+            .then(|| "TRAJECTORY_MRC_FALLBACK".to_string()),
         safe_value: None,
         mrc: matches!(outcome, CaptureOutcome::Deny),
         posture: "NOMINAL".to_string(),
@@ -83,7 +93,10 @@ fn bus_msg(t_wall_ms: u64, ver: &str, traj_id: Option<u64>, reff: &str) -> BusMe
 }
 
 fn lineage() -> Lineage {
-    Lineage { inputs: vec![], bag_backend: "test".to_string() }
+    Lineage {
+        inputs: vec![],
+        bag_backend: "test".to_string(),
+    }
 }
 
 fn unique_out(tag: &str) -> PathBuf {
@@ -97,21 +110,45 @@ fn unique_out(tag: &str) -> PathBuf {
 }
 
 fn write_jsonl(path: &Path, recs: &[CaptureRecord]) {
-    let body: String =
-        recs.iter().map(|r| serde_json::to_string(r).unwrap() + "\n").collect();
+    let body: String = recs
+        .iter()
+        .map(|r| serde_json::to_string(r).unwrap() + "\n")
+        .collect();
     std::fs::write(path, body).unwrap();
 }
 
 /// The dataset's full column set — pinning this proves NO raw frame/point/object
 /// payload column exists (only counts + endpoint poses + bulk_ref).
 const EXPECTED_COLUMNS: &[&str] = &[
-    "decision_seq", "source", "t_wall_ms", "t_mono_ns", "doer_version", "outcome", "deny_code",
-    "safe_value", "mrc", "posture", "derate_enabled", "proposed_linear_velocity_mps",
-    "proposed_current_velocity_mps", "proposed_steering_angle_deg",
-    "proposed_current_steering_angle_deg", "proposed_delta_time_s", "asset_id", "trajectory_id",
-    "objects_ms", "point_count", "object_count", "first_pose_x_m", "first_pose_y_m",
-    "first_pose_heading_rad", "last_pose_x_m", "last_pose_y_m", "last_pose_heading_rad",
-    "target_speed_mps", "bulk_ref",
+    "decision_seq",
+    "source",
+    "t_wall_ms",
+    "t_mono_ns",
+    "doer_version",
+    "outcome",
+    "deny_code",
+    "safe_value",
+    "mrc",
+    "posture",
+    "derate_enabled",
+    "proposed_linear_velocity_mps",
+    "proposed_current_velocity_mps",
+    "proposed_steering_angle_deg",
+    "proposed_current_steering_angle_deg",
+    "proposed_delta_time_s",
+    "asset_id",
+    "trajectory_id",
+    "objects_ms",
+    "point_count",
+    "object_count",
+    "first_pose_x_m",
+    "first_pose_y_m",
+    "first_pose_heading_rad",
+    "last_pose_x_m",
+    "last_pose_y_m",
+    "last_pose_heading_rad",
+    "target_speed_mps",
+    "bulk_ref",
 ];
 
 // ---- pipeline tests --------------------------------------------------------
@@ -134,7 +171,12 @@ fn happy_path_joins_both_sources_and_partitions() {
             bus_msg(2105, "model_v1", Some(43), "bag#tj1"),
         ],
     );
-    let cfg = CollectorConfig { pass_rate: 1.0, window_ms: 100, max_orphan_rate: 0.0, out_dir: out.clone() };
+    let cfg = CollectorConfig {
+        pass_rate: 1.0,
+        window_ms: 100,
+        max_orphan_rate: 0.0,
+        out_dir: out.clone(),
+    };
 
     let m = run(records, &bag, &lineage(), &cfg).expect("run should succeed");
     let recon = &m.quality;
@@ -149,17 +191,39 @@ fn happy_path_joins_both_sources_and_partitions() {
     assert_eq!(recon.orphan_rate, 0.0);
 
     // INV-3: manifest is ADDED at the dataset root; partitions unchanged.
-    assert!(out.join("manifest.json").exists(), "manifest.json at dataset root");
+    assert!(
+        out.join("manifest.json").exists(),
+        "manifest.json at dataset root"
+    );
     let gw_part = out.join("doer_version=model_v1/source=COMMAND_GATEWAY/part-000.parquet");
     let tj_part = out.join("doer_version=model_v1/source=SLOW_LOOP_TRAJECTORY/part-000.parquet");
-    assert!(gw_part.exists(), "gateway partition must exist at {gw_part:?}");
-    assert!(tj_part.exists(), "trajectory partition must exist at {tj_part:?}");
+    assert!(
+        gw_part.exists(),
+        "gateway partition must exist at {gw_part:?}"
+    );
+    assert!(
+        tj_part.exists(),
+        "trajectory partition must exist at {tj_part:?}"
+    );
 
     let (cols, rows) = read_part_columns_and_rows(&gw_part).unwrap();
     assert_eq!(rows, 2, "two gateway rows");
-    assert_eq!(cols, EXPECTED_COLUMNS, "schema must be exactly the summary columns");
-    for forbidden in ["points", "objects", "object_list", "frame", "frames", "trajectory_points"] {
-        assert!(!cols.iter().any(|c| c == forbidden), "no raw `{forbidden}` column");
+    assert_eq!(
+        cols, EXPECTED_COLUMNS,
+        "schema must be exactly the summary columns"
+    );
+    for forbidden in [
+        "points",
+        "objects",
+        "object_list",
+        "frame",
+        "frames",
+        "trajectory_points",
+    ] {
+        assert!(
+            !cols.iter().any(|c| c == forbidden),
+            "no raw `{forbidden}` column"
+        );
     }
     let (_c, tj_rows) = read_part_columns_and_rows(&tj_part).unwrap();
     assert_eq!(tj_rows, 2, "two trajectory rows");
@@ -182,7 +246,12 @@ fn stratified_sampling_keeps_interventions_drops_passes_at_zero_rate() {
             bus_msg(2105, "model_v1", Some(43), "bag#tj1"),
         ],
     );
-    let cfg = CollectorConfig { pass_rate: 0.0, window_ms: 100, max_orphan_rate: 0.0, out_dir: out.clone() };
+    let cfg = CollectorConfig {
+        pass_rate: 0.0,
+        window_ms: 100,
+        max_orphan_rate: 0.0,
+        out_dir: out.clone(),
+    };
 
     let m = run(records, &bag, &lineage(), &cfg).expect("run should succeed");
     let recon = &m.quality;
@@ -201,7 +270,12 @@ fn orphan_rate_gate_fails_loud_when_exceeded() {
     let out = unique_out("orphan");
     let records = vec![gateway(0, 1000, CaptureOutcome::ClampLinear)];
     let bag = InMemoryBag::new("synthetic", vec![bus_msg(99_000, "model_v1", None, "far")]);
-    let cfg = CollectorConfig { pass_rate: 1.0, window_ms: 100, max_orphan_rate: 0.0, out_dir: out.clone() };
+    let cfg = CollectorConfig {
+        pass_rate: 1.0,
+        window_ms: 100,
+        max_orphan_rate: 0.0,
+        out_dir: out.clone(),
+    };
 
     match run(records, &bag, &lineage(), &cfg) {
         Err(CollectorError::OrphanRateExceeded { manifest, max }) => {
@@ -225,8 +299,16 @@ fn orphan_under_ceiling_succeeds() {
         gateway(0, 1000, CaptureOutcome::ClampLinear),
         gateway(1, 5000, CaptureOutcome::Deny),
     ];
-    let bag = InMemoryBag::new("synthetic", vec![bus_msg(1005, "model_v1", None, "bag#gw0")]);
-    let cfg = CollectorConfig { pass_rate: 1.0, window_ms: 100, max_orphan_rate: 0.75, out_dir: out.clone() };
+    let bag = InMemoryBag::new(
+        "synthetic",
+        vec![bus_msg(1005, "model_v1", None, "bag#gw0")],
+    );
+    let cfg = CollectorConfig {
+        pass_rate: 1.0,
+        window_ms: 100,
+        max_orphan_rate: 0.75,
+        out_dir: out.clone(),
+    };
 
     let m = run(records, &bag, &lineage(), &cfg).expect("under ceiling → ok");
     assert_eq!(m.quality.joined, 1);
@@ -249,11 +331,19 @@ fn distinct_doer_versions_produce_distinct_partitions() {
             bus_msg(2005, "model_v2", None, "bag#b"),
         ],
     );
-    let cfg = CollectorConfig { pass_rate: 1.0, window_ms: 100, max_orphan_rate: 0.0, out_dir: out.clone() };
+    let cfg = CollectorConfig {
+        pass_rate: 1.0,
+        window_ms: 100,
+        max_orphan_rate: 0.0,
+        out_dir: out.clone(),
+    };
 
     let m = run(records, &bag, &lineage(), &cfg).expect("run ok");
     assert_eq!(m.quality.joined, 2);
-    assert_eq!(m.doer_versions, vec!["model_v1".to_string(), "model_v2".to_string()]);
+    assert_eq!(
+        m.doer_versions,
+        vec!["model_v1".to_string(), "model_v2".to_string()]
+    );
     let parts = list_parquet_parts(&out).unwrap();
     assert_eq!(parts.len(), 2, "one partition per doer_version");
     cleanup(&out);
@@ -284,11 +374,25 @@ fn read_jsonl_and_dedup_round_trips_through_the_pipeline() {
             bus_msg(2005, "model_v1", Some(42), "bag#tj0"),
         ],
     );
-    let lin = Lineage { inputs, bag_backend: "bag-json".to_string() };
-    let cfg = CollectorConfig { pass_rate: 1.0, window_ms: 100, max_orphan_rate: 0.0, out_dir: out.clone() };
+    let lin = Lineage {
+        inputs,
+        bag_backend: "bag-json".to_string(),
+    };
+    let cfg = CollectorConfig {
+        pass_rate: 1.0,
+        window_ms: 100,
+        max_orphan_rate: 0.0,
+        out_dir: out.clone(),
+    };
     let m = run(records, &bag, &lin, &cfg).expect("run ok");
-    assert_eq!(m.quality.duplicates_dropped, 1, "the duplicate (source, decision_seq) is dropped");
-    assert_eq!(m.quality.records_in, 2, "two distinct records survive dedup");
+    assert_eq!(
+        m.quality.duplicates_dropped, 1,
+        "the duplicate (source, decision_seq) is dropped"
+    );
+    assert_eq!(
+        m.quality.records_in, 2,
+        "two distinct records survive dedup"
+    );
     assert_eq!(m.quality.joined, 2);
     cleanup(&out);
     cleanup(&dir);
@@ -305,16 +409,33 @@ fn dataset_id_is_reproducible_and_input_sensitive() {
     let dir = unique_out("detin");
     std::fs::create_dir_all(&dir).unwrap();
     let cap = dir.join("cap.jsonl");
-    write_jsonl(&cap, &[gateway(0, 1000, CaptureOutcome::ClampLinear), trajectory(0, 2000, 42, CaptureOutcome::Deny)]);
+    write_jsonl(
+        &cap,
+        &[
+            gateway(0, 1000, CaptureOutcome::ClampLinear),
+            trajectory(0, 2000, 42, CaptureOutcome::Deny),
+        ],
+    );
     let bag = InMemoryBag::new(
         "synthetic",
-        vec![bus_msg(1005, "model_v1", None, "a"), bus_msg(2005, "model_v1", Some(42), "b")],
+        vec![
+            bus_msg(1005, "model_v1", None, "a"),
+            bus_msg(2005, "model_v1", Some(42), "b"),
+        ],
     );
 
     let run_id = |cap_path: &Path, pass_rate: f64| -> String {
         let (records, inputs) = read_jsonl_with_digests(&[cap_path.to_path_buf()]).unwrap();
-        let lin = Lineage { inputs, bag_backend: "bag-json".to_string() };
-        let cfg = CollectorConfig { pass_rate, window_ms: 100, max_orphan_rate: 1.0, out_dir: unique_out("idrun") };
+        let lin = Lineage {
+            inputs,
+            bag_backend: "bag-json".to_string(),
+        };
+        let cfg = CollectorConfig {
+            pass_rate,
+            window_ms: 100,
+            max_orphan_rate: 1.0,
+            out_dir: unique_out("idrun"),
+        };
         let m = run(records, &bag, &lin, &cfg).expect("run ok");
         cleanup(&cfg.out_dir);
         m.dataset_id
@@ -322,16 +443,28 @@ fn dataset_id_is_reproducible_and_input_sensitive() {
 
     let id1 = run_id(&cap, 1.0);
     let id2 = run_id(&cap, 1.0);
-    assert_eq!(id1, id2, "same inputs + params + build → identical dataset_id");
+    assert_eq!(
+        id1, id2,
+        "same inputs + params + build → identical dataset_id"
+    );
 
     let id_rate = run_id(&cap, 0.5);
     assert_ne!(id1, id_rate, "different pass_rate → different dataset_id");
 
     // Perturb one input record (different decision_seq → different bytes + content).
     let cap2 = dir.join("cap2.jsonl");
-    write_jsonl(&cap2, &[gateway(0, 1000, CaptureOutcome::ClampLinear), trajectory(9, 2000, 42, CaptureOutcome::Deny)]);
+    write_jsonl(
+        &cap2,
+        &[
+            gateway(0, 1000, CaptureOutcome::ClampLinear),
+            trajectory(9, 2000, 42, CaptureOutcome::Deny),
+        ],
+    );
     let id_perturbed = run_id(&cap2, 1.0);
-    assert_ne!(id1, id_perturbed, "a perturbed input record → different dataset_id");
+    assert_ne!(
+        id1, id_perturbed,
+        "a perturbed input record → different dataset_id"
+    );
 
     cleanup(&dir);
 }
@@ -352,9 +485,17 @@ fn manifest_records_lineage_quality_and_partitions() {
         ],
     );
     let (records, inputs) = read_jsonl_with_digests(std::slice::from_ref(&cap)).unwrap();
-    let lin = Lineage { inputs, bag_backend: "bag-json".to_string() };
+    let lin = Lineage {
+        inputs,
+        bag_backend: "bag-json".to_string(),
+    };
     let out = unique_out("manout");
-    let cfg = CollectorConfig { pass_rate: 1.0, window_ms: 100, max_orphan_rate: 1.0, out_dir: out.clone() };
+    let cfg = CollectorConfig {
+        pass_rate: 1.0,
+        window_ms: 100,
+        max_orphan_rate: 1.0,
+        out_dir: out.clone(),
+    };
     let bag = InMemoryBag::new(
         "synthetic.json",
         vec![
@@ -381,7 +522,10 @@ fn manifest_records_lineage_quality_and_partitions() {
     // Partitions (gateway + trajectory, single doer_version) with row counts.
     assert_eq!(m.partitions.len(), 2);
     assert_eq!(m.partitions.iter().map(|p| p.row_count).sum::<usize>(), 3);
-    assert!(m.partitions.iter().all(|p| p.relative_path.ends_with("part-000.parquet")));
+    assert!(m
+        .partitions
+        .iter()
+        .all(|p| p.relative_path.ends_with("part-000.parquet")));
 
     // Provenance present.
     assert!(!m.collector.version.is_empty());

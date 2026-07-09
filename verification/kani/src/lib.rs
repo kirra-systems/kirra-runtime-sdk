@@ -48,6 +48,7 @@ pub mod lease;
 /// proofs live here instead of inline).
 #[path = "../../../crates/kirra-core/src/kinematics_contract.rs"]
 #[allow(clippy::doc_overindented_list_items)] // pre-existing in the frozen file
+#[rustfmt::skip] // blob-pinned (`ed00f4da…`) — a reformat here breaks the pin
 pub mod kinematics_contract;
 
 /// The parko RSS primitives — `parko-core`'s file (its own workspace).
@@ -59,6 +60,6 @@ pub mod rss;
 // (compiled under `cargo test`, so the properties are exercised locally too).
 // ---------------------------------------------------------------------------
 
-mod proofs_lease;
 mod proofs_kinematics;
+mod proofs_lease;
 mod proofs_rss;

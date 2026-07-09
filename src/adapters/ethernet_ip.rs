@@ -1,7 +1,7 @@
 // src/adapters/ethernet_ip.rs
 
-use serde::{Deserialize, Serialize};
 use crate::gateway::policy::OperationalCommand;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EtherNetIpMessage {
@@ -30,12 +30,16 @@ pub struct EtherNetIpAdapter;
 impl EtherNetIpAdapter {
     pub fn evaluate(msg: &EtherNetIpMessage) -> EtherNetIpEvaluation {
         let (command, service_name, is_write) = match msg.service_code {
-            0x0E => (OperationalCommand::ReadTelemetry, "Get_Attribute_Single", false),
-            0x10 => (OperationalCommand::WriteState,    "Set_Attribute_Single", true),
-            0x4B => (OperationalCommand::SystemMutation, "Execute_Service",     true),
-            0x4C => (OperationalCommand::ReadTelemetry, "Read_Tag",             false),
-            0x4D => (OperationalCommand::WriteState,    "Write_Tag",            true),
-            _    => (OperationalCommand::Unknown,       "Unknown_Service",      false),
+            0x0E => (
+                OperationalCommand::ReadTelemetry,
+                "Get_Attribute_Single",
+                false,
+            ),
+            0x10 => (OperationalCommand::WriteState, "Set_Attribute_Single", true),
+            0x4B => (OperationalCommand::SystemMutation, "Execute_Service", true),
+            0x4C => (OperationalCommand::ReadTelemetry, "Read_Tag", false),
+            0x4D => (OperationalCommand::WriteState, "Write_Tag", true),
+            _ => (OperationalCommand::Unknown, "Unknown_Service", false),
         };
 
         // Safety-relevant CIP classes: Safety Supervisor, Safety Validator,
@@ -221,7 +225,13 @@ mod cip_bounds_tests {
     use super::*;
 
     /// A CIP write to (class, instance, attr) carrying `value` as the attribute data.
-    fn cip_write(service: u8, class: u16, instance: u16, attr: u16, value: &[u8]) -> EtherNetIpMessage {
+    fn cip_write(
+        service: u8,
+        class: u16,
+        instance: u16,
+        attr: u16,
+        value: &[u8],
+    ) -> EtherNetIpMessage {
         EtherNetIpMessage {
             command_code: 0x0065,
             session_handle: 1,
@@ -376,7 +386,10 @@ mod tests {
     fn test_safety_relevant_classes_flagged() {
         for class in [0x29u16, 0x2A, 0x3B, 0x3C] {
             let e = EtherNetIpAdapter::evaluate(&msg(0x0E, class));
-            assert!(e.safety_relevant, "class 0x{class:02X} must be safety_relevant");
+            assert!(
+                e.safety_relevant,
+                "class 0x{class:02X} must be safety_relevant"
+            );
         }
     }
 

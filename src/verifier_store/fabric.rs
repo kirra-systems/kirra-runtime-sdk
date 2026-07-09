@@ -106,28 +106,30 @@ impl VerifierStore {
         };
         let sequence: u64 = (prev_seq + 1) as u64;
 
-        let record_hash =
-            compute_causal_record_hash(&crate::audit_chain::CausalRecordHashInput {
-                previous_hash: &previous_hash,
-                entry_id,
-                asset_id,
-                event_type,
-                payload,
-                caused_by,
-                affects_assets,
-                timestamp_ms,
-                fabric_generation,
-                sequence,
-            });
+        let record_hash = compute_causal_record_hash(&crate::audit_chain::CausalRecordHashInput {
+            previous_hash: &previous_hash,
+            entry_id,
+            asset_id,
+            event_type,
+            payload,
+            caused_by,
+            affects_assets,
+            timestamp_ms,
+            fabric_generation,
+            sequence,
+        });
 
         let signature_b64: Option<String> = signing_key.map(|k| {
             let payload_str = canonical_causal_signing_payload(
-                &previous_hash, &record_hash, event_type, timestamp_ms, sequence,
+                &previous_hash,
+                &record_hash,
+                event_type,
+                timestamp_ms,
+                sequence,
             );
             b64e.encode(k.sign(payload_str.as_bytes()).to_bytes())
         });
-        let key_id: Option<String> =
-            signing_key.map(|k| verifying_key_id(&k.verifying_key()));
+        let key_id: Option<String> = signing_key.map(|k| verifying_key_id(&k.verifying_key()));
 
         let caused_by_json = serde_json::to_string(caused_by).unwrap_or_else(|_| "[]".to_string());
         let affects_json =
@@ -439,9 +441,7 @@ impl VerifierStore {
                 },
             );
             match head {
-                Err(rusqlite::Error::QueryReturnedNoRows) => {
-                    (false, "HEAD_ABSENT".to_string())
-                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => (false, "HEAD_ABSENT".to_string()),
                 Err(e) => return Err(e),
                 Ok((h_seq, h_hash, h_sig, h_key_id)) => {
                     if Some(h_seq) != last_sequence || h_hash != latest_hash {

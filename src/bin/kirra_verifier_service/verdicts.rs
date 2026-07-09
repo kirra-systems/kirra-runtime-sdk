@@ -161,8 +161,7 @@ mod verdict_handler_tests {
         let cached = kirra_verifier::posture_cache::CachedFleetPosture::new(
             kirra_verifier::verifier::FleetPosture::Nominal,
         );
-        let posture_cache: SharedPostureCache =
-            Arc::new(std::sync::RwLock::new(Some(cached)));
+        let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(cached)));
         Arc::new(ServiceState {
             app,
             posture_cache,
@@ -222,7 +221,10 @@ mod verdict_handler_tests {
         assert_eq!(deny_body["code"], "INVALID_TIME_DELTA");
         let explanation = deny_body["explanation"].as_str().expect("explanation");
         assert!(explanation.contains("zero or negative"), "{explanation}");
-        let verdict_id = deny_body["verdict_id"].as_str().expect("verdict id").to_string();
+        let verdict_id = deny_body["verdict_id"]
+            .as_str()
+            .expect("verdict id")
+            .to_string();
         assert!(kirra_verifier::verdicts::is_valid_verdict_id(&verdict_id));
 
         // The audit write is fire-and-forget on the deny path (fallback direct
@@ -251,8 +253,13 @@ mod verdict_handler_tests {
             use sha2::Digest;
             hex::encode(sha2::Sha256::digest(event_json.as_bytes()))
         };
-        assert_eq!(v["inputs_digest_sha256"].as_str(), Some(recomputed.as_str()));
-        assert!(v["audit"]["record_hash_hex"].as_str().is_some_and(|h| h.len() == 64));
+        assert_eq!(
+            v["inputs_digest_sha256"].as_str(),
+            Some(recomputed.as_str())
+        );
+        assert!(v["audit"]["record_hash_hex"]
+            .as_str()
+            .is_some_and(|h| h.len() == 64));
     }
 
     #[tokio::test]

@@ -54,7 +54,11 @@ fn any_bounded_contract() -> VehicleKinematicsContract {
         length_m: 4.6,
         overhang_front_m: 0.9,
         overhang_rear_m: 0.9,
-        odd_speed_cap_mps: if has_cap { Some(f64::from(cap_raw) * 0.1) } else { None },
+        odd_speed_cap_mps: if has_cap {
+            Some(f64::from(cap_raw) * 0.1)
+        } else {
+            None
+        },
     }
 }
 
@@ -135,7 +139,10 @@ mod proofs {
 
         let max = contract.effective_max_speed_mps();
         if let Some(cap) = contract.odd_speed_cap_mps {
-            assert!(max <= contract.max_speed_mps && max <= cap, "ceiling = the tighter bound");
+            assert!(
+                max <= contract.max_speed_mps && max <= cap,
+                "ceiling = the tighter bound"
+            );
         }
         kani::assume(cmd.linear_velocity_mps.abs() > max);
 
@@ -182,12 +189,8 @@ mod proofs {
         // Moving (not the (c) hold case), same direction (not the (c′) reversal
         // case), and a meaningful magnitude increase (the (b) region).
         kani::assume(cmd.current_velocity_mps.abs() > STOP_EPSILON_MPS);
-        kani::assume(
-            cmd.linear_velocity_mps.signum() == cmd.current_velocity_mps.signum(),
-        );
-        kani::assume(
-            cmd.linear_velocity_mps.abs() > cmd.current_velocity_mps.abs() + 1e-9,
-        );
+        kani::assume(cmd.linear_velocity_mps.signum() == cmd.current_velocity_mps.signum());
+        kani::assume(cmd.linear_velocity_mps.abs() > cmd.current_velocity_mps.abs() + 1e-9);
 
         assert_eq!(
             enforce_degraded_decel_to_stop(&cmd, &contract),

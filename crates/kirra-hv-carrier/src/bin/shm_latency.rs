@@ -90,7 +90,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          governor mapping = PROT_READ (R-HV-1). Compare against the latency_bench\n\
          iceoryx2 / socket rows (same payload + percentile method)."
     );
-    println!("\n{:<28} {:>9} {:>9} {:>9} {:>9}", "path", "p50_ns", "p99_ns", "p999_ns", "max_ns");
+    println!(
+        "\n{:<28} {:>9} {:>9} {:>9} {:>9}",
+        "path", "p50_ns", "p99_ns", "p999_ns", "max_ns"
+    );
     println!("{}", "-".repeat(70));
 
     // (1) read_coherent_snapshot alone — the seqlock read the governor pays.

@@ -31,7 +31,9 @@ use kirra_core::posture_tracker::PostureTracker;
 // The lean trajectory/perception data types live in `kirra-core` (de-monolith
 // Stage 6a); re-exported here so every existing `crate::state::*` /
 // `kirra_ros2_adapter::state::*` path keeps the SAME type.
-pub use kirra_core::trajectory::{PerceivedObject, PerceivedPedestrian, Pose, TrajectoryPoint, TrajectoryVerdict};
+pub use kirra_core::trajectory::{
+    PerceivedObject, PerceivedPedestrian, Pose, TrajectoryPoint, TrajectoryVerdict,
+};
 
 // R1: the trajectory CHECKER contract types `AcceptedTrajectory` / `EgoOdom` (+
 // `DEFAULT_MAX_AGE_MS`) were relocated to the lean `kirra-trajectory` crate so the
@@ -125,11 +127,11 @@ pub struct AdaptorState {
     /// against `SUBSCRIPTION_STALENESS_TIMEOUT_MS` and MRCs if exceeded.
     pub last_trajectory_ms: Arc<AtomicU64>,
     /// Wall-clock-ms when the LAST PredictedObjects message arrived.
-    pub last_objects_ms:    Arc<AtomicU64>,
+    pub last_objects_ms: Arc<AtomicU64>,
     /// Wall-clock-ms when the LAST *redundant* (channel-B) PredictedObjects message arrived
     /// (0 = none yet). The slow loop checks it against the staleness timeout: a configured
     /// redundant channel that goes silent is a redundancy loss → fail closed.
-    pub last_objects_b_ms:  Arc<AtomicU64>,
+    pub last_objects_b_ms: Arc<AtomicU64>,
     /// Monotonic stamp of the last pedestrian-channel write (0 = never seen).
     pub last_pedestrians_ms: Arc<AtomicU64>,
     /// Wall-clock-ms when the LAST per-object yaw-rate estimate arrived (0 = none yet). A STALE
@@ -137,7 +139,7 @@ pub struct AdaptorState {
     /// turn-in after the object straightened) — an enhancement dropped, NOT a fault.
     pub last_object_yaw_ms: Arc<AtomicU64>,
     /// Wall-clock-ms when the LAST nav_msgs::Odometry message arrived.
-    pub last_odom_ms:       Arc<AtomicU64>,
+    pub last_odom_ms: Arc<AtomicU64>,
 
     /// Fail-closed fleet-posture state machine, consumed by
     /// `validate_trajectory_slow` to select the effective kinematics
@@ -202,13 +204,12 @@ impl AdaptorState {
             config: Arc::new(config),
             latest_odom: Arc::new(RwLock::new(None)),
             last_trajectory_ms: Arc::new(AtomicU64::new(0)),
-            last_objects_ms:    Arc::new(AtomicU64::new(0)),
-            last_objects_b_ms:  Arc::new(AtomicU64::new(0)),
+            last_objects_ms: Arc::new(AtomicU64::new(0)),
+            last_objects_b_ms: Arc::new(AtomicU64::new(0)),
             last_pedestrians_ms: Arc::new(AtomicU64::new(0)),
             last_object_yaw_ms: Arc::new(AtomicU64::new(0)),
-            last_odom_ms:       Arc::new(AtomicU64::new(0)),
-            posture_tracker:    Arc::new(RwLock::new(
-                PostureTracker::nominal_default_no_source())),
+            last_odom_ms: Arc::new(AtomicU64::new(0)),
+            posture_tracker: Arc::new(RwLock::new(PostureTracker::nominal_default_no_source())),
             latest_frame_integrity: Arc::new(RwLock::new(None)),
             last_frame_integrity_ms: Arc::new(AtomicU64::new(0)),
         })
@@ -228,13 +229,12 @@ impl AdaptorState {
             config: Arc::new(config),
             latest_odom: Arc::new(RwLock::new(None)),
             last_trajectory_ms: Arc::new(AtomicU64::new(0)),
-            last_objects_ms:    Arc::new(AtomicU64::new(0)),
-            last_objects_b_ms:  Arc::new(AtomicU64::new(0)),
+            last_objects_ms: Arc::new(AtomicU64::new(0)),
+            last_objects_b_ms: Arc::new(AtomicU64::new(0)),
             last_pedestrians_ms: Arc::new(AtomicU64::new(0)),
             last_object_yaw_ms: Arc::new(AtomicU64::new(0)),
-            last_odom_ms:       Arc::new(AtomicU64::new(0)),
-            posture_tracker:    Arc::new(RwLock::new(
-                PostureTracker::nominal_default_no_source())),
+            last_odom_ms: Arc::new(AtomicU64::new(0)),
+            posture_tracker: Arc::new(RwLock::new(PostureTracker::nominal_default_no_source())),
             latest_frame_integrity: Arc::new(RwLock::new(None)),
             last_frame_integrity_ms: Arc::new(AtomicU64::new(0)),
         })
@@ -257,13 +257,12 @@ impl AdaptorState {
             config: Arc::new(config),
             latest_odom: Arc::new(RwLock::new(None)),
             last_trajectory_ms: Arc::new(AtomicU64::new(0)),
-            last_objects_ms:    Arc::new(AtomicU64::new(0)),
-            last_objects_b_ms:  Arc::new(AtomicU64::new(0)),
+            last_objects_ms: Arc::new(AtomicU64::new(0)),
+            last_objects_b_ms: Arc::new(AtomicU64::new(0)),
             last_pedestrians_ms: Arc::new(AtomicU64::new(0)),
             last_object_yaw_ms: Arc::new(AtomicU64::new(0)),
-            last_odom_ms:       Arc::new(AtomicU64::new(0)),
-            posture_tracker:    Arc::new(RwLock::new(
-                PostureTracker::with_source())),
+            last_odom_ms: Arc::new(AtomicU64::new(0)),
+            posture_tracker: Arc::new(RwLock::new(PostureTracker::with_source())),
             latest_frame_integrity: Arc::new(RwLock::new(None)),
             last_frame_integrity_ms: Arc::new(AtomicU64::new(0)),
         })
@@ -309,9 +308,7 @@ impl AdaptorState {
         if let Ok(mut guard) = self.latest_odom.write() {
             *guard = Some(odom);
         } else {
-            tracing::error!(
-                "latest_odom RwLock POISONED — ego-odometry snapshot dropped"
-            );
+            tracing::error!("latest_odom RwLock POISONED — ego-odometry snapshot dropped");
         }
     }
 
@@ -331,9 +328,12 @@ impl AdaptorState {
         if let Ok(mut guard) = self.latest_frame_integrity.write() {
             *guard = Some(report);
             // Never store 0 once a source has reported (0 means "never reported" → AoU seam).
-            self.last_frame_integrity_ms.store(now_ms.max(1), Ordering::Relaxed);
+            self.last_frame_integrity_ms
+                .store(now_ms.max(1), Ordering::Relaxed);
         } else {
-            tracing::error!("latest_frame_integrity RwLock POISONED — frame-integrity report dropped");
+            tracing::error!(
+                "latest_frame_integrity RwLock POISONED — frame-integrity report dropped"
+            );
         }
     }
 
@@ -375,7 +375,9 @@ impl AdaptorState {
         let d = self.last_odom_ms.load(Ordering::Relaxed);
         // For each subscription: if it has never been touched (== 0),
         // treat as stale immediately. Otherwise compare the lag.
-        t == 0 || o == 0 || d == 0
+        t == 0
+            || o == 0
+            || d == 0
             || now_ms.saturating_sub(t) > timeout_ms
             || now_ms.saturating_sub(o) > timeout_ms
             || now_ms.saturating_sub(d) > timeout_ms
@@ -403,9 +405,7 @@ impl AdaptorState {
         if let Ok(mut guard) = self.objects_cache.write() {
             *guard = objects;
         } else {
-            tracing::error!(
-                "objects_cache RwLock POISONED — perception snapshot dropped"
-            );
+            tracing::error!("objects_cache RwLock POISONED — perception snapshot dropped");
         }
     }
 
@@ -444,7 +444,9 @@ impl AdaptorState {
         if let Ok(mut guard) = self.objects_cache_b.write() {
             *guard = objects;
         } else {
-            tracing::error!("objects_cache_b RwLock POISONED — redundant perception snapshot dropped");
+            tracing::error!(
+                "objects_cache_b RwLock POISONED — redundant perception snapshot dropped"
+            );
         }
     }
 
@@ -629,7 +631,10 @@ mod tests {
         let st = AdaptorState::new();
         st.update_pedestrians(Vec::new(), 1_000);
         let snap = st.snapshot_pedestrians(1_100, 500).expect("fresh channel");
-        assert!(snap.is_empty(), "a fresh empty write is 'no pedestrians in view'");
+        assert!(
+            snap.is_empty(),
+            "a fresh empty write is 'no pedestrians in view'"
+        );
     }
 
     /// Enabled-but-NEVER-SEEN fails closed — an enabled VRU gate with no
@@ -645,8 +650,14 @@ mod tests {
     fn pedestrian_channel_stale_fails_closed() {
         let st = AdaptorState::new();
         st.update_pedestrians(Vec::new(), 1_000);
-        assert!(st.snapshot_pedestrians(1_501, 500).is_none(), "1 ms past the budget");
-        assert!(st.snapshot_pedestrians(1_500, 500).is_some(), "at the budget is fresh");
+        assert!(
+            st.snapshot_pedestrians(1_501, 500).is_none(),
+            "1 ms past the budget"
+        );
+        assert!(
+            st.snapshot_pedestrians(1_500, 500).is_some(),
+            "at the budget is fresh"
+        );
     }
 
     use super::*;
@@ -669,12 +680,19 @@ mod tests {
         // a huge "age since wall epoch". This is the property staleness relies on.
         let stamp = monotonic_now_ms();
         let age = monotonic_now_ms().saturating_sub(stamp);
-        assert!(age < 60_000, "an immediate re-check must not look stale (age={age}ms)");
+        assert!(
+            age < 60_000,
+            "an immediate re-check must not look stale (age={age}ms)"
+        );
     }
 
     fn pt(x: f64, y: f64, v: f64, t: f64) -> TrajectoryPoint {
         TrajectoryPoint {
-            pose: Pose { x_m: x, y_m: y, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: x,
+                y_m: y,
+                heading_rad: 0.0,
+            },
             velocity_mps: v,
             time_from_start_s: t,
         }
@@ -691,7 +709,10 @@ mod tests {
 
         let objs = vec![PerceivedObject {
             id: 5,
-            pos: crate::corridor::Point { x_m: 12.0, y_m: -1.0 },
+            pos: crate::corridor::Point {
+                x_m: 12.0,
+                y_m: -1.0,
+            },
             velocity_mps: 3.0,
             heading_rad: 0.0,
             vel: crate::corridor::Point { x_m: 3.0, y_m: 0.0 },
@@ -700,7 +721,11 @@ mod tests {
         let got = state.snapshot_objects_secondary();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, 5);
-        assert_eq!(state.last_objects_b_ms.load(Ordering::Relaxed), 7_000, "B arrival stamped");
+        assert_eq!(
+            state.last_objects_b_ms.load(Ordering::Relaxed),
+            7_000,
+            "B arrival stamped"
+        );
         // The primary channel is untouched by a secondary write.
         assert!(
             state.snapshot_objects().expect("readable").is_empty(),
@@ -727,7 +752,10 @@ mod tests {
         // Poison the primary objects RwLock: panic while holding the write guard.
         let poison = Arc::clone(&state);
         let _ = std::thread::spawn(move || {
-            let _guard = poison.objects_cache.write().expect("acquire write before poison");
+            let _guard = poison
+                .objects_cache
+                .write()
+                .expect("acquire write before poison");
             panic!("intentional poison for M7 fail-closed test");
         })
         .join();
@@ -749,7 +777,11 @@ mod tests {
         state.update_object_yaw_rates(vec![(5, 0.3), (9, -0.4)], 8_000);
         let got = state.snapshot_object_yaw_rates();
         assert_eq!(got, vec![(5, 0.3), (9, -0.4)]);
-        assert_eq!(state.last_object_yaw_ms.load(Ordering::Relaxed), 8_000, "yaw arrival stamped");
+        assert_eq!(
+            state.last_object_yaw_ms.load(Ordering::Relaxed),
+            8_000,
+            "yaw arrival stamped"
+        );
     }
 
     /// Phase-1 GAP: a fresh adapter has no trajectory for any asset and
@@ -759,8 +791,11 @@ mod tests {
         let state = AdaptorState::new();
         assert!(state.is_empty());
         let verdict = state.current_verdict("av_01", 1_000);
-        assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-            "absent asset must collapse to MRCFallback (Pending → fail-closed)");
+        assert_eq!(
+            verdict,
+            TrajectoryVerdict::MRCFallback,
+            "absent asset must collapse to MRCFallback (Pending → fail-closed)"
+        );
         assert!(state.snapshot("av_01").is_none());
     }
 
@@ -770,7 +805,10 @@ mod tests {
     fn test_accept_installs_trajectory() {
         let state = AdaptorState::new();
         let traj = AcceptedTrajectory::new_accepted(
-            "av_01", 42, vec![pt(0.0, 0.0, 5.0, 0.0), pt(0.5, 0.0, 5.0, 0.1)], 1_000,
+            "av_01",
+            42,
+            vec![pt(0.0, 0.0, 5.0, 0.0), pt(0.5, 0.0, 5.0, 0.1)],
+            1_000,
         );
         let prev = state.install(traj);
         assert!(prev.is_none(), "first install returns None");
@@ -780,8 +818,11 @@ mod tests {
         assert_eq!(snap.trajectory_id, 42);
         assert_eq!(snap.points.len(), 2);
         assert_eq!(snap.verdict, TrajectoryVerdict::Accept);
-        assert_eq!(state.current_verdict("av_01", 1_050), TrajectoryVerdict::Accept,
-            "fresh install must read back as Accept within max_age_ms");
+        assert_eq!(
+            state.current_verdict("av_01", 1_050),
+            TrajectoryVerdict::Accept,
+            "fresh install must read back as Accept within max_age_ms"
+        );
     }
 
     /// Crosses the staleness boundary: `max_age_ms = 100` and `now -
@@ -790,18 +831,23 @@ mod tests {
     #[test]
     fn test_stale_trajectory_fails_closed() {
         let state = AdaptorState::new();
-        let mut traj = AcceptedTrajectory::new_accepted(
-            "av_01", 1, vec![pt(0.0, 0.0, 1.0, 0.0)], 1_000,
-        );
+        let mut traj =
+            AcceptedTrajectory::new_accepted("av_01", 1, vec![pt(0.0, 0.0, 1.0, 0.0)], 1_000);
         traj.max_age_ms = 100;
         state.install(traj);
 
         // At t = 1_050 still fresh (50 ms < 100 ms).
-        assert_eq!(state.current_verdict("av_01", 1_050), TrajectoryVerdict::Accept);
+        assert_eq!(
+            state.current_verdict("av_01", 1_050),
+            TrajectoryVerdict::Accept
+        );
 
         // At t = 1_200 the age is 200 ms ≥ 100 ms cap → MRC.
-        assert_eq!(state.current_verdict("av_01", 1_200), TrajectoryVerdict::MRCFallback,
-            "after max_age_ms elapses the slot must fail closed");
+        assert_eq!(
+            state.current_verdict("av_01", 1_200),
+            TrajectoryVerdict::MRCFallback,
+            "after max_age_ms elapses the slot must fail closed"
+        );
     }
 
     /// WS-6 detector-latency-spike drill (the two-loop isolation guarantee). A
@@ -916,8 +962,11 @@ mod tests {
         let state = AdaptorState::new();
         // No install for "ghost_av".
         let verdict = state.current_verdict("ghost_av", 99_999);
-        assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-            "CONTRACT: absent asset must produce MRCFallback, not Accept or Pending");
+        assert_eq!(
+            verdict,
+            TrajectoryVerdict::MRCFallback,
+            "CONTRACT: absent asset must produce MRCFallback, not Accept or Pending"
+        );
     }
 
     /// State-machine direction is one-way: Pending → Accept is allowed by
@@ -928,20 +977,27 @@ mod tests {
     #[test]
     fn test_pending_promotion() {
         let state = AdaptorState::new();
-        let traj = AcceptedTrajectory::new_accepted(
-            "av_01", 1, vec![pt(0.0, 0.0, 1.0, 0.0)], 1_000,
-        );
+        let traj =
+            AcceptedTrajectory::new_accepted("av_01", 1, vec![pt(0.0, 0.0, 1.0, 0.0)], 1_000);
         state.install(traj);
-        assert_eq!(state.current_verdict("av_01", 1_050), TrajectoryVerdict::Accept);
+        assert_eq!(
+            state.current_verdict("av_01", 1_050),
+            TrajectoryVerdict::Accept
+        );
 
         // Slow loop accepts a fresh candidate; install replaces the old.
-        let traj2 = AcceptedTrajectory::new_accepted(
-            "av_01", 2, vec![pt(0.5, 0.0, 1.5, 0.0)], 1_100,
-        );
+        let traj2 =
+            AcceptedTrajectory::new_accepted("av_01", 2, vec![pt(0.5, 0.0, 1.5, 0.0)], 1_100);
         let prev = state.install(traj2);
-        assert_eq!(prev.expect("prev").trajectory_id, 1,
-            "install returns the displaced trajectory");
-        assert_eq!(state.current_verdict("av_01", 1_150), TrajectoryVerdict::Accept);
+        assert_eq!(
+            prev.expect("prev").trajectory_id,
+            1,
+            "install returns the displaced trajectory"
+        );
+        assert_eq!(
+            state.current_verdict("av_01", 1_150),
+            TrajectoryVerdict::Accept
+        );
         assert_eq!(state.snapshot("av_01").unwrap().trajectory_id, 2);
 
         // There is no API to demote Accept → Pending; `TrajectoryVerdict::Pending`
@@ -958,14 +1014,16 @@ mod tests {
     /// skew). saturating_sub does the right thing.
     #[test]
     fn test_fail_closed_handles_clock_skew_safely() {
-        let mut traj = AcceptedTrajectory::new_accepted(
-            "av_01", 1, vec![pt(0.0, 0.0, 1.0, 0.0)], 1_000_000,
-        );
+        let mut traj =
+            AcceptedTrajectory::new_accepted("av_01", 1, vec![pt(0.0, 0.0, 1.0, 0.0)], 1_000_000);
         traj.max_age_ms = 200;
         // now is BEFORE promoted_at_ms — clock skew or restart.
         let verdict = traj.fail_closed(500_000);
-        assert_eq!(verdict, TrajectoryVerdict::Accept,
-            "clock skew must not falsely trigger staleness (saturating_sub → 0)");
+        assert_eq!(
+            verdict,
+            TrajectoryVerdict::Accept,
+            "clock skew must not falsely trigger staleness (saturating_sub → 0)"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1044,16 +1102,32 @@ mod tests {
         let state = AdaptorState::new();
         // Good, fresh report (ε ≤ 0.10 m) → Trusted (primary 0.40 m containment margin).
         state.update_frame_integrity(reported(0.05, 0), 1000);
-        assert_eq!(state.snapshot_frame_trust(1000), FrameTrust::Trusted, "good ε → Trusted");
+        assert_eq!(
+            state.snapshot_frame_trust(1000),
+            FrameTrust::Trusted,
+            "good ε → Trusted"
+        );
         // Borderline (0.10 < ε ≤ 0.30) → Degraded (fallback 0.75 m margin).
         state.update_frame_integrity(reported(0.20, 0), 2000);
-        assert_eq!(state.snapshot_frame_trust(2000), FrameTrust::Degraded, "borderline ε → Degraded");
+        assert_eq!(
+            state.snapshot_frame_trust(2000),
+            FrameTrust::Degraded,
+            "borderline ε → Degraded"
+        );
         // ε beyond the fallback bound → Untrusted (containment refuses).
         state.update_frame_integrity(reported(0.50, 0), 3000);
-        assert_eq!(state.snapshot_frame_trust(3000), FrameTrust::Untrusted, "ε > fallback → Untrusted");
+        assert_eq!(
+            state.snapshot_frame_trust(3000),
+            FrameTrust::Untrusted,
+            "ε > fallback → Untrusted"
+        );
         // Non-finite ε → Untrusted (an unverifiable pose is no pose).
         state.update_frame_integrity(reported(f64::NAN, 0), 4000);
-        assert_eq!(state.snapshot_frame_trust(4000), FrameTrust::Untrusted, "non-finite ε → Untrusted");
+        assert_eq!(
+            state.snapshot_frame_trust(4000),
+            FrameTrust::Untrusted,
+            "non-finite ε → Untrusted"
+        );
     }
 
     #[test]
@@ -1062,7 +1136,15 @@ mod tests {
         // Untrusted, not frozen at the last-good value — an absent signal is not "the pose is fine".
         let state = AdaptorState::new();
         state.update_frame_integrity(reported(0.05, 0), 1000);
-        assert_eq!(state.snapshot_frame_trust(1400), FrameTrust::Trusted, "still fresh at +400 ms");
-        assert_eq!(state.snapshot_frame_trust(1600), FrameTrust::Untrusted, "silent past 500 ms → fail closed");
+        assert_eq!(
+            state.snapshot_frame_trust(1400),
+            FrameTrust::Trusted,
+            "still fresh at +400 ms"
+        );
+        assert_eq!(
+            state.snapshot_frame_trust(1600),
+            FrameTrust::Untrusted,
+            "silent past 500 ms → fail closed"
+        );
     }
 }

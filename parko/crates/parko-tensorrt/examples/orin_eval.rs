@@ -63,14 +63,20 @@ fn skip_or_refuse(reason: &str) -> ! {
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn main() {
     // --- Inputs: artifacts dir (root-workspace export) + measurement knobs. ---
     let artifacts = std::env::var("KIRRA_DOER_ARTIFACTS").unwrap_or_else(|_| {
         // Default: the checked-in artifacts, resolved from this crate's location.
-        format!("{}/../../../artifacts/doer-eval", env!("CARGO_MANIFEST_DIR"))
+        format!(
+            "{}/../../../artifacts/doer-eval",
+            env!("CARGO_MANIFEST_DIR")
+        )
     });
     let iters = env_u64("KIRRA_EVAL_ITERS", 1000) as usize;
     let warmup = env_u64("KIRRA_EVAL_WARMUP", 100) as usize;
@@ -84,13 +90,16 @@ fn main() {
 
     let dylib = std::env::var("ORT_DYLIB_PATH").unwrap_or_default();
     if dylib.is_empty() || !std::path::Path::new(&dylib).exists() {
-        skip_or_refuse(&format!("no loadable ORT runtime at ORT_DYLIB_PATH ({dylib:?})"));
+        skip_or_refuse(&format!(
+            "no loadable ORT runtime at ORT_DYLIB_PATH ({dylib:?})"
+        ));
     }
 
     let card: Scorecard = {
         let path = format!("{artifacts}/scorecard.json");
-        let raw = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("scorecard missing at {path}: {e} — run the root-workspace export"));
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("scorecard missing at {path}: {e} — run the root-workspace export")
+        });
         serde_json::from_str(&raw).expect("valid scorecard JSON")
     };
     assert_eq!(card.schema_version, 1, "unknown scorecard schema version");
@@ -99,11 +108,35 @@ fn main() {
     // --- The matrix rows: (name, model file, posture, precision, scorecard join). ---
     let fp32_model = format!("{artifacts}/planner_fp32.onnx");
     let qdq_model = format!("{artifacts}/planner_int8_qdq.onnx");
-    let rows: [(&str, &str, TrtPrecision, PrecisionMode, Option<&ScorecardRow>); 3] = [
-        ("fp32", &fp32_model, TrtPrecision::Full, PrecisionMode::FP32, find("fp32")),
+    let rows: [(
+        &str,
+        &str,
+        TrtPrecision,
+        PrecisionMode,
+        Option<&ScorecardRow>,
+    ); 3] = [
+        (
+            "fp32",
+            &fp32_model,
+            TrtPrecision::Full,
+            PrecisionMode::FP32,
+            find("fp32"),
+        ),
         // FP16: latency-only (no measured quality row yet) — informational.
-        ("fp16", &fp32_model, TrtPrecision::Fp16, PrecisionMode::FP16, None),
-        ("int8-qdq", &qdq_model, TrtPrecision::Int8Qdq, PrecisionMode::INT8, find("int8-ptq")),
+        (
+            "fp16",
+            &fp32_model,
+            TrtPrecision::Fp16,
+            PrecisionMode::FP16,
+            None,
+        ),
+        (
+            "int8-qdq",
+            &qdq_model,
+            TrtPrecision::Int8Qdq,
+            PrecisionMode::INT8,
+            find("int8-ptq"),
+        ),
     ];
 
     // The same featurized scene for every row (latency depends on shape, not values).
@@ -114,18 +147,30 @@ fn main() {
     for (name, model_path, trt_precision, precision, joined) in rows {
         // Distinct engine cache per precision — engines are precision-specific.
         let cache = std::env::temp_dir().join(format!("kirra_orin_eval_cache_{name}"));
-        let cfg = TrtConfig { engine_cache_path: cache.to_string_lossy().into_owned() };
+        let cfg = TrtConfig {
+            engine_cache_path: cache.to_string_lossy().into_owned(),
+        };
 
         let backend = match TrtBackend::with_precision(model_path, &cfg, trt_precision) {
             Ok(b) => b,
             Err(e) => skip_or_refuse(&format!("TensorRT EP unavailable for row {name}: {e:?}")),
         };
-        let model = backend.load_model(model_path).expect("introspect exported model");
-        let report = backend.warm_up_report(&model).expect("engine build must succeed");
+        let model = backend
+            .load_model(model_path)
+            .expect("introspect exported model");
+        let report = backend
+            .warm_up_report(&model)
+            .expect("engine build must succeed");
 
         let mut named = HashMap::new();
-        named.insert("features".to_string(), TensorStorage::Borrowed(&features[..]));
-        let batch = TensorBatch { named_tensors: named, metadata: HashMap::new() };
+        named.insert(
+            "features".to_string(),
+            TensorStorage::Borrowed(&features[..]),
+        );
+        let batch = TensorBatch {
+            named_tensors: named,
+            metadata: HashMap::new(),
+        };
         let latency: LatencyStats =
             run_latency(&backend, &model, &batch, iters, warmup).expect("latency measurement");
 

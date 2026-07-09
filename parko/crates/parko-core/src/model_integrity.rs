@@ -90,13 +90,21 @@ impl ModelAllowList {
                     continue;
                 }
                 // Accept `name=digest`; keep only the digest half.
-                let digest = tok.rsplit('=').next().unwrap_or(tok).trim().to_ascii_lowercase();
+                let digest = tok
+                    .rsplit('=')
+                    .next()
+                    .unwrap_or(tok)
+                    .trim()
+                    .to_ascii_lowercase();
                 if is_sha256_hex(&digest) {
                     allowed.insert(digest);
                 }
             }
         }
-        let strict = matches!(strict.map(|s| s.trim().to_ascii_lowercase()).as_deref(), Some("1" | "true" | "yes" | "on"));
+        let strict = matches!(
+            strict.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+            Some("1" | "true" | "yes" | "on")
+        );
         Self { allowed, strict }
     }
 
@@ -142,9 +150,9 @@ pub fn sha256_file(path: &Path) -> Result<String, BackendError> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; HASH_BUF_BYTES];
     loop {
-        let n = file
-            .read(&mut buf)
-            .map_err(|e| BackendError::Io(format!("cannot read model '{}': {e}", path.display())))?;
+        let n = file.read(&mut buf).map_err(|e| {
+            BackendError::Io(format!("cannot read model '{}': {e}", path.display()))
+        })?;
         if n == 0 {
             break;
         }
@@ -159,18 +167,30 @@ pub fn sha256_file(path: &Path) -> Result<String, BackendError> {
 /// allow-list is [`BackendError::IntegrityRejected`]; an unreadable file is
 /// [`BackendError::Io`]; enforcement-off returns `Ok { verified: false }` with the
 /// computed digest (the caller may log it). Never runs the model on rejection.
-pub fn verify_model_file(path: &str, allow: &ModelAllowList) -> Result<VerifiedModel, BackendError> {
+pub fn verify_model_file(
+    path: &str,
+    allow: &ModelAllowList,
+) -> Result<VerifiedModel, BackendError> {
     let sha256_hex = sha256_file(Path::new(path))?;
     if allow.is_enforcing() {
         if allow.contains(&sha256_hex) {
-            Ok(VerifiedModel { sha256_hex, verified: true })
+            Ok(VerifiedModel {
+                sha256_hex,
+                verified: true,
+            })
         } else {
-            Err(BackendError::IntegrityRejected { path: path.to_string(), sha256: sha256_hex })
+            Err(BackendError::IntegrityRejected {
+                path: path.to_string(),
+                sha256: sha256_hex,
+            })
         }
     } else {
         // Enforcement OFF: compute-and-accept (byte-identical to prior behaviour);
         // the digest is returned so the backend can log it for audit.
-        Ok(VerifiedModel { sha256_hex, verified: false })
+        Ok(VerifiedModel {
+            sha256_hex,
+            verified: false,
+        })
     }
 }
 
@@ -185,7 +205,10 @@ mod tests {
     fn write_temp(content: &[u8]) -> std::path::PathBuf {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let p = std::env::temp_dir().join(format!("parko_g16_{}_{n}.bin", std::process::id()));
-        std::fs::File::create(&p).unwrap().write_all(content).unwrap();
+        std::fs::File::create(&p)
+            .unwrap()
+            .write_all(content)
+            .unwrap();
         p
     }
 
@@ -194,7 +217,10 @@ mod tests {
         // SHA-256("abc") — the canonical NIST test vector.
         let p = write_temp(b"abc");
         let d = sha256_file(&p).unwrap();
-        assert_eq!(d, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            d,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
         std::fs::remove_file(&p).ok();
     }
 
@@ -216,7 +242,10 @@ mod tests {
         let p = write_temp(b"model-bytes-v1");
         let v1 = sha256_file(&p).unwrap();
         let allow = ModelAllowList::from_parts([v1], false);
-        std::fs::File::create(&p).unwrap().write_all(b"model-bytes-v2-EVIL").unwrap();
+        std::fs::File::create(&p)
+            .unwrap()
+            .write_all(b"model-bytes-v2-EVIL")
+            .unwrap();
         let err = verify_model_file(p.to_str().unwrap(), &allow).unwrap_err();
         assert!(
             matches!(err, BackendError::IntegrityRejected { .. }),
@@ -232,7 +261,11 @@ mod tests {
         assert!(!allow.is_enforcing());
         let v = verify_model_file(p.to_str().unwrap(), &allow).unwrap();
         assert!(!v.verified, "enforcement off → unverified");
-        assert_eq!(v.sha256_hex, sha256_file(&p).unwrap(), "digest still computed for audit");
+        assert_eq!(
+            v.sha256_hex,
+            sha256_file(&p).unwrap(),
+            "digest still computed for audit"
+        );
         std::fs::remove_file(&p).ok();
     }
 
@@ -241,7 +274,10 @@ mod tests {
         // Deny-by-default: strict + no entries → nothing may load.
         let p = write_temp(b"unlisted-model");
         let allow = ModelAllowList::from_parts(Vec::<String>::new(), true);
-        assert!(allow.is_enforcing(), "strict is enforcing even with an empty list");
+        assert!(
+            allow.is_enforcing(),
+            "strict is enforcing even with an empty list"
+        );
         let err = verify_model_file(p.to_str().unwrap(), &allow).unwrap_err();
         assert!(matches!(err, BackendError::IntegrityRejected { .. }));
         std::fs::remove_file(&p).ok();
@@ -251,7 +287,10 @@ mod tests {
     fn unreadable_file_fails_closed_even_when_enforcement_off() {
         let allow = ModelAllowList::from_parts(Vec::<String>::new(), false);
         let err = verify_model_file("/no/such/parko/model.onnx", &allow).unwrap_err();
-        assert!(matches!(err, BackendError::Io(_)), "a model that cannot be hashed cannot be proven");
+        assert!(
+            matches!(err, BackendError::Io(_)),
+            "a model that cannot be hashed cannot be proven"
+        );
     }
 
     #[test]
@@ -259,7 +298,10 @@ mod tests {
         let d1 = "a".repeat(64);
         let d2 = "b".repeat(64);
         // mixed separators, a name= form, an UPPERCASE digest, and junk that must be dropped.
-        let list = format!("{d1} , primary={}  ; not-a-digest ,", d2.to_ascii_uppercase());
+        let list = format!(
+            "{d1} , primary={}  ; not-a-digest ,",
+            d2.to_ascii_uppercase()
+        );
         let allow = ModelAllowList::parse(Some(&list), Some("true"));
         assert!(allow.is_enforcing());
         assert!(allow.strict);

@@ -48,7 +48,10 @@ impl LineageDecision {
     /// rolled-back one)?
     #[must_use]
     pub fn admits_model(&self) -> bool {
-        matches!(self, LineageDecision::Commit { .. } | LineageDecision::Rollback { .. })
+        matches!(
+            self,
+            LineageDecision::Commit { .. } | LineageDecision::Rollback { .. }
+        )
     }
 }
 
@@ -65,7 +68,9 @@ impl ModelLineage {
     /// model), so the very first rejection already has a rollback target.
     #[must_use]
     pub fn with_last_good(digest: impl Into<String>) -> Self {
-        Self { last_good: Some(digest.into()) }
+        Self {
+            last_good: Some(digest.into()),
+        }
     }
 
     /// The current last-good digest, if any.
@@ -79,18 +84,33 @@ impl ModelLineage {
     /// is not `Clone`); returns an owned decision.
     pub fn admit(&mut self, verdict: Result<VerifiedModel, BackendError>) -> LineageDecision {
         match verdict {
-            Ok(VerifiedModel { sha256_hex, verified: true }) => {
+            Ok(VerifiedModel {
+                sha256_hex,
+                verified: true,
+            }) => {
                 // A clean, allow-listed model: run it AND make it the rollback anchor.
                 self.last_good = Some(sha256_hex.clone());
-                LineageDecision::Commit { digest: sha256_hex, verified: true }
+                LineageDecision::Commit {
+                    digest: sha256_hex,
+                    verified: true,
+                }
             }
-            Ok(VerifiedModel { sha256_hex, verified: false }) => {
+            Ok(VerifiedModel {
+                sha256_hex,
+                verified: false,
+            }) => {
                 // Enforcement off: accept (byte-identical to today) but do NOT
                 // anchor — an unverified model must never become a rollback target.
-                LineageDecision::Commit { digest: sha256_hex, verified: false }
+                LineageDecision::Commit {
+                    digest: sha256_hex,
+                    verified: false,
+                }
             }
             Err(BackendError::IntegrityRejected { sha256, .. }) => match &self.last_good {
-                Some(good) => LineageDecision::Rollback { to: good.clone(), rejected: sha256 },
+                Some(good) => LineageDecision::Rollback {
+                    to: good.clone(),
+                    rejected: sha256,
+                },
                 None => LineageDecision::Deny {
                     reason: format!(
                         "model {sha256} rejected and no known-good artifact to roll back to"
@@ -109,10 +129,16 @@ mod tests {
     use super::*;
 
     fn verified(digest: &str) -> Result<VerifiedModel, BackendError> {
-        Ok(VerifiedModel { sha256_hex: digest.into(), verified: true })
+        Ok(VerifiedModel {
+            sha256_hex: digest.into(),
+            verified: true,
+        })
     }
     fn rejected(digest: &str) -> Result<VerifiedModel, BackendError> {
-        Err(BackendError::IntegrityRejected { path: "m.onnx".into(), sha256: digest.into() })
+        Err(BackendError::IntegrityRejected {
+            path: "m.onnx".into(),
+            sha256: digest.into(),
+        })
     }
 
     #[test]
@@ -120,7 +146,13 @@ mod tests {
         let mut lin = ModelLineage::default();
         assert_eq!(lin.last_good(), None);
         let d = lin.admit(verified("aa"));
-        assert_eq!(d, LineageDecision::Commit { digest: "aa".into(), verified: true });
+        assert_eq!(
+            d,
+            LineageDecision::Commit {
+                digest: "aa".into(),
+                verified: true
+            }
+        );
         assert_eq!(lin.last_good(), Some("aa"));
     }
 
@@ -129,7 +161,13 @@ mod tests {
         let mut lin = ModelLineage::default();
         lin.admit(verified("good1"));
         let d = lin.admit(rejected("EVIL"));
-        assert_eq!(d, LineageDecision::Rollback { to: "good1".into(), rejected: "EVIL".into() });
+        assert_eq!(
+            d,
+            LineageDecision::Rollback {
+                to: "good1".into(),
+                rejected: "EVIL".into()
+            }
+        );
         assert!(d.admits_model(), "a rollback still runs a (good) model");
         // The rejection did NOT move the anchor.
         assert_eq!(lin.last_good(), Some("good1"));
@@ -139,7 +177,10 @@ mod tests {
     fn rejection_with_no_known_good_denies_by_default() {
         let mut lin = ModelLineage::default();
         let d = lin.admit(rejected("EVIL"));
-        assert!(matches!(d, LineageDecision::Deny { .. }), "no fallback ⇒ deny: {d:?}");
+        assert!(
+            matches!(d, LineageDecision::Deny { .. }),
+            "no fallback ⇒ deny: {d:?}"
+        );
         assert!(!d.admits_model());
     }
 
@@ -151,14 +192,29 @@ mod tests {
         assert_eq!(lin.last_good(), Some("v2"));
         // A later rejection rolls back to the MOST RECENT good, not the first.
         let d = lin.admit(rejected("v3-bad"));
-        assert_eq!(d, LineageDecision::Rollback { to: "v2".into(), rejected: "v3-bad".into() });
+        assert_eq!(
+            d,
+            LineageDecision::Rollback {
+                to: "v2".into(),
+                rejected: "v3-bad".into()
+            }
+        );
     }
 
     #[test]
     fn enforcement_off_commits_but_does_not_anchor() {
         let mut lin = ModelLineage::default();
-        let d = lin.admit(Ok(VerifiedModel { sha256_hex: "x".into(), verified: false }));
-        assert_eq!(d, LineageDecision::Commit { digest: "x".into(), verified: false });
+        let d = lin.admit(Ok(VerifiedModel {
+            sha256_hex: "x".into(),
+            verified: false,
+        }));
+        assert_eq!(
+            d,
+            LineageDecision::Commit {
+                digest: "x".into(),
+                verified: false
+            }
+        );
         // Unverified must not become a rollback target.
         assert_eq!(lin.last_good(), None);
     }
@@ -167,13 +223,22 @@ mod tests {
     fn seeded_last_good_gives_the_first_rejection_a_target() {
         let mut lin = ModelLineage::with_last_good("factory");
         let d = lin.admit(rejected("bad"));
-        assert_eq!(d, LineageDecision::Rollback { to: "factory".into(), rejected: "bad".into() });
+        assert_eq!(
+            d,
+            LineageDecision::Rollback {
+                to: "factory".into(),
+                rejected: "bad".into()
+            }
+        );
     }
 
     #[test]
     fn an_unhashable_model_denies_regardless_of_last_good() {
         let mut lin = ModelLineage::with_last_good("factory");
         let d = lin.admit(Err(BackendError::Io("disk gone".into())));
-        assert!(matches!(d, LineageDecision::Deny { .. }), "I/O failure ⇒ deny: {d:?}");
+        assert!(
+            matches!(d, LineageDecision::Deny { .. }),
+            "I/O failure ⇒ deny: {d:?}"
+        );
     }
 }

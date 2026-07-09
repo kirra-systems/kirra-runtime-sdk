@@ -90,7 +90,11 @@ fn sample_at_fraction(poly: &[Point], cum: &[f64], frac: f64) -> Point {
     // such a segment, so no separate skip loop is needed (and none can divide by
     // zero).
     let seg = cum[i + 1] - cum[i];
-    let t = if seg > 0.0 { ((target - cum[i]) / seg).clamp(0.0, 1.0) } else { 0.0 };
+    let t = if seg > 0.0 {
+        ((target - cum[i]) / seg).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     Point {
         x_m: poly[i].x_m + t * (poly[i + 1].x_m - poly[i].x_m),
         y_m: poly[i].y_m + t * (poly[i + 1].y_m - poly[i].y_m),
@@ -146,7 +150,10 @@ impl CenterlineFrenet {
         for frac in arc_fractions(n) {
             let l = sample_at_fraction(left, &cum_l, frac);
             let r = sample_at_fraction(right, &cum_r, frac);
-            let mid = Point { x_m: (l.x_m + r.x_m) / 2.0, y_m: (l.y_m + r.y_m) / 2.0 };
+            let mid = Point {
+                x_m: (l.x_m + r.x_m) / 2.0,
+                y_m: (l.y_m + r.y_m) / 2.0,
+            };
             // Collapse consecutive duplicates (a pinched corridor) so segment
             // tangents below are always well-defined.
             if let Some(prev) = pts.last() {
@@ -266,8 +273,26 @@ mod tests {
 
     fn straight_boundaries(len: f64, half_w: f64) -> (Vec<Point>, Vec<Point>) {
         (
-            vec![Point { x_m: 0.0, y_m: half_w }, Point { x_m: len, y_m: half_w }],
-            vec![Point { x_m: 0.0, y_m: -half_w }, Point { x_m: len, y_m: -half_w }],
+            vec![
+                Point {
+                    x_m: 0.0,
+                    y_m: half_w,
+                },
+                Point {
+                    x_m: len,
+                    y_m: half_w,
+                },
+            ],
+            vec![
+                Point {
+                    x_m: 0.0,
+                    y_m: -half_w,
+                },
+                Point {
+                    x_m: len,
+                    y_m: -half_w,
+                },
+            ],
         )
     }
 
@@ -319,7 +344,10 @@ mod tests {
         );
         // A point ON the centerline halfway around: s ≈ half the arc, d ≈ 0.
         let a = std::f64::consts::FRAC_PI_4;
-        let p = Point { x_m: 30.0 * a.sin(), y_m: 30.0 - 30.0 * a.cos() };
+        let p = Point {
+            x_m: 30.0 * a.sin(),
+            y_m: 30.0 - 30.0 * a.cos(),
+        };
         let c = f.project(p).unwrap();
         assert!((c.s - 30.0 * a).abs() < 0.1, "s = {}", c.s);
         assert!(c.d.abs() < 0.05, "d = {}", c.d);
@@ -329,8 +357,24 @@ mod tests {
     fn signed_offset_is_left_positive() {
         let (l, r) = straight_boundaries(50.0, 5.0);
         let f = CenterlineFrenet::from_boundaries(&l, &r).unwrap();
-        assert!(f.project(Point { x_m: 10.0, y_m: 2.0 }).unwrap().d > 0.0, "left of travel");
-        assert!(f.project(Point { x_m: 10.0, y_m: -2.0 }).unwrap().d < 0.0, "right of travel");
+        assert!(
+            f.project(Point {
+                x_m: 10.0,
+                y_m: 2.0
+            })
+            .unwrap()
+            .d > 0.0,
+            "left of travel"
+        );
+        assert!(
+            f.project(Point {
+                x_m: 10.0,
+                y_m: -2.0
+            })
+            .unwrap()
+            .d < 0.0,
+            "right of travel"
+        );
     }
 
     #[test]
@@ -341,8 +385,26 @@ mod tests {
         let p = Point { x_m: 1.0, y_m: 1.0 };
         assert!(CenterlineFrenet::from_boundaries(&[p, p], &[p, p]).is_none());
         // Non-finite vertex.
-        let bad = vec![Point { x_m: 0.0, y_m: f64::NAN }, Point { x_m: 10.0, y_m: 0.0 }];
-        let good = vec![Point { x_m: 0.0, y_m: -5.0 }, Point { x_m: 10.0, y_m: -5.0 }];
+        let bad = vec![
+            Point {
+                x_m: 0.0,
+                y_m: f64::NAN,
+            },
+            Point {
+                x_m: 10.0,
+                y_m: 0.0,
+            },
+        ];
+        let good = vec![
+            Point {
+                x_m: 0.0,
+                y_m: -5.0,
+            },
+            Point {
+                x_m: 10.0,
+                y_m: -5.0,
+            },
+        ];
         assert!(CenterlineFrenet::from_boundaries(&bad, &good).is_none());
     }
 
@@ -350,8 +412,18 @@ mod tests {
     fn non_finite_point_projection_is_none() {
         let (l, r) = straight_boundaries(50.0, 5.0);
         let f = CenterlineFrenet::from_boundaries(&l, &r).unwrap();
-        assert!(f.project(Point { x_m: f64::NAN, y_m: 0.0 }).is_none());
-        assert!(f.project(Point { x_m: 1.0, y_m: f64::INFINITY }).is_none());
+        assert!(f
+            .project(Point {
+                x_m: f64::NAN,
+                y_m: 0.0
+            })
+            .is_none());
+        assert!(f
+            .project(Point {
+                x_m: 1.0,
+                y_m: f64::INFINITY
+            })
+            .is_none());
     }
 
     #[test]
@@ -359,7 +431,16 @@ mod tests {
         // `cumulative_arc` guards all four coordinates of each window; a NaN
         // or Inf in ANY position must degrade to the tangent frame, so each
         // operand's failing side is pinned individually (not just one).
-        let good = vec![Point { x_m: 0.0, y_m: -5.0 }, Point { x_m: 10.0, y_m: -5.0 }];
+        let good = vec![
+            Point {
+                x_m: 0.0,
+                y_m: -5.0,
+            },
+            Point {
+                x_m: 10.0,
+                y_m: -5.0,
+            },
+        ];
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             for (bx, by, gx, gy) in [
                 (bad, 5.0, 10.0, 5.0), // w[0].x
@@ -396,7 +477,10 @@ mod tests {
             Point { x_m: 4.0, y_m: 0.0 },
             Point { x_m: 4.0, y_m: 0.0 },
             Point { x_m: 4.0, y_m: 0.0 },
-            Point { x_m: 16.0, y_m: 0.0 },
+            Point {
+                x_m: 16.0,
+                y_m: 0.0,
+            },
         ];
         let cum = cumulative_arc(&poly).unwrap();
         assert_eq!(cum, vec![0.0, 4.0, 4.0, 4.0, 16.0]);
@@ -416,9 +500,23 @@ mod tests {
         assert!((p.x_m - 4.0).abs() < 1e-9 && p.y_m.abs() < 1e-9);
         // End-to-end: boundaries carrying duplicates still build a frame whose
         // projection matches the clean-geometry answer.
-        let dup_left: Vec<Point> = poly.iter().map(|p| Point { x_m: p.x_m, y_m: 3.0 }).collect();
-        let clean_right =
-            vec![Point { x_m: 0.0, y_m: -3.0 }, Point { x_m: 16.0, y_m: -3.0 }];
+        let dup_left: Vec<Point> = poly
+            .iter()
+            .map(|p| Point {
+                x_m: p.x_m,
+                y_m: 3.0,
+            })
+            .collect();
+        let clean_right = vec![
+            Point {
+                x_m: 0.0,
+                y_m: -3.0,
+            },
+            Point {
+                x_m: 16.0,
+                y_m: -3.0,
+            },
+        ];
         let f = CenterlineFrenet::from_boundaries(&dup_left, &clean_right).unwrap();
         let c = f.project(Point { x_m: 8.0, y_m: 1.0 }).unwrap();
         assert!((c.s - 8.0).abs() < 1e-9 && (c.d - 1.0).abs() < 1e-9);
@@ -430,8 +528,23 @@ mod tests {
         // midpoint lands on the same point, the duplicate collapse reduces the
         // centerline to one vertex, and the constructor refuses (tangent-frame
         // fallback) rather than emit a degenerate reference line.
-        let left = vec![Point { x_m: 0.0, y_m: 1.0 }, Point { x_m: 10.0, y_m: 1.0 }];
-        let right = vec![Point { x_m: 10.0, y_m: -1.0 }, Point { x_m: 0.0, y_m: -1.0 }];
+        let left = vec![
+            Point { x_m: 0.0, y_m: 1.0 },
+            Point {
+                x_m: 10.0,
+                y_m: 1.0,
+            },
+        ];
+        let right = vec![
+            Point {
+                x_m: 10.0,
+                y_m: -1.0,
+            },
+            Point {
+                x_m: 0.0,
+                y_m: -1.0,
+            },
+        ];
         assert!(CenterlineFrenet::from_boundaries(&left, &right).is_none());
     }
 
@@ -446,7 +559,10 @@ mod tests {
                 Point { x_m: 0.0, y_m: 0.0 },
                 Point { x_m: 5.0, y_m: 0.0 },
                 Point { x_m: 5.0, y_m: 0.0 },
-                Point { x_m: 10.0, y_m: 0.0 },
+                Point {
+                    x_m: 10.0,
+                    y_m: 0.0,
+                },
             ],
             cum_s: vec![0.0, 5.0, 5.0, 10.0],
         };
@@ -473,11 +589,26 @@ mod tests {
     fn mismatched_vertex_counts_still_center_the_lane() {
         // Left has 2 vertices, right has 7 (same geometry) — matched-fraction
         // resampling must not skew the centerline.
-        let l = vec![Point { x_m: 0.0, y_m: 3.0 }, Point { x_m: 60.0, y_m: 3.0 }];
-        let r: Vec<Point> =
-            (0..7).map(|i| Point { x_m: 10.0 * i as f64, y_m: -3.0 }).collect();
+        let l = vec![
+            Point { x_m: 0.0, y_m: 3.0 },
+            Point {
+                x_m: 60.0,
+                y_m: 3.0,
+            },
+        ];
+        let r: Vec<Point> = (0..7)
+            .map(|i| Point {
+                x_m: 10.0 * i as f64,
+                y_m: -3.0,
+            })
+            .collect();
         let f = CenterlineFrenet::from_boundaries(&l, &r).unwrap();
-        let c = f.project(Point { x_m: 30.0, y_m: 0.0 }).unwrap();
+        let c = f
+            .project(Point {
+                x_m: 30.0,
+                y_m: 0.0,
+            })
+            .unwrap();
         assert!(c.d.abs() < 1e-9, "centerline must sit on y=0, d = {}", c.d);
     }
 
@@ -488,13 +619,19 @@ mod tests {
         let poly = vec![
             Point { x_m: 0.0, y_m: 0.0 },
             Point { x_m: 3.0, y_m: 4.0 }, // +5
-            Point { x_m: 3.0, y_m: 4.0 + 12.0 }, // +12
+            Point {
+                x_m: 3.0,
+                y_m: 4.0 + 12.0,
+            }, // +12
         ];
         assert_eq!(cumulative_arc(&poly).unwrap(), vec![0.0, 5.0, 17.0]);
         // The single trailing guard rejects BOTH failure modes:
         //   - a zero-length (all-coincident) polyline → s == 0, not > 0.
         let p = Point { x_m: 2.0, y_m: 7.0 };
-        assert!(cumulative_arc(&[p, p]).is_none(), "s>0 must reject zero length");
+        assert!(
+            cumulative_arc(&[p, p]).is_none(),
+            "s>0 must reject zero length"
+        );
         assert!(cumulative_arc(&[p, p, p]).is_none());
         //   - a non-finite coordinate → s non-finite (poisoned through the sum).
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
@@ -508,8 +645,14 @@ mod tests {
         // L-corner polyline: seg0 (0,0)→(10,0) len 10, seg1 (10,0)→(10,10) len 10.
         let poly = vec![
             Point { x_m: 0.0, y_m: 0.0 },
-            Point { x_m: 10.0, y_m: 0.0 },
-            Point { x_m: 10.0, y_m: 10.0 },
+            Point {
+                x_m: 10.0,
+                y_m: 0.0,
+            },
+            Point {
+                x_m: 10.0,
+                y_m: 10.0,
+            },
         ];
         let cum = vec![0.0, 10.0, 20.0];
         // frac 0.25 → target 5 → seg0, t = 0.5 → (5, 0). Pins the `target-cum[i]`
@@ -518,7 +661,10 @@ mod tests {
         assert!((a.x_m - 5.0).abs() < 1e-12 && a.y_m.abs() < 1e-12, "{a:?}");
         // frac 0.75 → target 15 → seg1, t = 0.5 → (10, 5).
         let b = sample_at_fraction(&poly, &cum, 0.75);
-        assert!((b.x_m - 10.0).abs() < 1e-12 && (b.y_m - 5.0).abs() < 1e-12, "{b:?}");
+        assert!(
+            (b.x_m - 10.0).abs() < 1e-12 && (b.y_m - 5.0).abs() < 1e-12,
+            "{b:?}"
+        );
         // Endpoints resolve exactly (frac 0 → start, frac 1 → end).
         let s0 = sample_at_fraction(&poly, &cum, 0.0);
         assert!(s0.x_m.abs() < 1e-12 && s0.y_m.abs() < 1e-12);
@@ -550,9 +696,15 @@ mod tests {
         let (s10, s26) = (10.0_f64.sqrt(), 26.0_f64.sqrt());
         // Inside seg0 → unit (1,3)/√10; inside seg1 → unit (5,1)/√26.
         let (t0x, t0y) = f.tangent_at(s10 / 2.0);
-        assert!((t0x - 1.0 / s10).abs() < 1e-12 && (t0y - 3.0 / s10).abs() < 1e-12, "{t0x},{t0y}");
+        assert!(
+            (t0x - 1.0 / s10).abs() < 1e-12 && (t0y - 3.0 / s10).abs() < 1e-12,
+            "{t0x},{t0y}"
+        );
         let (t1x, t1y) = f.tangent_at(s10 + s26 / 2.0);
-        assert!((t1x - 5.0 / s26).abs() < 1e-12 && (t1y - 1.0 / s26).abs() < 1e-12, "{t1x},{t1y}");
+        assert!(
+            (t1x - 5.0 / s26).abs() < 1e-12 && (t1y - 1.0 / s26).abs() < 1e-12,
+            "{t1x},{t1y}"
+        );
         // Neither is (1,0): kills the whole-function default-return mutant.
         assert!((t0x - 1.0).abs() > 0.1 || t0y.abs() > 0.1);
     }
@@ -582,18 +734,35 @@ mod tests {
         let f = CenterlineFrenet {
             pts: vec![
                 Point { x_m: 0.0, y_m: 0.0 },
-                Point { x_m: 10.0, y_m: 0.0 },
-                Point { x_m: 10.0, y_m: 10.0 },
+                Point {
+                    x_m: 10.0,
+                    y_m: 0.0,
+                },
+                Point {
+                    x_m: 10.0,
+                    y_m: 10.0,
+                },
             ],
             cum_s: vec![0.0, 10.0, 20.0],
         };
         // Beside seg0, LEFT of +X travel (y>0) → d = +2, s = 5.
         let a = f.project(Point { x_m: 5.0, y_m: 2.0 }).unwrap();
-        assert!((a.s - 5.0).abs() < 1e-12 && (a.d - 2.0).abs() < 1e-12, "{a:?}");
+        assert!(
+            (a.s - 5.0).abs() < 1e-12 && (a.d - 2.0).abs() < 1e-12,
+            "{a:?}"
+        );
         // Beside seg1 (travel +Y), a point at x=12 is to the RIGHT → d = -2,
         // s = 10 + 5. The ex=0 branch makes the `ey*dx` sign load-bearing.
-        let b = f.project(Point { x_m: 12.0, y_m: 5.0 }).unwrap();
-        assert!((b.s - 15.0).abs() < 1e-12 && (b.d + 2.0).abs() < 1e-12, "{b:?}");
+        let b = f
+            .project(Point {
+                x_m: 12.0,
+                y_m: 5.0,
+            })
+            .unwrap();
+        assert!(
+            (b.s - 15.0).abs() < 1e-12 && (b.d + 2.0).abs() < 1e-12,
+            "{b:?}"
+        );
         // Nearest-segment retention: (12,5) is 2 m from seg1 but ~5.4 m from
         // seg0's end — the near-vs-far comparison must keep seg1.
         assert!(b.s > 10.0, "must have chosen seg1, s = {}", b.s);
@@ -610,19 +779,34 @@ mod tests {
             pts: vec![
                 Point { x_m: 0.0, y_m: 0.0 },
                 Point { x_m: 5.0, y_m: 0.0 },
-                Point { x_m: 10.0, y_m: 0.0 },
-                Point { x_m: 15.0, y_m: 0.0 },
-                Point { x_m: 20.0, y_m: 5.0 }, // last segment turns, so its tangent is distinct
+                Point {
+                    x_m: 10.0,
+                    y_m: 0.0,
+                },
+                Point {
+                    x_m: 15.0,
+                    y_m: 0.0,
+                },
+                Point {
+                    x_m: 20.0,
+                    y_m: 5.0,
+                }, // last segment turns, so its tangent is distinct
             ],
             cum_s: vec![0.0, 5.0, 10.0, 15.0, 15.0 + 29.0_f64.sqrt()],
         };
         // tangent_at(total) → last segment (5,5)/√50.
         let (tx, ty) = f.tangent_at(f.total_length_m());
-        assert!((tx - 5.0 / 50.0_f64.sqrt()).abs() < 1e-12 && (ty - 5.0 / 50.0_f64.sqrt()).abs() < 1e-12, "{tx},{ty}");
+        assert!(
+            (tx - 5.0 / 50.0_f64.sqrt()).abs() < 1e-12
+                && (ty - 5.0 / 50.0_f64.sqrt()).abs() < 1e-12,
+            "{tx},{ty}"
+        );
         // sample_at_fraction(frac = 1.0) → the final vertex exactly.
         let poly: Vec<Point> = f.pts.clone();
         let end = sample_at_fraction(&poly, &f.cum_s, 1.0);
-        assert!((end.x_m - 20.0).abs() < 1e-12 && (end.y_m - 5.0).abs() < 1e-12, "{end:?}");
+        assert!(
+            (end.x_m - 20.0).abs() < 1e-12 && (end.y_m - 5.0).abs() < 1e-12,
+            "{end:?}"
+        );
     }
-
 }

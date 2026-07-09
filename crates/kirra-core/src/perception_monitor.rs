@@ -84,7 +84,7 @@ const KIN_DERATE_TABLE: &[(f64, f64)] = &[
     (0.10, 0.75), // up to 10% implausible → 75% cap
     (0.25, 0.50), // up to 25% implausible → 50% cap
     (0.50, 0.25), // up to 50% implausible → 25% cap
-    // > 0.50 implausible → MRC floor (table tail; see fn body)
+                  // > 0.50 implausible → MRC floor (table tail; see fn body)
 ];
 
 // ---------------------------------------------------------------------------
@@ -126,12 +126,12 @@ impl DerateCode {
     #[must_use]
     pub const fn reason(&self) -> &'static str {
         match self {
-            Self::NominalNoDerate            => "NOMINAL_NO_DERATE",
-            Self::ObjectVelocityImplausible  => "OBJECT_VELOCITY_IMPLAUSIBLE",
-            Self::ObjectFrameTeleport        => "OBJECT_FRAME_TELEPORT",
+            Self::NominalNoDerate => "NOMINAL_NO_DERATE",
+            Self::ObjectVelocityImplausible => "OBJECT_VELOCITY_IMPLAUSIBLE",
+            Self::ObjectFrameTeleport => "OBJECT_FRAME_TELEPORT",
             Self::PerceptionSnapshotUnhealthy => "PERCEPTION_SNAPSHOT_UNHEALTHY",
-            Self::DetectionRangeDegraded     => "DETECTION_RANGE_DEGRADED",
-            Self::DetectionRangeUntrusted    => "DETECTION_RANGE_UNTRUSTED",
+            Self::DetectionRangeDegraded => "DETECTION_RANGE_DEGRADED",
+            Self::DetectionRangeUntrusted => "DETECTION_RANGE_UNTRUSTED",
         }
     }
 }
@@ -419,7 +419,10 @@ pub fn kinematic_plausibility_derate(
         None => contract.mrc_floor_mps,
     };
 
-    DerateDecision { cap_mps: cap, reason }
+    DerateDecision {
+        cap_mps: cap,
+        reason,
+    }
 }
 
 /// Monotone step-table lookup: returns the cap factor for the first row whose
@@ -482,11 +485,8 @@ pub fn range_supported_derate(
         };
     }
 
-    let v_max = range_supported_speed_mps(
-        observed_range_m,
-        contract.t_react_s,
-        contract.a_brake_mps2,
-    );
+    let v_max =
+        range_supported_speed_mps(observed_range_m, contract.t_react_s, contract.a_brake_mps2);
 
     if v_max >= contract.nominal_cap_mps {
         DerateDecision {
@@ -536,8 +536,8 @@ pub fn range_supported_speed_mps(range_m: f64, t_react_s: f64, a_brake_mps2: f64
 // Derate-only: never touches `DenyCode` or the deny path.
 // ===========================================================================
 
-use std::sync::{Arc, RwLock};
 use crate::kinematics_contract::VehicleKinematicsContract;
+use std::sync::{Arc, RwLock};
 
 /// The MRC-floor cap (m/s). A published cap of `0.0` composes into
 /// `effective_max_speed = min(…, 0.0) = 0.0` and surfaces as the EXISTING
@@ -665,7 +665,11 @@ impl PerceptionCapPublisher {
         contract: KinematicPlausibilityContract,
         ttl_ms: u64,
     ) -> Self {
-        Self { cache, contract, ttl_ms }
+        Self {
+            cache,
+            contract,
+            ttl_ms,
+        }
     }
 
     /// Run the kinematic guard over a fresh perception snapshot and publish the
@@ -684,7 +688,11 @@ impl PerceptionCapPublisher {
             Err(_) => true,
         };
         if stale {
-            self.publish(MRC_FLOOR_CAP_MPS, DerateCode::PerceptionSnapshotUnhealthy, now_ms);
+            self.publish(
+                MRC_FLOOR_CAP_MPS,
+                DerateCode::PerceptionSnapshotUnhealthy,
+                now_ms,
+            );
         }
     }
 
@@ -801,16 +809,21 @@ mod tests {
     fn kin_passes_clean_snapshot() {
         let objs = [ok_object(1), ok_object(2)];
         let p = healthy(&objs);
-        let d = kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
+        let d =
+            kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
         assert_eq!(d.reason, DerateCode::NominalNoDerate);
-        assert_eq!(d.cap_mps, crate::kinematics_contract::URBAN_ODD_SPEED_CAP_MPS);
+        assert_eq!(
+            d.cap_mps,
+            crate::kinematics_contract::URBAN_ODD_SPEED_CAP_MPS
+        );
     }
 
     #[test]
     fn kin_empty_healthy_snapshot_no_derate() {
         let objs: [TrackedObject; 0] = [];
         let p = healthy(&objs);
-        let d = kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
+        let d =
+            kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
         assert_eq!(d.reason, DerateCode::NominalNoDerate);
     }
 
@@ -838,7 +851,8 @@ mod tests {
         bad.dt_s = 0.1; // → 100 m/s implied
         let objs = [ok_object(1), bad];
         let p = healthy(&objs);
-        let d = kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
+        let d =
+            kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
         assert_eq!(d.reason, DerateCode::ObjectFrameTeleport);
     }
 
@@ -853,7 +867,8 @@ mod tests {
         tbad.dt_s = 0.1; // 200 m/s implied
         let objs = [vbad, tbad];
         let p = healthy(&objs);
-        let d = kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
+        let d =
+            kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
         assert_eq!(d.reason, DerateCode::ObjectVelocityImplausible);
     }
 
@@ -876,7 +891,8 @@ mod tests {
         bad.dt_s = 0.0; // teleport check undefined → fail closed
         let objs = [bad];
         let p = healthy(&objs);
-        let d = kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
+        let d =
+            kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
         assert_eq!(d.reason, DerateCode::PerceptionSnapshotUnhealthy);
     }
 
@@ -885,7 +901,8 @@ mod tests {
         let objs = [ok_object(1)];
         let mut p = healthy(&objs);
         p.confidence = 0.1; // below min_confidence
-        let d = kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
+        let d =
+            kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
         assert_eq!(d.reason, DerateCode::PerceptionSnapshotUnhealthy);
     }
 
@@ -894,27 +911,30 @@ mod tests {
         let objs = [ok_object(1)];
         let mut p = healthy(&objs);
         p.age_ms = 10_000; // > max_age_ms
-        let d = kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
+        let d =
+            kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
         assert_eq!(d.reason, DerateCode::PerceptionSnapshotUnhealthy);
     }
 
     #[test]
     fn kin_over_cap_object_count_mrc_floor() {
         // MAX_TRACKED_OBJECTS + 1 → unhealthy → MRC floor.
-        let objs: Vec<TrackedObject> =
-            (0..(MAX_TRACKED_OBJECTS + 1) as u64).map(ok_object).collect();
+        let objs: Vec<TrackedObject> = (0..(MAX_TRACKED_OBJECTS + 1) as u64)
+            .map(ok_object)
+            .collect();
         let p = healthy(&objs);
-        let d = kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
+        let d =
+            kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
         assert_eq!(d.reason, DerateCode::PerceptionSnapshotUnhealthy);
     }
 
     #[test]
     fn kin_full_max_slice_runs_bounded() {
         // Exactly MAX_TRACKED_OBJECTS healthy objects: passes, bounded WCET shape.
-        let objs: Vec<TrackedObject> =
-            (0..MAX_TRACKED_OBJECTS as u64).map(ok_object).collect();
+        let objs: Vec<TrackedObject> = (0..MAX_TRACKED_OBJECTS as u64).map(ok_object).collect();
         let p = healthy(&objs);
-        let d = kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
+        let d =
+            kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
         assert_eq!(d.reason, DerateCode::NominalNoDerate);
     }
 
@@ -1015,7 +1035,10 @@ mod tests {
         // With t_react=0.5, a_brake=3.0: SSD(22.35) = 11.175 + 83.25 ≈ 94.4 m.
         let c = RangeDerateContract::urban_reference();
         let required = 22.35 * c.t_react_s + 22.35 * 22.35 / (2.0 * c.a_brake_mps2);
-        assert!((required - 94.4).abs() < 0.5, "SSD(22.35) ≈ 94.4 m, got {required}");
+        assert!(
+            (required - 94.4).abs() < 0.5,
+            "SSD(22.35) ≈ 94.4 m, got {required}"
+        );
         // Inverting that range yields ~22.35 m/s.
         let v_max = range_supported_speed_mps(required, c.t_react_s, c.a_brake_mps2);
         assert!((v_max - 22.35).abs() < 1e-3, "inverted v_max = {v_max}");
@@ -1045,11 +1068,23 @@ mod tests {
     fn derate_code_stable_tokens() {
         for (code, token) in [
             (DerateCode::NominalNoDerate, "NOMINAL_NO_DERATE"),
-            (DerateCode::ObjectVelocityImplausible, "OBJECT_VELOCITY_IMPLAUSIBLE"),
+            (
+                DerateCode::ObjectVelocityImplausible,
+                "OBJECT_VELOCITY_IMPLAUSIBLE",
+            ),
             (DerateCode::ObjectFrameTeleport, "OBJECT_FRAME_TELEPORT"),
-            (DerateCode::PerceptionSnapshotUnhealthy, "PERCEPTION_SNAPSHOT_UNHEALTHY"),
-            (DerateCode::DetectionRangeDegraded, "DETECTION_RANGE_DEGRADED"),
-            (DerateCode::DetectionRangeUntrusted, "DETECTION_RANGE_UNTRUSTED"),
+            (
+                DerateCode::PerceptionSnapshotUnhealthy,
+                "PERCEPTION_SNAPSHOT_UNHEALTHY",
+            ),
+            (
+                DerateCode::DetectionRangeDegraded,
+                "DETECTION_RANGE_DEGRADED",
+            ),
+            (
+                DerateCode::DetectionRangeUntrusted,
+                "DETECTION_RANGE_UNTRUSTED",
+            ),
         ] {
             assert_eq!(code.reason(), token);
             assert_eq!(code.to_string(), token);
@@ -1095,7 +1130,11 @@ mod tests {
     fn resolver_state1_not_enabled_is_none() {
         let cache = empty_perception_cap();
         fresh_cap(&cache, 5.0, 1000, 500); // even with a fresh cap present…
-        assert_eq!(resolve_perception_cap(false, &cache, 1100), None, "disabled → no cap");
+        assert_eq!(
+            resolve_perception_cap(false, &cache, 1100),
+            None,
+            "disabled → no cap"
+        );
     }
 
     #[test]
@@ -1110,13 +1149,19 @@ mod tests {
         let cache = empty_perception_cap();
         fresh_cap(&cache, 7.5, 1000, 500);
         // now - generated = 600 > ttl 500 → stale → MRC floor.
-        assert_eq!(resolve_perception_cap(true, &cache, 1600), Some(MRC_FLOOR_CAP_MPS));
+        assert_eq!(
+            resolve_perception_cap(true, &cache, 1600),
+            Some(MRC_FLOOR_CAP_MPS)
+        );
     }
 
     #[test]
     fn resolver_state3_enabled_none_is_mrc_floor() {
         let cache = empty_perception_cap(); // never published
-        assert_eq!(resolve_perception_cap(true, &cache, 1000), Some(MRC_FLOOR_CAP_MPS));
+        assert_eq!(
+            resolve_perception_cap(true, &cache, 1000),
+            Some(MRC_FLOOR_CAP_MPS)
+        );
     }
 
     // ---- apply_perception_cap ----
@@ -1125,14 +1170,17 @@ mod tests {
     fn apply_none_returns_unchanged_contract() {
         let base = VehicleKinematicsContract::nominal_reference_profile();
         let out = apply_perception_cap(&base, None);
-        assert_eq!(out.effective_max_speed_mps(), base.effective_max_speed_mps());
+        assert_eq!(
+            out.effective_max_speed_mps(),
+            base.effective_max_speed_mps()
+        );
         assert_eq!(out.odd_speed_cap_mps, base.odd_speed_cap_mps);
     }
 
     #[test]
     fn apply_some_tightens_to_min() {
         let base = VehicleKinematicsContract::nominal_reference_profile(); // max 35, no odd cap
-        // Perception cap 12 < 35 → effective becomes 12.
+                                                                           // Perception cap 12 < 35 → effective becomes 12.
         let out = apply_perception_cap(&base, Some(12.0));
         assert_eq!(out.effective_max_speed_mps(), 12.0);
         // A looser perception cap never raises the ceiling.
@@ -1144,11 +1192,17 @@ mod tests {
     fn apply_composes_with_existing_odd_cap_most_conservative_wins() {
         let mut base = VehicleKinematicsContract::nominal_reference_profile();
         base.odd_speed_cap_mps = Some(URBAN_ODD_SPEED_CAP_MPS); // 22.35
-        // Perception cap 10 < 22.35 → 10 wins.
-        assert_eq!(apply_perception_cap(&base, Some(10.0)).effective_max_speed_mps(), 10.0);
+                                                                // Perception cap 10 < 22.35 → 10 wins.
+        assert_eq!(
+            apply_perception_cap(&base, Some(10.0)).effective_max_speed_mps(),
+            10.0
+        );
         // Perception cap 30 > 22.35 → existing odd cap still wins.
         assert!(
-            (apply_perception_cap(&base, Some(30.0)).effective_max_speed_mps() - URBAN_ODD_SPEED_CAP_MPS).abs() < 1e-9
+            (apply_perception_cap(&base, Some(30.0)).effective_max_speed_mps()
+                - URBAN_ODD_SPEED_CAP_MPS)
+                .abs()
+                < 1e-9
         );
     }
 
@@ -1257,7 +1311,10 @@ mod tests {
         );
         // A non-finite object → structural failure → MRC floor (0.0).
         let mut bad = ok_obj(1);
-        bad.vel_mps = Vec2 { x: f64::NAN, y: 0.0 };
+        bad.vel_mps = Vec2 {
+            x: f64::NAN,
+            y: 0.0,
+        };
         let objs = [bad];
         let p = PerceptionOutput {
             objects: &objs,
@@ -1309,7 +1366,7 @@ mod tests {
         assert_eq!(obj.id, 7);
         assert_eq!(obj.pos_m, Vec2 { x: 10.0, y: 2.0 });
         assert_eq!(obj.vel_mps, Vec2 { x: 3.0, y: 4.0 }); // vector preserved
-        // D2a: prev == pos and dt > 0 → implied speed is exactly 0 (teleport no-op).
+                                                          // D2a: prev == pos and dt > 0 → implied speed is exactly 0 (teleport no-op).
         assert_eq!(obj.prev_pos_m, obj.pos_m);
         assert_eq!(obj.dt_s, TELEPORT_NOOP_DT_S);
         assert!(obj.dt_s > 0.0);
@@ -1325,7 +1382,8 @@ mod tests {
         let bad = tracked_object_from_parts(2, Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 65.0, y: 0.0 });
         let objs = [ok, bad];
         let p = ingest_perception_output(&objs);
-        let d = kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
+        let d =
+            kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
         assert_eq!(d.reason, DerateCode::ObjectVelocityImplausible);
     }
 
@@ -1341,7 +1399,8 @@ mod tests {
             .collect();
         let p = ingest_perception_output(&too_many);
         assert!(!p.is_healthy());
-        let d = kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
+        let d =
+            kinematic_plausibility_derate(&p, &KinematicPlausibilityContract::urban_reference());
         assert_eq!(d.reason, DerateCode::PerceptionSnapshotUnhealthy);
         assert_eq!(d.cap_mps, 0.0);
     }

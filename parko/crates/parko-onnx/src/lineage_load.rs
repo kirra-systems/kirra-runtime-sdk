@@ -70,7 +70,10 @@ impl LineageLoader {
         let digest = digest.into();
         let mut paths_by_digest = HashMap::new();
         paths_by_digest.insert(digest.clone(), path.into());
-        Self { lineage: ModelLineage::with_last_good(digest), paths_by_digest }
+        Self {
+            lineage: ModelLineage::with_last_good(digest),
+            paths_by_digest,
+        }
     }
 
     /// Decide which artifact to load for `requested_path` under `allow` — the
@@ -88,9 +91,13 @@ impl LineageLoader {
                 if *verified {
                     // Remember where this verified digest's bytes live so a
                     // LATER rejection can roll back to them.
-                    self.paths_by_digest.insert(digest.clone(), requested_path.to_string());
+                    self.paths_by_digest
+                        .insert(digest.clone(), requested_path.to_string());
                 }
-                Ok(ResolvedLoad { path: requested_path.to_string(), decision })
+                Ok(ResolvedLoad {
+                    path: requested_path.to_string(),
+                    decision,
+                })
             }
             LineageDecision::Rollback { to, rejected } => {
                 let Some(fallback_path) = self.paths_by_digest.get(to).cloned() else {
@@ -113,7 +120,10 @@ impl LineageLoader {
                             fallback_sha256 = %to,
                             "model lineage ROLLBACK: rejected artifact; loading last-good"
                         );
-                        Ok(ResolvedLoad { path: fallback_path, decision })
+                        Ok(ResolvedLoad {
+                            path: fallback_path,
+                            decision,
+                        })
                     }
                     _ => Err(BackendError::IntegrityRejected {
                         path: fallback_path,
@@ -147,7 +157,10 @@ mod tests {
     fn write_temp(content: &[u8]) -> std::path::PathBuf {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let p = std::env::temp_dir().join(format!("parko_ep04_{}_{n}.onnx", std::process::id()));
-        std::fs::File::create(&p).unwrap().write_all(content).unwrap();
+        std::fs::File::create(&p)
+            .unwrap()
+            .write_all(content)
+            .unwrap();
         p
     }
     fn digest_of(p: &std::path::Path) -> String {
@@ -161,7 +174,10 @@ mod tests {
         let mut loader = LineageLoader::new();
         let r = loader.resolve(good.to_str().unwrap(), &allow).unwrap();
         assert_eq!(r.path, good.to_str().unwrap());
-        assert!(matches!(r.decision, LineageDecision::Commit { verified: true, .. }));
+        assert!(matches!(
+            r.decision,
+            LineageDecision::Commit { verified: true, .. }
+        ));
         assert_eq!(loader.last_good().unwrap(), digest_of(&good));
         std::fs::remove_file(&good).ok();
     }
@@ -175,7 +191,11 @@ mod tests {
         loader.resolve(good.to_str().unwrap(), &allow).unwrap();
 
         let r = loader.resolve(evil.to_str().unwrap(), &allow).unwrap();
-        assert_eq!(r.path, good.to_str().unwrap(), "rollback resolves to the last-good bytes");
+        assert_eq!(
+            r.path,
+            good.to_str().unwrap(),
+            "rollback resolves to the last-good bytes"
+        );
         assert!(matches!(r.decision, LineageDecision::Rollback { .. }));
         std::fs::remove_file(&good).ok();
         std::fs::remove_file(&evil).ok();
@@ -189,7 +209,10 @@ mod tests {
         let mut loader = LineageLoader::new();
         loader.resolve(good.to_str().unwrap(), &allow).unwrap();
         // Tamper the LAST-GOOD file after it was recorded.
-        std::fs::File::create(&good).unwrap().write_all(b"tampered-behind-our-back").unwrap();
+        std::fs::File::create(&good)
+            .unwrap()
+            .write_all(b"tampered-behind-our-back")
+            .unwrap();
 
         let err = loader.resolve(evil.to_str().unwrap(), &allow).unwrap_err();
         assert!(
@@ -206,7 +229,10 @@ mod tests {
         let allow = ModelAllowList::from_parts([format!("{:0>64}", "a")], true);
         let mut loader = LineageLoader::new();
         let err = loader.resolve(evil.to_str().unwrap(), &allow).unwrap_err();
-        assert!(matches!(err, BackendError::InitializationError(_)), "deny-by-default: {err:?}");
+        assert!(
+            matches!(err, BackendError::InitializationError(_)),
+            "deny-by-default: {err:?}"
+        );
         std::fs::remove_file(&evil).ok();
     }
 
@@ -216,7 +242,13 @@ mod tests {
         let off = ModelAllowList::from_parts(Vec::<String>::new(), false);
         let mut loader = LineageLoader::new();
         let r = loader.resolve(m.to_str().unwrap(), &off).unwrap();
-        assert!(matches!(r.decision, LineageDecision::Commit { verified: false, .. }));
+        assert!(matches!(
+            r.decision,
+            LineageDecision::Commit {
+                verified: false,
+                ..
+            }
+        ));
         assert!(loader.last_good().is_none(), "unverified never anchors");
 
         // Now strict enforcement rejects a substituted file: with no verified
@@ -237,13 +269,15 @@ mod tests {
         let factory = write_temp(b"factory-model");
         let factory_digest = digest_of(&factory);
         let allow = ModelAllowList::from_parts([factory_digest.clone()], false);
-        let mut loader =
-            LineageLoader::with_last_good(factory_digest, factory.to_str().unwrap());
+        let mut loader = LineageLoader::with_last_good(factory_digest, factory.to_str().unwrap());
         std::fs::remove_file(&factory).ok(); // the fallback bytes vanish
 
         let evil = write_temp(b"evil");
         let err = loader.resolve(evil.to_str().unwrap(), &allow).unwrap_err();
-        assert!(matches!(err, BackendError::Io(_) | BackendError::IntegrityRejected { .. }));
+        assert!(matches!(
+            err,
+            BackendError::Io(_) | BackendError::IntegrityRejected { .. }
+        ));
         std::fs::remove_file(&evil).ok();
     }
 }

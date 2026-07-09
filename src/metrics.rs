@@ -50,12 +50,12 @@ impl GateDenialReason {
     /// The stable Prometheus label value.
     pub fn as_label(self) -> &'static str {
         match self {
-            Self::UnknownCommand      => "unknown_command",
-            Self::PostureCacheEmpty   => "posture_cache_empty",
-            Self::PostureCacheStale   => "posture_cache_stale",
-            Self::LockedOut           => "locked_out",
+            Self::UnknownCommand => "unknown_command",
+            Self::PostureCacheEmpty => "posture_cache_empty",
+            Self::PostureCacheStale => "posture_cache_stale",
+            Self::LockedOut => "locked_out",
             Self::DegradedWriteDenied => "degraded_write_denied",
-            Self::HaFenced            => "ha_fenced",
+            Self::HaFenced => "ha_fenced",
         }
     }
 }
@@ -159,7 +159,10 @@ impl LatencyHistogram {
     pub fn record_micros(&self, micros: u64) {
         self.count.fetch_add(1, Ordering::Relaxed);
         self.sum_micros.fetch_add(micros, Ordering::Relaxed);
-        match LATENCY_BUCKET_BOUNDS_MICROS.iter().position(|(b, _)| micros <= *b) {
+        match LATENCY_BUCKET_BOUNDS_MICROS
+            .iter()
+            .position(|(b, _)| micros <= *b)
+        {
             Some(i) => self.buckets[i].fetch_add(1, Ordering::Relaxed),
             None => self.overflow.fetch_add(1, Ordering::Relaxed),
         };
@@ -199,7 +202,10 @@ impl LatencyHistogram {
             "kirra_{name}_bucket{{node_id=\"{node_id}\",le=\"+Inf\"}} {count}"
         );
         let sum_seconds = self.sum_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0;
-        let _ = writeln!(out, "kirra_{name}_sum{{node_id=\"{node_id}\"}} {sum_seconds}");
+        let _ = writeln!(
+            out,
+            "kirra_{name}_sum{{node_id=\"{node_id}\"}} {sum_seconds}"
+        );
         let _ = writeln!(out, "kirra_{name}_count{{node_id=\"{node_id}\"}} {count}");
     }
 }
@@ -263,12 +269,12 @@ impl FleetSafetyMetrics {
     /// Count a posture-routing gate denial (a dropped command).
     pub fn record_gate_denial(&self, reason: GateDenialReason) {
         let c = match reason {
-            GateDenialReason::UnknownCommand      => &self.denials_unknown_command,
-            GateDenialReason::PostureCacheEmpty   => &self.denials_posture_cache_empty,
-            GateDenialReason::PostureCacheStale   => &self.denials_posture_cache_stale,
-            GateDenialReason::LockedOut           => &self.denials_locked_out,
+            GateDenialReason::UnknownCommand => &self.denials_unknown_command,
+            GateDenialReason::PostureCacheEmpty => &self.denials_posture_cache_empty,
+            GateDenialReason::PostureCacheStale => &self.denials_posture_cache_stale,
+            GateDenialReason::LockedOut => &self.denials_locked_out,
             GateDenialReason::DegradedWriteDenied => &self.denials_degraded_write,
-            GateDenialReason::HaFenced            => &self.denials_ha_fenced,
+            GateDenialReason::HaFenced => &self.denials_ha_fenced,
         };
         c.fetch_add(1, Ordering::Relaxed);
     }
@@ -307,24 +313,19 @@ impl FleetSafetyMetrics {
         let mut out = String::with_capacity(4096);
 
         // One HELP/TYPE block, then one sample line per label value.
-        let family = |out: &mut String,
-                          name: &str,
-                          mtype: &str,
-                          desc: &str,
-                          samples: &[(&str, u64)]| {
-            let _ = writeln!(out, "# HELP kirra_{name} {desc}");
-            let _ = writeln!(out, "# TYPE kirra_{name} {mtype}");
-            for (labels, val) in samples {
-                if labels.is_empty() {
-                    let _ = writeln!(out, "kirra_{name}{{node_id=\"{node_id}\"}} {val}");
-                } else {
-                    let _ = writeln!(
-                        out,
-                        "kirra_{name}{{node_id=\"{node_id}\",{labels}}} {val}"
-                    );
+        let family =
+            |out: &mut String, name: &str, mtype: &str, desc: &str, samples: &[(&str, u64)]| {
+                let _ = writeln!(out, "# HELP kirra_{name} {desc}");
+                let _ = writeln!(out, "# TYPE kirra_{name} {mtype}");
+                for (labels, val) in samples {
+                    if labels.is_empty() {
+                        let _ = writeln!(out, "kirra_{name}{{node_id=\"{node_id}\"}} {val}");
+                    } else {
+                        let _ =
+                            writeln!(out, "kirra_{name}{{node_id=\"{node_id}\",{labels}}} {val}");
+                    }
                 }
-            }
-        };
+            };
 
         // --- gauges (scrape-time state) ---
         family(
@@ -333,11 +334,14 @@ impl FleetSafetyMetrics {
             "gauge",
             "Effective fleet routing posture (0=Nominal 1=Degraded 2=LockedOut; \
              fail-closed: a cold/stale/poisoned posture cache reads as LockedOut)",
-            &[("", match snap.effective_posture {
-                FleetPosture::Nominal => 0,
-                FleetPosture::Degraded => 1,
-                FleetPosture::LockedOut => 2,
-            })],
+            &[(
+                "",
+                match snap.effective_posture {
+                    FleetPosture::Nominal => 0,
+                    FleetPosture::Degraded => 1,
+                    FleetPosture::LockedOut => 2,
+                },
+            )],
         );
         family(
             &mut out,
@@ -371,9 +375,18 @@ impl FleetSafetyMetrics {
              (reconciles with the SSE stream; periodic cache refreshes are not \
              transitions; audit-committed-but-unenforced transitions are in the audit chain)",
             &[
-                ("posture=\"nominal\"", self.transitions_nominal.load(Ordering::Relaxed)),
-                ("posture=\"degraded\"", self.transitions_degraded.load(Ordering::Relaxed)),
-                ("posture=\"locked_out\"", self.transitions_locked_out.load(Ordering::Relaxed)),
+                (
+                    "posture=\"nominal\"",
+                    self.transitions_nominal.load(Ordering::Relaxed),
+                ),
+                (
+                    "posture=\"degraded\"",
+                    self.transitions_degraded.load(Ordering::Relaxed),
+                ),
+                (
+                    "posture=\"locked_out\"",
+                    self.transitions_locked_out.load(Ordering::Relaxed),
+                ),
             ],
         );
         family(
@@ -382,12 +395,30 @@ impl FleetSafetyMetrics {
             "counter",
             "Commands dropped by the posture-routing gate (HTTP 503) by fail-closed reason",
             &[
-                ("reason=\"unknown_command\"", self.denials_unknown_command.load(Ordering::Relaxed)),
-                ("reason=\"posture_cache_empty\"", self.denials_posture_cache_empty.load(Ordering::Relaxed)),
-                ("reason=\"posture_cache_stale\"", self.denials_posture_cache_stale.load(Ordering::Relaxed)),
-                ("reason=\"locked_out\"", self.denials_locked_out.load(Ordering::Relaxed)),
-                ("reason=\"degraded_write_denied\"", self.denials_degraded_write.load(Ordering::Relaxed)),
-                ("reason=\"ha_fenced\"", self.denials_ha_fenced.load(Ordering::Relaxed)),
+                (
+                    "reason=\"unknown_command\"",
+                    self.denials_unknown_command.load(Ordering::Relaxed),
+                ),
+                (
+                    "reason=\"posture_cache_empty\"",
+                    self.denials_posture_cache_empty.load(Ordering::Relaxed),
+                ),
+                (
+                    "reason=\"posture_cache_stale\"",
+                    self.denials_posture_cache_stale.load(Ordering::Relaxed),
+                ),
+                (
+                    "reason=\"locked_out\"",
+                    self.denials_locked_out.load(Ordering::Relaxed),
+                ),
+                (
+                    "reason=\"degraded_write_denied\"",
+                    self.denials_degraded_write.load(Ordering::Relaxed),
+                ),
+                (
+                    "reason=\"ha_fenced\"",
+                    self.denials_ha_fenced.load(Ordering::Relaxed),
+                ),
             ],
         );
         family(
@@ -495,9 +526,16 @@ pub fn cert_expiry_prometheus(
             "kirra_cert_principals{{node_id=\"{node_id}\",state=\"{state}\"}} {val}"
         );
     }
-    let _ = writeln!(out, "# HELP kirra_cert_principals_total Registered mTLS cert principals");
+    let _ = writeln!(
+        out,
+        "# HELP kirra_cert_principals_total Registered mTLS cert principals"
+    );
     let _ = writeln!(out, "# TYPE kirra_cert_principals_total gauge");
-    let _ = writeln!(out, "kirra_cert_principals_total{{node_id=\"{node_id}\"}} {}", summary.total);
+    let _ = writeln!(
+        out,
+        "kirra_cert_principals_total{{node_id=\"{node_id}\"}} {}",
+        summary.total
+    );
     out
 }
 
@@ -535,16 +573,61 @@ impl LockFreeMetricsAggregator {
         let write_metric = |buffer: &mut String, name: &str, mtype: &str, desc: &str, val: u64| {
             buffer.push_str(&format!("# HELP kirra_{} {}\n", name, desc));
             buffer.push_str(&format!("# TYPE kirra_{} {}\n", name, mtype));
-            buffer.push_str(&format!("kirra_{}{{node_id=\"{}\"}} {}\n", name, node_id, val));
+            buffer.push_str(&format!(
+                "kirra_{}{{node_id=\"{}\"}} {}\n",
+                name, node_id, val
+            ));
         };
 
-        write_metric(&mut out, "processed_frames_total", "counter", "Total Modbus TCP write frames evaluated", self.total_processed_frames.load(Ordering::Relaxed));
-        write_metric(&mut out, "envelope_clamping_events_total", "counter", "Total entries matching out-of-envelope parameters", self.envelope_clamping_events.load(Ordering::Relaxed));
-        write_metric(&mut out, "rate_limiting_events_total", "counter", "Total entries triggering acceleration constraints", self.rate_limiting_events.load(Ordering::Relaxed));
-        write_metric(&mut out, "authentication_failures_total", "counter", "Total failed administrative override sequences", self.authentication_failures.load(Ordering::Relaxed));
-        write_metric(&mut out, "jitter_violations_total", "counter", "Total times runtime loops missed jitter margins", self.tracking_jitter_violations.load(Ordering::Relaxed));
-        write_metric(&mut out, "trust_score", "gauge", "Active mathematical safety trust score boundary", self.trust_score.load(Ordering::Relaxed));
-        write_metric(&mut out, "active_worker_threads", "gauge", "Concurrent thread saturation within worker pools", self.active_worker_threads.load(Ordering::Relaxed));
+        write_metric(
+            &mut out,
+            "processed_frames_total",
+            "counter",
+            "Total Modbus TCP write frames evaluated",
+            self.total_processed_frames.load(Ordering::Relaxed),
+        );
+        write_metric(
+            &mut out,
+            "envelope_clamping_events_total",
+            "counter",
+            "Total entries matching out-of-envelope parameters",
+            self.envelope_clamping_events.load(Ordering::Relaxed),
+        );
+        write_metric(
+            &mut out,
+            "rate_limiting_events_total",
+            "counter",
+            "Total entries triggering acceleration constraints",
+            self.rate_limiting_events.load(Ordering::Relaxed),
+        );
+        write_metric(
+            &mut out,
+            "authentication_failures_total",
+            "counter",
+            "Total failed administrative override sequences",
+            self.authentication_failures.load(Ordering::Relaxed),
+        );
+        write_metric(
+            &mut out,
+            "jitter_violations_total",
+            "counter",
+            "Total times runtime loops missed jitter margins",
+            self.tracking_jitter_violations.load(Ordering::Relaxed),
+        );
+        write_metric(
+            &mut out,
+            "trust_score",
+            "gauge",
+            "Active mathematical safety trust score boundary",
+            self.trust_score.load(Ordering::Relaxed),
+        );
+        write_metric(
+            &mut out,
+            "active_worker_threads",
+            "gauge",
+            "Concurrent thread saturation within worker pools",
+            self.active_worker_threads.load(Ordering::Relaxed),
+        );
 
         out
     }
@@ -570,12 +653,27 @@ mod latency_histogram_tests {
         h.append_prometheus(&mut out, "t_seconds", "test", "n1");
 
         // Cumulative: le="0.0001" sees 2, le="0.001" sees 3, le="1" still 3.
-        assert!(out.contains("kirra_t_seconds_bucket{node_id=\"n1\",le=\"0.0001\"} 2"), "{out}");
-        assert!(out.contains("kirra_t_seconds_bucket{node_id=\"n1\",le=\"0.001\"} 3"), "{out}");
-        assert!(out.contains("kirra_t_seconds_bucket{node_id=\"n1\",le=\"1\"} 3"), "{out}");
+        assert!(
+            out.contains("kirra_t_seconds_bucket{node_id=\"n1\",le=\"0.0001\"} 2"),
+            "{out}"
+        );
+        assert!(
+            out.contains("kirra_t_seconds_bucket{node_id=\"n1\",le=\"0.001\"} 3"),
+            "{out}"
+        );
+        assert!(
+            out.contains("kirra_t_seconds_bucket{node_id=\"n1\",le=\"1\"} 3"),
+            "{out}"
+        );
         // +Inf carries every observation and equals _count.
-        assert!(out.contains("kirra_t_seconds_bucket{node_id=\"n1\",le=\"+Inf\"} 4"), "{out}");
-        assert!(out.contains("kirra_t_seconds_count{node_id=\"n1\"} 4"), "{out}");
+        assert!(
+            out.contains("kirra_t_seconds_bucket{node_id=\"n1\",le=\"+Inf\"} 4"),
+            "{out}"
+        );
+        assert!(
+            out.contains("kirra_t_seconds_count{node_id=\"n1\"} 4"),
+            "{out}"
+        );
         assert_eq!(h.observation_count(), 4);
     }
 
@@ -586,7 +684,10 @@ mod latency_histogram_tests {
         h.record_micros(1_500_000);
         let mut out = String::new();
         h.append_prometheus(&mut out, "t_seconds", "test", "n1");
-        assert!(out.contains("kirra_t_seconds_sum{node_id=\"n1\"} 2"), "{out}");
+        assert!(
+            out.contains("kirra_t_seconds_sum{node_id=\"n1\"} 2"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -606,10 +707,15 @@ mod latency_histogram_tests {
             command_source_write_failures: 0,
         };
         let out = m.format_prometheus("node-1", &snap);
-        assert!(out.contains("# TYPE kirra_http_request_duration_seconds histogram"), "{out}");
+        assert!(
+            out.contains("# TYPE kirra_http_request_duration_seconds histogram"),
+            "{out}"
+        );
         assert!(out.contains("kirra_http_request_duration_seconds_count{node_id=\"node-1\"} 1"));
         assert!(out.contains("# TYPE kirra_actuator_envelope_duration_seconds histogram"));
-        assert!(out.contains("kirra_actuator_envelope_duration_seconds_count{node_id=\"node-1\"} 1"));
+        assert!(
+            out.contains("kirra_actuator_envelope_duration_seconds_count{node_id=\"node-1\"} 1")
+        );
     }
 }
 
@@ -717,7 +823,10 @@ mod fleet_metrics_tests {
             "kirra_incident_durability_failures_total{node_id=\"n\"} 15\n",
             "kirra_command_source_write_failures_total{node_id=\"n\"} 14\n",
         ] {
-            assert!(text.contains(expected), "missing exact sample {expected:?} in:\n{text}");
+            assert!(
+                text.contains(expected),
+                "missing exact sample {expected:?} in:\n{text}"
+            );
         }
     }
 
@@ -757,10 +866,17 @@ mod fleet_metrics_tests {
             no_expiry: 1,
         };
         let text = super::cert_expiry_prometheus("node-a", &summary);
-        assert!(text.contains("# TYPE kirra_cert_principals gauge"), "{text}");
-        for (state, val) in
-            [("active", 3), ("revoked", 1), ("expired", 1), ("expiring_soon", 2), ("no_expiry", 1)]
-        {
+        assert!(
+            text.contains("# TYPE kirra_cert_principals gauge"),
+            "{text}"
+        );
+        for (state, val) in [
+            ("active", 3),
+            ("revoked", 1),
+            ("expired", 1),
+            ("expiring_soon", 2),
+            ("no_expiry", 1),
+        ] {
             assert!(
                 text.contains(&format!(
                     "kirra_cert_principals{{node_id=\"node-a\",state=\"{state}\"}} {val}\n"
@@ -768,26 +884,47 @@ mod fleet_metrics_tests {
                 "missing state={state}:\n{text}"
             );
         }
-        assert!(text.contains("kirra_cert_principals_total{node_id=\"node-a\"} 5\n"), "{text}");
+        assert!(
+            text.contains("kirra_cert_principals_total{node_id=\"node-a\"} 5\n"),
+            "{text}"
+        );
     }
 
     #[test]
     fn cert_expiry_exposition_escapes_node_id() {
         use crate::verifier_store::CertExpirySummary;
         let text = super::cert_expiry_prometheus("bad\"id\nx", &CertExpirySummary::default());
-        assert!(text.contains("node_id=\"bad\\\"id\\nx\""), "node_id must be escaped:\n{text}");
-        assert!(!text.lines().any(|l| l.starts_with("x\"")), "no raw newline splits a line:\n{text}");
+        assert!(
+            text.contains("node_id=\"bad\\\"id\\nx\""),
+            "node_id must be escaped:\n{text}"
+        );
+        assert!(
+            !text.lines().any(|l| l.starts_with("x\"")),
+            "no raw newline splits a line:\n{text}"
+        );
     }
 
     /// Label values are the stable snake_case codes (renaming one breaks
     /// every dashboard/alert built on it — pin the vocabulary).
     #[test]
     fn gate_denial_labels_are_pinned() {
-        assert_eq!(GateDenialReason::UnknownCommand.as_label(), "unknown_command");
-        assert_eq!(GateDenialReason::PostureCacheEmpty.as_label(), "posture_cache_empty");
-        assert_eq!(GateDenialReason::PostureCacheStale.as_label(), "posture_cache_stale");
+        assert_eq!(
+            GateDenialReason::UnknownCommand.as_label(),
+            "unknown_command"
+        );
+        assert_eq!(
+            GateDenialReason::PostureCacheEmpty.as_label(),
+            "posture_cache_empty"
+        );
+        assert_eq!(
+            GateDenialReason::PostureCacheStale.as_label(),
+            "posture_cache_stale"
+        );
         assert_eq!(GateDenialReason::LockedOut.as_label(), "locked_out");
-        assert_eq!(GateDenialReason::DegradedWriteDenied.as_label(), "degraded_write_denied");
+        assert_eq!(
+            GateDenialReason::DegradedWriteDenied.as_label(),
+            "degraded_write_denied"
+        );
         assert_eq!(GateDenialReason::HaFenced.as_label(), "ha_fenced");
     }
 }

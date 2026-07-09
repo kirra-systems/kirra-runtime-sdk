@@ -12,8 +12,11 @@ pub(crate) async fn register_node(
     Json(req): Json<RegisterNodeRequest>,
 ) -> impl IntoResponse {
     if !svc.app.is_active() {
-        return (StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "instance is in passive standby mode" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "instance is in passive standby mode" })),
+        )
+            .into_response();
     }
     let now = now_ms();
 
@@ -22,7 +25,9 @@ pub(crate) async fn register_node(
     // (measured-boot fleets flip the default to quote-required); an explicit value in
     // the request wins.
     let fleet_default = require_tpm_quote_fleet_default(
-        std::env::var("KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT").ok().as_deref(),
+        std::env::var("KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT")
+            .ok()
+            .as_deref(),
     );
     let require = resolve_require_tpm_quote(req.require_tpm_quote, fleet_default);
 
@@ -33,17 +38,24 @@ pub(crate) async fn register_node(
     // permanently-unattestable node that still 201s. This guard fires whether the
     // requirement is explicit OR came from the fleet gate.
     if require {
-        let ak_ok = req.ak_public_pem.as_deref().is_some_and(|s| !s.trim().is_empty());
+        let ak_ok = req
+            .ak_public_pem
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
         let pcr_ok = req
             .expected_pcr16_digest_hex
             .as_deref()
             .is_some_and(is_valid_pcr16_sha256_hex);
         if !ak_ok || !pcr_ok {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "require_tpm_quote demands ak_public_pem and a 64-hex-char \
-                          (SHA-256) expected_pcr16_digest_hex — a quote-required node \
-                          without both could never attest"
-            }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "require_tpm_quote demands ak_public_pem and a 64-hex-char \
+                              (SHA-256) expected_pcr16_digest_hex — a quote-required node \
+                              without both could never attest"
+                })),
+            )
+                .into_response();
         }
     }
 
@@ -66,23 +78,34 @@ pub(crate) async fn register_node(
         // SAFETY: SG-HA-3 — durable write off the async worker pool.
         let node_id_p = req.node_id.clone();
         let policy_err = !matches!(
-            svc.app.store.call(move |store| {
-                store.set_node_attestation_policy(&node_id_p, require)
-            }).await,
+            svc.app
+                .store
+                .call(move |store| { store.set_node_attestation_policy(&node_id_p, require) })
+                .await,
             Ok(Ok(()))
         );
         if policy_err {
-            return (StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "failed to persist attestation policy" }))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to persist attestation policy" })),
+            )
+                .into_response();
         }
     }
 
     if svc.app.persist_and_insert_node(node).is_err() {
-        return (StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "failed to persist node" }))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to persist node" })),
+        )
+            .into_response();
     }
 
-    (StatusCode::CREATED, Json(json!({ "node_id": req.node_id, "status": "registered" }))).into_response()
+    (
+        StatusCode::CREATED,
+        Json(json!({ "node_id": req.node_id, "status": "registered" })),
+    )
+        .into_response()
 }
 
 pub(crate) async fn issue_challenge(
@@ -90,12 +113,18 @@ pub(crate) async fn issue_challenge(
     Path(node_id): Path<String>,
 ) -> impl IntoResponse {
     if !svc.app.is_active() {
-        return (StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "instance is in passive standby mode" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "instance is in passive standby mode" })),
+        )
+            .into_response();
     }
     if !svc.app.nodes.contains_key(&node_id) {
-        return (StatusCode::NOT_FOUND,
-                Json(json!({ "error": "node not registered" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "node not registered" })),
+        )
+            .into_response();
     }
     // #147: the challenge nonce comes from a CSPRNG (OsRng), NEVER the wall
     // clock. A `SystemTime`-derived nonce is predictable and can collide within
@@ -103,7 +132,11 @@ pub(crate) async fn issue_challenge(
     // challenge store and the verify-then-consume order in `verify_attestation`.
     let nonce = kirra_verifier::verifier::generate_challenge_nonce();
     svc.app.issue_challenge(&node_id, nonce, now_ms());
-    (StatusCode::OK, Json(json!({ "node_id": node_id, "nonce": nonce }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "node_id": node_id, "nonce": nonce })),
+    )
+        .into_response()
 }
 
 pub(crate) async fn verify_attestation(
@@ -111,8 +144,11 @@ pub(crate) async fn verify_attestation(
     Json(req): Json<VerifyAttestationRequest>,
 ) -> impl IntoResponse {
     if !svc.app.is_active() {
-        return (StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "instance is in passive standby mode" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "instance is in passive standby mode" })),
+        )
+            .into_response();
     }
     let now = now_ms();
 
@@ -130,9 +166,17 @@ pub(crate) async fn verify_attestation(
     // expectation is unaffected. A hardware TPM *quote* (the deeper measured-boot
     // root) is enforced just below for a node whose policy requires it.
     let (ak_public_pem, expected_pcr16) = match svc.app.nodes.get(&req.node_id) {
-        Some(node) => (node.ak_public_pem.clone(), node.expected_pcr16_digest_hex.clone()),
-        None => return (StatusCode::NOT_FOUND,
-                        Json(json!({ "error": "node not registered" }))).into_response(),
+        Some(node) => (
+            node.ak_public_pem.clone(),
+            node.expected_pcr16_digest_hex.clone(),
+        ),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "node not registered" })),
+            )
+                .into_response()
+        }
     };
 
     if let Err(reason) = kirra_verifier::attestation::verify_attestation_proof_with_pcr16(
@@ -172,10 +216,20 @@ pub(crate) async fn verify_attestation(
     // `consume_challenge`, so a quote failure does NOT burn the nonce (retry).
     // SAFETY: SG-HA-3 — read off the async worker pool via read replica.
     let node_id_q = req.node_id.clone();
-    let require_quote = match svc.app.store.call_read(move |store| store.node_requires_tpm_quote(&node_id_q)).await {
+    let require_quote = match svc
+        .app
+        .store
+        .call_read(move |store| store.node_requires_tpm_quote(&node_id_q))
+        .await
+    {
         Ok(Ok(v)) => v,
-        _ => return (StatusCode::INTERNAL_SERVER_ERROR,
-                     Json(json!({ "error": "attestation policy lookup failed" }))).into_response(),
+        _ => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "attestation policy lookup failed" })),
+            )
+                .into_response()
+        }
     };
     match (&req.tpm_quote, require_quote) {
         (Some(quote), _) => {
@@ -219,15 +273,21 @@ pub(crate) async fn verify_attestation(
         (None, true) => {
             tracing::warn!(node_id = %req.node_id,
                 "node policy requires a tpm quote but none was presented");
-            return (StatusCode::FORBIDDEN,
-                    Json(json!({ "error": "tpm quote required by node policy but not presented" }))).into_response();
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "tpm quote required by node policy but not presented" })),
+            )
+                .into_response();
         }
         (None, false) => { /* back-compat: no quote required, none presented */ }
     }
 
     if !svc.app.consume_challenge(&req.node_id, req.nonce, now) {
-        return (StatusCode::CONFLICT,
-                Json(json!({ "error": "nonce absent, expired, or already consumed" }))).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "nonce absent, expired, or already consumed" })),
+        )
+            .into_response();
     }
 
     let updated = match svc.app.nodes.get(&req.node_id) {
@@ -241,13 +301,21 @@ pub(crate) async fn verify_attestation(
             site: existing.site.clone(),
             firmware_version: existing.firmware_version.clone(),
         },
-        None => return (StatusCode::NOT_FOUND,
-                        Json(json!({ "error": "node not registered" }))).into_response(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "node not registered" })),
+            )
+                .into_response()
+        }
     };
 
     if svc.app.persist_and_insert_node(updated).is_err() {
-        return (StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "failed to persist trust state" }))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to persist trust state" })),
+        )
+            .into_response();
     }
 
     let posture = svc.app.calculate_posture(&req.node_id);
@@ -264,12 +332,19 @@ pub(crate) async fn verify_attestation(
         }).await;
     }
     emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.node_id.clone()));
-    enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
-        node_id: req.node_id.clone(),
-        reason:  "ATTESTATION_TRUSTED".to_string(),
-    });
+    enqueue_recalc(
+        &svc,
+        kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
+            node_id: req.node_id.clone(),
+            reason: "ATTESTATION_TRUSTED".to_string(),
+        },
+    );
 
-    (StatusCode::OK, Json(json!({ "node_id": req.node_id, "attested": true }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "node_id": req.node_id, "attested": true })),
+    )
+        .into_response()
 }
 
 pub(crate) async fn get_node_status(
@@ -283,11 +358,15 @@ pub(crate) async fn get_node_status(
                 NodeTrustState::Untrusted(_) => "Untrusted",
                 NodeTrustState::Unknown => "Unknown",
             };
-            (StatusCode::OK, Json(AttestationStatusResponse {
-                node_id: node_id.clone(),
-                status: status.to_string(),
-                registered_at_ms: node.registered_at_ms,
-            })).into_response()
+            (
+                StatusCode::OK,
+                Json(AttestationStatusResponse {
+                    node_id: node_id.clone(),
+                    status: status.to_string(),
+                    registered_at_ms: node.registered_at_ms,
+                }),
+            )
+                .into_response()
         }
         None => (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response(),
     }
@@ -298,23 +377,40 @@ pub(crate) async fn register_node_identity(
     Json(req): Json<RegisterIdentityRequest>,
 ) -> impl IntoResponse {
     if req.node_id.trim().is_empty() || req.ak_public_fingerprint_hex.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "node_id and ak_public_fingerprint_hex are required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "node_id and ak_public_fingerprint_hex are required" })),
+        )
+            .into_response();
     }
     // P1: durable identity write off the worker pool. Own the request fields.
     let now = now_ms();
     let node_id_c = req.node_id.clone();
     let fingerprint = req.ak_public_fingerprint_hex.clone();
-    let registered = svc.app.store.call(move |store| store.register_attestation_identity(
-        &node_id_c, &fingerprint, "admin", now,
-    )).await;
+    let registered = svc
+        .app
+        .store
+        .call(move |store| {
+            store.register_attestation_identity(&node_id_c, &fingerprint, "admin", now)
+        })
+        .await;
     match registered {
         Ok(Ok(())) => {
-            emit_posture_event(&svc.app, "NODE_IDENTITY_PROVISIONED", Some(req.node_id.clone()));
-            (StatusCode::CREATED,
-             Json(json!({ "node_id": req.node_id, "registered": true }))).into_response()
+            emit_posture_event(
+                &svc.app,
+                "NODE_IDENTITY_PROVISIONED",
+                Some(req.node_id.clone()),
+            );
+            (
+                StatusCode::CREATED,
+                Json(json!({ "node_id": req.node_id, "registered": true })),
+            )
+                .into_response()
         }
-        _ => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "failed to register identity" }))).into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to register identity" })),
+        )
+            .into_response(),
     }
 }

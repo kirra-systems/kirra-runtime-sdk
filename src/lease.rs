@@ -103,8 +103,12 @@ impl LeaseParams {
             ttl_ms
         };
         let renew_interval_ms = ttl_ms / 2; // ≥ 1 by the MIN clamp
-        // No overflow by the MAX clamp, so this is exact (not saturating).
-        Self { ttl_ms, renew_interval_ms, promote_after_ms: ttl_ms + renew_interval_ms }
+                                            // No overflow by the MAX clamp, so this is exact (not saturating).
+        Self {
+            ttl_ms,
+            renew_interval_ms,
+            promote_after_ms: ttl_ms + renew_interval_ms,
+        }
     }
 
     /// The default lease parameters (`DEFAULT_LEASE_TTL_MS`).
@@ -232,7 +236,10 @@ mod tests {
     fn default_lease_meets_the_failover_and_cache_bounds() {
         let p = LeaseParams::default_params();
         assert!(p.ttl_ms <= POSTURE_CACHE_TTL_MS, "TTL ≤ posture-cache TTL");
-        assert!(p.promote_after_ms <= 5_000, "promote within the ≤5s failover target");
+        assert!(
+            p.promote_after_ms <= 5_000,
+            "promote within the ≤5s failover target"
+        );
         // A big cut from the legacy ~12 s (PROMOTION_TIMEOUT_MS 10 s + interval).
         assert!(
             p.promote_after_ms < crate::standby_monitor::PROMOTION_TIMEOUT_MS,
@@ -247,13 +254,28 @@ mod tests {
     fn demote_deadline_strictly_precedes_promote_deadline() {
         for ttl in [2_000u64, 3_000, 4_000, 5_000, 10_000] {
             let p = LeaseParams::from_ttl(ttl);
-            assert!(p.demote_before_promote(), "invariant must hold for ttl={ttl}");
+            assert!(
+                p.demote_before_promote(),
+                "invariant must hold for ttl={ttl}"
+            );
             // The holder is gone (lease_expired) by ttl; the challenger only promotes
             // at promote_after > ttl → a positive guard window with no overlap.
-            assert!(lease_expired(p.ttl_ms, &p), "holder's lease has expired at ttl");
-            assert!(!should_promote(p.ttl_ms, &p), "challenger must NOT promote yet at ttl");
-            assert!(should_promote(p.promote_after_ms, &p), "challenger promotes at promote_after");
-            assert!(p.guard_margin_ms() > 0, "positive guard margin for ttl={ttl}");
+            assert!(
+                lease_expired(p.ttl_ms, &p),
+                "holder's lease has expired at ttl"
+            );
+            assert!(
+                !should_promote(p.ttl_ms, &p),
+                "challenger must NOT promote yet at ttl"
+            );
+            assert!(
+                should_promote(p.promote_after_ms, &p),
+                "challenger promotes at promote_after"
+            );
+            assert!(
+                p.guard_margin_ms() > 0,
+                "positive guard margin for ttl={ttl}"
+            );
         }
     }
 
@@ -262,16 +284,32 @@ mod tests {
     /// the demote-before-promote invariant (renew > 0, promote_after > ttl, no wrap).
     #[test]
     fn from_ttl_is_total_and_never_violates_the_invariant() {
-        for ttl in [0u64, 1, 2, 3, 100, 3_000, MAX_LEASE_TTL_MS, MAX_LEASE_TTL_MS + 1, u64::MAX] {
+        for ttl in [
+            0u64,
+            1,
+            2,
+            3,
+            100,
+            3_000,
+            MAX_LEASE_TTL_MS,
+            MAX_LEASE_TTL_MS + 1,
+            u64::MAX,
+        ] {
             let p = LeaseParams::from_ttl(ttl);
-            assert!(p.renew_interval_ms >= 1, "renew must be ≥ 1 for input {ttl}");
+            assert!(
+                p.renew_interval_ms >= 1,
+                "renew must be ≥ 1 for input {ttl}"
+            );
             assert!(
                 p.promote_after_ms > p.ttl_ms,
                 "promote_after ({}) must exceed ttl ({}) for input {ttl} — no overflow wrap",
                 p.promote_after_ms,
                 p.ttl_ms
             );
-            assert!(p.demote_before_promote(), "invariant must hold for input {ttl}");
+            assert!(
+                p.demote_before_promote(),
+                "invariant must hold for input {ttl}"
+            );
         }
         // The degenerate inputs clamp to the floor; the huge inputs clamp to the ceiling.
         assert_eq!(LeaseParams::from_ttl(0).ttl_ms, MIN_LEASE_TTL_MS);
@@ -284,9 +322,15 @@ mod tests {
         // Renew fires at half-life; the lease is still valid then (one miss survivable).
         assert!(!should_renew(p.renew_interval_ms - 1, &p));
         assert!(should_renew(p.renew_interval_ms, &p));
-        assert!(!lease_expired(p.renew_interval_ms, &p), "one missed renewal: lease still valid");
+        assert!(
+            !lease_expired(p.renew_interval_ms, &p),
+            "one missed renewal: lease still valid"
+        );
         // A second consecutive miss reaches expiry → self-demote.
-        assert!(lease_expired(p.ttl_ms, &p), "sustained renewal failure expires the lease");
+        assert!(
+            lease_expired(p.ttl_ms, &p),
+            "sustained renewal failure expires the lease"
+        );
     }
 
     #[test]
@@ -301,15 +345,29 @@ mod tests {
         // At ttl the holder's lease has expired (self-demote) but the challenger is
         // still inside the guard window (must NOT promote yet).
         assert!(holder_must_self_demote(renew_at + p.ttl_ms, renew_at, &p));
-        assert!(!promotion_due_since_renew(renew_at + p.ttl_ms, renew_at, &p));
+        assert!(!promotion_due_since_renew(
+            renew_at + p.ttl_ms,
+            renew_at,
+            &p
+        ));
 
         // At promote_after the challenger may finally promote.
-        assert!(promotion_due_since_renew(renew_at + p.promote_after_ms, renew_at, &p));
+        assert!(promotion_due_since_renew(
+            renew_at + p.promote_after_ms,
+            renew_at,
+            &p
+        ));
 
         // Skew fails SAFE: an observer whose clock reads BEFORE the stored renewal
         // sees elapsed 0 (freshly renewed), never a spurious huge elapsed.
-        assert!(!promotion_due_since_renew(renew_at - 5_000, renew_at, &p), "skew must not promote");
-        assert!(!holder_must_self_demote(renew_at - 5_000, renew_at, &p), "skew must not self-demote");
+        assert!(
+            !promotion_due_since_renew(renew_at - 5_000, renew_at, &p),
+            "skew must not promote"
+        );
+        assert!(
+            !holder_must_self_demote(renew_at - 5_000, renew_at, &p),
+            "skew must not self-demote"
+        );
     }
 
     // (The env-gate routing tests moved with the read itself: EP-12 validates
@@ -328,6 +386,9 @@ mod tests {
             p.renew_interval_ms
         );
         assert!(!poll_fast_enough(0, &p), "a zero poll interval is rejected");
-        assert!(!poll_fast_enough(p.renew_interval_ms, &p), "poll == renew is too slow");
+        assert!(
+            !poll_fast_enough(p.renew_interval_ms, &p),
+            "poll == renew is too slow"
+        );
     }
 }

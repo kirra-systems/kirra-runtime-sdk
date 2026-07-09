@@ -51,7 +51,7 @@ use crate::state::AdaptorState;
 /// Initial reconnect delay (ms). Each successive failure doubles up to
 /// `RECONNECT_MAX_BACKOFF_MS`.
 const RECONNECT_BASE_BACKOFF_MS: u64 = 1_000;
-const RECONNECT_MAX_BACKOFF_MS:  u64 = 30_000;
+const RECONNECT_MAX_BACKOFF_MS: u64 = 30_000;
 
 /// HTTP timeout for the fleet-posture GET. Tight enough that a slow
 /// verifier doesn't stall the SSE reader for long; loose enough to
@@ -106,8 +106,7 @@ pub fn spawn_posture_source(
         loop {
             match connect_and_pump(&client, &state, &config).await {
                 Ok(()) => {
-                    tracing::warn!(
-                        "posture-source: SSE stream closed cleanly; reconnecting");
+                    tracing::warn!("posture-source: SSE stream closed cleanly; reconnecting");
                     backoff_ms = RECONNECT_BASE_BACKOFF_MS;
                 }
                 Err(e) => {
@@ -130,8 +129,12 @@ async fn connect_and_pump(
     state: &Arc<AdaptorState>,
     config: &PostureSourceConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let url = format!("{}/system/posture/stream", config.verifier_base_url.trim_end_matches('/'));
-    let response = client.get(&url)
+    let url = format!(
+        "{}/system/posture/stream",
+        config.verifier_base_url.trim_end_matches('/')
+    );
+    let response = client
+        .get(&url)
         .bearer_auth(&config.admin_token)
         .header("x-kirra-client-id", &config.client_id)
         .header("Accept", "text/event-stream")
@@ -181,8 +184,10 @@ fn find_event_terminator(buf: &[u8]) -> Option<usize> {
             return Some(i + 2);
         }
         if i + 3 < buf.len()
-            && buf[i] == b'\r' && buf[i + 1] == b'\n'
-            && buf[i + 2] == b'\r' && buf[i + 3] == b'\n'
+            && buf[i] == b'\r'
+            && buf[i + 1] == b'\n'
+            && buf[i + 2] == b'\r'
+            && buf[i + 3] == b'\n'
         {
             return Some(i + 4);
         }
@@ -196,7 +201,10 @@ async fn fetch_fleet_posture(
     client: &reqwest::Client,
     config: &PostureSourceConfig,
 ) -> Result<FleetPosture, Box<dyn std::error::Error + Send + Sync>> {
-    let url = format!("{}/fleet/posture", config.verifier_base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/fleet/posture",
+        config.verifier_base_url.trim_end_matches('/')
+    );
     let response = tokio::time::timeout(
         Duration::from_millis(FLEET_POSTURE_GET_TIMEOUT_MS),
         client.get(&url).send(),
@@ -224,13 +232,16 @@ pub(crate) fn fold_fleet_posture(body: &Value) -> FleetPosture {
     }
     let mut worst = FleetPosture::Nominal;
     for node in fleet {
-        let status = node.get("propagated_status").and_then(|v| v.as_str()).unwrap_or("");
+        let status = node
+            .get("propagated_status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let p = match status {
             "LockedOut" => FleetPosture::LockedOut,
-            "Degraded"  => FleetPosture::Degraded,
-            "Nominal"   => FleetPosture::Nominal,
+            "Degraded" => FleetPosture::Degraded,
+            "Nominal" => FleetPosture::Nominal,
             // Unknown variant string → fail-closed.
-            _           => FleetPosture::Degraded,
+            _ => FleetPosture::Degraded,
         };
         worst = worst_of(worst, p);
     }
@@ -239,11 +250,15 @@ pub(crate) fn fold_fleet_posture(body: &Value) -> FleetPosture {
 
 fn worst_of(a: FleetPosture, b: FleetPosture) -> FleetPosture {
     let rank = |p: &FleetPosture| match p {
-        FleetPosture::Nominal   => 0,
-        FleetPosture::Degraded  => 1,
+        FleetPosture::Nominal => 0,
+        FleetPosture::Degraded => 1,
         FleetPosture::LockedOut => 2,
     };
-    if rank(&a) >= rank(&b) { a } else { b }
+    if rank(&a) >= rank(&b) {
+        a
+    } else {
+        b
+    }
 }
 
 // ---------------------------------------------------------------------------

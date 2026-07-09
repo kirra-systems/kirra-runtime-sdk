@@ -62,8 +62,23 @@ impl MockCorridorSource {
     /// Both polylines have two vertices (the minimum the kernel accepts).
     pub fn straight_5m_half_width(length_m: f64) -> Self {
         Self {
-            left:  vec![Point { x_m: 0.0, y_m:  5.0 }, Point { x_m: length_m, y_m:  5.0 }],
-            right: vec![Point { x_m: 0.0, y_m: -5.0 }, Point { x_m: length_m, y_m: -5.0 }],
+            left: vec![
+                Point { x_m: 0.0, y_m: 5.0 },
+                Point {
+                    x_m: length_m,
+                    y_m: 5.0,
+                },
+            ],
+            right: vec![
+                Point {
+                    x_m: 0.0,
+                    y_m: -5.0,
+                },
+                Point {
+                    x_m: length_m,
+                    y_m: -5.0,
+                },
+            ],
             confidence: 0.95,
             age_ms: 10,
         }
@@ -78,10 +93,18 @@ impl MockCorridorSource {
 }
 
 impl CorridorSource for MockCorridorSource {
-    fn left_boundary(&self) -> &[Point]  { &self.left }
-    fn right_boundary(&self) -> &[Point] { &self.right }
-    fn confidence(&self) -> f32          { self.confidence }
-    fn age_ms(&self) -> u64              { self.age_ms }
+    fn left_boundary(&self) -> &[Point] {
+        &self.left
+    }
+    fn right_boundary(&self) -> &[Point] {
+        &self.right
+    }
+    fn confidence(&self) -> f32 {
+        self.confidence
+    }
+    fn age_ms(&self) -> u64 {
+        self.age_ms
+    }
 }
 
 // ---------------------------------------------------------------------------

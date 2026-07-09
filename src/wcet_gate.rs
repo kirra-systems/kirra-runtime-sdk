@@ -217,8 +217,7 @@ mod ci_gate_tests {
             "GOVERNOR REGRESSION-GATE (host-indicative p99.9, NOT certified WCET) {name}: \
              max={max_ns}ns ({max_us}us)  p99.9={p999_ns}ns ({p999_us}us) \
              over {ITERS} iterations  vs CI-threshold {}us  (target {}us)",
-            GOVERNOR_VERDICT_WCET_CI_THRESHOLD_MICROS,
-            GOVERNOR_VERDICT_WCET_TARGET_MICROS,
+            GOVERNOR_VERDICT_WCET_CI_THRESHOLD_MICROS, GOVERNOR_VERDICT_WCET_TARGET_MICROS,
         );
         // Gate on p99.9, not max: max in `Instant`-based microbenchmarks is
         // dominated by OS scheduler / VM-hypervisor jitter (cgroup preemption,
@@ -301,7 +300,11 @@ mod ci_gate_tests {
         // ~10 ms/cycle, so the wall-clock budget is asserted ONLY when optimized
         // (the containment-guard precedent below; the dedicated `wcet-gate` CI
         // lane runs --release and is the authoritative measurement).
-        let iters: u32 = if cfg!(debug_assertions) { 200 } else { ITERS / 10 };
+        let iters: u32 = if cfg!(debug_assertions) {
+            200
+        } else {
+            ITERS / 10
+        };
         let mut seq: u64 = 0;
         let (max_ns, p999_ns) = measure_stats(iters, || {
             seq += 1;
@@ -312,7 +315,10 @@ mod ci_gate_tests {
                 &payload.to_view(generation, seq, 0, u64::MAX / 2),
             );
             let released = govern_and_release(&mut governor, &mut actuator, &region, 0);
-            assert!(released.is_ok(), "gate loop cycle must release: {released:?}");
+            assert!(
+                released.is_ok(),
+                "gate loop cycle must release: {released:?}"
+            );
             let _ = std::hint::black_box(released);
         });
         if cfg!(not(debug_assertions)) {
@@ -354,7 +360,11 @@ mod ci_gate_tests {
                 serde_json::to_vec(std::hint::black_box(&cmd)).expect("re-serialize"),
             );
         });
-        assert_under_budget("deployed_shape::serde_deser+verdict+reserialize", max_ns, p999_ns);
+        assert_under_budget(
+            "deployed_shape::serde_deser+verdict+reserialize",
+            max_ns,
+            p999_ns,
+        );
     }
 
     #[test]
@@ -415,7 +425,11 @@ mod ci_gate_tests {
                 std::hint::black_box(&contract),
             ));
         });
-        assert_under_budget("validate_vehicle_command::P6_ClampSteering", max_ns, p999_ns);
+        assert_under_budget(
+            "validate_vehicle_command::P6_ClampSteering",
+            max_ns,
+            p999_ns,
+        );
     }
 
     #[test]
@@ -454,7 +468,7 @@ mod ci_gate_tests {
         // Degraded path stays under the same per-verdict budget.
         let mrc = VehicleKinematicsContract::mrc_fallback_profile();
         let cmd = ProposedVehicleCommand {
-            linear_velocity_mps: 4.0,   // decelerating from 4.5 → passes gate
+            linear_velocity_mps: 4.0, // decelerating from 4.5 → passes gate
             current_velocity_mps: 4.5,
             delta_time_s: 0.05,
             steering_angle_deg: 5.0,
@@ -466,7 +480,11 @@ mod ci_gate_tests {
                 std::hint::black_box(&mrc),
             ));
         });
-        assert_under_budget("enforce_degraded_decel_to_stop::pass_then_envelope", max_ns, p999_ns);
+        assert_under_budget(
+            "enforce_degraded_decel_to_stop::pass_then_envelope",
+            max_ns,
+            p999_ns,
+        );
     }
 
     #[test]
@@ -496,7 +514,7 @@ mod ci_gate_tests {
         // regression that introduces an alloc, Mutex, or unbounded loop on the
         // SG2 check would surface here.
         use crate::gateway::containment::{
-            validate_trajectory_containment, Corridor, Pose, Point, VehicleFootprint,
+            validate_trajectory_containment, Corridor, Point, Pose, VehicleFootprint,
             MAX_CORRIDOR_VERTICES, MAX_TRAJECTORY_HORIZON,
         };
         use crate::gateway::kinematics_contract::VehicleKinematicsContract;
@@ -507,10 +525,16 @@ mod ci_gate_tests {
         let x_max = 200.0;
         let dx = x_max / (n as f64 - 1.0);
         let left: Vec<Point> = (0..n)
-            .map(|i| Point { x_m: i as f64 * dx, y_m: half_w })
+            .map(|i| Point {
+                x_m: i as f64 * dx,
+                y_m: half_w,
+            })
             .collect();
         let right: Vec<Point> = (0..n)
-            .map(|i| Point { x_m: i as f64 * dx, y_m: -half_w })
+            .map(|i| Point {
+                x_m: i as f64 * dx,
+                y_m: -half_w,
+            })
             .collect();
         let corridor = Corridor {
             left: &left,
@@ -527,7 +551,8 @@ mod ci_gate_tests {
                 heading_rad: 0.0,
             })
             .collect();
-        let footprint = VehicleFootprint::from(&VehicleKinematicsContract::nominal_reference_profile());
+        let footprint =
+            VehicleFootprint::from(&VehicleKinematicsContract::nominal_reference_profile());
 
         // Slightly fewer iterations than the per-command checks because the
         // per-call work is O(poses × vertices × 4) — still plenty of samples
@@ -641,8 +666,8 @@ mod ci_gate_tests {
     fn wcet_perception_cap_read_is_o1() {
         use crate::gateway::kinematics_contract::VehicleKinematicsContract;
         use crate::gateway::perception_monitor::{
-            apply_perception_cap, empty_perception_cap, resolve_perception_cap, CachedPerceptionCap,
-            DerateCode,
+            apply_perception_cap, empty_perception_cap, resolve_perception_cap,
+            CachedPerceptionCap, DerateCode,
         };
         // The per-command hot-path addition: resolve (one RwLock read + staleness
         // compare) + apply (clone + one min). Must stay under the PER-COMMAND

@@ -58,7 +58,9 @@ fn main() -> ExitCode {
         println!("session replays DETERMINISTICALLY (bit-identical verdicts)");
         ExitCode::SUCCESS
     } else {
-        eprintln!("REPLAY DIVERGENCE — the recorded session does not reproduce under this build/class");
+        eprintln!(
+            "REPLAY DIVERGENCE — the recorded session does not reproduce under this build/class"
+        );
         ExitCode::from(1)
     }
 }

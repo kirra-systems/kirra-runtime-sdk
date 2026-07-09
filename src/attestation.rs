@@ -223,8 +223,9 @@ pub const OPERATOR_GRANT_DOMAIN: &[u8] = b"KIRRA-OPERATOR-GRANT-v1";
 /// in-browser flow never loses precision on a > 2^53 value).
 #[must_use]
 pub fn operator_grant_signing_payload(operator_id: &str, node_id: &str, nonce: &str) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(OPERATOR_GRANT_DOMAIN.len() + 24
-        + operator_id.len() + node_id.len() + nonce.len());
+    let mut payload = Vec::with_capacity(
+        OPERATOR_GRANT_DOMAIN.len() + 24 + operator_id.len() + node_id.len() + nonce.len(),
+    );
     payload.extend_from_slice(OPERATOR_GRANT_DOMAIN);
     for field in [operator_id, node_id, nonce] {
         let b = field.as_bytes();
@@ -249,8 +250,9 @@ pub const OPERATOR_STOP_DOMAIN: &[u8] = b"KIRRA-OPERATOR-ESTOP-v1";
 /// identically.
 #[must_use]
 pub fn operator_stop_signing_payload(operator_id: &str, node_id: &str, nonce: &str) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(OPERATOR_STOP_DOMAIN.len() + 24
-        + operator_id.len() + node_id.len() + nonce.len());
+    let mut payload = Vec::with_capacity(
+        OPERATOR_STOP_DOMAIN.len() + 24 + operator_id.len() + node_id.len() + nonce.len(),
+    );
     payload.extend_from_slice(OPERATOR_STOP_DOMAIN);
     for field in [operator_id, node_id, nonce] {
         let b = field.as_bytes();
@@ -296,11 +298,14 @@ pub fn adoption_report_signing_payload(
 /// return `false`. Uses `verify_strict` (the same path as node attestation).
 #[must_use]
 pub fn verify_ed25519_pem_signature(pem: &str, payload: &[u8], signature_bytes: &[u8]) -> bool {
-    let Some(vk) = parse_ed25519_public_pem(pem) else { return false };
+    let Some(vk) = parse_ed25519_public_pem(pem) else {
+        return false;
+    };
     let Ok(sig_array) = <[u8; ED25519_SIGNATURE_LEN]>::try_from(signature_bytes) else {
         return false;
     };
-    vk.verify_strict(payload, &Signature::from_bytes(&sig_array)).is_ok()
+    vk.verify_strict(payload, &Signature::from_bytes(&sig_array))
+        .is_ok()
 }
 
 /// A short, stable fingerprint for a PEM-encoded Ed25519 public key — the
@@ -387,7 +392,8 @@ pub fn verify_attestation_proof_with_pcr16(
 
     // The signature must cover the presented digest (when one is presented), so a
     // valid proof AUTHENTICATES the digest under the AK — not just the challenge.
-    let payload = attestation_signing_payload_with_pcr16(node_id, nonce, presented_pcr16_digest_hex);
+    let payload =
+        attestation_signing_payload_with_pcr16(node_id, nonce, presented_pcr16_digest_hex);
     verifying_key
         .verify_strict(&payload, &signature)
         .map_err(|_| AttestationError::SignatureInvalid)?;
@@ -422,9 +428,18 @@ mod tests {
     fn stop_and_grant_payloads_are_domain_separated() {
         let g = operator_grant_signing_payload("alice", "robot-01", "deadbeef");
         let s = operator_stop_signing_payload("alice", "robot-01", "deadbeef");
-        assert_ne!(g, s, "stop and grant payloads must not collide for the same inputs");
-        assert!(s.starts_with(OPERATOR_STOP_DOMAIN), "stop payload carries its own domain tag");
-        assert!(g.starts_with(OPERATOR_GRANT_DOMAIN), "grant payload carries its own domain tag");
+        assert_ne!(
+            g, s,
+            "stop and grant payloads must not collide for the same inputs"
+        );
+        assert!(
+            s.starts_with(OPERATOR_STOP_DOMAIN),
+            "stop payload carries its own domain tag"
+        );
+        assert!(
+            g.starts_with(OPERATOR_GRANT_DOMAIN),
+            "grant payload carries its own domain tag"
+        );
     }
 
     /// Per-call counter mixed into the seed so two keypairs created in the
@@ -441,7 +456,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0xDEAD_BEEF);
-        let mut state = nanos ^ SEED_COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x2545_F491_4F6C_DD1D);
+        let mut state = nanos
+            ^ SEED_COUNTER
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_mul(0x2545_F491_4F6C_DD1D);
         let mut seed = [0u8; 32];
         for chunk in seed.chunks_mut(8) {
             state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -495,7 +513,14 @@ mod tests {
         let pem = public_key_to_pem(&sk.verifying_key());
         let proof = sign_proof_with_pcr16(&sk, "node-a", 7, Some(PCR16_X));
         assert_eq!(
-            verify_attestation_proof_with_pcr16(Some(&pem), "node-a", 7, &proof, Some(PCR16_X), Some(PCR16_X)),
+            verify_attestation_proof_with_pcr16(
+                Some(&pem),
+                "node-a",
+                7,
+                &proof,
+                Some(PCR16_X),
+                Some(PCR16_X)
+            ),
             Ok(())
         );
     }
@@ -508,7 +533,14 @@ mod tests {
         let pem = public_key_to_pem(&sk.verifying_key());
         let proof = sign_proof_with_pcr16(&sk, "node-a", 7, Some(PCR16_Y));
         assert_eq!(
-            verify_attestation_proof_with_pcr16(Some(&pem), "node-a", 7, &proof, Some(PCR16_X), Some(PCR16_Y)),
+            verify_attestation_proof_with_pcr16(
+                Some(&pem),
+                "node-a",
+                7,
+                &proof,
+                Some(PCR16_X),
+                Some(PCR16_Y)
+            ),
             Err(AttestationError::Pcr16Mismatch)
         );
     }
@@ -521,7 +553,14 @@ mod tests {
         let pem = public_key_to_pem(&sk.verifying_key());
         let proof = sign_proof(&sk, "node-a", 7); // valid v1 signature, no digest
         assert_eq!(
-            verify_attestation_proof_with_pcr16(Some(&pem), "node-a", 7, &proof, Some(PCR16_X), None),
+            verify_attestation_proof_with_pcr16(
+                Some(&pem),
+                "node-a",
+                7,
+                &proof,
+                Some(PCR16_X),
+                None
+            ),
             Err(AttestationError::Pcr16Mismatch)
         );
     }
@@ -536,7 +575,14 @@ mod tests {
         let pem = public_key_to_pem(&sk.verifying_key());
         let proof = sign_proof(&sk, "node-a", 7); // signs the BASE payload only
         assert_eq!(
-            verify_attestation_proof_with_pcr16(Some(&pem), "node-a", 7, &proof, Some(PCR16_X), Some(PCR16_X)),
+            verify_attestation_proof_with_pcr16(
+                Some(&pem),
+                "node-a",
+                7,
+                &proof,
+                Some(PCR16_X),
+                Some(PCR16_X)
+            ),
             Err(AttestationError::SignatureInvalid)
         );
     }
@@ -553,7 +599,10 @@ mod tests {
             Ok(())
         );
         // The 4-arg path is exactly this case.
-        assert_eq!(verify_attestation_proof(Some(&pem), "node-a", 7, &proof), Ok(()));
+        assert_eq!(
+            verify_attestation_proof(Some(&pem), "node-a", 7, &proof),
+            Ok(())
+        );
         // And the bound payload with no digest equals the v1 payload byte-for-byte.
         assert_eq!(
             attestation_signing_payload_with_pcr16("node-a", 7, None),
@@ -569,7 +618,14 @@ mod tests {
         let pem = public_key_to_pem(&sk.verifying_key());
         let proof = sign_proof_with_pcr16(&sk, "node-a", 7, Some(PCR16_X));
         assert_eq!(
-            verify_attestation_proof_with_pcr16(Some(&pem), "node-a", 7, &proof, None, Some(PCR16_X)),
+            verify_attestation_proof_with_pcr16(
+                Some(&pem),
+                "node-a",
+                7,
+                &proof,
+                None,
+                Some(PCR16_X)
+            ),
             Ok(())
         );
     }
@@ -653,12 +709,22 @@ mod tests {
         let sk = ephemeral_signing_key();
         let proof = sign_proof(&sk, "node-a", 42);
         assert_eq!(
-            verify_attestation_proof(Some("-----BEGIN PUBLIC KEY-----\nnot-base64!!\n-----END PUBLIC KEY-----"), "node-a", 42, &proof),
+            verify_attestation_proof(
+                Some("-----BEGIN PUBLIC KEY-----\nnot-base64!!\n-----END PUBLIC KEY-----"),
+                "node-a",
+                42,
+                &proof
+            ),
             Err(AttestationError::MalformedRegisteredKey)
         );
         // A syntactically-valid-but-wrong-algorithm / truncated DER also fails.
         assert_eq!(
-            verify_attestation_proof(Some("-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"), "node-a", 42, &proof),
+            verify_attestation_proof(
+                Some("-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"),
+                "node-a",
+                42,
+                &proof
+            ),
             Err(AttestationError::MalformedRegisteredKey)
         );
     }

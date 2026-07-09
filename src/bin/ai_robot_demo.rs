@@ -1,9 +1,9 @@
 // src/bin/ai_robot_demo.rs
 // Demonstrates the Kirra AI robot safety pipeline with CDR-framed DDS output.
 
+use kirra_verifier::dds_bridge::{DdsPublisherBridge, DdsQosProfile};
 use kirra_verifier::kinematics_contract::KinematicContract;
 use kirra_verifier::robotics_alignment::AlignmentBridge;
-use kirra_verifier::dds_bridge::{DdsPublisherBridge, DdsQosProfile};
 
 fn main() {
     let contract = KinematicContract {

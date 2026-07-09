@@ -45,8 +45,9 @@ const G_MPS2: f64 = 9.806_65;
 /// prefix the verifier service constructs, so `verify_ed25519_pem_signature` and
 /// `operator_key_fingerprint` accept it).
 fn operator_keypair(seed: u8) -> (SigningKey, String) {
-    const ED25519_SPKI_PREFIX: [u8; 12] =
-        [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+    const ED25519_SPKI_PREFIX: [u8; 12] = [
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
     let sk = SigningKey::from_bytes(&[seed; 32]);
     let mut der = ED25519_SPKI_PREFIX.to_vec();
     der.extend_from_slice(sk.verifying_key().as_bytes());
@@ -81,12 +82,17 @@ fn escalated_loop() -> ClearanceLoop {
     let cfg = ImpactCfg::default();
     l.observe(&ev, &cfg, 0); // Normal -> Latched
     l.observe(&ev, &cfg, 0); // Latched -> EscalationRaised
-    assert!(l.is_immobilized() && l.escalation_pending(), "SG6 must be immobilized");
+    assert!(
+        l.is_immobilized() && l.escalation_pending(),
+        "SG6 must be immobilized"
+    );
     l
 }
 
 fn audit_chain(store: &StoreHandle, vk: &VerifyingKey) -> AuditExportPage {
-    store.with(|s| s.load_audit_chain_page(500, 0, Some(vk))).unwrap()
+    store
+        .with(|s| s.load_audit_chain_page(500, 0, Some(vk)))
+        .unwrap()
 }
 
 // --------------------------------------------------------------------------
@@ -106,7 +112,9 @@ fn sg6_latch_to_operator_signed_grant_to_phase_b_clears_motion() {
     // 2. The operator PROVES identity (#314 verify-THEN-consume), then the grant is
     //    recorded through the real Phase-A store path.
     let (op_sk, op_pem) = operator_keypair(42);
-    store.with(|s| s.register_operator(operator, &op_pem, 1)).unwrap();
+    store
+        .with(|s| s.register_operator(operator, &op_pem, 1))
+        .unwrap();
     assert!(
         store.with(|s| s.load_operator(operator)).unwrap().is_some(),
         "operator is registered"
@@ -129,7 +137,10 @@ fn sg6_latch_to_operator_signed_grant_to_phase_b_clears_motion() {
 
     // Verify-THEN-consume: the nonce is single-use. A replay of the SAME nonce is
     // rejected — the #314/#322 replay defense, here at the console lane.
-    assert!(app.consume_clearance_challenge(&key, nonce, now), "first consume succeeds");
+    assert!(
+        app.consume_clearance_challenge(&key, nonce, now),
+        "first consume succeeds"
+    );
     assert!(
         !app.consume_clearance_challenge(&key, nonce, now),
         "the nonce is single-use — a replay is rejected"
@@ -139,7 +150,15 @@ fn sg6_latch_to_operator_signed_grant_to_phase_b_clears_motion() {
     // audit event naming WHICH operator key cleared it (non-repudiation).
     let fingerprint = operator_key_fingerprint(&op_pem);
     let rowid = store
-        .with(|s| s.save_clearance_grant_chained_with_auth(node, operator, now, "operator-signed", fingerprint.as_deref()))
+        .with(|s| {
+            s.save_clearance_grant_chained_with_auth(
+                node,
+                operator,
+                now,
+                "operator-signed",
+                fingerprint.as_deref(),
+            )
+        })
         .unwrap();
     assert!(rowid > 0, "Phase-A recorded the grant");
 
@@ -147,13 +166,26 @@ fn sg6_latch_to_operator_signed_grant_to_phase_b_clears_motion() {
     //    motion resumes. Same co-located store; within the grant-age window.
     let delivery = ClearanceDelivery::new(store.clone(), node);
     match delivery.poll_and_deliver(&mut sg6, now + 500) {
-        DeliveryOutcome::Cleared { operator_id, grant_rowid } => {
-            assert_eq!(operator_id, operator, "the clearing operator is carried through");
-            assert_eq!(grant_rowid, rowid, "the delivered grant is the recorded row");
+        DeliveryOutcome::Cleared {
+            operator_id,
+            grant_rowid,
+        } => {
+            assert_eq!(
+                operator_id, operator,
+                "the clearing operator is carried through"
+            );
+            assert_eq!(
+                grant_rowid, rowid,
+                "the delivered grant is the recorded row"
+            );
         }
         other => panic!("expected Cleared, got {other:?}"),
     }
-    assert_eq!(sg6.state(), ClearanceState::Normal, "the loop cleared to Normal");
+    assert_eq!(
+        sg6.state(),
+        ClearanceState::Normal,
+        "the loop cleared to Normal"
+    );
     assert!(!sg6.is_immobilized(), "motion resumes");
 
     // 4. One-shot — the grant is consumed; a second delivery finds nothing (no
@@ -168,13 +200,25 @@ fn sg6_latch_to_operator_signed_grant_to_phase_b_clears_motion() {
     //    key and carries both the operator-signed grant AND the delivery, each with a
     //    VALID signature.
     let page = audit_chain(&store, &vk);
-    assert!(page.chain_intact, "the audit hash-chain is intact under the signing key");
+    assert!(
+        page.chain_intact,
+        "the audit hash-chain is intact under the signing key"
+    );
     let find = |et: &str| page.entries.iter().find(|e| e.event_type == et);
     let issued = find("OperatorClearanceGrantIssued").expect("grant issuance is audited");
     let delivered = find("ClearanceDelivered").expect("delivery is audited");
-    assert_eq!(issued.signature_status, "valid", "grant event is signed + valid");
-    assert_eq!(delivered.signature_status, "valid", "delivery event is signed + valid");
-    assert!(issued.payload.contains(operator), "the grant event names the operator");
+    assert_eq!(
+        issued.signature_status, "valid",
+        "grant event is signed + valid"
+    );
+    assert_eq!(
+        delivered.signature_status, "valid",
+        "delivery event is signed + valid"
+    );
+    assert!(
+        issued.payload.contains(operator),
+        "the grant event names the operator"
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -194,21 +238,40 @@ fn operator_signed_grant_stale_at_delivery_is_rejected_two_checkpoint() {
     let mut sg6 = escalated_loop();
 
     let (_op_sk, op_pem) = operator_keypair(11);
-    store.with(|s| s.register_operator(operator, &op_pem, 1)).unwrap();
+    store
+        .with(|s| s.register_operator(operator, &op_pem, 1))
+        .unwrap();
     let granted = 1_000_000u64;
     let fingerprint = operator_key_fingerprint(&op_pem);
     store
-        .with(|s| s.save_clearance_grant_chained_with_auth(node, operator, granted, "operator-signed", fingerprint.as_deref()))
+        .with(|s| {
+            s.save_clearance_grant_chained_with_auth(
+                node,
+                operator,
+                granted,
+                "operator-signed",
+                fingerprint.as_deref(),
+            )
+        })
         .unwrap();
 
     let delivery = ClearanceDelivery::new(store.clone(), node);
     let stale_now = granted + DEFAULT_MAX_GRANT_AGE_MS + 1;
     let out = delivery.poll_and_deliver(&mut sg6, stale_now);
     assert!(
-        matches!(out, DeliveryOutcome::Rejected { reason: "malformed_grant", .. }),
+        matches!(
+            out,
+            DeliveryOutcome::Rejected {
+                reason: "malformed_grant",
+                ..
+            }
+        ),
         "a verifier-accepted grant is still rejected at delivery if stale; got {out:?}"
     );
-    assert!(sg6.is_immobilized(), "the loop stays immobilized after a stale grant");
+    assert!(
+        sg6.is_immobilized(),
+        "the loop stays immobilized after a stale grant"
+    );
     assert_eq!(
         delivery.poll_and_deliver(&mut sg6, stale_now + 1),
         DeliveryOutcome::NoGrant,
@@ -245,8 +308,14 @@ fn per_class_impact_profile_pins_321_deviation_contract() {
     // standard gravity. That is only safe because the field is a deviation (`|‖a‖−G|`)
     // — under the OLD raw-norm convention a sub-gravity threshold false-latched a
     // parked vehicle on gravity alone (the #321 bug). Still above the 1.0 noise floor.
-    assert!(courier.spike_threshold_mps2 < G_MPS2, "courier threshold is sub-gravity (deviation units)");
-    assert!(courier.spike_threshold_mps2 > 1.0, "courier threshold is above the noise floor");
+    assert!(
+        courier.spike_threshold_mps2 < G_MPS2,
+        "courier threshold is sub-gravity (deviation units)"
+    );
+    assert!(
+        courier.spike_threshold_mps2 > 1.0,
+        "courier threshold is above the noise floor"
+    );
 
     // A STATIC vehicle (deviation ≈ 0) never fuses an impact for ANY class.
     let at_rest = ImpactEvidence {
@@ -254,9 +323,18 @@ fn per_class_impact_profile_pins_321_deviation_contract() {
         contact_sensor: false,
         vanished_object: false,
     };
-    assert!(!is_impact(&at_rest, &courier), "a parked courier never latches at rest");
-    assert!(!is_impact(&at_rest, &delivery), "a parked delivery-av never latches at rest");
-    assert!(!is_impact(&at_rest, &robotaxi), "a parked robotaxi never latches at rest");
+    assert!(
+        !is_impact(&at_rest, &courier),
+        "a parked courier never latches at rest"
+    );
+    assert!(
+        !is_impact(&at_rest, &delivery),
+        "a parked delivery-av never latches at rest"
+    );
+    assert!(
+        !is_impact(&at_rest, &robotaxi),
+        "a parked robotaxi never latches at rest"
+    );
 
     // SAME physical deviation, DIFFERENT verdict by class: a 3.0 m/s² deviation is a
     // sidewalk-collision-grade event for a courier but well within a robotaxi's /
@@ -266,7 +344,16 @@ fn per_class_impact_profile_pins_321_deviation_contract() {
         contact_sensor: false,
         vanished_object: false,
     };
-    assert!(is_impact(&small, &courier), "3.0 deviation latches a courier (> 2.5)");
-    assert!(!is_impact(&small, &delivery), "3.0 deviation is within a delivery-av (< 8.0)");
-    assert!(!is_impact(&small, &robotaxi), "3.0 deviation is within a robotaxi (< 22.0)");
+    assert!(
+        is_impact(&small, &courier),
+        "3.0 deviation latches a courier (> 2.5)"
+    );
+    assert!(
+        !is_impact(&small, &delivery),
+        "3.0 deviation is within a delivery-av (< 8.0)"
+    );
+    assert!(
+        !is_impact(&small, &robotaxi),
+        "3.0 deviation is within a robotaxi (< 22.0)"
+    );
 }

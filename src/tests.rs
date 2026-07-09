@@ -1,15 +1,15 @@
 // src/tests.rs
 
-use crate::kirra_core::{KirraKernelGovernor, ContractProfile};
-use crate::kinematics_contract::KinematicContract;
-use crate::{AgentAction, ActionResolution};
 use crate::action_filter::ActionFilter;
 use crate::action_policy::UnstructuredTextParser;
-use crate::ros2_adapter::Ros2Adapter;
-use crate::robotics_alignment::AlignmentBridge;
 use crate::dds_bridge::DdsPublisherBridge;
-use crate::SafetyGovernor;
+use crate::kinematics_contract::KinematicContract;
+use crate::kirra_core::{ContractProfile, KirraKernelGovernor};
+use crate::robotics_alignment::AlignmentBridge;
+use crate::ros2_adapter::Ros2Adapter;
 use crate::verifier::{AppState, FleetPosture, NodeTrustState, RegisteredNode};
+use crate::SafetyGovernor;
+use crate::{ActionResolution, AgentAction};
 
 fn generate_valid_test_profile() -> ContractProfile {
     ContractProfile {
@@ -42,7 +42,7 @@ fn test_unrestricted_autonomy_envelope_limit_clamping() {
 
 fn velocity_contract() -> KinematicContract {
     KinematicContract {
-        max_linear_velocity: 2.0,     // symmetric envelope ±2.0
+        max_linear_velocity: 2.0, // symmetric envelope ±2.0
         max_angular_velocity: 0.5,
         max_linear_acceleration: 0.1,
         fallback_linear_speed: 0.0,
@@ -65,8 +65,14 @@ fn test_degraded_refuses_speed_increase_holds_current() {
     // would admit 1.8 — a speed INCREASE in Degraded. Decel-to-stop holds at 1.0.
     let mut gov = degraded_velocity_governor(1.0);
     let res = gov.evaluate(1.8, 1.0);
-    assert_eq!(res.sanitized_scalar, 1.0, "Degraded must not author a speed increase");
-    assert!(matches!(res.mitigation, crate::MitigationCode::DegradedDecelToStopHold { .. }));
+    assert_eq!(
+        res.sanitized_scalar, 1.0,
+        "Degraded must not author a speed increase"
+    );
+    assert!(matches!(
+        res.mitigation,
+        crate::MitigationCode::DegradedDecelToStopHold { .. }
+    ));
 }
 
 #[test]
@@ -74,7 +80,10 @@ fn test_degraded_admits_deceleration() {
     // Moving at 1.5, planner demands 0.5 — a decelerating command is admitted.
     let mut gov = degraded_velocity_governor(1.5);
     let res = gov.evaluate(0.5, 1.0);
-    assert_eq!(res.sanitized_scalar, 0.5, "a decelerating command must pass under Degraded");
+    assert_eq!(
+        res.sanitized_scalar, 0.5,
+        "a decelerating command must pass under Degraded"
+    );
 }
 
 #[test]
@@ -83,8 +92,14 @@ fn test_degraded_refuses_reinitiation_from_stop() {
     // Decel-to-stop HOLDs at the stop.
     let mut gov = degraded_velocity_governor(0.0);
     let res = gov.evaluate(1.5, 1.0);
-    assert_eq!(res.sanitized_scalar, 0.0, "Degraded must not re-initiate motion from a stop");
-    assert!(matches!(res.mitigation, crate::MitigationCode::DegradedDecelToStopHold { .. }));
+    assert_eq!(
+        res.sanitized_scalar, 0.0,
+        "Degraded must not re-initiate motion from a stop"
+    );
+    assert!(matches!(
+        res.mitigation,
+        crate::MitigationCode::DegradedDecelToStopHold { .. }
+    ));
 }
 
 #[test]
@@ -93,8 +108,14 @@ fn test_degraded_refuses_reversal_through_zero() {
     // keeps the current sign — no reversal — at non-increasing magnitude.
     let mut gov = degraded_velocity_governor(1.5);
     let res = gov.evaluate(-1.5, 1.0);
-    assert_eq!(res.sanitized_scalar, 1.5, "Degraded must not reverse direction through a stop");
-    assert!(matches!(res.mitigation, crate::MitigationCode::DegradedDecelToStopHold { .. }));
+    assert_eq!(
+        res.sanitized_scalar, 1.5,
+        "Degraded must not reverse direction through a stop"
+    );
+    assert!(matches!(
+        res.mitigation,
+        crate::MitigationCode::DegradedDecelToStopHold { .. }
+    ));
 }
 
 #[test]
@@ -107,7 +128,10 @@ fn test_nonfinite_initial_scalar_is_normalized_to_finite() {
         gov.last_validated_scalar.is_finite(),
         "non-finite initial_scalar must be normalized to a finite value"
     );
-    assert_eq!(gov.last_validated_scalar, velocity_contract().fallback_linear_speed);
+    assert_eq!(
+        gov.last_validated_scalar,
+        velocity_contract().fallback_linear_speed
+    );
 
     // A Degraded tick must therefore emit a finite setpoint, not NaN.
     gov.trust_engine.decay_trust(30); // -> ConstrainedAdvisory (Degraded)
@@ -141,7 +165,9 @@ fn test_action_filter_leverages_dynamic_contract_angular_bounds() {
     let mut gov = KirraKernelGovernor::new(contract, 0.0, -0.5, 0.5);
     let filter = ActionFilter::new(contract);
 
-    let over_rotation = AgentAction::Rotate { angular_velocity: 0.8 };
+    let over_rotation = AgentAction::Rotate {
+        angular_velocity: 0.8,
+    };
     let output = filter.process_agent_intent(&mut gov, over_rotation, 1.0);
     assert_eq!(output.resolution, ActionResolution::Rejected);
 }
@@ -184,11 +210,16 @@ fn test_startup_sentinel_trusted_when_tpm_feature_absent() {
     #[cfg(not(feature = "tpm"))]
     {
         use crate::startup_sentinel::{StartupSentinel, StartupTrustState};
-        assert_eq!(StartupSentinel::verify_hardware_root(), StartupTrustState::Trusted);
+        assert_eq!(
+            StartupSentinel::verify_hardware_root(),
+            StartupTrustState::Trusted
+        );
     }
     // With the tpm feature this path is exercised by the live swtpm test below.
     #[cfg(feature = "tpm")]
-    { let _ = (); }
+    {
+        let _ = ();
+    }
 }
 
 #[cfg(feature = "tpm")]
@@ -197,23 +228,30 @@ fn test_startup_sentinel_trusted_with_live_swtpm() {
     // Requires: TSS2_TCTI=swtpm:host=127.0.0.1,port=2321
     use crate::startup_sentinel::{StartupSentinel, StartupTrustState};
     let state = StartupSentinel::verify_hardware_root();
-    assert_eq!(state, StartupTrustState::Trusted,
-        "expected Trusted from swtpm — is TSS2_TCTI set and swtpm running? got: {:?}", state);
+    assert_eq!(
+        state,
+        StartupTrustState::Trusted,
+        "expected Trusted from swtpm — is TSS2_TCTI set and swtpm running? got: {:?}",
+        state
+    );
 }
 
 // --- Verifier engine tests ---------------------------------------------------
 
 fn make_node(state: &AppState, id: &str, status: NodeTrustState) {
-    state.nodes.insert(id.to_string(), RegisteredNode {
-        node_id: id.to_string(),
-        status,
-        registered_at_ms: 0,
-        last_trust_update_ms: 0,
-        ak_public_pem: None,
-        expected_pcr16_digest_hex: None,
-        site: None,
-        firmware_version: None,
-    });
+    state.nodes.insert(
+        id.to_string(),
+        RegisteredNode {
+            node_id: id.to_string(),
+            status,
+            registered_at_ms: 0,
+            last_trust_update_ms: 0,
+            ak_public_pem: None,
+            expected_pcr16_digest_hex: None,
+            site: None,
+            firmware_version: None,
+        },
+    );
 }
 
 #[test]
@@ -222,15 +260,29 @@ fn test_posture_diamond_dag_not_misidentified_as_cycle() {
     // The old single-set algorithm incorrectly returned LockedOut/INVALID_GRAPH_CONFIG
     // the second time D was encountered. The gray/black two-set algorithm memoizes D
     // on first completion and returns the cached result on the second visit.
-    let state = AppState::new(crate::verifier_store::VerifierStore::new(":memory:").unwrap(), crate::verifier::VerifierOperationMode::Active);
-    for id in ["A", "B", "C", "D"] { make_node(&state, id, NodeTrustState::Trusted); }
-    state.dependency_graph.insert("A".to_string(), vec!["B".to_string(), "C".to_string()]);
-    state.dependency_graph.insert("B".to_string(), vec!["D".to_string()]);
-    state.dependency_graph.insert("C".to_string(), vec!["D".to_string()]);
+    let state = AppState::new(
+        crate::verifier_store::VerifierStore::new(":memory:").unwrap(),
+        crate::verifier::VerifierOperationMode::Active,
+    );
+    for id in ["A", "B", "C", "D"] {
+        make_node(&state, id, NodeTrustState::Trusted);
+    }
+    state
+        .dependency_graph
+        .insert("A".to_string(), vec!["B".to_string(), "C".to_string()]);
+    state
+        .dependency_graph
+        .insert("B".to_string(), vec!["D".to_string()]);
+    state
+        .dependency_graph
+        .insert("C".to_string(), vec!["D".to_string()]);
 
     let posture = state.calculate_posture("A");
-    assert_eq!(posture.propagated_status, FleetPosture::Nominal,
-        "diamond DAG should resolve to Nominal, not be misidentified as a cycle");
+    assert_eq!(
+        posture.propagated_status,
+        FleetPosture::Nominal,
+        "diamond DAG should resolve to Nominal, not be misidentified as a cycle"
+    );
     assert!(posture.blocked_by.is_empty());
 }
 
@@ -253,10 +305,14 @@ fn test_posture_deep_acyclic_chain_is_not_depth_locked_out() {
             crate::verifier::VerifierOperationMode::Active,
         );
         let ids: Vec<String> = (0..N).map(|i| format!("A{i}")).collect();
-        for id in &ids { make_node(&state, id, NodeTrustState::Trusted); }
+        for id in &ids {
+            make_node(&state, id, NodeTrustState::Trusted);
+        }
         // Chain edges A_i → A_{i+1}.
         for i in 0..N - 1 {
-            state.dependency_graph.insert(ids[i].clone(), vec![ids[i + 1].clone()]);
+            state
+                .dependency_graph
+                .insert(ids[i].clone(), vec![ids[i + 1].clone()]);
         }
         // A0 also depends directly on the deepest node — the diamond shortcut that
         // makes A14 reachable at two very different depths. Vary the edge order so a
@@ -281,33 +337,59 @@ fn test_posture_deep_acyclic_chain_is_not_depth_locked_out() {
 #[test]
 fn test_posture_cycle_returns_locked_out_with_diagnostic_tag() {
     // A→B→A: genuine cycle — must lock out and tag with INVALID_GRAPH_CONFIG.
-    let state = AppState::new(crate::verifier_store::VerifierStore::new(":memory:").unwrap(), crate::verifier::VerifierOperationMode::Active);
-    for id in ["A", "B"] { make_node(&state, id, NodeTrustState::Trusted); }
-    state.dependency_graph.insert("A".to_string(), vec!["B".to_string()]);
-    state.dependency_graph.insert("B".to_string(), vec!["A".to_string()]);
+    let state = AppState::new(
+        crate::verifier_store::VerifierStore::new(":memory:").unwrap(),
+        crate::verifier::VerifierOperationMode::Active,
+    );
+    for id in ["A", "B"] {
+        make_node(&state, id, NodeTrustState::Trusted);
+    }
+    state
+        .dependency_graph
+        .insert("A".to_string(), vec!["B".to_string()]);
+    state
+        .dependency_graph
+        .insert("B".to_string(), vec!["A".to_string()]);
 
     let posture = state.calculate_posture("A");
-    assert_eq!(posture.propagated_status, FleetPosture::LockedOut,
-        "cycle must produce LockedOut");
+    assert_eq!(
+        posture.propagated_status,
+        FleetPosture::LockedOut,
+        "cycle must produce LockedOut"
+    );
     // The INVALID_GRAPH_CONFIG tag appears on the synthetic back-edge return inside
     // the recursion (B's view of A). A's top-level result carries blocked_by: ["B"],
     // which is the accurate causal chain. Either form confirms the cycle was detected.
-    assert!(!posture.blocked_by.is_empty(),
-        "cycle must produce a non-empty blocked_by chain");
+    assert!(
+        !posture.blocked_by.is_empty(),
+        "cycle must produce a non-empty blocked_by chain"
+    );
 }
 
 #[test]
 fn test_posture_locked_out_dep_propagates_locked_out_not_degraded() {
     // Parent is Trusted but its dependency is Untrusted (LockedOut).
     // The propagated status must be LockedOut, not softened to Degraded.
-    let state = AppState::new(crate::verifier_store::VerifierStore::new(":memory:").unwrap(), crate::verifier::VerifierOperationMode::Active);
+    let state = AppState::new(
+        crate::verifier_store::VerifierStore::new(":memory:").unwrap(),
+        crate::verifier::VerifierOperationMode::Active,
+    );
     make_node(&state, "parent", NodeTrustState::Trusted);
-    make_node(&state, "dep", NodeTrustState::Untrusted("compromised".to_string()));
-    state.dependency_graph.insert("parent".to_string(), vec!["dep".to_string()]);
+    make_node(
+        &state,
+        "dep",
+        NodeTrustState::Untrusted("compromised".to_string()),
+    );
+    state
+        .dependency_graph
+        .insert("parent".to_string(), vec!["dep".to_string()]);
 
     let posture = state.calculate_posture("parent");
-    assert_eq!(posture.propagated_status, FleetPosture::LockedOut,
-        "LockedOut dependency must propagate LockedOut to parent, not be softened to Degraded");
+    assert_eq!(
+        posture.propagated_status,
+        FleetPosture::LockedOut,
+        "LockedOut dependency must propagate LockedOut to parent, not be softened to Degraded"
+    );
     assert!(posture.blocked_by.iter().any(|s| &**s == "dep"));
 }
 
@@ -330,59 +412,134 @@ fn make_cache(status: FleetPosture, age_ms: u64) -> (Option<CachedFleetPosture>,
 
 #[test]
 fn test_classify_get_paths_are_read_telemetry() {
-    assert_eq!(classify_http_command("GET", "/metrics/cpu"),       OperationalCommand::ReadTelemetry);
-    assert_eq!(classify_http_command("GET", "/telemetry/joints"),  OperationalCommand::ReadTelemetry);
-    assert_eq!(classify_http_command("GET", "/health/live"),       OperationalCommand::ReadTelemetry);
+    assert_eq!(
+        classify_http_command("GET", "/metrics/cpu"),
+        OperationalCommand::ReadTelemetry
+    );
+    assert_eq!(
+        classify_http_command("GET", "/telemetry/joints"),
+        OperationalCommand::ReadTelemetry
+    );
+    assert_eq!(
+        classify_http_command("GET", "/health/live"),
+        OperationalCommand::ReadTelemetry
+    );
     // Unknown GET paths are still reads — HTTP semantics prohibit side effects.
-    assert_eq!(classify_http_command("GET", "/unknown/path"),      OperationalCommand::ReadTelemetry);
+    assert_eq!(
+        classify_http_command("GET", "/unknown/path"),
+        OperationalCommand::ReadTelemetry
+    );
 }
 
 #[test]
 fn test_classify_actuator_and_control_are_write_state() {
-    assert_eq!(classify_http_command("POST", "/actuator/servo"),   OperationalCommand::WriteState);
-    assert_eq!(classify_http_command("PUT",  "/actuator/valve"),   OperationalCommand::WriteState);
-    assert_eq!(classify_http_command("POST", "/cmd_vel"),          OperationalCommand::WriteState);
+    assert_eq!(
+        classify_http_command("POST", "/actuator/servo"),
+        OperationalCommand::WriteState
+    );
+    assert_eq!(
+        classify_http_command("PUT", "/actuator/valve"),
+        OperationalCommand::WriteState
+    );
+    assert_eq!(
+        classify_http_command("POST", "/cmd_vel"),
+        OperationalCommand::WriteState
+    );
     // #69 / SG-006: `/control/arm` is NOT a registered route and NOT on the
     // write-path allowlist, so it now classifies as Unknown (denied in all
     // postures) rather than silently riding the old catch-all into WriteState.
-    assert_eq!(classify_http_command("POST", "/control/arm"),      OperationalCommand::Unknown);
+    assert_eq!(
+        classify_http_command("POST", "/control/arm"),
+        OperationalCommand::Unknown
+    );
 }
 
 #[test]
 fn test_classify_system_mutations() {
-    assert_eq!(classify_http_command("POST",   "/firmware/update"), OperationalCommand::SystemMutation);
-    assert_eq!(classify_http_command("POST",   "/reboot"),          OperationalCommand::SystemMutation);
-    assert_eq!(classify_http_command("PUT",    "/config/network"),  OperationalCommand::SystemMutation);
-    assert_eq!(classify_http_command("DELETE", "/nodes/abc"),       OperationalCommand::SystemMutation);
-    assert_eq!(classify_http_command("DELETE", "/"),                OperationalCommand::SystemMutation);
+    assert_eq!(
+        classify_http_command("POST", "/firmware/update"),
+        OperationalCommand::SystemMutation
+    );
+    assert_eq!(
+        classify_http_command("POST", "/reboot"),
+        OperationalCommand::SystemMutation
+    );
+    assert_eq!(
+        classify_http_command("PUT", "/config/network"),
+        OperationalCommand::SystemMutation
+    );
+    assert_eq!(
+        classify_http_command("DELETE", "/nodes/abc"),
+        OperationalCommand::SystemMutation
+    );
+    assert_eq!(
+        classify_http_command("DELETE", "/"),
+        OperationalCommand::SystemMutation
+    );
 }
 
 #[test]
 fn test_classify_strips_query_string_before_matching() {
-    assert_eq!(classify_http_command("GET",  "/metrics?window=60s"),         OperationalCommand::ReadTelemetry);
-    assert_eq!(classify_http_command("POST", "/actuator/servo?dry_run=true"), OperationalCommand::WriteState);
-    assert_eq!(classify_http_command("PUT",  "/config/net?validate=1"),       OperationalCommand::SystemMutation);
+    assert_eq!(
+        classify_http_command("GET", "/metrics?window=60s"),
+        OperationalCommand::ReadTelemetry
+    );
+    assert_eq!(
+        classify_http_command("POST", "/actuator/servo?dry_run=true"),
+        OperationalCommand::WriteState
+    );
+    assert_eq!(
+        classify_http_command("PUT", "/config/net?validate=1"),
+        OperationalCommand::SystemMutation
+    );
 }
 
 #[test]
 fn test_classify_method_comparison_uppercase() {
-    assert_eq!(classify_http_command("GET",    "/metrics"), OperationalCommand::ReadTelemetry);
-    assert_eq!(classify_http_command("POST",   "/cmd_vel"), OperationalCommand::WriteState);
-    assert_eq!(classify_http_command("DELETE", "/x"),       OperationalCommand::SystemMutation);
+    assert_eq!(
+        classify_http_command("GET", "/metrics"),
+        OperationalCommand::ReadTelemetry
+    );
+    assert_eq!(
+        classify_http_command("POST", "/cmd_vel"),
+        OperationalCommand::WriteState
+    );
+    assert_eq!(
+        classify_http_command("DELETE", "/x"),
+        OperationalCommand::SystemMutation
+    );
 }
 
 #[test]
 fn test_classify_unknown_method_is_unknown() {
-    assert_eq!(classify_http_command("PATCH",  "/actuator/x"), OperationalCommand::Unknown);
-    assert_eq!(classify_http_command("FROBNI", "/anything"),   OperationalCommand::Unknown);
+    assert_eq!(
+        classify_http_command("PATCH", "/actuator/x"),
+        OperationalCommand::Unknown
+    );
+    assert_eq!(
+        classify_http_command("FROBNI", "/anything"),
+        OperationalCommand::Unknown
+    );
 }
 
 #[test]
 fn test_routing_nominal_allows_all_command_classes() {
     let (cache, now) = make_cache(FleetPosture::Nominal, 500);
-    assert!(should_route_command(&cache, now, OperationalCommand::ReadTelemetry));
-    assert!(should_route_command(&cache, now, OperationalCommand::WriteState));
-    assert!(should_route_command(&cache, now, OperationalCommand::SystemMutation));
+    assert!(should_route_command(
+        &cache,
+        now,
+        OperationalCommand::ReadTelemetry
+    ));
+    assert!(should_route_command(
+        &cache,
+        now,
+        OperationalCommand::WriteState
+    ));
+    assert!(should_route_command(
+        &cache,
+        now,
+        OperationalCommand::SystemMutation
+    ));
 }
 
 #[test]
@@ -390,27 +547,47 @@ fn test_routing_nominal_rejects_unknown_command() {
     // Unknown commands must be denied in ALL postures, including Nominal —
     // closing the implicit fallback bypass identified in the v1 spec.
     let (cache, now) = make_cache(FleetPosture::Nominal, 500);
-    assert!(!should_route_command(&cache, now, OperationalCommand::Unknown),
-        "Nominal posture must not route Unknown commands");
+    assert!(
+        !should_route_command(&cache, now, OperationalCommand::Unknown),
+        "Nominal posture must not route Unknown commands"
+    );
 }
 
 #[test]
 fn test_routing_degraded_allows_reads_blocks_writes() {
     let (cache, now) = make_cache(FleetPosture::Degraded, 500);
-    assert!( should_route_command(&cache, now, OperationalCommand::ReadTelemetry),
-        "Degraded must still allow telemetry reads");
-    assert!(!should_route_command(&cache, now, OperationalCommand::WriteState),
-        "Degraded must block WriteState");
-    assert!(!should_route_command(&cache, now, OperationalCommand::SystemMutation),
-        "Degraded must block SystemMutation");
+    assert!(
+        should_route_command(&cache, now, OperationalCommand::ReadTelemetry),
+        "Degraded must still allow telemetry reads"
+    );
+    assert!(
+        !should_route_command(&cache, now, OperationalCommand::WriteState),
+        "Degraded must block WriteState"
+    );
+    assert!(
+        !should_route_command(&cache, now, OperationalCommand::SystemMutation),
+        "Degraded must block SystemMutation"
+    );
 }
 
 #[test]
 fn test_routing_locked_out_blocks_all_including_reads() {
     let (cache, now) = make_cache(FleetPosture::LockedOut, 500);
-    assert!(!should_route_command(&cache, now, OperationalCommand::ReadTelemetry));
-    assert!(!should_route_command(&cache, now, OperationalCommand::WriteState));
-    assert!(!should_route_command(&cache, now, OperationalCommand::SystemMutation));
+    assert!(!should_route_command(
+        &cache,
+        now,
+        OperationalCommand::ReadTelemetry
+    ));
+    assert!(!should_route_command(
+        &cache,
+        now,
+        OperationalCommand::WriteState
+    ));
+    assert!(!should_route_command(
+        &cache,
+        now,
+        OperationalCommand::SystemMutation
+    ));
 }
 
 #[test]
@@ -418,22 +595,42 @@ fn test_routing_stale_cache_blocks_all_regardless_of_posture() {
     // Even a Nominal posture entry must be blocked once the TTL expires.
     let stale_age = POSTURE_CACHE_TTL_MS + 1;
     let (cache, now) = make_cache(FleetPosture::Nominal, stale_age);
-    assert!(!should_route_command(&cache, now, OperationalCommand::ReadTelemetry));
-    assert!(!should_route_command(&cache, now, OperationalCommand::WriteState));
-    assert!(!should_route_command(&cache, now, OperationalCommand::SystemMutation));
+    assert!(!should_route_command(
+        &cache,
+        now,
+        OperationalCommand::ReadTelemetry
+    ));
+    assert!(!should_route_command(
+        &cache,
+        now,
+        OperationalCommand::WriteState
+    ));
+    assert!(!should_route_command(
+        &cache,
+        now,
+        OperationalCommand::SystemMutation
+    ));
 }
 
 #[test]
 fn test_routing_exactly_at_ttl_boundary_is_blocked() {
     // Age == POSTURE_CACHE_TTL_MS is stale (>= semantics in is_stale).
     let (cache, now) = make_cache(FleetPosture::Nominal, POSTURE_CACHE_TTL_MS);
-    assert!(!should_route_command(&cache, now, OperationalCommand::WriteState));
+    assert!(!should_route_command(
+        &cache,
+        now,
+        OperationalCommand::WriteState
+    ));
 }
 
 #[test]
 fn test_routing_one_ms_past_ttl_is_blocked() {
     let (cache, now) = make_cache(FleetPosture::Nominal, POSTURE_CACHE_TTL_MS + 1);
-    assert!(!should_route_command(&cache, now, OperationalCommand::WriteState));
+    assert!(!should_route_command(
+        &cache,
+        now,
+        OperationalCommand::WriteState
+    ));
 }
 
 // --- v0.9.7 posture event store tests ----------------------------------------
@@ -447,10 +644,19 @@ fn in_memory_store() -> VerifierStore {
 #[test]
 fn test_posture_event_round_trip() {
     let store = in_memory_store();
-    store.save_posture_event("node-a", "ATTESTATION_TRUSTED", r#"{"ok":true}"#, None, 1_000)
+    store
+        .save_posture_event(
+            "node-a",
+            "ATTESTATION_TRUSTED",
+            r#"{"ok":true}"#,
+            None,
+            1_000,
+        )
         .expect("save must succeed");
 
-    let history = store.load_node_history("node-a").expect("load must succeed");
+    let history = store
+        .load_node_history("node-a")
+        .expect("load must succeed");
     assert_eq!(history.len(), 1);
     assert_eq!(history[0]["event_type"], "ATTESTATION_TRUSTED");
     assert_eq!(history[0]["reason"], serde_json::Value::Null);
@@ -459,10 +665,19 @@ fn test_posture_event_round_trip() {
 #[test]
 fn test_posture_event_with_reason_round_trip() {
     let store = in_memory_store();
-    store.save_posture_event("node-b", "DEPENDENCY_UPDATED", "{}", Some("parent changed"), 2_000)
+    store
+        .save_posture_event(
+            "node-b",
+            "DEPENDENCY_UPDATED",
+            "{}",
+            Some("parent changed"),
+            2_000,
+        )
         .expect("save must succeed");
 
-    let history = store.load_node_history("node-b").expect("load must succeed");
+    let history = store
+        .load_node_history("node-b")
+        .expect("load must succeed");
     assert_eq!(history[0]["reason"], "parent changed");
 }
 
@@ -470,7 +685,9 @@ fn test_posture_event_with_reason_round_trip() {
 fn test_load_node_history_newest_first() {
     let store = in_memory_store();
     for ts in [1_000u64, 2_000, 3_000] {
-        store.save_posture_event("node-c", "EV", "{}", None, ts).unwrap();
+        store
+            .save_posture_event("node-c", "EV", "{}", None, ts)
+            .unwrap();
     }
     let history = store.load_node_history("node-c").unwrap();
     assert_eq!(history.len(), 3);
@@ -483,7 +700,9 @@ fn test_load_node_history_newest_first() {
 fn test_count_recent_posture_events_within_window() {
     let store = in_memory_store();
     for ts in [1_000u64, 2_000, 3_000] {
-        store.save_posture_event("node-d", "EV", "{}", None, ts).unwrap();
+        store
+            .save_posture_event("node-d", "EV", "{}", None, ts)
+            .unwrap();
     }
     // since_ms = 2_000 → only events at 2_000 and 3_000 qualify.
     let count = store.count_recent_posture_events("node-d", 2_000).unwrap();
@@ -493,8 +712,12 @@ fn test_count_recent_posture_events_within_window() {
 #[test]
 fn test_count_excludes_events_before_window() {
     let store = in_memory_store();
-    store.save_posture_event("node-e", "EV", "{}", None, 500).unwrap();
-    store.save_posture_event("node-e", "EV", "{}", None, 1_000).unwrap();
+    store
+        .save_posture_event("node-e", "EV", "{}", None, 500)
+        .unwrap();
+    store
+        .save_posture_event("node-e", "EV", "{}", None, 1_000)
+        .unwrap();
     // since_ms = 1_001 → neither event qualifies.
     let count = store.count_recent_posture_events("node-e", 1_001).unwrap();
     assert_eq!(count, 0);
@@ -504,7 +727,9 @@ fn test_count_excludes_events_before_window() {
 fn test_flap_threshold_below_three_is_not_flapping() {
     let store = in_memory_store();
     for ts in [1_000u64, 2_000] {
-        store.save_posture_event("node-f", "EV", "{}", None, ts).unwrap();
+        store
+            .save_posture_event("node-f", "EV", "{}", None, ts)
+            .unwrap();
     }
     let count = store.count_recent_posture_events("node-f", 0).unwrap();
     assert!(count < 3, "two events must not trigger flap threshold");
@@ -514,7 +739,9 @@ fn test_flap_threshold_below_three_is_not_flapping() {
 fn test_flap_threshold_at_three_is_flapping() {
     let store = in_memory_store();
     for ts in [1_000u64, 2_000, 3_000] {
-        store.save_posture_event("node-g", "EV", "{}", None, ts).unwrap();
+        store
+            .save_posture_event("node-g", "EV", "{}", None, ts)
+            .unwrap();
     }
     let count = store.count_recent_posture_events("node-g", 0).unwrap();
     assert!(count >= 3, "three events must meet the flap threshold");
@@ -523,8 +750,12 @@ fn test_flap_threshold_at_three_is_flapping() {
 #[test]
 fn test_history_isolated_per_node() {
     let store = in_memory_store();
-    store.save_posture_event("node-h", "EV", "{}", None, 1_000).unwrap();
-    store.save_posture_event("node-i", "EV", "{}", None, 2_000).unwrap();
+    store
+        .save_posture_event("node-h", "EV", "{}", None, 1_000)
+        .unwrap();
+    store
+        .save_posture_event("node-i", "EV", "{}", None, 2_000)
+        .unwrap();
 
     let h_history = store.load_node_history("node-h").unwrap();
     let i_history = store.load_node_history("node-i").unwrap();
@@ -556,8 +787,11 @@ fn test_verifier_mode_passive_variants_parsed() {
             "passive" | "passive_standby" | "standby" => VerifierOperationMode::PassiveStandby,
             _ => VerifierOperationMode::Active,
         };
-        assert_eq!(mode, VerifierOperationMode::PassiveStandby,
-            "{input:?} should parse to PassiveStandby");
+        assert_eq!(
+            mode,
+            VerifierOperationMode::PassiveStandby,
+            "{input:?} should parse to PassiveStandby"
+        );
     }
 }
 
@@ -574,14 +808,19 @@ fn test_passive_standby_mode_blocks_mutation() {
 #[test]
 fn test_health_check_passes_on_valid_connection() {
     let store = in_memory_store();
-    assert!(store.health_check().is_ok(), "SELECT 1 must succeed on a live connection");
+    assert!(
+        store.health_check().is_ok(),
+        "SELECT 1 must succeed on a live connection"
+    );
 }
 
 #[test]
 fn test_load_all_posture_events_returns_in_asc_order() {
     let store = in_memory_store();
     for (node, ts) in [("n1", 3_000u64), ("n2", 1_000), ("n1", 2_000)] {
-        store.save_posture_event(node, "EV", "{}", None, ts).unwrap();
+        store
+            .save_posture_event(node, "EV", "{}", None, ts)
+            .unwrap();
     }
     let all = store.load_all_posture_events().unwrap();
     assert_eq!(all.len(), 3);
@@ -600,11 +839,13 @@ fn test_load_all_posture_events_empty_on_fresh_store() {
 
 #[test]
 fn test_valid_ed25519_signature_verification_passes() {
-    use crate::federation::{canonical_federation_payload, verify_federated_report_signature, FederatedTrustReport};
+    use crate::federation::{
+        canonical_federation_payload, verify_federated_report_signature, FederatedTrustReport,
+    };
     use crate::verifier::FleetPosture;
-    use ed25519_dalek::{SigningKey, Signer};
-    use rand::rngs::OsRng;
     use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand::rngs::OsRng;
 
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
@@ -630,11 +871,13 @@ fn test_valid_ed25519_signature_verification_passes() {
 
 #[test]
 fn test_tampered_payload_ed25519_verification_fails() {
-    use crate::federation::{canonical_federation_payload, verify_federated_report_signature, FederatedTrustReport};
+    use crate::federation::{
+        canonical_federation_payload, verify_federated_report_signature, FederatedTrustReport,
+    };
     use crate::verifier::FleetPosture;
-    use ed25519_dalek::{SigningKey, Signer};
-    use rand::rngs::OsRng;
     use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand::rngs::OsRng;
 
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
@@ -663,11 +906,13 @@ fn test_tampered_payload_ed25519_verification_fails() {
 
 #[test]
 fn test_wrong_key_ed25519_verification_fails() {
-    use crate::federation::{canonical_federation_payload, verify_federated_report_signature, FederatedTrustReport};
+    use crate::federation::{
+        canonical_federation_payload, verify_federated_report_signature, FederatedTrustReport,
+    };
     use crate::verifier::FleetPosture;
-    use ed25519_dalek::{SigningKey, Signer};
-    use rand::rngs::OsRng;
     use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand::rngs::OsRng;
 
     let signing_key = SigningKey::generate(&mut OsRng);
     let wrong_key = SigningKey::generate(&mut OsRng);
@@ -688,7 +933,10 @@ fn test_wrong_key_ed25519_verification_fails() {
     let signature = signing_key.sign(payload.as_bytes());
     report.signature_b64 = b64.encode(signature.to_bytes());
 
-    assert!(!verify_federated_report_signature(&report, &wrong_public_key_b64));
+    assert!(!verify_federated_report_signature(
+        &report,
+        &wrong_public_key_b64
+    ));
 }
 
 #[tokio::test]
@@ -711,7 +959,10 @@ async fn test_slow_subscriber_drops_on_buffer_saturation_without_blocking() {
     // A slow receiver that missed the window gets RecvError::Lagged, not a deadlock.
     let result = rx_slow.recv().await;
     assert!(
-        matches!(result, Err(tokio::sync::broadcast::error::RecvError::Lagged(_))),
+        matches!(
+            result,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+        ),
         "expected Lagged error from saturated broadcast channel"
     );
 }

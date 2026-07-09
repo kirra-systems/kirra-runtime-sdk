@@ -80,8 +80,11 @@ extern "C" {
     fn dds_get_qos(entity: i32, qos: *mut DdsQos) -> i32;
     fn dds_qget_durability(qos: *const DdsQos, kind: *mut i32) -> bool;
     fn dds_qget_history(qos: *const DdsQos, kind: *mut i32, depth: *mut i32) -> bool;
-    fn dds_qget_reliability(qos: *const DdsQos, kind: *mut i32, max_blocking_time: *mut i64)
-        -> bool;
+    fn dds_qget_reliability(
+        qos: *const DdsQos,
+        kind: *mut i32,
+        max_blocking_time: *mut i64,
+    ) -> bool;
     fn dds_qget_lifespan(qos: *const DdsQos, lifespan: *mut i64) -> bool;
     fn dds_qget_deadline(qos: *const DdsQos, deadline: *mut i64) -> bool;
     fn dds_qget_liveliness(qos: *const DdsQos, kind: *mut i32, lease_duration: *mut i64) -> bool;
@@ -141,27 +144,48 @@ impl CycloneDdsActuatorWriter {
         let qos = build_qos(profile)?;
         // From here on, `qos` and any created entities must be cleaned up on every
         // error path. `Guard` handles the entities; qos is deleted before return.
-        let participant = dds_create_participant(DDS_DOMAIN_DEFAULT, std::ptr::null(), std::ptr::null());
+        let participant =
+            dds_create_participant(DDS_DOMAIN_DEFAULT, std::ptr::null(), std::ptr::null());
         if participant < 0 {
             dds_delete_qos(qos);
-            return Err(CycloneDdsError::EntityCreate { what: "participant", code: participant });
+            return Err(CycloneDdsError::EntityCreate {
+                what: "participant",
+                code: participant,
+            });
         }
-        let mut guard = Guard { entity: participant };
+        let mut guard = Guard {
+            entity: participant,
+        };
 
         let cname = CString::new(topic_name).map_err(|_| {
             dds_delete_qos(qos);
-            CycloneDdsError::EntityCreate { what: "topic_name_nul", code: 0 }
+            CycloneDdsError::EntityCreate {
+                what: "topic_name_nul",
+                code: 0,
+            }
         })?;
-        let topic = dds_create_topic(participant, descriptor, cname.as_ptr(), qos, std::ptr::null());
+        let topic = dds_create_topic(
+            participant,
+            descriptor,
+            cname.as_ptr(),
+            qos,
+            std::ptr::null(),
+        );
         if topic < 0 {
             dds_delete_qos(qos);
-            return Err(CycloneDdsError::EntityCreate { what: "topic", code: topic });
+            return Err(CycloneDdsError::EntityCreate {
+                what: "topic",
+                code: topic,
+            });
         }
 
         let writer = dds_create_writer(participant, topic, qos, std::ptr::null());
         dds_delete_qos(qos); // the writer copied what it needs
         if writer < 0 {
-            return Err(CycloneDdsError::EntityCreate { what: "writer", code: writer });
+            return Err(CycloneDdsError::EntityCreate {
+                what: "writer",
+                code: writer,
+            });
         }
 
         // READ-BACK: prove the writer negotiated at least the requested strictness.
@@ -172,7 +196,12 @@ impl CycloneDdsActuatorWriter {
         // scope end); the writer/topic are children of the participant and are
         // deleted with it by `CycloneDdsActuatorWriter`'s own Drop.
         guard.entity = 0;
-        Ok(Self { participant, topic, writer, negotiated })
+        Ok(Self {
+            participant,
+            topic,
+            writer,
+            negotiated,
+        })
     }
 
     /// The QoS the middleware actually negotiated (proven read-back-admissible).

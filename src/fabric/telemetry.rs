@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use dashmap::DashMap;
-use serde::{Deserialize, Serialize};
 use crate::fabric::asset::AssetType;
 use crate::posture_cache::now_ms;
 use crate::verifier::FleetPosture;
+use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetTelemetrySnapshot {
@@ -38,7 +38,9 @@ pub struct FabricTelemetry {
 
 impl FabricTelemetry {
     pub fn new() -> Self {
-        Self { snapshots: DashMap::new() }
+        Self {
+            snapshots: DashMap::new(),
+        }
     }
 
     pub fn update(&self, snapshot: AssetTelemetrySnapshot) {
@@ -59,19 +61,24 @@ impl FabricTelemetry {
         let now = now_ms();
         let active_threshold_ms = 30_000u64;
 
-        let all: Vec<AssetTelemetrySnapshot> = self.snapshots.iter()
-            .map(|r| r.value().clone())
-            .collect();
+        let all: Vec<AssetTelemetrySnapshot> =
+            self.snapshots.iter().map(|r| r.value().clone()).collect();
 
         let total_assets = all.len();
-        let active_assets = all.iter()
+        let active_assets = all
+            .iter()
             .filter(|s| now.saturating_sub(s.updated_at_ms) < active_threshold_ms)
             .count();
 
         let total_cpm: f64 = all.iter().map(|s| s.commands_per_minute).sum();
 
-        let total_commands: f64 = all.iter().map(|s| s.commands_per_minute).sum::<f64>().max(1.0);
-        let weighted_denial: f64 = all.iter()
+        let total_commands: f64 = all
+            .iter()
+            .map(|s| s.commands_per_minute)
+            .sum::<f64>()
+            .max(1.0);
+        let weighted_denial: f64 = all
+            .iter()
             .map(|s| s.denial_rate * s.commands_per_minute)
             .sum::<f64>();
         let fabric_denial_rate = weighted_denial / total_commands;
@@ -79,12 +86,21 @@ impl FabricTelemetry {
         let mut assets_by_type: HashMap<String, usize> = HashMap::new();
         let mut assets_by_posture: HashMap<String, usize> = HashMap::new();
         for s in &all {
-            *assets_by_type.entry(format!("{:?}", s.asset_type)).or_insert(0) += 1;
-            *assets_by_posture.entry(format!("{:?}", s.posture)).or_insert(0) += 1;
+            *assets_by_type
+                .entry(format!("{:?}", s.asset_type))
+                .or_insert(0) += 1;
+            *assets_by_posture
+                .entry(format!("{:?}", s.posture))
+                .or_insert(0) += 1;
         }
 
-        let highest_denial_asset = all.iter()
-            .max_by(|a, b| a.denial_rate.partial_cmp(&b.denial_rate).unwrap_or(std::cmp::Ordering::Equal))
+        let highest_denial_asset = all
+            .iter()
+            .max_by(|a, b| {
+                a.denial_rate
+                    .partial_cmp(&b.denial_rate)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .filter(|s| s.denial_rate > 0.0)
             .map(|s| s.asset_id.clone());
 
@@ -102,7 +118,9 @@ impl FabricTelemetry {
 }
 
 impl Default for FabricTelemetry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -110,7 +128,13 @@ mod tests {
     use super::*;
     use crate::fabric::asset::AssetType;
 
-    fn snap(id: &str, cpm: f64, denial: f64, posture: FleetPosture, stale: bool) -> AssetTelemetrySnapshot {
+    fn snap(
+        id: &str,
+        cpm: f64,
+        denial: f64,
+        posture: FleetPosture,
+        stale: bool,
+    ) -> AssetTelemetrySnapshot {
         let now = now_ms();
         AssetTelemetrySnapshot {
             asset_id: id.to_string(),
@@ -123,7 +147,11 @@ mod tests {
             last_command_action: "Allow".to_string(),
             commands_per_minute: cpm,
             denial_rate: denial,
-            updated_at_ms: if stale { now.saturating_sub(60_000) } else { now },
+            updated_at_ms: if stale {
+                now.saturating_sub(60_000)
+            } else {
+                now
+            },
         }
     }
 
@@ -141,7 +169,7 @@ mod tests {
     fn test_active_assets_excludes_stale() {
         let t = FabricTelemetry::new();
         t.update(snap("r01", 10.0, 0.0, FleetPosture::Nominal, false));
-        t.update(snap("r02", 10.0, 0.0, FleetPosture::Nominal, true));  // stale
+        t.update(snap("r02", 10.0, 0.0, FleetPosture::Nominal, true)); // stale
         let s = t.summary();
         assert_eq!(s.active_assets, 1);
     }

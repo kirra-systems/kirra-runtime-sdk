@@ -134,8 +134,7 @@ fn bench_socket_serde(iters: usize, warmup: usize) -> std::io::Result<Stats> {
         let img = v.canonical_image(); // serialize (LE, 176 B)
         sock.send(&img)?;
         let n = sock.recv(&mut buf)?;
-        let received =
-            GovernorContractView::from_canonical_image(&buf[..n]).expect("parse"); // deserialize
+        let received = GovernorContractView::from_canonical_image(&buf[..n]).expect("parse"); // deserialize
         let dt = t0.elapsed();
         black_box(received.sequence);
         if i >= warmup {
@@ -348,15 +347,31 @@ fn main() {
 
     // ---- the deployment lowest-latency mode: busy-wait ping-pong on pinned cores
     // (optionally SCHED_FIFO). Two threads, two iceoryx2 services, no event wakeup.
-    let n_cpus = thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+    let n_cpus = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
     let env_cpu = |k: &str, dflt: usize| {
-        std::env::var(k).ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(dflt)
+        std::env::var(k)
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(dflt)
     };
     // Default to the two highest logical cores; override with KIRRA_LAT_REQ_CPU /
     // KIRRA_LAT_RESP_CPU. KIRRA_LAT_FIFO=1 attempts SCHED_FIFO (needs privilege).
-    let req_cpu = if n_cpus >= 2 { Some(env_cpu("KIRRA_LAT_REQ_CPU", n_cpus - 2)) } else { None };
-    let resp_cpu = if n_cpus >= 2 { Some(env_cpu("KIRRA_LAT_RESP_CPU", n_cpus - 1)) } else { None };
-    let want_fifo = matches!(std::env::var("KIRRA_LAT_FIFO").as_deref(), Ok("1") | Ok("true"));
+    let req_cpu = if n_cpus >= 2 {
+        Some(env_cpu("KIRRA_LAT_REQ_CPU", n_cpus - 2))
+    } else {
+        None
+    };
+    let resp_cpu = if n_cpus >= 2 {
+        Some(env_cpu("KIRRA_LAT_RESP_CPU", n_cpus - 1))
+    } else {
+        None
+    };
+    let want_fifo = matches!(
+        std::env::var("KIRRA_LAT_FIFO").as_deref(),
+        Ok("1") | Ok("true")
+    );
     let fifo_granted = want_fifo && try_fifo();
     if want_fifo && !fifo_granted {
         eprintln!("[latency_bench] WARN: SCHED_FIFO not granted (need privilege) — ping-pong is time-shared / INDICATIVE");

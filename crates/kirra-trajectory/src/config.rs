@@ -9,9 +9,7 @@
 // config and a deserializer.
 
 use kirra_core::containment::VehicleFootprint;
-use kirra_core::kinematics_contract::{
-    VehicleKinematicsContract, URBAN_ODD_SPEED_CAP_MPS,
-};
+use kirra_core::kinematics_contract::{VehicleKinematicsContract, URBAN_ODD_SPEED_CAP_MPS};
 
 /// Integrator-supplied vehicle profile. Holds the platform geometry +
 /// dynamic limits the validator needs. All units SI.
@@ -141,15 +139,15 @@ impl CourierAngularBound {
     #[must_use]
     pub fn courier_reference() -> Self {
         Self {
-            track_width_m:      0.50,
-            cog_height_m:       0.40,
-            robot_extent_m:     0.30,
-            v_edge_safe_mps:    0.25,
-            theta_max_rad:      0.087, // 5°
-            ftti_s:             0.10,
+            track_width_m: 0.50,
+            cog_height_m: 0.40,
+            robot_extent_m: 0.30,
+            v_edge_safe_mps: 0.25,
+            theta_max_rad: 0.087, // 5°
+            ftti_s: 0.10,
             mrc_posture_factor: 0.5,
             stop_epsilon_rad_s: 0.02,
-            k_roll:             0.6,
+            k_roll: 0.6,
         }
     }
 
@@ -182,16 +180,16 @@ impl VehicleConfig {
     /// S8 Item C (KIRRA-OCCY-SPEED-VAL-001).
     pub fn default_urban() -> Self {
         Self {
-            wheelbase_m:        2.8,
-            track_width_m:      1.55,
-            half_length_m:      2.4,    // → length 4.8 m
-            half_width_m:       0.925,  // → width  1.85 m
-            max_speed_mps:      35.0,
-            max_accel_mps2:     2.5,
-            max_decel_mps2:     4.5,
+            wheelbase_m: 2.8,
+            track_width_m: 1.55,
+            half_length_m: 2.4,  // → length 4.8 m
+            half_width_m: 0.925, // → width  1.85 m
+            max_speed_mps: 35.0,
+            max_accel_mps2: 2.5,
+            max_decel_mps2: 4.5,
             // 35° steering rack on a 2.8 m wheelbase ≈ 0.6109 rad.
-            max_steering_rad:   35.0_f64.to_radians(),
-            odd_speed_cap_mps:  Some(URBAN_ODD_SPEED_CAP_MPS),
+            max_steering_rad: 35.0_f64.to_radians(),
+            odd_speed_cap_mps: Some(URBAN_ODD_SPEED_CAP_MPS),
             rss_lateral_alignment_tolerance_m: DEFAULT_RSS_LATERAL_ALIGNMENT_TOLERANCE_M,
             // The frozen robotaxi footprint-overlap half-window, verbatim.
             rss_longitudinal_overlap_m: parko_core::rss::RSS_LONGITUDINAL_OVERLAP_M,
@@ -212,15 +210,15 @@ impl VehicleConfig {
     /// The RSS band (0.6 m) is the courier "lane" half-scale; tune per chassis.
     pub fn courier() -> Self {
         Self {
-            wheelbase_m:        0.5,
-            track_width_m:      0.4,
-            half_length_m:      0.45,   // → length 0.9 m
-            half_width_m:       0.3,    // → width  0.6 m
-            max_speed_mps:      3.0,
-            max_accel_mps2:     1.0,
-            max_decel_mps2:     3.0,
-            max_steering_rad:   30.0_f64.to_radians(),
-            odd_speed_cap_mps:  Some(2.5),
+            wheelbase_m: 0.5,
+            track_width_m: 0.4,
+            half_length_m: 0.45, // → length 0.9 m
+            half_width_m: 0.3,   // → width  0.6 m
+            max_speed_mps: 3.0,
+            max_accel_mps2: 1.0,
+            max_decel_mps2: 3.0,
+            max_steering_rad: 30.0_f64.to_radians(),
+            odd_speed_cap_mps: Some(2.5),
             rss_lateral_alignment_tolerance_m: 0.6,
             // Overlap == the band (the courier band is narrower than the old global
             // 2.5 m constant, so every in-band object was — and stays — overlap).
@@ -238,15 +236,15 @@ impl VehicleConfig {
     /// **VALIDATION-PENDING**. Included so the slow-loop class family mirrors the fast-loop one.
     pub fn delivery_av() -> Self {
         Self {
-            wheelbase_m:        1.9,
-            track_width_m:      0.9,
-            half_length_m:      1.45,   // → length 2.9 m
-            half_width_m:       0.55,   // → width  1.1 m
-            max_speed_mps:      12.0,
-            max_accel_mps2:     1.8,
-            max_decel_mps2:     4.0,
-            max_steering_rad:   33.0_f64.to_radians(),
-            odd_speed_cap_mps:  Some(11.0),
+            wheelbase_m: 1.9,
+            track_width_m: 0.9,
+            half_length_m: 1.45, // → length 2.9 m
+            half_width_m: 0.55,  // → width  1.1 m
+            max_speed_mps: 12.0,
+            max_accel_mps2: 1.8,
+            max_decel_mps2: 4.0,
+            max_steering_rad: 33.0_f64.to_radians(),
+            odd_speed_cap_mps: Some(11.0),
             rss_lateral_alignment_tolerance_m: 2.0,
             // Overlap == the band (narrower than the old global 2.5 m constant).
             rss_longitudinal_overlap_m: 2.0,
@@ -327,23 +325,23 @@ impl VehicleConfig {
         let length_m = 2.0 * self.half_length_m;
         let extra = (length_m - self.wheelbase_m).max(0.0);
         let overhang_front_m = extra * 0.45;
-        let overhang_rear_m  = extra * 0.55;
+        let overhang_rear_m = extra * 0.55;
         VehicleKinematicsContract {
-            max_speed_mps:           self.max_speed_mps,
-            max_accel_mps2:          self.max_accel_mps2,
-            max_brake_mps2:          self.max_decel_mps2,
-            max_steering_deg:        self.max_steering_rad.to_degrees(),
-            max_steering_rate_deg_s: 45.0,  // kernel-default; tracked for Phase 4
-            min_follow_distance_m:   2.0,
-            max_lateral_accel_mps2:  3.5,   // kernel-default; tracked for Phase 4
-            wheelbase_m:             self.wheelbase_m,
-            width_m:                 2.0 * self.half_width_m,
+            max_speed_mps: self.max_speed_mps,
+            max_accel_mps2: self.max_accel_mps2,
+            max_brake_mps2: self.max_decel_mps2,
+            max_steering_deg: self.max_steering_rad.to_degrees(),
+            max_steering_rate_deg_s: 45.0, // kernel-default; tracked for Phase 4
+            min_follow_distance_m: 2.0,
+            max_lateral_accel_mps2: 3.5, // kernel-default; tracked for Phase 4
+            wheelbase_m: self.wheelbase_m,
+            width_m: 2.0 * self.half_width_m,
             length_m,
             overhang_front_m,
             overhang_rear_m,
             // Propagate the ODD operational cap into the kernel contract
             // so `validate_vehicle_command` enforces it.
-            odd_speed_cap_mps:       self.odd_speed_cap_mps,
+            odd_speed_cap_mps: self.odd_speed_cap_mps,
         }
     }
 
@@ -365,15 +363,15 @@ impl VehicleConfig {
     /// ODD cap is redundant-but-explicit (no `None`-cap surprise).
     // SAFETY: SG8 | REQ: mrc-derated-contract-shape | TEST: to_mrc_kinematics_contract_keeps_geometry_swaps_dynamic,to_mrc_kinematics_contract_preserves_odd_cap
     pub fn to_mrc_kinematics_contract(&self) -> VehicleKinematicsContract {
-        let mut c   = self.to_kinematics_contract();
+        let mut c = self.to_kinematics_contract();
         let mrc = VehicleKinematicsContract::mrc_fallback_profile();
-        c.max_speed_mps           = mrc.max_speed_mps;
-        c.max_accel_mps2          = mrc.max_accel_mps2;
-        c.max_brake_mps2          = mrc.max_brake_mps2;
-        c.max_steering_deg        = mrc.max_steering_deg;
+        c.max_speed_mps = mrc.max_speed_mps;
+        c.max_accel_mps2 = mrc.max_accel_mps2;
+        c.max_brake_mps2 = mrc.max_brake_mps2;
+        c.max_steering_deg = mrc.max_steering_deg;
         c.max_steering_rate_deg_s = mrc.max_steering_rate_deg_s;
-        c.min_follow_distance_m   = mrc.min_follow_distance_m;
-        c.max_lateral_accel_mps2  = mrc.max_lateral_accel_mps2;
+        c.min_follow_distance_m = mrc.min_follow_distance_m;
+        c.max_lateral_accel_mps2 = mrc.max_lateral_accel_mps2;
         // `c.odd_speed_cap_mps` intentionally left untouched — it carries
         // the integrator's ODD cap forward (see doc-comment above).
         c
@@ -406,25 +404,48 @@ mod tests {
     #[test]
     fn for_class_selects_the_sibling_profiles_by_name() {
         // One selector, keyed by the same class string the fast-loop VehicleClass parses.
-        assert_eq!(VehicleConfig::for_class("courier").rss_lateral_alignment_tolerance_m, 0.6);
-        assert_eq!(VehicleConfig::for_class("sidewalk").max_speed_mps, 3.0);          // courier alias
-        assert_eq!(VehicleConfig::for_class("delivery-av").rss_lateral_alignment_tolerance_m, 2.0);
-        assert_eq!(VehicleConfig::for_class("robotaxi").rss_lateral_alignment_tolerance_m, 4.0);
+        assert_eq!(
+            VehicleConfig::for_class("courier").rss_lateral_alignment_tolerance_m,
+            0.6
+        );
+        assert_eq!(VehicleConfig::for_class("sidewalk").max_speed_mps, 3.0); // courier alias
+        assert_eq!(
+            VehicleConfig::for_class("delivery-av").rss_lateral_alignment_tolerance_m,
+            2.0
+        );
+        assert_eq!(
+            VehicleConfig::for_class("robotaxi").rss_lateral_alignment_tolerance_m,
+            4.0
+        );
         // Unknown / absent → robotaxi (frozen reference), the fail-safe default.
-        assert_eq!(VehicleConfig::for_class("nonsense").half_length_m,
-                   VehicleConfig::default_urban().half_length_m);
-        assert_eq!(VehicleConfig::for_class("  Courier  ").rss_lateral_alignment_tolerance_m, 0.6);
+        assert_eq!(
+            VehicleConfig::for_class("nonsense").half_length_m,
+            VehicleConfig::default_urban().half_length_m
+        );
+        assert_eq!(
+            VehicleConfig::for_class("  Courier  ").rss_lateral_alignment_tolerance_m,
+            0.6
+        );
     }
 
     #[test]
     fn slow_loop_class_family_is_ordered_courier_lt_delivery_lt_robotaxi() {
         // The family is monotone in the dimensions that scale with vehicle size/speed —
         // the cited-copy mirror of the fast-loop contract family.
-        let (c, d, r) = (VehicleConfig::courier(), VehicleConfig::delivery_av(), VehicleConfig::default_urban());
-        for f in [|v: &VehicleConfig| v.rss_lateral_alignment_tolerance_m,
-                  |v: &VehicleConfig| v.max_speed_mps,
-                  |v: &VehicleConfig| v.half_length_m] {
-            assert!(f(&c) < f(&d) && f(&d) < f(&r), "courier < delivery-av < robotaxi expected");
+        let (c, d, r) = (
+            VehicleConfig::courier(),
+            VehicleConfig::delivery_av(),
+            VehicleConfig::default_urban(),
+        );
+        for f in [
+            |v: &VehicleConfig| v.rss_lateral_alignment_tolerance_m,
+            |v: &VehicleConfig| v.max_speed_mps,
+            |v: &VehicleConfig| v.half_length_m,
+        ] {
+            assert!(
+                f(&c) < f(&d) && f(&d) < f(&r),
+                "courier < delivery-av < robotaxi expected"
+            );
         }
     }
 
@@ -450,7 +471,7 @@ mod tests {
         // Geometry (the integrator-supplied + derived dimensions) must
         // line up with the kernel's reference profile.
         assert_eq!(kc.wheelbase_m, nominal.wheelbase_m);
-        assert!((kc.width_m  - nominal.width_m ).abs() < 1e-9);
+        assert!((kc.width_m - nominal.width_m).abs() < 1e-9);
         assert!((kc.length_m - nominal.length_m).abs() < 1e-9);
         assert_eq!(kc.max_speed_mps, nominal.max_speed_mps);
         assert_eq!(kc.max_accel_mps2, nominal.max_accel_mps2);
@@ -461,8 +482,8 @@ mod tests {
     fn footprint_roundtrip_through_kinematics_contract() {
         let cfg = VehicleConfig::default_urban();
         let fp = cfg.to_vehicle_footprint();
-        assert!((fp.width_m  - 1.85).abs() < 1e-9);
-        assert!((fp.length_m - 4.8 ).abs() < 1e-9);
+        assert!((fp.width_m - 1.85).abs() < 1e-9);
+        assert!((fp.length_m - 4.8).abs() < 1e-9);
         assert_eq!(fp.wheelbase_m, 2.8);
     }
 
@@ -479,29 +500,38 @@ mod tests {
     fn to_mrc_kinematics_contract_keeps_geometry_swaps_dynamic() {
         let cfg = VehicleConfig::default_urban();
         let nominal = cfg.to_kinematics_contract();
-        let mrc     = cfg.to_mrc_kinematics_contract();
+        let mrc = cfg.to_mrc_kinematics_contract();
         let kernel_mrc = VehicleKinematicsContract::mrc_fallback_profile();
 
         // Dynamic limits must come from the kernel's MRC profile.
-        assert_eq!(mrc.max_speed_mps,           kernel_mrc.max_speed_mps);
-        assert_eq!(mrc.max_accel_mps2,          kernel_mrc.max_accel_mps2);
-        assert_eq!(mrc.max_brake_mps2,          kernel_mrc.max_brake_mps2);
-        assert_eq!(mrc.max_steering_deg,        kernel_mrc.max_steering_deg);
-        assert_eq!(mrc.max_steering_rate_deg_s, kernel_mrc.max_steering_rate_deg_s);
-        assert_eq!(mrc.min_follow_distance_m,   kernel_mrc.min_follow_distance_m);
-        assert_eq!(mrc.max_lateral_accel_mps2,  kernel_mrc.max_lateral_accel_mps2);
+        assert_eq!(mrc.max_speed_mps, kernel_mrc.max_speed_mps);
+        assert_eq!(mrc.max_accel_mps2, kernel_mrc.max_accel_mps2);
+        assert_eq!(mrc.max_brake_mps2, kernel_mrc.max_brake_mps2);
+        assert_eq!(mrc.max_steering_deg, kernel_mrc.max_steering_deg);
+        assert_eq!(
+            mrc.max_steering_rate_deg_s,
+            kernel_mrc.max_steering_rate_deg_s
+        );
+        assert_eq!(mrc.min_follow_distance_m, kernel_mrc.min_follow_distance_m);
+        assert_eq!(
+            mrc.max_lateral_accel_mps2,
+            kernel_mrc.max_lateral_accel_mps2
+        );
 
         // Geometry must come from the integrator's nominal contract.
-        assert_eq!(mrc.wheelbase_m,      nominal.wheelbase_m);
-        assert_eq!(mrc.width_m,          nominal.width_m);
-        assert_eq!(mrc.length_m,         nominal.length_m);
+        assert_eq!(mrc.wheelbase_m, nominal.wheelbase_m);
+        assert_eq!(mrc.width_m, nominal.width_m);
+        assert_eq!(mrc.length_m, nominal.length_m);
         assert_eq!(mrc.overhang_front_m, nominal.overhang_front_m);
-        assert_eq!(mrc.overhang_rear_m,  nominal.overhang_rear_m);
+        assert_eq!(mrc.overhang_rear_m, nominal.overhang_rear_m);
 
         // The MRC speed cap is strictly tighter than the nominal vehicle max.
-        assert!(mrc.max_speed_mps < nominal.max_speed_mps,
+        assert!(
+            mrc.max_speed_mps < nominal.max_speed_mps,
             "MRC cap ({}) must be tighter than vehicle nominal max ({})",
-            mrc.max_speed_mps, nominal.max_speed_mps);
+            mrc.max_speed_mps,
+            nominal.max_speed_mps
+        );
     }
 
     #[test]
@@ -512,10 +542,16 @@ mod tests {
         // explicit-but-redundant (no None-cap surprise on this path).
         let cfg = VehicleConfig::default_urban();
         let mrc = cfg.to_mrc_kinematics_contract();
-        assert_eq!(mrc.odd_speed_cap_mps, Some(URBAN_ODD_SPEED_CAP_MPS),
-            "MRC-derate must carry the integrator's ODD cap forward");
-        assert_eq!(mrc.effective_max_speed_mps(), 5.0,
-            "MRC max (5.0) is more restrictive than ODD cap (22.35) — MRC wins");
+        assert_eq!(
+            mrc.odd_speed_cap_mps,
+            Some(URBAN_ODD_SPEED_CAP_MPS),
+            "MRC-derate must carry the integrator's ODD cap forward"
+        );
+        assert_eq!(
+            mrc.effective_max_speed_mps(),
+            5.0,
+            "MRC max (5.0) is more restrictive than ODD cap (22.35) — MRC wins"
+        );
     }
 
     #[test]
@@ -573,27 +609,49 @@ mod tests {
         assert_eq!(ab.ftti_s, 0.10);
         assert_eq!(ab.mrc_posture_factor, 0.5);
         assert_eq!(ab.stop_epsilon_rad_s, 0.02);
-        assert_eq!(ab.k_roll, 0.6, "rollover safety factor must equal parko's k_roll (§3.2)");
+        assert_eq!(
+            ab.k_roll, 0.6,
+            "rollover safety factor must equal parko's k_roll (§3.2)"
+        );
         assert_eq!(ROLLOVER_MIN_LINEAR_VELOCITY_MPS, 0.05);
         // ω_max(0) = min(∞, sweep 0.25/0.30, ftti 0.087/0.10) ≈ 0.833 rad/s,
         // matching parko's reference ω_max(0) ≈ 0.833.
         let w0 = ab.omega_max(0.0, 1.0);
-        assert!((w0 - 0.8333).abs() < 1e-3, "ω_max(0) must equal parko's 0.833 rad/s; got {w0}");
+        assert!(
+            (w0 - 0.8333).abs() < 1e-3,
+            "ω_max(0) must equal parko's 0.833 rad/s; got {w0}"
+        );
         // Below the courier's speed range sweep binds (with k_roll=0.6 the rollover
         // term only tightens past ~4.4 m/s): ω_max is flat at 0.833 across creep speeds...
-        assert_eq!(ab.omega_max(2.0, 1.0), w0, "at courier speeds sweep binds, not rollover");
+        assert_eq!(
+            ab.omega_max(2.0, 1.0),
+            w0,
+            "at courier speeds sweep binds, not rollover"
+        );
         // ...but the rollover term IS correct — at a high v it binds below sweep.
         assert!(ab.omega_max(10.0, 1.0) < w0, "rollover must bind at high v");
         // MRC is tighter than Nominal.
-        assert!(ab.omega_max(0.0, ab.mrc_posture_factor) < w0, "MRC must be tighter than Nominal");
+        assert!(
+            ab.omega_max(0.0, ab.mrc_posture_factor) < w0,
+            "MRC must be tighter than Nominal"
+        );
     }
 
     /// Only the diff-drive class carries the angular channel; the Ackermann
     /// profiles leave it `None` so their per-pose path is byte-identical (frozen).
     #[test]
     fn only_the_courier_carries_an_angular_channel() {
-        assert!(VehicleConfig::courier().angular.is_some(), "courier (diff-drive) must have the bound");
-        assert!(VehicleConfig::default_urban().angular.is_none(), "robotaxi must NOT (frozen AV path)");
-        assert!(VehicleConfig::delivery_av().angular.is_none(), "delivery-AV (Ackermann) must NOT");
+        assert!(
+            VehicleConfig::courier().angular.is_some(),
+            "courier (diff-drive) must have the bound"
+        );
+        assert!(
+            VehicleConfig::default_urban().angular.is_none(),
+            "robotaxi must NOT (frozen AV path)"
+        );
+        assert!(
+            VehicleConfig::delivery_av().angular.is_none(),
+            "delivery-AV (Ackermann) must NOT"
+        );
     }
 }

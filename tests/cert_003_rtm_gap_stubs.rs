@@ -35,11 +35,13 @@
 // The test below asserts BOTH the decision and the recorded causal event.
 #[test]
 fn test_safety_goal_sg_007_causal_log_records_propagation_event() {
-    use std::collections::HashMap;
-    use kirra_verifier::fabric::router::FabricRouter;
+    use kirra_verifier::fabric::asset::{
+        AssetPosture, AssetType, FabricAsset, KinematicProfileType,
+    };
     use kirra_verifier::fabric::causal_log::FabricCausalLog;
-    use kirra_verifier::fabric::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
+    use kirra_verifier::fabric::router::FabricRouter;
     use kirra_verifier::verifier::FleetPosture;
+    use std::collections::HashMap;
 
     fn convoy_av(id: &str, role: &str) -> FabricAsset {
         let mut metadata = HashMap::new();
@@ -70,7 +72,10 @@ fn test_safety_goal_sg_007_causal_log_records_propagation_event() {
     router.register_asset(&convoy_av("follower01", "follower"));
     // Registration seeds Degraded; lift the follower to Nominal so the rule has
     // a transition to make, then lock out the leader.
-    router.update_asset_posture("follower01", posture("follower01", FleetPosture::Nominal, 1));
+    router.update_asset_posture(
+        "follower01",
+        posture("follower01", FleetPosture::Nominal, 1),
+    );
     router.update_asset_posture("leader01", posture("leader01", FleetPosture::LockedOut, 2));
 
     let log = FabricCausalLog::new_in_memory(None);
@@ -87,12 +92,10 @@ fn test_safety_goal_sg_007_causal_log_records_propagation_event() {
     // leader, affects_assets containing the degraded follower.
     let entries = log.export(0, u64::MAX);
     assert!(
-        entries.iter().any(|e|
-            e.asset_id == "leader01"
+        entries.iter().any(|e| e.asset_id == "leader01"
             && e.event_type == "cross_asset_trust_degrade"
             && e.affects_assets.iter().any(|a| a == "follower01")
-            && e.fabric_generation == fabric_generation
-        ),
+            && e.fabric_generation == fabric_generation),
         "FabricCausalLog must record the leader→follower propagation event \
          (asset_id=leader01, affects=follower01); entries={entries:?}"
     );
@@ -168,7 +171,10 @@ fn test_safety_goal_sg_013_recovery_hysteresis_streak_and_window() {
     };
     use kirra_verifier::verifier_store::VerifierStore;
 
-    assert_eq!(AV_RECOVERY_STREAK_THRESHOLD, 5, "spec pins the threshold at 5");
+    assert_eq!(
+        AV_RECOVERY_STREAK_THRESHOLD, 5,
+        "spec pins the threshold at 5"
+    );
 
     // Fresh in-memory store with one registered AV node (single connection ⇒
     // streak increments/loads are self-consistent).
@@ -188,7 +194,9 @@ fn test_safety_goal_sg_013_recovery_hysteresis_streak_and_window() {
         for i in 0..(AV_RECOVERY_STREAK_THRESHOLD - 1) {
             let d = evaluate_recovery_report(&store, node, base + (i as u64) * 100);
             match d {
-                HysteresisDecision::StreakBuilding { current, required, .. } => {
+                HysteresisDecision::StreakBuilding {
+                    current, required, ..
+                } => {
                     assert_eq!(current, i + 1, "streak must advance one per healthy report");
                     assert_eq!(required, AV_RECOVERY_STREAK_THRESHOLD);
                 }
@@ -200,8 +208,10 @@ fn test_safety_goal_sg_013_recovery_hysteresis_streak_and_window() {
         let fifth = evaluate_recovery_report(&store, node, base + 400);
         match fifth {
             HysteresisDecision::RecoveryConfirmed { streak } => {
-                assert_eq!(streak, AV_RECOVERY_STREAK_THRESHOLD,
-                    "the 5th in-window healthy report must confirm recovery at streak=5");
+                assert_eq!(
+                    streak, AV_RECOVERY_STREAK_THRESHOLD,
+                    "the 5th in-window healthy report must confirm recovery at streak=5"
+                );
             }
             other => panic!("5th in-window report must be RecoveryConfirmed, got {other:?}"),
         }
@@ -249,11 +259,14 @@ fn test_safety_goal_sg_013_recovery_hysteresis_streak_and_window() {
             evaluate_recovery_report(&store, node, base + i * 100); // streak 1..4
         }
         // Unhealthy report ⇒ the degraded branch calls reset_recovery_streak.
-        store.reset_recovery_streak(node, base + 450).expect("reset on fault");
+        store
+            .reset_recovery_streak(node, base + 450)
+            .expect("reset on fault");
 
         let mut last = None;
         for i in 0..4 {
-            last = Some(evaluate_recovery_report(&store, node, base + 500 + i * 100)); // streak 1..4
+            last = Some(evaluate_recovery_report(&store, node, base + 500 + i * 100));
+            // streak 1..4
         }
         match last.unwrap() {
             HysteresisDecision::StreakBuilding { current, .. } => {

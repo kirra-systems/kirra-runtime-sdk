@@ -112,7 +112,9 @@ mod tests {
         assert_eq!(Degraded.escalate(LockedOut), LockedOut);
         assert_eq!(LockedOut.escalate(Degraded), LockedOut);
         assert_eq!(Nominal.escalate(Nominal), Nominal);
-        assert!(Nominal.severity() < Degraded.severity() && Degraded.severity() < LockedOut.severity());
+        assert!(
+            Nominal.severity() < Degraded.severity() && Degraded.severity() < LockedOut.severity()
+        );
         // The trait default recommends nothing (a plain governor drives no posture escalation).
         assert_eq!(AllowAllGovernor.recommended_posture(), Nominal);
     }
@@ -261,7 +263,10 @@ mod tests {
         // Some linear value → that value
         assert_eq!(
             effective_linear(
-                &EnforcementAction::ClampMotion { linear: Some(3.0), angular: Some(0.1) },
+                &EnforcementAction::ClampMotion {
+                    linear: Some(3.0),
+                    angular: Some(0.1)
+                },
                 10.0
             ),
             3.0
@@ -269,7 +274,10 @@ mod tests {
         // None linear → proposed value passes through unconstrained
         assert_eq!(
             effective_linear(
-                &EnforcementAction::ClampMotion { linear: None, angular: Some(0.1) },
+                &EnforcementAction::ClampMotion {
+                    linear: None,
+                    angular: Some(0.1)
+                },
                 10.0
             ),
             10.0
@@ -277,7 +285,10 @@ mod tests {
         // Both None → both axes pass through; effectively `Allow`-like
         assert_eq!(
             effective_linear(
-                &EnforcementAction::ClampMotion { linear: None, angular: None },
+                &EnforcementAction::ClampMotion {
+                    linear: None,
+                    angular: None
+                },
                 7.0
             ),
             7.0

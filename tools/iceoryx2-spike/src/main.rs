@@ -36,7 +36,9 @@ fn main() {
         "subscribe" => run_subscriber(parse_count(&args, 2)),
         "publish" => run_publisher(parse_count(&args, 2)),
         other => {
-            eprintln!("unknown mode: {other} (use: matrix | --two-process | subscribe N | publish N)");
+            eprintln!(
+                "unknown mode: {other} (use: matrix | --two-process | subscribe N | publish N)"
+            );
             std::process::exit(2);
         }
     };
@@ -115,10 +117,16 @@ fn print_torn_header_finding() {
 fn run_two_process(exe: &str) -> Result<(), Box<dyn core::error::Error>> {
     const N: usize = 500;
     println!("[two-process] spawning subscriber + publisher as separate OS processes...");
-    let mut sub = Command::new(exe).arg("subscribe").arg(N.to_string()).spawn()?;
+    let mut sub = Command::new(exe)
+        .arg("subscribe")
+        .arg(N.to_string())
+        .spawn()?;
     // Give the subscriber a moment to create the service/endpoint.
     std::thread::sleep(std::time::Duration::from_millis(300));
-    let mut pubp = Command::new(exe).arg("publish").arg(N.to_string()).spawn()?;
+    let mut pubp = Command::new(exe)
+        .arg("publish")
+        .arg(N.to_string())
+        .spawn()?;
     let pub_status = pubp.wait()?;
     let sub_status = sub.wait()?;
     println!(

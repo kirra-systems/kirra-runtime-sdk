@@ -47,8 +47,8 @@ pub use uptane_trust::{
 // launches under (the non-test consumer of kirra_release_token::model_targets).
 pub mod model_allowlist;
 pub use model_allowlist::{
-    derive_model_allowlist, parse_metadata_bundle, render_allowlist_env_file,
-    ModelAllowlistError, ModelMetadataBundle,
+    derive_model_allowlist, parse_metadata_bundle, render_allowlist_env_file, ModelAllowlistError,
+    ModelMetadataBundle,
 };
 
 /// One of the two governor-artifact slots.
@@ -307,7 +307,10 @@ impl<B: BootController> Installer<B> {
         };
         // A signed stage REQUIRES the key: verifying against nothing is not a
         // pass. (An unprovisioned node uses the legacy path explicitly.)
-        let vk = self.release_vk.as_ref().ok_or(InstallError::SignatureRequired)?;
+        let vk = self
+            .release_vk
+            .as_ref()
+            .ok_or(InstallError::SignatureRequired)?;
         kirra_release_token::artifact_release::verify_artifact_release(
             expected_digest,
             signature_b64,
@@ -653,10 +656,13 @@ pub fn plan_rollback(rec: &BootRecord) -> BootRecord {
 /// length-prefixed on the two string fields (u64 LE length then bytes), with
 /// `reported_at_ms` appended as a fixed u64 LE. A drift from the server is caught by
 /// the byte-pinned `adoption_report_payload_is_byte_stable` test.
-pub fn adoption_report_payload(node_id: &str, applied_digest: &str, reported_at_ms: u64) -> Vec<u8> {
+pub fn adoption_report_payload(
+    node_id: &str,
+    applied_digest: &str,
+    reported_at_ms: u64,
+) -> Vec<u8> {
     const DOMAIN: &[u8] = b"KIRRA-ADOPTION-REPORT-v1";
-    let mut p =
-        Vec::with_capacity(DOMAIN.len() + 16 + node_id.len() + applied_digest.len() + 8);
+    let mut p = Vec::with_capacity(DOMAIN.len() + 16 + node_id.len() + applied_digest.len() + 8);
     p.extend_from_slice(DOMAIN);
     for field in [node_id, applied_digest] {
         p.extend_from_slice(&(field.len() as u64).to_le_bytes());
@@ -1301,7 +1307,10 @@ mod tests {
             inst.stage(&p, DIGEST_HELLO),
             Err(InstallError::SignatureRequired)
         ));
-        assert!(matches!(inst.state(), InstallState::Idle { .. }), "slot never armed");
+        assert!(
+            matches!(inst.state(), InstallState::Idle { .. }),
+            "slot never armed"
+        );
     }
 
     /// A signature from the WRONG key never arms the slot.

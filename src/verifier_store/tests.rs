@@ -12,8 +12,12 @@ mod attestation_registry_tests {
     #[test]
     fn test_load_av_subsystems_lists_registered_rows() {
         let store = in_memory();
-        store.register_av_subsystem_meta("lidar-1", "Perception", "LIDAR-001", 0.65, 1_000).unwrap();
-        store.register_av_subsystem_meta("radar-1", "Perception", "RADAR-002", 0.70, 2_000).unwrap();
+        store
+            .register_av_subsystem_meta("lidar-1", "Perception", "LIDAR-001", 0.65, 1_000)
+            .unwrap();
+        store
+            .register_av_subsystem_meta("radar-1", "Perception", "RADAR-002", 0.70, 2_000)
+            .unwrap();
         store.increment_recovery_streak("lidar-1", 1_500).unwrap();
         let rows = store.load_av_subsystems().unwrap();
         assert_eq!(rows.len(), 2);
@@ -31,7 +35,9 @@ mod attestation_registry_tests {
         store.register_operator("op-1", "pem-a", 1_000).unwrap();
         let ops = store.load_operators().unwrap();
         assert_eq!(ops.len(), 2);
-        assert!(ops.iter().all(|o| o.revoked_at_ms.is_none() && o.is_active()));
+        assert!(ops
+            .iter()
+            .all(|o| o.revoked_at_ms.is_none() && o.is_active()));
         assert_eq!(ops[0].operator_id, "op-1", "ordered by operator_id");
     }
 
@@ -39,21 +45,31 @@ mod attestation_registry_tests {
     fn test_register_and_load_fingerprint() {
         let mut store = in_memory();
         let fp = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        assert!(store.register_attestation_identity("node-01", fp, "admin", 1_000).is_ok());
-        assert_eq!(store.load_registered_fingerprint("node-01").unwrap(), Some(fp.to_string()));
+        assert!(store
+            .register_attestation_identity("node-01", fp, "admin", 1_000)
+            .is_ok());
+        assert_eq!(
+            store.load_registered_fingerprint("node-01").unwrap(),
+            Some(fp.to_string())
+        );
     }
 
     #[test]
     fn test_load_fingerprint_missing_node_returns_none() {
         let store = in_memory();
-        assert_eq!(store.load_registered_fingerprint("ghost-node").unwrap(), None);
+        assert_eq!(
+            store.load_registered_fingerprint("ghost-node").unwrap(),
+            None
+        );
     }
 
     #[test]
     fn test_identity_registration_chains_audit_entry() {
         let mut store = in_memory();
         let fp = "abc123def456";
-        store.register_attestation_identity("node-02", fp, "admin", 2_000).unwrap();
+        store
+            .register_attestation_identity("node-02", fp, "admin", 2_000)
+            .unwrap();
         assert!(store.verify_audit_chain_integrity().unwrap());
     }
 
@@ -62,16 +78,25 @@ mod attestation_registry_tests {
         let mut store = in_memory();
         let fp1 = "aaaa";
         let fp2 = "bbbb";
-        store.register_attestation_identity("node-03", fp1, "admin", 1_000).unwrap();
-        store.register_attestation_identity("node-03", fp2, "admin", 2_000).unwrap();
-        assert_eq!(store.load_registered_fingerprint("node-03").unwrap(), Some(fp2.to_string()));
+        store
+            .register_attestation_identity("node-03", fp1, "admin", 1_000)
+            .unwrap();
+        store
+            .register_attestation_identity("node-03", fp2, "admin", 2_000)
+            .unwrap();
+        assert_eq!(
+            store.load_registered_fingerprint("node-03").unwrap(),
+            Some(fp2.to_string())
+        );
         assert!(store.verify_audit_chain_integrity().unwrap());
     }
 
     #[test]
     fn test_av_subsystem_meta_round_trip() {
         let store = in_memory();
-        store.register_av_subsystem_meta("lidar_front", "Perception", "LIDAR-001", 0.70, 0).unwrap();
+        store
+            .register_av_subsystem_meta("lidar_front", "Perception", "LIDAR-001", 0.70, 0)
+            .unwrap();
         let floor = store.load_av_confidence_floor("lidar_front").unwrap();
         assert_eq!(floor, Some(0.70));
     }
@@ -79,7 +104,9 @@ mod attestation_registry_tests {
     #[test]
     fn test_recovery_streak_increments_and_resets() {
         let store = in_memory();
-        store.register_av_subsystem_meta("cam", "Perception", "CAM-001", 0.70, 0).unwrap();
+        store
+            .register_av_subsystem_meta("cam", "Perception", "CAM-001", 0.70, 0)
+            .unwrap();
         let n1 = store.increment_recovery_streak("cam", 1000).unwrap();
         let n2 = store.increment_recovery_streak("cam", 1100).unwrap();
         assert_eq!(n1, 1);
@@ -96,13 +123,17 @@ mod attestation_registry_tests {
     #[test]
     fn test_reset_recovery_streak_preserving_telemetry() {
         let store = in_memory();
-        store.register_av_subsystem_meta("lidar", "Perception", "LDR-1", 0.70, 5_000).unwrap();
+        store
+            .register_av_subsystem_meta("lidar", "Perception", "LDR-1", 0.70, 5_000)
+            .unwrap();
         store.increment_recovery_streak("lidar", 5_000).unwrap();
         store.increment_recovery_streak("lidar", 5_000).unwrap();
         assert_eq!(store.load_recovery_streak("lidar").unwrap().0, 2);
         assert_eq!(store.get_last_telemetry_timestamp("lidar").unwrap(), 5_000);
 
-        store.reset_recovery_streak_preserving_telemetry("lidar").unwrap();
+        store
+            .reset_recovery_streak_preserving_telemetry("lidar")
+            .unwrap();
 
         let (count, start) = store.load_recovery_streak("lidar").unwrap();
         assert_eq!(count, 0, "streak must be cleared");
@@ -128,15 +159,31 @@ mod attestation_registry_tests {
     fn test_save_last_generation_reports_acceptance() {
         let store = in_memory();
         // First write creates the row → accepted.
-        assert!(store.save_last_generation(10).unwrap(), "first write must be accepted");
+        assert!(
+            store.save_last_generation(10).unwrap(),
+            "first write must be accepted"
+        );
         // Strictly greater → accepted.
-        assert!(store.save_last_generation(11).unwrap(), "a higher generation is accepted");
+        assert!(
+            store.save_last_generation(11).unwrap(),
+            "a higher generation is accepted"
+        );
         assert_eq!(store.load_last_generation().unwrap(), 11);
         // Lower → REJECTED (returns false), high-water unchanged.
-        assert!(!store.save_last_generation(5).unwrap(), "a lower generation is rejected");
-        assert_eq!(store.load_last_generation().unwrap(), 11, "stale write must not regress the high-water");
+        assert!(
+            !store.save_last_generation(5).unwrap(),
+            "a lower generation is rejected"
+        );
+        assert_eq!(
+            store.load_last_generation().unwrap(),
+            11,
+            "stale write must not regress the high-water"
+        );
         // Equal → REJECTED (strict > required).
-        assert!(!store.save_last_generation(11).unwrap(), "an equal generation is rejected (strict >)");
+        assert!(
+            !store.save_last_generation(11).unwrap(),
+            "an equal generation is rejected (strict >)"
+        );
         assert_eq!(store.load_last_generation().unwrap(), 11);
     }
 
@@ -216,7 +263,11 @@ mod attestation_registry_tests {
             .unwrap();
         assert!(advanced, "first write must advance the high-water");
         assert_eq!(store.load_last_generation().unwrap(), 42);
-        assert_eq!(store.load_all_posture_events().unwrap().len(), 1, "event must commit");
+        assert_eq!(
+            store.load_all_posture_events().unwrap().len(),
+            1,
+            "event must commit"
+        );
 
         // (b) Stale generation — the monotonic guard rejects the high-water bump,
         // but the event still commits (matches the old separate-write semantics).
@@ -230,9 +281,20 @@ mod attestation_registry_tests {
                 10,
             )
             .unwrap();
-        assert!(!advanced2, "a stale generation must not advance the high-water");
-        assert_eq!(store.load_last_generation().unwrap(), 42, "high-water unchanged by stale write");
-        assert_eq!(store.load_all_posture_events().unwrap().len(), 2, "the event still commits");
+        assert!(
+            !advanced2,
+            "a stale generation must not advance the high-water"
+        );
+        assert_eq!(
+            store.load_last_generation().unwrap(),
+            42,
+            "high-water unchanged by stale write"
+        );
+        assert_eq!(
+            store.load_all_posture_events().unwrap().len(),
+            2,
+            "the event still commits"
+        );
 
         // (c) Atomicity on failure — break the audit-chain append so the tx must
         // roll back; NEITHER the event NOR the high-water may land.
@@ -245,7 +307,10 @@ mod attestation_registry_tests {
             3_000,
             99,
         );
-        assert!(r.is_err(), "a failed audit append must error the whole write");
+        assert!(
+            r.is_err(),
+            "a failed audit append must error the whole write"
+        );
         assert_eq!(
             store.load_last_generation().unwrap(),
             42,
@@ -276,7 +341,9 @@ mod standby_store_tests {
     #[test]
     fn test_save_and_load_engine_state_round_trip() {
         let store = in_memory();
-        store.save_engine_state("primary_heartbeat_ms", "12345").unwrap();
+        store
+            .save_engine_state("primary_heartbeat_ms", "12345")
+            .unwrap();
         let val = store.load_engine_state("primary_heartbeat_ms").unwrap();
         assert_eq!(val, Some("12345".to_string()));
     }
@@ -286,7 +353,10 @@ mod standby_store_tests {
         let store = in_memory();
         store.save_engine_state("key", "first").unwrap();
         store.save_engine_state("key", "second").unwrap();
-        assert_eq!(store.load_engine_state("key").unwrap(), Some("second".to_string()));
+        assert_eq!(
+            store.load_engine_state("key").unwrap(),
+            Some("second".to_string())
+        );
     }
 
     #[test]
@@ -294,11 +364,20 @@ mod standby_store_tests {
         // TPM-quote follow-up: an unknown node requires no quote (fail-closed
         // opt-in default); set persists; re-set can flip it back off.
         let store = in_memory();
-        assert!(!store.node_requires_tpm_quote("unknown").unwrap(), "absent → false");
+        assert!(
+            !store.node_requires_tpm_quote("unknown").unwrap(),
+            "absent → false"
+        );
         store.set_node_attestation_policy("n1", true).unwrap();
-        assert!(store.node_requires_tpm_quote("n1").unwrap(), "set true persists");
+        assert!(
+            store.node_requires_tpm_quote("n1").unwrap(),
+            "set true persists"
+        );
         store.set_node_attestation_policy("n1", false).unwrap();
-        assert!(!store.node_requires_tpm_quote("n1").unwrap(), "re-set clears the requirement");
+        assert!(
+            !store.node_requires_tpm_quote("n1").unwrap(),
+            "re-set clears the requirement"
+        );
     }
 
     // --- #394 console rollups -----------------------------------------------
@@ -336,11 +415,19 @@ mod standby_store_tests {
         let store = in_memory();
         let nominal = serde_json::to_string(&crate::verifier::FleetPosture::Nominal).unwrap();
         let degraded = serde_json::to_string(&crate::verifier::FleetPosture::Degraded).unwrap();
-        store.save_posture_event("a", "E", &nominal, None, 1_000).unwrap();
-        store.save_posture_event("a", "E", &degraded, None, 2_000).unwrap();
-        store.save_posture_event("b", "E", &nominal, None, 3_000).unwrap();
+        store
+            .save_posture_event("a", "E", &nominal, None, 1_000)
+            .unwrap();
+        store
+            .save_posture_event("a", "E", &degraded, None, 2_000)
+            .unwrap();
+        store
+            .save_posture_event("b", "E", &nominal, None, 3_000)
+            .unwrap();
         // An old event outside the window is excluded.
-        store.save_posture_event("c", "E", &nominal, None, 10).unwrap();
+        store
+            .save_posture_event("c", "E", &nominal, None, 10)
+            .unwrap();
 
         let since = 500;
         let events = store.load_posture_events_since(since).unwrap();
@@ -359,21 +446,31 @@ mod standby_store_tests {
         let store = in_memory();
         store.save_engine_state("key_a", "value_a").unwrap();
         store.save_engine_state("key_b", "value_b").unwrap();
-        assert_eq!(store.load_engine_state("key_a").unwrap(), Some("value_a".to_string()));
-        assert_eq!(store.load_engine_state("key_b").unwrap(), Some("value_b".to_string()));
+        assert_eq!(
+            store.load_engine_state("key_a").unwrap(),
+            Some("value_a".to_string())
+        );
+        assert_eq!(
+            store.load_engine_state("key_b").unwrap(),
+            Some("value_b".to_string())
+        );
     }
 
     #[test]
     fn test_heartbeat_age_parse_from_stored_string() {
         let store = in_memory();
         let ts: u64 = 1_700_000_000_000;
-        store.save_engine_state("primary_heartbeat_ms", &ts.to_string()).unwrap();
-        let loaded = store.load_engine_state("primary_heartbeat_ms").unwrap().unwrap();
+        store
+            .save_engine_state("primary_heartbeat_ms", &ts.to_string())
+            .unwrap();
+        let loaded = store
+            .load_engine_state("primary_heartbeat_ms")
+            .unwrap()
+            .unwrap();
         let parsed: u64 = loaded.parse().expect("must parse as u64");
         assert_eq!(parsed, ts);
     }
 }
-
 
 /// Regression suite for the audit-chain bypass fix.
 ///
@@ -465,8 +562,8 @@ mod audit_chain_bypass_tests {
 /// signatures. Pre-v2 these were undetected by the hash-only check.
 #[cfg(test)]
 mod audit_hash_v2_tests {
-    use crate::verifier_store::*;
     use crate::audit_chain::AuditChainLinker;
+    use crate::verifier_store::*;
 
     fn in_memory() -> VerifierStore {
         VerifierStore::new(":memory:").unwrap()
@@ -561,8 +658,7 @@ mod audit_hash_v2_tests {
         let prev_v1 = "0".repeat(64);
         let v1_ts: i64 = 1_000;
         let v1_payload = "{\"legacy\":true}";
-        let v1_hash =
-            AuditChainLinker::compute_record_hash_v1(&prev_v1, v1_payload, v1_ts);
+        let v1_hash = AuditChainLinker::compute_record_hash_v1(&prev_v1, v1_payload, v1_ts);
         store
             .conn
             .execute(
@@ -666,9 +762,9 @@ mod audit_hash_v2_tests {
 /// fail-closed unknown-key-id case.
 #[cfg(test)]
 mod audit_key_rotation_tests {
+    use crate::audit_chain::{verifying_key_id, AuditChainLinker};
     use crate::verifier_store::*;
     use ed25519_dalek::SigningKey;
-    use crate::audit_chain::{AuditChainLinker, verifying_key_id};
 
     fn store_with_key(seed: u8) -> (VerifierStore, SigningKey) {
         let mut s = VerifierStore::new(":memory:").expect("store");
@@ -695,23 +791,36 @@ mod audit_key_rotation_tests {
     }
 
     fn max_id(s: &VerifierStore) -> i64 {
-        s.conn.query_row("SELECT MAX(id) FROM audit_log_chain", [], |r| r.get(0)).unwrap()
+        s.conn
+            .query_row("SELECT MAX(id) FROM audit_log_chain", [], |r| r.get(0))
+            .unwrap()
     }
 
     /// (payload, signature_b64, key_id) for a row, for direct sig checks.
     fn row_payload_sig(s: &VerifierStore, id: i64) -> (String, String, String) {
-        s.conn.query_row(
-            "SELECT event_type, previous_hash_hex, record_hash_hex, created_at_ms, \
+        s.conn
+            .query_row(
+                "SELECT event_type, previous_hash_hex, record_hash_hex, created_at_ms, \
              signature_b64, hash_version, sequence, key_id \
              FROM audit_log_chain WHERE id = ?1",
-            [id],
-            |r| {
-                let et: String = r.get(0)?; let prev: String = r.get(1)?; let rec: String = r.get(2)?;
-                let ts: i64 = r.get(3)?; let sig: String = r.get(4)?; let hv: i64 = r.get(5)?;
-                let seq: Option<i64> = r.get(6)?; let kid: String = r.get(7)?;
-                Ok((audit_signing_payload(hv, &prev, &rec, &et, ts, seq), sig, kid))
-            },
-        ).unwrap()
+                [id],
+                |r| {
+                    let et: String = r.get(0)?;
+                    let prev: String = r.get(1)?;
+                    let rec: String = r.get(2)?;
+                    let ts: i64 = r.get(3)?;
+                    let sig: String = r.get(4)?;
+                    let hv: i64 = r.get(5)?;
+                    let seq: Option<i64> = r.get(6)?;
+                    let kid: String = r.get(7)?;
+                    Ok((
+                        audit_signing_payload(hv, &prev, &rec, &et, ts, seq),
+                        sig,
+                        kid,
+                    ))
+                },
+            )
+            .unwrap()
     }
 
     /// CROSS-ROTATION VERIFY: sign under A → rotate to B → append under B →
@@ -723,7 +832,8 @@ mod audit_key_rotation_tests {
         append(&mut s, "E1", 100);
         append(&mut s, "E2", 200);
         let b = SigningKey::from_bytes(&[2; 32]);
-        s.record_key_rotation(b.clone(), "scheduled", 300, held).unwrap();
+        s.record_key_rotation(b.clone(), "scheduled", 300, held)
+            .unwrap();
         append(&mut s, "E3", 400);
         append(&mut s, "E4", 500);
 
@@ -753,9 +863,19 @@ mod audit_key_rotation_tests {
         append(&mut s, "E2", 300);
         let id = max_id(&s);
         let (payload, sig, kid) = row_payload_sig(&s, id);
-        assert_eq!(kid, verifying_key_id(&b.verifying_key()), "post-rotation row's key_id is B");
-        assert!(audit_verify_sig(&b.verifying_key(), &payload, &sig), "verifies under B");
-        assert!(!audit_verify_sig(&a.verifying_key(), &payload, &sig), "FAILS under A — signing swapped");
+        assert_eq!(
+            kid,
+            verifying_key_id(&b.verifying_key()),
+            "post-rotation row's key_id is B"
+        );
+        assert!(
+            audit_verify_sig(&b.verifying_key(), &payload, &sig),
+            "verifies under B"
+        );
+        assert!(
+            !audit_verify_sig(&a.verifying_key(), &payload, &sig),
+            "FAILS under A — signing swapped"
+        );
     }
 
     /// NEGATIVE CONTROL: the OLD single-key verify (one vk = A for every row)
@@ -773,11 +893,16 @@ mod audit_key_rotation_tests {
         let (payload, sig, _kid) = row_payload_sig(&s, id);
 
         // OLD behavior: verify the B-row under the single key A → fails.
-        assert!(!audit_verify_sig(&a.verifying_key(), &payload, &sig),
-            "old single-key(A) verify WOULD have failed the B-row (false tamper alarm)");
+        assert!(
+            !audit_verify_sig(&a.verifying_key(), &payload, &sig),
+            "old single-key(A) verify WOULD have failed the B-row (false tamper alarm)"
+        );
         // NEW behavior: full per-row keyring verify passes.
         let r = s.verify_audit_chain_full(Some(&a.verifying_key())).unwrap();
-        assert!(r.signature_valid, "new keyring verify passes for the same chain");
+        assert!(
+            r.signature_valid,
+            "new keyring verify passes for the same chain"
+        );
     }
 
     /// TAMPER: mutating a row's payload is detected (tamper-evidence intact).
@@ -786,9 +911,17 @@ mod audit_key_rotation_tests {
         let (mut s, a) = store_with_key(1);
         append(&mut s, "E1", 100);
         append(&mut s, "E2", 200);
-        s.conn.execute("UPDATE audit_log_chain SET event_json = '{\"x\":1}' WHERE id = 1", []).unwrap();
+        s.conn
+            .execute(
+                "UPDATE audit_log_chain SET event_json = '{\"x\":1}' WHERE id = 1",
+                [],
+            )
+            .unwrap();
         let r = s.verify_audit_chain_full(Some(&a.verifying_key())).unwrap();
-        assert!(!r.chain_intact || !r.signature_valid, "tamper must be detected");
+        assert!(
+            !r.chain_intact || !r.signature_valid,
+            "tamper must be detected"
+        );
     }
 
     /// MIGRATION: existing rows with NULL key_id are backfilled with the genesis
@@ -799,26 +932,55 @@ mod audit_key_rotation_tests {
         append(&mut s, "E1", 100);
         append(&mut s, "E2", 200);
         // Simulate a pre-upgrade chain: drop the key_id the new append recorded.
-        s.conn.execute("UPDATE audit_log_chain SET key_id = NULL", []).unwrap();
+        s.conn
+            .execute("UPDATE audit_log_chain SET key_id = NULL", [])
+            .unwrap();
 
         s.ensure_key_id_backfill_migration(999).unwrap();
         let gid = verifying_key_id(&a.verifying_key());
-        let nulls: i64 = s.conn.query_row(
-            "SELECT COUNT(*) FROM audit_log_chain WHERE key_id IS NULL", [], |r| r.get(0)).unwrap();
+        let nulls: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log_chain WHERE key_id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(nulls, 0, "all rows backfilled");
-        let backfilled: i64 = s.conn.query_row(
-            "SELECT COUNT(*) FROM audit_log_chain WHERE key_id = ?1", [&gid], |r| r.get(0)).unwrap();
+        let backfilled: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log_chain WHERE key_id = ?1",
+                [&gid],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!(backfilled >= 2, "rows carry the genesis key_id");
         // A signed KEY_ID_BACKFILL anchor exists, and the chain still verifies.
-        let anchors: i64 = s.conn.query_row(
-            "SELECT COUNT(*) FROM audit_log_chain WHERE event_type = 'KEY_ID_BACKFILL'", [], |r| r.get(0)).unwrap();
+        let anchors: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log_chain WHERE event_type = 'KEY_ID_BACKFILL'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(anchors, 1, "migration anchored by a signed event");
         let r = s.verify_audit_chain_full(Some(&a.verifying_key())).unwrap();
-        assert!(r.chain_intact && r.signature_valid, "backfilled rows still verify under genesis");
+        assert!(
+            r.chain_intact && r.signature_valid,
+            "backfilled rows still verify under genesis"
+        );
         // Idempotent.
         s.ensure_key_id_backfill_migration(1000).unwrap();
-        let anchors2: i64 = s.conn.query_row(
-            "SELECT COUNT(*) FROM audit_log_chain WHERE event_type = 'KEY_ID_BACKFILL'", [], |r| r.get(0)).unwrap();
+        let anchors2: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log_chain WHERE event_type = 'KEY_ID_BACKFILL'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(anchors2, 1, "migration is idempotent");
     }
 
@@ -833,7 +995,10 @@ mod audit_key_rotation_tests {
             [],
         ).unwrap();
         let r = s.verify_audit_chain_full(Some(&a.verifying_key())).unwrap();
-        assert!(!r.signature_valid, "unknown key_id must fail closed, not skip");
+        assert!(
+            !r.signature_valid,
+            "unknown key_id must fail closed, not skip"
+        );
         assert_eq!(r.first_invalid_signature_index, Some(0));
     }
 }
@@ -853,11 +1018,13 @@ mod durability_tests {
     impl TmpDb {
         fn new(tag: &str) -> Self {
             let n = CTR.fetch_add(1, Ordering::SeqCst);
-            let p = std::env::temp_dir()
-                .join(format!("kirra74_{tag}_{}_{n}.db", std::process::id()));
+            let p =
+                std::env::temp_dir().join(format!("kirra74_{tag}_{}_{n}.db", std::process::id()));
             TmpDb(p.to_string_lossy().into_owned())
         }
-        fn path(&self) -> &str { &self.0 }
+        fn path(&self) -> &str {
+            &self.0
+        }
     }
     impl Drop for TmpDb {
         fn drop(&mut self) {
@@ -890,7 +1057,10 @@ mod durability_tests {
         let db = TmpDb::new("routing");
         let s = VerifierStore::new(db.path()).unwrap();
         assert_eq!(pragma_synchronous(&s.conn), 1, "main conn is NORMAL (1)");
-        let dc = s.durable_conn.as_ref().expect("file store must have a durable connection");
+        let dc = s
+            .durable_conn
+            .as_ref()
+            .expect("file store must have a durable connection");
         assert_eq!(pragma_synchronous(dc), 2, "durable conn is FULL (2)");
     }
 
@@ -915,7 +1085,11 @@ mod durability_tests {
             )
             .unwrap();
         assert!(advanced, "the durable write must advance the high-water");
-        assert_eq!(s.load_last_generation().unwrap(), 7, "high-water committed with the row");
+        assert_eq!(
+            s.load_last_generation().unwrap(),
+            7,
+            "high-water committed with the row"
+        );
         assert!(
             s.load_all_posture_events()
                 .unwrap()
@@ -925,16 +1099,19 @@ mod durability_tests {
         );
     }
 
-
     /// IN-MEMORY FALLBACK: no separate durable conn (a 2nd :memory: open would be
     /// a distinct db), and epoch/nonce still work via the main connection.
     #[test]
     fn memory_store_has_no_durable_conn_but_works() {
         let mut s = VerifierStore::new(":memory:").unwrap();
-        assert!(s.durable_conn.is_none(), ":memory: must fall back to the main conn");
+        assert!(
+            s.durable_conn.is_none(),
+            ":memory: must fall back to the main conn"
+        );
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
         // #79: held == durable epoch (1) → the fence admits the legitimate write.
-        s.save_federated_report_chained(&report("aa"), None, 2_000, 1).unwrap();
+        s.save_federated_report_chained(&report("aa"), None, 2_000, 1)
+            .unwrap();
         assert!(s.has_seen_federation_nonce("aa").unwrap());
     }
 
@@ -946,18 +1123,26 @@ mod durability_tests {
     fn duplicate_nonce_chain_returns_nonce_replay_and_rolls_back() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("dup"), None, 2_000, 1).unwrap();
+        s.save_federated_report_chained(&report("dup"), None, 2_000, 1)
+            .unwrap();
 
         let second = s.save_federated_report_chained(&report("dup"), None, 2_001, 1);
         assert!(
             matches!(second, Err(DurableWriteError::NonceReplay)),
             "a duplicate nonce must surface as NonceReplay, got {second:?}"
         );
-        let count: i64 = s.conn.query_row(
-            "SELECT COUNT(*) FROM federated_trust_reports WHERE asset_id = 'asset-1'",
-            [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(count, 1, "the replayed report must NOT have been persisted (atomic rollback)");
+        let count: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM federated_trust_reports WHERE asset_id = 'asset-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "the replayed report must NOT have been persisted (atomic rollback)"
+        );
     }
 
     /// Item 20 — the per-(controller, asset) generation high-water gate ACCEPTS a
@@ -966,15 +1151,25 @@ mod durability_tests {
     fn generation_highwater_accepts_ascending() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("g1"), Some(10), 2_000, 1).unwrap();
-        s.save_federated_report_chained(&report("g2"), Some(11), 2_001, 1).unwrap();
-        s.save_federated_report_chained(&report("g3"), Some(50), 2_002, 1).unwrap();
-        let hw: i64 = s.conn.query_row(
-            "SELECT last_generation FROM federation_generation_highwater
+        s.save_federated_report_chained(&report("g1"), Some(10), 2_000, 1)
+            .unwrap();
+        s.save_federated_report_chained(&report("g2"), Some(11), 2_001, 1)
+            .unwrap();
+        s.save_federated_report_chained(&report("g3"), Some(50), 2_002, 1)
+            .unwrap();
+        let hw: i64 = s
+            .conn
+            .query_row(
+                "SELECT last_generation FROM federation_generation_highwater
              WHERE source_controller_id = 'ctrl-A' AND asset_id = 'asset-1'",
-            [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(hw, 50, "the high-water mark advances to the latest accepted generation");
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            hw, 50,
+            "the high-water mark advances to the latest accepted generation"
+        );
     }
 
     /// Item 20 — a report whose generation is <= the high-water (a regress, or an
@@ -984,7 +1179,8 @@ mod durability_tests {
     fn generation_highwater_rejects_regress_and_rolls_back() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("hi"), Some(20), 2_000, 1).unwrap();
+        s.save_federated_report_chained(&report("hi"), Some(20), 2_000, 1)
+            .unwrap();
 
         for (nonce, gen) in [("lo", 19u64), ("eq", 20u64)] {
             let res = s.save_federated_report_chained(&report(nonce), Some(gen), 2_010, 1);
@@ -993,15 +1189,24 @@ mod durability_tests {
                     if found == gen && high_water == 20),
                 "generation {gen} <= high-water 20 must surface as GenerationRegress, got {res:?}"
             );
-            assert!(!s.has_seen_federation_nonce(nonce).unwrap(),
-                "a rejected report must NOT have burned its nonce (atomic rollback)");
+            assert!(
+                !s.has_seen_federation_nonce(nonce).unwrap(),
+                "a rejected report must NOT have burned its nonce (atomic rollback)"
+            );
         }
 
-        let count: i64 = s.conn.query_row(
-            "SELECT COUNT(*) FROM federated_trust_reports WHERE asset_id = 'asset-1'",
-            [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(count, 1, "only the first (gen 20) report persists; the regresses rolled back");
+        let count: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM federated_trust_reports WHERE asset_id = 'asset-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "only the first (gen 20) report persists; the regresses rolled back"
+        );
     }
 
     /// Item 20 — a v1 report (no generation) is NOT gated and does not seed the
@@ -1010,12 +1215,22 @@ mod durability_tests {
     fn generation_highwater_skips_v1_reports() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("v1a"), None, 2_000, 1).unwrap();
-        s.save_federated_report_chained(&report("v1b"), None, 2_001, 1).unwrap();
-        let rows: i64 = s.conn.query_row(
-            "SELECT COUNT(*) FROM federation_generation_highwater", [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(rows, 0, "a v1 (None-generation) report must not touch the high-water table");
+        s.save_federated_report_chained(&report("v1a"), None, 2_000, 1)
+            .unwrap();
+        s.save_federated_report_chained(&report("v1b"), None, 2_001, 1)
+            .unwrap();
+        let rows: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM federation_generation_highwater",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            rows, 0,
+            "a v1 (None-generation) report must not touch the high-water table"
+        );
     }
 
     /// Item 20 — a forward generation JUMP (gen > high-water + 1) is accepted but
@@ -1025,23 +1240,33 @@ mod durability_tests {
     fn generation_gap_emits_in_chain_audit_marker() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("base"), Some(5), 2_000, 1).unwrap();
+        s.save_federated_report_chained(&report("base"), Some(5), 2_000, 1)
+            .unwrap();
         // Contiguous step: no gap marker.
-        s.save_federated_report_chained(&report("step"), Some(6), 2_001, 1).unwrap();
+        s.save_federated_report_chained(&report("step"), Some(6), 2_001, 1)
+            .unwrap();
         // Jump 6 -> 9: missing 7,8 -> one gap marker.
-        s.save_federated_report_chained(&report("jump"), Some(9), 2_002, 1).unwrap();
+        s.save_federated_report_chained(&report("jump"), Some(9), 2_002, 1)
+            .unwrap();
 
         let markers: i64 = s.conn.query_row(
             "SELECT COUNT(*) FROM audit_log_chain WHERE event_type = 'FEDERATION_GENERATION_GAP'",
             [], |r| r.get(0),
         ).unwrap();
-        assert_eq!(markers, 1, "exactly one gap marker for the 6->9 jump (the +1 step emits none)");
+        assert_eq!(
+            markers, 1,
+            "exactly one gap marker for the 6->9 jump (the +1 step emits none)"
+        );
 
-        let payload: String = s.conn.query_row(
-            "SELECT event_json FROM audit_log_chain
+        let payload: String = s
+            .conn
+            .query_row(
+                "SELECT event_json FROM audit_log_chain
              WHERE event_type = 'FEDERATION_GENERATION_GAP'",
-            [], |r| r.get(0),
-        ).unwrap();
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["last_accepted_generation"], 6);
         assert_eq!(v["observed_generation"], 9);
@@ -1058,14 +1283,26 @@ mod durability_tests {
     fn aged_nonces_are_pruned_on_accept() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("old"), None, 2_000, 1).unwrap();
+        s.save_federated_report_chained(&report("old"), None, 2_000, 1)
+            .unwrap();
         assert!(s.has_seen_federation_nonce("old").unwrap());
 
         // A later accept whose received_at is past the retention horizon over "old".
-        s.save_federated_report_chained(&report("new"), None, 2_000 + FEDERATION_NONCE_RETENTION_MS as u64 + 1, 1).unwrap();
-        assert!(!s.has_seen_federation_nonce("old").unwrap(),
-            "an aged nonce must be pruned once an accept lands past the retention horizon");
-        assert!(s.has_seen_federation_nonce("new").unwrap(), "the fresh nonce stays");
+        s.save_federated_report_chained(
+            &report("new"),
+            None,
+            2_000 + FEDERATION_NONCE_RETENTION_MS as u64 + 1,
+            1,
+        )
+        .unwrap();
+        assert!(
+            !s.has_seen_federation_nonce("old").unwrap(),
+            "an aged nonce must be pruned once an accept lands past the retention horizon"
+        );
+        assert!(
+            s.has_seen_federation_nonce("new").unwrap(),
+            "the fresh nonce stays"
+        );
     }
 
     /// EPOCH NON-REGRESSION (the fence-correctness core of #74): a claim
@@ -1076,16 +1313,25 @@ mod durability_tests {
         let db = TmpDb::new("epoch");
         {
             let mut s = VerifierStore::new(db.path()).unwrap();
-            assert_eq!(s.try_claim_epoch(0, "primary", 100).unwrap(), Some(1),
-                "primary claims epoch 1 (FULL-synced)");
+            assert_eq!(
+                s.try_claim_epoch(0, "primary", 100).unwrap(),
+                Some(1),
+                "primary claims epoch 1 (FULL-synced)"
+            );
         } // drop → simulate process loss; the claim was fsync'd on its FULL commit.
 
         // Recover: reopen the SAME file.
         let mut s2 = VerifierStore::new(db.path()).unwrap();
-        assert_eq!(s2.try_claim_epoch(0, "ghost", 200).unwrap(), None,
-            "a stale-observed (epoch 0) re-claim MUST fail — the epoch did not regress to 0");
-        assert_eq!(s2.try_claim_epoch(1, "standby", 300).unwrap(), Some(2),
-            "the durable epoch is 1; the legitimate next claim advances to 2 (fence intact)");
+        assert_eq!(
+            s2.try_claim_epoch(0, "ghost", 200).unwrap(),
+            None,
+            "a stale-observed (epoch 0) re-claim MUST fail — the epoch did not regress to 0"
+        );
+        assert_eq!(
+            s2.try_claim_epoch(1, "standby", 300).unwrap(),
+            Some(2),
+            "the durable epoch is 1; the legitimate next claim advances to 2 (fence intact)"
+        );
     }
 
     /// NONCE DURABILITY: a burned federation nonce survives reopen → no replay.
@@ -1095,12 +1341,18 @@ mod durability_tests {
         {
             let mut s = VerifierStore::new(db.path()).unwrap();
             let held = s.try_claim_epoch(0, "test-node", 0).unwrap().unwrap();
-            s.save_federated_report_chained(&report("deadbeef"), None, 2_000, held).unwrap();
-            assert!(s.has_seen_federation_nonce("deadbeef").unwrap(), "burned before reopen");
+            s.save_federated_report_chained(&report("deadbeef"), None, 2_000, held)
+                .unwrap();
+            assert!(
+                s.has_seen_federation_nonce("deadbeef").unwrap(),
+                "burned before reopen"
+            );
         } // drop → simulate process loss.
         let s2 = VerifierStore::new(db.path()).unwrap();
-        assert!(s2.has_seen_federation_nonce("deadbeef").unwrap(),
-            "burned nonce must survive recovery — no replay window");
+        assert!(
+            s2.has_seen_federation_nonce("deadbeef").unwrap(),
+            "burned nonce must survive recovery — no replay window"
+        );
     }
 
     /// AUDIT-CHAIN INTEGRITY + shutdown checkpoint: appends stay sequenced and
@@ -1115,26 +1367,37 @@ mod durability_tests {
         s.set_signing_key(key.clone());
         // Append a few chained rows via a real store write path.
         for i in 0..3 {
-            s.save_posture_event_chained("n", "EVT", "{}", None, 100 + i).unwrap();
+            s.save_posture_event_chained("n", "EVT", "{}", None, 100 + i)
+                .unwrap();
         }
         // Force the shutdown-style durable checkpoint.
         s.durable_checkpoint().unwrap();
-        let r = s.verify_audit_chain_full(Some(&key.verifying_key())).unwrap();
-        assert!(r.chain_intact, "hash chain intact across the dual-conn + checkpoint");
+        let r = s
+            .verify_audit_chain_full(Some(&key.verifying_key()))
+            .unwrap();
+        assert!(
+            r.chain_intact,
+            "hash chain intact across the dual-conn + checkpoint"
+        );
         assert!(r.signature_valid, "signatures verify");
         // Reopen and re-verify — checkpointed rows are durable.
         drop(s);
         let s2 = VerifierStore::new(db.path()).unwrap();
-        let r2 = s2.verify_audit_chain_full(Some(&key.verifying_key())).unwrap();
-        assert!(r2.chain_intact && r2.signed_entries >= 3, "rows durable + intact after reopen");
+        let r2 = s2
+            .verify_audit_chain_full(Some(&key.verifying_key()))
+            .unwrap();
+        assert!(
+            r2.chain_intact && r2.signed_entries >= 3,
+            "rows durable + intact after reopen"
+        );
     }
 }
 
 #[cfg(test)]
 mod key_durability_165_tests {
+    use crate::audit_chain::{verifying_key_id, AuditChainLinker};
     use crate::verifier_store::*;
     use ed25519_dalek::SigningKey;
-    use crate::audit_chain::{verifying_key_id, AuditChainLinker};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static CTR: AtomicU64 = AtomicU64::new(0);
@@ -1145,11 +1408,13 @@ mod key_durability_165_tests {
     impl TmpDb {
         fn new(tag: &str) -> Self {
             let n = CTR.fetch_add(1, Ordering::SeqCst);
-            let p = std::env::temp_dir()
-                .join(format!("kirra165_{tag}_{}_{n}.db", std::process::id()));
+            let p =
+                std::env::temp_dir().join(format!("kirra165_{tag}_{}_{n}.db", std::process::id()));
             TmpDb(p.to_string_lossy().into_owned())
         }
-        fn path(&self) -> &str { &self.0 }
+        fn path(&self) -> &str {
+            &self.0
+        }
     }
     impl Drop for TmpDb {
         fn drop(&mut self) {
@@ -1159,8 +1424,12 @@ mod key_durability_165_tests {
         }
     }
 
-    fn key(seed: u8) -> SigningKey { SigningKey::from_bytes(&[seed; 32]) }
-    fn kid(k: &SigningKey) -> String { verifying_key_id(&k.verifying_key()) }
+    fn key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+    fn kid(k: &SigningKey) -> String {
+        verifying_key_id(&k.verifying_key())
+    }
 
     // --- Test 1: DURABLE ROTATION (gap-1 proof) -----------------------------
     #[test]
@@ -1173,23 +1442,36 @@ mod key_durability_165_tests {
                 s.admit_signing_key(a.clone(), false, None, 1_000).unwrap(),
                 KeyAdmission::BackfilledGenesis
             );
-            assert_eq!(s.audit_key_ledger_active_id().unwrap().as_deref(), Some(kid(&a).as_str()));
+            assert_eq!(
+                s.audit_key_ledger_active_id().unwrap().as_deref(),
+                Some(kid(&a).as_str())
+            );
             // #79: an Active node holds the epoch it claimed; the rotation fence
             // re-checks it inside the write transaction.
             let held = s.try_claim_epoch(0, "test-node", 0).unwrap().unwrap();
-            s.record_key_rotation(b.clone(), "scheduled", 2_000, held).unwrap();
-            assert_eq!(s.audit_key_ledger_active_id().unwrap().as_deref(), Some(kid(&b).as_str()));
+            s.record_key_rotation(b.clone(), "scheduled", 2_000, held)
+                .unwrap();
+            assert_eq!(
+                s.audit_key_ledger_active_id().unwrap().as_deref(),
+                Some(kid(&b).as_str())
+            );
         }
         // Reopen with env reverted to A (the retired key) → FAIL CLOSED.
         {
             let mut s = VerifierStore::new(db.path()).unwrap();
-            assert_eq!(s.audit_key_ledger_active_id().unwrap().as_deref(), Some(kid(&b).as_str()),
-                "active=B is durable across reopen");
+            assert_eq!(
+                s.audit_key_ledger_active_id().unwrap().as_deref(),
+                Some(kid(&b).as_str()),
+                "active=B is durable across reopen"
+            );
             assert_eq!(
                 s.admit_signing_key(a.clone(), false, None, 3_000).unwrap(),
                 KeyAdmission::RetiredKeyRejected
             );
-            assert!(s.signing_key.is_none(), "must NOT adopt a retired key for signing");
+            assert!(
+                s.signing_key.is_none(),
+                "must NOT adopt a retired key for signing"
+            );
         }
         // Reopen with the correct active key B → resume.
         {
@@ -1207,26 +1489,40 @@ mod key_durability_165_tests {
     fn env_rotation_new_key_requires_explicit_adopt() {
         let db = TmpDb::new("g2");
         let (a, c) = (key(1), key(3));
-        { let mut s = VerifierStore::new(db.path()).unwrap();
-          s.admit_signing_key(a.clone(), false, None, 1_000).unwrap(); }
+        {
+            let mut s = VerifierStore::new(db.path()).unwrap();
+            s.admit_signing_key(a.clone(), false, None, 1_000).unwrap();
+        }
         // New env key, NO adopt → fail closed.
-        { let mut s = VerifierStore::new(db.path()).unwrap();
-          assert_eq!(
-              s.admit_signing_key(c.clone(), false, None, 2_000).unwrap(),
-              KeyAdmission::UnadoptedNewKeyRejected);
-          assert!(s.signing_key.is_none()); }
+        {
+            let mut s = VerifierStore::new(db.path()).unwrap();
+            assert_eq!(
+                s.admit_signing_key(c.clone(), false, None, 2_000).unwrap(),
+                KeyAdmission::UnadoptedNewKeyRejected
+            );
+            assert!(s.signing_key.is_none());
+        }
         // New env key, WITH adopt → records reanchor, adopts C.
-        { let mut s = VerifierStore::new(db.path()).unwrap();
-          assert_eq!(
-              s.admit_signing_key(c.clone(), true, None, 3_000).unwrap(),
-              KeyAdmission::AdoptedReanchor);
-          assert_eq!(s.audit_key_ledger_active_id().unwrap().as_deref(), Some(kid(&c).as_str()));
-          assert!(s.signing_key.is_some()); }
+        {
+            let mut s = VerifierStore::new(db.path()).unwrap();
+            assert_eq!(
+                s.admit_signing_key(c.clone(), true, None, 3_000).unwrap(),
+                KeyAdmission::AdoptedReanchor
+            );
+            assert_eq!(
+                s.audit_key_ledger_active_id().unwrap().as_deref(),
+                Some(kid(&c).as_str())
+            );
+            assert!(s.signing_key.is_some());
+        }
         // Subsequent boot with C (now active) resumes without adopt.
-        { let mut s = VerifierStore::new(db.path()).unwrap();
-          assert_eq!(
-              s.admit_signing_key(c.clone(), false, None, 4_000).unwrap(),
-              KeyAdmission::Resumed); }
+        {
+            let mut s = VerifierStore::new(db.path()).unwrap();
+            assert_eq!(
+                s.admit_signing_key(c.clone(), false, None, 4_000).unwrap(),
+                KeyAdmission::Resumed
+            );
+        }
     }
 
     // --- Test 3: GENESIS ANCHOR (gap-2) — mutated env can't re-root ---------
@@ -1236,7 +1532,7 @@ mod key_durability_165_tests {
         let (a, mutated) = (key(1), key(9));
         let mut s = VerifierStore::new(db.path()).unwrap();
         s.admit_signing_key(a.clone(), false, None, 1_000).unwrap(); // anchor genesis = A
-        // Append a normal signed row under A.
+                                                                     // Append a normal signed row under A.
         {
             let sk = s.signing_key.clone();
             let tx = s.conn.transaction().unwrap();
@@ -1246,9 +1542,14 @@ mod key_durability_165_tests {
         // Verify while passing a MUTATED key: genesis must resolve from the
         // durable anchor (A), so the prior rows still verify and the mutated
         // key cannot re-root the keyring.
-        let r = s.verify_audit_chain_full(Some(&mutated.verifying_key())).unwrap();
+        let r = s
+            .verify_audit_chain_full(Some(&mutated.verifying_key()))
+            .unwrap();
         assert!(r.chain_intact, "chain intact");
-        assert!(r.signature_valid, "prior rows verify under the durable genesis anchor, not the mutated env key");
+        assert!(
+            r.signature_valid,
+            "prior rows verify under the durable genesis anchor, not the mutated env key"
+        );
     }
 
     // --- Test 4: FIRST-BOOT BACKFILL + idempotency --------------------------
@@ -1259,18 +1560,34 @@ mod key_durability_165_tests {
         let mut s = VerifierStore::new(db.path()).unwrap();
         assert_eq!(
             s.admit_signing_key(a.clone(), false, None, 1_000).unwrap(),
-            KeyAdmission::BackfilledGenesis);
-        assert_eq!(s.audit_trust_anchor_genesis_id().unwrap().as_deref(), Some(kid(&a).as_str()));
-        let genesis_rows = s.audit_key_ledger_rows().unwrap()
-            .into_iter().filter(|r| r.role == "genesis").count();
+            KeyAdmission::BackfilledGenesis
+        );
+        assert_eq!(
+            s.audit_trust_anchor_genesis_id().unwrap().as_deref(),
+            Some(kid(&a).as_str())
+        );
+        let genesis_rows = s
+            .audit_key_ledger_rows()
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.role == "genesis")
+            .count();
         assert_eq!(genesis_rows, 1, "exactly one genesis ledger row");
         // Re-run admission with the same key → resume, no second backfill.
         assert_eq!(
             s.admit_signing_key(a.clone(), false, None, 2_000).unwrap(),
-            KeyAdmission::Resumed);
-        let genesis_rows2 = s.audit_key_ledger_rows().unwrap()
-            .into_iter().filter(|r| r.role == "genesis").count();
-        assert_eq!(genesis_rows2, 1, "backfill is idempotent — still exactly one genesis row");
+            KeyAdmission::Resumed
+        );
+        let genesis_rows2 = s
+            .audit_key_ledger_rows()
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.role == "genesis")
+            .count();
+        assert_eq!(
+            genesis_rows2, 1,
+            "backfill is idempotent — still exactly one genesis row"
+        );
     }
 
     /// Inject a pre-#165 in-chain `KEY_ROTATION` (old→new) with NO ledger row,
@@ -1281,9 +1598,11 @@ mod key_durability_165_tests {
             "new_key_id": kid(new),
             "reason": "preexisting",
             "rotated_at_ms": ts,
-        }).to_string();
+        })
+        .to_string();
         let tx = s.conn.transaction().unwrap();
-        AuditChainLinker::append_audit_event_tx(&tx, "KEY_ROTATION", &payload, ts, Some(old)).unwrap();
+        AuditChainLinker::append_audit_event_tx(&tx, "KEY_ROTATION", &payload, ts, Some(old))
+            .unwrap();
         tx.commit().unwrap();
     }
 
@@ -1300,18 +1619,30 @@ mod key_durability_165_tests {
         // adopt is required; it backfills the ledger AND logs a reanchor.
         assert_eq!(
             s.admit_signing_key(a.clone(), true, None, 1_000).unwrap(),
-            KeyAdmission::AdoptedReanchor);
+            KeyAdmission::AdoptedReanchor
+        );
         let rows = s.audit_key_ledger_rows().unwrap();
-        assert!(rows.iter().any(|r| r.role == "genesis" && r.key_id == kid(&a)),
-            "genesis ledger row for A");
-        assert!(rows.iter().any(|r| r.role == "backfill" && r.key_id == kid(&b)),
-            "forensic backfill ledger row matching the pre-existing chain rotation to B");
-        assert!(rows.iter().any(|r| r.role == "reanchor"
+        assert!(
+            rows.iter()
+                .any(|r| r.role == "genesis" && r.key_id == kid(&a)),
+            "genesis ledger row for A"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.role == "backfill" && r.key_id == kid(&b)),
+            "forensic backfill ledger row matching the pre-existing chain rotation to B"
+        );
+        assert!(
+            rows.iter().any(|r| r.role == "reanchor"
                 && r.key_id == kid(&a)
                 && r.prev_key_id.as_deref() == Some(kid(&b).as_str())),
-            "consented reanchor row: A adopted over the chain's latest (B)");
+            "consented reanchor row: A adopted over the chain's latest (B)"
+        );
         // The consented env key (A) is the active key.
-        assert_eq!(s.audit_key_ledger_active_id().unwrap().as_deref(), Some(kid(&a).as_str()));
+        assert_eq!(
+            s.audit_key_ledger_active_id().unwrap().as_deref(),
+            Some(kid(&a).as_str())
+        );
     }
 
     // --- Migration hardening: reversion at first boot, no adopt → fail-closed
@@ -1322,16 +1653,23 @@ mod key_durability_165_tests {
         let mut s = VerifierStore::new(db.path()).unwrap();
         s.set_signing_key(a.clone());
         inject_chain_rotation(&mut s, &a, &b, 500); // chain A→B
-        // Env = A (reverted to a pre-rotation key), no adopt → FAIL CLOSED.
+                                                    // Env = A (reverted to a pre-rotation key), no adopt → FAIL CLOSED.
         assert_eq!(
             s.admit_signing_key(a.clone(), false, None, 1_000).unwrap(),
             KeyAdmission::MigrationReversionRejected {
                 chain_latest_key_id: kid(&b),
                 env_key_id: kid(&a),
-            });
+            }
+        );
         // Fail-closed: nothing durable was written — no anchor, no ledger rows.
-        assert!(s.audit_trust_anchor_genesis_id().unwrap().is_none(), "no anchor written on reject");
-        assert!(s.audit_key_ledger_active_id().unwrap().is_none(), "no ledger row written on reject");
+        assert!(
+            s.audit_trust_anchor_genesis_id().unwrap().is_none(),
+            "no anchor written on reject"
+        );
+        assert!(
+            s.audit_key_ledger_active_id().unwrap().is_none(),
+            "no ledger row written on reject"
+        );
     }
 
     // --- Migration hardening: env matches the chain's latest rotation → OK ---
@@ -1342,12 +1680,19 @@ mod key_durability_165_tests {
         let mut s = VerifierStore::new(db.path()).unwrap();
         s.set_signing_key(a.clone());
         inject_chain_rotation(&mut s, &a, &b, 500); // chain A→B
-        // Env = B (correctly updated to the latest rotation) → normal backfill.
+                                                    // Env = B (correctly updated to the latest rotation) → normal backfill.
         assert_eq!(
             s.admit_signing_key(b.clone(), false, None, 1_000).unwrap(),
-            KeyAdmission::BackfilledGenesis);
-        assert_eq!(s.audit_trust_anchor_genesis_id().unwrap().as_deref(), Some(kid(&b).as_str()));
-        assert_eq!(s.audit_key_ledger_active_id().unwrap().as_deref(), Some(kid(&b).as_str()));
+            KeyAdmission::BackfilledGenesis
+        );
+        assert_eq!(
+            s.audit_trust_anchor_genesis_id().unwrap().as_deref(),
+            Some(kid(&b).as_str())
+        );
+        assert_eq!(
+            s.audit_key_ledger_active_id().unwrap().as_deref(),
+            Some(kid(&b).as_str())
+        );
     }
 
     // --- Migration hardening: no rotations in chain → unaffected ------------
@@ -1366,8 +1711,12 @@ mod key_durability_165_tests {
         }
         assert_eq!(
             s.admit_signing_key(a.clone(), false, None, 1_000).unwrap(),
-            KeyAdmission::BackfilledGenesis);
-        assert_eq!(s.audit_key_ledger_active_id().unwrap().as_deref(), Some(kid(&a).as_str()));
+            KeyAdmission::BackfilledGenesis
+        );
+        assert_eq!(
+            s.audit_key_ledger_active_id().unwrap().as_deref(),
+            Some(kid(&a).as_str())
+        );
     }
 
     // --- Test 6: ATOMICITY — chain row + ledger row both-or-neither ---------
@@ -1382,13 +1731,34 @@ mod key_durability_165_tests {
             s.record_key_rotation(b.clone(), "r", 2, held).unwrap();
         }
         let s = VerifierStore::new(db.path()).unwrap();
-        let chain_rot: i64 = s.conn.query_row(
-            "SELECT COUNT(*) FROM audit_log_chain WHERE event_type='KEY_ROTATION'", [], |r| r.get(0)).unwrap();
-        let ledger_rot: i64 = s.durable_ref().query_row(
-            "SELECT COUNT(*) FROM audit_key_ledger WHERE role='rotation'", [], |r| r.get(0)).unwrap();
-        assert_eq!(chain_rot, 1, "the KEY_ROTATION chain row is durable across reopen");
-        assert_eq!(ledger_rot, 1, "the ledger rotation row is durable across reopen");
-        assert_eq!(chain_rot, ledger_rot, "both-present (single FULL transaction)");
+        let chain_rot: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log_chain WHERE event_type='KEY_ROTATION'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let ledger_rot: i64 = s
+            .durable_ref()
+            .query_row(
+                "SELECT COUNT(*) FROM audit_key_ledger WHERE role='rotation'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            chain_rot, 1,
+            "the KEY_ROTATION chain row is durable across reopen"
+        );
+        assert_eq!(
+            ledger_rot, 1,
+            "the ledger rotation row is durable across reopen"
+        );
+        assert_eq!(
+            chain_rot, ledger_rot,
+            "both-present (single FULL transaction)"
+        );
     }
 
     // --- Regression: a rotated chain still verifies under the ledger seed ----
@@ -1415,7 +1785,10 @@ mod key_durability_165_tests {
         }
         let r = s.verify_audit_chain_full(Some(&a.verifying_key())).unwrap();
         assert!(r.chain_intact, "hash chain intact across rotation");
-        assert!(r.signature_valid, "all rows (A-signed AND B-signed) verify under the durable seed");
+        assert!(
+            r.signature_valid,
+            "all rows (A-signed AND B-signed) verify under the durable seed"
+        );
     }
 
     // --- #685: audit chain stays contiguous across both connections ----------
@@ -1445,16 +1818,24 @@ mod key_durability_165_tests {
 
         // NORMAL-conn audit writes (posture events) interleaved with a FULL-conn
         // audit write (key rotation), all appending to the same audit_log_chain.
-        s.save_posture_event_chained("n1", "DEGRADED", "{}", None, 10).unwrap();
-        s.save_posture_event_chained("n1", "NOMINAL", "{}", None, 20).unwrap();
-        s.record_key_rotation(b.clone(), "scheduled", 30, held).unwrap(); // durable_conn
-        s.save_posture_event_chained("n2", "DEGRADED", "{}", None, 40).unwrap();
-        s.save_posture_event_chained("n2", "LOCKEDOUT", "{}", None, 50).unwrap();
+        s.save_posture_event_chained("n1", "DEGRADED", "{}", None, 10)
+            .unwrap();
+        s.save_posture_event_chained("n1", "NOMINAL", "{}", None, 20)
+            .unwrap();
+        s.record_key_rotation(b.clone(), "scheduled", 30, held)
+            .unwrap(); // durable_conn
+        s.save_posture_event_chained("n2", "DEGRADED", "{}", None, 40)
+            .unwrap();
+        s.save_posture_event_chained("n2", "LOCKEDOUT", "{}", None, 50)
+            .unwrap();
 
         // (1) The chain verifies end-to-end across the connection boundary and the
         //     rotation (rows signed by A before, by B after).
         let r = s.verify_audit_chain_full(Some(&a.verifying_key())).unwrap();
-        assert!(r.chain_intact, "hash chain intact across the NORMAL/FULL connection boundary");
+        assert!(
+            r.chain_intact,
+            "hash chain intact across the NORMAL/FULL connection boundary"
+        );
         assert!(r.signature_valid, "all rows verify (A-signed and B-signed)");
         assert_eq!(r.first_invalid_signature_index, None);
 
@@ -1469,8 +1850,14 @@ mod key_durability_165_tests {
             rows.map(|x| x.unwrap()).collect()
         };
         let expected: Vec<i64> = (0..seqs.len() as i64).collect();
-        assert_eq!(seqs, expected, "audit sequences are contiguous 0..N — chain did not fork");
-        assert!(seqs.len() >= 5, "at least the 5 rows this test appended are present");
+        assert_eq!(
+            seqs, expected,
+            "audit sequences are contiguous 0..N — chain did not fork"
+        );
+        assert!(
+            seqs.len() >= 5,
+            "at least the 5 rows this test appended are present"
+        );
     }
 
     // --- Test 7: WCET — verdict path is independent of the key ledger --------
@@ -1488,12 +1875,15 @@ mod key_durability_165_tests {
         let contract = VehicleKinematicsContract::nominal_reference_profile();
         let cmd = ProposedVehicleCommand {
             linear_velocity_mps: 10.0,
-            current_velocity_mps: 10.0,   // zero implied accel
+            current_velocity_mps: 10.0, // zero implied accel
             delta_time_s: 0.05,
             steering_angle_deg: 1.0,
             current_steering_angle_deg: 1.0, // zero steering rate
         };
-        assert_eq!(validate_vehicle_command(&cmd, &contract), EnforceAction::Allow);
+        assert_eq!(
+            validate_vehicle_command(&cmd, &contract),
+            EnforceAction::Allow
+        );
     }
 }
 
@@ -1539,17 +1929,28 @@ mod sg_010_audit_tamper_tests {
 
         let mut writer = VerifierStore::new(&path_str).expect("writer store");
         writer.set_signing_key(sk);
-        writer.save_posture_event_chained("n1", "E1", "{}", None, 100).unwrap();
-        writer.save_posture_event_chained("n1", "E2", "{}", None, 200).unwrap();
-        writer.save_posture_event_chained("n1", "E3", "{}", None, 300).unwrap();
+        writer
+            .save_posture_event_chained("n1", "E1", "{}", None, 100)
+            .unwrap();
+        writer
+            .save_posture_event_chained("n1", "E2", "{}", None, 200)
+            .unwrap();
+        writer
+            .save_posture_event_chained("n1", "E3", "{}", None, 300)
+            .unwrap();
 
         // Control: the untampered chain verifies clean. This proves the tamper —
         // not some pre-existing breakage — is what trips the later assertions.
         let clean = writer.verify_audit_chain_full(Some(&vk)).unwrap();
         assert!(clean.chain_intact, "freshly written chain must be intact");
-        assert!(clean.signature_valid, "freshly written rows must all verify");
-        assert_eq!(clean.first_invalid_signature_index, None,
-            "no tampered index in a clean chain");
+        assert!(
+            clean.signature_valid,
+            "freshly written rows must all verify"
+        );
+        assert_eq!(
+            clean.first_invalid_signature_index, None,
+            "no tampered index in a clean chain"
+        );
         assert_eq!(clean.total_entries, 3, "exactly the three rows we wrote");
 
         (dir, path_str, vk)
@@ -1600,12 +2001,19 @@ mod sg_010_audit_tamper_tests {
         let reader = VerifierStore::new(&path_str).expect("reader store");
         let r = reader.verify_audit_chain_full(Some(&vk)).unwrap();
 
-        assert!(!r.chain_intact,
-            "back-dating row id={tampered_id} must break the hash chain");
-        assert!(!r.signature_valid,
-            "the tampered row's signature must no longer verify");
-        assert_eq!(r.first_invalid_signature_index, Some(ordinal),
-            "verify must pinpoint the FIRST tampered row's index ({ordinal})");
+        assert!(
+            !r.chain_intact,
+            "back-dating row id={tampered_id} must break the hash chain"
+        );
+        assert!(
+            !r.signature_valid,
+            "the tampered row's signature must no longer verify"
+        );
+        assert_eq!(
+            r.first_invalid_signature_index,
+            Some(ordinal),
+            "verify must pinpoint the FIRST tampered row's index ({ordinal})"
+        );
     }
 
     /// Even an unsigned chain detects tampering via the hash linkage alone
@@ -1618,8 +2026,12 @@ mod sg_010_audit_tamper_tests {
 
         // No signing key set ⇒ unsigned rows.
         let mut store = VerifierStore::new(&path_str).expect("store");
-        store.save_posture_event_chained("n1", "E1", "{}", None, 100).unwrap();
-        store.save_posture_event_chained("n1", "E2", "{}", None, 200).unwrap();
+        store
+            .save_posture_event_chained("n1", "E1", "{}", None, 100)
+            .unwrap();
+        store
+            .save_posture_event_chained("n1", "E2", "{}", None, 200)
+            .unwrap();
 
         let clean = store.verify_audit_chain_full(None).unwrap();
         assert!(clean.chain_intact, "unsigned chain still hash-links");
@@ -1635,8 +2047,10 @@ mod sg_010_audit_tamper_tests {
             .unwrap();
 
         let r = store.verify_audit_chain_full(None).unwrap();
-        assert!(!r.chain_intact,
-            "tampering event_json must break the recomputed hash even with no signatures");
+        assert!(
+            !r.chain_intact,
+            "tampering event_json must break the recomputed hash even with no signatures"
+        );
     }
 }
 
@@ -1695,7 +2109,10 @@ mod epoch_fence_79_tests {
             .save_federated_report_chained(&report("cafe"), None, 9_000, held)
             .unwrap_err();
         match err {
-            DurableWriteError::Fenced(FenceError::EpochSuperseded { held: h, durable: d }) => {
+            DurableWriteError::Fenced(FenceError::EpochSuperseded {
+                held: h,
+                durable: d,
+            }) => {
                 assert_eq!((h, d), (1, 2), "fence reports stale-held vs durable epoch");
             }
             other => panic!("expected EpochSuperseded, got {other:?}"),
@@ -1706,10 +2123,16 @@ mod epoch_fence_79_tests {
             "fenced write must NOT burn the nonce"
         );
         assert!(
-            s.load_federated_reports_for_asset("asset-1").unwrap().is_empty(),
+            s.load_federated_reports_for_asset("asset-1")
+                .unwrap()
+                .is_empty(),
             "fenced write must NOT persist the report row"
         );
-        assert_eq!(s.current_epoch().unwrap(), 2, "fenced attempt must not touch ha_state");
+        assert_eq!(
+            s.current_epoch().unwrap(),
+            2,
+            "fenced attempt must not touch ha_state"
+        );
     }
 
     /// LEGITIMATE PATH: held == durable → the identical write commits. The only
@@ -1733,7 +2156,9 @@ mod epoch_fence_79_tests {
     fn fenced_fail_closed_when_epoch_unreadable() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         let held = claimed(&mut s);
-        s.conn.execute("DELETE FROM ha_state WHERE id = 1", []).unwrap();
+        s.conn
+            .execute("DELETE FROM ha_state WHERE id = 1", [])
+            .unwrap();
 
         let err = s
             .save_federated_report_chained(&report("f00d"), None, 9_000, held)
@@ -1758,7 +2183,10 @@ mod epoch_fence_79_tests {
         assert!(
             matches!(
                 err,
-                DurableWriteError::Fenced(FenceError::EpochSuperseded { held: 0, durable: 0 })
+                DurableWriteError::Fenced(FenceError::EpochSuperseded {
+                    held: 0,
+                    durable: 0
+                })
             ),
             "held == 0 must be fenced even when durable == 0"
         );
@@ -1778,10 +2206,15 @@ mod epoch_fence_79_tests {
         assert_eq!(s.try_claim_epoch(1, "other", 5).unwrap(), Some(2)); // superseded
         let b = SigningKey::from_bytes(&[2; 32]);
 
-        let err = s.record_key_rotation(b.clone(), "fenced", 9, held).unwrap_err();
+        let err = s
+            .record_key_rotation(b.clone(), "fenced", 9, held)
+            .unwrap_err();
         assert!(matches!(
             err,
-            DurableWriteError::Fenced(FenceError::EpochSuperseded { held: 1, durable: 2 })
+            DurableWriteError::Fenced(FenceError::EpochSuperseded {
+                held: 1,
+                durable: 2
+            })
         ));
 
         let rotations: i64 = s
@@ -1792,7 +2225,10 @@ mod epoch_fence_79_tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(rotations, 0, "fenced rotation must not append a KEY_ROTATION row");
+        assert_eq!(
+            rotations, 0,
+            "fenced rotation must not append a KEY_ROTATION row"
+        );
         assert_eq!(
             s.signing_key.as_ref().unwrap().verifying_key(),
             a.verifying_key(),
@@ -1814,9 +2250,9 @@ mod epoch_fence_79_tests {
 #[cfg(test)]
 mod audit_anchor_head_77_tests {
     use crate::verifier_store::*;
-    use rusqlite::params;
-    use ed25519_dalek::SigningKey;
     use base64::engine::general_purpose::STANDARD as b64e;
+    use ed25519_dalek::SigningKey;
+    use rusqlite::params;
 
     fn signed_store() -> (VerifierStore, ed25519_dalek::VerifyingKey) {
         let mut s = VerifierStore::new(":memory:").expect("store");
@@ -1827,9 +2263,12 @@ mod audit_anchor_head_77_tests {
     }
 
     fn append3(s: &mut VerifierStore) {
-        s.save_posture_event_chained("n", "E1", "{}", None, 100).unwrap();
-        s.save_posture_event_chained("n", "E2", "{}", None, 200).unwrap();
-        s.save_posture_event_chained("n", "E3", "{}", None, 300).unwrap();
+        s.save_posture_event_chained("n", "E1", "{}", None, 100)
+            .unwrap();
+        s.save_posture_event_chained("n", "E2", "{}", None, 200)
+            .unwrap();
+        s.save_posture_event_chained("n", "E3", "{}", None, 300)
+            .unwrap();
     }
 
     fn read_head(s: &mut VerifierStore) -> (i64, String, Option<String>, Option<String>) {
@@ -1850,7 +2289,10 @@ mod audit_anchor_head_77_tests {
         let (mut s, vk) = signed_store();
         append3(&mut s);
         let r = s.verify_audit_chain_full(Some(&vk)).unwrap();
-        assert!(r.chain_intact && r.signature_valid, "control: chain itself is intact");
+        assert!(
+            r.chain_intact && r.signature_valid,
+            "control: chain itself is intact"
+        );
         assert!(r.head_verified, "head must match the tail on a clean chain");
         assert_eq!(r.head_status, "OK");
         assert_eq!(r.total_entries, 3);
@@ -1883,13 +2325,22 @@ mod audit_anchor_head_77_tests {
         assert_eq!(changed, 1, "exactly the middle row's signature was altered");
 
         let r = s.verify_audit_chain_full(Some(&vk)).unwrap();
-        assert!(r.chain_intact, "hash linkage is untouched — chain_intact stays true");
-        assert!(!r.signature_valid, "the tampered signature must fail to verify");
+        assert!(
+            r.chain_intact,
+            "hash linkage is untouched — chain_intact stays true"
+        );
+        assert!(
+            !r.signature_valid,
+            "the tampered signature must fail to verify"
+        );
         assert!(
             !r.verified(),
             "the authoritative verdict folds in signatures → a hash-intact, bad-signature chain is NOT verified"
         );
-        assert!(r.first_invalid_signature_index.is_some(), "the offending row is named");
+        assert!(
+            r.first_invalid_signature_index.is_some(),
+            "the offending row is named"
+        );
     }
 
     /// EMPTY chain → no head required, clean.
@@ -1924,7 +2375,10 @@ mod audit_anchor_head_77_tests {
             r.chain_intact,
             "the surviving 2-row prefix is still hash-consistent — the walk alone cannot see the truncation"
         );
-        assert!(!r.head_verified, "the head high-water mark must detect the deleted tail");
+        assert!(
+            !r.head_verified,
+            "the head high-water mark must detect the deleted tail"
+        );
         assert_eq!(r.head_status, "TRUNCATION_DETECTED");
         assert_eq!(r.total_entries, 2, "only the prefix survived");
     }
@@ -1961,7 +2415,10 @@ mod audit_anchor_head_77_tests {
             )
             .unwrap();
         let r = s.verify_audit_chain_full(Some(&vk)).unwrap();
-        assert!(!r.head_verified, "a tampered head signature must fail closed");
+        assert!(
+            !r.head_verified,
+            "a tampered head signature must fail closed"
+        );
         assert_eq!(r.head_status, "HEAD_SIGNATURE_INVALID");
     }
 
@@ -1970,7 +2427,9 @@ mod audit_anchor_head_77_tests {
     fn absent_head_on_nonempty_chain_fails_closed() {
         let (mut s, vk) = signed_store();
         append3(&mut s);
-        s.raw_conn().execute("DELETE FROM audit_anchor_head", []).unwrap();
+        s.raw_conn()
+            .execute("DELETE FROM audit_anchor_head", [])
+            .unwrap();
         let r = s.verify_audit_chain_full(Some(&vk)).unwrap();
         assert!(!r.head_verified);
         assert_eq!(r.head_status, "HEAD_ABSENT");
@@ -1983,12 +2442,15 @@ mod audit_anchor_head_77_tests {
     #[test]
     fn power_loss_of_last_commit_does_not_false_alarm() {
         let (mut s, vk) = signed_store();
-        s.save_posture_event_chained("n", "E1", "{}", None, 100).unwrap();
-        s.save_posture_event_chained("n", "E2", "{}", None, 200).unwrap();
+        s.save_posture_event_chained("n", "E1", "{}", None, 100)
+            .unwrap();
+        s.save_posture_event_chained("n", "E2", "{}", None, 200)
+            .unwrap();
         // Head as committed after E2 (the state the head reverts to on rollback).
         let head_after_e2 = read_head(&mut s);
         // E3 commits: row + head→E3 atomically.
-        s.save_posture_event_chained("n", "E3", "{}", None, 300).unwrap();
+        s.save_posture_event_chained("n", "E3", "{}", None, 300)
+            .unwrap();
 
         // Ungraceful power loss of E3's single commit: row AND head update vanish
         // together (same NORMAL transaction). Recover to the post-E2 state.
@@ -2003,7 +2465,12 @@ mod audit_anchor_head_77_tests {
                 "UPDATE audit_anchor_head \
                  SET sequence = ?1, record_hash_hex = ?2, signature_b64 = ?3, key_id = ?4 \
                  WHERE id = 1",
-                params![head_after_e2.0, head_after_e2.1, head_after_e2.2, head_after_e2.3],
+                params![
+                    head_after_e2.0,
+                    head_after_e2.1,
+                    head_after_e2.2,
+                    head_after_e2.3
+                ],
             )
             .unwrap();
         }
@@ -2025,9 +2492,13 @@ mod audit_anchor_head_77_tests {
         let (mut s, vk) = signed_store();
         append3(&mut s);
         // Model a pre-#77 chain: rows present, head missing.
-        s.raw_conn().execute("DELETE FROM audit_anchor_head", []).unwrap();
-        assert!(!s.verify_audit_chain_full(Some(&vk)).unwrap().head_verified,
-            "precondition: no head → fail closed");
+        s.raw_conn()
+            .execute("DELETE FROM audit_anchor_head", [])
+            .unwrap();
+        assert!(
+            !s.verify_audit_chain_full(Some(&vk)).unwrap().head_verified,
+            "precondition: no head → fail closed"
+        );
 
         s.ensure_audit_anchor_head(999).unwrap();
 
@@ -2049,8 +2520,8 @@ mod audit_anchor_head_77_tests {
 #[cfg(test)]
 mod causal_chain_87_tests {
     use crate::verifier_store::*;
-    use rusqlite::params;
     use ed25519_dalek::SigningKey;
+    use rusqlite::params;
 
     fn signed_store() -> (VerifierStore, ed25519_dalek::VerifyingKey) {
         let mut s = VerifierStore::new(":memory:").expect("store");
@@ -2064,21 +2535,48 @@ mod causal_chain_87_tests {
     fn append3_causal(s: &mut VerifierStore) {
         let sk = s.signing_key.clone();
         let id1 = "entry-1".to_string();
-        s.append_causal_event(&CausalEventInput {
-            entry_id: "entry-1", asset_id: "leader", event_type: "FAULT", payload: "{}",
-            caused_by: &[], affects_assets: &["follower".to_string()],
-            fabric_generation: 1, timestamp_ms: 100,
-        }, sk.as_ref()).unwrap();
-        s.append_causal_event(&CausalEventInput {
-            entry_id: "entry-2", asset_id: "follower", event_type: "DEGRADE", payload: "{}",
-            caused_by: std::slice::from_ref(&id1), affects_assets: &[],
-            fabric_generation: 1, timestamp_ms: 200,
-        }, sk.as_ref()).unwrap();
-        s.append_causal_event(&CausalEventInput {
-            entry_id: "entry-3", asset_id: "follower", event_type: "STOP", payload: "{}",
-            caused_by: &[id1], affects_assets: &["leader".to_string()],
-            fabric_generation: 2, timestamp_ms: 300,
-        }, sk.as_ref()).unwrap();
+        s.append_causal_event(
+            &CausalEventInput {
+                entry_id: "entry-1",
+                asset_id: "leader",
+                event_type: "FAULT",
+                payload: "{}",
+                caused_by: &[],
+                affects_assets: &["follower".to_string()],
+                fabric_generation: 1,
+                timestamp_ms: 100,
+            },
+            sk.as_ref(),
+        )
+        .unwrap();
+        s.append_causal_event(
+            &CausalEventInput {
+                entry_id: "entry-2",
+                asset_id: "follower",
+                event_type: "DEGRADE",
+                payload: "{}",
+                caused_by: std::slice::from_ref(&id1),
+                affects_assets: &[],
+                fabric_generation: 1,
+                timestamp_ms: 200,
+            },
+            sk.as_ref(),
+        )
+        .unwrap();
+        s.append_causal_event(
+            &CausalEventInput {
+                entry_id: "entry-3",
+                asset_id: "follower",
+                event_type: "STOP",
+                payload: "{}",
+                caused_by: &[id1],
+                affects_assets: &["leader".to_string()],
+                fabric_generation: 2,
+                timestamp_ms: 300,
+            },
+            sk.as_ref(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2100,14 +2598,23 @@ mod causal_chain_87_tests {
         let (mut s, vk) = signed_store();
         append3_causal(&mut s);
         // Precondition: clean.
-        assert!(s.verify_causal_chain_integrity(Some(&vk)).unwrap().chain_intact);
+        assert!(
+            s.verify_causal_chain_integrity(Some(&vk))
+                .unwrap()
+                .chain_intact
+        );
         // Rewrite the caused_by edge of the middle row.
-        s.raw_conn().execute(
-            "UPDATE fabric_causal_log SET caused_by = ?1 WHERE entry_id = 'entry-2'",
-            params![r#"["forged-cause"]"#],
-        ).unwrap();
+        s.raw_conn()
+            .execute(
+                "UPDATE fabric_causal_log SET caused_by = ?1 WHERE entry_id = 'entry-2'",
+                params![r#"["forged-cause"]"#],
+            )
+            .unwrap();
         let r = s.verify_causal_chain_integrity(Some(&vk)).unwrap();
-        assert!(!r.chain_intact, "tampered caused_by edge MUST break chain_intact");
+        assert!(
+            !r.chain_intact,
+            "tampered caused_by edge MUST break chain_intact"
+        );
     }
 
     /// KEY WIN: tampering `affects_assets` breaks the recomputed record hash.
@@ -2115,13 +2622,22 @@ mod causal_chain_87_tests {
     fn tampering_affects_assets_edge_is_detected() {
         let (mut s, vk) = signed_store();
         append3_causal(&mut s);
-        assert!(s.verify_causal_chain_integrity(Some(&vk)).unwrap().chain_intact);
-        s.raw_conn().execute(
-            "UPDATE fabric_causal_log SET affects_assets = ?1 WHERE entry_id = 'entry-1'",
-            params![r#"["forged-asset"]"#],
-        ).unwrap();
+        assert!(
+            s.verify_causal_chain_integrity(Some(&vk))
+                .unwrap()
+                .chain_intact
+        );
+        s.raw_conn()
+            .execute(
+                "UPDATE fabric_causal_log SET affects_assets = ?1 WHERE entry_id = 'entry-1'",
+                params![r#"["forged-asset"]"#],
+            )
+            .unwrap();
         let r = s.verify_causal_chain_integrity(Some(&vk)).unwrap();
-        assert!(!r.chain_intact, "tampered affects_assets edge MUST break chain_intact");
+        assert!(
+            !r.chain_intact,
+            "tampered affects_assets edge MUST break chain_intact"
+        );
     }
 
     /// KEY WIN: tampering `fabric_generation` breaks the recomputed record hash.
@@ -2129,13 +2645,22 @@ mod causal_chain_87_tests {
     fn tampering_fabric_generation_edge_is_detected() {
         let (mut s, vk) = signed_store();
         append3_causal(&mut s);
-        assert!(s.verify_causal_chain_integrity(Some(&vk)).unwrap().chain_intact);
-        s.raw_conn().execute(
-            "UPDATE fabric_causal_log SET fabric_generation = 99 WHERE entry_id = 'entry-3'",
-            [],
-        ).unwrap();
+        assert!(
+            s.verify_causal_chain_integrity(Some(&vk))
+                .unwrap()
+                .chain_intact
+        );
+        s.raw_conn()
+            .execute(
+                "UPDATE fabric_causal_log SET fabric_generation = 99 WHERE entry_id = 'entry-3'",
+                [],
+            )
+            .unwrap();
         let r = s.verify_causal_chain_integrity(Some(&vk)).unwrap();
-        assert!(!r.chain_intact, "tampered fabric_generation edge MUST break chain_intact");
+        assert!(
+            !r.chain_intact,
+            "tampered fabric_generation edge MUST break chain_intact"
+        );
     }
 
     /// TRUNCATION: delete the tail row; the surviving prefix is internally
@@ -2144,13 +2669,21 @@ mod causal_chain_87_tests {
     fn truncation_of_causal_tail_is_detected() {
         let (mut s, vk) = signed_store();
         append3_causal(&mut s);
-        s.raw_conn().execute(
-            "DELETE FROM fabric_causal_log WHERE id = (SELECT MAX(id) FROM fabric_causal_log)",
-            [],
-        ).unwrap();
+        s.raw_conn()
+            .execute(
+                "DELETE FROM fabric_causal_log WHERE id = (SELECT MAX(id) FROM fabric_causal_log)",
+                [],
+            )
+            .unwrap();
         let r = s.verify_causal_chain_integrity(Some(&vk)).unwrap();
-        assert!(r.chain_intact, "surviving 2-row prefix is still hash-consistent");
-        assert!(!r.head_verified, "the signed head must detect the deleted tail");
+        assert!(
+            r.chain_intact,
+            "surviving 2-row prefix is still hash-consistent"
+        );
+        assert!(
+            !r.head_verified,
+            "the signed head must detect the deleted tail"
+        );
         assert_eq!(r.head_status, "TRUNCATION_DETECTED");
     }
 
@@ -2160,10 +2693,12 @@ mod causal_chain_87_tests {
         let (mut s, vk) = signed_store();
         append3_causal(&mut s);
         let bogus = b64e.encode([0u8; 64]);
-        s.raw_conn().execute(
-            "UPDATE fabric_causal_anchor_head SET signature_b64 = ?1 WHERE id = 1",
-            params![bogus],
-        ).unwrap();
+        s.raw_conn()
+            .execute(
+                "UPDATE fabric_causal_anchor_head SET signature_b64 = ?1 WHERE id = 1",
+                params![bogus],
+            )
+            .unwrap();
         let r = s.verify_causal_chain_integrity(Some(&vk)).unwrap();
         assert!(!r.head_verified);
         assert_eq!(r.head_status, "HEAD_SIGNATURE_INVALID");
@@ -2181,17 +2716,36 @@ mod causal_chain_87_tests {
         let entry_id;
         {
             let mut s = VerifierStore::new(&path_str).expect("file store");
-            let e = s.append_causal_event(&CausalEventInput {
-                entry_id: "persist-1", asset_id: "a", event_type: "EVT", payload: "{}",
-                caused_by: &[], affects_assets: &["x".to_string()],
-                fabric_generation: 3, timestamp_ms: 1000,
-            }, None).unwrap();
+            let e = s
+                .append_causal_event(
+                    &CausalEventInput {
+                        entry_id: "persist-1",
+                        asset_id: "a",
+                        event_type: "EVT",
+                        payload: "{}",
+                        caused_by: &[],
+                        affects_assets: &["x".to_string()],
+                        fabric_generation: 3,
+                        timestamp_ms: 1000,
+                    },
+                    None,
+                )
+                .unwrap();
             entry_id = e.entry_id.clone();
-            s.append_causal_event(&CausalEventInput {
-                entry_id: "persist-2", asset_id: "b", event_type: "EVT2", payload: "{}",
-                caused_by: std::slice::from_ref(&entry_id), affects_assets: &[],
-                fabric_generation: 3, timestamp_ms: 2000,
-            }, None).unwrap();
+            s.append_causal_event(
+                &CausalEventInput {
+                    entry_id: "persist-2",
+                    asset_id: "b",
+                    event_type: "EVT2",
+                    payload: "{}",
+                    caused_by: std::slice::from_ref(&entry_id),
+                    affects_assets: &[],
+                    fabric_generation: 3,
+                    timestamp_ms: 2000,
+                },
+                None,
+            )
+            .unwrap();
         } // drop closes the connection
 
         {
@@ -2203,7 +2757,10 @@ mod causal_chain_87_tests {
             assert_eq!(rows[1].caused_by, vec![entry_id]);
             // Chain still verifies after reopen.
             let r = s.verify_causal_chain_integrity(None).unwrap();
-            assert!(r.chain_intact && r.head_verified, "reopened chain must verify");
+            assert!(
+                r.chain_intact && r.head_verified,
+                "reopened chain must verify"
+            );
         }
 
         let _ = std::fs::remove_file(&path);
@@ -2224,11 +2781,16 @@ mod causal_chain_87_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod federation_v2_wiring_tests {
-    use crate::verifier_store::*;
     use crate::federation_reconciliation::authoritative_posture;
     use crate::verifier::FleetPosture;
+    use crate::verifier_store::*;
 
-    fn rep(nonce: &str, asset: &str, posture: FleetPosture, issued_at_ms: u64) -> FederatedTrustReport {
+    fn rep(
+        nonce: &str,
+        asset: &str,
+        posture: FleetPosture,
+        issued_at_ms: u64,
+    ) -> FederatedTrustReport {
         FederatedTrustReport {
             source_controller_id: "ctrl-A".to_string(),
             asset_id: asset.to_string(),
@@ -2241,7 +2803,9 @@ mod federation_v2_wiring_tests {
     }
 
     fn claimed(s: &mut VerifierStore) -> u64 {
-        s.try_claim_epoch(0, "self", 0).unwrap().expect("first epoch claim wins")
+        s.try_claim_epoch(0, "self", 0)
+            .unwrap()
+            .expect("first epoch claim wins")
     }
 
     #[test]
@@ -2253,13 +2817,23 @@ mod federation_v2_wiring_tests {
         // and an EARLIER-issued Degraded at a HIGH generation. Pure timestamp ordering
         // would pick the Nominal; generation ordering must pick the Degraded.
         s.save_federated_report_chained(
-            &rep("a1", "lidar_front", FleetPosture::Nominal, 2_000), Some(100), 2_100, held,
-        ).unwrap();
+            &rep("a1", "lidar_front", FleetPosture::Nominal, 2_000),
+            Some(100),
+            2_100,
+            held,
+        )
+        .unwrap();
         s.save_federated_report_chained(
-            &rep("b2", "lidar_front", FleetPosture::Degraded, 1_000), Some(412), 1_100, held,
-        ).unwrap();
+            &rep("b2", "lidar_front", FleetPosture::Degraded, 1_000),
+            Some(412),
+            1_100,
+            held,
+        )
+        .unwrap();
 
-        let v2s = s.load_federated_report_v2s_for_asset("lidar_front").unwrap();
+        let v2s = s
+            .load_federated_report_v2s_for_asset("lidar_front")
+            .unwrap();
         assert_eq!(v2s.len(), 2, "both reports must be loaded");
         assert!(v2s.iter().any(|r| r.source_generation == Some(100)));
         assert!(v2s.iter().any(|r| r.source_generation == Some(412)));
@@ -2267,13 +2841,16 @@ mod federation_v2_wiring_tests {
         // Higher generation (412 → Degraded) is authoritative over the newer-but-lower
         // generation (100 → Nominal).
         assert_eq!(
-            authoritative_posture(&v2s), Some(FleetPosture::Degraded),
+            authoritative_posture(&v2s),
+            Some(FleetPosture::Degraded),
             "the higher-generation report must win regardless of issue time/severity",
         );
 
         // The JSON loader also surfaces the generation for API consumers.
         let json_rows = s.load_federated_reports_for_asset("lidar_front").unwrap();
-        assert!(json_rows.iter().any(|v| v["source_generation"] == serde_json::json!(412)));
+        assert!(json_rows
+            .iter()
+            .any(|v| v["source_generation"] == serde_json::json!(412)));
     }
 
     #[test]
@@ -2283,17 +2860,29 @@ mod federation_v2_wiring_tests {
 
         // A v1 report (no generation) persists with NULL source_generation.
         s.save_federated_report_chained(
-            &rep("c3", "camera_front", FleetPosture::LockedOut, 1_000), None, 1_100, held,
-        ).unwrap();
+            &rep("c3", "camera_front", FleetPosture::LockedOut, 1_000),
+            None,
+            1_100,
+            held,
+        )
+        .unwrap();
 
-        let v2s = s.load_federated_report_v2s_for_asset("camera_front").unwrap();
+        let v2s = s
+            .load_federated_report_v2s_for_asset("camera_front")
+            .unwrap();
         assert_eq!(v2s.len(), 1);
-        assert_eq!(v2s[0].source_generation, None, "a v1 report must load as None generation");
+        assert_eq!(
+            v2s[0].source_generation, None,
+            "a v1 report must load as None generation"
+        );
         assert_eq!(authoritative_posture(&v2s), Some(FleetPosture::LockedOut));
 
         let json_rows = s.load_federated_reports_for_asset("camera_front").unwrap();
-        assert_eq!(json_rows[0]["source_generation"], serde_json::Value::Null,
-            "a v1 report's generation must serialize as null");
+        assert_eq!(
+            json_rows[0]["source_generation"],
+            serde_json::Value::Null,
+            "a v1 report's generation must serialize as null"
+        );
     }
 }
 
@@ -2308,26 +2897,58 @@ mod industrial_seq_tests {
     fn first_message_from_a_source_is_accepted_then_monotonic() {
         let s = VerifierStore::new(":memory:").unwrap();
         // First message establishes the baseline.
-        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 10, 1_000), Ok(true));
+        assert_eq!(
+            s.industrial_seq_check_and_advance("plc-a", 10, 1_000),
+            Ok(true)
+        );
         // Strictly-greater advances.
-        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 11, 1_001), Ok(true));
-        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 50, 1_002), Ok(true));
+        assert_eq!(
+            s.industrial_seq_check_and_advance("plc-a", 11, 1_001),
+            Ok(true)
+        );
+        assert_eq!(
+            s.industrial_seq_check_and_advance("plc-a", 50, 1_002),
+            Ok(true)
+        );
         // Equal = replay; lower = regress — both rejected, mark NOT advanced.
-        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 50, 1_003), Ok(false), "equal seq is a replay");
-        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 20, 1_004), Ok(false), "lower seq is a regress");
+        assert_eq!(
+            s.industrial_seq_check_and_advance("plc-a", 50, 1_003),
+            Ok(false),
+            "equal seq is a replay"
+        );
+        assert_eq!(
+            s.industrial_seq_check_and_advance("plc-a", 20, 1_004),
+            Ok(false),
+            "lower seq is a regress"
+        );
         // After rejects, the mark is still 50 → 51 advances.
-        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 51, 1_005), Ok(true));
+        assert_eq!(
+            s.industrial_seq_check_and_advance("plc-a", 51, 1_005),
+            Ok(true)
+        );
     }
 
     #[test]
     fn sources_are_independent() {
         let s = VerifierStore::new(":memory:").unwrap();
-        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 100, 1_000), Ok(true));
+        assert_eq!(
+            s.industrial_seq_check_and_advance("plc-a", 100, 1_000),
+            Ok(true)
+        );
         // A different source starts fresh at its own baseline.
-        assert_eq!(s.industrial_seq_check_and_advance("plc-b", 1, 1_001), Ok(true));
-        assert_eq!(s.industrial_seq_check_and_advance("plc-b", 2, 1_002), Ok(true));
+        assert_eq!(
+            s.industrial_seq_check_and_advance("plc-b", 1, 1_001),
+            Ok(true)
+        );
+        assert_eq!(
+            s.industrial_seq_check_and_advance("plc-b", 2, 1_002),
+            Ok(true)
+        );
         // plc-a's mark (100) is unaffected by plc-b.
-        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 100, 1_003), Ok(false));
+        assert_eq!(
+            s.industrial_seq_check_and_advance("plc-a", 100, 1_003),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -2340,14 +2961,23 @@ mod industrial_seq_tests {
         );
         {
             let s = VerifierStore::new(&path).unwrap();
-            assert_eq!(s.industrial_seq_check_and_advance("plc-a", 42, 1_000), Ok(true));
+            assert_eq!(
+                s.industrial_seq_check_and_advance("plc-a", 42, 1_000),
+                Ok(true)
+            );
         }
         {
             let s = VerifierStore::new(&path).unwrap();
             // 42 was already seen before the reopen → still a replay.
-            assert_eq!(s.industrial_seq_check_and_advance("plc-a", 42, 2_000), Ok(false),
-                "a replay must stay rejected across restart");
-            assert_eq!(s.industrial_seq_check_and_advance("plc-a", 43, 2_001), Ok(true));
+            assert_eq!(
+                s.industrial_seq_check_and_advance("plc-a", 42, 2_000),
+                Ok(false),
+                "a replay must stay rejected across restart"
+            );
+            assert_eq!(
+                s.industrial_seq_check_and_advance("plc-a", 43, 2_001),
+                Ok(true)
+            );
         }
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{path}-wal"));

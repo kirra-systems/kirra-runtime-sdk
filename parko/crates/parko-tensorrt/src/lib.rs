@@ -56,7 +56,9 @@ impl Tf32Control {
     #[must_use]
     pub fn status_str(self) -> &'static str {
         match self {
-            Tf32Control::UnenforcedPendingJetsonResolution => "UNENFORCED (pending Jetson resolution; no TF32 knob in ort TRT EP)",
+            Tf32Control::UnenforcedPendingJetsonResolution => {
+                "UNENFORCED (pending Jetson resolution; no TF32 knob in ort TRT EP)"
+            }
         }
     }
 }
@@ -156,7 +158,9 @@ pub struct TrtConfig {
 
 impl Default for TrtConfig {
     fn default() -> Self {
-        Self { engine_cache_path: resolve_engine_cache_path(None) }
+        Self {
+            engine_cache_path: resolve_engine_cache_path(None),
+        }
     }
 }
 
@@ -237,13 +241,17 @@ impl TrtBackend {
         let session: Session = Session::builder()
             .map_err(|e| BackendError::InitializationError(format!("ort builder error: {e:?}")))?
             .with_execution_providers([trt_ep])
-            .map_err(|e| BackendError::InitializationError(format!(
+            .map_err(|e| {
+                BackendError::InitializationError(format!(
                 "TensorRT EP registration failed — refusing to run (fail-closed; no CPU fallback). \
                  The dlopened ONNX Runtime lacks a usable TensorRT provider \
                  (expected on a CPU-only ORT build / CI): {e:?}"
-            )))?
+            ))
+            })?
             .commit_from_file(model_path)
-            .map_err(|e| BackendError::InitializationError(format!("ort session init error: {e:?}")))?;
+            .map_err(|e| {
+                BackendError::InitializationError(format!("ort session init error: {e:?}"))
+            })?;
 
         // Audit-relevant posture log. HONEST: full_precision_guaranteed is false
         // while TF32 is unenforceable, and GPU TRT is not bitwise-reproducible.
@@ -305,7 +313,10 @@ impl TrtBackend {
             let total: usize = shape.iter().product();
             named_tensors.insert(name.clone(), TensorStorage::Owned(vec![0.0f32; total]));
         }
-        let batch = TensorBatch { named_tensors, metadata: HashMap::new() };
+        let batch = TensorBatch {
+            named_tensors,
+            metadata: HashMap::new(),
+        };
 
         let t0 = Instant::now();
         // Build (cold) or deserialize (warm) the engine; the output is discarded.
@@ -416,9 +427,11 @@ impl InferenceBackend for TrtBackend {
         self.core.load_model(path)
     }
 
-    fn run(&self, model: &ModelHandle, inputs: &TensorBatch)
-        -> Result<TensorBatch<'static>, BackendError>
-    {
+    fn run(
+        &self,
+        model: &ModelHandle,
+        inputs: &TensorBatch,
+    ) -> Result<TensorBatch<'static>, BackendError> {
         self.core.run(model, inputs)
     }
 
@@ -503,16 +516,23 @@ mod tests {
         // guaranteed because TF32 is unenforceable from the EP. The flag — and
         // therefore the init log — must say false.
         let p = TrtPosture::full_precision("/tmp/cache");
-        assert!(!p.full_precision_guaranteed(),
-            "must not claim full precision while TF32 is unenforced");
+        assert!(
+            !p.full_precision_guaranteed(),
+            "must not claim full precision while TF32 is unenforced"
+        );
     }
 
     #[test]
     fn tf32_status_is_honest_not_off() {
         let s = Tf32Control::UnenforcedPendingJetsonResolution.status_str();
-        assert!(s.contains("UNENFORCED"), "status must surface that TF32 is unenforced");
-        assert!(!s.to_lowercase().contains("off"),
-            "status must NOT read as 'TF32 off'");
+        assert!(
+            s.contains("UNENFORCED"),
+            "status must surface that TF32 is unenforced"
+        );
+        assert!(
+            !s.to_lowercase().contains("off"),
+            "status must NOT read as 'TF32 off'"
+        );
     }
 
     #[test]
@@ -539,7 +559,10 @@ mod tests {
 
     #[test]
     fn engine_cache_path_explicit_wins() {
-        assert_eq!(resolve_engine_cache_path(Some("/var/parko/trt")), "/var/parko/trt");
+        assert_eq!(
+            resolve_engine_cache_path(Some("/var/parko/trt")),
+            "/var/parko/trt"
+        );
     }
 
     #[test]

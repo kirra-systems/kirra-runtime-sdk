@@ -25,12 +25,22 @@ use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 fn drive(map: &dyn CorridorSource) -> (f64, TrajectoryVerdict) {
     let input = PlanInput {
         ego: EgoState {
-            pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             linear_x_mps: 2.0,
             yaw_rate_rads: 0.0,
             stamp_ms: 0,
         },
-        goal: Goal { target: Pose { x_m: 40.0, y_m: 0.0, heading_rad: 0.0 } },
+        goal: Goal {
+            target: Pose {
+                x_m: 40.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+        },
         map,
         objects: &[],
         controls: &[],
@@ -46,7 +56,8 @@ fn drive(map: &dyn CorridorSource) -> (f64, TrajectoryVerdict) {
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-        signal_states: &[],    };
+        signal_states: &[],
+    };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
     let verdict = validate_trajectory_slow(
@@ -57,7 +68,11 @@ fn drive(map: &dyn CorridorSource) -> (f64, TrajectoryVerdict) {
         None,
         FleetPosture::Nominal,
     );
-    let min_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
+    let min_y = plan
+        .trajectory
+        .iter()
+        .map(|t| t.pose.y_m)
+        .fold(0.0, f64::min);
     (min_y, verdict)
 }
 
@@ -68,20 +83,35 @@ fn keep_right_drives_the_right_half_not_the_middle() {
 
     // Naive: follow the wide corridor directly → drives down the MIDDLE (y≈0).
     let (naive_min_y, naive_verdict) = drive(&road);
-    assert!(naive_min_y > -0.5, "naive centering drives the middle, got min_y {naive_min_y}");
-    assert!(matches!(naive_verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp));
+    assert!(
+        naive_min_y > -0.5,
+        "naive centering drives the middle, got min_y {naive_min_y}"
+    );
+    assert!(matches!(
+        naive_verdict,
+        TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+    ));
 
     // Keep-right: synthesize the two-lane split and follow the EGO (right) lane.
     let g = LaneGraph::from_undivided_corridor(&road, 1, 2).expect("synthesize undivided road");
     let ego_lane = g.lane(1).unwrap().corridor(0.95, 10);
     let (kr_min_y, kr_verdict) = drive(&ego_lane);
-    assert!(kr_min_y <= -2.0, "keep-right drives the right half, got min_y {kr_min_y}");
     assert!(
-        matches!(kr_verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        kr_min_y <= -2.0,
+        "keep-right drives the right half, got min_y {kr_min_y}"
+    );
+    assert!(
+        matches!(
+            kr_verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
         "KIRRA admits the keep-right plan, got {kr_verdict:?}"
     );
 
     // The point: same road, the keep-right derivation sits a full half-lane right
     // of the naive one.
-    assert!(kr_min_y < naive_min_y - 1.5, "keep-right is meaningfully right of center");
+    assert!(
+        kr_min_y < naive_min_y - 1.5,
+        "keep-right is meaningfully right of center"
+    );
 }

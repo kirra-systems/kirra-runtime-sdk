@@ -206,7 +206,9 @@ fn evaluate(
             let unresolved: Vec<&String> = scenarios
                 .iter()
                 .filter(|prefix| {
-                    !corpus_scenarios.iter().any(|name| name.starts_with(*prefix))
+                    !corpus_scenarios
+                        .iter()
+                        .any(|name| name.starts_with(*prefix))
                 })
                 .collect();
             if unresolved.is_empty() {
@@ -281,12 +283,18 @@ pub fn live_corpus_scenario_names() -> BTreeSet<String> {
 mod tests {
     use super::*;
 
-    const SOTIF_MD: &str =
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/safety/OCCY_SOTIF.md");
-    const AOU_MD: &str =
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/safety/ASSUMPTIONS_OF_USE.md");
-    const MANIFEST_JSON: &str =
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../../ci/sotif_trigger_coverage.json");
+    const SOTIF_MD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/safety/OCCY_SOTIF.md"
+    );
+    const AOU_MD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/safety/ASSUMPTIONS_OF_USE.md"
+    );
+    const MANIFEST_JSON: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../ci/sotif_trigger_coverage.json"
+    );
 
     fn read(p: &str) -> String {
         std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {p}: {e}"))
@@ -301,14 +309,20 @@ mod tests {
         let ids = parse_trigger_ids(&read(SOTIF_MD));
         // The catalog is living; assert the currently-committed set is present.
         for n in 1..=8u32 {
-            assert!(ids.contains(&format!("TC-{n:02}")), "TC-{n:02} must parse from §3");
+            assert!(
+                ids.contains(&format!("TC-{n:02}")),
+                "TC-{n:02} must parse from §3"
+            );
         }
     }
 
     #[test]
     fn parses_known_aou_ids() {
         let ids = parse_aou_ids(&read(AOU_MD));
-        assert!(ids.contains("AOU-LOCALIZATION-001"), "a known AoU must parse");
+        assert!(
+            ids.contains("AOU-LOCALIZATION-001"),
+            "a known AoU must parse"
+        );
         // The '-' trimming must not admit a bare 'AOU'.
         assert!(!ids.contains("AOU"));
     }
@@ -345,7 +359,8 @@ mod tests {
                 note: "n".to_string(),
             },
         );
-        let report = check_sotif_coverage(&doc, &m, &live_corpus_scenario_names(), &BTreeSet::new());
+        let report =
+            check_sotif_coverage(&doc, &m, &live_corpus_scenario_names(), &BTreeSet::new());
         assert!(!report.passed());
         assert_eq!(report.missing_from_manifest, vec!["TC-99".to_string()]);
     }
@@ -396,9 +411,14 @@ mod tests {
                 note: "n".to_string(),
             },
         );
-        let report = check_sotif_coverage(&doc, &m, &live_corpus_scenario_names(), &BTreeSet::new());
+        let report =
+            check_sotif_coverage(&doc, &m, &live_corpus_scenario_names(), &BTreeSet::new());
         assert!(!report.passed());
-        assert!(report.rows[0].reason.as_deref().unwrap().contains("no live scenario"));
+        assert!(report.rows[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("no live scenario"));
     }
 
     /// An `aou` mapping to an ID not in the register reds the gate.
@@ -421,7 +441,11 @@ mod tests {
         known.insert("AOU-LOCALIZATION-001".to_string());
         let report = check_sotif_coverage(&doc, &m, &BTreeSet::new(), &known);
         assert!(!report.passed());
-        assert!(report.rows[0].reason.as_deref().unwrap().contains("not in the register"));
+        assert!(report.rows[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("not in the register"));
     }
 
     /// The two corpus-backed TCs genuinely resolve against the live corpus (the
@@ -429,8 +453,14 @@ mod tests {
     #[test]
     fn corpus_backed_triggers_resolve_against_live_scenarios() {
         let corpus = live_corpus_scenario_names();
-        assert!(corpus.iter().any(|n| n.starts_with("Water_")), "water perception cases exist");
-        assert!(corpus.iter().any(|n| n.starts_with("Stopped_")), "stopped doer cases exist");
+        assert!(
+            corpus.iter().any(|n| n.starts_with("Water_")),
+            "water perception cases exist"
+        );
+        assert!(
+            corpus.iter().any(|n| n.starts_with("Stopped_")),
+            "stopped doer cases exist"
+        );
         assert!(
             corpus.iter().any(|n| n.starts_with("StaticObstacle_")),
             "static-obstacle perception cases exist"

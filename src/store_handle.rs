@@ -253,7 +253,10 @@ mod store_handle_tests {
         }));
         // A subsequent access still works (recovered via into_inner).
         let n = handle.with(|s| s.load_nodes().map(|v| v.len()).unwrap_or(usize::MAX));
-        assert_eq!(n, 0, "the handle recovers a poisoned lock instead of wedging");
+        assert_eq!(
+            n, 0,
+            "the handle recovers a poisoned lock instead of wedging"
+        );
     }
 
     #[test]
@@ -261,13 +264,20 @@ mod store_handle_tests {
         // `:memory:` → ReadReplica::Fallback; with_read still reads the writer.
         let handle = StoreHandle::new(temp_store());
         let n = handle.with_read(|s| s.load_nodes().map(|v| v.len()).unwrap_or(usize::MAX));
-        assert_eq!(n, 0, "in-memory read falls back to the writer and reads consistently");
+        assert_eq!(
+            n, 0,
+            "in-memory read falls back to the writer and reads consistently"
+        );
     }
 
     fn file_db_path(tag: &str) -> std::path::PathBuf {
         // Unique-per-test file under the OS temp dir; pid keeps parallel runs apart.
         let mut p = std::env::temp_dir();
-        p.push(format!("kirra_store_handle_{}_{}.sqlite", tag, std::process::id()));
+        p.push(format!(
+            "kirra_store_handle_{}_{}.sqlite",
+            tag,
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&p);
         p
     }
@@ -299,7 +309,11 @@ mod store_handle_tests {
         // A fresh read transaction on a replica connection must observe the
         // committed write (WAL read-committed visibility).
         let nodes = handle.with_read(|s| s.load_nodes().expect("load_nodes"));
-        assert_eq!(nodes.len(), 1, "read replica must see the committed writer node");
+        assert_eq!(
+            nodes.len(),
+            1,
+            "read replica must see the committed writer node"
+        );
         assert_eq!(nodes[0].node_id, "node-A");
 
         let _ = std::fs::remove_file(&path);

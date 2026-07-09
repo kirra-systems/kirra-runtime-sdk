@@ -137,8 +137,12 @@ impl<E: PgExecutor> SchemaBackend for PostgresBackend<E> {
 
     fn read_version(&mut self) -> Result<i64, Self::Error> {
         // Idempotently ensure the version table exists, then read the single row.
-        self.exec.execute(CREATE_VERSION_TABLE).map_err(PgMigrationError::Executor)?;
-        self.exec.query_version().map_err(PgMigrationError::Executor)
+        self.exec
+            .execute(CREATE_VERSION_TABLE)
+            .map_err(PgMigrationError::Executor)?;
+        self.exec
+            .query_version()
+            .map_err(PgMigrationError::Executor)
     }
 
     fn apply_and_stamp(&mut self, step: &PgMigration) -> Result<(), Self::Error> {
@@ -155,7 +159,9 @@ impl<E: PgExecutor> SchemaBackend for PostgresBackend<E> {
     }
 
     fn stamp(&mut self, version: i64) -> Result<(), Self::Error> {
-        self.exec.execute(&upsert_version_sql(version)).map_err(PgMigrationError::Executor)
+        self.exec
+            .execute(&upsert_version_sql(version))
+            .map_err(PgMigrationError::Executor)
     }
 
     fn future_error(db_version: i64, target: i64) -> Self::Error {
@@ -196,7 +202,9 @@ mod tests {
             }
             if sql.contains("CREATE TABLE IF NOT EXISTS kirra_schema_version") {
                 self.table_exists = true;
-            } else if let Some(rest) = sql.strip_prefix("INSERT INTO kirra_schema_version (id, version) VALUES (1, ") {
+            } else if let Some(rest) =
+                sql.strip_prefix("INSERT INTO kirra_schema_version (id, version) VALUES (1, ")
+            {
                 // Parse the inline version out of "…VALUES (1, <n>) ON CONFLICT…".
                 let n: i64 = rest.split(')').next().unwrap().trim().parse().unwrap();
                 self.version = Some(n);
@@ -208,7 +216,10 @@ mod tests {
         }
 
         fn query_version(&mut self) -> Result<i64, String> {
-            assert!(self.table_exists, "read_version must ensure the table first");
+            assert!(
+                self.table_exists,
+                "read_version must ensure the table first"
+            );
             Ok(self.version.unwrap_or(0))
         }
 
@@ -244,10 +255,24 @@ mod tests {
 
     #[test]
     fn a_future_store_is_refused_fail_closed() {
-        let mut b = PostgresBackend::new(MockPg { table_exists: true, version: Some(5), ..Default::default() });
+        let mut b = PostgresBackend::new(MockPg {
+            table_exists: true,
+            version: Some(5),
+            ..Default::default()
+        });
         let err = b.migrate(&[], 1).unwrap_err();
-        assert_eq!(err, PgMigrationError::FutureSchema { db_version: 5, target: 1 });
-        assert_eq!(b.exec.version, Some(5), "the refusal did not downgrade the stamp");
+        assert_eq!(
+            err,
+            PgMigrationError::FutureSchema {
+                db_version: 5,
+                target: 1
+            }
+        );
+        assert_eq!(
+            b.exec.version,
+            Some(5),
+            "the refusal did not downgrade the stamp"
+        );
     }
 
     #[test]
@@ -256,10 +281,18 @@ mod tests {
             step(2, "CREATE TABLE m2 (x INTEGER)"),
             step(3, "CREATE TABLE m3 (x INTEGER)"),
         ];
-        let mut b = PostgresBackend::new(MockPg { table_exists: true, version: Some(1), ..Default::default() });
+        let mut b = PostgresBackend::new(MockPg {
+            table_exists: true,
+            version: Some(1),
+            ..Default::default()
+        });
         let before = b.migrate(&steps, 3).unwrap();
         assert_eq!(before, 1);
-        assert_eq!(b.exec.version, Some(3), "stamped to the newest applied step");
+        assert_eq!(
+            b.exec.version,
+            Some(3),
+            "stamped to the newest applied step"
+        );
         assert!(b.exec.objects.contains("CREATE TABLE m2 (x INTEGER)"));
         assert!(b.exec.objects.contains("CREATE TABLE m3 (x INTEGER)"));
         // Re-running is a no-op.
@@ -279,16 +312,33 @@ mod tests {
             ..Default::default()
         });
         assert!(b.migrate(&steps, 2).is_err(), "the failing step propagates");
-        assert_eq!(b.exec.version, Some(1), "version not advanced on a failed step");
-        assert!(!b.exec.objects.contains("CREATE TABLE m2 (x INTEGER)"), "DDL rolled back with the stamp");
+        assert_eq!(
+            b.exec.version,
+            Some(1),
+            "version not advanced on a failed step"
+        );
+        assert!(
+            !b.exec.objects.contains("CREATE TABLE m2 (x INTEGER)"),
+            "DDL rolled back with the stamp"
+        );
     }
 
     #[test]
     fn a_malformed_registry_is_refused_fail_closed() {
-        let mut b = PostgresBackend::new(MockPg { table_exists: true, version: Some(1), ..Default::default() });
-        let descending = [step(3, "CREATE TABLE a (x INTEGER)"), step(2, "CREATE TABLE b (x INTEGER)")];
+        let mut b = PostgresBackend::new(MockPg {
+            table_exists: true,
+            version: Some(1),
+            ..Default::default()
+        });
+        let descending = [
+            step(3, "CREATE TABLE a (x INTEGER)"),
+            step(2, "CREATE TABLE b (x INTEGER)"),
+        ];
         let err = b.migrate(&descending, 5).unwrap_err();
-        assert!(matches!(err, PgMigrationError::MalformedRegistry(_)), "descending registry refused: {err:?}");
+        assert!(
+            matches!(err, PgMigrationError::MalformedRegistry(_)),
+            "descending registry refused: {err:?}"
+        );
         // Nothing was applied.
         assert!(b.exec.objects.is_empty());
     }
@@ -300,10 +350,17 @@ mod tests {
             step(2, "SELECT will_not_run"),
             step(3, "CREATE TABLE m3 (x INTEGER)"),
         ];
-        let mut b = PostgresBackend::new(MockPg { table_exists: true, version: Some(2), ..Default::default() });
+        let mut b = PostgresBackend::new(MockPg {
+            table_exists: true,
+            version: Some(2),
+            ..Default::default()
+        });
         assert_eq!(b.migrate(&steps, 3).unwrap(), 2);
         assert_eq!(b.exec.version, Some(3));
-        assert!(!b.exec.objects.contains("SELECT will_not_run"), "the already-applied v2 step did not re-run");
+        assert!(
+            !b.exec.objects.contains("SELECT will_not_run"),
+            "the already-applied v2 step did not re-run"
+        );
         assert!(b.exec.objects.contains("CREATE TABLE m3 (x INTEGER)"));
     }
 
@@ -315,8 +372,10 @@ mod tests {
         let io = std::io::Error::other("boom");
         let e: PgMigrationError<std::io::Error> = PgMigrationError::Executor(io);
         assert!(e.source().is_some(), "Executor variant chains its cause");
-        let fut: PgMigrationError<std::io::Error> =
-            PgMigrationError::FutureSchema { db_version: 2, target: 1 };
+        let fut: PgMigrationError<std::io::Error> = PgMigrationError::FutureSchema {
+            db_version: 2,
+            target: 1,
+        };
         assert!(fut.source().is_none());
     }
 

@@ -73,7 +73,9 @@ fn governor_process_bounds_a_guest_over_envelope_proposal() {
             "over-speed must be clamped into the envelope, got {}",
             c.linear_velocity_mps
         ),
-        GovernorOutcome::SafeStop => panic!("nominal over-speed must clamp (Actuate), not safe-stop"),
+        GovernorOutcome::SafeStop => {
+            panic!("nominal over-speed must clamp (Actuate), not safe-stop")
+        }
     }
     drop(region);
 }

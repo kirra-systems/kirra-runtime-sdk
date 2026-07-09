@@ -43,7 +43,12 @@ use crate::uptane::{TargetEntry, VerifiedUpdate};
 /// parko's case-insensitive allow-list parse.
 #[must_use]
 pub fn authorized_model_digests(verified: &VerifiedUpdate) -> Vec<&str> {
-    verified.targets().targets.iter().map(|t| t.digest_hex.as_str()).collect()
+    verified
+        .targets()
+        .targets
+        .iter()
+        .map(|t| t.digest_hex.as_str())
+        .collect()
 }
 
 /// The `KIRRA_MODEL_ALLOWLIST` env value parko's `ModelAllowList::parse` consumes,
@@ -74,7 +79,11 @@ pub fn authorized_model_entry<'a>(
     verified: &'a VerifiedUpdate,
     model_digest: &str,
 ) -> Option<&'a TargetEntry> {
-    verified.targets().targets.iter().find(|t| t.digest_hex.eq_ignore_ascii_case(model_digest))
+    verified
+        .targets()
+        .targets
+        .iter()
+        .find(|t| t.digest_hex.eq_ignore_ascii_case(model_digest))
 }
 
 /// Is `model_digest` authorized by the verified signed manifest? Case-insensitive
@@ -88,8 +97,8 @@ pub fn is_model_authorized(verified: &VerifiedUpdate, model_digest: &str) -> boo
 mod tests {
     use super::*;
     use crate::uptane::{
-        sign_snapshot, sign_targets, sign_timestamp, verify_update, RootMetadata,
-        SnapshotMetadata, TargetsMetadata, TimestampMetadata, TrustedVersions,
+        sign_snapshot, sign_targets, sign_timestamp, verify_update, RootMetadata, SnapshotMetadata,
+        TargetsMetadata, TimestampMetadata, TrustedVersions,
     };
     use ed25519_dalek::SigningKey;
 
@@ -100,7 +109,11 @@ mod tests {
     const NOW: u64 = 1_000;
 
     fn model(digest: &str, version: &str) -> TargetEntry {
-        TargetEntry { digest_hex: digest.to_string(), length_bytes: 1024, version: version.to_string() }
+        TargetEntry {
+            digest_hex: digest.to_string(),
+            length_bytes: 1024,
+            version: version.to_string(),
+        }
     }
 
     /// Mint a consistent role keyset + a signed `targets`/`snapshot`/`timestamp`
@@ -121,9 +134,21 @@ mod tests {
             snapshot_key: snapshot_sk.verifying_key().to_bytes(),
             timestamp_key: timestamp_sk.verifying_key().to_bytes(),
         };
-        let targets = TargetsMetadata { version: 5, expires_at_ms: EXP, targets: models };
-        let snapshot = SnapshotMetadata { version: 5, expires_at_ms: EXP, targets_version: 5 };
-        let timestamp = TimestampMetadata { version: 5, expires_at_ms: EXP, snapshot_version: 5 };
+        let targets = TargetsMetadata {
+            version: 5,
+            expires_at_ms: EXP,
+            targets: models,
+        };
+        let snapshot = SnapshotMetadata {
+            version: 5,
+            expires_at_ms: EXP,
+            targets_version: 5,
+        };
+        let timestamp = TimestampMetadata {
+            version: 5,
+            expires_at_ms: EXP,
+            snapshot_version: 5,
+        };
         verify_update(
             &root,
             TrustedVersions::default(),
@@ -150,7 +175,10 @@ mod tests {
         let v = verified_with(vec![model(D1, "v1")]);
         assert!(is_model_authorized(&v, D1));
         assert!(!is_model_authorized(&v, UNLISTED));
-        assert_eq!(authorized_model_entry(&v, D1).map(|e| e.version.as_str()), Some("v1"));
+        assert_eq!(
+            authorized_model_entry(&v, D1).map(|e| e.version.as_str()),
+            Some("v1")
+        );
         assert!(authorized_model_entry(&v, UNLISTED).is_none());
     }
 
@@ -160,8 +188,15 @@ mod tests {
         // would (parko lowercases both sides). The env value is canonicalized to
         // lowercase so the env policy matches the lookup.
         let v = verified_with(vec![model(D1, "v1")]);
-        assert!(is_model_authorized(&v, &D1.to_ascii_uppercase()), "uppercase query matches");
-        assert_eq!(model_allowlist_env_value(&v), D1, "env value is lowercase-canonical");
+        assert!(
+            is_model_authorized(&v, &D1.to_ascii_uppercase()),
+            "uppercase query matches"
+        );
+        assert_eq!(
+            model_allowlist_env_value(&v),
+            D1,
+            "env value is lowercase-canonical"
+        );
     }
 
     #[test]
@@ -195,16 +230,31 @@ mod tests {
             expires_at_ms: EXP,
             targets: vec![model(D1, "v1"), model(D2, "v2")],
         };
-        let snapshot = SnapshotMetadata { version: 7, expires_at_ms: EXP, targets_version: 7 };
-        let timestamp = TimestampMetadata { version: 7, expires_at_ms: EXP, snapshot_version: 7 };
+        let snapshot = SnapshotMetadata {
+            version: 7,
+            expires_at_ms: EXP,
+            targets_version: 7,
+        };
+        let timestamp = TimestampMetadata {
+            version: 7,
+            expires_at_ms: EXP,
+            snapshot_version: 7,
+        };
         let ts_sig = sign_timestamp(&timestamp, &timestamp_sk);
         let sn_sig = sign_snapshot(&snapshot, &snapshot_sk);
         let tg_sig = sign_targets(&targets, &targets_sk);
 
         // Verified → the signed allow-list is the manifest's digests.
         let verified = verify_update(
-            &root, TrustedVersions::default(), NOW,
-            &timestamp, &ts_sig, &snapshot, &sn_sig, &targets, &tg_sig,
+            &root,
+            TrustedVersions::default(),
+            NOW,
+            &timestamp,
+            &ts_sig,
+            &snapshot,
+            &sn_sig,
+            &targets,
+            &tg_sig,
         )
         .expect("a consistent signed manifest verifies");
         assert_eq!(model_allowlist_env_value(&verified), format!("{D1},{D2}"));
@@ -214,9 +264,19 @@ mod tests {
         let mut forged = targets.clone();
         forged.targets[0].digest_hex = UNLISTED.to_string();
         let refused = verify_update(
-            &root, TrustedVersions::default(), NOW,
-            &timestamp, &ts_sig, &snapshot, &sn_sig, &forged, &tg_sig,
+            &root,
+            TrustedVersions::default(),
+            NOW,
+            &timestamp,
+            &ts_sig,
+            &snapshot,
+            &sn_sig,
+            &forged,
+            &tg_sig,
         );
-        assert!(refused.is_err(), "a manifest tampered after signing must be refused");
+        assert!(
+            refused.is_err(),
+            "a manifest tampered after signing must be refused"
+        );
     }
 }

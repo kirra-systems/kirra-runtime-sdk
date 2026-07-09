@@ -12,8 +12,8 @@
 //! pure-predicate unit tests (`authz::tests`) and the TLS-fingerprint tests
 //! (`tls.rs`) each cover only half of.
 
-use kirra_verifier::authz::{authorize_request, ApiRole, AuthzOutcome, ResolvedPrincipal};
 use kirra_verifier::authz::SCOPE_INTEGRATION_EVALUATE;
+use kirra_verifier::authz::{authorize_request, ApiRole, AuthzOutcome, ResolvedPrincipal};
 use kirra_verifier::verifier_store::VerifierStore;
 
 const ADMIN_ROOT: &str = "root-admin-token";
@@ -25,7 +25,11 @@ fn store() -> VerifierStore {
 
 /// Resolve a cert principal by fingerprint EXACTLY as the mTLS middleware does at
 /// `now_ms`: expiry OR revocation ⇒ the invalid-credential flag; a miss ⇒ None.
-fn resolve_cert(store: &VerifierStore, fingerprint: &str, now_ms: u64) -> Option<ResolvedPrincipal> {
+fn resolve_cert(
+    store: &VerifierStore,
+    fingerprint: &str,
+    now_ms: u64,
+) -> Option<ResolvedPrincipal> {
     store
         .load_cert_principal_by_fingerprint(fingerprint)
         .expect("query")
@@ -53,7 +57,8 @@ fn decide(store: &VerifierStore, fingerprint: &str, now_ms: u64) -> AuthzOutcome
 fn valid_before_expiry_then_rejected_at_and_after_it() {
     let mut s = store();
     // integrator cert, notAfter = 5_000.
-    s.register_cert_principal("svc", FP, "integrator", Some(5_000), 1_000).unwrap();
+    s.register_cert_principal("svc", FP, "integrator", Some(5_000), 1_000)
+        .unwrap();
     assert_eq!(
         decide(&s, FP, 4_999),
         AuthzOutcome::Allow,
@@ -74,7 +79,8 @@ fn valid_before_expiry_then_rejected_at_and_after_it() {
 #[test]
 fn renewal_restores_authorization_without_a_restart() {
     let mut s = store();
-    s.register_cert_principal("svc", FP, "integrator", Some(5_000), 1_000).unwrap();
+    s.register_cert_principal("svc", FP, "integrator", Some(5_000), 1_000)
+        .unwrap();
     // Lapsed at now = 6_000.
     assert_eq!(decide(&s, FP, 6_000), AuthzOutcome::Unauthenticated);
 
@@ -82,7 +88,8 @@ fn renewal_restores_authorization_without_a_restart() {
     // notAfter. This is a plain store write — no process restart — and the very next
     // resolution honors it.
     const FP_RENEWED: &str = "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00";
-    s.register_cert_principal("svc", FP_RENEWED, "integrator", Some(50_000), 6_000).unwrap();
+    s.register_cert_principal("svc", FP_RENEWED, "integrator", Some(50_000), 6_000)
+        .unwrap();
 
     assert_eq!(
         decide(&s, FP, 6_000),
@@ -106,7 +113,8 @@ fn renewal_restores_authorization_without_a_restart() {
 fn revocation_is_honored_on_the_next_resolution() {
     let mut s = store();
     // Far-future expiry so ONLY revocation can end it.
-    s.register_cert_principal("svc", FP, "integrator", Some(1_000_000), 1_000).unwrap();
+    s.register_cert_principal("svc", FP, "integrator", Some(1_000_000), 1_000)
+        .unwrap();
     assert_eq!(decide(&s, FP, 2_000), AuthzOutcome::Allow);
     assert!(s.revoke_cert_principal("svc", 3_000).unwrap());
     assert_eq!(
@@ -120,6 +128,7 @@ fn revocation_is_honored_on_the_next_resolution() {
 fn an_untracked_expiry_cert_never_ages_out() {
     let mut s = store();
     // No notAfter → the pin authorizes until explicitly revoked (back-compat).
-    s.register_cert_principal("svc", FP, "integrator", None, 1_000).unwrap();
+    s.register_cert_principal("svc", FP, "integrator", None, 1_000)
+        .unwrap();
     assert_eq!(decide(&s, FP, u64::MAX), AuthzOutcome::Allow);
 }

@@ -133,14 +133,14 @@ impl PlatformParams {
     #[must_use]
     pub fn conservative_default() -> Self {
         Self {
-            track_width_m:   0.20,
-            cog_height_m:    0.50,
-            robot_extent_m:  0.50,
+            track_width_m: 0.20,
+            cog_height_m: 0.50,
+            robot_extent_m: 0.50,
             v_edge_safe_mps: 0.10,
-            theta_max_rad:   0.05,
-            ftti_s:          0.10,
+            theta_max_rad: 0.05,
+            ftti_s: 0.10,
             mrc_posture_factor: 0.5,
-            k_roll:          0.6,  // rollover dynamic-correction starting point (§3.2)
+            k_roll: 0.6, // rollover dynamic-correction starting point (§3.2)
         }
     }
 
@@ -161,14 +161,14 @@ impl PlatformParams {
     #[must_use]
     pub fn urban_service_robot_reference() -> Self {
         Self {
-            track_width_m:   0.50,
-            cog_height_m:    0.40,
-            robot_extent_m:  0.30,
+            track_width_m: 0.50,
+            cog_height_m: 0.40,
+            robot_extent_m: 0.30,
             v_edge_safe_mps: 0.25,
-            theta_max_rad:   0.087, // 5°
-            ftti_s:          0.10,
+            theta_max_rad: 0.087, // 5°
+            ftti_s: 0.10,
             mrc_posture_factor: 0.5,
-            k_roll:          0.6,  // rollover dynamic-correction starting point (§3.2)
+            k_roll: 0.6, // rollover dynamic-correction starting point (§3.2)
         }
     }
 
@@ -178,12 +178,24 @@ impl PlatformParams {
     /// Construction does NOT validate by default; callers can opt in
     /// when reading config from a file.
     pub fn validate(&self) -> Result<(), String> {
-        if self.track_width_m   <= 0.0 { return Err("track_width_m must be > 0".into()); }
-        if self.cog_height_m    <= 0.0 { return Err("cog_height_m must be > 0".into()); }
-        if self.robot_extent_m  <= 0.0 { return Err("robot_extent_m must be > 0".into()); }
-        if self.v_edge_safe_mps <= 0.0 { return Err("v_edge_safe_mps must be > 0".into()); }
-        if self.theta_max_rad   <= 0.0 { return Err("theta_max_rad must be > 0".into()); }
-        if self.ftti_s          <= 0.0 { return Err("ftti_s must be > 0".into()); }
+        if self.track_width_m <= 0.0 {
+            return Err("track_width_m must be > 0".into());
+        }
+        if self.cog_height_m <= 0.0 {
+            return Err("cog_height_m must be > 0".into());
+        }
+        if self.robot_extent_m <= 0.0 {
+            return Err("robot_extent_m must be > 0".into());
+        }
+        if self.v_edge_safe_mps <= 0.0 {
+            return Err("v_edge_safe_mps must be > 0".into());
+        }
+        if self.theta_max_rad <= 0.0 {
+            return Err("theta_max_rad must be > 0".into());
+        }
+        if self.ftti_s <= 0.0 {
+            return Err("ftti_s must be > 0".into());
+        }
         if !(0.0 < self.mrc_posture_factor && self.mrc_posture_factor <= 1.0) {
             return Err("mrc_posture_factor must be in (0, 1]".into());
         }
@@ -222,7 +234,10 @@ impl AngularVelocityBound {
     /// (posture_factor = 1.0).
     #[must_use]
     pub fn nominal(params: PlatformParams) -> Self {
-        Self::Derived { params, posture_factor: 1.0 }
+        Self::Derived {
+            params,
+            posture_factor: 1.0,
+        }
     }
 
     /// Construct the MRC bound from platform params (posture_factor =
@@ -230,7 +245,10 @@ impl AngularVelocityBound {
     #[must_use]
     pub fn mrc(params: PlatformParams) -> Self {
         let pf = params.mrc_posture_factor;
-        Self::Derived { params, posture_factor: pf }
+        Self::Derived {
+            params,
+            posture_factor: pf,
+        }
     }
 
     /// Compute `ω_max(v)` for a proposed linear velocity. Always
@@ -241,7 +259,10 @@ impl AngularVelocityBound {
     pub fn omega_max(&self, linear_velocity_mps: f64) -> f64 {
         match self {
             Self::Scalar(c) => *c,
-            Self::Derived { params, posture_factor } => {
+            Self::Derived {
+                params,
+                posture_factor,
+            } => {
                 let v = linear_velocity_mps.abs();
                 // (a) Rollover — only when |v| is above the floor.
                 let omega_rollover = if v >= ROLLOVER_MIN_LINEAR_VELOCITY_MPS {
@@ -275,7 +296,9 @@ impl AngularVelocityBound {
 mod tests {
     use super::*;
 
-    fn ref_platform() -> PlatformParams { PlatformParams::urban_service_robot_reference() }
+    fn ref_platform() -> PlatformParams {
+        PlatformParams::urban_service_robot_reference()
+    }
 
     #[test]
     fn platform_params_conservative_default_validates() {
@@ -291,15 +314,18 @@ mod tests {
 
     #[test]
     fn platform_params_validate_rejects_non_positive_geometry() {
-        let mut p = ref_platform(); p.track_width_m = 0.0;
+        let mut p = ref_platform();
+        p.track_width_m = 0.0;
         assert!(p.validate().is_err());
     }
 
     #[test]
     fn platform_params_validate_rejects_out_of_range_mrc_factor() {
-        let mut p = ref_platform(); p.mrc_posture_factor = 1.5;
+        let mut p = ref_platform();
+        p.mrc_posture_factor = 1.5;
         assert!(p.validate().is_err());
-        let mut p = ref_platform(); p.mrc_posture_factor = 0.0;
+        let mut p = ref_platform();
+        p.mrc_posture_factor = 0.0;
         assert!(p.validate().is_err());
     }
 
@@ -311,8 +337,10 @@ mod tests {
         let bound = AngularVelocityBound::nominal(ref_platform());
         let omega = bound.omega_max(0.0);
         // Should be the min(sweep, ftti) = min(0.833, 0.87) = 0.833.
-        assert!((omega - 0.833_f64).abs() < 1e-2,
-            "in-place rotation must use sweep/FTTI (not rollover); got {omega}");
+        assert!(
+            (omega - 0.833_f64).abs() < 1e-2,
+            "in-place rotation must use sweep/FTTI (not rollover); got {omega}"
+        );
         // And it must be FINITE — the v=0 singularity must not leak.
         assert!(omega.is_finite());
     }
@@ -341,7 +369,7 @@ mod tests {
         assert!((omega - bound.omega_max(0.0)).abs() < 1e-9);
         // And explicit min(sweep, ftti):
         let sweep = ref_platform().v_edge_safe_mps / ref_platform().robot_extent_m;
-        let ftti  = ref_platform().theta_max_rad / ref_platform().ftti_s;
+        let ftti = ref_platform().theta_max_rad / ref_platform().ftti_s;
         assert!((omega - sweep.min(ftti)).abs() < 1e-9);
     }
 
@@ -352,8 +380,10 @@ mod tests {
         let bound = AngularVelocityBound::nominal(ref_platform());
         let omega = bound.omega_max(1.0);
         let sweep = ref_platform().v_edge_safe_mps / ref_platform().robot_extent_m;
-        assert!((omega - sweep).abs() < 1e-9,
-            "at v=1 m/s sweep must bind; expected {sweep}, got {omega}");
+        assert!(
+            (omega - sweep).abs() < 1e-9,
+            "at v=1 m/s sweep must bind; expected {sweep}, got {omega}"
+        );
     }
 
     #[test]
@@ -362,19 +392,20 @@ mod tests {
         // small extent) and large θ_max so rollover is the only
         // constraint that bites at high v.
         let p = PlatformParams {
-            v_edge_safe_mps: 10.0,    // huge — sweep won't bind
-            robot_extent_m:  0.1,
-            theta_max_rad:   1.0,     // huge — FTTI won't bind
-            ftti_s:          0.1,
+            v_edge_safe_mps: 10.0, // huge — sweep won't bind
+            robot_extent_m: 0.1,
+            theta_max_rad: 1.0, // huge — FTTI won't bind
+            ftti_s: 0.1,
             ..ref_platform()
         };
         let bound = AngularVelocityBound::nominal(p.clone());
         // At v = 10 m/s: rollover = k_roll·9.81·0.5/(2·0.4·10) = 0.6·0.613 ≈ 0.368 rad/s.
         let omega = bound.omega_max(10.0);
-        let rollover = p.k_roll * GRAVITY_MPS2 * p.track_width_m
-            / (2.0 * p.cog_height_m * 10.0);
-        assert!((omega - rollover).abs() < 1e-9,
-            "at v=10 m/s rollover must bind (k_roll-corrected); expected {rollover}, got {omega}");
+        let rollover = p.k_roll * GRAVITY_MPS2 * p.track_width_m / (2.0 * p.cog_height_m * 10.0);
+        assert!(
+            (omega - rollover).abs() < 1e-9,
+            "at v=10 m/s rollover must bind (k_roll-corrected); expected {rollover}, got {omega}"
+        );
     }
 
     #[test]
@@ -383,28 +414,54 @@ mod tests {
         // proportionally; k_roll = 1.0 recovers the rigid (uncorrected) bound.
         // Easy sweep/ftti so rollover is the sole binding constraint at high v.
         let base = PlatformParams {
-            v_edge_safe_mps: 10.0, robot_extent_m: 0.1, theta_max_rad: 1.0, ftti_s: 0.1,
+            v_edge_safe_mps: 10.0,
+            robot_extent_m: 0.1,
+            theta_max_rad: 1.0,
+            ftti_s: 0.1,
             ..ref_platform()
         };
-        let rigid = AngularVelocityBound::nominal(PlatformParams { k_roll: 1.0, ..base.clone() });
-        let corrected = AngularVelocityBound::nominal(PlatformParams { k_roll: 0.6, ..base.clone() });
+        let rigid = AngularVelocityBound::nominal(PlatformParams {
+            k_roll: 1.0,
+            ..base.clone()
+        });
+        let corrected = AngularVelocityBound::nominal(PlatformParams {
+            k_roll: 0.6,
+            ..base.clone()
+        });
         let (r, c) = (rigid.omega_max(10.0), corrected.omega_max(10.0));
-        assert!((c - 0.6 * r).abs() < 1e-9,
-            "k_roll must scale the rollover bound: expected {} got {c}", 0.6 * r);
-        assert!(c < r, "the corrected bound must be tighter than the rigid one");
+        assert!(
+            (c - 0.6 * r).abs() < 1e-9,
+            "k_roll must scale the rollover bound: expected {} got {c}",
+            0.6 * r
+        );
+        assert!(
+            c < r,
+            "the corrected bound must be tighter than the rigid one"
+        );
 
         // k_roll must NOT touch the sweep/ftti regime (v=0, rollover masked).
-        let s_rigid = AngularVelocityBound::nominal(PlatformParams { k_roll: 1.0, ..ref_platform() });
-        let s_corr  = AngularVelocityBound::nominal(PlatformParams { k_roll: 0.6, ..ref_platform() });
-        assert_eq!(s_rigid.omega_max(0.0), s_corr.omega_max(0.0),
-            "k_roll must not change the in-place (sweep-bound) regime");
+        let s_rigid = AngularVelocityBound::nominal(PlatformParams {
+            k_roll: 1.0,
+            ..ref_platform()
+        });
+        let s_corr = AngularVelocityBound::nominal(PlatformParams {
+            k_roll: 0.6,
+            ..ref_platform()
+        });
+        assert_eq!(
+            s_rigid.omega_max(0.0),
+            s_corr.omega_max(0.0),
+            "k_roll must not change the in-place (sweep-bound) regime"
+        );
     }
 
     #[test]
     fn platform_params_validate_rejects_out_of_range_k_roll() {
-        let mut p = ref_platform(); p.k_roll = 0.0;
+        let mut p = ref_platform();
+        p.k_roll = 0.0;
         assert!(p.validate().is_err());
-        let mut p = ref_platform(); p.k_roll = 1.5;
+        let mut p = ref_platform();
+        p.k_roll = 1.5;
         assert!(p.validate().is_err());
     }
 
@@ -412,16 +469,18 @@ mod tests {
     fn omega_max_ftti_binds_when_theta_is_tight() {
         // Construct a platform where FTTI is the tightest of the three.
         let p = PlatformParams {
-            v_edge_safe_mps: 10.0,    // huge sweep → ω_sweep ≈ 33
-            robot_extent_m:  0.3,
-            theta_max_rad:   0.02,    // 1.15° — very tight FTTI
-            ftti_s:          0.10,    // ω_ftti = 0.2
+            v_edge_safe_mps: 10.0, // huge sweep → ω_sweep ≈ 33
+            robot_extent_m: 0.3,
+            theta_max_rad: 0.02, // 1.15° — very tight FTTI
+            ftti_s: 0.10,        // ω_ftti = 0.2
             ..ref_platform()
         };
         let bound = AngularVelocityBound::nominal(p);
         let omega = bound.omega_max(1.0);
-        assert!((omega - 0.2).abs() < 1e-9,
-            "FTTI must bind when θ_max/τ is tightest; expected 0.2, got {omega}");
+        assert!(
+            (omega - 0.2).abs() < 1e-9,
+            "FTTI must bind when θ_max/τ is tightest; expected 0.2, got {omega}"
+        );
     }
 
     #[test]
@@ -434,10 +493,12 @@ mod tests {
         let refp = AngularVelocityBound::nominal(ref_platform());
         for v in [0.0, 0.1, 0.5, 1.0, 2.0, 3.0, 5.0] {
             let cons_o = cons.omega_max(v);
-            let ref_o  = refp.omega_max(v);
-            assert!(cons_o <= ref_o + 1e-9,
+            let ref_o = refp.omega_max(v);
+            assert!(
+                cons_o <= ref_o + 1e-9,
                 "conservative_default at v={v} produced ω={cons_o}, must be ≤ reference {ref_o} \
-                 — the default must fail toward safe for an uncharacterised platform");
+                 — the default must fail toward safe for an uncharacterised platform"
+            );
         }
     }
 
@@ -453,8 +514,10 @@ mod tests {
         for v in [0.0, 0.5, 1.0, 2.0] {
             let n = nom.omega_max(v);
             let m = mrc.omega_max(v);
-            assert!(m < n + 1e-9,
-                "MRC must be ≤ Nominal at v={v}: nominal={n}, mrc={m}");
+            assert!(
+                m < n + 1e-9,
+                "MRC must be ≤ Nominal at v={v}: nominal={n}, mrc={m}"
+            );
         }
     }
 
@@ -476,8 +539,10 @@ mod tests {
         //   min       = 0.4167 (sweep)
         let mrc = AngularVelocityBound::mrc(ref_platform());
         let omega = mrc.omega_max(0.0);
-        assert!((omega - 0.4167_f64).abs() < 1e-3,
-            "MRC at v=0: expected ~0.4167 rad/s (sweep with halved v_edge_safe), got {omega}");
+        assert!(
+            (omega - 0.4167_f64).abs() < 1e-3,
+            "MRC at v=0: expected ~0.4167 rad/s (sweep with halved v_edge_safe), got {omega}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -494,14 +559,14 @@ mod tests {
     /// posture factor in (0, 1]). Mirrors `PlatformParams::validate`'s domain.
     fn plausible_params() -> impl Strategy<Value = PlatformParams> {
         (
-            0.05_f64..2.0,   // track_width_m
-            0.05_f64..2.0,   // cog_height_m
-            0.05_f64..2.0,   // robot_extent_m
-            0.01_f64..2.0,   // v_edge_safe_mps
-            0.005_f64..1.5,  // theta_max_rad
-            0.01_f64..1.0,   // ftti_s
-            0.05_f64..1.0,   // mrc_posture_factor (in (0,1])
-            0.05_f64..1.0,   // k_roll (in (0,1])
+            0.05_f64..2.0,  // track_width_m
+            0.05_f64..2.0,  // cog_height_m
+            0.05_f64..2.0,  // robot_extent_m
+            0.01_f64..2.0,  // v_edge_safe_mps
+            0.005_f64..1.5, // theta_max_rad
+            0.01_f64..1.0,  // ftti_s
+            0.05_f64..1.0,  // mrc_posture_factor (in (0,1])
+            0.05_f64..1.0,  // k_roll (in (0,1])
         )
             .prop_map(|(t, h, r, ve, th, ftti, pf, kr)| PlatformParams {
                 track_width_m: t,

@@ -148,9 +148,7 @@ impl FrozenFault {
     /// prior accepted `(generation, sequence)`; the rest start fresh.
     fn watermark(self) -> AcceptedWatermark {
         match self {
-            FrozenFault::SequenceRegress
-            | FrozenFault::Replay
-            | FrozenFault::GenerationRegress => {
+            FrozenFault::SequenceRegress | FrozenFault::Replay | FrozenFault::GenerationRegress => {
                 let mut wm = AcceptedWatermark::new();
                 // Only the seed's generation+sequence are used by the watermark,
                 // but `record`'s documented precondition is that `validate()` would
@@ -269,7 +267,10 @@ impl FrozenChannel {
             .open_or_create()?;
         let publisher = service.publisher_builder().create()?;
         let subscriber = service.subscriber_builder().create()?;
-        Ok(Self { publisher, subscriber })
+        Ok(Self {
+            publisher,
+            subscriber,
+        })
     }
 
     /// Publish one frozen view and return the RECEIVED owned copy (proves the
@@ -293,10 +294,7 @@ impl FrozenChannel {
 
     /// Drive one fault class through the channel and validate the RECEIVED owned
     /// snapshot with the production `validate()`. Returns the observed `FaultKind`.
-    pub fn run_class(
-        &self,
-        class: FrozenFault,
-    ) -> Result<FaultKind, Box<dyn core::error::Error>> {
+    pub fn run_class(&self, class: FrozenFault) -> Result<FaultKind, Box<dyn core::error::Error>> {
         let received = self.round_trip(class.build_view())?;
         let verdict = validate(&received, LOGICAL_NOW_NANOS, &class.watermark());
         Ok(FaultKind::of(&verdict))
@@ -324,7 +322,12 @@ pub fn run_frozen_matrix(
     for class in FrozenFault::ALL {
         let expected = class.expected();
         let observed = channel.run_class(class)?;
-        rows.push(FrozenRow { class, expected, observed, correct: observed == expected });
+        rows.push(FrozenRow {
+            class,
+            expected,
+            observed,
+            correct: observed == expected,
+        });
     }
     Ok(rows)
 }

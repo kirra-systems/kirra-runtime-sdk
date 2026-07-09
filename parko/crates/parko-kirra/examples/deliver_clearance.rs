@@ -28,12 +28,17 @@ use parko_core::{ClearanceLoop, ImpactCfg, ImpactEvidence};
 use parko_kirra::clearance_delivery::{ClearanceDelivery, DeliveryOutcome};
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn arg(flag: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 fn main() {
@@ -70,25 +75,47 @@ fn main() {
     // Pre-latch a real ClearanceLoop into EscalationRaised, mirroring the seeded
     // escalation (vanished-object trigger), via the real state machine.
     let mut clearance_loop = ClearanceLoop::new();
-    let ev = ImpactEvidence { imu_accel_spike_mps2: 0.0, contact_sensor: false, vanished_object: true };
+    let ev = ImpactEvidence {
+        imu_accel_spike_mps2: 0.0,
+        contact_sensor: false,
+        vanished_object: true,
+    };
     let cfg = ImpactCfg::default();
     clearance_loop.observe(&ev, &cfg, now_ms()); // Normal -> Latched
     clearance_loop.observe(&ev, &cfg, now_ms()); // Latched -> EscalationRaised
-    println!("  loop state: {:?} (immobilized via the real state machine)", clearance_loop.state());
+    println!(
+        "  loop state: {:?} (immobilized via the real state machine)",
+        clearance_loop.state()
+    );
 
     let delivery = ClearanceDelivery::new(store, &node);
     match delivery.poll_and_deliver(&mut clearance_loop, now_ms()) {
-        DeliveryOutcome::Cleared { operator_id, grant_rowid } => {
-            println!("  verdict: DELIVERED · CLEARED  (operator={operator_id}, grant #{grant_rowid})");
-            println!("  loop state now: {:?} — refresh /console to see the grant card flip.", clearance_loop.state());
+        DeliveryOutcome::Cleared {
+            operator_id,
+            grant_rowid,
+        } => {
+            println!(
+                "  verdict: DELIVERED · CLEARED  (operator={operator_id}, grant #{grant_rowid})"
+            );
+            println!(
+                "  loop state now: {:?} — refresh /console to see the grant card flip.",
+                clearance_loop.state()
+            );
         }
-        DeliveryOutcome::Rejected { reason, grant_rowid } => {
+        DeliveryOutcome::Rejected {
+            reason,
+            grant_rowid,
+        } => {
             println!("  verdict: DELIVERY REJECTED · {reason}  (grant #{grant_rowid})");
-            println!("  the grant is consumed (never retried) — re-issue a FRESH grant in the console.");
+            println!(
+                "  the grant is consumed (never retried) — re-issue a FRESH grant in the console."
+            );
         }
         DeliveryOutcome::NoGrant => {
             println!("  verdict: NO GRANT — nothing pending for {node}.");
-            println!("  record a grant in the console first (the supervisor-key form), then re-run.");
+            println!(
+                "  record a grant in the console first (the supervisor-key form), then re-run."
+            );
         }
         DeliveryOutcome::StoreError => {
             eprintln!("  verdict: STORE ERROR — could not consult '{db}'.");

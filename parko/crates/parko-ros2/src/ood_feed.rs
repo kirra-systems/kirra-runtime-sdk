@@ -92,7 +92,10 @@ impl core::fmt::Display for OodFeedError {
                 write!(f, "cannot read OOD baseline '{path}': {cause}")
             }
             OodFeedError::BaselineInvalid { path, cause } => {
-                write!(f, "OOD baseline '{path}' is not a trustworthy corpus: {cause}")
+                write!(
+                    f,
+                    "OOD baseline '{path}' is not a trustworthy corpus: {cause}"
+                )
             }
         }
     }
@@ -128,10 +131,20 @@ pub fn load_baseline(path: &str) -> Result<CalibrationBaseline, OodFeedError> {
         path: path.to_string(),
         cause: e.to_string(),
     })?;
-    let samples = parse_baseline_samples(&text)
-        .map_err(|cause| OodFeedError::BaselineInvalid { path: path.to_string(), cause })?;
-    CalibrationBaseline::from_samples(&samples, OOD_CONFIDENCE_BINS, OOD_CONFIDENCE_LO, OOD_CONFIDENCE_HI)
-        .map_err(|e| OodFeedError::BaselineInvalid { path: path.to_string(), cause: e.to_string() })
+    let samples = parse_baseline_samples(&text).map_err(|cause| OodFeedError::BaselineInvalid {
+        path: path.to_string(),
+        cause,
+    })?;
+    CalibrationBaseline::from_samples(
+        &samples,
+        OOD_CONFIDENCE_BINS,
+        OOD_CONFIDENCE_LO,
+        OOD_CONFIDENCE_HI,
+    )
+    .map_err(|e| OodFeedError::BaselineInvalid {
+        path: path.to_string(),
+        cause: e.to_string(),
+    })
 }
 
 /// The live feed: a frozen monitor plus the bounded ring window the node
@@ -148,7 +161,11 @@ impl OodFeed {
     #[must_use]
     pub fn new(monitor: OodMonitor, capacity: usize) -> Self {
         let capacity = capacity.max(1);
-        Self { monitor, window: VecDeque::with_capacity(capacity), capacity }
+        Self {
+            monitor,
+            window: VecDeque::with_capacity(capacity),
+            capacity,
+        }
     }
 
     /// Push one per-tick confidence sample, evicting the oldest at capacity.
@@ -210,7 +227,10 @@ pub fn ood_feed_from_env_values(
         _ => return Err(OodFeedError::BaselinePathMissing),
     };
     let baseline = load_baseline(path)?;
-    Ok(Some(OodFeed::new(OodMonitor::new(baseline), DEFAULT_OOD_WINDOW_CAPACITY)))
+    Ok(Some(OodFeed::new(
+        OodMonitor::new(baseline),
+        DEFAULT_OOD_WINDOW_CAPACITY,
+    )))
 }
 
 /// Read the gate + baseline path from the process env once (startup) and
@@ -232,9 +252,12 @@ mod tests {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     fn write_temp(content: &str) -> std::path::PathBuf {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir()
-            .join(format!("parko_ep05_{}_{n}.baseline", std::process::id()));
-        std::fs::File::create(&p).unwrap().write_all(content.as_bytes()).unwrap();
+        let p =
+            std::env::temp_dir().join(format!("parko_ep05_{}_{n}.baseline", std::process::id()));
+        std::fs::File::create(&p)
+            .unwrap()
+            .write_all(content.as_bytes())
+            .unwrap();
         p
     }
 
@@ -252,10 +275,28 @@ mod tests {
 
     #[test]
     fn disabled_gate_is_a_noop() {
-        assert_eq!(ood_feed_from_env_values(None, None).unwrap().map(|_| ()), None);
-        assert_eq!(ood_feed_from_env_values(Some(""), None).unwrap().map(|_| ()), None);
-        assert_eq!(ood_feed_from_env_values(Some("0"), None).unwrap().map(|_| ()), None);
-        assert_eq!(ood_feed_from_env_values(Some("false"), Some("/x")).unwrap().map(|_| ()), None);
+        assert_eq!(
+            ood_feed_from_env_values(None, None).unwrap().map(|_| ()),
+            None
+        );
+        assert_eq!(
+            ood_feed_from_env_values(Some(""), None)
+                .unwrap()
+                .map(|_| ()),
+            None
+        );
+        assert_eq!(
+            ood_feed_from_env_values(Some("0"), None)
+                .unwrap()
+                .map(|_| ()),
+            None
+        );
+        assert_eq!(
+            ood_feed_from_env_values(Some("false"), Some("/x"))
+                .unwrap()
+                .map(|_| ()),
+            None
+        );
     }
 
     #[test]
@@ -278,9 +319,12 @@ mod tests {
 
     #[test]
     fn enabled_with_a_missing_file_fails_closed() {
-        let err = ood_feed_from_env_values(Some("1"), Some("/nonexistent/ep05.baseline"))
-            .unwrap_err();
-        assert!(matches!(err, OodFeedError::BaselineUnreadable { .. }), "{err}");
+        let err =
+            ood_feed_from_env_values(Some("1"), Some("/nonexistent/ep05.baseline")).unwrap_err();
+        assert!(
+            matches!(err, OodFeedError::BaselineUnreadable { .. }),
+            "{err}"
+        );
     }
 
     #[test]

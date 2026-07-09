@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use crate::backend::{
-    BackendCapabilities, BackendDescriptor, BackendError, InferenceBackend,
-    ModelHandle, PrecisionMode, TensorBatch,
+    BackendCapabilities, BackendDescriptor, BackendError, InferenceBackend, ModelHandle,
+    PrecisionMode, TensorBatch,
 };
 
 /// Zero-output stub for CI builds — no TensorRT hardware required.
@@ -48,11 +48,17 @@ mod tests {
 
     #[test]
     fn test_tensorrt_stub_descriptor() {
-        assert_eq!(TensorRTStubBackend.descriptor(), BackendDescriptor::TensorRT);
+        assert_eq!(
+            TensorRTStubBackend.descriptor(),
+            BackendDescriptor::TensorRT
+        );
     }
 
     #[test]
     fn test_tensorrt_stub_capabilities_are_default() {
-        assert_eq!(TensorRTStubBackend.capabilities(), BackendCapabilities::default());
+        assert_eq!(
+            TensorRTStubBackend.capabilities(),
+            BackendCapabilities::default()
+        );
     }
 }

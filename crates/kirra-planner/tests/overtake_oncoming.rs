@@ -64,7 +64,10 @@ fn oncoming_car(x_m: f64, speed: f64) -> PerceivedObject {
         pos: Point { x_m, y_m: 2.0 },
         velocity_mps: speed,
         heading_rad: std::f64::consts::PI,
-        vel: Point { x_m: -speed, y_m: 0.0 },
+        vel: Point {
+            x_m: -speed,
+            y_m: 0.0,
+        },
     }
 }
 
@@ -79,12 +82,22 @@ fn plan_and_check(
     let boundaries = g.boundaries_relative_to(1, &[1, 2]).unwrap();
     let input = PlanInput {
         ego: EgoState {
-            pose: Pose { x_m: 6.0, y_m: -2.5, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 6.0,
+                y_m: -2.5,
+                heading_rad: 0.0,
+            },
             linear_x_mps: 2.0,
             yaw_rate_rads: 0.0,
             stamp_ms: 0,
         },
-        goal: Goal { target: Pose { x_m: 60.0, y_m: -2.5, heading_rad: 0.0 } },
+        goal: Goal {
+            target: Pose {
+                x_m: 60.0,
+                y_m: -2.5,
+                heading_rad: 0.0,
+            },
+        },
         map,
         objects,
         controls: &[],
@@ -100,11 +113,16 @@ fn plan_and_check(
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-        signal_states: &[],    };
+        signal_states: &[],
+    };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
     let verdict = validate_trajectory_slow(
-        &plan.trajectory, drivable, objects, &VehicleConfig::default_urban(), None,
+        &plan.trajectory,
+        drivable,
+        objects,
+        &VehicleConfig::default_urban(),
+        None,
         FleetPosture::Nominal,
     );
     (plan, verdict)
@@ -117,9 +135,20 @@ fn occy_proposes_an_overtake_across_the_crossable_centerline() {
     let cars = [stopped_car(24.0)];
     let (plan, _) = plan_and_check(&g, &map, &drivable, &cars, true);
 
-    assert_eq!(plan.kind, ProposalKind::Motion, "Occy moves to pass, not stops");
-    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max);
-    assert!(max_y > 0.0, "the pass crosses into the oncoming half, got max_y {max_y}");
+    assert_eq!(
+        plan.kind,
+        ProposalKind::Motion,
+        "Occy moves to pass, not stops"
+    );
+    let max_y = plan
+        .trajectory
+        .iter()
+        .map(|t| t.pose.y_m)
+        .fold(f64::MIN, f64::max);
+    assert!(
+        max_y > 0.0,
+        "the pass crosses into the oncoming half, got max_y {max_y}"
+    );
 }
 
 #[test]
@@ -129,8 +158,15 @@ fn solid_centerline_forbids_the_overtake() {
     let cars = [stopped_car(24.0)];
     let (plan, _) = plan_and_check(&g, &map, &drivable, &cars, true);
 
-    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max);
-    assert!(max_y <= 0.0, "a solid centerline → no pass into oncoming, got max_y {max_y}");
+    let max_y = plan
+        .trajectory
+        .iter()
+        .map(|t| t.pose.y_m)
+        .fold(f64::MIN, f64::max);
+    assert!(
+        max_y <= 0.0,
+        "a solid centerline → no pass into oncoming, got max_y {max_y}"
+    );
 }
 
 #[test]
@@ -141,8 +177,15 @@ fn no_drivable_area_means_no_overtake() {
     // drivable not provided → opt-out → prior behavior (no cross-centerline pass).
     let (plan, _) = plan_and_check(&g, &map, &drivable, &cars, false);
 
-    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max);
-    assert!(max_y <= 0.0, "without a drivable area Occy does not overtake, got max_y {max_y}");
+    let max_y = plan
+        .trajectory
+        .iter()
+        .map(|t| t.pose.y_m)
+        .fold(f64::MIN, f64::max);
+    assert!(
+        max_y <= 0.0,
+        "without a drivable area Occy does not overtake, got max_y {max_y}"
+    );
 }
 
 #[test]
@@ -153,7 +196,10 @@ fn kirra_admits_the_pass_when_the_oncoming_lane_is_clear() {
     let (_, verdict) = plan_and_check(&g, &map, &drivable, &cars, true);
 
     assert!(
-        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
         "a clear oncoming lane → KIRRA admits the pass, got {verdict:?}"
     );
 }
@@ -170,17 +216,30 @@ fn a_car_centered_in_the_ego_lane_is_now_overtaken_and_admitted() {
     let (map, drivable) = (ego_corridor(&g), full_road(&g));
     let centered = PerceivedObject {
         id: 1,
-        pos: Point { x_m: 24.0, y_m: -2.5 }, // ego-lane centerline (on the reference path)
+        pos: Point {
+            x_m: 24.0,
+            y_m: -2.5,
+        }, // ego-lane centerline (on the reference path)
         velocity_mps: 0.0,
         heading_rad: 0.0,
         vel: Point { x_m: 0.0, y_m: 0.0 },
     };
     let (plan, verdict) = plan_and_check(&g, &map, &drivable, &[centered], true);
 
-    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max);
-    assert!(max_y > 0.0, "the pass crosses into the oncoming half, got max_y {max_y}");
+    let max_y = plan
+        .trajectory
+        .iter()
+        .map(|t| t.pose.y_m)
+        .fold(f64::MIN, f64::max);
     assert!(
-        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        max_y > 0.0,
+        "the pass crosses into the oncoming half, got max_y {max_y}"
+    );
+    assert!(
+        matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
         "a centered-lane car is now passable (footprint-overlap gate), got {verdict:?}"
     );
 }
@@ -199,7 +258,8 @@ fn kirra_refuses_the_pass_when_oncoming_traffic_is_too_close() {
     let (_, verdict) = plan_and_check(&g, &map, &drivable, &cars, true);
 
     assert_eq!(
-        verdict, TrajectoryVerdict::MRCFallback,
+        verdict,
+        TrajectoryVerdict::MRCFallback,
         "oncoming traffic too close → KIRRA refuses the pass, got {verdict:?}"
     );
 }
@@ -219,16 +279,25 @@ fn a_same_direction_vehicle_at_the_same_spot_does_not_block_the_pass() {
     let (map, drivable) = (ego_corridor(&g), full_road(&g));
     let same_dir = PerceivedObject {
         id: 2,
-        pos: Point { x_m: 38.0, y_m: 2.0 },
+        pos: Point {
+            x_m: 38.0,
+            y_m: 2.0,
+        },
         velocity_mps: 12.0,
         heading_rad: 0.0, // same direction, faster → a lead pulling away
-        vel: Point { x_m: 12.0, y_m: 0.0 },
+        vel: Point {
+            x_m: 12.0,
+            y_m: 0.0,
+        },
     };
     let cars = [stopped_car(24.0), same_dir];
     let (_, verdict) = plan_and_check(&g, &map, &drivable, &cars, true);
 
     assert!(
-        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
         "a same-direction vehicle at the same spot is admitted; only the oncoming \
          direction refuses, got {verdict:?}"
     );
@@ -245,12 +314,22 @@ fn overtake_world<'a>(
 ) -> PlanInput<'a> {
     PlanInput {
         ego: EgoState {
-            pose: Pose { x_m: 6.0, y_m: -2.5, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 6.0,
+                y_m: -2.5,
+                heading_rad: 0.0,
+            },
             linear_x_mps: 2.0,
             yaw_rate_rads: 0.0,
             stamp_ms: 0,
         },
-        goal: Goal { target: Pose { x_m: 60.0, y_m: -2.5, heading_rad: 0.0 } },
+        goal: Goal {
+            target: Pose {
+                x_m: 60.0,
+                y_m: -2.5,
+                heading_rad: 0.0,
+            },
+        },
         map,
         objects,
         controls: &[],
@@ -266,7 +345,8 @@ fn overtake_world<'a>(
         request_overtake: false, // the MickIntent::Overtake grounding flips this on
         request_pull_over: false,
         lane_graph: None,
-        signal_states: &[],    }
+        signal_states: &[],
+    }
 }
 
 /// **The full Mick path.** A `MickIntent::Overtake` — the LLM chauffeur's discretionary
@@ -284,15 +364,29 @@ fn mick_overtake_intent_grounds_to_a_pass_and_kirra_admits() {
     let mut occy = GeometricPlanner::default();
     let plan = plan_for_intent(&mut occy, &MickIntent::Overtake, &w);
 
-    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max);
-    assert!(max_y > 0.0, "Mick's Overtake intent crosses into the oncoming half, got max_y {max_y}");
+    let max_y = plan
+        .trajectory
+        .iter()
+        .map(|t| t.pose.y_m)
+        .fold(f64::MIN, f64::max);
+    assert!(
+        max_y > 0.0,
+        "Mick's Overtake intent crosses into the oncoming half, got max_y {max_y}"
+    );
 
     let verdict = validate_trajectory_slow(
-        &plan.trajectory, &drivable, &cars, &VehicleConfig::default_urban(), None,
+        &plan.trajectory,
+        &drivable,
+        &cars,
+        &VehicleConfig::default_urban(),
+        None,
         FleetPosture::Nominal,
     );
     assert!(
-        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
         "a clear oncoming lane → KIRRA admits Mick's pass, got {verdict:?}"
     );
 }
@@ -311,11 +405,16 @@ fn mick_overtake_into_oncoming_traffic_is_refused_by_kirra() {
     let mut occy = GeometricPlanner::default();
     let plan = plan_for_intent(&mut occy, &MickIntent::Overtake, &w);
     let verdict = validate_trajectory_slow(
-        &plan.trajectory, &drivable, &cars, &VehicleConfig::default_urban(), None,
+        &plan.trajectory,
+        &drivable,
+        &cars,
+        &VehicleConfig::default_urban(),
+        None,
         FleetPosture::Nominal,
     );
     assert_eq!(
-        verdict, TrajectoryVerdict::MRCFallback,
+        verdict,
+        TrajectoryVerdict::MRCFallback,
         "oncoming traffic too close → KIRRA refuses Mick's pass, got {verdict:?}"
     );
 }
@@ -335,12 +434,22 @@ fn a_stopped_school_bus_is_never_overtaken_and_the_ego_holds_behind_it() {
 
     let input = PlanInput {
         ego: EgoState {
-            pose: Pose { x_m: 6.0, y_m: -2.5, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 6.0,
+                y_m: -2.5,
+                heading_rad: 0.0,
+            },
             linear_x_mps: 2.0,
             yaw_rate_rads: 0.0,
             stamp_ms: 0,
         },
-        goal: Goal { target: Pose { x_m: 60.0, y_m: -2.5, heading_rad: 0.0 } },
+        goal: Goal {
+            target: Pose {
+                x_m: 60.0,
+                y_m: -2.5,
+                heading_rad: 0.0,
+            },
+        },
         map: &map,
         objects: &cars,
         controls: &[],
@@ -356,17 +465,32 @@ fn a_stopped_school_bus_is_never_overtaken_and_the_ego_holds_behind_it() {
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-        signal_states: &[],    };
+        signal_states: &[],
+    };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
 
-    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max);
-    assert!(max_y <= 0.0, "school bus → no pass into oncoming, got max_y {max_y}");
+    let max_y = plan
+        .trajectory
+        .iter()
+        .map(|t| t.pose.y_m)
+        .fold(f64::MIN, f64::max);
+    assert!(
+        max_y <= 0.0,
+        "school bus → no pass into oncoming, got max_y {max_y}"
+    );
     // And it HOLDS behind: a controlled decel-to-stop short of the bus (id 1 at
     // x=24, stop gap 5 → stop ~x=19), never reaching/passing it. (The full stop
     // completes over the receding horizon; here it is still decelerating in.)
-    let max_x = plan.trajectory.iter().map(|t| t.pose.x_m).fold(f64::MIN, f64::max);
-    assert!(max_x < 20.0, "ego stays behind the bus's stop line, got max_x {max_x}");
+    let max_x = plan
+        .trajectory
+        .iter()
+        .map(|t| t.pose.x_m)
+        .fold(f64::MIN, f64::max);
+    assert!(
+        max_x < 20.0,
+        "ego stays behind the bus's stop line, got max_x {max_x}"
+    );
     assert!(
         plan.trajectory.last().unwrap().velocity_mps <= 2.0,
         "approaching at the slow object-approach speed (decel-to-stop), not cruising"

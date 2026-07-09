@@ -21,7 +21,11 @@ impl VerifierStore {
         // the demo seed) record with auth_method = "unspecified". The auth-aware
         // path below is what the upgraded console route uses.
         self.save_clearance_grant_chained_with_auth(
-            node_id, operator_id, granted_at_ms, "unspecified", None,
+            node_id,
+            operator_id,
+            granted_at_ms,
+            "unspecified",
+            None,
         )
     }
 

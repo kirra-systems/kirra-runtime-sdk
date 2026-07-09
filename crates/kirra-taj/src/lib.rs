@@ -35,8 +35,8 @@
 // ros2/tokio tree). The adapter is now a dev-dependency only (its `validate_trajectory_slow`
 // + `VehicleConfig` are used solely by the integration tests).
 use kirra_core::corridor::{CorridorSource, Point};
-use kirra_core::trajectory::PerceivedPedestrian;
 use kirra_core::trajectory::PerceivedObject;
+use kirra_core::trajectory::PerceivedPedestrian;
 
 mod semantic_eval;
 pub use semantic_eval::{
@@ -117,7 +117,10 @@ pub struct VruClassifierConfig {
 
 impl Default for VruClassifierConfig {
     fn default() -> Self {
-        Self { max_extent_m: 1.2, max_speed_mps: 3.5 }
+        Self {
+            max_extent_m: 1.2,
+            max_speed_mps: 3.5,
+        }
     }
 }
 
@@ -241,7 +244,11 @@ fn boundary_y_at(boundary: &[Point], x: f64) -> f64 {
     for w in boundary.windows(2) {
         if x <= w[1].x_m {
             let dx = w[1].x_m - w[0].x_m;
-            let f = if dx.abs() > 1e-9 { (x - w[0].x_m) / dx } else { 0.0 };
+            let f = if dx.abs() > 1e-9 {
+                (x - w[0].x_m) / dx
+            } else {
+                0.0
+            };
             return w[0].y_m + f * (w[1].y_m - w[0].y_m);
         }
     }
@@ -259,8 +266,15 @@ fn truncate_boundary(boundary: &[Point], x_clip: f64) -> Vec<Point> {
             if i > 0 {
                 let a = boundary[i - 1];
                 let dx = p.x_m - a.x_m;
-                let f = if dx.abs() > 1e-9 { (x_clip - a.x_m) / dx } else { 0.0 };
-                out.push(Point { x_m: x_clip, y_m: a.y_m + f * (p.y_m - a.y_m) });
+                let f = if dx.abs() > 1e-9 {
+                    (x_clip - a.x_m) / dx
+                } else {
+                    0.0
+                };
+                out.push(Point {
+                    x_m: x_clip,
+                    y_m: a.y_m + f * (p.y_m - a.y_m),
+                });
             }
             break;
         }
@@ -374,7 +388,14 @@ impl TajPhaseA {
             objects.push(o);
             extents.push(e);
         }
-        (TajPerception { corridor, objects, stamp_ms: scan.stamp_ms }, extents)
+        (
+            TajPerception {
+                corridor,
+                objects,
+                stamp_ms: scan.stamp_ms,
+            },
+            extents,
+        )
     }
 
     /// Per-station drivable corridor: boundary vertices are placed every
@@ -412,8 +433,14 @@ impl TajPhaseA {
                     right_y = y;
                 }
             }
-            left.push(Point { x_m: xs, y_m: left_y.clamp(1e-3, cap) });
-            right.push(Point { x_m: xs, y_m: right_y.clamp(-cap, -1e-3) });
+            left.push(Point {
+                x_m: xs,
+                y_m: left_y.clamp(1e-3, cap),
+            });
+            right.push(Point {
+                x_m: xs,
+                y_m: right_y.clamp(-cap, -1e-3),
+            });
         }
 
         TajCorridor {
@@ -467,7 +494,10 @@ impl TajPhaseA {
                     objects.push((
                         PerceivedObject {
                             id: next_id,
-                            pos: Point { x_m: sx / n, y_m: sy / n },
+                            pos: Point {
+                                x_m: sx / n,
+                                y_m: sy / n,
+                            },
                             velocity_mps: 0.0,
                             heading_rad: 0.0,
                             vel: Point { x_m: 0.0, y_m: 0.0 },
@@ -532,7 +562,11 @@ pub struct TajTracker {
 impl TajTracker {
     #[must_use]
     pub fn new(cfg: TajConfig) -> Self {
-        Self { phase_a: TajPhaseA::new(cfg), tracks: Vec::new(), next_id: 0 }
+        Self {
+            phase_a: TajPhaseA::new(cfg),
+            tracks: Vec::new(),
+            next_id: 0,
+        }
     }
 
     /// Process a scan with temporal association: returns Phase-A perception whose
@@ -562,17 +596,25 @@ impl TajTracker {
                 Some((j, _)) => {
                     used[j] = true;
                     let tr = self.tracks[j];
-                    let dt = f64::from(u32::try_from(now_ms.saturating_sub(tr.stamp_ms)).unwrap_or(u32::MAX))
-                        / 1000.0;
+                    let dt = f64::from(
+                        u32::try_from(now_ms.saturating_sub(tr.stamp_ms)).unwrap_or(u32::MAX),
+                    ) / 1000.0;
                     let (vx, vy) = if dt > 1e-3 {
-                        ((obj.pos.x_m - tr.pos.x_m) / dt, (obj.pos.y_m - tr.pos.y_m) / dt)
+                        (
+                            (obj.pos.x_m - tr.pos.x_m) / dt,
+                            (obj.pos.y_m - tr.pos.y_m) / dt,
+                        )
                     } else {
                         (0.0, 0.0)
                     };
                     obj.id = tr.id;
                     obj.vel = Point { x_m: vx, y_m: vy };
                     obj.velocity_mps = vx.hypot(vy);
-                    obj.heading_rad = if obj.velocity_mps > 1e-6 { vy.atan2(vx) } else { 0.0 };
+                    obj.heading_rad = if obj.velocity_mps > 1e-6 {
+                        vy.atan2(vx)
+                    } else {
+                        0.0
+                    };
                     // Yaw rate from the heading change vs. the track's prior
                     // velocity (needs two velocity estimates → a third frame).
                     let prev_speed = tr.vel.x_m.hypot(tr.vel.y_m);
@@ -692,7 +734,11 @@ impl TajTracker {
                     y += speed * heading.sin() * dt;
                     points.push(Point { x_m: x, y_m: y });
                 }
-                PredictedPath { id: t.id, yaw_rate_rad_s: t.yaw_rate, points }
+                PredictedPath {
+                    id: t.id,
+                    yaw_rate_rad_s: t.yaw_rate,
+                    points,
+                }
             })
             .collect()
     }
@@ -769,7 +815,10 @@ mod tests {
             out.corridor.right_boundary()[0].y_m
         );
         assert!(out.corridor.confidence() > 0.5, "walls give good coverage");
-        assert!(out.corridor.left_boundary().len() >= 2, "per-station boundary");
+        assert!(
+            out.corridor.left_boundary().len() >= 2,
+            "per-station boundary"
+        );
         assert_eq!(out.corridor.age_ms(), 5);
     }
 
@@ -777,7 +826,11 @@ mod tests {
     fn obstacle_ahead_clusters_to_one_object() {
         // A ~±8.6° blob of returns at 5 m dead ahead; everything else no-return.
         let taj = TajPhaseA::default();
-        let scan = scan_from(10.0, 0, |theta| if theta.abs() < 0.15 { Some(5.0) } else { None });
+        let scan = scan_from(
+            10.0,
+            0,
+            |theta| if theta.abs() < 0.15 { Some(5.0) } else { None },
+        );
         let out = taj.process(&scan, 0);
 
         assert_eq!(out.objects.len(), 1, "one blob → one object");
@@ -791,7 +844,7 @@ mod tests {
         assert_eq!(o.velocity_mps, 0.0, "single-frame → velocity reported as 0");
     }
 
-// ---- WP-10: the VRU classifier (producer for the pedestrian-RSS bound) ----
+    // ---- WP-10: the VRU classifier (producer for the pedestrian-RSS bound) ----
 
     /// Two-frame small slow blob → classified pedestrian, with the tracked
     /// velocity carried through — and it REMAINS in `objects` (the VRU bound
@@ -802,16 +855,28 @@ mod tests {
         // ±2° blob at 5 m → extent ≈ 0.35 m. Second frame shifted +0.1 m
         // longitudinally over 100 ms → ~1 m/s, within the pedestrian envelope.
         let s1 = scan_from(10.0, 0, |t| if t.abs() < 0.035 { Some(5.0) } else { None });
-        let s2 = scan_from(10.0, 100, |t| if t.abs() < 0.035 { Some(5.1) } else { None });
+        let s2 = scan_from(
+            10.0,
+            100,
+            |t| if t.abs() < 0.035 { Some(5.1) } else { None },
+        );
         tracker.track(&s1, 0);
         let out = tracker.track(&s2, 100);
 
         let peds = tracker.classify_pedestrians(100, &VruClassifierConfig::default());
-        assert_eq!(peds.len(), 1, "small slow blob must classify as a pedestrian");
+        assert_eq!(
+            peds.len(),
+            1,
+            "small slow blob must classify as a pedestrian"
+        );
         assert!((peds[0].pos.x_m - 5.1).abs() < 0.5);
         assert!(peds[0].vel.x_m.hypot(peds[0].vel.y_m) <= 3.5);
         assert_eq!(peds[0].age_s, 0.0, "fresh measurement at classify time");
-        assert_eq!(out.objects.len(), 1, "the pedestrian is STILL an object (additive bound)");
+        assert_eq!(
+            out.objects.len(),
+            1,
+            "the pedestrian is STILL an object (additive bound)"
+        );
     }
 
     /// FIRST sighting (velocity not yet estimable) with a small footprint →
@@ -838,12 +903,23 @@ mod tests {
         let mut tracker = TajTracker::new(TajConfig::default());
         // +0.5 m over 100 ms → 5 m/s > 3.5 envelope.
         let s1 = scan_from(10.0, 0, |t| if t.abs() < 0.035 { Some(5.0) } else { None });
-        let s2 = scan_from(10.0, 100, |t| if t.abs() < 0.035 { Some(5.5) } else { None });
+        let s2 = scan_from(
+            10.0,
+            100,
+            |t| if t.abs() < 0.035 { Some(5.5) } else { None },
+        );
         tracker.track(&s1, 0);
         let out = tracker.track(&s2, 100);
         let peds = tracker.classify_pedestrians(100, &VruClassifierConfig::default());
-        assert!(peds.is_empty(), "5 m/s is outside the pedestrian envelope: {peds:?}");
-        assert_eq!(out.objects.len(), 1, "still tracked as an object for vehicle RSS");
+        assert!(
+            peds.is_empty(),
+            "5 m/s is outside the pedestrian envelope: {peds:?}"
+        );
+        assert_eq!(
+            out.objects.len(),
+            1,
+            "still tracked as an object for vehicle RSS"
+        );
     }
 
     /// A LARGE cluster (car-scale footprint) is not a pedestrian even when slow.
@@ -854,7 +930,10 @@ mod tests {
         let s1 = scan_from(10.0, 0, |t| if t.abs() < 0.35 { Some(5.0) } else { None });
         tracker.track(&s1, 0);
         let peds = tracker.classify_pedestrians(0, &VruClassifierConfig::default());
-        assert!(peds.is_empty(), "a car-scale footprint must not classify as a pedestrian");
+        assert!(
+            peds.is_empty(),
+            "a car-scale footprint must not classify as a pedestrian"
+        );
     }
 
     /// `age_s` reflects real measurement staleness at classify time (#789 F8:
@@ -862,11 +941,18 @@ mod tests {
     #[test]
     fn classifier_age_reflects_measurement_staleness() {
         let mut tracker = TajTracker::new(TajConfig::default());
-        let s1 = scan_from(10.0, 1_000, |t| if t.abs() < 0.035 { Some(5.0) } else { None });
+        let s1 = scan_from(
+            10.0,
+            1_000,
+            |t| if t.abs() < 0.035 { Some(5.0) } else { None },
+        );
         tracker.track(&s1, 1_000);
         let peds = tracker.classify_pedestrians(1_500, &VruClassifierConfig::default());
         assert_eq!(peds.len(), 1);
-        assert!((peds[0].age_s - 0.5).abs() < 1e-9, "500 ms old at classify time");
+        assert!(
+            (peds[0].age_s - 0.5).abs() < 1e-9,
+            "500 ms old at classify time"
+        );
     }
 
     /// END-TO-END (the WP-10 point): a Taj-classified pedestrian feeds the
@@ -877,10 +963,10 @@ mod tests {
     /// same trajectory is admitted: the producer is the deciding difference.
     #[test]
     fn classified_pedestrian_feeds_the_checker_reachable_set_bound() {
-        use kirra_trajectory::state::{Pose, TrajectoryPoint};
-        use kirra_trajectory::vru::{PedestrianScene, VruRssParams};
         use kirra_core::frame_integrity::FrameTrust;
+        use kirra_trajectory::state::{Pose, TrajectoryPoint};
         use kirra_trajectory::validation::validate_trajectory_slow_capped;
+        use kirra_trajectory::vru::{PedestrianScene, VruRssParams};
         use kirra_trajectory::VehicleConfig;
         use kirra_verifier::verifier::FleetPosture;
 
@@ -888,14 +974,20 @@ mod tests {
         // A kerbside pedestrian: small blob at 6 m ahead, ~1.9 m to the left
         // (bearing ~+17.5°) — outside the ego footprint path, no motion.
         let bearing = 0.305_f64;
-        let s1 = scan_from(
-            10.0,
-            0,
-            |t| if (t - bearing).abs() < 0.03 { Some(6.3) } else { None },
-        );
+        let s1 = scan_from(10.0, 0, |t| {
+            if (t - bearing).abs() < 0.03 {
+                Some(6.3)
+            } else {
+                None
+            }
+        });
         tracker.track(&s1, 0);
         let peds = tracker.classify_pedestrians(0, &VruClassifierConfig::default());
-        assert_eq!(peds.len(), 1, "the kerbside blob classifies as a pedestrian");
+        assert_eq!(
+            peds.len(),
+            1,
+            "the kerbside blob classifies as a pedestrian"
+        );
 
         // A straight 8 m/s pass through the kerbside position's x. Starts at
         // x = 5 so the REAR footprint overhang stays inside the corridor's
@@ -903,7 +995,11 @@ mod tests {
         // while writing this test).
         let traj: Vec<TrajectoryPoint> = (0..10)
             .map(|i| TrajectoryPoint {
-                pose: Pose { x_m: 5.0 + i as f64, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 5.0 + i as f64,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 8.0,
                 time_from_start_s: i as f64 * 0.125,
             })
@@ -911,14 +1007,35 @@ mod tests {
         let corridor = kirra_core::corridor::MockCorridorSource::straight_5m_half_width(200.0);
         let cfg = VehicleConfig::default_urban();
 
-        let scene = PedestrianScene { pedestrians: &peds, params: VruRssParams::default() };
+        let scene = PedestrianScene {
+            pedestrians: &peds,
+            params: VruRssParams::default(),
+        };
         let with_vru = validate_trajectory_slow_capped(
-            &traj, &corridor, &[], &cfg, None, FleetPosture::Nominal,
-            None, None, None, Some(&scene), FrameTrust::Trusted,
+            &traj,
+            &corridor,
+            &[],
+            &cfg,
+            None,
+            FleetPosture::Nominal,
+            None,
+            None,
+            None,
+            Some(&scene),
+            FrameTrust::Trusted,
         );
         let without_vru = validate_trajectory_slow_capped(
-            &traj, &corridor, &[], &cfg, None, FleetPosture::Nominal,
-            None, None, None, None, FrameTrust::Trusted,
+            &traj,
+            &corridor,
+            &[],
+            &cfg,
+            None,
+            FleetPosture::Nominal,
+            None,
+            None,
+            None,
+            None,
+            FrameTrust::Trusted,
         );
         assert_eq!(
             with_vru,
@@ -933,7 +1050,6 @@ mod tests {
         );
     }
 
-    
     #[test]
     fn taj_corridor_feeds_the_checker() {
         use kirra_trajectory::state::{Pose, TrajectoryPoint};
@@ -946,12 +1062,20 @@ mod tests {
 
         let traj = vec![
             TrajectoryPoint {
-                pose: Pose { x_m: 2.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 2.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 1.0,
                 time_from_start_s: 0.0,
             },
             TrajectoryPoint {
-                pose: Pose { x_m: 3.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 3.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 1.0,
                 time_from_start_s: 1.0,
             },
@@ -979,7 +1103,11 @@ mod tests {
         let out = taj.process(&scan_from(10.0, 0, |_| None), 0);
 
         assert_eq!(out.objects.len(), 0);
-        assert_eq!(out.corridor.confidence(), 0.0, "no valid returns → zero confidence");
+        assert_eq!(
+            out.corridor.confidence(),
+            0.0,
+            "no valid returns → zero confidence"
+        );
         // Fail-closed: 0.0 < the checker's SLOW_LOOP_MIN_CORRIDOR_CONFIDENCE → MRC.
     }
 
@@ -1000,8 +1128,16 @@ mod tests {
         let taj = TajPhaseA::default(); // forward_extent 8, stations every 1 m
         let scan = scan_from(12.0, 0, |theta| {
             let s = theta.sin();
-            let wall = if s.abs() < 1e-3 { f64::INFINITY } else { 5.0 / s.abs() };
-            let blob = if theta.abs() < 0.12 { 4.0 / theta.cos() } else { f64::INFINITY };
+            let wall = if s.abs() < 1e-3 {
+                f64::INFINITY
+            } else {
+                5.0 / s.abs()
+            };
+            let blob = if theta.abs() < 0.12 {
+                4.0 / theta.cos()
+            } else {
+                f64::INFINITY
+            };
             let r = wall.min(blob);
             if r.is_finite() {
                 Some(r)
@@ -1019,8 +1155,16 @@ mod tests {
                 .unwrap()
                 .y_m
         };
-        assert!(y_near(4.0) < 1.0, "corridor narrows near the obstacle, got {}", y_near(4.0));
-        assert!(y_near(7.0) > 3.0, "corridor stays wide away from it, got {}", y_near(7.0));
+        assert!(
+            y_near(4.0) < 1.0,
+            "corridor narrows near the obstacle, got {}",
+            y_near(4.0)
+        );
+        assert!(
+            y_near(7.0) > 3.0,
+            "corridor stays wide away from it, got {}",
+            y_near(7.0)
+        );
     }
 
     // --- Temporal tracker (velocity estimation) ----------------------------
@@ -1045,9 +1189,21 @@ mod tests {
 
         assert_eq!(out.objects.len(), 1);
         let o = &out.objects[0];
-        assert!((o.velocity_mps - 10.0).abs() < 1.0, "speed ≈ 10 m/s, got {}", o.velocity_mps);
-        assert!(o.vel.x_m > 8.0 && o.vel.y_m.abs() < 1.0, "velocity is +x, got {:?}", o.vel);
-        assert!(o.heading_rad.abs() < 0.2, "heading ≈ 0 (forward), got {}", o.heading_rad);
+        assert!(
+            (o.velocity_mps - 10.0).abs() < 1.0,
+            "speed ≈ 10 m/s, got {}",
+            o.velocity_mps
+        );
+        assert!(
+            o.vel.x_m > 8.0 && o.vel.y_m.abs() < 1.0,
+            "velocity is +x, got {:?}",
+            o.vel
+        );
+        assert!(
+            o.heading_rad.abs() < 0.2,
+            "heading ≈ 0 (forward), got {}",
+            o.heading_rad
+        );
     }
 
     #[test]
@@ -1057,7 +1213,11 @@ mod tests {
         let out = taj.track(&blob_scan(10.0, 200), 200);
 
         assert_eq!(out.objects.len(), 1);
-        assert!(out.objects[0].velocity_mps < 0.5, "static → ~0 m/s, got {}", out.objects[0].velocity_mps);
+        assert!(
+            out.objects[0].velocity_mps < 0.5,
+            "static → ~0 m/s, got {}",
+            out.objects[0].velocity_mps
+        );
     }
 
     #[test]
@@ -1065,7 +1225,10 @@ mod tests {
         let mut taj = TajTracker::default();
         let a = taj.track(&blob_scan(10.0, 0), 0);
         let b = taj.track(&blob_scan(11.0, 200), 200);
-        assert_eq!(a.objects[0].id, b.objects[0].id, "same object keeps its track id");
+        assert_eq!(
+            a.objects[0].id, b.objects[0].id,
+            "same object keeps its track id"
+        );
     }
 
     #[test]
@@ -1073,7 +1236,10 @@ mod tests {
         let mut taj = TajTracker::default();
         let out = taj.track(&blob_scan(10.0, 0), 0);
         assert_eq!(out.objects.len(), 1);
-        assert_eq!(out.objects[0].velocity_mps, 0.0, "first sighting has no prior → 0 velocity");
+        assert_eq!(
+            out.objects[0].velocity_mps, 0.0,
+            "first sighting has no prior → 0 velocity"
+        );
     }
 
     #[test]
@@ -1089,7 +1255,11 @@ mod tests {
 
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
         let tp = |x: f64, t: f64| TrajectoryPoint {
-            pose: Pose { x_m: x, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: x,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             velocity_mps: 8.0,
             time_from_start_s: t,
         };
@@ -1102,7 +1272,10 @@ mod tests {
             // → no longitudinal threat — is admitted. (Post the §4 RSS-conjunction
             // gating: an object 3 m aside is correctly passable, so velocity, not
             // mere presence, must drive the verdict here.)
-            pos: Point { x_m: 22.0, y_m: 2.0 },
+            pos: Point {
+                x_m: 22.0,
+                y_m: 2.0,
+            },
             velocity_mps: vmag,
             heading_rad: 0.0,
             vel: Point { x_m: vx, y_m: 0.0 },
@@ -1125,7 +1298,12 @@ mod tests {
 
     fn hazard(class: SemanticClass, near_x: f64) -> SemanticDetection {
         // A region spanning the full lane width at `near_x`.
-        SemanticDetection { class, near_x_m: near_x, lateral_min_m: -5.0, lateral_max_m: 5.0 }
+        SemanticDetection {
+            class,
+            near_x_m: near_x,
+            lateral_min_m: -5.0,
+            lateral_max_m: 5.0,
+        }
     }
 
     #[test]
@@ -1133,12 +1311,17 @@ mod tests {
         assert!(SemanticClass::Road.is_drivable());
         assert!(!SemanticClass::Water.is_drivable());
         assert!(!SemanticClass::StaticObstacle.is_drivable());
-        assert!(!SemanticClass::Unknown.is_drivable(), "Unknown fails closed");
+        assert!(
+            !SemanticClass::Unknown.is_drivable(),
+            "Unknown fails closed"
+        );
     }
 
     #[test]
     fn mock_detector_returns_scripted_detections() {
-        let det = MockSemanticDetector { detections: vec![hazard(SemanticClass::Water, 8.0)] };
+        let det = MockSemanticDetector {
+            detections: vec![hazard(SemanticClass::Water, 8.0)],
+        };
         let out = det.detect();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].class, SemanticClass::Water);
@@ -1148,14 +1331,20 @@ mod tests {
     fn water_hazard_clips_corridor_forward_extent() {
         // A clear (Phase-A) corridor extends to forward_extent; a water hazard at
         // 4 m clips the drivable space to ~4 m.
-        let taj = TajPhaseA::new(TajConfig { forward_extent_m: 20.0, ..Default::default() });
+        let taj = TajPhaseA::new(TajConfig {
+            forward_extent_m: 20.0,
+            ..Default::default()
+        });
         let out = taj.process(&walls_scan(5.0, 30.0), 0);
         let far = out.corridor.left_boundary().last().unwrap().x_m;
         assert!(far > 15.0, "clear corridor reaches far, got {far}");
 
         let clipped = clip_corridor_to_hazards(&out.corridor, &[hazard(SemanticClass::Water, 4.0)]);
         let clipped_far = clipped.left_boundary().last().unwrap().x_m;
-        assert!((clipped_far - 4.0).abs() < 1.0, "corridor clipped at the water edge, got {clipped_far}");
+        assert!(
+            (clipped_far - 4.0).abs() < 1.0,
+            "corridor clipped at the water edge, got {clipped_far}"
+        );
     }
 
     #[test]
@@ -1169,13 +1358,32 @@ mod tests {
         use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
         use kirra_verifier::verifier::FleetPosture;
 
-        let taj = TajPhaseA::new(TajConfig { forward_extent_m: 20.0, ..Default::default() });
+        let taj = TajPhaseA::new(TajConfig {
+            forward_extent_m: 20.0,
+            ..Default::default()
+        });
         let perception = taj.process(&walls_scan(5.0, 30.0), 0);
 
         // A trajectory driving forward to x = 15 (into where the water is).
         let traj = vec![
-            TrajectoryPoint { pose: Pose { x_m: 2.0, y_m: 0.0, heading_rad: 0.0 }, velocity_mps: 2.0, time_from_start_s: 0.0 },
-            TrajectoryPoint { pose: Pose { x_m: 15.0, y_m: 0.0, heading_rad: 0.0 }, velocity_mps: 2.0, time_from_start_s: 6.5 },
+            TrajectoryPoint {
+                pose: Pose {
+                    x_m: 2.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+                velocity_mps: 2.0,
+                time_from_start_s: 0.0,
+            },
+            TrajectoryPoint {
+                pose: Pose {
+                    x_m: 15.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+                velocity_mps: 2.0,
+                time_from_start_s: 6.5,
+            },
         ];
         let cfg = VehicleConfig::default_urban();
         let check = |corr: &TajCorridor| {
@@ -1184,12 +1392,19 @@ mod tests {
 
         // Phase A only (lidar blind to water): corridor reaches 20 m → admitted.
         assert!(
-            matches!(check(&perception.corridor), TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            matches!(
+                check(&perception.corridor),
+                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+            ),
             "Phase A admits driving into invisible water"
         );
         // Phase B: water detected at 10 m → corridor clipped → driving in is rejected.
-        let clipped = clip_corridor_to_hazards(&perception.corridor, &[hazard(SemanticClass::Water, 10.0)]);
-        assert!(clipped.left_boundary().last().unwrap().x_m < 11.0, "corridor clipped at water");
+        let clipped =
+            clip_corridor_to_hazards(&perception.corridor, &[hazard(SemanticClass::Water, 10.0)]);
+        assert!(
+            clipped.left_boundary().last().unwrap().x_m < 11.0,
+            "corridor clipped at water"
+        );
         assert_eq!(
             check(&clipped),
             TrajectoryVerdict::MRCFallback,
@@ -1199,7 +1414,10 @@ mod tests {
 
     #[test]
     fn drivable_class_does_not_clip() {
-        let taj = TajPhaseA::new(TajConfig { forward_extent_m: 20.0, ..Default::default() });
+        let taj = TajPhaseA::new(TajConfig {
+            forward_extent_m: 20.0,
+            ..Default::default()
+        });
         let out = taj.process(&walls_scan(5.0, 30.0), 0);
         let clipped = clip_corridor_to_hazards(&out.corridor, &[hazard(SemanticClass::Road, 4.0)]);
         assert_eq!(
@@ -1213,9 +1431,17 @@ mod tests {
     fn offlane_hazard_does_not_clip() {
         // Water entirely beyond the corridor wall (lateral 8..10, corridor ±5) →
         // not in the way → no clip.
-        let taj = TajPhaseA::new(TajConfig { forward_extent_m: 20.0, ..Default::default() });
+        let taj = TajPhaseA::new(TajConfig {
+            forward_extent_m: 20.0,
+            ..Default::default()
+        });
         let out = taj.process(&walls_scan(5.0, 30.0), 0);
-        let off = SemanticDetection { class: SemanticClass::Water, near_x_m: 4.0, lateral_min_m: 8.0, lateral_max_m: 10.0 };
+        let off = SemanticDetection {
+            class: SemanticClass::Water,
+            near_x_m: 4.0,
+            lateral_min_m: 8.0,
+            lateral_max_m: 10.0,
+        };
         let clipped = clip_corridor_to_hazards(&out.corridor, &[off]);
         assert_eq!(
             clipped.left_boundary().last().unwrap().x_m,
@@ -1230,7 +1456,13 @@ mod tests {
     fn point_blob_scan(bx: f64, by: f64, stamp_ms: u64) -> LaserScan {
         let r0 = bx.hypot(by);
         let th0 = by.atan2(bx);
-        scan_from(40.0, stamp_ms, |theta| if (theta - th0).abs() < 0.05 { Some(r0) } else { None })
+        scan_from(40.0, stamp_ms, |theta| {
+            if (theta - th0).abs() < 0.05 {
+                Some(r0)
+            } else {
+                None
+            }
+        })
     }
 
     /// Three frames of a left-turning object (its heading rotates toward +y).
@@ -1279,9 +1511,19 @@ mod tests {
         let _ = taj.track(&point_blob_scan(14.0, 0.0, 400), 400);
         let paths = taj.predict(2.0, 0.2);
 
-        assert!(paths[0].yaw_rate_rad_s.abs() < 0.1, "straight → ~0 yaw rate, got {}", paths[0].yaw_rate_rad_s);
-        let max_y = paths[0].points.iter().map(|p| p.y_m.abs()).fold(0.0, f64::max);
-        assert!(max_y < 1.0, "straight (CV) path stays near y≈0, got {max_y}");
+        assert!(
+            paths[0].yaw_rate_rad_s.abs() < 0.1,
+            "straight → ~0 yaw rate, got {}",
+            paths[0].yaw_rate_rad_s
+        );
+        let max_y = paths[0]
+            .points
+            .iter()
+            .map(|p| p.y_m.abs())
+            .fold(0.0, f64::max);
+        assert!(
+            max_y < 1.0,
+            "straight (CV) path stays near y≈0, got {max_y}"
+        );
     }
 }
-

@@ -229,7 +229,9 @@ fn verify_image(
     role: Role,
 ) -> Result<(), UptaneError> {
     let bytes = b64::decode(sig_b64).ok_or(UptaneError::SignatureInvalid(role))?;
-    let arr: [u8; 64] = bytes.try_into().map_err(|_| UptaneError::SignatureInvalid(role))?;
+    let arr: [u8; 64] = bytes
+        .try_into()
+        .map_err(|_| UptaneError::SignatureInvalid(role))?;
     vk.verify_strict(image, &Signature::from_bytes(&arr))
         .map_err(|_| UptaneError::SignatureInvalid(role))
 }
@@ -315,7 +317,11 @@ pub struct SignedRoot {
 #[must_use]
 pub fn author_initial_root(meta: RootMetadata, root_key: &SigningKey) -> SignedRoot {
     let sig = sign_root(&meta, root_key);
-    SignedRoot { meta, sig_by_current_root_b64: sig.clone(), sig_by_new_root_b64: sig }
+    SignedRoot {
+        meta,
+        sig_by_current_root_b64: sig.clone(),
+        sig_by_new_root_b64: sig,
+    }
 }
 
 /// Author a ROOT ROTATION that produces `new_meta` from the currently-trusted
@@ -558,7 +564,14 @@ mod tests {
         tgt_v: u64,
         snap_v: u64,
         ts_v: u64,
-    ) -> (TargetsMetadata, String, SnapshotMetadata, String, TimestampMetadata, String) {
+    ) -> (
+        TargetsMetadata,
+        String,
+        SnapshotMetadata,
+        String,
+        TimestampMetadata,
+        String,
+    ) {
         let targets = TargetsMetadata {
             version: tgt_v,
             expires_at_ms: EXP,
@@ -568,10 +581,16 @@ mod tests {
                 version: "v2".into(),
             }],
         };
-        let snapshot =
-            SnapshotMetadata { version: snap_v, expires_at_ms: EXP, targets_version: tgt_v };
-        let timestamp =
-            TimestampMetadata { version: ts_v, expires_at_ms: EXP, snapshot_version: snap_v };
+        let snapshot = SnapshotMetadata {
+            version: snap_v,
+            expires_at_ms: EXP,
+            targets_version: tgt_v,
+        };
+        let timestamp = TimestampMetadata {
+            version: ts_v,
+            expires_at_ms: EXP,
+            snapshot_version: snap_v,
+        };
         (
             targets.clone(),
             sign_targets(&targets, &r.targets_sk),
@@ -614,8 +633,15 @@ mod tests {
         let forged_tm_sig = sign_image(&tsm.signing_image(), &r.targets_sk);
         assert_eq!(
             verify_update(
-                &root, TrustedVersions::default(), NOW,
-                &tsm, &forged_tm_sig, &snap, &sn_sig, &tgt, &ts_sig,
+                &root,
+                TrustedVersions::default(),
+                NOW,
+                &tsm,
+                &forged_tm_sig,
+                &snap,
+                &sn_sig,
+                &tgt,
+                &ts_sig,
             ),
             Err(UptaneError::SignatureInvalid(Role::Timestamp))
         );
@@ -627,13 +653,14 @@ mod tests {
         let r = Repo::new();
         let root = r.root(1, EXP);
         let (tgt, ts_sig, snap, sn_sig, tsm, tm_sig) = metaset(&r, 5, 5, 5);
-        let trusted = TrustedVersions { targets: 5, snapshot: 5, timestamp: 5 };
+        let trusted = TrustedVersions {
+            targets: 5,
+            snapshot: 5,
+            timestamp: 5,
+        };
         // A replay of version 5 when 5 is already trusted → timestamp rollback.
         assert_eq!(
-            verify_update(
-                &root, trusted, NOW,
-                &tsm, &tm_sig, &snap, &sn_sig, &tgt, &ts_sig,
-            ),
+            verify_update(&root, trusted, NOW, &tsm, &tm_sig, &snap, &sn_sig, &tgt, &ts_sig,),
             Err(UptaneError::RollbackAttempt(Role::Timestamp))
         );
     }
@@ -647,8 +674,15 @@ mod tests {
         let (tgt, ts_sig, snap, sn_sig, tsm, tm_sig) = metaset(&r, 5, 5, 5);
         assert_eq!(
             verify_update(
-                &root, TrustedVersions::default(), EXP + 1, // now past expiry
-                &tsm, &tm_sig, &snap, &sn_sig, &tgt, &ts_sig,
+                &root,
+                TrustedVersions::default(),
+                EXP + 1, // now past expiry
+                &tsm,
+                &tm_sig,
+                &snap,
+                &sn_sig,
+                &tgt,
+                &ts_sig,
             ),
             Err(UptaneError::Expired(Role::Timestamp))
         );
@@ -662,13 +696,23 @@ mod tests {
         let root = r.root(1, EXP);
         // timestamp says snapshot_version=6, but the presented snapshot is v5.
         let (tgt, ts_sig, snap, sn_sig, _tsm, _tm_sig) = metaset(&r, 5, 5, 5);
-        let bad_ts =
-            TimestampMetadata { version: 7, expires_at_ms: EXP, snapshot_version: 6 };
+        let bad_ts = TimestampMetadata {
+            version: 7,
+            expires_at_ms: EXP,
+            snapshot_version: 6,
+        };
         let bad_ts_sig = sign_timestamp(&bad_ts, &r.timestamp_sk);
         assert_eq!(
             verify_update(
-                &root, TrustedVersions::default(), NOW,
-                &bad_ts, &bad_ts_sig, &snap, &sn_sig, &tgt, &ts_sig,
+                &root,
+                TrustedVersions::default(),
+                NOW,
+                &bad_ts,
+                &bad_ts_sig,
+                &snap,
+                &sn_sig,
+                &tgt,
+                &ts_sig,
             ),
             Err(UptaneError::ChainMismatch)
         );
@@ -680,16 +724,29 @@ mod tests {
         let root = r.root(1, EXP);
         // snapshot pins targets_version=9 but the presented targets is v5.
         let (tgt, ts_sig, _snap, _sn_sig, _tsm, _tm_sig) = metaset(&r, 5, 5, 5);
-        let bad_snap =
-            SnapshotMetadata { version: 5, expires_at_ms: EXP, targets_version: 9 };
+        let bad_snap = SnapshotMetadata {
+            version: 5,
+            expires_at_ms: EXP,
+            targets_version: 9,
+        };
         let bad_sn_sig = sign_snapshot(&bad_snap, &r.snapshot_sk);
-        let tsm =
-            TimestampMetadata { version: 5, expires_at_ms: EXP, snapshot_version: 5 };
+        let tsm = TimestampMetadata {
+            version: 5,
+            expires_at_ms: EXP,
+            snapshot_version: 5,
+        };
         let tm_sig = sign_timestamp(&tsm, &r.timestamp_sk);
         assert_eq!(
             verify_update(
-                &root, TrustedVersions::default(), NOW,
-                &tsm, &tm_sig, &bad_snap, &bad_sn_sig, &tgt, &ts_sig,
+                &root,
+                TrustedVersions::default(),
+                NOW,
+                &tsm,
+                &tm_sig,
+                &bad_snap,
+                &bad_sn_sig,
+                &tgt,
+                &ts_sig,
             ),
             Err(UptaneError::ChainMismatch)
         );
@@ -710,7 +767,10 @@ mod tests {
         let by_old = b64::encode(&r.root_sk.sign(&img).to_bytes());
         let by_new = b64::encode(&r.root_sk.sign(&img).to_bytes()); // same root key rotates targets
         let rotated = verify_root_rotation(&current, &new_root, &by_old, &by_new).unwrap();
-        assert_eq!(rotated.targets_key, new_targets_sk.verifying_key().to_bytes());
+        assert_eq!(
+            rotated.targets_key,
+            new_targets_sk.verifying_key().to_bytes()
+        );
     }
 
     /// A rotation NOT signed by the outgoing root is refused (an attacker with
@@ -763,8 +823,16 @@ mod tests {
     /// another.
     #[test]
     fn role_domains_are_separated() {
-        let snap = SnapshotMetadata { version: 1, expires_at_ms: EXP, targets_version: 1 };
-        let tsm = TimestampMetadata { version: 1, expires_at_ms: EXP, snapshot_version: 1 };
+        let snap = SnapshotMetadata {
+            version: 1,
+            expires_at_ms: EXP,
+            targets_version: 1,
+        };
+        let tsm = TimestampMetadata {
+            version: 1,
+            expires_at_ms: EXP,
+            snapshot_version: 1,
+        };
         assert_ne!(snap.signing_image(), tsm.signing_image());
     }
 
@@ -785,7 +853,10 @@ mod tests {
         let rotation = author_root_rotation(m2, &r.root_sk, &r.root_sk);
         let adopted = apply_root_rotation(&anchor.meta, &rotation).expect("valid rotation adopts");
         assert_eq!(adopted.version, 2);
-        assert_eq!(adopted.targets_key, new_targets_sk.verifying_key().to_bytes());
+        assert_eq!(
+            adopted.targets_key,
+            new_targets_sk.verifying_key().to_bytes()
+        );
     }
 
     /// REVOCATION — the payoff of rotation. After the node adopts a root that
@@ -800,8 +871,15 @@ mod tests {
         // A metadata set the OLD targets key signs — valid under the old root.
         let (tgt, ts_sig, snap, sn_sig, tsm, tm_sig) = metaset(&r, 5, 5, 5);
         assert!(verify_update(
-            &anchor, TrustedVersions::default(), NOW,
-            &tsm, &tm_sig, &snap, &sn_sig, &tgt, &ts_sig,
+            &anchor,
+            TrustedVersions::default(),
+            NOW,
+            &tsm,
+            &tm_sig,
+            &snap,
+            &sn_sig,
+            &tgt,
+            &ts_sig,
         )
         .is_ok());
 
@@ -816,8 +894,15 @@ mod tests {
         // under the new root — the old key is revoked.
         assert_eq!(
             verify_update(
-                &adopted, TrustedVersions::default(), NOW,
-                &tsm, &tm_sig, &snap, &sn_sig, &tgt, &ts_sig,
+                &adopted,
+                TrustedVersions::default(),
+                NOW,
+                &tsm,
+                &tm_sig,
+                &snap,
+                &sn_sig,
+                &tgt,
+                &ts_sig,
             ),
             Err(UptaneError::SignatureInvalid(Role::Targets))
         );
@@ -825,8 +910,15 @@ mod tests {
         // Re-signed by the NEW targets key, it verifies under the new root.
         let new_tgt_sig = sign_targets(&tgt, &new_targets_sk);
         assert!(verify_update(
-            &adopted, TrustedVersions::default(), NOW,
-            &tsm, &tm_sig, &snap, &sn_sig, &tgt, &new_tgt_sig,
+            &adopted,
+            TrustedVersions::default(),
+            NOW,
+            &tsm,
+            &tm_sig,
+            &snap,
+            &sn_sig,
+            &tgt,
+            &new_tgt_sig,
         )
         .is_ok());
     }

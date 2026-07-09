@@ -47,7 +47,7 @@ use kirra_core::trajectory::PerceivedObject;
 use kirra_doer_eval::{verdict_of, AdmissibilityTally, EvalScenario};
 use kirra_planner::{GeometricPlanner, GeometricPlannerConfig, LearnedPlanner, Planner, Teacher};
 use kirra_taj::{
-    LaserScan, SemanticClass, SemanticDetection, SemanticDetector, MockSemanticDetector,
+    LaserScan, MockSemanticDetector, SemanticClass, SemanticDetection, SemanticDetector,
     SemanticEvalFrame, SemanticEvalSummary, TajConfig, TajCorridor, TajPhaseA,
 };
 use serde::{Deserialize, Serialize};
@@ -102,7 +102,11 @@ pub fn generated_doer_corpus() -> Vec<EvalScenario> {
     let speeds = [1.0, 2.0, 4.0, 6.0];
     let goals = [40.0, 60.0];
     let distances = [12.0, 16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0, 44.0, 48.0];
-    let kinds = [HazardKind::Stopped, HazardKind::LeadMoving, HazardKind::Oncoming];
+    let kinds = [
+        HazardKind::Stopped,
+        HazardKind::LeadMoving,
+        HazardKind::Oncoming,
+    ];
 
     let mut corpus = Vec::new();
     for &speed in &speeds {
@@ -136,11 +140,20 @@ pub fn generated_doer_corpus() -> Vec<EvalScenario> {
 /// the REAL checker (`validate_trajectory_slow` via `verdict_of`); the rate
 /// is `kirra_doer_eval::AdmissibilityTally::admissibility_rate` (fail-closed:
 /// an empty corpus scores 0.0, not 1.0).
-pub(crate) fn admissibility_over(corpus: &[EvalScenario], mut plan: impl FnMut(&EvalScenario) -> kirra_planner::PlanOutput) -> (f64, AdmissibilityTally) {
+pub(crate) fn admissibility_over(
+    corpus: &[EvalScenario],
+    mut plan: impl FnMut(&EvalScenario) -> kirra_planner::PlanOutput,
+) -> (f64, AdmissibilityTally) {
     let mut tally = AdmissibilityTally::default();
     for sc in corpus {
         let out = plan(sc);
-        tally.record(verdict_of(&out, sc.corridor(), sc.objects(), sc.config(), sc.posture()));
+        tally.record(verdict_of(
+            &out,
+            sc.corridor(),
+            sc.objects(),
+            sc.config(),
+            sc.posture(),
+        ));
     }
     (tally.admissibility_rate(), tally)
 }
@@ -162,7 +175,10 @@ pub struct PerceptionCase {
 /// pipeline (the same substrate the taj fusion tests use), so the binding
 /// hazard in each frame is the semantic one, never geometry.
 pub(crate) fn open_corridor() -> TajCorridor {
-    let taj = TajPhaseA::new(TajConfig { forward_extent_m: 20.0, ..Default::default() });
+    let taj = TajPhaseA::new(TajConfig {
+        forward_extent_m: 20.0,
+        ..Default::default()
+    });
     let n = 180usize;
     let mut ranges = vec![f32::INFINITY; n];
     ranges[10] = 30.0;
@@ -213,7 +229,9 @@ pub fn generated_perception_corpus() -> Vec<PerceptionCase> {
                 // The shipped detector seam: a scripted mock carrying the
                 // scene's hazards — `detect()` is the trait the real model
                 // will implement.
-                let detector = MockSemanticDetector { detections: vec![det] };
+                let detector = MockSemanticDetector {
+                    detections: vec![det],
+                };
                 cases.push(PerceptionCase {
                     name: format!("{class:?}_x{near_x}_span{si}"),
                     corridor: open_corridor(),
@@ -281,17 +299,27 @@ fn faulted_detected(truth: &[SemanticDetection], fault: DetectorFault) -> Vec<Se
         DetectorFault::Dropout => Vec::new(),
         DetectorFault::RangeBiasFar => truth
             .iter()
-            .map(|d| SemanticDetection { near_x_m: d.near_x_m + RANGE_BIAS_FAR_M, ..*d })
+            .map(|d| SemanticDetection {
+                near_x_m: d.near_x_m + RANGE_BIAS_FAR_M,
+                ..*d
+            })
             .collect(),
         DetectorFault::ClassConfusion => truth
             .iter()
-            .map(|d| SemanticDetection { class: SemanticClass::Road, ..*d })
+            .map(|d| SemanticDetection {
+                class: SemanticClass::Road,
+                ..*d
+            })
             .collect(),
         DetectorFault::LateralShrink => truth
             .iter()
             // Push the lateral span far off the corridor centerline (the corridor
             // is lidar-bounded to ~±30 m near the ego) so it no longer overlaps.
-            .map(|d| SemanticDetection { lateral_min_m: 500.0, lateral_max_m: 501.0, ..*d })
+            .map(|d| SemanticDetection {
+                lateral_min_m: 500.0,
+                lateral_max_m: 501.0,
+                ..*d
+            })
             .collect(),
     }
 }
@@ -300,7 +328,10 @@ fn faulted_detected(truth: &[SemanticDetection], fault: DetectorFault) -> Vec<Se
 /// non-empty), with `detected` re-derived from `truth` under `fault`. Scoring
 /// this must breach `unsafe_miss_rate` (the oracle caught the fault).
 #[must_use]
-pub(crate) fn negative_control_corpus(base: &[PerceptionCase], fault: DetectorFault) -> Vec<PerceptionCase> {
+pub(crate) fn negative_control_corpus(
+    base: &[PerceptionCase],
+    fault: DetectorFault,
+) -> Vec<PerceptionCase> {
     base.iter()
         .filter(|c| !c.truth.is_empty())
         .map(|c| PerceptionCase {
@@ -378,10 +409,22 @@ pub struct KpiRow {
 
 impl KpiRow {
     fn at_least(name: &'static str, measured: f64, bound: f64) -> Self {
-        Self { name, measured, direction: ">=", bound, pass: measured >= bound }
+        Self {
+            name,
+            measured,
+            direction: ">=",
+            bound,
+            pass: measured >= bound,
+        }
     }
     fn at_most(name: &'static str, measured: f64, bound: f64) -> Self {
-        Self { name, measured, direction: "<=", bound, pass: measured <= bound }
+        Self {
+            name,
+            measured,
+            direction: "<=",
+            bound,
+            pass: measured <= bound,
+        }
     }
 }
 
@@ -423,8 +466,16 @@ pub fn run_gate(t: &KpiThresholds) -> GateReport {
     let perception = score_perception(&cases);
 
     let mut rows = vec![
-        KpiRow::at_least("geometric_admissibility", geo_rate, t.geometric_admissibility_min),
-        KpiRow::at_least("learned_admissibility", learned_rate, t.learned_admissibility_min),
+        KpiRow::at_least(
+            "geometric_admissibility",
+            geo_rate,
+            t.geometric_admissibility_min,
+        ),
+        KpiRow::at_least(
+            "learned_admissibility",
+            learned_rate,
+            t.learned_admissibility_min,
+        ),
         // #777 F1: these two rows are SEAM-PINNED — the mock detector is fed its
         // own ground truth, so they score the identity function and cannot fail.
         // Kept as a harness smoke test (labelled so CI output can't be mistaken
@@ -460,7 +511,11 @@ pub fn run_gate(t: &KpiThresholds) -> GateReport {
             DetectorFault::ClassConfusion => "negctl_class_confusion_unsafe_miss",
             DetectorFault::LateralShrink => "negctl_lateral_shrink_unsafe_miss",
         };
-        rows.push(KpiRow::at_least(name, s.unsafe_miss_rate(), NEG_CONTROL_BREACH_MIN));
+        rows.push(KpiRow::at_least(
+            name,
+            s.unsafe_miss_rate(),
+            NEG_CONTROL_BREACH_MIN,
+        ));
     }
 
     // #777 F1 — phantom control: a hallucinated hazard over a CLEAR world is an
@@ -474,7 +529,11 @@ pub fn run_gate(t: &KpiThresholds) -> GateReport {
         ps.over_conservative_rate(),
         NEG_CONTROL_BREACH_MIN,
     ));
-    rows.push(KpiRow::at_most("negctl_phantom_no_unsafe_miss", ps.unsafe_miss_rate(), 0.0));
+    rows.push(KpiRow::at_most(
+        "negctl_phantom_no_unsafe_miss",
+        ps.unsafe_miss_rate(),
+        0.0,
+    ));
 
     // EP-20 — differential perception rows: Phase-A (geometric, hazard-blind)
     // vs Phase-B (semantic fusion) over the SHARED ground-truth corpus. The
@@ -482,7 +541,9 @@ pub fn run_gate(t: &KpiThresholds) -> GateReport {
     // exact 0s); the DISCRIMINANCE evidence is the differential negative
     // controls below, mirroring the #777 pattern.
     let diff = differential::differential_summary(
-        cases.iter().map(|c| (&c.corridor, c.truth.as_slice(), c.detected.as_slice())),
+        cases
+            .iter()
+            .map(|c| (&c.corridor, c.truth.as_slice(), c.detected.as_slice())),
     );
     rows.push(KpiRow::at_most(
         "differential_forbidden_loosen",
@@ -512,7 +573,9 @@ pub fn run_gate(t: &KpiThresholds) -> GateReport {
     ] {
         let faulted = negative_control_corpus(&cases, fault);
         let d = differential::differential_summary(
-            faulted.iter().map(|c| (&c.corridor, c.truth.as_slice(), c.detected.as_slice())),
+            faulted
+                .iter()
+                .map(|c| (&c.corridor, c.truth.as_slice(), c.detected.as_slice())),
         );
         let name: &'static str = match fault {
             DetectorFault::Dropout => "negctl_dropout_differential_missed",
@@ -520,7 +583,11 @@ pub fn run_gate(t: &KpiThresholds) -> GateReport {
             DetectorFault::ClassConfusion => "negctl_class_confusion_differential_missed",
             DetectorFault::LateralShrink => "negctl_lateral_shrink_differential_missed",
         };
-        rows.push(KpiRow::at_least(name, d.missed_tighten_rate(), NEG_CONTROL_BREACH_MIN));
+        rows.push(KpiRow::at_least(
+            name,
+            d.missed_tighten_rate(),
+            NEG_CONTROL_BREACH_MIN,
+        ));
         rows.push(KpiRow::at_most(
             match fault {
                 DetectorFault::Dropout => "negctl_dropout_differential_no_loosen",
@@ -535,7 +602,9 @@ pub fn run_gate(t: &KpiThresholds) -> GateReport {
     {
         let phantom = phantom_control_corpus(&cases);
         let d = differential::differential_summary(
-            phantom.iter().map(|c| (&c.corridor, c.truth.as_slice(), c.detected.as_slice())),
+            phantom
+                .iter()
+                .map(|c| (&c.corridor, c.truth.as_slice(), c.detected.as_slice())),
         );
         // Every phantom-corpus frame is clear-truth with a hallucinated
         // detection, so the differential must classify (nearly) all of them
@@ -565,7 +634,13 @@ use montecarlo::{
 };
 
 /// A Wilson (gated) + Clopper–Pearson (reported) interval pair from a count.
-fn intervals(successes: u64, trials: u64) -> (confidence::ConfidenceInterval, confidence::ConfidenceInterval) {
+fn intervals(
+    successes: u64,
+    trials: u64,
+) -> (
+    confidence::ConfidenceInterval,
+    confidence::ConfidenceInterval,
+) {
     (
         wilson_interval(successes, trials, Z_95),
         clopper_pearson_interval(successes, trials, ALPHA_95),
@@ -602,8 +677,10 @@ pub fn run_montecarlo_gate(policy: &MonteCarloPolicy, profile: Profile) -> McGat
     let cases = sample_perception_corpus(seed, sizes.perception_samples);
     let perc = score_perception(&cases);
     let (miss_w, miss_cp) = intervals(perc.unsafe_miss as u64, perc.frames as u64);
-    let (recall_w, recall_cp) =
-        intervals(perc.true_hazards_caught as u64, perc.frames_with_true_hazard as u64);
+    let (recall_w, recall_cp) = intervals(
+        perc.true_hazards_caught as u64,
+        perc.frames_with_true_hazard as u64,
+    );
 
     let mut rows = vec![
         McKpiRow::new(
@@ -648,7 +725,12 @@ pub fn run_montecarlo_gate(policy: &MonteCarloPolicy, profile: Profile) -> McGat
             DetectorFault::ClassConfusion => "negctl_class_confusion_unsafe_miss",
             DetectorFault::LateralShrink => "negctl_lateral_shrink_unsafe_miss",
         };
-        rows.push(McKpiRow::new(name, w, cp, Bound::CiLowerAtLeast(policy.negctl_breach_lo_min)));
+        rows.push(McKpiRow::new(
+            name,
+            w,
+            cp,
+            Bound::CiLowerAtLeast(policy.negctl_breach_lo_min),
+        ));
     }
 
     // --- Phantom control: over-conservative breach (statistical), and the HARD
@@ -697,18 +779,33 @@ mod tests {
     /// scenario names in identical order (no RNG, no time).
     #[test]
     fn generators_are_deterministic() {
-        let a: Vec<String> = generated_doer_corpus().into_iter().map(|s| s.name).collect();
-        let b: Vec<String> = generated_doer_corpus().into_iter().map(|s| s.name).collect();
+        let a: Vec<String> = generated_doer_corpus()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        let b: Vec<String> = generated_doer_corpus()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
         assert_eq!(a, b);
-        let pa: Vec<String> = generated_perception_corpus().into_iter().map(|c| c.name).collect();
-        let pb: Vec<String> = generated_perception_corpus().into_iter().map(|c| c.name).collect();
+        let pa: Vec<String> = generated_perception_corpus()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        let pb: Vec<String> = generated_perception_corpus()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
         assert_eq!(pa, pb);
     }
 
     fn committed_thresholds() -> KpiThresholds {
         // The gate tests run from the crate dir; the binary defaults to the
         // repo-root path. Resolve relative to the manifest.
-        let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../ci/scenario_kpi_thresholds.json");
+        let p = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../ci/scenario_kpi_thresholds.json"
+        );
         serde_json::from_str(&std::fs::read_to_string(p).expect("committed thresholds exist"))
             .expect("thresholds parse")
     }
@@ -734,7 +831,10 @@ mod tests {
         let report = run_gate(&t);
         assert!(!report.passed(), "an unreachable bound must red the gate");
         assert!(
-            report.rows.iter().any(|r| r.name == "geometric_admissibility" && !r.pass),
+            report
+                .rows
+                .iter()
+                .any(|r| r.name == "geometric_admissibility" && !r.pass),
             "the breach must be attributed to the right row: {report:#?}"
         );
     }
@@ -749,7 +849,10 @@ mod tests {
             c.detected.clear(); // a detector that sees nothing
         }
         let s = score_perception(&cases);
-        assert!(s.unsafe_miss_rate() > 0.5, "a blind detector must unsafe-miss most hazard frames");
+        assert!(
+            s.unsafe_miss_rate() > 0.5,
+            "a blind detector must unsafe-miss most hazard frames"
+        );
         assert_eq!(s.hazard_recall(), 0.0, "a blind detector catches nothing");
     }
 
@@ -811,9 +914,15 @@ mod tests {
             "negctl_phantom_over_conservative",
             "negctl_phantom_no_unsafe_miss",
         ] {
-            let row = report.rows.iter().find(|r| r.name == name)
+            let row = report
+                .rows
+                .iter()
+                .find(|r| r.name == name)
                 .unwrap_or_else(|| panic!("gate must carry the {name} row: {report:#?}"));
-            assert!(row.pass, "negative-control row {name} must pass (oracle discriminates the fault): {row:?}");
+            assert!(
+                row.pass,
+                "negative-control row {name} must pass (oracle discriminates the fault): {row:?}"
+            );
         }
     }
 
@@ -822,7 +931,10 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn committed_mc_policy() -> montecarlo::MonteCarloPolicy {
-        let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../ci/scenario_kpi_montecarlo.json");
+        let p = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../ci/scenario_kpi_montecarlo.json"
+        );
         serde_json::from_str(&std::fs::read_to_string(p).expect("committed MC policy exists"))
             .expect("MC policy parses")
     }
@@ -839,7 +951,11 @@ mod tests {
             report.rows.iter().filter(|r| !r.pass).collect::<Vec<_>>()
         );
         // Every KPI + every negative-control row is present (no silent shrink).
-        assert_eq!(report.rows.len(), 4 + 4 + 2, "all KPI + negctl rows present");
+        assert_eq!(
+            report.rows.len(),
+            4 + 4 + 2,
+            "all KPI + negctl rows present"
+        );
     }
 
     /// THE WP-23 DoD (red half): a floor set past the measured interval reds the
@@ -850,9 +966,15 @@ mod tests {
         let mut policy = committed_mc_policy();
         policy.unsafe_miss_rate_hi_max = -0.001; // unreachable: an upper bound < 0
         let report = run_montecarlo_gate(&policy, montecarlo::Profile::PerPr);
-        assert!(!report.passed(), "an impossible CI bound must red the campaign");
         assert!(
-            report.rows.iter().any(|r| r.name == "unsafe_miss_rate_seam_pinned" && !r.pass),
+            !report.passed(),
+            "an impossible CI bound must red the campaign"
+        );
+        assert!(
+            report
+                .rows
+                .iter()
+                .any(|r| r.name == "unsafe_miss_rate_seam_pinned" && !r.pass),
             "the breach must attribute to the unsafe_miss row"
         );
     }
@@ -865,7 +987,10 @@ mod tests {
         let a = run_montecarlo_gate(&policy, montecarlo::Profile::PerPr);
         let b = run_montecarlo_gate(&policy, montecarlo::Profile::PerPr);
         let fingerprint = |r: &montecarlo::McGateReport| -> Vec<(&'static str, bool, f64, f64)> {
-            r.rows.iter().map(|x| (x.name, x.pass, x.wilson.lo, x.wilson.hi)).collect()
+            r.rows
+                .iter()
+                .map(|x| (x.name, x.pass, x.wilson.lo, x.wilson.hi))
+                .collect()
         };
         assert_eq!(fingerprint(&a), fingerprint(&b));
     }
@@ -885,9 +1010,15 @@ mod tests {
             "negctl_phantom_over_conservative",
             "negctl_phantom_no_unsafe_miss",
         ] {
-            let row = report.rows.iter().find(|r| r.name == name)
+            let row = report
+                .rows
+                .iter()
+                .find(|r| r.name == name)
                 .unwrap_or_else(|| panic!("campaign must carry {name}"));
-            assert!(row.pass, "negative-control row {name} must pass under sampling: {row:?}");
+            assert!(
+                row.pass,
+                "negative-control row {name} must pass under sampling: {row:?}"
+            );
         }
     }
 

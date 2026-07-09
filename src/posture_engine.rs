@@ -1,9 +1,9 @@
 // src/posture_engine.rs
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
+use crate::posture_cache::{now_ms, CachedFleetPosture, SharedPostureCache};
 use crate::verifier::{AppState, FleetNodePosture, FleetPosture};
-use crate::posture_cache::{CachedFleetPosture, SharedPostureCache, now_ms};
 
 pub use crate::posture_cache::POSTURE_CACHE_TTL_MS;
 
@@ -86,11 +86,15 @@ pub fn derive_fleet_posture(node_postures: &[FleetNodePosture]) -> FleetPosture 
     for np in node_postures {
         match np.propagated_status {
             FleetPosture::LockedOut => return FleetPosture::LockedOut,
-            FleetPosture::Degraded  => any_degraded = true,
-            FleetPosture::Nominal   => {}
+            FleetPosture::Degraded => any_degraded = true,
+            FleetPosture::Nominal => {}
         }
     }
-    if any_degraded { FleetPosture::Degraded } else { FleetPosture::Nominal }
+    if any_degraded {
+        FleetPosture::Degraded
+    } else {
+        FleetPosture::Nominal
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -130,8 +134,10 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // others is traversed once and black-hit by the rest — O(N·(N+E)) → ~O(N+E).
     // (The per-call gray cycle-detection set stays fresh inside
     // `calculate_posture_memoized`.)
-    let mut black: std::collections::HashMap<std::sync::Arc<str>, std::sync::Arc<FleetNodePosture>> =
-        std::collections::HashMap::new();
+    let mut black: std::collections::HashMap<
+        std::sync::Arc<str>,
+        std::sync::Arc<FleetNodePosture>,
+    > = std::collections::HashMap::new();
     let node_postures: Vec<FleetNodePosture> = node_ids
         .iter()
         .map(|id| app.calculate_posture_memoized(id, &mut black))
@@ -158,10 +164,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     let empty_live_set = node_ids.is_empty();
     let empty_set_reason = if empty_live_set {
         // SAFETY: SG-HA-3 — durable store reads on runtime paths must be offloaded by callers.
-        let registered = app
-            .store
-            .with(|store| store.count_nodes())
-            .unwrap_or(0);
+        let registered = app.store.with(|store| store.count_nodes()).unwrap_or(0);
         Some(if registered > 0 {
             "EMPTY_LIVE_SET_HYDRATION_GAP"
         } else {
@@ -190,10 +193,18 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // Composes with the others (any → Degraded); auto-recovers when agreeing
     // ticks clear the flag.
     // SAFETY: SG9 | REQ: governor-divergence-posture-coupling | TEST: test_divergence_degraded_active_escalates_nominal,test_divergence_lockout_active_forces_locked_out,test_divergence_flags_default_inert
-    let escalate = (app.rss_active_violation.load(std::sync::atomic::Ordering::SeqCst)
-        || app.flood_condition_active.load(std::sync::atomic::Ordering::SeqCst)
-        || app.frame_degraded_active.load(std::sync::atomic::Ordering::SeqCst)
-        || app.divergence_degraded_active.load(std::sync::atomic::Ordering::SeqCst))
+    let escalate = (app
+        .rss_active_violation
+        .load(std::sync::atomic::Ordering::SeqCst)
+        || app
+            .flood_condition_active
+            .load(std::sync::atomic::Ordering::SeqCst)
+        || app
+            .frame_degraded_active
+            .load(std::sync::atomic::Ordering::SeqCst)
+        || app
+            .divergence_degraded_active
+            .load(std::sync::atomic::Ordering::SeqCst))
         && dag_posture == FleetPosture::Nominal;
     // C2 supervisor escalation has ABSOLUTE priority over the DAG and the
     // operational (rss/flood) escalation: if a critical background safety loop is
@@ -205,9 +216,15 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // A sustained frame-integrity fault (`frame_lockout_active`) shares the
     // absolute LockedOut priority with `supervisor_tripped`: both are sticky
     // human-reset conditions that override the DAG and the operational escalation.
-    let new_posture = if app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst)
-        || app.frame_lockout_active.load(std::sync::atomic::Ordering::SeqCst)
-        || app.divergence_lockout_active.load(std::sync::atomic::Ordering::SeqCst)
+    let new_posture = if app
+        .supervisor_tripped
+        .load(std::sync::atomic::Ordering::SeqCst)
+        || app
+            .frame_lockout_active
+            .load(std::sync::atomic::Ordering::SeqCst)
+        || app
+            .divergence_lockout_active
+            .load(std::sync::atomic::Ordering::SeqCst)
     {
         FleetPosture::LockedOut
     } else if empty_live_set {
@@ -429,9 +446,9 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
 
         let _ = app.posture_tx.send(crate::verifier::PostureStreamEvent {
             event_type: event_type.to_string(),
-            node_id:    None,
+            node_id: None,
             emitted_at_ms: ts,
-            posture:    None,
+            posture: None,
         });
 
         tracing::info!(
@@ -506,7 +523,7 @@ fn replace_cache_if_newer(
             } else {
                 tracing::debug!(
                     candidate_gen = candidate.generation,
-                    current_gen   = cur_gen,
+                    current_gen = cur_gen,
                     "Skipping cache replace — a newer or equal generation is already cached"
                 );
                 false
@@ -611,7 +628,8 @@ mod posture_engine_tests {
     #[test]
     fn test_transition_detection_none_previous_is_always_transition() {
         let previous: Option<FleetPosture> = None;
-        let is_transition = previous.as_ref()
+        let is_transition = previous
+            .as_ref()
             .map(|p| p != &FleetPosture::Nominal)
             .unwrap_or(true);
         assert!(is_transition);
@@ -620,7 +638,8 @@ mod posture_engine_tests {
     #[test]
     fn test_transition_detection_same_posture_is_not_transition() {
         let previous = Some(FleetPosture::Nominal);
-        let is_transition = previous.as_ref()
+        let is_transition = previous
+            .as_ref()
             .map(|p| p != &FleetPosture::Nominal)
             .unwrap_or(true);
         assert!(!is_transition);
@@ -629,7 +648,8 @@ mod posture_engine_tests {
     #[test]
     fn test_transition_detection_different_posture_is_transition() {
         let previous = Some(FleetPosture::Nominal);
-        let is_transition = previous.as_ref()
+        let is_transition = previous
+            .as_ref()
             .map(|p| p != &FleetPosture::Degraded)
             .unwrap_or(true);
         assert!(is_transition);
@@ -650,9 +670,9 @@ mod posture_engine_tests {
 
     #[test]
     fn test_recalculate_and_broadcast_writes_to_cache() {
-        use std::sync::Arc;
         use crate::verifier::{AppState, VerifierOperationMode};
         use crate::verifier_store::VerifierStore;
+        use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
@@ -680,9 +700,9 @@ mod posture_engine_tests {
 
     #[test]
     fn test_empty_live_set_fails_closed_to_locked_out() {
-        use std::sync::Arc;
         use crate::verifier::{AppState, VerifierOperationMode};
         use crate::verifier_store::VerifierStore;
+        use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
@@ -702,9 +722,9 @@ mod posture_engine_tests {
 
     #[test]
     fn test_empty_live_set_with_orphaned_store_nodes_is_locked_out() {
-        use std::sync::Arc;
         use crate::verifier::{AppState, VerifierOperationMode};
         use crate::verifier_store::VerifierStore;
+        use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
@@ -717,7 +737,10 @@ mod posture_engine_tests {
         app.store
             .with(|s| s.save_node(&registered_trusted_node("orphan")))
             .unwrap();
-        assert!(app.nodes.is_empty(), "in-memory live set must be empty for this case");
+        assert!(
+            app.nodes.is_empty(),
+            "in-memory live set must be empty for this case"
+        );
 
         recalculate_and_broadcast(&app, &cache);
 
@@ -731,9 +754,9 @@ mod posture_engine_tests {
 
     #[test]
     fn test_empty_live_set_lockout_auto_recovers_on_registration() {
-        use std::sync::Arc;
         use crate::verifier::{AppState, VerifierOperationMode};
         use crate::verifier_store::VerifierStore;
+        use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
@@ -761,10 +784,10 @@ mod posture_engine_tests {
 
     #[test]
     fn test_supervisor_tripped_forces_locked_out_over_healthy_dag() {
-        use std::sync::Arc;
-        use std::sync::atomic::Ordering;
         use crate::verifier::{AppState, VerifierOperationMode};
         use crate::verifier_store::VerifierStore;
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
@@ -797,8 +820,8 @@ mod posture_engine_tests {
 
     #[test]
     fn test_force_lockout_writes_locked_out_with_bumped_generation() {
-        use std::sync::Arc;
         use crate::posture_cache::CachedFleetPosture;
+        use std::sync::Arc;
 
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
             CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 1, 1_000),
@@ -809,14 +832,17 @@ mod posture_engine_tests {
         let guard = cache.read().unwrap();
         let entry = guard.as_ref().unwrap();
         assert_eq!(entry.posture, FleetPosture::LockedOut);
-        assert!(entry.generation > 1, "force_lockout must bump the generation to win the CAS");
+        assert!(
+            entry.generation > 1,
+            "force_lockout must bump the generation to win the CAS"
+        );
     }
 
     #[test]
     fn test_passive_standby_audits_but_does_not_write_cache() {
-        use std::sync::Arc;
         use crate::verifier::{AppState, VerifierOperationMode};
         use crate::verifier_store::VerifierStore;
+        use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
         let app = Arc::new(AppState::new(store, VerifierOperationMode::PassiveStandby));
@@ -825,8 +851,10 @@ mod posture_engine_tests {
         recalculate_and_broadcast(&app, &cache);
 
         let guard = cache.read().unwrap();
-        assert!(guard.is_none(),
-            "PassiveStandby must NOT populate the cache even after a successful audit commit");
+        assert!(
+            guard.is_none(),
+            "PassiveStandby must NOT populate the cache even after a successful audit commit"
+        );
     }
 
     // FIX 1: generation-monotonic replace.
@@ -837,8 +865,8 @@ mod posture_engine_tests {
     // write lock) deadlocks.
     #[test]
     fn test_replace_cache_if_newer_rejects_lower_generation() {
-        use std::sync::Arc;
         use crate::posture_cache::CachedFleetPosture;
+        use std::sync::Arc;
 
         fn snapshot(cache: &SharedPostureCache) -> (u64, FleetPosture) {
             let g = cache.read().unwrap();
@@ -855,15 +883,22 @@ mod posture_engine_tests {
 
         // Lower generation 9 must be rejected, cache unchanged.
         let g9 = CachedFleetPosture::new_with_generation(FleetPosture::Degraded, 9, 2_000);
-        assert!(!replace_cache_if_newer(&cache, g9, false),
-            "lower generation must NOT replace the cache");
-        assert_eq!(snapshot(&cache), (10, FleetPosture::Nominal),
-            "older recalc must NOT have clobbered the newer posture");
+        assert!(
+            !replace_cache_if_newer(&cache, g9, false),
+            "lower generation must NOT replace the cache"
+        );
+        assert_eq!(
+            snapshot(&cache),
+            (10, FleetPosture::Nominal),
+            "older recalc must NOT have clobbered the newer posture"
+        );
 
         // Equal generation 10 must also be rejected (strictly greater).
         let g10_eq = CachedFleetPosture::new_with_generation(FleetPosture::LockedOut, 10, 3_000);
-        assert!(!replace_cache_if_newer(&cache, g10_eq, false),
-            "equal generation must NOT replace (strict > required)");
+        assert!(
+            !replace_cache_if_newer(&cache, g10_eq, false),
+            "equal generation must NOT replace (strict > required)"
+        );
         assert_eq!(snapshot(&cache), (10, FleetPosture::Nominal));
 
         // Strictly greater generation 11 wins.
@@ -875,13 +910,15 @@ mod posture_engine_tests {
     // FIX 1: an empty cache always accepts (current_gen treated as 0).
     #[test]
     fn test_replace_cache_if_newer_accepts_into_empty_cache() {
-        use std::sync::Arc;
         use crate::posture_cache::CachedFleetPosture;
+        use std::sync::Arc;
 
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
         let g1 = CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 1, 0);
-        assert!(replace_cache_if_newer(&cache, g1, false),
-            "generation > 0 must populate an empty cache");
+        assert!(
+            replace_cache_if_newer(&cache, g1, false),
+            "generation > 0 must populate an empty cache"
+        );
         let snap_gen = cache.read().unwrap().as_ref().unwrap().generation;
         assert_eq!(snap_gen, 1);
     }
@@ -894,8 +931,8 @@ mod posture_engine_tests {
     /// generation CAS, and once the flag clears, recovery recalcs resume writing.
     #[test]
     fn test_sticky_lockout_refuses_higher_gen_downgrade_688() {
-        use std::sync::Arc;
         use crate::posture_cache::CachedFleetPosture;
+        use std::sync::Arc;
 
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
         // force_lockout writes LockedOut at gen 10.
@@ -979,7 +1016,10 @@ mod posture_engine_tests {
     }
 
     fn cache_posture(cache: &SharedPostureCache) -> Option<FleetPosture> {
-        cache.read().ok().and_then(|g| g.as_ref().map(|c| c.posture))
+        cache
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.posture))
     }
 
     /// #774 F4 — a PassiveStandby recalc AUDITS a transition (it lands in the
@@ -1001,7 +1041,11 @@ mod posture_engine_tests {
         recalculate_and_broadcast(&app, &cache);
 
         // NOT counted on any posture bucket.
-        for p in [FleetPosture::Nominal, FleetPosture::Degraded, FleetPosture::LockedOut] {
+        for p in [
+            FleetPosture::Nominal,
+            FleetPosture::Degraded,
+            FleetPosture::LockedOut,
+        ] {
             assert_eq!(
                 app.fleet_metrics.transition_count(&p),
                 0,
@@ -1020,7 +1064,10 @@ mod posture_engine_tests {
                 .iter()
                 .any(|e| e["event_type"] == "SYSTEM_POSTURE_TRANSITION")
         });
-        assert!(audited, "the standby must still audit the transition to the chain");
+        assert!(
+            audited,
+            "the standby must still audit the transition to the chain"
+        );
     }
 
     fn empty_cache() -> SharedPostureCache {
@@ -1033,8 +1080,11 @@ mod posture_engine_tests {
         let cache = empty_cache();
         app.flood_condition_active.store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
-        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded),
-            "flood + DAG Nominal must escalate to Degraded");
+        assert_eq!(
+            cache_posture(&cache),
+            Some(FleetPosture::Degraded),
+            "flood + DAG Nominal must escalate to Degraded"
+        );
     }
 
     /// THE KEY SAFETY ASSERTION: flood never downgrades a DAG LockedOut.
@@ -1045,8 +1095,11 @@ mod posture_engine_tests {
         insert_node(&app, "n", NodeTrustState::Untrusted("test".to_string())); // DAG → LockedOut
         app.flood_condition_active.store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
-        assert_eq!(cache_posture(&cache), Some(FleetPosture::LockedOut),
-            "flood must NEVER downgrade a DAG LockedOut");
+        assert_eq!(
+            cache_posture(&cache),
+            Some(FleetPosture::LockedOut),
+            "flood must NEVER downgrade a DAG LockedOut"
+        );
     }
 
     #[test]
@@ -1056,8 +1109,11 @@ mod posture_engine_tests {
         insert_node(&app, "n", NodeTrustState::Unknown); // DAG → Degraded
         app.flood_condition_active.store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
-        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded),
-            "flood does not alter an already-Degraded DAG posture");
+        assert_eq!(
+            cache_posture(&cache),
+            Some(FleetPosture::Degraded),
+            "flood does not alter an already-Degraded DAG posture"
+        );
     }
 
     // --- S-FI1d: frame-integrity posture coupling --------------------------
@@ -1072,8 +1128,11 @@ mod posture_engine_tests {
         let cache = empty_cache();
         app.divergence_degraded_active.store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
-        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded),
-            "divergence_degraded_active + DAG Nominal must escalate to Degraded");
+        assert_eq!(
+            cache_posture(&cache),
+            Some(FleetPosture::Degraded),
+            "divergence_degraded_active + DAG Nominal must escalate to Degraded"
+        );
     }
 
     /// divergence_lockout_active shares the absolute LockedOut priority with
@@ -1085,8 +1144,11 @@ mod posture_engine_tests {
         let cache = empty_cache();
         app.divergence_lockout_active.store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
-        assert_eq!(cache_posture(&cache), Some(FleetPosture::LockedOut),
-            "divergence_lockout_active must force LockedOut over a healthy DAG");
+        assert_eq!(
+            cache_posture(&cache),
+            Some(FleetPosture::LockedOut),
+            "divergence_lockout_active must force LockedOut over a healthy DAG"
+        );
         // Sticky: a subsequent healthy recalc must NOT downgrade it.
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(cache_posture(&cache), Some(FleetPosture::LockedOut));
@@ -1099,8 +1161,11 @@ mod posture_engine_tests {
         let app = active_app();
         let cache = empty_cache();
         recalculate_and_broadcast(&app, &cache);
-        assert_eq!(cache_posture(&cache), Some(FleetPosture::Nominal),
-            "unwired divergence flags must not perturb a healthy fleet");
+        assert_eq!(
+            cache_posture(&cache),
+            Some(FleetPosture::Nominal),
+            "unwired divergence flags must not perturb a healthy fleet"
+        );
     }
 
     #[test]
@@ -1109,8 +1174,11 @@ mod posture_engine_tests {
         let cache = empty_cache();
         app.frame_degraded_active.store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
-        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded),
-            "frame_degraded_active + DAG Nominal must escalate to Degraded");
+        assert_eq!(
+            cache_posture(&cache),
+            Some(FleetPosture::Degraded),
+            "frame_degraded_active + DAG Nominal must escalate to Degraded"
+        );
     }
 
     /// frame_lockout_active shares the absolute LockedOut priority with the
@@ -1121,8 +1189,11 @@ mod posture_engine_tests {
         let cache = empty_cache();
         app.frame_lockout_active.store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
-        assert_eq!(cache_posture(&cache), Some(FleetPosture::LockedOut),
-            "frame_lockout_active must force LockedOut over a healthy DAG");
+        assert_eq!(
+            cache_posture(&cache),
+            Some(FleetPosture::LockedOut),
+            "frame_lockout_active must force LockedOut over a healthy DAG"
+        );
     }
 
     /// frame and RSS compose: either active (with Nominal DAG) → Degraded.
@@ -1133,8 +1204,11 @@ mod posture_engine_tests {
         app.frame_degraded_active.store(true, Ordering::SeqCst);
         app.rss_active_violation.store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
-        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded),
-            "frame OR rss escalates Nominal → Degraded");
+        assert_eq!(
+            cache_posture(&cache),
+            Some(FleetPosture::Degraded),
+            "frame OR rss escalates Nominal → Degraded"
+        );
     }
 
     /// Clearing the frame-degraded flag auto-recovers to Nominal via the same path.
@@ -1148,8 +1222,11 @@ mod posture_engine_tests {
 
         app.frame_degraded_active.store(false, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
-        assert_eq!(cache_posture(&cache), Some(FleetPosture::Nominal),
-            "clearing frame_degraded_active returns posture to Nominal (auto-recovery)");
+        assert_eq!(
+            cache_posture(&cache),
+            Some(FleetPosture::Nominal),
+            "clearing frame_degraded_active returns posture to Nominal (auto-recovery)"
+        );
     }
 
     /// flood and RSS compose: either active (with Nominal DAG) → Degraded.
@@ -1160,8 +1237,11 @@ mod posture_engine_tests {
         app.flood_condition_active.store(true, Ordering::SeqCst);
         app.rss_active_violation.store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
-        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded),
-            "flood OR rss escalates Nominal → Degraded");
+        assert_eq!(
+            cache_posture(&cache),
+            Some(FleetPosture::Degraded),
+            "flood OR rss escalates Nominal → Degraded"
+        );
     }
 
     /// Clearing the flag auto-recovers to Nominal via the existing path — no new
@@ -1176,8 +1256,11 @@ mod posture_engine_tests {
 
         app.flood_condition_active.store(false, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
-        assert_eq!(cache_posture(&cache), Some(FleetPosture::Nominal),
-            "clearing the flood flag returns posture to Nominal (auto-recovery)");
+        assert_eq!(
+            cache_posture(&cache),
+            Some(FleetPosture::Nominal),
+            "clearing the flood flag returns posture to Nominal (auto-recovery)"
+        );
     }
 
     /// Default-false flag is inert (no setter exists in this PR).
@@ -1185,10 +1268,16 @@ mod posture_engine_tests {
     fn test_flood_default_false_is_inert() {
         let app = active_app();
         let cache = empty_cache();
-        assert!(!app.flood_condition_active.load(Ordering::SeqCst), "the flag defaults false");
+        assert!(
+            !app.flood_condition_active.load(Ordering::SeqCst),
+            "the flag defaults false"
+        );
         recalculate_and_broadcast(&app, &cache);
-        assert_eq!(cache_posture(&cache), Some(FleetPosture::Nominal),
-            "no flood (default) → no escalation");
+        assert_eq!(
+            cache_posture(&cache),
+            Some(FleetPosture::Nominal),
+            "no flood (default) → no escalation"
+        );
     }
 
     /// The flood escalation flows through the EXISTING audit-commit-gated path:
@@ -1206,16 +1295,18 @@ mod posture_engine_tests {
             .store
             .with(|store| store.load_all_posture_events().expect("load events"));
         assert!(
-            events.iter().any(|e| e["event_type"] == "SYSTEM_POSTURE_TRANSITION"),
+            events
+                .iter()
+                .any(|e| e["event_type"] == "SYSTEM_POSTURE_TRANSITION"),
             "the flood escalation must emit the existing posture-transition audit event"
         );
     }
 
     #[test]
     fn test_init_generation_never_moves_counter_backwards() {
-        use std::sync::Arc;
         use crate::verifier::{AppState, VerifierOperationMode};
         use crate::verifier_store::VerifierStore;
+        use std::sync::Arc;
 
         // B6 regression: simulate a recalc having already advanced the live counter
         // well past any persisted value. (`fetch_max` here so this test is robust to
@@ -1248,9 +1339,9 @@ mod posture_engine_tests {
     /// SSE consumers rely on).
     #[test]
     fn test_init_generation_raises_counter_above_persisted_high_water() {
-        use std::sync::Arc;
         use crate::verifier::{AppState, VerifierOperationMode};
         use crate::verifier_store::VerifierStore;
+        use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
@@ -1259,7 +1350,8 @@ mod posture_engine_tests {
         // this process's live counter (offset keeps the test robust to the
         // shared global being bumped concurrently by other tests).
         let high_water = POSTURE_GENERATION.load(Ordering::SeqCst) + 10_000;
-        app.store.with(|s| s.save_last_generation(high_water).unwrap());
+        app.store
+            .with(|s| s.save_last_generation(high_water).unwrap());
 
         let loaded = init_generation_from_store(&app).expect("readable store");
         assert_eq!(loaded, high_water);
@@ -1299,12 +1391,12 @@ mod posture_engine_tests {
         // Trust the DAG down: the new posture's counter increments once.
         insert_node(&app, "faulty", NodeTrustState::Untrusted("test".into()));
         recalculate_and_broadcast(&app, &cache);
-        let new_posture = cache
-            .read()
-            .unwrap()
-            .expect("cache populated")
-            .posture;
-        assert_ne!(new_posture, FleetPosture::Nominal, "precondition: the fault degrades the fleet");
+        let new_posture = cache.read().unwrap().expect("cache populated").posture;
+        assert_ne!(
+            new_posture,
+            FleetPosture::Nominal,
+            "precondition: the fault degrades the fleet"
+        );
         assert_eq!(
             app.fleet_metrics.transition_count(&new_posture),
             1,
@@ -1397,9 +1489,9 @@ mod posture_engine_tests {
 
     #[test]
     fn test_recalc_over_shared_dependency_dag_completes() {
-        use std::sync::Arc;
         use crate::verifier::{AppState, NodeTrustState, RegisteredNode, VerifierOperationMode};
         use crate::verifier_store::VerifierStore;
+        use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
@@ -1421,8 +1513,10 @@ mod posture_engine_tests {
             })
             .unwrap();
         }
-        app.persist_and_insert_deps("b", vec!["a".to_string()]).unwrap();
-        app.persist_and_insert_deps("c", vec!["a".to_string()]).unwrap();
+        app.persist_and_insert_deps("b", vec!["a".to_string()])
+            .unwrap();
+        app.persist_and_insert_deps("c", vec!["a".to_string()])
+            .unwrap();
         app.persist_and_insert_deps("d", vec!["b".to_string(), "c".to_string()])
             .unwrap();
 

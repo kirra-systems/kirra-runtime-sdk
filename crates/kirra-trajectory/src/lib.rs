@@ -29,8 +29,8 @@ pub mod prediction;
 pub mod perception_redundancy;
 
 // Phase 2A Adversarial Review Hardening
-pub mod validation_hardening;
 pub mod redundancy_hardening;
+pub mod validation_hardening;
 
 // Public surface — the symbols downstream consumers import directly. Kept identical
 // to the adapter's prior re-exports so a consumer switch is a pure path rename.

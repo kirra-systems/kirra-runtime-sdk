@@ -1,6 +1,6 @@
 // src/modbus_adapter.rs
 
-use crate::{ProtocolAdapter, AdapterError};
+use crate::{AdapterError, ProtocolAdapter};
 
 pub struct ModbusTcpAdapter {
     pub target_register_offset: u16,
@@ -10,19 +10,30 @@ pub struct ModbusTcpAdapter {
 impl ModbusTcpAdapter {
     pub fn new(register_offset: u16, scale: f64) -> Self {
         let valid_scale = if scale <= 0.0 { 1.0 } else { scale };
-        Self { target_register_offset: register_offset, scale_factor: valid_scale }
+        Self {
+            target_register_offset: register_offset,
+            scale_factor: valid_scale,
+        }
     }
 }
 
 impl ProtocolAdapter for ModbusTcpAdapter {
     fn decode_demand(&self, frame: &[u8]) -> Result<f64, AdapterError> {
-        if frame.len() < 12 { return Err(AdapterError::FrameTruncated); }
+        if frame.len() < 12 {
+            return Err(AdapterError::FrameTruncated);
+        }
         let protocol_id = u16::from_be_bytes([frame[2], frame[3]]);
-        if protocol_id != 0 { return Err(AdapterError::InvalidProtocolIdentifier); }
+        if protocol_id != 0 {
+            return Err(AdapterError::InvalidProtocolIdentifier);
+        }
         let function_code = frame[7];
-        if function_code != 6 { return Err(AdapterError::IllegalFunctionCode); }
+        if function_code != 6 {
+            return Err(AdapterError::IllegalFunctionCode);
+        }
         let wire_register_offset = u16::from_be_bytes([frame[8], frame[9]]);
-        if wire_register_offset != self.target_register_offset { return Err(AdapterError::UnmonitoredRegisterTarget); }
+        if wire_register_offset != self.target_register_offset {
+            return Err(AdapterError::UnmonitoredRegisterTarget);
+        }
         let raw_integer_counts = u16::from_be_bytes([frame[10], frame[11]]) as f64;
         Ok(raw_integer_counts / self.scale_factor)
     }
@@ -81,8 +92,11 @@ mod modbus_adapter_tests {
         let adapter = ModbusTcpAdapter::new(0, 1.0);
         let short_frame: [u8; 8] = [0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x01, 0x06];
         let out = adapter.encode_response(42.0, &short_frame);
-        assert_eq!(out.as_slice(), &short_frame[..],
-            "under-length frame must be returned unmodified, not panic or partially written");
+        assert_eq!(
+            out.as_slice(),
+            &short_frame[..],
+            "under-length frame must be returned unmodified, not panic or partially written"
+        );
     }
 
     /// Empty frame is also handled — exercises the extreme of the guard.
@@ -90,8 +104,10 @@ mod modbus_adapter_tests {
     fn test_encode_response_empty_frame_does_not_panic() {
         let adapter = ModbusTcpAdapter::new(0, 1.0);
         let out = adapter.encode_response(42.0, &[]);
-        assert!(out.is_empty(),
-            "empty-frame input must return empty-frame output without panic");
+        assert!(
+            out.is_empty(),
+            "empty-frame input must return empty-frame output without panic"
+        );
     }
 
     /// Sanity: a well-formed 12-byte frame still works end-to-end.

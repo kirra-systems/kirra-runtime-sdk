@@ -26,8 +26,8 @@ mod common;
 
 use common::*;
 use kirra_core::kinematics_contract::EnforceAction;
-use kirra_core::kinematics_sim::{apply_enforcement, VehicleState};
 use kirra_core::kinematics_contract::VehicleKinematicsContract;
+use kirra_core::kinematics_sim::{apply_enforcement, VehicleState};
 use kirra_core::perception_monitor::apply_perception_cap;
 
 const NOW: u64 = 1_000;
@@ -39,7 +39,11 @@ const FRESH_TICK: u64 = 1_000; // now - tick = 0 ≤ ttl → fresh
 fn scenario_b_plausible_publishes_nominal_cap() {
     let objs = perceived_vec(&scenario_b());
     let cap = published_cap(&objs, /*enabled*/ true, FRESH_TICK, NOW);
-    assert_eq!(cap, Some(NOMINAL_CAP_MPS), "all-plausible snapshot → nominal cap (no derate)");
+    assert_eq!(
+        cap,
+        Some(NOMINAL_CAP_MPS),
+        "all-plausible snapshot → nominal cap (no derate)"
+    );
 }
 
 #[test]
@@ -51,7 +55,11 @@ fn scenario_b_gated_command_unchanged_vs_disabled_baseline() {
     let gated = gated_linear_mps(enabled_cap, 20.0);
     let baseline = baseline_linear_mps(20.0);
     assert_eq!(gated, baseline, "plausible: gated == disabled baseline");
-    assert_eq!(gated, Some(20.0), "20 m/s within the nominal envelope → unchanged");
+    assert_eq!(
+        gated,
+        Some(20.0),
+        "20 m/s within the nominal envelope → unchanged"
+    );
 }
 
 // --- scenario (c1): SINGLE IMPLAUSIBLE → MRC floor → controlled stop ---
@@ -62,7 +70,11 @@ fn scenario_c1_single_implausible_is_mrc_floor() {
     let cap = published_cap(&objs, true, FRESH_TICK, NOW);
     // fraction 1/1 = 1.0 > 0.50 → table tail → MRC floor (0.0). The
     // conservative-by-design property: a single implausible track → full stop.
-    assert_eq!(cap, Some(MRC_FLOOR_CAP_MPS), "single implausible object → MRC floor");
+    assert_eq!(
+        cap,
+        Some(MRC_FLOOR_CAP_MPS),
+        "single implausible object → MRC floor"
+    );
     assert_eq!(
         gated_action(cap, 30.0),
         EnforceAction::ClampLinear(0.0),
@@ -78,10 +90,20 @@ fn scenario_c2_mixed_is_graded_cap() {
     let cap = published_cap(&objs, true, FRESH_TICK, NOW);
     // fraction 0.10 → KIN_DERATE_TABLE (0.10, 0.75) → 0.75 × 22.35 = 16.7625.
     let expected = C2_GRADED_CAP_MPS;
-    assert!((cap.unwrap() - expected).abs() < 1e-9, "1-of-10 → graded cap {expected}");
+    assert!(
+        (cap.unwrap() - expected).abs() < 1e-9,
+        "1-of-10 → graded cap {expected}"
+    );
     // A command above the cap is clamped TO the cap; below it passes.
-    assert_eq!(gated_action(cap, 30.0), EnforceAction::ClampLinear(expected));
-    assert_eq!(gated_linear_mps(cap, 10.0), Some(10.0), "10 < cap → unchanged");
+    assert_eq!(
+        gated_action(cap, 30.0),
+        EnforceAction::ClampLinear(expected)
+    );
+    assert_eq!(
+        gated_linear_mps(cap, 10.0),
+        Some(10.0),
+        "10 < cap → unchanged"
+    );
 }
 
 #[test]
@@ -103,7 +125,11 @@ fn scenario_d_silent_stream_resolves_to_mrc() {
     // now - tick = 601 > ttl 500 → stale → MRC floor (state 3).
     let objs = perceived_vec(&scenario_b());
     let stale_cap = published_cap(&objs, true, 1_000, 1_601);
-    assert_eq!(stale_cap, Some(MRC_FLOOR_CAP_MPS), "silent stream past ttl → MRC floor");
+    assert_eq!(
+        stale_cap,
+        Some(MRC_FLOOR_CAP_MPS),
+        "silent stream past ttl → MRC floor"
+    );
 }
 
 #[test]
@@ -120,7 +146,11 @@ fn scenario_d_gated_stop_brings_vehicle_to_rest() {
     let keep_going = steady_cmd(10.0); // planner still wants 10 m/s
     let gated = apply_enforcement(&keep_going, &contract).expect("derate-only: never denies");
     state = state.step(&gated, base.wheelbase_m);
-    assert!(state.velocity_mps.abs() < 1e-9, "MRC derate → vehicle at rest, got {}", state.velocity_mps);
+    assert!(
+        state.velocity_mps.abs() < 1e-9,
+        "MRC derate → vehicle at rest, got {}",
+        state.velocity_mps
+    );
 }
 
 // --- scenario (e): DISABLED → no-op, verdict path byte-identical to baseline ---

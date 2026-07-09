@@ -620,7 +620,10 @@ pub enum OcclusionScene {
     /// A limited sightline: the nearest occluded-region boundary is `d_sight_m`
     /// along the ego path, and an actor could emerge from it at up to
     /// `v_emerge_max_mps`.
-    Limited { d_sight_m: f64, v_emerge_max_mps: f64 },
+    Limited {
+        d_sight_m: f64,
+        v_emerge_max_mps: f64,
+    },
 }
 
 #[cfg(test)]
@@ -660,7 +663,10 @@ mod tests {
     #[test]
     fn test_rss_lead_faster_returns_zero() {
         let result = longitudinal_safe_distance(5.0, 30.0, 0.5, 3.0, 6.0, 8.0);
-        assert_eq!(result, 0.0, "lead faster: result must clamp to 0.0, got {result}");
+        assert_eq!(
+            result, 0.0,
+            "lead faster: result must clamp to 0.0, got {result}"
+        );
     }
 
     /// Both vehicles stopped: only reaction-phase creep creates a required gap.
@@ -680,7 +686,10 @@ mod tests {
     #[test]
     fn test_rss_result_is_finite_and_nonnegative() {
         let result = longitudinal_safe_distance(100.0, 80.0, 0.5, 5.0, 8.0, 10.0);
-        assert!(result.is_finite(), "large velocities must produce finite result, got {result}");
+        assert!(
+            result.is_finite(),
+            "large velocities must produce finite result, got {result}"
+        );
         assert!(result >= 0.0, "result must be non-negative, got {result}");
     }
 
@@ -746,7 +755,10 @@ mod tests {
     #[test]
     fn test_lateral_result_is_finite_and_nonnegative() {
         let result = lateral_safe_distance(30.0, -25.0, 6.0, 0.5);
-        assert!(result.is_finite(), "large velocities: result must be finite, got {result}");
+        assert!(
+            result.is_finite(),
+            "large velocities: result must be finite, got {result}"
+        );
         assert!(result >= 0.0, "result must be non-negative, got {result}");
     }
 
@@ -813,12 +825,12 @@ mod tests {
         runner
             .run(
                 &(
-                    -40.0f64..40.0,   // ego_lat_vel
-                    -40.0f64..40.0,   // obj_lat_vel
-                    0.1f64..10.0,     // lat_accel_max
-                    0.05f64..1.0,     // brake fraction (brake_min = f * accel_max)
-                    0.05f64..2.0,     // reaction_time
-                    0.0f64..1.0,      // mu
+                    -40.0f64..40.0, // ego_lat_vel
+                    -40.0f64..40.0, // obj_lat_vel
+                    0.1f64..10.0,   // lat_accel_max
+                    0.05f64..1.0,   // brake fraction (brake_min = f * accel_max)
+                    0.05f64..2.0,   // reaction_time
+                    0.0f64..1.0,    // mu
                 ),
                 |(e, o, a, f, rt, mu)| {
                     let legacy = lateral_safe_distance(e, o, a, rt);
@@ -925,9 +937,11 @@ mod tests {
     /// cannot drift.
     #[test]
     fn test_lat_legacy_equals_split_with_equal_roles() {
-        for (e, o, a, rt) in
-            [(5.0, -5.0, 4.0, 0.5), (0.0, 0.0, 4.0, 0.5), (30.0, -25.0, 6.0, 0.5)]
-        {
+        for (e, o, a, rt) in [
+            (5.0, -5.0, 4.0, 0.5),
+            (0.0, 0.0, 4.0, 0.5),
+            (30.0, -25.0, 6.0, 0.5),
+        ] {
             assert_eq!(
                 lateral_safe_distance(e, o, a, rt),
                 lateral_safe_distance_split(e, o, a, a, rt, 0.0)
@@ -965,10 +979,7 @@ mod tests {
     #[test]
     fn test_lat_post_arithmetic_overflow_is_failsafe() {
         let r = lateral_safe_distance(1.0, 0.0, 1.0e-10, 1.0e200);
-        assert!(
-            r.is_finite(),
-            "must not leak Inf downstream; got {r}"
-        );
+        assert!(r.is_finite(), "must not leak Inf downstream; got {r}");
         assert!(
             r >= RSS_FAILSAFE_DISTANCE_M,
             "post-arithmetic overflow must fail safe, got {r}"
@@ -984,16 +995,12 @@ mod tests {
     #[test]
     fn test_long_post_arithmetic_overflow_is_failsafe() {
         let r = longitudinal_safe_distance(
-            1.0, 1.0,
-            1.0e200,   // reaction_time → reaction_time.powi(2) overflows
-            1.0e-10,   // accel_max  finite-positive
-            1.0e-10,   // brake_min  finite-positive
-            1.0e-10,   // brake_max  finite-positive
+            1.0, 1.0, 1.0e200, // reaction_time → reaction_time.powi(2) overflows
+            1.0e-10, // accel_max  finite-positive
+            1.0e-10, // brake_min  finite-positive
+            1.0e-10, // brake_max  finite-positive
         );
-        assert!(
-            r.is_finite(),
-            "must not leak Inf downstream; got {r}"
-        );
+        assert!(r.is_finite(), "must not leak Inf downstream; got {r}");
         assert!(
             r >= RSS_FAILSAFE_DISTANCE_M,
             "post-arithmetic overflow must fail safe, got {r}"
@@ -1018,7 +1025,10 @@ mod tests {
     #[test]
     fn test_lat_nan_ego_lat_vel_is_failsafe() {
         let r = lateral_safe_distance(f64::NAN, 0.0, 4.0, 0.5);
-        assert!(r >= RSS_FAILSAFE_DISTANCE_M, "NaN ego_lat_vel must fail safe, got {r}");
+        assert!(
+            r >= RSS_FAILSAFE_DISTANCE_M,
+            "NaN ego_lat_vel must fail safe, got {r}"
+        );
     }
 
     /// MC/DC: lateral guard — `obj_lat_vel.is_finite()` (l.65).
@@ -1026,7 +1036,10 @@ mod tests {
     #[test]
     fn test_lat_inf_obj_lat_vel_is_failsafe() {
         let r = lateral_safe_distance(0.0, f64::INFINITY, 4.0, 0.5);
-        assert!(r >= RSS_FAILSAFE_DISTANCE_M, "Inf obj_lat_vel must fail safe, got {r}");
+        assert!(
+            r >= RSS_FAILSAFE_DISTANCE_M,
+            "Inf obj_lat_vel must fail safe, got {r}"
+        );
     }
 
     /// MC/DC: longitudinal guard — `ego_vel.is_finite()` (l.123).
@@ -1034,7 +1047,10 @@ mod tests {
     #[test]
     fn test_long_inf_ego_vel_is_failsafe() {
         let r = longitudinal_safe_distance(f64::INFINITY, 5.0, 0.5, 3.0, 6.0, 8.0);
-        assert!(r >= RSS_FAILSAFE_DISTANCE_M, "Inf ego_vel must fail safe, got {r}");
+        assert!(
+            r >= RSS_FAILSAFE_DISTANCE_M,
+            "Inf ego_vel must fail safe, got {r}"
+        );
     }
 
     /// MC/DC: longitudinal guard — `lead_vel.is_finite()` (l.124).
@@ -1042,7 +1058,10 @@ mod tests {
     #[test]
     fn test_long_nan_lead_vel_is_failsafe() {
         let r = longitudinal_safe_distance(10.0, f64::NAN, 0.5, 3.0, 6.0, 8.0);
-        assert!(r >= RSS_FAILSAFE_DISTANCE_M, "NaN lead_vel must fail safe, got {r}");
+        assert!(
+            r >= RSS_FAILSAFE_DISTANCE_M,
+            "NaN lead_vel must fail safe, got {r}"
+        );
     }
 
     /// MC/DC: longitudinal guard — `reaction_time.is_finite()` (l.125).
@@ -1050,7 +1069,10 @@ mod tests {
     #[test]
     fn test_long_nan_reaction_time_is_failsafe() {
         let r = longitudinal_safe_distance(10.0, 5.0, f64::NAN, 3.0, 6.0, 8.0);
-        assert!(r >= RSS_FAILSAFE_DISTANCE_M, "NaN reaction_time must fail safe, got {r}");
+        assert!(
+            r >= RSS_FAILSAFE_DISTANCE_M,
+            "NaN reaction_time must fail safe, got {r}"
+        );
     }
 
     /// MC/DC: longitudinal guard — `accel_max.is_finite()` (l.125 / accel_max).
@@ -1060,7 +1082,10 @@ mod tests {
     #[test]
     fn test_long_nan_accel_max_is_failsafe() {
         let r = longitudinal_safe_distance(10.0, 5.0, 0.5, f64::NAN, 6.0, 8.0);
-        assert!(r >= RSS_FAILSAFE_DISTANCE_M, "NaN accel_max must fail safe, got {r}");
+        assert!(
+            r >= RSS_FAILSAFE_DISTANCE_M,
+            "NaN accel_max must fail safe, got {r}"
+        );
     }
 
     /// MC/DC: `finite_positive(x)` second clause — `x > 0.0` false arm
@@ -1075,8 +1100,14 @@ mod tests {
         let r1 = longitudinal_safe_distance(0.0, 0.0, 0.0, 0.0, f64::MIN_POSITIVE, 1.0);
         // Tiny non-positive — finite_positive returns false → failsafe.
         let r2 = longitudinal_safe_distance(0.0, 0.0, 0.0, 0.0, -f64::MIN_POSITIVE, 1.0);
-        assert!(r1 < RSS_FAILSAFE_DISTANCE_M, "tiny positive brake_min passes the guard, got {r1}");
-        assert!(r2 >= RSS_FAILSAFE_DISTANCE_M, "tiny negative brake_min must fail safe, got {r2}");
+        assert!(
+            r1 < RSS_FAILSAFE_DISTANCE_M,
+            "tiny positive brake_min passes the guard, got {r1}"
+        );
+        assert!(
+            r2 >= RSS_FAILSAFE_DISTANCE_M,
+            "tiny negative brake_min must fail safe, got {r2}"
+        );
     }
 
     // ── occlusion_limited_speed (RSS rule iv, issue #122) ────────────────────
@@ -1085,26 +1116,56 @@ mod tests {
     /// d_sight <= 0 → ego must stop (0.0). Zero and negative sightlines.
     #[test]
     fn test_occlusion_nonpositive_dsight_is_stop() {
-        assert_eq!(occlusion_limited_speed(0.0, 0.0, 0.5, 2.0, 6.0, 6.0), 0.0,
-            "zero sightline must fail closed to a stop");
-        assert_eq!(occlusion_limited_speed(-5.0, 0.0, 0.5, 2.0, 6.0, 6.0), 0.0,
-            "negative sightline must fail closed to a stop");
+        assert_eq!(
+            occlusion_limited_speed(0.0, 0.0, 0.5, 2.0, 6.0, 6.0),
+            0.0,
+            "zero sightline must fail closed to a stop"
+        );
+        assert_eq!(
+            occlusion_limited_speed(-5.0, 0.0, 0.5, 2.0, 6.0, 6.0),
+            0.0,
+            "negative sightline must fail closed to a stop"
+        );
     }
 
     /// Non-finite inputs (incl. negative emerge velocity) → 0.0.
     #[test]
     fn test_occlusion_nonfinite_input_is_stop() {
-        assert_eq!(occlusion_limited_speed(f64::NAN, 0.0, 0.5, 2.0, 6.0, 6.0), 0.0, "NaN d_sight → stop");
-        assert_eq!(occlusion_limited_speed(50.0, f64::INFINITY, 0.5, 2.0, 6.0, 6.0), 0.0, "Inf v_emerge → stop");
-        assert_eq!(occlusion_limited_speed(50.0, -1.0, 0.5, 2.0, 6.0, 6.0), 0.0, "negative v_emerge is invalid → stop");
-        assert_eq!(occlusion_limited_speed(50.0, 0.0, f64::NAN, 2.0, 6.0, 6.0), 0.0, "NaN reaction_time → stop");
+        assert_eq!(
+            occlusion_limited_speed(f64::NAN, 0.0, 0.5, 2.0, 6.0, 6.0),
+            0.0,
+            "NaN d_sight → stop"
+        );
+        assert_eq!(
+            occlusion_limited_speed(50.0, f64::INFINITY, 0.5, 2.0, 6.0, 6.0),
+            0.0,
+            "Inf v_emerge → stop"
+        );
+        assert_eq!(
+            occlusion_limited_speed(50.0, -1.0, 0.5, 2.0, 6.0, 6.0),
+            0.0,
+            "negative v_emerge is invalid → stop"
+        );
+        assert_eq!(
+            occlusion_limited_speed(50.0, 0.0, f64::NAN, 2.0, 6.0, 6.0),
+            0.0,
+            "NaN reaction_time → stop"
+        );
     }
 
     /// The same non-positive/non-finite brake/accel guard as the primitives.
     #[test]
     fn test_occlusion_invalid_brake_is_stop() {
-        assert_eq!(occlusion_limited_speed(50.0, 0.0, 0.5, 2.0, 0.0, 6.0), 0.0, "zero brake_min → stop");
-        assert_eq!(occlusion_limited_speed(50.0, 0.0, 0.5, 2.0, 6.0, -1.0), 0.0, "negative brake_max → stop");
+        assert_eq!(
+            occlusion_limited_speed(50.0, 0.0, 0.5, 2.0, 0.0, 6.0),
+            0.0,
+            "zero brake_min → stop"
+        );
+        assert_eq!(
+            occlusion_limited_speed(50.0, 0.0, 0.5, 2.0, 6.0, -1.0),
+            0.0,
+            "negative brake_max → stop"
+        );
     }
 
     /// Monotonicity: a longer sightline allows a greater-or-equal speed, and a
@@ -1113,8 +1174,14 @@ mod tests {
     fn test_occlusion_monotonic_in_sightline() {
         let cap = |d: f64| occlusion_limited_speed(d, 0.0, 0.5, 2.0, 6.0, 6.0);
         let (a, b, c) = (cap(10.0), cap(40.0), cap(120.0));
-        assert!(a <= b && b <= c, "more sightline must allow >= speed: {a}, {b}, {c}");
-        assert!(c > a, "a much longer sightline must allow a strictly higher speed: {a} vs {c}");
+        assert!(
+            a <= b && b <= c,
+            "more sightline must allow >= speed: {a}, {b}, {c}"
+        );
+        assert!(
+            c > a,
+            "a much longer sightline must allow a strictly higher speed: {a} vs {c}"
+        );
     }
 
     /// Hand-anchored via the longitudinal primitive as the ORACLE: take a closing
@@ -1126,8 +1193,10 @@ mod tests {
         let v = 12.0_f64;
         let d = longitudinal_safe_distance(v, 0.0, rt, acc, bmin, bmax);
         let cap = occlusion_limited_speed(d, 0.0, rt, acc, bmin, bmax);
-        assert!((cap - v).abs() < 1e-3,
-            "the inverse of longitudinal_safe_distance must recover {v}, got {cap}");
+        assert!(
+            (cap - v).abs() < 1e-3,
+            "the inverse of longitudinal_safe_distance must recover {v}, got {cap}"
+        );
     }
 
     /// A faster possible emerger lowers the cap (the conservative direction).
@@ -1135,7 +1204,10 @@ mod tests {
     fn test_occlusion_faster_emerger_lowers_cap() {
         let slow = occlusion_limited_speed(60.0, 0.0, 0.5, 2.0, 6.0, 6.0);
         let fast = occlusion_limited_speed(60.0, 5.0, 0.5, 2.0, 6.0, 6.0);
-        assert!(fast < slow, "a faster possible emerger must lower the cap: slow={slow}, fast={fast}");
+        assert!(
+            fast < slow,
+            "a faster possible emerger must lower the cap: slow={slow}, fast={fast}"
+        );
         assert!(fast >= 0.0, "the cap is never negative, got {fast}");
     }
 
@@ -1152,7 +1224,10 @@ mod tests {
         // Symmetric closing: result is exactly twice one vehicle's stopping distance.
         let d = opposite_direction_safe_distance(10.0, 10.0, 0.5, 0.0, 6.0, 6.0);
         let one = opposite_direction_safe_distance(10.0, 0.0, 0.5, 0.0, 6.0, 6.0);
-        assert!((d - 2.0 * one).abs() < EPS, "equal closing = 2× one side: d={d}, one={one}");
+        assert!(
+            (d - 2.0 * one).abs() < EPS,
+            "equal closing = 2× one side: d={d}, one={one}"
+        );
     }
 
     /// The required gap is the SUM of both vehicles' stopping distances — it must
@@ -1164,8 +1239,14 @@ mod tests {
         let head_on = opposite_direction_safe_distance(12.0, 8.0, 0.5, 0.0, 6.0, 6.0);
         let ego_only = opposite_direction_safe_distance(12.0, 0.0, 0.5, 0.0, 6.0, 6.0);
         let onc_only = opposite_direction_safe_distance(0.0, 8.0, 0.5, 0.0, 6.0, 6.0);
-        assert!(head_on > ego_only, "oncoming motion adds to the required gap");
-        assert!((head_on - (ego_only + onc_only)).abs() < EPS, "gap is additive across both");
+        assert!(
+            head_on > ego_only,
+            "oncoming motion adds to the required gap"
+        );
+        assert!(
+            (head_on - (ego_only + onc_only)).abs() < EPS,
+            "gap is additive across both"
+        );
     }
 
     /// With worst-case response acceleration (`accel_max > 0`) even a *stationary*
@@ -1175,7 +1256,10 @@ mod tests {
     fn test_opposite_stationary_oncoming_still_contributes_under_accel() {
         let onc_only = opposite_direction_safe_distance(0.0, 0.0, 0.5, 2.0, 6.0, 6.0);
         // 0.5·a·ρ² + (a·ρ)²/(2·b) per side, ×2 = 2·(0.25 + 1/12) ≈ 0.667.
-        assert!(onc_only > 0.6 && onc_only < 0.7, "worst-case response term, got {onc_only}");
+        assert!(
+            onc_only > 0.6 && onc_only < 0.7,
+            "worst-case response term, got {onc_only}"
+        );
     }
 
     /// Monotonic: a faster oncoming closing speed strictly increases the gap.
@@ -1183,7 +1267,10 @@ mod tests {
     fn test_opposite_monotonic_in_closing() {
         let slow = opposite_direction_safe_distance(10.0, 5.0, 0.5, 2.0, 6.0, 6.0);
         let fast = opposite_direction_safe_distance(10.0, 15.0, 0.5, 2.0, 6.0, 6.0);
-        assert!(fast > slow, "faster oncoming → larger required gap: slow={slow}, fast={fast}");
+        assert!(
+            fast > slow,
+            "faster oncoming → larger required gap: slow={slow}, fast={fast}"
+        );
         assert!(slow.is_finite() && slow >= 0.0);
     }
 
@@ -1192,14 +1279,20 @@ mod tests {
     fn test_opposite_stronger_brake_shrinks_gap() {
         let weak = opposite_direction_safe_distance(10.0, 10.0, 0.5, 2.0, 4.0, 6.0);
         let strong = opposite_direction_safe_distance(10.0, 10.0, 0.5, 2.0, 9.0, 6.0);
-        assert!(strong < weak, "a stronger ego brake reduces the gap: weak={weak}, strong={strong}");
+        assert!(
+            strong < weak,
+            "a stronger ego brake reduces the gap: weak={weak}, strong={strong}"
+        );
     }
 
     /// NaN input must fail safe (an unreachable gap), not collapse to a small value.
     #[test]
     fn test_opposite_nan_input_is_failsafe() {
         let r = opposite_direction_safe_distance(f64::NAN, 8.0, 0.5, 2.0, 6.0, 6.0);
-        assert!(r >= RSS_FAILSAFE_DISTANCE_M, "NaN closing speed must fail safe, got {r}");
+        assert!(
+            r >= RSS_FAILSAFE_DISTANCE_M,
+            "NaN closing speed must fail safe, got {r}"
+        );
     }
 
     /// Zero ego brake with a stationary ego (raw numerator 0) must NOT collapse to
@@ -1207,13 +1300,19 @@ mod tests {
     #[test]
     fn test_opposite_zero_brake_ego_is_failsafe() {
         let r = opposite_direction_safe_distance(0.0, 0.0, 0.5, 2.0, 0.0, 6.0);
-        assert!(r >= RSS_FAILSAFE_DISTANCE_M, "zero ego brake must fail safe, got {r}");
+        assert!(
+            r >= RSS_FAILSAFE_DISTANCE_M,
+            "zero ego brake must fail safe, got {r}"
+        );
     }
 
     /// Zero oncoming brake (divisor → NaN otherwise) must fail safe.
     #[test]
     fn test_opposite_zero_brake_oncoming_is_failsafe() {
         let r = opposite_direction_safe_distance(10.0, 5.0, 0.5, 2.0, 6.0, 0.0);
-        assert!(r >= RSS_FAILSAFE_DISTANCE_M, "zero oncoming brake must fail safe, got {r}");
+        assert!(
+            r >= RSS_FAILSAFE_DISTANCE_M,
+            "zero oncoming brake must fail safe, got {r}"
+        );
     }
 }

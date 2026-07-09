@@ -15,6 +15,7 @@
 //!      tick*, the ego MRCs, and across the entire run the ego never reaches the obstacle.
 //!      A bad brain does not get safer with time; the guardrail holds it safe with time.
 
+use kirra_core::FleetPosture;
 use kirra_planner::{
     mick_drive_once, EgoState, GeometricPlanner, Goal, MickBrain, MickError, MickIntent, PlanInput,
     PlanOutput, Planner, Pose, ProposalKind, TrajectoryPoint, WorldContext,
@@ -22,7 +23,6 @@ use kirra_planner::{
 use kirra_trajectory::corridor::{CorridorSource, MockCorridorSource, Point};
 use kirra_trajectory::state::{PerceivedObject, TrajectoryVerdict};
 use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
-use kirra_core::FleetPosture;
 
 const TICK_DT: f64 = 0.5; // seconds advanced per loop tick
 const MRC_DECEL: f64 = 3.0; // m/s² the fast-loop safe-stop sheds on a rejection
@@ -54,7 +54,11 @@ impl Planner for RecklessDoer {
         let trajectory = (0..50)
             .map(|i| {
                 let p = TrajectoryPoint {
-                    pose: Pose { x_m: ego.x_m + s * cos_h, y_m: ego.y_m + s * sin_h, heading_rad: heading },
+                    pose: Pose {
+                        x_m: ego.x_m + s * cos_h,
+                        y_m: ego.y_m + s * sin_h,
+                        heading_rad: heading,
+                    },
                     velocity_mps: v,
                     time_from_start_s: i as f64 * dt,
                 };
@@ -63,14 +67,27 @@ impl Planner for RecklessDoer {
                 p
             })
             .collect();
-        PlanOutput { trajectory, kind: ProposalKind::Motion }
+        PlanOutput {
+            trajectory,
+            kind: ProposalKind::Motion,
+        }
     }
 }
 
-fn world<'a>(ego: EgoState, map: &'a dyn CorridorSource, objects: &'a [PerceivedObject]) -> PlanInput<'a> {
+fn world<'a>(
+    ego: EgoState,
+    map: &'a dyn CorridorSource,
+    objects: &'a [PerceivedObject],
+) -> PlanInput<'a> {
     PlanInput {
         ego,
-        goal: Goal { target: Pose { x_m: 60.0, y_m: 0.0, heading_rad: 0.0 } },
+        goal: Goal {
+            target: Pose {
+                x_m: 60.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+        },
         map,
         objects,
         controls: &[],
@@ -86,12 +103,20 @@ fn world<'a>(ego: EgoState, map: &'a dyn CorridorSource, objects: &'a [Perceived
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-        signal_states: &[],    }
+        signal_states: &[],
+    }
 }
 
 fn kirra_admits(plan: &PlanOutput, corr: &dyn CorridorSource, objs: &[PerceivedObject]) -> bool {
     matches!(
-        validate_trajectory_slow(&plan.trajectory, corr, objs, &VehicleConfig::default_urban(), None, FleetPosture::Nominal),
+        validate_trajectory_slow(
+            &plan.trajectory,
+            corr,
+            objs,
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Nominal
+        ),
         TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
     )
 }
@@ -99,7 +124,10 @@ fn kirra_admits(plan: &PlanOutput, corr: &dyn CorridorSource, objs: &[PerceivedO
 /// The pose+velocity at time `t` along a plan (the fast-loop conformance target): the
 /// first point at/after `t`, else the final point (a held stop).
 fn pose_at(plan: &PlanOutput, t: f64) -> Option<&TrajectoryPoint> {
-    plan.trajectory.iter().find(|p| p.time_from_start_s >= t).or_else(|| plan.trajectory.last())
+    plan.trajectory
+        .iter()
+        .find(|p| p.time_from_start_s >= t)
+        .or_else(|| plan.trajectory.last())
 }
 
 /// Run the closed loop for `ticks` and return `(ego trace, was-every-tick-admitted)`.
@@ -114,7 +142,11 @@ fn drive(
     // footprint would poke out behind the corridor and KIRRA would (correctly) flag a
     // containment departure. This is about the demo's start pose, not the loop.
     let mut ego = EgoState {
-        pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 },
+        pose: Pose {
+            x_m: 5.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        },
         linear_x_mps: 2.0,
         yaw_rate_rads: 0.0,
         stamp_ms: 0,
@@ -142,13 +174,17 @@ fn drive(
         ego = match accepted.as_ref().and_then(|p| pose_at(p, slot_t)) {
             // Fast loop conforms to the accepted slot, advancing along it.
             Some(tp) => EgoState {
-                pose: tp.pose, linear_x_mps: tp.velocity_mps, yaw_rate_rads: 0.0,
+                pose: tp.pose,
+                linear_x_mps: tp.velocity_mps,
+                yaw_rate_rads: 0.0,
                 stamp_ms: tick as u64 * (TICK_DT * 1000.0) as u64,
             },
             // No accepted slot ever → MRC: shed speed and hold.
             None => EgoState {
-                pose: ego.pose, linear_x_mps: (ego.linear_x_mps - MRC_DECEL * TICK_DT).max(0.0),
-                yaw_rate_rads: 0.0, stamp_ms: tick as u64 * (TICK_DT * 1000.0) as u64,
+                pose: ego.pose,
+                linear_x_mps: (ego.linear_x_mps - MRC_DECEL * TICK_DT).max(0.0),
+                yaw_rate_rads: 0.0,
+                stamp_ms: tick as u64 * (TICK_DT * 1000.0) as u64,
             },
         };
         trace.push(ego);
@@ -163,25 +199,49 @@ fn max_x(trace: &[EgoState]) -> f64 {
 #[test]
 fn chauffeur_cruises_and_makes_progress_on_a_clear_road() {
     let corr = MockCorridorSource::straight_5m_half_width(100.0);
-    let mut brain = ConstantBrain(MickIntent::Cruise { target_speed_mps: 5.0 });
+    let mut brain = ConstantBrain(MickIntent::Cruise {
+        target_speed_mps: 5.0,
+    });
     let mut occy = GeometricPlanner::default();
     let (trace, all_admitted) = drive(&mut brain, &mut occy, &corr, &[], 30);
-    assert!(all_admitted, "every tick of a clear-road cruise is admitted by KIRRA");
-    assert!(max_x(&trace) > 30.0, "the chauffeur makes real progress, reached {}", max_x(&trace));
+    assert!(
+        all_admitted,
+        "every tick of a clear-road cruise is admitted by KIRRA"
+    );
+    assert!(
+        max_x(&trace) > 30.0,
+        "the chauffeur makes real progress, reached {}",
+        max_x(&trace)
+    );
 }
 
 #[test]
 fn chauffeur_holds_short_of_a_hazard_across_the_whole_run() {
     let corr = MockCorridorSource::straight_5m_half_width(100.0);
-    let objs = [PerceivedObject { id: 1, pos: Point { x_m: HAZARD_X, y_m: 0.0 }, velocity_mps: 0.0, heading_rad: 0.0, vel: Point { x_m: 0.0, y_m: 0.0 } }];
-    let mut brain = ConstantBrain(MickIntent::GoTo { x_m: 60.0, y_m: 0.0 });
+    let objs = [PerceivedObject {
+        id: 1,
+        pos: Point {
+            x_m: HAZARD_X,
+            y_m: 0.0,
+        },
+        velocity_mps: 0.0,
+        heading_rad: 0.0,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    }];
+    let mut brain = ConstantBrain(MickIntent::GoTo {
+        x_m: 60.0,
+        y_m: 0.0,
+    });
     let mut occy = GeometricPlanner::default();
     let (trace, _) = drive(&mut brain, &mut occy, &corr, &objs, 40);
     let reached = max_x(&trace);
     // THE safety property: across the entire run the ego never reaches the obstacle —
     // whether by Occy grounding the plan to stop short OR by KIRRA MRC-ing it as the ego
     // closes in (defense in depth). Either way the chauffeur is held safe.
-    assert!(reached < HAZARD_X, "the ego must never reach the hazard, reached {reached}");
+    assert!(
+        reached < HAZARD_X,
+        "the ego must never reach the hazard, reached {reached}"
+    );
     // And it NOSES UP to the obstacle — the rear axle reaches ~16-17 m, i.e. the front
     // bumper (~4 m ahead, rear-axle convention) holds ~4 m behind the object at x=25, the
     // closest KIRRA's RSS admits. With the fast/slow-loop conformance this is a smooth
@@ -189,7 +249,10 @@ fn chauffeur_holds_short_of_a_hazard_across_the_whole_run() {
     // produced. The residual ~4 m gap is the footprint length + the RSS following distance,
     // not planner timidity (shrinking it further would require an RSS-tapered approach
     // profile in the planner, never loosening the checker).
-    assert!(reached > 14.0, "the chauffeur noses up close to the hazard, reached {reached}");
+    assert!(
+        reached > 14.0,
+        "the chauffeur noses up close to the hazard, reached {reached}"
+    );
 }
 
 #[test]
@@ -199,10 +262,29 @@ fn reckless_doer_is_caught_every_tick_and_the_ego_never_reaches_the_hazard() {
     // tick; the ego MRCs and never reaches the obstacle. A persistently-bad brain is held
     // safe over the entire run — the guardrail does not tire.
     let corr = MockCorridorSource::straight_5m_half_width(100.0);
-    let objs = [PerceivedObject { id: 1, pos: Point { x_m: HAZARD_X, y_m: 0.0 }, velocity_mps: 0.0, heading_rad: 0.0, vel: Point { x_m: 0.0, y_m: 0.0 } }];
-    let mut brain = ConstantBrain(MickIntent::GoTo { x_m: 60.0, y_m: 0.0 });
+    let objs = [PerceivedObject {
+        id: 1,
+        pos: Point {
+            x_m: HAZARD_X,
+            y_m: 0.0,
+        },
+        velocity_mps: 0.0,
+        heading_rad: 0.0,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    }];
+    let mut brain = ConstantBrain(MickIntent::GoTo {
+        x_m: 60.0,
+        y_m: 0.0,
+    });
     let mut reckless = RecklessDoer;
     let (trace, all_admitted) = drive(&mut brain, &mut reckless, &corr, &objs, 40);
-    assert!(!all_admitted, "the reckless doer's drive-through plan is rejected (not admitted)");
-    assert!(max_x(&trace) < HAZARD_X, "and the ego NEVER reaches the hazard across the run, reached {}", max_x(&trace));
+    assert!(
+        !all_admitted,
+        "the reckless doer's drive-through plan is rejected (not admitted)"
+    );
+    assert!(
+        max_x(&trace) < HAZARD_X,
+        "and the ego NEVER reaches the hazard across the run, reached {}",
+        max_x(&trace)
+    );
 }

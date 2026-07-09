@@ -133,7 +133,9 @@ macro_rules! wcet_measure {
 #[cfg(not(feature = "instrument"))]
 #[macro_export]
 macro_rules! wcet_measure {
-    ($channel:expr, $clock:expr, $block:block) => {{ $block }};
+    ($channel:expr, $clock:expr, $block:block) => {{
+        $block
+    }};
 }
 
 #[cfg(test)]
@@ -195,7 +197,10 @@ mod tests {
         ch.record_nanos(11);
         let s = ch.snapshot();
         assert_eq!(s.mean_ns, 10); // 21/2 truncated
-        assert_eq!(s.stddev_ns, 0, "exact variance floors to 0, not the truncated 3");
+        assert_eq!(
+            s.stddev_ns, 0,
+            "exact variance floors to 0, not the truncated 3"
+        );
     }
 
     #[test]
@@ -229,7 +234,7 @@ mod tests {
         ch.record_nanos(9000);
         let s = ch.snapshot();
         assert_eq!(s.max_ns, 9000); // exact even though it overflowed the histogram
-        // p99.9 (top 0.1% of 100 samples = the one 9000ns) falls in overflow → max.
+                                    // p99.9 (top 0.1% of 100 samples = the one 9000ns) falls in overflow → max.
         assert_eq!(s.p999_ns, 9000);
     }
 
@@ -256,7 +261,10 @@ mod tests {
         assert!(!MeasurementEnv::Host.is_certified_wcet());
         assert!(!MeasurementEnv::CiRunner.is_certified_wcet());
         assert!(!MeasurementEnv::Other.is_certified_wcet());
-        assert_eq!(MeasurementEnv::QnxTargetFifo.wcet_status(), "QNX-TARGET-MEASURED");
+        assert_eq!(
+            MeasurementEnv::QnxTargetFifo.wcet_status(),
+            "QNX-TARGET-MEASURED"
+        );
         assert_eq!(MeasurementEnv::Host.wcet_status(), "INDICATIVE-NOT-WCET");
     }
 

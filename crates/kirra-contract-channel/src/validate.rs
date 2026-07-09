@@ -49,7 +49,11 @@ impl AcceptedWatermark {
     /// A fresh watermark with nothing accepted yet (the first valid command of
     /// any `(generation, sequence)` is admissible).
     pub const fn new() -> Self {
-        Self { last_generation: 0, last_sequence: 0, initialized: false }
+        Self {
+            last_generation: 0,
+            last_sequence: 0,
+            initialized: false,
+        }
     }
 
     /// Record `view` as the newest accepted command. Call this **only** after
@@ -104,7 +108,10 @@ pub fn validate(
     // 4. Integrity.
     let computed = crc32_ieee(&view.command[..len]);
     if view.crc32 != computed {
-        return Err(ContractFault::CrcMismatch { found: view.crc32, computed });
+        return Err(ContractFault::CrcMismatch {
+            found: view.crc32,
+            computed,
+        });
     }
     // 5/6. Monotonic generation + sequence (`<= last_accepted ⇒ reject`; §3.1).
     if let Some((last_gen, last_seq)) = watermark.last() {
@@ -123,7 +130,10 @@ pub fn validate(
     }
     // 7. Freshness against the absolute deadline (boundary domain).
     if now_nanos > view.deadline_nanos {
-        return Err(ContractFault::DeadlineExpired { now: now_nanos, deadline: view.deadline_nanos });
+        return Err(ContractFault::DeadlineExpired {
+            now: now_nanos,
+            deadline: view.deadline_nanos,
+        });
     }
     Ok(())
 }
@@ -150,7 +160,10 @@ mod tests {
         v.magic = 0;
         assert_eq!(
             validate(&v, 1_000, &AcceptedWatermark::new()),
-            Err(ContractFault::LayoutVersionMismatch { found: 999, expected: LAYOUT_VERSION })
+            Err(ContractFault::LayoutVersionMismatch {
+                found: 999,
+                expected: LAYOUT_VERSION
+            })
         );
     }
 
@@ -191,13 +204,16 @@ mod tests {
     fn equal_sequence_is_replay_reject() {
         let mut wm = AcceptedWatermark::new();
         wm.record(&good()); // last = (gen 2, seq 5)
-        // Same sequence, higher generation → still a replay on sequence.
+                            // Same sequence, higher generation → still a replay on sequence.
         let mut v = good();
         v.generation = 4;
         v.crc32 = crate::crc::crc32_ieee(v.validated_command().unwrap());
         assert_eq!(
             validate(&v, 1_000, &wm),
-            Err(ContractFault::SequenceRegressOrReplay { found: 5, last_accepted: 5 })
+            Err(ContractFault::SequenceRegressOrReplay {
+                found: 5,
+                last_accepted: 5
+            })
         );
     }
 
@@ -211,7 +227,10 @@ mod tests {
         v.crc32 = crate::crc::crc32_ieee(v.validated_command().unwrap());
         assert_eq!(
             validate(&v, 1_000, &wm),
-            Err(ContractFault::GenerationRegressOrReplay { found: 2, last_accepted: 2 })
+            Err(ContractFault::GenerationRegressOrReplay {
+                found: 2,
+                last_accepted: 2
+            })
         );
     }
 
@@ -229,10 +248,17 @@ mod tests {
     #[test]
     fn expired_deadline_rejects_now_strictly_after() {
         let v = good(); // deadline 10_000
-        assert_eq!(validate(&v, 10_000, &AcceptedWatermark::new()), Ok(()), "now == deadline is fresh");
+        assert_eq!(
+            validate(&v, 10_000, &AcceptedWatermark::new()),
+            Ok(()),
+            "now == deadline is fresh"
+        );
         assert_eq!(
             validate(&v, 10_001, &AcceptedWatermark::new()),
-            Err(ContractFault::DeadlineExpired { now: 10_001, deadline: 10_000 })
+            Err(ContractFault::DeadlineExpired {
+                now: 10_001,
+                deadline: 10_000
+            })
         );
     }
 

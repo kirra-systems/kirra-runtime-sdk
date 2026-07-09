@@ -13,7 +13,8 @@
 
 use kirra_planner::{
     plan_for_intent, EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneEdge, LaneGraph,
-    LineType, MickIntent, PlanInput, PlanOutput, Pose, ProposalKind, TrajectoryVerdict, TurnDirection,
+    LineType, MickIntent, PlanInput, PlanOutput, Pose, ProposalKind, TrajectoryVerdict,
+    TurnDirection,
 };
 use kirra_trajectory::corridor::Point;
 use kirra_trajectory::state::PerceivedObject;
@@ -26,14 +27,28 @@ fn arc(cx: f64, cy: f64, r: f64, start: f64, sweep: f64, n: usize) -> Vec<Point>
     (0..=n)
         .map(|i| {
             let t = start + sweep * (i as f64 / n as f64);
-            Point { x_m: cx + r * t.cos(), y_m: cy + r * t.sin() }
+            Point {
+                x_m: cx + r * t.cos(),
+                y_m: cy + r * t.sin(),
+            }
         })
         .collect()
 }
 
 fn lane(id: u64, centerline: Vec<Point>, heading_rad: f64, succ: Option<u64>) -> Lane {
-    let edges = succ.map(|s| vec![LaneEdge::Successor { to: s }]).unwrap_or_default();
-    Lane { id, centerline, half_width_m: HALF, left_line: LineType::Solid, right_line: LineType::Solid, heading_rad, edges, control: None }
+    let edges = succ
+        .map(|s| vec![LaneEdge::Successor { to: s }])
+        .unwrap_or_default();
+    Lane {
+        id,
+        centerline,
+        half_width_m: HALF,
+        left_line: LineType::Solid,
+        right_line: LineType::Solid,
+        heading_rad,
+        edges,
+        control: None,
+    }
 }
 
 /// Approach (lane 1, east to the junction mouth at x=20) → LEFT arc (lane 2) → north exit (lane 3).
@@ -43,8 +58,34 @@ fn left_junction() -> LaneGraph {
         Lane::straight(1, 0.0, 0.0, 20.0, HALF, LineType::Solid, LineType::Solid)
             .with_edge(LaneEdge::Successor { to: 2 }),
     );
-    g.add_lane(lane(2, arc(20.0, R, R, -std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2, 12), std::f64::consts::FRAC_PI_2, Some(3)));
-    g.add_lane(lane(3, vec![Point { x_m: 20.0 + R, y_m: R }, Point { x_m: 20.0 + R, y_m: R + 20.0 }], std::f64::consts::FRAC_PI_2, None));
+    g.add_lane(lane(
+        2,
+        arc(
+            20.0,
+            R,
+            R,
+            -std::f64::consts::FRAC_PI_2,
+            std::f64::consts::FRAC_PI_2,
+            12,
+        ),
+        std::f64::consts::FRAC_PI_2,
+        Some(3),
+    ));
+    g.add_lane(lane(
+        3,
+        vec![
+            Point {
+                x_m: 20.0 + R,
+                y_m: R,
+            },
+            Point {
+                x_m: 20.0 + R,
+                y_m: R + 20.0,
+            },
+        ],
+        std::f64::consts::FRAC_PI_2,
+        None,
+    ));
     g
 }
 
@@ -53,10 +94,16 @@ fn left_junction() -> LaneGraph {
 fn northbound_crosser(id: u64, south_of_junction: f64, speed: f64) -> PerceivedObject {
     PerceivedObject {
         id,
-        pos: Point { x_m: 20.0, y_m: -south_of_junction },
+        pos: Point {
+            x_m: 20.0,
+            y_m: -south_of_junction,
+        },
         velocity_mps: speed,
         heading_rad: std::f64::consts::FRAC_PI_2,
-        vel: Point { x_m: 0.0, y_m: speed },
+        vel: Point {
+            x_m: 0.0,
+            y_m: speed,
+        },
     }
 }
 
@@ -64,8 +111,23 @@ fn northbound_crosser(id: u64, south_of_junction: f64, speed: f64) -> PerceivedO
 fn ground_left_turn(g: &LaneGraph, objects: &[PerceivedObject], cedes: &[u64]) -> PlanOutput {
     let ego_corr = g.lane(1).unwrap().corridor(0.95, 0);
     let input = PlanInput {
-        ego: EgoState { pose: Pose { x_m: 16.0, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: 2.0, yaw_rate_rads: 0.0, stamp_ms: 0 },
-        goal: Goal { target: Pose { x_m: 20.0 + R, y_m: R + 12.0, heading_rad: std::f64::consts::FRAC_PI_2 } },
+        ego: EgoState {
+            pose: Pose {
+                x_m: 16.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+            linear_x_mps: 2.0,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        },
+        goal: Goal {
+            target: Pose {
+                x_m: 20.0 + R,
+                y_m: R + 12.0,
+                heading_rad: std::f64::consts::FRAC_PI_2,
+            },
+        },
         map: &ego_corr,
         objects,
         controls: &[],
@@ -83,12 +145,22 @@ fn ground_left_turn(g: &LaneGraph, objects: &[PerceivedObject], cedes: &[u64]) -
         lane_graph: Some(g),
         signal_states: &[],
     };
-    plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::TurnAt { direction: TurnDirection::Left }, &input)
+    plan_for_intent(
+        &mut GeometricPlanner::default(),
+        &MickIntent::TurnAt {
+            direction: TurnDirection::Left,
+        },
+        &input,
+    )
 }
 
 fn turns_left(p: &PlanOutput) -> bool {
     p.kind == ProposalKind::Motion
-        && p.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max) > 0.6 * R
+        && p.trajectory
+            .iter()
+            .map(|t| t.pose.y_m)
+            .fold(f64::MIN, f64::max)
+            > 0.6 * R
 }
 
 #[test]
@@ -98,8 +170,15 @@ fn a_tight_gap_holds_the_turn() {
     let g = left_junction();
     let objs = [northbound_crosser(9, 12.0, 4.0)];
     let plan = ground_left_turn(&g, &objs, &[]);
-    assert_eq!(plan.kind, ProposalKind::SafeStop, "an inadequate gap HOLDs the unprotected turn");
-    assert!(plan.trajectory.iter().all(|t| t.velocity_mps == 0.0), "the HOLD is a full stop");
+    assert_eq!(
+        plan.kind,
+        ProposalKind::SafeStop,
+        "an inadequate gap HOLDs the unprotected turn"
+    );
+    assert!(
+        plan.trajectory.iter().all(|t| t.velocity_mps == 0.0),
+        "the HOLD is a full stop"
+    );
 }
 
 #[test]
@@ -109,12 +188,29 @@ fn an_ample_gap_takes_the_turn() {
     let g = left_junction();
     let objs = [northbound_crosser(9, 40.0, 4.0)];
     let plan = ground_left_turn(&g, &objs, &[]);
-    assert!(turns_left(&plan), "an ample gap is accepted — the ego takes the turn (kind {:?})", plan.kind);
+    assert!(
+        turns_left(&plan),
+        "an ample gap is accepted — the ego takes the turn (kind {:?})",
+        plan.kind
+    );
 
     let route = g.route(1, 3).unwrap();
     let corr = g.route_corridor(&route, 0.95, 0).unwrap();
-    let verdict = validate_trajectory_slow(&plan.trajectory, &corr, &objs, &VehicleConfig::default_urban(), None, FleetPosture::Nominal);
-    assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp), "KIRRA admits the accepted turn, got {verdict:?}");
+    let verdict = validate_trajectory_slow(
+        &plan.trajectory,
+        &corr,
+        &objs,
+        &VehicleConfig::default_urban(),
+        None,
+        FleetPosture::Nominal,
+    );
+    assert!(
+        matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
+        "KIRRA admits the accepted turn, got {verdict:?}"
+    );
 }
 
 #[test]
@@ -124,7 +220,11 @@ fn asserting_right_of_way_proceeds_through_the_same_tight_gap() {
     let g = left_junction();
     let objs = [northbound_crosser(9, 12.0, 4.0)];
     let plan = ground_left_turn(&g, &objs, &[9]);
-    assert!(turns_left(&plan), "with asserted priority the ego proceeds through the gap (kind {:?})", plan.kind);
+    assert!(
+        turns_left(&plan),
+        "with asserted priority the ego proceeds through the gap (kind {:?})",
+        plan.kind
+    );
 }
 
 #[test]
@@ -132,9 +232,22 @@ fn a_non_closing_vehicle_is_not_a_conflict() {
     // A stopped vehicle near the junction is not closing → not a gap-acceptance conflict → the ego
     // takes the turn (a parked car beside the junction must not freeze an unprotected turn forever).
     let g = left_junction();
-    let stopped = PerceivedObject { id: 9, pos: Point { x_m: 20.0, y_m: -8.0 }, velocity_mps: 0.0, heading_rad: 0.0, vel: Point { x_m: 0.0, y_m: 0.0 } };
+    let stopped = PerceivedObject {
+        id: 9,
+        pos: Point {
+            x_m: 20.0,
+            y_m: -8.0,
+        },
+        velocity_mps: 0.0,
+        heading_rad: 0.0,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    };
     let plan = ground_left_turn(&g, &[stopped], &[]);
-    assert!(turns_left(&plan), "a stopped (non-closing) vehicle does not hold the turn (kind {:?})", plan.kind);
+    assert!(
+        turns_left(&plan),
+        "a stopped (non-closing) vehicle does not hold the turn (kind {:?})",
+        plan.kind
+    );
 }
 
 #[test]
@@ -142,7 +255,11 @@ fn no_conflicting_traffic_takes_the_turn() {
     // Baseline: an empty junction — the turn grounds and drives, unchanged from before the gate.
     let g = left_junction();
     let plan = ground_left_turn(&g, &[], &[]);
-    assert!(turns_left(&plan), "an empty junction takes the turn (kind {:?})", plan.kind);
+    assert!(
+        turns_left(&plan),
+        "an empty junction takes the turn (kind {:?})",
+        plan.kind
+    );
 }
 
 #[test]
@@ -153,7 +270,11 @@ fn the_interaction_model_holds_a_slow_but_close_agent() {
     // re-acceleration (~2.2 s to the conflict) and HOLDs. KIRRA still backstops.
     let g = left_junction();
     let plan = ground_left_turn(&g, &[northbound_crosser(9, 8.0, 1.0)], &[]);
-    assert_eq!(plan.kind, ProposalKind::SafeStop, "a slow-but-close agent is not trusted ⇒ HOLD");
+    assert_eq!(
+        plan.kind,
+        ProposalKind::SafeStop,
+        "a slow-but-close agent is not trusted ⇒ HOLD"
+    );
 }
 
 #[test]
@@ -162,5 +283,9 @@ fn the_interaction_model_asserts_a_genuinely_yielded_agent() {
     // junction, so the yielded position is real — the ego asserts the turn.
     let g = left_junction();
     let plan = ground_left_turn(&g, &[northbound_crosser(9, 28.0, 1.0)], &[]);
-    assert!(turns_left(&plan), "a genuinely-yielded (slow + far) agent lets the ego assert (kind {:?})", plan.kind);
+    assert!(
+        turns_left(&plan),
+        "a genuinely-yielded (slow + far) agent lets the ego assert (kind {:?})",
+        plan.kind
+    );
 }

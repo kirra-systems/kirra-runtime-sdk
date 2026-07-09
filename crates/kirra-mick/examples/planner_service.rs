@@ -29,11 +29,25 @@ use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
-struct Xy { x: f64, y: f64 }
+struct Xy {
+    x: f64,
+    y: f64,
+}
 #[derive(Deserialize)]
-struct EgoReq { x: f64, y: f64, heading: f64, speed: f64 }
+struct EgoReq {
+    x: f64,
+    y: f64,
+    heading: f64,
+    speed: f64,
+}
 #[derive(Deserialize)]
-struct ObjReq { id: u64, x: f64, y: f64, vx: f64, vy: f64 }
+struct ObjReq {
+    id: u64,
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+}
 #[derive(Deserialize)]
 struct PlanRequest {
     ego: EgoReq,
@@ -51,7 +65,9 @@ struct PlanRequest {
     #[serde(default)]
     vehicle: Option<VehicleReq>,
 }
-fn default_cruise() -> f64 { 10.0 }
+fn default_cruise() -> f64 {
+    10.0
+}
 
 /// Vehicle profile for BOTH the checker (`VehicleConfig`) and the doer's lateral-clearance
 /// target. `class` picks the base sibling profile (`robotaxi` default, or `courier` for a
@@ -84,56 +100,133 @@ fn vehicle_config(req: &PlanRequest) -> VehicleConfig {
         None => VehicleConfig::default_urban(),
     };
     if let Some(o) = &req.vehicle {
-        if let Some(x) = o.wheelbase_m { v.wheelbase_m = x; }
-        if let Some(x) = o.half_length_m { v.half_length_m = x; }
-        if let Some(x) = o.half_width_m { v.half_width_m = x; }
-        if let Some(x) = o.max_speed_mps { v.max_speed_mps = x; }
-        if let Some(x) = o.max_steering_deg { v.max_steering_rad = x.to_radians(); }
-        if let Some(x) = o.rss_lateral_alignment_tolerance_m { v.rss_lateral_alignment_tolerance_m = x; }
+        if let Some(x) = o.wheelbase_m {
+            v.wheelbase_m = x;
+        }
+        if let Some(x) = o.half_length_m {
+            v.half_length_m = x;
+        }
+        if let Some(x) = o.half_width_m {
+            v.half_width_m = x;
+        }
+        if let Some(x) = o.max_speed_mps {
+            v.max_speed_mps = x;
+        }
+        if let Some(x) = o.max_steering_deg {
+            v.max_steering_rad = x.to_radians();
+        }
+        if let Some(x) = o.rss_lateral_alignment_tolerance_m {
+            v.rss_lateral_alignment_tolerance_m = x;
+        }
     }
     v
 }
 
 /// The DOER's lateral-clearance target from the request (default keeps the planner default).
 fn lateral_clearance_target(req: &PlanRequest) -> Option<f64> {
-    req.vehicle.as_ref().and_then(|o| o.lateral_clearance_target_m)
+    req.vehicle
+        .as_ref()
+        .and_then(|o| o.lateral_clearance_target_m)
 }
 
 #[derive(Serialize)]
-struct TrajPt { x: f64, y: f64, heading: f64, v: f64, t: f64 }
+struct TrajPt {
+    x: f64,
+    y: f64,
+    heading: f64,
+    v: f64,
+    t: f64,
+}
 #[derive(Serialize)]
-struct PlanResponse { kind: String, verdict: String, trajectory: Vec<TrajPt> }
+struct PlanResponse {
+    kind: String,
+    verdict: String,
+    trajectory: Vec<TrajPt>,
+}
 
 /// A `CorridorSource` straight off the request's boundary polylines.
-struct ReqCorridor { left: Vec<Point>, right: Vec<Point> }
+struct ReqCorridor {
+    left: Vec<Point>,
+    right: Vec<Point>,
+}
 impl CorridorSource for ReqCorridor {
-    fn left_boundary(&self) -> &[Point] { &self.left }
-    fn right_boundary(&self) -> &[Point] { &self.right }
-    fn confidence(&self) -> f32 { 0.95 }
-    fn age_ms(&self) -> u64 { 10 }
+    fn left_boundary(&self) -> &[Point] {
+        &self.left
+    }
+    fn right_boundary(&self) -> &[Point] {
+        &self.right
+    }
+    fn confidence(&self) -> f32 {
+        0.95
+    }
+    fn age_ms(&self) -> u64 {
+        10
+    }
 }
 
 fn pts(v: &[[f64; 2]]) -> Vec<Point> {
-    v.iter().map(|p| Point { x_m: p[0], y_m: p[1] }).collect()
+    v.iter()
+        .map(|p| Point {
+            x_m: p[0],
+            y_m: p[1],
+        })
+        .collect()
 }
 
 fn handle_plan(req: &PlanRequest) -> PlanResponse {
-    let corr = ReqCorridor { left: pts(&req.left), right: pts(&req.right) };
-    let objects: Vec<PerceivedObject> = req.objects.iter().map(|o| PerceivedObject {
-        id: o.id,
-        pos: Point { x_m: o.x, y_m: o.y },
-        velocity_mps: o.vx.hypot(o.vy),
-        heading_rad: o.vy.atan2(o.vx),
-        vel: Point { x_m: o.vx, y_m: o.vy },
-    }).collect();
+    let corr = ReqCorridor {
+        left: pts(&req.left),
+        right: pts(&req.right),
+    };
+    let objects: Vec<PerceivedObject> = req
+        .objects
+        .iter()
+        .map(|o| PerceivedObject {
+            id: o.id,
+            pos: Point { x_m: o.x, y_m: o.y },
+            velocity_mps: o.vx.hypot(o.vy),
+            heading_rad: o.vy.atan2(o.vx),
+            vel: Point {
+                x_m: o.vx,
+                y_m: o.vy,
+            },
+        })
+        .collect();
 
     let world = PlanInput {
-        ego: EgoState { pose: Pose { x_m: req.ego.x, y_m: req.ego.y, heading_rad: req.ego.heading }, linear_x_mps: req.ego.speed, yaw_rate_rads: 0.0, stamp_ms: 0 },
-        goal: Goal { target: Pose { x_m: req.goal.x, y_m: req.goal.y, heading_rad: req.ego.heading } },
-        map: &corr, objects: &objects, controls: &[], lane_boundaries: &[], motion: &[], predicted_paths: &[],
-        cedes_to_ego_ids: &[], lane_change_to_m: None, no_overtake_ids: &[], drivable: None,
-        posture: FleetPosture::Nominal, target_speed_mps: None, request_overtake: false, request_pull_over: false,
-        lane_graph: None, signal_states: &[],
+        ego: EgoState {
+            pose: Pose {
+                x_m: req.ego.x,
+                y_m: req.ego.y,
+                heading_rad: req.ego.heading,
+            },
+            linear_x_mps: req.ego.speed,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        },
+        goal: Goal {
+            target: Pose {
+                x_m: req.goal.x,
+                y_m: req.goal.y,
+                heading_rad: req.ego.heading,
+            },
+        },
+        map: &corr,
+        objects: &objects,
+        controls: &[],
+        lane_boundaries: &[],
+        motion: &[],
+        predicted_paths: &[],
+        cedes_to_ego_ids: &[],
+        lane_change_to_m: None,
+        no_overtake_ids: &[],
+        drivable: None,
+        posture: FleetPosture::Nominal,
+        target_speed_mps: None,
+        request_overtake: false,
+        request_pull_over: false,
+        lane_graph: None,
+        signal_states: &[],
     };
 
     // The DOER: real Occy grounds the GoTo intent. A courier class selects the robot-scale
@@ -145,22 +238,57 @@ fn handle_plan(req: &PlanRequest) -> PlanResponse {
         _ => GeometricPlannerConfig::default(),
     };
     cfg.cruise_speed_mps = req.cruise;
-    if let Some(ct) = lateral_clearance_target(req) { cfg.lateral_clearance_target_m = ct; }
-    let plan = plan_for_intent(&mut GeometricPlanner::new(cfg), &MickIntent::GoTo { x_m: req.goal.x, y_m: req.goal.y }, &world);
+    if let Some(ct) = lateral_clearance_target(req) {
+        cfg.lateral_clearance_target_m = ct;
+    }
+    let plan = plan_for_intent(
+        &mut GeometricPlanner::new(cfg),
+        &MickIntent::GoTo {
+            x_m: req.goal.x,
+            y_m: req.goal.y,
+        },
+        &world,
+    );
     // The CHECKER: KIRRA's verdict on the proposal (the client applies it / falls back accordingly).
-    let verdict = validate_trajectory_slow(&plan.trajectory, &corr, &objects, &vehicle_config(req), None, FleetPosture::Nominal);
+    let verdict = validate_trajectory_slow(
+        &plan.trajectory,
+        &corr,
+        &objects,
+        &vehicle_config(req),
+        None,
+        FleetPosture::Nominal,
+    );
 
     PlanResponse {
-        kind: match plan.kind { ProposalKind::Motion => "Motion", ProposalKind::SafeStop => "SafeStop" }.to_string(),
+        kind: match plan.kind {
+            ProposalKind::Motion => "Motion",
+            ProposalKind::SafeStop => "SafeStop",
+        }
+        .to_string(),
         verdict: match verdict {
             TrajectoryVerdict::Accept => "Accept",
             TrajectoryVerdict::Clamp => "Clamp",
             TrajectoryVerdict::MRCFallback => "MRCFallback",
-            other => return PlanResponse { kind: "SafeStop".into(), verdict: format!("{other:?}"), trajectory: vec![] },
-        }.to_string(),
-        trajectory: plan.trajectory.iter().map(|p| TrajPt {
-            x: p.pose.x_m, y: p.pose.y_m, heading: p.pose.heading_rad, v: p.velocity_mps, t: p.time_from_start_s,
-        }).collect(),
+            other => {
+                return PlanResponse {
+                    kind: "SafeStop".into(),
+                    verdict: format!("{other:?}"),
+                    trajectory: vec![],
+                }
+            }
+        }
+        .to_string(),
+        trajectory: plan
+            .trajectory
+            .iter()
+            .map(|p| TrajPt {
+                x: p.pose.x_m,
+                y: p.pose.y_m,
+                heading: p.pose.heading_rad,
+                v: p.velocity_mps,
+                t: p.time_from_start_s,
+            })
+            .collect(),
     }
 }
 
@@ -172,11 +300,15 @@ fn respond(stream: &mut TcpStream, status: &str, body: &str) {
 fn serve(mut stream: TcpStream) {
     let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
     let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() { return; }
+    if reader.read_line(&mut request_line).is_err() {
+        return;
+    }
     let mut content_length = 0usize;
     loop {
         let mut line = String::new();
-        if reader.read_line(&mut line).is_err() || line == "\r\n" || line.is_empty() { break; }
+        if reader.read_line(&mut line).is_err() || line == "\r\n" || line.is_empty() {
+            break;
+        }
         if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
             content_length = v.trim().parse().unwrap_or(0);
         }
@@ -197,18 +329,33 @@ fn serve(mut stream: TcpStream) {
         match serde_json::from_slice::<PlanRequest>(&body) {
             Ok(req) => {
                 let resp = handle_plan(&req);
-                respond(&mut stream, "200 OK", &serde_json::to_string(&resp).unwrap());
+                respond(
+                    &mut stream,
+                    "200 OK",
+                    &serde_json::to_string(&resp).unwrap(),
+                );
             }
-            Err(e) => respond(&mut stream, "400 Bad Request", &format!("{{\"error\":\"{e}\"}}")),
+            Err(e) => respond(
+                &mut stream,
+                "400 Bad Request",
+                &format!("{{\"error\":\"{e}\"}}"),
+            ),
         }
         return;
     }
-    respond(&mut stream, "404 Not Found", "{\"error\":\"unknown route\"}");
+    respond(
+        &mut stream,
+        "404 Not Found",
+        "{\"error\":\"unknown route\"}",
+    );
 }
 
 fn main() {
     let addr = std::env::var("KIRRA_PLANNER_ADDR").unwrap_or_else(|_| "127.0.0.1:8100".to_string());
-    let listener = TcpListener::bind(&addr).unwrap_or_else(|e| { eprintln!("planner_service: bind {addr}: {e}"); std::process::exit(1); });
+    let listener = TcpListener::bind(&addr).unwrap_or_else(|e| {
+        eprintln!("planner_service: bind {addr}: {e}");
+        std::process::exit(1);
+    });
     println!("Occy planner service on http://{addr}  (POST /plan, GET /health)");
     for stream in listener.incoming() {
         match stream {

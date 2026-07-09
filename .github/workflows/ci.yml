@@ -179,6 +179,39 @@ jobs:
   # explicit so it holds regardless of `rust-toolchain.toml` (which pins the far
   # newer BUILD toolchain). Raising the MSRV is a deliberate MINOR bump (policy
   # §3): update both `rust-version` fields, the CHANGELOG, and this lane together.
+  fmt:
+    name: rustfmt gate (all cargo trees)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: rustfmt
+      # Every cargo tree in the repo, including the workspace-detached
+      # harnesses. The frozen kinematics talisman is excluded via
+      # `#[rustfmt::skip]` on its `mod` declarations (kirra-core lib.rs +
+      # the kani #[path] include) — its git blob pin (`ed00f4da…`) must
+      # survive any formatting pass; the step below asserts exactly that.
+      - name: cargo fmt --check — root workspace
+        run: cargo fmt --check
+      - name: cargo fmt --check — parko workspace
+        # parko/Cargo.toml is a virtual manifest — cargo fmt needs --all there.
+        run: cargo fmt --check --all --manifest-path parko/Cargo.toml
+      - name: cargo fmt --check — detached harnesses
+        run: |
+          cargo fmt --check --manifest-path fuzz/Cargo.toml
+          cargo fmt --check --manifest-path verification/kani/Cargo.toml
+          cargo fmt --check --manifest-path crates/kirra-loom-models/Cargo.toml
+          cargo fmt --check --manifest-path crates/kirra-verifier-pg/Cargo.toml
+          cargo fmt --check --manifest-path tools/iceoryx2-spike/Cargo.toml
+      - name: frozen-talisman blob pin survives formatting
+        run: |
+          pin=$(grep -oE '\bed00f4da[0-9a-f]{32}\b' docs/CAPTURE_PIPELINE_SPEC.md | head -1)
+          actual=$(git hash-object crates/kirra-core/src/kinematics_contract.rs)
+          test -n "$pin" && test "$actual" = "$pin" \
+            || { echo "talisman blob $actual != pinned $pin"; exit 1; }
+
   msrv:
     name: MSRV check (rustc 1.88)
     runs-on: ubuntu-latest

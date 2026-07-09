@@ -16,7 +16,13 @@ impl VerifierStore {
             "INSERT OR REPLACE INTO av_subsystem_meta
              (node_id, subsystem_type, hardware_id, confidence_floor, last_telemetry_ms)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![node_id, subsystem_type, hardware_id, confidence_floor, initial_telemetry_ms as i64],
+            params![
+                node_id,
+                subsystem_type,
+                hardware_id,
+                confidence_floor,
+                initial_telemetry_ms as i64
+            ],
         )?;
         Ok(())
     }

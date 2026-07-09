@@ -54,11 +54,17 @@ mod tests {
     fn comparator_as_governor_delegates_evaluate() {
         let comparator = GovernorComparator::new(KirraGovernor::new(), KirraGovernor::new());
         let adapter = ComparatorAsGovernor(comparator);
-        let cmd = ControlCommand { linear_velocity: 1.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let cmd = ControlCommand {
+            linear_velocity: 1.0,
+            angular_velocity: 0.0,
+            timestamp_ms: 0,
+        };
         // A LockedOut posture should produce Deny via the underlying
         // KirraGovernor → GovernorComparator → both arms agree on Deny.
         let action = adapter.evaluate(&cmd, None, 0.05, SafetyPosture::LockedOut);
-        assert!(matches!(action, EnforcementAction::Deny { .. }),
-            "LockedOut must Deny through the adapter; got {action:?}");
+        assert!(
+            matches!(action, EnforcementAction::Deny { .. }),
+            "LockedOut must Deny through the adapter; got {action:?}"
+        );
     }
 }

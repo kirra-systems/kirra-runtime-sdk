@@ -108,34 +108,58 @@ fn read_value_f32(data: &[u8], at: usize, datatype: u8, be: bool) -> f32 {
         FLOAT32 => {
             let mut b = [0u8; 4];
             b.copy_from_slice(&data[at..at + 4]);
-            if be { f32::from_be_bytes(b) } else { f32::from_le_bytes(b) }
+            if be {
+                f32::from_be_bytes(b)
+            } else {
+                f32::from_le_bytes(b)
+            }
         }
         FLOAT64 => {
             let mut b = [0u8; 8];
             b.copy_from_slice(&data[at..at + 8]);
-            (if be { f64::from_be_bytes(b) } else { f64::from_le_bytes(b) }) as f32
+            (if be {
+                f64::from_be_bytes(b)
+            } else {
+                f64::from_le_bytes(b)
+            }) as f32
         }
         UINT8 => data[at] as f32,
         INT8 => (data[at] as i8) as f32,
         UINT16 => {
             let mut b = [0u8; 2];
             b.copy_from_slice(&data[at..at + 2]);
-            (if be { u16::from_be_bytes(b) } else { u16::from_le_bytes(b) }) as f32
+            (if be {
+                u16::from_be_bytes(b)
+            } else {
+                u16::from_le_bytes(b)
+            }) as f32
         }
         INT16 => {
             let mut b = [0u8; 2];
             b.copy_from_slice(&data[at..at + 2]);
-            (if be { i16::from_be_bytes(b) } else { i16::from_le_bytes(b) }) as f32
+            (if be {
+                i16::from_be_bytes(b)
+            } else {
+                i16::from_le_bytes(b)
+            }) as f32
         }
         UINT32 => {
             let mut b = [0u8; 4];
             b.copy_from_slice(&data[at..at + 4]);
-            (if be { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) }) as f32
+            (if be {
+                u32::from_be_bytes(b)
+            } else {
+                u32::from_le_bytes(b)
+            }) as f32
         }
         INT32 => {
             let mut b = [0u8; 4];
             b.copy_from_slice(&data[at..at + 4]);
-            (if be { i32::from_be_bytes(b) } else { i32::from_le_bytes(b) }) as f32
+            (if be {
+                i32::from_be_bytes(b)
+            } else {
+                i32::from_le_bytes(b)
+            }) as f32
         }
         // Unreachable: every field's datatype is validated before any read.
         _ => f32::NAN,
@@ -151,7 +175,9 @@ fn find_unique<'a>(
     for f in fields {
         if f.name == name {
             if found.is_some() {
-                return Err(PointCloud2DecodeError::DuplicateField { name: name.to_string() });
+                return Err(PointCloud2DecodeError::DuplicateField {
+                    name: name.to_string(),
+                });
             }
             found = Some(f);
         }
@@ -161,10 +187,15 @@ fn find_unique<'a>(
 
 fn ensure_fits(f: &PointFieldDesc, point_step: usize) -> Result<(), PointCloud2DecodeError> {
     let size = datatype_size(f.datatype).ok_or_else(|| {
-        PointCloud2DecodeError::UnsupportedFieldDatatype { name: f.name.clone(), datatype: f.datatype }
+        PointCloud2DecodeError::UnsupportedFieldDatatype {
+            name: f.name.clone(),
+            datatype: f.datatype,
+        }
     })?;
     if (f.offset as usize) + size > point_step {
-        return Err(PointCloud2DecodeError::FieldExceedsPointStep { name: f.name.clone() });
+        return Err(PointCloud2DecodeError::FieldExceedsPointStep {
+            name: f.name.clone(),
+        });
     }
     Ok(())
 }
@@ -225,21 +256,32 @@ pub fn decode_pointcloud2(
 
     let width = width as usize;
     let height = height as usize;
-    let point_count = width.checked_mul(height).ok_or(PointCloud2DecodeError::DimensionOverflow)?;
+    let point_count = width
+        .checked_mul(height)
+        .ok_or(PointCloud2DecodeError::DimensionOverflow)?;
 
     // Row stride: honor padding between rows; reject overlap.
     let packed_row = width
         .checked_mul(point_step)
         .ok_or(PointCloud2DecodeError::DimensionOverflow)?;
-    let eff_row = if row_step == 0 { packed_row } else { row_step as usize };
+    let eff_row = if row_step == 0 {
+        packed_row
+    } else {
+        row_step as usize
+    };
     if eff_row < packed_row {
         return Err(PointCloud2DecodeError::InvalidRowStep);
     }
 
     // Buffer must hold every point (row_step * height) — never read past end.
-    let needed = height.checked_mul(eff_row).ok_or(PointCloud2DecodeError::DimensionOverflow)?;
+    let needed = height
+        .checked_mul(eff_row)
+        .ok_or(PointCloud2DecodeError::DimensionOverflow)?;
     if data.len() < needed {
-        return Err(PointCloud2DecodeError::TruncatedBuffer { needed, got: data.len() });
+        return Err(PointCloud2DecodeError::TruncatedBuffer {
+            needed,
+            got: data.len(),
+        });
     }
 
     let mut out = Vec::with_capacity(point_count);
@@ -256,7 +298,9 @@ pub fn decode_pointcloud2(
             };
             // Fail closed: a non-finite point must never reach the transform.
             if !x.is_finite() || !y.is_finite() || !z.is_finite() || !intensity.is_finite() {
-                return Err(PointCloud2DecodeError::NonFinitePoint { index: row * width + col });
+                return Err(PointCloud2DecodeError::NonFinitePoint {
+                    index: row * width + col,
+                });
             }
             out.push(LidarPoint { x, y, z, intensity });
         }
@@ -306,7 +350,12 @@ mod tests {
     use super::*;
 
     fn fd(name: &str, offset: u32, datatype: u8) -> PointFieldDesc {
-        PointFieldDesc { name: name.to_string(), offset, datatype, count: 1 }
+        PointFieldDesc {
+            name: name.to_string(),
+            offset,
+            datatype,
+            count: 1,
+        }
     }
 
     /// Append a value as little-endian f32 to `buf`.
@@ -332,8 +381,24 @@ mod tests {
         ];
         let pts = decode_pointcloud2(&data, &fields, 16, 2, 1, 0, false).unwrap();
         assert_eq!(pts.len(), 2);
-        assert_eq!(pts[0], LidarPoint { x: 1.0, y: 2.0, z: 3.0, intensity: 10.0 });
-        assert_eq!(pts[1], LidarPoint { x: -4.5, y: 5.5, z: 6.5, intensity: 20.0 });
+        assert_eq!(
+            pts[0],
+            LidarPoint {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                intensity: 10.0
+            }
+        );
+        assert_eq!(
+            pts[1],
+            LidarPoint {
+                x: -4.5,
+                y: 5.5,
+                z: 6.5,
+                intensity: 20.0
+            }
+        );
     }
 
     /// `point_step` larger than the packed fields (trailing padding) must be
@@ -356,7 +421,15 @@ mod tests {
             fd("intensity", 12, FLOAT32),
         ];
         let pts = decode_pointcloud2(&data, &fields, point_step, 2, 1, 0, false).unwrap();
-        assert_eq!(pts[1], LidarPoint { x: 8.0, y: 9.0, z: 10.0, intensity: 11.0 });
+        assert_eq!(
+            pts[1],
+            LidarPoint {
+                x: 8.0,
+                y: 9.0,
+                z: 10.0,
+                intensity: 11.0
+            }
+        );
     }
 
     /// Fields declared OUT OF OFFSET ORDER (and not positionally) — proves the
@@ -375,7 +448,15 @@ mod tests {
             fd("y", 0, FLOAT32),
         ];
         let pts = decode_pointcloud2(&data, &fields, 12, 1, 1, 0, false).unwrap();
-        assert_eq!(pts[0], LidarPoint { x: 7.0, y: 8.0, z: 9.0, intensity: 0.0 });
+        assert_eq!(
+            pts[0],
+            LidarPoint {
+                x: 7.0,
+                y: 8.0,
+                z: 9.0,
+                intensity: 0.0
+            }
+        );
     }
 
     /// BIG-ENDIAN multi-byte reads.
@@ -385,9 +466,21 @@ mod tests {
         data.extend_from_slice(&1.25_f32.to_be_bytes());
         data.extend_from_slice(&(-2.5_f32).to_be_bytes());
         data.extend_from_slice(&3.75_f32.to_be_bytes());
-        let fields = vec![fd("x", 0, FLOAT32), fd("y", 4, FLOAT32), fd("z", 8, FLOAT32)];
+        let fields = vec![
+            fd("x", 0, FLOAT32),
+            fd("y", 4, FLOAT32),
+            fd("z", 8, FLOAT32),
+        ];
         let pts = decode_pointcloud2(&data, &fields, 12, 1, 1, 0, true).unwrap();
-        assert_eq!(pts[0], LidarPoint { x: 1.25, y: -2.5, z: 3.75, intensity: 0.0 });
+        assert_eq!(
+            pts[0],
+            LidarPoint {
+                x: 1.25,
+                y: -2.5,
+                z: 3.75,
+                intensity: 0.0
+            }
+        );
     }
 
     /// FLOAT64 coordinates (cast to f32).
@@ -397,9 +490,21 @@ mod tests {
         data.extend_from_slice(&1.5_f64.to_le_bytes());
         data.extend_from_slice(&2.5_f64.to_le_bytes());
         data.extend_from_slice(&(-3.5_f64).to_le_bytes());
-        let fields = vec![fd("x", 0, FLOAT64), fd("y", 8, FLOAT64), fd("z", 16, FLOAT64)];
+        let fields = vec![
+            fd("x", 0, FLOAT64),
+            fd("y", 8, FLOAT64),
+            fd("z", 16, FLOAT64),
+        ];
         let pts = decode_pointcloud2(&data, &fields, 24, 1, 1, 0, false).unwrap();
-        assert_eq!(pts[0], LidarPoint { x: 1.5, y: 2.5, z: -3.5, intensity: 0.0 });
+        assert_eq!(
+            pts[0],
+            LidarPoint {
+                x: 1.5,
+                y: 2.5,
+                z: -3.5,
+                intensity: 0.0
+            }
+        );
     }
 
     /// Integer intensity (UINT8) is accepted and widened; coordinates stay float.
@@ -438,8 +543,13 @@ mod tests {
         write(&mut data, 12, 2.0, 2.1, 2.2);
         write(&mut data, 32, 3.0, 3.1, 3.2);
         write(&mut data, 44, 4.0, 4.1, 4.2);
-        let fields = vec![fd("x", 0, FLOAT32), fd("y", 4, FLOAT32), fd("z", 8, FLOAT32)];
-        let pts = decode_pointcloud2(&data, &fields, point_step, width, height, row_step, false).unwrap();
+        let fields = vec![
+            fd("x", 0, FLOAT32),
+            fd("y", 4, FLOAT32),
+            fd("z", 8, FLOAT32),
+        ];
+        let pts =
+            decode_pointcloud2(&data, &fields, point_step, width, height, row_step, false).unwrap();
         assert_eq!(pts.len(), 4);
         assert_eq!(pts[2].x, 3.0); // first point of row 1, after the padding
         assert_eq!(pts[3].x, 4.0);
@@ -456,7 +566,11 @@ mod tests {
             push_f32(&mut data, (i as f32) + 0.5);
             push_f32(&mut data, (i as f32) + 0.25);
         }
-        let fields = vec![fd("x", 0, FLOAT32), fd("y", 4, FLOAT32), fd("z", 8, FLOAT32)];
+        let fields = vec![
+            fd("x", 0, FLOAT32),
+            fd("y", 4, FLOAT32),
+            fd("z", 8, FLOAT32),
+        ];
         let pts = decode_pointcloud2(&data, &fields, 12, w, h, 0, false).unwrap();
         assert_eq!(pts.len(), (w * h) as usize);
         for (i, p) in pts.iter().enumerate() {
@@ -468,14 +582,21 @@ mod tests {
     // -- Fail-closed -----------------------------------------------------
 
     fn xyz_fields() -> Vec<PointFieldDesc> {
-        vec![fd("x", 0, FLOAT32), fd("y", 4, FLOAT32), fd("z", 8, FLOAT32)]
+        vec![
+            fd("x", 0, FLOAT32),
+            fd("y", 4, FLOAT32),
+            fd("z", 8, FLOAT32),
+        ]
     }
 
     #[test]
     fn rejects_truncated_buffer() {
         let data = vec![0u8; 11]; // one point needs 12
         let err = decode_pointcloud2(&data, &xyz_fields(), 12, 1, 1, 0, false).unwrap_err();
-        assert!(matches!(err, PointCloud2DecodeError::TruncatedBuffer { .. }));
+        assert!(matches!(
+            err,
+            PointCloud2DecodeError::TruncatedBuffer { .. }
+        ));
     }
 
     #[test]
@@ -495,7 +616,9 @@ mod tests {
         fields.push(fd("x", 12, FLOAT32)); // x twice
         assert_eq!(
             decode_pointcloud2(&data, &fields, 16, 1, 1, 0, false).unwrap_err(),
-            PointCloud2DecodeError::DuplicateField { name: "x".to_string() }
+            PointCloud2DecodeError::DuplicateField {
+                name: "x".to_string()
+            }
         );
     }
 
@@ -505,7 +628,10 @@ mod tests {
         let fields = vec![fd("x", 0, UINT32), fd("y", 4, FLOAT32), fd("z", 8, FLOAT32)];
         assert_eq!(
             decode_pointcloud2(&data, &fields, 12, 1, 1, 0, false).unwrap_err(),
-            PointCloud2DecodeError::UnsupportedCoordinateDatatype { axis: "x", datatype: UINT32 }
+            PointCloud2DecodeError::UnsupportedCoordinateDatatype {
+                axis: "x",
+                datatype: UINT32
+            }
         );
     }
 
@@ -527,7 +653,9 @@ mod tests {
         let data = vec![0u8; 8];
         assert_eq!(
             decode_pointcloud2(&data, &xyz_fields(), 2, 1, 1, 0, false).unwrap_err(),
-            PointCloud2DecodeError::FieldExceedsPointStep { name: "x".to_string() }
+            PointCloud2DecodeError::FieldExceedsPointStep {
+                name: "x".to_string()
+            }
         );
     }
 

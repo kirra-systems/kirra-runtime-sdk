@@ -64,12 +64,20 @@ fn project_lookahead(command: &ControlCommand, horizon_s: f64, step_s: f64) -> V
     let steps = steps.min(48);
     let mut poses = Vec::with_capacity(steps + 1);
     let (mut x, mut y, mut th) = (0.0_f64, 0.0_f64, 0.0_f64);
-    poses.push(Pose { x_m: x, y_m: y, heading_rad: th });
+    poses.push(Pose {
+        x_m: x,
+        y_m: y,
+        heading_rad: th,
+    });
     for _ in 0..steps {
         x += v * th.cos() * step_s;
         y += v * th.sin() * step_s;
         th += w * step_s;
-        poses.push(Pose { x_m: x, y_m: y, heading_rad: th });
+        poses.push(Pose {
+            x_m: x,
+            y_m: y,
+            heading_rad: th,
+        });
     }
     poses
 }
@@ -165,16 +173,29 @@ mod tests {
         let x0 = -2.0;
         let dx = (span_m - x0) / (n as f64 - 1.0);
         let left = (0..n)
-            .map(|i| Point { x_m: x0 + i as f64 * dx, y_m: half_width_m })
+            .map(|i| Point {
+                x_m: x0 + i as f64 * dx,
+                y_m: half_width_m,
+            })
             .collect();
         let right = (0..n)
-            .map(|i| Point { x_m: x0 + i as f64 * dx, y_m: -half_width_m })
+            .map(|i| Point {
+                x_m: x0 + i as f64 * dx,
+                y_m: -half_width_m,
+            })
             .collect();
         (left, right)
     }
 
     fn healthy_corridor<'a>(left: &'a [Point], right: &'a [Point]) -> Corridor<'a> {
-        Corridor { left, right, confidence: 0.95, age_ms: 10, min_confidence: 0.5, max_age_ms: 500 }
+        Corridor {
+            left,
+            right,
+            confidence: 0.95,
+            age_ms: 10,
+            min_confidence: 0.5,
+            max_age_ms: 500,
+        }
     }
 
     fn courier_footprint() -> VehicleFootprint {
@@ -182,7 +203,11 @@ mod tests {
     }
 
     fn cmd(v: f64, w: f64) -> ControlCommand {
-        ControlCommand { linear_velocity: v, angular_velocity: w, timestamp_ms: 0 }
+        ControlCommand {
+            linear_velocity: v,
+            angular_velocity: w,
+            timestamp_ms: 0,
+        }
     }
 
     #[test]
@@ -191,9 +216,12 @@ mod tests {
         // 0.40 margin = 0.70 < 1.0 → contained for the whole lookahead.
         let (l, r) = corridor_points(1.0, 5.0);
         let corridor = healthy_corridor(&l, &r);
-        let verdict = command_stays_in_corridor_default(&courier_footprint(), &cmd(1.0, 0.0), &corridor);
-        assert!(matches!(verdict, EnforceAction::Allow),
-            "a straight in-corridor command must be allowed; got {verdict:?}");
+        let verdict =
+            command_stays_in_corridor_default(&courier_footprint(), &cmd(1.0, 0.0), &corridor);
+        assert!(
+            matches!(verdict, EnforceAction::Allow),
+            "a straight in-corridor command must be allowed; got {verdict:?}"
+        );
     }
 
     #[test]
@@ -202,9 +230,15 @@ mod tests {
         // out of the 1 m half-width corridor within the horizon.
         let (l, r) = corridor_points(1.0, 5.0);
         let corridor = healthy_corridor(&l, &r);
-        let verdict = command_stays_in_corridor_default(&courier_footprint(), &cmd(1.5, 3.0), &corridor);
-        assert!(matches!(verdict, EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture)),
-            "a command curving out of the corridor must DenyBreach; got {verdict:?}");
+        let verdict =
+            command_stays_in_corridor_default(&courier_footprint(), &cmd(1.5, 3.0), &corridor);
+        assert!(
+            matches!(
+                verdict,
+                EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture)
+            ),
+            "a command curving out of the corridor must DenyBreach; got {verdict:?}"
+        );
     }
 
     #[test]
@@ -212,10 +246,20 @@ mod tests {
         // age_ms (1000) > max_age_ms (500) → unhealthy corridor → DenyBreach,
         // regardless of the (benign, straight) command.
         let (l, r) = corridor_points(1.0, 5.0);
-        let stale = Corridor { left: &l, right: &r, confidence: 0.95, age_ms: 1000, min_confidence: 0.5, max_age_ms: 500 };
-        let verdict = command_stays_in_corridor_default(&courier_footprint(), &cmd(1.0, 0.0), &stale);
-        assert!(matches!(verdict, EnforceAction::DenyBreach(_)),
-            "a stale corridor must fail closed; got {verdict:?}");
+        let stale = Corridor {
+            left: &l,
+            right: &r,
+            confidence: 0.95,
+            age_ms: 1000,
+            min_confidence: 0.5,
+            max_age_ms: 500,
+        };
+        let verdict =
+            command_stays_in_corridor_default(&courier_footprint(), &cmd(1.0, 0.0), &stale);
+        assert!(
+            matches!(verdict, EnforceAction::DenyBreach(_)),
+            "a stale corridor must fail closed; got {verdict:?}"
+        );
     }
 
     #[test]
@@ -224,8 +268,13 @@ mod tests {
         let corridor = healthy_corridor(&l, &r);
         for c in [cmd(f64::NAN, 0.0), cmd(1.0, f64::INFINITY)] {
             let verdict = command_stays_in_corridor_default(&courier_footprint(), &c, &corridor);
-            assert!(matches!(verdict, EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture)),
-                "a non-finite command must fail closed; got {verdict:?}");
+            assert!(
+                matches!(
+                    verdict,
+                    EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture)
+                ),
+                "a non-finite command must fail closed; got {verdict:?}"
+            );
         }
     }
 
@@ -235,9 +284,12 @@ mod tests {
         // centered in the corridor → allowed.
         let (l, r) = corridor_points(1.0, 5.0);
         let corridor = healthy_corridor(&l, &r);
-        let verdict = command_stays_in_corridor_default(&courier_footprint(), &cmd(0.0, 0.0), &corridor);
-        assert!(matches!(verdict, EnforceAction::Allow),
-            "a stationary in-corridor command must be allowed; got {verdict:?}");
+        let verdict =
+            command_stays_in_corridor_default(&courier_footprint(), &cmd(0.0, 0.0), &corridor);
+        assert!(
+            matches!(verdict, EnforceAction::Allow),
+            "a stationary in-corridor command must be allowed; got {verdict:?}"
+        );
     }
 
     #[test]
@@ -246,16 +298,20 @@ mod tests {
         // `validate_platform_containment` (S-PK1c) on the same lookahead — the
         // gate is that seam, just fed the projected poses.
         use kirra_core::platform_kinematics::{validate_platform_containment, PlatformKinematics};
-        let platform = crate::platform_profile::CourierPlatformProfile::courier_reference().platform();
+        let platform =
+            crate::platform_profile::CourierPlatformProfile::courier_reference().platform();
         let (l, r) = corridor_points(1.0, 5.0);
         let corridor = healthy_corridor(&l, &r);
         let command = cmd(1.5, 3.0);
         let lookahead = project_lookahead(&command, CONTAINMENT_HORIZON_S, CONTAINMENT_STEP_S);
 
-        let via_platform = validate_platform_containment(&platform, &lookahead, &corridor, FrameTrust::Trusted);
-        let via_gate = command_stays_in_corridor_default(&platform.footprint(), &command, &corridor);
+        let via_platform =
+            validate_platform_containment(&platform, &lookahead, &corridor, FrameTrust::Trusted);
+        let via_gate =
+            command_stays_in_corridor_default(&platform.footprint(), &command, &corridor);
         assert_eq!(
-            format!("{via_platform:?}"), format!("{via_gate:?}"),
+            format!("{via_platform:?}"),
+            format!("{via_gate:?}"),
             "the gate must equal the platform containment seam on the same lookahead"
         );
     }
@@ -264,7 +320,11 @@ mod tests {
 
     fn outcome(linear: f64, angular: f64) -> TickOutcome {
         TickOutcome {
-            twist: OutgoingTwist { linear_x_mps: linear, angular_z_rads: angular, stamp_ms: 7 },
+            twist: OutgoingTwist {
+                linear_x_mps: linear,
+                angular_z_rads: angular,
+                stamp_ms: 7,
+            },
             error: None,
             degraded: false,
         }
@@ -275,8 +335,16 @@ mod tests {
         let (l, r) = corridor_points(1.0, 5.0);
         let corridor = healthy_corridor(&l, &r);
         let out = apply_containment_gate(
-            outcome(1.0, 0.0), &courier_footprint(), &corridor, CONTAINMENT_HORIZON_S, CONTAINMENT_STEP_S);
-        assert_eq!(out.twist.linear_x_mps, 1.0, "an in-corridor command must pass through");
+            outcome(1.0, 0.0),
+            &courier_footprint(),
+            &corridor,
+            CONTAINMENT_HORIZON_S,
+            CONTAINMENT_STEP_S,
+        );
+        assert_eq!(
+            out.twist.linear_x_mps, 1.0,
+            "an in-corridor command must pass through"
+        );
         assert!(out.error.is_none());
     }
 
@@ -285,9 +353,17 @@ mod tests {
         let (l, r) = corridor_points(1.0, 5.0);
         let corridor = healthy_corridor(&l, &r);
         let out = apply_containment_gate(
-            outcome(1.5, 3.0), &courier_footprint(), &corridor, CONTAINMENT_HORIZON_S, CONTAINMENT_STEP_S);
-        assert_eq!(out.twist, OutgoingTwist::stopped(7),
-            "an out-of-corridor command must be MRC'd to a stop");
+            outcome(1.5, 3.0),
+            &courier_footprint(),
+            &corridor,
+            CONTAINMENT_HORIZON_S,
+            CONTAINMENT_STEP_S,
+        );
+        assert_eq!(
+            out.twist,
+            OutgoingTwist::stopped(7),
+            "an out-of-corridor command must be MRC'd to a stop"
+        );
         assert_eq!(out.error, Some(TickError::ContainmentBreach));
     }
 
@@ -304,7 +380,15 @@ mod tests {
             degraded: true,
         };
         let out = apply_containment_gate(
-            prior.clone(), &courier_footprint(), &corridor, CONTAINMENT_HORIZON_S, CONTAINMENT_STEP_S);
-        assert_eq!(out, prior, "an already-stopped outcome must pass through unchanged");
+            prior.clone(),
+            &courier_footprint(),
+            &corridor,
+            CONTAINMENT_HORIZON_S,
+            CONTAINMENT_STEP_S,
+        );
+        assert_eq!(
+            out, prior,
+            "an already-stopped outcome must pass through unchanged"
+        );
     }
 }

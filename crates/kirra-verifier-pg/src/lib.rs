@@ -186,8 +186,8 @@ impl PgVerifierStore {
     /// Connect to `url` (e.g. `postgres://user:pass@host:5432/db`), install /
     /// migrate the schema fail-closed, and seed the `ha_state` genesis row.
     pub fn connect(url: &str) -> Result<Self, PgMigrationError<postgres::Error>> {
-        let client = postgres::Client::connect(url, postgres::NoTls)
-            .map_err(PgMigrationError::Executor)?;
+        let client =
+            postgres::Client::connect(url, postgres::NoTls).map_err(PgMigrationError::Executor)?;
         Self::from_client(client)
     }
 
@@ -198,7 +198,9 @@ impl PgVerifierStore {
         mut client: postgres::Client,
     ) -> Result<Self, PgMigrationError<postgres::Error>> {
         Self::initialize(&mut client)?;
-        Ok(Self { client: Mutex::new(client) })
+        Ok(Self {
+            client: Mutex::new(client),
+        })
     }
 
     /// Idempotent schema install + versioned migration, fail-closed: a database
@@ -207,7 +209,9 @@ impl PgVerifierStore {
     pub fn initialize(
         client: &mut postgres::Client,
     ) -> Result<(), PgMigrationError<postgres::Error>> {
-        client.batch_execute(BASELINE_DDL).map_err(PgMigrationError::Executor)?;
+        client
+            .batch_execute(BASELINE_DDL)
+            .map_err(PgMigrationError::Executor)?;
         let mut backend = PostgresBackend::new(LivePgExecutor::new(client));
         backend.migrate(PG_MIGRATIONS, PG_SCHEMA_VERSION)?;
         Ok(())
@@ -293,10 +297,9 @@ impl NodeStore for PgVerifierStore {
     }
 
     fn node_exists(&self, node_id: &str) -> Result<bool, PgStoreError> {
-        let row = self.lock().query_one(
-            "SELECT COUNT(*) FROM nodes WHERE node_id = $1",
-            &[&node_id],
-        )?;
+        let row = self
+            .lock()
+            .query_one("SELECT COUNT(*) FROM nodes WHERE node_id = $1", &[&node_id])?;
         Ok(row.get::<_, i64>(0) > 0)
     }
 
@@ -354,7 +357,9 @@ impl EpochFence for PgVerifierStore {
         // `held == 0` or any mismatch → `EpochSuperseded`. The transaction
         // rolls back on drop, so the reject path never commits anything.
         let mut guard = self.lock();
-        let mut tx = guard.transaction().map_err(|_| FenceError::EpochUnreadable)?;
+        let mut tx = guard
+            .transaction()
+            .map_err(|_| FenceError::EpochUnreadable)?;
         let row = tx
             .query_opt("SELECT epoch FROM ha_state WHERE id = 1 FOR UPDATE", &[])
             .map_err(|_| FenceError::EpochUnreadable)?;
@@ -364,7 +369,10 @@ impl EpochFence for PgVerifierStore {
             None => return Err(FenceError::EpochUnreadable),
         };
         if held_epoch == 0 || durable != held_epoch {
-            return Err(FenceError::EpochSuperseded { held: held_epoch, durable });
+            return Err(FenceError::EpochSuperseded {
+                held: held_epoch,
+                durable,
+            });
         }
         tx.commit().map_err(|_| FenceError::EpochUnreadable)
     }

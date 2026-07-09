@@ -40,10 +40,22 @@ fn checked_in_artifacts_match_regeneration() {
 
     // Models: byte-identical.
     for (file, expected) in [
-        ("planner_fp32.onnx", onnx::fp32_model(&fp32.scorer_weights())),
-        ("planner_int8_qdq.onnx", onnx::int8_qdq_model(&int8.scorer_weights())),
-        ("planner_v2_fp32.onnx", onnx::fp32_model_chain(&v2.scorer_weights())),
-        ("planner_v2_int8_qdq.onnx", onnx::int8_qdq_model_chain(&v2_int8.scorer_weights())),
+        (
+            "planner_fp32.onnx",
+            onnx::fp32_model(&fp32.scorer_weights()),
+        ),
+        (
+            "planner_int8_qdq.onnx",
+            onnx::int8_qdq_model(&int8.scorer_weights()),
+        ),
+        (
+            "planner_v2_fp32.onnx",
+            onnx::fp32_model_chain(&v2.scorer_weights()),
+        ),
+        (
+            "planner_v2_int8_qdq.onnx",
+            onnx::int8_qdq_model_chain(&v2_int8.scorer_weights()),
+        ),
     ] {
         let on_disk = std::fs::read(dir.join(file))
             .unwrap_or_else(|e| panic!("missing checked-in artifact {file}: {e}"));

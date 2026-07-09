@@ -513,7 +513,10 @@ impl VerifierStore {
             // Exact-match re-check on the parsed payload — the authority.
             let exact = serde_json::from_str::<serde_json::Value>(&rec.event_json)
                 .ok()
-                .and_then(|v| v.get("verdict_id").and_then(|id| id.as_str().map(String::from)))
+                .and_then(|v| {
+                    v.get("verdict_id")
+                        .and_then(|id| id.as_str().map(String::from))
+                })
                 .is_some_and(|id| id == verdict_id);
             if exact {
                 return Ok(Some(rec));
@@ -1471,7 +1474,13 @@ mod verdict_lookup_tests {
         )
         .expect("seed chained record");
 
-        for bad in ["", "abc", "abc%", &format!("{}%", "a".repeat(31)), &"A".repeat(32)] {
+        for bad in [
+            "",
+            "abc",
+            "abc%",
+            &format!("{}%", "a".repeat(31)),
+            &"A".repeat(32),
+        ] {
             assert!(
                 s.load_audit_record_by_verdict_id(bad).unwrap().is_none(),
                 "id={bad:?} must be refused"

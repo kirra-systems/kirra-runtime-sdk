@@ -118,9 +118,9 @@ impl Default for CommitZoneCfg {
     fn default() -> Self {
         // VALIDATION-PENDING placeholders (not certified values):
         Self {
-            look_ahead_m: 94.0,    // SG5 / SG4 ≈ 94 m look-ahead basis
-            vehicle_length_m: 4.5, // a passenger-vehicle-class default
-            exit_margin_m: 1.0,    // a small standoff beyond the vehicle length
+            look_ahead_m: 94.0,           // SG5 / SG4 ≈ 94 m look-ahead basis
+            vehicle_length_m: 4.5,        // a passenger-vehicle-class default
+            exit_margin_m: 1.0,           // a small standoff beyond the vehicle length
             clearance_time_margin_s: 2.0, // conservative temporal standoff
         }
     }
@@ -358,35 +358,51 @@ mod tests {
     /// no live perception of the crossing needed.
     #[test]
     fn test_map_prior_perception_miss_unknown_vetoes() {
-        assert!(commit_zone_blocked(&CommitZoneScene::Unknown, &cfg()),
-            "an absent/unhealthy map must veto (Reject from map alone)");
+        assert!(
+            commit_zone_blocked(&CommitZoneScene::Unknown, &cfg()),
+            "an absent/unhealthy map must veto (Reject from map alone)"
+        );
     }
 
     /// Gate-down: clearance not confirmed → veto, even with a verified exit.
     #[test]
     fn test_gate_down_clearance_unconfirmed_vetoes() {
         let s = CommitZoneScene::ZoneAhead {
-            map: healthy_map(50.0), clearance_confirmed: false, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: None,
+            map: healthy_map(50.0),
+            clearance_confirmed: false,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: None,
         };
-        assert!(commit_zone_blocked(&s, &cfg()), "unconfirmed clearance must veto");
+        assert!(
+            commit_zone_blocked(&s, &cfg()),
+            "unconfirmed clearance must veto"
+        );
     }
 
     /// No verified exit → veto (the no-stuck-inside guard at entry).
     #[test]
     fn test_no_verified_exit_vetoes() {
         let s = CommitZoneScene::ZoneAhead {
-            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: false,
-            zone_length_m: 30.0, proposed_stop_distance_m: None,
+            map: healthy_map(50.0),
+            clearance_confirmed: true,
+            exit_verified: false,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: None,
         };
-        assert!(commit_zone_blocked(&s, &cfg()), "no verified exit must veto");
+        assert!(
+            commit_zone_blocked(&s, &cfg()),
+            "no verified exit must veto"
+        );
     }
 
     /// Both confirmed on a healthy map within horizon → NO veto (no over-block).
     #[test]
     fn test_both_confirmed_healthy_no_veto() {
-        assert!(!commit_zone_blocked(&confirmed_zone(50.0), &cfg()),
-            "a healthy, clearance-confirmed, exit-verified zone permits entry");
+        assert!(
+            !commit_zone_blocked(&confirmed_zone(50.0), &cfg()),
+            "a healthy, clearance-confirmed, exit-verified zone permits entry"
+        );
     }
 
     /// Health gates the confirmations: a degraded map with BOTH confirmations
@@ -395,18 +411,34 @@ mod tests {
     fn test_unhealthy_map_with_confirmations_still_vetoes() {
         // low confidence
         let low_conf = CommitZoneScene::ZoneAhead {
-            map: CommitZoneMap { confidence: 0.1, ..healthy_map(50.0) },
-            clearance_confirmed: true, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: None,
+            map: CommitZoneMap {
+                confidence: 0.1,
+                ..healthy_map(50.0)
+            },
+            clearance_confirmed: true,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: None,
         };
-        assert!(commit_zone_blocked(&low_conf, &cfg()), "low-confidence map must veto despite confirmations");
+        assert!(
+            commit_zone_blocked(&low_conf, &cfg()),
+            "low-confidence map must veto despite confirmations"
+        );
         // stale
         let stale = CommitZoneScene::ZoneAhead {
-            map: CommitZoneMap { age_ms: 999_999, ..healthy_map(50.0) },
-            clearance_confirmed: true, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: None,
+            map: CommitZoneMap {
+                age_ms: 999_999,
+                ..healthy_map(50.0)
+            },
+            clearance_confirmed: true,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: None,
         };
-        assert!(commit_zone_blocked(&stale, &cfg()), "stale map must veto despite confirmations");
+        assert!(
+            commit_zone_blocked(&stale, &cfg()),
+            "stale map must veto despite confirmations"
+        );
     }
 
     /// NoZone and Unknown are DISTINCT outcomes.
@@ -426,7 +458,10 @@ mod tests {
     fn test_nonfinite_distance_vetoes() {
         for bad in [f64::NAN, f64::INFINITY] {
             let s = confirmed_zone(bad);
-            assert!(commit_zone_blocked(&s, &cfg()), "non-finite distance must veto ({bad})");
+            assert!(
+                commit_zone_blocked(&s, &cfg()),
+                "non-finite distance must veto ({bad})"
+            );
         }
     }
 
@@ -437,15 +472,22 @@ mod tests {
     #[test]
     fn test_horizon_boundary() {
         // exactly at horizon, confirmed → within horizon, permitted (no veto).
-        assert!(!commit_zone_blocked(&confirmed_zone(94.0), &cfg()),
-            "a confirmed zone exactly at the horizon is actionable and permitted");
+        assert!(
+            !commit_zone_blocked(&confirmed_zone(94.0), &cfg()),
+            "a confirmed zone exactly at the horizon is actionable and permitted"
+        );
         // exactly at horizon, unconfirmed → within horizon → veto.
         let at_unconfirmed = CommitZoneScene::ZoneAhead {
-            map: healthy_map(94.0), clearance_confirmed: false, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: None,
+            map: healthy_map(94.0),
+            clearance_confirmed: false,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: None,
         };
-        assert!(commit_zone_blocked(&at_unconfirmed, &cfg()),
-            "an unconfirmed zone exactly at the horizon must veto (within horizon)");
+        assert!(
+            commit_zone_blocked(&at_unconfirmed, &cfg()),
+            "an unconfirmed zone exactly at the horizon must veto (within horizon)"
+        );
     }
 
     /// A zone just beyond the horizon is not yet a decision (no veto), even
@@ -453,11 +495,16 @@ mod tests {
     #[test]
     fn test_beyond_horizon_no_veto() {
         let beyond = CommitZoneScene::ZoneAhead {
-            map: healthy_map(94.0 + 1e-6), clearance_confirmed: false, exit_verified: false,
-            zone_length_m: 30.0, proposed_stop_distance_m: None,
+            map: healthy_map(94.0 + 1e-6),
+            clearance_confirmed: false,
+            exit_verified: false,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: None,
         };
-        assert!(!commit_zone_blocked(&beyond, &cfg()),
-            "a zone beyond the look-ahead horizon is not yet actionable");
+        assert!(
+            !commit_zone_blocked(&beyond, &cfg()),
+            "a zone beyond the look-ahead horizon is not yet actionable"
+        );
     }
 
     // ───────────────────────── #107 exit-clearance derivation ──────────────
@@ -467,18 +514,26 @@ mod tests {
     #[test]
     fn test_exit_clearance_queue_spillback_blocks() {
         let c = cfg(); // needs >= 4.5 + 1.0 = 5.5 m
-        let ev = ExitClearanceEvidence { downstream_clear_m: 3.0 };
-        assert!(!exit_clearance_verified(&ev, &c),
-            "insufficient downstream space must NOT verify the exit");
+        let ev = ExitClearanceEvidence {
+            downstream_clear_m: 3.0,
+        };
+        assert!(
+            !exit_clearance_verified(&ev, &c),
+            "insufficient downstream space must NOT verify the exit"
+        );
     }
 
     /// Ample receiving space → exit verified.
     #[test]
     fn test_exit_clearance_ample_space_verified() {
         let c = cfg();
-        let ev = ExitClearanceEvidence { downstream_clear_m: 20.0 };
-        assert!(exit_clearance_verified(&ev, &c),
-            "ample downstream space must verify the exit");
+        let ev = ExitClearanceEvidence {
+            downstream_clear_m: 20.0,
+        };
+        assert!(
+            exit_clearance_verified(&ev, &c),
+            "ample downstream space must verify the exit"
+        );
     }
 
     /// Non-finite measurement is fail-closed (an unverifiable exit is NO exit).
@@ -486,9 +541,13 @@ mod tests {
     fn test_exit_clearance_nonfinite_not_verified() {
         let c = cfg();
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let ev = ExitClearanceEvidence { downstream_clear_m: bad };
-            assert!(!exit_clearance_verified(&ev, &c),
-                "non-finite downstream space must NOT verify ({bad})");
+            let ev = ExitClearanceEvidence {
+                downstream_clear_m: bad,
+            };
+            assert!(
+                !exit_clearance_verified(&ev, &c),
+                "non-finite downstream space must NOT verify ({bad})"
+            );
         }
     }
 
@@ -498,10 +557,20 @@ mod tests {
     fn test_exit_clearance_boundary() {
         let c = cfg();
         let threshold = c.vehicle_length_m + c.exit_margin_m; // 5.5
-        let at = ExitClearanceEvidence { downstream_clear_m: threshold };
-        assert!(exit_clearance_verified(&at, &c), "exactly at threshold verifies");
-        let below = ExitClearanceEvidence { downstream_clear_m: threshold - 1e-9 };
-        assert!(!exit_clearance_verified(&below, &c), "just below threshold does not verify");
+        let at = ExitClearanceEvidence {
+            downstream_clear_m: threshold,
+        };
+        assert!(
+            exit_clearance_verified(&at, &c),
+            "exactly at threshold verifies"
+        );
+        let below = ExitClearanceEvidence {
+            downstream_clear_m: threshold - 1e-9,
+        };
+        assert!(
+            !exit_clearance_verified(&below, &c),
+            "just below threshold does not verify"
+        );
     }
 
     // ───────────────────────── #107 stop-inside clause ─────────────────────
@@ -512,11 +581,16 @@ mod tests {
     fn test_stop_inside_vetoes_despite_confirmations() {
         // zone [50, 80]; stop at 65 is inside.
         let s = CommitZoneScene::ZoneAhead {
-            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: Some(65.0),
+            map: healthy_map(50.0),
+            clearance_confirmed: true,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: Some(65.0),
         };
-        assert!(commit_zone_blocked(&s, &cfg()),
-            "a stop inside the zone must veto even with both confirmations");
+        assert!(
+            commit_zone_blocked(&s, &cfg()),
+            "a stop inside the zone must veto even with both confirmations"
+        );
     }
 
     /// A stop SHORT of the zone is the safe state → no veto (with entry confirmed).
@@ -524,11 +598,16 @@ mod tests {
     fn test_stop_short_of_zone_no_veto() {
         // zone [50, 80]; stop at 40 is short.
         let s = CommitZoneScene::ZoneAhead {
-            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: Some(40.0),
+            map: healthy_map(50.0),
+            clearance_confirmed: true,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: Some(40.0),
         };
-        assert!(!commit_zone_blocked(&s, &cfg()),
-            "a stop short of the zone is the safe state and must not veto");
+        assert!(
+            !commit_zone_blocked(&s, &cfg()),
+            "a stop short of the zone is the safe state and must not veto"
+        );
     }
 
     /// A stop BEYOND the far edge (fully clears) → no veto (with entry confirmed).
@@ -536,11 +615,16 @@ mod tests {
     fn test_stop_beyond_far_edge_no_veto() {
         // zone [50, 80]; stop at 90 is beyond.
         let s = CommitZoneScene::ZoneAhead {
-            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: Some(90.0),
+            map: healthy_map(50.0),
+            clearance_confirmed: true,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: Some(90.0),
         };
-        assert!(!commit_zone_blocked(&s, &cfg()),
-            "a stop beyond the far edge fully clears and must not veto");
+        assert!(
+            !commit_zone_blocked(&s, &cfg()),
+            "a stop beyond the far edge fully clears and must not veto"
+        );
     }
 
     /// Inclusive interval: stopping EXACTLY on either edge is stopping in the zone.
@@ -548,18 +632,28 @@ mod tests {
     fn test_stop_inside_interval_boundaries() {
         // near edge (zone_start = 50)
         let at_start = CommitZoneScene::ZoneAhead {
-            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: Some(50.0),
+            map: healthy_map(50.0),
+            clearance_confirmed: true,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: Some(50.0),
         };
-        assert!(commit_zone_blocked(&at_start, &cfg()),
-            "a stop exactly on the near edge is stopping in the zone");
+        assert!(
+            commit_zone_blocked(&at_start, &cfg()),
+            "a stop exactly on the near edge is stopping in the zone"
+        );
         // far edge (zone_end = 80)
         let at_end = CommitZoneScene::ZoneAhead {
-            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: Some(80.0),
+            map: healthy_map(50.0),
+            clearance_confirmed: true,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: Some(80.0),
         };
-        assert!(commit_zone_blocked(&at_end, &cfg()),
-            "a stop exactly on the far edge is stopping in the zone");
+        assert!(
+            commit_zone_blocked(&at_end, &cfg()),
+            "a stop exactly on the far edge is stopping in the zone"
+        );
     }
 
     /// `None` proposed stop → the stop-inside clause is inert (no veto on its
@@ -567,11 +661,16 @@ mod tests {
     #[test]
     fn test_stop_none_clause_inert() {
         let s = CommitZoneScene::ZoneAhead {
-            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: None,
+            map: healthy_map(50.0),
+            clearance_confirmed: true,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: None,
         };
-        assert!(!commit_zone_blocked(&s, &cfg()),
-            "no proposed stop → the stop-inside clause must not veto");
+        assert!(
+            !commit_zone_blocked(&s, &cfg()),
+            "no proposed stop → the stop-inside clause must not veto"
+        );
     }
 
     /// The stop-inside clause vetoes even for a zone BEYOND the horizon: a planned
@@ -581,11 +680,16 @@ mod tests {
     fn test_stop_inside_vetoes_beyond_horizon() {
         // zone start 200 (> 94 horizon), length 30 → [200, 230]; stop at 210 inside.
         let s = CommitZoneScene::ZoneAhead {
-            map: healthy_map(200.0), clearance_confirmed: true, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: Some(210.0),
+            map: healthy_map(200.0),
+            clearance_confirmed: true,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: Some(210.0),
         };
-        assert!(commit_zone_blocked(&s, &cfg()),
-            "a planned stop inside a far zone must still veto (clause precedes horizon)");
+        assert!(
+            commit_zone_blocked(&s, &cfg()),
+            "a planned stop inside a far zone must still veto (clause precedes horizon)"
+        );
     }
 
     /// NaN discipline on the stop-inside inputs: a non-finite `zone_length_m` or
@@ -594,17 +698,27 @@ mod tests {
     fn test_nonfinite_zone_length_or_stop_vetoes() {
         for bad in [f64::NAN, f64::INFINITY] {
             let bad_len = CommitZoneScene::ZoneAhead {
-                map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
-                zone_length_m: bad, proposed_stop_distance_m: Some(60.0),
+                map: healthy_map(50.0),
+                clearance_confirmed: true,
+                exit_verified: true,
+                zone_length_m: bad,
+                proposed_stop_distance_m: Some(60.0),
             };
-            assert!(commit_zone_blocked(&bad_len, &cfg()),
-                "non-finite zone_length_m with a proposed stop must veto ({bad})");
+            assert!(
+                commit_zone_blocked(&bad_len, &cfg()),
+                "non-finite zone_length_m with a proposed stop must veto ({bad})"
+            );
             let bad_stop = CommitZoneScene::ZoneAhead {
-                map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
-                zone_length_m: 30.0, proposed_stop_distance_m: Some(bad),
+                map: healthy_map(50.0),
+                clearance_confirmed: true,
+                exit_verified: true,
+                zone_length_m: 30.0,
+                proposed_stop_distance_m: Some(bad),
             };
-            assert!(commit_zone_blocked(&bad_stop, &cfg()),
-                "non-finite proposed stop must veto ({bad})");
+            assert!(
+                commit_zone_blocked(&bad_stop, &cfg()),
+                "non-finite proposed stop must veto ({bad})"
+            );
         }
     }
 
@@ -614,13 +728,22 @@ mod tests {
     fn test_derived_exit_clearance_feeds_gate() {
         let c = cfg();
         let exit = exit_clearance_verified(
-            &ExitClearanceEvidence { downstream_clear_m: 2.0 }, &c); // < 5.5 → false
+            &ExitClearanceEvidence {
+                downstream_clear_m: 2.0,
+            },
+            &c,
+        ); // < 5.5 → false
         let s = CommitZoneScene::ZoneAhead {
-            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: exit,
-            zone_length_m: 30.0, proposed_stop_distance_m: None,
+            map: healthy_map(50.0),
+            clearance_confirmed: true,
+            exit_verified: exit,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: None,
         };
-        assert!(commit_zone_blocked(&s, &c),
-            "a derived unverified exit must veto entry");
+        assert!(
+            commit_zone_blocked(&s, &c),
+            "a derived unverified exit must veto entry"
+        );
     }
 
     // ───────────────────── #108 non-yielding-agent clearance ───────────────
@@ -637,10 +760,13 @@ mod tests {
     fn test_nonyield_train_beats_ego_not_clear() {
         // arrival = 60 / 10 = 6.0 s  <  8.45 s clear time → not clear.
         let s = agents(vec![NonYieldingAgent {
-            approach_velocity_mps: 10.0, distance_to_conflict_m: 60.0,
+            approach_velocity_mps: 10.0,
+            distance_to_conflict_m: 60.0,
         }]);
-        assert!(!non_yielding_clearance(&s, &healthy_map(50.0), 30.0, 10.0, &cfg()),
-            "a train that arrives before the ego clears must NOT be clear");
+        assert!(
+            !non_yielding_clearance(&s, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "a train that arrives before the ego clears must NOT be clear"
+        );
     }
 
     /// Ego clears with margin to spare → clear.
@@ -648,10 +774,13 @@ mod tests {
     fn test_nonyield_ego_clears_with_margin() {
         // arrival = 200 / 10 = 20.0 s  >  8.45 + 2.0 = 10.45 s → clear.
         let s = agents(vec![NonYieldingAgent {
-            approach_velocity_mps: 10.0, distance_to_conflict_m: 200.0,
+            approach_velocity_mps: 10.0,
+            distance_to_conflict_m: 200.0,
         }]);
-        assert!(non_yielding_clearance(&s, &healthy_map(50.0), 30.0, 10.0, &cfg()),
-            "an agent arriving well after the ego clears must be clear");
+        assert!(
+            non_yielding_clearance(&s, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "an agent arriving well after the ego clears must be clear"
+        );
     }
 
     /// Hand-checked margin boundary: arrival EXACTLY at clear + margin → NOT clear
@@ -659,48 +788,80 @@ mod tests {
     #[test]
     fn test_nonyield_margin_boundary_strict() {
         let at = agents(vec![NonYieldingAgent {
-            approach_velocity_mps: 10.0, distance_to_conflict_m: 104.5,
+            approach_velocity_mps: 10.0,
+            distance_to_conflict_m: 104.5,
         }]);
-        assert!(!non_yielding_clearance(&at, &healthy_map(50.0), 30.0, 10.0, &cfg()),
-            "arrival exactly at clear+margin must NOT be clear (strict >)");
+        assert!(
+            !non_yielding_clearance(&at, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "arrival exactly at clear+margin must NOT be clear (strict >)"
+        );
         // just past the boundary → clear.
         let past = agents(vec![NonYieldingAgent {
-            approach_velocity_mps: 10.0, distance_to_conflict_m: 104.5 + 1e-3,
+            approach_velocity_mps: 10.0,
+            distance_to_conflict_m: 104.5 + 1e-3,
         }]);
-        assert!(non_yielding_clearance(&past, &healthy_map(50.0), 30.0, 10.0, &cfg()),
-            "arrival just past clear+margin must be clear");
+        assert!(
+            non_yielding_clearance(&past, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "arrival just past clear+margin must be clear"
+        );
     }
 
     /// ALL rule: one clear agent + one not-clear agent → NOT clear.
     #[test]
     fn test_nonyield_all_rule_one_not_clear() {
         let s = agents(vec![
-            NonYieldingAgent { approach_velocity_mps: 10.0, distance_to_conflict_m: 200.0 }, // clear
-            NonYieldingAgent { approach_velocity_mps: 10.0, distance_to_conflict_m: 60.0 },  // not clear
+            NonYieldingAgent {
+                approach_velocity_mps: 10.0,
+                distance_to_conflict_m: 200.0,
+            }, // clear
+            NonYieldingAgent {
+                approach_velocity_mps: 10.0,
+                distance_to_conflict_m: 60.0,
+            }, // not clear
         ]);
-        assert!(!non_yielding_clearance(&s, &healthy_map(50.0), 30.0, 10.0, &cfg()),
-            "one non-clear agent among many must make the scene NOT clear");
+        assert!(
+            !non_yielding_clearance(&s, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "one non-clear agent among many must make the scene NOT clear"
+        );
     }
 
     /// Absent detector → NOT clear (absent ≠ none).
     #[test]
     fn test_nonyield_absent_not_clear() {
-        assert!(!non_yielding_clearance(&NonYieldingScene::Absent, &healthy_map(50.0), 30.0, 10.0, &cfg()),
-            "an absent detector must NOT be clear (fail-closed)");
+        assert!(
+            !non_yielding_clearance(
+                &NonYieldingScene::Absent,
+                &healthy_map(50.0),
+                30.0,
+                10.0,
+                &cfg()
+            ),
+            "an absent detector must NOT be clear (fail-closed)"
+        );
     }
 
     /// KnownNone → clear.
     #[test]
     fn test_nonyield_known_none_clear() {
-        assert!(non_yielding_clearance(&NonYieldingScene::KnownNone, &healthy_map(50.0), 30.0, 10.0, &cfg()),
-            "a positive 'none detected' must be clear");
+        assert!(
+            non_yielding_clearance(
+                &NonYieldingScene::KnownNone,
+                &healthy_map(50.0),
+                30.0,
+                10.0,
+                &cfg()
+            ),
+            "a positive 'none detected' must be clear"
+        );
     }
 
     /// EMPTY Agents vec is ambiguous vs KnownNone → NOT clear (#92 rule).
     #[test]
     fn test_nonyield_empty_vec_not_clear() {
-        assert!(!non_yielding_clearance(&agents(vec![]), &healthy_map(50.0), 30.0, 10.0, &cfg()),
-            "an empty agents vec must NOT be clear (distinct from KnownNone)");
+        assert!(
+            !non_yielding_clearance(&agents(vec![]), &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "an empty agents vec must NOT be clear (distinct from KnownNone)"
+        );
     }
 
     /// An ego that cannot traverse cannot claim clearance: speed 0 / negative /
@@ -708,11 +869,14 @@ mod tests {
     #[test]
     fn test_nonyield_ego_speed_nonpositive_or_nan_not_clear() {
         let far = agents(vec![NonYieldingAgent {
-            approach_velocity_mps: 10.0, distance_to_conflict_m: 1.0e6,
+            approach_velocity_mps: 10.0,
+            distance_to_conflict_m: 1.0e6,
         }]);
         for bad in [0.0, -5.0, f64::NAN] {
-            assert!(!non_yielding_clearance(&far, &healthy_map(50.0), 30.0, bad, &cfg()),
-                "ego speed {bad} must make the scene NOT clear");
+            assert!(
+                !non_yielding_clearance(&far, &healthy_map(50.0), 30.0, bad, &cfg()),
+                "ego speed {bad} must make the scene NOT clear"
+            );
         }
     }
 
@@ -721,15 +885,21 @@ mod tests {
     #[test]
     fn test_nonyield_agent_receding_clear_nan_velocity_not_clear() {
         let receding = agents(vec![NonYieldingAgent {
-            approach_velocity_mps: -3.0, distance_to_conflict_m: 5.0,
+            approach_velocity_mps: -3.0,
+            distance_to_conflict_m: 5.0,
         }]);
-        assert!(non_yielding_clearance(&receding, &healthy_map(50.0), 30.0, 10.0, &cfg()),
-            "a finite receding agent never arrives → clear w.r.t. it");
+        assert!(
+            non_yielding_clearance(&receding, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "a finite receding agent never arrives → clear w.r.t. it"
+        );
         let nan_v = agents(vec![NonYieldingAgent {
-            approach_velocity_mps: f64::NAN, distance_to_conflict_m: 5.0,
+            approach_velocity_mps: f64::NAN,
+            distance_to_conflict_m: 5.0,
         }]);
-        assert!(!non_yielding_clearance(&nan_v, &healthy_map(50.0), 30.0, 10.0, &cfg()),
-            "a NaN velocity must NOT slip through the receding branch (NOT clear)");
+        assert!(
+            !non_yielding_clearance(&nan_v, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "a NaN velocity must NOT slip through the receding branch (NOT clear)"
+        );
     }
 
     /// Non-finite distance_to_conflict → NOT clear.
@@ -737,10 +907,13 @@ mod tests {
     fn test_nonyield_nonfinite_distance_not_clear() {
         for bad in [f64::NAN, f64::INFINITY] {
             let s = agents(vec![NonYieldingAgent {
-                approach_velocity_mps: 10.0, distance_to_conflict_m: bad,
+                approach_velocity_mps: 10.0,
+                distance_to_conflict_m: bad,
             }]);
-            assert!(!non_yielding_clearance(&s, &healthy_map(50.0), 30.0, 10.0, &cfg()),
-                "non-finite distance_to_conflict must be NOT clear ({bad})");
+            assert!(
+                !non_yielding_clearance(&s, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+                "non-finite distance_to_conflict must be NOT clear ({bad})"
+            );
         }
     }
 }

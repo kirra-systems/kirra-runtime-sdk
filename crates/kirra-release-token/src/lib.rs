@@ -69,12 +69,24 @@ pub(crate) mod b64 {
     pub(crate) fn encode(data: &[u8]) -> String {
         let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
         for chunk in data.chunks(3) {
-            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
             let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
             out.push(B64[(n >> 18) as usize & 63] as char);
             out.push(B64[(n >> 12) as usize & 63] as char);
-            out.push(if chunk.len() > 1 { B64[(n >> 6) as usize & 63] as char } else { '=' });
-            out.push(if chunk.len() > 2 { B64[n as usize & 63] as char } else { '=' });
+            out.push(if chunk.len() > 1 {
+                B64[(n >> 6) as usize & 63] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                B64[n as usize & 63] as char
+            } else {
+                '='
+            });
         }
         out
     }
@@ -178,7 +190,10 @@ fn release_signing_payload(digest: &[u8; 32]) -> [u8; RELEASE_DOMAIN.len() + 8 +
 pub fn issue_release_token(view: &GovernorContractView, signing_key: &SigningKey) -> ReleaseToken {
     let digest = contract_digest(view);
     let signature = signing_key.sign(&release_signing_payload(&digest));
-    ReleaseToken { digest, signature: signature.to_bytes() }
+    ReleaseToken {
+        digest,
+        signature: signature.to_bytes(),
+    }
 }
 
 /// Step 7: the actuator's verify-before-release gate. `actuating_view` is the
@@ -377,7 +392,9 @@ mod tests {
         let token = issue_release_token(&v, &sk);
         let bare = Signature::from_bytes(&token.signature);
         assert!(
-            sk.verifying_key().verify_strict(&token.digest, &bare).is_err(),
+            sk.verifying_key()
+                .verify_strict(&token.digest, &bare)
+                .is_err(),
             "the signature must not verify over the bare digest (no domain tag)"
         );
     }
@@ -412,7 +429,9 @@ pub mod artifact_release {
 
     fn digest_hex_valid(digest_hex: &str) -> bool {
         digest_hex.len() == 64
-            && digest_hex.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            && digest_hex
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     }
 
     fn payload(digest_hex: &str) -> Vec<u8> {
@@ -449,8 +468,9 @@ pub mod artifact_release {
             return Err(ArtifactReleaseError::MalformedDigest);
         }
         let bytes = base64_decode(signature_b64).ok_or(ArtifactReleaseError::MalformedSignature)?;
-        let arr: [u8; 64] =
-            bytes.try_into().map_err(|_| ArtifactReleaseError::MalformedSignature)?;
+        let arr: [u8; 64] = bytes
+            .try_into()
+            .map_err(|_| ArtifactReleaseError::MalformedSignature)?;
         let sig = Signature::from_bytes(&arr);
         release_vk
             .verify_strict(&payload(digest_hex), &sig)
@@ -467,8 +487,7 @@ pub mod artifact_release {
         fn key() -> SigningKey {
             SigningKey::from_bytes(&[7u8; 32])
         }
-        const DIGEST: &str =
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
         #[test]
         fn round_trip_signs_and_verifies() {
@@ -491,8 +510,7 @@ pub mod artifact_release {
         fn signature_over_a_different_digest_is_refused() {
             let sk = key();
             let sig = sign_artifact_release(DIGEST, &sk).unwrap();
-            let other_digest =
-                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+            let other_digest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
             assert_eq!(
                 verify_artifact_release(other_digest, &sig, &sk.verifying_key()),
                 Err(ArtifactReleaseError::SignatureInvalid)

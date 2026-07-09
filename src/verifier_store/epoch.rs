@@ -42,20 +42,22 @@ impl VerifierStore {
         tx: &rusqlite::Transaction,
         held_epoch: u64,
     ) -> std::result::Result<(), FenceError> {
-        let durable: u64 = match tx.query_row(
-            "SELECT epoch FROM ha_state WHERE id = 1",
-            [],
-            |row| row.get::<_, i64>(0),
-        ) {
-            Ok(e) => e as u64,
-            // SELECT failed or the singleton row is absent — never write blind.
-            Err(_) => return Err(FenceError::EpochUnreadable),
-        };
+        let durable: u64 =
+            match tx.query_row("SELECT epoch FROM ha_state WHERE id = 1", [], |row| {
+                row.get::<_, i64>(0)
+            }) {
+                Ok(e) => e as u64,
+                // SELECT failed or the singleton row is absent — never write blind.
+                Err(_) => return Err(FenceError::EpochUnreadable),
+            };
         // `held == 0` is fenced explicitly: it must reject even when the durable
         // epoch is also 0 (genesis, no claim anywhere) — a node that never
         // claimed must not perform a top-tier write.
         if held_epoch == 0 || durable != held_epoch {
-            return Err(FenceError::EpochSuperseded { held: held_epoch, durable });
+            return Err(FenceError::EpochSuperseded {
+                held: held_epoch,
+                durable,
+            });
         }
         Ok(())
     }
@@ -88,11 +90,11 @@ impl VerifierStore {
 
     /// Current durable HA epoch. Source of truth for "who owns writes."
     pub fn current_epoch(&self) -> Result<u64> {
-        let e: i64 = self.conn.query_row(
-            "SELECT epoch FROM ha_state WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )?;
+        let e: i64 = self
+            .conn
+            .query_row("SELECT epoch FROM ha_state WHERE id = 1", [], |row| {
+                row.get(0)
+            })?;
         Ok(e as u64)
     }
 
@@ -148,12 +150,7 @@ impl VerifierStore {
     ///
     /// Rides the durable (force-synced) connection like `try_claim_epoch`, so a
     /// renewal is fsync'd before it is relied on. O(1); no retry loop.
-    pub fn renew_lease(
-        &mut self,
-        instance_id: &str,
-        held_epoch: u64,
-        now_ms: u64,
-    ) -> Result<bool> {
+    pub fn renew_lease(&mut self, instance_id: &str, held_epoch: u64, now_ms: u64) -> Result<bool> {
         let n = self.durable_ref().execute(
             "UPDATE ha_state SET updated_at_ms = ?3 \
              WHERE id = 1 AND epoch = ?1 AND active_instance_id = ?2",
@@ -171,7 +168,11 @@ impl VerifierStore {
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        Ok(HaLease { epoch: epoch as u64, holder, last_renew_ms: last_renew_ms as u64 })
+        Ok(HaLease {
+            epoch: epoch as u64,
+            holder,
+            last_renew_ms: last_renew_ms as u64,
+        })
     }
 
     /// TEST-ONLY: remove the singleton HA row to simulate an epoch-read/disk
@@ -261,7 +262,10 @@ impl EpochFence for VerifierStore {
         self.try_claim_epoch(observed, instance_id, now_ms)
     }
 
-    fn assert_actuator_epoch_held(&mut self, held_epoch: u64) -> std::result::Result<(), FenceError> {
+    fn assert_actuator_epoch_held(
+        &mut self,
+        held_epoch: u64,
+    ) -> std::result::Result<(), FenceError> {
         self.assert_actuator_epoch_held(held_epoch)
     }
 }
@@ -307,7 +311,12 @@ impl InMemoryEpochFence {
     /// `VerifierStore`'s seeded `ha_state`).
     #[must_use]
     pub fn genesis() -> Self {
-        Self { epoch: 0, holder: None, updated_at_ms: 0, row_present: true }
+        Self {
+            epoch: 0,
+            holder: None,
+            updated_at_ms: 0,
+            row_present: true,
+        }
     }
 
     /// Simulate an epoch-read/disk wedge (the row becomes unreadable) — the
@@ -354,13 +363,19 @@ impl EpochFence for InMemoryEpochFence {
         }
     }
 
-    fn assert_actuator_epoch_held(&mut self, held_epoch: u64) -> std::result::Result<(), FenceError> {
+    fn assert_actuator_epoch_held(
+        &mut self,
+        held_epoch: u64,
+    ) -> std::result::Result<(), FenceError> {
         if !self.row_present {
             return Err(FenceError::EpochUnreadable);
         }
         // Identical fail-closed predicate to `VerifierStore::assert_epoch_held`.
         if held_epoch == 0 || self.epoch != held_epoch {
-            return Err(FenceError::EpochSuperseded { held: held_epoch, durable: self.epoch });
+            return Err(FenceError::EpochSuperseded {
+                held: held_epoch,
+                durable: self.epoch,
+            });
         }
         Ok(())
     }
@@ -390,11 +405,18 @@ where
 
     // A claim on a WRONG observed epoch loses and never advances the counter.
     assert_eq!(f.try_claim_epoch(7, "A", 1).unwrap(), None);
-    assert_eq!(f.current_epoch().unwrap(), 0, "a lost claim must not advance the epoch");
+    assert_eq!(
+        f.current_epoch().unwrap(),
+        0,
+        "a lost claim must not advance the epoch"
+    );
 
     // The correct claim wins and records the holder.
     assert_eq!(f.try_claim_epoch(0, "A", 10).unwrap(), Some(1));
-    assert_eq!(f.current_active_holder().unwrap(), (1, Some("A".to_string())));
+    assert_eq!(
+        f.current_active_holder().unwrap(),
+        (1, Some("A".to_string()))
+    );
 
     // The winner (held == durable == 1) holds the fence.
     assert_eq!(f.assert_actuator_epoch_held(1), Ok(()));
@@ -402,11 +424,17 @@ where
     // future epoch are all fenced.
     assert_eq!(
         f.assert_actuator_epoch_held(0),
-        Err(FenceError::EpochSuperseded { held: 0, durable: 1 })
+        Err(FenceError::EpochSuperseded {
+            held: 0,
+            durable: 1
+        })
     );
     assert_eq!(
         f.assert_actuator_epoch_held(2),
-        Err(FenceError::EpochSuperseded { held: 2, durable: 1 })
+        Err(FenceError::EpochSuperseded {
+            held: 2,
+            durable: 1
+        })
     );
 
     // A second instance observing epoch 1 claims → exactly one writer moves on,
@@ -414,10 +442,17 @@ where
     assert_eq!(f.try_claim_epoch(1, "B", 20).unwrap(), Some(2));
     assert_eq!(
         f.assert_actuator_epoch_held(1),
-        Err(FenceError::EpochSuperseded { held: 1, durable: 2 }),
+        Err(FenceError::EpochSuperseded {
+            held: 1,
+            durable: 2
+        }),
         "A is superseded by B's claim"
     );
-    assert_eq!(f.assert_actuator_epoch_held(2), Ok(()), "B now holds the fence");
+    assert_eq!(
+        f.assert_actuator_epoch_held(2),
+        Ok(()),
+        "B now holds the fence"
+    );
 
     // A double-claim on the already-consumed observed epoch loses (idempotent CAS).
     assert_eq!(f.try_claim_epoch(1, "C", 30).unwrap(), None);
@@ -454,6 +489,9 @@ mod fence_contract_tests {
         let mut fence = InMemoryEpochFence::genesis();
         fence.try_claim_epoch(0, "A", 1).unwrap();
         fence.wedge();
-        assert_eq!(fence.assert_actuator_epoch_held(1), Err(FenceError::EpochUnreadable));
+        assert_eq!(
+            fence.assert_actuator_epoch_held(1),
+            Err(FenceError::EpochUnreadable)
+        );
     }
 }

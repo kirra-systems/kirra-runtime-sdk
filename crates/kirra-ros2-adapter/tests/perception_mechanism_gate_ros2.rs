@@ -92,7 +92,10 @@ pub fn fixture_to_predicted_objects(
         })
         .collect();
 
-    PredictedObjects { objects, ..Default::default() }
+    PredictedObjects {
+        objects,
+        ..Default::default()
+    }
 }
 
 // --- AUTO-TESTED: r2r decode round-trip (exercises parse_predicted_objects) ---
@@ -147,11 +150,11 @@ fn decoded_objects_produce_expected_caps() {
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use kirra_core::FleetPosture;
 use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource};
 use kirra_ros2_adapter::node::run_adapter;
 use kirra_ros2_adapter::perception_ingest::perception_derate_enabled;
 use kirra_ros2_adapter::state::{AdaptorState, TrajectoryVerdict};
-use kirra_core::FleetPosture;
 
 /// Adapter node name + namespace the harness publishes INTO. `run_adapter`
 /// creates the node in namespace `"kirra"`; the harness picks the name, so the
@@ -212,7 +215,10 @@ fn build_trajectory_msg() -> r2r::autoware_planning_msgs::msg::Trajectory {
             pt
         })
         .collect();
-    Trajectory { points, ..Default::default() }
+    Trajectory {
+        points,
+        ..Default::default()
+    }
 }
 
 /// Ego odom at the trajectory speed, zero yaw-rate (→ derived current steering 0,
@@ -364,19 +370,55 @@ async fn run_full_node_integration_async() {
 
     if derate_on {
         // (b) PLAUSIBLE → no derate → trajectory accepted at 20 m/s.
-        drive_until(&state, &traj_pub, &odom_pub, &obj_pub, Some(&objs_b),
-            TrajectoryVerdict::Accept, 0, "b plausible → Accept").await;
+        drive_until(
+            &state,
+            &traj_pub,
+            &odom_pub,
+            &obj_pub,
+            Some(&objs_b),
+            TrajectoryVerdict::Accept,
+            0,
+            "b plausible → Accept",
+        )
+        .await;
         // (c1) SINGLE IMPLAUSIBLE → MRC-floor cap (0.0) → per-pose clamp → Clamp.
-        drive_until(&state, &traj_pub, &odom_pub, &obj_pub, Some(&objs_c1),
-            TrajectoryVerdict::Clamp, 0, "c1 single-implausible → derated (Clamp)").await;
+        drive_until(
+            &state,
+            &traj_pub,
+            &odom_pub,
+            &obj_pub,
+            Some(&objs_c1),
+            TrajectoryVerdict::Clamp,
+            0,
+            "c1 single-implausible → derated (Clamp)",
+        )
+        .await;
         // (c2) GRADED (1-of-10) → cap 16.7625 < 20 → per-pose clamp → Clamp.
-        drive_until(&state, &traj_pub, &odom_pub, &obj_pub, Some(&objs_c2),
-            TrajectoryVerdict::Clamp, 0, "c2 graded → derated (Clamp)").await;
+        drive_until(
+            &state,
+            &traj_pub,
+            &odom_pub,
+            &obj_pub,
+            Some(&objs_c2),
+            TrajectoryVerdict::Clamp,
+            0,
+            "c2 graded → derated (Clamp)",
+        )
+        .await;
         // (d) SILENT → objects go stale past the TTL → swept to the MRC-floor cap
         //     → Clamp. Settle > TTL_MS so the prior (c2) objects are stale, then
         //     publish NO objects.
-        drive_until(&state, &traj_pub, &odom_pub, &obj_pub, None,
-            TrajectoryVerdict::Clamp, TTL_MS + 200, "d silent → staleness → derated (Clamp)").await;
+        drive_until(
+            &state,
+            &traj_pub,
+            &odom_pub,
+            &obj_pub,
+            None,
+            TrajectoryVerdict::Clamp,
+            TTL_MS + 200,
+            "d silent → staleness → derated (Clamp)",
+        )
+        .await;
     } else {
         // NEGATIVE CONTROL (#159-style): derate OFF → the cap is never applied, so
         // every scenario — plausible OR implausible — accepts at 20 m/s. The
@@ -385,16 +427,34 @@ async fn run_full_node_integration_async() {
         // cap is never applied, so a clean in-corridor 20 m/s trajectory MUST Accept.
         // If THIS times out on MRCFallback, the failure is delivery/install (Branch A),
         // not perception — and the trace above says which.
-        drive_until(&state, &traj_pub, &odom_pub, &obj_pub, None,
-            TrajectoryVerdict::Accept, 0, "baseline: traj+odom only -> Accept").await;
+        drive_until(
+            &state,
+            &traj_pub,
+            &odom_pub,
+            &obj_pub,
+            None,
+            TrajectoryVerdict::Accept,
+            0,
+            "baseline: traj+odom only -> Accept",
+        )
+        .await;
 
         for (objs, label) in [
             (&objs_b, "b (derate OFF) → Accept"),
             (&objs_c1, "c1 (derate OFF) → Accept"),
             (&objs_c2, "c2 (derate OFF) → Accept"),
         ] {
-            drive_until(&state, &traj_pub, &odom_pub, &obj_pub, Some(objs),
-                TrajectoryVerdict::Accept, 0, label).await;
+            drive_until(
+                &state,
+                &traj_pub,
+                &odom_pub,
+                &obj_pub,
+                Some(objs),
+                TrajectoryVerdict::Accept,
+                0,
+                label,
+            )
+            .await;
         }
     }
 
@@ -500,4 +560,3 @@ async fn clean_accept_delivery_probe_async() {
     adapter.abort();
     let _ = adapter.await;
 }
-

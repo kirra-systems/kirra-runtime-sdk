@@ -7,18 +7,17 @@
 
 use super::*;
 
-pub(crate) async fn verify_audit_chain(
-    State(svc): State<Arc<ServiceState>>,
-) -> impl IntoResponse {
+pub(crate) async fn verify_audit_chain(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     // `VerifyingKey` is `Copy`; copy it into the blocking task. A full-chain scan
     // with a per-row Ed25519 verification is the heaviest read-side op — `call_read`
     // runs it off the worker pool AND on a read-only replica, so it neither pins a
     // tokio worker nor contends the writer mutex.
     let vk = svc.audit_verifying_key;
-    let result = svc.app.store.call_read(move |store| {
-        store.verify_audit_chain_full(vk.as_ref())
-    })
-    .await;
+    let result = svc
+        .app
+        .store
+        .call_read(move |store| store.verify_audit_chain_full(vk.as_ref()))
+        .await;
     match result {
         Ok(Ok(r)) => Json(json!({
             "chain_intact": r.chain_intact,
@@ -38,11 +37,18 @@ pub(crate) async fn verify_audit_chain(
             // (rows internally consistent but tail deleted) or a row with a valid
             // hash but invalid signature both read as not-verified.
             "verified": r.verified(),
-        })).into_response(),
-        Ok(Err(_)) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "audit chain query failed" }))).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
+        }))
+        .into_response(),
+        Ok(Err(_)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "audit chain query failed" })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "store lock poisoned" })),
+        )
+            .into_response(),
     }
 }
 
@@ -53,10 +59,17 @@ pub(crate) async fn handle_audit_export(
     let limit = params.limit.unwrap_or(100).min(1000);
     let offset = params.offset.unwrap_or(0);
     let vk = svc.audit_verifying_key.as_ref();
-    match svc.app.store.with_read(|store| store.load_audit_chain_page(limit, offset, vk)) {
+    match svc
+        .app
+        .store
+        .with_read(|store| store.load_audit_chain_page(limit, offset, vk))
+    {
         Ok(page) => Json(page).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "export query failed" }))).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "export query failed" })),
+        )
+            .into_response(),
     }
 }
 
@@ -65,23 +78,33 @@ pub(crate) async fn handle_audit_rotate_key(
     Json(req): Json<RotateSigningKeyRequest>,
 ) -> impl IntoResponse {
     if !svc.app.is_active() {
-        return (StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "instance is in passive standby mode" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "instance is in passive standby mode" })),
+        )
+            .into_response();
     }
     // Decode the new signing seed → SigningKey (32-byte Ed25519 seed).
     let new_signing_key = {
         use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
-        match b64e.decode(req.new_signing_key_b64.trim())
+        match b64e
+            .decode(req.new_signing_key_b64.trim())
             .ok()
             .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
             .map(|seed| ed25519_dalek::SigningKey::from_bytes(&seed))
         {
             Some(sk) => sk,
-            None => return (StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "new_signing_key_b64 must be a base64 32-byte ed25519 seed" }))).into_response(),
+            None => return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    json!({ "error": "new_signing_key_b64 must be a base64 32-byte ed25519 seed" }),
+                ),
+            )
+                .into_response(),
         }
     };
-    let new_key_id = kirra_verifier::audit_chain::verifying_key_id(&new_signing_key.verifying_key());
+    let new_key_id =
+        kirra_verifier::audit_chain::verifying_key_id(&new_signing_key.verifying_key());
     // #79: pass our held fencing token so the durable write re-checks it INSIDE
     // the transaction, closing the gate→commit TOCTOU.
     let held_epoch = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
@@ -90,21 +113,35 @@ pub(crate) async fn handle_audit_rotate_key(
     // happens OUTSIDE the closure — the lock is already released by then,
     // matching the prior `drop(store)`-before-self-demote ordering (Rule 4).
     // SAFETY: SG-HA-3 — durable write off the worker pool.
-    let rotation = svc.app.store.call(move |store| {
-        store.record_key_rotation(new_signing_key, &req.reason, now_ms(), held_epoch)
-    }).await;
+    let rotation = svc
+        .app
+        .store
+        .call(move |store| {
+            store.record_key_rotation(new_signing_key, &req.reason, now_ms(), held_epoch)
+        })
+        .await;
     let rotation = match rotation {
         Ok(r) => r,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                          Json(json!({ "error": "store task failed" }))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "store task failed" })),
+            )
+                .into_response()
+        }
     };
     match rotation {
-        Ok(_) => Json(json!({ "recorded": true, "event_type": "KEY_ROTATION", "new_key_id": new_key_id })).into_response(),
+        Ok(_) => Json(
+            json!({ "recorded": true, "event_type": "KEY_ROTATION", "new_key_id": new_key_id }),
+        )
+        .into_response(),
         Err(DurableWriteError::Fenced(reason)) => {
             // Superseded between the request-path gate and this commit.
             // Mirror the gate: self-demote and reject fail-closed (no write
             // landed). Subsequent mutations hit the standby check above.
-            svc.app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            svc.app
+                .mode_active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             tracing::error!(
                 path = "/system/audit/rotate-signing-key",
                 fence = ?reason,
@@ -116,9 +153,14 @@ pub(crate) async fn handle_audit_rotate_key(
         // NonceReplay / GenerationRegress cannot arise here (key rotation touches
         // neither the nonce nor the federation-generation tables); fold them into the
         // generic server-error arm for exhaustiveness.
-        Err(DurableWriteError::Db(_)
+        Err(
+            DurableWriteError::Db(_)
             | DurableWriteError::NonceReplay
-            | DurableWriteError::GenerationRegress { .. }) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "failed to record key rotation" }))).into_response(),
+            | DurableWriteError::GenerationRegress { .. },
+        ) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to record key rotation" })),
+        )
+            .into_response(),
     }
 }

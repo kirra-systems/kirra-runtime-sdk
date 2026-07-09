@@ -134,7 +134,10 @@ fn posture_cache_stale(port: u16) -> Option<bool> {
 }
 
 fn ready(port: u16) -> bool {
-    matches!(http_get(&format!("http://127.0.0.1:{port}/ready")), Some((200, _)))
+    matches!(
+        http_get(&format!("http://127.0.0.1:{port}/ready")),
+        Some((200, _))
+    )
 }
 
 /// Poll `f` every `poll` until it returns true or `budget` elapses.
@@ -207,8 +210,7 @@ fn durable_holder(db: &Path) -> (u64, Option<String>) {
 }
 
 fn drill_dir(tag: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("kirra_ha_drill_{}_{tag}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("kirra_ha_drill_{}_{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create drill dir");
     dir
@@ -217,7 +219,10 @@ fn drill_dir(tag: &str) -> PathBuf {
 /// The legacy-path timing env (scaled down; see the constants above).
 fn legacy_env() -> Vec<(&'static str, String)> {
     vec![
-        ("KIRRA_HEARTBEAT_INTERVAL", HEARTBEAT_INTERVAL_MS.to_string()),
+        (
+            "KIRRA_HEARTBEAT_INTERVAL",
+            HEARTBEAT_INTERVAL_MS.to_string(),
+        ),
         ("KIRRA_PROMOTION_TIMEOUT", PROMOTION_TIMEOUT_MS.to_string()),
         ("KIRRA_PROMOTION_POLL", PROMOTION_POLL_MS.to_string()),
     ]

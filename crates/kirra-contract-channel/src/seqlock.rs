@@ -177,15 +177,26 @@ mod tests {
     #[test]
     fn stable_even_generation_yields_a_snapshot() {
         // g1 even, g2 == g1 ⇒ coherent on the first attempt.
-        let r = ScriptedReader { gens: std::vec![4, 4], idx: Cell::new(0), view: any_view() };
+        let r = ScriptedReader {
+            gens: std::vec![4, 4],
+            idx: Cell::new(0),
+            view: any_view(),
+        };
         assert_eq!(read_coherent_snapshot(&r, 8), Ok(any_view()));
     }
 
     #[test]
     fn persistently_odd_generation_exhausts_and_fails_closed() {
         // Always odd ⇒ a write never commits ⇒ fail-closed after the budget.
-        let r = ScriptedReader { gens: std::vec![3], idx: Cell::new(0), view: any_view() };
-        assert_eq!(read_coherent_snapshot(&r, 4), Err(SnapshotFault::RetryExhausted));
+        let r = ScriptedReader {
+            gens: std::vec![3],
+            idx: Cell::new(0),
+            view: any_view(),
+        };
+        assert_eq!(
+            read_coherent_snapshot(&r, 4),
+            Err(SnapshotFault::RetryExhausted)
+        );
     }
 
     #[test]
@@ -203,7 +214,11 @@ mod tests {
     #[test]
     fn odd_then_even_recovers_within_budget() {
         // g1=3 (odd, skip+retry), then g1=8,g2=8 (coherent).
-        let r = ScriptedReader { gens: std::vec![3, 8, 8], idx: Cell::new(0), view: any_view() };
+        let r = ScriptedReader {
+            gens: std::vec![3, 8, 8],
+            idx: Cell::new(0),
+            view: any_view(),
+        };
         assert_eq!(read_coherent_snapshot(&r, 8), Ok(any_view()));
     }
 
@@ -225,8 +240,7 @@ mod tests {
             let mut committed = 0u64;
             for s in 1..=N {
                 let cmd = s.to_le_bytes();
-                let body =
-                    GovernorContractView::new_command(0, s, s, s * 1000, &cmd).unwrap();
+                let body = GovernorContractView::new_command(0, s, s, s * 1000, &cmd).unwrap();
                 committed = publish(&*w, committed, &body);
             }
         });

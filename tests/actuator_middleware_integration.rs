@@ -8,10 +8,12 @@
 use std::sync::Arc;
 
 use kirra_verifier::{
+    gateway::kinematics_contract::{
+        validate_vehicle_command, EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
+    },
     posture_cache::{CachedFleetPosture, ServiceState, SharedPostureCache},
     verifier::{AppState, FleetPosture, VerifierOperationMode},
     verifier_store::VerifierStore,
-    gateway::kinematics_contract::{validate_vehicle_command, EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract},
 };
 
 // ---------------------------------------------------------------------------
@@ -21,8 +23,9 @@ use kirra_verifier::{
 fn build_state(posture: FleetPosture) -> Arc<ServiceState> {
     let store = VerifierStore::new(":memory:").expect("in-memory store");
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
-    let posture_cache: SharedPostureCache =
-        Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(posture))));
+    let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+        CachedFleetPosture::new(posture),
+    )));
     Arc::new(ServiceState {
         app,
         posture_cache,
@@ -30,7 +33,9 @@ fn build_state(posture: FleetPosture) -> Arc<ServiceState> {
         audit_verifying_key: None,
         fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
         fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_causal_log: Arc::new(
+            kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+        ),
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
@@ -48,7 +53,9 @@ fn build_state_empty_cache() -> Arc<ServiceState> {
         audit_verifying_key: None,
         fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
         fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_causal_log: Arc::new(
+            kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+        ),
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
@@ -92,7 +99,11 @@ fn test_nominal_safe_command_passes_through_unmodified() {
     };
 
     let result = validate_vehicle_command(&cmd, &contract);
-    assert_eq!(result, EnforceAction::Allow, "safe command must pass through");
+    assert_eq!(
+        result,
+        EnforceAction::Allow,
+        "safe command must pass through"
+    );
 }
 
 #[test]
@@ -112,7 +123,8 @@ fn test_nominal_invalid_time_delta_returns_deny() {
     let result = validate_vehicle_command(&cmd, &contract);
     assert!(
         matches!(result, EnforceAction::DenyBreach(_)),
-        "zero dt must be denied, got {:?}", result
+        "zero dt must be denied, got {:?}",
+        result
     );
 }
 
@@ -185,7 +197,11 @@ fn test_locked_out_rejects_zero_motion_command() {
     // LockedOut must reject ALL commands — even a zero-velocity command.
     let state = build_state(FleetPosture::LockedOut);
     let posture = resolve_posture_from_state(&state);
-    assert_eq!(posture, FleetPosture::LockedOut, "posture must be LockedOut");
+    assert_eq!(
+        posture,
+        FleetPosture::LockedOut,
+        "posture must be LockedOut"
+    );
     assert!(
         get_contract_for_posture(&posture).is_none(),
         "LockedOut posture yields no contract — middleware blocks at posture check"
@@ -201,6 +217,9 @@ fn test_empty_posture_cache_fails_closed_as_locked_out() {
     // None cache (cold start) must be treated as LockedOut — fail-closed.
     let state = build_state_empty_cache();
     let posture = resolve_posture_from_state(&state);
-    assert_eq!(posture, FleetPosture::LockedOut,
-        "empty cache must resolve to LockedOut (fail-closed)");
+    assert_eq!(
+        posture,
+        FleetPosture::LockedOut,
+        "empty cache must resolve to LockedOut (fail-closed)"
+    );
 }

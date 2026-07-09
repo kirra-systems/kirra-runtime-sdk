@@ -21,35 +21,44 @@ pub(crate) async fn console_fleet(State(svc): State<Arc<ServiceState>>) -> impl 
     // SAFETY: SG-HA-3 — heavy read off the worker pool via read replica.
     // load_nodes + the per-node clearance lookups run under ONE acquisition
     // (Rule 5). The closure returns a Result; the error response is built outside.
-    let fleet = svc.app.store.call_read(|store| {
-        let nodes = store.load_nodes().map_err(|_| "load_nodes failed")?;
-        let fleet: Vec<_> = nodes
-            .iter()
-            .map(|n| {
-                let (posture, note) = match &n.status {
-                    NodeTrustState::Trusted => ("Trusted", None),
-                    NodeTrustState::Untrusted(reason) => ("Untrusted", Some(reason.clone())),
-                    NodeTrustState::Unknown => ("Unknown", None),
-                };
-                // Phase B: the latest clearance grant's delivery state (or null). The
-                // UI derives the lifecycle label (pending / delivered:Cleared /
-                // delivery-rejected:reason) from these raw columns — no invented state.
-                let clearance = store.latest_clearance_grant(&n.node_id).ok().flatten();
-                json!({
-                    "node_id": n.node_id,
-                    "posture": posture,
-                    "note": note,
-                    "last_seen_ms": n.last_trust_update_ms,
-                    "clearance": clearance,
+    let fleet = svc
+        .app
+        .store
+        .call_read(|store| {
+            let nodes = store.load_nodes().map_err(|_| "load_nodes failed")?;
+            let fleet: Vec<_> = nodes
+                .iter()
+                .map(|n| {
+                    let (posture, note) = match &n.status {
+                        NodeTrustState::Trusted => ("Trusted", None),
+                        NodeTrustState::Untrusted(reason) => ("Untrusted", Some(reason.clone())),
+                        NodeTrustState::Unknown => ("Unknown", None),
+                    };
+                    // Phase B: the latest clearance grant's delivery state (or null). The
+                    // UI derives the lifecycle label (pending / delivered:Cleared /
+                    // delivery-rejected:reason) from these raw columns — no invented state.
+                    let clearance = store.latest_clearance_grant(&n.node_id).ok().flatten();
+                    json!({
+                        "node_id": n.node_id,
+                        "posture": posture,
+                        "note": note,
+                        "last_seen_ms": n.last_trust_update_ms,
+                        "clearance": clearance,
+                    })
                 })
-            })
-            .collect();
-        Ok::<_, &'static str>(fleet)
-    }).await;
+                .collect();
+            Ok::<_, &'static str>(fleet)
+        })
+        .await;
     let fleet = match fleet {
         Ok(Ok(f)) => f,
-        _ => return (StatusCode::INTERNAL_SERVER_ERROR,
-                     Json(json!({ "error": "load_nodes failed" }))).into_response(),
+        _ => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "load_nodes failed" })),
+            )
+                .into_response()
+        }
     };
     Json(json!({ "fleet": fleet, "total": fleet.len() })).into_response()
 }
@@ -70,10 +79,18 @@ pub(crate) async fn console_audit(
     let offset = params.offset.unwrap_or(0);
     // SAFETY: SG-HA-3 — paged read off the worker pool via read replica.
     let vk = svc.audit_verifying_key;
-    match svc.app.store.call_read(move |store| store.load_audit_chain_page(limit, offset, vk.as_ref())).await {
+    match svc
+        .app
+        .store
+        .call_read(move |store| store.load_audit_chain_page(limit, offset, vk.as_ref()))
+        .await
+    {
         Ok(Ok(page)) => Json(page).into_response(),
-        _ => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "audit query failed" }))).into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "audit query failed" })),
+        )
+            .into_response(),
     }
 }
 
@@ -92,11 +109,19 @@ pub(crate) async fn console_audit(
 pub(crate) async fn console_escalations(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     // SAFETY: SG-HA-3 — paged read off the worker pool via read replica.
     let vk = svc.audit_verifying_key;
-    let page = match svc.app.store.call_read(move |store| store.load_audit_chain_page(1000, 0, vk.as_ref())).await {
+    let page = match svc
+        .app
+        .store
+        .call_read(move |store| store.load_audit_chain_page(1000, 0, vk.as_ref()))
+        .await
+    {
         Ok(Ok(p)) => p,
         _ => {
-            return (StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "audit query failed" }))).into_response()
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "audit query failed" })),
+            )
+                .into_response()
         }
     };
     let mut open = Vec::new();
@@ -143,15 +168,20 @@ pub(crate) async fn console_runtime(State(svc): State<Arc<ServiceState>>) -> imp
     // Two store reads under one lock acquisition: audit depth + HA heartbeat.
     // The closure returns a Result; per-read error responses are built outside.
     // SAFETY: SG-HA-3 — two-read probe off the worker pool via read replica.
-    let probe = svc.app.store.call_read(move |store| {
-        let audit_entries = store.audit_chain_len().map_err(|_| "audit query failed")?;
-        // Heartbeat absent → null (no primary has written yet).
-        let hb = store.load_engine_state(HEARTBEAT_KEY)
-            .map_err(|_| "engine state query failed")?
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(|stored| now.saturating_sub(stored));
-        Ok::<_, &'static str>((audit_entries, hb))
-    }).await;
+    let probe = svc
+        .app
+        .store
+        .call_read(move |store| {
+            let audit_entries = store.audit_chain_len().map_err(|_| "audit query failed")?;
+            // Heartbeat absent → null (no primary has written yet).
+            let hb = store
+                .load_engine_state(HEARTBEAT_KEY)
+                .map_err(|_| "engine state query failed")?
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|stored| now.saturating_sub(stored));
+            Ok::<_, &'static str>((audit_entries, hb))
+        })
+        .await;
     let (audit_entries, ha_heartbeat_age_ms) = match probe {
         Ok(Ok(pair)) => pair,
         _ => {
@@ -163,7 +193,11 @@ pub(crate) async fn console_runtime(State(svc): State<Arc<ServiceState>>) -> imp
         }
     };
 
-    let mode = if svc.app.is_active() { "Active" } else { "PassiveStandby" };
+    let mode = if svc.app.is_active() {
+        "Active"
+    } else {
+        "PassiveStandby"
+    };
 
     Json(json!({
         "mode": mode,
@@ -212,13 +246,19 @@ pub(crate) async fn console_analytics(
     // Both reads share ONE acquisition (Rule 5); the closure returns a Result and
     // the error response is produced outside (Rule 4).
     // SAFETY: SG-HA-3 — analytics reads off the worker pool via read replica.
-    let loaded = svc.app.store.call_read(move |store| {
-        let events = store.load_posture_events_since(since_ms)
-            .map_err(|_| "posture event query failed")?;
-        let by_node = store.count_posture_events_by_node_since(since_ms)
-            .map_err(|_| "posture event query failed")?;
-        Ok::<_, &'static str>((events, by_node))
-    }).await;
+    let loaded = svc
+        .app
+        .store
+        .call_read(move |store| {
+            let events = store
+                .load_posture_events_since(since_ms)
+                .map_err(|_| "posture event query failed")?;
+            let by_node = store
+                .count_posture_events_by_node_since(since_ms)
+                .map_err(|_| "posture event query failed")?;
+            Ok::<_, &'static str>((events, by_node))
+        })
+        .await;
     let (events, by_node) = match loaded {
         Ok(Ok(pair)) => pair,
         _ => {
@@ -235,8 +275,7 @@ pub(crate) async fn console_analytics(
     let mut to_lockedout = vec![0u64; BUCKETS as usize];
     let mut to_nominal = vec![0u64; BUCKETS as usize];
     for (created_at_ms, posture_json) in &events {
-        let idx = (created_at_ms.saturating_sub(since_ms) / bucket_span)
-            .min(BUCKETS - 1) as usize;
+        let idx = (created_at_ms.saturating_sub(since_ms) / bucket_span).min(BUCKETS - 1) as usize;
         // posture_json serializes FleetPosture as "Nominal"/"Degraded"/"LockedOut"
         // (or {"Untrusted": "..."} style for node states). Match the variant name.
         let v: serde_json::Value =
@@ -289,10 +328,12 @@ pub(crate) async fn console_analytics(
     let flapping_top: Vec<serde_json::Value> = by_node
         .into_iter()
         .take(FLAPPING_TOP_N)
-        .map(|(node_id, transitions)| json!({
-            "node_id": node_id,
-            "transitions": transitions,
-        }))
+        .map(|(node_id, transitions)| {
+            json!({
+                "node_id": node_id,
+                "transitions": transitions,
+            })
+        })
         .collect();
 
     Json(json!({
@@ -340,13 +381,15 @@ pub(crate) async fn console_sites(State(svc): State<Arc<ServiceState>>) -> impl 
 
     let sites: Vec<serde_json::Value> = sites
         .into_iter()
-        .map(|(site, (total, nominal, degraded, lockedout))| json!({
-            "site": site,
-            "total": total,
-            "nominal": nominal,
-            "degraded": degraded,
-            "lockedout": lockedout,
-        }))
+        .map(|(site, (total, nominal, degraded, lockedout))| {
+            json!({
+                "site": site,
+                "total": total,
+                "nominal": nominal,
+                "degraded": degraded,
+                "lockedout": lockedout,
+            })
+        })
         .collect();
 
     Json(json!({ "sites": sites, "unassigned": unassigned })).into_response()
@@ -381,8 +424,7 @@ pub(crate) async fn console_versions(State(svc): State<Arc<ServiceState>>) -> im
         })
         .collect();
 
-    Json(json!({ "versions": versions, "total": total, "unknown": unknown }))
-        .into_response()
+    Json(json!({ "versions": versions, "total": total, "unknown": unknown })).into_response()
 }
 
 /// GET /console/campaigns (WS-4 / Track 3) — public read-only OTA rollout view for
@@ -404,8 +446,7 @@ pub(crate) async fn console_campaigns(State(svc): State<Arc<ServiceState>>) -> i
         .await
     {
         Ok(Ok((campaigns, statuses))) => {
-            let summary =
-                kirra_verifier::ota_campaign::summarize_campaigns(&campaigns, &statuses);
+            let summary = kirra_verifier::ota_campaign::summarize_campaigns(&campaigns, &statuses);
             Json(summary).into_response()
         }
         _ => (

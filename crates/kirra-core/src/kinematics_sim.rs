@@ -57,8 +57,7 @@
 //   real vehicle behavior
 
 use crate::kinematics_contract::{
-    EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
-    validate_vehicle_command,
+    validate_vehicle_command, EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
 };
 
 // ---------------------------------------------------------------------------
@@ -131,7 +130,7 @@ impl VehicleState {
         }
 
         let dt = cmd.delta_time_s;
-        let v  = self.velocity_mps;
+        let v = self.velocity_mps;
         let psi = self.heading_rad;
         let delta_rad = self.steering_angle_deg.to_radians();
 
@@ -406,9 +405,7 @@ pub fn run_simulation(
 #[cfg(test)]
 mod kinematics_sim_tests {
     use super::*;
-    use crate::kinematics_contract::{
-        ProposedVehicleCommand, VehicleKinematicsContract,
-    };
+    use crate::kinematics_contract::{ProposedVehicleCommand, VehicleKinematicsContract};
 
     const DT: f64 = 0.1;
     const WB: f64 = 2.8;
@@ -432,7 +429,10 @@ mod kinematics_sim_tests {
         let c = cmd(10.0, 0.0);
         let next = state.step(&c, WB);
         assert!((next.x_m - 1.0).abs() < 1e-9, "x must advance by v*dt");
-        assert!(next.y_m.abs() < 1e-9, "y must not change for straight motion");
+        assert!(
+            next.y_m.abs() < 1e-9,
+            "y must not change for straight motion"
+        );
         assert_eq!(next.velocity_mps, 10.0);
         assert_eq!(next.steering_angle_deg, 0.0);
     }
@@ -452,7 +452,10 @@ mod kinematics_sim_tests {
         // Pre-populate both velocity and steering so step() integrates with the active
         // kinematic state. The one-tick lag is intentional — see validate_vehicle_command's
         // acceleration contract.
-        let state = VehicleState { steering_angle_deg: 10.0, ..VehicleState::new(0.0, 0.0, 0.0, 10.0) };
+        let state = VehicleState {
+            steering_angle_deg: 10.0,
+            ..VehicleState::new(0.0, 0.0, 0.0, 10.0)
+        };
         let c = cmd(10.0, 10.0);
         let next = state.step(&c, WB);
         assert!(next.heading_rad > 0.0, "left turn must increase heading");
@@ -463,7 +466,10 @@ mod kinematics_sim_tests {
         // Pre-populate both velocity and steering so step() integrates with the active
         // kinematic state. The one-tick lag is intentional — see validate_vehicle_command's
         // acceleration contract.
-        let state = VehicleState { steering_angle_deg: -10.0, ..VehicleState::new(0.0, 0.0, 0.0, 10.0) };
+        let state = VehicleState {
+            steering_angle_deg: -10.0,
+            ..VehicleState::new(0.0, 0.0, 0.0, 10.0)
+        };
         let c = cmd(10.0, -10.0);
         let next = state.step(&c, WB);
         assert!(next.heading_rad < 0.0, "right turn must decrease heading");
@@ -513,8 +519,10 @@ mod kinematics_sim_tests {
         };
         let expected = (v.powi(2) * delta_deg.to_radians().tan().abs()) / WB;
         let actual = state.lateral_accel_mps2(WB);
-        assert!((actual - expected).abs() < 1e-12,
-            "lateral_accel_mps2 must match contract formula: expected {expected}, got {actual}");
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "lateral_accel_mps2 must match contract formula: expected {expected}, got {actual}"
+        );
     }
 
     #[test]
@@ -557,7 +565,10 @@ mod kinematics_sim_tests {
             steering_angle_deg: 0.0,
             current_steering_angle_deg: 0.0,
         };
-        assert!(apply_enforcement(&c, &contract).is_none(), "DenyBreach must return None");
+        assert!(
+            apply_enforcement(&c, &contract).is_none(),
+            "DenyBreach must return None"
+        );
     }
 
     // --- apply_enforce_action: applying an ALREADY-COMPUTED verdict (#86) ---
@@ -583,25 +594,48 @@ mod kinematics_sim_tests {
     #[test]
     fn test_apply_action_clamp_linear_substitutes_safe_velocity() {
         let c = sample_cmd();
-        let out = apply_enforce_action(&c, &EnforceAction::ClampLinear(12.5)).expect("clamp yields a command");
-        assert_eq!(out.linear_velocity_mps, 12.5, "enforced command carries the SAFE velocity");
-        assert!(out.linear_velocity_mps < c.linear_velocity_mps, "within envelope (below the proposal)");
-        assert_eq!(out.steering_angle_deg, c.steering_angle_deg, "steering untouched on a linear clamp");
+        let out = apply_enforce_action(&c, &EnforceAction::ClampLinear(12.5))
+            .expect("clamp yields a command");
+        assert_eq!(
+            out.linear_velocity_mps, 12.5,
+            "enforced command carries the SAFE velocity"
+        );
+        assert!(
+            out.linear_velocity_mps < c.linear_velocity_mps,
+            "within envelope (below the proposal)"
+        );
+        assert_eq!(
+            out.steering_angle_deg, c.steering_angle_deg,
+            "steering untouched on a linear clamp"
+        );
     }
 
     #[test]
     fn test_apply_action_clamp_steering_substitutes_safe_angle() {
         let c = sample_cmd();
-        let out = apply_enforce_action(&c, &EnforceAction::ClampSteering(1.5)).expect("clamp yields a command");
-        assert_eq!(out.steering_angle_deg, 1.5, "enforced command carries the SAFE steering");
-        assert_eq!(out.linear_velocity_mps, c.linear_velocity_mps, "linear untouched on a steering clamp");
+        let out = apply_enforce_action(&c, &EnforceAction::ClampSteering(1.5))
+            .expect("clamp yields a command");
+        assert_eq!(
+            out.steering_angle_deg, 1.5,
+            "enforced command carries the SAFE steering"
+        );
+        assert_eq!(
+            out.linear_velocity_mps, c.linear_velocity_mps,
+            "linear untouched on a steering clamp"
+        );
     }
 
     #[test]
     fn test_apply_action_deny_is_none() {
         let c = sample_cmd();
         assert!(
-            apply_enforce_action(&c, &EnforceAction::DenyBreach(crate::kinematics_contract::DenyCode::NanInfLinearVelocity)).is_none(),
+            apply_enforce_action(
+                &c,
+                &EnforceAction::DenyBreach(
+                    crate::kinematics_contract::DenyCode::NanInfLinearVelocity
+                )
+            )
+            .is_none(),
             "DenyBreach yields no enforced command (caller fail-closes)"
         );
     }
@@ -615,7 +649,10 @@ mod kinematics_sim_tests {
         let result = run_simulation(initial, &commands, &contract, true);
 
         assert!(!result.invariant_violated);
-        assert_eq!(result.clamp_count, 0, "straight cruise at 25 m/s must need no clamping");
+        assert_eq!(
+            result.clamp_count, 0,
+            "straight cruise at 25 m/s must need no clamping"
+        );
         assert_eq!(result.deny_count, 0);
         assert!(result.final_state.x_m > 0.0, "must have advanced");
     }
@@ -626,12 +663,20 @@ mod kinematics_sim_tests {
         let commands: Vec<_> = (0..100).map(|_| cmd(30.0, 20.0)).collect();
         let result = run_simulation(VehicleState::at_rest(), &commands, &contract, true);
 
-        assert!(result.clamp_count > 0, "high-speed high-steering must trigger clamping");
-        assert!(!result.invariant_violated,
-            "clamped commands must not produce lateral accel violations");
-        assert!(result.peak_lateral_accel_mps2 <= contract.max_lateral_accel_mps2 + 1e-6,
+        assert!(
+            result.clamp_count > 0,
+            "high-speed high-steering must trigger clamping"
+        );
+        assert!(
+            !result.invariant_violated,
+            "clamped commands must not produce lateral accel violations"
+        );
+        assert!(
+            result.peak_lateral_accel_mps2 <= contract.max_lateral_accel_mps2 + 1e-6,
             "peak lat accel {:.4} must be <= contract max {:.4}",
-            result.peak_lateral_accel_mps2, contract.max_lateral_accel_mps2);
+            result.peak_lateral_accel_mps2,
+            contract.max_lateral_accel_mps2
+        );
     }
 
     #[test]
@@ -641,29 +686,39 @@ mod kinematics_sim_tests {
         let result = run_simulation(VehicleState::at_rest(), &commands, &contract, true);
 
         assert!(!result.invariant_violated);
-        assert!(result.peak_speed_mps <= contract.max_speed_mps + 1e-6,
+        assert!(
+            result.peak_speed_mps <= contract.max_speed_mps + 1e-6,
             "MRC must cap speed at {}, got {:.4}",
-            contract.max_speed_mps, result.peak_speed_mps);
-        assert_eq!(result.clamp_count, 100, "every step must be clamped under MRC");
+            contract.max_speed_mps,
+            result.peak_speed_mps
+        );
+        assert_eq!(
+            result.clamp_count, 100,
+            "every step must be clamped under MRC"
+        );
     }
 
     #[test]
     fn test_acceleration_from_rest_ramp_stays_within_contract() {
         let contract = VehicleKinematicsContract::nominal_reference_profile();
-        let commands: Vec<_> = (0..100).map(|i| {
-            let target = (i as f64 * 0.5).min(30.0);
-            ProposedVehicleCommand {
-                linear_velocity_mps: target,
-                current_velocity_mps: ((i as f64 - 1.0) * 0.5).clamp(0.0, 30.0),
-                delta_time_s: DT,
-                steering_angle_deg: 0.0,
-                current_steering_angle_deg: 0.0,
-            }
-        }).collect();
+        let commands: Vec<_> = (0..100)
+            .map(|i| {
+                let target = (i as f64 * 0.5).min(30.0);
+                ProposedVehicleCommand {
+                    linear_velocity_mps: target,
+                    current_velocity_mps: ((i as f64 - 1.0) * 0.5).clamp(0.0, 30.0),
+                    delta_time_s: DT,
+                    steering_angle_deg: 0.0,
+                    current_steering_angle_deg: 0.0,
+                }
+            })
+            .collect();
 
         let result = run_simulation(VehicleState::at_rest(), &commands, &contract, true);
-        assert!(!result.invariant_violated,
-            "accelerating ramp must not produce invariant violations after clamping");
+        assert!(
+            !result.invariant_violated,
+            "accelerating ramp must not produce invariant violations after clamping"
+        );
     }
 
     #[test]
@@ -691,8 +746,10 @@ mod kinematics_sim_tests {
         let commands: Vec<_> = (0..200).map(|_| cmd(15.0, 15.0)).collect();
         let result = run_simulation(VehicleState::at_rest(), &commands, &contract, true);
 
-        assert!(!result.invariant_violated,
-            "sustained circular turn must be clamped to safe angle throughout");
+        assert!(
+            !result.invariant_violated,
+            "sustained circular turn must be clamped to safe angle throughout"
+        );
         assert!(result.peak_lateral_accel_mps2 <= contract.max_lateral_accel_mps2 + 1e-6);
     }
 
@@ -703,12 +760,18 @@ mod kinematics_sim_tests {
         let commands: Vec<_> = (0..50).map(|_| cmd(1.0, 30.0)).collect();
         // Pre-populate both velocity and steering to match the commanded state so the
         // first step doesn't trigger the accel or steering-rate clamps.
-        let initial = VehicleState { velocity_mps: 1.0, steering_angle_deg: 30.0, ..VehicleState::at_rest() };
+        let initial = VehicleState {
+            velocity_mps: 1.0,
+            steering_angle_deg: 30.0,
+            ..VehicleState::at_rest()
+        };
         let result = run_simulation(initial, &commands, &contract, true);
 
         assert!(!result.invariant_violated);
-        assert_eq!(result.clamp_count, 0,
-            "parking-speed large steering must not be clamped by bicycle model");
+        assert_eq!(
+            result.clamp_count, 0,
+            "parking-speed large steering must not be clamped by bicycle model"
+        );
     }
 
     #[test]

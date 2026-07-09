@@ -87,7 +87,9 @@ pub struct Manifest {
 #[must_use]
 pub fn content_digest(rows: &[DatasetRow]) -> String {
     let mut sorted: Vec<&DatasetRow> = rows.iter().collect();
-    sorted.sort_by(|a, b| (a.source.as_str(), a.decision_seq).cmp(&(b.source.as_str(), b.decision_seq)));
+    sorted.sort_by(|a, b| {
+        (a.source.as_str(), a.decision_seq).cmp(&(b.source.as_str(), b.decision_seq))
+    });
     let mut h = Sha256::new();
     for row in sorted {
         let line = serde_json::to_string(row).expect("DatasetRow serializes infallibly");
@@ -148,10 +150,16 @@ pub fn build_manifest(
     };
     let content_digest = content_digest(rows);
     let input_sha256s: Vec<String> = lineage.inputs.iter().map(|i| i.sha256.clone()).collect();
-    let dataset_id =
-        compute_dataset_id(&input_sha256s, SCHEMA_VERSION, COLLECTOR_VERSION, &params, &content_digest);
+    let dataset_id = compute_dataset_id(
+        &input_sha256s,
+        SCHEMA_VERSION,
+        COLLECTOR_VERSION,
+        &params,
+        &content_digest,
+    );
 
-    let mut doer_versions: Vec<String> = partitions.iter().map(|p| p.doer_version.clone()).collect();
+    let mut doer_versions: Vec<String> =
+        partitions.iter().map(|p| p.doer_version.clone()).collect();
     doer_versions.sort();
     doer_versions.dedup();
 
@@ -241,25 +249,52 @@ mod tests {
 
     #[test]
     fn dataset_id_is_stable_and_input_sensitive() {
-        let base = compute_dataset_id(&["aaa".into(), "bbb".into()], "0.1.0", "0.1.0", &params(), "cd");
+        let base = compute_dataset_id(
+            &["aaa".into(), "bbb".into()],
+            "0.1.0",
+            "0.1.0",
+            &params(),
+            "cd",
+        );
         // Same inputs → same id (order-independent on the input list).
         assert_eq!(
             base,
-            compute_dataset_id(&["bbb".into(), "aaa".into()], "0.1.0", "0.1.0", &params(), "cd")
+            compute_dataset_id(
+                &["bbb".into(), "aaa".into()],
+                "0.1.0",
+                "0.1.0",
+                &params(),
+                "cd"
+            )
         );
         // A different input hash → different id.
         assert_ne!(
             base,
-            compute_dataset_id(&["aaa".into(), "ccc".into()], "0.1.0", "0.1.0", &params(), "cd")
+            compute_dataset_id(
+                &["aaa".into(), "ccc".into()],
+                "0.1.0",
+                "0.1.0",
+                &params(),
+                "cd"
+            )
         );
         // A different param → different id.
         let mut p2 = params();
         p2.pass_rate = 0.5;
-        assert_ne!(base, compute_dataset_id(&["aaa".into(), "bbb".into()], "0.1.0", "0.1.0", &p2, "cd"));
+        assert_ne!(
+            base,
+            compute_dataset_id(&["aaa".into(), "bbb".into()], "0.1.0", "0.1.0", &p2, "cd")
+        );
         // A different content digest → different id.
         assert_ne!(
             base,
-            compute_dataset_id(&["aaa".into(), "bbb".into()], "0.1.0", "0.1.0", &params(), "cd2")
+            compute_dataset_id(
+                &["aaa".into(), "bbb".into()],
+                "0.1.0",
+                "0.1.0",
+                &params(),
+                "cd2"
+            )
         );
     }
 

@@ -42,12 +42,20 @@ fn ort_available() -> Option<()> {
 
 /// Run one feature vector through an ONNX model via the real ORT CPU backend.
 fn ort_scores(backend: &OrtBackend, model_path: &str, features: &[f64]) -> Vec<f64> {
-    let model = backend.load_model(model_path).expect("introspect exported model");
+    let model = backend
+        .load_model(model_path)
+        .expect("introspect exported model");
     let x: Vec<f32> = features.iter().map(|&v| v as f32).collect();
     let mut named = HashMap::new();
     named.insert(onnx::INPUT_NAME.to_string(), TensorStorage::Borrowed(&x));
     let out = backend
-        .run(&model, &TensorBatch { named_tensors: named, metadata: HashMap::new() })
+        .run(
+            &model,
+            &TensorBatch {
+                named_tensors: named,
+                metadata: HashMap::new(),
+            },
+        )
         .expect("exported model must run");
     out.named_tensors[onnx::OUTPUT_NAME]
         .as_slice()
@@ -246,5 +254,7 @@ fn v2_qdq_chain_export_matches_rust_int8_planner_through_real_ort() {
             sc.name
         );
     }
-    println!("ROUND-TRIP PASSED: v2 QDQ chain export matches the in-Rust int8 planner through real ORT");
+    println!(
+        "ROUND-TRIP PASSED: v2 QDQ chain export matches the in-Rust int8 planner through real ORT"
+    );
 }

@@ -54,11 +54,16 @@ impl core::fmt::Display for EvtError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             EvtError::TooFewExceedances { got, need } => {
-                write!(f, "too few exceedances for a stable GPD fit: {got} < {need}")
+                write!(
+                    f,
+                    "too few exceedances for a stable GPD fit: {got} < {need}"
+                )
             }
             EvtError::NonFinite => write!(f, "non-finite sample or parameter"),
             EvtError::DegenerateVariance => write!(f, "exceedance variance ~0 — no tail to fit"),
-            EvtError::InvalidParameter => write!(f, "invalid threshold quantile or target probability"),
+            EvtError::InvalidParameter => {
+                write!(f, "invalid threshold quantile or target probability")
+            }
             EvtError::TailTooHeavy => write!(f, "fit implied ξ ≥ 0.5 (method-of-moments invalid)"),
         }
     }
@@ -86,7 +91,10 @@ pub struct GpdParams {
 /// few exceedances, non-finite input, degenerate variance, or a too-heavy tail.
 pub fn fit_gpd_pot(exceedances: &[f64]) -> Result<GpdParams, EvtError> {
     if exceedances.len() < MIN_EXCEEDANCES {
-        return Err(EvtError::TooFewExceedances { got: exceedances.len(), need: MIN_EXCEEDANCES });
+        return Err(EvtError::TooFewExceedances {
+            got: exceedances.len(),
+            need: MIN_EXCEEDANCES,
+        });
     }
     if exceedances.iter().any(|x| !x.is_finite()) {
         return Err(EvtError::NonFinite);
@@ -94,7 +102,11 @@ pub fn fit_gpd_pot(exceedances: &[f64]) -> Result<GpdParams, EvtError> {
     let n = exceedances.len() as f64;
     let mean = exceedances.iter().sum::<f64>() / n;
     // Sample variance (unbiased, n−1). Exceedances are ≥ 0; mean > 0 for a real tail.
-    let var = exceedances.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / (n - 1.0);
+    let var = exceedances
+        .iter()
+        .map(|x| (x - mean) * (x - mean))
+        .sum::<f64>()
+        / (n - 1.0);
     if !mean.is_finite() || !var.is_finite() {
         return Err(EvtError::NonFinite);
     }
@@ -182,13 +194,19 @@ pub fn estimate_pwcet(
         return Err(EvtError::NonFinite);
     }
     if samples.len() < MIN_EXCEEDANCES {
-        return Err(EvtError::TooFewExceedances { got: samples.len(), need: MIN_EXCEEDANCES });
+        return Err(EvtError::TooFewExceedances {
+            got: samples.len(),
+            need: MIN_EXCEEDANCES,
+        });
     }
     let mut sorted = samples.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap()); // finite-checked above
     let threshold = empirical_quantile(&sorted, threshold_quantile);
-    let exceedances: Vec<f64> =
-        samples.iter().filter(|&&x| x > threshold).map(|&x| x - threshold).collect();
+    let exceedances: Vec<f64> = samples
+        .iter()
+        .filter(|&&x| x > threshold)
+        .map(|&x| x - threshold)
+        .collect();
     let gpd = fit_gpd_pot(&exceedances)?;
     let n_exceed = exceedances.len();
     let pwcet = pwcet_return_level(&gpd, threshold, samples.len(), n_exceed, target_prob)?;
@@ -227,8 +245,9 @@ pub fn lag1_autocorrelation(samples: &[f64]) -> f64 {
     if denom <= 0.0 {
         return 0.0;
     }
-    let numer: f64 =
-        (0..n - 1).map(|i| (samples[i] - mean) * (samples[i + 1] - mean)).sum();
+    let numer: f64 = (0..n - 1)
+        .map(|i| (samples[i] - mean) * (samples[i + 1] - mean))
+        .sum();
     numer / denom
 }
 
@@ -288,10 +307,12 @@ mod tests {
 
     /// Exponential(λ) quantile grid (a GPD with ξ=0): `x_i = −ln(1−p_i)/λ`.
     fn exponential_grid(lambda: f64, n: usize) -> Vec<f64> {
-        (1..=n).map(|i| {
-            let p = i as f64 / (n as f64 + 1.0);
-            -(1.0 - p).ln() / lambda
-        }).collect()
+        (1..=n)
+            .map(|i| {
+                let p = i as f64 / (n as f64 + 1.0);
+                -(1.0 - p).ln() / lambda
+            })
+            .collect()
     }
 
     #[test]
@@ -324,9 +345,22 @@ mod tests {
         // level must equal the analytic Exp quantile to floating precision.
         let u = -(0.10_f64).ln(); // 90th pct of Exp(1) = 2.302585
         let p = 1e-5;
-        let exact = pwcet_return_level(&GpdParams { xi: 0.0, sigma: 1.0 }, u, 1000, 100, p).unwrap();
+        let exact = pwcet_return_level(
+            &GpdParams {
+                xi: 0.0,
+                sigma: 1.0,
+            },
+            u,
+            1000,
+            100,
+            p,
+        )
+        .unwrap();
         let analytic = -(p).ln(); // 11.512925
-        assert!((exact - analytic).abs() < 1e-6, "formula {exact} == analytic {analytic}");
+        assert!(
+            (exact - analytic).abs() < 1e-6,
+            "formula {exact} == analytic {analytic}"
+        );
 
         // End-to-end FIT + extrapolation. Target 1e-5 is rarer than any observed
         // sample (the grid's rarest is ~2e-4), so the pWCET genuinely extrapolates
@@ -341,12 +375,19 @@ mod tests {
             est.pwcet
         );
         let hwm = samples.iter().cloned().fold(f64::MIN, f64::max);
-        assert!(est.pwcet > hwm, "pWCET {} must exceed the high-water mark {hwm}", est.pwcet);
+        assert!(
+            est.pwcet > hwm,
+            "pWCET {} must exceed the high-water mark {hwm}",
+            est.pwcet
+        );
     }
 
     #[test]
     fn fit_is_fail_closed() {
-        assert!(matches!(fit_gpd_pot(&[1.0; 5]), Err(EvtError::TooFewExceedances { .. })));
+        assert!(matches!(
+            fit_gpd_pot(&[1.0; 5]),
+            Err(EvtError::TooFewExceedances { .. })
+        ));
         let mut bad = gpd_quantile_grid(0.1, 1.0, 100);
         bad[0] = f64::NAN;
         assert_eq!(fit_gpd_pot(&bad), Err(EvtError::NonFinite));
@@ -355,7 +396,10 @@ mod tests {
 
     #[test]
     fn return_level_requires_target_rarer_than_the_threshold() {
-        let g = GpdParams { xi: 0.1, sigma: 1.0 };
+        let g = GpdParams {
+            xi: 0.1,
+            sigma: 1.0,
+        };
         // ζ = 100/1000 = 0.1; a target ≥ ζ is not an extrapolation → refused.
         assert!(pwcet_return_level(&g, 10.0, 1000, 100, 0.2).is_err());
         assert!(pwcet_return_level(&g, 10.0, 1000, 100, 0.0).is_err());
@@ -367,20 +411,46 @@ mod tests {
         // A strictly increasing ramp: strong positive lag-1 autocorrelation + a
         // second-half mean well above the first (non-stationary).
         let ramp: Vec<f64> = (0..1000).map(|i| i as f64).collect();
-        assert!(lag1_autocorrelation(&ramp) > 0.9, "a ramp is highly autocorrelated");
-        assert!(stationarity_split_mean_ratio(&ramp) > 2.0, "a ramp's mean drifts up");
+        assert!(
+            lag1_autocorrelation(&ramp) > 0.9,
+            "a ramp is highly autocorrelated"
+        );
+        assert!(
+            stationarity_split_mean_ratio(&ramp) > 2.0,
+            "a ramp's mean drifts up"
+        );
 
         // An alternating sequence: strong NEGATIVE lag-1 autocorrelation, stationary mean.
-        let alt: Vec<f64> = (0..1000).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
-        assert!(lag1_autocorrelation(&alt) < -0.9, "alternating → strong negative autocorr");
-        assert!((stationarity_split_mean_ratio(&alt)).abs() < 5.0, "alternating mean is ~stationary");
+        let alt: Vec<f64> = (0..1000)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        assert!(
+            lag1_autocorrelation(&alt) < -0.9,
+            "alternating → strong negative autocorr"
+        );
+        assert!(
+            (stationarity_split_mean_ratio(&alt)).abs() < 5.0,
+            "alternating mean is ~stationary"
+        );
     }
 
     #[test]
     fn convergence_detects_a_stabilized_series() {
-        assert!(!pwcet_converged(&[10.0], 0.01), "one estimate is never converged");
-        assert!(!pwcet_converged(&[10.0, 12.0], 0.01), "20% change is not converged");
-        assert!(pwcet_converged(&[10.0, 10.05], 0.01), "0.5% change is within 1% tol");
-        assert!(!pwcet_converged(&[0.0, 1.0], 0.01), "a zero baseline is not converged");
+        assert!(
+            !pwcet_converged(&[10.0], 0.01),
+            "one estimate is never converged"
+        );
+        assert!(
+            !pwcet_converged(&[10.0, 12.0], 0.01),
+            "20% change is not converged"
+        );
+        assert!(
+            pwcet_converged(&[10.0, 10.05], 0.01),
+            "0.5% change is within 1% tol"
+        );
+        assert!(
+            !pwcet_converged(&[0.0, 1.0], 0.01),
+            "a zero baseline is not converged"
+        );
     }
 }

@@ -63,9 +63,11 @@ fn guest_main(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     }
     let (name, linvel, seq, deadline) = (&args[0], &args[1], &args[2], &args[3]);
-    let (Ok(linvel), Ok(seq), Ok(deadline)) =
-        (linvel.parse::<f64>(), seq.parse::<u64>(), deadline.parse::<u64>())
-    else {
+    let (Ok(linvel), Ok(seq), Ok(deadline)) = (
+        linvel.parse::<f64>(),
+        seq.parse::<u64>(),
+        deadline.parse::<u64>(),
+    ) else {
         return ExitCode::from(2);
     };
     let region = match PosixShmRegion::open(name) {
@@ -110,7 +112,10 @@ fn spawn_guest(name: &str, linvel: f64, seq: u64, deadline: u64) -> bool {
 
 /// Print one matrix row and return its pass/fail (the only thing the gate needs).
 fn row(id: &str, what: &str, pass: bool, detail: String) -> bool {
-    println!("{id:<7} {what:<52} {}  {detail}", if pass { "PASS" } else { "FAIL" });
+    println!(
+        "{id:<7} {what:<52} {}  {detail}",
+        if pass { "PASS" } else { "FAIL" }
+    );
     pass
 }
 
@@ -170,7 +175,8 @@ fn governor_main() -> ExitCode {
         let reader = PosixShmReader::open(&name).expect("governor RO mapping");
         let mut wm = AcceptedWatermark::new();
         let cycle = decide_cycle(&reader, &mut wm, 0, &contract, MAX_SNAPSHOT_RETRIES);
-        let actuated = matches!(&cycle.outcome, GovernorOutcome::Actuate(c) if c.linear_velocity_mps == 10.0);
+        let actuated =
+            matches!(&cycle.outcome, GovernorOutcome::Actuate(c) if c.linear_velocity_mps == 10.0);
         let (signed, verified) = match cycle.view_to_sign() {
             Some(view) => {
                 let token = issue_release_token(view, &gov_key);
@@ -182,7 +188,9 @@ fn governor_main() -> ExitCode {
             "L3-01",
             "in-envelope: Actuate(10.0) + token verifies",
             published && actuated && signed && verified,
-            format!("published={published} actuated={actuated} signed={signed} verified={verified}"),
+            format!(
+                "published={published} actuated={actuated} signed={signed} verified={verified}"
+            ),
         ));
         drop(region);
     }
@@ -194,7 +202,8 @@ fn governor_main() -> ExitCode {
         let published = spawn_guest(&name, 50.0, 1, FUTURE_DEADLINE);
         let reader = PosixShmReader::open(&name).expect("governor RO mapping");
         // The raw proposal view, for the must-NOT-release check below.
-        let proposal_view = read_coherent_snapshot(&reader, MAX_SNAPSHOT_RETRIES).expect("snapshot");
+        let proposal_view =
+            read_coherent_snapshot(&reader, MAX_SNAPSHOT_RETRIES).expect("snapshot");
         let mut wm = AcceptedWatermark::new();
         let cycle = decide_cycle(&reader, &mut wm, 0, &contract, MAX_SNAPSHOT_RETRIES);
         let clamped_vel = match &cycle.outcome {
@@ -219,7 +228,9 @@ fn governor_main() -> ExitCode {
             "L3-02",
             "over-envelope 50: clamped to envelope; token binds enforced bytes",
             published && clamped && enforced_bound,
-            format!("published={published} clamped_vel={clamped_vel:?} enforced_bound={enforced_bound}"),
+            format!(
+                "published={published} clamped_vel={clamped_vel:?} enforced_bound={enforced_bound}"
+            ),
         ));
         drop(region);
     }
@@ -237,7 +248,11 @@ fn governor_main() -> ExitCode {
             "L3-03",
             "expired deadline: SafeStop, nothing signable",
             published && safe,
-            format!("published={published} outcome={:?} signable={}", cycle.outcome, cycle.view_to_sign().is_some()),
+            format!(
+                "published={published} outcome={:?} signable={}",
+                cycle.outcome,
+                cycle.view_to_sign().is_some()
+            ),
         ));
         drop(region);
     }
@@ -283,7 +298,10 @@ fn governor_main() -> ExitCode {
     }
 
     let gate_pass = rows.iter().all(|&p| p);
-    println!("\nGATE (verdict correctness): {}", if gate_pass { "PASS" } else { "FAIL" });
+    println!(
+        "\nGATE (verdict correctness): {}",
+        if gate_pass { "PASS" } else { "FAIL" }
+    );
 
     // ---- Timing (INDICATIVE) — the governor path over the SHM carrier ----
     let iters: usize = std::env::var("KIRRA_LAT_ITERS")
@@ -292,7 +310,10 @@ fn governor_main() -> ExitCode {
         .filter(|&n| n > 0)
         .unwrap_or(100_000);
     let warmup = (iters / 10).max(1_000);
-    let want_fifo = matches!(std::env::var("KIRRA_E2E_FIFO").as_deref(), Ok("1") | Ok("true"));
+    let want_fifo = matches!(
+        std::env::var("KIRRA_E2E_FIFO").as_deref(),
+        Ok("1") | Ok("true")
+    );
     let fifo = want_fifo && try_fifo();
     if want_fifo && !fifo {
         eprintln!("[l3e2e] WARN: SCHED_FIFO not granted (need privilege) — timing is time-shared");
@@ -307,7 +328,10 @@ fn governor_main() -> ExitCode {
         "\n=== timing — INDICATIVE (sched={}, iters={iters}) — never a WCET claim ===",
         if fifo { "SCHED_FIFO" } else { "default" }
     );
-    println!("{:<34} {:>9} {:>9} {:>9} {:>11}", "path", "p50_ns", "p99_ns", "p999_ns", "max_ns");
+    println!(
+        "{:<34} {:>9} {:>9} {:>9} {:>11}",
+        "path", "p50_ns", "p99_ns", "p999_ns", "max_ns"
+    );
     println!("{}", "-".repeat(78));
 
     // (a) the seqlock read alone
@@ -373,7 +397,10 @@ fn governor_main() -> ExitCode {
     print_timing("verify_release (actuator)", s);
     drop(region);
 
-    println!("\n===== KIRRA-L3E2E DONE (gate={}) =====", if gate_pass { "PASS" } else { "FAIL" });
+    println!(
+        "\n===== KIRRA-L3E2E DONE (gate={}) =====",
+        if gate_pass { "PASS" } else { "FAIL" }
+    );
     if gate_pass {
         ExitCode::SUCCESS
     } else {

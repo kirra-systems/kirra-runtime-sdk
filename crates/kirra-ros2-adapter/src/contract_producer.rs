@@ -85,7 +85,10 @@ impl ProposalSequencer {
     /// A fresh producer: committed generation 0 (the region's quiescent even
     /// value) and the first command sequence 1.
     pub fn new() -> Self {
-        Self { committed_generation: 0, next_sequence: 1 }
+        Self {
+            committed_generation: 0,
+            next_sequence: 1,
+        }
     }
 
     /// The last committed (even) seqlock generation.
@@ -184,7 +187,10 @@ mod tests {
         validate(&snap, 5_000, &wm).expect("fresh proposal validates");
         wm.record(&snap);
         assert_eq!(snap.sequence, 1);
-        assert_eq!(VehicleCommandPayload::from_validated_view(&snap), Ok(payload));
+        assert_eq!(
+            VehicleCommandPayload::from_validated_view(&snap),
+            Ok(payload)
+        );
     }
 
     #[test]
@@ -201,7 +207,10 @@ mod tests {
             assert_eq!(snap.sequence, i);
             validate(&snap, 5_000, &wm).expect("each proposal validates in order");
             wm.record(&snap);
-            assert_eq!(VehicleCommandPayload::from_validated_view(&snap), Ok(payload));
+            assert_eq!(
+                VehicleCommandPayload::from_validated_view(&snap),
+                Ok(payload)
+            );
         }
     }
 
@@ -226,7 +235,10 @@ mod tests {
         // Re-presenting `first` (sequence 1) after sequence 1 was accepted is a replay.
         assert_eq!(
             validate(&first, 5_000, &wm),
-            Err(ContractFault::SequenceRegressOrReplay { found: 1, last_accepted: 1 })
+            Err(ContractFault::SequenceRegressOrReplay {
+                found: 1,
+                last_accepted: 1
+            })
         );
     }
 

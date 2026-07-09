@@ -211,13 +211,19 @@ impl<M: ModelClient> LlmBrain<M> {
     /// A road-chauffeur brain (the default persona).
     #[must_use]
     pub fn new(model: M) -> Self {
-        Self { model, persona: Persona::Chauffeur }
+        Self {
+            model,
+            persona: Persona::Chauffeur,
+        }
     }
 
     /// A sidewalk-courier brain — prompts the courier persona, offered only sidewalk intents.
     #[must_use]
     pub fn courier(model: M) -> Self {
-        Self { model, persona: Persona::SidewalkCourier }
+        Self {
+            model,
+            persona: Persona::SidewalkCourier,
+        }
     }
 
     /// This brain's persona.
@@ -230,7 +236,10 @@ impl<M: ModelClient> LlmBrain<M> {
 impl<M: ModelClient> MickBrain for LlmBrain<M> {
     fn decide(&mut self, ctx: &WorldContext) -> Result<MickIntent, MickError> {
         let prompt = self.persona.prompt(ctx);
-        let raw = self.model.complete(&prompt).map_err(|_| "MICK_MODEL_ERROR")?;
+        let raw = self
+            .model
+            .complete(&prompt)
+            .map_err(|_| "MICK_MODEL_ERROR")?;
         // from_llm_json is already fail-closed + tolerant of small-model framing.
         MickIntent::from_llm_json(&raw)
     }
@@ -246,7 +255,9 @@ impl MockModel {
     /// A model that always replies with `text`.
     #[must_use]
     pub fn replying(text: impl Into<String>) -> Self {
-        Self { response: Ok(text.into()) }
+        Self {
+            response: Ok(text.into()),
+        }
     }
 
     /// A model whose backend always fails with `err`.
@@ -283,21 +294,44 @@ mod tests {
     fn prompt_carries_the_schema_and_the_situation() {
         let p = build_prompt(&sample_ctx());
         // The typed-intent contract the model must follow.
-        for tag in ["cruise", "go_to", "lane_change", "overtake", "pull_over", "turn_at", "route_to", "hold"] {
+        for tag in [
+            "cruise",
+            "go_to",
+            "lane_change",
+            "overtake",
+            "pull_over",
+            "turn_at",
+            "route_to",
+            "hold",
+        ] {
             assert!(p.contains(tag), "prompt must list the {tag} intent");
         }
         // The ego-relative situation is embedded (serialized WorldContext).
-        assert!(p.contains("ego_speed_mps") && p.contains("posture"), "prompt must embed the situation");
+        assert!(
+            p.contains("ego_speed_mps") && p.contains("posture"),
+            "prompt must embed the situation"
+        );
         // Few-shot worked examples are present (small models lean on them heavily).
-        assert!(p.contains("Examples"), "prompt must carry few-shot examples");
+        assert!(
+            p.contains("Examples"),
+            "prompt must carry few-shot examples"
+        );
     }
 
     #[test]
     fn intent_schema_is_a_well_formed_object_schema_requiring_the_tag() {
         let s = intent_schema();
         assert_eq!(s["type"], "object", "the schema is an object schema");
-        assert_eq!(s["required"], serde_json::json!(["intent"]), "the intent tag is required");
-        assert_eq!(s["additionalProperties"], serde_json::json!(false), "no stray fields admitted");
+        assert_eq!(
+            s["required"],
+            serde_json::json!(["intent"]),
+            "the intent tag is required"
+        );
+        assert_eq!(
+            s["additionalProperties"],
+            serde_json::json!(false),
+            "no stray fields admitted"
+        );
         // It must serialize as a JSON object (this is what Ollama's `format` receives).
         assert!(serde_json::to_string(&s).is_ok(), "the schema serializes");
     }
@@ -318,29 +352,58 @@ mod tests {
         // A minimal VALID object for each tag, and the typed intent it must parse to.
         let cases = [
             (r#"{"intent":"go_to","x_m":1.0,"y_m":2.0}"#, "go_to"),
-            (r#"{"intent":"lane_change","target_offset_m":3.5}"#, "lane_change"),
+            (
+                r#"{"intent":"lane_change","target_offset_m":3.5}"#,
+                "lane_change",
+            ),
             (r#"{"intent":"hold"}"#, "hold"),
             (r#"{"intent":"cruise","target_speed_mps":5.0}"#, "cruise"),
             (r#"{"intent":"overtake"}"#, "overtake"),
             (r#"{"intent":"pull_over"}"#, "pull_over"),
             (r#"{"intent":"turn_at","direction":"left"}"#, "turn_at"),
-            (r#"{"intent":"route_to","x_m":120.0,"y_m":40.0}"#, "route_to"),
+            (
+                r#"{"intent":"route_to","x_m":120.0,"y_m":40.0}"#,
+                "route_to",
+            ),
             (r#"{"intent":"yield","x_m":12.0,"y_m":0.0}"#, "yield"),
-            (r#"{"intent":"cross_when_clear","x_m":12.0,"y_m":0.0}"#, "cross_when_clear"),
-            (r#"{"intent":"creep_through","x_m":12.0,"y_m":0.0}"#, "creep_through"),
+            (
+                r#"{"intent":"cross_when_clear","x_m":12.0,"y_m":0.0}"#,
+                "cross_when_clear",
+            ),
+            (
+                r#"{"intent":"creep_through","x_m":12.0,"y_m":0.0}"#,
+                "creep_through",
+            ),
         ];
         for (json, tag) in cases {
-            assert!(enum_tags.contains(&tag.to_string()), "schema enum must list {tag}");
-            assert!(MickIntent::from_llm_json(json).is_ok(), "parser must accept the schema-valid {tag}");
+            assert!(
+                enum_tags.contains(&tag.to_string()),
+                "schema enum must list {tag}"
+            );
+            assert!(
+                MickIntent::from_llm_json(json).is_ok(),
+                "parser must accept the schema-valid {tag}"
+            );
         }
         // No extra tags the parser would reject (the enum is exactly the parseable set).
-        assert_eq!(enum_tags.len(), cases.len(), "schema enum lists exactly the parseable tags");
+        assert_eq!(
+            enum_tags.len(),
+            cases.len(),
+            "schema enum lists exactly the parseable tags"
+        );
     }
 
     #[test]
     fn llm_brain_parses_a_valid_model_reply() {
-        let mut brain = LlmBrain::new(MockModel::replying(r#"{"intent":"cruise","target_speed_mps":4.0}"#));
-        assert_eq!(brain.decide(&sample_ctx()).unwrap(), MickIntent::Cruise { target_speed_mps: 4.0 });
+        let mut brain = LlmBrain::new(MockModel::replying(
+            r#"{"intent":"cruise","target_speed_mps":4.0}"#,
+        ));
+        assert_eq!(
+            brain.decide(&sample_ctx()).unwrap(),
+            MickIntent::Cruise {
+                target_speed_mps: 4.0
+            }
+        );
     }
 
     // --- sidewalk-courier persona (ADR-0028 / D) ----------------------------
@@ -348,62 +411,120 @@ mod tests {
     #[test]
     fn courier_prompt_offers_the_sidewalk_intents_and_not_road_maneuvers() {
         let p = build_courier_prompt(&sample_ctx());
-        for tag in ["go_to", "yield", "cross_when_clear", "creep_through", "hold"] {
-            assert!(p.contains(tag), "courier prompt must offer the {tag} intent");
+        for tag in [
+            "go_to",
+            "yield",
+            "cross_when_clear",
+            "creep_through",
+            "hold",
+        ] {
+            assert!(
+                p.contains(tag),
+                "courier prompt must offer the {tag} intent"
+            );
         }
         // A courier does not get road maneuvers.
         for tag in ["lane_change", "overtake", "turn_at", "route_to"] {
-            assert!(!p.contains(tag), "courier prompt must NOT offer the road maneuver {tag}");
+            assert!(
+                !p.contains(tag),
+                "courier prompt must NOT offer the road maneuver {tag}"
+            );
         }
-        assert!(p.contains("courier") && p.contains("pedestrian"), "the sidewalk persona is present");
+        assert!(
+            p.contains("courier") && p.contains("pedestrian"),
+            "the sidewalk persona is present"
+        );
     }
 
     #[test]
     fn courier_schema_is_a_subset_of_the_parseable_tags() {
         let courier: Vec<String> = courier_intent_schema()["properties"]["intent"]["enum"]
-            .as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
         let full: Vec<String> = intent_schema()["properties"]["intent"]["enum"]
-            .as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
-        assert_eq!(courier, ["go_to", "yield", "cross_when_clear", "creep_through", "hold"]);
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            courier,
+            [
+                "go_to",
+                "yield",
+                "cross_when_clear",
+                "creep_through",
+                "hold"
+            ]
+        );
         for tag in &courier {
-            assert!(full.contains(tag), "courier tag {tag} must be in the full parseable set");
+            assert!(
+                full.contains(tag),
+                "courier tag {tag} must be in the full parseable set"
+            );
         }
     }
 
     #[test]
     fn courier_brain_authors_and_parses_a_sidewalk_intent() {
         // The courier persona round-trips a sidewalk intent through the brain.
-        let mut brain = LlmBrain::courier(MockModel::replying(r#"{"intent":"yield","x_m":8.0,"y_m":0.0}"#));
+        let mut brain = LlmBrain::courier(MockModel::replying(
+            r#"{"intent":"yield","x_m":8.0,"y_m":0.0}"#,
+        ));
         assert_eq!(brain.persona(), Persona::SidewalkCourier);
-        assert_eq!(brain.decide(&sample_ctx()).unwrap(), MickIntent::Yield { x_m: 8.0, y_m: 0.0 });
+        assert_eq!(
+            brain.decide(&sample_ctx()).unwrap(),
+            MickIntent::Yield { x_m: 8.0, y_m: 0.0 }
+        );
 
-        let mut creeper = LlmBrain::courier(MockModel::replying(r#"{"intent":"creep_through","x_m":8.0,"y_m":0.0}"#));
-        assert_eq!(creeper.decide(&sample_ctx()).unwrap(), MickIntent::CreepThrough { x_m: 8.0, y_m: 0.0 });
+        let mut creeper = LlmBrain::courier(MockModel::replying(
+            r#"{"intent":"creep_through","x_m":8.0,"y_m":0.0}"#,
+        ));
+        assert_eq!(
+            creeper.decide(&sample_ctx()).unwrap(),
+            MickIntent::CreepThrough { x_m: 8.0, y_m: 0.0 }
+        );
     }
 
     #[test]
     fn llm_brain_tolerates_gemma_framing() {
         // The tolerant extractor recovers the object from a fence + preamble.
-        let mut brain = LlmBrain::new(MockModel::replying("Sure — here is the intent:\n```json\n{\"intent\":\"hold\"}\n```"));
+        let mut brain = LlmBrain::new(MockModel::replying(
+            "Sure — here is the intent:\n```json\n{\"intent\":\"hold\"}\n```",
+        ));
         assert_eq!(brain.decide(&sample_ctx()).unwrap(), MickIntent::Hold);
     }
 
     #[test]
     fn llm_brain_fails_closed_on_a_hallucinated_reply() {
         let mut brain = LlmBrain::new(MockModel::replying("just floor it, trust me"));
-        assert!(brain.decide(&sample_ctx()).is_err(), "unparseable reply must fail closed");
+        assert!(
+            brain.decide(&sample_ctx()).is_err(),
+            "unparseable reply must fail closed"
+        );
     }
 
     #[test]
     fn llm_brain_fails_closed_on_a_model_error() {
         let mut brain = LlmBrain::new(MockModel::failing("connection refused"));
-        assert!(brain.decide(&sample_ctx()).is_err(), "a backend error must fail closed");
+        assert!(
+            brain.decide(&sample_ctx()).is_err(),
+            "a backend error must fail closed"
+        );
     }
 
     #[test]
     fn llm_brain_fails_closed_on_a_nonfinite_intent() {
         // The model emits a syntactically valid object with an overflowing number.
-        let mut brain = LlmBrain::new(MockModel::replying(r#"{"intent":"go_to","x_m":1e400,"y_m":0.0}"#));
-        assert!(brain.decide(&sample_ctx()).is_err(), "a non-finite intent must fail closed");
+        let mut brain = LlmBrain::new(MockModel::replying(
+            r#"{"intent":"go_to","x_m":1e400,"y_m":0.0}"#,
+        ));
+        assert!(
+            brain.decide(&sample_ctx()).is_err(),
+            "a non-finite intent must fail closed"
+        );
     }
 }

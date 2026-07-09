@@ -89,7 +89,7 @@ impl ParkoPostureState {
         let now = current_time_ms();
         match self.tracker.read() {
             Ok(guard) => guard.current_posture(now),
-            Err(_)    => FleetPosture::Degraded,
+            Err(_) => FleetPosture::Degraded,
         }
     }
 
@@ -110,8 +110,8 @@ impl ParkoPostureState {
 #[must_use]
 pub fn fleet_to_safety(p: FleetPosture) -> SafetyPosture {
     match p {
-        FleetPosture::Nominal   => SafetyPosture::Nominal,
-        FleetPosture::Degraded  => SafetyPosture::Degraded,
+        FleetPosture::Nominal => SafetyPosture::Nominal,
+        FleetPosture::Degraded => SafetyPosture::Degraded,
         FleetPosture::LockedOut => SafetyPosture::LockedOut,
     }
 }
@@ -137,9 +137,18 @@ mod tests {
 
     #[test]
     fn fleet_to_safety_is_pure_projection() {
-        assert!(matches!(fleet_to_safety(FleetPosture::Nominal),   SafetyPosture::Nominal));
-        assert!(matches!(fleet_to_safety(FleetPosture::Degraded),  SafetyPosture::Degraded));
-        assert!(matches!(fleet_to_safety(FleetPosture::LockedOut), SafetyPosture::LockedOut));
+        assert!(matches!(
+            fleet_to_safety(FleetPosture::Nominal),
+            SafetyPosture::Nominal
+        ));
+        assert!(matches!(
+            fleet_to_safety(FleetPosture::Degraded),
+            SafetyPosture::Degraded
+        ));
+        assert!(matches!(
+            fleet_to_safety(FleetPosture::LockedOut),
+            SafetyPosture::LockedOut
+        ));
     }
 
     #[test]
@@ -147,13 +156,21 @@ mod tests {
         let state = ParkoPostureState::no_source();
         // Multiple reads at wall-clock time advances must still
         // return Nominal — the no-source mode is time-independent.
-        assert!(matches!(state.current_fleet_posture(),  FleetPosture::Nominal));
-        assert!(matches!(state.current_safety_posture(), SafetyPosture::Nominal));
+        assert!(matches!(
+            state.current_fleet_posture(),
+            FleetPosture::Nominal
+        ));
+        assert!(matches!(
+            state.current_safety_posture(),
+            SafetyPosture::Nominal
+        ));
         // observe is a no-op in this mode — verify the tracker
         // refuses to latch a LockedOut even when one is offered.
         state.observe(FleetPosture::LockedOut);
-        assert!(matches!(state.current_fleet_posture(), FleetPosture::Nominal),
-            "no_source must ignore observe and hold Nominal");
+        assert!(
+            matches!(state.current_fleet_posture(), FleetPosture::Nominal),
+            "no_source must ignore observe and hold Nominal"
+        );
     }
 
     #[test]
@@ -163,15 +180,24 @@ mod tests {
         // full envelope. The kernel tracker's pre-first-event seed
         // gives us this for free.
         let state = ParkoPostureState::with_source();
-        assert!(matches!(state.current_fleet_posture(),  FleetPosture::Degraded));
-        assert!(matches!(state.current_safety_posture(), SafetyPosture::Degraded));
+        assert!(matches!(
+            state.current_fleet_posture(),
+            FleetPosture::Degraded
+        ));
+        assert!(matches!(
+            state.current_safety_posture(),
+            SafetyPosture::Degraded
+        ));
     }
 
     #[test]
     fn observe_nominal_then_read_is_nominal() {
         let state = ParkoPostureState::with_source();
         state.observe(FleetPosture::Nominal);
-        assert!(matches!(state.current_safety_posture(), SafetyPosture::Nominal));
+        assert!(matches!(
+            state.current_safety_posture(),
+            SafetyPosture::Nominal
+        ));
     }
 
     #[test]
@@ -180,9 +206,15 @@ mod tests {
         state.observe(FleetPosture::LockedOut);
         // A subsequent read should still be LockedOut — the kernel
         // tracker latches sticky-toward-safe.
-        assert!(matches!(state.current_safety_posture(), SafetyPosture::LockedOut));
+        assert!(matches!(
+            state.current_safety_posture(),
+            SafetyPosture::LockedOut
+        ));
         // Recovery requires an EXPLICIT non-LockedOut event.
         state.observe(FleetPosture::Nominal);
-        assert!(matches!(state.current_safety_posture(), SafetyPosture::Nominal));
+        assert!(matches!(
+            state.current_safety_posture(),
+            SafetyPosture::Nominal
+        ));
     }
 }

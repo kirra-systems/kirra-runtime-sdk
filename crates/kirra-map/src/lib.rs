@@ -16,5 +16,5 @@
 //! - [`lanelet2`] — the pure-Rust Lanelet2 `.osm` (OSM-XML) parser → [`lanemap::LaneGraph`].
 
 pub mod lane_lines;
-pub mod lanemap;
 pub mod lanelet2;
+pub mod lanemap;

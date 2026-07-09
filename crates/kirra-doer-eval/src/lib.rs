@@ -219,12 +219,22 @@ impl EvalScenario {
             corridor,
             objects,
             ego: EgoState {
-                pose: Pose { x_m: ego_x, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: ego_x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 linear_x_mps: ego_speed_mps,
                 yaw_rate_rads: 0.0,
                 stamp_ms: 0,
             },
-            goal: Goal { target: Pose { x_m: goal_x, y_m: 0.0, heading_rad: 0.0 } },
+            goal: Goal {
+                target: Pose {
+                    x_m: goal_x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+            },
             config: VehicleConfig::default_urban(),
             posture: FleetPosture::Nominal,
         }
@@ -334,7 +344,10 @@ fn evaluate_scenarios<'a>(
         quality.record(cand_choice == ref_choice, pr);
     }
 
-    DoerEvalSummary { admissibility, quality }
+    DoerEvalSummary {
+        admissibility,
+        quality,
+    }
 }
 
 /// Int8-quantize `planner` (PTQ), calibrating over `corpus` — a convenience wrapper
@@ -421,7 +434,10 @@ pub fn split_corpus(corpus: &[EvalScenario], holdout_every_n: usize) -> CorpusSp
             calibration.push(sc);
         }
     }
-    CorpusSplit { calibration, holdout }
+    CorpusSplit {
+        calibration,
+        holdout,
+    }
 }
 
 /// The held-out generalization measurement (Q1 scope §5). Calibrates the int8 PTQ
@@ -455,7 +471,10 @@ impl GeneralizationReport {
 /// Produce the [`GeneralizationReport`] for `fp32` under `split`: quantize on the
 /// calibration partition, evaluate the resulting int8 planner on both partitions.
 #[must_use]
-pub fn generalization_report(fp32: &LearnedPlanner, split: &CorpusSplit<'_>) -> GeneralizationReport {
+pub fn generalization_report(
+    fp32: &LearnedPlanner,
+    split: &CorpusSplit<'_>,
+) -> GeneralizationReport {
     let int8 = quantize_over_refs(fp32, &split.calibration);
     let calib = evaluate_scenarios(split.calibration.iter().copied(), &int8, fp32);
     let holdout = evaluate_scenarios(split.holdout.iter().copied(), &int8, fp32);
@@ -481,7 +500,11 @@ fn progress_ratio(plan: &PlanOutput, ego_x: f64, goal_x: f64) -> f64 {
     if span <= f64::EPSILON {
         return 0.0;
     }
-    let reach = plan.trajectory.iter().map(|t| t.pose.x_m).fold(f64::MIN, f64::max);
+    let reach = plan
+        .trajectory
+        .iter()
+        .map(|t| t.pose.x_m)
+        .fold(f64::MIN, f64::max);
     ((reach - ego_x) / span).clamp(0.0, 1.0)
 }
 
@@ -514,9 +537,30 @@ pub fn demo_corpus() -> Vec<EvalScenario> {
     let road = || MockCorridorSource::straight_5m_half_width(100.0);
     vec![
         EvalScenario::new("clear_road", road(), vec![], 5.0, 2.0, 40.0),
-        EvalScenario::new("hazard_far", road(), vec![stopped_car(1, 45.0)], 5.0, 2.0, 40.0),
-        EvalScenario::new("hazard_mid", road(), vec![stopped_car(1, 25.0)], 5.0, 2.0, 40.0),
-        EvalScenario::new("hazard_near", road(), vec![stopped_car(1, 18.0)], 5.0, 2.0, 40.0),
+        EvalScenario::new(
+            "hazard_far",
+            road(),
+            vec![stopped_car(1, 45.0)],
+            5.0,
+            2.0,
+            40.0,
+        ),
+        EvalScenario::new(
+            "hazard_mid",
+            road(),
+            vec![stopped_car(1, 25.0)],
+            5.0,
+            2.0,
+            40.0,
+        ),
+        EvalScenario::new(
+            "hazard_near",
+            road(),
+            vec![stopped_car(1, 18.0)],
+            5.0,
+            2.0,
+            40.0,
+        ),
     ]
 }
 
@@ -570,7 +614,10 @@ impl Scorecard {
     /// A scorecard stamped with the current [`Self::SCHEMA_VERSION`].
     #[must_use]
     pub fn new(rows: Vec<ScorecardRow>) -> Self {
-        Self { schema_version: Self::SCHEMA_VERSION, rows }
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            rows,
+        }
     }
 
     /// Serialize to pretty JSON — the file the cross-workspace seam carries.
@@ -711,8 +758,12 @@ mod tests {
         let ref_safe = LearnedPlanner::trained(SEED, Teacher::SafetyAware);
         let ref_prog = LearnedPlanner::trained(SEED, Teacher::ProgressOnly);
 
-        let safe_progress = evaluate_corpus(&corpus, &safe, &ref_safe).quality.mean_progress();
-        let prog_progress = evaluate_corpus(&corpus, &prog, &ref_prog).quality.mean_progress();
+        let safe_progress = evaluate_corpus(&corpus, &safe, &ref_safe)
+            .quality
+            .mean_progress();
+        let prog_progress = evaluate_corpus(&corpus, &prog, &ref_prog)
+            .quality
+            .mean_progress();
 
         assert!((0.0..=1.0).contains(&safe_progress));
         assert!((0.0..=1.0).contains(&prog_progress));
@@ -775,7 +826,11 @@ mod tests {
         let absmax = fp32.quantize_int8_with(&inputs, CalibrationMethod::AbsMax);
         let p100 = fp32.quantize_int8_with(&inputs, CalibrationMethod::Percentile(1.0));
 
-        assert_eq!(default.scales(), absmax.scales(), "default == explicit AbsMax");
+        assert_eq!(
+            default.scales(),
+            absmax.scales(),
+            "default == explicit AbsMax"
+        );
         assert_eq!(absmax.scales(), p100.scales(), "Percentile(1.0) == AbsMax");
     }
 
@@ -808,12 +863,20 @@ mod tests {
             .into_iter()
             .enumerate()
         {
-            v.push(EvalScenario::new(format!("clear_{i}"), road(), vec![], 5.0, spd, goal));
+            v.push(EvalScenario::new(
+                format!("clear_{i}"),
+                road(),
+                vec![],
+                5.0,
+                spd,
+                goal,
+            ));
         }
-        for (i, dist) in
-            [15.0, 18.0, 22.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0, 28.0]
-                .into_iter()
-                .enumerate()
+        for (i, dist) in [
+            15.0, 18.0, 22.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0, 28.0,
+        ]
+        .into_iter()
+        .enumerate()
         {
             v.push(EvalScenario::new(
                 format!("hazard_{i}"),
@@ -853,9 +916,8 @@ mod tests {
 
         // Deterministic: same partition on a re-split.
         let again = split_corpus(&corpus, 4);
-        let names = |s: &CorpusSplit| -> Vec<String> {
-            s.holdout.iter().map(|x| x.name.clone()).collect()
-        };
+        let names =
+            |s: &CorpusSplit| -> Vec<String> { s.holdout.iter().map(|x| x.name.clone()).collect() };
         assert_eq!(names(&split), names(&again));
     }
 
@@ -881,7 +943,14 @@ mod tests {
             EvalScenario::new("clear_a", road(), vec![], 5.0, 2.0, 40.0),
             EvalScenario::new("clear_b", road(), vec![], 5.0, 3.0, 50.0),
             EvalScenario::new("clear_c", road(), vec![], 5.0, 2.5, 45.0),
-            EvalScenario::new("hazard_near", road(), vec![stopped_car(1, 16.0)], 5.0, 2.0, 40.0),
+            EvalScenario::new(
+                "hazard_near",
+                road(),
+                vec![stopped_car(1, 16.0)],
+                5.0,
+                2.0,
+                40.0,
+            ),
         ];
         let split = split_corpus(&corpus, 4);
         assert_eq!(split.calibration.len(), 3);
@@ -894,8 +963,7 @@ mod tests {
         // Independently evaluate the same int8 (calibrated on the calibration
         // partition) over ONLY the held-out scenario, and confirm the report used it.
         let int8 = quantize_over_refs(&fp32, &split.calibration);
-        let independent =
-            evaluate_scenarios(split.holdout.iter().copied(), &int8, &fp32);
+        let independent = evaluate_scenarios(split.holdout.iter().copied(), &int8, &fp32);
         assert_eq!(
             report.holdout_admissibility,
             independent.admissibility.admissibility_rate(),
@@ -918,7 +986,10 @@ mod tests {
 
         let report = generalization_report(&fp32, &split);
 
-        assert!(report.holdout_scenarios >= 1, "the held-out partition is non-empty");
+        assert!(
+            report.holdout_scenarios >= 1,
+            "the held-out partition is non-empty"
+        );
         // Held-out floor: a genuinely unseen argmax-agreement, the release-trustable
         // number. Matches the whole-corpus int8 floor used elsewhere (0.75).
         assert!(
@@ -953,7 +1024,10 @@ mod tests {
             ScorecardRow::from_summary("int8-ptq", &int8_s),
         ]);
         let json = card.to_json();
-        assert!(json.contains("\"schema_version\""), "scorecard carries a version");
+        assert!(
+            json.contains("\"schema_version\""),
+            "scorecard carries a version"
+        );
         let parsed = Scorecard::from_json(&json).expect("valid scorecard JSON");
         assert_eq!(card, parsed);
         assert_eq!(parsed.schema_version, Scorecard::SCHEMA_VERSION);

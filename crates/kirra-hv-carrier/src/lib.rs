@@ -63,14 +63,24 @@ struct AtomicView {
 // The mapped-region layout IS the frozen contract layout — assert every offset
 // against GovernorContractView's own (themselves frozen in kirra-contract-channel).
 use core::mem::{align_of, offset_of, size_of};
-const _: () = assert!(offset_of!(AtomicView, layout_version) == offset_of!(GovernorContractView, layout_version));
+const _: () = assert!(
+    offset_of!(AtomicView, layout_version) == offset_of!(GovernorContractView, layout_version)
+);
 const _: () = assert!(offset_of!(AtomicView, magic) == offset_of!(GovernorContractView, magic));
-const _: () = assert!(offset_of!(AtomicView, generation) == offset_of!(GovernorContractView, generation));
-const _: () = assert!(offset_of!(AtomicView, sequence) == offset_of!(GovernorContractView, sequence));
-const _: () = assert!(offset_of!(AtomicView, publication_nanos) == offset_of!(GovernorContractView, publication_nanos));
-const _: () = assert!(offset_of!(AtomicView, deadline_nanos) == offset_of!(GovernorContractView, deadline_nanos));
+const _: () =
+    assert!(offset_of!(AtomicView, generation) == offset_of!(GovernorContractView, generation));
+const _: () =
+    assert!(offset_of!(AtomicView, sequence) == offset_of!(GovernorContractView, sequence));
+const _: () = assert!(
+    offset_of!(AtomicView, publication_nanos)
+        == offset_of!(GovernorContractView, publication_nanos)
+);
+const _: () = assert!(
+    offset_of!(AtomicView, deadline_nanos) == offset_of!(GovernorContractView, deadline_nanos)
+);
 const _: () = assert!(offset_of!(AtomicView, crc32) == offset_of!(GovernorContractView, crc32));
-const _: () = assert!(offset_of!(AtomicView, command_len) == offset_of!(GovernorContractView, command_len));
+const _: () =
+    assert!(offset_of!(AtomicView, command_len) == offset_of!(GovernorContractView, command_len));
 const _: () = assert!(offset_of!(AtomicView, command) == offset_of!(GovernorContractView, command));
 const _: () = assert!(size_of::<AtomicView>() == size_of::<GovernorContractView>());
 const _: () = assert!(size_of::<AtomicView>() == CANONICAL_IMAGE_LEN);
@@ -102,11 +112,14 @@ fn read_view(v: &AtomicView) -> GovernorContractView {
 /// Relaxed; the Release store of `generation` publishes them. **Mirrors
 /// `InProcessRegion::store_body` exactly.**
 fn write_body(v: &AtomicView, view: &GovernorContractView) {
-    v.layout_version.store(view.layout_version, Ordering::Relaxed);
+    v.layout_version
+        .store(view.layout_version, Ordering::Relaxed);
     v.magic.store(view.magic, Ordering::Relaxed);
     v.sequence.store(view.sequence, Ordering::Relaxed);
-    v.publication_nanos.store(view.publication_nanos, Ordering::Relaxed);
-    v.deadline_nanos.store(view.deadline_nanos, Ordering::Relaxed);
+    v.publication_nanos
+        .store(view.publication_nanos, Ordering::Relaxed);
+    v.deadline_nanos
+        .store(view.deadline_nanos, Ordering::Relaxed);
     v.crc32.store(view.crc32, Ordering::Relaxed);
     v.command_len.store(view.command_len, Ordering::Relaxed);
     for (i, b) in view.command.iter().enumerate() {
@@ -119,7 +132,8 @@ fn write_body(v: &AtomicView, view: &GovernorContractView) {
 /// Build a NUL-terminated POSIX shared-memory name. Callers pass a leading-slash
 /// name (e.g. `"/kirra-gov"`); an interior NUL is rejected.
 fn shm_name(name: &str) -> io::Result<CString> {
-    CString::new(name).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has interior NUL"))
+    CString::new(name)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has interior NUL"))
 }
 
 /// `mmap` the named shared region and return the base pointer. `create` adds
@@ -176,7 +190,14 @@ fn map_region(name: &CString, prot: libc::c_int, create: bool) -> io::Result<*mu
     // SAFETY: fd valid; length is the fixed region size; MAP_SHARED so writes are
     // visible to every peer mapping the same object.
     let addr = unsafe {
-        libc::mmap(core::ptr::null_mut(), CANONICAL_IMAGE_LEN, prot, libc::MAP_SHARED, fd, 0)
+        libc::mmap(
+            core::ptr::null_mut(),
+            CANONICAL_IMAGE_LEN,
+            prot,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        )
     };
     // Capture the mmap errno BEFORE close() can overwrite it.
     let map_err = if addr == libc::MAP_FAILED {
@@ -219,7 +240,11 @@ impl PosixShmRegion {
     pub fn create(name: &str) -> io::Result<Self> {
         let name = shm_name(name)?;
         let ptr = map_region(&name, libc::PROT_READ | libc::PROT_WRITE, true)?;
-        Ok(Self { ptr, name, is_creator: true })
+        Ok(Self {
+            ptr,
+            name,
+            is_creator: true,
+        })
     }
 
     /// Open an existing region read-write (a second guest-side mapping). Does not
@@ -227,7 +252,11 @@ impl PosixShmRegion {
     pub fn open(name: &str) -> io::Result<Self> {
         let name = shm_name(name)?;
         let ptr = map_region(&name, libc::PROT_READ | libc::PROT_WRITE, false)?;
-        Ok(Self { ptr, name, is_creator: false })
+        Ok(Self {
+            ptr,
+            name,
+            is_creator: false,
+        })
     }
 
     /// SAFETY: `ptr` is a valid, aligned mapping of `size_of::<AtomicView>()`
@@ -352,7 +381,10 @@ mod tests {
         let mut wm = AcceptedWatermark::new();
         validate(&snap, 0, &wm).expect("valid");
         wm.record(&snap);
-        assert_eq!(VehicleCommandPayload::from_validated_view(&snap), Ok(payload));
+        assert_eq!(
+            VehicleCommandPayload::from_validated_view(&snap),
+            Ok(payload)
+        );
     }
 
     #[test]
@@ -369,7 +401,10 @@ mod tests {
         let wm = AcceptedWatermark::new();
         validate(&snap, 0, &wm).expect("valid");
         assert_eq!(snap.sequence, 42);
-        assert_eq!(VehicleCommandPayload::from_validated_view(&snap), Ok(payload));
+        assert_eq!(
+            VehicleCommandPayload::from_validated_view(&snap),
+            Ok(payload)
+        );
     }
 
     #[test]
@@ -387,7 +422,10 @@ mod tests {
             validate(&snap, 0, &wm).expect("in order");
             wm.record(&snap);
             assert_eq!(snap.sequence, seq);
-            assert_eq!(VehicleCommandPayload::from_validated_view(&snap), Ok(demo(seq)));
+            assert_eq!(
+                VehicleCommandPayload::from_validated_view(&snap),
+                Ok(demo(seq))
+            );
         }
         assert_eq!(wm.last(), Some((8, 4)));
     }
@@ -400,7 +438,11 @@ mod tests {
         let cname = std::ffi::CString::new(name.clone()).unwrap();
         // SAFETY: FFI; fd is checked and closed.
         unsafe {
-            let fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600);
+            let fd = libc::shm_open(
+                cname.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                0o600,
+            );
             assert!(fd >= 0, "raw shm_open");
             assert_eq!(
                 libc::ftruncate(fd, (CANONICAL_IMAGE_LEN - 1) as libc::off_t),
@@ -410,8 +452,14 @@ mod tests {
             libc::close(fd);
         }
         // Both handles fail closed rather than map a SIGBUS-prone region.
-        assert!(PosixShmRegion::open(&name).is_err(), "RW open must reject too-small");
-        assert!(PosixShmReader::open(&name).is_err(), "RO open must reject too-small");
+        assert!(
+            PosixShmRegion::open(&name).is_err(),
+            "RW open must reject too-small"
+        );
+        assert!(
+            PosixShmReader::open(&name).is_err(),
+            "RO open must reject too-small"
+        );
         // SAFETY: cleanup the raw object.
         unsafe { libc::shm_unlink(cname.as_ptr()) };
     }
@@ -422,7 +470,7 @@ mod tests {
         {
             let _guest = PosixShmRegion::create(&name).expect("create");
         } // dropped → shm_unlink
-        // A fresh create with the same name must succeed (O_EXCL) → proves unlink.
+          // A fresh create with the same name must succeed (O_EXCL) → proves unlink.
         let _again = PosixShmRegion::create(&name).expect("recreate after unlink");
     }
 }

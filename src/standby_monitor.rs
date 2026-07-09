@@ -55,10 +55,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::time::{interval, Duration};
 
-use crate::verifier::AppState;
-use crate::posture_cache::{SharedPostureCache, now_ms};
+use crate::posture_cache::{now_ms, SharedPostureCache};
 use crate::posture_engine::{init_generation_from_store, recalculate_and_broadcast};
 use crate::posture_engine_v2::resolve_post_promotion_posture;
+use crate::verifier::AppState;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -174,7 +174,10 @@ pub(crate) fn takeover_record_verdict(
 // #707: pub(crate) — internal helper (promotion loop + same-module tests), not a
 // supported external API.
 #[must_use]
-pub(crate) fn enforce_promotion_timeout_floor(env_timeout_ms: u64, interval_ms: u64) -> (u64, bool) {
+pub(crate) fn enforce_promotion_timeout_floor(
+    env_timeout_ms: u64,
+    interval_ms: u64,
+) -> (u64, bool) {
     // Contract: callers pass a positive interval (both env reads filter `> 0`).
     // `interval_ms == 0` would make the floor 0 and silently disable the
     // split-brain guard — fail fast on misuse in debug/test builds without
@@ -234,7 +237,9 @@ pub fn init_instance_id(id: String) {
 /// resolution [`resolve_instance_id`] performs with no explicit inputs, which
 /// keeps tests and library callers working without boot wiring.
 pub fn instance_id() -> String {
-    INSTANCE_ID.get_or_init(|| resolve_instance_id(None, None, None)).clone()
+    INSTANCE_ID
+        .get_or_init(|| resolve_instance_id(None, None, None))
+        .clone()
 }
 
 /// Resolve the HA instance identity from EXPLICIT inputs (pure over its
@@ -366,91 +371,92 @@ pub fn spawn_heartbeat_writer(app: Arc<AppState>, ha: HaTimings) {
 }
 
 async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
-        // EP-03: the lease gate. When armed, the holder must renew at the lease
-        // half-life — which is FASTER than the default heartbeat interval
-        // (1.5 s vs 2 s at the default TTL) — so the loop runs at the tighter
-        // of the two cadences (each tick both heartbeats AND renews).
-        let lease = ha.lease;
-        let interval_ms = match &lease {
-            Some(p) => ha.heartbeat_interval_ms.min(p.renew_interval_ms.max(1)),
-            None => ha.heartbeat_interval_ms,
-        };
+    // EP-03: the lease gate. When armed, the holder must renew at the lease
+    // half-life — which is FASTER than the default heartbeat interval
+    // (1.5 s vs 2 s at the default TTL) — so the loop runs at the tighter
+    // of the two cadences (each tick both heartbeats AND renews).
+    let lease = ha.lease;
+    let interval_ms = match &lease {
+        Some(p) => ha.heartbeat_interval_ms.min(p.renew_interval_ms.max(1)),
+        None => ha.heartbeat_interval_ms,
+    };
 
-        let mut tick = interval(Duration::from_millis(interval_ms));
+    let mut tick = interval(Duration::from_millis(interval_ms));
 
-        tracing::info!(
-            instance_id = %id,
-            interval_ms = interval_ms,
-            lease_enabled = lease.is_some(),
-            "Heartbeat writer started"
-        );
+    tracing::info!(
+        instance_id = %id,
+        interval_ms = interval_ms,
+        lease_enabled = lease.is_some(),
+        "Heartbeat writer started"
+    );
 
-        // EP-03: monotonic anchor of the last SUCCESSFUL lease renewal. The
-        // durable claim that made this instance Active stamped the lease
-        // (`try_claim_epoch` sets `updated_at_ms`), so loop start counts as
-        // freshly renewed.
-        let mut last_renew = Instant::now();
+    // EP-03: monotonic anchor of the last SUCCESSFUL lease renewal. The
+    // durable claim that made this instance Active stamped the lease
+    // (`try_claim_epoch` sets `updated_at_ms`), so loop start counts as
+    // freshly renewed.
+    let mut last_renew = Instant::now();
 
-        // Review item "1": consecutive failed heartbeat ticks (write or epoch
-        // read). Reset to 0 on any healthy tick; at MAX_CONSECUTIVE_HEARTBEAT_
-        // FAILURES the primary self-demotes (disk-wedge / fence-uncertainty).
-        let mut consecutive_failures: u32 = 0;
+    // Review item "1": consecutive failed heartbeat ticks (write or epoch
+    // read). Reset to 0 on any healthy tick; at MAX_CONSECUTIVE_HEARTBEAT_
+    // FAILURES the primary self-demotes (disk-wedge / fence-uncertainty).
+    let mut consecutive_failures: u32 = 0;
 
-        // The store work runs under one acquisition; the closure returns an
-        // OUTCOME the outer loop acts on (the closure cannot `continue`/`break`
-        // the outer loop directly — Rule 4).
-        enum HeartbeatOutcome {
-            /// Fenced or promoted-over: the closure already set mode_active=false;
-            /// the loop breaks.
-            SelfDemoted,
-            /// The heartbeat write, the epoch read, or the lease renewal failed
-            /// this tick.
-            Failed,
-            /// A clean tick: heartbeat written, epoch read and still owned, and —
-            /// lease gate on — the durable lease renewed.
-            Healthy,
+    // The store work runs under one acquisition; the closure returns an
+    // OUTCOME the outer loop acts on (the closure cannot `continue`/`break`
+    // the outer loop directly — Rule 4).
+    enum HeartbeatOutcome {
+        /// Fenced or promoted-over: the closure already set mode_active=false;
+        /// the loop breaks.
+        SelfDemoted,
+        /// The heartbeat write, the epoch read, or the lease renewal failed
+        /// this tick.
+        Failed,
+        /// A clean tick: heartbeat written, epoch read and still owned, and —
+        /// lease gate on — the durable lease renewed.
+        Healthy,
+    }
+
+    loop {
+        tick.tick().await;
+
+        // EP-03 holder-side lease rule: past its own TTL this holder can no
+        // longer PROVE it holds the lease — self-demote (fail-closed) before
+        // touching the store, exactly like the disk-wedge path. The
+        // challenger's promote deadline is ttl + ttl/2, so this demote
+        // strictly precedes any lease-triggered promotion
+        // (`demote_before_promote`, const-proved in `lease.rs`).
+        if let Some(params) = &lease {
+            let elapsed_ms = last_renew.elapsed().as_millis() as u64;
+            if crate::lease::lease_expired(elapsed_ms, params) {
+                app.mode_active
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                tracing::error!(
+                    instance_id = %id,
+                    elapsed_ms,
+                    ttl_ms = params.ttl_ms,
+                    "LEASE EXPIRED — this holder cannot prove ownership; self-demoting and stopping heartbeat (fail-closed)"
+                );
+                break;
+            }
         }
 
-        loop {
-            tick.tick().await;
-
-            // EP-03 holder-side lease rule: past its own TTL this holder can no
-            // longer PROVE it holds the lease — self-demote (fail-closed) before
-            // touching the store, exactly like the disk-wedge path. The
-            // challenger's promote deadline is ttl + ttl/2, so this demote
-            // strictly precedes any lease-triggered promotion
-            // (`demote_before_promote`, const-proved in `lease.rs`).
-            if let Some(params) = &lease {
-                let elapsed_ms = last_renew.elapsed().as_millis() as u64;
-                if crate::lease::lease_expired(elapsed_ms, params) {
-                    app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
-                    tracing::error!(
-                        instance_id = %id,
-                        elapsed_ms,
-                        ttl_ms = params.ttl_ms,
-                        "LEASE EXPIRED — this holder cannot prove ownership; self-demoting and stopping heartbeat (fail-closed)"
-                    );
-                    break;
-                }
-            }
-
-            // #80: this `now_ms()` is written as a freshness TOKEN, not a clock
-            // the standby trusts. The standby treats it as an opaque
-            // change-detector (it advances each tick) and times staleness on its
-            // OWN monotonic clock — see `HeartbeatFreshness`. Any value that
-            // strictly changes each tick would do; `now_ms()` is convenient.
-            let ts = now_ms();
-            // P1: run the heartbeat write + epoch read OFF the tokio worker pool
-            // (`call` → spawn_blocking) so the ~2 s fsync write can't pin a shared
-            // worker and head-of-line-block request handlers / the fast loop. The
-            // whole closure still runs under ONE writer-lock acquisition on the
-            // blocking thread, so the write-then-epoch-read group stays atomic. The
-            // closure must own its captures; clone the Arc (for the atomics) and the
-            // instance id (reused next tick) into it.
-            let app_c = Arc::clone(&app);
-            let id_c = id.clone();
-            let lease_c = lease;
-            let outcome = match app.store.call(move |store| {
+        // #80: this `now_ms()` is written as a freshness TOKEN, not a clock
+        // the standby trusts. The standby treats it as an opaque
+        // change-detector (it advances each tick) and times staleness on its
+        // OWN monotonic clock — see `HeartbeatFreshness`. Any value that
+        // strictly changes each tick would do; `now_ms()` is convenient.
+        let ts = now_ms();
+        // P1: run the heartbeat write + epoch read OFF the tokio worker pool
+        // (`call` → spawn_blocking) so the ~2 s fsync write can't pin a shared
+        // worker and head-of-line-block request handlers / the fast loop. The
+        // whole closure still runs under ONE writer-lock acquisition on the
+        // blocking thread, so the write-then-epoch-read group stays atomic. The
+        // closure must own its captures; clone the Arc (for the atomics) and the
+        // instance id (reused next tick) into it.
+        let app_c = Arc::clone(&app);
+        let id_c = id.clone();
+        let lease_c = lease;
+        let outcome = match app.store.call(move |store| {
                 if let Err(e) = store.save_engine_state(HEARTBEAT_KEY, &ts.to_string()) {
                     tracing::warn!(
                         error       = %e,
@@ -570,32 +576,33 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
                     HeartbeatOutcome::Failed
                 }
             };
-            match outcome {
-                HeartbeatOutcome::SelfDemoted => break,
-                HeartbeatOutcome::Healthy => {
-                    consecutive_failures = 0;
-                    // EP-03: a healthy tick renewed the lease (gate on) — re-anchor.
-                    last_renew = Instant::now();
-                }
-                HeartbeatOutcome::Failed => {
-                    consecutive_failures += 1;
-                    // Review item "1": after N consecutive failures the primary can
-                    // no longer confirm it owns the epoch and the standby is about
-                    // to promote on heartbeat silence. Self-demote (fail closed) so
-                    // the old primary stops being a writer before the new one starts.
-                    if should_self_demote_on_heartbeat_failures(consecutive_failures) {
-                        app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
-                        tracing::error!(
-                            instance_id          = %id,
-                            consecutive_failures = consecutive_failures,
-                            max                  = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
-                            "DISK-WEDGE — consecutive heartbeat/epoch failures exceeded; self-demoting and stopping heartbeat (fence-uncertainty → fail closed)"
-                        );
-                        break;
-                    }
+        match outcome {
+            HeartbeatOutcome::SelfDemoted => break,
+            HeartbeatOutcome::Healthy => {
+                consecutive_failures = 0;
+                // EP-03: a healthy tick renewed the lease (gate on) — re-anchor.
+                last_renew = Instant::now();
+            }
+            HeartbeatOutcome::Failed => {
+                consecutive_failures += 1;
+                // Review item "1": after N consecutive failures the primary can
+                // no longer confirm it owns the epoch and the standby is about
+                // to promote on heartbeat silence. Self-demote (fail closed) so
+                // the old primary stops being a writer before the new one starts.
+                if should_self_demote_on_heartbeat_failures(consecutive_failures) {
+                    app.mode_active
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                    tracing::error!(
+                        instance_id          = %id,
+                        consecutive_failures = consecutive_failures,
+                        max                  = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
+                        "DISK-WEDGE — consecutive heartbeat/epoch failures exceeded; self-demoting and stopping heartbeat (fence-uncertainty → fail closed)"
+                    );
+                    break;
                 }
             }
         }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -647,7 +654,10 @@ pub(crate) struct HeartbeatFreshness {
 impl HeartbeatFreshness {
     /// Starts a tracker anchored at `now` with no token observed yet.
     pub(crate) fn new(now: Instant) -> Self {
-        Self { last_token: None, anchor: now }
+        Self {
+            last_token: None,
+            anchor: now,
+        }
     }
 
     /// Records an observation of `token` at monotonic instant `now`. Returns
@@ -721,7 +731,13 @@ pub fn spawn_promotion_monitor(
         /* run-forever */ false,
         None,
         move || {
-            promotion_loop(Arc::clone(&app), cache.clone(), id.clone(), Arc::clone(&on_promote), ha)
+            promotion_loop(
+                Arc::clone(&app),
+                cache.clone(),
+                id.clone(),
+                Arc::clone(&on_promote),
+                ha,
+            )
         },
     );
 }
@@ -767,234 +783,236 @@ async fn promotion_loop(
     on_promote: OnPromote,
     timings: HaTimings,
 ) {
-        let poll_ms = timings.promotion_poll_ms;
+    let poll_ms = timings.promotion_poll_ms;
 
-        // #689: cross-check the configured timeout against the configured
-        // heartbeat interval (the const assert only guards the defaults). Clamp
-        // UP to the (MAX+1)×interval floor so there is at least one full
-        // heartbeat interval between the primary's self-demote and the
-        // standby's promotion (see `enforce_promotion_timeout_floor`). Both
-        // values arrive boot-VALIDATED via `HaTimings` (EP-12) — a malformed
-        // env value now refuses startup instead of silently defaulting here.
-        let (timeout_ms, clamped) =
-            enforce_promotion_timeout_floor(timings.promotion_timeout_ms, timings.heartbeat_interval_ms);
-        if clamped {
-            tracing::error!(
-                configured_timeout_ms = timings.promotion_timeout_ms,
-                interval_ms = timings.heartbeat_interval_ms,
-                resolved_timeout_ms = timeout_ms,
-                max_consecutive_failures = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
-                "KIRRA_PROMOTION_TIMEOUT below the safe floor for KIRRA_HEARTBEAT_INTERVAL \
+    // #689: cross-check the configured timeout against the configured
+    // heartbeat interval (the const assert only guards the defaults). Clamp
+    // UP to the (MAX+1)×interval floor so there is at least one full
+    // heartbeat interval between the primary's self-demote and the
+    // standby's promotion (see `enforce_promotion_timeout_floor`). Both
+    // values arrive boot-VALIDATED via `HaTimings` (EP-12) — a malformed
+    // env value now refuses startup instead of silently defaulting here.
+    let (timeout_ms, clamped) = enforce_promotion_timeout_floor(
+        timings.promotion_timeout_ms,
+        timings.heartbeat_interval_ms,
+    );
+    if clamped {
+        tracing::error!(
+            configured_timeout_ms = timings.promotion_timeout_ms,
+            interval_ms = timings.heartbeat_interval_ms,
+            resolved_timeout_ms = timeout_ms,
+            max_consecutive_failures = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
+            "KIRRA_PROMOTION_TIMEOUT below the safe floor for KIRRA_HEARTBEAT_INTERVAL \
                  (timeout < (MAX+1)×interval): clamped UP to keep ≥1 heartbeat interval between \
                  the primary's self-demote and the standby's promotion (#689 split-brain margin). \
                  Fix the env config to silence this."
+        );
+    }
+
+    if timings.force_promote {
+        tracing::warn!(
+            instance_id = %id,
+            "KIRRA_FORCE_PROMOTE=1: bypassing heartbeat check, promoting immediately"
+        );
+        if perform_promotion(&app, &cache, &id, "FORCE_PROMOTE").await {
+            // reviews H2 + H3: re-wire posture freshness AND start
+            // heartbeating on the newly-Active node (see apply_post_promotion).
+            apply_post_promotion(&app, on_promote.as_ref(), timings);
+        }
+        return;
+    }
+
+    // EP-03: the lease gate. When armed, the promotion TRIGGER is the lease
+    // rule (`promote_after_ms` = ttl + ttl/2 ≈ 4.5 s at the default TTL)
+    // instead of the legacy heartbeat timeout (~10 s) — the ≤5 s failover
+    // property. The durable epoch CAS in `perform_promotion` remains the
+    // sole takeover authority either way.
+    let lease = timings.lease;
+    let poll_ms = match &lease {
+        // The challenger must observe every renewal: clamp the poll DOWN to
+        // half the renew cadence if the configured poll is too slow
+        // (clamping down is the safe direction — never promotes late, never
+        // misses a live holder's renewals).
+        Some(params) if !crate::lease::poll_fast_enough(poll_ms, params) => {
+            let clamped = (params.renew_interval_ms / 2).max(1);
+            tracing::error!(
+                poll_ms,
+                clamped,
+                renew_interval_ms = params.renew_interval_ms,
+                "KIRRA_PROMOTION_POLL too slow to observe every lease renewal — clamped down"
+            );
+            clamped
+        }
+        _ => poll_ms,
+    };
+
+    let mut tick = interval(Duration::from_millis(poll_ms));
+
+    // #80: monotonic heartbeat-freshness tracker. Staleness is measured as
+    // "how long the heartbeat TOKEN has gone unchanged", on this standby's
+    // own monotonic clock — NOT by differencing the primary's wall-clock
+    // timestamp against ours (which is skew-vulnerable across machines).
+    let mut freshness = HeartbeatFreshness::new(Instant::now());
+
+    tracing::info!(
+        instance_id = %id,
+        poll_ms     = poll_ms,
+        timeout_ms  = timeout_ms,
+        lease_enabled = lease.is_some(),
+        "Promotion monitor started"
+    );
+
+    // EP-03 (gate on): the lease path. Promote only when BOTH liveness
+    // signals — the heartbeat TOKEN and the durable lease STAMP — have gone
+    // unobserved-to-advance for `promote_after_ms`, each timed on THIS
+    // standby's monotonic clock via the same change-token tracker (#80's
+    // skew-immunity, never cross-machine wall-clock differencing). The
+    // conjunction keeps a mixed-config fleet safe: a gate-OFF primary never
+    // renews the lease (its stamp reads permanently stale) but its
+    // heartbeat token keeps advancing, so a gate-ON standby will not
+    // promote over it; a DEAD primary stops advancing both, so promotion
+    // fires at promote_after (≈4.5 s), not the legacy ~10 s timeout.
+    if let Some(params) = lease {
+        let mut hb_fresh = HeartbeatFreshness::new(Instant::now());
+        let mut lease_fresh = HeartbeatFreshness::new(Instant::now());
+        loop {
+            tick.tick().await;
+
+            let read = app
+                .store
+                .call_read(|store| {
+                    let token = store.load_engine_state(HEARTBEAT_KEY)?;
+                    let ha = store.read_ha_lease()?;
+                    Ok::<_, rusqlite::Error>((token, ha))
+                })
+                .await;
+            let (token, ha) = match read {
+                Ok(Ok(pair)) => pair,
+                // SAFETY: SG-HA-4 — a store/offload error skips the tick
+                // without disturbing either anchor (decide only on a read).
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "Lease monitor: store read failed");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Lease monitor: read offload failed");
+                    continue;
+                }
+            };
+
+            // Fresh deployment: no primary has EVER held the lease and no
+            // heartbeat was ever written — nothing to take over (mirrors the
+            // legacy absent-key rule: never auto-promote a cold fleet).
+            if ha.holder.is_none() && token.is_none() {
+                tracing::debug!("Lease monitor: no holder yet — waiting for a primary");
+                continue;
+            }
+
+            let now = Instant::now();
+            if let Some(t) = &token {
+                let _ = hb_fresh.observe(t, now);
+            }
+            let _ = lease_fresh.observe(&ha.last_renew_ms.to_string(), now);
+
+            let hb_elapsed = hb_fresh.elapsed(now).as_millis() as u64;
+            let lease_elapsed = lease_fresh.elapsed(now).as_millis() as u64;
+            let hb_stale = crate::lease::should_promote(hb_elapsed, &params);
+            let lease_stale = crate::lease::should_promote(lease_elapsed, &params);
+
+            if hb_stale && lease_stale {
+                tracing::error!(
+                    instance_id = %id,
+                    hb_elapsed_ms = hb_elapsed,
+                    lease_elapsed_ms = lease_elapsed,
+                    promote_after_ms = params.promote_after_ms,
+                    "Lease expired unobserved past the promote deadline — promoting to Active"
+                );
+                if perform_promotion(&app, &cache, &id, "LEASE_EXPIRED").await {
+                    apply_post_promotion(&app, on_promote.as_ref(), timings);
+                }
+                return;
+            }
+            tracing::debug!(
+                hb_elapsed_ms = hb_elapsed,
+                lease_elapsed_ms = lease_elapsed,
+                "Lease monitor: holder alive (a liveness signal is advancing)"
             );
         }
+    }
 
-        if timings.force_promote {
-            tracing::warn!(
+    loop {
+        tick.tick().await;
+
+        // Read the heartbeat TOKEN. It is treated as an opaque change-detector
+        // (the primary writes now_ms(), but we never interpret its value as a
+        // clock). On any read failure we skip this tick without disturbing the
+        // anchor — we only ever decide on a successful read.
+        // Closure returns Some(token) on a successful read; None signals
+        // "skip this tick" (no key yet / read error) — the outer loop
+        // `continue`s on None (Rule 4: `continue` cannot cross the closure).
+        // SAFETY: SG-HA-3 — durable writes/reads must never block the async runtime.
+        let token = match app
+            .store
+            .call_read(|store| store.load_engine_state(HEARTBEAT_KEY))
+            .await
+        {
+            Ok(Ok(Some(token))) => token,
+            Ok(Ok(None)) => {
+                tracing::debug!("Promotion monitor: no heartbeat key yet — waiting for primary");
+                continue;
+            }
+            // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "Promotion monitor: failed to read heartbeat");
+                continue;
+            }
+            // SAFETY: SG-HA-4 — DB actor/offload failure is fail-closed.
+            Err(e) => {
+                tracing::warn!(error = %e, "Promotion monitor: heartbeat read offload failed");
+                continue;
+            }
+        };
+
+        let now = Instant::now();
+
+        // Token advanced (changed, or first ever seen) → primary is alive →
+        // re-anchor and wait. A CHANGED token re-anchors even if its numeric
+        // value moved backward (e.g. a primary NTP step), so a primary clock
+        // skew can never trigger a spurious failover.
+        if freshness.observe(&token, now) {
+            tracing::debug!(
                 instance_id = %id,
-                "KIRRA_FORCE_PROMOTE=1: bypassing heartbeat check, promoting immediately"
+                "Promotion monitor: heartbeat token advanced — primary alive"
             );
-            if perform_promotion(&app, &cache, &id, "FORCE_PROMOTE").await {
+            continue;
+        }
+
+        // Token unchanged: how long (monotonic) has it been stale?
+        let elapsed = freshness.elapsed(now);
+
+        // The promotion gate is `promotion_decision` (unit-tested in
+        // `sg_009_promotion_act_tests`) — the loop just acts on its verdict.
+        if promotion_decision(elapsed, timeout_ms) {
+            tracing::error!(
+                instance_id = %id,
+                stale_ms    = elapsed.as_millis() as u64,
+                timeout_ms  = timeout_ms,
+                "Primary heartbeat token unchanged past timeout — promoting to Active"
+            );
+            if perform_promotion(&app, &cache, &id, "HEARTBEAT_TIMEOUT").await {
                 // reviews H2 + H3: re-wire posture freshness AND start
                 // heartbeating on the newly-Active node (see apply_post_promotion).
                 apply_post_promotion(&app, on_promote.as_ref(), timings);
             }
             return;
+        } else {
+            tracing::debug!(
+                stale_ms = elapsed.as_millis() as u64,
+                timeout_ms = timeout_ms,
+                "Promotion monitor: primary alive (heartbeat token fresh)"
+            );
         }
-
-        // EP-03: the lease gate. When armed, the promotion TRIGGER is the lease
-        // rule (`promote_after_ms` = ttl + ttl/2 ≈ 4.5 s at the default TTL)
-        // instead of the legacy heartbeat timeout (~10 s) — the ≤5 s failover
-        // property. The durable epoch CAS in `perform_promotion` remains the
-        // sole takeover authority either way.
-        let lease = timings.lease;
-        let poll_ms = match &lease {
-            // The challenger must observe every renewal: clamp the poll DOWN to
-            // half the renew cadence if the configured poll is too slow
-            // (clamping down is the safe direction — never promotes late, never
-            // misses a live holder's renewals).
-            Some(params) if !crate::lease::poll_fast_enough(poll_ms, params) => {
-                let clamped = (params.renew_interval_ms / 2).max(1);
-                tracing::error!(
-                    poll_ms,
-                    clamped,
-                    renew_interval_ms = params.renew_interval_ms,
-                    "KIRRA_PROMOTION_POLL too slow to observe every lease renewal — clamped down"
-                );
-                clamped
-            }
-            _ => poll_ms,
-        };
-
-        let mut tick = interval(Duration::from_millis(poll_ms));
-
-        // #80: monotonic heartbeat-freshness tracker. Staleness is measured as
-        // "how long the heartbeat TOKEN has gone unchanged", on this standby's
-        // own monotonic clock — NOT by differencing the primary's wall-clock
-        // timestamp against ours (which is skew-vulnerable across machines).
-        let mut freshness = HeartbeatFreshness::new(Instant::now());
-
-        tracing::info!(
-            instance_id = %id,
-            poll_ms     = poll_ms,
-            timeout_ms  = timeout_ms,
-            lease_enabled = lease.is_some(),
-            "Promotion monitor started"
-        );
-
-        // EP-03 (gate on): the lease path. Promote only when BOTH liveness
-        // signals — the heartbeat TOKEN and the durable lease STAMP — have gone
-        // unobserved-to-advance for `promote_after_ms`, each timed on THIS
-        // standby's monotonic clock via the same change-token tracker (#80's
-        // skew-immunity, never cross-machine wall-clock differencing). The
-        // conjunction keeps a mixed-config fleet safe: a gate-OFF primary never
-        // renews the lease (its stamp reads permanently stale) but its
-        // heartbeat token keeps advancing, so a gate-ON standby will not
-        // promote over it; a DEAD primary stops advancing both, so promotion
-        // fires at promote_after (≈4.5 s), not the legacy ~10 s timeout.
-        if let Some(params) = lease {
-            let mut hb_fresh = HeartbeatFreshness::new(Instant::now());
-            let mut lease_fresh = HeartbeatFreshness::new(Instant::now());
-            loop {
-                tick.tick().await;
-
-                let read = app
-                    .store
-                    .call_read(|store| {
-                        let token = store.load_engine_state(HEARTBEAT_KEY)?;
-                        let ha = store.read_ha_lease()?;
-                        Ok::<_, rusqlite::Error>((token, ha))
-                    })
-                    .await;
-                let (token, ha) = match read {
-                    Ok(Ok(pair)) => pair,
-                    // SAFETY: SG-HA-4 — a store/offload error skips the tick
-                    // without disturbing either anchor (decide only on a read).
-                    Ok(Err(e)) => {
-                        tracing::warn!(error = %e, "Lease monitor: store read failed");
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Lease monitor: read offload failed");
-                        continue;
-                    }
-                };
-
-                // Fresh deployment: no primary has EVER held the lease and no
-                // heartbeat was ever written — nothing to take over (mirrors the
-                // legacy absent-key rule: never auto-promote a cold fleet).
-                if ha.holder.is_none() && token.is_none() {
-                    tracing::debug!("Lease monitor: no holder yet — waiting for a primary");
-                    continue;
-                }
-
-                let now = Instant::now();
-                if let Some(t) = &token {
-                    let _ = hb_fresh.observe(t, now);
-                }
-                let _ = lease_fresh.observe(&ha.last_renew_ms.to_string(), now);
-
-                let hb_elapsed = hb_fresh.elapsed(now).as_millis() as u64;
-                let lease_elapsed = lease_fresh.elapsed(now).as_millis() as u64;
-                let hb_stale = crate::lease::should_promote(hb_elapsed, &params);
-                let lease_stale = crate::lease::should_promote(lease_elapsed, &params);
-
-                if hb_stale && lease_stale {
-                    tracing::error!(
-                        instance_id = %id,
-                        hb_elapsed_ms = hb_elapsed,
-                        lease_elapsed_ms = lease_elapsed,
-                        promote_after_ms = params.promote_after_ms,
-                        "Lease expired unobserved past the promote deadline — promoting to Active"
-                    );
-                    if perform_promotion(&app, &cache, &id, "LEASE_EXPIRED").await {
-                        apply_post_promotion(&app, on_promote.as_ref(), timings);
-                    }
-                    return;
-                }
-                tracing::debug!(
-                    hb_elapsed_ms = hb_elapsed,
-                    lease_elapsed_ms = lease_elapsed,
-                    "Lease monitor: holder alive (a liveness signal is advancing)"
-                );
-            }
-        }
-
-        loop {
-            tick.tick().await;
-
-            // Read the heartbeat TOKEN. It is treated as an opaque change-detector
-            // (the primary writes now_ms(), but we never interpret its value as a
-            // clock). On any read failure we skip this tick without disturbing the
-            // anchor — we only ever decide on a successful read.
-            // Closure returns Some(token) on a successful read; None signals
-            // "skip this tick" (no key yet / read error) — the outer loop
-            // `continue`s on None (Rule 4: `continue` cannot cross the closure).
-            // SAFETY: SG-HA-3 — durable writes/reads must never block the async runtime.
-            let token = match app
-                .store
-                .call_read(|store| store.load_engine_state(HEARTBEAT_KEY))
-                .await
-            {
-                Ok(Ok(Some(token))) => token,
-                Ok(Ok(None)) => {
-                    tracing::debug!("Promotion monitor: no heartbeat key yet — waiting for primary");
-                    continue;
-                }
-                // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "Promotion monitor: failed to read heartbeat");
-                    continue;
-                }
-                // SAFETY: SG-HA-4 — DB actor/offload failure is fail-closed.
-                Err(e) => {
-                    tracing::warn!(error = %e, "Promotion monitor: heartbeat read offload failed");
-                    continue;
-                }
-            };
-
-            let now = Instant::now();
-
-            // Token advanced (changed, or first ever seen) → primary is alive →
-            // re-anchor and wait. A CHANGED token re-anchors even if its numeric
-            // value moved backward (e.g. a primary NTP step), so a primary clock
-            // skew can never trigger a spurious failover.
-            if freshness.observe(&token, now) {
-                tracing::debug!(
-                    instance_id = %id,
-                    "Promotion monitor: heartbeat token advanced — primary alive"
-                );
-                continue;
-            }
-
-            // Token unchanged: how long (monotonic) has it been stale?
-            let elapsed = freshness.elapsed(now);
-
-            // The promotion gate is `promotion_decision` (unit-tested in
-            // `sg_009_promotion_act_tests`) — the loop just acts on its verdict.
-            if promotion_decision(elapsed, timeout_ms) {
-                tracing::error!(
-                    instance_id = %id,
-                    stale_ms    = elapsed.as_millis() as u64,
-                    timeout_ms  = timeout_ms,
-                    "Primary heartbeat token unchanged past timeout — promoting to Active"
-                );
-                if perform_promotion(&app, &cache, &id, "HEARTBEAT_TIMEOUT").await {
-                    // reviews H2 + H3: re-wire posture freshness AND start
-                    // heartbeating on the newly-Active node (see apply_post_promotion).
-                    apply_post_promotion(&app, on_promote.as_ref(), timings);
-                }
-                return;
-            } else {
-                tracing::debug!(
-                    stale_ms   = elapsed.as_millis() as u64,
-                    timeout_ms = timeout_ms,
-                    "Promotion monitor: primary alive (heartbeat token fresh)"
-                );
-            }
-        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1109,11 +1127,13 @@ async fn perform_promotion(
     // compare it against the DB epoch on every write. If a later
     // promotion fences us, gate-level checks will detect held != db and
     // self-demote.
-    app.held_epoch.store(new_epoch, std::sync::atomic::Ordering::SeqCst);
+    app.held_epoch
+        .store(new_epoch, std::sync::atomic::Ordering::SeqCst);
     // Pass B1 (S3 / #115): re-stamp the cached DB epoch atomically so the
     // gate sees this promotion without taking the store lock. Release pairs
     // with the gate's Acquire load at `policy_layer.rs::enforce_posture_routing`.
-    app.cached_db_epoch.store(new_epoch, std::sync::atomic::Ordering::Release);
+    app.cached_db_epoch
+        .store(new_epoch, std::sync::atomic::Ordering::Release);
 
     // Step 3: Flip the local mode atomic. By this point the durable
     // claim already succeeded, so this is a per-process bookkeeping
@@ -1163,7 +1183,8 @@ async fn perform_promotion(
             // Fail-closed: we already claimed the durable epoch; if we can't persist
             // required promotion metadata, immediately self-demote so this instance
             // does not serve writes as a partially-promoted Active.
-            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            app.mode_active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
         Err(e) => {
@@ -1173,7 +1194,8 @@ async fn perform_promotion(
                 epoch = new_epoch,
                 "promotion ABORTED — failed to persist promotion record key"
             );
-            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            app.mode_active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
     }
@@ -1213,7 +1235,8 @@ async fn perform_promotion(
                 "promotion ABORTED — failed to persist promotion audit event"
             );
             // Fail-closed: do not remain Active if the required audit event cannot be persisted.
-            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            app.mode_active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
         Err(e) => {
@@ -1223,7 +1246,8 @@ async fn perform_promotion(
                 epoch = new_epoch,
                 "promotion ABORTED — failed to persist promotion audit event"
             );
-            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            app.mode_active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
     }
@@ -1274,7 +1298,8 @@ async fn perform_promotion(
                 error = %e, instance_id = %id, epoch = new_epoch,
                 "promotion ABORTED — cannot re-seed generation high-water from shared store; staying PassiveStandby (fail-closed) to avoid time-reversing generations"
             );
-            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            app.mode_active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
         Err(e) => {
@@ -1282,7 +1307,8 @@ async fn perform_promotion(
                 error = %e, instance_id = %id, epoch = new_epoch,
                 "promotion ABORTED — generation re-seed offload failed; staying PassiveStandby (fail-closed)"
             );
-            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            app.mode_active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
     }
@@ -1304,7 +1330,8 @@ async fn perform_promotion(
             "promotion ABORTED — initial posture recompute task failed"
         );
         // Fail-closed: avoid remaining Active without a fresh posture cache.
-        app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+        app.mode_active
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         return false;
     }
 
@@ -1400,21 +1427,28 @@ mod standby_monitor_tests {
 
     #[test]
     fn test_promotion_timeout_exceeds_heartbeat_interval() {
-        assert!(PROMOTION_TIMEOUT_MS > HEARTBEAT_INTERVAL_MS,
-            "timeout must exceed interval to allow for missed writes");
+        assert!(
+            PROMOTION_TIMEOUT_MS > HEARTBEAT_INTERVAL_MS,
+            "timeout must exceed interval to allow for missed writes"
+        );
     }
 
     #[test]
     fn test_poll_interval_shorter_than_promotion_timeout() {
-        assert!(PROMOTION_POLL_MS < PROMOTION_TIMEOUT_MS,
-            "poll must be faster than timeout to avoid missing the window");
+        assert!(
+            PROMOTION_POLL_MS < PROMOTION_TIMEOUT_MS,
+            "poll must be faster than timeout to avoid missing the window"
+        );
     }
 
     #[test]
     fn test_timeout_allows_multiple_missed_heartbeats() {
         let missed_beats = PROMOTION_TIMEOUT_MS / HEARTBEAT_INTERVAL_MS;
-        assert!(missed_beats >= 3,
-            "timeout should tolerate at least 3 missed beats (got {})", missed_beats);
+        assert!(
+            missed_beats >= 3,
+            "timeout should tolerate at least 3 missed beats (got {})",
+            missed_beats
+        );
     }
 
     #[test]
@@ -1427,7 +1461,10 @@ mod standby_monitor_tests {
     fn test_instance_id_is_stable_within_process() {
         let id1 = instance_id();
         let id2 = instance_id();
-        assert_eq!(id1, id2, "instance_id must be stable within a process lifetime");
+        assert_eq!(
+            id1, id2,
+            "instance_id must be stable within a process lifetime"
+        );
     }
 
     #[test]
@@ -1467,10 +1504,15 @@ mod standby_monitor_tests {
         // A coherent ENV config (the inequality already holds) is passed through
         // unchanged — no clamp, operator's value respected.
         let (t, clamped) = enforce_promotion_timeout_floor(10_000, 2_000);
-        assert_eq!((t, clamped), (10_000, false), "a safe config must not be clamped");
+        assert_eq!(
+            (t, clamped),
+            (10_000, false),
+            "a safe config must not be clamped"
+        );
 
         // The DEFAULTS must never trip the runtime clamp (they satisfy the const assert).
-        let (t, clamped) = enforce_promotion_timeout_floor(PROMOTION_TIMEOUT_MS, HEARTBEAT_INTERVAL_MS);
+        let (t, clamped) =
+            enforce_promotion_timeout_floor(PROMOTION_TIMEOUT_MS, HEARTBEAT_INTERVAL_MS);
         assert!(!clamped, "default config must pass the runtime check too");
         assert_eq!(t, PROMOTION_TIMEOUT_MS);
 
@@ -1478,7 +1520,10 @@ mod standby_monitor_tests {
         // self-demotes at 3×5=15s but the operator set promotion=10s → standby
         // promotes BEFORE the demote → two-active window. Clamp UP to (MAX+1)×interval.
         let (t, clamped) = enforce_promotion_timeout_floor(10_000, 5_000);
-        assert!(clamped, "MAX×interval (15s) ≥ timeout (10s) must be clamped");
+        assert!(
+            clamped,
+            "MAX×interval (15s) ≥ timeout (10s) must be clamped"
+        );
         assert_eq!(t, (MAX_CONSECUTIVE_HEARTBEAT_FAILURES as u64 + 1) * 5_000);
         // Post-clamp the split-brain inequality holds: self-demote < promote.
         assert!(
@@ -1491,7 +1536,10 @@ mod standby_monitor_tests {
         let interval = 2_000;
         let exactly = MAX_CONSECUTIVE_HEARTBEAT_FAILURES as u64 * interval;
         let (t, clamped) = enforce_promotion_timeout_floor(exactly, interval);
-        assert!(clamped && t > exactly, "timeout == MAX×interval must be clamped strictly above");
+        assert!(
+            clamped && t > exactly,
+            "timeout == MAX×interval must be clamped strictly above"
+        );
     }
 }
 
@@ -1540,12 +1588,18 @@ mod ha_epoch_fence_tests {
 
         let observed_a = store_a.current_epoch().unwrap();
         let observed_b = store_b.current_epoch().unwrap();
-        assert_eq!(observed_a, observed_b,
-            "both standbys must read the same observed epoch in the race");
+        assert_eq!(
+            observed_a, observed_b,
+            "both standbys must read the same observed epoch in the race"
+        );
         assert_eq!(observed_a, 0, "fresh DB starts at epoch 0");
 
-        let claim_a = store_a.try_claim_epoch(observed_a, "instance-A", 1_000).unwrap();
-        let claim_b = store_b.try_claim_epoch(observed_b, "instance-B", 1_000).unwrap();
+        let claim_a = store_a
+            .try_claim_epoch(observed_a, "instance-A", 1_000)
+            .unwrap();
+        let claim_b = store_b
+            .try_claim_epoch(observed_b, "instance-B", 1_000)
+            .unwrap();
 
         // The fence: exactly one Some, exactly one None.
         let wins = [claim_a.is_some(), claim_b.is_some()]
@@ -1556,8 +1610,10 @@ mod ha_epoch_fence_tests {
 
         // Epoch advanced by exactly 1 (not by 2).
         let final_epoch = store_a.current_epoch().unwrap();
-        assert_eq!(final_epoch, 1,
-            "exactly one bump must land — observed=0, final=1, not 2");
+        assert_eq!(
+            final_epoch, 1,
+            "exactly one bump must land — observed=0, final=1, not 2"
+        );
 
         let (db_epoch, holder) = store_a.current_active_holder().unwrap();
         assert_eq!(db_epoch, 1);
@@ -1594,8 +1650,10 @@ mod ha_epoch_fence_tests {
         // A's gate check: held (1) vs current DB epoch (2) → fenced.
         let db_epoch = store_a.current_epoch().unwrap();
         assert_eq!(db_epoch, 2, "DB must reflect B's successful claim");
-        assert_ne!(held_a, db_epoch,
-            "A is fenced — its held epoch is now stale relative to the DB");
+        assert_ne!(
+            held_a, db_epoch,
+            "A is fenced — its held epoch is now stale relative to the DB"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -1613,7 +1671,9 @@ mod ha_epoch_fence_tests {
         assert_eq!(initial_epoch, 0);
         assert!(initial_holder.is_none(), "clean DB has no holder yet");
 
-        let claimed = store.try_claim_epoch(initial_epoch, "primary-1", 5_000).unwrap();
+        let claimed = store
+            .try_claim_epoch(initial_epoch, "primary-1", 5_000)
+            .unwrap();
         assert_eq!(claimed, Some(1), "first claim on clean DB must succeed");
 
         let (final_epoch, final_holder) = store.current_active_holder().unwrap();
@@ -1642,13 +1702,18 @@ mod ha_epoch_fence_tests {
         // B observed `observed` (0) too, but the DB is now at 1. Its
         // conditional UPDATE finds zero matching rows.
         let lose = store_b.try_claim_epoch(observed, "loser", 2).unwrap();
-        assert!(lose.is_none(),
-            "stale-observed claim must abort with None (durable fence)");
+        assert!(
+            lose.is_none(),
+            "stale-observed claim must abort with None (durable fence)"
+        );
 
         let (final_epoch, holder) = store_a.current_active_holder().unwrap();
         assert_eq!(final_epoch, 1, "exactly one bump");
-        assert_eq!(holder.as_deref(), Some("winner"),
-            "loser must NOT have overwritten the holder column");
+        assert_eq!(
+            holder.as_deref(),
+            Some("winner"),
+            "loser must NOT have overwritten the holder column"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -1684,15 +1749,20 @@ mod ha_epoch_fence_tests {
 
         assert_eq!(epoch, 1);
         assert_eq!(holder.as_deref(), Some("primary"));
-        assert!(fresh, "heartbeat must read as fresh within the timeout window");
+        assert!(
+            fresh,
+            "heartbeat must read as fresh within the timeout window"
+        );
 
         // The bin's policy: holder is some OTHER id AND heartbeat is fresh
         // ⇒ stand down. We model that decision here so the test fails if
         // either input changes meaning.
         let my_id = "newcomer";
         let should_defer = matches!(holder.as_deref(), Some(h) if h != my_id) && fresh;
-        assert!(should_defer,
-            "startup must defer to a live holder rather than steal the epoch");
+        assert!(
+            should_defer,
+            "startup must defer to a live holder rather than steal the epoch"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -1728,16 +1798,20 @@ mod sg_009_promotion_act_tests {
     #[test]
     fn test_stale_heartbeat_decides_promote() {
         // Token unchanged for 15s at a 10s timeout.
-        assert!(promotion_decision(Duration::from_millis(15_000), PROMOTION_TIMEOUT_MS),
-            "a heartbeat token unchanged longer than PROMOTION_TIMEOUT_MS must decide promote");
+        assert!(
+            promotion_decision(Duration::from_millis(15_000), PROMOTION_TIMEOUT_MS),
+            "a heartbeat token unchanged longer than PROMOTION_TIMEOUT_MS must decide promote"
+        );
     }
 
     /// Fresh token (unchanged for less than the timeout) → no promotion.
     #[test]
     fn test_fresh_heartbeat_decides_no_promote() {
         // Token unchanged for only 1s at a 10s timeout.
-        assert!(!promotion_decision(Duration::from_millis(1_000), PROMOTION_TIMEOUT_MS),
-            "a heartbeat token unchanged less than PROMOTION_TIMEOUT_MS must NOT promote");
+        assert!(
+            !promotion_decision(Duration::from_millis(1_000), PROMOTION_TIMEOUT_MS),
+            "a heartbeat token unchanged less than PROMOTION_TIMEOUT_MS must NOT promote"
+        );
     }
 
     /// Boundary is inclusive (`>=`): exactly `timeout_ms` of monotonic staleness promotes.
@@ -1745,8 +1819,13 @@ mod sg_009_promotion_act_tests {
     fn test_decision_boundary_is_inclusive() {
         assert!(promotion_decision(Duration::from_millis(PROMOTION_TIMEOUT_MS), PROMOTION_TIMEOUT_MS),
             "exactly PROMOTION_TIMEOUT_MS of staleness must promote (>=, matching the inline check)");
-        assert!(!promotion_decision(Duration::from_millis(PROMOTION_TIMEOUT_MS - 1), PROMOTION_TIMEOUT_MS),
-            "one ms below the timeout must not promote");
+        assert!(
+            !promotion_decision(
+                Duration::from_millis(PROMOTION_TIMEOUT_MS - 1),
+                PROMOTION_TIMEOUT_MS
+            ),
+            "one ms below the timeout must not promote"
+        );
     }
 
     /// A just-anchored token (zero monotonic elapsed) never promotes — the
@@ -1754,8 +1833,10 @@ mod sg_009_promotion_act_tests {
     /// saturating clock-skew underflow case is structurally impossible.
     #[test]
     fn test_decision_zero_elapsed_does_not_promote() {
-        assert!(!promotion_decision(Duration::ZERO, PROMOTION_TIMEOUT_MS),
-            "a freshly-anchored token (0 elapsed) must never promote");
+        assert!(
+            !promotion_decision(Duration::ZERO, PROMOTION_TIMEOUT_MS),
+            "a freshly-anchored token (0 elapsed) must never promote"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1768,19 +1849,29 @@ mod sg_009_promotion_act_tests {
     fn test_token_unchanged_promotes_after_monotonic_timeout() {
         let t0 = Instant::now();
         let mut hb = HeartbeatFreshness::new(t0);
-        assert!(hb.observe("1000", t0), "first observation anchors (token advanced)");
+        assert!(
+            hb.observe("1000", t0),
+            "first observation anchors (token advanced)"
+        );
 
         // Token never changes again. Just under the timeout: no promotion.
         let t_under = t0 + Duration::from_millis(PROMOTION_TIMEOUT_MS - 1);
-        assert!(!hb.observe("1000", t_under), "unchanged token does not re-anchor");
-        assert!(!promotion_decision(hb.elapsed(t_under), PROMOTION_TIMEOUT_MS),
-            "just under timeout → no promotion");
+        assert!(
+            !hb.observe("1000", t_under),
+            "unchanged token does not re-anchor"
+        );
+        assert!(
+            !promotion_decision(hb.elapsed(t_under), PROMOTION_TIMEOUT_MS),
+            "just under timeout → no promotion"
+        );
 
         // At the timeout: promote (inclusive boundary).
         let t_at = t0 + Duration::from_millis(PROMOTION_TIMEOUT_MS);
         assert!(!hb.observe("1000", t_at), "still unchanged");
-        assert!(promotion_decision(hb.elapsed(t_at), PROMOTION_TIMEOUT_MS),
-            "token unchanged for the full timeout → promote");
+        assert!(
+            promotion_decision(hb.elapsed(t_at), PROMOTION_TIMEOUT_MS),
+            "token unchanged for the full timeout → promote"
+        );
     }
 
     /// Heartbeat token KEEPS advancing → never promotes, even across a span far
@@ -1795,9 +1886,14 @@ mod sg_009_promotion_act_tests {
             let now = t0 + Duration::from_millis(1_000 * i);
             let token = (1_000 + i).to_string();
             let advanced = hb.observe(&token, now);
-            assert!(advanced, "an advancing token must always re-anchor (primary alive)");
-            assert!(!promotion_decision(hb.elapsed(now), PROMOTION_TIMEOUT_MS),
-                "a re-anchored (advancing) token must never promote");
+            assert!(
+                advanced,
+                "an advancing token must always re-anchor (primary alive)"
+            );
+            assert!(
+                !promotion_decision(hb.elapsed(now), PROMOTION_TIMEOUT_MS),
+                "a re-anchored (advancing) token must never promote"
+            );
         }
     }
 
@@ -1809,15 +1905,22 @@ mod sg_009_promotion_act_tests {
     fn test_primary_clock_step_back_does_not_spuriously_promote() {
         let t0 = Instant::now();
         let mut hb = HeartbeatFreshness::new(t0);
-        assert!(hb.observe("5000", t0), "anchor on first token (primary ts=5000)");
+        assert!(
+            hb.observe("5000", t0),
+            "anchor on first token (primary ts=5000)"
+        );
 
         // One poll (1s) later the primary's clock steps BACK to 3000 — a smaller,
         // but still different, token.
         let t1 = t0 + Duration::from_millis(1_000);
-        assert!(hb.observe("3000", t1),
-            "a changed token (even decreasing) re-anchors — primary is alive");
-        assert!(!promotion_decision(hb.elapsed(t1), PROMOTION_TIMEOUT_MS),
-            "a primary clock step-back must NOT cause spurious failover");
+        assert!(
+            hb.observe("3000", t1),
+            "a changed token (even decreasing) re-anchors — primary is alive"
+        );
+        assert!(
+            !promotion_decision(hb.elapsed(t1), PROMOTION_TIMEOUT_MS),
+            "a primary clock step-back must NOT cause spurious failover"
+        );
     }
 
     /// STANDBY wall-clock jump immunity: the decision consults only `Instant`
@@ -1837,10 +1940,14 @@ mod sg_009_promotion_act_tests {
         // are pure `Instant` deltas — the decision is a function of those alone.
         let before = t0 + Duration::from_millis(PROMOTION_TIMEOUT_MS - 1);
         let at = t0 + Duration::from_millis(PROMOTION_TIMEOUT_MS);
-        assert!(!promotion_decision(hb.elapsed(before), PROMOTION_TIMEOUT_MS),
-            "no wall-clock value can promote before the monotonic timeout");
-        assert!(promotion_decision(hb.elapsed(at), PROMOTION_TIMEOUT_MS),
-            "promotion is governed by the monotonic anchor, not the wall clock");
+        assert!(
+            !promotion_decision(hb.elapsed(before), PROMOTION_TIMEOUT_MS),
+            "no wall-clock value can promote before the monotonic timeout"
+        );
+        assert!(
+            promotion_decision(hb.elapsed(at), PROMOTION_TIMEOUT_MS),
+            "promotion is governed by the monotonic anchor, not the wall clock"
+        );
     }
 
     /// THE ACT: a PassiveStandby that calls `perform_promotion` becomes Active,
@@ -1856,7 +1963,10 @@ mod sg_009_promotion_act_tests {
 
         // Precondition: standby (mode_active == false), empty cache.
         assert!(!app.is_active(), "must start as PassiveStandby");
-        assert!(cache.read().unwrap().is_none(), "cache empty before promotion");
+        assert!(
+            cache.read().unwrap().is_none(),
+            "cache empty before promotion"
+        );
 
         // Drive the real promotion path. `perform_promotion` is async but has no
         // .await suspension points that need the reactor; a current-thread
@@ -1865,32 +1975,54 @@ mod sg_009_promotion_act_tests {
             .enable_all()
             .build()
             .expect("runtime");
-        rt.block_on(perform_promotion(&app, &cache, "standby-under-test", "HEARTBEAT_TIMEOUT"));
+        rt.block_on(perform_promotion(
+            &app,
+            &cache,
+            "standby-under-test",
+            "HEARTBEAT_TIMEOUT",
+        ));
 
         // 1. mode_active transitioned false → true (the compare_exchange ACT).
-        assert!(app.is_active(), "promotion must flip mode_active false→true (now Active)");
+        assert!(
+            app.is_active(),
+            "promotion must flip mode_active false→true (now Active)"
+        );
 
         // 2. Durable promotion record written (disk-first bookkeeping).
-        let recorded = app.store
-            .with(|store| store.load_engine_state(PROMOTION_RECORD_KEY)).unwrap();
-        assert_eq!(recorded.as_deref(), Some("standby-under-test"),
-            "promoted instance must persist its id to the promotion record");
+        let recorded = app
+            .store
+            .with(|store| store.load_engine_state(PROMOTION_RECORD_KEY))
+            .unwrap();
+        assert_eq!(
+            recorded.as_deref(),
+            Some("standby-under-test"),
+            "promoted instance must persist its id to the promotion record"
+        );
 
         // 3. An epoch was durably claimed (the split-brain fence advanced).
-        assert_eq!(app.held_epoch.load(Ordering::SeqCst), 1,
-            "first promotion on a clean DB must claim epoch 1");
+        assert_eq!(
+            app.held_epoch.load(Ordering::SeqCst),
+            1,
+            "first promotion on a clean DB must claim epoch 1"
+        );
 
         // 4. Posture was recalculated as Active — the cache is populated. Only an
         //    Active instance writes the cache, so a populated cache is proof the
         //    mode flip happened BEFORE the recalc (ordering invariant).
-        assert!(cache.read().unwrap().is_some(),
-            "promoted (Active) instance must recalculate posture and populate the cache");
+        assert!(
+            cache.read().unwrap().is_some(),
+            "promoted (Active) instance must recalculate posture and populate the cache"
+        );
 
         // 5. The promotion is recorded in the tamper-evident audit chain.
-        let audit = app.store
-            .with(|store| store.verify_audit_chain_full(None)).unwrap();
-        assert!(audit.total_entries >= 1,
-            "promotion must append a STANDBY_PROMOTED_TO_ACTIVE audit event");
+        let audit = app
+            .store
+            .with(|store| store.verify_audit_chain_full(None))
+            .unwrap();
+        assert!(
+            audit.total_entries >= 1,
+            "promotion must append a STANDBY_PROMOTED_TO_ACTIVE audit event"
+        );
     }
 
     /// #771 F1 — a promoted standby must RE-SEED the generation counter from the
@@ -2036,7 +2168,8 @@ mod sg_009_promotion_act_tests {
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
 
         assert_eq!(
-            app.store.with(|store| store.count_audit_events_for_test("HASH_V2_MIGRATION")),
+            app.store
+                .with(|store| store.count_audit_events_for_test("HASH_V2_MIGRATION")),
             0,
             "precondition: no anchor marker before promotion"
         );
@@ -2045,7 +2178,8 @@ mod sg_009_promotion_act_tests {
 
         assert!(app.is_active(), "healthy promotion must complete (Active)");
         assert_eq!(
-            app.store.with(|store| store.count_audit_events_for_test("HASH_V2_MIGRATION")),
+            app.store
+                .with(|store| store.count_audit_events_for_test("HASH_V2_MIGRATION")),
             1,
             "promotion must ensure the hash-v2 anchor before writing as Active"
         );
@@ -2075,8 +2209,14 @@ mod sg_009_promotion_act_tests {
             0,
             "abort must occur before the in-memory epoch is cached (Step 2 not reached)"
         );
-        let record = app.store.with(|store| store.load_engine_state(PROMOTION_RECORD_KEY)).unwrap();
-        assert_eq!(record, None, "aborted promotion must NOT write a promotion record");
+        let record = app
+            .store
+            .with(|store| store.load_engine_state(PROMOTION_RECORD_KEY))
+            .unwrap();
+        assert_eq!(
+            record, None,
+            "aborted promotion must NOT write a promotion record"
+        );
         assert!(
             cache.read().unwrap().is_none(),
             "aborted promotion must NOT recalculate / populate the cache"

@@ -21,9 +21,7 @@ use ort::{
     value::{Tensor, ValueType},
 };
 
-use parko_core::backend::{
-    BackendError, ModelHandle, PrecisionMode, TensorBatch, TensorStorage,
-};
+use parko_core::backend::{BackendError, ModelHandle, PrecisionMode, TensorBatch, TensorStorage};
 
 /// Owns a committed `ort::Session` and runs the shared `load_model` / `run`
 /// inference path. Each backend builds its own session (CPU vs TRT EP) and hands
@@ -64,8 +62,9 @@ impl OrtRunCore {
             "ort load_model integrity check"
         );
 
-        let session = self.session.lock()
-            .map_err(|e| BackendError::InitializationError(format!("session lock poisoned: {}", e)))?;
+        let session = self.session.lock().map_err(|e| {
+            BackendError::InitializationError(format!("session lock poisoned: {}", e))
+        })?;
 
         let mut input_shapes = HashMap::new();
         let mut output_shapes = HashMap::new();
@@ -97,15 +96,18 @@ impl OrtRunCore {
     }
 
     /// Run inference. Relocated verbatim from `OrtBackend::run`.
-    pub fn run(&self, model: &ModelHandle, inputs: &TensorBatch)
-        -> Result<TensorBatch<'static>, BackendError>
-    {
+    pub fn run(
+        &self,
+        model: &ModelHandle,
+        inputs: &TensorBatch,
+    ) -> Result<TensorBatch<'static>, BackendError> {
         let mut ort_inputs: Vec<(String, Tensor<f32>)> = Vec::new();
 
         for (name, expected_shape) in &model.input_shapes {
             let Some(storage) = inputs.named_tensors.get(name) else {
                 return Err(BackendError::ExecutionFailure(format!(
-                    "Missing input tensor '{}'", name
+                    "Missing input tensor '{}'",
+                    name
                 )));
             };
 
@@ -119,38 +121,42 @@ impl OrtRunCore {
                 });
             }
 
-            let tensor = Tensor::from_array((expected_shape.clone(), raw_slice.to_vec()))
-                .map_err(|e| BackendError::ExecutionFailure(format!("ort tensor error: {:?}", e)))?;
+            let tensor =
+                Tensor::from_array((expected_shape.clone(), raw_slice.to_vec())).map_err(|e| {
+                    BackendError::ExecutionFailure(format!("ort tensor error: {:?}", e))
+                })?;
 
             ort_inputs.push((name.clone(), tensor));
         }
 
-        let mut session = self.session.lock()
+        let mut session = self
+            .session
+            .lock()
             .map_err(|e| BackendError::ExecutionFailure(format!("session lock poisoned: {}", e)))?;
 
         // Collect output names before run() borrows session mutably.
-        let output_names: Vec<String> = session.outputs().iter()
+        let output_names: Vec<String> = session
+            .outputs()
+            .iter()
             .map(|o| o.name().to_string())
             .collect();
 
-        let outputs = session.run(ort_inputs)
+        let outputs = session
+            .run(ort_inputs)
             .map_err(|e| BackendError::ExecutionFailure(format!("ort execution error: {:?}", e)))?;
 
         let mut output_named_tensors = HashMap::new();
 
         for name in &output_names {
-            let ort_value = outputs.get(name.as_str())
-                .ok_or_else(|| BackendError::ExecutionFailure(format!(
-                    "Missing output node '{}'", name
-                )))?;
+            let ort_value = outputs.get(name.as_str()).ok_or_else(|| {
+                BackendError::ExecutionFailure(format!("Missing output node '{}'", name))
+            })?;
 
-            let (_, raw_slice) = ort_value.try_extract_tensor::<f32>()
-                .map_err(|e| BackendError::ExecutionFailure(format!("tensor extract error: {:?}", e)))?;
+            let (_, raw_slice) = ort_value.try_extract_tensor::<f32>().map_err(|e| {
+                BackendError::ExecutionFailure(format!("tensor extract error: {:?}", e))
+            })?;
 
-            output_named_tensors.insert(
-                name.clone(),
-                TensorStorage::Owned(raw_slice.to_vec()),
-            );
+            output_named_tensors.insert(name.clone(), TensorStorage::Owned(raw_slice.to_vec()));
         }
 
         Ok(TensorBatch {

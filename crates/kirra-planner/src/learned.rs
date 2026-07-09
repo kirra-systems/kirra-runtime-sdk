@@ -72,7 +72,11 @@ fn materialize(s: &Scene, target: f64) -> Vec<TrajectoryPoint> {
     (0..HORIZON)
         .map(|i| {
             let p = TrajectoryPoint {
-                pose: Pose { x_m: s.ego_x + arc * cos_h, y_m: s.ego_y + arc * sin_h, heading_rad: heading },
+                pose: Pose {
+                    x_m: s.ego_x + arc * cos_h,
+                    y_m: s.ego_y + arc * sin_h,
+                    heading_rad: heading,
+                },
                 velocity_mps: v,
                 time_from_start_s: i as f64 * DT,
             };
@@ -90,7 +94,12 @@ fn featurize(s: &Scene) -> [f64; IN] {
         Some(ox) if ox > s.ego_x => (1.0, (ox - s.ego_x).min(50.0)),
         _ => (0.0, 50.0),
     };
-    [s.ego_speed / 8.0, goal_dist / 50.0, obj_dist / 50.0, present]
+    [
+        s.ego_speed / 8.0,
+        goal_dist / 50.0,
+        obj_dist / 50.0,
+        present,
+    ]
 }
 
 /// Progress term: fraction of the max attainable forward travel the trajectory achieves.
@@ -104,11 +113,16 @@ fn progress_of(traj: &[TrajectoryPoint], ego_x: f64) -> f64 {
 /// term that rewards slowing also rewards routing around, which is what lets the 2-D
 /// [`LearnedManeuverPlanner`] learn the pass.
 fn hazard_penalty(traj: &[TrajectoryPoint], scene: &Scene, teacher: Teacher, margin: f64) -> f64 {
-    let Some(ox) = scene.obstacle_x else { return 0.0 };
+    let Some(ox) = scene.obstacle_x else {
+        return 0.0;
+    };
     if teacher != Teacher::SafetyAware {
         return 0.0;
     }
-    let min_gap = traj.iter().map(|p| (p.pose.x_m - ox).hypot(p.pose.y_m)).fold(f64::MAX, f64::min);
+    let min_gap = traj
+        .iter()
+        .map(|p| (p.pose.x_m - ox).hypot(p.pose.y_m))
+        .fold(f64::MAX, f64::min);
     if min_gap < 1.5 {
         -5.0 // collision
     } else if min_gap < margin {
@@ -228,7 +242,11 @@ fn training_scene(rng: &mut Rng) -> Scene {
         ego_speed: rng.range(0.0, 4.0),
         goal_x: 40.0,
         goal_y: 0.0,
-        obstacle_x: if rng.unit() < 0.6 { Some(rng.range(12.0, 35.0)) } else { None },
+        obstacle_x: if rng.unit() < 0.6 {
+            Some(rng.range(12.0, 35.0))
+        } else {
+            None
+        },
     }
 }
 
@@ -250,7 +268,12 @@ fn fit<const M: usize>(rng: &mut Rng, data: &[([f64; IN], [f64; M])], iters: usi
     };
 
     // Small random init.
-    let mut best = Mlp::<M> { w1: [[0.0; IN]; H], b1: [0.0; H], w2: [[0.0; H]; M], b2: [0.0; M] };
+    let mut best = Mlp::<M> {
+        w1: [[0.0; IN]; H],
+        b1: [0.0; H],
+        w2: [[0.0; H]; M],
+        b2: [0.0; M],
+    };
     best.perturb(rng, 0.3);
     let mut best_loss = loss(&best);
 
@@ -294,7 +317,10 @@ impl LearnedPlanner {
             data.push((feats, label));
         }
 
-        LearnedPlanner { scorer: fit(&mut rng, &data, SPEED_FIT_ITERS), teacher }
+        LearnedPlanner {
+            scorer: fit(&mut rng, &data, SPEED_FIT_ITERS),
+            teacher,
+        }
     }
 
     /// The teacher this planner was distilled from (audit / test introspection).
@@ -318,7 +344,13 @@ impl LearnedPlanner {
     pub fn plan_with_chosen_index(&self, input: &PlanInput) -> (usize, PlanOutput) {
         let scene = scene_of(input);
         let best = argmax(&self.scorer.forward(&featurize(&scene)));
-        (best, PlanOutput { trajectory: materialize(&scene, TARGET_SPEEDS[best]), kind: ProposalKind::Motion })
+        (
+            best,
+            PlanOutput {
+                trajectory: materialize(&scene, TARGET_SPEEDS[best]),
+                kind: ProposalKind::Motion,
+            },
+        )
     }
 }
 
@@ -326,7 +358,10 @@ impl Planner for LearnedPlanner {
     fn plan(&mut self, input: &PlanInput<'_>) -> PlanOutput {
         let scene = scene_of(input);
         let best = argmax(&self.scorer.forward(&featurize(&scene)));
-        PlanOutput { trajectory: materialize(&scene, TARGET_SPEEDS[best]), kind: ProposalKind::Motion }
+        PlanOutput {
+            trajectory: materialize(&scene, TARGET_SPEEDS[best]),
+            kind: ProposalKind::Motion,
+        }
     }
 }
 
@@ -341,8 +376,17 @@ fn scene_of(input: &PlanInput) -> Scene {
         .iter()
         .map(|o| o.pos.x_m)
         .filter(|&x| x > ego.x_m)
-        .fold(None, |acc: Option<f64>, x| Some(acc.map_or(x, |a| a.min(x))));
-    Scene { ego_x: ego.x_m, ego_y: ego.y_m, ego_speed: input.ego.linear_x_mps, goal_x: goal.x_m, goal_y: goal.y_m, obstacle_x }
+        .fold(None, |acc: Option<f64>, x| {
+            Some(acc.map_or(x, |a| a.min(x)))
+        });
+    Scene {
+        ego_x: ego.x_m,
+        ego_y: ego.y_m,
+        ego_speed: input.ego.linear_x_mps,
+        goal_x: goal.x_m,
+        goal_y: goal.y_m,
+        obstacle_x,
+    }
 }
 
 fn argmax<const M: usize>(v: &[f64; M]) -> usize {
@@ -443,9 +487,19 @@ impl LearnedPlanner {
             input_dim: IN,
             hidden_dim: H,
             output_dim: K,
-            w1: self.scorer.w1.iter().flat_map(|r| r.iter().copied()).collect(),
+            w1: self
+                .scorer
+                .w1
+                .iter()
+                .flat_map(|r| r.iter().copied())
+                .collect(),
             b1: self.scorer.b1.to_vec(),
-            w2: self.scorer.w2.iter().flat_map(|r| r.iter().copied()).collect(),
+            w2: self
+                .scorer
+                .w2
+                .iter()
+                .flat_map(|r| r.iter().copied())
+                .collect(),
             b2: self.scorer.b2.to_vec(),
         }
     }
@@ -468,10 +522,20 @@ impl QuantizedLearnedPlanner {
             input_dim: IN,
             hidden_dim: H,
             output_dim: K,
-            w1_codes: self.scorer.w1.iter().flat_map(|r| r.iter().copied()).collect(),
+            w1_codes: self
+                .scorer
+                .w1
+                .iter()
+                .flat_map(|r| r.iter().copied())
+                .collect(),
             w1_scale: self.scorer.s_w1,
             b1: self.scorer.b1.to_vec(),
-            w2_codes: self.scorer.w2.iter().flat_map(|r| r.iter().copied()).collect(),
+            w2_codes: self
+                .scorer
+                .w2
+                .iter()
+                .flat_map(|r| r.iter().copied())
+                .collect(),
             w2_scale: self.scorer.s_w2,
             b2: self.scorer.b2.to_vec(),
             input_scale: self.scorer.s_x,
@@ -587,7 +651,12 @@ impl QuantizedLearnedPlanner {
     /// The calibrated scales `(w1, w2, input, hidden)` — all finite and `> 0` for a
     /// non-degenerate calibration. A hook for tests and the eval scorecard.
     pub fn scales(&self) -> (f64, f64, f64, f64) {
-        (self.scorer.s_w1, self.scorer.s_w2, self.scorer.s_x, self.scorer.s_h)
+        (
+            self.scorer.s_w1,
+            self.scorer.s_w2,
+            self.scorer.s_x,
+            self.scorer.s_h,
+        )
     }
 }
 
@@ -598,7 +667,13 @@ impl ScoredPlanner for QuantizedLearnedPlanner {
     fn plan_with_chosen_index(&self, input: &PlanInput) -> (usize, PlanOutput) {
         let scene = scene_of(input);
         let best = argmax(&self.scorer.forward(&featurize(&scene)));
-        (best, PlanOutput { trajectory: materialize(&scene, TARGET_SPEEDS[best]), kind: ProposalKind::Motion })
+        (
+            best,
+            PlanOutput {
+                trajectory: materialize(&scene, TARGET_SPEEDS[best]),
+                kind: ProposalKind::Motion,
+            },
+        )
     }
 }
 
@@ -697,7 +772,10 @@ impl LearnedPlanner {
                         hs.push(hj.abs());
                     }
                 }
-                (percentile_nearest_rank(&mut xs, frac), percentile_nearest_rank(&mut hs, frac))
+                (
+                    percentile_nearest_rank(&mut xs, frac),
+                    percentile_nearest_rank(&mut hs, frac),
+                )
             }
         };
         let s_x = int8_scale(ax);
@@ -764,9 +842,17 @@ fn materialize_maneuver(s: &Scene, offset: f64, target: f64) -> Vec<TrajectoryPo
     (0..HORIZON)
         .map(|i| {
             let y = s.ego_y + offset * smoothstep01((x - s.ego_x) / TRANSITION_M);
-            let heading = if i == 0 { 0.0 } else { (y - prev.1).atan2((x - prev.0).max(1e-6)) };
+            let heading = if i == 0 {
+                0.0
+            } else {
+                (y - prev.1).atan2((x - prev.0).max(1e-6))
+            };
             let p = TrajectoryPoint {
-                pose: Pose { x_m: x, y_m: y, heading_rad: heading },
+                pose: Pose {
+                    x_m: x,
+                    y_m: y,
+                    heading_rad: heading,
+                },
                 velocity_mps: v,
                 time_from_start_s: i as f64 * DT,
             };
@@ -832,7 +918,10 @@ impl LearnedManeuverPlanner {
             }
             data.push((feats, label));
         }
-        LearnedManeuverPlanner { scorer: fit(&mut rng, &data, MANEUVER_FIT_ITERS), teacher }
+        LearnedManeuverPlanner {
+            scorer: fit(&mut rng, &data, MANEUVER_FIT_ITERS),
+            teacher,
+        }
     }
 
     /// The teacher this planner was distilled from (audit / test introspection).
@@ -851,7 +940,10 @@ impl Planner for LearnedManeuverPlanner {
     fn plan(&mut self, input: &PlanInput<'_>) -> PlanOutput {
         let scene = scene_of(input);
         let (offset, speed) = maneuver_candidate(argmax(&self.scorer.forward(&featurize(&scene))));
-        PlanOutput { trajectory: materialize_maneuver(&scene, offset, speed), kind: ProposalKind::Motion }
+        PlanOutput {
+            trajectory: materialize_maneuver(&scene, offset, speed),
+            kind: ProposalKind::Motion,
+        }
     }
 }
 
@@ -884,7 +976,12 @@ mod ptq_tests {
     #[test]
     fn int8_forward_is_lossy_but_close() {
         // A hand-built scorer with clearly off-grid weights.
-        let mut m = Mlp::<K> { w1: [[0.0; IN]; H], b1: [0.0; H], w2: [[0.0; H]; K], b2: [0.0; K] };
+        let mut m = Mlp::<K> {
+            w1: [[0.0; IN]; H],
+            b1: [0.0; H],
+            w2: [[0.0; H]; K],
+            b2: [0.0; K],
+        };
         for (j, row) in m.w1.iter_mut().enumerate() {
             for (i, w) in row.iter_mut().enumerate() {
                 *w = 0.1234 * (j as f64 + 1.0) - 0.037 * (i as f64);
@@ -916,9 +1013,19 @@ mod ptq_tests {
         let yf = m.forward(&x);
         let yq = q.forward(&x);
         let moved = yf.iter().zip(yq.iter()).any(|(a, b)| (a - b).abs() > 1e-9);
-        assert!(moved, "int8 forward must differ from fp32 — quantization is non-trivial");
-        let maxdiff = yf.iter().zip(yq.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
-        assert!(maxdiff < 0.5, "int8 perturbation should be small, got {maxdiff}");
+        assert!(
+            moved,
+            "int8 forward must differ from fp32 — quantization is non-trivial"
+        );
+        let maxdiff = yf
+            .iter()
+            .zip(yq.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            maxdiff < 0.5,
+            "int8 perturbation should be small, got {maxdiff}"
+        );
     }
 
     // ---- Percentile calibrator (#3: the graduation path off absmax) ----
@@ -967,7 +1074,10 @@ mod ptq_tests {
         // is strictly smaller under the tighter percentile scale.
         let bulk: Vec<f64> = (0..99).map(|i| 0.20 + 0.001 * f64::from(i)).collect();
         let mean_err = |scale: f64| -> f64 {
-            bulk.iter().map(|&v| (fake_quant(v, scale) - v).abs()).sum::<f64>() / bulk.len() as f64
+            bulk.iter()
+                .map(|&v| (fake_quant(v, scale) - v).abs())
+                .sum::<f64>()
+                / bulk.len() as f64
         };
         assert!(
             mean_err(s_pct) < mean_err(s_absmax),

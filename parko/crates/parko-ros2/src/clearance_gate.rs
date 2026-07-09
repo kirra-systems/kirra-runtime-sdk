@@ -71,9 +71,9 @@ use parko_core::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
-use parko_kirra::clearance_delivery::{ClearanceDelivery, DeliveryOutcome};
 #[cfg(test)]
 use kirra_verifier::verifier_store::VerifierStore;
+use parko_kirra::clearance_delivery::{ClearanceDelivery, DeliveryOutcome};
 
 use crate::command_mapping::OutgoingTwist;
 use crate::config::ParkoNodeConfig;
@@ -234,7 +234,11 @@ pub struct StalenessGuard {
 impl StalenessGuard {
     #[must_use]
     pub fn new(window_ms: u64) -> Self {
-        Self { last_update_ms: None, window_ms, last_warn_ms: None }
+        Self {
+            last_update_ms: None,
+            window_ms,
+            last_warn_ms: None,
+        }
     }
 
     /// Record a fresh sample arrival at `now_ms`. Idempotent if called repeatedly
@@ -347,13 +351,17 @@ impl NodeClearance {
     /// must force the MRC. Always false when no IMU source is configured.
     #[must_use]
     pub fn imu_mrc_required(&self, now_ms: u64) -> bool {
-        self.imu_staleness.as_ref().is_some_and(|g| g.is_stale(now_ms))
+        self.imu_staleness
+            .as_ref()
+            .is_some_and(|g| g.is_stale(now_ms))
     }
 
     /// Rate-limited stale-IMU warning for the tick log (#324). At most once per
     /// window while stale; false when not armed or not stale.
     pub fn imu_stale_warning(&mut self, now_ms: u64) -> bool {
-        self.imu_staleness.as_mut().is_some_and(|g| g.take_warning(now_ms))
+        self.imu_staleness
+            .as_mut()
+            .is_some_and(|g| g.take_warning(now_ms))
     }
 
     /// Enable the vanished-object trigger with the given config. The caller MUST
@@ -372,7 +380,10 @@ impl NodeClearance {
     /// The store-open + signing-key path is [`NodeClearance::open_signed`]; this
     /// is the seam tests use with an in-memory store.
     #[must_use]
-    pub fn from_store(store: kirra_verifier::store_handle::StoreHandle, node_id: impl Into<String>) -> Self {
+    pub fn from_store(
+        store: kirra_verifier::store_handle::StoreHandle,
+        node_id: impl Into<String>,
+    ) -> Self {
         Self::new(ClearanceDelivery::new(store, node_id))
     }
 
@@ -380,7 +391,11 @@ impl NodeClearance {
     /// key so delivered-grant outcomes are signed, and build the gate for
     /// `node_id`. Fail-closed: an unopenable store / undecodable key is an `Err`.
     /// The node never names `base64` / `ed25519` itself — `parko-kirra` owns that.
-    pub fn open_signed(db_path: &str, node_id: &str, signing_key_b64: &str) -> Result<Self, String> {
+    pub fn open_signed(
+        db_path: &str,
+        node_id: &str,
+        signing_key_b64: &str,
+    ) -> Result<Self, String> {
         Ok(Self::new(ClearanceDelivery::open_signed(
             db_path,
             node_id,
@@ -405,7 +420,8 @@ impl NodeClearance {
     /// `NoGrant` no-op when nothing is pending. Node-scoped pickup: a grant for a
     /// different node id is never taken.
     pub fn poll(&mut self, now_ms: u64) -> DeliveryOutcome {
-        self.delivery.poll_and_deliver(&mut self.clearance_loop, now_ms)
+        self.delivery
+            .poll_and_deliver(&mut self.clearance_loop, now_ms)
     }
 
     /// Assemble this tick's [`ImpactEvidence`] from the node's live inputs and
@@ -413,12 +429,7 @@ impl NodeClearance {
     /// detector ONLY when both it is enabled AND a `scene` is supplied; otherwise
     /// `vanished = false` (the deferred trigger, never fabricated). This is the
     /// detection step the tick calls between delivery and the immobilized gate.
-    pub fn observe_tick(
-        &mut self,
-        inputs: &ImpactInputs,
-        scene: Option<&AgentScene>,
-        now_ms: u64,
-    ) {
+    pub fn observe_tick(&mut self, inputs: &ImpactInputs, scene: Option<&AgentScene>, now_ms: u64) {
         let vanished = match (self.vanished.as_mut(), scene) {
             (Some(det), Some(sc)) => det.observe(sc, now_ms, &self.vanished_cfg),
             _ => false,
@@ -450,12 +461,7 @@ impl NodeClearance {
     /// input-assembly + config). The seam tests use to drive the loop into an
     /// immobilized state through the REAL state machine (never by poking
     /// internals).
-    pub fn observe(
-        &mut self,
-        evidence: &ImpactEvidence,
-        cfg: &ImpactCfg,
-        now_ms: u64,
-    ) {
+    pub fn observe(&mut self, evidence: &ImpactEvidence, cfg: &ImpactCfg, now_ms: u64) {
         self.clearance_loop.observe(evidence, cfg, now_ms);
     }
 }
@@ -578,7 +584,10 @@ mod tests {
         let cell = ContactCell::new();
         cell.assert(true); // the pulse
         cell.assert(false); // de-assert before the tick reads
-        assert!(cell.drain(), "a sub-tick contact pulse must survive to the next tick read");
+        assert!(
+            cell.drain(),
+            "a sub-tick contact pulse must survive to the next tick read"
+        );
     }
 
     /// One contact event latches exactly ONCE — after the tick drains a `true`,
@@ -588,13 +597,20 @@ mod tests {
         let cell = ContactCell::new();
         cell.assert(true);
         assert!(cell.drain(), "first read sees the contact");
-        assert!(!cell.drain(), "second read is reset — one event latches once");
+        assert!(
+            !cell.drain(),
+            "second read is reset — one event latches once"
+        );
     }
 
     // ---- #321: decel deviation convention + SpikeDebouncer --------------
 
     fn imu_with(ax: f32, ay: f32, az: f32) -> ImuSample {
-        ImuSample { linear_acceleration: [ax, ay, az], angular_velocity: [0.0; 3], orientation: None }
+        ImuSample {
+            linear_acceleration: [ax, ay, az],
+            angular_velocity: [0.0; 3],
+            orientation: None,
+        }
     }
 
     /// A flat, RESTING IMU (gravity only) reads ≈ 0 deviation — the #321 fix: it is
@@ -605,8 +621,11 @@ mod tests {
         let dev = decel_deviation(&imu_with(0.0, 0.0, 9.80665));
         assert!(dev < 1e-3, "resting deviation must be ≈ 0, got {dev}");
         let courier = parko_core::impact_cfg_for_class(parko_core::VehicleClass::Courier);
-        assert!(dev < courier.spike_threshold_mps2,
-            "resting deviation {dev} must be below the courier threshold {}", courier.spike_threshold_mps2);
+        assert!(
+            dev < courier.spike_threshold_mps2,
+            "resting deviation {dev} must be below the courier threshold {}",
+            courier.spike_threshold_mps2
+        );
     }
 
     /// Parametric deviation: a known acceleration vector → expected `|‖a‖ − G|`.
@@ -617,11 +636,18 @@ mod tests {
         assert!((dev - (40.0 - 9.80665)).abs() < 1e-3, "got {dev}");
         // free-fall ‖(0,0,0)‖ = 0 → |0 − G| = G (a secondary anomaly trigger)
         let ff = decel_deviation(&imu_with(0.0, 0.0, 0.0));
-        assert!((ff - 9.80665).abs() < 1e-3, "free-fall deviation = G, got {ff}");
+        assert!(
+            (ff - 9.80665).abs() < 1e-3,
+            "free-fall deviation = G, got {ff}"
+        );
     }
 
     fn cfg_mn(threshold: f64, m: u8, n: u8) -> ImpactCfg {
-        ImpactCfg { spike_threshold_mps2: threshold, confirmation_m: m, confirmation_n: n }
+        ImpactCfg {
+            spike_threshold_mps2: threshold,
+            confirmation_m: m,
+            confirmation_n: n,
+        }
     }
 
     /// M=2/N=3: one hit not confirmed; two CONSECUTIVE hits confirmed + drain
@@ -637,17 +663,29 @@ mod tests {
         // a SECOND consecutive hit → confirmed, and drain resets the window
         d.observe(5.0, &cfg);
         assert!(d.drain_confirmed(&cfg), "two consecutive hits confirm M=2");
-        assert!(!d.is_confirmed(&cfg), "drain reset the window after a confirm");
+        assert!(
+            !d.is_confirmed(&cfg),
+            "drain reset the window after a confirm"
+        );
 
         // non-consecutive T,F,T → never confirms (the debounce, not a vote)
         let mut d2 = SpikeDebouncer::new();
-        d2.observe(5.0, &cfg); assert!(!d2.drain_confirmed(&cfg));
-        d2.observe(0.0, &cfg); assert!(!d2.drain_confirmed(&cfg));
-        d2.observe(5.0, &cfg); assert!(!d2.drain_confirmed(&cfg), "T,F,T is non-consecutive → not confirmed");
+        d2.observe(5.0, &cfg);
+        assert!(!d2.drain_confirmed(&cfg));
+        d2.observe(0.0, &cfg);
+        assert!(!d2.drain_confirmed(&cfg));
+        d2.observe(5.0, &cfg);
+        assert!(
+            !d2.drain_confirmed(&cfg),
+            "T,F,T is non-consecutive → not confirmed"
+        );
 
         // sub-threshold forever → never confirms
         let mut d3 = SpikeDebouncer::new();
-        for _ in 0..10 { d3.observe(1.0, &cfg); assert!(!d3.drain_confirmed(&cfg)); }
+        for _ in 0..10 {
+            d3.observe(1.0, &cfg);
+            assert!(!d3.drain_confirmed(&cfg));
+        }
     }
 
     /// M=1/N=1 (robotaxi / default): a single above-threshold tick confirms
@@ -670,7 +708,10 @@ mod tests {
     #[test]
     fn staleness_guard_never_stamped_is_stale() {
         let g = StalenessGuard::new(100);
-        assert!(g.is_stale(0), "never stamped → stale (missing sensor → MRC)");
+        assert!(
+            g.is_stale(0),
+            "never stamped → stale (missing sensor → MRC)"
+        );
         assert!(g.is_stale(10_000), "still stale far later");
     }
 
@@ -681,7 +722,10 @@ mod tests {
         let mut g = StalenessGuard::new(100);
         g.stamp(1_000);
         assert!(!g.is_stale(1_050), "within the 100ms window → fresh");
-        assert!(!g.is_stale(1_100), "exactly at the window edge → still fresh (inclusive)");
+        assert!(
+            !g.is_stale(1_100),
+            "exactly at the window edge → still fresh (inclusive)"
+        );
         assert!(g.is_stale(1_101), "one ms past the window → stale → MRC");
         // A fresh sample resets the watchdog.
         g.stamp(1_200);
@@ -693,7 +737,10 @@ mod tests {
     fn staleness_guard_warning_is_rate_limited() {
         let mut g = StalenessGuard::new(100); // never stamped → always stale
         assert!(g.take_warning(1_000), "first stale tick warns");
-        assert!(!g.take_warning(1_050), "a second tick within the window does not re-warn");
+        assert!(
+            !g.take_warning(1_050),
+            "a second tick within the window does not re-warn"
+        );
         assert!(g.take_warning(1_100), "after a full window it warns again");
     }
 
@@ -702,11 +749,17 @@ mod tests {
     #[test]
     fn node_clearance_imu_mrc_only_when_armed() {
         let mut unarmed = NodeClearance::from_store(store(), "node-x");
-        assert!(!unarmed.imu_mrc_required(10_000), "no IMU configured → never forces MRC");
+        assert!(
+            !unarmed.imu_mrc_required(10_000),
+            "no IMU configured → never forces MRC"
+        );
         unarmed.stamp_imu(1); // no-op when unarmed
 
         let mut armed = NodeClearance::from_store(store(), "node-x").with_imu_staleness(100);
-        assert!(armed.imu_mrc_required(0), "armed + never stamped → MRC (startup-missing)");
+        assert!(
+            armed.imu_mrc_required(0),
+            "armed + never stamped → MRC (startup-missing)"
+        );
         armed.stamp_imu(1_000);
         assert!(!armed.imu_mrc_required(1_050), "fresh sample → no MRC");
         assert!(armed.imu_mrc_required(1_500), "gone stale → MRC again");
@@ -795,10 +848,23 @@ mod tests {
         )
         .await;
 
-        assert!(out.vetoed, "an immobilized loop must veto motion regardless of posture");
-        assert_eq!(out.tick.twist.linear_x_mps, 0.0, "latched → stopped twist (linear)");
-        assert_eq!(out.tick.twist.angular_z_rads, 0.0, "latched → stopped twist (angular)");
-        assert_eq!(out.delivery, Some(DeliveryOutcome::NoGrant), "no grant pending");
+        assert!(
+            out.vetoed,
+            "an immobilized loop must veto motion regardless of posture"
+        );
+        assert_eq!(
+            out.tick.twist.linear_x_mps, 0.0,
+            "latched → stopped twist (linear)"
+        );
+        assert_eq!(
+            out.tick.twist.angular_z_rads, 0.0,
+            "latched → stopped twist (angular)"
+        );
+        assert_eq!(
+            out.delivery,
+            Some(DeliveryOutcome::NoGrant),
+            "no grant pending"
+        );
     }
 
     /// #324 — STALE IMU FORCES MRC: with the loop in Normal (not immobilized) at
@@ -810,7 +876,11 @@ mod tests {
         let infer = build_loop(0.1, 0.2);
         // Armed watchdog, NEVER stamped → stale at any tick time (startup-missing).
         let mut nc = NodeClearance::from_store(store(), "KIRRA-DEMO-03").with_imu_staleness(100);
-        assert_eq!(nc.state(), ClearanceState::Normal, "loop is NOT immobilized");
+        assert_eq!(
+            nc.state(),
+            ClearanceState::Normal,
+            "loop is NOT immobilized"
+        );
 
         let out = run_pipeline_tick_with_clearance(
             &ParkoNodeConfig::default(),
@@ -823,10 +893,20 @@ mod tests {
         )
         .await;
 
-        assert!(out.imu_stale, "a configured-but-silent IMU is reported stale");
+        assert!(
+            out.imu_stale,
+            "a configured-but-silent IMU is reported stale"
+        );
         assert!(out.vetoed, "stale IMU forces the MRC veto");
-        assert_eq!(nc.state(), ClearanceState::Normal, "the stop came from staleness, not the loop");
-        assert_eq!(out.tick.twist.linear_x_mps, 0.0, "stale IMU → stopped twist");
+        assert_eq!(
+            nc.state(),
+            ClearanceState::Normal,
+            "the stop came from staleness, not the loop"
+        );
+        assert_eq!(
+            out.tick.twist.linear_x_mps, 0.0,
+            "stale IMU → stopped twist"
+        );
     }
 
     /// #324 — A FRESH IMU does NOT force the MRC: an armed watchdog stamped fresh
@@ -891,8 +971,15 @@ mod tests {
             "the pending grant must be delivered this tick; got {:?}",
             out.delivery
         );
-        assert_eq!(nc.state(), ClearanceState::Normal, "the loop clears back to Normal");
-        assert!(!out.vetoed, "veto lifts the same tick the grant clears the loop");
+        assert_eq!(
+            nc.state(),
+            ClearanceState::Normal,
+            "the loop clears back to Normal"
+        );
+        assert!(
+            !out.vetoed,
+            "veto lifts the same tick the grant clears the loop"
+        );
         assert!(
             (out.tick.twist.linear_x_mps - 0.1).abs() < 1e-4,
             "command publishing resumes — governed forward command, not a stop; got {}",
@@ -911,7 +998,11 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(out2.delivery, Some(DeliveryOutcome::NoGrant), "grant consumed — no retry");
+        assert_eq!(
+            out2.delivery,
+            Some(DeliveryOutcome::NoGrant),
+            "grant consumed — no retry"
+        );
         assert!(!out2.vetoed);
     }
 
@@ -971,7 +1062,10 @@ mod tests {
             Some(DeliveryOutcome::NoGrant),
             "a grant scoped to another node must NOT be picked up"
         );
-        assert!(nc.is_immobilized(), "loop stays immobilized — nothing cleared it");
+        assert!(
+            nc.is_immobilized(),
+            "loop stays immobilized — nothing cleared it"
+        );
         assert!(out.vetoed, "still immobilized → still vetoed to a stop");
         assert_eq!(out.tick.twist.linear_x_mps, 0.0);
     }
@@ -1015,7 +1109,10 @@ mod tests {
         assert_eq!(nc.state(), ClearanceState::Normal);
 
         // 40 m/s² total accel > the 30 m/s² default threshold → impact.
-        let inputs = ImpactInputs { imu: Some(imu_accel_mag(40.0)), contact: false };
+        let inputs = ImpactInputs {
+            imu: Some(imu_accel_mag(40.0)),
+            contact: false,
+        };
         let out = run_pipeline_tick_with_clearance(
             &ParkoNodeConfig::default(),
             infer,
@@ -1027,7 +1124,10 @@ mod tests {
         )
         .await;
 
-        assert!(nc.is_immobilized(), "a decel spike must latch the loop from the tick");
+        assert!(
+            nc.is_immobilized(),
+            "a decel spike must latch the loop from the tick"
+        );
         assert!(out.vetoed, "latched → stop regardless of posture");
         assert_eq!(out.tick.twist.linear_x_mps, 0.0);
         assert_eq!(out.tick.twist.angular_z_rads, 0.0);
@@ -1039,7 +1139,10 @@ mod tests {
         let infer = build_loop(0.1, 0.2);
         let mut nc = NodeClearance::from_store(store(), "KIRRA-DEMO-03");
 
-        let inputs = ImpactInputs { imu: None, contact: true };
+        let inputs = ImpactInputs {
+            imu: None,
+            contact: true,
+        };
         let out = run_pipeline_tick_with_clearance(
             &ParkoNodeConfig::default(),
             infer,
@@ -1051,7 +1154,10 @@ mod tests {
         )
         .await;
 
-        assert!(nc.is_immobilized(), "contact=true is a definitive impact → latch");
+        assert!(
+            nc.is_immobilized(),
+            "contact=true is a definitive impact → latch"
+        );
         assert!(out.vetoed);
         assert_eq!(out.tick.twist.linear_x_mps, 0.0);
     }
@@ -1064,7 +1170,10 @@ mod tests {
     async fn vanished_object_latches_from_scene() {
         let mut nc = NodeClearance::from_store(store(), "KIRRA-DEMO-03")
             .with_vanished_detection(VanishedCfg::default());
-        let no_impact = ImpactInputs { imu: Some(imu_accel_mag(9.81)), contact: false };
+        let no_impact = ImpactInputs {
+            imu: Some(imu_accel_mag(9.81)),
+            contact: false,
+        };
 
         // Tick 1 — a close agent 1 m ahead (gap ≤ r_close 2.0): opens the
         // close-agent obligation; nothing has vanished yet → no latch.
@@ -1087,7 +1196,11 @@ mod tests {
             Some(&close),
         )
         .await;
-        assert_eq!(nc.state(), ClearanceState::Normal, "a present close agent must not latch");
+        assert_eq!(
+            nc.state(),
+            ClearanceState::Normal,
+            "a present close agent must not latch"
+        );
         assert!(!out1.vetoed);
 
         // Tick 2 — perception ran and is verified-empty (`KnownEmpty`): the close
@@ -1102,7 +1215,10 @@ mod tests {
             Some(&AgentScene::KnownEmpty),
         )
         .await;
-        assert!(nc.is_immobilized(), "a close agent that vanished must latch the loop");
+        assert!(
+            nc.is_immobilized(),
+            "a close agent that vanished must latch the loop"
+        );
         assert!(out2.vetoed, "latched → stop regardless of posture");
         assert_eq!(out2.tick.twist.linear_x_mps, 0.0);
     }
@@ -1114,7 +1230,10 @@ mod tests {
     async fn vanished_detector_with_no_scene_never_latches() {
         let mut nc = NodeClearance::from_store(store(), "KIRRA-DEMO-03")
             .with_vanished_detection(VanishedCfg::default());
-        let no_impact = ImpactInputs { imu: Some(imu_accel_mag(9.81)), contact: false };
+        let no_impact = ImpactInputs {
+            imu: Some(imu_accel_mag(9.81)),
+            contact: false,
+        };
         for i in 0..5 {
             let out = run_pipeline_tick_with_clearance(
                 &ParkoNodeConfig::default(),
@@ -1126,7 +1245,11 @@ mod tests {
                 None, // no scene source this tick
             )
             .await;
-            assert_eq!(nc.state(), ClearanceState::Normal, "tick {i}: no scene must never latch");
+            assert_eq!(
+                nc.state(),
+                ClearanceState::Normal,
+                "tick {i}: no scene must never latch"
+            );
             assert!(!out.vetoed);
         }
     }
@@ -1138,7 +1261,10 @@ mod tests {
     async fn no_signals_never_latch_across_many_ticks() {
         let mut nc = NodeClearance::from_store(store(), "KIRRA-DEMO-03");
         // gravity baseline magnitude, well under the 30 m/s² threshold.
-        let inputs = ImpactInputs { imu: Some(imu_accel_mag(9.81)), contact: false };
+        let inputs = ImpactInputs {
+            imu: Some(imu_accel_mag(9.81)),
+            contact: false,
+        };
 
         for i in 0..50 {
             let infer = build_loop(0.1, 0.2);
@@ -1152,7 +1278,11 @@ mod tests {
                 None,
             )
             .await;
-            assert_eq!(nc.state(), ClearanceState::Normal, "tick {i}: must not latch on sub-threshold accel");
+            assert_eq!(
+                nc.state(),
+                ClearanceState::Normal,
+                "tick {i}: must not latch on sub-threshold accel"
+            );
             assert!(!out.vetoed, "tick {i}: no veto");
             assert!(
                 (out.tick.twist.linear_x_mps - 0.1).abs() < 1e-4,
@@ -1180,7 +1310,10 @@ mod tests {
 
         // Same tick: a NEW impact arrives (contact).
         let infer = build_loop(0.1, 0.2);
-        let inputs = ImpactInputs { imu: None, contact: true };
+        let inputs = ImpactInputs {
+            imu: None,
+            contact: true,
+        };
         let out = run_pipeline_tick_with_clearance(
             &ParkoNodeConfig::default(),
             infer,
@@ -1215,14 +1348,25 @@ mod tests {
         let no_impact = ImpactInputs::default();
 
         // Tick 1: a decel spike LATCHES the loop and raises escalation in one step (#328).
-        let spike = ImpactInputs { imu: Some(imu_accel_mag(40.0)), contact: false };
+        let spike = ImpactInputs {
+            imu: Some(imu_accel_mag(40.0)),
+            contact: false,
+        };
         let out1 = tick(&mut nc, &spike).await;
-        assert_eq!(nc.state(), ClearanceState::EscalationRaised, "tick 1 latches + escalates (#328)");
+        assert_eq!(
+            nc.state(),
+            ClearanceState::EscalationRaised,
+            "tick 1 latches + escalates (#328)"
+        );
         assert!(out1.vetoed);
 
         // Tick 2: no new impact — stays escalated (operator-required), still vetoed.
         let out2 = tick(&mut nc, &no_impact).await;
-        assert_eq!(nc.state(), ClearanceState::EscalationRaised, "tick 2 stays escalated");
+        assert_eq!(
+            nc.state(),
+            ClearanceState::EscalationRaised,
+            "tick 2 stays escalated"
+        );
         assert!(out2.vetoed, "still immobilized → still stopped");
 
         // The operator records a grant.
@@ -1237,7 +1381,11 @@ mod tests {
             "tick 3 delivers the grant; got {:?}",
             out3.delivery
         );
-        assert_eq!(nc.state(), ClearanceState::Normal, "loop recovers to Normal");
+        assert_eq!(
+            nc.state(),
+            ClearanceState::Normal,
+            "loop recovers to Normal"
+        );
         assert!(!out3.vetoed, "veto lifts");
         assert!(
             (out3.tick.twist.linear_x_mps - 0.1).abs() < 1e-4,

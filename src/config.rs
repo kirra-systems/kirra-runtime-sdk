@@ -74,7 +74,9 @@ impl KirraRuntimeConfig {
         // Schema-version gate FIRST (fail-closed): a config from an unknown future
         // schema must never be interpreted against this binary's field meanings.
         if self.config_version == 0 {
-            return Err("CONFIG_INVALID: config_version must be >= 1 (0 is not a valid schema version).");
+            return Err(
+                "CONFIG_INVALID: config_version must be >= 1 (0 is not a valid schema version).",
+            );
         }
         if self.config_version > CONFIG_SCHEMA_VERSION {
             return Err("CONFIG_INVALID: config_version is newer than this binary supports — refusing a config from an unknown future schema (fail-closed).");
@@ -88,16 +90,25 @@ impl KirraRuntimeConfig {
         // explicitly. This also guarantees the config is JSON-serializable, so
         // `effective_digest` cannot fail on a validated config.
         let finite = [
-            c.min_permissible_ceiling, c.max_permissible_ceiling,
-            c.max_angular_velocity_ceiling, c.max_rate_of_change_dt,
-            c.fallback_safe_setpoint, c.constraint_cap_min, c.constraint_cap_max,
+            c.min_permissible_ceiling,
+            c.max_permissible_ceiling,
+            c.max_angular_velocity_ceiling,
+            c.max_rate_of_change_dt,
+            c.fallback_safe_setpoint,
+            c.constraint_cap_min,
+            c.constraint_cap_max,
             c.engineering_scale_factor,
         ];
         if finite.iter().any(|v| !v.is_finite()) {
             return Err("CONFIG_INVALID: contract safety bounds must all be finite (no NaN/Inf).");
         }
 
-        let ports = [n.proxy_listen_port, n.plc_target_port, n.admin_reset_port, n.metrics_http_port];
+        let ports = [
+            n.proxy_listen_port,
+            n.plc_target_port,
+            n.admin_reset_port,
+            n.metrics_http_port,
+        ];
         for i in 0..ports.len() {
             for j in (i + 1)..ports.len() {
                 if ports[i] == ports[j] {
@@ -120,10 +131,14 @@ impl KirraRuntimeConfig {
         if c.max_angular_velocity_ceiling <= 0.0 {
             return Err("CONFIG_INVALID: Maximum permitted turning angular rates must be strictly positive values.");
         }
-        if c.fallback_safe_setpoint < c.min_permissible_ceiling || c.fallback_safe_setpoint > c.max_permissible_ceiling {
+        if c.fallback_safe_setpoint < c.min_permissible_ceiling
+            || c.fallback_safe_setpoint > c.max_permissible_ceiling
+        {
             return Err("CONFIG_INVALID: Fallback safe setpoint maps outside permissible core tracking boundaries.");
         }
-        if c.constraint_cap_min < c.min_permissible_ceiling || c.constraint_cap_max > c.max_permissible_ceiling {
+        if c.constraint_cap_min < c.min_permissible_ceiling
+            || c.constraint_cap_max > c.max_permissible_ceiling
+        {
             return Err("CONFIG_INVALID: Posture tracking caps expand past absolute hard engineering bounds.");
         }
         if c.constraint_cap_min >= c.constraint_cap_max {
@@ -136,10 +151,14 @@ impl KirraRuntimeConfig {
     pub fn load_and_validate<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let mut file = File::open(path).map_err(|e| format!("FILE_OPEN_ERROR: {}", e))?;
         let mut contents = String::new();
-        file.read_to_string(&mut contents).map_err(|e| format!("FILE_READ_ERROR: {}", e))?;
+        file.read_to_string(&mut contents)
+            .map_err(|e| format!("FILE_READ_ERROR: {}", e))?;
 
-        let parsed: Self = serde_json::from_str(&contents).map_err(|e| format!("JSON_DESERIALIZE_ERROR: {}", e))?;
-        parsed.validate_safety_invariants().map_err(|e| e.to_string())?;
+        let parsed: Self = serde_json::from_str(&contents)
+            .map_err(|e| format!("JSON_DESERIALIZE_ERROR: {}", e))?;
+        parsed
+            .validate_safety_invariants()
+            .map_err(|e| e.to_string())?;
         Ok(parsed)
     }
 }
@@ -186,7 +205,9 @@ mod tests {
     #[test]
     fn explicit_current_version_is_accepted() {
         // Track CONFIG_SCHEMA_VERSION so this keeps testing "current version" after a bump.
-        let cfg = parse(&valid_json(&format!(r#""config_version": {CONFIG_SCHEMA_VERSION},"#)));
+        let cfg = parse(&valid_json(&format!(
+            r#""config_version": {CONFIG_SCHEMA_VERSION},"#
+        )));
         assert_eq!(cfg.config_version, CONFIG_SCHEMA_VERSION);
         assert!(cfg.validate_safety_invariants().is_ok());
     }
@@ -200,9 +221,15 @@ mod tests {
     #[test]
     fn future_version_is_refused_fail_closed() {
         // A config from a newer schema than this binary understands must not run.
-        let cfg = parse(&valid_json(&format!(r#""config_version": {},"#, CONFIG_SCHEMA_VERSION + 1)));
+        let cfg = parse(&valid_json(&format!(
+            r#""config_version": {},"#,
+            CONFIG_SCHEMA_VERSION + 1
+        )));
         let err = cfg.validate_safety_invariants().unwrap_err();
-        assert!(err.contains("newer than this binary supports"), "got: {err}");
+        assert!(
+            err.contains("newer than this binary supports"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -210,7 +237,11 @@ mod tests {
         let a = parse(&valid_json(r#""config_version": 1,"#));
         let b = parse(&valid_json(r#""config_version": 1,"#));
         let da = a.effective_digest().expect("digest");
-        assert_eq!(da, b.effective_digest().expect("digest"), "same config → same digest");
+        assert_eq!(
+            da,
+            b.effective_digest().expect("digest"),
+            "same config → same digest"
+        );
         assert_eq!(da.len(), 64, "sha-256 hex is 64 chars");
 
         // A changed safety bound changes the digest — the fingerprint tracks content.

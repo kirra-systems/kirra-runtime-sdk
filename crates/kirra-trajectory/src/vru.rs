@@ -429,7 +429,11 @@ mod tests {
 
     fn pt(x: f64, v: f64, t: f64) -> TrajectoryPoint {
         TrajectoryPoint {
-            pose: Pose { x_m: x, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: x,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             velocity_mps: v,
             time_from_start_s: t,
         }
@@ -467,7 +471,10 @@ mod tests {
     }
 
     fn scene(peds: &[PerceivedPedestrian]) -> PedestrianScene<'_> {
-        PedestrianScene { pedestrians: peds, params: VruRssParams::default() }
+        PedestrianScene {
+            pedestrians: peds,
+            params: VruRssParams::default(),
+        }
     }
 
     /// The formula at a worked point (doc §4.1) with the F1 ego-body + F2
@@ -492,14 +499,20 @@ mod tests {
         // What the old point-ego formula would have demanded (no ego_reach term).
         let axle_only = req - ego_reach();
         let ped_x = axle_only + 0.1; // clears the axle bound, INSIDE the body bound
-        assert!(ped_x < req, "precondition: still inside the full requirement");
+        assert!(
+            ped_x < req,
+            "precondition: still inside the full requirement"
+        );
         let traj = [pt(0.0, 2.0, 0.0)];
         assert!(
             breaches(&traj, &scene(&[ped(ped_x, 0.0)])),
             "a pedestrian inside the ego-body envelope must breach (F1)"
         );
         // Just OUTSIDE the full requirement still admits (no over-rejection).
-        assert!(!breaches(&[pt(0.0, 2.0, 0.0)], &scene(&[ped(req + 0.1, 0.0)])));
+        assert!(!breaches(
+            &[pt(0.0, 2.0, 0.0)],
+            &scene(&[ped(req + 0.1, 0.0)])
+        ));
     }
 
     /// #779 F2 — the response-phase acceleration term raises the requirement vs a
@@ -510,7 +523,10 @@ mod tests {
         let p = VruRssParams::default();
         let with_accel = required_pedestrian_clearance_m(4.0, 0.0, BRAKE, A_MAX, ego_reach(), &p);
         let no_accel = required_pedestrian_clearance_m(4.0, 0.0, BRAKE, 0.0, ego_reach(), &p);
-        assert!(with_accel > no_accel, "the a_max·ρ response phase must add distance");
+        assert!(
+            with_accel > no_accel,
+            "the a_max·ρ response phase must add distance"
+        );
     }
 
     /// #779 F1 / Copilot #788 — `ego_reach_m` fails closed (NaN → downstream ∞) on
@@ -534,7 +550,14 @@ mod tests {
         assert!(ego_reach_m(2.8, 0.9, -1.0, 1.85).is_nan());
         // And the NaN reach makes the requirement ∞ (breach) downstream.
         assert_eq!(
-            required_pedestrian_clearance_m(2.0, 0.0, BRAKE, A_MAX, f64::NAN, &VruRssParams::default()),
+            required_pedestrian_clearance_m(
+                2.0,
+                0.0,
+                BRAKE,
+                A_MAX,
+                f64::NAN,
+                &VruRssParams::default()
+            ),
             f64::INFINITY
         );
     }
@@ -549,18 +572,35 @@ mod tests {
         let p = VruRssParams::default();
         const NOMINAL_BRAKE: f64 = 4.5;
         const DEGRADED_BRAKE: f64 = 3.0;
-        let nominal = required_pedestrian_clearance_m(5.0, 0.0, NOMINAL_BRAKE, A_MAX, ego_reach(), &p);
-        let degraded = required_pedestrian_clearance_m(5.0, 0.0, DEGRADED_BRAKE, A_MAX, ego_reach(), &p);
-        assert!(degraded > nominal, "the weaker Degraded brake must demand MORE clearance");
+        let nominal =
+            required_pedestrian_clearance_m(5.0, 0.0, NOMINAL_BRAKE, A_MAX, ego_reach(), &p);
+        let degraded =
+            required_pedestrian_clearance_m(5.0, 0.0, DEGRADED_BRAKE, A_MAX, ego_reach(), &p);
+        assert!(
+            degraded > nominal,
+            "the weaker Degraded brake must demand MORE clearance"
+        );
         // A pedestrian between the two boundaries: Nominal admits, Degraded breaches.
         let d = 0.5 * (nominal + degraded);
         let traj = [pt(0.0, 5.0, 0.0)];
         assert!(
-            !pedestrian_breach(&traj, &scene(&[ped(d, 0.0)]), NOMINAL_BRAKE, A_MAX, ego_reach()),
+            !pedestrian_breach(
+                &traj,
+                &scene(&[ped(d, 0.0)]),
+                NOMINAL_BRAKE,
+                A_MAX,
+                ego_reach()
+            ),
             "the Nominal brake admits a pedestrian at the mid-distance"
         );
         assert!(
-            pedestrian_breach(&traj, &scene(&[ped(d, 0.0)]), DEGRADED_BRAKE, A_MAX, ego_reach()),
+            pedestrian_breach(
+                &traj,
+                &scene(&[ped(d, 0.0)]),
+                DEGRADED_BRAKE,
+                A_MAX,
+                ego_reach()
+            ),
             "the Degraded brake breaches the same pedestrian (F3)"
         );
     }
@@ -614,12 +654,30 @@ mod tests {
     #[test]
     fn non_positive_brake_and_bad_geometry_fail_closed() {
         let p = VruRssParams::default();
-        assert_eq!(required_pedestrian_clearance_m(1.0, 0.0, 0.0, A_MAX, ego_reach(), &p), f64::INFINITY);
-        assert_eq!(required_pedestrian_clearance_m(1.0, 0.0, f64::NAN, A_MAX, ego_reach(), &p), f64::INFINITY);
-        assert_eq!(required_pedestrian_clearance_m(1.0, 0.0, BRAKE, f64::NAN, ego_reach(), &p), f64::INFINITY);
-        assert_eq!(required_pedestrian_clearance_m(1.0, 0.0, BRAKE, -1.0, ego_reach(), &p), f64::INFINITY);
-        assert_eq!(required_pedestrian_clearance_m(1.0, 0.0, BRAKE, A_MAX, f64::NAN, &p), f64::INFINITY);
-        assert_eq!(required_pedestrian_clearance_m(1.0, 0.0, BRAKE, A_MAX, -1.0, &p), f64::INFINITY);
+        assert_eq!(
+            required_pedestrian_clearance_m(1.0, 0.0, 0.0, A_MAX, ego_reach(), &p),
+            f64::INFINITY
+        );
+        assert_eq!(
+            required_pedestrian_clearance_m(1.0, 0.0, f64::NAN, A_MAX, ego_reach(), &p),
+            f64::INFINITY
+        );
+        assert_eq!(
+            required_pedestrian_clearance_m(1.0, 0.0, BRAKE, f64::NAN, ego_reach(), &p),
+            f64::INFINITY
+        );
+        assert_eq!(
+            required_pedestrian_clearance_m(1.0, 0.0, BRAKE, -1.0, ego_reach(), &p),
+            f64::INFINITY
+        );
+        assert_eq!(
+            required_pedestrian_clearance_m(1.0, 0.0, BRAKE, A_MAX, f64::NAN, &p),
+            f64::INFINITY
+        );
+        assert_eq!(
+            required_pedestrian_clearance_m(1.0, 0.0, BRAKE, A_MAX, -1.0, &p),
+            f64::INFINITY
+        );
     }
 
     /// Fail-closed on corrupt inputs/params: a NaN speed, time, or ANY
@@ -631,11 +689,26 @@ mod tests {
         assert_eq!(required(f64::NAN, 0.0, &p), f64::INFINITY);
         assert_eq!(required(1.0, f64::NAN, &p), f64::INFINITY);
         for corrupt in [
-            VruRssParams { v_ped_max_mps: f64::NAN, ..p },
-            VruRssParams { ped_radius_m: -1.0, ..p },
-            VruRssParams { clearance_m: f64::INFINITY, ..p },
-            VruRssParams { reaction_time_s: -0.5, ..p },
-            VruRssParams { stop_epsilon_mps: f64::NAN, ..p },
+            VruRssParams {
+                v_ped_max_mps: f64::NAN,
+                ..p
+            },
+            VruRssParams {
+                ped_radius_m: -1.0,
+                ..p
+            },
+            VruRssParams {
+                clearance_m: f64::INFINITY,
+                ..p
+            },
+            VruRssParams {
+                reaction_time_s: -0.5,
+                ..p
+            },
+            VruRssParams {
+                stop_epsilon_mps: f64::NAN,
+                ..p
+            },
         ] {
             let r = required(1.0, 0.0, &corrupt);
             assert_eq!(r, f64::INFINITY, "corrupt {corrupt:?} must fail closed");
@@ -645,7 +718,10 @@ mod tests {
         let traj = [pt(0.0, 2.0, 0.0), pt(2.0, 2.0, 1.0)];
         let sc = PedestrianScene {
             pedestrians: &[ped(1000.0, 0.0)],
-            params: VruRssParams { reaction_time_s: f64::NAN, ..p },
+            params: VruRssParams {
+                reaction_time_s: f64::NAN,
+                ..p
+            },
         };
         assert!(breaches(&traj, &sc));
     }
@@ -711,15 +787,21 @@ mod tests {
     /// still binds. Pre-fix the loose epsilon skipped the pose and it admitted.
     #[test]
     fn loose_params_cannot_weaken_the_bound() {
-        let loose =
-            VruRssParams { v_ped_max_mps: 0.0, stop_epsilon_mps: 5.0, ..VruRssParams::default() };
+        let loose = VruRssParams {
+            v_ped_max_mps: 0.0,
+            stop_epsilon_mps: 5.0,
+            ..VruRssParams::default()
+        };
         // The sanitizer floors/clamps both fields (monotone-tightening).
         let s = loose.sanitized();
         assert_eq!(s.v_ped_max_mps, V_PED_MAX_FLOOR_MPS);
         assert!(s.stop_epsilon_mps <= VRU_STOP_EPSILON_CEILING_MPS);
         // And through the predicate: the 2 m/s pose is NOT skipped despite eps=5.0.
         let traj = [pt(0.0, 2.0, 0.0), pt(2.0, 2.0, 1.0)];
-        let sc = PedestrianScene { pedestrians: &[ped(3.0, 0.0)], params: loose };
+        let sc = PedestrianScene {
+            pedestrians: &[ped(3.0, 0.0)],
+            params: loose,
+        };
         assert!(
             pedestrian_breach(&traj, &sc, BRAKE, A_MAX, ego_reach()),
             "a loose stop_epsilon must be clamped so the pose is not skipped (F5)"
@@ -737,7 +819,10 @@ mod tests {
         // required is the age-free base at v=2).
         let traj = [pt(0.0, 2.0, 0.0), pt(0.0, 2.0, 0.0)];
         let req = required(2.0, 0.0, &p);
-        assert!(!breaches(&traj, &scene(&[ped_age(req + 1.0, 0.0, 0.0)])), "fresh: admits");
+        assert!(
+            !breaches(&traj, &scene(&[ped_age(req + 1.0, 0.0, 0.0)])),
+            "fresh: admits"
+        );
         assert!(
             breaches(&traj, &scene(&[ped_age(req + 1.0, 0.0, 2.0)])),
             "a 2 s stale measurement grows the disc by v_ped_max·age = 4 m → binds (F8)"
@@ -755,8 +840,14 @@ mod tests {
     #[test]
     fn corrupt_v_ped_max_is_not_laundered_and_fails_closed() {
         // A negative v_ped_max is NOT floored to 2.0.
-        let neg = VruRssParams { v_ped_max_mps: -1.0, ..VruRssParams::default() };
-        assert!(neg.sanitized().v_ped_max_mps < 0.0, "a negative v_ped_max must NOT be floored");
+        let neg = VruRssParams {
+            v_ped_max_mps: -1.0,
+            ..VruRssParams::default()
+        };
+        assert!(
+            neg.sanitized().v_ped_max_mps < 0.0,
+            "a negative v_ped_max must NOT be floored"
+        );
         // Through the predicate: a moving pose with a corrupt v_ped_max breaches even
         // a FRESH (age 0) pedestrian placed arbitrarily far — no NaN fail-open. Each
         // of these silently ADMITTED before the fix (negative → laundered to 2.0 with
@@ -765,7 +856,10 @@ mod tests {
         for bad in [-1.0, f64::NAN, f64::INFINITY] {
             let sc = PedestrianScene {
                 pedestrians: &[ped_age(1000.0, 0.0, 0.0)],
-                params: VruRssParams { v_ped_max_mps: bad, ..VruRssParams::default() },
+                params: VruRssParams {
+                    v_ped_max_mps: bad,
+                    ..VruRssParams::default()
+                },
             };
             assert!(
                 pedestrian_breach(&traj, &sc, BRAKE, A_MAX, ego_reach()),
@@ -780,10 +874,20 @@ mod tests {
     #[test]
     fn too_many_pedestrians_fails_closed() {
         let traj = [pt(0.0, 2.0, 0.0), pt(2.0, 2.0, 1.0)];
-        let ok: Vec<_> = (0..MAX_PEDESTRIANS).map(|i| ped(1000.0 + i as f64, 0.0)).collect();
-        assert!(!breaches(&traj, &scene(&ok)), "a scene at the bound with far VRUs admits");
-        let over: Vec<_> = (0..=MAX_PEDESTRIANS).map(|i| ped(1000.0 + i as f64, 0.0)).collect();
-        assert!(breaches(&traj, &scene(&over)), "an over-bound scene must fail closed (F9)");
+        let ok: Vec<_> = (0..MAX_PEDESTRIANS)
+            .map(|i| ped(1000.0 + i as f64, 0.0))
+            .collect();
+        assert!(
+            !breaches(&traj, &scene(&ok)),
+            "a scene at the bound with far VRUs admits"
+        );
+        let over: Vec<_> = (0..=MAX_PEDESTRIANS)
+            .map(|i| ped(1000.0 + i as f64, 0.0))
+            .collect();
+        assert!(
+            breaches(&traj, &scene(&over)),
+            "an over-bound scene must fail closed (F9)"
+        );
     }
 
     /// An INDEPENDENT reference for the breach predicate: pedestrian-outer /

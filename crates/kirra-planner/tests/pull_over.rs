@@ -32,8 +32,26 @@ struct Straight {
 impl Straight {
     fn new(half: f64, len: f64) -> Self {
         Self {
-            left: vec![Point { x_m: 0.0, y_m: half }, Point { x_m: len, y_m: half }],
-            right: vec![Point { x_m: 0.0, y_m: -half }, Point { x_m: len, y_m: -half }],
+            left: vec![
+                Point {
+                    x_m: 0.0,
+                    y_m: half,
+                },
+                Point {
+                    x_m: len,
+                    y_m: half,
+                },
+            ],
+            right: vec![
+                Point {
+                    x_m: 0.0,
+                    y_m: -half,
+                },
+                Point {
+                    x_m: len,
+                    y_m: -half,
+                },
+            ],
         }
     }
 }
@@ -64,12 +82,22 @@ fn world<'a>(
 ) -> PlanInput<'a> {
     PlanInput {
         ego: EgoState {
-            pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             linear_x_mps: 2.0,
             yaw_rate_rads: 0.0,
             stamp_ms: 0,
         },
-        goal: Goal { target: Pose { x_m: 80.0, y_m: 0.0, heading_rad: 0.0 } },
+        goal: Goal {
+            target: Pose {
+                x_m: 80.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+        },
         map,
         objects,
         controls: &[],
@@ -85,23 +113,42 @@ fn world<'a>(
         request_overtake: false,
         request_pull_over,
         lane_graph: None,
-        signal_states: &[],    }
+        signal_states: &[],
+    }
 }
 
-fn verdict(plan: &kirra_planner::PlanOutput, map: &dyn CorridorSource, objs: &[PerceivedObject]) -> TrajectoryVerdict {
+fn verdict(
+    plan: &kirra_planner::PlanOutput,
+    map: &dyn CorridorSource,
+    objs: &[PerceivedObject],
+) -> TrajectoryVerdict {
     validate_trajectory_slow(
-        &plan.trajectory, map, objs, &VehicleConfig::default_urban(), None, FleetPosture::Nominal,
+        &plan.trajectory,
+        map,
+        objs,
+        &VehicleConfig::default_urban(),
+        None,
+        FleetPosture::Nominal,
     )
 }
 
 fn min_y(plan: &kirra_planner::PlanOutput) -> f64 {
-    plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MAX, f64::min)
+    plan.trajectory
+        .iter()
+        .map(|t| t.pose.y_m)
+        .fold(f64::MAX, f64::min)
 }
 fn max_x(plan: &kirra_planner::PlanOutput) -> f64 {
-    plan.trajectory.iter().map(|t| t.pose.x_m).fold(f64::MIN, f64::max)
+    plan.trajectory
+        .iter()
+        .map(|t| t.pose.x_m)
+        .fold(f64::MIN, f64::max)
 }
 fn final_v(plan: &kirra_planner::PlanOutput) -> f64 {
-    plan.trajectory.last().map(|t| t.velocity_mps).unwrap_or(0.0)
+    plan.trajectory
+        .last()
+        .map(|t| t.velocity_mps)
+        .unwrap_or(0.0)
 }
 
 #[test]
@@ -112,9 +159,21 @@ fn pull_over_shifts_to_the_right_edge_and_stops() {
 
     // The ego moves RIGHT (negative y) toward the edge — far past the centerline it
     // was cruising on — and comes to a controlled stop there.
-    assert_eq!(plan.kind, ProposalKind::Motion, "a pull-over is a move-then-stop, not an instant HOLD");
-    assert!(min_y(&plan) < -1.5, "the ego shifts toward the right edge, got min_y {}", min_y(&plan));
-    assert!(final_v(&plan) <= 0.05, "and decelerates to a stop at the edge, final v {}", final_v(&plan));
+    assert_eq!(
+        plan.kind,
+        ProposalKind::Motion,
+        "a pull-over is a move-then-stop, not an instant HOLD"
+    );
+    assert!(
+        min_y(&plan) < -1.5,
+        "the ego shifts toward the right edge, got min_y {}",
+        min_y(&plan)
+    );
+    assert!(
+        final_v(&plan) <= 0.05,
+        "and decelerates to a stop at the edge, final v {}",
+        final_v(&plan)
+    );
 }
 
 #[test]
@@ -124,7 +183,10 @@ fn kirra_admits_a_clear_pull_over() {
     let plan = occy.plan(&world(&map, &[], &[], true));
 
     assert!(
-        matches!(verdict(&plan, &map, &[]), TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        matches!(
+            verdict(&plan, &map, &[]),
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
         "a clear edge → KIRRA admits the pull-over, got {:?}",
         verdict(&plan, &map, &[])
     );
@@ -138,7 +200,11 @@ fn no_request_means_no_pull_over() {
     let mut occy = GeometricPlanner::default();
     let plan = occy.plan(&world(&map, &[], &[], false));
 
-    assert!(min_y(&plan) > -0.5, "without a request the ego stays centered, got min_y {}", min_y(&plan));
+    assert!(
+        min_y(&plan) > -0.5,
+        "without a request the ego stays centered, got min_y {}",
+        min_y(&plan)
+    );
 }
 
 #[test]
@@ -146,7 +212,10 @@ fn a_solid_right_edge_line_forbids_the_pull_over() {
     // A solid line / barrier on the right (no lawful shoulder access) forbids the
     // rightward move — the legal constraint lives in Occy. The ego stays in lane.
     let map = Straight::new(HALF, 200.0);
-    let boundaries = [LaneBoundary { y_m: -1.5, line: LineType::Solid }];
+    let boundaries = [LaneBoundary {
+        y_m: -1.5,
+        line: LineType::Solid,
+    }];
     let mut occy = GeometricPlanner::default();
     let plan = occy.plan(&world(&map, &[], &boundaries, true));
 
@@ -170,7 +239,10 @@ fn the_ego_never_parks_into_an_object_on_the_shoulder() {
     let obj_x = 16.0;
     let shoulder_obj = PerceivedObject {
         id: 1,
-        pos: Point { x_m: obj_x, y_m: -2.3 }, // out at the pull-over park lateral
+        pos: Point {
+            x_m: obj_x,
+            y_m: -2.3,
+        }, // out at the pull-over park lateral
         velocity_mps: 0.0,
         heading_rad: 0.0,
         vel: Point { x_m: 0.0, y_m: 0.0 },
@@ -179,7 +251,11 @@ fn the_ego_never_parks_into_an_object_on_the_shoulder() {
     let mut occy = GeometricPlanner::default();
     let plan = occy.plan(&world(&map, &objs, &[], true));
 
-    assert!(min_y(&plan) < -1.0, "the ego still moves toward the edge to park, got min_y {}", min_y(&plan));
+    assert!(
+        min_y(&plan) < -1.0,
+        "the ego still moves toward the edge to park, got min_y {}",
+        min_y(&plan)
+    );
     assert!(
         max_x(&plan) < obj_x,
         "but it stops short of the shoulder object, never reaching it (max_x {} vs object {obj_x})",
@@ -187,10 +263,17 @@ fn the_ego_never_parks_into_an_object_on_the_shoulder() {
     );
     // The KIRRA floor: the immediate safe-stop is always an admissible action, so the
     // ego is never forced into an unsafe pull-over.
-    let ego_pose = Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 };
+    let ego_pose = Pose {
+        x_m: 5.0,
+        y_m: 0.0,
+        heading_rad: 0.0,
+    };
     let fallback = kirra_planner::PlanOutput::safe_stop(ego_pose);
     assert!(
-        matches!(verdict(&fallback, &map, &objs), TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        matches!(
+            verdict(&fallback, &map, &objs),
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
         "the safe-stop fallback is admissible, got {:?}",
         verdict(&fallback, &map, &objs)
     );
@@ -203,12 +286,27 @@ fn mick_pull_over_intent_grounds_and_kirra_admits() {
     // admits the clear pull-over.
     let map = Straight::new(HALF, 200.0);
     let mut occy = GeometricPlanner::default();
-    let plan = plan_for_intent(&mut occy, &MickIntent::PullOver, &world(&map, &[], &[], false));
+    let plan = plan_for_intent(
+        &mut occy,
+        &MickIntent::PullOver,
+        &world(&map, &[], &[], false),
+    );
 
-    assert!(min_y(&plan) < -1.5, "Mick's PullOver intent drives the ego to the edge, got min_y {}", min_y(&plan));
-    assert!(final_v(&plan) <= 0.05, "and stops there, final v {}", final_v(&plan));
     assert!(
-        matches!(verdict(&plan, &map, &[]), TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        min_y(&plan) < -1.5,
+        "Mick's PullOver intent drives the ego to the edge, got min_y {}",
+        min_y(&plan)
+    );
+    assert!(
+        final_v(&plan) <= 0.05,
+        "and stops there, final v {}",
+        final_v(&plan)
+    );
+    assert!(
+        matches!(
+            verdict(&plan, &map, &[]),
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
         "KIRRA admits Mick's pull-over, got {:?}",
         verdict(&plan, &map, &[])
     );

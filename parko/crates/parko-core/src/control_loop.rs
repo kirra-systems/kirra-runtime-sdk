@@ -269,7 +269,10 @@ mod tests {
 
     #[test]
     fn warmup_stays_warmup_while_degraded() {
-        assert_eq!(next_state(RuntimeState::Warmup, true, 0, T), RuntimeState::Warmup);
+        assert_eq!(
+            next_state(RuntimeState::Warmup, true, 0, T),
+            RuntimeState::Warmup
+        );
     }
 
     #[test]
@@ -360,48 +363,77 @@ mod tests {
     #[test]
     fn recovery_dwells_until_streak_reaches_threshold() {
         // threshold 3: streaks 1 and 2 stay in Recovery; streak 3 promotes.
-        assert_eq!(next_state(RuntimeState::Degraded, false, 1, 3), RuntimeState::Recovery);
-        assert_eq!(next_state(RuntimeState::Recovery, false, 2, 3), RuntimeState::Recovery);
-        assert_eq!(next_state(RuntimeState::Recovery, false, 3, 3), RuntimeState::Nominal);
+        assert_eq!(
+            next_state(RuntimeState::Degraded, false, 1, 3),
+            RuntimeState::Recovery
+        );
+        assert_eq!(
+            next_state(RuntimeState::Recovery, false, 2, 3),
+            RuntimeState::Recovery
+        );
+        assert_eq!(
+            next_state(RuntimeState::Recovery, false, 3, 3),
+            RuntimeState::Nominal
+        );
     }
 
     #[test]
     fn threshold_one_recovers_in_a_single_good_tick() {
         // A threshold of 1 collapses to direct Degraded → Nominal recovery.
-        assert_eq!(next_state(RuntimeState::Degraded, false, 1, 1), RuntimeState::Nominal);
+        assert_eq!(
+            next_state(RuntimeState::Degraded, false, 1, 1),
+            RuntimeState::Nominal
+        );
     }
 
     #[test]
     fn threshold_two_reproduces_prior_two_tick_behavior() {
         // Prior behavior: Degraded → Recovery → Nominal (two good ticks).
-        assert_eq!(next_state(RuntimeState::Degraded, false, 1, 2), RuntimeState::Recovery);
-        assert_eq!(next_state(RuntimeState::Recovery, false, 2, 2), RuntimeState::Nominal);
+        assert_eq!(
+            next_state(RuntimeState::Degraded, false, 1, 2),
+            RuntimeState::Recovery
+        );
+        assert_eq!(
+            next_state(RuntimeState::Recovery, false, 2, 2),
+            RuntimeState::Nominal
+        );
     }
 
     #[test]
     fn degrade_is_immediate_regardless_of_streak() {
         // A degraded tick drops to Degraded from any recovering state, even with
         // a large prior streak (the degrade path is never gated).
-        assert_eq!(next_state(RuntimeState::Nominal, true, 99, 3), RuntimeState::Degraded);
-        assert_eq!(next_state(RuntimeState::Recovery, true, 99, 3), RuntimeState::Degraded);
-        assert_eq!(next_state(RuntimeState::Degraded, true, 99, 3), RuntimeState::Degraded);
+        assert_eq!(
+            next_state(RuntimeState::Nominal, true, 99, 3),
+            RuntimeState::Degraded
+        );
+        assert_eq!(
+            next_state(RuntimeState::Recovery, true, 99, 3),
+            RuntimeState::Degraded
+        );
+        assert_eq!(
+            next_state(RuntimeState::Degraded, true, 99, 3),
+            RuntimeState::Degraded
+        );
     }
 
     #[test]
     fn zero_threshold_is_clamped_to_one() {
         // A 0 threshold must not allow recovery with no confirmation; clamped to 1.
-        assert_eq!(next_state(RuntimeState::Degraded, false, 1, 0), RuntimeState::Nominal);
+        assert_eq!(
+            next_state(RuntimeState::Degraded, false, 1, 0),
+            RuntimeState::Nominal
+        );
     }
 
     #[test]
     fn set_state_for_test_overrides_initial_warmup_state() {
-        use std::collections::HashMap;
-        use std::sync::Arc;
         use crate::backend::{
-            BackendError, InferenceBackend, ModelHandle,
-            PrecisionMode, TensorBatch,
+            BackendError, InferenceBackend, ModelHandle, PrecisionMode, TensorBatch,
         };
         use crate::sensor::{SensorFrame, SensorStream};
+        use std::collections::HashMap;
+        use std::sync::Arc;
 
         struct FastBackend;
         impl InferenceBackend for FastBackend {
@@ -413,14 +445,23 @@ mod tests {
                     expected_precision: PrecisionMode::FP32,
                 })
             }
-            fn run(&self, _: &ModelHandle, _: &TensorBatch) -> Result<TensorBatch<'static>, BackendError> {
-                Ok(TensorBatch { named_tensors: HashMap::new(), metadata: HashMap::new() })
+            fn run(
+                &self,
+                _: &ModelHandle,
+                _: &TensorBatch,
+            ) -> Result<TensorBatch<'static>, BackendError> {
+                Ok(TensorBatch {
+                    named_tensors: HashMap::new(),
+                    metadata: HashMap::new(),
+                })
             }
         }
 
         struct EmptyStream;
         impl SensorStream for EmptyStream {
-            fn next_frame(&mut self) -> Option<SensorFrame> { None }
+            fn next_frame(&mut self) -> Option<SensorFrame> {
+                None
+            }
         }
 
         let backend = Arc::new(FastBackend);
@@ -428,9 +469,17 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let mut control = ControlLoop::new(backend, model, EmptyStream, tx, 10.0);
 
-        assert_eq!(control.state(), RuntimeState::Warmup, "initial state should be Warmup");
+        assert_eq!(
+            control.state(),
+            RuntimeState::Warmup,
+            "initial state should be Warmup"
+        );
         control.set_state_for_test(RuntimeState::Degraded);
-        assert_eq!(control.state(), RuntimeState::Degraded, "set_state_for_test must override Warmup");
+        assert_eq!(
+            control.state(),
+            RuntimeState::Degraded,
+            "set_state_for_test must override Warmup"
+        );
     }
 
     // ── PARK-005 clock tests ─────────────────────────────────────────────────
@@ -444,13 +493,12 @@ mod tests {
     ///  - four advances of 50ms each produce exactly four fired ticks
     #[tokio::test]
     async fn test_mock_clock_tick_count() {
-        use std::collections::HashMap;
         use crate::backend::{
-            BackendError, InferenceBackend, ModelHandle,
-            PrecisionMode, TensorBatch,
+            BackendError, InferenceBackend, ModelHandle, PrecisionMode, TensorBatch,
         };
         use crate::clock::MockClock;
         use crate::sensor::{SensorFrame, SensorStream};
+        use std::collections::HashMap;
 
         struct FastBackend2;
         impl InferenceBackend for FastBackend2 {
@@ -462,18 +510,30 @@ mod tests {
                     expected_precision: PrecisionMode::FP32,
                 })
             }
-            fn run(&self, _: &ModelHandle, _: &TensorBatch) -> Result<TensorBatch<'static>, BackendError> {
-                Ok(TensorBatch { named_tensors: HashMap::new(), metadata: HashMap::new() })
+            fn run(
+                &self,
+                _: &ModelHandle,
+                _: &TensorBatch,
+            ) -> Result<TensorBatch<'static>, BackendError> {
+                Ok(TensorBatch {
+                    named_tensors: HashMap::new(),
+                    metadata: HashMap::new(),
+                })
             }
         }
 
-        struct InfiniteStream { next_id: u64 }
+        struct InfiniteStream {
+            next_id: u64,
+        }
         impl SensorStream for InfiniteStream {
             fn next_frame(&mut self) -> Option<SensorFrame> {
                 self.next_id += 1;
                 Some(SensorFrame::new(
                     self.next_id,
-                    TensorBatch { named_tensors: HashMap::new(), metadata: HashMap::new() },
+                    TensorBatch {
+                        named_tensors: HashMap::new(),
+                        metadata: HashMap::new(),
+                    },
                 ))
             }
         }
@@ -494,7 +554,10 @@ mod tests {
         // t=40ms: interval not yet elapsed (40 < 50).
         mock.advance(40);
         let r = control.tick().await.unwrap();
-        assert!(r.is_none(), "tick at 40ms must not fire (interval not elapsed)");
+        assert!(
+            r.is_none(),
+            "tick at 40ms must not fire (interval not elapsed)"
+        );
 
         // t=50ms: exactly one interval; must fire.
         mock.advance(10);
@@ -510,19 +573,21 @@ mod tests {
                 fired += 1;
             }
         }
-        assert_eq!(fired, 4, "four 50ms advances must produce exactly 4 fired ticks");
+        assert_eq!(
+            fired, 4,
+            "four 50ms advances must produce exactly 4 fired ticks"
+        );
     }
 
     /// WallClock is the default when no with_clock() call is made.
     /// Verifies no panic and that the first tick fires (returns Some).
     #[tokio::test]
     async fn test_runtime_clock_default_smoke() {
-        use std::collections::HashMap;
         use crate::backend::{
-            BackendError, InferenceBackend, ModelHandle,
-            PrecisionMode, TensorBatch,
+            BackendError, InferenceBackend, ModelHandle, PrecisionMode, TensorBatch,
         };
         use crate::sensor::{SensorFrame, SensorStream};
+        use std::collections::HashMap;
 
         struct FastBackend3;
         impl InferenceBackend for FastBackend3 {
@@ -534,19 +599,33 @@ mod tests {
                     expected_precision: PrecisionMode::FP32,
                 })
             }
-            fn run(&self, _: &ModelHandle, _: &TensorBatch) -> Result<TensorBatch<'static>, BackendError> {
-                Ok(TensorBatch { named_tensors: HashMap::new(), metadata: HashMap::new() })
+            fn run(
+                &self,
+                _: &ModelHandle,
+                _: &TensorBatch,
+            ) -> Result<TensorBatch<'static>, BackendError> {
+                Ok(TensorBatch {
+                    named_tensors: HashMap::new(),
+                    metadata: HashMap::new(),
+                })
             }
         }
 
-        struct OneFrameStream { done: bool }
+        struct OneFrameStream {
+            done: bool,
+        }
         impl SensorStream for OneFrameStream {
             fn next_frame(&mut self) -> Option<SensorFrame> {
-                if self.done { return None; }
+                if self.done {
+                    return None;
+                }
                 self.done = true;
                 Some(SensorFrame::new(
                     1,
-                    TensorBatch { named_tensors: HashMap::new(), metadata: HashMap::new() },
+                    TensorBatch {
+                        named_tensors: HashMap::new(),
+                        metadata: HashMap::new(),
+                    },
                 ))
             }
         }
@@ -556,13 +635,17 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
 
         // No with_clock() call — defaults to WallClock.
-        let mut control = ControlLoop::new(backend, model, OneFrameStream { done: false }, tx, 20.0);
+        let mut control =
+            ControlLoop::new(backend, model, OneFrameStream { done: false }, tx, 20.0);
 
         // First tick always fires; WallClock returns a non-zero unix timestamp.
         let result = control.tick().await;
         assert!(result.is_ok(), "tick must not error: {:?}", result);
         let snapshot = result.unwrap();
-        assert!(snapshot.is_some(), "first tick must fire with WallClock default");
+        assert!(
+            snapshot.is_some(),
+            "first tick must fire with WallClock default"
+        );
     }
 
     // ── CHANGE 1 + CHANGE 2: loop-driven fail-closed / hysteresis tests ──────
@@ -570,13 +653,13 @@ mod tests {
     // These drive the real `ControlLoop::tick()` (not just the pure `next_state`)
     // to prove the error→EmergencyStop wiring and the streak management.
 
-    use std::collections::{HashMap, VecDeque};
-    use std::sync::Mutex;
     use crate::backend::{
         BackendError, InferenceBackend as IB, ModelHandle as MH, PrecisionMode, TensorBatch,
         TensorStorage,
     };
     use crate::sensor::{SensorFrame, SensorStream as SS};
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::Mutex;
 
     fn empty_model(id: &str) -> MH {
         MH {
@@ -592,37 +675,59 @@ mod tests {
     /// rejects → `active_state_degraded == true` (a deterministic, timing-free
     /// lever — unlike frame age, which depends on the monotonic clock). A `false`
     /// flag emits finite zero velocities → healthy. Exhausted script → healthy.
-    struct ScriptedBackend { degrade: Mutex<VecDeque<bool>> }
+    struct ScriptedBackend {
+        degrade: Mutex<VecDeque<bool>>,
+    }
     impl IB for ScriptedBackend {
-        fn load_model(&self, _: &str) -> Result<MH, BackendError> { Ok(empty_model("scripted")) }
+        fn load_model(&self, _: &str) -> Result<MH, BackendError> {
+            Ok(empty_model("scripted"))
+        }
         fn run(&self, _: &MH, _: &TensorBatch) -> Result<TensorBatch<'static>, BackendError> {
             let degrade = self.degrade.lock().unwrap().pop_front().unwrap_or(false);
             let linear = if degrade { f32::NAN } else { 0.0_f32 };
             let mut map = HashMap::new();
-            map.insert("cmd_vel_linear".to_string(), TensorStorage::Owned(vec![linear]));
-            map.insert("cmd_vel_angular".to_string(), TensorStorage::Owned(vec![0.0_f32]));
-            Ok(TensorBatch { named_tensors: map, metadata: HashMap::new() })
+            map.insert(
+                "cmd_vel_linear".to_string(),
+                TensorStorage::Owned(vec![linear]),
+            );
+            map.insert(
+                "cmd_vel_angular".to_string(),
+                TensorStorage::Owned(vec![0.0_f32]),
+            );
+            Ok(TensorBatch {
+                named_tensors: map,
+                metadata: HashMap::new(),
+            })
         }
     }
 
     /// Backend whose inference always fails — forces `inner.tick()` to return Err.
     struct ErrBackend;
     impl IB for ErrBackend {
-        fn load_model(&self, _: &str) -> Result<MH, BackendError> { Ok(empty_model("err")) }
+        fn load_model(&self, _: &str) -> Result<MH, BackendError> {
+            Ok(empty_model("err"))
+        }
         fn run(&self, _: &MH, _: &TensorBatch) -> Result<TensorBatch<'static>, BackendError> {
-            Err(BackendError::ExecutionFailure("forced inner-tick failure".into()))
+            Err(BackendError::ExecutionFailure(
+                "forced inner-tick failure".into(),
+            ))
         }
     }
 
     /// Always-fresh frame source (degraded-ness is driven by the backend, not the
     /// frame, so the frames just need to exist).
-    struct FreshStream { id: u64 }
+    struct FreshStream {
+        id: u64,
+    }
     impl SS for FreshStream {
         fn next_frame(&mut self) -> Option<SensorFrame> {
             self.id += 1;
             Some(SensorFrame::new(
                 self.id,
-                TensorBatch { named_tensors: HashMap::new(), metadata: HashMap::new() },
+                TensorBatch {
+                    named_tensors: HashMap::new(),
+                    metadata: HashMap::new(),
+                },
             ))
         }
     }
@@ -634,14 +739,18 @@ mod tests {
     fn loop_with(
         degrade_script: Vec<bool>,
         threshold: u32,
-    ) -> (ControlLoop<ScriptedBackend, FreshStream>, mpsc::Receiver<ControlCommand>) {
-        let backend = Arc::new(ScriptedBackend { degrade: Mutex::new(degrade_script.into()) });
+    ) -> (
+        ControlLoop<ScriptedBackend, FreshStream>,
+        mpsc::Receiver<ControlCommand>,
+    ) {
+        let backend = Arc::new(ScriptedBackend {
+            degrade: Mutex::new(degrade_script.into()),
+        });
         let model = backend.load_model("").unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let control =
-            ControlLoop::new(backend, model, FreshStream { id: 0 }, tx, 10.0)
-                .with_tick_interval_ms(0) // every tick() fires
-                .with_recovery_confirm_ticks(threshold);
+        let control = ControlLoop::new(backend, model, FreshStream { id: 0 }, tx, 10.0)
+            .with_tick_interval_ms(0) // every tick() fires
+            .with_recovery_confirm_ticks(threshold);
         (control, rx)
     }
 
@@ -652,13 +761,14 @@ mod tests {
         let backend = Arc::new(ErrBackend);
         let model = backend.load_model("").unwrap();
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let mut control = ControlLoop::new(
-            backend, model, FreshStream { id: 0 }, tx, 10.0,
-        )
-        .with_tick_interval_ms(0);
+        let mut control = ControlLoop::new(backend, model, FreshStream { id: 0 }, tx, 10.0)
+            .with_tick_interval_ms(0);
 
         let r = control.tick().await;
-        assert!(r.is_err(), "a failing inner tick must propagate as Err, got {r:?}");
+        assert!(
+            r.is_err(),
+            "a failing inner tick must propagate as Err, got {r:?}"
+        );
         assert_eq!(
             control.state(),
             RuntimeState::EmergencyStop,
@@ -675,14 +785,26 @@ mod tests {
 
         // (a) one good tick must not recover at threshold 3.
         control.tick().await.unwrap();
-        assert_eq!(control.state(), RuntimeState::Recovery, "1 good tick → confirming, not Nominal");
+        assert_eq!(
+            control.state(),
+            RuntimeState::Recovery,
+            "1 good tick → confirming, not Nominal"
+        );
 
         control.tick().await.unwrap();
-        assert_ne!(control.state(), RuntimeState::Nominal, "2 good ticks still below threshold");
+        assert_ne!(
+            control.state(),
+            RuntimeState::Nominal,
+            "2 good ticks still below threshold"
+        );
 
         // (b) the 3rd consecutive good tick confirms recovery → Nominal.
         control.tick().await.unwrap();
-        assert_eq!(control.state(), RuntimeState::Nominal, "exactly 3 consecutive good ticks recover");
+        assert_eq!(
+            control.state(),
+            RuntimeState::Nominal,
+            "exactly 3 consecutive good ticks recover"
+        );
     }
 
     /// CHANGE 2 (c): a degraded tick mid-streak resets the counter, so recovery
@@ -698,14 +820,30 @@ mod tests {
         assert_eq!(control.state(), RuntimeState::Recovery);
 
         control.tick().await.unwrap(); // DEGRADED → Degraded (streak reset 0)
-        assert_eq!(control.state(), RuntimeState::Degraded, "mid-streak degrade drops back to Degraded");
+        assert_eq!(
+            control.state(),
+            RuntimeState::Degraded,
+            "mid-streak degrade drops back to Degraded"
+        );
 
         control.tick().await.unwrap(); // healthy → Recovery (streak 1)
-        assert_ne!(control.state(), RuntimeState::Nominal, "counter reset: must not recover immediately");
+        assert_ne!(
+            control.state(),
+            RuntimeState::Nominal,
+            "counter reset: must not recover immediately"
+        );
         control.tick().await.unwrap(); // healthy → Recovery (streak 2)
-        assert_ne!(control.state(), RuntimeState::Nominal, "still below threshold after reset");
+        assert_ne!(
+            control.state(),
+            RuntimeState::Nominal,
+            "still below threshold after reset"
+        );
         control.tick().await.unwrap(); // healthy → Nominal (streak 3) — proves restart from 0
-        assert_eq!(control.state(), RuntimeState::Nominal, "3 fresh ticks after the reset recover");
+        assert_eq!(
+            control.state(),
+            RuntimeState::Nominal,
+            "3 fresh ticks after the reset recover"
+        );
     }
 
     /// CHANGE 2 (d): the degrade direction is unchanged — a single degraded tick

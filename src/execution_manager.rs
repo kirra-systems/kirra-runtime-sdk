@@ -172,10 +172,12 @@ pub fn resolve_startup_order(manifest: &[TaskSpec]) -> Result<Vec<&'static str>,
     let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, t) in manifest.iter().enumerate() {
         for dep in t.deps {
-            let j = *index.get(dep).ok_or_else(|| ManifestError::MissingDependency {
-                task: t.name.to_string(),
-                dep: (*dep).to_string(),
-            })?;
+            let j = *index
+                .get(dep)
+                .ok_or_else(|| ManifestError::MissingDependency {
+                    task: t.name.to_string(),
+                    dep: (*dep).to_string(),
+                })?;
             dependents[j].push(i);
             in_degree[i] += 1;
         }
@@ -287,7 +289,10 @@ impl SustainedMissTracker {
     /// A tracker with the default threshold/window.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_params(DEADLINE_SUSTAINED_MISS_THRESHOLD, DEADLINE_SUSTAINED_WINDOW_MS)
+        Self::with_params(
+            DEADLINE_SUSTAINED_MISS_THRESHOLD,
+            DEADLINE_SUSTAINED_WINDOW_MS,
+        )
     }
 
     /// Override the bands (deployment-tunable). `threshold` is forced ≥ 1 so a
@@ -377,7 +382,10 @@ impl DeadlineRegistry {
     pub fn from_manifest(manifest: &[TaskSpec]) -> Self {
         let tasks = manifest
             .iter()
-            .filter_map(|t| t.deadline_ms.map(|d| (t.name, (d, DeadlineStats::default()))))
+            .filter_map(|t| {
+                t.deadline_ms
+                    .map(|d| (t.name, (d, DeadlineStats::default())))
+            })
             .collect();
         Self { tasks }
     }
@@ -411,14 +419,22 @@ impl DeadlineRegistry {
              # TYPE kirra_task_deadline_cycles_total counter\n",
         );
         for (name, (_, stats)) in &self.tasks {
-            let _ = writeln!(out, "kirra_task_deadline_cycles_total{{task=\"{name}\"}} {}", stats.cycles());
+            let _ = writeln!(
+                out,
+                "kirra_task_deadline_cycles_total{{task=\"{name}\"}} {}",
+                stats.cycles()
+            );
         }
         out.push_str(
             "# HELP kirra_task_deadline_misses_total Supervised-task cycles that exceeded their deadline budget.\n\
              # TYPE kirra_task_deadline_misses_total counter\n",
         );
         for (name, (_, stats)) in &self.tasks {
-            let _ = writeln!(out, "kirra_task_deadline_misses_total{{task=\"{name}\"}} {}", stats.misses());
+            let _ = writeln!(
+                out,
+                "kirra_task_deadline_misses_total{{task=\"{name}\"}} {}",
+                stats.misses()
+            );
         }
     }
 }
@@ -459,7 +475,9 @@ impl<C> SpawnRegistry<C> {
     /// An empty registry.
     #[must_use]
     pub fn new() -> Self {
-        Self { actions: Vec::new() }
+        Self {
+            actions: Vec::new(),
+        }
     }
 
     /// Register the spawn `action` for the manifest task `name`.
@@ -495,7 +513,9 @@ impl std::fmt::Display for DispatchError {
             DispatchError::SpawnerNotCovered(n) => {
                 write!(f, "registered spawner {n:?} is not in the cover set")
             }
-            DispatchError::MissingSpawner(n) => write!(f, "cover task {n:?} has no registered spawner"),
+            DispatchError::MissingSpawner(n) => {
+                write!(f, "cover task {n:?} has no registered spawner")
+            }
             DispatchError::DuplicateSpawner(n) => write!(f, "task {n:?} registered more than once"),
             DispatchError::DuplicateCover(n) => write!(f, "cover task {n:?} listed more than once"),
         }
@@ -581,9 +601,16 @@ mod tests {
         let mut t = SustainedMissTracker::new();
         // 5 misses, 100 ms apart (one sweep cadence) — all inside the 10 s window.
         for i in 0..4 {
-            assert!(!t.observe(1_000 + i * 100, true), "miss {} must not fire early", i + 1);
+            assert!(
+                !t.observe(1_000 + i * 100, true),
+                "miss {} must not fire early",
+                i + 1
+            );
         }
-        assert!(t.observe(1_400, true), "the threshold-th miss inside the window fires");
+        assert!(
+            t.observe(1_400, true),
+            "the threshold-th miss inside the window fires"
+        );
         assert_eq!(t.misses_in_window(), 0, "state resets after firing");
     }
 
@@ -615,7 +642,10 @@ mod tests {
                 break;
             }
         }
-        assert!(fired, "interleaved on-time cycles must not mask a sustained overload");
+        assert!(
+            fired,
+            "interleaved on-time cycles must not mask a sustained overload"
+        );
     }
 
     #[test]
@@ -636,7 +666,10 @@ mod tests {
     fn zero_threshold_is_forced_to_one_and_on_time_never_fires() {
         let mut t = SustainedMissTracker::with_params(0, 10_000);
         assert!(!t.observe(1_000, false), "an on-time cycle can never fire");
-        assert!(t.observe(1_100, true), "threshold forced to 1: the first miss fires");
+        assert!(
+            t.observe(1_100, true),
+            "threshold forced to 1: the first miss fires"
+        );
     }
 
     fn spec(name: &'static str, deps: &'static [&'static str]) -> TaskSpec {
@@ -654,7 +687,11 @@ mod tests {
     #[test]
     fn the_real_manifest_resolves_with_deps_before_dependents() {
         let order = resolve_startup_order(TASK_MANIFEST).expect("manifest resolves");
-        assert_eq!(order.len(), TASK_MANIFEST.len(), "every task is scheduled exactly once");
+        assert_eq!(
+            order.len(),
+            TASK_MANIFEST.len(),
+            "every task is scheduled exactly once"
+        );
         let pos = |name: &str| order.iter().position(|&t| t == name).unwrap();
         // The posture engine worker starts before its dependents.
         assert!(pos("posture_engine_worker") < pos("telemetry_watchdog"));
@@ -670,7 +707,12 @@ mod tests {
     #[test]
     fn a_diamond_dag_resolves() {
         // a → {b, c} → d
-        let m = [spec("a", &[]), spec("b", &["a"]), spec("c", &["a"]), spec("d", &["b", "c"])];
+        let m = [
+            spec("a", &[]),
+            spec("b", &["a"]),
+            spec("c", &["a"]),
+            spec("d", &["b", "c"]),
+        ];
         let order = resolve_startup_order(&m).unwrap();
         let pos = |name: &str| order.iter().position(|&t| t == name).unwrap();
         assert_eq!(pos("a"), 0);
@@ -697,7 +739,10 @@ mod tests {
         match resolve_startup_order(&m) {
             Err(ManifestError::Unorderable(tasks)) => {
                 for t in ["a", "b", "d"] {
-                    assert!(tasks.contains(&t.to_string()), "{t} must be in the unorderable set");
+                    assert!(
+                        tasks.contains(&t.to_string()),
+                        "{t} must be in the unorderable set"
+                    );
                 }
             }
             other => panic!("expected an unorderable error, got {other:?}"),
@@ -709,14 +754,20 @@ mod tests {
         let m = [spec("a", &["ghost"])];
         assert_eq!(
             resolve_startup_order(&m),
-            Err(ManifestError::MissingDependency { task: "a".into(), dep: "ghost".into() })
+            Err(ManifestError::MissingDependency {
+                task: "a".into(),
+                dep: "ghost".into()
+            })
         );
     }
 
     #[test]
     fn a_duplicate_task_is_refused() {
         let m = [spec("a", &[]), spec("a", &[])];
-        assert_eq!(resolve_startup_order(&m), Err(ManifestError::DuplicateTask("a".into())));
+        assert_eq!(
+            resolve_startup_order(&m),
+            Err(ManifestError::DuplicateTask("a".into()))
+        );
     }
 
     #[test]
@@ -758,7 +809,11 @@ mod tests {
         let dispatched = dispatch_in_order(&reg, &m, &["b", "c"], &rec).unwrap();
         // …but dispatch follows the manifest's resolved order (b before c).
         assert_eq!(dispatched, vec!["b", "c"]);
-        assert_eq!(*rec.borrow(), vec!["b", "c"], "actions fired in resolved order, not registration order");
+        assert_eq!(
+            *rec.borrow(),
+            vec!["b", "c"],
+            "actions fired in resolved order, not registration order"
+        );
     }
 
     #[test]
@@ -831,8 +886,14 @@ mod tests {
     fn deadline_registry_covers_only_budgeted_manifest_tasks() {
         let reg = DeadlineRegistry::from_manifest(TASK_MANIFEST);
         // telemetry_watchdog declares deadline_ms = Some(100); the rest are None.
-        assert!(reg.stats("telemetry_watchdog").is_some(), "the watchdog is budgeted");
-        assert!(reg.stats("posture_engine_worker").is_none(), "an unbudgeted task is not tracked");
+        assert!(
+            reg.stats("telemetry_watchdog").is_some(),
+            "the watchdog is budgeted"
+        );
+        assert!(
+            reg.stats("posture_engine_worker").is_none(),
+            "an unbudgeted task is not tracked"
+        );
         assert!(reg.stats("not_a_task").is_none());
     }
 
@@ -841,7 +902,10 @@ mod tests {
         let reg = DeadlineRegistry::from_manifest(TASK_MANIFEST);
         // Under budget, then over budget (deadline is 100).
         assert!(!reg.record("telemetry_watchdog", 50));
-        assert!(reg.record("telemetry_watchdog", 150), "over budget is a miss");
+        assert!(
+            reg.record("telemetry_watchdog", 150),
+            "over budget is a miss"
+        );
         let s = reg.stats("telemetry_watchdog").unwrap();
         assert_eq!(s.cycles(), 2);
         assert_eq!(s.misses(), 1);

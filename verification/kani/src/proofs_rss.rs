@@ -142,7 +142,8 @@ mod mirrors {
         let (rho, a_max, b_min, b_max) = (0.5, 3.0, 4.0, 8.0);
         let mut prev = longitudinal_safe_distance(0.0, 0.0, rho, a_max, b_min, b_max);
         for raw in 1..=6_000u16 {
-            let d = longitudinal_safe_distance(f64::from(raw) * 0.01, 0.0, rho, a_max, b_min, b_max);
+            let d =
+                longitudinal_safe_distance(f64::from(raw) * 0.01, 0.0, rho, a_max, b_min, b_max);
             assert!(prev <= d, "non-monotone step at raw={raw}");
             prev = d;
         }

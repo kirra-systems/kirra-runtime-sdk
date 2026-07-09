@@ -14,52 +14,52 @@ impl KinematicProfileType {
     pub fn nominal_contract(&self) -> VehicleKinematicsContract {
         match self {
             Self::AutomotiveNominal => VehicleKinematicsContract::nominal_reference_profile(),
-            Self::AutomotiveMRC    => VehicleKinematicsContract::mrc_fallback_profile(),
-            Self::RobotNominal     => VehicleKinematicsContract {
-                max_speed_mps:          1.8,
-                max_accel_mps2:         1.5,
-                max_brake_mps2:         2.0,
-                max_steering_deg:       45.0,
+            Self::AutomotiveMRC => VehicleKinematicsContract::mrc_fallback_profile(),
+            Self::RobotNominal => VehicleKinematicsContract {
+                max_speed_mps: 1.8,
+                max_accel_mps2: 1.5,
+                max_brake_mps2: 2.0,
+                max_steering_deg: 45.0,
                 max_steering_rate_deg_s: 90.0,
-                min_follow_distance_m:  0.3,
+                min_follow_distance_m: 0.3,
                 max_lateral_accel_mps2: 2.0,
-                wheelbase_m:            0.2,
-                width_m:                0.5,
-                length_m:               0.6,
-                overhang_front_m:       0.2,
-                overhang_rear_m:        0.2,
+                wheelbase_m: 0.2,
+                width_m: 0.5,
+                length_m: 0.6,
+                overhang_front_m: 0.2,
+                overhang_rear_m: 0.2,
                 // Non-AV vertical: no ODD operational cap applies.
-                odd_speed_cap_mps:      None,
+                odd_speed_cap_mps: None,
             },
             Self::DroneNominal => VehicleKinematicsContract {
-                max_speed_mps:          15.0,
-                max_accel_mps2:         3.0,
-                max_brake_mps2:         5.0,
-                max_steering_deg:       180.0,
+                max_speed_mps: 15.0,
+                max_accel_mps2: 3.0,
+                max_brake_mps2: 5.0,
+                max_steering_deg: 180.0,
                 max_steering_rate_deg_s: 180.0,
-                min_follow_distance_m:  1.0,
+                min_follow_distance_m: 1.0,
                 max_lateral_accel_mps2: 5.0,
-                wheelbase_m:            0.4,
-                width_m:                0.6,
-                length_m:               0.6,
-                overhang_front_m:       0.1,
-                overhang_rear_m:        0.1,
-                odd_speed_cap_mps:      None,
+                wheelbase_m: 0.4,
+                width_m: 0.6,
+                length_m: 0.6,
+                overhang_front_m: 0.1,
+                overhang_rear_m: 0.1,
+                odd_speed_cap_mps: None,
             },
             Self::IndustrialNominal => VehicleKinematicsContract {
-                max_speed_mps:          0.5,
-                max_accel_mps2:         0.3,
-                max_brake_mps2:         0.5,
-                max_steering_deg:       360.0,
+                max_speed_mps: 0.5,
+                max_accel_mps2: 0.3,
+                max_brake_mps2: 0.5,
+                max_steering_deg: 360.0,
                 max_steering_rate_deg_s: 45.0,
-                min_follow_distance_m:  0.5,
+                min_follow_distance_m: 0.5,
                 max_lateral_accel_mps2: 0.5,
-                wheelbase_m:            0.5,
-                width_m:                1.2,
-                length_m:               1.5,
-                overhang_front_m:       0.5,
-                overhang_rear_m:        0.5,
-                odd_speed_cap_mps:      None,
+                wheelbase_m: 0.5,
+                width_m: 1.2,
+                length_m: 1.5,
+                overhang_front_m: 0.5,
+                overhang_rear_m: 0.5,
+                odd_speed_cap_mps: None,
             },
             Self::Custom => VehicleKinematicsContract::nominal_reference_profile(),
         }
@@ -132,9 +132,7 @@ impl AssetGovernor {
         effective_perception_cap: Option<f64>,
     ) -> EnforceAction {
         match current_posture {
-            FleetPosture::LockedOut => {
-                EnforceAction::DenyBreach(DenyCode::AssetLockedOut)
-            }
+            FleetPosture::LockedOut => EnforceAction::DenyBreach(DenyCode::AssetLockedOut),
             // Issue #70: Degraded is decel-to-stop-and-HOLD, not an MRC crawl.
             // The command must be converging toward zero within the MRC
             // envelope and must never re-initiate motion from a stop.
@@ -194,7 +192,10 @@ mod tests {
         let gateway_mrc = VehicleKinematicsContract::mrc_fallback_profile();
         // The validated SS-002 crawl ceiling, identical at both points.
         assert_eq!(fabric_mrc.max_speed_mps, gateway_mrc.max_speed_mps);
-        assert_eq!(fabric_mrc.max_speed_mps, 5.0, "the validated SS-002 5.0 m/s ceiling");
+        assert_eq!(
+            fabric_mrc.max_speed_mps, 5.0,
+            "the validated SS-002 5.0 m/s ceiling"
+        );
         // The full envelope converges (not just the speed scalar) — fabric ==
         // gateway, byte-for-byte, so the whole Degraded contract is authoritative.
         assert_eq!(
@@ -214,13 +215,22 @@ mod tests {
     #[test]
     fn non_automotive_mrc_keeps_per_platform_derate() {
         let robot = KinematicProfileType::RobotNominal.mrc_contract();
-        assert!((robot.max_speed_mps - 1.8 * 0.3).abs() < 1e-9, "robot {}", robot.max_speed_mps);
+        assert!(
+            (robot.max_speed_mps - 1.8 * 0.3).abs() < 1e-9,
+            "robot {}",
+            robot.max_speed_mps
+        );
         let drone = KinematicProfileType::DroneNominal.mrc_contract();
-        assert!((drone.max_speed_mps - 15.0 * 0.3).abs() < 1e-9, "drone {}", drone.max_speed_mps);
+        assert!(
+            (drone.max_speed_mps - 15.0 * 0.3).abs() < 1e-9,
+            "drone {}",
+            drone.max_speed_mps
+        );
         let industrial = KinematicProfileType::IndustrialNominal.mrc_contract();
         assert!(
             (industrial.max_speed_mps - 0.5 * 0.3).abs() < 1e-9,
-            "industrial {}", industrial.max_speed_mps
+            "industrial {}",
+            industrial.max_speed_mps
         );
     }
 
@@ -268,7 +278,10 @@ mod tests {
         let degraded_result = g.evaluate_command(&reinit_cmd, &FleetPosture::Degraded, None);
         // Nominal admits the motion (clamped by accel limits, never denied).
         assert!(
-            matches!(nominal_result, EnforceAction::ClampLinear(_) | EnforceAction::Allow),
+            matches!(
+                nominal_result,
+                EnforceAction::ClampLinear(_) | EnforceAction::Allow
+            ),
             "nominal: {nominal_result:?}"
         );
         // Degraded refuses to re-initiate motion from a stop — fail-closed.
@@ -322,7 +335,7 @@ mod tests {
     fn test_industrial_profile_speed_limit() {
         let g = AssetGovernor::new("ind01".to_string(), KinematicProfileType::IndustrialNominal);
         let fast = ProposedVehicleCommand {
-            linear_velocity_mps: 2.0,  // above 0.5 limit
+            linear_velocity_mps: 2.0, // above 0.5 limit
             current_velocity_mps: 0.0,
             delta_time_s: 1.0,
             steering_angle_deg: 0.0,

@@ -1192,8 +1192,15 @@ mod tests {
     #[test]
     fn summary_counts_adopted_nodes_by_digest() {
         // A Rolling campaign; three nodes reported — two on its digest, one on another.
-        let mut rolling =
-            Campaign::new("c-roll", DIGEST, "v2", vec!["fleet".into()], vec![50, 100], 1).unwrap();
+        let mut rolling = Campaign::new(
+            "c-roll",
+            DIGEST,
+            "v2",
+            vec!["fleet".into()],
+            vec![50, 100],
+            1,
+        )
+        .unwrap();
         rolling.state = CampaignState::Rolling;
         rolling.rollout_percent = 50;
         let other = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
@@ -1219,8 +1226,15 @@ mod tests {
 
     #[test]
     fn summary_counts_every_state_and_projects_active_and_halted() {
-        let draft = Campaign::new("c-draft", DIGEST, "v1", vec!["fleet".into()], vec![50, 100], 1)
-            .unwrap();
+        let draft = Campaign::new(
+            "c-draft",
+            DIGEST,
+            "v1",
+            vec!["fleet".into()],
+            vec![50, 100],
+            1,
+        )
+        .unwrap();
         let mut staged = draft.clone();
         staged.campaign_id = "c-staged".into();
         staged.state = CampaignState::Staged;
@@ -1266,12 +1280,18 @@ mod tests {
 
     #[test]
     fn campaign_metrics_emit_counts_and_active_series() {
-        let mut rolling =
-            Campaign::new("gov.11", DIGEST, "v2", vec!["fleet".into()], vec![50, 100], 1).unwrap();
+        let mut rolling = Campaign::new(
+            "gov.11",
+            DIGEST,
+            "v2",
+            vec!["fleet".into()],
+            vec![50, 100],
+            1,
+        )
+        .unwrap();
         rolling.state = CampaignState::Rolling;
         rolling.rollout_percent = 50;
-        let summary =
-            summarize_campaigns(std::slice::from_ref(&rolling), &[status("n1", DIGEST)]);
+        let summary = summarize_campaigns(std::slice::from_ref(&rolling), &[status("n1", DIGEST)]);
         let m = campaign_metrics_prometheus(&summary);
         assert!(m.contains("kirra_ota_campaigns_total{state=\"rolling\"} 1"));
         assert!(m.contains("kirra_ota_campaigns_total{state=\"draft\"} 0"));
@@ -1284,8 +1304,7 @@ mod tests {
     #[test]
     fn campaign_metrics_escape_label_values() {
         // A quote/backslash in an id must be escaped so the exposition stays valid.
-        let mut c =
-            Campaign::new("a\"b\\c", DIGEST, "v1", vec!["f".into()], vec![100], 1).unwrap();
+        let mut c = Campaign::new("a\"b\\c", DIGEST, "v1", vec!["f".into()], vec![100], 1).unwrap();
         c.state = CampaignState::Rolling;
         c.rollout_percent = 100;
         let m = campaign_metrics_prometheus(&summarize_campaigns(std::slice::from_ref(&c), &[]));
@@ -1310,8 +1329,16 @@ mod tests {
                 version: "v1.2.3".into(),
             }],
         };
-        let snapshot = SnapshotMetadata { version: 3, expires_at_ms: 100_000, targets_version: 3 };
-        let timestamp = TimestampMetadata { version: 3, expires_at_ms: 100_000, snapshot_version: 3 };
+        let snapshot = SnapshotMetadata {
+            version: 3,
+            expires_at_ms: 100_000,
+            targets_version: 3,
+        };
+        let timestamp = TimestampMetadata {
+            version: 3,
+            expires_at_ms: 100_000,
+            snapshot_version: 3,
+        };
         let set = UptaneMetadataSet {
             timestamp_sig_b64: sign_timestamp(&timestamp, &SigningKey::from_bytes(&[4u8; 32])),
             timestamp,
@@ -1375,7 +1402,8 @@ mod tests {
 
     #[test]
     fn summary_distinguishes_operator_halt_from_regression() {
-        let mut op = Campaign::new("c-op", DIGEST, "v1", vec!["fleet".into()], vec![100], 1).unwrap();
+        let mut op =
+            Campaign::new("c-op", DIGEST, "v1", vec!["fleet".into()], vec![100], 1).unwrap();
         op.state = CampaignState::Halted;
         op.halt_reason = Some(HaltReason::OperatorHalt);
         let s = summarize_campaigns(std::slice::from_ref(&op), &[]);

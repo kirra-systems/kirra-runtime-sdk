@@ -80,7 +80,11 @@ fn run_montecarlo_campaign() -> bool {
     println!("=== Monte-Carlo scenario campaign (WP-23) ===");
     println!(
         "profile: {} — seed {}, {} doer scenarios, {} perception frames (95% CI bounds)",
-        if profile == Profile::Nightly { "nightly" } else { "per_pr" },
+        if profile == Profile::Nightly {
+            "nightly"
+        } else {
+            "per_pr"
+        },
         report.seed,
         report.doer_samples,
         report.perception_samples,
@@ -117,7 +121,9 @@ fn run_kpi_gate(path: &str) -> bool {
         Ok(s) => s,
         Err(e) => {
             eprintln!("scenario_kpi_gate: cannot read thresholds at {path}: {e}");
-            eprintln!("  (run from the repo root, or pass the thresholds path as the first argument)");
+            eprintln!(
+                "  (run from the repo root, or pass the thresholds path as the first argument)"
+            );
             std::process::exit(2);
         }
     };
@@ -180,7 +186,9 @@ fn run_sotif_gate() -> bool {
     let manifest: SotifCoverageManifest = match serde_json::from_str(&manifest_raw) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("scenario_kpi_gate: SOTIF manifest at {SOTIF_MANIFEST_PATH} does not parse: {e}");
+            eprintln!(
+                "scenario_kpi_gate: SOTIF manifest at {SOTIF_MANIFEST_PATH} does not parse: {e}"
+            );
             std::process::exit(2);
         }
     };
@@ -199,11 +207,16 @@ fn run_sotif_gate() -> bool {
     for row in &report.rows {
         match &row.reason {
             None => println!("  [PASS] {:<8} {} — {}", row.tc, row.kind, row.detail),
-            Some(why) => println!("  [FAIL] {:<8} {} — {} ({why})", row.tc, row.kind, row.detail),
+            Some(why) => println!(
+                "  [FAIL] {:<8} {} — {} ({why})",
+                row.tc, row.kind, row.detail
+            ),
         }
     }
     for tc in &report.missing_from_manifest {
-        println!("  [FAIL] {tc:<8} — triggering condition in OCCY_SOTIF.md §3 has NO coverage entry");
+        println!(
+            "  [FAIL] {tc:<8} — triggering condition in OCCY_SOTIF.md §3 has NO coverage entry"
+        );
     }
     for tc in &report.extra_in_manifest {
         println!("  [FAIL] {tc:<8} — manifest entry for a TC that is NOT in OCCY_SOTIF.md §3");

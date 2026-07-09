@@ -11,8 +11,8 @@
 //   - the trait impl (slice borrows into that owned storage),
 //   - the error type.
 
-use crate::corridor::{CorridorSource, Point};
 use crate::corridor::lanelet2_bridge;
+use crate::corridor::{CorridorSource, Point};
 
 /// Reasons a `Lanelet2CorridorSource` construction can fail. All errors
 /// flow through cxx as `cxx::Exception` from the C++ shim; we wrap into
@@ -33,8 +33,8 @@ impl std::fmt::Display for Lanelet2Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidInput(s) => write!(f, "InvalidInput: {s}"),
-            Self::Deserialize(s)  => write!(f, "Deserialize: {s}"),
-            Self::Extract(s)      => write!(f, "Extract: {s}"),
+            Self::Deserialize(s) => write!(f, "Deserialize: {s}"),
+            Self::Extract(s) => write!(f, "Extract: {s}"),
         }
     }
 }
@@ -45,10 +45,10 @@ impl std::error::Error for Lanelet2Error {}
 /// boundary polylines; the trait methods return slice borrows into the
 /// owned `Vec<Point>`s.
 pub struct Lanelet2CorridorSource {
-    left:        Vec<Point>,
-    right:       Vec<Point>,
-    confidence:  f32,
-    age_ms:      u64,
+    left: Vec<Point>,
+    right: Vec<Point>,
+    confidence: f32,
+    age_ms: u64,
 }
 
 impl Lanelet2CorridorSource {
@@ -69,13 +69,22 @@ impl Lanelet2CorridorSource {
             .map_err(|e| Lanelet2Error::Deserialize(e.what().to_string()))?;
         let pts = lanelet2_bridge::extract_corridor(map.as_ref().unwrap(), lanelet_ids)
             .map_err(|e| Lanelet2Error::Extract(e.what().to_string()))?;
-        let left: Vec<Point> = pts.left.iter()
+        let left: Vec<Point> = pts
+            .left
+            .iter()
             .map(|p| Point { x_m: p.x, y_m: p.y })
             .collect();
-        let right: Vec<Point> = pts.right.iter()
+        let right: Vec<Point> = pts
+            .right
+            .iter()
             .map(|p| Point { x_m: p.x, y_m: p.y })
             .collect();
-        Ok(Self { left, right, confidence, age_ms })
+        Ok(Self {
+            left,
+            right,
+            confidence,
+            age_ms,
+        })
     }
 
     /// Total vertex count across both boundaries. Test + diagnostic
@@ -86,10 +95,18 @@ impl Lanelet2CorridorSource {
 }
 
 impl CorridorSource for Lanelet2CorridorSource {
-    fn left_boundary(&self) -> &[Point]  { &self.left  }
-    fn right_boundary(&self) -> &[Point] { &self.right }
-    fn confidence(&self) -> f32          { self.confidence }
-    fn age_ms(&self) -> u64              { self.age_ms }
+    fn left_boundary(&self) -> &[Point] {
+        &self.left
+    }
+    fn right_boundary(&self) -> &[Point] {
+        &self.right
+    }
+    fn confidence(&self) -> f32 {
+        self.confidence
+    }
+    fn age_ms(&self) -> u64 {
+        self.age_ms
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -138,18 +155,27 @@ mod lanelet2_tests {
     #[test]
     fn test_load_and_extract_corridor() {
         let bin = load_fixture("straight_corridor.osm.bin");
-        let source = Lanelet2CorridorSource::from_map_bin_and_route(
-            &bin, &[1001, 1002], 0.95, 50,
-        ).expect("Lanelet2CorridorSource construction");
-        let left  = source.left_boundary();
+        let source = Lanelet2CorridorSource::from_map_bin_and_route(&bin, &[1001, 1002], 0.95, 50)
+            .expect("Lanelet2CorridorSource construction");
+        let left = source.left_boundary();
         let right = source.right_boundary();
-        assert!(left.len()  >= 4, "left side ≥ 4 vertices, got {}",  left.len());
-        assert!(right.len() >= 4, "right side ≥ 4 vertices, got {}", right.len());
+        assert!(
+            left.len() >= 4,
+            "left side ≥ 4 vertices, got {}",
+            left.len()
+        );
+        assert!(
+            right.len() >= 4,
+            "right side ≥ 4 vertices, got {}",
+            right.len()
+        );
         for p in left.iter().chain(right.iter()) {
-            assert!(p.x_m >= 0.0 && p.x_m <= 50.0,
-                "vertex x={} out of [0, 50]", p.x_m);
-            assert!(p.y_m.abs() <= 2.5,
-                "vertex |y|={} out of [0, 2.5]", p.y_m);
+            assert!(
+                p.x_m >= 0.0 && p.x_m <= 50.0,
+                "vertex x={} out of [0, 50]",
+                p.x_m
+            );
+            assert!(p.y_m.abs() <= 2.5, "vertex |y|={} out of [0, 2.5]", p.y_m);
         }
     }
 
@@ -158,13 +184,15 @@ mod lanelet2_tests {
     #[test]
     fn test_unknown_lanelet_id_returns_error() {
         let bin = load_fixture("straight_corridor.osm.bin");
-        let err = Lanelet2CorridorSource::from_map_bin_and_route(
-            &bin, &[999_999_999], 0.95, 50,
-        ).err().expect("expected Err for unknown lanelet id");
+        let err = Lanelet2CorridorSource::from_map_bin_and_route(&bin, &[999_999_999], 0.95, 50)
+            .err()
+            .expect("expected Err for unknown lanelet id");
         match err {
             Lanelet2Error::Extract(msg) => {
-                assert!(msg.contains("not found"),
-                    "expected 'not found' in error message, got: {msg}");
+                assert!(
+                    msg.contains("not found"),
+                    "expected 'not found' in error message, got: {msg}"
+                );
             }
             other => panic!("expected Extract error, got {other:?}"),
         }
@@ -175,13 +203,12 @@ mod lanelet2_tests {
     #[test]
     fn test_corridor_source_trait_impl() {
         let bin = load_fixture("straight_corridor.osm.bin");
-        let src = Lanelet2CorridorSource::from_map_bin_and_route(
-            &bin, &[1001, 1002], 0.95, 50,
-        ).expect("source");
+        let src = Lanelet2CorridorSource::from_map_bin_and_route(&bin, &[1001, 1002], 0.95, 50)
+            .expect("source");
         let dyn_src: &dyn CorridorSource = &src;
-        assert_eq!(dyn_src.left_boundary().len(),  src.left.len());
+        assert_eq!(dyn_src.left_boundary().len(), src.left.len());
         assert_eq!(dyn_src.right_boundary().len(), src.right.len());
         assert_eq!(dyn_src.confidence(), 0.95);
-        assert_eq!(dyn_src.age_ms(),     50);
+        assert_eq!(dyn_src.age_ms(), 50);
     }
 }

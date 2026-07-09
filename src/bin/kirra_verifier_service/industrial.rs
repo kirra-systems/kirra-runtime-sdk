@@ -36,27 +36,37 @@ pub(crate) async fn enforce_industrial_replay(
     // failure → fail-closed reject (store unavailable).
     let protocol_owned = protocol.to_string();
     let source_owned = source_id.to_string();
-    match svc.app.store.call(move |store| {
-        let reason = match fresh {
-            Some(r) => Some(r),
-            None => match store.industrial_seq_check_and_advance(&source_owned, sequence, now) {
-                Ok(true) => None,
-                Ok(false) => Some("INDUSTRIAL_MESSAGE_REPLAY"),
-                Err(_) => Some("INDUSTRIAL_REPLAY_STORE_UNAVAILABLE"),
-            },
-        };
-        if let Some(r) = reason {
-            let payload = json!({
-                "protocol": protocol_owned, "source_id": source_owned,
-                "sequence": sequence, "timestamp_ms": timestamp_ms, "reason": r,
-            });
-            let _ = store.save_posture_event_chained(
-                "industrial_replay_guard", "INDUSTRIAL_MESSAGE_REJECTED",
-                &payload.to_string(), Some(r), now,
-            );
-        }
-        reason
-    }).await {
+    match svc
+        .app
+        .store
+        .call(move |store| {
+            let reason = match fresh {
+                Some(r) => Some(r),
+                None => {
+                    match store.industrial_seq_check_and_advance(&source_owned, sequence, now) {
+                        Ok(true) => None,
+                        Ok(false) => Some("INDUSTRIAL_MESSAGE_REPLAY"),
+                        Err(_) => Some("INDUSTRIAL_REPLAY_STORE_UNAVAILABLE"),
+                    }
+                }
+            };
+            if let Some(r) = reason {
+                let payload = json!({
+                    "protocol": protocol_owned, "source_id": source_owned,
+                    "sequence": sequence, "timestamp_ms": timestamp_ms, "reason": r,
+                });
+                let _ = store.save_posture_event_chained(
+                    "industrial_replay_guard",
+                    "INDUSTRIAL_MESSAGE_REJECTED",
+                    &payload.to_string(),
+                    Some(r),
+                    now,
+                );
+            }
+            reason
+        })
+        .await
+    {
         Ok(reason) => reason,
         Err(_) => Some("INDUSTRIAL_REPLAY_STORE_UNAVAILABLE"),
     }
@@ -64,13 +74,20 @@ pub(crate) async fn enforce_industrial_replay(
 
 /// Standard rejection response for a replay/freshness denial (200 + allowed:false,
 /// matching the industrial handlers' denial shape; the rejection precedes evaluation).
-pub(crate) fn industrial_replay_rejection(protocol: &str, reason: &str) -> axum::response::Response {
-    (StatusCode::OK, Json(json!({
-        "protocol": protocol,
-        "allowed": false,
-        "denial_reason": reason,
-        "replay_rejected": true,
-    }))).into_response()
+pub(crate) fn industrial_replay_rejection(
+    protocol: &str,
+    reason: &str,
+) -> axum::response::Response {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "protocol": protocol,
+            "allowed": false,
+            "denial_reason": reason,
+            "replay_rejected": true,
+        })),
+    )
+        .into_response()
 }
 
 pub(crate) async fn evaluate_industrial_adapter(
@@ -80,11 +97,15 @@ pub(crate) async fn evaluate_industrial_adapter(
     let req = match body {
         Ok(Json(r)) => r,
         Err(rejection) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "MALFORMED_REQUEST",
-                "detail": rejection.body_text(),
-                "allowed": false,
-            }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "MALFORMED_REQUEST",
+                    "detail": rejection.body_text(),
+                    "allowed": false,
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -93,7 +114,15 @@ pub(crate) async fn evaluate_industrial_adapter(
     // Replay/freshness gate (IEC 62443) — reject a stale/replayed message before
     // evaluation. Key the per-source sequence by protocol:source_id.
     let replay_key = format!("{protocol_name}:{}", req.source_id);
-    if let Some(reason) = enforce_industrial_replay(&svc, &protocol_name, &replay_key, req.sequence, req.timestamp_ms).await {
+    if let Some(reason) = enforce_industrial_replay(
+        &svc,
+        &protocol_name,
+        &replay_key,
+        req.sequence,
+        req.timestamp_ms,
+    )
+    .await
+    {
         return industrial_replay_rejection(&protocol_name, reason);
     }
 
@@ -106,8 +135,11 @@ pub(crate) async fn evaluate_industrial_adapter(
             // SG-012 / H-011: a DNP3 broadcast (only DNP3 sets `is_broadcast`)
             // must carry a tamper-evident record; mirror the dedicated DNP3
             // handler's fail-closed policy on this generic path too.
-            let is_broadcast = result.adapter_details
-                .get("is_broadcast").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_broadcast = result
+                .adapter_details
+                .get("is_broadcast")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let should_audit = !result.allowed || is_broadcast;
 
             if should_audit {
@@ -166,16 +198,19 @@ pub(crate) async fn evaluate_industrial_adapter(
                 "adapter_details": result.adapter_details,
                 "audit_ref": audit_ref,
                 "triggers_recalculation": result.triggers_recalculation,
-            })).into_response()
+            }))
+            .into_response()
         }
-        Err(e) => {
-            (StatusCode::BAD_REQUEST, Json(json!({
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
                 "error": "ADAPTER_PARSE_FAILURE",
                 "detail": e,
                 "protocol": protocol_name,
                 "allowed": false,
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -186,17 +221,23 @@ pub(crate) async fn evaluate_ethernet_ip_adapter(
     let (msg, sequence, timestamp_ms) = match body {
         Ok(Json(g)) => (g.message, g.sequence, g.timestamp_ms),
         Err(rejection) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "MALFORMED_REQUEST",
-                "detail": rejection.body_text(),
-                "allowed": false,
-            }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "MALFORMED_REQUEST",
+                    "detail": rejection.body_text(),
+                    "allowed": false,
+                })),
+            )
+                .into_response();
         }
     };
 
     // Replay/freshness gate before evaluation.
     let replay_key = format!("ethernet_ip:{}", msg.source_node);
-    if let Some(reason) = enforce_industrial_replay(&svc, "ethernet_ip", &replay_key, sequence, timestamp_ms).await {
+    if let Some(reason) =
+        enforce_industrial_replay(&svc, "ethernet_ip", &replay_key, sequence, timestamp_ms).await
+    {
         return industrial_replay_rejection("ethernet_ip", reason);
     }
 
@@ -204,7 +245,8 @@ pub(crate) async fn evaluate_ethernet_ip_adapter(
 
     let posture_str = format!("{:?}", posture);
     let eval = EtherNetIpAdapter::evaluate(&msg);
-    let (allowed, denial_reason) = kirra_verifier::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
+    let (allowed, denial_reason) =
+        kirra_verifier::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
     let audit_ref = now_ms().to_string();
 
     if !allowed {
@@ -218,7 +260,8 @@ pub(crate) async fn evaluate_ethernet_ip_adapter(
             "posture": posture_str,
             "denial_reason": denial_reason,
             "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
-        }).to_string();
+        })
+        .to_string();
         let _ = svc.app.store.call(move |store| {
             if let Err(e) = store.save_posture_event_chained(
                 "ethernet_ip_adapter", "INDUSTRIAL_ACTION_DENIED",
@@ -243,7 +286,8 @@ pub(crate) async fn evaluate_ethernet_ip_adapter(
             "safety_relevant": eval.safety_relevant,
         },
         "audit_ref": audit_ref,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 pub(crate) async fn evaluate_canopen_adapter(
@@ -253,17 +297,23 @@ pub(crate) async fn evaluate_canopen_adapter(
     let (msg, sequence, timestamp_ms) = match body {
         Ok(Json(g)) => (g.message, g.sequence, g.timestamp_ms),
         Err(rejection) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "MALFORMED_REQUEST",
-                "detail": rejection.body_text(),
-                "allowed": false,
-            }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "MALFORMED_REQUEST",
+                    "detail": rejection.body_text(),
+                    "allowed": false,
+                })),
+            )
+                .into_response();
         }
     };
 
     // Replay/freshness gate before evaluation.
     let replay_key = format!("canopen:{}", msg.source_node);
-    if let Some(reason) = enforce_industrial_replay(&svc, "canopen", &replay_key, sequence, timestamp_ms).await {
+    if let Some(reason) =
+        enforce_industrial_replay(&svc, "canopen", &replay_key, sequence, timestamp_ms).await
+    {
         return industrial_replay_rejection("canopen", reason);
     }
 
@@ -271,7 +321,8 @@ pub(crate) async fn evaluate_canopen_adapter(
 
     let posture_str = format!("{:?}", posture);
     let eval = CanOpenAdapter::evaluate(&msg);
-    let (allowed, denial_reason) = kirra_verifier::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
+    let (allowed, denial_reason) =
+        kirra_verifier::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
     let audit_ref = now_ms().to_string();
 
     // #84: resolve the CANopen bus node-id to a FLEET node so an NMT-offline
@@ -298,7 +349,10 @@ pub(crate) async fn evaluate_canopen_adapter(
         use kirra_verifier::posture_engine_v2::PostureRecalcTrigger;
         match outcome {
             NmtOfflineOutcome::Attributed { fleet_node_id } => {
-                match svc.app.mark_node_untrusted(fleet_node_id, "CANOPEN_NMT_OFFLINE", now_ms()) {
+                match svc
+                    .app
+                    .mark_node_untrusted(fleet_node_id, "CANOPEN_NMT_OFFLINE", now_ms())
+                {
                     Ok(true) => {
                         attributed_fleet_node = Some(fleet_node_id.clone());
                         tracing::warn!(
@@ -306,10 +360,13 @@ pub(crate) async fn evaluate_canopen_adapter(
                             fleet_node_id = %fleet_node_id,
                             "CANopen NMT node-offline → fleet node marked Untrusted; effectful recalc enqueued"
                         );
-                        enqueue_recalc(&svc, PostureRecalcTrigger::NodeTrustChanged {
-                            node_id: fleet_node_id.clone(),
-                            reason: "CANOPEN_NMT_OFFLINE".to_string(),
-                        });
+                        enqueue_recalc(
+                            &svc,
+                            PostureRecalcTrigger::NodeTrustChanged {
+                                node_id: fleet_node_id.clone(),
+                                reason: "CANOPEN_NMT_OFFLINE".to_string(),
+                            },
+                        );
                     }
                     // Mapping raced a deregistration, or the store write failed:
                     // fail-closed exactly like an unattributed offline.
@@ -324,7 +381,10 @@ pub(crate) async fn evaluate_canopen_adapter(
                     }
                 }
             }
-            NmtOfflineOutcome::Unattributed { canopen_node_id, reason } => {
+            NmtOfflineOutcome::Unattributed {
+                canopen_node_id,
+                reason,
+            } => {
                 let reason_str = match reason {
                     UnattributedReason::NoMapping => "NO_MAPPING",
                     UnattributedReason::NodeNotRegistered => "NODE_NOT_REGISTERED",
@@ -364,7 +424,8 @@ pub(crate) async fn evaluate_canopen_adapter(
             "triggers_recalculation": eval.triggers_recalculation,
             "posture": posture_str,
             "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
-        }).to_string();
+        })
+        .to_string();
         let _ = svc.app.store.call(move |store| {
             if let Err(e) = store.save_posture_event_chained(
                 "canopen_adapter", event_type,
@@ -395,7 +456,8 @@ pub(crate) async fn evaluate_canopen_adapter(
             "triggers_recalculation": eval.triggers_recalculation,
         },
         "audit_ref": audit_ref,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 pub(crate) async fn evaluate_dnp3_adapter(
@@ -405,17 +467,23 @@ pub(crate) async fn evaluate_dnp3_adapter(
     let (msg, sequence, timestamp_ms) = match body {
         Ok(Json(g)) => (g.message, g.sequence, g.timestamp_ms),
         Err(rejection) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "MALFORMED_REQUEST",
-                "detail": rejection.body_text(),
-                "allowed": false,
-            }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "MALFORMED_REQUEST",
+                    "detail": rejection.body_text(),
+                    "allowed": false,
+                })),
+            )
+                .into_response();
         }
     };
 
     // Replay/freshness gate before evaluation.
     let replay_key = format!("dnp3:{}", msg.source_node);
-    if let Some(reason) = enforce_industrial_replay(&svc, "dnp3", &replay_key, sequence, timestamp_ms).await {
+    if let Some(reason) =
+        enforce_industrial_replay(&svc, "dnp3", &replay_key, sequence, timestamp_ms).await
+    {
         return industrial_replay_rejection("dnp3", reason);
     }
 
@@ -423,7 +491,8 @@ pub(crate) async fn evaluate_dnp3_adapter(
 
     let posture_str = format!("{:?}", posture);
     let eval = Dnp3Adapter::evaluate(&msg);
-    let (allowed, denial_reason) = kirra_verifier::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
+    let (allowed, denial_reason) =
+        kirra_verifier::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
     let audit_ref = now_ms().to_string();
 
     // SG-012 / H-011 — a DNP3 broadcast control command must carry a
@@ -508,18 +577,22 @@ pub(crate) async fn evaluate_dnp3_adapter(
         }
     }
 
-    (status, Json(json!({
-        "protocol": "dnp3",
-        "command": format!("{:?}", eval.command),
-        "allowed": allowed,
-        "denial_reason": denial_reason,
-        "posture_at_evaluation": posture_str,
-        "adapter_details": {
-            "function_name": eval.function_name,
-            "is_control": eval.is_control,
-            "is_broadcast": eval.is_broadcast,
-            "critical_infrastructure_relevant": eval.critical_infrastructure_relevant,
-        },
-        "audit_ref": audit_ref,
-    }))).into_response()
+    (
+        status,
+        Json(json!({
+            "protocol": "dnp3",
+            "command": format!("{:?}", eval.command),
+            "allowed": allowed,
+            "denial_reason": denial_reason,
+            "posture_at_evaluation": posture_str,
+            "adapter_details": {
+                "function_name": eval.function_name,
+                "is_control": eval.is_control,
+                "is_broadcast": eval.is_broadcast,
+                "critical_infrastructure_relevant": eval.critical_infrastructure_relevant,
+            },
+            "audit_ref": audit_ref,
+        })),
+    )
+        .into_response()
 }

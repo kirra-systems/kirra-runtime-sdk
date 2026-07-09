@@ -7,20 +7,22 @@
 use std::process::Command;
 
 use ed25519_dalek::SigningKey;
-use kirra_contract_channel::{
-    read_coherent_snapshot, ContractWriter, MAX_SNAPSHOT_RETRIES,
-};
+use kirra_contract_channel::{read_coherent_snapshot, ContractWriter, MAX_SNAPSHOT_RETRIES};
 use kirra_core::kinematics_contract::VehicleKinematicsContract;
 use kirra_hv_carrier::{PosixShmReader, PosixShmRegion};
-use kirra_inline_governor::{
-    govern_and_release, ActuatorStation, GovernorStation, ReleaseRefusal,
-};
+use kirra_inline_governor::{govern_and_release, ActuatorStation, GovernorStation, ReleaseRefusal};
 
 const FUTURE_DEADLINE: u64 = u64::MAX / 2;
 
 fn spawn_guest(name: &str, linvel: f64, seq: u64, deadline: u64) -> bool {
     Command::new(env!("CARGO_BIN_EXE_inline_demo"))
-        .args(["--guest", name, &linvel.to_string(), &seq.to_string(), &deadline.to_string()])
+        .args([
+            "--guest",
+            name,
+            &linvel.to_string(),
+            &seq.to_string(),
+            &deadline.to_string(),
+        ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -43,7 +45,10 @@ fn cross_process_proposal_is_released_with_verified_token() {
     let reader = PosixShmReader::open(&name).expect("governor RO mapping");
     let (mut gov, mut act) = stations();
 
-    assert!(spawn_guest(&name, 10.0, 1, FUTURE_DEADLINE), "guest publish");
+    assert!(
+        spawn_guest(&name, 10.0, 1, FUTURE_DEADLINE),
+        "guest publish"
+    );
     let released = govern_and_release(&mut gov, &mut act, &reader, 0)
         .expect("a cross-process in-envelope proposal must release");
     assert_eq!(released.sequence, 1);
@@ -60,7 +65,10 @@ fn cross_process_corruption_never_releases() {
     let reader = PosixShmReader::open(&name).expect("governor RO mapping");
     let (mut gov, mut act) = stations();
 
-    assert!(spawn_guest(&name, 10.0, 1, FUTURE_DEADLINE), "guest publish");
+    assert!(
+        spawn_guest(&name, 10.0, 1, FUTURE_DEADLINE),
+        "guest publish"
+    );
     // Corrupt the committed snapshot IN PLACE through the RW mapping: flip a
     // CRC bit in the body (the generation stays even/committed, so the reader
     // gets a coherent-but-invalid snapshot — the transport contract must catch it).
@@ -96,7 +104,10 @@ fn cross_process_wrong_governor_key_is_refused_at_the_actuator() {
     );
     let mut act = ActuatorStation::new(trusted.verifying_key());
 
-    assert!(spawn_guest(&name, 10.0, 1, FUTURE_DEADLINE), "guest publish");
+    assert!(
+        spawn_guest(&name, 10.0, 1, FUTURE_DEADLINE),
+        "guest publish"
+    );
     let outcome = govern_and_release(&mut rogue_gov, &mut act, &reader, 0);
     assert!(
         matches!(outcome, Err(ReleaseRefusal::Denied(_))),

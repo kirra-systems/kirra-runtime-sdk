@@ -58,9 +58,12 @@ fn run_scenario(
 ) {
     let corridor = MockCorridorSource::straight_5m_half_width(100.0);
     let vcfg = VehicleConfig::courier(); // the checker judges a small robot, not a car
-    // The DOER's robot-scale planner preset (ADR-0028 / step B): stop ~1 m short of a person,
-    // route around with the courier clearance, small footprint — overridden cruise to creep.
-    let mut occy = GeometricPlanner::new(GeometricPlannerConfig { cruise_speed_mps: CREEP_CRUISE_MPS, ..GeometricPlannerConfig::courier() });
+                                         // The DOER's robot-scale planner preset (ADR-0028 / step B): stop ~1 m short of a person,
+                                         // route around with the courier clearance, small footprint — overridden cruise to creep.
+    let mut occy = GeometricPlanner::new(GeometricPlannerConfig {
+        cruise_speed_mps: CREEP_CRUISE_MPS,
+        ..GeometricPlannerConfig::courier()
+    });
 
     let mut ego_x = ego_start_x;
     let mut speed = 0.0;
@@ -74,34 +77,88 @@ fn run_scenario(
         let agents = agents_at(tick);
 
         let world = PlanInput {
-            ego: EgoState { pose: Pose { x_m: ego_x, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: speed, yaw_rate_rads: 0.0, stamp_ms: now },
-            goal: Goal { target: Pose { x_m: goal_x, y_m: 0.0, heading_rad: 0.0 } },
+            ego: EgoState {
+                pose: Pose {
+                    x_m: ego_x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+                linear_x_mps: speed,
+                yaw_rate_rads: 0.0,
+                stamp_ms: now,
+            },
+            goal: Goal {
+                target: Pose {
+                    x_m: goal_x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+            },
             map: &corridor,
             objects: &agents,
-            controls: &[], lane_boundaries: &[], motion: &[], predicted_paths: &[],
-            cedes_to_ego_ids: &[], lane_change_to_m: None, no_overtake_ids: &[], drivable: None,
-            posture: FleetPosture::Nominal, target_speed_mps: None,
-            request_overtake: false, request_pull_over: false, lane_graph: None, signal_states: &[],
+            controls: &[],
+            lane_boundaries: &[],
+            motion: &[],
+            predicted_paths: &[],
+            cedes_to_ego_ids: &[],
+            lane_change_to_m: None,
+            no_overtake_ids: &[],
+            drivable: None,
+            posture: FleetPosture::Nominal,
+            target_speed_mps: None,
+            request_overtake: false,
+            request_pull_over: false,
+            lane_graph: None,
+            signal_states: &[],
         };
         let plan = plan_for_intent(&mut occy, &intent, &world);
-        let verdict = validate_trajectory_slow(&plan.trajectory, &corridor, &agents, &vcfg, None, FleetPosture::Nominal);
+        let verdict = validate_trajectory_slow(
+            &plan.trajectory,
+            &corridor,
+            &agents,
+            &vcfg,
+            None,
+            FleetPosture::Nominal,
+        );
 
-        let admitted = matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp) && plan.kind == ProposalKind::Motion;
-        let cmd_v = if admitted { committed_speed(&plan.trajectory) } else { 0.0 };
+        let admitted = matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ) && plan.kind == ProposalKind::Motion;
+        let cmd_v = if admitted {
+            committed_speed(&plan.trajectory)
+        } else {
+            0.0
+        };
         // Occy proposed motion but KIRRA refused it → a doer/checker DIVERGENCE (the courier still
         // holds, fail-safe; this is the tuning signal, not a fault — KIRRA backstops the doer).
-        if plan.kind == ProposalKind::Motion && !admitted { divergences += 1; }
-        if cmd_v > STOP_EPS { moved += 1; } else { held += 1; }
+        if plan.kind == ProposalKind::Motion && !admitted {
+            divergences += 1;
+        }
+        if cmd_v > STOP_EPS {
+            moved += 1;
+        } else {
+            held += 1;
+        }
 
         speed = cmd_v;
         ego_x += cmd_v * DT;
 
         // Compact trace: print transitions + a few samples.
         if tick % 4 == 0 || (cmd_v <= STOP_EPS) != (speed <= STOP_EPS) {
-            let near = agents.iter().min_by(|a, b| a.pos.x_m.total_cmp(&b.pos.x_m))
-                .map(|a| format!("nearest@({:.1},{:.1})", a.pos.x_m, a.pos.y_m)).unwrap_or_else(|| "—".into());
-            println!("  {:>4.1} {:>6.2} {:>6.2}  {:<11} {:<12} {near}",
-                now as f64 / 1000.0, ego_x, cmd_v, format!("{:?}", plan.kind), format!("{verdict:?}"));
+            let near = agents
+                .iter()
+                .min_by(|a, b| a.pos.x_m.total_cmp(&b.pos.x_m))
+                .map(|a| format!("nearest@({:.1},{:.1})", a.pos.x_m, a.pos.y_m))
+                .unwrap_or_else(|| "—".into());
+            println!(
+                "  {:>4.1} {:>6.2} {:>6.2}  {:<11} {:<12} {near}",
+                now as f64 / 1000.0,
+                ego_x,
+                cmd_v,
+                format!("{:?}", plan.kind),
+                format!("{verdict:?}")
+            );
         }
         if ego_x >= goal_x - 0.6 {
             reached = true;
@@ -123,11 +180,20 @@ fn main() {
     //    while the person is there, then resumes once they clear and reaches the goal.
     run_scenario(
         "Yield to a pedestrian in the path",
-        16.0, 2.0, 110,
-        MickIntent::Yield { x_m: 16.0, y_m: 0.0 },
+        16.0,
+        2.0,
+        110,
+        MickIntent::Yield {
+            x_m: 16.0,
+            y_m: 0.0,
+        },
         |tick| {
             // Stationary in the path until t=6 s, then steps aside (+Y) out of the band.
-            let y = if tick < 30 { 0.0 } else { 0.30 * (tick as f64 - 30.0) * DT * 5.0 };
+            let y = if tick < 30 {
+                0.0
+            } else {
+                0.30 * (tick as f64 - 30.0) * DT * 5.0
+            };
             vec![obj(1, 9.0, y, 0.0, 0.0)]
         },
     );
@@ -136,12 +202,23 @@ fn main() {
     //    crosses its line at x=6, reaching y=0 at ~t=10 then receding. The courier waits, then crosses.
     run_scenario(
         "Cross a crosswalk when clear",
-        10.0, 2.0, 110,
-        MickIntent::CrossWhenClear { x_m: 10.0, y_m: 0.0 },
+        10.0,
+        2.0,
+        110,
+        MickIntent::CrossWhenClear {
+            x_m: 10.0,
+            y_m: 0.0,
+        },
         |tick| vec![obj(2, 6.0, -12.0 + 6.0 * (tick as f64 * DT), 0.0, 6.0)], // car crossing +Y at 6 m/s
     );
 
-    println!("  Mick proposes a sidewalk intent; Occy grounds it; KIRRA (courier profile) bounds it.");
-    println!("  Yield: the courier gives way to a pedestrian, then resumes. CrossWhenClear: it waits");
-    println!("  at the curb for the car, then steps off. Every committed pose cleared the checker.");
+    println!(
+        "  Mick proposes a sidewalk intent; Occy grounds it; KIRRA (courier profile) bounds it."
+    );
+    println!(
+        "  Yield: the courier gives way to a pedestrian, then resumes. CrossWhenClear: it waits"
+    );
+    println!(
+        "  at the curb for the car, then steps off. Every committed pose cleared the checker."
+    );
 }

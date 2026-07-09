@@ -117,7 +117,10 @@ pub enum CollectorError {
     /// The orphan rate exceeded `max_orphan_rate`. The dataset + manifest were
     /// still written; the manifest is carried so the caller can report the
     /// `dataset_id` + quality of the flagged dataset.
-    OrphanRateExceeded { manifest: Box<Manifest>, max: f64 },
+    OrphanRateExceeded {
+        manifest: Box<Manifest>,
+        max: f64,
+    },
 }
 
 impl std::fmt::Display for CollectorError {
@@ -276,12 +279,15 @@ pub fn run(
 
     // Canonical order for a reproducible content digest [M2] (already the
     // dedup order; explicit for robustness).
-    rows.sort_by(|a, b| (a.source.as_str(), a.decision_seq).cmp(&(b.source.as_str(), b.decision_seq)));
+    rows.sort_by(|a, b| {
+        (a.source.as_str(), a.decision_seq).cmp(&(b.source.as_str(), b.decision_seq))
+    });
 
     let partitions = dataset::write_dataset(&rows, &cfg.out_dir)?;
     recon.orphan_rate = recon.orphan_rate();
 
-    let manifest = manifest::build_manifest(lineage, bag.bag_uri(), cfg, &recon, &rows, &partitions);
+    let manifest =
+        manifest::build_manifest(lineage, bag.bag_uri(), cfg, &recon, &rows, &partitions);
     manifest::write_manifest(&manifest, &cfg.out_dir)?;
 
     if recon.orphan_rate > cfg.max_orphan_rate {

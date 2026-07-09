@@ -36,9 +36,9 @@ use std::time::{Duration, Instant};
 
 use kirra_ota_installer::{
     adoption_report_payload, artifact_sha256_hex, decide_pull, derive_model_allowlist,
-    parse_metadata_bundle, plan_commit, plan_rollback, plan_run, plan_stage,
-    uptane_pull_gate, verify_staged_artifact, AssignmentView, BootRecord, FileBootController,
-    HealthGate, PullAction, Slot, UptaneTrustStore,
+    parse_metadata_bundle, plan_commit, plan_rollback, plan_run, plan_stage, uptane_pull_gate,
+    verify_staged_artifact, AssignmentView, BootRecord, FileBootController, HealthGate, PullAction,
+    Slot, UptaneTrustStore,
 };
 
 struct Cfg {
@@ -285,8 +285,9 @@ impl ProbeOpts {
         if interval_secs == 0 {
             return Err("--interval-secs must be >= 1".into());
         }
-        let cmd = cmd
-            .ok_or_else(|| "probe requires --cmd '<health command>' (exit 0 = healthy)".to_string())?;
+        let cmd = cmd.ok_or_else(|| {
+            "probe requires --cmd '<health command>' (exit 0 = healthy)".to_string()
+        })?;
         Ok(ProbeOpts {
             cmd,
             window_secs,
@@ -319,8 +320,8 @@ fn cmd_probe(args: &[String]) -> Result<(), String> {
         );
         return Ok(());
     }
-    let mut ctrl =
-        FileBootController::open(&cfg.record, Slot::A).map_err(|e| format!("open boot record: {e}"))?;
+    let mut ctrl = FileBootController::open(&cfg.record, Slot::A)
+        .map_err(|e| format!("open boot record: {e}"))?;
     let record = ctrl
         .record()
         .map_err(|e| format!("read boot record: {e}"))?;
@@ -384,7 +385,9 @@ fn cmd_probe(args: &[String]) -> Result<(), String> {
         if let Err(e) = restart_unit(&opts.unit) {
             // The record is already reverted, so correctness holds regardless — a
             // failed restart just means the switch waits for the next natural one.
-            eprintln!("warning: {e}; boot record is reverted, so the next restart runs the good slot");
+            eprintln!(
+                "warning: {e}; boot record is reverted, so the next restart runs the good slot"
+            );
         }
     } else {
         eprintln!(
@@ -479,8 +482,7 @@ impl PullOpts {
             .filter(|s| !s.is_empty())
             .collect();
         Ok(PullOpts {
-            verifier: verifier
-                .ok_or("pull requires --verifier <url> (or KIRRA_VERIFIER_URL)")?,
+            verifier: verifier.ok_or("pull requires --verifier <url> (or KIRRA_VERIFIER_URL)")?,
             node_id: node_id.ok_or("pull requires --node-id <id> (or KIRRA_NODE_ID)")?,
             cohorts,
             artifact_base: artifact_base
@@ -579,11 +581,13 @@ fn cmd_pull(args: &[String]) -> Result<(), String> {
             let trust_state = if Path::new(&opts.trust_store).exists() {
                 // An anchored node whose trust state fails to LOAD must refuse
                 // the pull outright — never degrade to a legacy pull.
-                Some(trust_store.load().map_err(|e| format!(
-                    "uptane trust state at {} is unreadable — refusing to stage \
+                Some(trust_store.load().map_err(|e| {
+                    format!(
+                        "uptane trust state at {} is unreadable — refusing to stage \
                      (fail-closed): {e}",
-                    opts.trust_store
-                ))?)
+                        opts.trust_store
+                    )
+                })?)
             } else {
                 None
             };
@@ -739,8 +743,7 @@ impl ReportOpts {
             }
         }
         Ok(ReportOpts {
-            verifier: verifier
-                .ok_or("report requires --verifier <url> (or KIRRA_VERIFIER_URL)")?,
+            verifier: verifier.ok_or("report requires --verifier <url> (or KIRRA_VERIFIER_URL)")?,
             node_id: node_id.ok_or("report requires --node-id <id> (or KIRRA_NODE_ID)")?,
             token,
             client_id,
@@ -781,8 +784,8 @@ fn cmd_report(args: &[String]) -> Result<(), String> {
             active_path.display()
         ));
     }
-    let digest = artifact_sha256_hex(&active_path)
-        .map_err(|e| format!("hash active slot artifact: {e}"))?;
+    let digest =
+        artifact_sha256_hex(&active_path).map_err(|e| format!("hash active slot artifact: {e}"))?;
 
     let mut body = serde_json::json!({
         "node_id": opts.node_id,
@@ -808,7 +811,12 @@ fn cmd_report(args: &[String]) -> Result<(), String> {
         "{}/fleet/campaigns/report",
         opts.verifier.trim_end_matches('/')
     );
-    let (code, resp) = http_post_json(&url, &body, opts.token.as_deref(), opts.client_id.as_deref())?;
+    let (code, resp) = http_post_json(
+        &url,
+        &body,
+        opts.token.as_deref(),
+        opts.client_id.as_deref(),
+    )?;
     if code == 200 {
         println!(
             "reported: node {} running digest {} (campaign {})",
@@ -877,7 +885,9 @@ impl EnrollOpts {
         let mut it = args.iter();
         while let Some(a) = it.next() {
             let mut next = |flag: &str| -> Result<String, String> {
-                it.next().cloned().ok_or_else(|| format!("{flag} needs a value"))
+                it.next()
+                    .cloned()
+                    .ok_or_else(|| format!("{flag} needs a value"))
             };
             match a.as_str() {
                 "--verifier" => verifier = Some(next("--verifier")?),
@@ -927,11 +937,15 @@ fn validate_pcr16_hex(v: &str) -> Result<String, String> {
 /// form the verifier's `parse_ed25519_public_pem` decodes (12-byte prefix + key).
 fn ed25519_spki_pem(pubkey: &[u8; 32]) -> String {
     use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
-    const ED25519_SPKI_PREFIX: [u8; 12] =
-        [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+    const ED25519_SPKI_PREFIX: [u8; 12] = [
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
     let mut der = ED25519_SPKI_PREFIX.to_vec();
     der.extend_from_slice(pubkey);
-    format!("-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n", b64e.encode(&der))
+    format!(
+        "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
+        b64e.encode(&der)
+    )
 }
 
 /// Derive the AK PUBLIC-key SPKI PEM from a PKCS#8 Ed25519 PRIVATE key PEM. The
@@ -985,17 +999,21 @@ fn cmd_enroll(args: &[String]) -> Result<(), String> {
     // #861: silently preferring one could enroll a different key than intended).
     let ak_public_pem = match (&opts.ak_pub, &opts.ak_key) {
         (Some(_), Some(_)) => {
-            return Err("give exactly one of --ak-pub <spki.pem> / --ak-key <pkcs8.pem>, \
+            return Err(
+                "give exactly one of --ak-pub <spki.pem> / --ak-key <pkcs8.pem>, \
                         not both (they may name different keys)"
-                .to_string())
+                    .to_string(),
+            )
         }
         (Some(pub_path), None) => std::fs::read_to_string(pub_path)
             .map_err(|e| format!("read AK public PEM {}: {e}", pub_path.display()))?,
         (None, Some(key_path)) => ak_public_pem_from_pkcs8(key_path)?,
         (None, None) => {
-            return Err("enroll requires --ak-pub <spki.pem> or --ak-key <pkcs8.pem> \
+            return Err(
+                "enroll requires --ak-pub <spki.pem> or --ak-key <pkcs8.pem> \
                         (or KIRRA_OTA_AK_PUB / KIRRA_OTA_AK_KEY)"
-                .to_string())
+                    .to_string(),
+            )
         }
     };
     if !ak_public_pem.contains("BEGIN PUBLIC KEY") {
@@ -1015,8 +1033,16 @@ fn cmd_enroll(args: &[String]) -> Result<(), String> {
     )
     .to_string();
 
-    let url = format!("{}/attestation/register", opts.verifier.trim_end_matches('/'));
-    let (code, resp) = http_post_json(&url, &body, opts.token.as_deref(), opts.client_id.as_deref())?;
+    let url = format!(
+        "{}/attestation/register",
+        opts.verifier.trim_end_matches('/')
+    );
+    let (code, resp) = http_post_json(
+        &url,
+        &body,
+        opts.token.as_deref(),
+        opts.client_id.as_deref(),
+    )?;
     if code == 201 {
         println!(
             "enrolled: node {} (require_tpm_quote={}) — /attestation/verify now demands a TPM quote",
@@ -1025,7 +1051,9 @@ fn cmd_enroll(args: &[String]) -> Result<(), String> {
         Ok(())
     } else {
         // Provisioning is not best-effort: surface a non-201 as a hard failure.
-        Err(format!("enroll failed — verifier returned HTTP {code}: {resp}"))
+        Err(format!(
+            "enroll failed — verifier returned HTTP {code}: {resp}"
+        ))
     }
 }
 
@@ -1166,12 +1194,14 @@ const DEFAULT_TRUST_STORE: &str = "/var/lib/kirra/uptane-trust.json";
 /// once; rotations flow through the metadata channel, not re-provisioning).
 fn cmd_trust_provision(args: &[String]) -> Result<(), String> {
     let mut root_path: Option<PathBuf> = None;
-    let mut store_path = std::env::var("KIRRA_OTA_TRUST_STORE")
-        .unwrap_or_else(|_| DEFAULT_TRUST_STORE.to_string());
+    let mut store_path =
+        std::env::var("KIRRA_OTA_TRUST_STORE").unwrap_or_else(|_| DEFAULT_TRUST_STORE.to_string());
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut next = |flag: &str| -> Result<String, String> {
-            it.next().cloned().ok_or_else(|| format!("{flag} needs a value"))
+            it.next()
+                .cloned()
+                .ok_or_else(|| format!("{flag} needs a value"))
         };
         match a.as_str() {
             "--root" => root_path = Some(PathBuf::from(next("--root")?)),
@@ -1210,15 +1240,21 @@ fn cmd_trust_provision(args: &[String]) -> Result<(), String> {
 /// over HTTP (`--metadata-url`, the EP-13 client replacing the file-drop
 /// stub) — either way the carrier is untrusted and verification happens here.
 fn cmd_model_allowlist(args: &[String]) -> Result<(), String> {
-    let mut metadata = std::env::var("KIRRA_OTA_MODEL_METADATA").ok().map(PathBuf::from);
+    let mut metadata = std::env::var("KIRRA_OTA_MODEL_METADATA")
+        .ok()
+        .map(PathBuf::from);
     let mut metadata_url = std::env::var("KIRRA_OTA_MODEL_METADATA_URL").ok();
-    let mut out = std::env::var("KIRRA_OTA_MODEL_ENV_FILE").ok().map(PathBuf::from);
-    let mut store_path = std::env::var("KIRRA_OTA_TRUST_STORE")
-        .unwrap_or_else(|_| DEFAULT_TRUST_STORE.to_string());
+    let mut out = std::env::var("KIRRA_OTA_MODEL_ENV_FILE")
+        .ok()
+        .map(PathBuf::from);
+    let mut store_path =
+        std::env::var("KIRRA_OTA_TRUST_STORE").unwrap_or_else(|_| DEFAULT_TRUST_STORE.to_string());
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut next = |flag: &str| -> Result<String, String> {
-            it.next().cloned().ok_or_else(|| format!("{flag} needs a value"))
+            it.next()
+                .cloned()
+                .ok_or_else(|| format!("{flag} needs a value"))
         };
         match a.as_str() {
             "--metadata" => metadata = Some(PathBuf::from(next("--metadata")?)),
@@ -1228,8 +1264,8 @@ fn cmd_model_allowlist(args: &[String]) -> Result<(), String> {
             other => return Err(format!("unknown model-allowlist flag {other:?}")),
         }
     }
-    let out = out
-        .ok_or("model-allowlist requires --out <env-file> (or KIRRA_OTA_MODEL_ENV_FILE)")?;
+    let out =
+        out.ok_or("model-allowlist requires --out <env-file> (or KIRRA_OTA_MODEL_ENV_FILE)")?;
 
     let text = match (metadata, metadata_url) {
         (Some(_), Some(_)) => {
@@ -1349,9 +1385,7 @@ fn print_usage() {
 /// either 32 raw bytes or 64 hex chars. `None` path → legacy mode (no key).
 /// A path that is SET but unreadable/malformed is a hard error — a node told
 /// to enforce signatures must never silently fall back to hash-only.
-fn load_release_pubkey(
-    path: Option<&str>,
-) -> Result<Option<ed25519_dalek::VerifyingKey>, String> {
+fn load_release_pubkey(path: Option<&str>) -> Result<Option<ed25519_dalek::VerifyingKey>, String> {
     let Some(path) = path else { return Ok(None) };
     let raw = std::fs::read(path).map_err(|e| format!("read release pubkey {path}: {e}"))?;
     let bytes: [u8; 32] = if raw.len() == 32 {
@@ -1403,7 +1437,10 @@ mod enroll_tests {
         assert_eq!(body["expected_pcr16_digest_hex"], "abab");
         assert_eq!(body["require_tpm_quote"], true, "always sent explicitly");
         assert_eq!(body["site"], "dock-3");
-        assert!(body.get("firmware_version").is_none(), "omitted label is absent, not null");
+        assert!(
+            body.get("firmware_version").is_none(),
+            "omitted label is absent, not null"
+        );
 
         // The opt-out path is faithfully carried too.
         let out = enroll_body("n", "P", "cd", false, None, None);
@@ -1414,12 +1451,27 @@ mod enroll_tests {
     #[test]
     fn pcr16_hex_requires_64_sha256_chars() {
         // A real SHA-256 PCR16 value (exactly 64 hex chars) is accepted, trimmed + lowered.
-        assert_eq!(validate_pcr16_hex(&format!("  {}  ", "AB".repeat(32))).unwrap(), "ab".repeat(32));
+        assert_eq!(
+            validate_pcr16_hex(&format!("  {}  ", "AB".repeat(32))).unwrap(),
+            "ab".repeat(32)
+        );
         assert!(validate_pcr16_hex("").is_err(), "empty refused");
-        assert!(validate_pcr16_hex("abab").is_err(), "short (non-64) refused");
-        assert!(validate_pcr16_hex(&"ab".repeat(31)).is_err(), "62 chars refused");
-        assert!(validate_pcr16_hex(&"ab".repeat(33)).is_err(), "66 chars refused");
-        assert!(validate_pcr16_hex(&format!("xy{}", "ab".repeat(31))).is_err(), "non-hex refused");
+        assert!(
+            validate_pcr16_hex("abab").is_err(),
+            "short (non-64) refused"
+        );
+        assert!(
+            validate_pcr16_hex(&"ab".repeat(31)).is_err(),
+            "62 chars refused"
+        );
+        assert!(
+            validate_pcr16_hex(&"ab".repeat(33)).is_err(),
+            "66 chars refused"
+        );
+        assert!(
+            validate_pcr16_hex(&format!("xy{}", "ab".repeat(31))).is_err(),
+            "non-hex refused"
+        );
     }
 
     /// The AK public PEM derived from a PKCS#8 private key round-trips to the same
@@ -1428,7 +1480,9 @@ mod enroll_tests {
     #[test]
     fn ak_public_pem_derives_the_matching_spki() {
         let sk = SigningKey::from_bytes(&[3u8; 32]);
-        let pkcs8 = sk.to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF).unwrap();
+        let pkcs8 = sk
+            .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
+            .unwrap();
         let dir = std::env::temp_dir();
         let path = dir.join(format!("kirra_ak_{}.pem", std::process::id()));
         std::fs::write(&path, pkcs8.as_bytes()).unwrap();
@@ -1443,8 +1497,18 @@ mod enroll_tests {
     #[test]
     fn enroll_opts_parse_defaults_require_quote_true_and_reads_flags() {
         let args: Vec<String> = [
-            "--verifier", "https://v:8090", "--node-id", "edge-7", "--pcr16", "abab",
-            "--ak-pub", "/k/pub.pem", "--token", "adm", "--site", "dock-3",
+            "--verifier",
+            "https://v:8090",
+            "--node-id",
+            "edge-7",
+            "--pcr16",
+            "abab",
+            "--ak-pub",
+            "/k/pub.pem",
+            "--token",
+            "adm",
+            "--site",
+            "dock-3",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -1470,9 +1534,16 @@ mod enroll_tests {
         // (the ak-source match returns early), so this runs offline.
         let pcr = "ab".repeat(32);
         let args: Vec<String> = vec![
-            "--verifier".into(), "https://v".into(), "--node-id".into(), "n".into(),
-            "--pcr16".into(), pcr, "--ak-pub".into(), "/a.pem".into(),
-            "--ak-key".into(), "/b.pem".into(),
+            "--verifier".into(),
+            "https://v".into(),
+            "--node-id".into(),
+            "n".into(),
+            "--pcr16".into(),
+            pcr,
+            "--ak-pub".into(),
+            "/a.pem".into(),
+            "--ak-key".into(),
+            "/b.pem".into(),
         ];
         let err = cmd_enroll(&args).expect_err("both AK sources must be rejected");
         assert!(err.contains("exactly one"), "got: {err}");
@@ -1486,7 +1557,10 @@ mod enroll_tests {
             .map(|s| s.to_string())
             .collect();
         assert!(EnrollOpts::parse(&args).is_err(), "pcr16 is required");
-        assert!(EnrollOpts::parse(&["--pcr16".into(), "ab".into()]).is_err(), "verifier+node required");
+        assert!(
+            EnrollOpts::parse(&["--pcr16".into(), "ab".into()]).is_err(),
+            "verifier+node required"
+        );
     }
 }
 
@@ -1530,11 +1604,21 @@ mod model_allowlist_cli_tests {
             }
         }
         fn bundle_json(&self, version: u64, models: Vec<TargetEntry>) -> String {
-            let targets = TargetsMetadata { version, expires_at_ms: EXP, targets: models };
-            let snapshot =
-                SnapshotMetadata { version, expires_at_ms: EXP, targets_version: version };
-            let timestamp =
-                TimestampMetadata { version, expires_at_ms: EXP, snapshot_version: version };
+            let targets = TargetsMetadata {
+                version,
+                expires_at_ms: EXP,
+                targets: models,
+            };
+            let snapshot = SnapshotMetadata {
+                version,
+                expires_at_ms: EXP,
+                targets_version: version,
+            };
+            let timestamp = TimestampMetadata {
+                version,
+                expires_at_ms: EXP,
+                snapshot_version: version,
+            };
             serde_json::json!({
                 "timestamp": timestamp,
                 "timestamp_sig_b64": sign_timestamp(&timestamp, &self.timestamp_sk),
@@ -1548,14 +1632,17 @@ mod model_allowlist_cli_tests {
     }
 
     fn model(digest: &str) -> TargetEntry {
-        TargetEntry { digest_hex: digest.into(), length_bytes: 64, version: "m-v1".into() }
+        TargetEntry {
+            digest_hex: digest.into(),
+            length_bytes: 64,
+            version: "m-v1".into(),
+        }
     }
 
     /// A per-test workspace dir: trust store + bundle + out file live together
     /// and are removed at the end (parallel-safe, no env mutation).
     fn workspace(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("kirra_ma_cli_{}_{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kirra_ma_cli_{}_{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1583,7 +1670,9 @@ mod model_allowlist_cli_tests {
             "--metadata".into(),
             bundle_file.to_string_lossy().into_owned(),
             "--out".into(),
-            dir.join("model-allowlist.env").to_string_lossy().into_owned(),
+            dir.join("model-allowlist.env")
+                .to_string_lossy()
+                .into_owned(),
             "--trust-store".into(),
             store.to_string(),
         ]
@@ -1596,10 +1685,17 @@ mod model_allowlist_cli_tests {
         let dir = workspace("signed");
         let repo = Repo::new();
         let store = provision(&dir, &repo);
-        let args = args_for(&dir, &store, &repo.bundle_json(5, vec![model(D1), model(D2)]));
+        let args = args_for(
+            &dir,
+            &store,
+            &repo.bundle_json(5, vec![model(D1), model(D2)]),
+        );
         cmd_model_allowlist(&args).expect("derive + write");
         let text = std::fs::read_to_string(dir.join("model-allowlist.env")).unwrap();
-        assert!(text.contains(&format!("KIRRA_MODEL_ALLOWLIST={D1},{D2}\n")), "{text}");
+        assert!(
+            text.contains(&format!("KIRRA_MODEL_ALLOWLIST={D1},{D2}\n")),
+            "{text}"
+        );
         assert!(text.contains("KIRRA_MODEL_ALLOWLIST_STRICT=1\n"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1650,7 +1746,10 @@ mod model_allowlist_cli_tests {
         let err = cmd_model_allowlist(&args).unwrap_err();
         assert!(err.contains("uptane verification refused"), "{err}");
         let after = std::fs::read_to_string(dir.join("model-allowlist.env")).unwrap();
-        assert_eq!(before, after, "a refused replay must not touch the emitted file");
+        assert_eq!(
+            before, after,
+            "a refused replay must not touch the emitted file"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

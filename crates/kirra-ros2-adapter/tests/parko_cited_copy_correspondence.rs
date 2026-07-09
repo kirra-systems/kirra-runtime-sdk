@@ -29,9 +29,7 @@
 
 use std::path::PathBuf;
 
-use kirra_ros2_adapter::config::{
-    CourierAngularBound, ROLLOVER_MIN_LINEAR_VELOCITY_MPS,
-};
+use kirra_ros2_adapter::config::{CourierAngularBound, ROLLOVER_MIN_LINEAR_VELOCITY_MPS};
 
 /// Repo root, derived from this crate's manifest dir
 /// (`<root>/crates/kirra-ros2-adapter`).
@@ -85,7 +83,10 @@ fn field(body: &str, name: &str) -> f64 {
         .find(',')
         .unwrap_or_else(|| panic!("DRIFT GUARD: field `{name}` value must end with a comma"));
     after[..end].trim().parse::<f64>().unwrap_or_else(|_| {
-        panic!("DRIFT GUARD: could not parse parko field `{name}` value `{}`", after[..end].trim())
+        panic!(
+            "DRIFT GUARD: could not parse parko field `{name}` value `{}`",
+            after[..end].trim()
+        )
     })
 }
 
@@ -93,15 +94,18 @@ fn field(body: &str, name: &str) -> f64 {
 /// qualifier matches the DECLARATION, not the symbol's later uses in formulas.
 fn konst(src: &str, name: &str) -> f64 {
     let key = format!("{name}: f64 =");
-    let idx = src
-        .find(&key)
-        .unwrap_or_else(|| panic!("DRIFT GUARD: const `{name}` declaration not found in parko source"));
+    let idx = src.find(&key).unwrap_or_else(|| {
+        panic!("DRIFT GUARD: const `{name}` declaration not found in parko source")
+    });
     let after = &src[idx + key.len()..];
     let end = after
         .find(';')
         .unwrap_or_else(|| panic!("DRIFT GUARD: const `{name}` must end with `;`"));
     after[..end].trim().parse::<f64>().unwrap_or_else(|_| {
-        panic!("DRIFT GUARD: could not parse parko const `{name}` value `{}`", after[..end].trim())
+        panic!(
+            "DRIFT GUARD: could not parse parko const `{name}` value `{}`",
+            after[..end].trim()
+        )
     })
 }
 
@@ -129,30 +133,63 @@ fn sdk_courier_bound_matches_parko_source() {
     let sdk = CourierAngularBound::courier_reference();
 
     // PlatformParams fields (parko: urban_service_robot_reference).
-    assert_eq!(sdk.track_width_m,   field(body, "track_width_m"),
-        "track_width_m drifted from parko's urban_service_robot_reference()");
-    assert_eq!(sdk.cog_height_m,    field(body, "cog_height_m"),
-        "cog_height_m drifted from parko");
-    assert_eq!(sdk.robot_extent_m,  field(body, "robot_extent_m"),
-        "robot_extent_m drifted from parko");
-    assert_eq!(sdk.v_edge_safe_mps, field(body, "v_edge_safe_mps"),
-        "v_edge_safe_mps drifted from parko");
-    assert_eq!(sdk.theta_max_rad,   field(body, "theta_max_rad"),
-        "theta_max_rad drifted from parko");
-    assert_eq!(sdk.ftti_s,          field(body, "ftti_s"),
-        "ftti_s drifted from parko");
-    assert_eq!(sdk.mrc_posture_factor, field(body, "mrc_posture_factor"),
-        "mrc_posture_factor drifted from parko");
-    assert_eq!(sdk.k_roll, field(body, "k_roll"),
-        "k_roll (rollover safety factor) drifted from parko's urban_service_robot_reference()");
+    assert_eq!(
+        sdk.track_width_m,
+        field(body, "track_width_m"),
+        "track_width_m drifted from parko's urban_service_robot_reference()"
+    );
+    assert_eq!(
+        sdk.cog_height_m,
+        field(body, "cog_height_m"),
+        "cog_height_m drifted from parko"
+    );
+    assert_eq!(
+        sdk.robot_extent_m,
+        field(body, "robot_extent_m"),
+        "robot_extent_m drifted from parko"
+    );
+    assert_eq!(
+        sdk.v_edge_safe_mps,
+        field(body, "v_edge_safe_mps"),
+        "v_edge_safe_mps drifted from parko"
+    );
+    assert_eq!(
+        sdk.theta_max_rad,
+        field(body, "theta_max_rad"),
+        "theta_max_rad drifted from parko"
+    );
+    assert_eq!(
+        sdk.ftti_s,
+        field(body, "ftti_s"),
+        "ftti_s drifted from parko"
+    );
+    assert_eq!(
+        sdk.mrc_posture_factor,
+        field(body, "mrc_posture_factor"),
+        "mrc_posture_factor drifted from parko"
+    );
+    assert_eq!(
+        sdk.k_roll,
+        field(body, "k_roll"),
+        "k_roll (rollover safety factor) drifted from parko's urban_service_robot_reference()"
+    );
 
     // Consts cited from parko.
-    assert_eq!(sdk.stop_epsilon_rad_s, konst(&lib_src, "STOP_EPSILON_RAD_S"),
-        "stop_epsilon_rad_s drifted from parko's STOP_EPSILON_RAD_S");
-    assert_eq!(ROLLOVER_MIN_LINEAR_VELOCITY_MPS, konst(&angular_src, "ROLLOVER_MIN_LINEAR_VELOCITY_MPS"),
-        "ROLLOVER_MIN_LINEAR_VELOCITY_MPS drifted from parko");
-    assert_eq!(9.81_f64, konst(&angular_src, "GRAVITY_MPS2"),
-        "the SDK rollover gravity constant drifted from parko's GRAVITY_MPS2");
+    assert_eq!(
+        sdk.stop_epsilon_rad_s,
+        konst(&lib_src, "STOP_EPSILON_RAD_S"),
+        "stop_epsilon_rad_s drifted from parko's STOP_EPSILON_RAD_S"
+    );
+    assert_eq!(
+        ROLLOVER_MIN_LINEAR_VELOCITY_MPS,
+        konst(&angular_src, "ROLLOVER_MIN_LINEAR_VELOCITY_MPS"),
+        "ROLLOVER_MIN_LINEAR_VELOCITY_MPS drifted from parko"
+    );
+    assert_eq!(
+        9.81_f64,
+        konst(&angular_src, "GRAVITY_MPS2"),
+        "the SDK rollover gravity constant drifted from parko's GRAVITY_MPS2"
+    );
 }
 
 /// Meta-test: prove the parser actually discriminates between the two
@@ -168,10 +205,16 @@ fn drift_guard_parser_extracts_the_right_constructor() {
 
     // The reference platform's track is 0.50; the conservative default's is 0.20.
     // If the parser returned the wrong/whole slice these would not differ as expected.
-    assert_eq!(field(reference, "track_width_m"), 0.50,
-        "reference constructor must yield track 0.50");
-    assert_eq!(field(conservative, "track_width_m"), 0.20,
-        "conservative_default must yield track 0.20 — proves fn-body scoping works");
+    assert_eq!(
+        field(reference, "track_width_m"),
+        0.50,
+        "reference constructor must yield track 0.50"
+    );
+    assert_eq!(
+        field(conservative, "track_width_m"),
+        0.20,
+        "conservative_default must yield track 0.20 — proves fn-body scoping works"
+    );
     assert_ne!(
         field(reference, "v_edge_safe_mps"),
         field(conservative, "v_edge_safe_mps"),

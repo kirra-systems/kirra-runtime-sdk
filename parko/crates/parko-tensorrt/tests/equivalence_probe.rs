@@ -37,10 +37,10 @@ fn require_ep() -> bool {
 
 /// argmax over a logit slice — the "decision" the governor would act on.
 fn argmax(scores: &[f32]) -> usize {
-    scores
-        .iter()
-        .enumerate()
-        .fold(0usize, |best, (i, &s)| if s > scores[best] { i } else { best })
+    scores.iter().enumerate().fold(
+        0usize,
+        |best, (i, &s)| if s > scores[best] { i } else { best },
+    )
 }
 
 /// Deterministic NON-zero input (matches `tf32_probe.rs`). A zero image gives 0
@@ -48,7 +48,9 @@ fn argmax(scores: &[f32]) -> usize {
 /// divergence; a varied input exercises the fp32 matmuls that actually differ
 /// between the GPU TRT kernels and single-thread CPU ORT.
 fn deterministic_input(n: usize) -> Vec<f32> {
-    (0..n).map(|i| ((i * 7 + 13) % 251) as f32 / 251.0).collect()
+    (0..n)
+        .map(|i| ((i * 7 + 13) % 251) as f32 / 251.0)
+        .collect()
 }
 
 /// On a TensorRT-enabled ORT runtime, the TRT backend's MNIST DECISION (argmax)
@@ -73,7 +75,9 @@ fn trt_decision_agrees_with_cpu_baseline() {
     }
 
     let cache = std::env::temp_dir().join("parko_trt_equivalence_probe_cache");
-    let cfg = TrtConfig { engine_cache_path: cache.to_string_lossy().into_owned() };
+    let cfg = TrtConfig {
+        engine_cache_path: cache.to_string_lossy().into_owned(),
+    };
 
     // Candidate: the TensorRT backend. If the TRT EP isn't available this Errs —
     // the fail-closed path proven by fail_closed.rs — so SKIP (or fail, if strict).
@@ -99,10 +103,15 @@ fn trt_decision_agrees_with_cpu_baseline() {
     );
 
     // Reference: the single-thread CPU ORT baseline (same dlopened runtime, CPU EP).
-    let cpu = OrtBackend::new(model_path).expect("failed to construct the CPU ORT baseline backend");
+    let cpu =
+        OrtBackend::new(model_path).expect("failed to construct the CPU ORT baseline backend");
 
-    let model_trt = trt.load_model(model_path).expect("TRT model introspection failed");
-    let model_cpu = cpu.load_model(model_path).expect("CPU model introspection failed");
+    let model_trt = trt
+        .load_model(model_path)
+        .expect("TRT model introspection failed");
+    let model_cpu = cpu
+        .load_model(model_path)
+        .expect("CPU model introspection failed");
 
     let input_name = "Input3";
     let output_name = "Plus214_Output_0";
@@ -119,13 +128,26 @@ fn trt_decision_agrees_with_cpu_baseline() {
     let flat = deterministic_input(total);
     let mut named = HashMap::new();
     named.insert(input_name.to_string(), TensorStorage::Borrowed(&flat));
-    let batch = TensorBatch { named_tensors: named, metadata: HashMap::new() };
+    let batch = TensorBatch {
+        named_tensors: named,
+        metadata: HashMap::new(),
+    };
 
     let out_trt = trt.run(&model_trt, &batch).expect("TensorRT run() failed");
-    let out_cpu = cpu.run(&model_cpu, &batch).expect("CPU baseline run() failed");
+    let out_cpu = cpu
+        .run(&model_cpu, &batch)
+        .expect("CPU baseline run() failed");
 
-    let a = out_trt.named_tensors.get(output_name).expect("missing TRT output").as_slice();
-    let b = out_cpu.named_tensors.get(output_name).expect("missing CPU output").as_slice();
+    let a = out_trt
+        .named_tensors
+        .get(output_name)
+        .expect("missing TRT output")
+        .as_slice();
+    let b = out_cpu
+        .named_tensors
+        .get(output_name)
+        .expect("missing CPU output")
+        .as_slice();
     assert_eq!(a.len(), b.len(), "output length must match across backends");
     assert_eq!(a.len(), 10, "expected 10-class MNIST output");
     for (i, s) in a.iter().enumerate() {

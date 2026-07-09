@@ -61,46 +61,207 @@ pub struct EnvKeySpec {
 /// Scope: the verifier service binary + its library modules. The industrial Modbus
 /// gateway (`main.rs`) and the ROS2/parko node have their own configs.
 pub const KIRRA_ENV_KEYS: &[EnvKeySpec] = &[
-    EnvKeySpec { name: "KIRRA_ADMIN_TOKEN", required: true, purpose: "Bearer token for mutation routes; absent/empty → 503 (fail-closed)" },
-    EnvKeySpec { name: "KIRRA_SUPERVISOR_RESET_KEY", required: false, purpose: "Reset-op key; must be non-empty and ≤64 bytes when used" },
-    EnvKeySpec { name: "KIRRA_VERIFIER_MODE", required: false, purpose: "active | passive_standby (read-only standby)" },
-    EnvKeySpec { name: "KIRRA_DB_PATH", required: false, purpose: "SQLite file path (default kirra_verifier.sqlite)" },
-    EnvKeySpec { name: "KIRRA_VERIFIER_ADDR", required: false, purpose: "Listen address (default 0.0.0.0:8090)" },
-    EnvKeySpec { name: "KIRRA_VEHICLE_CLASS", required: true, purpose: "courier | delivery-av | robotaxi; unset/unknown aborts startup (fail-closed)" },
-    EnvKeySpec { name: "KIRRA_TRUSTED_INGRESS_MODE", required: false, purpose: "Enable client-id header enforcement" },
-    EnvKeySpec { name: "KIRRA_CLIENT_ID_HEADER", required: false, purpose: "Header name for identity-gated routes (default x-kirra-client-id)" },
-    EnvKeySpec { name: "KIRRA_REQUIRE_SECURE_TRANSPORT", required: false, purpose: "Require https on gated routes (fail-closed gate)" },
-    EnvKeySpec { name: "KIRRA_FORWARDED_PROTO_HEADER", required: false, purpose: "Proxy proto header (default x-forwarded-proto)" },
-    EnvKeySpec { name: "KIRRA_INSTANCE_ID", required: false, purpose: "Unique HA instance id (default hostname/machine-id)" },
-    EnvKeySpec { name: "KIRRA_INSTANCE_ID_FILE", required: false, purpose: "Persistent instance-id file path" },
-    EnvKeySpec { name: "KIRRA_HEARTBEAT_INTERVAL", required: false, purpose: "HA heartbeat write interval ms (rejects 0)" },
-    EnvKeySpec { name: "KIRRA_PROMOTION_POLL", required: false, purpose: "Standby heartbeat poll interval ms" },
-    EnvKeySpec { name: "KIRRA_PROMOTION_TIMEOUT", required: false, purpose: "Standby promotes if primary silent this long ms" },
-    EnvKeySpec { name: "KIRRA_HA_LEASE_ENABLED", required: false, purpose: "EP-03 lease-based failover trigger (1/true; default off = legacy heartbeat timeout)" },
-    EnvKeySpec { name: "KIRRA_FORCE_PROMOTE", required: false, purpose: "Force this instance Active (break-glass)" },
-    EnvKeySpec { name: "KIRRA_LOG_SIGNING_KEY", required: false, purpose: "base64 Ed25519 seed for the audit signing key" },
-    EnvKeySpec { name: "KIRRA_LOG_SIGNING_KEY_ADOPT", required: false, purpose: "Adopt a new/rotated audit signing key (opt-in)" },
-    EnvKeySpec { name: "KIRRA_LOG_SIGNING_GENESIS_PIN", required: false, purpose: "Pin the durable audit-chain genesis" },
-    EnvKeySpec { name: "KIRRA_TLS_CERT_PATH", required: false, purpose: "PEM cert-chain for in-process TLS (with KEY_PATH)" },
-    EnvKeySpec { name: "KIRRA_TLS_KEY_PATH", required: false, purpose: "PEM private key for in-process TLS (with CERT_PATH)" },
-    EnvKeySpec { name: "KIRRA_TLS_CLIENT_CA_PATH", required: false, purpose: "PEM client-CA → opt-in mTLS (server TLS must be on)" },
-    EnvKeySpec { name: "KIRRA_HTTP_MAX_CONCURRENCY", required: false, purpose: "API-plane concurrency pool (default 512; load-shed 429)" },
-    EnvKeySpec { name: "KIRRA_HTTP_CONSOLE_MAX_CONCURRENCY", required: false, purpose: "Console concurrency pool (default 64)" },
-    EnvKeySpec { name: "KIRRA_HTTP_MAX_BODY_BYTES", required: false, purpose: "Request-body cap (default 262144; 413 over)" },
-    EnvKeySpec { name: "KIRRA_CORS_ALLOWED_ORIGINS", required: false, purpose: "Comma-separated CORS allow-list (empty → deny)" },
-    EnvKeySpec { name: "KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT", required: false, purpose: "WP-16 fleet default: omitted require_tpm_quote → quote-required" },
-    EnvKeySpec { name: "KIRRA_AUDIT_SHIP_PATH", required: false, purpose: "WORM off-box audit-ship sink file (opt-in shipper)" },
-    EnvKeySpec { name: "KIRRA_FABRIC_ASSET_ID", required: false, purpose: "Local fabric asset id for the verifier→fabric feed" },
-    EnvKeySpec { name: "KIRRA_CAPTURE_ENABLED", required: false, purpose: "Enable the learning-loop capture writer (non-safety)" },
-    EnvKeySpec { name: "KIRRA_CAPTURE_SINK_PATH", required: false, purpose: "Capture JSONL sink path" },
-    EnvKeySpec { name: "KIRRA_CANOPEN_NODE_MAP", required: false, purpose: "CANopen node-id → fleet-node map (#84)" },
-    EnvKeySpec { name: "KIRRA_CANOPEN_SDO_BOUNDS", required: false, purpose: "Per-target CANopen SDO magnitude bounds (#85)" },
-    EnvKeySpec { name: "KIRRA_CANOPEN_STRICT_BOUNDS", required: false, purpose: "Deny an unconfigured CANopen SDO download (high-assurance)" },
-    EnvKeySpec { name: "KIRRA_CIP_ATTR_BOUNDS", required: false, purpose: "Per-attribute CIP (EtherNet/IP) magnitude bounds (#85)" },
-    EnvKeySpec { name: "KIRRA_CIP_STRICT_BOUNDS", required: false, purpose: "Deny an unconfigured CIP Set_Attribute_Single (high-assurance)" },
-    EnvKeySpec { name: "KIRRA_DNP3_ANALOG_OUTPUT_ENVELOPE", required: false, purpose: "DNP3 Analog Output g41 magnitude envelope min:max" },
-    EnvKeySpec { name: "KIRRA_GOVERNOR_SIGNING_KEY_SOURCE", required: false, purpose: "Governor release-signing key source (file/dev-fixed/tpm)" },
-    EnvKeySpec { name: "KIRRA_GOVERNOR_SIGNING_KEY_ALLOW_DEV", required: false, purpose: "Admit the dev-fixed governor key source" },
+    EnvKeySpec {
+        name: "KIRRA_ADMIN_TOKEN",
+        required: true,
+        purpose: "Bearer token for mutation routes; absent/empty → 503 (fail-closed)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_SUPERVISOR_RESET_KEY",
+        required: false,
+        purpose: "Reset-op key; must be non-empty and ≤64 bytes when used",
+    },
+    EnvKeySpec {
+        name: "KIRRA_VERIFIER_MODE",
+        required: false,
+        purpose: "active | passive_standby (read-only standby)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_DB_PATH",
+        required: false,
+        purpose: "SQLite file path (default kirra_verifier.sqlite)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_VERIFIER_ADDR",
+        required: false,
+        purpose: "Listen address (default 0.0.0.0:8090)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_VEHICLE_CLASS",
+        required: true,
+        purpose: "courier | delivery-av | robotaxi; unset/unknown aborts startup (fail-closed)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_TRUSTED_INGRESS_MODE",
+        required: false,
+        purpose: "Enable client-id header enforcement",
+    },
+    EnvKeySpec {
+        name: "KIRRA_CLIENT_ID_HEADER",
+        required: false,
+        purpose: "Header name for identity-gated routes (default x-kirra-client-id)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_REQUIRE_SECURE_TRANSPORT",
+        required: false,
+        purpose: "Require https on gated routes (fail-closed gate)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_FORWARDED_PROTO_HEADER",
+        required: false,
+        purpose: "Proxy proto header (default x-forwarded-proto)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_INSTANCE_ID",
+        required: false,
+        purpose: "Unique HA instance id (default hostname/machine-id)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_INSTANCE_ID_FILE",
+        required: false,
+        purpose: "Persistent instance-id file path",
+    },
+    EnvKeySpec {
+        name: "KIRRA_HEARTBEAT_INTERVAL",
+        required: false,
+        purpose: "HA heartbeat write interval ms (rejects 0)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_PROMOTION_POLL",
+        required: false,
+        purpose: "Standby heartbeat poll interval ms",
+    },
+    EnvKeySpec {
+        name: "KIRRA_PROMOTION_TIMEOUT",
+        required: false,
+        purpose: "Standby promotes if primary silent this long ms",
+    },
+    EnvKeySpec {
+        name: "KIRRA_HA_LEASE_ENABLED",
+        required: false,
+        purpose:
+            "EP-03 lease-based failover trigger (1/true; default off = legacy heartbeat timeout)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_FORCE_PROMOTE",
+        required: false,
+        purpose: "Force this instance Active (break-glass)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_LOG_SIGNING_KEY",
+        required: false,
+        purpose: "base64 Ed25519 seed for the audit signing key",
+    },
+    EnvKeySpec {
+        name: "KIRRA_LOG_SIGNING_KEY_ADOPT",
+        required: false,
+        purpose: "Adopt a new/rotated audit signing key (opt-in)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_LOG_SIGNING_GENESIS_PIN",
+        required: false,
+        purpose: "Pin the durable audit-chain genesis",
+    },
+    EnvKeySpec {
+        name: "KIRRA_TLS_CERT_PATH",
+        required: false,
+        purpose: "PEM cert-chain for in-process TLS (with KEY_PATH)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_TLS_KEY_PATH",
+        required: false,
+        purpose: "PEM private key for in-process TLS (with CERT_PATH)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_TLS_CLIENT_CA_PATH",
+        required: false,
+        purpose: "PEM client-CA → opt-in mTLS (server TLS must be on)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_HTTP_MAX_CONCURRENCY",
+        required: false,
+        purpose: "API-plane concurrency pool (default 512; load-shed 429)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_HTTP_CONSOLE_MAX_CONCURRENCY",
+        required: false,
+        purpose: "Console concurrency pool (default 64)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_HTTP_MAX_BODY_BYTES",
+        required: false,
+        purpose: "Request-body cap (default 262144; 413 over)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_CORS_ALLOWED_ORIGINS",
+        required: false,
+        purpose: "Comma-separated CORS allow-list (empty → deny)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT",
+        required: false,
+        purpose: "WP-16 fleet default: omitted require_tpm_quote → quote-required",
+    },
+    EnvKeySpec {
+        name: "KIRRA_AUDIT_SHIP_PATH",
+        required: false,
+        purpose: "WORM off-box audit-ship sink file (opt-in shipper)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_FABRIC_ASSET_ID",
+        required: false,
+        purpose: "Local fabric asset id for the verifier→fabric feed",
+    },
+    EnvKeySpec {
+        name: "KIRRA_CAPTURE_ENABLED",
+        required: false,
+        purpose: "Enable the learning-loop capture writer (non-safety)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_CAPTURE_SINK_PATH",
+        required: false,
+        purpose: "Capture JSONL sink path",
+    },
+    EnvKeySpec {
+        name: "KIRRA_CANOPEN_NODE_MAP",
+        required: false,
+        purpose: "CANopen node-id → fleet-node map (#84)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_CANOPEN_SDO_BOUNDS",
+        required: false,
+        purpose: "Per-target CANopen SDO magnitude bounds (#85)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_CANOPEN_STRICT_BOUNDS",
+        required: false,
+        purpose: "Deny an unconfigured CANopen SDO download (high-assurance)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_CIP_ATTR_BOUNDS",
+        required: false,
+        purpose: "Per-attribute CIP (EtherNet/IP) magnitude bounds (#85)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_CIP_STRICT_BOUNDS",
+        required: false,
+        purpose: "Deny an unconfigured CIP Set_Attribute_Single (high-assurance)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_DNP3_ANALOG_OUTPUT_ENVELOPE",
+        required: false,
+        purpose: "DNP3 Analog Output g41 magnitude envelope min:max",
+    },
+    EnvKeySpec {
+        name: "KIRRA_GOVERNOR_SIGNING_KEY_SOURCE",
+        required: false,
+        purpose: "Governor release-signing key source (file/dev-fixed/tpm)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_GOVERNOR_SIGNING_KEY_ALLOW_DEV",
+        required: false,
+        purpose: "Admit the dev-fixed governor key source",
+    },
 ];
 
 /// True iff `name` is a registered `KIRRA_*` key.
@@ -252,7 +413,9 @@ fn parse_ms(
     default: u64,
     reject_zero: bool,
 ) -> Result<u64, ConfigError> {
-    let Some(v) = non_empty(raw) else { return Ok(default) };
+    let Some(v) = non_empty(raw) else {
+        return Ok(default);
+    };
     match v.parse::<u64>() {
         Ok(0) if reject_zero => Err(ConfigError {
             key,
@@ -321,8 +484,12 @@ impl EffectiveConfig {
 
         Ok(Self {
             config_version: CONFIG_SCHEMA_VERSION,
-            verifier_addr: non_empty(raw.verifier_addr).unwrap_or("0.0.0.0:8090").to_string(),
-            db_path: non_empty(raw.db_path).unwrap_or("kirra_verifier.sqlite").to_string(),
+            verifier_addr: non_empty(raw.verifier_addr)
+                .unwrap_or("0.0.0.0:8090")
+                .to_string(),
+            db_path: non_empty(raw.db_path)
+                .unwrap_or("kirra_verifier.sqlite")
+                .to_string(),
             mode,
             vehicle_class: vehicle_class_typed.as_str().to_string(),
             tls_enabled,
@@ -523,7 +690,11 @@ mod tests {
         let n = names.len();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), n, "the env registry must have no duplicate keys");
+        assert_eq!(
+            names.len(),
+            n,
+            "the env registry must have no duplicate keys"
+        );
         // Spot-check the load-bearing ones are registered.
         for k in [
             "KIRRA_ADMIN_TOKEN",
@@ -540,15 +711,18 @@ mod tests {
     #[test]
     fn unknown_sweep_flags_only_unregistered_kirra_vars() {
         let env = [
-            "KIRRA_ADMIN_TOKEN",   // known
-            "KIRRA_ADMIN_TOEKN",   // typo → unknown
-            "KIRRA_DB_PATH",       // known
-            "KIRRA_MYSTERY",       // unknown
-            "PATH",                // not KIRRA_ → ignored
-            "HOME",                // ignored
+            "KIRRA_ADMIN_TOKEN", // known
+            "KIRRA_ADMIN_TOEKN", // typo → unknown
+            "KIRRA_DB_PATH",     // known
+            "KIRRA_MYSTERY",     // unknown
+            "PATH",              // not KIRRA_ → ignored
+            "HOME",              // ignored
         ];
         let unknown = unknown_kirra_env_vars(env.iter().copied());
-        assert_eq!(unknown, vec!["KIRRA_ADMIN_TOEKN".to_string(), "KIRRA_MYSTERY".to_string()]);
+        assert_eq!(
+            unknown,
+            vec!["KIRRA_ADMIN_TOEKN".to_string(), "KIRRA_MYSTERY".to_string()]
+        );
     }
 
     #[test]
@@ -561,7 +735,18 @@ mod tests {
     fn effective_config_applies_defaults_and_normalizes() {
         // Empty everything → the documented defaults + off flags.
         let c = legacy(
-            None, None, None, Some("robotaxi"), None, None, None, None, None, None, None, None,
+            None,
+            None,
+            None,
+            Some("robotaxi"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert_eq!(c.verifier_addr, "0.0.0.0:8090");
         assert_eq!(c.db_path, "kirra_verifier.sqlite");
@@ -573,8 +758,18 @@ mod tests {
 
         // Standby aliases normalize; a whitespace addr counts as unset.
         let s = legacy(
-            Some("   "), Some("/db"), Some("STANDBY"), Some("Courier"),
-            None, None, None, None, None, None, None, None,
+            Some("   "),
+            Some("/db"),
+            Some("STANDBY"),
+            Some("Courier"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert_eq!(s.verifier_addr, "0.0.0.0:8090");
         assert_eq!(s.mode, "passive_standby");
@@ -584,18 +779,53 @@ mod tests {
     #[test]
     fn tls_requires_both_cert_and_key_mtls_also_ca() {
         let cert_only = legacy(
-            None, None, None, Some("robotaxi"), Some("/c.pem"), None, None, None, None, None, None, None,
+            None,
+            None,
+            None,
+            Some("robotaxi"),
+            Some("/c.pem"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
-        assert!(!cert_only.tls_enabled, "cert without key is not effective TLS (half-config aborts elsewhere)");
+        assert!(
+            !cert_only.tls_enabled,
+            "cert without key is not effective TLS (half-config aborts elsewhere)"
+        );
 
         let tls = legacy(
-            None, None, None, Some("robotaxi"), Some("/c.pem"), Some("/k.pem"), None, None, None, None, None, None,
+            None,
+            None,
+            None,
+            Some("robotaxi"),
+            Some("/c.pem"),
+            Some("/k.pem"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert!(tls.tls_enabled && !tls.mtls_enabled);
 
         let mtls = legacy(
-            None, None, None, Some("robotaxi"), Some("/c.pem"), Some("/k.pem"), Some("/ca.pem"),
-            None, None, None, None, None,
+            None,
+            None,
+            None,
+            Some("robotaxi"),
+            Some("/c.pem"),
+            Some("/k.pem"),
+            Some("/ca.pem"),
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert!(mtls.tls_enabled && mtls.mtls_enabled);
     }
@@ -603,37 +833,90 @@ mod tests {
     #[test]
     fn flags_follow_the_one_true_convention() {
         let on = legacy(
-            None, None, None, Some("robotaxi"), None, None, None,
-            Some("1"), Some("TRUE"), Some(" true "), Some("/ship.log"), Some("seedbytes"),
+            None,
+            None,
+            None,
+            Some("robotaxi"),
+            None,
+            None,
+            None,
+            Some("1"),
+            Some("TRUE"),
+            Some(" true "),
+            Some("/ship.log"),
+            Some("seedbytes"),
         );
         assert!(on.trusted_ingress && on.require_secure_transport && on.require_tpm_quote_default);
         assert!(on.audit_shipping_enabled && on.audit_signing_key_configured);
 
         let off = legacy(
-            None, None, None, Some("robotaxi"), None, None, None,
-            Some("yes"), Some("0"), Some(""), Some("  "), None,
+            None,
+            None,
+            None,
+            Some("robotaxi"),
+            None,
+            None,
+            None,
+            Some("yes"),
+            Some("0"),
+            Some(""),
+            Some("  "),
+            None,
         );
-        assert!(!off.trusted_ingress && !off.require_secure_transport && !off.require_tpm_quote_default);
-        assert!(!off.audit_shipping_enabled, "a whitespace ship path is not enabled");
+        assert!(
+            !off.trusted_ingress && !off.require_secure_transport && !off.require_tpm_quote_default
+        );
+        assert!(
+            !off.audit_shipping_enabled,
+            "a whitespace ship path is not enabled"
+        );
         assert!(!off.audit_signing_key_configured);
     }
 
     #[test]
     fn digest_is_deterministic_and_change_sensitive() {
         let a = legacy(
-            Some("0.0.0.0:8090"), Some("/db"), Some("active"), Some("robotaxi"),
-            None, None, None, None, None, None, None, None,
+            Some("0.0.0.0:8090"),
+            Some("/db"),
+            Some("active"),
+            Some("robotaxi"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         let b = a.clone();
-        assert_eq!(a.effective_digest(), b.effective_digest(), "same config → same digest");
+        assert_eq!(
+            a.effective_digest(),
+            b.effective_digest(),
+            "same config → same digest"
+        );
         assert_eq!(a.effective_digest().len(), 64, "sha-256 hex");
 
         // Any captured field change moves the digest.
         let c = legacy(
-            Some("0.0.0.0:8090"), Some("/db"), Some("passive_standby"), Some("robotaxi"),
-            None, None, None, None, None, None, None, None,
+            Some("0.0.0.0:8090"),
+            Some("/db"),
+            Some("passive_standby"),
+            Some("robotaxi"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
-        assert_ne!(a.effective_digest(), c.effective_digest(), "mode change → different digest");
+        assert_ne!(
+            a.effective_digest(),
+            c.effective_digest(),
+            "mode change → different digest"
+        );
     }
 
     #[test]
@@ -643,20 +926,45 @@ mod tests {
         // `audit_signing_key_configured` boolean is captured — the bytes must be absent
         // from the exact input the digest hashes.
         let with_secret = legacy(
-            Some("0.0.0.0:8090"), Some("/db"), Some("active"), Some("robotaxi"),
-            None, None, None, None, None, None, None, Some("SUPER_SECRET_SEED_BYTES"),
+            Some("0.0.0.0:8090"),
+            Some("/db"),
+            Some("active"),
+            Some("robotaxi"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("SUPER_SECRET_SEED_BYTES"),
         );
-        assert!(with_secret.audit_signing_key_configured, "the key IS registered as configured");
         assert!(
-            !with_secret.canonical_json().contains("SUPER_SECRET_SEED_BYTES"),
+            with_secret.audit_signing_key_configured,
+            "the key IS registered as configured"
+        );
+        assert!(
+            !with_secret
+                .canonical_json()
+                .contains("SUPER_SECRET_SEED_BYTES"),
             "the signing-key bytes must NEVER appear in the digest input"
         );
         // And the digest reflects only the boolean: a config that differs ONLY by a
         // present-vs-absent key still moves the digest (configured is captured), but a
         // config with a DIFFERENT key value hashes identically (bytes not captured).
         let other_secret = legacy(
-            Some("0.0.0.0:8090"), Some("/db"), Some("active"), Some("robotaxi"),
-            None, None, None, None, None, None, None, Some("A_DIFFERENT_SEED"),
+            Some("0.0.0.0:8090"),
+            Some("/db"),
+            Some("active"),
+            Some("robotaxi"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("A_DIFFERENT_SEED"),
         );
         assert_eq!(
             with_secret.effective_digest(),
@@ -673,7 +981,10 @@ mod tests {
 
     /// A valid baseline every bad-value test perturbs one field of.
     fn valid_raw() -> RawConfig<'static> {
-        RawConfig { vehicle_class: Some("robotaxi"), ..RawConfig::default() }
+        RawConfig {
+            vehicle_class: Some("robotaxi"),
+            ..RawConfig::default()
+        }
     }
 
     #[test]
@@ -713,7 +1024,10 @@ mod tests {
         }
         // Absent → the documented default; a valid value is carried verbatim.
         let d = EffectiveConfig::from_values(valid_raw()).unwrap();
-        assert_eq!(d.heartbeat_interval_ms, crate::standby_monitor::HEARTBEAT_INTERVAL_MS);
+        assert_eq!(
+            d.heartbeat_interval_ms,
+            crate::standby_monitor::HEARTBEAT_INTERVAL_MS
+        );
         let v = EffectiveConfig::from_values(RawConfig {
             heartbeat_interval_ms: Some("2500"),
             ..valid_raw()
@@ -754,9 +1068,27 @@ mod tests {
         // "ture" must not read as "off" while the operator believes the
         // feature is armed.
         for (field_name, raw) in [
-            ("KIRRA_FORCE_PROMOTE", RawConfig { force_promote: Some("maybe"), ..valid_raw() }),
-            ("KIRRA_HA_LEASE_ENABLED", RawConfig { ha_lease_enabled: Some("ture"), ..valid_raw() }),
-            ("KIRRA_HA_LEASE_ENABLED", RawConfig { ha_lease_enabled: Some("yes"), ..valid_raw() }),
+            (
+                "KIRRA_FORCE_PROMOTE",
+                RawConfig {
+                    force_promote: Some("maybe"),
+                    ..valid_raw()
+                },
+            ),
+            (
+                "KIRRA_HA_LEASE_ENABLED",
+                RawConfig {
+                    ha_lease_enabled: Some("ture"),
+                    ..valid_raw()
+                },
+            ),
+            (
+                "KIRRA_HA_LEASE_ENABLED",
+                RawConfig {
+                    ha_lease_enabled: Some("yes"),
+                    ..valid_raw()
+                },
+            ),
         ] {
             let err = EffectiveConfig::from_values(raw)
                 .expect_err("an unrecognized HA gate value must refuse boot");
@@ -777,7 +1109,11 @@ mod tests {
         })
         .unwrap();
         assert!(!off.ha_lease_enabled && !off.force_promote);
-        assert!(!EffectiveConfig::from_values(valid_raw()).unwrap().ha_lease_enabled);
+        assert!(
+            !EffectiveConfig::from_values(valid_raw())
+                .unwrap()
+                .ha_lease_enabled
+        );
     }
 
     #[test]
@@ -786,7 +1122,9 @@ mod tests {
         // HaTimings::default() (what an unset environment produced before), and
         // configured values arrive verbatim with the lease gate mapped to the
         // default-TTL LeaseParams.
-        let d = EffectiveConfig::from_values(valid_raw()).unwrap().ha_timings();
+        let d = EffectiveConfig::from_values(valid_raw())
+            .unwrap()
+            .ha_timings();
         assert_eq!(d, crate::standby_monitor::HaTimings::default());
 
         let t = EffectiveConfig::from_values(RawConfig {

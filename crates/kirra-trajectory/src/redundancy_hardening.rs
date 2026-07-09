@@ -103,8 +103,8 @@ pub fn heading_difference(heading1: f64, heading2: f64) -> f64 {
 pub fn ego_frame_velocity(vx: f64, vy: f64, ego_heading: f64) -> (f64, f64) {
     let cos_h = ego_heading.cos();
     let sin_h = ego_heading.sin();
-    let v_lon = cos_h * vx + sin_h * vy;      // longitudinal
-    let v_lat = -sin_h * vx + cos_h * vy;     // lateral
+    let v_lon = cos_h * vx + sin_h * vy; // longitudinal
+    let v_lat = -sin_h * vx + cos_h * vy; // lateral
     (v_lon, v_lat)
 }
 
@@ -245,7 +245,10 @@ mod tests {
     #[test]
     fn heading_difference_half_turn() {
         let diff = (heading_difference(0.0, PI)).abs();
-        assert!((diff - PI).abs() < 1e-9, "0 vs π should be a half-turn difference");
+        assert!(
+            (diff - PI).abs() < 1e-9,
+            "0 vs π should be a half-turn difference"
+        );
     }
 
     #[test]
@@ -258,7 +261,10 @@ mod tests {
     #[test]
     fn ego_frame_velocity_at_pi_over_2_heading() {
         let (v_lon, v_lat) = ego_frame_velocity(10.0, 5.0, PI / 2.0);
-        assert!((v_lon - 5.0).abs() < 1e-9, "at π/2, vx projects to vy (lateral)");
+        assert!(
+            (v_lon - 5.0).abs() < 1e-9,
+            "at π/2, vx projects to vy (lateral)"
+        );
         assert!((v_lat + 10.0).abs() < 1e-9, "at π/2, vy projects to -vx");
     }
 
@@ -268,7 +274,7 @@ mod tests {
         let result = objects_are_equivalent_extended(
             0.0, 0.0, 0.0, 0.0, // positions match
             5.0, 0.0, 5.0, 0.0, // velocities match
-            0.0, 0.0,           // headings match
+            0.0, 0.0, // headings match
             cfg,
         );
         assert_eq!(result, EquivalenceCheckResult::Equivalent);
@@ -280,7 +286,7 @@ mod tests {
         let result = objects_are_equivalent_extended(
             0.0, 0.0, 1.0, 0.0, // position distance = 1 m > 0.5 m tolerance
             5.0, 0.0, 5.0, 0.0, // velocities match
-            0.0, 0.0,           // headings match
+            0.0, 0.0, // headings match
             cfg,
         );
         assert_eq!(result, EquivalenceCheckResult::PositionDivergence);
@@ -292,7 +298,7 @@ mod tests {
         let result = objects_are_equivalent_extended(
             0.0, 0.0, 0.0, 0.0, // positions match
             5.0, 0.0, 5.0, 0.0, // velocities match
-            0.0, 0.2,           // heading diff = 0.2 rad > 0.1 rad tolerance
+            0.0, 0.2, // heading diff = 0.2 rad > 0.1 rad tolerance
             cfg,
         );
         assert_eq!(result, EquivalenceCheckResult::HeadingDivergence);
@@ -304,7 +310,7 @@ mod tests {
         let result = objects_are_equivalent_extended(
             0.0, 0.0, 0.0, 0.0, // positions match
             5.0, 0.0, 6.0, 0.0, // velocity diff = 1 m/s > 0.5 m/s tolerance
-            0.0, 0.0,           // headings match
+            0.0, 0.0, // headings match
             cfg,
         );
         assert_eq!(result, EquivalenceCheckResult::LonVelocityDivergence);
@@ -316,7 +322,7 @@ mod tests {
         let result = objects_are_equivalent_extended(
             0.0, 0.0, 1.0, 0.0, // position divergence
             5.0, 0.0, 6.0, 0.0, // velocity divergence
-            0.0, 0.0,           // headings match
+            0.0, 0.0, // headings match
             cfg,
         );
         assert_eq!(result, EquivalenceCheckResult::MultipleDivergences);
@@ -343,7 +349,10 @@ mod tests {
     #[test]
     fn checked_elapsed_rejects_wraparound() {
         let result = checked_elapsed(1000, 2000, 100); // elapsed 1000 > 100 max
-        assert!(result.is_err(), "large elapsed should be treated as wraparound");
+        assert!(
+            result.is_err(),
+            "large elapsed should be treated as wraparound"
+        );
     }
 
     #[test]

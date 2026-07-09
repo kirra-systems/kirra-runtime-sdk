@@ -41,7 +41,10 @@ impl CorridorSnapshot {
     /// `corridor::Point` → `containment::Point` field-for-field.
     #[must_use]
     pub fn from_taj(corridor: &TajCorridor) -> Self {
-        let conv = |p: &kirra_core::corridor::Point| KernelPoint { x_m: p.x_m, y_m: p.y_m };
+        let conv = |p: &kirra_core::corridor::Point| KernelPoint {
+            x_m: p.x_m,
+            y_m: p.y_m,
+        };
         Self {
             left: corridor.left_boundary().iter().map(conv).collect(),
             right: corridor.right_boundary().iter().map(conv).collect(),
@@ -61,8 +64,20 @@ impl CorridorSnapshot {
     #[must_use]
     pub fn with_ego_rear_cover(mut self, rear_m: f64) -> Self {
         if let (Some(&l0), Some(&r0)) = (self.left.first(), self.right.first()) {
-            self.left.insert(0, KernelPoint { x_m: l0.x_m - rear_m, y_m: l0.y_m });
-            self.right.insert(0, KernelPoint { x_m: r0.x_m - rear_m, y_m: r0.y_m });
+            self.left.insert(
+                0,
+                KernelPoint {
+                    x_m: l0.x_m - rear_m,
+                    y_m: l0.y_m,
+                },
+            );
+            self.right.insert(
+                0,
+                KernelPoint {
+                    x_m: r0.x_m - rear_m,
+                    y_m: r0.y_m,
+                },
+            );
         }
         self
     }
@@ -101,7 +116,8 @@ pub const EGO_REAR_COVER_M: f64 = 1.5;
 /// production path the node feeds into the gate.
 #[must_use]
 pub fn corridor_from_scan(taj: &TajPhaseA, scan: &LaserScan, now_ms: u64) -> CorridorSnapshot {
-    CorridorSnapshot::from_taj(&taj.process(scan, now_ms).corridor).with_ego_rear_cover(EGO_REAR_COVER_M)
+    CorridorSnapshot::from_taj(&taj.process(scan, now_ms).corridor)
+        .with_ego_rear_cover(EGO_REAR_COVER_M)
 }
 
 /// Plain mirror of the `sensor_msgs/LaserScan` fields Taj reads — r2r-free, so
@@ -171,7 +187,11 @@ mod tests {
                 let a = angle_min + i as f64 * inc;
                 let sin = a.sin();
                 // Distance along the ray to the nearer wall (|y| = half).
-                let r = if sin.abs() < 1e-6 { range_max } else { (half_width_m / sin.abs()).min(range_max) };
+                let r = if sin.abs() < 1e-6 {
+                    range_max
+                } else {
+                    (half_width_m / sin.abs()).min(range_max)
+                };
                 r as f32
             })
             .collect();
@@ -200,7 +220,11 @@ mod tests {
     }
 
     fn cmd(v: f64, w: f64) -> ControlCommand {
-        ControlCommand { linear_velocity: v, angular_velocity: w, timestamp_ms: 0 }
+        ControlCommand {
+            linear_velocity: v,
+            angular_velocity: w,
+            timestamp_ms: 0,
+        }
     }
 
     fn courier_footprint() -> kirra_core::containment::VehicleFootprint {
@@ -213,11 +237,17 @@ mod tests {
         // 0.40 margin = 0.70 < 1.2 → a straight command is contained.
         let taj = TajPhaseA::new(kirra_taj::TajConfig::default());
         let snap = corridor_from_scan(&taj, &walls_scan(1.2, 100), 100);
-        assert!(!snap.left.is_empty() && !snap.right.is_empty(), "Taj must produce a bounded corridor");
+        assert!(
+            !snap.left.is_empty() && !snap.right.is_empty(),
+            "Taj must produce a bounded corridor"
+        );
         let corridor = snap.to_corridor(0.5, 500);
-        let verdict = command_stays_in_corridor_default(&courier_footprint(), &cmd(1.0, 0.0), &corridor);
-        assert!(matches!(verdict, EnforceAction::Allow),
-            "a straight command in a ~1.2 m corridor must be admitted; got {verdict:?}");
+        let verdict =
+            command_stays_in_corridor_default(&courier_footprint(), &cmd(1.0, 0.0), &corridor);
+        assert!(
+            matches!(verdict, EnforceAction::Allow),
+            "a straight command in a ~1.2 m corridor must be admitted; got {verdict:?}"
+        );
     }
 
     #[test]
@@ -226,9 +256,12 @@ mod tests {
         let taj = TajPhaseA::new(kirra_taj::TajConfig::default());
         let snap = corridor_from_scan(&taj, &walls_scan(1.2, 100), 100);
         let corridor = snap.to_corridor(0.5, 500);
-        let verdict = command_stays_in_corridor_default(&courier_footprint(), &cmd(1.5, 3.0), &corridor);
-        assert!(matches!(verdict, EnforceAction::DenyBreach(_)),
-            "a command curving into the wall must MRC; got {verdict:?}");
+        let verdict =
+            command_stays_in_corridor_default(&courier_footprint(), &cmd(1.5, 3.0), &corridor);
+        assert!(
+            matches!(verdict, EnforceAction::DenyBreach(_)),
+            "a command curving into the wall must MRC; got {verdict:?}"
+        );
     }
 
     #[test]
@@ -238,9 +271,12 @@ mod tests {
         let taj = TajPhaseA::new(kirra_taj::TajConfig::default());
         let snap = corridor_from_scan(&taj, &walls_scan(3.0, 100), 100);
         let corridor = snap.to_corridor(0.5, 500);
-        let verdict = command_stays_in_corridor_default(&courier_footprint(), &cmd(1.0, 0.2), &corridor);
-        assert!(matches!(verdict, EnforceAction::Allow),
-            "a wide corridor must admit a gentle curve; got {verdict:?}");
+        let verdict =
+            command_stays_in_corridor_default(&courier_footprint(), &cmd(1.0, 0.2), &corridor);
+        assert!(
+            matches!(verdict, EnforceAction::Allow),
+            "a wide corridor must admit a gentle curve; got {verdict:?}"
+        );
     }
 
     #[test]
@@ -250,9 +286,12 @@ mod tests {
         let taj = TajPhaseA::new(kirra_taj::TajConfig::default());
         let snap = corridor_from_scan(&taj, &no_return_scan(100), 100);
         let corridor = snap.to_corridor(0.5, 500);
-        let verdict = command_stays_in_corridor_default(&courier_footprint(), &cmd(1.0, 0.0), &corridor);
-        assert!(matches!(verdict, EnforceAction::DenyBreach(_)),
-            "a no-perception (low-confidence) corridor must fail closed; got {verdict:?}");
+        let verdict =
+            command_stays_in_corridor_default(&courier_footprint(), &cmd(1.0, 0.0), &corridor);
+        assert!(
+            matches!(verdict, EnforceAction::DenyBreach(_)),
+            "a no-perception (low-confidence) corridor must fail closed; got {verdict:?}"
+        );
     }
 
     #[test]
@@ -272,8 +311,14 @@ mod tests {
         assert_eq!(scan.range_max_m, 12.0);
         assert_eq!(scan.ranges, vec![1.0, 2.0, 3.0]);
         // A negative sec clamps to 0 (no underflow).
-        let neg = taj_scan_from_raw(&LaserScanRawFields { stamp_sec: -3, ..raw });
-        assert_eq!(neg.stamp_ms, 500, "negative sec clamps to 0; only the nanosec remains");
+        let neg = taj_scan_from_raw(&LaserScanRawFields {
+            stamp_sec: -3,
+            ..raw
+        });
+        assert_eq!(
+            neg.stamp_ms, 500,
+            "negative sec clamps to 0; only the nanosec remains"
+        );
     }
 
     #[test]
@@ -286,7 +331,10 @@ mod tests {
         assert_eq!(snap.left.len(), perception.corridor.left_boundary().len());
         assert_eq!(snap.confidence, perception.corridor.confidence());
         assert_eq!(snap.age_ms, perception.corridor.age_ms());
-        if let (Some(a), Some(b)) = (snap.left.first(), perception.corridor.left_boundary().first()) {
+        if let (Some(a), Some(b)) = (
+            snap.left.first(),
+            perception.corridor.left_boundary().first(),
+        ) {
             assert_eq!(a.x_m, b.x_m);
             assert_eq!(a.y_m, b.y_m);
         }

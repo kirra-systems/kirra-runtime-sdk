@@ -30,9 +30,7 @@
 
 use std::collections::HashMap;
 
-use parko_core::backend::{
-    BackendDescriptor, InferenceBackend, TensorBatch, TensorStorage,
-};
+use parko_core::backend::{BackendDescriptor, InferenceBackend, TensorBatch, TensorStorage};
 use parko_tensorrt::{TrtBackend, TrtConfig};
 
 /// `PARKO_TRT_REQUIRE_EP` truthy → the TensorRT EP is REQUIRED: a would-be skip
@@ -72,7 +70,9 @@ fn trt_backend_loads_and_runs_when_tensorrt_ep_available() {
 
     // Engine cache in a temp dir so the probe is self-contained and repeatable.
     let cache = std::env::temp_dir().join("parko_trt_positive_probe_cache");
-    let cfg = TrtConfig { engine_cache_path: cache.to_string_lossy().into_owned() };
+    let cfg = TrtConfig {
+        engine_cache_path: cache.to_string_lossy().into_owned(),
+    };
 
     // Construct the TRT backend fail-closed. If the TensorRT EP isn't available
     // (CPU-only ORT / no GPU / no TRT provider) this returns Err — that is the
@@ -105,8 +105,14 @@ fn trt_backend_loads_and_runs_when_tensorrt_ep_available() {
 
     // The posture this backend logged at init is the audited full-precision anchor.
     let posture = backend.posture();
-    assert!(!posture.fp16, "safety path runs full precision — fp16 must be off");
-    assert!(!posture.int8, "safety path runs full precision — int8 must be off");
+    assert!(
+        !posture.fp16,
+        "safety path runs full precision — fp16 must be off"
+    );
+    assert!(
+        !posture.int8,
+        "safety path runs full precision — int8 must be off"
+    );
 
     let model = backend
         .load_model(model_path)
@@ -119,14 +125,21 @@ fn trt_backend_loads_and_runs_when_tensorrt_ep_available() {
         .input_shapes
         .get(input_name)
         .expect("MNIST input node 'Input3' not found");
-    assert_eq!(input_shape, &vec![1, 1, 28, 28], "MNIST input shape mismatch");
+    assert_eq!(
+        input_shape,
+        &vec![1, 1, 28, 28],
+        "MNIST input shape mismatch"
+    );
 
     let total_elems: usize = input_shape.iter().product();
     let flat_image = vec![0.0f32; total_elems];
 
     let mut named = HashMap::new();
     named.insert(input_name.to_string(), TensorStorage::Borrowed(&flat_image));
-    let batch = TensorBatch { named_tensors: named, metadata: HashMap::new() };
+    let batch = TensorBatch {
+        named_tensors: named,
+        metadata: HashMap::new(),
+    };
 
     // First run on TRT may build+cache an engine (slow) before inferring; both
     // must complete without falling back or erroring.

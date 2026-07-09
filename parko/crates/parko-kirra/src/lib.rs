@@ -48,13 +48,15 @@ use kirra_core::kinematics_contract::{
 // `DenyCode` is reached via `EnforceAction::DenyBreach` — see the Nominal branch below.
 use kirra_core::FleetPosture;
 
+use kirra_core::frame_integrity::{
+    resolve_frame_trust, FrameIntegrity, FrameIntegrityCfg, FrameTrust,
+};
 use parko_core::commands::ControlCommand;
 use parko_core::rss::{
     lateral_safe_distance_split, longitudinal_safe_distance, occlusion_limited_speed,
     opposite_direction_safe_distance, RSS_LATERAL_MOTION_EPS_MPS, RSS_LONGITUDINAL_CONFLICT_M,
     RSS_LONGITUDINAL_OVERLAP_M,
 };
-use kirra_core::frame_integrity::{resolve_frame_trust, FrameIntegrity, FrameIntegrityCfg, FrameTrust};
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 use parko_core::{
     commit_zone_blocked, gate_commit_zone_scene, gate_water_scene, water_untraversable_veto,
@@ -75,18 +77,18 @@ pub mod diverse;
 pub mod platform;
 pub use angular_bound::{AngularVelocityBound, PlatformParams, ROLLOVER_MIN_LINEAR_VELOCITY_MPS};
 #[cfg(feature = "verifier-sink")]
-pub use clearance_delivery::{ClearanceDelivery, DeliveryOutcome};
-#[cfg(feature = "verifier-sink")]
 pub use audit_sink::{
     select_audit_client, select_divergence_sink, select_impact_sink, AuditChainLinkerAuditClient,
-    PostureEngineSenderSink,
     AuditChainLinkerDivergenceSink, FatalAuditConfig, ImpactAuditSink,
     ImpactClearanceRejectedPayload, ImpactClearedPayload, ImpactDetectedPayload,
-    ImpactEscalationPayload, ImpactEventSink, InMemoryImpactSink, RecordedClearanceLoop,
-    RecordedImpactLatch, IMPACT_CLEARANCE_REJECTED_EVENT_TYPE, IMPACT_CLEARED_EVENT_TYPE,
-    IMPACT_DETECTED_EVENT_TYPE, IMPACT_ESCALATION_RAISED_EVENT_TYPE, PARKO_DECISION_EVENT_TYPE,
-    PARKO_FAULT_EVENT_TYPE, PARKO_HEALTH_EVENT_TYPE, PARKO_OVERRIDE_EVENT_TYPE,
+    ImpactEscalationPayload, ImpactEventSink, InMemoryImpactSink, PostureEngineSenderSink,
+    RecordedClearanceLoop, RecordedImpactLatch, IMPACT_CLEARANCE_REJECTED_EVENT_TYPE,
+    IMPACT_CLEARED_EVENT_TYPE, IMPACT_DETECTED_EVENT_TYPE, IMPACT_ESCALATION_RAISED_EVENT_TYPE,
+    PARKO_DECISION_EVENT_TYPE, PARKO_FAULT_EVENT_TYPE, PARKO_HEALTH_EVENT_TYPE,
+    PARKO_OVERRIDE_EVENT_TYPE,
 };
+#[cfg(feature = "verifier-sink")]
+pub use clearance_delivery::{ClearanceDelivery, DeliveryOutcome};
 pub use comparator::{GovernorComparator, PostureSignalSink, RssAwareGovernor};
 pub use diverse::DiverseKirraGovernor;
 
@@ -468,8 +470,10 @@ impl KirraGovernor {
             nominal_contract: VehicleKinematicsContract::nominal_reference_profile(),
             fallback_contract: VehicleKinematicsContract::mrc_fallback_profile(),
             rss_feed: RssFeed::NeverFed,
-            nominal_angular_bound: AngularVelocityBound::nominal(PlatformParams::conservative_default()),
-            mrc_angular_bound:     AngularVelocityBound::mrc    (PlatformParams::conservative_default()),
+            nominal_angular_bound: AngularVelocityBound::nominal(
+                PlatformParams::conservative_default(),
+            ),
+            mrc_angular_bound: AngularVelocityBound::mrc(PlatformParams::conservative_default()),
         }
     }
 
@@ -492,7 +496,7 @@ impl KirraGovernor {
             mrc_rad_s
         );
         self.nominal_angular_bound = AngularVelocityBound::Scalar(nominal_rad_s);
-        self.mrc_angular_bound     = AngularVelocityBound::Scalar(mrc_rad_s);
+        self.mrc_angular_bound = AngularVelocityBound::Scalar(mrc_rad_s);
         self
     }
 
@@ -508,10 +512,10 @@ impl KirraGovernor {
     pub fn with_platform_params(mut self, params: PlatformParams) -> Self {
         params.validate().expect(
             "PlatformParams failed validation; check geometry > 0 and \
-             mrc_posture_factor in (0, 1]"
+             mrc_posture_factor in (0, 1]",
         );
         self.nominal_angular_bound = AngularVelocityBound::nominal(params.clone());
-        self.mrc_angular_bound     = AngularVelocityBound::mrc(params);
+        self.mrc_angular_bound = AngularVelocityBound::mrc(params);
         self
     }
 
@@ -567,8 +571,10 @@ impl KirraGovernor {
             nominal_contract: profile,
             fallback_contract: profile,
             rss_feed: RssFeed::NeverFed,
-            nominal_angular_bound: AngularVelocityBound::nominal(PlatformParams::conservative_default()),
-            mrc_angular_bound:     AngularVelocityBound::mrc    (PlatformParams::conservative_default()),
+            nominal_angular_bound: AngularVelocityBound::nominal(
+                PlatformParams::conservative_default(),
+            ),
+            mrc_angular_bound: AngularVelocityBound::mrc(PlatformParams::conservative_default()),
         }
     }
 
@@ -582,8 +588,10 @@ impl KirraGovernor {
             nominal_contract: profile,
             fallback_contract: profile,
             rss_feed: RssFeed::NeverFed,
-            nominal_angular_bound: AngularVelocityBound::nominal(PlatformParams::conservative_default()),
-            mrc_angular_bound:     AngularVelocityBound::mrc    (PlatformParams::conservative_default()),
+            nominal_angular_bound: AngularVelocityBound::nominal(
+                PlatformParams::conservative_default(),
+            ),
+            mrc_angular_bound: AngularVelocityBound::mrc(PlatformParams::conservative_default()),
         }
     }
 
@@ -638,12 +646,16 @@ impl KirraGovernor {
         if let Some(reason) =
             degraded_channel_violation(cur_lin, proposed.linear_velocity, STOP_EPSILON_MPS)
         {
-            return EnforcementAction::Deny { reason: reason.to_string() };
+            return EnforcementAction::Deny {
+                reason: reason.to_string(),
+            };
         }
         if let Some(reason) =
             degraded_channel_violation(cur_ang, proposed.angular_velocity, STOP_EPSILON_RAD_S)
         {
-            return EnforcementAction::Deny { reason: reason.to_string() };
+            return EnforcementAction::Deny {
+                reason: reason.to_string(),
+            };
         }
 
         // Stage 2 — MRC envelope clamp. `MRC_VELOCITY_CEILING_MPS` is a MAGNITUDE
@@ -652,8 +664,9 @@ impl KirraGovernor {
         // (e.g. -8 m/s convergent from -10, which passes the Stage-1 non-increasing
         // gate) unclamped (#407). The angular channel below already clamps by
         // magnitude; the linear channel must match.
-        let safe_linear =
-            proposed.linear_velocity.clamp(-MRC_VELOCITY_CEILING_MPS, MRC_VELOCITY_CEILING_MPS);
+        let safe_linear = proposed
+            .linear_velocity
+            .clamp(-MRC_VELOCITY_CEILING_MPS, MRC_VELOCITY_CEILING_MPS);
         let linear_clamped = safe_linear != proposed.linear_velocity;
         // SOTIF-derived: ω_max evaluated at the COMMAND's linear
         // velocity (clamped to the post-linear-cap value so the
@@ -669,10 +682,10 @@ impl KirraGovernor {
         };
         match (linear_clamped, angular_clamped) {
             (false, false) => EnforcementAction::Allow,
-            (true, false)  => EnforcementAction::ClampLinearVelocity(safe_linear),
-            (false, true)  => EnforcementAction::ClampAngularVelocity(safe_angular),
-            (true, true)   => EnforcementAction::ClampMotion {
-                linear:  Some(safe_linear),
+            (true, false) => EnforcementAction::ClampLinearVelocity(safe_linear),
+            (false, true) => EnforcementAction::ClampAngularVelocity(safe_angular),
+            (true, true) => EnforcementAction::ClampMotion {
+                linear: Some(safe_linear),
                 angular: Some(safe_angular),
             },
         }
@@ -697,7 +710,9 @@ impl KirraGovernor {
     /// at the proposed command's linear velocity.
     // SAFETY: SG8 | REQ: angular-velocity-bound-sotif | TEST: nominal_angular_above_bound_clamps_to_max,nominal_angular_below_bound_passes_through,in_place_rotation_above_bound_is_clamped,linear_and_angular_both_above_bound_returns_clampmotion,locked_out_dominates_high_angular_velocity,reverse_spin_above_bound_clamps_with_correct_sign
     fn nominal_angular_clamp(&self, proposed: &ControlCommand) -> Option<f64> {
-        let omega_max = self.nominal_angular_bound.omega_max(proposed.linear_velocity.abs());
+        let omega_max = self
+            .nominal_angular_bound
+            .omega_max(proposed.linear_velocity.abs());
         if proposed.angular_velocity.abs() > omega_max {
             Some(omega_max * proposed.angular_velocity.signum())
         } else {
@@ -783,10 +798,13 @@ impl KirraGovernor {
                     // so only the linear channel is honored — identical handling
                     // to ClampLinear.
                     EnforceAction::ClampLinear(safe_linear)
-                    | EnforceAction::ClampBoth { linear: safe_linear, .. } => match angular_clamp {
+                    | EnforceAction::ClampBoth {
+                        linear: safe_linear,
+                        ..
+                    } => match angular_clamp {
                         // Both axes need clamping → multi-axis enforcement.
                         Some(safe_angular) => EnforcementAction::ClampMotion {
-                            linear:  Some(safe_linear),
+                            linear: Some(safe_linear),
                             angular: Some(safe_angular),
                         },
                         // Only the linear axis needs clamping.
@@ -983,10 +1001,20 @@ impl KirraGovernor {
         // under full `Trusted` (≤ 0.10 m). The `Degraded` fallback band is good
         // enough for graduated containment but NOT for trusting a mapped zone's
         // placement, so anything short of `Trusted` gates the scene fail-closed.
-        let trusted = matches!(resolve_frame_trust(localization, loc_cfg), FrameTrust::Trusted);
+        let trusted = matches!(
+            resolve_frame_trust(localization, loc_cfg),
+            FrameTrust::Trusted
+        );
         let gated = gate_commit_zone_scene(*commit_zone, trusted);
         self.evaluate_scene_with_commit_zone(
-            proposed, previous, delta_time_s, posture, scene, &gated, cz_cfg, params,
+            proposed,
+            previous,
+            delta_time_s,
+            posture,
+            scene,
+            &gated,
+            cz_cfg,
+            params,
         )
     }
 
@@ -1013,10 +1041,20 @@ impl KirraGovernor {
     ) -> EnforcementAction {
         // STRICT view (see commit-zone wrapper): a map-frame ford earn-back may
         // only be trusted under full `Trusted`; the `Degraded` band gates it.
-        let trusted = matches!(resolve_frame_trust(localization, loc_cfg), FrameTrust::Trusted);
+        let trusted = matches!(
+            resolve_frame_trust(localization, loc_cfg),
+            FrameTrust::Trusted
+        );
         let gated = gate_water_scene(*water, trusted);
         self.evaluate_scene_with_water(
-            proposed, previous, delta_time_s, posture, scene, &gated, water_cfg, params,
+            proposed,
+            previous,
+            delta_time_s,
+            posture,
+            scene,
+            &gated,
+            water_cfg,
+            params,
         )
     }
 
@@ -1040,8 +1078,7 @@ impl KirraGovernor {
     ) -> EnforcementAction {
         if latch.is_latched() {
             return EnforcementAction::Deny {
-                reason: "SG6: post-collision impact latch — immobilize until clearance"
-                    .to_string(),
+                reason: "SG6: post-collision impact latch — immobilize until clearance".to_string(),
             };
         }
         self.evaluate(proposed, previous, delta_time_s, posture)
@@ -1112,13 +1149,19 @@ impl SafetyGovernor for KirraGovernor {
         // the publication-seam gate when `with_external_rss_gate` was
         // declared. A governor that was NEVER fed gates as UNSAFE
         // (RssFeed::NeverFed → MRC/HOLD): "no RSS input" is never "safe".
-        self.gate(proposed, previous, delta_time_s, posture, self.rss_feed.rss_safe())
+        self.gate(
+            proposed,
+            previous,
+            delta_time_s,
+            posture,
+            self.rss_feed.rss_safe(),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{KirraGovernor, MRC_VELOCITY_CEILING_MPS, PlatformParams};
+    use super::{KirraGovernor, PlatformParams, MRC_VELOCITY_CEILING_MPS};
     use parko_core::commands::ControlCommand;
     use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
     use parko_core::RssState;
@@ -1134,7 +1177,11 @@ mod tests {
     }
 
     fn cmd(v: f64) -> ControlCommand {
-        ControlCommand { linear_velocity: v, angular_velocity: 0.0, timestamp_ms: 0 }
+        ControlCommand {
+            linear_velocity: v,
+            angular_velocity: 0.0,
+            timestamp_ms: 0,
+        }
     }
 
     // Test 1 — LockedOut is a hard stop across the full input range.
@@ -1207,7 +1254,11 @@ mod tests {
     fn nominal_nonfinite_angular_is_denied() {
         let gov = KirraGovernor::new();
         for &ang in &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let proposed = ControlCommand { linear_velocity: 1.0, angular_velocity: ang, timestamp_ms: 0 };
+            let proposed = ControlCommand {
+                linear_velocity: 1.0,
+                angular_velocity: ang,
+                timestamp_ms: 0,
+            };
             let action = gov.evaluate(&proposed, None, 0.05, SafetyPosture::Nominal);
             assert!(
                 matches!(action, EnforcementAction::Deny { .. }),
@@ -1221,15 +1272,33 @@ mod tests {
     #[test]
     fn nonfinite_command_is_denied_in_all_postures() {
         let gov = KirraGovernor::new();
-        for posture in [SafetyPosture::Nominal, SafetyPosture::Degraded, SafetyPosture::LockedOut] {
-            let nan_lin = ControlCommand { linear_velocity: f64::NAN, angular_velocity: 0.0, timestamp_ms: 0 };
-            let nan_ang = ControlCommand { linear_velocity: 1.0, angular_velocity: f64::NAN, timestamp_ms: 0 };
+        for posture in [
+            SafetyPosture::Nominal,
+            SafetyPosture::Degraded,
+            SafetyPosture::LockedOut,
+        ] {
+            let nan_lin = ControlCommand {
+                linear_velocity: f64::NAN,
+                angular_velocity: 0.0,
+                timestamp_ms: 0,
+            };
+            let nan_ang = ControlCommand {
+                linear_velocity: 1.0,
+                angular_velocity: f64::NAN,
+                timestamp_ms: 0,
+            };
             assert!(
-                matches!(gov.evaluate(&nan_lin, None, 0.05, posture), EnforcementAction::Deny { .. }),
+                matches!(
+                    gov.evaluate(&nan_lin, None, 0.05, posture),
+                    EnforcementAction::Deny { .. }
+                ),
                 "posture {posture:?}: NaN linear must Deny"
             );
             assert!(
-                matches!(gov.evaluate(&nan_ang, None, 0.05, posture), EnforcementAction::Deny { .. }),
+                matches!(
+                    gov.evaluate(&nan_ang, None, 0.05, posture),
+                    EnforcementAction::Deny { .. }
+                ),
                 "posture {posture:?}: NaN angular must Deny"
             );
         }
@@ -1274,11 +1343,19 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn unsafe_rss() -> RssState {
-        RssState { safe: false, longitudinal_margin: 1.0, lateral_margin: 0.3 }
+        RssState {
+            safe: false,
+            longitudinal_margin: 1.0,
+            lateral_margin: 0.3,
+        }
     }
 
     fn safe_rss() -> RssState {
-        RssState { safe: true, longitudinal_margin: 12.0, lateral_margin: 5.0 }
+        RssState {
+            safe: true,
+            longitudinal_margin: 12.0,
+            lateral_margin: 5.0,
+        }
     }
 
     // Test A — RSS unsafe, input above MRC ceiling: exact MRC contract — ADL-001
@@ -1489,7 +1566,7 @@ mod tests {
     /// the existing enforcement-logic assertions read the same way
     /// they did before #136 landed.
     const H1_NOMINAL_RAD_S: f64 = 1.5;
-    const H1_MRC_RAD_S:     f64 = 0.5;
+    const H1_MRC_RAD_S: f64 = 0.5;
 
     /// Helper: build a governor with the legacy scalar bounds so the
     /// enforcement-logic tests below have a known reference. Tests
@@ -1505,7 +1582,11 @@ mod tests {
     }
 
     fn cmd_twist(linear: f64, angular: f64) -> ControlCommand {
-        ControlCommand { linear_velocity: linear, angular_velocity: angular, timestamp_ms: 0 }
+        ControlCommand {
+            linear_velocity: linear,
+            angular_velocity: angular,
+            timestamp_ms: 0,
+        }
     }
 
     fn effective_angular(action: &EnforcementAction, proposed: f64) -> f64 {
@@ -1566,9 +1647,9 @@ mod tests {
             EnforcementAction::ClampAngularVelocity(a) => {
                 assert_eq!(a, H1_NOMINAL_RAD_S);
             }
-            other => panic!(
-                "in-place rotation with excess spin must clamp angular axis; got {other:?}"
-            ),
+            other => {
+                panic!("in-place rotation with excess spin must clamp angular axis; got {other:?}")
+            }
         }
     }
 
@@ -1620,10 +1701,7 @@ mod tests {
     fn degraded_angular_above_bound_clamps_to_mrc_angular_ceiling() {
         let gov = legacy_scalar_gov();
         // linear is within MRC linear cap so only the angular axis fires.
-        let proposed = cmd_twist(
-            MRC_VELOCITY_CEILING_MPS - 0.5,
-            H1_MRC_RAD_S + 0.3,
-        );
+        let proposed = cmd_twist(MRC_VELOCITY_CEILING_MPS - 0.5, H1_MRC_RAD_S + 0.3);
         // Issue #70: a moving, non-increasing `previous` so the decel-to-stop
         // gate passes and the angular MRC clamp is what the test exercises.
         let prev = proposed.clone();
@@ -1644,10 +1722,7 @@ mod tests {
     #[test]
     fn degraded_both_axes_above_bound_returns_clampmotion() {
         let gov = legacy_scalar_gov();
-        let proposed = cmd_twist(
-            MRC_VELOCITY_CEILING_MPS + 2.0,
-            H1_MRC_RAD_S + 0.4,
-        );
+        let proposed = cmd_twist(MRC_VELOCITY_CEILING_MPS + 2.0, H1_MRC_RAD_S + 0.4);
         // Issue #70: moving, non-increasing `previous` so the gate passes and
         // the dual-axis MRC clamp is what the test exercises.
         let prev = proposed.clone();
@@ -1682,13 +1757,17 @@ mod tests {
     fn with_angular_bounds_override_changes_verdict() {
         // Tighter platform: 0.3 rad/s nominal cap. A command at 0.5 rad/s
         // that would be Allow under the placeholder default now clamps.
-        let gov = KirraGovernor::new().with_angular_bounds(0.3, 0.1).with_external_rss_gate();
+        let gov = KirraGovernor::new()
+            .with_angular_bounds(0.3, 0.1)
+            .with_external_rss_gate();
         let prev = cmd_twist(2.0, 0.0);
         let proposed = cmd_twist(2.0, 0.5);
         let action = gov.evaluate(&proposed, Some(&prev), 0.05, SafetyPosture::Nominal);
         match action {
             EnforcementAction::ClampAngularVelocity(a) => assert_eq!(a, 0.3),
-            other => panic!("expected ClampAngularVelocity(0.3) with tightened bound; got {other:?}"),
+            other => {
+                panic!("expected ClampAngularVelocity(0.3) with tightened bound; got {other:?}")
+            }
         }
     }
 
@@ -1724,16 +1803,28 @@ mod tests {
             .with_platform_params(PlatformParams::urban_service_robot_reference())
             .with_external_rss_gate();
         let action_urban = urban.evaluate(
-            &proposed, Some(&cmd_twist(1.0, 0.0)), 0.05, SafetyPosture::Nominal);
-        assert!(matches!(action_urban, EnforcementAction::Allow),
-            "urban-reference: 0.5 rad/s at v=1 m/s must Allow; got {action_urban:?}");
+            &proposed,
+            Some(&cmd_twist(1.0, 0.0)),
+            0.05,
+            SafetyPosture::Nominal,
+        );
+        assert!(
+            matches!(action_urban, EnforcementAction::Allow),
+            "urban-reference: 0.5 rad/s at v=1 m/s must Allow; got {action_urban:?}"
+        );
         let cons = KirraGovernor::new().with_external_rss_gate();
         let action_cons = cons.evaluate(
-            &proposed, Some(&cmd_twist(1.0, 0.0)), 0.05, SafetyPosture::Nominal);
+            &proposed,
+            Some(&cmd_twist(1.0, 0.0)),
+            0.05,
+            SafetyPosture::Nominal,
+        );
         match action_cons {
             EnforcementAction::ClampAngularVelocity(a) => {
-                assert!((a - 0.2_f64).abs() < 1e-9,
-                    "conservative default: expected 0.2 rad/s, got {a}");
+                assert!(
+                    (a - 0.2_f64).abs() < 1e-9,
+                    "conservative default: expected 0.2 rad/s, got {a}"
+                );
             }
             other => panic!("conservative default must clamp; got {other:?}"),
         }
@@ -1750,8 +1841,10 @@ mod tests {
         let action = gov.evaluate(&proposed, None, 0.05, SafetyPosture::Nominal);
         match action {
             EnforcementAction::ClampAngularVelocity(a) => {
-                assert!((a - 0.833_f64).abs() < 1e-2,
-                    "in-place: expected ~0.833 (sweep), got {a}");
+                assert!(
+                    (a - 0.833_f64).abs() < 1e-2,
+                    "in-place: expected ~0.833 (sweep), got {a}"
+                );
             }
             other => panic!("expected ClampAngularVelocity at v=0; got {other:?}"),
         }
@@ -1772,8 +1865,10 @@ mod tests {
         let action = gov.evaluate(&proposed, Some(&prev), 0.05, SafetyPosture::Degraded);
         match action {
             EnforcementAction::ClampAngularVelocity(a) => {
-                assert!((a - 0.4167_f64).abs() < 1e-2,
-                    "MRC in-place: expected ~0.4167, got {a}");
+                assert!(
+                    (a - 0.4167_f64).abs() < 1e-2,
+                    "MRC in-place: expected ~0.4167, got {a}"
+                );
             }
             other => panic!("expected ClampAngularVelocity under MRC; got {other:?}"),
         }
@@ -1783,11 +1878,17 @@ mod tests {
     /// confirmation for the H1 enforcement-logic tests.
     #[test]
     fn with_angular_bounds_scalar_back_compat_is_v_independent() {
-        let gov = KirraGovernor::new().with_angular_bounds(0.7, 0.3).with_external_rss_gate();
+        let gov = KirraGovernor::new()
+            .with_angular_bounds(0.7, 0.3)
+            .with_external_rss_gate();
         for v in [0.0_f64, 1.0, 5.0] {
             let proposed = cmd_twist(v, 0.8);
             let action = gov.evaluate(
-                &proposed, Some(&cmd_twist(v, 0.0)), 0.05, SafetyPosture::Nominal);
+                &proposed,
+                Some(&cmd_twist(v, 0.0)),
+                0.05,
+                SafetyPosture::Nominal,
+            );
             match action {
                 EnforcementAction::ClampAngularVelocity(a) => {
                     assert!((a - 0.7_f64).abs() < 1e-9, "v={v}: expected 0.7, got {a}");
@@ -1862,8 +1963,11 @@ mod tests {
             !matches!(action, EnforcementAction::Deny { .. }),
             "Degraded must admit a decelerating command; got {action:?}"
         );
-        assert_eq!(effective_velocity(action, 2.0), 2.0,
-            "a within-MRC decelerating command passes through unchanged");
+        assert_eq!(
+            effective_velocity(action, 2.0),
+            2.0,
+            "a within-MRC decelerating command passes through unchanged"
+        );
     }
 
     /// Holding at a standstill (0 → 0) on both channels is admitted — the
@@ -1872,7 +1976,12 @@ mod tests {
     fn degraded_hold_at_stop_is_admitted() {
         let gov = KirraGovernor::new();
         let prev = cmd_twist(0.0, 0.0);
-        let action = gov.evaluate(&cmd_twist(0.0, 0.0), Some(&prev), 0.05, SafetyPosture::Degraded);
+        let action = gov.evaluate(
+            &cmd_twist(0.0, 0.0),
+            Some(&prev),
+            0.05,
+            SafetyPosture::Degraded,
+        );
         assert!(
             matches!(action, EnforcementAction::Allow),
             "Degraded must admit holding at a standstill; got {action:?}"
@@ -1885,10 +1994,12 @@ mod tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod scene_rss_tests {
-    use super::{compute_occlusion_cap, compute_scene_rss, impact_evidence_with_vanished, KirraGovernor};
+    use super::{
+        compute_occlusion_cap, compute_scene_rss, impact_evidence_with_vanished, KirraGovernor,
+    };
+    use kirra_core::frame_integrity::{FrameIntegrity, FrameIntegrityCfg, LocalizationChannel};
     use parko_core::commands::ControlCommand;
     use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
-    use kirra_core::frame_integrity::{FrameIntegrity, FrameIntegrityCfg, LocalizationChannel};
     use parko_core::{
         non_yielding_clearance, AgentScene, ClearanceLoop, ClearanceState, CommitZoneCfg,
         CommitZoneMap, CommitZoneScene, ImpactCfg, ImpactEvidence, ImpactLatch, NonYieldingAgent,
@@ -1927,7 +2038,10 @@ mod scene_rss_tests {
     }
 
     fn long_unsafe_agent() -> RssAgent {
-        RssAgent { actual_longitudinal_gap_m: 0.1, ..safe_agent() }
+        RssAgent {
+            actual_longitudinal_gap_m: 0.1,
+            ..safe_agent()
+        }
     }
 
     fn lat_unsafe_agent() -> RssAgent {
@@ -1946,7 +2060,11 @@ mod scene_rss_tests {
     }
 
     fn cmd(linear: f64) -> ControlCommand {
-        ControlCommand { linear_velocity: linear, angular_velocity: 0.0, timestamp_ms: 0 }
+        ControlCommand {
+            linear_velocity: linear,
+            angular_velocity: 0.0,
+            timestamp_ms: 0,
+        }
     }
 
     // --- compute_scene_rss: scene semantics ---
@@ -1958,14 +2076,18 @@ mod scene_rss_tests {
 
     #[test]
     fn absent_is_fail_closed_unsafe() {
-        assert!(!compute_scene_rss(&AgentScene::Absent, &params()).safe,
-            "no perception data must be fail-closed unsafe (absent != clear)");
+        assert!(
+            !compute_scene_rss(&AgentScene::Absent, &params()).safe,
+            "no perception data must be fail-closed unsafe (absent != clear)"
+        );
     }
 
     #[test]
     fn empty_agents_vector_is_fail_closed() {
-        assert!(!compute_scene_rss(&AgentScene::Agents(vec![]), &params()).safe,
-            "an empty Agents vector is ambiguous vs KnownEmpty → fail-closed");
+        assert!(
+            !compute_scene_rss(&AgentScene::Agents(vec![]), &params()).safe,
+            "an empty Agents vector is ambiguous vs KnownEmpty → fail-closed"
+        );
     }
 
     #[test]
@@ -1996,13 +2118,20 @@ mod scene_rss_tests {
 
         // The veto only NARROWS for genuine stillness — the same close, dead-center pair is
         // STILL unsafe if it is closing laterally (a cut-in) ...
-        let cut_in = RssAgent { ego_lat_vel: 2.0, obj_lat_vel: 2.0, ..queue };
+        let cut_in = RssAgent {
+            ego_lat_vel: 2.0,
+            obj_lat_vel: 2.0,
+            ..queue
+        };
         assert!(
             !compute_scene_rss(&AgentScene::Agents(vec![cut_in]), &params()).safe,
             "the same close dead-center pair CLOSING laterally is still vetoed"
         );
         // ... or longitudinally unsafe (abreast).
-        let abreast = RssAgent { actual_longitudinal_gap_m: 0.2, ..queue };
+        let abreast = RssAgent {
+            actual_longitudinal_gap_m: 0.2,
+            ..queue
+        };
         assert!(
             !compute_scene_rss(&AgentScene::Agents(vec![abreast]), &params()).safe,
             "a longitudinally-unsafe (abreast) pair is still vetoed"
@@ -2056,8 +2185,10 @@ mod scene_rss_tests {
     #[test]
     fn one_unsafe_among_safe_is_worst_case_unsafe() {
         let scene = AgentScene::Agents(vec![safe_agent(), long_unsafe_agent(), safe_agent()]);
-        assert!(!compute_scene_rss(&scene, &params()).safe,
-            "a single unsafe agent makes the whole-scene verdict unsafe (worst case)");
+        assert!(
+            !compute_scene_rss(&scene, &params()).safe,
+            "a single unsafe agent makes the whole-scene verdict unsafe (worst case)"
+        );
     }
 
     // --- oncoming (head-on) agents take the opposite-direction bound ---
@@ -2072,26 +2203,50 @@ mod scene_rss_tests {
         // ~31 m. 20 m sits between → safe as a lead, unsafe as oncoming.
         let gap = 20.0;
         // In-lane (laterally overlapping) so the longitudinal axis is live for both.
-        let lead = RssAgent { ego_vel: 10.0, lead_vel: 10.0, actual_longitudinal_gap_m: gap,
-            ego_lat_vel: 0.0, obj_lat_vel: 0.0, actual_lateral_separation_m: 1.5, oncoming: false };
-        let onc = RssAgent { oncoming: true, ..lead };
+        let lead = RssAgent {
+            ego_vel: 10.0,
+            lead_vel: 10.0,
+            actual_longitudinal_gap_m: gap,
+            ego_lat_vel: 0.0,
+            obj_lat_vel: 0.0,
+            actual_lateral_separation_m: 1.5,
+            oncoming: false,
+        };
+        let onc = RssAgent {
+            oncoming: true,
+            ..lead
+        };
 
         let lead_state = compute_scene_rss(&AgentScene::Agents(vec![lead]), &params());
         let onc_state = compute_scene_rss(&AgentScene::Agents(vec![onc]), &params());
         assert!(lead_state.safe, "a same-direction lead at {gap} m is safe");
-        assert!(!onc_state.safe, "the SAME gap is unsafe for an oncoming (head-on) vehicle");
-        assert!(onc_state.longitudinal_margin < lead_state.longitudinal_margin,
-            "the head-on bound leaves a smaller (here negative) margin");
+        assert!(
+            !onc_state.safe,
+            "the SAME gap is unsafe for an oncoming (head-on) vehicle"
+        );
+        assert!(
+            onc_state.longitudinal_margin < lead_state.longitudinal_margin,
+            "the head-on bound leaves a smaller (here negative) margin"
+        );
     }
 
     #[test]
     fn oncoming_agent_with_ample_gap_is_safe() {
         // A wide gap clears even the (larger) head-on requirement. In-lane
         // (laterally overlapping) so the head-on longitudinal bound actually applies.
-        let onc = RssAgent { ego_vel: 10.0, lead_vel: 10.0, actual_longitudinal_gap_m: 1000.0,
-            ego_lat_vel: 0.0, obj_lat_vel: 0.0, actual_lateral_separation_m: 1.5, oncoming: true };
-        assert!(compute_scene_rss(&AgentScene::Agents(vec![onc]), &params()).safe,
-            "an oncoming vehicle far enough away is safe under the head-on bound");
+        let onc = RssAgent {
+            ego_vel: 10.0,
+            lead_vel: 10.0,
+            actual_longitudinal_gap_m: 1000.0,
+            ego_lat_vel: 0.0,
+            obj_lat_vel: 0.0,
+            actual_lateral_separation_m: 1.5,
+            oncoming: true,
+        };
+        assert!(
+            compute_scene_rss(&AgentScene::Agents(vec![onc]), &params()).safe,
+            "an oncoming vehicle far enough away is safe under the head-on bound"
+        );
     }
 
     // --- both axes evaluated per pair ---
@@ -2099,13 +2254,19 @@ mod scene_rss_tests {
     #[test]
     fn longitudinal_axis_is_evaluated() {
         let scene = AgentScene::Agents(vec![long_unsafe_agent()]);
-        assert!(!compute_scene_rss(&scene, &params()).safe, "longitudinal violation must be caught");
+        assert!(
+            !compute_scene_rss(&scene, &params()).safe,
+            "longitudinal violation must be caught"
+        );
     }
 
     #[test]
     fn lateral_axis_is_evaluated() {
         let scene = AgentScene::Agents(vec![lat_unsafe_agent()]);
-        assert!(!compute_scene_rss(&scene, &params()).safe, "lateral violation must be caught");
+        assert!(
+            !compute_scene_rss(&scene, &params()).safe,
+            "lateral violation must be caught"
+        );
     }
 
     /// The lateral defence-in-depth is GATED on longitudinal proximity (the RSS
@@ -2118,12 +2279,19 @@ mod scene_rss_tests {
         // Same lateral shortfall as `lat_unsafe_agent`, but longitudinally FAR
         // (well beyond RSS_LONGITUDINAL_CONFLICT_M) → longitudinally safe → not
         // dangerous.
-        let far = RssAgent { actual_longitudinal_gap_m: 50.0, ..lat_unsafe_agent() };
-        assert!(compute_scene_rss(&AgentScene::Agents(vec![far]), &params()).safe,
-            "a lateral shortfall 50 m ahead is not a collision risk (RSS conjunction)");
+        let far = RssAgent {
+            actual_longitudinal_gap_m: 50.0,
+            ..lat_unsafe_agent()
+        };
+        assert!(
+            compute_scene_rss(&AgentScene::Agents(vec![far]), &params()).safe,
+            "a lateral shortfall 50 m ahead is not a collision risk (RSS conjunction)"
+        );
         // Control: the SAME shortfall when alongside is still caught.
-        assert!(!compute_scene_rss(&AgentScene::Agents(vec![lat_unsafe_agent()]), &params()).safe,
-            "the shortfall WHEN ALONGSIDE is still caught (defence-in-depth intact)");
+        assert!(
+            !compute_scene_rss(&AgentScene::Agents(vec![lat_unsafe_agent()]), &params()).safe,
+            "the shortfall WHEN ALONGSIDE is still caught (defence-in-depth intact)"
+        );
     }
 
     // --- NaN / non-finite → failsafe → unsafe (agent evaluated, not skipped) ---
@@ -2132,14 +2300,20 @@ mod scene_rss_tests {
     fn nan_velocity_agent_is_failsafe_unsafe() {
         // ego_vel NaN → longitudinal_safe_distance returns RSS_FAILSAFE_DISTANCE_M
         // (1e6 m); the agent's realistic 1000 m gap is < 1e6 → unsafe.
-        let agent = RssAgent { ego_vel: f64::NAN, ..safe_agent() };
+        let agent = RssAgent {
+            ego_vel: f64::NAN,
+            ..safe_agent()
+        };
         assert!(!compute_scene_rss(&AgentScene::Agents(vec![agent]), &params()).safe);
     }
 
     #[test]
     fn nan_actual_gap_agent_is_unsafe() {
         // A NaN actual gap makes `actual >= required` false → unsafe.
-        let agent = RssAgent { actual_longitudinal_gap_m: f64::NAN, ..safe_agent() };
+        let agent = RssAgent {
+            actual_longitudinal_gap_m: f64::NAN,
+            ..safe_agent()
+        };
         assert!(!compute_scene_rss(&AgentScene::Agents(vec![agent]), &params()).safe);
     }
 
@@ -2148,9 +2322,15 @@ mod scene_rss_tests {
     #[test]
     fn over_max_agents_is_fail_closed() {
         let over = AgentScene::Agents(vec![safe_agent(); MAX_RSS_AGENTS + 1]);
-        assert!(!compute_scene_rss(&over, &params()).safe, "more than MAX_RSS_AGENTS → fail-closed");
+        assert!(
+            !compute_scene_rss(&over, &params()).safe,
+            "more than MAX_RSS_AGENTS → fail-closed"
+        );
         let at_cap = AgentScene::Agents(vec![safe_agent(); MAX_RSS_AGENTS]);
-        assert!(compute_scene_rss(&at_cap, &params()).safe, "exactly MAX_RSS_AGENTS is still evaluated");
+        assert!(
+            compute_scene_rss(&at_cap, &params()).safe,
+            "exactly MAX_RSS_AGENTS is still evaluated"
+        );
     }
 
     // --- THE KEY TEST: checker overrides doer ---
@@ -2159,7 +2339,11 @@ mod scene_rss_tests {
     fn checker_over_doer_pairwise_overrides_pushed_safe_bool() {
         let mut gov = KirraGovernor::new();
         // The doer PUSHES safe:true via the old trusted path.
-        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
+        gov.update_rss_state(RssState {
+            safe: true,
+            longitudinal_margin: f64::MAX,
+            lateral_margin: f64::MAX,
+        });
 
         // 8 m/s steady: within the Nominal envelope (max 35) but above the MRC
         // ceiling (5) — so a Nominal-safe verdict is `Allow`, while an RSS-unsafe
@@ -2170,22 +2354,40 @@ mod scene_rss_tests {
 
         // The doer's pushed safe:true → trusts the bool → Nominal Allow.
         let doer_pushed = gov.evaluate(&proposed, Some(&prev), 0.05, SafetyPosture::Nominal);
-        assert!(matches!(doer_pushed, EnforcementAction::Allow),
-            "pushed safe:true yields Nominal Allow, got {doer_pushed:?}");
+        assert!(
+            matches!(doer_pushed, EnforcementAction::Allow),
+            "pushed safe:true yields Nominal Allow, got {doer_pushed:?}"
+        );
 
         // SAME pushed state, but evaluate_scene COMPUTES the verdict from the
         // scene. A clear scene agrees (Allow); the unsafe scene OVERRIDES the
         // pushed bool and applies the MRC profile (not Allow).
         let computed_clear = gov.evaluate_scene(
-            &proposed, Some(&prev), 0.05, SafetyPosture::Nominal, &AgentScene::KnownEmpty, &params());
-        assert!(matches!(computed_clear, EnforcementAction::Allow),
-            "clear computed scene matches the safe verdict, got {computed_clear:?}");
+            &proposed,
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &params(),
+        );
+        assert!(
+            matches!(computed_clear, EnforcementAction::Allow),
+            "clear computed scene matches the safe verdict, got {computed_clear:?}"
+        );
 
         let computed_unsafe = gov.evaluate_scene(
-            &proposed, Some(&prev), 0.05, SafetyPosture::Nominal, &unsafe_scene, &params());
-        assert!(!matches!(computed_unsafe, EnforcementAction::Allow),
+            &proposed,
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+            &unsafe_scene,
+            &params(),
+        );
+        assert!(
+            !matches!(computed_unsafe, EnforcementAction::Allow),
             "the governor's OWN pairwise computation must override the doer's safe:true \
-             and apply the RSS-unsafe MRC profile, got {computed_unsafe:?}");
+             and apply the RSS-unsafe MRC profile, got {computed_unsafe:?}"
+        );
     }
 
     // --- RSS rule iv: occlusion speed bound (issue #122) ---
@@ -2195,14 +2397,26 @@ mod scene_rss_tests {
     #[test]
     fn occlusion_absent_is_fail_closed_unsafe() {
         let mut gov = KirraGovernor::new();
-        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
+        gov.update_rss_state(RssState {
+            safe: true,
+            longitudinal_margin: f64::MAX,
+            lateral_margin: f64::MAX,
+        });
         let proposed = cmd(8.0);
         let prev = cmd(8.0);
         let action = gov.evaluate_scene_with_occlusion(
-            &proposed, Some(&prev), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &OcclusionScene::Absent, &params());
-        assert!(!matches!(action, EnforcementAction::Allow),
-            "absent occlusion data must fail closed (not Allow), got {action:?}");
+            &proposed,
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &OcclusionScene::Absent,
+            &params(),
+        );
+        assert!(
+            !matches!(action, EnforcementAction::Allow),
+            "absent occlusion data must fail closed (not Allow), got {action:?}"
+        );
     }
 
     /// KNOWN-CLEAR sightline imposes no rule-iv bound: with a clear agent scene
@@ -2213,10 +2427,18 @@ mod scene_rss_tests {
         let proposed = cmd(8.0);
         let prev = cmd(8.0);
         let action = gov.evaluate_scene_with_occlusion(
-            &proposed, Some(&prev), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &OcclusionScene::KnownClear, &params());
-        assert!(matches!(action, EnforcementAction::Allow),
-            "a verified-clear sightline must not bind rule iv, got {action:?}");
+            &proposed,
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &OcclusionScene::KnownClear,
+            &params(),
+        );
+        assert!(
+            matches!(action, EnforcementAction::Allow),
+            "a verified-clear sightline must not bind rule iv, got {action:?}"
+        );
     }
 
     /// THE KEY TEST (rule-iv analogue of the pairwise checker-over-doer): a tight
@@ -2225,18 +2447,33 @@ mod scene_rss_tests {
     #[test]
     fn checker_over_doer_occlusion_overrides_pushed_safe_bool() {
         let mut gov = KirraGovernor::new();
-        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
+        gov.update_rss_state(RssState {
+            safe: true,
+            longitudinal_margin: f64::MAX,
+            lateral_margin: f64::MAX,
+        });
         let proposed = cmd(8.0);
         let prev = cmd(8.0);
         let p = params();
         // 5 m of sightline → cap well below 8 m/s (fixture self-check).
-        let tight = OcclusionScene::Limited { d_sight_m: 5.0, v_emerge_max_mps: 0.0 };
-        assert!(compute_occlusion_cap(&tight, &p) < 8.0,
-            "fixture: the occlusion cap must bind below the proposed 8 m/s");
+        let tight = OcclusionScene::Limited {
+            d_sight_m: 5.0,
+            v_emerge_max_mps: 0.0,
+        };
+        assert!(
+            compute_occlusion_cap(&tight, &p) < 8.0,
+            "fixture: the occlusion cap must bind below the proposed 8 m/s"
+        );
 
         let action = gov.evaluate_scene_with_occlusion(
-            &proposed, Some(&prev), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &tight, &p);
+            &proposed,
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &tight,
+            &p,
+        );
         assert!(!matches!(action, EnforcementAction::Allow),
             "a proposed speed above the occlusion cap must override pushed safe:true → MRC, got {action:?}");
     }
@@ -2249,14 +2486,27 @@ mod scene_rss_tests {
         let proposed = cmd(8.0);
         let prev = cmd(8.0);
         let p = params();
-        let clear_enough = OcclusionScene::Limited { d_sight_m: 500.0, v_emerge_max_mps: 0.0 };
-        assert!(compute_occlusion_cap(&clear_enough, &p) > 8.0,
-            "fixture: a 500 m sightline cap must exceed 8 m/s");
+        let clear_enough = OcclusionScene::Limited {
+            d_sight_m: 500.0,
+            v_emerge_max_mps: 0.0,
+        };
+        assert!(
+            compute_occlusion_cap(&clear_enough, &p) > 8.0,
+            "fixture: a 500 m sightline cap must exceed 8 m/s"
+        );
         let action = gov.evaluate_scene_with_occlusion(
-            &proposed, Some(&prev), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &clear_enough, &p);
-        assert!(matches!(action, EnforcementAction::Allow),
-            "a sightline long enough must not bind rule iv, got {action:?}");
+            &proposed,
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &clear_enough,
+            &p,
+        );
+        assert!(
+            matches!(action, EnforcementAction::Allow),
+            "a sightline long enough must not bind rule iv, got {action:?}"
+        );
     }
 
     /// The bound is never larger than the no-occlusion (KnownClear) case — for
@@ -2267,8 +2517,16 @@ mod scene_rss_tests {
         let no_occ = compute_occlusion_cap(&OcclusionScene::KnownClear, &p);
         for d in [5.0_f64, 20.0, 100.0, 1000.0] {
             let lim = compute_occlusion_cap(
-                &OcclusionScene::Limited { d_sight_m: d, v_emerge_max_mps: 0.0 }, &p);
-            assert!(lim <= no_occ, "limited cap {lim} (d={d}) must be <= no-occlusion {no_occ}");
+                &OcclusionScene::Limited {
+                    d_sight_m: d,
+                    v_emerge_max_mps: 0.0,
+                },
+                &p,
+            );
+            assert!(
+                lim <= no_occ,
+                "limited cap {lim} (d={d}) must be <= no-occlusion {no_occ}"
+            );
         }
     }
 
@@ -2300,15 +2558,28 @@ mod scene_rss_tests {
     #[test]
     fn checker_over_doer_water_overrides_pushed_safe_bool() {
         let mut gov = KirraGovernor::new();
-        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
+        gov.update_rss_state(RssState {
+            safe: true,
+            longitudinal_margin: f64::MAX,
+            lateral_margin: f64::MAX,
+        });
         let proposed = cmd(8.0);
         let prev = cmd(8.0);
 
         let action = gov.evaluate_scene_with_water(
-            &proposed, Some(&prev), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &unbounded_water(), &WaterVetoConfig::default(), &params());
-        assert!(!matches!(action, EnforcementAction::Allow),
-            "unbounded water must override the planner's safe:true → MRC, got {action:?}");
+            &proposed,
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &unbounded_water(),
+            &WaterVetoConfig::default(),
+            &params(),
+        );
+        assert!(
+            !matches!(action, EnforcementAction::Allow),
+            "unbounded water must override the planner's safe:true → MRC, got {action:?}"
+        );
     }
 
     /// NO-OVER-STOP proof: a pushed `safe: true` over a bounded-safe puddle is NOT
@@ -2319,10 +2590,19 @@ mod scene_rss_tests {
         let proposed = cmd(8.0);
         let prev = cmd(8.0);
         let action = gov.evaluate_scene_with_water(
-            &proposed, Some(&prev), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &bounded_safe_puddle(), &WaterVetoConfig::default(), &params());
-        assert!(matches!(action, EnforcementAction::Allow),
-            "a bounded-safe puddle must NOT be vetoed (planner drives it), got {action:?}");
+            &proposed,
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &bounded_safe_puddle(),
+            &WaterVetoConfig::default(),
+            &params(),
+        );
+        assert!(
+            matches!(action, EnforcementAction::Allow),
+            "a bounded-safe puddle must NOT be vetoed (planner drives it), got {action:?}"
+        );
     }
 
     /// The #98 named negative test — "no false-traverse without evidence":
@@ -2337,18 +2617,38 @@ mod scene_rss_tests {
 
         // Unbounded water, no evidence → veto (not Allow).
         let vetoed = gov.evaluate_scene_with_water(
-            &proposed, Some(&prev), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &unbounded_water(), &WaterVetoConfig::default(), &params());
-        assert!(!matches!(vetoed, EnforcementAction::Allow),
-            "unbounded water without evidence must NOT traverse, got {vetoed:?}");
+            &proposed,
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &unbounded_water(),
+            &WaterVetoConfig::default(),
+            &params(),
+        );
+        assert!(
+            !matches!(vetoed, EnforcementAction::Allow),
+            "unbounded water without evidence must NOT traverse, got {vetoed:?}"
+        );
 
         // Same situation, but an EXPLICIT earned-traversable grant → allowed.
-        let earned = WaterScene::EarnedTraversable { evidence: TraversalEvidence::OperatorAuthorized };
+        let earned = WaterScene::EarnedTraversable {
+            evidence: TraversalEvidence::OperatorAuthorized,
+        };
         let allowed = gov.evaluate_scene_with_water(
-            &proposed, Some(&prev), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &earned, &WaterVetoConfig::default(), &params());
-        assert!(matches!(allowed, EnforcementAction::Allow),
-            "an explicit map/operator grant earns traversal, got {allowed:?}");
+            &proposed,
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &earned,
+            &WaterVetoConfig::default(),
+            &params(),
+        );
+        assert!(
+            matches!(allowed, EnforcementAction::Allow),
+            "an explicit map/operator grant earns traversal, got {allowed:?}"
+        );
     }
 
     /// Unknown water (no healthy detector update) fails closed to a veto — and is
@@ -2359,15 +2659,33 @@ mod scene_rss_tests {
         let proposed = cmd(8.0);
         let prev = cmd(8.0);
         let unknown = gov.evaluate_scene_with_water(
-            &proposed, Some(&prev), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &WaterScene::Unknown, &WaterVetoConfig::default(), &params());
-        assert!(!matches!(unknown, EnforcementAction::Allow),
-            "Unknown water must fail closed (not Allow), got {unknown:?}");
+            &proposed,
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &WaterScene::Unknown,
+            &WaterVetoConfig::default(),
+            &params(),
+        );
+        assert!(
+            !matches!(unknown, EnforcementAction::Allow),
+            "Unknown water must fail closed (not Allow), got {unknown:?}"
+        );
         let clear = gov.evaluate_scene_with_water(
-            &proposed, Some(&prev), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &WaterScene::Clear, &WaterVetoConfig::default(), &params());
-        assert!(matches!(clear, EnforcementAction::Allow),
-            "Clear water must not veto, got {clear:?}");
+            &proposed,
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &WaterScene::Clear,
+            &WaterVetoConfig::default(),
+            &params(),
+        );
+        assert!(
+            matches!(clear, EnforcementAction::Allow),
+            "Clear water must not veto, got {clear:?}"
+        );
     }
 
     // --- SG6 post-collision impact latch (issue #102) ---
@@ -2375,7 +2693,11 @@ mod scene_rss_tests {
     fn latched() -> ImpactLatch {
         let mut l = ImpactLatch::new();
         l.observe(
-            &ImpactEvidence { imu_accel_spike_mps2: 0.0, contact_sensor: true, vanished_object: false },
+            &ImpactEvidence {
+                imu_accel_spike_mps2: 0.0,
+                contact_sensor: true,
+                vanished_object: false,
+            },
             &ImpactCfg::default(),
         );
         l
@@ -2387,9 +2709,16 @@ mod scene_rss_tests {
     fn impact_latch_overrides_pushed_safe_to_immobilize() {
         let gov = KirraGovernor::new().with_external_rss_gate();
         let action = gov.evaluate_with_impact_latch(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &latched());
-        assert!(matches!(action, EnforcementAction::Deny { .. }),
-            "a latched impact must immobilize (Deny), got {action:?}");
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &latched(),
+        );
+        assert!(
+            matches!(action, EnforcementAction::Deny { .. }),
+            "a latched impact must immobilize (Deny), got {action:?}"
+        );
     }
 
     /// Not latched → motion passes through (normal evaluation).
@@ -2397,9 +2726,16 @@ mod scene_rss_tests {
     fn impact_not_latched_passes_through() {
         let gov = KirraGovernor::new().with_external_rss_gate();
         let action = gov.evaluate_with_impact_latch(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &ImpactLatch::new());
-        assert!(matches!(action, EnforcementAction::Allow),
-            "an un-latched governor passes motion through, got {action:?}");
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &ImpactLatch::new(),
+        );
+        assert!(
+            matches!(action, EnforcementAction::Allow),
+            "an un-latched governor passes motion through, got {action:?}"
+        );
     }
 
     /// The SG6 named test — "no resume without clearance": a latch that has seen
@@ -2411,20 +2747,38 @@ mod scene_rss_tests {
         let mut l = latched();
         // More clean ticks must NOT release the latch (sticky-toward-safe).
         l.observe(
-            &ImpactEvidence { imu_accel_spike_mps2: 0.1, contact_sensor: false, vanished_object: false },
+            &ImpactEvidence {
+                imu_accel_spike_mps2: 0.1,
+                contact_sensor: false,
+                vanished_object: false,
+            },
             &ImpactCfg::default(),
         );
         let still = gov.evaluate_with_impact_latch(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &l);
-        assert!(matches!(still, EnforcementAction::Deny { .. }),
-            "no resume without clearance — still immobilized, got {still:?}");
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &l,
+        );
+        assert!(
+            matches!(still, EnforcementAction::Deny { .. }),
+            "no resume without clearance — still immobilized, got {still:?}"
+        );
 
         // Only an explicit clearance permits motion again.
         l.clear(true);
         let resumed = gov.evaluate_with_impact_latch(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &l);
-        assert!(matches!(resumed, EnforcementAction::Allow),
-            "after explicit clearance, motion resumes, got {resumed:?}");
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &l,
+        );
+        assert!(
+            matches!(resumed, EnforcementAction::Allow),
+            "after explicit clearance, motion resumes, got {resumed:?}"
+        );
     }
 
     // --- SG6 clearance loop (issue #103) ---
@@ -2436,27 +2790,66 @@ mod scene_rss_tests {
     fn clearance_loop_vetoes_in_both_states_and_releases_only_on_grant() {
         let gov = KirraGovernor::new().with_external_rss_gate();
         let mut l = ClearanceLoop::new();
-        let contact = ImpactEvidence { imu_accel_spike_mps2: 0.5, contact_sensor: true, vanished_object: false };
-        let clean = ImpactEvidence { imu_accel_spike_mps2: 0.5, contact_sensor: false, vanished_object: false };
+        let contact = ImpactEvidence {
+            imu_accel_spike_mps2: 0.5,
+            contact_sensor: true,
+            vanished_object: false,
+        };
+        let clean = ImpactEvidence {
+            imu_accel_spike_mps2: 0.5,
+            contact_sensor: false,
+            vanished_object: false,
+        };
 
         // Latching observe → immobilized (post-#328: EscalationRaised in one step) → Deny.
         l.observe(&contact, &ImpactCfg::default(), 1_000);
         assert_eq!(l.state(), ClearanceState::EscalationRaised);
-        let d1 = gov.evaluate_with_clearance_loop(&cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &l);
-        assert!(matches!(d1, EnforcementAction::Deny { .. }), "the latching tick must immobilize, got {d1:?}");
+        let d1 = gov.evaluate_with_clearance_loop(
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &l,
+        );
+        assert!(
+            matches!(d1, EnforcementAction::Deny { .. }),
+            "the latching tick must immobilize, got {d1:?}"
+        );
 
         // Still EscalationRaised on a clean tick → still Deny; clean evidence never resumes.
         l.observe(&clean, &ImpactCfg::default(), 1_001);
         assert_eq!(l.state(), ClearanceState::EscalationRaised);
-        let d2 = gov.evaluate_with_clearance_loop(&cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &l);
-        assert!(matches!(d2, EnforcementAction::Deny { .. }), "EscalationRaised must immobilize, got {d2:?}");
+        let d2 = gov.evaluate_with_clearance_loop(
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &l,
+        );
+        assert!(
+            matches!(d2, EnforcementAction::Deny { .. }),
+            "EscalationRaised must immobilize, got {d2:?}"
+        );
 
         // A well-formed grant — and ONLY that — releases motion.
         let now = 5_000u64;
-        let grant = OperatorClearanceGrant { operator_id: "op-1".to_string(), granted_at_ms: now - 100 };
-        l.try_clear(&grant, now, 60_000).expect("well-formed grant clears");
-        let resumed = gov.evaluate_with_clearance_loop(&cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &l);
-        assert!(matches!(resumed, EnforcementAction::Allow), "after the grant, motion resumes, got {resumed:?}");
+        let grant = OperatorClearanceGrant {
+            operator_id: "op-1".to_string(),
+            granted_at_ms: now - 100,
+        };
+        l.try_clear(&grant, now, 60_000)
+            .expect("well-formed grant clears");
+        let resumed = gov.evaluate_with_clearance_loop(
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &l,
+        );
+        assert!(
+            matches!(resumed, EnforcementAction::Allow),
+            "after the grant, motion resumes, got {resumed:?}"
+        );
     }
 
     /// SG6 end-to-end (#102 follow-up): a close agent, then a next valid frame
@@ -2470,8 +2863,12 @@ mod scene_rss_tests {
         let mut latch = ImpactLatch::new();
 
         let close = AgentScene::Agents(vec![RssAgent {
-            ego_vel: 0.0, lead_vel: 0.0, actual_longitudinal_gap_m: 1.0,
-            ego_lat_vel: 0.0, obj_lat_vel: 0.0, actual_lateral_separation_m: 100.0,
+            ego_vel: 0.0,
+            lead_vel: 0.0,
+            actual_longitudinal_gap_m: 1.0,
+            ego_lat_vel: 0.0,
+            obj_lat_vel: 0.0,
+            actual_lateral_separation_m: 100.0,
             oncoming: false,
         }]);
 
@@ -2483,16 +2880,37 @@ mod scene_rss_tests {
 
         // Tick 2 — KnownEmpty within the band: derives vanished=true with NO IMU
         // spike and NO contact → the latch fires on the vanished flag ALONE.
-        let ev2 = impact_evidence_with_vanished(&mut detector, &AgentScene::KnownEmpty, 100, &vcfg, 0.0, false);
-        assert!(ev2.vanished_object, "small-band empty after a close agent must derive vanished");
-        assert!(!ev2.contact_sensor && ev2.imu_accel_spike_mps2 == 0.0, "latches on vanished ALONE");
+        let ev2 = impact_evidence_with_vanished(
+            &mut detector,
+            &AgentScene::KnownEmpty,
+            100,
+            &vcfg,
+            0.0,
+            false,
+        );
+        assert!(
+            ev2.vanished_object,
+            "small-band empty after a close agent must derive vanished"
+        );
+        assert!(
+            !ev2.contact_sensor && ev2.imu_accel_spike_mps2 == 0.0,
+            "latches on vanished ALONE"
+        );
         latch.observe(&ev2, &ImpactCfg::default());
         assert!(latch.is_latched(), "vanished_object latches alone per SG6");
 
         // The motion veto immobilizes a pushed-safe command.
-        let action = gov.evaluate_with_impact_latch(&cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &latch);
-        assert!(matches!(action, EnforcementAction::Deny { .. }),
-            "a derived vanished-object latch must immobilize, got {action:?}");
+        let action = gov.evaluate_with_impact_latch(
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &latch,
+        );
+        assert!(
+            matches!(action, EnforcementAction::Deny { .. }),
+            "a derived vanished-object latch must immobilize, got {action:?}"
+        );
     }
 
     // --- SG5 commit-zone veto (issue #106) ---
@@ -2524,12 +2942,25 @@ mod scene_rss_tests {
     #[test]
     fn checker_over_doer_commit_zone_overrides_pushed_safe_bool() {
         let mut gov = KirraGovernor::new();
-        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
+        gov.update_rss_state(RssState {
+            safe: true,
+            longitudinal_margin: f64::MAX,
+            lateral_margin: f64::MAX,
+        });
         let action = gov.evaluate_scene_with_commit_zone(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &blocked_zone(), &CommitZoneCfg::default(), &params());
-        assert!(!matches!(action, EnforcementAction::Allow),
-            "a blocked commit zone must override the planner's safe:true → MRC, got {action:?}");
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &blocked_zone(),
+            &CommitZoneCfg::default(),
+            &params(),
+        );
+        assert!(
+            !matches!(action, EnforcementAction::Allow),
+            "a blocked commit zone must override the planner's safe:true → MRC, got {action:?}"
+        );
     }
 
     /// A healthy, clearance-confirmed, exit-verified zone passes through (no
@@ -2538,14 +2969,26 @@ mod scene_rss_tests {
     fn commit_zone_confirmed_clear_passes_through() {
         let gov = KirraGovernor::new();
         let confirmed = CommitZoneScene::ZoneAhead {
-            map: healthy_zone_map(50.0), clearance_confirmed: true, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: None,
+            map: healthy_zone_map(50.0),
+            clearance_confirmed: true,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: None,
         };
         let action = gov.evaluate_scene_with_commit_zone(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &confirmed, &CommitZoneCfg::default(), &params());
-        assert!(matches!(action, EnforcementAction::Allow),
-            "a confirmed-clear zone must permit entry, got {action:?}");
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &confirmed,
+            &CommitZoneCfg::default(),
+            &params(),
+        );
+        assert!(
+            matches!(action, EnforcementAction::Allow),
+            "a confirmed-clear zone must permit entry, got {action:?}"
+        );
     }
 
     /// SG5 stop-inside at the integration layer: a confirmed, healthy zone whose
@@ -2553,17 +2996,33 @@ mod scene_rss_tests {
     #[test]
     fn commit_zone_stop_inside_overrides_pushed_safe() {
         let mut gov = KirraGovernor::new();
-        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
+        gov.update_rss_state(RssState {
+            safe: true,
+            longitudinal_margin: f64::MAX,
+            lateral_margin: f64::MAX,
+        });
         // zone [50, 80]; plan stops at 65 — inside.
         let stop_inside = CommitZoneScene::ZoneAhead {
-            map: healthy_zone_map(50.0), clearance_confirmed: true, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: Some(65.0),
+            map: healthy_zone_map(50.0),
+            clearance_confirmed: true,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: Some(65.0),
         };
         let action = gov.evaluate_scene_with_commit_zone(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &stop_inside, &CommitZoneCfg::default(), &params());
-        assert!(!matches!(action, EnforcementAction::Allow),
-            "a plan that stops inside the zone must override safe:true → MRC, got {action:?}");
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &stop_inside,
+            &CommitZoneCfg::default(),
+            &params(),
+        );
+        assert!(
+            !matches!(action, EnforcementAction::Allow),
+            "a plan that stops inside the zone must override safe:true → MRC, got {action:?}"
+        );
     }
 
     /// Reject-from-map-alone at the integration layer: an `Unknown` (absent /
@@ -2571,10 +3030,21 @@ mod scene_rss_tests {
     #[test]
     fn commit_zone_unknown_map_overrides_pushed_safe() {
         let mut gov = KirraGovernor::new();
-        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
+        gov.update_rss_state(RssState {
+            safe: true,
+            longitudinal_margin: f64::MAX,
+            lateral_margin: f64::MAX,
+        });
         let action = gov.evaluate_scene_with_commit_zone(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &CommitZoneScene::Unknown, &CommitZoneCfg::default(), &params());
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &CommitZoneScene::Unknown,
+            &CommitZoneCfg::default(),
+            &params(),
+        );
         assert!(!matches!(action, EnforcementAction::Allow),
             "an absent/unhealthy map must override pushed safe:true (Reject from map alone), got {action:?}");
     }
@@ -2587,30 +3057,60 @@ mod scene_rss_tests {
     #[test]
     fn localization_untrusted_overrides_healthy_commit_zone() {
         let mut gov = KirraGovernor::new();
-        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
+        gov.update_rss_state(RssState {
+            safe: true,
+            longitudinal_margin: f64::MAX,
+            lateral_margin: f64::MAX,
+        });
         // A confirmed, healthy, exit-verified zone — passes through when trusted.
         let confirmed = CommitZoneScene::ZoneAhead {
-            map: healthy_zone_map(50.0), clearance_confirmed: true, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: None,
+            map: healthy_zone_map(50.0),
+            clearance_confirmed: true,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: None,
         };
         // Sanity: trusted localization → the confirmed zone passes through.
         let trusted = FrameIntegrity::Reported {
-            localization: LocalizationChannel { lateral_error_95_m: 0.05, age_ms: 50 },
+            localization: LocalizationChannel {
+                lateral_error_95_m: 0.05,
+                age_ms: 50,
+            },
         };
         let ok = gov.evaluate_scene_with_commit_zone_localized(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &confirmed, &CommitZoneCfg::default(),
-            &trusted, &FrameIntegrityCfg::default(), &params());
-        assert!(matches!(ok, EnforcementAction::Allow),
-            "a confirmed zone under trusted localization must pass, got {ok:?}");
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &confirmed,
+            &CommitZoneCfg::default(),
+            &trusted,
+            &FrameIntegrityCfg::default(),
+            &params(),
+        );
+        assert!(
+            matches!(ok, EnforcementAction::Allow),
+            "a confirmed zone under trusted localization must pass, got {ok:?}"
+        );
         // Untrusted (absent report) → scene degrades to Unknown → overridden.
         let untrusted = FrameIntegrity::Unknown;
         let action = gov.evaluate_scene_with_commit_zone_localized(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &confirmed, &CommitZoneCfg::default(),
-            &untrusted, &FrameIntegrityCfg::default(), &params());
-        assert!(!matches!(action, EnforcementAction::Allow),
-            "untrusted localization must override a healthy commit zone → MRC, got {action:?}");
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &confirmed,
+            &CommitZoneCfg::default(),
+            &untrusted,
+            &FrameIntegrityCfg::default(),
+            &params(),
+        );
+        assert!(
+            !matches!(action, EnforcementAction::Allow),
+            "untrusted localization must override a healthy commit zone → MRC, got {action:?}"
+        );
     }
 
     /// Water path: a mapped-ford earn-back (MapKnownSafe) that normally permits
@@ -2618,25 +3118,59 @@ mod scene_rss_tests {
     #[test]
     fn localization_untrusted_vetoes_mapknownsafe_ford() {
         let mut gov = KirraGovernor::new();
-        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
-        let ford = WaterScene::EarnedTraversable { evidence: TraversalEvidence::MapKnownSafe };
-        let wcfg = WaterVetoConfig { max_exit_distance_m: 5.0, max_puddle_extent_m: 5.0 };
+        gov.update_rss_state(RssState {
+            safe: true,
+            longitudinal_margin: f64::MAX,
+            lateral_margin: f64::MAX,
+        });
+        let ford = WaterScene::EarnedTraversable {
+            evidence: TraversalEvidence::MapKnownSafe,
+        };
+        let wcfg = WaterVetoConfig {
+            max_exit_distance_m: 5.0,
+            max_puddle_extent_m: 5.0,
+        };
         // Trusted → the mapped ford permits traversal.
         let trusted = FrameIntegrity::Reported {
-            localization: LocalizationChannel { lateral_error_95_m: 0.05, age_ms: 50 },
+            localization: LocalizationChannel {
+                lateral_error_95_m: 0.05,
+                age_ms: 50,
+            },
         };
         let ok = gov.evaluate_scene_with_water_localized(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &ford, &wcfg, &trusted, &FrameIntegrityCfg::default(), &params());
-        assert!(matches!(ok, EnforcementAction::Allow),
-            "a mapped ford under trusted localization must pass, got {ok:?}");
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &ford,
+            &wcfg,
+            &trusted,
+            &FrameIntegrityCfg::default(),
+            &params(),
+        );
+        assert!(
+            matches!(ok, EnforcementAction::Allow),
+            "a mapped ford under trusted localization must pass, got {ok:?}"
+        );
         // Untrusted → MapKnownSafe stripped → veto.
         let untrusted = FrameIntegrity::Unknown;
         let action = gov.evaluate_scene_with_water_localized(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &ford, &wcfg, &untrusted, &FrameIntegrityCfg::default(), &params());
-        assert!(!matches!(action, EnforcementAction::Allow),
-            "untrusted localization must strip the MapKnownSafe ford → veto, got {action:?}");
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &ford,
+            &wcfg,
+            &untrusted,
+            &FrameIntegrityCfg::default(),
+            &params(),
+        );
+        assert!(
+            !matches!(action, EnforcementAction::Allow),
+            "untrusted localization must strip the MapKnownSafe ford → veto, got {action:?}"
+        );
     }
 
     /// The asymmetry crux at the integration layer: an OperatorAuthorized grant
@@ -2644,15 +3178,35 @@ mod scene_rss_tests {
     #[test]
     fn localization_untrusted_preserves_operator_authorized_ford() {
         let mut gov = KirraGovernor::new();
-        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
-        let ford = WaterScene::EarnedTraversable { evidence: TraversalEvidence::OperatorAuthorized };
-        let wcfg = WaterVetoConfig { max_exit_distance_m: 5.0, max_puddle_extent_m: 5.0 };
+        gov.update_rss_state(RssState {
+            safe: true,
+            longitudinal_margin: f64::MAX,
+            lateral_margin: f64::MAX,
+        });
+        let ford = WaterScene::EarnedTraversable {
+            evidence: TraversalEvidence::OperatorAuthorized,
+        };
+        let wcfg = WaterVetoConfig {
+            max_exit_distance_m: 5.0,
+            max_puddle_extent_m: 5.0,
+        };
         let untrusted = FrameIntegrity::Unknown;
         let action = gov.evaluate_scene_with_water_localized(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &ford, &wcfg, &untrusted, &FrameIntegrityCfg::default(), &params());
-        assert!(matches!(action, EnforcementAction::Allow),
-            "operator authority must survive untrusted localization, got {action:?}");
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &ford,
+            &wcfg,
+            &untrusted,
+            &FrameIntegrityCfg::default(),
+            &params(),
+        );
+        assert!(
+            matches!(action, EnforcementAction::Allow),
+            "operator authority must survive untrusted localization, got {action:?}"
+        );
     }
 
     /// SG5 trio end-to-end (#260 map-anchored block + #107 exit-clearance + #108
@@ -2661,25 +3215,45 @@ mod scene_rss_tests {
     #[test]
     fn commit_zone_non_yielding_train_overrides_pushed_safe() {
         let mut gov = KirraGovernor::new();
-        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
+        gov.update_rss_state(RssState {
+            safe: true,
+            longitudinal_margin: f64::MAX,
+            lateral_margin: f64::MAX,
+        });
         let cfg = CommitZoneCfg::default();
         let map = healthy_zone_map(50.0);
         // train: arrival 60/10 = 6.0 s < ego clear (8.45 s) → NOT clear.
         let scene = NonYieldingScene::Agents(vec![NonYieldingAgent {
-            approach_velocity_mps: 10.0, distance_to_conflict_m: 60.0,
+            approach_velocity_mps: 10.0,
+            distance_to_conflict_m: 60.0,
         }]);
         let clearance = non_yielding_clearance(&scene, &map, 30.0, 10.0, &cfg);
-        assert!(!clearance, "the train must defeat clearance (derived false)");
+        assert!(
+            !clearance,
+            "the train must defeat clearance (derived false)"
+        );
         // exit verified independently, but clearance is false → blocked.
         let zone = CommitZoneScene::ZoneAhead {
-            map, clearance_confirmed: clearance, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: None,
+            map,
+            clearance_confirmed: clearance,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: None,
         };
         let action = gov.evaluate_scene_with_commit_zone(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &zone, &cfg, &params());
-        assert!(!matches!(action, EnforcementAction::Allow),
-            "a non-yielding train must override safe:true → MRC (stop short), got {action:?}");
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &zone,
+            &cfg,
+            &params(),
+        );
+        assert!(
+            !matches!(action, EnforcementAction::Allow),
+            "a non-yielding train must override safe:true → MRC (stop short), got {action:?}"
+        );
     }
 
     /// Inverse: train arrives well AFTER the ego clears + exit verified → DERIVED
@@ -2691,18 +3265,34 @@ mod scene_rss_tests {
         let map = healthy_zone_map(50.0);
         // train: arrival 200/10 = 20.0 s > 8.45 + 2.0 = 10.45 s → clear.
         let scene = NonYieldingScene::Agents(vec![NonYieldingAgent {
-            approach_velocity_mps: 10.0, distance_to_conflict_m: 200.0,
+            approach_velocity_mps: 10.0,
+            distance_to_conflict_m: 200.0,
         }]);
         let clearance = non_yielding_clearance(&scene, &map, 30.0, 10.0, &cfg);
-        assert!(clearance, "an agent arriving well after the ego clears must be clear");
+        assert!(
+            clearance,
+            "an agent arriving well after the ego clears must be clear"
+        );
         let zone = CommitZoneScene::ZoneAhead {
-            map, clearance_confirmed: clearance, exit_verified: true,
-            zone_length_m: 30.0, proposed_stop_distance_m: None,
+            map,
+            clearance_confirmed: clearance,
+            exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: None,
         };
         let action = gov.evaluate_scene_with_commit_zone(
-            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &zone, &cfg, &params());
-        assert!(matches!(action, EnforcementAction::Allow),
-            "a non-yielding-clear, exit-verified zone must permit entry, got {action:?}");
+            &cmd(8.0),
+            Some(&cmd(8.0)),
+            0.05,
+            SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty,
+            &zone,
+            &cfg,
+            &params(),
+        );
+        assert!(
+            matches!(action, EnforcementAction::Allow),
+            "a non-yielding-clear, exit-verified zone must permit entry, got {action:?}"
+        );
     }
 }

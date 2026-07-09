@@ -83,7 +83,10 @@ fn full_trust_chain_accepts_monotonic_stream_and_rejects_replay() {
         // bytes, and it round-trips — what the existing Ed25519/SHA-256 machinery
         // signs is precisely the snapshot the judge approved.
         let image = snap.canonical_image();
-        assert_eq!(GovernorContractView::from_canonical_image(&image), Some(snap));
+        assert_eq!(
+            GovernorContractView::from_canonical_image(&image),
+            Some(snap)
+        );
         assert_eq!(snap.validated_command(), Some(cmd.as_bytes()));
     }
 

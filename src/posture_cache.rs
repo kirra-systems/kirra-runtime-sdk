@@ -1,8 +1,8 @@
 // src/posture_cache.rs — CachedFleetPosture definition
-use ed25519_dalek::VerifyingKey;
+use crate::fabric::causal_log::FabricCausalLog;
 use crate::fabric::router::FabricRouter;
 use crate::fabric::telemetry::FabricTelemetry;
-use crate::fabric::causal_log::FabricCausalLog;
+use ed25519_dalek::VerifyingKey;
 //
 // v2.2.2 — Temporal hardening patch
 //
@@ -30,10 +30,10 @@ use crate::fabric::causal_log::FabricCausalLog;
 // This file is the single definition of CachedFleetPosture.
 // SharedPostureCache = Arc<RwLock<Option<CachedFleetPosture>>> (unchanged).
 
+use crate::gateway::policy::OperationalCommand;
+use crate::verifier::{AppState, FleetPosture};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::verifier::{FleetPosture, AppState};
-use crate::gateway::policy::OperationalCommand;
 
 /// Staleness TTL for the posture cache (milliseconds).
 /// After `generated_at_ms + POSTURE_CACHE_TTL_MS < now`, the cache entry is
@@ -127,7 +127,6 @@ impl CachedFleetPosture {
         }
     }
 
-
     /// Returns true if this entry has exceeded `ttl_ms` relative to `now_ms`.
     ///
     /// R3: this is the SINGLE staleness authority. Both the entry-owned
@@ -189,8 +188,7 @@ pub struct ServiceState {
     /// a `PostureRecalcTrigger` so the cache stays in sync with the DAG
     /// truth. A `try_send` failure means the worker is gone or its
     /// channel is full; the gate fail-closes on the resulting stale cache.
-    pub posture_engine_tx:
-        std::sync::OnceLock<crate::posture_engine_v2::PostureEngineSender>,
+    pub posture_engine_tx: std::sync::OnceLock<crate::posture_engine_v2::PostureEngineSender>,
 
     /// Track-C perception-derate cap cache (KIRRA-OCCY-PMON-002). The
     /// perception-monitor worker publishes a speed cap here at perception-tick
@@ -264,16 +262,16 @@ pub fn route_command_verdict(
     if entry.is_stale(now_ms) {
         tracing::warn!(
             generated_at_ms = entry.generated_at_ms,
-            ttl_ms          = entry.ttl_ms,
-            now_ms          = now_ms,
-            generation      = entry.generation,
+            ttl_ms = entry.ttl_ms,
+            now_ms = now_ms,
+            generation = entry.generation,
             "posture-routing gate: cache stale — blocking command"
         );
         return Err(R::PostureCacheStale);
     }
 
     match entry.posture {
-        FleetPosture::Nominal   => Ok(()),
+        FleetPosture::Nominal => Ok(()),
         // Degraded admits safe reads AND the inner-gated actuator-motion command
         // (Option A / ADR-0011): `ActuatorMotion` is the ONE write path mounted
         // behind `enforce_actuator_safety_envelope`, whose Degraded branch runs
@@ -283,7 +281,7 @@ pub fn route_command_verdict(
         // stop instead of holding its pre-Degraded speed. Every OTHER WriteState
         // / SystemMutation stays denied here. LockedOut still denies even
         // ActuatorMotion below (deny-all preserved at both gates).
-        FleetPosture::Degraded  => {
+        FleetPosture::Degraded => {
             if matches!(
                 command,
                 OperationalCommand::ReadTelemetry | OperationalCommand::ActuatorMotion
@@ -326,7 +324,10 @@ mod posture_cache_tests {
     #[test]
     fn test_new_entry_is_not_stale() {
         let entry = CachedFleetPosture::new(FleetPosture::Nominal);
-        assert!(!entry.is_stale(now_ms()), "brand-new entry must not be stale");
+        assert!(
+            !entry.is_stale(now_ms()),
+            "brand-new entry must not be stale"
+        );
     }
 
     #[test]
@@ -338,7 +339,10 @@ mod posture_cache_tests {
             ttl_ms: POSTURE_CACHE_TTL_MS,
             generation: 1,
         };
-        assert!(entry.is_stale(now_ms()), "entry older than TTL must be stale");
+        assert!(
+            entry.is_stale(now_ms()),
+            "entry older than TTL must be stale"
+        );
     }
 
     #[test]
@@ -366,11 +370,15 @@ mod posture_cache_tests {
             ttl_ms: POSTURE_CACHE_TTL_MS,
             generation: 1,
         };
-        assert!(entry.is_stale(5_000),
-            "an entry stamped in the future (backward clock step) must be stale, not fresh");
+        assert!(
+            entry.is_stale(5_000),
+            "an entry stamped in the future (backward clock step) must be stale, not fresh"
+        );
         // Sanity: a normal forward read of the same entry within TTL is still fresh.
-        assert!(!entry.is_stale(10_000 + POSTURE_CACHE_TTL_MS - 1),
-            "within-TTL forward read must remain fresh");
+        assert!(
+            !entry.is_stale(10_000 + POSTURE_CACHE_TTL_MS - 1),
+            "within-TTL forward read must remain fresh"
+        );
     }
 
     // R3: `is_stale` must be exactly `is_stale_with_ttl(now, self.ttl_ms)` — the
@@ -393,7 +401,10 @@ mod posture_cache_tests {
         // An explicit shorter TTL makes a within-own-ttl entry stale — proving the
         // engine's `POSTURE_CACHE_TTL_MS` argument actually governs the decision.
         assert!(!entry.is_stale(3_000), "age 2000 < own ttl 5000 → fresh");
-        assert!(entry.is_stale_with_ttl(3_000, 1_500), "age 2000 >= explicit ttl 1500 → stale");
+        assert!(
+            entry.is_stale_with_ttl(3_000, 1_500),
+            "age 2000 >= explicit ttl 1500 → stale"
+        );
     }
 
     #[test]
@@ -463,28 +474,46 @@ mod posture_cache_tests {
     fn test_unknown_command_denied_before_posture_check() {
         // Invariant #9: Unknown blocked even in Nominal posture.
         let cache = fresh_cache(FleetPosture::Nominal);
-        assert!(!should_route_command(&cache, now_ms(), OperationalCommand::Unknown));
+        assert!(!should_route_command(
+            &cache,
+            now_ms(),
+            OperationalCommand::Unknown
+        ));
     }
 
     #[test]
     fn test_none_cache_denies_all_commands() {
         let ts = now_ms();
-        assert!(!should_route_command(&None, ts, OperationalCommand::ReadTelemetry));
-        assert!(!should_route_command(&None, ts, OperationalCommand::Unknown));
+        assert!(!should_route_command(
+            &None,
+            ts,
+            OperationalCommand::ReadTelemetry
+        ));
+        assert!(!should_route_command(
+            &None,
+            ts,
+            OperationalCommand::Unknown
+        ));
     }
 
     #[test]
     fn test_stale_cache_denies_all_non_unknown_commands() {
         let cache = stale_cache(FleetPosture::Nominal);
         let ts = now_ms();
-        assert!(!should_route_command(&cache, ts, OperationalCommand::ReadTelemetry),
-            "stale Nominal must deny — fail-closed");
+        assert!(
+            !should_route_command(&cache, ts, OperationalCommand::ReadTelemetry),
+            "stale Nominal must deny — fail-closed"
+        );
     }
 
     #[test]
     fn test_nominal_posture_allows_read_telemetry() {
         let cache = fresh_cache(FleetPosture::Nominal);
-        assert!(should_route_command(&cache, now_ms(), OperationalCommand::ReadTelemetry));
+        assert!(should_route_command(
+            &cache,
+            now_ms(),
+            OperationalCommand::ReadTelemetry
+        ));
     }
 
     #[test]
@@ -495,16 +524,26 @@ mod posture_cache_tests {
         // fail-closed Unknown.
         let cache = fresh_cache(FleetPosture::Degraded);
         let ts = now_ms();
-        assert!(should_route_command(&cache, ts, OperationalCommand::ReadTelemetry),
-            "Degraded must allow ReadTelemetry");
-        assert!(should_route_command(&cache, ts, OperationalCommand::ActuatorMotion),
-            "Degraded must defer ActuatorMotion to the inner kinematic gate (Option A)");
-        assert!(!should_route_command(&cache, ts, OperationalCommand::WriteState),
-            "Degraded must still deny generic WriteState (no inner gate)");
-        assert!(!should_route_command(&cache, ts, OperationalCommand::SystemMutation),
-            "Degraded must still deny SystemMutation");
-        assert!(!should_route_command(&cache, ts, OperationalCommand::Unknown),
-            "Degraded must deny Unknown (fail-closed)");
+        assert!(
+            should_route_command(&cache, ts, OperationalCommand::ReadTelemetry),
+            "Degraded must allow ReadTelemetry"
+        );
+        assert!(
+            should_route_command(&cache, ts, OperationalCommand::ActuatorMotion),
+            "Degraded must defer ActuatorMotion to the inner kinematic gate (Option A)"
+        );
+        assert!(
+            !should_route_command(&cache, ts, OperationalCommand::WriteState),
+            "Degraded must still deny generic WriteState (no inner gate)"
+        );
+        assert!(
+            !should_route_command(&cache, ts, OperationalCommand::SystemMutation),
+            "Degraded must still deny SystemMutation"
+        );
+        assert!(
+            !should_route_command(&cache, ts, OperationalCommand::Unknown),
+            "Degraded must deny Unknown (fail-closed)"
+        );
     }
 
     #[test]
@@ -514,10 +553,20 @@ mod posture_cache_tests {
         // Degraded ONLY, never LockedOut).
         let cache = fresh_cache(FleetPosture::LockedOut);
         let ts = now_ms();
-        assert!(!should_route_command(&cache, ts, OperationalCommand::ReadTelemetry));
-        assert!(!should_route_command(&cache, ts, OperationalCommand::ActuatorMotion),
-            "LockedOut must deny ActuatorMotion at the outer gate (deny-all preserved)");
-        assert!(!should_route_command(&cache, ts, OperationalCommand::WriteState));
+        assert!(!should_route_command(
+            &cache,
+            ts,
+            OperationalCommand::ReadTelemetry
+        ));
+        assert!(
+            !should_route_command(&cache, ts, OperationalCommand::ActuatorMotion),
+            "LockedOut must deny ActuatorMotion at the outer gate (deny-all preserved)"
+        );
+        assert!(!should_route_command(
+            &cache,
+            ts,
+            OperationalCommand::WriteState
+        ));
     }
 
     #[test]
@@ -526,10 +575,14 @@ mod posture_cache_tests {
         // rule: ActuatorMotion is denied with no fresh posture, exactly like any
         // other command.
         let ts = now_ms();
-        assert!(!should_route_command(&None, ts, OperationalCommand::ActuatorMotion),
-            "cold cache (None) must deny ActuatorMotion — fail-closed");
+        assert!(
+            !should_route_command(&None, ts, OperationalCommand::ActuatorMotion),
+            "cold cache (None) must deny ActuatorMotion — fail-closed"
+        );
         let stale = stale_cache(FleetPosture::Degraded);
-        assert!(!should_route_command(&stale, ts, OperationalCommand::ActuatorMotion),
-            "stale Degraded cache must deny ActuatorMotion — fail-closed");
+        assert!(
+            !should_route_command(&stale, ts, OperationalCommand::ActuatorMotion),
+            "stale Degraded cache must deny ActuatorMotion — fail-closed"
+        );
     }
 }

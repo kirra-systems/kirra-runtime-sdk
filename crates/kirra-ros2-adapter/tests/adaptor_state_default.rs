@@ -17,6 +17,9 @@ fn nominal_behavior_matches_prior_default() {
     // live posture source, the slow-loop verdict is byte-for-byte the
     // pre-M1 behaviour.
     let state = AdaptorState::new();
-    assert_eq!(state.current_posture(), FleetPosture::Nominal,
-        "AdaptorState must default to Nominal so pre-M1 callers see no behaviour change");
+    assert_eq!(
+        state.current_posture(),
+        FleetPosture::Nominal,
+        "AdaptorState must default to Nominal so pre-M1 callers see no behaviour change"
+    );
 }

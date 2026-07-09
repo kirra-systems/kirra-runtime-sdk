@@ -141,7 +141,10 @@ pub struct ActuatorStation {
 impl ActuatorStation {
     #[must_use]
     pub fn new(governor_vk: VerifyingKey) -> Self {
-        Self { governor_vk, last_released: None }
+        Self {
+            governor_vk,
+            last_released: None,
+        }
     }
 
     /// The verify-before-release gate. Order matters and every step is
@@ -175,7 +178,10 @@ impl ActuatorStation {
         let command =
             VehicleCommandPayload::from_validated_view(view).map_err(ReleaseRefusal::Codec)?;
         self.last_released = Some(view.sequence);
-        Ok(ReleasedCommand { sequence: view.sequence, command })
+        Ok(ReleasedCommand {
+            sequence: view.sequence,
+            command,
+        })
     }
 
     /// The last released sequence (observability/tests).
@@ -282,9 +288,11 @@ mod fdit_matrix {
         let raw_view = raw.to_view(2, 1, 0, FUTURE_DEADLINE); // what the guest proposed
 
         let inline = gov.cycle(&region, 0);
-        let (view, token) = inline.releasable().expect("a clampable proposal is actuatable");
-        let ceiling = VehicleKinematicsContract::nominal_reference_profile()
-            .effective_max_speed_mps();
+        let (view, token) = inline
+            .releasable()
+            .expect("a clampable proposal is actuatable");
+        let ceiling =
+            VehicleKinematicsContract::nominal_reference_profile().effective_max_speed_mps();
 
         // The signed view is the ENFORCED (clamped) command…
         let released = act.release(view, Some(token)).expect("clamped release");
@@ -368,7 +376,11 @@ mod fdit_matrix {
             Err(ReleaseRefusal::NoToken),
             "an equal sequence is a replay — the governor must refuse it"
         );
-        assert_eq!(act.last_released(), Some(7), "the replay must not advance the watermark");
+        assert_eq!(
+            act.last_released(),
+            Some(7),
+            "the replay must not advance the watermark"
+        );
     }
 
     // ---- FDIT-07: sequence regress → no release ------------------------------
@@ -454,7 +466,10 @@ mod fdit_matrix {
         act.release(view, Some(token)).expect("first release");
         assert_eq!(
             act.release(view, Some(token)),
-            Err(ReleaseRefusal::SequenceNotAdvanced { presented: 4, last_released: 4 }),
+            Err(ReleaseRefusal::SequenceNotAdvanced {
+                presented: 4,
+                last_released: 4
+            }),
             "re-presenting an already-released (view, token) is a replay at the release point"
         );
     }

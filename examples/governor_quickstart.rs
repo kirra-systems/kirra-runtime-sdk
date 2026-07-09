@@ -38,7 +38,12 @@ fn main() {
     // A doer's proposed linear velocities over successive 50 ms ticks. The last is
     // deliberately corrupt to show the fail-closed path.
     let dt = 0.05;
-    let proposals = [1.0_f64, 1.8, 5.0 /* over-envelope */, f64::NAN /* corrupt */];
+    let proposals = [
+        1.0_f64,
+        1.8,
+        5.0,      /* over-envelope */
+        f64::NAN, /* corrupt */
+    ];
 
     println!("proposed -> emitted   (why)");
     println!("---------------------------");
@@ -62,6 +67,9 @@ fn main() {
     }
 
     // The governor also exposes its trust posture and last emitted output.
-    println!("\ntrust mode after the corrupt tick: {:?}", governor.trust_mode());
+    println!(
+        "\ntrust mode after the corrupt tick: {:?}",
+        governor.trust_mode()
+    );
     println!("last emitted output: {:.2} m/s", governor.last_output());
 }

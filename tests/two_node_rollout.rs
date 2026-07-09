@@ -52,8 +52,10 @@ fn node_runs_cycle(
     match decide_pull(&view, Some(current_digest), false) {
         PullAction::UpToDate => current_digest.to_string(),
         PullAction::Stage { digest, .. } => {
-            let mut inst = Installer::new(InMemoryBootController::new(Slot::A), 1).expect("installer");
-            inst.stage(artifact, &digest).expect("stage verified artifact");
+            let mut inst =
+                Installer::new(InMemoryBootController::new(Slot::A), 1).expect("installer");
+            inst.stage(artifact, &digest)
+                .expect("stage verified artifact");
             inst.begin_trial().expect("arm trial");
             match inst.report_health(healthy).expect("health report") {
                 HealthOutcome::Committed { .. } => digest, // now running the new artifact
@@ -89,8 +91,15 @@ fn two_node_staged_rollout_end_to_end() {
 
     // Author a campaign to cohort "fleet", staged 50% → 90% → 100%.
     const CID: &str = "gov-2025.11";
-    let mut campaign =
-        Campaign::new(CID, &digest, "v2", vec!["fleet".into()], vec![50, 90, 100], 1).unwrap();
+    let mut campaign = Campaign::new(
+        CID,
+        &digest,
+        "v2",
+        vec!["fleet".into()],
+        vec![50, 90, 100],
+        1,
+    )
+    .unwrap();
     campaign.arm(2).unwrap();
     campaign.advance(FleetPosture::Nominal, 3).unwrap(); // Staged → Rolling @ 50%
     store.insert_campaign(&campaign).expect("persist campaign");
@@ -120,35 +129,72 @@ fn two_node_staged_rollout_end_to_end() {
     assert!(!a_out.rolled, "out-of-cohort node is never assigned");
 
     // early installs (healthy) → new digest; mid isn't rolled → stays on baseline.
-    assert_eq!(node_runs_cycle(&a_early, OLD_DIGEST, &artifact, true), digest);
-    assert_eq!(node_runs_cycle(&a_mid, OLD_DIGEST, &artifact, true), OLD_DIGEST);
+    assert_eq!(
+        node_runs_cycle(&a_early, OLD_DIGEST, &artifact, true),
+        digest
+    );
+    assert_eq!(
+        node_runs_cycle(&a_mid, OLD_DIGEST, &artifact, true),
+        OLD_DIGEST
+    );
 
     // --- Stage 2: advance to Rolling @ 90% — mid now rolls ---
     campaign.advance(FleetPosture::Nominal, 4).unwrap();
-    store.update_campaign(&campaign, "OtaCampaignAdvanced").unwrap();
+    store
+        .update_campaign(&campaign, "OtaCampaignAdvanced")
+        .unwrap();
     let active = store.load_active_campaigns().unwrap();
     let a_mid2 = resolve_node_assignment(&mid, &cohort, &active);
-    assert!(a_mid2.rolled, "mid node rolls once the campaign reaches 90%");
-    assert_eq!(node_runs_cycle(&a_mid2, OLD_DIGEST, &artifact, true), digest);
+    assert!(
+        a_mid2.rolled,
+        "mid node rolls once the campaign reaches 90%"
+    );
+    assert_eq!(
+        node_runs_cycle(&a_mid2, OLD_DIGEST, &artifact, true),
+        digest
+    );
 
     // Both installed the new digest → they report adoption; the fleet summary counts 2.
-    store.upsert_node_artifact_status(&adoption(&early, &digest, CID, 10)).unwrap();
-    store.upsert_node_artifact_status(&adoption(&mid, &digest, CID, 10)).unwrap();
+    store
+        .upsert_node_artifact_status(&adoption(&early, &digest, CID, 10))
+        .unwrap();
+    store
+        .upsert_node_artifact_status(&adoption(&mid, &digest, CID, 10))
+        .unwrap();
     let summary = summarize_campaigns(
         &store.load_campaigns().unwrap(),
         &store.load_node_artifact_statuses().unwrap(),
     );
-    let prog = summary.active.iter().find(|c| c.campaign_id == CID).expect("campaign in summary");
+    let prog = summary
+        .active
+        .iter()
+        .find(|c| c.campaign_id == CID)
+        .expect("campaign in summary");
     assert_eq!(prog.rollout_percent, 90);
-    assert_eq!(prog.applied_nodes, 2, "both rolled nodes adopted the new digest");
+    assert_eq!(
+        prog.applied_nodes, 2,
+        "both rolled nodes adopted the new digest"
+    );
 
     // --- Stage 3: final advance completes the rollout (terminal, no new assignments) ---
     campaign.advance(FleetPosture::Nominal, 5).unwrap(); // → Completed @ 100%
-    store.update_campaign(&campaign, "OtaCampaignCompleted").unwrap();
-    assert!(store.load_active_campaigns().unwrap().is_empty(), "completed campaign is no longer active");
+    store
+        .update_campaign(&campaign, "OtaCampaignCompleted")
+        .unwrap();
+    assert!(
+        store.load_active_campaigns().unwrap().is_empty(),
+        "completed campaign is no longer active"
+    );
     // A brand-new node querying now gets nothing — the rollout is done.
-    let a_fresh = resolve_node_assignment("node-newcomer", &cohort, &store.load_active_campaigns().unwrap());
-    assert!(!a_fresh.rolled, "a completed campaign assigns nothing further");
+    let a_fresh = resolve_node_assignment(
+        "node-newcomer",
+        &cohort,
+        &store.load_active_campaigns().unwrap(),
+    );
+    assert!(
+        !a_fresh.rolled,
+        "a completed campaign assigns nothing further"
+    );
 }
 
 #[test]
@@ -182,10 +228,16 @@ fn unhealthy_node_rolls_back_and_is_not_counted_adopted() {
     let active = store.load_active_campaigns().unwrap();
     let a_good = resolve_node_assignment(&good, &cohort, &active);
     let a_bad = resolve_node_assignment(&bad, &cohort, &active);
-    assert!(a_good.rolled && a_bad.rolled, "both nodes are in the 50% rollout");
+    assert!(
+        a_good.rolled && a_bad.rolled,
+        "both nodes are in the 50% rollout"
+    );
 
     // good commits the new digest; bad's trial is UNHEALTHY → rolls back to baseline.
-    assert_eq!(node_runs_cycle(&a_good, OLD_DIGEST, &artifact, true), digest);
+    assert_eq!(
+        node_runs_cycle(&a_good, OLD_DIGEST, &artifact, true),
+        digest
+    );
     assert_eq!(
         node_runs_cycle(&a_bad, OLD_DIGEST, &artifact, false),
         OLD_DIGEST,
@@ -193,14 +245,22 @@ fn unhealthy_node_rolls_back_and_is_not_counted_adopted() {
     );
 
     // Each reports what it is ACTUALLY running: good on the new digest, bad on baseline.
-    store.upsert_node_artifact_status(&adoption(&good, &digest, CID, 10)).unwrap();
-    store.upsert_node_artifact_status(&adoption(&bad, OLD_DIGEST, CID, 10)).unwrap();
+    store
+        .upsert_node_artifact_status(&adoption(&good, &digest, CID, 10))
+        .unwrap();
+    store
+        .upsert_node_artifact_status(&adoption(&bad, OLD_DIGEST, CID, 10))
+        .unwrap();
 
     let summary = summarize_campaigns(
         &store.load_campaigns().unwrap(),
         &store.load_node_artifact_statuses().unwrap(),
     );
-    let prog = summary.active.iter().find(|c| c.campaign_id == CID).expect("campaign in summary");
+    let prog = summary
+        .active
+        .iter()
+        .find(|c| c.campaign_id == CID)
+        .expect("campaign in summary");
     assert_eq!(
         prog.applied_nodes, 1,
         "only the healthy node adopted; the rolled-back node is not counted"
@@ -226,17 +286,25 @@ fn signed_campaign_flows_the_release_signature_to_a_verifying_node() {
 
     // Verifier side: a SIGNED campaign, armed and advanced to 100%.
     let mut store = VerifierStore::new(":memory:").expect("store");
-    let mut c =
-        Campaign::new("camp-signed", &digest, "v2", vec!["fleet".into()], vec![50, 100], 1)
-            .unwrap()
-            .with_artifact_signature(&sig);
+    let mut c = Campaign::new(
+        "camp-signed",
+        &digest,
+        "v2",
+        vec!["fleet".into()],
+        vec![50, 100],
+        1,
+    )
+    .unwrap()
+    .with_artifact_signature(&sig);
     store.insert_campaign(&c).expect("insert");
     c.arm(2).unwrap();
     store.update_campaign(&c, "OtaCampaignArmed").expect("arm");
     // One advance → Rolling@50% (a single [100] stage would jump to Completed,
     // which resolve_node_assignment excludes).
     c.advance(FleetPosture::Nominal, 3).unwrap();
-    store.update_campaign(&c, "OtaCampaignAdvanced").expect("advance");
+    store
+        .update_campaign(&c, "OtaCampaignAdvanced")
+        .expect("advance");
 
     // A node deterministically inside the 50% bucket fetches the assignment,
     // which carries the signature.
@@ -247,7 +315,10 @@ fn signed_campaign_flows_the_release_signature_to_a_verifying_node() {
     let active = store.load_active_campaigns().expect("active");
     let assignment = resolve_node_assignment(&node, &["fleet".into()], &active);
     assert!(assignment.rolled);
-    assert_eq!(assignment.artifact_signature_b64.as_deref(), Some(sig.as_str()));
+    assert_eq!(
+        assignment.artifact_signature_b64.as_deref(),
+        Some(sig.as_str())
+    );
 
     // Node side: a key-provisioned installer accepts the signed stage...
     let mut inst = Installer::new(InMemoryBootController::new(Slot::A), 1)
@@ -333,8 +404,16 @@ fn uptane_anchored_rollout_verifies_and_rejects_a_rollback_attack() {
                 version: "v3".into(),
             }],
         };
-        let snapshot = SnapshotMetadata { version: v, expires_at_ms: EXP, targets_version: v };
-        let timestamp = TimestampMetadata { version: v, expires_at_ms: EXP, snapshot_version: v };
+        let snapshot = SnapshotMetadata {
+            version: v,
+            expires_at_ms: EXP,
+            targets_version: v,
+        };
+        let timestamp = TimestampMetadata {
+            version: v,
+            expires_at_ms: EXP,
+            snapshot_version: v,
+        };
         UptaneMetadataSet {
             timestamp_sig_b64: sign_timestamp(&timestamp, &timestamp_sk),
             timestamp,
@@ -357,7 +436,9 @@ fn uptane_anchored_rollout_verifies_and_rejects_a_rollback_attack() {
     c.arm(2).unwrap();
     store.update_campaign(&c, "OtaCampaignArmed").expect("arm");
     c.advance(FleetPosture::Nominal, 3).unwrap(); // → Rolling @ 50%
-    store.update_campaign(&c, "OtaCampaignAdvanced").expect("advance");
+    store
+        .update_campaign(&c, "OtaCampaignAdvanced")
+        .expect("advance");
 
     let node = (0..500)
         .map(|i| format!("node-{i}"))
@@ -370,7 +451,10 @@ fn uptane_anchored_rollout_verifies_and_rejects_a_rollback_attack() {
     // --- The WIRE boundary: assignment JSON → the installer's view --------
     let wire = serde_json::to_string(&assignment).expect("assignment JSON");
     let view: AssignmentView = serde_json::from_str(&wire).expect("installer view");
-    let carried = view.uptane_metadata.as_ref().expect("assignment carries the metadata set");
+    let carried = view
+        .uptane_metadata
+        .as_ref()
+        .expect("assignment carries the metadata set");
     assert_eq!(carried, &set_v3, "the set survives the relay bit-for-bit");
 
     // --- Node side: anchored trust store, gate BEFORE the pull ------------
@@ -385,27 +469,37 @@ fn uptane_anchored_rollout_verifies_and_rejects_a_rollback_attack() {
 
     // Install through the REAL slot state machine, then persist the floor
     // (floor AFTER a successful stage — a failed stage never burns it).
-    let mut inst =
-        Installer::new(InMemoryBootController::new(Slot::A), 1).expect("installer");
-    inst.stage(&artifact, &digest).expect("stage the authorized artifact");
+    let mut inst = Installer::new(InMemoryBootController::new(Slot::A), 1).expect("installer");
+    inst.stage(&artifact, &digest)
+        .expect("stage the authorized artifact");
     inst.begin_trial().expect("trial");
     match inst.report_health(true).expect("health") {
         HealthOutcome::Committed { active } => assert_eq!(active, Slot::B),
         other => panic!("healthy uptane rollout must commit, got {other:?}"),
     }
-    trust.record_versions(floor).expect("persist the advanced floor");
+    trust
+        .record_versions(floor)
+        .expect("persist the advanced floor");
 
     // --- Attack 1: ROLLBACK — the carrier re-serves an OLDER signed set ---
     // (correctly signed by the real role keys, so only the persisted floor
     // stands between the node and the downgrade).
     let stale = set_at(2);
-    let mut rollback_campaign =
-        Campaign::new("camp-rollback", &digest, "v3", vec!["fleet".into()], vec![100], 4)
-            .unwrap()
-            .with_uptane_metadata(&serde_json::to_string(&stale).unwrap())
-            .expect("the verifier is a carrier — it cannot know the node's floor");
+    let mut rollback_campaign = Campaign::new(
+        "camp-rollback",
+        &digest,
+        "v3",
+        vec!["fleet".into()],
+        vec![100],
+        4,
+    )
+    .unwrap()
+    .with_uptane_metadata(&serde_json::to_string(&stale).unwrap())
+    .expect("the verifier is a carrier — it cannot know the node's floor");
     rollback_campaign.arm(5).unwrap();
-    store.insert_campaign(&rollback_campaign).expect("insert rollback campaign");
+    store
+        .insert_campaign(&rollback_campaign)
+        .expect("insert rollback campaign");
     // (arm only — the node-side gate is what must refuse, not campaign state)
     let stale_view: AssignmentView = serde_json::from_str(
         &serde_json::to_string(&NodeAssignment {
@@ -423,9 +517,16 @@ fn uptane_anchored_rollout_verifies_and_rejects_a_rollback_attack() {
     let reloaded = trust.load().expect("reload trust state (restart boundary)");
     assert!(
         matches!(
-            uptane_pull_gate(Some(&reloaded), stale_view.uptane_metadata.as_ref(), &digest, NOW),
+            uptane_pull_gate(
+                Some(&reloaded),
+                stale_view.uptane_metadata.as_ref(),
+                &digest,
+                NOW
+            ),
             // Timestamp is the first role the version floor screens.
-            Err(UptaneGateError::Verify(UptaneError::RollbackAttempt(Role::Timestamp)))
+            Err(UptaneGateError::Verify(UptaneError::RollbackAttempt(
+                Role::Timestamp
+            )))
         ),
         "an older re-served metadata set must be refused by the persisted floor"
     );

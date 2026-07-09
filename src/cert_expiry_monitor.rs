@@ -117,7 +117,8 @@ pub fn spawn_cert_expiry_monitor_with_clock(app: Arc<AppState>, clock: Arc<dyn C
                         Err(_) => tracing::error!("cert-expiry monitor sweep task failed"),
                     }
                     let elapsed_ms = clock.now_ms().saturating_sub(sweep_start_ms);
-                    app.deadline_registry.record("cert_expiry_monitor", elapsed_ms);
+                    app.deadline_registry
+                        .record("cert_expiry_monitor", elapsed_ms);
                 }
             }
         },
@@ -137,30 +138,42 @@ mod tests {
         let mut s = store();
         // One active cert whose expiry is comfortably beyond the 14-day warn window
         // from `now = 10_000` (so it is neither expired nor expiring-soon).
-        s.register_cert_principal("svc", "fp", "integrator", Some(5_000_000_000), 1_000).unwrap();
+        s.register_cert_principal("svc", "fp", "integrator", Some(5_000_000_000), 1_000)
+            .unwrap();
         let sum = sweep_cert_expiry_once(&mut s, 10_000, CERT_EXPIRY_WARN_WINDOW_MS).unwrap();
         assert_eq!(sum.active, 1);
         assert_eq!(sum.expired, 0);
         assert_eq!(sum.expiring_soon, 0);
         // No lapse → no audit event.
-        assert_eq!(s.count_audit_events_for_test("CertPrincipalExpiryWarning"), 0);
+        assert_eq!(
+            s.count_audit_events_for_test("CertPrincipalExpiryWarning"),
+            0
+        );
     }
 
     #[test]
     fn lapsed_or_lapsing_registry_audits_the_warning() {
         let mut s = store();
         // Expired (past notAfter).
-        s.register_cert_principal("stale", "fp-stale", "integrator", Some(5_000), 1_000).unwrap();
+        s.register_cert_principal("stale", "fp-stale", "integrator", Some(5_000), 1_000)
+            .unwrap();
         // Expiring within the window.
-        s.register_cert_principal("soon", "fp-soon", "integrator", Some(10_500), 1_000).unwrap();
+        s.register_cert_principal("soon", "fp-soon", "integrator", Some(10_500), 1_000)
+            .unwrap();
         let sum = sweep_cert_expiry_once(&mut s, 10_000, 1_000).unwrap();
         assert_eq!(sum.expired, 1);
         assert_eq!(sum.expiring_soon, 1);
         // The lapse is recorded once in the hash-chained audit log.
-        assert_eq!(s.count_audit_events_for_test("CertPrincipalExpiryWarning"), 1);
+        assert_eq!(
+            s.count_audit_events_for_test("CertPrincipalExpiryWarning"),
+            1
+        );
         // A second sweep with the same state records again (each census is a fresh
         // observation — the audit chain is append-only, dedup is the consumer's job).
         let _ = sweep_cert_expiry_once(&mut s, 10_000, 1_000).unwrap();
-        assert_eq!(s.count_audit_events_for_test("CertPrincipalExpiryWarning"), 2);
+        assert_eq!(
+            s.count_audit_events_for_test("CertPrincipalExpiryWarning"),
+            2
+        );
     }
 }

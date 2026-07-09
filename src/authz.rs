@@ -135,7 +135,12 @@ pub struct AuthzDecision {
 
 impl AuthzDecision {
     fn deny(outcome: AuthzOutcome, auth_method: &'static str) -> Self {
-        AuthzDecision { outcome, auth_method, principal_id: None, role: None }
+        AuthzDecision {
+            outcome,
+            auth_method,
+            principal_id: None,
+            role: None,
+        }
     }
 }
 
@@ -259,7 +264,11 @@ mod tests {
     use super::*;
 
     fn principal(id: &str, role: ApiRole, revoked: bool) -> ResolvedPrincipal {
-        ResolvedPrincipal { principal_id: id.into(), role: Some(role), revoked }
+        ResolvedPrincipal {
+            principal_id: id.into(),
+            role: Some(role),
+            revoked,
+        }
     }
 
     // --- RBAC matrix ---------------------------------------------------------
@@ -292,12 +301,21 @@ mod tests {
 
     #[test]
     fn role_string_round_trips_and_rejects_unknown() {
-        for r in [ApiRole::Admin, ApiRole::Integrator, ApiRole::Auditor, ApiRole::Operator] {
+        for r in [
+            ApiRole::Admin,
+            ApiRole::Integrator,
+            ApiRole::Auditor,
+            ApiRole::Operator,
+        ] {
             assert_eq!(ApiRole::parse_role(r.as_str()), Some(r));
         }
         assert_eq!(ApiRole::parse_role("superuser"), None);
         assert_eq!(ApiRole::parse_role(""), None);
-        assert_eq!(ApiRole::parse_role("Admin"), None, "role match is case-sensitive");
+        assert_eq!(
+            ApiRole::parse_role("Admin"),
+            None,
+            "role match is case-sensitive"
+        );
     }
 
     // --- authorize_request truth table --------------------------------------
@@ -336,7 +354,11 @@ mod tests {
     fn cert_principal_under_scope_is_403_not_401() {
         let p = principal("mtls-svc", ApiRole::Auditor, false);
         let d = authorize_request(SCOPE_ADMIN, Some("root"), None, Some(&p));
-        assert_eq!(d.outcome, AuthzOutcome::Forbidden, "authenticated cert, wrong scope");
+        assert_eq!(
+            d.outcome,
+            AuthzOutcome::Forbidden,
+            "authenticated cert, wrong scope"
+        );
     }
 
     #[test]
@@ -356,9 +378,18 @@ mod tests {
 
     #[test]
     fn root_admin_token_allows_every_scope_as_break_glass() {
-        for s in [SCOPE_ADMIN, SCOPE_INTEGRATION_EVALUATE, SCOPE_ACTUATOR_COMMAND, SCOPE_AUDIT_READ] {
+        for s in [
+            SCOPE_ADMIN,
+            SCOPE_INTEGRATION_EVALUATE,
+            SCOPE_ACTUATOR_COMMAND,
+            SCOPE_AUDIT_READ,
+        ] {
             let d = authorize_request(s, Some("root-token"), Some("root-token"), None);
-            assert_eq!(d.outcome, AuthzOutcome::Allow, "admin token must satisfy {s}");
+            assert_eq!(
+                d.outcome,
+                AuthzOutcome::Allow,
+                "admin token must satisfy {s}"
+            );
             assert_eq!(d.auth_method, "admin-token");
             assert_eq!(d.role, Some(ApiRole::Admin));
         }
@@ -367,14 +398,23 @@ mod tests {
     #[test]
     fn integrator_reaches_integration_but_not_admin_or_actuator() {
         let p = principal("svc-integ", ApiRole::Integrator, false);
-        let allow = authorize_request(SCOPE_INTEGRATION_EVALUATE, Some("root"), Some("scoped"), Some(&p));
+        let allow = authorize_request(
+            SCOPE_INTEGRATION_EVALUATE,
+            Some("root"),
+            Some("scoped"),
+            Some(&p),
+        );
         assert_eq!(allow.outcome, AuthzOutcome::Allow);
         assert_eq!(allow.auth_method, "api-principal");
         assert_eq!(allow.principal_id.as_deref(), Some("svc-integ"));
 
         for s in [SCOPE_ADMIN, SCOPE_ACTUATOR_COMMAND, SCOPE_AUDIT_READ] {
             let d = authorize_request(s, Some("root"), Some("scoped"), Some(&p));
-            assert_eq!(d.outcome, AuthzOutcome::Forbidden, "integrator must be 403 on {s}");
+            assert_eq!(
+                d.outcome,
+                AuthzOutcome::Forbidden,
+                "integrator must be 403 on {s}"
+            );
         }
     }
 
@@ -394,21 +434,40 @@ mod tests {
     #[test]
     fn revoked_principal_is_401() {
         let p = principal("svc-old", ApiRole::Integrator, true);
-        let d = authorize_request(SCOPE_INTEGRATION_EVALUATE, Some("root"), Some("scoped"), Some(&p));
+        let d = authorize_request(
+            SCOPE_INTEGRATION_EVALUATE,
+            Some("root"),
+            Some("scoped"),
+            Some(&p),
+        );
         assert_eq!(d.outcome, AuthzOutcome::Unauthenticated);
     }
 
     #[test]
     fn unknown_token_is_401() {
         // Bearer present, not the admin token, no principal holds its hash.
-        let d = authorize_request(SCOPE_INTEGRATION_EVALUATE, Some("root"), Some("mystery"), None);
+        let d = authorize_request(
+            SCOPE_INTEGRATION_EVALUATE,
+            Some("root"),
+            Some("mystery"),
+            None,
+        );
         assert_eq!(d.outcome, AuthzOutcome::Unauthenticated);
     }
 
     #[test]
     fn corrupt_stored_role_fails_closed() {
-        let p = ResolvedPrincipal { principal_id: "svc-x".into(), role: None, revoked: false };
-        let d = authorize_request(SCOPE_INTEGRATION_EVALUATE, Some("root"), Some("scoped"), Some(&p));
+        let p = ResolvedPrincipal {
+            principal_id: "svc-x".into(),
+            role: None,
+            revoked: false,
+        };
+        let d = authorize_request(
+            SCOPE_INTEGRATION_EVALUATE,
+            Some("root"),
+            Some("scoped"),
+            Some(&p),
+        );
         assert_eq!(d.outcome, AuthzOutcome::Unauthenticated);
     }
 

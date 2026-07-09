@@ -46,9 +46,9 @@ pub enum TickError {
     /// `ParkoNodeConfig::sensor_staleness_budget_ms` relative to wall
     /// clock at tick time. MRC.
     StaleSensorInput {
-        frame_id:        u64,
-        frame_age_ms:    u64,
-        budget_ms:       u64,
+        frame_id: u64,
+        frame_age_ms: u64,
+        budget_ms: u64,
     },
     /// `InferenceLoop::tick` returned `Err`. The string is the
     /// underlying error message; logged + audited.
@@ -107,10 +107,10 @@ pub struct TickOutcome {
 ///
 // SAFETY: SG8 SG9 | REQ: parko-ros2-tick-fail-closed | TEST: tick_with_finite_inference_publishes_governed_command,tick_with_stale_sensor_input_publishes_stopped_twist,tick_with_zero_inference_publishes_stopped_twist,tick_with_locked_out_posture_publishes_stopped_twist,fault_hung_backend_mrcs_the_tick_within_budget
 pub async fn run_pipeline_tick<B>(
-    config:      &ParkoNodeConfig,
-    loop_mutex:  Arc<Mutex<InferenceLoop<B>>>,
-    frame:       SensorFrame,
-    posture:     SafetyPosture,
+    config: &ParkoNodeConfig,
+    loop_mutex: Arc<Mutex<InferenceLoop<B>>>,
+    frame: SensorFrame,
+    posture: SafetyPosture,
 ) -> TickOutcome
 where
     B: InferenceBackend + 'static,
@@ -131,9 +131,9 @@ where
 ///
 // SAFETY: SG8 SG9 | REQ: parko-ros2-tick-posture-source-fail-closed | TEST: tick_with_no_posture_source_is_nominal,tick_with_source_pre_first_event_is_degraded,tick_with_source_after_locked_out_event_is_locked_out,tick_with_source_after_nominal_event_is_nominal
 pub async fn run_pipeline_tick_with_posture_state<B>(
-    config:        &ParkoNodeConfig,
-    loop_mutex:    Arc<Mutex<InferenceLoop<B>>>,
-    frame:         SensorFrame,
+    config: &ParkoNodeConfig,
+    loop_mutex: Arc<Mutex<InferenceLoop<B>>>,
+    frame: SensorFrame,
     posture_state: &crate::posture_state::ParkoPostureState,
 ) -> TickOutcome
 where
@@ -152,11 +152,11 @@ where
 ///
 // SAFETY: SG8 SG9 | REQ: parko-ros2-tick-ood-derate-only | TEST: ood_shifted_stream_locks_out_the_tick,ood_moderate_shift_derates_the_tick_to_mrc_cap,ood_nominal_stream_leaves_the_tick_alone,ood_under_filled_window_is_a_noop
 pub async fn run_pipeline_tick_with_ood<B>(
-    config:      &ParkoNodeConfig,
-    loop_mutex:  Arc<Mutex<InferenceLoop<B>>>,
-    frame:       SensorFrame,
-    posture:     SafetyPosture,
-    ood:         &crate::ood_feed::OodFeed,
+    config: &ParkoNodeConfig,
+    loop_mutex: Arc<Mutex<InferenceLoop<B>>>,
+    frame: SensorFrame,
+    posture: SafetyPosture,
+    ood: &crate::ood_feed::OodFeed,
 ) -> TickOutcome
 where
     B: InferenceBackend + 'static,
@@ -175,10 +175,10 @@ where
 }
 
 pub(crate) async fn run_pipeline_tick_inner<B>(
-    config:      &ParkoNodeConfig,
-    loop_mutex:  Arc<Mutex<InferenceLoop<B>>>,
-    frame:       SensorFrame,
-    posture:     SafetyPosture,
+    config: &ParkoNodeConfig,
+    loop_mutex: Arc<Mutex<InferenceLoop<B>>>,
+    frame: SensorFrame,
+    posture: SafetyPosture,
 ) -> TickOutcome
 where
     B: InferenceBackend + 'static,
@@ -223,14 +223,14 @@ where
             // command; the mapping is a pure projection of axes plus
             // a finiteness defence-in-depth check.
             TickOutcome {
-                twist:    enforce_outgoing_twist(&snapshot.active_command),
-                error:    None,
+                twist: enforce_outgoing_twist(&snapshot.active_command),
+                error: None,
                 degraded: snapshot.active_state_degraded,
             }
         }
         Err(e) => TickOutcome {
-            twist:    OutgoingTwist::stopped(now_ms),
-            error:    Some(TickError::InferenceError(e)),
+            twist: OutgoingTwist::stopped(now_ms),
+            error: Some(TickError::InferenceError(e)),
             degraded: false,
         },
     }
@@ -272,9 +272,12 @@ mod tick_pipeline_tests {
     fn build_loop(
         linear_out: f32,
         angular_out: f32,
-    ) -> (Arc<Mutex<InferenceLoop<MockBackend>>>, mpsc::Receiver<ControlCommand>) {
+    ) -> (
+        Arc<Mutex<InferenceLoop<MockBackend>>>,
+        mpsc::Receiver<ControlCommand>,
+    ) {
         let mut outputs: HashMap<String, Vec<f32>> = HashMap::new();
-        outputs.insert("cmd_vel_linear".to_string(),  vec![linear_out]);
+        outputs.insert("cmd_vel_linear".to_string(), vec![linear_out]);
         outputs.insert("cmd_vel_angular".to_string(), vec![angular_out]);
         let backend = Arc::new(MockBackend::new(outputs, BackendDescriptor::Cpu));
 
@@ -308,7 +311,9 @@ mod tick_pipeline_tests {
         let backend = Arc::new(MockBackend::new(outputs, BackendDescriptor::Cpu));
         let model = backend.load_model("test.onnx").expect("mock model loads");
         let (tx, _rx) = mpsc::channel::<ControlCommand>(8);
-        let infer = InferenceLoop::new(backend, model, tx).with_governor(governor).with_tick_period(0.05);
+        let infer = InferenceLoop::new(backend, model, tx)
+            .with_governor(governor)
+            .with_tick_period(0.05);
         Arc::new(Mutex::new(infer))
     }
 
@@ -324,7 +329,9 @@ mod tick_pipeline_tests {
             posture: SafetyPosture,
         ) -> parko_core::safety::EnforcementAction {
             if posture == SafetyPosture::LockedOut {
-                parko_core::safety::EnforcementAction::Deny { reason: "locked out".into() }
+                parko_core::safety::EnforcementAction::Deny {
+                    reason: "locked out".into(),
+                }
             } else {
                 parko_core::safety::EnforcementAction::Allow
             }
@@ -364,14 +371,23 @@ mod tick_pipeline_tests {
         // M1b PostureTracker / parko-kirra bounds.
         let (infer, _rx) = build_loop(0.1, 0.2);
         let frame = make_frame(1, 0);
-        let outcome = run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
-        assert!(outcome.error.is_none(),
-            "happy-path tick must not surface an error; got {:?}", outcome.error);
-        assert!((outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
+        let outcome =
+            run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
+        assert!(
+            outcome.error.is_none(),
+            "happy-path tick must not surface an error; got {:?}",
+            outcome.error
+        );
+        assert!(
+            (outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
             "expected linear ~0.1 (within accel envelope), got {}",
-            outcome.twist.linear_x_mps);
-        assert!((outcome.twist.angular_z_rads - 0.2).abs() < 1e-4,
-            "expected angular ~0.2, got {}", outcome.twist.angular_z_rads);
+            outcome.twist.linear_x_mps
+        );
+        assert!(
+            (outcome.twist.angular_z_rads - 0.2).abs() < 1e-4,
+            "expected angular ~0.2, got {}",
+            outcome.twist.angular_z_rads
+        );
     }
 
     // ---- divergence→posture: the governor's recommendation escalates the tick ----
@@ -383,7 +399,13 @@ mod tick_pipeline_tests {
         // publishes a STOPPED twist. (Without the loop, evaluate(Nominal) would Allow the
         // 0.1 m/s command through.) This is the integrator step the #537 seam was built for.
         let infer = build_loop_with(RecommendsPosture(SafetyPosture::LockedOut), 0.1, 0.2);
-        let outcome = run_pipeline_tick(&default_config(), infer, make_frame(1, 0), SafetyPosture::Nominal).await;
+        let outcome = run_pipeline_tick(
+            &default_config(),
+            infer,
+            make_frame(1, 0),
+            SafetyPosture::Nominal,
+        )
+        .await;
         assert!(
             outcome.twist.linear_x_mps.abs() < 1e-6,
             "a LockedOut RECOMMENDATION escalated the Nominal source → stopped twist, got linear {}",
@@ -393,7 +415,13 @@ mod tick_pipeline_tests {
         // Control: a Nominal recommendation does NOT escalate — the command passes (the loop only
         // ESCALATES the posture, it never fabricates a stop).
         let infer2 = build_loop_with(RecommendsPosture(SafetyPosture::Nominal), 0.1, 0.2);
-        let outcome2 = run_pipeline_tick(&default_config(), infer2, make_frame(2, 0), SafetyPosture::Nominal).await;
+        let outcome2 = run_pipeline_tick(
+            &default_config(),
+            infer2,
+            make_frame(2, 0),
+            SafetyPosture::Nominal,
+        )
+        .await;
         assert!(
             outcome2.twist.linear_x_mps.abs() > 1e-6,
             "a Nominal recommendation leaves the command alone, got linear {}",
@@ -412,13 +440,19 @@ mod tick_pipeline_tests {
         // P3 clamps to `max_accel * dt = 0.125 m/s`.
         let (infer, _rx) = build_loop(1.0, 0.0);
         let frame = make_frame(2, 0);
-        let outcome = run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
+        let outcome =
+            run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
         assert!(outcome.error.is_none());
-        assert!(outcome.twist.linear_x_mps > 0.0,
-            "clamp must preserve motion direction; got {}", outcome.twist.linear_x_mps);
-        assert!(outcome.twist.linear_x_mps < 0.2,
+        assert!(
+            outcome.twist.linear_x_mps > 0.0,
+            "clamp must preserve motion direction; got {}",
+            outcome.twist.linear_x_mps
+        );
+        assert!(
+            outcome.twist.linear_x_mps < 0.2,
             "first-tick accel clamp must reduce 1.0 m/s well below model output; got {}",
-            outcome.twist.linear_x_mps);
+            outcome.twist.linear_x_mps
+        );
     }
 
     // ---- Fail-closed: stale sensor ------------------------------------
@@ -428,15 +462,27 @@ mod tick_pipeline_tests {
         let (infer, _rx) = build_loop(2.0, 0.5);
         // Frame timestamp older than the default 200ms staleness budget.
         let frame = make_frame(7, 500);
-        let outcome = run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
-        assert_eq!(outcome.twist.linear_x_mps,   0.0,
-            "stale sensor must produce a stopped twist (linear=0)");
-        assert_eq!(outcome.twist.angular_z_rads, 0.0,
-            "stale sensor must produce a stopped twist (angular=0)");
+        let outcome =
+            run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
+        assert_eq!(
+            outcome.twist.linear_x_mps, 0.0,
+            "stale sensor must produce a stopped twist (linear=0)"
+        );
+        assert_eq!(
+            outcome.twist.angular_z_rads, 0.0,
+            "stale sensor must produce a stopped twist (angular=0)"
+        );
         match outcome.error {
-            Some(TickError::StaleSensorInput { frame_id, frame_age_ms, budget_ms }) => {
+            Some(TickError::StaleSensorInput {
+                frame_id,
+                frame_age_ms,
+                budget_ms,
+            }) => {
                 assert_eq!(frame_id, 7);
-                assert!(frame_age_ms >= 500,  "frame_age={frame_age_ms} should be ≥500ms");
+                assert!(
+                    frame_age_ms >= 500,
+                    "frame_age={frame_age_ms} should be ≥500ms"
+                );
                 assert_eq!(budget_ms, 200);
             }
             other => panic!("expected StaleSensorInput error, got {other:?}"),
@@ -453,14 +499,22 @@ mod tick_pipeline_tests {
         // twist is zero.
         let (infer, _rx) = build_loop(2.5, 0.4);
         let frame = make_frame(11, 0);
-        let outcome = run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::LockedOut).await;
-        assert!(outcome.error.is_none(),
+        let outcome =
+            run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::LockedOut).await;
+        assert!(
+            outcome.error.is_none(),
             "happy-path inference + LockedOut produces a deny inside the governor; \
-             no TickError surfaces — got {:?}", outcome.error);
-        assert_eq!(outcome.twist.linear_x_mps,   0.0,
-            "LockedOut posture must produce a stopped twist (linear=0)");
-        assert_eq!(outcome.twist.angular_z_rads, 0.0,
-            "LockedOut posture must produce a stopped twist (angular=0)");
+             no TickError surfaces — got {:?}",
+            outcome.error
+        );
+        assert_eq!(
+            outcome.twist.linear_x_mps, 0.0,
+            "LockedOut posture must produce a stopped twist (linear=0)"
+        );
+        assert_eq!(
+            outcome.twist.angular_z_rads, 0.0,
+            "LockedOut posture must produce a stopped twist (angular=0)"
+        );
     }
 
     // ---- Posture: Degraded clamps -------------------------------------
@@ -470,10 +524,13 @@ mod tick_pipeline_tests {
         // 10 m/s requested but Degraded MRC cap = 5 m/s.
         let (infer, _rx) = build_loop(10.0, 0.2);
         let frame = make_frame(13, 0);
-        let outcome = run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Degraded).await;
-        assert!(outcome.twist.linear_x_mps <= 5.0 + 1e-9,
+        let outcome =
+            run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Degraded).await;
+        assert!(
+            outcome.twist.linear_x_mps <= 5.0 + 1e-9,
             "Degraded posture must clamp linear to MRC ceiling (≤5 m/s); got {}",
-            outcome.twist.linear_x_mps);
+            outcome.twist.linear_x_mps
+        );
         assert!(outcome.error.is_none());
     }
 
@@ -485,9 +542,10 @@ mod tick_pipeline_tests {
     async fn tick_with_zero_inference_publishes_stopped_twist() {
         let (infer, _rx) = build_loop(0.0, 0.0);
         let frame = make_frame(17, 0);
-        let outcome = run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
+        let outcome =
+            run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
         assert!(outcome.error.is_none());
-        assert_eq!(outcome.twist.linear_x_mps,   0.0);
+        assert_eq!(outcome.twist.linear_x_mps, 0.0);
         assert_eq!(outcome.twist.angular_z_rads, 0.0);
     }
 
@@ -500,9 +558,9 @@ mod tick_pipeline_tests {
     #[test]
     fn defence_in_depth_nan_command_maps_to_stopped_twist_directly() {
         let cmd = ControlCommand {
-            linear_velocity:  f64::NAN,
+            linear_velocity: f64::NAN,
             angular_velocity: 0.1,
-            timestamp_ms:     100,
+            timestamp_ms: 100,
         };
         let twist = enforce_outgoing_twist(&cmd);
         assert_eq!(twist, OutgoingTwist::stopped(100));
@@ -573,13 +631,22 @@ mod tick_pipeline_tests {
     async fn fault_nan_inference_output_publishes_stopped_twist() {
         let (infer, _rx) = build_loop(f32::NAN, 0.5);
         let frame = make_frame(101, 0);
-        let outcome = run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
-        assert_eq!(outcome.twist.linear_x_mps, 0.0,
-            "NaN inference must safe-stop (linear=0), got {}", outcome.twist.linear_x_mps);
-        assert_eq!(outcome.twist.angular_z_rads, 0.0,
-            "NaN inference must safe-stop (angular=0), got {}", outcome.twist.angular_z_rads);
-        assert!(outcome.twist.linear_x_mps.is_finite() && outcome.twist.angular_z_rads.is_finite(),
-            "the published command must be finite (no NaN leak to cmd_vel)");
+        let outcome =
+            run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
+        assert_eq!(
+            outcome.twist.linear_x_mps, 0.0,
+            "NaN inference must safe-stop (linear=0), got {}",
+            outcome.twist.linear_x_mps
+        );
+        assert_eq!(
+            outcome.twist.angular_z_rads, 0.0,
+            "NaN inference must safe-stop (angular=0), got {}",
+            outcome.twist.angular_z_rads
+        );
+        assert!(
+            outcome.twist.linear_x_mps.is_finite() && outcome.twist.angular_z_rads.is_finite(),
+            "the published command must be finite (no NaN leak to cmd_vel)"
+        );
     }
 
     /// FAULT: inference emits +∞ linear velocity. ASSERT fail-closed safe stop.
@@ -587,11 +654,17 @@ mod tick_pipeline_tests {
     async fn fault_inf_inference_output_publishes_stopped_twist() {
         let (infer, _rx) = build_loop(f32::INFINITY, 0.0);
         let frame = make_frame(102, 0);
-        let outcome = run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
-        assert_eq!(outcome.twist.linear_x_mps, 0.0,
-            "inf inference must safe-stop, got {}", outcome.twist.linear_x_mps);
-        assert!(outcome.twist.linear_x_mps.is_finite(),
-            "no inf leak to cmd_vel");
+        let outcome =
+            run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
+        assert_eq!(
+            outcome.twist.linear_x_mps, 0.0,
+            "inf inference must safe-stop, got {}",
+            outcome.twist.linear_x_mps
+        );
+        assert!(
+            outcome.twist.linear_x_mps.is_finite(),
+            "no inf leak to cmd_vel"
+        );
     }
 
     /// FAULT: inference emits a wildly out-of-range (but finite) 1000 m/s.
@@ -602,12 +675,15 @@ mod tick_pipeline_tests {
     async fn fault_out_of_range_inference_is_bounded_not_admitted() {
         let (infer, _rx) = build_loop(1000.0, 0.0);
         let frame = make_frame(103, 0);
-        let outcome = run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
+        let outcome =
+            run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
         let v = outcome.twist.linear_x_mps;
         assert!(v.is_finite(), "published velocity must be finite, got {v}");
         assert!(v >= 0.0, "must not flip sign, got {v}");
-        assert!(v < 1000.0,
-            "1000 m/s must be CLAMPED by the governor envelope, never admitted as-is; got {v}");
+        assert!(
+            v < 1000.0,
+            "1000 m/s must be CLAMPED by the governor envelope, never admitted as-is; got {v}"
+        );
     }
 
     /// A backend that hangs (bounded 400 ms real sleep — the runtime's
@@ -644,7 +720,10 @@ mod tick_pipeline_tests {
                 "cmd_vel_angular".to_string(),
                 parko_core::backend::TensorStorage::Owned(vec![0.0_f32]),
             );
-            Ok(TensorBatch { named_tensors: map, metadata: HashMap::new() })
+            Ok(TensorBatch {
+                named_tensors: map,
+                metadata: HashMap::new(),
+            })
         }
         fn descriptor(&self) -> BackendDescriptor {
             BackendDescriptor::Cpu
@@ -673,9 +752,13 @@ mod tick_pipeline_tests {
         ));
 
         let started = std::time::Instant::now();
-        let outcome =
-            run_pipeline_tick(&default_config(), infer, make_frame(105, 0), SafetyPosture::Nominal)
-                .await;
+        let outcome = run_pipeline_tick(
+            &default_config(),
+            infer,
+            make_frame(105, 0),
+            SafetyPosture::Nominal,
+        )
+        .await;
         let elapsed = started.elapsed();
 
         // Strictly below the 400 ms hang: the timing proves the DEADLINE cut
@@ -684,12 +767,18 @@ mod tick_pipeline_tests {
             elapsed < std::time::Duration::from_millis(300),
             "a hung backend must not stall the tick; took {elapsed:?}"
         );
-        assert_eq!(outcome.twist.linear_x_mps, 0.0,
-            "deadline breach must publish a stopped twist (linear=0)");
-        assert_eq!(outcome.twist.angular_z_rads, 0.0,
-            "deadline breach must publish a stopped twist (angular=0)");
-        assert!(outcome.degraded,
-            "the deadline-MRC snapshot must be flagged degraded for the audit ledger");
+        assert_eq!(
+            outcome.twist.linear_x_mps, 0.0,
+            "deadline breach must publish a stopped twist (linear=0)"
+        );
+        assert_eq!(
+            outcome.twist.angular_z_rads, 0.0,
+            "deadline breach must publish a stopped twist (angular=0)"
+        );
+        assert!(
+            outcome.degraded,
+            "the deadline-MRC snapshot must be flagged degraded for the audit ledger"
+        );
     }
 
     /// FAULT: the inference backend itself errors. ASSERT fail-closed — the
@@ -699,14 +788,21 @@ mod tick_pipeline_tests {
     async fn fault_backend_failure_fails_closed() {
         let infer = build_loop_with_backend(Arc::new(FailingBackend));
         let frame = make_frame(104, 0);
-        let outcome = run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
-        assert_eq!(outcome.twist.linear_x_mps, 0.0,
-            "backend failure must safe-stop (linear=0)");
-        assert_eq!(outcome.twist.angular_z_rads, 0.0,
-            "backend failure must safe-stop (angular=0)");
+        let outcome =
+            run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
+        assert_eq!(
+            outcome.twist.linear_x_mps, 0.0,
+            "backend failure must safe-stop (linear=0)"
+        );
+        assert_eq!(
+            outcome.twist.angular_z_rads, 0.0,
+            "backend failure must safe-stop (angular=0)"
+        );
         match outcome.error {
             Some(TickError::InferenceError(_)) => {}
-            other => panic!("backend failure must surface InferenceError (fail-closed), got {other:?}"),
+            other => {
+                panic!("backend failure must surface InferenceError (fail-closed), got {other:?}")
+            }
         }
     }
 
@@ -721,8 +817,8 @@ mod tick_pipeline_tests {
     // fail-closed behaviour. Duplicating the state machine is exactly
     // what M2b exists to prevent.
 
-    use kirra_core::FleetPosture;
     use crate::posture_state::ParkoPostureState;
+    use kirra_core::FleetPosture;
 
     /// **No source → Nominal default (preserves the M2 behaviour).**
     /// A node constructed without a posture source must publish the
@@ -734,12 +830,17 @@ mod tick_pipeline_tests {
         let (infer, _rx) = build_loop(0.1, 0.2);
         let frame = make_frame(101, 0);
         let state = ParkoPostureState::no_source();
-        let outcome = run_pipeline_tick_with_posture_state(
-            &default_config(), infer, frame, &state).await;
-        assert!(outcome.error.is_none(), "no-source path must not surface a TickError");
-        assert!((outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
+        let outcome =
+            run_pipeline_tick_with_posture_state(&default_config(), infer, frame, &state).await;
+        assert!(
+            outcome.error.is_none(),
+            "no-source path must not surface a TickError"
+        );
+        assert!(
+            (outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
             "no-source default is Nominal — model output ~0.1 m/s passes through; got {}",
-            outcome.twist.linear_x_mps);
+            outcome.twist.linear_x_mps
+        );
     }
 
     /// **Source configured, no event yet → Degraded floor.**
@@ -753,11 +854,13 @@ mod tick_pipeline_tests {
         let (infer, _rx) = build_loop(10.0, 0.1);
         let frame = make_frame(102, 0);
         let state = ParkoPostureState::with_source();
-        let outcome = run_pipeline_tick_with_posture_state(
-            &default_config(), infer, frame, &state).await;
-        assert!(outcome.twist.linear_x_mps <= 5.0 + 1e-6,
+        let outcome =
+            run_pipeline_tick_with_posture_state(&default_config(), infer, frame, &state).await;
+        assert!(
+            outcome.twist.linear_x_mps <= 5.0 + 1e-6,
             "pre-first-event source must derate to Degraded (≤5 m/s MRC); got {}",
-            outcome.twist.linear_x_mps);
+            outcome.twist.linear_x_mps
+        );
     }
 
     /// **Source configured, LockedOut event observed → hard stop.**
@@ -771,12 +874,16 @@ mod tick_pipeline_tests {
         let frame = make_frame(103, 0);
         let state = ParkoPostureState::with_source();
         state.observe(FleetPosture::LockedOut);
-        let outcome = run_pipeline_tick_with_posture_state(
-            &default_config(), infer, frame, &state).await;
-        assert_eq!(outcome.twist.linear_x_mps,   0.0,
-            "LockedOut event must drive the tick to a stopped twist (linear=0)");
-        assert_eq!(outcome.twist.angular_z_rads, 0.0,
-            "LockedOut event must drive the tick to a stopped twist (angular=0)");
+        let outcome =
+            run_pipeline_tick_with_posture_state(&default_config(), infer, frame, &state).await;
+        assert_eq!(
+            outcome.twist.linear_x_mps, 0.0,
+            "LockedOut event must drive the tick to a stopped twist (linear=0)"
+        );
+        assert_eq!(
+            outcome.twist.angular_z_rads, 0.0,
+            "LockedOut event must drive the tick to a stopped twist (angular=0)"
+        );
     }
 
     /// **Source configured, Nominal event observed → live posture.**
@@ -789,12 +896,14 @@ mod tick_pipeline_tests {
         let frame = make_frame(104, 0);
         let state = ParkoPostureState::with_source();
         state.observe(FleetPosture::Nominal);
-        let outcome = run_pipeline_tick_with_posture_state(
-            &default_config(), infer, frame, &state).await;
+        let outcome =
+            run_pipeline_tick_with_posture_state(&default_config(), infer, frame, &state).await;
         assert!(outcome.error.is_none());
-        assert!((outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
+        assert!(
+            (outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
             "Nominal observation must release the Degraded seed; got {}",
-            outcome.twist.linear_x_mps);
+            outcome.twist.linear_x_mps
+        );
     }
 
     // =======================================================================
@@ -810,7 +919,7 @@ mod tick_pipeline_tests {
     #[tokio::test(start_paused = true)]
     async fn unfed_governor_tick_holds_at_zero() {
         let mut outputs: HashMap<String, Vec<f32>> = HashMap::new();
-        outputs.insert("cmd_vel_linear".to_string(),  vec![0.1]);
+        outputs.insert("cmd_vel_linear".to_string(), vec![0.1]);
         outputs.insert("cmd_vel_angular".to_string(), vec![0.0]);
         let backend = Arc::new(MockBackend::new(outputs, BackendDescriptor::Cpu));
         let model = backend.load_model("test.onnx").expect("mock model loads");
@@ -822,11 +931,17 @@ mod tick_pipeline_tests {
                 .with_governor(ComparatorAsGovernor(comparator))
                 .with_tick_period(0.05),
         ));
-        let outcome =
-            run_pipeline_tick(&default_config(), infer, make_frame(201, 0), SafetyPosture::Nominal)
-                .await;
-        assert_eq!(outcome.twist.linear_x_mps, 0.0,
-            "an unfed governor must HOLD at zero through the live tick (fail-closed default)");
+        let outcome = run_pipeline_tick(
+            &default_config(),
+            infer,
+            make_frame(201, 0),
+            SafetyPosture::Nominal,
+        )
+        .await;
+        assert_eq!(
+            outcome.twist.linear_x_mps, 0.0,
+            "an unfed governor must HOLD at zero through the live tick (fail-closed default)"
+        );
         assert_eq!(outcome.twist.angular_z_rads, 0.0);
     }
 
@@ -854,28 +969,48 @@ mod tick_pipeline_tests {
             pos: Point { x_m: 0.5, y_m: 0.0 },
             velocity_mps: 2.0,
             heading_rad: 0.0,
-            vel: Point { x_m: -2.0, y_m: 0.0 },
+            vel: Point {
+                x_m: -2.0,
+                y_m: 0.0,
+            },
         };
         let unsafe_snapshot = ObjectSnapshot::from_objects(&[blocker], now);
 
         let (infer, _rx) = build_loop(1.0, 0.0);
-        let tick =
-            run_pipeline_tick(&default_config(), infer, make_frame(202, 0), SafetyPosture::Nominal)
-                .await;
-        assert!(tick.twist.linear_x_mps > 0.0, "precondition: the tick admits motion");
+        let tick = run_pipeline_tick(
+            &default_config(),
+            infer,
+            make_frame(202, 0),
+            SafetyPosture::Nominal,
+        )
+        .await;
+        assert!(
+            tick.twist.linear_x_mps > 0.0,
+            "precondition: the tick admits motion"
+        );
         let gated = apply_object_rss_gate(tick, Some(&unsafe_snapshot), &params, 500, now);
-        assert_eq!(gated.twist.linear_x_mps, 0.0,
-            "an injected unsafe scene must MRC the live tick");
+        assert_eq!(
+            gated.twist.linear_x_mps, 0.0,
+            "an injected unsafe scene must MRC the live tick"
+        );
         assert_eq!(gated.error, Some(TickError::ObjectRssBreach));
 
         // Control: a fresh verified-clear scene admits the governed command.
         let clear_snapshot = ObjectSnapshot::from_objects(&[], now);
         let (infer2, _rx2) = build_loop(0.1, 0.0);
-        let tick2 =
-            run_pipeline_tick(&default_config(), infer2, make_frame(203, 0), SafetyPosture::Nominal)
-                .await;
+        let tick2 = run_pipeline_tick(
+            &default_config(),
+            infer2,
+            make_frame(203, 0),
+            SafetyPosture::Nominal,
+        )
+        .await;
         let gated2 = apply_object_rss_gate(tick2, Some(&clear_snapshot), &params, 500, now);
-        assert!(gated2.error.is_none(), "a verified-clear scene passes; got {:?}", gated2.error);
+        assert!(
+            gated2.error.is_none(),
+            "a verified-clear scene passes; got {:?}",
+            gated2.error
+        );
         assert!(gated2.twist.linear_x_mps > 0.0);
     }
 
@@ -913,9 +1048,17 @@ mod tick_pipeline_tests {
         }
         let (infer, _rx) = build_loop(0.1, 0.0);
         let outcome = run_pipeline_tick_with_ood(
-            &default_config(), infer, make_frame(301, 0), SafetyPosture::Nominal, &feed).await;
-        assert_eq!(outcome.twist.linear_x_mps, 0.0,
-            "a severe distribution shift must stop the tick (LockedOut escalation)");
+            &default_config(),
+            infer,
+            make_frame(301, 0),
+            SafetyPosture::Nominal,
+            &feed,
+        )
+        .await;
+        assert_eq!(
+            outcome.twist.linear_x_mps, 0.0,
+            "a severe distribution shift must stop the tick (LockedOut escalation)"
+        );
         assert_eq!(outcome.twist.angular_z_rads, 0.0);
     }
 
@@ -931,10 +1074,18 @@ mod tick_pipeline_tests {
         }
         let (infer, _rx) = build_loop(10.0, 0.0);
         let outcome = run_pipeline_tick_with_ood(
-            &default_config(), infer, make_frame(302, 0), SafetyPosture::Nominal, &feed).await;
-        assert!(outcome.twist.linear_x_mps <= 5.0 + 1e-9,
+            &default_config(),
+            infer,
+            make_frame(302, 0),
+            SafetyPosture::Nominal,
+            &feed,
+        )
+        .await;
+        assert!(
+            outcome.twist.linear_x_mps <= 5.0 + 1e-9,
             "a moderate shift must derate at least to the Degraded MRC cap (≤5 m/s); got {}",
-            outcome.twist.linear_x_mps);
+            outcome.twist.linear_x_mps
+        );
     }
 
     /// Control (false-positive budget at the tick level): an in-distribution
@@ -947,11 +1098,19 @@ mod tick_pipeline_tests {
         }
         let (infer, _rx) = build_loop(0.1, 0.2);
         let outcome = run_pipeline_tick_with_ood(
-            &default_config(), infer, make_frame(303, 0), SafetyPosture::Nominal, &feed).await;
+            &default_config(),
+            infer,
+            make_frame(303, 0),
+            SafetyPosture::Nominal,
+            &feed,
+        )
+        .await;
         assert!(outcome.error.is_none());
-        assert!((outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
+        assert!(
+            (outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
             "an in-distribution window must not derate the tick; got {}",
-            outcome.twist.linear_x_mps);
+            outcome.twist.linear_x_mps
+        );
     }
 
     /// Absent-input no-op: an under-filled window (no evidence this tick) is
@@ -962,9 +1121,18 @@ mod tick_pipeline_tests {
         feed.observe(0.05); // low — but one sample is no evidence
         let (infer, _rx) = build_loop(0.1, 0.2);
         let outcome = run_pipeline_tick_with_ood(
-            &default_config(), infer, make_frame(304, 0), SafetyPosture::Nominal, &feed).await;
+            &default_config(),
+            infer,
+            make_frame(304, 0),
+            SafetyPosture::Nominal,
+            &feed,
+        )
+        .await;
         assert!(outcome.error.is_none());
-        assert!((outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
-            "an under-filled window is a no-op; got {}", outcome.twist.linear_x_mps);
+        assert!(
+            (outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
+            "an under-filled window is a no-op; got {}",
+            outcome.twist.linear_x_mps
+        );
     }
 }

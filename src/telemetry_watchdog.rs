@@ -29,8 +29,8 @@
 //      remains the last observed report; timeout handling records trust state and
 //      triggers recalculation.
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::time::{interval, Duration};
 
 use tokio::sync::mpsc::error::TrySendError;
@@ -200,8 +200,7 @@ pub fn spawn_telemetry_watchdog_with_clock(
                 let mut node_health: HashMap<String, WatchdogNodeEntry> = HashMap::new();
                 // EP-11: sustained-miss hysteresis over the sweep deadline. Loop-owned
                 // (single consumer, no lock); rebuilt fresh on a supervisor restart.
-                let mut sustained_misses =
-                    crate::execution_manager::SustainedMissTracker::new();
+                let mut sustained_misses = crate::execution_manager::SustainedMissTracker::new();
                 loop {
                     sweep_interval.tick().await;
 
@@ -364,7 +363,9 @@ fn watchdog_sweep_once_inner(
         // posture would never recalculate). `with_read` recovers a poisoned
         // lock internally. This is a READ, so it goes through the read-replica
         // path (off the writer mutex, no contention with a slow write).
-        let load_result = app.store.with_read(|store| store.load_all_registered_av_node_ids());
+        let load_result = app
+            .store
+            .with_read(|store| store.load_all_registered_av_node_ids());
 
         match load_result {
             Ok(node_ids) => {
@@ -374,7 +375,8 @@ fn watchdog_sweep_once_inner(
                     // (that would reset their last_seen_ms).
                     node_health.entry(node_id.clone()).or_insert_with(|| {
                         // Load initial last_seen from persistent store (read-replica).
-                        let last_seen = app.store
+                        let last_seen = app
+                            .store
                             .with_read(|store| store.get_last_telemetry_timestamp(node_id))
                             .unwrap_or(0);
                         let monitoring_started_ms = if last_seen == 0 {
@@ -437,7 +439,10 @@ fn watchdog_sweep_once_inner(
         // Sync last_seen_ms from the store on each sweep. This per-node read goes
         // through the read-replica path (`with_read`) so the 100 ms sweep never
         // serializes behind a writer holding the store mutex.
-        if let Ok(ts) = app.store.with_read(|store| store.get_last_telemetry_timestamp(&entry.node_id)) {
+        if let Ok(ts) = app
+            .store
+            .with_read(|store| store.get_last_telemetry_timestamp(&entry.node_id))
+        {
             if ts > entry.last_seen_ms {
                 // Fresh telemetry received since last sweep — reset warn flag.
                 entry.last_seen_ms = ts;
@@ -459,11 +464,10 @@ fn watchdog_sweep_once_inner(
         if silence_ms >= AV_TELEMETRY_TIMEOUT_MS {
             // Already-timed-out check avoids repeated triggers for the
             // same ongoing silence.
-            let already_timed_out = app.nodes
+            let already_timed_out = app
+                .nodes
                 .get(&entry.node_id)
-                .map(|n| {
-                    n.status == NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string())
-                })
+                .map(|n| n.status == NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()))
                 .unwrap_or(false);
 
             if !already_timed_out {
@@ -653,7 +657,6 @@ fn force_watchdog_lockout(
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // EP-11 — sustained sweep-deadline overrun → C2 supervisor escalation
 // ---------------------------------------------------------------------------
@@ -745,7 +748,10 @@ mod watchdog_tests {
         let last_seen: u64 = 2_000; // Future timestamp (clock skew)
         let silence = now.saturating_sub(last_seen);
         // Must not panic or wrap — must produce 0 (no silence detected)
-        assert_eq!(silence, 0, "future last_seen must produce zero silence duration");
+        assert_eq!(
+            silence, 0,
+            "future last_seen must produce zero silence duration"
+        );
     }
 
     #[test]
@@ -754,7 +760,10 @@ mod watchdog_tests {
         // Verify it matches the string used in the Untrusted variant.
         let trust = NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string());
         let matches = trust == NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string());
-        assert!(matches, "trust state comparison must match exact reason string");
+        assert!(
+            matches,
+            "trust state comparison must match exact reason string"
+        );
     }
 
     #[test]
@@ -763,7 +772,10 @@ mod watchdog_tests {
         // be suppressed by the already_timed_out check — it uses a different reason.
         let trust = NodeTrustState::Untrusted("SENSOR_FAULT".to_string());
         let is_timeout = trust == NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string());
-        assert!(!is_timeout, "different untrusted reason must not suppress watchdog");
+        assert!(
+            !is_timeout,
+            "different untrusted reason must not suppress watchdog"
+        );
     }
 }
 
@@ -813,14 +825,20 @@ mod watchdog_di_tests {
         );
     }
 
-    fn prepopulated_node_health(node_id: &str, last_seen_ms: u64) -> HashMap<String, WatchdogNodeEntry> {
+    fn prepopulated_node_health(
+        node_id: &str,
+        last_seen_ms: u64,
+    ) -> HashMap<String, WatchdogNodeEntry> {
         let mut m = HashMap::new();
-        m.insert(node_id.to_string(), WatchdogNodeEntry {
-            node_id: node_id.to_string(),
-            last_seen_ms,
-            monitoring_started_ms: last_seen_ms,
-            warn_logged: false,
-        });
+        m.insert(
+            node_id.to_string(),
+            WatchdogNodeEntry {
+                node_id: node_id.to_string(),
+                last_seen_ms,
+                monitoring_started_ms: last_seen_ms,
+                warn_logged: false,
+            },
+        );
         m
     }
 
@@ -849,8 +867,11 @@ mod watchdog_di_tests {
         let mut last_node_refresh_ms: u64 = now;
 
         watchdog_sweep_once(
-            &app, &tx, clock.as_ref(),
-            &mut node_health, &mut last_node_refresh_ms,
+            &app,
+            &tx,
+            clock.as_ref(),
+            &mut node_health,
+            &mut last_node_refresh_ms,
         );
 
         // (a) node was mutated to Untrusted("TELEMETRY_TIMEOUT").
@@ -880,13 +901,20 @@ mod watchdog_di_tests {
         );
 
         // (b) a WatchdogTimeout trigger landed on the engine channel.
-        let trigger = rx.try_recv()
+        let trigger = rx
+            .try_recv()
             .expect("watchdog must send PostureRecalcTrigger::WatchdogTimeout");
         match trigger {
-            PostureRecalcTrigger::WatchdogTimeout { node_id, timeout_ms } => {
+            PostureRecalcTrigger::WatchdogTimeout {
+                node_id,
+                timeout_ms,
+            } => {
                 assert_eq!(node_id, "lidar_front");
-                assert_eq!(timeout_ms, now - anchor,
-                    "trigger.timeout_ms must report observed silence (now - last_seen)");
+                assert_eq!(
+                    timeout_ms,
+                    now - anchor,
+                    "trigger.timeout_ms must report observed silence (now - last_seen)"
+                );
             }
             other => panic!("expected WatchdogTimeout, got {other:?}"),
         }
@@ -919,8 +947,8 @@ mod watchdog_di_tests {
                 });
             })
             .join(); // Err — the thread panicked; the underlying mutex is now poisoned.
-            // The handle recovers the poison internally, so a subsequent `.with`
-            // must still run (this is the property the watchdog relies on).
+                     // The handle recovers the poison internally, so a subsequent `.with`
+                     // must still run (this is the property the watchdog relies on).
         }
 
         let (tx, mut rx) = mpsc::channel::<PostureRecalcTrigger>(128);
@@ -930,8 +958,11 @@ mod watchdog_di_tests {
         // Must NOT panic despite the poisoned lock — the sweep re-locks
         // `app.store` at the per-node telemetry read (the old `.unwrap()` site).
         watchdog_sweep_once(
-            &app, &tx, clock.as_ref(),
-            &mut node_health, &mut last_node_refresh_ms,
+            &app,
+            &tx,
+            clock.as_ref(),
+            &mut node_health,
+            &mut last_node_refresh_ms,
         );
 
         // And the dead-man's switch must still fire.
@@ -963,8 +994,11 @@ mod watchdog_di_tests {
         let mut last_node_refresh_ms: u64 = now;
 
         watchdog_sweep_once(
-            &app, &tx, clock.as_ref(),
-            &mut node_health, &mut last_node_refresh_ms,
+            &app,
+            &tx,
+            clock.as_ref(),
+            &mut node_health,
+            &mut last_node_refresh_ms,
         );
 
         assert!(
@@ -974,10 +1008,14 @@ mod watchdog_di_tests {
             ),
             "node must remain Trusted while in warn band (silence < TIMEOUT)"
         );
-        assert!(rx.try_recv().is_err(),
-            "no WatchdogTimeout trigger may be sent before the timeout fires");
-        assert!(node_health.get("imu_main").unwrap().warn_logged,
-            "warn_logged must flip true so the WARN log fires once per silence episode");
+        assert!(
+            rx.try_recv().is_err(),
+            "no WatchdogTimeout trigger may be sent before the timeout fires"
+        );
+        assert!(
+            node_health.get("imu_main").unwrap().warn_logged,
+            "warn_logged must flip true so the WARN log fires once per silence episode"
+        );
     }
 
     /// Idempotency: a second sweep after the timeout has already fired
@@ -997,17 +1035,29 @@ mod watchdog_di_tests {
         let mut node_health = prepopulated_node_health("radar_left", anchor);
         let mut last_node_refresh_ms: u64 = now;
 
-        watchdog_sweep_once(&app, &tx, clock.as_ref(),
-            &mut node_health, &mut last_node_refresh_ms);
+        watchdog_sweep_once(
+            &app,
+            &tx,
+            clock.as_ref(),
+            &mut node_health,
+            &mut last_node_refresh_ms,
+        );
         assert!(rx.try_recv().is_ok(), "first sweep past timeout must fire");
 
         // Advance the virtual clock further past the timeout but keep
         // the node silent — already-timed-out must suppress re-fire.
         clock.advance_ms(500);
-        watchdog_sweep_once(&app, &tx, clock.as_ref(),
-            &mut node_health, &mut last_node_refresh_ms);
-        assert!(rx.try_recv().is_err(),
-            "second sweep on the same ongoing silence must NOT re-fire");
+        watchdog_sweep_once(
+            &app,
+            &tx,
+            clock.as_ref(),
+            &mut node_health,
+            &mut last_node_refresh_ms,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "second sweep on the same ongoing silence must NOT re-fire"
+        );
     }
 
     /// B6 regression: `last_seen_ms == 0` means "no telemetry report has ever
@@ -1053,7 +1103,10 @@ mod watchdog_di_tests {
             .try_recv()
             .expect("never-reported node timeout must enqueue WatchdogTimeout")
         {
-            PostureRecalcTrigger::WatchdogTimeout { node_id, timeout_ms } => {
+            PostureRecalcTrigger::WatchdogTimeout {
+                node_id,
+                timeout_ms,
+            } => {
                 assert_eq!(node_id, "camera_front");
                 assert_eq!(timeout_ms, now - anchor);
             }
@@ -1085,7 +1138,9 @@ mod watchdog_di_tests {
             }
         });
         assert_eq!(
-            app.store.with(|s| s.load_recovery_streak("lidar_front").unwrap()).0,
+            app.store
+                .with(|s| s.load_recovery_streak("lidar_front").unwrap())
+                .0,
             crate::recovery_hysteresis::AV_RECOVERY_STREAK_THRESHOLD - 1,
             "precondition: streak is threshold-1"
         );
@@ -1109,11 +1164,17 @@ mod watchdog_di_tests {
             app.nodes.get("lidar_front").unwrap().status,
             NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
         );
-        let (count, start) = app.store.with(|s| s.load_recovery_streak("lidar_front").unwrap());
+        let (count, start) = app
+            .store
+            .with(|s| s.load_recovery_streak("lidar_front").unwrap());
         assert_eq!(count, 0, "watchdog timeout must reset the recovery streak");
-        assert_eq!(start, 0, "watchdog timeout must clear the streak-start stamp");
         assert_eq!(
-            app.store.with(|s| s.get_last_telemetry_timestamp("lidar_front").unwrap()),
+            start, 0,
+            "watchdog timeout must clear the streak-start stamp"
+        );
+        assert_eq!(
+            app.store
+                .with(|s| s.get_last_telemetry_timestamp("lidar_front").unwrap()),
             anchor,
             "watchdog timeout must NOT fabricate a fresh last_telemetry_ms"
         );
@@ -1126,9 +1187,9 @@ mod watchdog_di_tests {
     /// be able to recover without a human reset.
     #[test]
     fn test_watchdog_recalc_channel_full_forces_transient_lockout_b4() {
-        use std::sync::atomic::Ordering;
         use crate::posture_cache::{CachedFleetPosture, SharedPostureCache};
         use crate::verifier::FleetPosture;
+        use std::sync::atomic::Ordering;
 
         let anchor: u64 = 10_000_000;
         let now = anchor + AV_TELEMETRY_TIMEOUT_MS + 500;
@@ -1178,9 +1239,9 @@ mod watchdog_di_tests {
     /// AND trip the sticky supervisor flag (human/HA reset required).
     #[test]
     fn test_watchdog_recalc_channel_closed_trips_sticky_lockout_b4() {
-        use std::sync::atomic::Ordering;
         use crate::posture_cache::{CachedFleetPosture, SharedPostureCache};
         use crate::verifier::FleetPosture;
+        use std::sync::atomic::Ordering;
 
         let anchor: u64 = 11_000_000;
         let now = anchor + AV_TELEMETRY_TIMEOUT_MS + 500;
@@ -1243,12 +1304,12 @@ mod watchdog_di_tests {
         let store = VerifierStore::new(":memory:").expect("memory store");
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
         app.store.with(|store| {
-            store.register_av_subsystem_meta(
-                "lidar_front", "LIDAR", "hw-0001", 0.7, 1_000_000,
-            ).expect("register av subsystem");
-            store.register_av_subsystem_meta(
-                "imu_main", "IMU", "hw-0002", 0.7, 1_000_500,
-            ).expect("register av subsystem");
+            store
+                .register_av_subsystem_meta("lidar_front", "LIDAR", "hw-0001", 0.7, 1_000_000)
+                .expect("register av subsystem");
+            store
+                .register_av_subsystem_meta("imu_main", "IMU", "hw-0002", 0.7, 1_000_500)
+                .expect("register av subsystem");
         });
         insert_trusted_node(&app, "lidar_front", 1_000_000);
         insert_trusted_node(&app, "imu_main", 1_000_500);
@@ -1287,18 +1348,26 @@ mod watchdog_di_tests {
                 .expect("watchdog_sweep_once must not panic");
 
         // (1) node_health populated from the registered rows.
-        assert_eq!(node_health.len(), 2,
-            "cold refresh must seed node_health from av_subsystem_meta");
+        assert_eq!(
+            node_health.len(),
+            2,
+            "cold refresh must seed node_health from av_subsystem_meta"
+        );
         assert!(node_health.contains_key("lidar_front"));
         assert!(node_health.contains_key("imu_main"));
 
         // (2) last_seen_ms loaded from each row's last_telemetry_ms.
-        assert_eq!(node_health.get("lidar_front").unwrap().last_seen_ms, 1_000_000);
+        assert_eq!(
+            node_health.get("lidar_front").unwrap().last_seen_ms,
+            1_000_000
+        );
         assert_eq!(node_health.get("imu_main").unwrap().last_seen_ms, 1_000_500);
 
         // (3) refresh stamp advanced to `now`.
-        assert_eq!(observed_last_refresh, now,
-            "*last_node_refresh_ms must be set to clock.now_ms() after a refresh");
+        assert_eq!(
+            observed_last_refresh, now,
+            "*last_node_refresh_ms must be set to clock.now_ms() after a refresh"
+        );
     }
 
     /// M3: exercise the PRODUCTION spawned watchdog loop end to end. The loop
@@ -1376,7 +1445,11 @@ mod watchdog_di_tests {
         // Control — the ~28 s fail-open: within the window and not dirty, the
         // freshly-registered node is NOT yet monitored.
         watchdog_sweep_once(
-            &app, &tx, clock.as_ref(), &mut node_health, &mut last_node_refresh_ms,
+            &app,
+            &tx,
+            clock.as_ref(),
+            &mut node_health,
+            &mut last_node_refresh_ms,
         );
         assert!(
             node_health.is_empty(),
@@ -1387,14 +1460,19 @@ mod watchdog_di_tests {
         app.av_registry_dirty
             .store(true, std::sync::atomic::Ordering::Release);
         watchdog_sweep_once(
-            &app, &tx, clock.as_ref(), &mut node_health, &mut last_node_refresh_ms,
+            &app,
+            &tx,
+            clock.as_ref(),
+            &mut node_health,
+            &mut last_node_refresh_ms,
         );
         assert!(
             node_health.contains_key("lidar_front"),
             "H-3: a dirty registry must force a prompt refresh so the fresh node is monitored within one sweep"
         );
         assert!(
-            !app.av_registry_dirty.load(std::sync::atomic::Ordering::Acquire),
+            !app.av_registry_dirty
+                .load(std::sync::atomic::Ordering::Acquire),
             "the watchdog must clear av_registry_dirty after refreshing"
         );
     }
@@ -1498,7 +1576,10 @@ mod sg_003_cert_tests {
             ),
             "SG-003: must NOT detect a timeout before AV_TELEMETRY_TIMEOUT_MS of silence"
         );
-        assert!(rx.try_recv().is_err(), "SG-003: no trigger may fire before the timeout");
+        assert!(
+            rx.try_recv().is_err(),
+            "SG-003: no trigger may fire before the timeout"
+        );
 
         // Within one sweep after the boundary → detected.
         let detect_now = anchor + AV_TELEMETRY_TIMEOUT_MS + AV_WATCHDOG_SWEEP_MS;
@@ -1537,7 +1618,10 @@ mod sg_003_cert_tests {
             .expect("SG-003: watchdog must send PostureRecalcTrigger::WatchdogTimeout")
         {
             PostureRecalcTrigger::WatchdogTimeout { node_id, .. } => {
-                assert_eq!(node_id, "radar_left", "SG-003: trigger must name the silent node");
+                assert_eq!(
+                    node_id, "radar_left",
+                    "SG-003: trigger must name the silent node"
+                );
             }
             other => panic!("SG-003: expected WatchdogTimeout, got {other:?}"),
         }
@@ -1551,9 +1635,7 @@ mod sg_003_cert_tests {
 #[cfg(test)]
 mod sustained_overrun_tests {
     use super::*;
-    use crate::execution_manager::{
-        SustainedMissTracker, DEADLINE_SUSTAINED_MISS_THRESHOLD,
-    };
+    use crate::execution_manager::{SustainedMissTracker, DEADLINE_SUSTAINED_MISS_THRESHOLD};
     use crate::verifier::{AppState, VerifierOperationMode};
     use crate::verifier_store::VerifierStore;
     use tokio::sync::mpsc;
@@ -1582,7 +1664,8 @@ mod sustained_overrun_tests {
         }
 
         assert!(
-            app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst),
+            app.supervisor_tripped
+                .load(std::sync::atomic::Ordering::SeqCst),
             "a sustained sweep overrun must set the sticky supervisor_tripped flag (C2)"
         );
         assert!(
@@ -1614,10 +1697,14 @@ mod sustained_overrun_tests {
         }
 
         assert!(
-            !app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst),
+            !app.supervisor_tripped
+                .load(std::sync::atomic::Ordering::SeqCst),
             "isolated slow sweeps (nominal jitter) must never trip the supervisor"
         );
-        assert!(rx.try_recv().is_err(), "no engine nudge without a sustained breach");
+        assert!(
+            rx.try_recv().is_err(),
+            "no engine nudge without a sustained breach"
+        );
     }
 
     /// Below-threshold misses inside one window do not escalate — the breach
@@ -1630,7 +1717,9 @@ mod sustained_overrun_tests {
         for i in 0..u64::from(DEADLINE_SUSTAINED_MISS_THRESHOLD) - 1 {
             escalate_on_sustained_overrun(&app, &tx, &mut tracker, 1_000 + i * 100, true);
         }
-        assert!(!app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!app
+            .supervisor_tripped
+            .load(std::sync::atomic::Ordering::SeqCst));
         assert!(rx.try_recv().is_err());
     }
 }

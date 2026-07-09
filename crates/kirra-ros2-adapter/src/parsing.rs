@@ -27,9 +27,9 @@
 
 #![cfg(feature = "ros2")]
 
+use crate::corridor::Point;
 use crate::geometry::quat_to_yaw;
 use crate::state::{EgoOdom, IncomingTrajectory, PerceivedObject, Pose, TrajectoryPoint};
-use crate::corridor::Point;
 
 /// Convert an `autoware_planning_msgs::msg::Trajectory` to the kernel's
 /// trajectory envelope `IncomingTrajectory`. `received_ms` is set by the
@@ -49,26 +49,33 @@ pub fn parse_trajectory(
     msg: &r2r::autoware_planning_msgs::msg::Trajectory,
     received_ms: u64,
 ) -> IncomingTrajectory {
-    let points = msg.points.iter().map(|pt| {
-        let heading_rad = quat_to_yaw(
-            pt.pose.orientation.x as f64,
-            pt.pose.orientation.y as f64,
-            pt.pose.orientation.z as f64,
-            pt.pose.orientation.w as f64,
-        );
-        let time_from_start_s = pt.time_from_start.sec as f64
-            + (pt.time_from_start.nanosec as f64) * 1e-9;
-        TrajectoryPoint {
-            pose: Pose {
-                x_m: pt.pose.position.x as f64,
-                y_m: pt.pose.position.y as f64,
-                heading_rad,
-            },
-            velocity_mps: pt.longitudinal_velocity_mps as f64,
-            time_from_start_s,
-        }
-    }).collect();
-    IncomingTrajectory { points, received_ms }
+    let points = msg
+        .points
+        .iter()
+        .map(|pt| {
+            let heading_rad = quat_to_yaw(
+                pt.pose.orientation.x as f64,
+                pt.pose.orientation.y as f64,
+                pt.pose.orientation.z as f64,
+                pt.pose.orientation.w as f64,
+            );
+            let time_from_start_s =
+                pt.time_from_start.sec as f64 + (pt.time_from_start.nanosec as f64) * 1e-9;
+            TrajectoryPoint {
+                pose: Pose {
+                    x_m: pt.pose.position.x as f64,
+                    y_m: pt.pose.position.y as f64,
+                    heading_rad,
+                },
+                velocity_mps: pt.longitudinal_velocity_mps as f64,
+                time_from_start_s,
+            }
+        })
+        .collect();
+    IncomingTrajectory {
+        points,
+        received_ms,
+    }
 }
 
 /// Convert an `autoware_perception_msgs::msg::PredictedObjects` batch to
@@ -95,34 +102,45 @@ pub fn parse_trajectory(
 pub fn parse_predicted_objects(
     msg: &r2r::autoware_perception_msgs::msg::PredictedObjects,
 ) -> Vec<PerceivedObject> {
-    msg.objects.iter().map(|obj| {
-        // 16-byte UUID → u64 (low 8 bytes after a left-shift fold). Stable
-        // within a single observation but not globally unique; the slow
-        // loop only needs intra-cycle identity for the RSS per-object
-        // iteration.
-        let id = obj.object_id.uuid.iter().take(8).fold(0u64, |acc, b| (acc << 8) | (*b as u64));
-        let pose = &obj.kinematics.initial_pose_with_covariance.pose;
-        let twist = &obj.kinematics.initial_twist_with_covariance.twist;
-        let heading_rad = quat_to_yaw(
-            pose.orientation.x as f64,
-            pose.orientation.y as f64,
-            pose.orientation.z as f64,
-            pose.orientation.w as f64,
-        );
-        let vx = twist.linear.x as f64;
-        let vy = twist.linear.y as f64;
-        let velocity_mps = (vx * vx + vy * vy).sqrt();
-        PerceivedObject {
-            id,
-            pos: Point { x_m: pose.position.x as f64, y_m: pose.position.y as f64 },
-            velocity_mps,
-            heading_rad,
-            // KIRRA-OCCY-PMON-003 §5 (PRESERVE): carry the twist VECTOR through
-            // (previously discarded after the magnitude collapse) so the
-            // Track-C kinematic ceiling sees the reported map-frame velocity.
-            vel: Point { x_m: vx, y_m: vy },
-        }
-    }).collect()
+    msg.objects
+        .iter()
+        .map(|obj| {
+            // 16-byte UUID → u64 (low 8 bytes after a left-shift fold). Stable
+            // within a single observation but not globally unique; the slow
+            // loop only needs intra-cycle identity for the RSS per-object
+            // iteration.
+            let id = obj
+                .object_id
+                .uuid
+                .iter()
+                .take(8)
+                .fold(0u64, |acc, b| (acc << 8) | (*b as u64));
+            let pose = &obj.kinematics.initial_pose_with_covariance.pose;
+            let twist = &obj.kinematics.initial_twist_with_covariance.twist;
+            let heading_rad = quat_to_yaw(
+                pose.orientation.x as f64,
+                pose.orientation.y as f64,
+                pose.orientation.z as f64,
+                pose.orientation.w as f64,
+            );
+            let vx = twist.linear.x as f64;
+            let vy = twist.linear.y as f64;
+            let velocity_mps = (vx * vx + vy * vy).sqrt();
+            PerceivedObject {
+                id,
+                pos: Point {
+                    x_m: pose.position.x as f64,
+                    y_m: pose.position.y as f64,
+                },
+                velocity_mps,
+                heading_rad,
+                // KIRRA-OCCY-PMON-003 §5 (PRESERVE): carry the twist VECTOR through
+                // (previously discarded after the magnitude collapse) so the
+                // Track-C kinematic ceiling sees the reported map-frame velocity.
+                vel: Point { x_m: vx, y_m: vy },
+            }
+        })
+        .collect()
 }
 
 /// Convert a `nav_msgs::msg::Odometry` to the kernel's `EgoOdom`. The
@@ -135,8 +153,8 @@ pub fn parse_predicted_objects(
 ///   twist.twist.linear.x         → linear_x_mps
 ///   twist.twist.angular.z        → yaw_rate_rads
 pub fn parse_odom(msg: &r2r::nav_msgs::msg::Odometry) -> EgoOdom {
-    let stamp_ms = (msg.header.stamp.sec as u64) * 1_000
-        + (msg.header.stamp.nanosec as u64) / 1_000_000;
+    let stamp_ms =
+        (msg.header.stamp.sec as u64) * 1_000 + (msg.header.stamp.nanosec as u64) / 1_000_000;
     EgoOdom {
         linear_x_mps: msg.twist.twist.linear.x as f64,
         yaw_rate_rads: msg.twist.twist.angular.z as f64,

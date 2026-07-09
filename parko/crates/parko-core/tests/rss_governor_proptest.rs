@@ -23,12 +23,12 @@
 
 use proptest::prelude::*;
 
-use parko_kirra::{KirraGovernor, MRC_VELOCITY_CEILING_MPS};
 use parko_core::{
     commands::ControlCommand,
     rss::{longitudinal_safe_distance, RssState},
     safety::{EnforcementAction, SafetyGovernor, SafetyPosture},
 };
+use parko_kirra::{KirraGovernor, MRC_VELOCITY_CEILING_MPS};
 
 /// Resolve EnforcementAction to a concrete linear velocity.
 fn effective_linear_velocity(action: EnforcementAction, proposed: f64) -> f64 {
@@ -42,7 +42,11 @@ fn effective_linear_velocity(action: EnforcementAction, proposed: f64) -> f64 {
 }
 
 fn make_cmd(v: f64) -> ControlCommand {
-    ControlCommand { linear_velocity: v, angular_velocity: 0.0, timestamp_ms: 0 }
+    ControlCommand {
+        linear_velocity: v,
+        angular_velocity: 0.0,
+        timestamp_ms: 0,
+    }
 }
 
 proptest! {

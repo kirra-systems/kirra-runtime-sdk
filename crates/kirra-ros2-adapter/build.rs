@@ -83,7 +83,9 @@ fn lanelet2_build() {
             lanelet_include_dirs.push(candidate.clone());
             continue;
         }
-        let ament_nested = candidate.join("lanelet2_core").join(lanelet_header_relative);
+        let ament_nested = candidate
+            .join("lanelet2_core")
+            .join(lanelet_header_relative);
         if ament_nested.exists() {
             lanelet_include_dirs.push(candidate.join("lanelet2_core"));
         }

@@ -2,95 +2,96 @@
 // Kirra Verifier Service — distributed legitimacy fabric entry point.
 
 use axum::{
-    extract::{Path, Query, Request, State},
     extract::rejection::JsonRejection,
+    extract::{Path, Query, Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
-    response::{sse::{Event, KeepAlive, Sse}, Html, IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        Html, IntoResponse, Response,
+    },
     routing::{get, post},
     Extension, Json, Router,
 };
-use tower_http::cors::{CorsLayer, Any};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
+use tower_http::cors::{Any, CorsLayer};
 
-use kirra_verifier::verifier::{
-    request_transport_is_secure, validate_client_identity_headers, AppState, BackupExport, FlapStatus,
-    FleetPosture, HealthResponse, NodeTrustState, PostureStreamEvent, RegisteredNode, VerifierOperationMode,
-};
-use kirra_verifier::verifier_store::{DurableWriteError, VerifierStore};
-use kirra_verifier::posture_cache::{now_ms, ServiceState, POSTURE_CACHE_TTL_MS};
-use kirra_verifier::posture_engine_v2::{
-    resolve_posture_snapshot_silent, resolve_posture_with_reason, LockoutReason,
-};
-use kirra_verifier::security::{admin_token_ok, constant_time_compare};
+use kirra_verifier::action_filter::{evaluate_action_claim, ActionClaim};
+use kirra_verifier::adapters::canopen::{CanOpenAdapter, CanOpenMessage};
+use kirra_verifier::adapters::dnp3::{Dnp3Adapter, Dnp3Message};
+use kirra_verifier::adapters::ethernet_ip::{EtherNetIpAdapter, EtherNetIpMessage};
 use kirra_verifier::authz::{
     authorize_request, generate_api_token, token_fingerprint, token_sha256_hex, ApiRole,
     AuthzOutcome, ResolvedPrincipal, SCOPE_ACTUATOR_COMMAND, SCOPE_ADMIN, SCOPE_AUDIT_READ,
     SCOPE_INTEGRATION_EVALUATE,
 };
-use kirra_verifier::action_filter::{evaluate_action_claim, ActionClaim};
-use kirra_verifier::protocol_adapter::{
-    evaluate_unified_industrial_request, UnifiedIndustrialRequest,
-};
-use kirra_verifier::adapters::ethernet_ip::{EtherNetIpAdapter, EtherNetIpMessage};
-use kirra_verifier::adapters::canopen::{CanOpenAdapter, CanOpenMessage};
-use kirra_verifier::adapters::dnp3::{Dnp3Adapter, Dnp3Message};
-use kirra_verifier::federation::{
-    RegisterFederationControllerRequest,
-    ReportEvaluation,
-};
+use kirra_verifier::env_config::EffectiveConfig;
+use kirra_verifier::federation::{RegisterFederationControllerRequest, ReportEvaluation};
 use kirra_verifier::federation_reconciliation::{
     authoritative_posture, dissenting_restriction, evaluate_federated_report_v2,
     verify_federated_report_signature_v2, FederatedTrustReportV2,
 };
-use kirra_verifier::env_config::EffectiveConfig;
-use kirra_verifier::standby_monitor::{
-    instance_id as ha_instance_id, spawn_heartbeat_writer, spawn_promotion_monitor,
-    HEARTBEAT_KEY, PROMOTION_TIMEOUT_MS,
+use kirra_verifier::posture_cache::{now_ms, ServiceState, POSTURE_CACHE_TTL_MS};
+use kirra_verifier::posture_engine_v2::{
+    resolve_posture_snapshot_silent, resolve_posture_with_reason, LockoutReason,
 };
+use kirra_verifier::protocol_adapter::{
+    evaluate_unified_industrial_request, UnifiedIndustrialRequest,
+};
+use kirra_verifier::security::{admin_token_ok, constant_time_compare};
+use kirra_verifier::standby_monitor::{
+    instance_id as ha_instance_id, spawn_heartbeat_writer, spawn_promotion_monitor, HEARTBEAT_KEY,
+    PROMOTION_TIMEOUT_MS,
+};
+use kirra_verifier::verifier::{
+    request_transport_is_secure, validate_client_identity_headers, AppState, BackupExport,
+    FlapStatus, FleetPosture, HealthResponse, NodeTrustState, PostureStreamEvent, RegisteredNode,
+    VerifierOperationMode,
+};
+use kirra_verifier::verifier_store::{DurableWriteError, VerifierStore};
 
 /// EP-12 (Config Slice B): the boot-validated configuration snapshot, set ONCE
 /// in `main` after validation. The spawn-registry closures (which run again on
 /// standby promotion via `wire_active_posture_freshness`) read the audit-ship
 /// path from here — the same values the digest was computed over.
 static EFFECTIVE_CONFIG: std::sync::OnceLock<EffectiveConfig> = std::sync::OnceLock::new();
+use kirra_verifier::fabric::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
+use kirra_verifier::fabric::causal_log::FabricCausalLog;
+use kirra_verifier::fabric::router::FabricRouter;
+use kirra_verifier::fabric::telemetry::FabricTelemetry;
 use kirra_verifier::gateway::kinematics_contract::ProposedVehicleCommand;
 use kirra_verifier::gateway::policy_layer::{
     enforce_actuator_safety_envelope, enforce_posture_routing, EnforcementOutcome,
 };
 use kirra_verifier::recovery_hysteresis::{evaluate_recovery_report, HysteresisDecision};
-use kirra_verifier::fabric::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
-use kirra_verifier::fabric::router::FabricRouter;
-use kirra_verifier::fabric::telemetry::FabricTelemetry;
-use kirra_verifier::fabric::causal_log::FabricCausalLog;
 
 // Route handlers, split by domain into sibling submodules. Each holds
 // `pub(crate)` handler fns that share the binary's helpers, DTOs and `use`
 // imports via `use super::*` (descendant-module visibility). Re-exported
 // below so `build_app` and the in-file tests reference them unqualified.
-#[path = "kirra_verifier_service/attestation.rs"]
-mod attestation;
-#[path = "kirra_verifier_service/fleet.rs"]
-mod fleet;
-#[path = "kirra_verifier_service/audit.rs"]
-mod audit;
 #[path = "kirra_verifier_service/action_filter.rs"]
 mod action_filter;
-#[path = "kirra_verifier_service/industrial.rs"]
-mod industrial;
-#[path = "kirra_verifier_service/federation.rs"]
-mod federation;
 #[path = "kirra_verifier_service/actuator.rs"]
 mod actuator;
-#[path = "kirra_verifier_service/fabric.rs"]
-mod fabric;
+#[path = "kirra_verifier_service/attestation.rs"]
+mod attestation;
+#[path = "kirra_verifier_service/audit.rs"]
+mod audit;
 #[path = "kirra_verifier_service/console.rs"]
 mod console;
+#[path = "kirra_verifier_service/fabric.rs"]
+mod fabric;
+#[path = "kirra_verifier_service/federation.rs"]
+mod federation;
+#[path = "kirra_verifier_service/fleet.rs"]
+mod fleet;
+#[path = "kirra_verifier_service/industrial.rs"]
+mod industrial;
 #[path = "kirra_verifier_service/operators.rs"]
 mod operators;
 #[path = "kirra_verifier_service/principals.rs"]
@@ -126,22 +127,21 @@ use backpressure::{env_limit_or, with_backpressure};
 // admission decisions.
 #[path = "kirra_verifier_service/observability.rs"]
 mod observability;
-use observability::request_observability;
-use attestation::*;
-use fleet::*;
-use audit::*;
 use action_filter::*;
-use industrial::*;
-use federation::*;
 use actuator::*;
-use fabric::*;
+use attestation::*;
+use audit::*;
+use auth::*;
+use campaigns::*;
 use console::*;
+use fabric::*;
+use federation::*;
+use fleet::*;
+use industrial::*;
+use observability::request_observability;
 use operators::*;
 use principals::*;
-use campaigns::*;
 use startup::*;
-use auth::*;
-
 
 // --- Auth middleware ---------------------------------------------------------
 //
@@ -165,7 +165,10 @@ use auth::*;
 /// not maintain a posture cache. A `try_send` failure (channel full or
 /// worker gone) is logged; the periodic-refresh loop will fail-close the
 /// cache and gate on its own if the worker has truly died.
-fn enqueue_recalc(svc: &ServiceState, trigger: kirra_verifier::posture_engine_v2::PostureRecalcTrigger) {
+fn enqueue_recalc(
+    svc: &ServiceState,
+    trigger: kirra_verifier::posture_engine_v2::PostureRecalcTrigger,
+) {
     if let Some(tx) = svc.posture_engine_tx.get() {
         if let Err(e) = tx.try_send(trigger) {
             tracing::warn!(error = %e,
@@ -392,8 +395,9 @@ fn wire_active_posture_freshness(svc: &Arc<ServiceState>) {
     monitors.register("audit_shipper", |svc: &Arc<ServiceState>| {
         // EP-12: the sink path comes from the boot-validated snapshot (the
         // module reads no env). Unset → shipping off (the opt-in default).
-        let ship_path =
-            EFFECTIVE_CONFIG.get().and_then(|c| c.audit_ship_path.clone());
+        let ship_path = EFFECTIVE_CONFIG
+            .get()
+            .and_then(|c| c.audit_ship_path.clone());
         if kirra_verifier::audit_shipper::spawn_audit_shipper(
             Arc::clone(&svc.app),
             ship_path.as_deref(),
@@ -448,7 +452,11 @@ fn seed_local_asset_lockedout(svc: &ServiceState, registered_id: &str) {
 /// `Degraded` registration seed with fail-closed `LockedOut` IFF `registered_id`
 /// is the configured local asset. A peer (or an unset `local_id`) is left at its
 /// `Degraded` seed — peers rely on it.
-fn seed_local_asset_lockedout_inner(svc: &ServiceState, registered_id: &str, local_id: Option<&str>) {
+fn seed_local_asset_lockedout_inner(
+    svc: &ServiceState,
+    registered_id: &str,
+    local_id: Option<&str>,
+) {
     let Some(local_id) = local_id else { return };
     if local_id != registered_id {
         return;
@@ -537,7 +545,6 @@ fn emit_posture_event(state: &AppState, event_type: &str, node_id: Option<String
         posture,
     });
 }
-
 
 // --- Request / response types -----------------------------------------------
 
@@ -663,8 +670,6 @@ struct RegisterAvAssetRequest {
 
 // --- Handlers ----------------------------------------------------------------
 
-
-
 /// Outcome of the offloaded federation commit (`submit_federated_report`), mapped
 /// to an HTTP response on the async side. Side effects that must happen on the
 /// async task (the `Fenced` self-demote of `mode_active`) are applied by the caller,
@@ -679,13 +684,6 @@ enum FedCommitOutcome {
     Fenced(String),
 }
 
-
-
-
-
-
-
-
 #[derive(Serialize)]
 struct AvSubsystemView {
     node_id: String,
@@ -697,7 +695,6 @@ struct AvSubsystemView {
     recovery_streak_start_ms: u64,
 }
 
-
 #[derive(Serialize)]
 struct OperatorView {
     operator_id: String,
@@ -707,17 +704,11 @@ struct OperatorView {
     active: bool,
 }
 
-
-
-
-
-
 #[derive(Deserialize)]
 struct AuditExportQuery {
     limit: Option<u64>,
     offset: Option<u64>,
 }
-
 
 #[derive(Deserialize)]
 struct RotateSigningKeyRequest {
@@ -728,8 +719,6 @@ struct RotateSigningKeyRequest {
     new_signing_key_b64: String,
     reason: String,
 }
-
-
 
 /// Replay/freshness metadata required on every per-protocol industrial request.
 /// Flattened on the wire: `sequence` and `timestamp_ms` sit at the top level
@@ -744,24 +733,11 @@ struct ReplayGuarded<T> {
     message: T,
 }
 
-
-
-
-
-
-
-
 #[derive(Deserialize)]
 struct RegisterIdentityRequest {
     node_id: String,
     ak_public_fingerprint_hex: String,
 }
-
-
-
-
-
-
 
 // --- Fabric handlers --------------------------------------------------------
 
@@ -774,12 +750,6 @@ struct RegisterFabricAssetRequest {
     metadata: Option<std::collections::HashMap<String, String>>,
 }
 
-
-
-
-
-
-
 #[derive(Deserialize)]
 struct CausalLogQuery {
     from_ms: Option<u64>,
@@ -787,9 +757,6 @@ struct CausalLogQuery {
     limit: Option<u32>,
     offset: Option<u32>,
 }
-
-
-
 
 // ---------------------------------------------------------------------------
 // #46 — systemd `Type=notify` integration: READY notification + watchdog.
@@ -851,7 +818,10 @@ fn watchdog_should_ping(is_active: bool, cache_fresh: bool) -> bool {
 /// set (i.e. the unit declares `WatchdogSec=`). Pings `WATCHDOG=1` at half the
 /// configured interval, gated by [`watchdog_should_ping`].
 fn spawn_systemd_watchdog(svc: Arc<ServiceState>) {
-    let usec: u64 = match std::env::var("WATCHDOG_USEC").ok().and_then(|v| v.parse().ok()) {
+    let usec: u64 = match std::env::var("WATCHDOG_USEC")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
         Some(u) if u > 0 => u,
         _ => return, // no WatchdogSec configured → nothing to feed
     };
@@ -898,10 +868,10 @@ async fn main() {
         )
         .try_init();
 
-    let db_path = std::env::var("KIRRA_DB_PATH")
-        .unwrap_or_else(|_| "kirra_verifier.sqlite".to_string());
-    let listen_addr = std::env::var("KIRRA_VERIFIER_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:8090".to_string());
+    let db_path =
+        std::env::var("KIRRA_DB_PATH").unwrap_or_else(|_| "kirra_verifier.sqlite".to_string());
+    let listen_addr =
+        std::env::var("KIRRA_VERIFIER_ADDR").unwrap_or_else(|_| "0.0.0.0:8090".to_string());
 
     let mut store = match VerifierStore::new(&db_path) {
         Ok(store) => store,
@@ -971,11 +941,13 @@ async fn main() {
     kirra_verifier::standby_monitor::init_instance_id(effective_cfg.resolve_instance_id());
 
     let audit_signing_key: Option<ed25519_dalek::SigningKey> =
-        std::env::var("KIRRA_LOG_SIGNING_KEY").ok()
+        std::env::var("KIRRA_LOG_SIGNING_KEY")
+            .ok()
             .filter(|s| !s.is_empty())
             .and_then(|b64_str| {
                 use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
-                b64e.decode(&b64_str).ok()
+                b64e.decode(&b64_str)
+                    .ok()
                     .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
                     .map(|seed| ed25519_dalek::SigningKey::from_bytes(&seed))
             });
@@ -995,7 +967,12 @@ async fn main() {
         let pinned = std::env::var("KIRRA_LOG_SIGNING_GENESIS_PIN")
             .ok()
             .filter(|s| !s.is_empty());
-        let admission = match store.admit_signing_key(key.clone(), adopt, pinned.as_deref(), now_ms()) {
+        let admission = match store.admit_signing_key(
+            key.clone(),
+            adopt,
+            pinned.as_deref(),
+            now_ms(),
+        ) {
             Ok(admission) => admission,
             Err(err) => {
                 tracing::error!(
@@ -1038,7 +1015,10 @@ async fn main() {
                 );
                 std::process::exit(1);
             }
-            KeyAdmission::MigrationReversionRejected { chain_latest_key_id, env_key_id } => {
+            KeyAdmission::MigrationReversionRejected {
+                chain_latest_key_id,
+                env_key_id,
+            } => {
                 tracing::error!(
                     chain_latest_key_id = %chain_latest_key_id,
                     env_key_id = %env_key_id,
@@ -1061,8 +1041,7 @@ async fn main() {
     // reaches the Sender via `svc.app.audit_writer_tx.get()` to push the
     // kinematic-violation audit record off the verdict path. Done before
     // the listener binds so no request can race the install.
-    let audit_tx =
-        kirra_verifier::audit_writer::spawn_audit_writer(Arc::clone(&app_state));
+    let audit_tx = kirra_verifier::audit_writer::spawn_audit_writer(Arc::clone(&app_state));
     app_state.install_audit_writer(audit_tx);
 
     // WP-17 (MGA G-17) — unified env configuration: (1) WARN on any KIRRA_* env var
@@ -1134,16 +1113,20 @@ async fn main() {
     if kirra_verifier::capture::capture_enabled() {
         let capture_tx = kirra_verifier::capture::spawn_capture_writer();
         app_state.install_capture_writer(capture_tx);
-        tracing::info!("learning-loop capture ENABLED (KIRRA_CAPTURE_ENABLED) — verdict records → JSONL sink");
+        tracing::info!(
+            "learning-loop capture ENABLED (KIRRA_CAPTURE_ENABLED) — verdict records → JSONL sink"
+        );
     }
 
     {
-        let load_initial = app_state.store.call_read(|store| {
-            let nodes = store.load_nodes().map_err(|e| e.to_string())?;
-            let dependencies = store.load_dependencies()
-                .map_err(|e| e.to_string())?;
-            Ok::<_, String>((nodes, dependencies))
-        }).await;
+        let load_initial = app_state
+            .store
+            .call_read(|store| {
+                let nodes = store.load_nodes().map_err(|e| e.to_string())?;
+                let dependencies = store.load_dependencies().map_err(|e| e.to_string())?;
+                Ok::<_, String>((nodes, dependencies))
+            })
+            .await;
         let (nodes, dependencies) = match load_initial {
             Ok(Ok(data)) => data,
             Ok(Err(err)) => {
@@ -1233,7 +1216,13 @@ async fn main() {
         // closure (registration borrows svc_state and calls back into the store
         // via seed_local_asset_lockedout — keep it off the held guard).
         // SAFETY: SG-HA-3 — read off the worker pool via read replica.
-        let assets = svc_state.app.store.call_read(|store| store.load_fabric_assets()).await.ok().and_then(|r| r.ok());
+        let assets = svc_state
+            .app
+            .store
+            .call_read(|store| store.load_fabric_assets())
+            .await
+            .ok()
+            .and_then(|r| r.ok());
         let assets_loaded = match assets {
             Some(assets) => {
                 let n = assets.len();
@@ -1278,17 +1267,23 @@ async fn main() {
         VerifierOperationMode::PassiveStandby => VerifierOperationMode::PassiveStandby,
         VerifierOperationMode::Active => {
             // SAFETY: SG-HA-3 — read probe off the worker pool via read replica.
-            let arbitration = svc_state.app.store.call_read(|store| {
-                let (epoch, holder) = store.current_active_holder().ok()?;
-                let hb_str = store.load_engine_state(HEARTBEAT_KEY).ok()?;
-                let now = now_ms();
-                let hb_fresh = hb_str
-                    .as_deref()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(|ts| now.saturating_sub(ts) < PROMOTION_TIMEOUT_MS)
-                    .unwrap_or(false);
-                Some((epoch, holder, hb_fresh))
-            }).await.ok().flatten();
+            let arbitration = svc_state
+                .app
+                .store
+                .call_read(|store| {
+                    let (epoch, holder) = store.current_active_holder().ok()?;
+                    let hb_str = store.load_engine_state(HEARTBEAT_KEY).ok()?;
+                    let now = now_ms();
+                    let hb_fresh = hb_str
+                        .as_deref()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(|ts| now.saturating_sub(ts) < PROMOTION_TIMEOUT_MS)
+                        .unwrap_or(false);
+                    Some((epoch, holder, hb_fresh))
+                })
+                .await
+                .ok()
+                .flatten();
 
             match arbitration {
                 Some((epoch, Some(holder), true)) if holder != my_id => {
@@ -1303,9 +1298,16 @@ async fn main() {
                 Some((epoch, _holder, _stale_or_self)) => {
                     // SAFETY: SG-HA-3 — epoch claim is a durable write; off the worker pool.
                     let my_id_c = my_id.clone();
-                    let claim = svc_state.app.store.call(move |s| {
-                        Ok::<_, ()>(s.try_claim_epoch(epoch, &my_id_c, now_ms()).ok().flatten())
-                    }).await.ok().and_then(|r| r.ok()).flatten();
+                    let claim = svc_state
+                        .app
+                        .store
+                        .call(move |s| {
+                            Ok::<_, ()>(s.try_claim_epoch(epoch, &my_id_c, now_ms()).ok().flatten())
+                        })
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok())
+                        .flatten();
                     match claim {
                         Some(new_epoch) => {
                             svc_state
@@ -1395,16 +1397,30 @@ async fn main() {
     // (#72). Do not remove the log lines.
     if svc_state.app.is_active() {
         // SAFETY: SG-HA-3 — startup writes off the worker pool.
-        match svc_state.app.store.call(|store| store.ensure_hash_v2_migration_anchor(now_ms())).await {
+        match svc_state
+            .app
+            .store
+            .call(|store| store.ensure_hash_v2_migration_anchor(now_ms()))
+            .await
+        {
             Ok(Ok(())) => tracing::info!("audit: hash-v2 migration anchor ensured"),
-            Ok(Err(e)) => tracing::error!(error = %e, "audit: hash-v2 migration anchor FAILED at startup"),
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "audit: hash-v2 migration anchor FAILED at startup")
+            }
             Err(_) => tracing::error!("audit: hash-v2 migration anchor FAILED — store task error"),
         }
         // Key-id backfill (#76): assign existing NULL-key_id rows the genesis
         // key's id so they verify after a future rotation. Idempotent; signed.
-        match svc_state.app.store.call(|store| store.ensure_key_id_backfill_migration(now_ms())).await {
+        match svc_state
+            .app
+            .store
+            .call(|store| store.ensure_key_id_backfill_migration(now_ms()))
+            .await
+        {
             Ok(Ok(())) => tracing::info!("audit: key-id backfill migration ensured"),
-            Ok(Err(e)) => tracing::error!(error = %e, "audit: key-id backfill migration FAILED at startup"),
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "audit: key-id backfill migration FAILED at startup")
+            }
             Err(_) => tracing::error!("audit: key-id backfill migration FAILED — store task error"),
         }
         // Anchor-head backfill (#77): a chain written by a pre-#77 binary has no
@@ -1412,15 +1428,22 @@ async fn main() {
         // presents a head BEFORE serving /system/audit/verify (no false
         // HEAD_ABSENT). Idempotent. Log-and-continue: a missing head is itself
         // caught fail-closed at verify time (head_verified = false).
-        match svc_state.app.store.call(|store| store.ensure_audit_anchor_head(now_ms())).await {
+        match svc_state
+            .app
+            .store
+            .call(|store| store.ensure_audit_anchor_head(now_ms()))
+            .await
+        {
             Ok(Ok(())) => tracing::info!("audit: anchor-head high-water mark ensured"),
-            Ok(Err(e)) => tracing::error!(error = %e, "audit: anchor-head high-water mark FAILED at startup"),
-            Err(_) => tracing::error!("audit: anchor-head high-water mark FAILED — store task error"),
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "audit: anchor-head high-water mark FAILED at startup")
+            }
+            Err(_) => {
+                tracing::error!("audit: anchor-head high-water mark FAILED — store task error")
+            }
         }
     } else {
-        tracing::info!(
-            "audit: hash-v2 + key-id migrations skipped — passive standby (read-only)"
-        );
+        tracing::info!("audit: hash-v2 + key-id migrations skipped — passive standby (read-only)");
     }
 
     // ── WP-20 s2: execution-manager boot gate (fail-closed) ──────────────
@@ -1530,7 +1553,13 @@ async fn main() {
         admin_token_present: std::env::var("KIRRA_ADMIN_TOKEN")
             .map(|v| !v.is_empty())
             .unwrap_or(false),
-        sqlite_wal: svc_state.app.store.call_read(|store| store.is_wal_mode()).await.ok().unwrap_or(false),
+        sqlite_wal: svc_state
+            .app
+            .store
+            .call_read(|store| store.is_wal_mode())
+            .await
+            .ok()
+            .unwrap_or(false),
         mode_active: svc_state.app.is_active(),
         watchdog_spawned,
         posture_engine_running: svc_state.posture_engine_tx.get().is_some(),
@@ -1550,22 +1579,24 @@ async fn main() {
     // Default (neither env var) is Plaintext → byte-identical to before.
     let tls_config = match tls::resolve_tls_from_env() {
         Ok(tls::TlsResolution::Plaintext) => None,
-        Ok(tls::TlsResolution::Tls { cert_path, key_path, client_ca_path }) => {
-            match tls::load_server_config(&cert_path, &key_path, client_ca_path.as_deref()) {
-                Ok(cfg) => {
-                    tracing::info!(
-                        cert = %cert_path.display(),
-                        mtls = client_ca_path.is_some(),
-                        "TLS termination enabled (in-process, ring provider)"
-                    );
-                    Some(cfg)
-                }
-                Err(err) => {
-                    tracing::error!(error = %err, "TLS config invalid — aborting before bind (fail-closed)");
-                    std::process::exit(1);
-                }
+        Ok(tls::TlsResolution::Tls {
+            cert_path,
+            key_path,
+            client_ca_path,
+        }) => match tls::load_server_config(&cert_path, &key_path, client_ca_path.as_deref()) {
+            Ok(cfg) => {
+                tracing::info!(
+                    cert = %cert_path.display(),
+                    mtls = client_ca_path.is_some(),
+                    "TLS termination enabled (in-process, ring provider)"
+                );
+                Some(cfg)
             }
-        }
+            Err(err) => {
+                tracing::error!(error = %err, "TLS config invalid — aborting before bind (fail-closed)");
+                std::process::exit(1);
+            }
+        },
         Err(err) => {
             tracing::error!(error = %err, "TLS config invalid — aborting before bind (fail-closed)");
             std::process::exit(1);
@@ -1602,10 +1633,18 @@ async fn main() {
         // Offload the WAL checkpoint (a `wal_checkpoint(TRUNCATE)` fsync — the
         // longest single store hold) so it runs on the blocking pool rather than the
         // runtime thread driving graceful shutdown.
-        match shutdown_state.store.call(|store| store.durable_checkpoint()).await {
+        match shutdown_state
+            .store
+            .call(|store| store.durable_checkpoint())
+            .await
+        {
             Ok(Ok(())) => tracing::info!("audit: durable checkpoint flushed on shutdown"),
-            Ok(Err(e)) => tracing::error!(error = %e, "audit: durable checkpoint FAILED on shutdown"),
-            Err(_) => tracing::error!("audit: durable checkpoint skipped — store unavailable at shutdown"),
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "audit: durable checkpoint FAILED on shutdown")
+            }
+            Err(_) => {
+                tracing::error!("audit: durable checkpoint skipped — store unavailable at shutdown")
+            }
         }
     };
 
@@ -1614,9 +1653,11 @@ async fn main() {
         // the mesh-mTLS transport gate (#805) still composes on top when enabled.
         Some(cfg) => tls::serve_tls(listener, app, cfg, shutdown).await,
         // Default plaintext path — unchanged (`axum::serve` graceful shutdown).
-        None => axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown)
-            .await,
+        None => {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown)
+                .await
+        }
     };
     if let Err(err) = serve_result {
         tracing::error!(error = %err, "server exited with error");
@@ -1641,16 +1682,11 @@ async fn main() {
 // gated by the supervisor key below.
 // ===========================================================================
 
-
-
 #[derive(Deserialize)]
 struct ConsoleAuditQuery {
     limit: Option<u64>,
     offset: Option<u64>,
 }
-
-
-
 
 /// Query for #396 console analytics. `window_ms` defaults to 24h.
 #[derive(Deserialize)]
@@ -1659,16 +1695,15 @@ struct ConsoleAnalyticsQuery {
     window_ms: Option<u64>,
 }
 
-
-
-
 /// Pure supervisor-key decision (testable without env — INV-13 forbids `set_var`
 /// in multithreaded tests). REUSES the #255 mechanism: the value is the
 /// `KIRRA_SUPERVISOR_RESET_KEY`, constant-time compared. Fail-closed:
 /// unconfigured / empty / `> 64` bytes (INVARIANT #7) → 503; missing or
 /// mismatched provided key → 401.
 fn supervisor_key_ok(provided: Option<&str>, configured: Option<&str>) -> Result<(), StatusCode> {
-    let configured = configured.filter(|v| !v.is_empty()).ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let configured = configured
+        .filter(|v| !v.is_empty())
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     if configured.len() > 64 {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -1707,14 +1742,16 @@ async fn audit_grant_rejection(
     let reason = reason.to_string();
     let node_id = node_id.to_string();
     let operator_id = operator_id.to_string();
-    let _ = store.call(move |s| {
-        let _ = s.append_clearance_audit_event(
-            "OperatorClearanceGrantRejected",
-            &json!({ "reason": reason, "node_id": node_id, "operator_id": operator_id })
-                .to_string(),
-            now,
-        );
-    }).await;
+    let _ = store
+        .call(move |s| {
+            let _ = s.append_clearance_audit_event(
+                "OperatorClearanceGrantRejected",
+                &json!({ "reason": reason, "node_id": node_id, "operator_id": operator_id })
+                    .to_string(),
+                now,
+            );
+        })
+        .await;
 }
 
 /// #412 / ADR-0013 — audit a REJECTED operator e-stop request to the signed
@@ -1731,14 +1768,16 @@ async fn audit_estop_rejection(
     let reason = reason.to_string();
     let node_id = node_id.to_string();
     let operator_id = operator_id.to_string();
-    let _ = store.call(move |s| {
-        let _ = s.append_clearance_audit_event(
-            "OperatorStopRequestRejected",
-            &json!({ "reason": reason, "node_id": node_id, "operator_id": operator_id })
-                .to_string(),
-            now,
-        );
-    }).await;
+    let _ = store
+        .call(move |s| {
+            let _ = s.append_clearance_audit_event(
+                "OperatorStopRequestRejected",
+                &json!({ "reason": reason, "node_id": node_id, "operator_id": operator_id })
+                    .to_string(),
+                now,
+            );
+        })
+        .await;
 }
 
 /// #326 — the operator clearance-challenge map key. Length-prefixing the
@@ -1778,14 +1817,11 @@ struct RegisterOperatorRequest {
     ed25519_pubkey_pem: String,
 }
 
-
-
 #[derive(Deserialize)]
 struct ClearanceChallengeQuery {
     operator_id: String,
     node_id: String,
 }
-
 
 #[derive(Deserialize)]
 struct ClearanceGrantRequest {
@@ -1813,7 +1849,6 @@ struct OperatorStopRequest {
     signature_b64: String,
 }
 
-
 /// Assembles the complete production router from a fully-initialized
 /// `ServiceState`. Extracted verbatim from `main()` (issue #72) so the EXACT
 /// assembled router can be exercised by the binary-internal posture-gate test
@@ -1832,66 +1867,141 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/action_filter/evaluate", post(evaluate_action_filter))
         .route("/fleet/campaigns/report", post(report_node_artifact))
         .route("/industrial/evaluate", post(evaluate_industrial_adapter))
-        .route("/industrial/ethernet-ip/evaluate", post(evaluate_ethernet_ip_adapter))
-        .route("/industrial/canopen/evaluate", post(evaluate_canopen_adapter))
+        .route(
+            "/industrial/ethernet-ip/evaluate",
+            post(evaluate_ethernet_ip_adapter),
+        )
+        .route(
+            "/industrial/canopen/evaluate",
+            post(evaluate_canopen_adapter),
+        )
         .route("/industrial/dnp3/evaluate", post(evaluate_dnp3_adapter))
-        .layer(middleware::from_fn_with_state(svc_state.clone(), require_client_identity))
+        .layer(middleware::from_fn_with_state(
+            svc_state.clone(),
+            require_client_identity,
+        ))
         // WS-1 (#G7): SCOPE_INTEGRATION_EVALUATE — the admin token (break-glass) OR
         // an `integrator`-role principal. Previously admin-token-only.
-        .layer(middleware::from_fn_with_state(svc_state.clone(), require_integration_scope))
+        .layer(middleware::from_fn_with_state(
+            svc_state.clone(),
+            require_integration_scope,
+        ))
         // #G7 — OUTERMOST: reject an insecure-transport request before auth even
         // reads the credential (no-op unless KIRRA_REQUIRE_SECURE_TRANSPORT is on).
-        .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
+        .layer(middleware::from_fn_with_state(
+            svc_state.clone(),
+            require_secure_transport,
+        ));
 
     let admin_routes = Router::new()
         .route("/attestation/register", post(register_node))
         .route("/fleet/dependencies", post(register_dependencies))
-        .route("/fleet/diagnostics/report", post(handle_sensor_fault_report))
+        .route(
+            "/fleet/diagnostics/report",
+            post(handle_sensor_fault_report),
+        )
         .route("/fleet/assets/register", post(handle_register_av_asset))
         .route("/fleet/av-subsystems", get(list_av_subsystems))
         .route("/system/backup/export", post(export_backup))
-        .route("/system/audit/rotate-signing-key", post(handle_audit_rotate_key))
+        .route(
+            "/system/audit/rotate-signing-key",
+            post(handle_audit_rotate_key),
+        )
         // WS-1 (#G7) — API principal registry. SCOPE_ADMIN (admin-only); the mint
         // returns the plaintext token exactly once.
-        .route("/system/principals", post(register_api_principal_handler).get(list_api_principals_handler))
-        .route("/system/principals/{principal_id}/revoke", post(revoke_api_principal_handler))
+        .route(
+            "/system/principals",
+            post(register_api_principal_handler).get(list_api_principals_handler),
+        )
+        .route(
+            "/system/principals/{principal_id}/revoke",
+            post(revoke_api_principal_handler),
+        )
         // WS-1 (#G7) Track 1.2 — mTLS cert-principal registry. SCOPE_ADMIN; pins a
         // CA-verified client cert (by SHA-256 fingerprint) to a scoped principal.
-        .route("/system/cert-principals", post(register_cert_principal_handler).get(list_cert_principals_handler))
-        .route("/system/cert-principals/{principal_id}/revoke", post(revoke_cert_principal_handler))
+        .route(
+            "/system/cert-principals",
+            post(register_cert_principal_handler).get(list_cert_principals_handler),
+        )
+        .route(
+            "/system/cert-principals/{principal_id}/revoke",
+            post(revoke_cert_principal_handler),
+        )
         // WS-4 / Track 3 (Fleet Plane) — OTA governor-artifact campaign control
         // plane. SCOPE_ADMIN; each lifecycle mutation writes an R156-shaped audit
         // entry. `advance` is fail-closed on fleet posture (non-Nominal → HALT).
-        .route("/system/campaigns", post(create_campaign_handler).get(list_campaigns_handler))
+        .route(
+            "/system/campaigns",
+            post(create_campaign_handler).get(list_campaigns_handler),
+        )
         .route("/system/campaigns/summary", get(campaigns_summary_handler))
         .route("/system/campaigns/{campaign_id}", get(get_campaign_handler))
-        .route("/system/campaigns/{campaign_id}/arm", post(arm_campaign_handler))
-        .route("/system/campaigns/{campaign_id}/advance", post(advance_campaign_handler))
-        .route("/system/campaigns/{campaign_id}/halt", post(halt_campaign_handler))
-        .route("/federation/controllers/register", post(register_federation_controller))
-        .route("/attestation/identity/register", post(register_node_identity))
+        .route(
+            "/system/campaigns/{campaign_id}/arm",
+            post(arm_campaign_handler),
+        )
+        .route(
+            "/system/campaigns/{campaign_id}/advance",
+            post(advance_campaign_handler),
+        )
+        .route(
+            "/system/campaigns/{campaign_id}/halt",
+            post(halt_campaign_handler),
+        )
+        .route(
+            "/federation/controllers/register",
+            post(register_federation_controller),
+        )
+        .route(
+            "/attestation/identity/register",
+            post(register_node_identity),
+        )
         // #314 Phase 1 — operator registry. ADMIN-gated (separate power from the
         // supervisor key); posture-exempt by the /console/ path prefix.
-        .route("/console/operators", post(register_operator).get(list_operators))
-        .route("/console/operators/{operator_id}/revoke", post(revoke_operator))
-        .route("/fabric/assets/register", post(handle_register_fabric_asset))
+        .route(
+            "/console/operators",
+            post(register_operator).get(list_operators),
+        )
+        .route(
+            "/console/operators/{operator_id}/revoke",
+            post(revoke_operator),
+        )
+        .route(
+            "/fabric/assets/register",
+            post(handle_register_fabric_asset),
+        )
         .route("/fabric/assets", get(handle_list_fabric_assets))
         .route("/fabric/state", get(handle_fabric_state))
         .route("/fabric/telemetry", get(handle_fabric_telemetry))
-        .route("/fabric/telemetry/{asset_id}", get(handle_fabric_telemetry_asset))
+        .route(
+            "/fabric/telemetry/{asset_id}",
+            get(handle_fabric_telemetry_asset),
+        )
         .route("/fabric/command/{asset_id}", post(handle_fabric_command))
         .route("/fabric/causal-log", get(handle_fabric_causal_log))
-        .route("/fabric/causal-log/{entry_id}", get(handle_fabric_causal_chain))
+        .route(
+            "/fabric/causal-log/{entry_id}",
+            get(handle_fabric_causal_chain),
+        )
         // #G7 slice 3 — attribution runs INNER of require_admin_token (which
         // authenticates and records the resolved principal in the request
         // extensions). Scoped to these admin state-mutation routes only: NOT the
         // actuator (high-rate control) nor the self-auditing identity-gated
         // evaluations.
-        .layer(middleware::from_fn_with_state(svc_state.clone(), record_admin_action_audit))
-        .layer(middleware::from_fn_with_state(svc_state.clone(), require_admin_token))
+        .layer(middleware::from_fn_with_state(
+            svc_state.clone(),
+            record_admin_action_audit,
+        ))
+        .layer(middleware::from_fn_with_state(
+            svc_state.clone(),
+            require_admin_token,
+        ))
         // #G7 — OUTERMOST: reject an insecure-transport request before auth even
         // reads the credential (no-op unless KIRRA_REQUIRE_SECURE_TRANSPORT is on).
-        .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
+        .layer(middleware::from_fn_with_state(
+            svc_state.clone(),
+            require_secure_transport,
+        ));
 
     // WS-1 (#G7) — read-only audit-chain verification/export, carved out of the
     // admin group so an `auditor`-role principal (least privilege — NO mutation
@@ -1905,22 +2015,37 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         // EP-17 — one denial as a signed, explained artifact (reads the
         // chained record + the denied command's raw inputs → audit-read tier).
         .route("/verdicts/{verdict_id}", get(verdicts::get_verdict_handler))
-        .layer(middleware::from_fn_with_state(svc_state.clone(), require_audit_scope))
+        .layer(middleware::from_fn_with_state(
+            svc_state.clone(),
+            require_audit_scope,
+        ))
         // #G7 — same transport-security boundary as every other gated group.
-        .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
+        .layer(middleware::from_fn_with_state(
+            svc_state.clone(),
+            require_secure_transport,
+        ));
 
     let actuator_routes = Router::new()
-        .route("/actuator/motion/command", post(handle_actuator_motion_command))
+        .route(
+            "/actuator/motion/command",
+            post(handle_actuator_motion_command),
+        )
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&svc_state),
             enforce_actuator_safety_envelope,
         ))
         // WS-1 (#G7): SCOPE_ACTUATOR_COMMAND — the admin token OR an `operator`-role
         // principal. Auth runs before the envelope; the transport gate runs first of all.
-        .layer(middleware::from_fn_with_state(Arc::clone(&svc_state), require_actuator_scope))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&svc_state),
+            require_actuator_scope,
+        ))
         // #G7 — OUTERMOST: reject an insecure-transport request before auth even
         // reads the credential (no-op unless KIRRA_REQUIRE_SECURE_TRANSPORT is on).
-        .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
+        .layer(middleware::from_fn_with_state(
+            svc_state.clone(),
+            require_secure_transport,
+        ));
 
     let attestation_routes = Router::new()
         .route("/attestation/challenge/{node_id}", post(issue_challenge))
@@ -1929,7 +2054,10 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         // nonces + signatures; when secure transport is required they must not be
         // processed off a plaintext leg either, even though the flow is otherwise
         // unauthenticated (the challenge-response provides its own guarantee).
-        .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
+        .layer(middleware::from_fn_with_state(
+            svc_state.clone(),
+            require_secure_transport,
+        ));
 
     let probe_routes = Router::new()
         .route("/health", get(health))
@@ -2087,7 +2215,9 @@ async fn shutdown_signal() {
     };
     #[cfg(unix)]
     let terminate = async {
-        if let Ok(mut sig) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        if let Ok(mut sig) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
             sig.recv().await;
         }
     };
@@ -2143,7 +2273,9 @@ mod posture_gate_real_router_tests {
             audit_verifying_key: None,
             fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
             fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            fabric_causal_log: Arc::new(
+                kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+            ),
             posture_engine_tx: std::sync::OnceLock::new(),
             perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
@@ -2156,7 +2288,11 @@ mod posture_gate_real_router_tests {
 
     /// Drives one request through the REAL assembled app and returns its status.
     /// A fresh app per call because `oneshot` consumes the router.
-    async fn status_through_real_app(svc: Arc<ServiceState>, method: &str, path: &str) -> StatusCode {
+    async fn status_through_real_app(
+        svc: Arc<ServiceState>,
+        method: &str,
+        path: &str,
+    ) -> StatusCode {
         let req = Request::builder()
             .method(method)
             .uri(path)
@@ -2185,17 +2321,29 @@ mod posture_gate_real_router_tests {
                 "/system/campaigns",
                 post(super::create_campaign_handler).get(super::list_campaigns_handler),
             )
-            .route("/system/campaigns/summary", get(super::campaigns_summary_handler))
+            .route(
+                "/system/campaigns/summary",
+                get(super::campaigns_summary_handler),
+            )
             // The node adoption report (bare here for logic testing; its identity gate
             // is proven by `ws1_scope_gated_routes_fail_closed_on_real_router`).
             .route("/fleet/campaigns/report", post(super::report_node_artifact))
-            .route("/system/campaigns/{campaign_id}", get(super::get_campaign_handler))
-            .route("/system/campaigns/{campaign_id}/arm", post(super::arm_campaign_handler))
+            .route(
+                "/system/campaigns/{campaign_id}",
+                get(super::get_campaign_handler),
+            )
+            .route(
+                "/system/campaigns/{campaign_id}/arm",
+                post(super::arm_campaign_handler),
+            )
             .route(
                 "/system/campaigns/{campaign_id}/advance",
                 post(super::advance_campaign_handler),
             )
-            .route("/system/campaigns/{campaign_id}/halt", post(super::halt_campaign_handler))
+            .route(
+                "/system/campaigns/{campaign_id}/halt",
+                post(super::halt_campaign_handler),
+            )
             .with_state(svc)
     }
 
@@ -2280,9 +2428,13 @@ mod posture_gate_real_router_tests {
     async fn campaign_lifecycle_and_fail_closed_posture_halt_end_to_end() {
         let svc = state_with(FleetPosture::Nominal);
 
-        let (st, j) =
-            campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-e2e")))
-                .await;
+        let (st, j) = campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns",
+            Some(&create_body("camp-e2e")),
+        )
+        .await;
         assert_eq!(st, StatusCode::CREATED, "create; body={j}");
         assert_eq!(j["state"], "draft");
         assert_eq!(j["rollout_percent"], 0);
@@ -2292,8 +2444,13 @@ mod posture_gate_real_router_tests {
         assert_eq!(st, StatusCode::OK, "arm");
 
         // Advance under Nominal → first stage (10%).
-        let (st, j) =
-            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-e2e/advance", None).await;
+        let (st, j) = campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns/camp-e2e/advance",
+            None,
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "advance; body={j}");
         assert_eq!(j["outcome"]["advanced"], true);
         assert_eq!(j["outcome"]["rollout_percent"], 10);
@@ -2305,8 +2462,13 @@ mod posture_gate_real_router_tests {
             Some(CachedFleetPosture::new(FleetPosture::LockedOut));
 
         // The next advance HALTS fail-closed rather than rolling to 50%.
-        let (st, j) =
-            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-e2e/advance", None).await;
+        let (st, j) = campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns/camp-e2e/advance",
+            None,
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "halt-advance; body={j}");
         assert_eq!(j["outcome"]["halted"], true);
         assert_eq!(j["outcome"]["halt_reason"], "posture_locked_out");
@@ -2315,9 +2477,18 @@ mod posture_gate_real_router_tests {
         assert_eq!(j["campaign"]["rollout_percent"], 10);
 
         // Terminal: a further advance is a 409 conflict (the engine authors no resume).
-        let (st, _) =
-            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-e2e/advance", None).await;
-        assert_eq!(st, StatusCode::CONFLICT, "terminal campaign must reject advance");
+        let (st, _) = campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns/camp-e2e/advance",
+            None,
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::CONFLICT,
+            "terminal campaign must reject advance"
+        );
     }
 
     /// The fleet rollout summary reflects real campaign state through the HTTP
@@ -2328,22 +2499,47 @@ mod posture_gate_real_router_tests {
         let svc = state_with(FleetPosture::Nominal);
 
         // camp-roll: create → arm → advance → Rolling @ 10% (stage 1 of 3).
-        campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-roll")))
-            .await;
+        campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns",
+            Some(&create_body("camp-roll")),
+        )
+        .await;
         campaign_req(svc.clone(), "POST", "/system/campaigns/camp-roll/arm", None).await;
-        let (st, _) =
-            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-roll/advance", None).await;
+        let (st, _) = campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns/camp-roll/advance",
+            None,
+        )
+        .await;
         assert_eq!(st, StatusCode::OK);
 
         // camp-draft: left in Draft. camp-halt: armed then operator-halted (halt is
         // only legal from an active state).
-        campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-draft")))
-            .await;
-        campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-halt")))
-            .await;
+        campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns",
+            Some(&create_body("camp-draft")),
+        )
+        .await;
+        campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns",
+            Some(&create_body("camp-halt")),
+        )
+        .await;
         campaign_req(svc.clone(), "POST", "/system/campaigns/camp-halt/arm", None).await;
-        let (st, _) =
-            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-halt/halt", None).await;
+        let (st, _) = campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns/camp-halt/halt",
+            None,
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "operator halt of an armed campaign");
 
         let (st, j) = campaign_req(svc.clone(), "GET", "/system/campaigns/summary", None).await;
@@ -2378,17 +2574,37 @@ mod posture_gate_real_router_tests {
         let svc = state_with(FleetPosture::Nominal);
 
         // A Rolling campaign (create → arm → advance) whose digest nodes will adopt.
-        campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-adopt")))
-            .await;
-        campaign_req(svc.clone(), "POST", "/system/campaigns/camp-adopt/arm", None).await;
-        campaign_req(svc.clone(), "POST", "/system/campaigns/camp-adopt/advance", None).await;
+        campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns",
+            Some(&create_body("camp-adopt")),
+        )
+        .await;
+        campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns/camp-adopt/arm",
+            None,
+        )
+        .await;
+        campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns/camp-adopt/advance",
+            None,
+        )
+        .await;
 
         // A bad digest is rejected (400) and records nothing.
         let (st, _) = campaign_req(
             svc.clone(),
             "POST",
             "/fleet/campaigns/report",
-            Some(&serde_json::json!({ "node_id": "robot-x", "applied_digest": "nothex" }).to_string()),
+            Some(
+                &serde_json::json!({ "node_id": "robot-x", "applied_digest": "nothex" })
+                    .to_string(),
+            ),
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "non-hex digest must 400");
@@ -2424,9 +2640,16 @@ mod posture_gate_real_router_tests {
     async fn campaign_summary_route_is_not_shadowed_by_id_param() {
         let svc = state_with(FleetPosture::Nominal);
         let (st, j) = campaign_req(svc.clone(), "GET", "/system/campaigns/summary", None).await;
-        assert_eq!(st, StatusCode::OK, "summary must resolve, not 404 as a missing id");
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "summary must resolve, not 404 as a missing id"
+        );
         // A summary body has the count fields; a campaign body would not.
-        assert!(j.get("total").is_some(), "got a summary, not a campaign; body={j}");
+        assert!(
+            j.get("total").is_some(),
+            "got a summary, not a campaign; body={j}"
+        );
     }
 
     /// Fail-closed on posture UNAVAILABILITY: with a cold posture cache
@@ -2436,18 +2659,30 @@ mod posture_gate_real_router_tests {
     async fn campaign_advance_fails_closed_when_posture_unavailable() {
         let svc = build_state(None); // cold cache
 
-        let (st, _) =
-            campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-cold")))
-                .await;
+        let (st, _) = campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns",
+            Some(&create_body("camp-cold")),
+        )
+        .await;
         assert_eq!(st, StatusCode::CREATED);
         let (st, _) =
             campaign_req(svc.clone(), "POST", "/system/campaigns/camp-cold/arm", None).await;
         assert_eq!(st, StatusCode::OK);
 
-        let (st, j) =
-            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-cold/advance", None).await;
+        let (st, j) = campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns/camp-cold/advance",
+            None,
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "advance; body={j}");
-        assert_eq!(j["outcome"]["halted"], true, "cold posture must halt, not roll");
+        assert_eq!(
+            j["outcome"]["halted"], true,
+            "cold posture must halt, not roll"
+        );
         assert_eq!(j["campaign"]["state"], "halted");
     }
 
@@ -2467,11 +2702,21 @@ mod posture_gate_real_router_tests {
         assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
 
         // First create OK, duplicate id → 409.
-        let (st, _) =
-            campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("dup"))).await;
+        let (st, _) = campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns",
+            Some(&create_body("dup")),
+        )
+        .await;
         assert_eq!(st, StatusCode::CREATED);
-        let (st, _) =
-            campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("dup"))).await;
+        let (st, _) = campaign_req(
+            svc.clone(),
+            "POST",
+            "/system/campaigns",
+            Some(&create_body("dup")),
+        )
+        .await;
         assert_eq!(st, StatusCode::CONFLICT);
 
         // Advancing an unknown campaign → 404.
@@ -2567,7 +2812,11 @@ mod posture_gate_real_router_tests {
         // A cohort node INSIDE the 50% rolled bucket gets the artifact.
         let rolled = node_rolled_at_seed("camp-assign", true);
         let (st, j) = assignment_req(Arc::clone(&svc), &rolled, "canary").await;
-        assert_eq!(st, StatusCode::OK, "public assignment read must be reachable; body={j}");
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "public assignment read must be reachable; body={j}"
+        );
         assert_eq!(j["rolled"], true, "{rolled} is inside the 50% bucket");
         assert_eq!(j["artifact_digest"], CAMPAIGN_DIGEST);
         assert_eq!(j["campaign_id"], "camp-assign");
@@ -2607,7 +2856,8 @@ mod posture_gate_real_router_tests {
     #[tokio::test]
     async fn lockedout_blocks_read_on_real_router() {
         let status =
-            status_through_real_app(state_with(FleetPosture::LockedOut), "GET", "/fleet/posture").await;
+            status_through_real_app(state_with(FleetPosture::LockedOut), "GET", "/fleet/posture")
+                .await;
         assert_eq!(
             status,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2622,7 +2872,8 @@ mod posture_gate_real_router_tests {
     #[tokio::test]
     async fn nominal_passes_read_through_to_real_handler() {
         let status =
-            status_through_real_app(state_with(FleetPosture::Nominal), "GET", "/fleet/posture").await;
+            status_through_real_app(state_with(FleetPosture::Nominal), "GET", "/fleet/posture")
+                .await;
         assert_eq!(
             status,
             StatusCode::OK,
@@ -2681,7 +2932,10 @@ mod posture_gate_real_router_tests {
                 rb = rb.header(header::AUTHORIZATION, format!("Bearer {tok}"));
             }
             build_app(svc)
-                .oneshot(rb.body(Body::from(body.to_string())).expect("build request"))
+                .oneshot(
+                    rb.body(Body::from(body.to_string()))
+                        .expect("build request"),
+                )
                 .await
                 .expect("router service should not panic")
                 .status()
@@ -2776,8 +3030,7 @@ mod posture_gate_real_router_tests {
 
         // A functional read denied by the gate first, so the scrape can show
         // a non-zero locked_out denial.
-        let denied =
-            status_through_real_app(Arc::clone(&svc), "GET", "/fleet/posture").await;
+        let denied = status_through_real_app(Arc::clone(&svc), "GET", "/fleet/posture").await;
         assert_eq!(
             denied,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2847,9 +3100,10 @@ mod posture_gate_real_router_tests {
         );
         // The denied read above is visible on the labeled denial counter.
         assert!(
-            text.lines().any(|l| l.starts_with("kirra_gate_denials_total{")
-                && l.contains("reason=\"locked_out\"")
-                && l.ends_with(" 1")),
+            text.lines()
+                .any(|l| l.starts_with("kirra_gate_denials_total{")
+                    && l.contains("reason=\"locked_out\"")
+                    && l.ends_with(" 1")),
             "the LockedOut denial must be counted on the labeled series; got:\n{text}"
         );
     }
@@ -2882,9 +3136,7 @@ mod fabric_posture_feed_tests {
 
     use std::sync::Arc;
 
-    use kirra_verifier::fabric::asset::{
-        AssetType, FabricAsset, KinematicProfileType,
-    };
+    use kirra_verifier::fabric::asset::{AssetType, FabricAsset, KinematicProfileType};
     use kirra_verifier::fabric::router::FabricRouter;
     use kirra_verifier::posture_cache::{
         now_ms, CachedFleetPosture, ServiceState, SharedPostureCache,
@@ -2922,7 +3174,9 @@ mod fabric_posture_feed_tests {
             audit_verifying_key: None,
             fabric_router,
             fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            fabric_causal_log: Arc::new(
+                kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+            ),
             posture_engine_tx: std::sync::OnceLock::new(),
             perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
@@ -2946,8 +3200,15 @@ mod fabric_posture_feed_tests {
         sync_local_asset_posture(&svc, LOCAL);
 
         let after = svc.fabric_router.asset_posture(LOCAL).unwrap();
-        assert_eq!(after.posture, FleetPosture::Nominal, "feed must mirror the fleet posture");
-        assert!(after.blocked_by.is_empty(), "Nominal carries no blocked_by reason");
+        assert_eq!(
+            after.posture,
+            FleetPosture::Nominal,
+            "feed must mirror the fleet posture"
+        );
+        assert!(
+            after.blocked_by.is_empty(),
+            "Nominal carries no blocked_by reason"
+        );
         assert_eq!(after.generation, 1, "seed gen 0 → first feed write gen 1");
     }
 
@@ -3076,18 +3337,25 @@ mod fabric_command_authoritative_tests {
             audit_verifying_key: None,
             fabric_router,
             fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            fabric_causal_log: Arc::new(
+                kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+            ),
             posture_engine_tx: std::sync::OnceLock::new(),
             perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
         })
     }
 
-    async fn post_command(svc: Arc<ServiceState>, cmd: ProposedVehicleCommand) -> serde_json::Value {
+    async fn post_command(
+        svc: Arc<ServiceState>,
+        cmd: ProposedVehicleCommand,
+    ) -> serde_json::Value {
         let resp = handle_fabric_command(State(svc), Path(ASSET.to_string()), Ok(Json(cmd)))
             .await
             .into_response();
-        let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("read body");
+        let bytes = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
         serde_json::from_slice(&bytes).expect("json body")
     }
 
@@ -3107,17 +3375,33 @@ mod fabric_command_authoritative_tests {
         let v = post_command(svc_with_asset(FleetPosture::Nominal), cmd(40.0, 34.0, 0.0)).await;
 
         assert_eq!(v["allowed"], true);
-        assert_eq!(v["clamp_occurred"], true, "a clamp must be reported as enforcement");
+        assert_eq!(
+            v["clamp_occurred"], true,
+            "a clamp must be reported as enforcement"
+        );
         assert_eq!(v["original_linear_velocity_mps"], 40.0);
 
-        let enforced = v["enforced_linear_velocity_mps"].as_f64().expect("enforced velocity");
-        assert!(enforced < 40.0, "enforced velocity must be clamped below the proposal (within envelope)");
+        let enforced = v["enforced_linear_velocity_mps"]
+            .as_f64()
+            .expect("enforced velocity");
+        assert!(
+            enforced < 40.0,
+            "enforced velocity must be clamped below the proposal (within envelope)"
+        );
 
         // THE KEY ASSERTION: the authoritative `command` carries the SAFE value,
         // so a client applying it is within envelope even ignoring `action`.
-        let cmd_v = v["command"]["linear_velocity_mps"].as_f64().expect("command.linear");
-        assert_eq!(cmd_v, enforced, "response.command must carry the enforced (clamped) velocity");
-        assert!(cmd_v < 40.0, "the returned command is NOT the unclamped 40.0");
+        let cmd_v = v["command"]["linear_velocity_mps"]
+            .as_f64()
+            .expect("command.linear");
+        assert_eq!(
+            cmd_v, enforced,
+            "response.command must carry the enforced (clamped) velocity"
+        );
+        assert!(
+            cmd_v < 40.0,
+            "the returned command is NOT the unclamped 40.0"
+        );
     }
 
     #[tokio::test]
@@ -3132,10 +3416,20 @@ mod fabric_command_authoritative_tests {
 
     #[tokio::test]
     async fn lockedout_denies_and_omits_command() {
-        let v = post_command(svc_with_asset(FleetPosture::LockedOut), cmd(10.0, 10.0, 0.0)).await;
+        let v = post_command(
+            svc_with_asset(FleetPosture::LockedOut),
+            cmd(10.0, 10.0, 0.0),
+        )
+        .await;
         assert_eq!(v["allowed"], false, "LockedOut denies the command");
-        assert!(v.get("command").is_none(), "a denied command carries no enforced command");
-        assert!(v["denial_reason"].is_string(), "denial is recorded with a reason");
+        assert!(
+            v.get("command").is_none(),
+            "a denied command carries no enforced command"
+        );
+        assert!(
+            v["denial_reason"].is_string(),
+            "denial is recorded with a reason"
+        );
     }
 }
 
@@ -3172,15 +3466,22 @@ mod attestation_nonce_handler_tests {
     /// Test-only Ed25519 SubjectPublicKeyInfo PEM (RFC 8410 prefix; public key only).
     fn public_key_to_pem(vk: &VerifyingKey) -> String {
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-        const ED25519_SPKI_PREFIX: [u8; 12] =
-            [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        const ED25519_SPKI_PREFIX: [u8; 12] = [
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
         let mut der = ED25519_SPKI_PREFIX.to_vec();
         der.extend_from_slice(vk.as_bytes());
-        format!("-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n", B64.encode(&der))
+        format!(
+            "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
+            B64.encode(&der)
+        )
     }
 
     fn sign_proof(sk: &SigningKey, node_id: &str, nonce: u64) -> String {
-        hex::encode(sk.sign(&attestation_signing_payload(node_id, nonce)).to_bytes())
+        hex::encode(
+            sk.sign(&attestation_signing_payload(node_id, nonce))
+                .to_bytes(),
+        )
     }
 
     fn svc_with_registered_node(ak_pem: String) -> Arc<ServiceState> {
@@ -3208,7 +3509,9 @@ mod attestation_nonce_handler_tests {
             audit_verifying_key: None,
             fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
             fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            fabric_causal_log: Arc::new(
+                kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+            ),
             posture_engine_tx: std::sync::OnceLock::new(),
             perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
@@ -3220,7 +3523,10 @@ mod attestation_nonce_handler_tests {
             "node_id": NODE, "nonce": nonce, "proof_hex": proof_hex,
         }))
         .expect("build request");
-        verify_attestation(State(svc), Json(req)).await.into_response().status()
+        verify_attestation(State(svc), Json(req))
+            .await
+            .into_response()
+            .status()
     }
 
     /// WS-4: an attestation-SIGNED adoption report is verified against the node's
@@ -3237,9 +3543,9 @@ mod attestation_nonce_handler_tests {
         let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let ts: u64 = 5_000;
         let good_sig = B64.encode(
-            sk.sign(&kirra_verifier::attestation::adoption_report_signing_payload(
-                NODE, digest, ts,
-            ))
+            sk.sign(
+                &kirra_verifier::attestation::adoption_report_signing_payload(NODE, digest, ts),
+            )
             .to_bytes(),
         );
 
@@ -3268,7 +3574,11 @@ mod attestation_nonce_handler_tests {
         .into_response()
         .status();
         assert_eq!(st, StatusCode::OK, "valid signed report accepted");
-        assert_eq!(attested_of(svc.clone()).await, Some(true), "stored as attested");
+        assert_eq!(
+            attested_of(svc.clone()).await,
+            Some(true),
+            "stored as attested"
+        );
 
         // Tampered signature (flip a byte) → 401, fail-closed.
         let mut bad = B64.decode(&good_sig).unwrap();
@@ -3293,16 +3603,26 @@ mod attestation_nonce_handler_tests {
         .await
         .into_response()
         .status();
-        assert_eq!(st, StatusCode::OK, "unsigned report still accepted (identity-gated)");
-        assert_eq!(attested_of(svc.clone()).await, Some(false), "unsigned → not attested");
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "unsigned report still accepted (identity-gated)"
+        );
+        assert_eq!(
+            attested_of(svc.clone()).await,
+            Some(false),
+            "unsigned → not attested"
+        );
 
         // A signed report with a FAR-FUTURE timestamp is rejected (the monotonic
         // upsert would otherwise let it permanently wedge later legitimate updates).
         let future_ts = now_ms() + 3_600_000; // 1h ahead — beyond the skew allowance
         let future_sig = B64.encode(
-            sk.sign(&kirra_verifier::attestation::adoption_report_signing_payload(
-                NODE, digest, future_ts,
-            ))
+            sk.sign(
+                &kirra_verifier::attestation::adoption_report_signing_payload(
+                    NODE, digest, future_ts,
+                ),
+            )
             .to_bytes(),
         );
         let st = report(serde_json::json!({
@@ -3312,7 +3632,11 @@ mod attestation_nonce_handler_tests {
         .await
         .into_response()
         .status();
-        assert_eq!(st, StatusCode::BAD_REQUEST, "far-future signed timestamp rejected");
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "far-future signed timestamp rejected"
+        );
     }
 
     // ---- PCR16 measured-boot binding (attestation follow-up) --------------
@@ -3331,7 +3655,12 @@ mod attestation_nonce_handler_tests {
         svc
     }
 
-    fn sign_proof_with_pcr16(sk: &SigningKey, node_id: &str, nonce: u64, presented: Option<&str>) -> String {
+    fn sign_proof_with_pcr16(
+        sk: &SigningKey,
+        node_id: &str,
+        nonce: u64,
+        presented: Option<&str>,
+    ) -> String {
         let payload = kirra_verifier::attestation::attestation_signing_payload_with_pcr16(
             node_id, nonce, presented,
         );
@@ -3349,7 +3678,10 @@ mod attestation_nonce_handler_tests {
             "presented_pcr16_digest_hex": presented,
         }))
         .expect("build request");
-        verify_attestation(State(svc), Json(req)).await.into_response().status()
+        verify_attestation(State(svc), Json(req))
+            .await
+            .into_response()
+            .status()
     }
 
     /// A node enrolled with an expected PCR16 attests ONLY with a matching digest
@@ -3367,23 +3699,44 @@ mod attestation_nonce_handler_tests {
 
         // (a) Expected PCR16 but the node presents none → 403, nonce preserved.
         let absent = verify(Arc::clone(&svc), nonce, sign_proof(&node_key, NODE, nonce)).await;
-        assert_eq!(absent, StatusCode::FORBIDDEN, "expected PCR16, none presented → 403");
-        assert!(svc.app.pending_challenges.contains_key(NODE), "a PCR16 refusal must not burn the nonce");
+        assert_eq!(
+            absent,
+            StatusCode::FORBIDDEN,
+            "expected PCR16, none presented → 403"
+        );
+        assert!(
+            svc.app.pending_challenges.contains_key(NODE),
+            "a PCR16 refusal must not burn the nonce"
+        );
 
         // (b) A wrong digest Y (correctly signed) ≠ the expectation X → 403, preserved.
         let wrong = verify_with_pcr16(
-            Arc::clone(&svc), nonce, sign_proof_with_pcr16(&node_key, NODE, nonce, Some(Y)), Some(Y),
-        ).await;
+            Arc::clone(&svc),
+            nonce,
+            sign_proof_with_pcr16(&node_key, NODE, nonce, Some(Y)),
+            Some(Y),
+        )
+        .await;
         assert_eq!(wrong, StatusCode::FORBIDDEN, "mismatched PCR16 → 403");
-        assert!(svc.app.pending_challenges.contains_key(NODE), "still not burned");
+        assert!(
+            svc.app.pending_challenges.contains_key(NODE),
+            "still not burned"
+        );
 
         // (c) The correct digest X bound into the signature → 200 OK, Trusted.
         let ok = verify_with_pcr16(
-            Arc::clone(&svc), nonce, sign_proof_with_pcr16(&node_key, NODE, nonce, Some(X)), Some(X),
-        ).await;
+            Arc::clone(&svc),
+            nonce,
+            sign_proof_with_pcr16(&node_key, NODE, nonce, Some(X)),
+            Some(X),
+        )
+        .await;
         assert_eq!(ok, StatusCode::OK, "matching bound PCR16 attests");
         assert!(
-            matches!(svc.app.nodes.get(NODE).unwrap().status, NodeTrustState::Trusted),
+            matches!(
+                svc.app.nodes.get(NODE).unwrap().status,
+                NodeTrustState::Trusted
+            ),
             "node becomes Trusted after a valid PCR16-bound proof"
         );
     }
@@ -3424,16 +3777,21 @@ mod attestation_nonce_handler_tests {
         presented: Option<&str>,
         quote: Option<(String, String)>,
     ) -> StatusCode {
-        let tpm_quote = quote.map(|(q, s)| serde_json::json!({
-            "quote_msg_hex": q, "signature_hex": s,
-        }));
+        let tpm_quote = quote.map(|(q, s)| {
+            serde_json::json!({
+                "quote_msg_hex": q, "signature_hex": s,
+            })
+        });
         let req: VerifyAttestationRequest = serde_json::from_value(serde_json::json!({
             "node_id": NODE, "nonce": nonce, "proof_hex": proof_hex,
             "presented_pcr16_digest_hex": presented,
             "tpm_quote": tpm_quote,
         }))
         .expect("build request");
-        verify_attestation(State(svc), Json(req)).await.into_response().status()
+        verify_attestation(State(svc), Json(req))
+            .await
+            .into_response()
+            .status()
     }
 
     /// A node whose policy requires a TPM quote is REFUSED when it presents only
@@ -3441,7 +3799,10 @@ mod attestation_nonce_handler_tests {
     #[tokio::test]
     async fn tpm_quote_required_but_absent_is_refused() {
         let node_key = SigningKey::from_bytes(&[7u8; 32]);
-        let svc = svc_with_quote_node(public_key_to_pem(&node_key.verifying_key()), PCR16_VALUE_HEX);
+        let svc = svc_with_quote_node(
+            public_key_to_pem(&node_key.verifying_key()),
+            PCR16_VALUE_HEX,
+        );
         let nonce = 0x1122_3344_5566_7788;
         svc.app.issue_challenge(NODE, nonce, now_ms());
 
@@ -3451,11 +3812,22 @@ mod attestation_nonce_handler_tests {
             sign_proof_with_pcr16(&node_key, NODE, nonce, Some(PCR16_VALUE_HEX)),
             Some(PCR16_VALUE_HEX),
             None, // no quote, but policy requires one
-        ).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "policy requires a quote, none presented → 403");
-        assert!(svc.app.pending_challenges.contains_key(NODE), "a quote refusal must not burn the nonce");
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "policy requires a quote, none presented → 403"
+        );
         assert!(
-            matches!(svc.app.nodes.get(NODE).unwrap().status, NodeTrustState::Unknown),
+            svc.app.pending_challenges.contains_key(NODE),
+            "a quote refusal must not burn the nonce"
+        );
+        assert!(
+            matches!(
+                svc.app.nodes.get(NODE).unwrap().status,
+                NodeTrustState::Unknown
+            ),
             "node is not trusted without the required quote"
         );
     }
@@ -3465,7 +3837,10 @@ mod attestation_nonce_handler_tests {
     #[tokio::test]
     async fn tpm_quote_valid_attests_node_trusted() {
         let node_key = SigningKey::from_bytes(&[7u8; 32]);
-        let svc = svc_with_quote_node(public_key_to_pem(&node_key.verifying_key()), PCR16_VALUE_HEX);
+        let svc = svc_with_quote_node(
+            public_key_to_pem(&node_key.verifying_key()),
+            PCR16_VALUE_HEX,
+        );
         let nonce = 0x1122_3344_5566_7788;
         svc.app.issue_challenge(NODE, nonce, now_ms());
 
@@ -3475,10 +3850,14 @@ mod attestation_nonce_handler_tests {
             sign_proof_with_pcr16(&node_key, NODE, nonce, Some(PCR16_VALUE_HEX)),
             Some(PCR16_VALUE_HEX),
             Some(quote_evidence(&node_key, nonce, PCR16_VALUE_HEX)),
-        ).await;
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "valid quote attests");
         assert!(
-            matches!(svc.app.nodes.get(NODE).unwrap().status, NodeTrustState::Trusted),
+            matches!(
+                svc.app.nodes.get(NODE).unwrap().status,
+                NodeTrustState::Trusted
+            ),
             "node becomes Trusted after a valid hardware quote"
         );
     }
@@ -3489,7 +3868,10 @@ mod attestation_nonce_handler_tests {
     async fn tpm_quote_invalid_is_refused_and_nonce_preserved() {
         let node_key = SigningKey::from_bytes(&[7u8; 32]);
         let attacker = SigningKey::from_bytes(&[9u8; 32]); // not the registered AK
-        let svc = svc_with_quote_node(public_key_to_pem(&node_key.verifying_key()), PCR16_VALUE_HEX);
+        let svc = svc_with_quote_node(
+            public_key_to_pem(&node_key.verifying_key()),
+            PCR16_VALUE_HEX,
+        );
         let nonce = 0x1122_3344_5566_7788;
         svc.app.issue_challenge(NODE, nonce, now_ms());
 
@@ -3500,9 +3882,17 @@ mod attestation_nonce_handler_tests {
             sign_proof_with_pcr16(&node_key, NODE, nonce, Some(PCR16_VALUE_HEX)),
             Some(PCR16_VALUE_HEX),
             Some(quote_evidence(&attacker, nonce, PCR16_VALUE_HEX)),
-        ).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "quote signed by the wrong key → 401");
-        assert!(svc.app.pending_challenges.contains_key(NODE), "an invalid quote must not burn the nonce");
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "quote signed by the wrong key → 401"
+        );
+        assert!(
+            svc.app.pending_challenges.contains_key(NODE),
+            "an invalid quote must not burn the nonce"
+        );
     }
 
     /// A node with NO quote policy is unaffected: the self-report path attests
@@ -3512,7 +3902,10 @@ mod attestation_nonce_handler_tests {
     async fn tpm_quote_policy_absent_is_back_compat() {
         let node_key = SigningKey::from_bytes(&[7u8; 32]);
         // svc_with_pcr16_node sets NO attestation policy → require_tpm_quote=false.
-        let svc = svc_with_pcr16_node(public_key_to_pem(&node_key.verifying_key()), PCR16_VALUE_HEX);
+        let svc = svc_with_pcr16_node(
+            public_key_to_pem(&node_key.verifying_key()),
+            PCR16_VALUE_HEX,
+        );
         let nonce = 0x1122_3344_5566_7788;
         svc.app.issue_challenge(NODE, nonce, now_ms());
 
@@ -3521,10 +3914,18 @@ mod attestation_nonce_handler_tests {
             nonce,
             sign_proof_with_pcr16(&node_key, NODE, nonce, Some(PCR16_VALUE_HEX)),
             Some(PCR16_VALUE_HEX),
-        ).await;
-        assert_eq!(status, StatusCode::OK, "no quote policy → self-report path still attests");
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "no quote policy → self-report path still attests"
+        );
         assert!(
-            matches!(svc.app.nodes.get(NODE).unwrap().status, NodeTrustState::Trusted),
+            matches!(
+                svc.app.nodes.get(NODE).unwrap().status,
+                NodeTrustState::Trusted
+            ),
             "node attests via the back-compat self-report path"
         );
     }
@@ -3537,10 +3938,24 @@ mod attestation_nonce_handler_tests {
     #[test]
     fn require_tpm_quote_fleet_default_parses_the_gate() {
         for on in ["1", "true", "TRUE", "True", "  true  ", "\t1"] {
-            assert!(super::require_tpm_quote_fleet_default(Some(on)), "{on:?} must enable");
+            assert!(
+                super::require_tpm_quote_fleet_default(Some(on)),
+                "{on:?} must enable"
+            );
         }
-        for off in [None, Some(""), Some("0"), Some("false"), Some("yes"), Some("2"), Some("on")] {
-            assert!(!super::require_tpm_quote_fleet_default(off), "{off:?} must stay off");
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("yes"),
+            Some("2"),
+            Some("on"),
+        ] {
+            assert!(
+                !super::require_tpm_quote_fleet_default(off),
+                "{off:?} must stay off"
+            );
         }
     }
 
@@ -3548,10 +3963,22 @@ mod attestation_nonce_handler_tests {
     /// (`None`) defers to the fleet default. This is the whole WP-16 policy.
     #[test]
     fn resolve_require_tpm_quote_explicit_wins_else_default() {
-        assert!(super::resolve_require_tpm_quote(Some(true), false), "explicit true wins over off");
-        assert!(!super::resolve_require_tpm_quote(Some(false), true), "explicit false opts out under an on default");
-        assert!(super::resolve_require_tpm_quote(None, true), "omitted defers to an on default");
-        assert!(!super::resolve_require_tpm_quote(None, false), "omitted under off default stays off (back-compat)");
+        assert!(
+            super::resolve_require_tpm_quote(Some(true), false),
+            "explicit true wins over off"
+        );
+        assert!(
+            !super::resolve_require_tpm_quote(Some(false), true),
+            "explicit false opts out under an on default"
+        );
+        assert!(
+            super::resolve_require_tpm_quote(None, true),
+            "omitted defers to an on default"
+        );
+        assert!(
+            !super::resolve_require_tpm_quote(None, false),
+            "omitted under off default stays off (back-compat)"
+        );
     }
 
     /// An Active service with an EMPTY node registry — for exercising register_node.
@@ -3599,7 +4026,10 @@ mod attestation_nonce_handler_tests {
             body["require_tpm_quote"] = serde_json::json!(r);
         }
         let req: RegisterNodeRequest = serde_json::from_value(body).expect("build request");
-        let status = register_node(State(Arc::clone(svc)), Json(req)).await.into_response().status();
+        let status = register_node(State(Arc::clone(svc)), Json(req))
+            .await
+            .into_response()
+            .status();
         assert_eq!(status, StatusCode::CREATED, "registration succeeds");
         let nid = node_id.to_string();
         svc.app
@@ -3646,12 +4076,27 @@ mod attestation_nonce_handler_tests {
     /// The pure PCR16-SHA256 validator: exactly 64 hex chars, trimmed.
     #[test]
     fn is_valid_pcr16_sha256_hex_requires_64_hex() {
-        assert!(super::is_valid_pcr16_sha256_hex(&"ab".repeat(32)), "64 hex chars ok");
-        assert!(super::is_valid_pcr16_sha256_hex(&format!("  {}  ", "cd".repeat(32))), "trimmed");
-        assert!(!super::is_valid_pcr16_sha256_hex(&"ab".repeat(31)), "62 chars rejected");
-        assert!(!super::is_valid_pcr16_sha256_hex(&"ab".repeat(33)), "66 chars rejected");
+        assert!(
+            super::is_valid_pcr16_sha256_hex(&"ab".repeat(32)),
+            "64 hex chars ok"
+        );
+        assert!(
+            super::is_valid_pcr16_sha256_hex(&format!("  {}  ", "cd".repeat(32))),
+            "trimmed"
+        );
+        assert!(
+            !super::is_valid_pcr16_sha256_hex(&"ab".repeat(31)),
+            "62 chars rejected"
+        );
+        assert!(
+            !super::is_valid_pcr16_sha256_hex(&"ab".repeat(33)),
+            "66 chars rejected"
+        );
         assert!(!super::is_valid_pcr16_sha256_hex(""), "empty rejected");
-        assert!(!super::is_valid_pcr16_sha256_hex(&format!("xy{}", "ab".repeat(31))), "non-hex rejected");
+        assert!(
+            !super::is_valid_pcr16_sha256_hex(&format!("xy{}", "ab".repeat(31))),
+            "non-hex rejected"
+        );
     }
 
     /// Copilot #861 fail-closed: a quote-required registration MISSING its AK or a
@@ -3666,8 +4111,15 @@ mod attestation_nonce_handler_tests {
             "node_id": "n1", "require_tpm_quote": true,
         }))
         .unwrap();
-        let s = register_node(State(Arc::clone(&svc)), Json(no_material)).await.into_response().status();
-        assert_eq!(s, StatusCode::BAD_REQUEST, "quote-required with no AK/PCR16 → 400");
+        let s = register_node(State(Arc::clone(&svc)), Json(no_material))
+            .await
+            .into_response()
+            .status();
+        assert_eq!(
+            s,
+            StatusCode::BAD_REQUEST,
+            "quote-required with no AK/PCR16 → 400"
+        );
 
         // require=true, AK present but PCR16 the wrong length → 400.
         let bad_pcr: RegisterNodeRequest = serde_json::from_value(serde_json::json!({
@@ -3675,8 +4127,15 @@ mod attestation_nonce_handler_tests {
             "ak_public_pem": ak, "expected_pcr16_digest_hex": "abab",
         }))
         .unwrap();
-        let s = register_node(State(Arc::clone(&svc)), Json(bad_pcr)).await.into_response().status();
-        assert_eq!(s, StatusCode::BAD_REQUEST, "a non-64-hex PCR16 under require_tpm_quote → 400");
+        let s = register_node(State(Arc::clone(&svc)), Json(bad_pcr))
+            .await
+            .into_response()
+            .status();
+        assert_eq!(
+            s,
+            StatusCode::BAD_REQUEST,
+            "a non-64-hex PCR16 under require_tpm_quote → 400"
+        );
 
         // Neither node was minted.
         assert!(!svc.app.nodes.contains_key("n1") && !svc.app.nodes.contains_key("n2"));
@@ -3701,7 +4160,10 @@ mod attestation_nonce_handler_tests {
             "require_tpm_quote": true,
         });
         let req: RegisterNodeRequest = serde_json::from_value(body).expect("build request");
-        let status = register_node(State(Arc::clone(&svc)), Json(req)).await.into_response().status();
+        let status = register_node(State(Arc::clone(&svc)), Json(req))
+            .await
+            .into_response()
+            .status();
         assert_eq!(status, StatusCode::CREATED, "enrollment registers the node");
 
         // 2. A valid self-report but NO quote is refused — enrollment made a quote
@@ -3716,8 +4178,15 @@ mod attestation_nonce_handler_tests {
             None,
         )
         .await;
-        assert_eq!(no_quote, StatusCode::FORBIDDEN, "an enrolled node must present a quote");
-        assert!(svc.app.pending_challenges.contains_key(NODE), "the refusal preserves the nonce");
+        assert_eq!(
+            no_quote,
+            StatusCode::FORBIDDEN,
+            "an enrolled node must present a quote"
+        );
+        assert!(
+            svc.app.pending_challenges.contains_key(NODE),
+            "the refusal preserves the nonce"
+        );
 
         // 3. A genuine TPM quote attests → Trusted.
         let ok = verify_with_quote(
@@ -3728,9 +4197,16 @@ mod attestation_nonce_handler_tests {
             Some(quote_evidence(&node_key, nonce, PCR16_VALUE_HEX)),
         )
         .await;
-        assert_eq!(ok, StatusCode::OK, "a valid quote attests the enrolled node");
+        assert_eq!(
+            ok,
+            StatusCode::OK,
+            "a valid quote attests the enrolled node"
+        );
         assert!(
-            matches!(svc.app.nodes.get(NODE).unwrap().status, NodeTrustState::Trusted),
+            matches!(
+                svc.app.nodes.get(NODE).unwrap().status,
+                NodeTrustState::Trusted
+            ),
             "the enrolled measured-boot node becomes Trusted after a valid quote"
         );
     }
@@ -3746,7 +4222,12 @@ mod attestation_nonce_handler_tests {
 
         // 1) A bad proof (signed by the wrong key) is rejected 401 — and the
         //    pending nonce is NOT consumed (verify-then-consume).
-        let bad = verify(Arc::clone(&svc), nonce, sign_proof(&attacker_key, NODE, nonce)).await;
+        let bad = verify(
+            Arc::clone(&svc),
+            nonce,
+            sign_proof(&attacker_key, NODE, nonce),
+        )
+        .await;
         assert_eq!(bad, StatusCode::UNAUTHORIZED, "a bad proof is refused");
         assert!(
             svc.app.pending_challenges.contains_key(NODE),
@@ -3755,15 +4236,26 @@ mod attestation_nonce_handler_tests {
 
         // 2) The legitimate node, with the SAME outstanding nonce, now succeeds.
         let good = verify(Arc::clone(&svc), nonce, sign_proof(&node_key, NODE, nonce)).await;
-        assert_eq!(good, StatusCode::OK, "valid proof over the still-outstanding nonce attests");
+        assert_eq!(
+            good,
+            StatusCode::OK,
+            "valid proof over the still-outstanding nonce attests"
+        );
         assert!(
-            matches!(svc.app.nodes.get(NODE).unwrap().status, NodeTrustState::Trusted),
+            matches!(
+                svc.app.nodes.get(NODE).unwrap().status,
+                NodeTrustState::Trusted
+            ),
             "node becomes Trusted after a valid proof"
         );
 
         // 3) Single-use: the nonce is now consumed; a replay is a 409 conflict.
         let replay = verify(Arc::clone(&svc), nonce, sign_proof(&node_key, NODE, nonce)).await;
-        assert_eq!(replay, StatusCode::CONFLICT, "the consumed nonce cannot be replayed");
+        assert_eq!(
+            replay,
+            StatusCode::CONFLICT,
+            "the consumed nonce cannot be replayed"
+        );
     }
 }
 
@@ -3817,7 +4309,9 @@ mod local_asset_lockedout_seed_tests {
             audit_verifying_key: None,
             fabric_router,
             fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            fabric_causal_log: Arc::new(
+                kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+            ),
             posture_engine_tx: std::sync::OnceLock::new(),
             perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
@@ -3825,7 +4319,10 @@ mod local_asset_lockedout_seed_tests {
     }
 
     fn posture_of(svc: &ServiceState, id: &str) -> FleetPosture {
-        svc.fabric_router.asset_posture(id).expect("asset registered").posture
+        svc.fabric_router
+            .asset_posture(id)
+            .expect("asset registered")
+            .posture
     }
 
     #[test]
@@ -3856,16 +4353,28 @@ mod local_asset_lockedout_seed_tests {
         let svc = state(None);
         seed_local_asset_lockedout_inner(&svc, LOCAL, None);
         seed_local_asset_lockedout_inner(&svc, PEER, None);
-        assert_eq!(posture_of(&svc, LOCAL), FleetPosture::Degraded, "unset → no local asset to special-case");
+        assert_eq!(
+            posture_of(&svc, LOCAL),
+            FleetPosture::Degraded,
+            "unset → no local asset to special-case"
+        );
         assert_eq!(posture_of(&svc, PEER), FleetPosture::Degraded);
     }
 
     #[test]
     fn feed_lifts_lockedout_local_asset_on_recalc() {
         // Fresh Nominal fleet posture in the cache (as after the first Active recalc).
-        let svc = state(Some(CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 1, now_ms())));
+        let svc = state(Some(CachedFleetPosture::new_with_generation(
+            FleetPosture::Nominal,
+            1,
+            now_ms(),
+        )));
         seed_local_asset_lockedout_inner(&svc, LOCAL, Some(LOCAL));
-        assert_eq!(posture_of(&svc, LOCAL), FleetPosture::LockedOut, "starts fail-closed LockedOut");
+        assert_eq!(
+            posture_of(&svc, LOCAL),
+            FleetPosture::LockedOut,
+            "starts fail-closed LockedOut"
+        );
 
         // The feed lifts it to the real fleet posture.
         sync_local_asset_posture(&svc, LOCAL);
@@ -3896,7 +4405,9 @@ mod dnp3_mandatory_audit_tests {
     use axum::Json;
 
     use kirra_verifier::adapters::dnp3::{Dnp3Message, Dnp3Object, DNP3_BROADCAST_ADDRESS};
-    use kirra_verifier::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
+    use kirra_verifier::posture_cache::{
+        now_ms, CachedFleetPosture, ServiceState, SharedPostureCache,
+    };
     use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
     use kirra_verifier::verifier_store::VerifierStore;
 
@@ -3905,8 +4416,9 @@ mod dnp3_mandatory_audit_tests {
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
         // Fresh Nominal posture so the gate admits the command (we test the
         // AUDIT mechanism, not the posture gate).
-        let posture_cache: SharedPostureCache =
-            Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(FleetPosture::Nominal))));
+        let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+            CachedFleetPosture::new(FleetPosture::Nominal),
+        )));
         Arc::new(ServiceState {
             app,
             posture_cache,
@@ -3914,7 +4426,9 @@ mod dnp3_mandatory_audit_tests {
             audit_verifying_key: None,
             fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
             fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            fabric_causal_log: Arc::new(
+                kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+            ),
             posture_engine_tx: std::sync::OnceLock::new(),
             perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
@@ -3928,7 +4442,11 @@ mod dnp3_mandatory_audit_tests {
             dest_address: dest,
             function_code: 0x05,
             data_link_control: 0,
-            objects: vec![Dnp3Object { group: 12, variation: 1, data: vec![] }],
+            objects: vec![Dnp3Object {
+                group: 12,
+                variation: 1,
+                data: vec![],
+            }],
             source_node: "substation_01".to_string(),
         }
     }
@@ -3942,7 +4460,9 @@ mod dnp3_mandatory_audit_tests {
     fn poison_store(svc: &ServiceState) {
         let store = svc.app.store.clone();
         let _ = std::thread::spawn(move || {
-            store.with(|_s| panic!("intentionally poisoning the store mutex for the audit-failure test"));
+            store.with(|_s| {
+                panic!("intentionally poisoning the store mutex for the audit-failure test")
+            });
         })
         .join();
     }
@@ -3950,10 +4470,18 @@ mod dnp3_mandatory_audit_tests {
     async fn post(svc: Arc<ServiceState>, msg: Dnp3Message) -> (StatusCode, serde_json::Value) {
         // Wrap with fresh replay metadata (seq 1 on a fresh per-test store, current
         // timestamp) so the replay/freshness gate admits and we reach the audit path.
-        let guarded = ReplayGuarded { sequence: 1, timestamp_ms: now_ms(), message: msg };
-        let resp = evaluate_dnp3_adapter(State(svc), Ok(Json(guarded))).await.into_response();
+        let guarded = ReplayGuarded {
+            sequence: 1,
+            timestamp_ms: now_ms(),
+            message: msg,
+        };
+        let resp = evaluate_dnp3_adapter(State(svc), Ok(Json(guarded)))
+            .await
+            .into_response();
         let status = resp.status();
-        let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("read body");
+        let bytes = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
         (status, serde_json::from_slice(&bytes).expect("json body"))
     }
 
@@ -3965,9 +4493,15 @@ mod dnp3_mandatory_audit_tests {
         assert_eq!(v["allowed"], true, "broadcast admitted in Nominal");
         assert_eq!(v["adapter_details"]["is_broadcast"], true);
         // The mandatory audit entry was written to the tamper-evident log.
-        let n = svc.app.store
-            .with(|store| store.count_recent_posture_events("dnp3_adapter", 0)).unwrap();
-        assert!(n >= 1, "a broadcast must always produce an audit entry, got {n}");
+        let n = svc
+            .app
+            .store
+            .with(|store| store.count_recent_posture_events("dnp3_adapter", 0))
+            .unwrap();
+        assert!(
+            n >= 1,
+            "a broadcast must always produce an audit entry, got {n}"
+        );
     }
 
     // NOTE on TR-012a/b interaction with the replay gate: the replay/freshness gate
@@ -3992,7 +4526,10 @@ mod dnp3_mandatory_audit_tests {
         poison_store(&svc); // the handle recovers the poison; the gate runs normally
         let (status, v) = post(Arc::clone(&svc), control_msg(DNP3_BROADCAST_ADDRESS)).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(v["allowed"], true, "a recovered store evaluates the command normally (Nominal)");
+        assert_eq!(
+            v["allowed"], true,
+            "a recovered store evaluates the command normally (Nominal)"
+        );
         assert_eq!(v["adapter_details"]["is_broadcast"], true);
     }
 
@@ -4003,7 +4540,10 @@ mod dnp3_mandatory_audit_tests {
         let (status, v) = post(Arc::clone(&svc), control_msg(0x0005)).await;
         assert_eq!(status, StatusCode::OK);
         // Nominal posture admits the unicast control once the handle recovers.
-        assert_eq!(v["allowed"], true, "a recovered store evaluates the unicast command normally");
+        assert_eq!(
+            v["allowed"], true,
+            "a recovered store evaluates the unicast command normally"
+        );
     }
 }
 
@@ -4018,11 +4558,23 @@ mod systemd_notify_tests {
     #[test]
     fn watchdog_pings_active_only_when_cache_fresh() {
         // Active liveness is gated on a fresh posture cache (engine-liveness).
-        assert!(watchdog_should_ping(true, true), "Active + fresh cache → ping");
-        assert!(!watchdog_should_ping(true, false), "Active + STALE cache → withhold (fail-closed)");
+        assert!(
+            watchdog_should_ping(true, true),
+            "Active + fresh cache → ping"
+        );
+        assert!(
+            !watchdog_should_ping(true, false),
+            "Active + STALE cache → withhold (fail-closed)"
+        );
         // PassiveStandby has no posture engine by design → plain keepalive.
-        assert!(watchdog_should_ping(false, false), "PassiveStandby → keepalive ping");
-        assert!(watchdog_should_ping(false, true), "PassiveStandby → keepalive ping");
+        assert!(
+            watchdog_should_ping(false, false),
+            "PassiveStandby → keepalive ping"
+        );
+        assert!(
+            watchdog_should_ping(false, true),
+            "PassiveStandby → keepalive ping"
+        );
     }
 
     #[test]
@@ -4033,7 +4585,11 @@ mod systemd_notify_tests {
         sd_notify_to(path.as_os_str(), "READY=1").expect("sd_notify_to send");
         let mut buf = [0u8; 64];
         let n = listener.recv(&mut buf).expect("recv");
-        assert_eq!(&buf[..n], b"READY=1", "the exact sd_notify datagram must be delivered");
+        assert_eq!(
+            &buf[..n],
+            b"READY=1",
+            "the exact sd_notify datagram must be delivered"
+        );
     }
 }
 
@@ -4100,7 +4656,13 @@ mod console_phase_a_tests {
 
     async fn get(svc: Arc<ServiceState>, path: &str) -> (StatusCode, String) {
         let resp = build_app(svc)
-            .oneshot(Request::builder().method("GET").uri(path).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .expect("router");
         let status = resp.status();
@@ -4112,7 +4674,10 @@ mod console_phase_a_tests {
     async fn console_html_is_served() {
         let (status, body) = get(build_state(), "/console").await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("OPERATOR CONSOLE"), "the embedded UI must be served");
+        assert!(
+            body.contains("OPERATOR CONSOLE"),
+            "the embedded UI must be served"
+        );
     }
 
     #[tokio::test]
@@ -4121,9 +4686,18 @@ mod console_phase_a_tests {
         seed_node(&svc, "robot-01");
         let (status, body) = get(svc, "/console/fleet").await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("robot-01"), "fleet view must list the seeded node");
-        assert!(body.contains("Untrusted"), "posture mapped from NodeTrustState");
-        assert!(body.contains("post-collision latch"), "the Untrusted note carries through");
+        assert!(
+            body.contains("robot-01"),
+            "fleet view must list the seeded node"
+        );
+        assert!(
+            body.contains("Untrusted"),
+            "posture mapped from NodeTrustState"
+        );
+        assert!(
+            body.contains("post-collision latch"),
+            "the Untrusted note carries through"
+        );
     }
 
     #[tokio::test]
@@ -4131,7 +4705,10 @@ mod console_phase_a_tests {
         let (status, body) = get(build_state(), "/console/audit?limit=10").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"entries\""), "audit page passthrough");
-        assert!(body.contains("\"chain_intact\""), "the chain-verified flag is exposed");
+        assert!(
+            body.contains("\"chain_intact\""),
+            "the chain-verified flag is exposed"
+        );
     }
 
     #[tokio::test]
@@ -4147,7 +4724,9 @@ mod console_phase_a_tests {
                     .method("POST")
                     .uri("/console/clearance-grants")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"node_id":"robot-01","operator_id":"alice"}"#))
+                    .body(Body::from(
+                        r#"{"node_id":"robot-01","operator_id":"alice"}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -4163,7 +4742,11 @@ mod console_phase_a_tests {
         // (reachable to observe and recover, e.g. during LockedOut). Regression
         // lock for `gateway::policy_layer::is_posture_exempt`.
         let (status, _) = get(build_state(), "/console/fleet").await;
-        assert_eq!(status, StatusCode::OK, "the /console plane must be posture-exempt");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the /console plane must be posture-exempt"
+        );
     }
 
     // --- #394 live console endpoints ----------------------------------------
@@ -4216,7 +4799,10 @@ mod console_phase_a_tests {
         assert_eq!(v["total_nodes"], 0);
         assert_eq!(v["audit_entries"], 0);
         assert_eq!(v["posture_cache_ttl_ms"], POSTURE_CACHE_TTL_MS);
-        assert!(v["ha_heartbeat_age_ms"].is_null(), "no heartbeat written yet");
+        assert!(
+            v["ha_heartbeat_age_ms"].is_null(),
+            "no heartbeat written yet"
+        );
         assert!(v["uptime_ms"].is_u64());
     }
 
@@ -4272,7 +4858,10 @@ mod console_phase_a_tests {
             .expect("v1.0 present");
         assert_eq!(v10["count"], 2);
         let pct = v10["pct"].as_f64().unwrap();
-        assert!((pct - (2.0 / 3.0 * 100.0)).abs() < 1e-9, "pct = count/total*100");
+        assert!(
+            (pct - (2.0 / 3.0 * 100.0)).abs() < 1e-9,
+            "pct = count/total*100"
+        );
     }
 
     #[tokio::test]
@@ -4285,8 +4874,15 @@ mod console_phase_a_tests {
 
         // Seed a reachable Rolling@10% campaign (arm + one advance) and two adoption
         // reports on its digest, directly through the store.
-        let mut c = Campaign::new("c-live", digest, "v2", vec!["fleet".into()], vec![10, 100], 1)
-            .unwrap();
+        let mut c = Campaign::new(
+            "c-live",
+            digest,
+            "v2",
+            vec!["fleet".into()],
+            vec![10, 100],
+            1,
+        )
+        .unwrap();
         c.arm(2).unwrap();
         c.advance(kirra_verifier::verifier::FleetPosture::Nominal, 3)
             .unwrap();
@@ -4371,13 +4967,28 @@ mod console_phase_a_tests {
     #[test]
     fn supervisor_key_ok_truth_table() {
         // unconfigured / empty / over-length → 503 (fail-closed, INV-7)
-        assert_eq!(supervisor_key_ok(Some("k"), None), Err(StatusCode::SERVICE_UNAVAILABLE));
-        assert_eq!(supervisor_key_ok(Some("k"), Some("")), Err(StatusCode::SERVICE_UNAVAILABLE));
+        assert_eq!(
+            supervisor_key_ok(Some("k"), None),
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        );
+        assert_eq!(
+            supervisor_key_ok(Some("k"), Some("")),
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        );
         let too_long = "x".repeat(65);
-        assert_eq!(supervisor_key_ok(Some("x"), Some(&too_long)), Err(StatusCode::SERVICE_UNAVAILABLE));
+        assert_eq!(
+            supervisor_key_ok(Some("x"), Some(&too_long)),
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        );
         // configured but no / wrong key → 401 ("no auth → 401")
-        assert_eq!(supervisor_key_ok(None, Some("secret")), Err(StatusCode::UNAUTHORIZED));
-        assert_eq!(supervisor_key_ok(Some("wrong"), Some("secret")), Err(StatusCode::UNAUTHORIZED));
+        assert_eq!(
+            supervisor_key_ok(None, Some("secret")),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            supervisor_key_ok(Some("wrong"), Some("secret")),
+            Err(StatusCode::UNAUTHORIZED)
+        );
         // correct key → Ok
         assert_eq!(supervisor_key_ok(Some("secret"), Some("secret")), Ok(()));
     }
@@ -4390,13 +5001,21 @@ mod console_phase_a_tests {
             s.save_clearance_grant_chained("robot-01", "alice", 1_700_000_000_000)
                 .expect("record grant");
         });
-        let page = app.store.with(|s| s.load_audit_chain_page(50, 0, None)).expect("page");
+        let page = app
+            .store
+            .with(|s| s.load_audit_chain_page(50, 0, None))
+            .expect("page");
         let found = page.entries.iter().any(|e| {
             let v = serde_json::to_value(e).unwrap();
             v.get("event_type").and_then(|x| x.as_str()) == Some("OperatorClearanceGrantIssued")
-                && serde_json::to_string(&v).unwrap().contains("PENDING-NODE-TRANSPORT")
+                && serde_json::to_string(&v)
+                    .unwrap()
+                    .contains("PENDING-NODE-TRANSPORT")
         });
-        assert!(found, "the grant must be a signed chain event with the PENDING delivery marker");
+        assert!(
+            found,
+            "the grant must be a signed chain event with the PENDING delivery marker"
+        );
     }
 
     #[test]
@@ -4411,10 +5030,16 @@ mod console_phase_a_tests {
             )
             .expect("audit reject");
         });
-        let page = app.store.with(|s| s.load_audit_chain_page(50, 0, None)).expect("page");
+        let page = app
+            .store
+            .with(|s| s.load_audit_chain_page(50, 0, None))
+            .expect("page");
         assert!(
-            page.entries.iter().any(|e| serde_json::to_value(e).unwrap()
-                .get("event_type").and_then(|x| x.as_str()) == Some("OperatorClearanceGrantRejected")),
+            page.entries.iter().any(|e| serde_json::to_value(e)
+                .unwrap()
+                .get("event_type")
+                .and_then(|x| x.as_str())
+                == Some("OperatorClearanceGrantRejected")),
             "a rejected attempt must leave a signed audit row"
         );
     }
@@ -4466,8 +5091,9 @@ mod console_phase_a_tests {
     /// RFC-8410 prefix convention from `attestation_nonce_handler_tests`).
     fn operator_keypair(seed: u8) -> (SigningKey, String) {
         use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
-        const ED25519_SPKI_PREFIX: [u8; 12] =
-            [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        const ED25519_SPKI_PREFIX: [u8; 12] = [
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
         let sk = SigningKey::from_bytes(&[seed; 32]);
         let mut der = ED25519_SPKI_PREFIX.to_vec();
         der.extend_from_slice(sk.verifying_key().as_bytes());
@@ -4481,7 +5107,9 @@ mod console_phase_a_tests {
     fn sign_grant_b64(sk: &SigningKey, operator_id: &str, node_id: &str, nonce: &str) -> String {
         use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
         let payload = kirra_verifier::attestation::operator_grant_signing_payload(
-            operator_id, node_id, nonce,
+            operator_id,
+            node_id,
+            nonce,
         );
         b64e.encode(sk.sign(&payload).to_bytes())
     }
@@ -4489,14 +5117,16 @@ mod console_phase_a_tests {
     /// #412 — sign the EMERGENCY-STOP payload (domain-distinct from a grant).
     fn sign_stop_b64(sk: &SigningKey, operator_id: &str, node_id: &str, nonce: &str) -> String {
         use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
-        let payload = kirra_verifier::attestation::operator_stop_signing_payload(
-            operator_id, node_id, nonce,
-        );
+        let payload =
+            kirra_verifier::attestation::operator_stop_signing_payload(operator_id, node_id, nonce);
         b64e.encode(sk.sign(&payload).to_bytes())
     }
 
     fn register_op(svc: &Arc<ServiceState>, operator_id: &str, pem: &str) {
-        svc.app.store.with(|s| s.register_operator(operator_id, pem, 1)).unwrap();
+        svc.app
+            .store
+            .with(|s| s.register_operator(operator_id, pem, 1))
+            .unwrap();
     }
 
     fn parse_nonce(body: &str) -> String {
@@ -4521,7 +5151,10 @@ mod console_phase_a_tests {
         if let Some(k) = supervisor_key {
             rb = rb.header("x-kirra-supervisor-key", k);
         }
-        let resp = build_app(svc).oneshot(rb.body(Body::from(body)).unwrap()).await.expect("router");
+        let resp = build_app(svc)
+            .oneshot(rb.body(Body::from(body)).unwrap())
+            .await
+            .expect("router");
         let status = resp.status();
         let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         (status, String::from_utf8_lossy(&bytes).to_string())
@@ -4536,18 +5169,29 @@ mod console_phase_a_tests {
     // ===================================================================
 
     fn audit_has(svc: &Arc<ServiceState>, event_type: &str) -> bool {
-        let page = svc.app.store.with(|s| s.load_audit_chain_page(200, 0, None)).unwrap();
+        let page = svc
+            .app
+            .store
+            .with(|s| s.load_audit_chain_page(200, 0, None))
+            .unwrap();
         page.entries.iter().any(|e| e.event_type == event_type)
     }
 
     fn chain_json(svc: &Arc<ServiceState>) -> String {
-        let page = svc.app.store.with(|s| s.load_audit_chain_page(200, 0, None)).unwrap();
+        let page = svc
+            .app
+            .store
+            .with(|s| s.load_audit_chain_page(200, 0, None))
+            .unwrap();
         serde_json::to_string(&page.entries).unwrap()
     }
 
     fn admin_headers(token: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
-        h.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        h.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
         h
     }
 
@@ -4560,7 +5204,10 @@ mod console_phase_a_tests {
             composite_challenge_key("a", "b|c"),
             "length-prefixing must distinguish (a|b,c) from (a,b|c)"
         );
-        assert_eq!(composite_challenge_key("alice", "robot-01"), "5:alice:robot-01");
+        assert_eq!(
+            composite_challenge_key("alice", "robot-01"),
+            "5:alice:robot-01"
+        );
     }
 
     /// #326 — identifier charset: `|` and control characters rejected; clean ids pass.
@@ -4583,16 +5230,39 @@ mod console_phase_a_tests {
         let (_sk, pem) = operator_keypair(3);
         let headers = admin_headers("t");
 
-        let bad_pipe = RegisterOperatorRequest { operator_id: "a|b".into(), ed25519_pubkey_pem: pem.clone() };
-        let r = register_operator(State(svc.clone()), headers.clone(), Json(bad_pipe)).await.into_response();
-        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "pipe in operator_id → 400");
+        let bad_pipe = RegisterOperatorRequest {
+            operator_id: "a|b".into(),
+            ed25519_pubkey_pem: pem.clone(),
+        };
+        let r = register_operator(State(svc.clone()), headers.clone(), Json(bad_pipe))
+            .await
+            .into_response();
+        assert_eq!(
+            r.status(),
+            StatusCode::BAD_REQUEST,
+            "pipe in operator_id → 400"
+        );
 
-        let bad_ctrl = RegisterOperatorRequest { operator_id: "a\nb".into(), ed25519_pubkey_pem: pem.clone() };
-        let r = register_operator(State(svc.clone()), headers.clone(), Json(bad_ctrl)).await.into_response();
-        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "control char in operator_id → 400");
+        let bad_ctrl = RegisterOperatorRequest {
+            operator_id: "a\nb".into(),
+            ed25519_pubkey_pem: pem.clone(),
+        };
+        let r = register_operator(State(svc.clone()), headers.clone(), Json(bad_ctrl))
+            .await
+            .into_response();
+        assert_eq!(
+            r.status(),
+            StatusCode::BAD_REQUEST,
+            "control char in operator_id → 400"
+        );
 
-        let ok = RegisterOperatorRequest { operator_id: "alice".into(), ed25519_pubkey_pem: pem };
-        let r = register_operator(State(svc), headers, Json(ok)).await.into_response();
+        let ok = RegisterOperatorRequest {
+            operator_id: "alice".into(),
+            ed25519_pubkey_pem: pem,
+        };
+        let r = register_operator(State(svc), headers, Json(ok))
+            .await
+            .into_response();
         assert_eq!(r.status(), StatusCode::CREATED, "a clean id registers");
     }
 
@@ -4606,17 +5276,33 @@ mod console_phase_a_tests {
         seed_node(&svc, "robot-01");
 
         // Unknown operator → 200 + nonce, but NOTHING stored (no map growth, no 403).
-        let (status, body) =
-            get(svc.clone(), "/console/clearance-challenge?operator_id=ghost&node_id=robot-01").await;
-        assert_eq!(status, StatusCode::OK, "no 403 oracle — unknown operator still gets 200");
-        assert!(!parse_nonce(&body).is_empty(), "the decoy response is nonce-shaped");
-        assert!(svc.app.pending_clearance_challenges.is_empty(), "the decoy nonce is NEVER stored");
+        let (status, body) = get(
+            svc.clone(),
+            "/console/clearance-challenge?operator_id=ghost&node_id=robot-01",
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "no 403 oracle — unknown operator still gets 200"
+        );
+        assert!(
+            !parse_nonce(&body).is_empty(),
+            "the decoy response is nonce-shaped"
+        );
+        assert!(
+            svc.app.pending_clearance_challenges.is_empty(),
+            "the decoy nonce is NEVER stored"
+        );
 
         // Active operator → 200 + nonce AND a real stored challenge under the key.
         let (_sk, pem) = operator_keypair(4);
         register_op(&svc, "alice", &pem);
-        let (status, body) =
-            get(svc.clone(), "/console/clearance-challenge?operator_id=alice&node_id=robot-01").await;
+        let (status, body) = get(
+            svc.clone(),
+            "/console/clearance-challenge?operator_id=alice&node_id=robot-01",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert!(!parse_nonce(&body).is_empty());
         assert!(
@@ -4633,7 +5319,11 @@ mod console_phase_a_tests {
         })
         .to_string();
         let (status, _) = post_json(svc, "/console/clearance-grants", body, None).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "an unknown operator cannot redeem a decoy at grant time");
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "an unknown operator cannot redeem a decoy at grant time"
+        );
     }
 
     /// #327 — re-registering a REVOKED operator emits a distinct OperatorReactivated
@@ -4646,18 +5336,40 @@ mod console_phase_a_tests {
         let headers = admin_headers("admin-secret");
 
         // Fresh registration → OperatorRegistered only.
-        let req = RegisterOperatorRequest { operator_id: "alice".into(), ed25519_pubkey_pem: pem.clone() };
-        let r = register_operator(State(svc.clone()), headers.clone(), Json(req)).await.into_response();
+        let req = RegisterOperatorRequest {
+            operator_id: "alice".into(),
+            ed25519_pubkey_pem: pem.clone(),
+        };
+        let r = register_operator(State(svc.clone()), headers.clone(), Json(req))
+            .await
+            .into_response();
         assert_eq!(r.status(), StatusCode::CREATED);
-        assert!(audit_has(&svc, "OperatorRegistered"), "fresh registration is audited");
-        assert!(!audit_has(&svc, "OperatorReactivated"), "a fresh registration is NOT a reactivation");
+        assert!(
+            audit_has(&svc, "OperatorRegistered"),
+            "fresh registration is audited"
+        );
+        assert!(
+            !audit_has(&svc, "OperatorReactivated"),
+            "a fresh registration is NOT a reactivation"
+        );
 
         // Revoke, then re-register → OperatorReactivated appears, attributed.
-        svc.app.store.with(|s| s.revoke_operator("alice", 2)).unwrap();
-        let req2 = RegisterOperatorRequest { operator_id: "alice".into(), ed25519_pubkey_pem: pem };
-        let r = register_operator(State(svc.clone()), headers, Json(req2)).await.into_response();
+        svc.app
+            .store
+            .with(|s| s.revoke_operator("alice", 2))
+            .unwrap();
+        let req2 = RegisterOperatorRequest {
+            operator_id: "alice".into(),
+            ed25519_pubkey_pem: pem,
+        };
+        let r = register_operator(State(svc.clone()), headers, Json(req2))
+            .await
+            .into_response();
         assert_eq!(r.status(), StatusCode::CREATED);
-        assert!(audit_has(&svc, "OperatorReactivated"), "reactivation is distinctly audited");
+        assert!(
+            audit_has(&svc, "OperatorReactivated"),
+            "reactivation is distinctly audited"
+        );
 
         let fp = admin_token_fingerprint(&admin_headers("admin-secret")).unwrap();
         assert!(
@@ -4676,27 +5388,45 @@ mod console_phase_a_tests {
         let (sk, pem) = operator_keypair(7);
         register_op(&svc, "alice", &pem);
 
-        let (cs, cb) = get(svc.clone(),
-            "/console/clearance-challenge?operator_id=alice&node_id=robot-01").await;
+        let (cs, cb) = get(
+            svc.clone(),
+            "/console/clearance-challenge?operator_id=alice&node_id=robot-01",
+        )
+        .await;
         assert_eq!(cs, StatusCode::OK, "challenge issued; body={cb}");
         let nonce = parse_nonce(&cb);
 
         let sig = sign_grant_b64(&sk, "alice", "robot-01", &nonce);
-        let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":nonce,"signature_b64":sig}).to_string();
+        let body =
+            json!({"node_id":"robot-01","operator_id":"alice","nonce":nonce,"signature_b64":sig})
+                .to_string();
         let (gs, gb) = post_json(svc.clone(), "/console/clearance-grants", body, None).await;
-        assert_eq!(gs, StatusCode::OK, "operator-signed grant recorded; body={gb}");
+        assert_eq!(
+            gs,
+            StatusCode::OK,
+            "operator-signed grant recorded; body={gb}"
+        );
         assert!(gb.contains("operator-signed"), "auth_method in response");
         let fp = kirra_verifier::attestation::operator_key_fingerprint(&pem).unwrap();
         assert!(gb.contains(&fp), "response carries the key fingerprint");
 
         let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
         assert!(ab.contains("OperatorClearanceGrantIssued"));
-        assert!(ab.contains("operator-signed"), "chain event carries auth_method");
-        assert!(ab.contains(&fp), "chain event carries the fingerprint (non-repudiation)");
+        assert!(
+            ab.contains("operator-signed"),
+            "chain event carries auth_method"
+        );
+        assert!(
+            ab.contains(&fp),
+            "chain event carries the fingerprint (non-repudiation)"
+        );
 
         // THE ADDITIVE PROOF — Phase-B pickup is unchanged by the new columns.
-        let picked = svc.app.store
-            .with(|s| s.take_pending_clearance_grant("robot-01", 9_999_999_999_999)).unwrap()
+        let picked = svc
+            .app
+            .store
+            .with(|s| s.take_pending_clearance_grant("robot-01", 9_999_999_999_999))
+            .unwrap()
             .expect("Phase-B consumes the operator-signed grant row");
         assert_eq!(picked.operator_id, "alice");
     }
@@ -4708,18 +5438,30 @@ mod console_phase_a_tests {
         seed_node(&svc, "robot-01");
         let (sk, pem) = operator_keypair(8);
         register_op(&svc, "alice", &pem);
-        let (_c, cb) = get(svc.clone(),
-            "/console/clearance-challenge?operator_id=alice&node_id=robot-01").await;
+        let (_c, cb) = get(
+            svc.clone(),
+            "/console/clearance-challenge?operator_id=alice&node_id=robot-01",
+        )
+        .await;
         let nonce = parse_nonce(&cb);
         let sig = sign_grant_b64(&sk, "alice", "robot-01", &nonce);
-        let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":nonce,"signature_b64":sig}).to_string();
+        let body =
+            json!({"node_id":"robot-01","operator_id":"alice","nonce":nonce,"signature_b64":sig})
+                .to_string();
 
         let (s1, _) = post_json(svc.clone(), "/console/clearance-grants", body.clone(), None).await;
         assert_eq!(s1, StatusCode::OK, "first use accepted");
         let (s2, b2) = post_json(svc.clone(), "/console/clearance-grants", body, None).await;
-        assert_eq!(s2, StatusCode::UNAUTHORIZED, "replayed nonce rejected; body={b2}");
+        assert_eq!(
+            s2,
+            StatusCode::UNAUTHORIZED,
+            "replayed nonce rejected; body={b2}"
+        );
         let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
-        assert!(ab.contains("nonce_replay_or_expired"), "the replay is audited");
+        assert!(
+            ab.contains("nonce_replay_or_expired"),
+            "the replay is audited"
+        );
     }
 
     /// BAD SIGNATURE (signed by the wrong key) → 401, audited. Verify happens
@@ -4730,14 +5472,23 @@ mod console_phase_a_tests {
         seed_node(&svc, "robot-01");
         let (_sk, pem) = operator_keypair(9);
         register_op(&svc, "alice", &pem);
-        let (_c, cb) = get(svc.clone(),
-            "/console/clearance-challenge?operator_id=alice&node_id=robot-01").await;
+        let (_c, cb) = get(
+            svc.clone(),
+            "/console/clearance-challenge?operator_id=alice&node_id=robot-01",
+        )
+        .await;
         let nonce = parse_nonce(&cb);
         let (wrong, _wpem) = operator_keypair(99);
         let sig = sign_grant_b64(&wrong, "alice", "robot-01", &nonce);
-        let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":nonce,"signature_b64":sig}).to_string();
+        let body =
+            json!({"node_id":"robot-01","operator_id":"alice","nonce":nonce,"signature_b64":sig})
+                .to_string();
         let (s, b) = post_json(svc.clone(), "/console/clearance-grants", body, None).await;
-        assert_eq!(s, StatusCode::UNAUTHORIZED, "wrong-key signature rejected; body={b}");
+        assert_eq!(
+            s,
+            StatusCode::UNAUTHORIZED,
+            "wrong-key signature rejected; body={b}"
+        );
         let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
         assert!(ab.contains("bad_signature"));
     }
@@ -4747,9 +5498,15 @@ mod console_phase_a_tests {
     async fn unknown_operator_is_rejected_403_audited() {
         let svc = build_state();
         seed_node(&svc, "robot-01");
-        let body = json!({"node_id":"robot-01","operator_id":"ghost","nonce":"00","signature_b64":"AAAA"}).to_string();
+        let body =
+            json!({"node_id":"robot-01","operator_id":"ghost","nonce":"00","signature_b64":"AAAA"})
+                .to_string();
         let (s, b) = post_json(svc.clone(), "/console/clearance-grants", body, None).await;
-        assert_eq!(s, StatusCode::FORBIDDEN, "unknown operator rejected; body={b}");
+        assert_eq!(
+            s,
+            StatusCode::FORBIDDEN,
+            "unknown operator rejected; body={b}"
+        );
         let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
         assert!(ab.contains("unknown_operator"));
     }
@@ -4761,11 +5518,20 @@ mod console_phase_a_tests {
         seed_node(&svc, "robot-01");
         let (sk, pem) = operator_keypair(11);
         register_op(&svc, "alice", &pem);
-        svc.app.store.with(|s| s.revoke_operator("alice", 2)).unwrap();
+        svc.app
+            .store
+            .with(|s| s.revoke_operator("alice", 2))
+            .unwrap();
         let sig = sign_grant_b64(&sk, "alice", "robot-01", "00");
-        let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":"00","signature_b64":sig}).to_string();
+        let body =
+            json!({"node_id":"robot-01","operator_id":"alice","nonce":"00","signature_b64":sig})
+                .to_string();
         let (s, b) = post_json(svc.clone(), "/console/clearance-grants", body, None).await;
-        assert_eq!(s, StatusCode::FORBIDDEN, "revoked operator rejected; body={b}");
+        assert_eq!(
+            s,
+            StatusCode::FORBIDDEN,
+            "revoked operator rejected; body={b}"
+        );
         let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
         assert!(ab.contains("revoked_operator"));
     }
@@ -4780,8 +5546,11 @@ mod console_phase_a_tests {
         let (_sk, pem) = operator_keypair(12);
         let body = json!({"operator_id":"alice","ed25519_pubkey_pem":pem}).to_string();
         let (s, _b) = post_json(svc, "/console/operators", body, Some("a-supervisor-value")).await;
-        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE,
-            "operator registration is admin-gated — the supervisor key does not open it");
+        assert_eq!(
+            s,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "operator registration is admin-gated — the supervisor key does not open it"
+        );
     }
 
     /// BREAK-GLASS is DISTINCTLY audited. The success path needs the supervisor env
@@ -4794,13 +5563,23 @@ mod console_phase_a_tests {
         let app = AppState::new(store, VerifierOperationMode::Active);
         app.store.with(|s| {
             s.save_clearance_grant_chained_with_auth(
-                "robot-01", "alice", 1_700_000_000_000, "supervisor-break-glass", None,
-            ).unwrap();
+                "robot-01",
+                "alice",
+                1_700_000_000_000,
+                "supervisor-break-glass",
+                None,
+            )
+            .unwrap();
         });
-        let page = app.store.with(|s| s.load_audit_chain_page(50, 0, None)).unwrap();
+        let page = app
+            .store
+            .with(|s| s.load_audit_chain_page(50, 0, None))
+            .unwrap();
         let blob = serde_json::to_string(&page.entries).unwrap();
-        assert!(blob.contains("supervisor-break-glass"),
-            "break-glass auth_method recorded distinctly in the signed chain");
+        assert!(
+            blob.contains("supervisor-break-glass"),
+            "break-glass auth_method recorded distinctly in the signed chain"
+        );
     }
 
     /// #323 — a passive-standby instance must REJECT a clearance-grant write (the
@@ -4811,12 +5590,19 @@ mod console_phase_a_tests {
         let svc = build_state();
         seed_node(&svc, "robot-01");
         // Demote this instance to passive standby.
-        svc.app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+        svc.app
+            .mode_active
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         // Any grant shape — the is_active guard fires FIRST, before auth.
-        let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":"00","signature_b64":"AAAA"}).to_string();
+        let body =
+            json!({"node_id":"robot-01","operator_id":"alice","nonce":"00","signature_b64":"AAAA"})
+                .to_string();
         let (s, _b) = post_json(svc, "/console/clearance-grants", body, None).await;
-        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE,
-            "a passive-standby instance must not accept grant writes (split-brain guard)");
+        assert_eq!(
+            s,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a passive-standby instance must not accept grant writes (split-brain guard)"
+        );
     }
 
     // ----- #412 / ADR-0013 governor-routed authenticated e-stop request --------
@@ -4830,24 +5616,45 @@ mod console_phase_a_tests {
         seed_node(&svc, "robot-01");
         let (sk, pem) = operator_keypair(31);
         register_op(&svc, "alice", &pem);
-        let (_c, cb) = get(svc.clone(),
-            "/console/clearance-challenge?operator_id=alice&node_id=robot-01").await;
+        let (_c, cb) = get(
+            svc.clone(),
+            "/console/clearance-challenge?operator_id=alice&node_id=robot-01",
+        )
+        .await;
         let nonce = parse_nonce(&cb);
         let sig = sign_stop_b64(&sk, "alice", "robot-01", &nonce);
-        let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":nonce,"signature_b64":sig}).to_string();
+        let body =
+            json!({"node_id":"robot-01","operator_id":"alice","nonce":nonce,"signature_b64":sig})
+                .to_string();
 
         let (s, b) = post_json(svc.clone(), "/console/estop-requests", body, None).await;
         assert_eq!(s, StatusCode::OK, "operator-signed stop accepted; body={b}");
-        assert!(b.contains("stop_commanded") && b.contains("MRC_COMMANDED"), "body={b}");
+        assert!(
+            b.contains("stop_commanded") && b.contains("MRC_COMMANDED"),
+            "body={b}"
+        );
 
         // The governor commanded the sticky MRC under its own authority.
-        assert!(svc.app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst),
-            "an accepted e-stop must set the sticky supervisor_tripped flag (force_lockout)");
+        assert!(
+            svc.app
+                .supervisor_tripped
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "an accepted e-stop must set the sticky supervisor_tripped flag (force_lockout)"
+        );
         let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
-        assert!(ab.contains("OperatorStopRequested"), "the authenticated request is chained");
-        assert!(ab.contains("GovernorMRCCommanded"), "the governor's MRC action is chained");
+        assert!(
+            ab.contains("OperatorStopRequested"),
+            "the authenticated request is chained"
+        );
+        assert!(
+            ab.contains("GovernorMRCCommanded"),
+            "the governor's MRC action is chained"
+        );
         let fp = kirra_verifier::attestation::operator_key_fingerprint(&pem).unwrap();
-        assert!(ab.contains(&fp), "the request event carries the operator key fingerprint (non-repudiation)");
+        assert!(
+            ab.contains(&fp),
+            "the request event carries the operator key fingerprint (non-repudiation)"
+        );
     }
 
     /// THE DOMAIN-SEPARATION SECURITY PROPERTY: a CLEARANCE (release) signature
@@ -4859,17 +5666,27 @@ mod console_phase_a_tests {
         seed_node(&svc, "robot-01");
         let (sk, pem) = operator_keypair(32);
         register_op(&svc, "alice", &pem);
-        let (_c, cb) = get(svc.clone(),
-            "/console/clearance-challenge?operator_id=alice&node_id=robot-01").await;
+        let (_c, cb) = get(
+            svc.clone(),
+            "/console/clearance-challenge?operator_id=alice&node_id=robot-01",
+        )
+        .await;
         let nonce = parse_nonce(&cb);
         // Sign the GRANT payload, submit to the e-stop endpoint.
         let grant_sig = sign_grant_b64(&sk, "alice", "robot-01", &nonce);
         let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":nonce,"signature_b64":grant_sig}).to_string();
         let (s, b) = post_json(svc.clone(), "/console/estop-requests", body, None).await;
-        assert_eq!(s, StatusCode::UNAUTHORIZED,
-            "a clearance signature must not satisfy the e-stop domain; body={b}");
-        assert!(!svc.app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst),
-            "a rejected e-stop must NOT command the MRC");
+        assert_eq!(
+            s,
+            StatusCode::UNAUTHORIZED,
+            "a clearance signature must not satisfy the e-stop domain; body={b}"
+        );
+        assert!(
+            !svc.app
+                .supervisor_tripped
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "a rejected e-stop must NOT command the MRC"
+        );
         let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
         assert!(ab.contains("OperatorStopRequestRejected") && ab.contains("bad_signature"));
     }
@@ -4879,10 +5696,19 @@ mod console_phase_a_tests {
     async fn estop_unknown_operator_rejected_403() {
         let svc = build_state();
         seed_node(&svc, "robot-01");
-        let body = json!({"node_id":"robot-01","operator_id":"ghost","nonce":"00","signature_b64":"AAAA"}).to_string();
+        let body =
+            json!({"node_id":"robot-01","operator_id":"ghost","nonce":"00","signature_b64":"AAAA"})
+                .to_string();
         let (s, b) = post_json(svc.clone(), "/console/estop-requests", body, None).await;
-        assert_eq!(s, StatusCode::FORBIDDEN, "unknown operator rejected; body={b}");
-        assert!(!svc.app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            s,
+            StatusCode::FORBIDDEN,
+            "unknown operator rejected; body={b}"
+        );
+        assert!(!svc
+            .app
+            .supervisor_tripped
+            .load(std::sync::atomic::Ordering::SeqCst));
         let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
         assert!(ab.contains("OperatorStopRequestRejected") && ab.contains("unknown_operator"));
     }
@@ -4894,15 +5720,24 @@ mod console_phase_a_tests {
         seed_node(&svc, "robot-01");
         let (sk, pem) = operator_keypair(33);
         register_op(&svc, "alice", &pem);
-        let (_c, cb) = get(svc.clone(),
-            "/console/clearance-challenge?operator_id=alice&node_id=robot-01").await;
+        let (_c, cb) = get(
+            svc.clone(),
+            "/console/clearance-challenge?operator_id=alice&node_id=robot-01",
+        )
+        .await;
         let nonce = parse_nonce(&cb);
         let sig = sign_stop_b64(&sk, "alice", "robot-01", &nonce);
-        let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":nonce,"signature_b64":sig}).to_string();
+        let body =
+            json!({"node_id":"robot-01","operator_id":"alice","nonce":nonce,"signature_b64":sig})
+                .to_string();
         let (s1, _) = post_json(svc.clone(), "/console/estop-requests", body.clone(), None).await;
         assert_eq!(s1, StatusCode::OK, "first stop accepted");
         let (s2, b2) = post_json(svc.clone(), "/console/estop-requests", body, None).await;
-        assert_eq!(s2, StatusCode::UNAUTHORIZED, "replayed stop nonce rejected; body={b2}");
+        assert_eq!(
+            s2,
+            StatusCode::UNAUTHORIZED,
+            "replayed stop nonce rejected; body={b2}"
+        );
     }
 
     /// HA split-brain guard: a passive-standby instance must not command the MRC.
@@ -4910,12 +5745,22 @@ mod console_phase_a_tests {
     async fn standby_instance_rejects_estop_request() {
         let svc = build_state();
         seed_node(&svc, "robot-01");
-        svc.app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
-        let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":"00","signature_b64":"AAAA"}).to_string();
+        svc.app
+            .mode_active
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let body =
+            json!({"node_id":"robot-01","operator_id":"alice","nonce":"00","signature_b64":"AAAA"})
+                .to_string();
         let (s, _b) = post_json(svc.clone(), "/console/estop-requests", body, None).await;
-        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE,
-            "a passive-standby instance must not command the MRC (split-brain guard)");
-        assert!(!svc.app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            s,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a passive-standby instance must not command the MRC (split-brain guard)"
+        );
+        assert!(!svc
+            .app
+            .supervisor_tripped
+            .load(std::sync::atomic::Ordering::SeqCst));
     }
 }
 
@@ -4931,10 +5776,10 @@ mod console_phase_a_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod store_offload_tests {
-    use std::sync::Arc;
     use kirra_verifier::store_handle::StoreError;
     use kirra_verifier::verifier::{AppState, VerifierOperationMode};
     use kirra_verifier::verifier_store::VerifierStore;
+    use std::sync::Arc;
 
     fn app() -> Arc<AppState> {
         let store = VerifierStore::new(":memory:").expect("in-memory store");
@@ -4945,16 +5790,19 @@ mod store_offload_tests {
     async fn offloaded_write_is_visible_to_an_offloaded_read() {
         let app = app();
 
-        let wrote = app.store.call(|store| {
-            store.save_engine_state("offload_probe", "42").is_ok()
-        })
-        .await;
-        assert!(matches!(wrote, Ok(true)), "offloaded write must run to completion: {wrote:?}");
+        let wrote = app
+            .store
+            .call(|store| store.save_engine_state("offload_probe", "42").is_ok())
+            .await;
+        assert!(
+            matches!(wrote, Ok(true)),
+            "offloaded write must run to completion: {wrote:?}"
+        );
 
-        let read = app.store.call(|store| {
-            store.load_engine_state("offload_probe").ok().flatten()
-        })
-        .await;
+        let read = app
+            .store
+            .call(|store| store.load_engine_state("offload_probe").ok().flatten())
+            .await;
         assert!(
             matches!(read, Ok(Some(ref v)) if v == "42"),
             "an offloaded read must observe the offloaded write; got {read:?}"
@@ -4965,9 +5813,11 @@ mod store_offload_tests {
     async fn offloaded_closure_return_value_is_propagated() {
         let app = app();
         // A pure read that computes a value off-thread and returns it intact.
-        let n: Result<u64, StoreError> =
-            app.store.call(|_store| 7u64 * 6).await;
-        assert!(matches!(n, Ok(42)), "closure return value must propagate; got {n:?}");
+        let n: Result<u64, StoreError> = app.store.call(|_store| 7u64 * 6).await;
+        assert!(
+            matches!(n, Ok(42)),
+            "closure return value must propagate; got {n:?}"
+        );
     }
 }
 
@@ -4986,7 +5836,6 @@ mod store_offload_tests {
 #[cfg(test)]
 mod federation_submit_e2e_tests {
     use super::submit_federated_report;
-    use std::sync::Arc;
     use axum::extract::State;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -4999,6 +5848,7 @@ mod federation_submit_e2e_tests {
     use kirra_verifier::posture_cache::{now_ms, ServiceState, SharedPostureCache};
     use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
     use kirra_verifier::verifier_store::VerifierStore;
+    use std::sync::Arc;
 
     fn service() -> Arc<ServiceState> {
         let store = VerifierStore::new(":memory:").expect("in-memory store");
@@ -5012,7 +5862,8 @@ mod federation_submit_e2e_tests {
                 .with(|store| store.try_claim_epoch(0, "test-instance", 0))
                 .unwrap()
                 .expect("claim initial epoch on fresh store");
-            app.held_epoch.store(claimed, std::sync::atomic::Ordering::SeqCst);
+            app.held_epoch
+                .store(claimed, std::sync::atomic::Ordering::SeqCst);
         }
         let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
         Arc::new(ServiceState {
@@ -5068,9 +5919,13 @@ mod federation_submit_e2e_tests {
         svc: Arc<ServiceState>,
         report: FederatedTrustReportV2,
     ) -> (StatusCode, serde_json::Value) {
-        let resp = submit_federated_report(State(svc), Json(report)).await.into_response();
+        let resp = submit_federated_report(State(svc), Json(report))
+            .await
+            .into_response();
         let status = resp.status();
-        let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("read body");
+        let bytes = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
         let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, json)
     }
@@ -5081,14 +5936,23 @@ mod federation_submit_e2e_tests {
         let sk = SigningKey::from_bytes(&[7u8; 32]);
         register(&svc, "ctrl-a", &sk);
 
-        let (status, body) =
-            submit(svc.clone(), signed_report(&sk, "ctrl-a", "lidar_front", "nonce-aaaa", Some(412)))
-                .await;
+        let (status, body) = submit(
+            svc.clone(),
+            signed_report(&sk, "ctrl-a", "lidar_front", "nonce-aaaa", Some(412)),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["accepted"], serde_json::json!(true), "valid report must be accepted: {body}");
+        assert_eq!(
+            body["accepted"],
+            serde_json::json!(true),
+            "valid report must be accepted: {body}"
+        );
 
         let (has_reports, burned) = svc.app.store.with(|store| {
-            let has_reports = !store.load_federated_reports_for_asset("lidar_front").unwrap().is_empty();
+            let has_reports = !store
+                .load_federated_reports_for_asset("lidar_front")
+                .unwrap()
+                .is_empty();
             let burned = store.has_seen_federation_nonce("nonce-aaaa").unwrap();
             (has_reports, burned)
         });
@@ -5104,12 +5968,17 @@ mod federation_submit_e2e_tests {
         let report = signed_report(&sk, "ctrl-a", "lidar_front", "nonce-dup", Some(1));
 
         let (_, first) = submit(svc.clone(), report.clone()).await;
-        assert_eq!(first["accepted"], serde_json::json!(true), "first submit must be accepted: {first}");
+        assert_eq!(
+            first["accepted"],
+            serde_json::json!(true),
+            "first submit must be accepted: {first}"
+        );
 
         let (_, second) = submit(svc.clone(), report).await;
         assert_eq!(second["accepted"], serde_json::json!(false));
         assert_eq!(
-            second["reason"], serde_json::json!("FEDERATED_NONCE_REPLAY"),
+            second["reason"],
+            serde_json::json!("FEDERATED_NONCE_REPLAY"),
             "a replayed nonce must be rejected: {second}"
         );
     }
@@ -5118,11 +5987,16 @@ mod federation_submit_e2e_tests {
     async fn unregistered_controller_is_rejected() {
         let svc = service();
         let sk = SigningKey::from_bytes(&[9u8; 32]); // never registered
-        let (_, body) =
-            submit(svc, signed_report(&sk, "ctrl-unknown", "lidar_front", "nonce-x", None)).await;
+        let (_, body) = submit(
+            svc,
+            signed_report(&sk, "ctrl-unknown", "lidar_front", "nonce-x", None),
+        )
+        .await;
         assert_eq!(body["accepted"], serde_json::json!(false));
         assert_eq!(
-            body["reason"], serde_json::json!("UNREGISTERED_FEDERATION_CONTROLLER"), "{body}"
+            body["reason"],
+            serde_json::json!("UNREGISTERED_FEDERATION_CONTROLLER"),
+            "{body}"
         );
     }
 
@@ -5137,11 +6011,16 @@ mod federation_submit_e2e_tests {
         let (_, body) = submit(svc.clone(), report).await;
         assert_eq!(body["accepted"], serde_json::json!(false));
         assert_eq!(
-            body["reason"], serde_json::json!("INVALID_FEDERATION_SIGNATURE"), "{body}"
+            body["reason"],
+            serde_json::json!("INVALID_FEDERATION_SIGNATURE"),
+            "{body}"
         );
         // A signature-rejected report must NOT burn the nonce.
         assert!(
-            !svc.app.store.with(|store| store.has_seen_federation_nonce("nonce-bad")).unwrap(),
+            !svc.app
+                .store
+                .with(|store| store.has_seen_federation_nonce("nonce-bad"))
+                .unwrap(),
             "a rejected report must not burn its nonce"
         );
     }
@@ -5154,21 +6033,24 @@ mod federation_submit_e2e_tests {
 #[cfg(test)]
 mod industrial_replay_handler_tests {
     use super::{evaluate_dnp3_adapter, ReplayGuarded};
-    use std::sync::Arc;
     use axum::body::to_bytes;
     use axum::extract::State;
     use axum::response::IntoResponse;
     use axum::Json;
     use kirra_verifier::adapters::dnp3::Dnp3Message;
-    use kirra_verifier::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
+    use kirra_verifier::posture_cache::{
+        now_ms, CachedFleetPosture, ServiceState, SharedPostureCache,
+    };
     use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
     use kirra_verifier::verifier_store::VerifierStore;
+    use std::sync::Arc;
 
     fn svc() -> Arc<ServiceState> {
         let store = VerifierStore::new(":memory:").expect("in-memory store");
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
-        let posture_cache: SharedPostureCache =
-            Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(FleetPosture::Nominal))));
+        let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+            CachedFleetPosture::new(FleetPosture::Nominal),
+        )));
         Arc::new(ServiceState {
             app,
             posture_cache,
@@ -5176,7 +6058,9 @@ mod industrial_replay_handler_tests {
             audit_verifying_key: None,
             fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
             fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            fabric_causal_log: Arc::new(
+                kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+            ),
             posture_engine_tx: std::sync::OnceLock::new(),
             perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
@@ -5187,15 +6071,32 @@ mod industrial_replay_handler_tests {
     // (a read is ReadTelemetry → admitted in Nominal, not a control, not bounded).
     fn read_msg(source: &str) -> Dnp3Message {
         Dnp3Message {
-            source_address: 1, dest_address: 1, function_code: 0x01,
-            data_link_control: 0, objects: vec![], source_node: source.to_string(),
+            source_address: 1,
+            dest_address: 1,
+            function_code: 0x01,
+            data_link_control: 0,
+            objects: vec![],
+            source_node: source.to_string(),
         }
     }
 
-    async fn post(svc: Arc<ServiceState>, msg: Dnp3Message, sequence: u64, timestamp_ms: u64) -> serde_json::Value {
-        let g = ReplayGuarded { sequence, timestamp_ms, message: msg };
-        let resp = evaluate_dnp3_adapter(State(svc), Ok(Json(g))).await.into_response();
-        let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("read body");
+    async fn post(
+        svc: Arc<ServiceState>,
+        msg: Dnp3Message,
+        sequence: u64,
+        timestamp_ms: u64,
+    ) -> serde_json::Value {
+        let g = ReplayGuarded {
+            sequence,
+            timestamp_ms,
+            message: msg,
+        };
+        let resp = evaluate_dnp3_adapter(State(svc), Ok(Json(g)))
+            .await
+            .into_response();
+        let bytes = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
         serde_json::from_slice(&bytes).expect("json body")
     }
 
@@ -5207,9 +6108,15 @@ mod industrial_replay_handler_tests {
         assert_eq!(v1["allowed"], true, "fresh in-order read admitted: {v1}");
         let v2 = post(svc.clone(), read_msg("plc-1"), 10, now).await;
         assert_eq!(v2["allowed"], false);
-        assert_eq!(v2["denial_reason"], "INDUSTRIAL_MESSAGE_REPLAY", "replay rejected: {v2}");
+        assert_eq!(
+            v2["denial_reason"], "INDUSTRIAL_MESSAGE_REPLAY",
+            "replay rejected: {v2}"
+        );
         let v3 = post(svc.clone(), read_msg("plc-1"), 5, now).await;
-        assert_eq!(v3["denial_reason"], "INDUSTRIAL_MESSAGE_REPLAY", "regress rejected: {v3}");
+        assert_eq!(
+            v3["denial_reason"], "INDUSTRIAL_MESSAGE_REPLAY",
+            "regress rejected: {v3}"
+        );
         let v4 = post(svc.clone(), read_msg("plc-1"), 11, now).await;
         assert_eq!(v4["allowed"], true, "higher seq admitted again: {v4}");
     }
@@ -5218,23 +6125,44 @@ mod industrial_replay_handler_tests {
     async fn stale_and_future_rejected_and_stale_does_not_burn_sequence() {
         let svc = svc();
         let now = now_ms();
-        let stale = post(svc.clone(), read_msg("plc-2"), 1, now.saturating_sub(60_000)).await;
-        assert_eq!(stale["denial_reason"], "INDUSTRIAL_MESSAGE_STALE", "{stale}");
+        let stale = post(
+            svc.clone(),
+            read_msg("plc-2"),
+            1,
+            now.saturating_sub(60_000),
+        )
+        .await;
+        assert_eq!(
+            stale["denial_reason"], "INDUSTRIAL_MESSAGE_STALE",
+            "{stale}"
+        );
         let future = post(svc.clone(), read_msg("plc-3"), 1, now + 60_000).await;
-        assert_eq!(future["denial_reason"], "INDUSTRIAL_MESSAGE_FUTURE_DATED", "{future}");
+        assert_eq!(
+            future["denial_reason"], "INDUSTRIAL_MESSAGE_FUTURE_DATED",
+            "{future}"
+        );
         // The stale message (freshness-checked BEFORE the sequence advance) must NOT
         // have burned the sequence: a later in-window seq-1 from plc-2 is admitted.
         let ok = post(svc.clone(), read_msg("plc-2"), 1, now).await;
-        assert_eq!(ok["allowed"], true, "a stale message must not advance the sequence: {ok}");
+        assert_eq!(
+            ok["allowed"], true,
+            "a stale message must not advance the sequence: {ok}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn distinct_sources_have_independent_sequences() {
         let svc = svc();
         let now = now_ms();
-        assert_eq!(post(svc.clone(), read_msg("plc-a"), 100, now).await["allowed"], true);
+        assert_eq!(
+            post(svc.clone(), read_msg("plc-a"), 100, now).await["allowed"],
+            true
+        );
         // plc-b starts fresh; its seq 1 is admitted despite plc-a sitting at 100.
-        assert_eq!(post(svc.clone(), read_msg("plc-b"), 1, now).await["allowed"], true);
+        assert_eq!(
+            post(svc.clone(), read_msg("plc-b"), 1, now).await["allowed"],
+            true
+        );
     }
 }
 
@@ -5271,38 +6199,41 @@ mod store_offload_guard {
         let mut violations: Vec<usize> = Vec::new();
 
         for src in sources {
-        let mut nearest_access = ""; // "with" (sync) | "call" (off-worker)
-        let mut in_test = false; // tests live only in the root file; submodules are all production
-        for (idx, line) in src.lines().enumerate() {
+            let mut nearest_access = ""; // "with" (sync) | "call" (off-worker)
+            let mut in_test = false; // tests live only in the root file; submodules are all production
+            for (idx, line) in src.lines().enumerate() {
                 let trimmed = line.trim_start();
-                if trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with("//!") {
+                if trimmed.starts_with("//")
+                    || trimmed.starts_with("///")
+                    || trimmed.starts_with("//!")
+                {
                     continue;
                 }
                 if trimmed.starts_with("#[cfg(test)]") {
-                in_test = true;
-            }
-            // Track the nearest ENCLOSING store access (last one seen wins; the
-            // production sites place the access immediately above the write).
+                    in_test = true;
+                }
+                // Track the nearest ENCLOSING store access (last one seen wins; the
+                // production sites place the access immediately above the write).
                 if line.contains(".store.call(")
                     || line.contains(".store.call_read(")
                     || trimmed.starts_with(".call(")
                     || trimmed.starts_with(".call_read(")
                 {
-                nearest_access = "call";
+                    nearest_access = "call";
                 } else if line.contains(".store.with(")
                     || line.contains(".store.with_read(")
                     || trimmed.starts_with(".with(")
                     || trimmed.starts_with(".with_read(")
                 {
-                nearest_access = "with";
+                    nearest_access = "with";
+                }
+                if !in_test
+                    && line.contains("save_posture_event_chained")
+                    && nearest_access == "with"
+                {
+                    violations.push(idx + 1);
+                }
             }
-            if !in_test
-                && line.contains("save_posture_event_chained")
-                && nearest_access == "with"
-            {
-                violations.push(idx + 1);
-            }
-        }
         }
 
         assert!(

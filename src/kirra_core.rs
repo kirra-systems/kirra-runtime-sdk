@@ -1,13 +1,22 @@
 // src/kirra_core.rs
 
-use crate::{SafetyContract, SafetyGovernor, GovernorInterceptResult, MitigationCode, TrustMode};
 use crate::security::constant_time_compare;
+use crate::{GovernorInterceptResult, MitigationCode, SafetyContract, SafetyGovernor, TrustMode};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
-pub enum GlobalSystemState { Normal, Degraded, Failsafe }
+pub enum GlobalSystemState {
+    Normal,
+    Degraded,
+    Failsafe,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum BehavioralAction { ExecuteUnrestricted, ApplyVelocityCap, ForceStationaryHold, ExecutePassiveFailsafeLock }
+enum BehavioralAction {
+    ExecuteUnrestricted,
+    ApplyVelocityCap,
+    ForceStationaryHold,
+    ExecutePassiveFailsafeLock,
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct JournalEntry {
@@ -22,7 +31,9 @@ pub struct JournalEntry {
     pub operator_narrative: String,
 }
 
-fn default_angular_ceiling() -> f64 { 1.5 }
+fn default_angular_ceiling() -> f64 {
+    1.5
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
 pub struct ContractProfile {
@@ -40,12 +51,30 @@ pub struct ContractProfile {
 }
 
 impl SafetyContract for ContractProfile {
-    #[inline] fn min_bound(&self) -> f64 { self.min_permissible_ceiling }
-    #[inline] fn max_bound(&self) -> f64 { self.max_permissible_ceiling }
-    #[inline] fn max_angular_rate(&self) -> f64 { self.max_angular_velocity_ceiling }
-    #[inline] fn max_rate(&self) -> f64 { self.max_rate_of_change_dt }
-    #[inline] fn fallback(&self) -> f64 { self.fallback_safe_setpoint }
-    #[inline] fn scale_factor(&self) -> f64 { self.engineering_scale_factor }
+    #[inline]
+    fn min_bound(&self) -> f64 {
+        self.min_permissible_ceiling
+    }
+    #[inline]
+    fn max_bound(&self) -> f64 {
+        self.max_permissible_ceiling
+    }
+    #[inline]
+    fn max_angular_rate(&self) -> f64 {
+        self.max_angular_velocity_ceiling
+    }
+    #[inline]
+    fn max_rate(&self) -> f64 {
+        self.max_rate_of_change_dt
+    }
+    #[inline]
+    fn fallback(&self) -> f64 {
+        self.fallback_safe_setpoint
+    }
+    #[inline]
+    fn scale_factor(&self) -> f64 {
+        self.engineering_scale_factor
+    }
 }
 
 /// Consecutive failed supervisor-reset attempts that trip the brute-force cooldown.
@@ -90,7 +119,11 @@ impl RuntimeTrustEngine {
         if self.current_score < 100 {
             self.consecutive_safe_packets = self.consecutive_safe_packets.saturating_add(1);
             if self.consecutive_safe_packets >= self.recovery_threshold {
-                let recovery_step = if self.mode == TrustMode::LockedOut { 5 } else { 10 };
+                let recovery_step = if self.mode == TrustMode::LockedOut {
+                    5
+                } else {
+                    10
+                };
                 self.current_score = (self.current_score + recovery_step).min(100);
                 self.consecutive_safe_packets = 0;
                 self.update_mode();
@@ -101,13 +134,18 @@ impl RuntimeTrustEngine {
     fn update_mode(&mut self) {
         self.mode = match self.current_score {
             86..=100 => TrustMode::FullAutonomy,
-            56..=85  => TrustMode::ConstrainedAdvisory,
-            45..=55  => TrustMode::ShadowMode,
-            _        => TrustMode::LockedOut,
+            56..=85 => TrustMode::ConstrainedAdvisory,
+            45..=55 => TrustMode::ShadowMode,
+            _ => TrustMode::LockedOut,
         };
     }
 
-    pub fn authenticated_manual_reset(&mut self, raw_token: &[u8], system_auth_key: &[u8], current_time_ms: u64) -> Result<(), &'static str> {
+    pub fn authenticated_manual_reset(
+        &mut self,
+        raw_token: &[u8],
+        system_auth_key: &[u8],
+        current_time_ms: u64,
+    ) -> Result<(), &'static str> {
         // An armed cooldown window blocks every attempt outright.
         if current_time_ms < self.reset_cooldown_end_ms {
             return Err("RESET_REJECTED_COOLDOWN_ACTIVE");
@@ -199,7 +237,11 @@ impl<C: SafetyContract> KirraKernelGovernor<C> {
             initial_scalar
         } else {
             let fb = contract.fallback();
-            if fb.is_finite() { fb } else { 0.0 }
+            if fb.is_finite() {
+                fb
+            } else {
+                0.0
+            }
         };
         Self {
             contract,
@@ -257,13 +299,20 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
             TrustMode::LockedOut => GlobalSystemState::Failsafe,
         };
         let active_action = match (prior_system_state, prior_trust_mode) {
-            (GlobalSystemState::Normal, TrustMode::FullAutonomy) => BehavioralAction::ExecuteUnrestricted,
-            (GlobalSystemState::Degraded, TrustMode::ConstrainedAdvisory) => BehavioralAction::ApplyVelocityCap,
-            (GlobalSystemState::Degraded, TrustMode::ShadowMode) => BehavioralAction::ForceStationaryHold,
+            (GlobalSystemState::Normal, TrustMode::FullAutonomy) => {
+                BehavioralAction::ExecuteUnrestricted
+            }
+            (GlobalSystemState::Degraded, TrustMode::ConstrainedAdvisory) => {
+                BehavioralAction::ApplyVelocityCap
+            }
+            (GlobalSystemState::Degraded, TrustMode::ShadowMode) => {
+                BehavioralAction::ForceStationaryHold
+            }
             _ => BehavioralAction::ExecutePassiveFailsafeLock,
         };
 
-        let is_out_of_envelope = proposed_demand < self.contract.min_bound() || proposed_demand > self.contract.max_bound();
+        let is_out_of_envelope = proposed_demand < self.contract.min_bound()
+            || proposed_demand > self.contract.max_bound();
         let delta_step = (proposed_demand - self.last_validated_scalar).abs();
         let rate_change_per_sec = delta_step / dt;
         let is_rate_breached = rate_change_per_sec > self.contract.max_rate();
@@ -275,15 +324,26 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
         }
 
         let mut cumulative_penalty = 0;
-        if is_out_of_envelope { cumulative_penalty += 30; }
-        if self.continuous_rate_breach_ticks > 5 { cumulative_penalty += 15; }
+        if is_out_of_envelope {
+            cumulative_penalty += 30;
+        }
+        if self.continuous_rate_breach_ticks > 5 {
+            cumulative_penalty += 15;
+        }
 
-        let core_bounded_demand = safe_clamp(proposed_demand, self.contract.min_bound(), self.contract.max_bound());
+        let core_bounded_demand = safe_clamp(
+            proposed_demand,
+            self.contract.min_bound(),
+            self.contract.max_bound(),
+        );
 
         let (sanitized_scalar, mitigation): (f64, MitigationCode) = match active_action {
             BehavioralAction::ExecuteUnrestricted => {
                 if is_out_of_envelope {
-                    (core_bounded_demand, MitigationCode::EnvelopeClampTakesPriority)
+                    (
+                        core_bounded_demand,
+                        MitigationCode::EnvelopeClampTakesPriority,
+                    )
                 } else if is_rate_breached {
                     let step_direction = (proposed_demand - self.last_validated_scalar).signum();
                     // Gov-M1 (invariant #8 — envelope ALWAYS wins over rate): re-clamp
@@ -294,13 +354,22 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
                     // unconditional clamp guarantees the emitted scalar is in-envelope,
                     // matching the AV path's `validate_vehicle_command`.
                     let rate_clamped_value = safe_clamp(
-                        self.last_validated_scalar + (self.contract.max_rate() * dt * step_direction),
+                        self.last_validated_scalar
+                            + (self.contract.max_rate() * dt * step_direction),
                         self.contract.min_bound(),
                         self.contract.max_bound(),
                     );
-                    (rate_clamped_value, MitigationCode::RateClampEnforced { max_rate: self.contract.max_rate() })
+                    (
+                        rate_clamped_value,
+                        MitigationCode::RateClampEnforced {
+                            max_rate: self.contract.max_rate(),
+                        },
+                    )
                 } else {
-                    (proposed_demand, MitigationCode::PassthroughUnrestrictedNormal)
+                    (
+                        proposed_demand,
+                        MitigationCode::PassthroughUnrestrictedNormal,
+                    )
                 }
             }
             BehavioralAction::ApplyVelocityCap => {
@@ -325,21 +394,35 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
                 // the current direction (itself a valid decel trajectory). Recovery is
                 // automatic on return to FullAutonomy. The Nominal WCET path is UNCHANGED.
                 let current = self.last_validated_scalar;
-                let capped = safe_clamp(core_bounded_demand, self.constraint_cap_min, self.constraint_cap_max);
+                let capped = safe_clamp(
+                    core_bounded_demand,
+                    self.constraint_cap_min,
+                    self.constraint_cap_max,
+                );
                 let held = current.signum() * capped.abs().min(current.abs());
                 if (held - capped).abs() > 1e-9 {
                     // The decel-to-stop bound actively overrode the (capped) demand.
                     (held, MitigationCode::DegradedDecelToStopHold { held })
                 } else {
-                    (held, MitigationCode::DegradedPostureClamp { cap_min: self.constraint_cap_min, cap_max: self.constraint_cap_max })
+                    (
+                        held,
+                        MitigationCode::DegradedPostureClamp {
+                            cap_min: self.constraint_cap_min,
+                            cap_max: self.constraint_cap_max,
+                        },
+                    )
                 }
             }
-            BehavioralAction::ForceStationaryHold => {
-                (self.last_validated_scalar, MitigationCode::ShadowModeHoldEnforced { retained: self.last_validated_scalar })
-            }
-            BehavioralAction::ExecutePassiveFailsafeLock => {
-                (self.contract.fallback(), MitigationCode::CriticalLockoutFallback)
-            }
+            BehavioralAction::ForceStationaryHold => (
+                self.last_validated_scalar,
+                MitigationCode::ShadowModeHoldEnforced {
+                    retained: self.last_validated_scalar,
+                },
+            ),
+            BehavioralAction::ExecutePassiveFailsafeLock => (
+                self.contract.fallback(),
+                MitigationCode::CriticalLockoutFallback,
+            ),
         };
 
         if active_action != BehavioralAction::ExecutePassiveFailsafeLock {
@@ -353,7 +436,9 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
         }
 
         let asset_in_safe_control_state = match prior_trust_mode {
-            TrustMode::FullAutonomy | TrustMode::ConstrainedAdvisory => !is_out_of_envelope && !is_rate_breached,
+            TrustMode::FullAutonomy | TrustMode::ConstrainedAdvisory => {
+                !is_out_of_envelope && !is_rate_breached
+            }
             TrustMode::ShadowMode | TrustMode::LockedOut => false,
         };
 
@@ -366,12 +451,20 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
         }
     }
 
-    #[inline] fn trust_mode(&self) -> TrustMode { self.trust_engine.mode }
-    #[inline] fn last_output(&self) -> f64 { self.last_validated_scalar }
+    #[inline]
+    fn trust_mode(&self) -> TrustMode {
+        self.trust_engine.mode
+    }
+    #[inline]
+    fn last_output(&self) -> f64 {
+        self.last_validated_scalar
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct CausalFlightRecorder { pub journal: std::collections::VecDeque<JournalEntry> }
+pub struct CausalFlightRecorder {
+    pub journal: std::collections::VecDeque<JournalEntry>,
+}
 
 impl Default for CausalFlightRecorder {
     fn default() -> Self {
@@ -394,13 +487,26 @@ pub struct JournalLogEntry<'a> {
 }
 
 impl CausalFlightRecorder {
-    pub fn new() -> Self { Self { journal: std::collections::VecDeque::new() } }
+    pub fn new() -> Self {
+        Self {
+            journal: std::collections::VecDeque::new(),
+        }
+    }
     pub fn log(&mut self, entry: JournalLogEntry<'_>) {
         self.journal.push_back(JournalEntry {
-            timestamp_ms: entry.ts, actor: entry.actor.to_string(), token: entry.token.to_string(), action: entry.action.to_string(), resolution: entry.res.to_string(),
-            score: entry.score, system_state: entry.state, trust_mode: entry.mode, operator_narrative: entry.narrative,
+            timestamp_ms: entry.ts,
+            actor: entry.actor.to_string(),
+            token: entry.token.to_string(),
+            action: entry.action.to_string(),
+            resolution: entry.res.to_string(),
+            score: entry.score,
+            system_state: entry.state,
+            trust_mode: entry.mode,
+            operator_narrative: entry.narrative,
         });
-        if self.journal.len() > 100 { self.journal.pop_front(); }
+        if self.journal.len() > 100 {
+            self.journal.pop_front();
+        }
     }
 }
 
@@ -427,9 +533,15 @@ mod governor_nonfinite_tests {
     fn nan_demand_is_rejected_failsafe_not_passed_through() {
         let mut g = gov();
         let out = g.evaluate(f64::NAN, 0.05);
-        assert!(out.sanitized_scalar.is_finite(), "must never return NaN to an actuator");
+        assert!(
+            out.sanitized_scalar.is_finite(),
+            "must never return NaN to an actuator"
+        );
         assert_eq!(out.sanitized_scalar, g.contract.fallback());
-        assert!(!out.asset_in_safe_control_state, "NaN must not read as a safe control state");
+        assert!(
+            !out.asset_in_safe_control_state,
+            "NaN must not read as a safe control state"
+        );
         assert!(out.was_unsafe_attempt);
     }
 
@@ -457,7 +569,10 @@ mod governor_nonfinite_tests {
         let mut g = gov();
         let before = g.last_validated_scalar;
         let _ = g.evaluate(f64::NAN, 0.05);
-        assert_eq!(g.last_validated_scalar, before, "tainted value must not be retained");
+        assert_eq!(
+            g.last_validated_scalar, before,
+            "tainted value must not be retained"
+        );
     }
 
     #[test]
@@ -467,9 +582,16 @@ mod governor_nonfinite_tests {
         // clean passthrough — distinct from the rate-clamped or fail-closed paths.
         let mut g = gov();
         let out = g.evaluate(0.4, 0.05);
-        assert!(out.asset_in_safe_control_state, "a nominal in-envelope, in-rate command must read safe");
+        assert!(
+            out.asset_in_safe_control_state,
+            "a nominal in-envelope, in-rate command must read safe"
+        );
         assert!(!out.was_unsafe_attempt);
-        assert!((out.sanitized_scalar - 0.4).abs() < 1e-9, "got {}", out.sanitized_scalar);
+        assert!(
+            (out.sanitized_scalar - 0.4).abs() < 1e-9,
+            "got {}",
+            out.sanitized_scalar
+        );
     }
 
     #[test]
@@ -479,10 +601,19 @@ mod governor_nonfinite_tests {
         let mut g = gov();
         for dt in [0.0, -0.01] {
             let out = g.evaluate(1.0, dt);
-            assert_eq!(out.sanitized_scalar, g.contract.fallback(),
-                "dt={dt} must command the fallback");
-            assert!(!out.asset_in_safe_control_state, "dt={dt} must not read safe");
-            assert!(out.was_unsafe_attempt, "dt={dt} must flag an unsafe attempt");
+            assert_eq!(
+                out.sanitized_scalar,
+                g.contract.fallback(),
+                "dt={dt} must command the fallback"
+            );
+            assert!(
+                !out.asset_in_safe_control_state,
+                "dt={dt} must not read safe"
+            );
+            assert!(
+                out.was_unsafe_attempt,
+                "dt={dt} must flag an unsafe attempt"
+            );
         }
     }
 

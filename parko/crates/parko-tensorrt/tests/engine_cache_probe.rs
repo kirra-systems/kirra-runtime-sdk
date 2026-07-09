@@ -46,28 +46,38 @@ fn require_ep() -> bool {
 }
 
 fn argmax(scores: &[f32]) -> usize {
-    scores
-        .iter()
-        .enumerate()
-        .fold(0usize, |best, (i, &s)| if s > scores[best] { i } else { best })
+    scores.iter().enumerate().fold(
+        0usize,
+        |best, (i, &s)| if s > scores[best] { i } else { best },
+    )
 }
 
 /// Deterministic NON-zero input (matches the other probes).
 fn deterministic_input(n: usize) -> Vec<f32> {
-    (0..n).map(|i| ((i * 7 + 13) % 251) as f32 / 251.0).collect()
+    (0..n)
+        .map(|i| ((i * 7 + 13) % 251) as f32 / 251.0)
+        .collect()
 }
 
 /// Construct a TRT backend against `cache_dir`, load the model, run one inference,
 /// and return (logits, elapsed-wall-time) — the elapsed time spans `with_config`
 /// (where the engine builds or deserializes) through the first `run`.
-fn timed_build_and_run(cache_dir: &Path, input: &[f32]) -> Result<(Vec<f32>, Duration), BackendError> {
-    let cfg = TrtConfig { engine_cache_path: cache_dir.to_string_lossy().into_owned() };
+fn timed_build_and_run(
+    cache_dir: &Path,
+    input: &[f32],
+) -> Result<(Vec<f32>, Duration), BackendError> {
+    let cfg = TrtConfig {
+        engine_cache_path: cache_dir.to_string_lossy().into_owned(),
+    };
     let t0 = Instant::now();
     let trt = TrtBackend::with_config(MODEL, &cfg)?;
     let model = trt.load_model(MODEL)?;
     let mut named = HashMap::new();
     named.insert(INPUT_NAME.to_string(), TensorStorage::Borrowed(input));
-    let batch = TensorBatch { named_tensors: named, metadata: HashMap::new() };
+    let batch = TensorBatch {
+        named_tensors: named,
+        metadata: HashMap::new(),
+    };
     let out = trt.run(&model, &batch)?;
     let elapsed = t0.elapsed();
     let logits = out
@@ -94,7 +104,11 @@ fn engine_cache_fingerprint(dir: &Path) -> Option<(String, u64, u64)> {
     let bytes = std::fs::read(&path).ok()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut h);
-    Some((path.file_name()?.to_string_lossy().into_owned(), size, h.finish()))
+    Some((
+        path.file_name()?.to_string_lossy().into_owned(),
+        size,
+        h.finish(),
+    ))
 }
 
 #[test]
@@ -123,7 +137,9 @@ fn trt_engine_cache_cold_vs_warm() {
                 "STRICT (PARKO_TRT_REQUIRE_EP): TensorRT EP unavailable / cold build failed ({e:?}) — \
                  refusing (fail-closed).",
             );
-            eprintln!("SKIP: TensorRT EP unavailable / cold build failed ({e:?}) — Jetson/TRT ORT only.");
+            eprintln!(
+                "SKIP: TensorRT EP unavailable / cold build failed ({e:?}) — Jetson/TRT ORT only."
+            );
             return;
         }
     };
@@ -161,7 +177,11 @@ fn trt_engine_cache_cold_vs_warm() {
 
     let cold_ms = cold_dur.as_secs_f64() * 1000.0;
     let warm_ms = warm_dur.as_secs_f64() * 1000.0;
-    let speedup = if warm_ms > 0.0 { cold_ms / warm_ms } else { f64::INFINITY };
+    let speedup = if warm_ms > 0.0 {
+        cold_ms / warm_ms
+    } else {
+        f64::INFINITY
+    };
     let max_diff = cold_logits
         .iter()
         .zip(&warm_logits)
@@ -178,5 +198,7 @@ fn trt_engine_cache_cold_vs_warm() {
         ),
         None => unreachable!("fingerprint asserted Some above"),
     }
-    println!("NOTE: host-indicative Jetson timings — sizes the warm-up budget; NOT a WCET/FTTI claim.");
+    println!(
+        "NOTE: host-indicative Jetson timings — sizes the warm-up budget; NOT a WCET/FTTI claim."
+    );
 }
