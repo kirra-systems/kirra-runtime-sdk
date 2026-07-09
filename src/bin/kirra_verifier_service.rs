@@ -99,6 +99,10 @@ mod principals;
 // (create / list / get / arm / advance / halt). ADMIN-scoped at the router layer.
 #[path = "kirra_verifier_service/campaigns.rs"]
 mod campaigns;
+// EP-17 explainable safety verdicts — GET /verdicts/{id} renders a denied
+// actuator command as a signed, human-readable artifact. AUDITOR-scoped.
+#[path = "kirra_verifier_service/verdicts.rs"]
+mod verdicts;
 // SG-008 (ASIL D) startup sentinel — pure invariant predicate + its CERT-003
 // RTM coverage tests; extracted from this file to keep the entry point lean.
 #[path = "kirra_verifier_service/startup.rs"]
@@ -1898,6 +1902,9 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/system/audit/verify", get(verify_audit_chain))
         .route("/system/audit/causal/verify", get(verify_causal_chain))
         .route("/system/audit/export", get(handle_audit_export))
+        // EP-17 — one denial as a signed, explained artifact (reads the
+        // chained record + the denied command's raw inputs → audit-read tier).
+        .route("/verdicts/{verdict_id}", get(verdicts::get_verdict_handler))
         .layer(middleware::from_fn_with_state(svc_state.clone(), require_audit_scope))
         // #G7 — same transport-security boundary as every other gated group.
         .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
@@ -2740,6 +2747,8 @@ mod posture_gate_real_router_tests {
             ("POST", "/action_filter/evaluate"),
             // WS-4 node adoption report — identity-gated (a node write needs a credential).
             ("POST", "/fleet/campaigns/report"),
+            // EP-17 verdict retrieval — auditor tier (exposes denied-command inputs).
+            ("GET", "/verdicts/0123456789abcdef0123456789abcdef"),
         ];
         for (method, path) in cases {
             let status =

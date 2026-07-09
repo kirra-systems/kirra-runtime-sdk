@@ -149,6 +149,12 @@ src/
 │                               cursor persistence (at-least-once, ship-then-advance),
 │                               spawn_audit_shipper (env-gated background scheduler,
 │                               AUDIT_SHIP_INTERVAL_MS; opt-in via KIRRA_AUDIT_SHIP_PATH)
+├── verdicts.rs               — EP-17 explainable verdicts: mint_verdict_id /
+│                               is_valid_verdict_id + the DenyCode→operator-sentence
+│                               explanation table (kept OUT of the frozen talisman;
+│                               a lock-step test walks the real enum). Deny arm binds
+│                               the id into the chained payload + 400 body; the
+│                               auditor-tier GET /verdicts/{id} handler renders it
 ├── ota_campaign.rs           — WS-4/Track-3 OTA governor-artifact campaign engine
 │                               (PURE): Campaign, CampaignState machine, HaltReason,
 │                               fail-closed posture_regression_halt (advance HALTS,
@@ -344,6 +350,7 @@ Admin token or an `integrator`-role principal.
 - `GET  /system/audit/verify` — Verify audit chain integrity
 - `GET  /system/audit/causal/verify` — Verify the fabric causal chain
 - `GET  /system/audit/export` — Export the audit chain (read-only; no mutation rights)
+- `GET  /verdicts/{verdict_id}` — EP-17 explainable safety verdict: one DENIED actuator command as a signed, human-readable artifact (machine `DenyCode` → operator explanation → recorded inputs + `inputs_digest_sha256` over the exact chained bytes + the chain fields: sequence/hashes/signature/key id). The id is minted by the deny arm and returned in the 400 body (`verdict_id` / `verdict_uri`); auditor tier because it exposes the denied command's raw inputs
 
 ### Tier 2b — Actuator (`SCOPE_ACTUATOR_COMMAND`; admin token or `operator`-role principal)
 - `POST /actuator/motion/command` — behind the decel safety envelope + posture gate

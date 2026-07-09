@@ -7,7 +7,7 @@ use axum::{
     extract::State,
     http::{Request, StatusCode},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -472,17 +472,29 @@ pub async fn enforce_actuator_safety_envelope(
             // never gated on the audit write succeeding). Field-for-field
             // alphabetical ordering preserves audit-chain hash stability;
             // see audit_writer::byte_identity_tests.
+            //
+            // EP-17: mint the retrievable-verdict handle and bind it INTO the
+            // chained payload; the same id is returned in the 400 body below,
+            // so the denial is retrievable as a signed artifact via
+            // `GET /verdicts/{id}`. Minting is hash-over-bytes (no I/O, no
+            // lock) — verdict-path WCET shape unchanged.
+            let proposed_payload = ProposedCommandPayload {
+                current_steering_angle_deg: proposed_cmd.current_steering_angle_deg,
+                current_velocity_mps: proposed_cmd.current_velocity_mps,
+                delta_time_s: proposed_cmd.delta_time_s,
+                linear_velocity_mps: proposed_cmd.linear_velocity_mps,
+                steering_angle_deg: proposed_cmd.steering_angle_deg,
+            };
+            let verdict_id = crate::verdicts::mint_verdict_id(
+                now,
+                &format!("{}|{:?}", code.reason(), proposed_payload),
+            );
             let job = AuditWriteJob {
                 event_type: "KINEMATIC_CONTRACT_VIOLATION",
                 payload: KinematicViolationPayload {
                     posture_at_rejection: fleet_posture_str(&posture),
-                    proposed_command: ProposedCommandPayload {
-                        current_steering_angle_deg: proposed_cmd.current_steering_angle_deg,
-                        current_velocity_mps: proposed_cmd.current_velocity_mps,
-                        delta_time_s: proposed_cmd.delta_time_s,
-                        linear_velocity_mps: proposed_cmd.linear_velocity_mps,
-                        steering_angle_deg: proposed_cmd.steering_angle_deg,
-                    },
+                    proposed_command: proposed_payload,
+                    verdict_id: verdict_id.clone(),
                     violation: code.reason(),
                 },
                 created_at_ms: now as i64,
@@ -545,7 +557,24 @@ pub async fn enforce_actuator_safety_envelope(
                 }
             }
 
-            Err(StatusCode::BAD_REQUEST)
+            // EP-17: the 400 carries the machine code, the operator
+            // explanation, and the verdict handle — the SAME id bound into
+            // the chained (and, with a signing key, Ed25519-signed) audit
+            // payload above, retrievable via the auditor-tier
+            // `GET /verdicts/{verdict_id}`. Status is unchanged (400).
+            let body = serde_json::json!({
+                "denied": true,
+                "code": code.reason(),
+                "explanation": crate::verdicts::explain_deny_token(code.reason()),
+                "verdict_id": verdict_id,
+                "verdict_uri": format!("/verdicts/{verdict_id}"),
+            });
+            Ok((
+                StatusCode::BAD_REQUEST,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body.to_string(),
+            )
+                .into_response())
         }
     }
 }

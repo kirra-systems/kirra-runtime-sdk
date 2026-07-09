@@ -459,6 +459,65 @@ impl VerifierStore {
         rows.collect()
     }
 
+    /// EP-17 — load the chained audit record carrying `verdict_id` (the
+    /// retrievable-verdict handle the deny arm binds into the
+    /// `KINEMATIC_CONTRACT_VIOLATION` payload). `None` when no such record.
+    ///
+    /// The caller MUST pre-validate the id shape
+    /// (`crate::verdicts::is_valid_verdict_id` — 32 lowercase hex chars) so
+    /// LIKE metacharacters can never widen the pattern; this method
+    /// additionally re-checks the parsed payload field EXACTLY, so the LIKE
+    /// is only a coarse index-free prefilter, never the authority.
+    pub fn load_audit_record_by_verdict_id(
+        &self,
+        verdict_id: &str,
+    ) -> Result<Option<crate::audit_shipper::ShippedAuditRecord>> {
+        let like = format!("%\"verdict_id\":\"{verdict_id}\"%");
+        let mut stmt = self.conn.prepare(
+            "SELECT sequence, event_type, event_json, previous_hash_hex, record_hash_hex, \
+                    created_at_ms, hash_version, signature_b64, key_id \
+             FROM audit_log_chain \
+             WHERE event_type = 'KINEMATIC_CONTRACT_VIOLATION' AND event_json LIKE ?1 \
+             ORDER BY sequence ASC LIMIT 8",
+        )?;
+        let rows = stmt.query_map(params![like], |row| {
+            let seq_raw: i64 = row.get(0)?;
+            let sequence = u64::try_from(seq_raw).map_err(|_| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Integer,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("audit_log_chain.sequence negative/corrupt: {seq_raw}"),
+                    )),
+                )
+            })?;
+            Ok(crate::audit_shipper::ShippedAuditRecord {
+                sequence,
+                event_type: row.get(1)?,
+                event_json: row.get(2)?,
+                previous_hash_hex: row.get(3)?,
+                record_hash_hex: row.get(4)?,
+                created_at_ms: row.get(5)?,
+                hash_version: row.get(6)?,
+                signature_b64: row.get(7)?,
+                key_id: row.get(8)?,
+            })
+        })?;
+        for rec in rows {
+            let rec = rec?;
+            // Exact-match re-check on the parsed payload — the authority.
+            let exact = serde_json::from_str::<serde_json::Value>(&rec.event_json)
+                .ok()
+                .and_then(|v| v.get("verdict_id").and_then(|id| id.as_str().map(String::from)))
+                .is_some_and(|id| id == verdict_id);
+            if exact {
+                return Ok(Some(rec));
+            }
+        }
+        Ok(None)
+    }
+
     pub(crate) fn init_audit_chain_schema(conn: &Connection) -> Result<()> {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS audit_log_chain (

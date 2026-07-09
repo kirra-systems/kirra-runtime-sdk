@@ -52,10 +52,18 @@ pub const AUDIT_QUEUE_BOUND: usize = 2048;
 /// a versioned audit-format migration, not a transparent rewrite, because
 /// the entire serialized byte sequence is bound into the chain hash
 /// (`audit_chain::compute_record_hash_v2`, arg 3 `event_json`).
+///
+/// EP-17 format rev: `verdict_id` (the retrievable-verdict handle minted by
+/// `crate::verdicts::mint_verdict_id` and returned in the 400 body) is bound
+/// INTO the chained payload, so the operator artifact `GET /verdicts/{id}`
+/// serves is tamper-evident under the same chain hash + signature as the
+/// denial itself. Old records without the field verify unchanged (each chain
+/// hash binds that record's own bytes).
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct KinematicViolationPayload {
     pub posture_at_rejection: &'static str,
     pub proposed_command: ProposedCommandPayload,
+    pub verdict_id: String,
     pub violation: &'static str,
 }
 
@@ -191,6 +199,7 @@ mod byte_identity_tests {
         violation: &str,
         cmd: ProposedCommandPayload,
         posture_at_rejection: &str,
+        verdict_id: &str,
     ) -> String {
         json!({
             "violation": violation,
@@ -202,19 +211,24 @@ mod byte_identity_tests {
                 "current_steering_angle_deg": cmd.current_steering_angle_deg,
             },
             "posture_at_rejection": posture_at_rejection,
+            // EP-17 format rev: the retrievable-verdict handle. `json!`'s
+            // BTreeMap ordering slots it alphabetically, same as the struct.
+            "verdict_id": verdict_id,
         })
         .to_string()
     }
 
     fn assert_byte_identical(cmd: ProposedCommandPayload, code: DenyCode, posture: FleetPosture) {
         let posture_str = fleet_posture_str(&posture);
+        let verdict_id = "0123456789abcdef0123456789abcdef";
         let new = serde_json::to_string(&KinematicViolationPayload {
             posture_at_rejection: posture_str,
             proposed_command: cmd,
+            verdict_id: verdict_id.to_string(),
             violation: code.reason(),
         })
         .expect("serialize must succeed");
-        let legacy = render_legacy(code.reason(), cmd, posture_str);
+        let legacy = render_legacy(code.reason(), cmd, posture_str, verdict_id);
         assert_eq!(
             new, legacy,
             "byte-identity failure for code={code:?} posture={posture:?} cmd={cmd:?}\n  new={new}\nlegacy={legacy}"
@@ -336,6 +350,7 @@ mod queue_behavior_tests {
                     linear_velocity_mps: 0.0,
                     steering_angle_deg: 0.0,
                 },
+                verdict_id: "0123456789abcdef0123456789abcdef".to_string(),
                 violation: "TEST",
             },
             created_at_ms: 0,
