@@ -39,11 +39,13 @@ pub(crate) async fn get_verdict_handler(
             .into_response();
     }
 
+    // Read-only lookup → the read-replica pool, never the writer mutex (an
+    // auditor retrieving verdicts must not contend the audit writer).
     let id_for_query = verdict_id.clone();
     let loaded = svc
         .app
         .store
-        .call(move |store| store.load_audit_record_by_verdict_id(&id_for_query))
+        .call_read(move |store| store.load_audit_record_by_verdict_id(&id_for_query))
         .await;
 
     let record = match loaded {

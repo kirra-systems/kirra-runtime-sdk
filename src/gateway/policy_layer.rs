@@ -485,10 +485,15 @@ pub async fn enforce_actuator_safety_envelope(
                 linear_velocity_mps: proposed_cmd.linear_velocity_mps,
                 steering_angle_deg: proposed_cmd.steering_angle_deg,
             };
-            let verdict_id = crate::verdicts::mint_verdict_id(
-                now,
-                &format!("{}|{:?}", code.reason(), proposed_payload),
+            // Canonical serde_json bytes as the mint input (Debug output is
+            // not a stable format); the counter inside `mint_verdict_id`
+            // guarantees uniqueness even if serialization ever failed empty.
+            let mint_input = format!(
+                "{}|{}",
+                code.reason(),
+                serde_json::to_string(&proposed_payload).unwrap_or_default(),
             );
+            let verdict_id = crate::verdicts::mint_verdict_id(now, &mint_input);
             let job = AuditWriteJob {
                 event_type: "KINEMATIC_CONTRACT_VIOLATION",
                 payload: KinematicViolationPayload {
