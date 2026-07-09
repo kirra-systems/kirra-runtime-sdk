@@ -1013,6 +1013,12 @@ jobs:
         run: |
           set -o pipefail
           python3 ci/check_quality_guardrails.py | tee quality-guardrails-report.txt
+      - name: Orphan-core gate (wire-or-delete ratchet, DD §8.2)
+        # A crate-root `pub mod` with no non-test consumer must be wired,
+        # deleted, or baselined with a justification — the forcing function
+        # the DD review asked for after finding six unwired "DONE" cores.
+        # See ci/check_orphan_cores.py + ci/orphan_cores_baseline.json.
+        run: python3 ci/check_orphan_cores.py
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Clippy
