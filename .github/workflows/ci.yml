@@ -552,12 +552,15 @@ jobs:
   # (like loom/fuzz) and `#[path]`-includes the shipped sources VERBATIM, so
   # the file under proof IS the file that ships.
   #
-  # NON-BLOCKING for now (`continue-on-error`), per the EP-15 plan: the lane
-  # flips to blocking once it has a stable run history. The mirror tests of
-  # every property already run BLOCKING in this lane's first step (they need
-  # no Kani), so a property regression still fails CI today.
+  # BLOCKING as of the L5 flip (proof runs on main were green and the proofs
+  # are deterministic CBMC over blob-pinned sources): a genuine proof failure
+  # now fails CI. The one tolerated failure mode is the Kani INSTALL step
+  # (network/toolchain-fetch flake, `continue-on-error`) — when install fails
+  # the proofs are SKIPPED, not failed, and the mirror tests of every property
+  # (which need no Kani) have already run BLOCKING as this lane's first step,
+  # so a property regression still fails CI even on an install-flake day.
   kani-proofs:
-    name: Kani proofs (EP-15, non-blocking)
+    name: Kani proofs (EP-15, blocking; install-flake tolerated)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -565,13 +568,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Proof-property mirror tests (BLOCKING; includes compile + concrete mirrors)
         run: cd verification/kani && cargo test --locked
-      - name: Install Kani
+      - name: Install Kani (tolerated flake — proofs skip, mirrors already gated)
         id: kani-install
         continue-on-error: true
         run: cargo install kani-verifier --locked && cargo kani setup
-      - name: Run Kani proofs (non-blocking until the lane stabilizes)
+      - name: Run Kani proofs (BLOCKING)
         if: steps.kani-install.outcome == 'success'
-        continue-on-error: true
         run: cd verification/kani && cargo kani
 
   # M5 — fuzz-target build + bounded run guard. Compiles every cargo-fuzz
