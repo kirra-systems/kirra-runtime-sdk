@@ -89,7 +89,14 @@ pub enum EnrollError {
 
 fn parse_key_hex(key_hex: &str) -> Result<VerifyingKey, EnrollError> {
     let t = key_hex.trim();
-    if t.len() != 64 || !t.bytes().all(|b| b.is_ascii_hexdigit()) {
+    // LOWERCASE hex only, exactly as the module docs pin the format: a
+    // manually edited pin (e.g. uppercase) is treated as tamper/corruption
+    // evidence rather than silently normalized (Copilot review on #892).
+    if t.len() != 64
+        || !t
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
         return Err(EnrollError::MalformedKey);
     }
     let mut bytes = [0u8; 32];
@@ -154,20 +161,46 @@ pub fn enroll_verifying_key(
         Err(e) => return Err(EnrollError::Io(e.to_string())),
     };
 
-    // Atomic pin: write a sibling temp file, fsync, rename over the target.
+    // Atomic pin: write a sibling temp file (unique name — concurrent
+    // enrollments or a leftover tmp must not collide), 0600 (the pin is
+    // integrity-critical; do not let a permissive umask make it
+    // group-writable), fsync the file, rename over the target, then fsync
+    // the DIRECTORY so the rename itself is durable (Copilot review, #892).
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let unique = {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        format!("{}-{nanos}", std::process::id())
+    };
     let tmp = dir.join(format!(
-        ".{}.enroll-tmp",
+        ".{}.enroll-tmp.{unique}",
         path.file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "governor_vk".to_string())
     ));
     let write = (|| -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
         f.write_all(key_to_hex(&offered).as_bytes())?;
         f.write_all(b"\n")?;
         f.sync_all()?;
-        std::fs::rename(&tmp, path)
+        std::fs::rename(&tmp, path)?;
+        // Durability of the rename: fsync the containing directory (Unix).
+        #[cfg(unix)]
+        {
+            if let Ok(d) = std::fs::File::open(dir) {
+                let _ = d.sync_all();
+            }
+        }
+        Ok(())
     })();
     if let Err(e) = write {
         let _ = std::fs::remove_file(&tmp);
@@ -272,6 +305,31 @@ mod tests {
             enroll_verifying_key(&p, &key_hex(1), true),
             Ok(EnrollOutcome::Enrolled { .. })
         ));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// Copilot (#892): uppercase hex is refused (the documented format is
+    /// lowercase; a hand-edited pin reads as tamper evidence, not silently
+    /// normalized), and the written pin is 0600 regardless of umask.
+    #[test]
+    fn uppercase_hex_is_refused_and_pin_mode_is_0600() {
+        let p = pin_path("case-mode");
+        let _ = std::fs::remove_file(&p);
+        let upper = key_hex(1).to_uppercase();
+        assert_eq!(
+            enroll_verifying_key(&p, &upper, false),
+            Err(EnrollError::MalformedKey)
+        );
+        enroll_verifying_key(&p, &key_hex(1), false).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "pin must be 0600, got {mode:o}");
+        }
+        // An uppercase pin on disk is unreadable = tamper evidence.
+        std::fs::write(&p, key_hex(1).to_uppercase()).unwrap();
+        assert!(load_pinned_verifying_key(&p).is_err());
         let _ = std::fs::remove_file(&p);
     }
 
