@@ -20,8 +20,15 @@
 #
 # RUN:   cargo kani                      (inside verification/kani/)
 #        cargo kani --harness <name>     (one property)
-# CI:    the `kani-proofs` lane installs Kani on the runner and runs the full
-#        set — NON-BLOCKING until the lane has a stable history (EP-15 plan).
+#        cargo kani --features deep-proofs   (adds the R2 deep harness)
+# CI:    the `kani-proofs` lane (BLOCKING since the L5 flip) installs Kani and
+#        runs the default set on every PR. Harnesses behind `deep-proofs` run
+#        in the WEEKLY `kani-deep-weekly` lane instead: R2's exact-IEEE
+#        relational instance exceeds any per-PR solver budget (CaDiCaL and
+#        kissat both blew the 45-min job timeout on the final UNSAT solve), so
+#        it gets the scheduled multi-hour budget the deep-fuzz campaign already
+#        uses. Every deep property keeps a BLOCKING per-PR concrete mirror in
+#        this crate's `cargo test`.
 #
 # The empty `[workspace]` table detaches this crate from the parent workspace
 # (like `fuzz/` and `crates/kirra-loom-models`): Kani never enters the root
@@ -33,6 +40,14 @@ publish = false
 edition = "2021"
 
 [workspace]
+
+[features]
+# Proof harnesses whose solver cost exceeds the per-PR CI budget. Compiled (and
+# run) only by the weekly `kani-deep-weekly` lane via
+# `cargo kani --features deep-proofs`. Gating is opt-IN per harness: a new
+# harness is per-PR-blocking by default unless it is explicitly demoted here,
+# so the deep lane can never silently absorb the whole proof set.
+deep-proofs = []
 
 [lints.rust]
 # `--cfg kani` is set by the cargo-kani driver, not by any Cargo feature.

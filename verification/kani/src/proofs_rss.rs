@@ -13,6 +13,12 @@
 //! bit-precise CBMC float model can decide, scoped honestly around the
 //! nonlinear-float limits of full-real-domain monotonicity.
 //!
+//! LANE SPLIT: R1/R3 run per-PR in the blocking `kani-proofs` lane; R2 (the
+//! relational two-evaluation instance) is behind the `deep-proofs` feature and
+//! runs in the weekly `kani-deep-weekly` lane — its final UNSAT solve exceeds
+//! the per-PR job budget on both CaDiCaL and kissat. Its per-PR gate is the
+//! concrete mirror below (full speed-grid walk across all four param axes).
+//!
 //! Properties (cited from `docs/safety/GOVERNOR_INTEGRITY_EVIDENCE.md` §2):
 //!  * R1 fail-closed totality (SG9): for EVERY f64 bit pattern in every
 //!    argument — NaN, ±Inf, negatives, zeros, denormals — the result is finite
@@ -30,11 +36,11 @@ use crate::rss::{longitudinal_safe_distance, RSS_FAILSAFE_DISTANCE_M};
 /// Integer-scaled operational grids (EP-15 "integer-scaled forms").
 /// Speeds: 0 ..= 60.00 m/s in 0.01 steps (2× the 22.35 m/s ODD cap, covering
 /// closing-speed sums). Params: 0.1 ..= 25.5 in 0.1 steps.
-#[cfg(kani)]
+#[cfg(all(kani, feature = "deep-proofs"))]
 fn grid_speed(raw: u16) -> f64 {
     f64::from(raw) * 0.01
 }
-#[cfg(kani)]
+#[cfg(all(kani, feature = "deep-proofs"))]
 fn grid_param(raw: u8) -> f64 {
     f64::from(raw.max(1)) * 0.1
 }
@@ -64,12 +70,23 @@ mod proofs {
     /// the required distance never DECREASES as the closing speed grows. This
     /// is the precondition `occlusion_limited_speed`'s bisection relies on
     /// (`lead_vel = 0`, exactly its call shape).
+    // DEEP LANE (weekly), not per-PR. With the squares spelled as exact IEEE
+    // multiplications (rss.rs dropped `__builtin_powi`, whose cheap over-
+    // approximation both admitted a spurious counterexample AND made this
+    // relational two-evaluation proof artificially easy), the instance
+    // exceeds the per-PR 45-min job budget on BOTH default CaDiCaL and
+    // kissat: kissat's first (SAT, reachability) solve returns in ~20 s, but
+    // the final UNSAT solve — the one that actually proves the property — ran
+    // 43+ min without returning before the job timeout (CI runs of PR #888).
+    // The property itself is believed true and structurally so: with
+    // `lead_vel = 0` every step of `longitudinal_safe_distance` on the grid
+    // is a composition of IEEE-monotone operations (round-to-nearest
+    // preserves weak inequalities), and the BLOCKING per-PR mirror below
+    // walks the full speed grid across all four parameter axes. The
+    // machine-checked full-lattice proof runs in the `kani-deep-weekly`
+    // lane with a multi-hour budget.
+    #[cfg(feature = "deep-proofs")]
     #[kani::proof]
-    // kissat: with the squares now spelled as exact IEEE multiplications
-    // (rss.rs dropped `__builtin_powi`, whose cheap over-approximation both
-    // admitted a spurious counterexample AND made this relational two-
-    // evaluation proof artificially easy), the default CaDiCaL run exceeds
-    // the CI job timeout. Kissat solves this instance class far faster.
     #[kani::solver(kissat)]
     fn r2_longitudinal_monotone_in_closing_speed_on_grid() {
         let v1_raw: u16 = kani::any();
@@ -140,18 +157,41 @@ mod mirrors {
         }
     }
 
-    #[test]
-    fn r2_mirror_monotone_along_grid() {
-        // Walk the whole 0..=60.00 m/s grid at the frozen-shaped params and
-        // assert pairwise (adjacent) monotonicity — the transitive closure of
-        // what the proof checks for arbitrary pairs.
-        let (rho, a_max, b_min, b_max) = (0.5, 3.0, 4.0, 8.0);
+    /// Walk the whole 0..=60.00 m/s speed grid and assert pairwise (adjacent)
+    /// monotonicity — the transitive closure of what the R2 proof checks for
+    /// arbitrary pairs — at the given parameter tuple.
+    fn assert_monotone_along_speed_grid(rho: f64, a_max: f64, b_min: f64, b_max: f64) {
         let mut prev = longitudinal_safe_distance(0.0, 0.0, rho, a_max, b_min, b_max);
         for raw in 1..=6_000u16 {
             let d =
                 longitudinal_safe_distance(f64::from(raw) * 0.01, 0.0, rho, a_max, b_min, b_max);
-            assert!(prev <= d, "non-monotone step at raw={raw}");
+            assert!(
+                prev <= d,
+                "non-monotone step at raw={raw} (rho={rho} a_max={a_max} b_min={b_min} b_max={b_max})"
+            );
             prev = d;
+        }
+    }
+
+    #[test]
+    fn r2_mirror_monotone_along_grid() {
+        assert_monotone_along_speed_grid(0.5, 3.0, 4.0, 8.0);
+    }
+
+    /// This crate's per-PR stand-in for the deep-lane R2 proof: sweep each of
+    /// the four parameter axes through its ENTIRE 0.1 ..= 25.5 grid (the
+    /// others frozen at the shaped tuple) and walk the full speed grid at
+    /// every point — ~6.1 M evaluations, exhaustive per-axis, leaving only
+    /// cross-axis interaction to the weekly full-lattice Kani run.
+    #[test]
+    fn r2_mirror_monotone_per_param_axis() {
+        let frozen = (0.5, 3.0, 4.0, 8.0);
+        for raw in 1..=255u16 {
+            let p = f64::from(raw) * 0.1;
+            assert_monotone_along_speed_grid(p, frozen.1, frozen.2, frozen.3);
+            assert_monotone_along_speed_grid(frozen.0, p, frozen.2, frozen.3);
+            assert_monotone_along_speed_grid(frozen.0, frozen.1, p, frozen.3);
+            assert_monotone_along_speed_grid(frozen.0, frozen.1, frozen.2, p);
         }
     }
 

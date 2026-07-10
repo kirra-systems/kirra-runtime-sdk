@@ -559,6 +559,13 @@ jobs:
   # the proofs are SKIPPED, not failed, and the mirror tests of every property
   # (which need no Kani) have already run BLOCKING as this lane's first step,
   # so a property regression still fails CI even on an install-flake day.
+  #
+  # LANE SPLIT: harnesses behind the kani crate's `deep-proofs` feature (today:
+  # R2 full-lattice monotonicity, whose exact-IEEE relational instance blew
+  # this job's 45-min budget on both CaDiCaL and kissat) do NOT run here — the
+  # default `cargo kani` below compiles them out. They run weekly with a
+  # multi-hour budget in kani-deep-weekly.yml; their concrete mirrors still
+  # run BLOCKING in this lane's first step.
   kani-proofs:
     name: Kani proofs (EP-15, blocking; install-flake tolerated)
     runs-on: ubuntu-latest
