@@ -334,12 +334,76 @@ pub fn longitudinal_safe_distance(
         return RSS_FAILSAFE_DISTANCE_M;
     }
 
-    let d_response = ego_vel * reaction_time + 0.5 * accel_max * reaction_time.powi(2);
-    let v_after = ego_vel + accel_max * reaction_time;
-    let d_brake_ego = v_after.powi(2) / (2.0 * brake_min);
-    let d_brake_lead = lead_vel.powi(2) / (2.0 * brake_max);
+    // NO-TRANSIENT-NAN DISCIPLINE. Extreme-but-finite inputs can overflow an
+    // intermediate term to ±Inf, and `Inf + -Inf` / `Inf - Inf` would transit
+    // through NaN before a final finiteness check caught it. The previous
+    // shape was still fail-closed (a NaN `raw` is non-finite → failsafe), but
+    // the NaN *production* itself is now guarded away: every addition or
+    // subtraction below happens only after its operands are proven finite
+    // (products/divisions of finite operands — with the divisors guarded
+    // finite-positive above — yield ±Inf at worst, never NaN). Output is
+    // identical for every input; the property "this function never forms a
+    // NaN" is what the Kani R1/R2 harnesses machine-check.
+    // Spelled `x * x` (not `.powi(2)`) so the Kani/CBMC proof of this
+    // function models a plain IEEE multiplication instead of the loop-based
+    // `__builtin_powi` over-approximation, whose under-constrained result
+    // admits spurious monotonicity counterexamples (R2). Bit-identical on
+    // hardware: LLVM lowers `powi(2)` to a single `fmul`.
+    let rt2 = reaction_time * reaction_time;
+    if !rt2.is_finite() {
+        // finite² can overflow to +Inf; guarded here so the products below
+        // are finite×finite (0 × Inf would be the one product-formed NaN).
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
+    let d_react = ego_vel * reaction_time;
+    let d_accel = 0.5 * accel_max * rt2;
+    if !(d_react.is_finite() && d_accel.is_finite()) {
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
+    let d_response = d_react + d_accel;
 
-    let raw = d_response + d_brake_ego - d_brake_lead;
+    let v_gain = accel_max * reaction_time;
+    if !(v_gain.is_finite() && d_response.is_finite()) {
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
+    let v_after = ego_vel + v_gain;
+
+    // The one NaN a division can form here is Inf/Inf: the squared numerator
+    // AND the doubled denominator can each overflow to +Inf independently
+    // (review catch on the first cut of this restructure). Divide only when
+    // the divisor is finite; a divisor that overflowed (an absurdly strong
+    // brake) keeps the old finite/Inf → 0 flush, and Inf/Inf — whose old
+    // `raw` was NaN → failsafe — fails closed directly. Divisors are
+    // finite-positive-nonzero when used, so 0/0 is impossible and a finite
+    // division never forms NaN.
+    let v_after_sq = v_after * v_after; // ±Inf² → +Inf; never NaN
+    let lead_sq = lead_vel * lead_vel; // finite² → +Inf at worst; never NaN
+    let twice_brake_min = 2.0 * brake_min;
+    let twice_brake_max = 2.0 * brake_max;
+    let d_brake_ego = if twice_brake_min.is_finite() {
+        v_after_sq / twice_brake_min
+    } else if v_after_sq.is_finite() {
+        0.0
+    } else {
+        return RSS_FAILSAFE_DISTANCE_M;
+    };
+    let d_brake_lead = if twice_brake_max.is_finite() {
+        lead_sq / twice_brake_max
+    } else if lead_sq.is_finite() {
+        0.0
+    } else {
+        return RSS_FAILSAFE_DISTANCE_M;
+    };
+    if !(d_brake_ego.is_finite() && d_brake_lead.is_finite()) {
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
+
+    let sum = d_response + d_brake_ego;
+    if !sum.is_finite() {
+        // finite + finite can still overflow to ±Inf (never NaN); fail closed.
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
+    let raw = sum - d_brake_lead;
     if !raw.is_finite() {
         return RSS_FAILSAFE_DISTANCE_M;
     }
