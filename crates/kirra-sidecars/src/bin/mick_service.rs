@@ -52,19 +52,10 @@ fn serve(
         ("GET", "/health") => respond(&mut stream, "200 OK", "{\"status\":\"ok\"}"),
         ("POST", "/intent") => match serde_json::from_slice::<IntentRequest>(&req.body) {
             Ok(r) => match svc.handle_text(&r, now_ms()) {
-                Ok((_, accepted)) => {
-                    let intent: serde_json::Value =
-                        serde_json::from_str(&accepted.intent_json).unwrap_or(serde_json::Value::Null);
-                    respond(
-                        &mut stream,
-                        "200 OK",
-                        &serde_json::json!({
-                            "ok": true, "seq": accepted.seq, "at_ms": accepted.at_ms,
-                            "intent": intent,
-                        })
-                        .to_string(),
-                    )
-                }
+                // The accepted slice embeds verbatim — validated as a
+                // standalone JSON object at acceptance, so there is no
+                // re-parse and no silent-null fallback here.
+                Ok((_, accepted)) => respond(&mut stream, "200 OK", &accepted.to_post_wire()),
                 Err("MICK_RATE_LIMITED") => respond(
                     &mut stream,
                     "429 Too Many Requests",

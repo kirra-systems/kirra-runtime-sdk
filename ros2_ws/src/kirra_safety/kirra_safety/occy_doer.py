@@ -26,7 +26,6 @@ the same `objects` list (richer than Taj's geometric clusters) — this node's s
 unchanged. Mick (the LLM) fits by publishing the goal/intent instead of RViz.
 """
 
-import json
 import math
 import time
 

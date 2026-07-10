@@ -96,14 +96,27 @@ pub struct AcceptedIntent {
 }
 
 impl AcceptedIntent {
-    /// The `GET /intent/last` wire form.
+    /// The `GET /intent/last` wire form. Embeds `intent_json` VERBATIM —
+    /// valid by construction: [`IntentService::handle_text`] verified the
+    /// slice stands alone as a JSON object BEFORE latching (a re-embed
+    /// failure there is a loud `MICK_INTENT_REEMBED_FAILED`, never a latched
+    /// artifact), so there is no silent-null fallback path here (review:
+    /// Copilot on #894).
     #[must_use]
     pub fn to_wire(&self) -> String {
-        // The slice parsed as an object moments ago; re-embedding it as a
-        // Value cannot fail for an accepted intent.
-        let intent: serde_json::Value =
-            serde_json::from_str(&self.intent_json).unwrap_or(serde_json::Value::Null);
-        serde_json::json!({ "intent": intent, "seq": self.seq, "at_ms": self.at_ms }).to_string()
+        format!(
+            r#"{{"intent":{},"seq":{},"at_ms":{}}}"#,
+            self.intent_json, self.seq, self.at_ms
+        )
+    }
+
+    /// The `POST /intent` success wire form (same verbatim-embed guarantee).
+    #[must_use]
+    pub fn to_post_wire(&self) -> String {
+        format!(
+            r#"{{"ok":true,"intent":{},"seq":{},"at_ms":{}}}"#,
+            self.intent_json, self.seq, self.at_ms
+        )
     }
 }
 
@@ -141,6 +154,16 @@ impl<M: ModelClient> IntentService<M> {
         }
         let ctx = world_context(req.context.as_ref().unwrap_or(&ContextReq::default()))?;
         let (intent, slice) = self.brain.decide_request(&ctx, &req.text)?;
+        // The slice must stand alone as a JSON object for verbatim
+        // re-publication (`to_wire`). `parse_llm_json` guarantees this; if
+        // that invariant ever breaks, refuse LOUDLY here — an unpublishable
+        // artifact must never latch (review: Copilot on #894).
+        let is_object = serde_json::from_str::<serde_json::Value>(&slice)
+            .map(|v| v.is_object())
+            .unwrap_or(false);
+        if !is_object {
+            return Err("MICK_INTENT_REEMBED_FAILED");
+        }
         self.seq += 1;
         let accepted = AcceptedIntent {
             seq: self.seq,
@@ -191,6 +214,12 @@ mod tests {
         let republished = wire["intent"].to_string();
         assert_eq!(MickIntent::from_llm_json(&republished).unwrap(), intent);
         assert_eq!(wire["seq"], 1);
+        // Verbatim embed: the wire carries the EXACT accepted slice, and the
+        // POST form is the same artifact behind ok:true.
+        assert!(accepted.to_wire().contains(&accepted.intent_json));
+        let post: serde_json::Value = serde_json::from_str(&accepted.to_post_wire()).unwrap();
+        assert_eq!(post["ok"], true);
+        assert_eq!(post["intent"], wire["intent"]);
     }
 
     /// Part 2.4 — the proof: unparseable LLM output fails closed to NO

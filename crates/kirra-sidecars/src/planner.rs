@@ -229,7 +229,24 @@ fn validate_finite(req: &PlanRequest) -> Result<(), SeamRejection> {
         .objects
         .iter()
         .all(|o| finite(&[o.x, o.y, o.vx, o.vy]));
-    if ego_ok && goal_ok && corr_ok && obj_ok {
+    // The optional vehicle overrides feed the checker's VehicleConfig and the
+    // planner preset — a NaN footprint would mask comparisons downstream, so
+    // they get the same gate (review: Copilot on #894).
+    let veh_ok = req.vehicle.as_ref().is_none_or(|v| {
+        [
+            v.wheelbase_m,
+            v.half_length_m,
+            v.half_width_m,
+            v.max_speed_mps,
+            v.max_steering_deg,
+            v.rss_lateral_alignment_tolerance_m,
+            v.lateral_clearance_target_m,
+        ]
+        .iter()
+        .flatten()
+        .all(|x| x.is_finite())
+    });
+    if ego_ok && goal_ok && corr_ok && obj_ok && veh_ok {
         Ok(())
     } else {
         Err(SeamRejection {
@@ -513,6 +530,32 @@ mod tests {
     fn nonfinite_world_input_is_refused_at_the_seam() {
         let mut req = base_request();
         req.ego.speed = f64::NAN;
+        assert_eq!(handle_plan(&req).unwrap_err().code, "NONFINITE_INPUT");
+        // The optional vehicle overrides get the same gate — a NaN footprint
+        // must not reach the checker's VehicleConfig.
+        let mut req = base_request();
+        req.vehicle = Some(VehicleReq {
+            class: None,
+            wheelbase_m: Some(f64::NAN),
+            half_length_m: None,
+            half_width_m: None,
+            max_speed_mps: None,
+            max_steering_deg: None,
+            rss_lateral_alignment_tolerance_m: None,
+            lateral_clearance_target_m: None,
+        });
+        assert_eq!(handle_plan(&req).unwrap_err().code, "NONFINITE_INPUT");
+        let mut req = base_request();
+        req.vehicle = Some(VehicleReq {
+            class: None,
+            wheelbase_m: None,
+            half_length_m: None,
+            half_width_m: None,
+            max_speed_mps: Some(f64::INFINITY),
+            max_steering_deg: None,
+            rss_lateral_alignment_tolerance_m: None,
+            lateral_clearance_target_m: None,
+        });
         assert_eq!(handle_plan(&req).unwrap_err().code, "NONFINITE_INPUT");
     }
 
