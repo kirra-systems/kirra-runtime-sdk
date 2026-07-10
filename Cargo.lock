@@ -2111,7 +2111,10 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
+ "kirra-core",
+ "kirra-planner",
  "kirra-release-token",
+ "kirra-trajectory",
 ]
 
 [[package]]
