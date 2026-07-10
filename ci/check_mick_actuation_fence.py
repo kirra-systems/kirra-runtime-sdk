@@ -14,8 +14,13 @@ Mechanics (the check_orphan_cores.py precedent: pure-Python, no toolchain):
    closure of its NORMAL `[dependencies]` (+ `[target.*.dependencies]`) over
    workspace path deps, and fail if the closure contains any forbidden
    workspace crate (the actuation seams) or any forbidden external crate
-   (ROS/DDS/serial/GPIO stacks). `[dev-dependencies]` are exempt from the
-   closure — they cannot reach a shipped binary — but see (2).
+   (ROS/DDS/serial/GPIO stacks). The fenced crate's OWN `[dev-dependencies]`
+   are included: its examples and tests link them, and "just publish cmd_vel
+   from a quick example" is exactly the shortcut this gate exists to forbid.
+   TRANSITIVE dev-dependencies stay excluded — cargo never links a
+   dependency's dev-deps into the dependent's build, so counting them would
+   only teach people to ignore the gate (kirra-taj's own test harness dev-deps
+   the verifier, legitimately, without granting kirra-mick any edge).
 
 2. SYMBOL FENCE — scan every Rust source of the fenced crates (src/, bins,
    examples, AND tests — comment-stripped) for the actuation seam tokens
@@ -81,6 +86,10 @@ FORBIDDEN_SYMBOLS = [
     "issue_ros_release",
     "write_twist",
     "ReleaseToken",
+    # The actuator topic name itself: publishing needs the topic string, so a
+    # hand-rolled publisher in fenced code trips here even if the transport
+    # crate arrived under a name the manifest walk doesn't recognize.
+    "cmd_vel",
 ]
 
 LINE_COMMENT_RE = re.compile(r"//[^\n]*")
@@ -92,19 +101,25 @@ def load_manifest(crate_dir: Path) -> dict:
         return tomllib.load(f)
 
 
-def normal_deps(manifest: dict) -> dict[str, object]:
-    """NORMAL dependency name→spec map: [dependencies] plus every
-    [target.*.dependencies] table. dev-dependencies are deliberately
-    excluded (they cannot reach a shipped bin; the symbol fence covers
-    their source)."""
+def linked_deps(manifest: dict, include_dev: bool) -> dict[str, object]:
+    """Dependency name→spec map for the edges cargo actually LINKS from this
+    manifest: [dependencies] plus every [target.*.dependencies] table, plus —
+    at a FENCED ROOT only (`include_dev`) — its own [dev-dependencies], since
+    the root's examples and tests link those. Transitive dev-deps are never
+    linked by cargo and are never included (a false positive there would
+    teach people to ignore the gate)."""
     deps: dict[str, object] = {}
     deps.update(manifest.get("dependencies", {}))
     for target_tbl in manifest.get("target", {}).values():
         deps.update(target_tbl.get("dependencies", {}))
+        if include_dev:
+            deps.update(target_tbl.get("dev-dependencies", {}))
     # build-dependencies could smuggle codegen, not an actuation transport at
     # runtime — but there is no reason for a fenced crate to have any; include
     # them so a weird edge still surfaces.
     deps.update(manifest.get("build-dependencies", {}))
+    if include_dev:
+        deps.update(manifest.get("dev-dependencies", {}))
     return deps
 
 
@@ -134,24 +149,25 @@ def dep_name(name: str, spec: object) -> str:
 
 
 def closure(crate_dir: Path, members: dict[str, Path]) -> tuple[set[str], set[str]]:
-    """(workspace crate names, external crate names) transitively reachable
-    over NORMAL deps, following path deps through workspace members."""
+    """(workspace crate names, external crate names) reachable over the edges
+    cargo links: the fenced ROOT's normal + build + dev deps, then normal +
+    build deps transitively, following path deps through workspace members."""
     ws_seen: set[str] = set()
     ext_seen: set[str] = set()
-    queue = [crate_dir]
+    queue: list[tuple[Path, bool]] = [(crate_dir, True)]  # (dir, is_fenced_root)
     visited_dirs = set()
     while queue:
-        d = queue.pop()
+        d, is_root = queue.pop()
         if d in visited_dirs:
             continue
         visited_dirs.add(d)
         manifest = load_manifest(d)
-        for raw_name, spec in normal_deps(manifest).items():
+        for raw_name, spec in linked_deps(manifest, include_dev=is_root).items():
             name = dep_name(raw_name, spec)
             if name in members:
                 if name not in ws_seen:
                     ws_seen.add(name)
-                    queue.append(members[name])
+                    queue.append((members[name], False))
             else:
                 ext_seen.add(name)
     return ws_seen, ext_seen
