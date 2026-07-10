@@ -6,10 +6,11 @@
 //   1. Initialises tracing-subscriber (json envelope; INFO+ by default;
 //      RUST_LOG honoured).
 //   2. Parses a minimal CLI: --corridor-source <mock|lanelet2> [--map-bin PATH]
-//      [--lanelet-ids 1001,1002,...]. `mock` is the pilot default and
-//      requires no Lanelet2 install; `lanelet2` requires
-//      ros-${ROS_DISTRO}-lanelet2 + libboost-serialization-dev and a
-//      `.osm.bin` map file at --map-bin.
+//      [--lanelet-ids 1001,1002,...]. --corridor-source is REQUIRED — there is
+//      no silent default (ADR-0033 companion): `mock` is an explicit,
+//      WARN-bannered 5 m straight-line TEST stand-in requiring no Lanelet2
+//      install; `lanelet2` requires ros-${ROS_DISTRO}-lanelet2 +
+//      libboost-serialization-dev and a `.osm.bin` map file at --map-bin.
 //   3. Builds the `AdaptorState` (DashMap of per-asset accepted
 //      trajectories, perception cache, ego-odom cache, VehicleConfig).
 //   4. Builds the chosen `CorridorSource` impl.
@@ -47,6 +48,12 @@ enum CorridorSourceKind {
 #[derive(Debug, Clone)]
 struct CliArgs {
     corridor_source: CorridorSourceKind,
+    /// True only when `--corridor-source` was passed explicitly. The mock
+    /// corridor is a 5 m straight-line test stand-in (`MockCorridorSource`),
+    /// NOT drivable space — a deployment must never land on it by omission,
+    /// so an unspecified corridor source is a startup error, not a default
+    /// (ADR-0033 companion hardening).
+    corridor_source_explicit: bool,
     map_bin_path: Option<String>,
     lanelet_ids: Vec<i64>,
 }
@@ -55,6 +62,7 @@ impl Default for CliArgs {
     fn default() -> Self {
         Self {
             corridor_source: CorridorSourceKind::Mock,
+            corridor_source_explicit: false,
             map_bin_path: None,
             lanelet_ids: Vec::new(),
         }
@@ -83,6 +91,7 @@ fn parse_cli() -> Result<CliArgs, String> {
                         ))
                     }
                 };
+                args.corridor_source_explicit = true;
             }
             "--map-bin" => {
                 i += 1;
@@ -104,16 +113,28 @@ fn parse_cli() -> Result<CliArgs, String> {
                 eprintln!(
                     "kirra_ros2_adapter_node — S131 Governor adapter\n\
                   Usage:\n\
-                    kirra_ros2_adapter_node [--corridor-source <mock|lanelet2>]\n\
+                    kirra_ros2_adapter_node --corridor-source <mock|lanelet2>\n\
                                             [--map-bin <path/to/map.osm.bin>]\n\
                                             [--lanelet-ids <id1,id2,...>]\n\
-                  Default: --corridor-source mock (no Lanelet2 install needed)."
+                  --corridor-source is REQUIRED (no silent default): `mock` is a\n\
+                  5 m straight-line TEST stand-in, not drivable space."
                 );
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
+    }
+    // FAIL-CLOSED: no silent mock. The mock corridor is a straight-line test
+    // stand-in, not drivable space; running on it must be an explicit,
+    // visible operator choice, never an omission (ADR-0033 companion).
+    if !args.corridor_source_explicit {
+        return Err(
+            "--corridor-source is required (mock|lanelet2). The mock corridor is a \
+             5 m straight-line TEST stand-in, not drivable space; if you really \
+             want it, say so explicitly: --corridor-source mock"
+                .to_string(),
+        );
     }
     if args.corridor_source == CorridorSourceKind::Lanelet2
         && (args.map_bin_path.is_none() || args.lanelet_ids.is_empty())
@@ -142,7 +163,12 @@ fn init_tracing() {
 fn build_corridor(args: &CliArgs) -> Result<Arc<dyn CorridorSource>, Box<dyn std::error::Error>> {
     match args.corridor_source {
         CorridorSourceKind::Mock => {
-            tracing::info!("corridor source: mock (5 m half-width straight corridor, 500 m)");
+            tracing::warn!(
+                "corridor source: MOCK — a 5 m half-width straight TEST corridor \
+                 (500 m), NOT drivable space. Containment verdicts are meaningless \
+                 against real geometry. Explicitly requested via --corridor-source \
+                 mock; use lanelet2 for any real deployment."
+            );
             Ok(Arc::new(MockCorridorSource::straight_5m_half_width(500.0)))
         }
         #[cfg(feature = "lanelet2")]

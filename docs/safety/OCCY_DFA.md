@@ -32,6 +32,18 @@ integrity is concentrated in the simpler, deterministic, verifiable Governor.
   ISO 26262-9 voids the decomposition and *each* element would have to meet the
   full ASIL D.
 
+  > **Scope note (2026-07-09, pending ADR-0033).** PO-2's "cannot defeat" is
+  > currently **enforced on the SHM/inline enforcement path only** (EP-01
+  > `ActuatorStation` verify-before-release; FDIT matrix + WP-21b carrier
+  > evidence). On the **`ros2_ws` deployment topology it is asserted but
+  > unenforced**: the bus carries no DDS security, so any process can publish
+  > the motor topic directly, and the Rosmaster serial device has no in-repo
+  > owner. Until ADR-0033's motor-boundary chokepoint lands, PO-2 must be read
+  > as scoped to the SHM/inline path; on the ROS topology the honest claim is
+  > that the checker governs every command that *routes through* the
+  > interceptor, not every command that can reach the motors. Tracked as a
+  > safety finding (see ADR-0033 "Consequences — tracking").
+
 **Decision — planner rigor. SETTLED: DISCIPLINED-QM.**
 
 The planner is QM (no ASIL claim), but developed with **elevated process
