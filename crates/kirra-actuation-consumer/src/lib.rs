@@ -25,15 +25,42 @@
 
 #![forbid(unsafe_code)]
 
+/// Consumer verifying-key enrollment + rotation (the #891 key-distribution
+/// gap): pin/load/rotate the governor verifying key on a consumer host. See
+/// [`enrollment`].
+pub mod enrollment;
+
 pub use kirra_release_token::ros_twist::{
     RosReleaseGate, RosReleaseRefusal, RosTwistPayload, ROS_TWIST_PAYLOAD_LEN,
 };
-pub use kirra_release_token::ReleaseToken;
+pub use kirra_release_token::{ReleaseDenied, ReleaseToken};
 
 use ed25519_dalek::VerifyingKey;
 
 /// ADR-0033: the liveness deadline is ≈ 3 missed control periods.
 pub const DEFAULT_MISSED_PERIODS: u32 = 3;
+
+/// Consecutive `SignatureInvalid` refusals before the key-mismatch alarm
+/// latches. An OPERABILITY threshold, not a safety number: refusals already
+/// fail closed regardless; this only decides when the consumer starts saying
+/// "my pinned key doesn't match the signer" out loud. At the R2's 10–20 Hz
+/// command rate, 10 consecutive failures ≈ ½–1 s of uniform signature
+/// failure — long enough to rule out a stray corrupt frame, short enough
+/// that the diagnosis is up before anyone starts reading logs.
+pub const DEFAULT_SIGNATURE_INVALID_ALARM_STREAK: u32 = 10;
+
+/// The operator sentence the key-mismatch alarm carries. Fail-closed is
+/// correct; fail-closed-and-MUTE is a defect — a robot in a permanent safe
+/// stop must say why. This names the likely cause (rotation misorder) and
+/// the recovery.
+pub const KEY_MISMATCH_ALARM_EXPLANATION: &str =
+    "KEY MISMATCH: every release token is failing Ed25519 verification against this \
+     consumer's pinned governor verifying key. Likely cause: key rotation done out of \
+     order (the verifier is signing under a new key but this consumer was not re-enrolled \
+     first), or a wrong/stale consumer pin. The platform is holding its safe stop and will \
+     not move until this is fixed. Recovery: re-enroll the pin with the CURRENT governor \
+     verifying key (kirra-consumer-ctl enroll --rotate), restart the consumer. See \
+     docs/safety/GOVERNOR_KEY_PROVISIONING.md §7.";
 
 /// The one hardware seam. The real implementation owns the Rosmaster
 /// expansion-board serial device (dedicated user/group, mode 0600 — the
@@ -111,6 +138,75 @@ enum DriveState {
     Silent,
 }
 
+/// Per-class refusal counters — the distinguishable diagnostic surface
+/// (Tier-2's rogue-flood test watches `no_token`; the key-rotation drill
+/// watches `signature_invalid`). A refusal is never just "refused".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RefusalBreakdown {
+    pub no_token: u64,
+    pub digest_mismatch: u64,
+    pub signature_invalid: u64,
+    pub undecodable: u64,
+    pub stale: u64,
+    pub sequence_not_advanced: u64,
+}
+
+impl RefusalBreakdown {
+    fn count(&mut self, refusal: &RosReleaseRefusal) {
+        match refusal {
+            RosReleaseRefusal::NoToken => self.no_token += 1,
+            RosReleaseRefusal::Denied(ReleaseDenied::DigestMismatch) => self.digest_mismatch += 1,
+            RosReleaseRefusal::Denied(ReleaseDenied::SignatureInvalid) => {
+                self.signature_invalid += 1
+            }
+            RosReleaseRefusal::Undecodable(_) => self.undecodable += 1,
+            RosReleaseRefusal::Stale { .. } => self.stale += 1,
+            RosReleaseRefusal::SequenceNotAdvanced { .. } => self.sequence_not_advanced += 1,
+        }
+    }
+
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.no_token
+            + self.digest_mismatch
+            + self.signature_invalid
+            + self.undecodable
+            + self.stale
+            + self.sequence_not_advanced
+    }
+}
+
+/// The consumer's health surface — what a supervisor/monitor reads and what
+/// the field engineer sees. Read-only telemetry; nothing here gates the
+/// fence (the gate already failed closed before any of this is consulted).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConsumerHealth {
+    pub releases: u64,
+    pub refusals: RefusalBreakdown,
+    pub serial_errors: u64,
+    /// Consecutive `SignatureInvalid` refusals with no intervening release
+    /// or other-class refusal (uniform signature failure is the rotation-
+    /// misorder signature; a mixed stream is not).
+    pub consecutive_signature_invalid: u32,
+    /// LATCHED once `consecutive_signature_invalid` crosses the alarm
+    /// streak; cleared only by a VALID release (proof the pin works again).
+    /// While true, [`ConsumerHealth::alarm_explanation`] returns the loud
+    /// operator sentence.
+    pub key_mismatch_alarm: bool,
+    /// The starve path finished its ramp — the platform is in output
+    /// silence.
+    pub silent: bool,
+}
+
+impl ConsumerHealth {
+    /// The operator sentence for the latched alarm, if any.
+    #[must_use]
+    pub fn alarm_explanation(&self) -> Option<&'static str> {
+        self.key_mismatch_alarm
+            .then_some(KEY_MISMATCH_ALARM_EXPLANATION)
+    }
+}
+
 /// The consumer: gate + liveness + serial seam. Single-owner, single-thread —
 /// exactly one instance per actuation path (the same discipline as the gate).
 pub struct MotorConsumer<S: MotorSerial> {
@@ -121,7 +217,9 @@ pub struct MotorConsumer<S: MotorSerial> {
     /// Wall-clock (ms) of the last VALID release. Refusals never touch this.
     last_valid_at_ms: Option<u64>,
     releases: u64,
-    refusals: u64,
+    refusal_breakdown: RefusalBreakdown,
+    consecutive_signature_invalid: u32,
+    key_mismatch_alarm: bool,
     serial_errors: u64,
 }
 
@@ -144,7 +242,9 @@ impl<S: MotorSerial> MotorConsumer<S> {
             state: DriveState::NeverReleased,
             last_valid_at_ms: None,
             releases: 0,
-            refusals: 0,
+            refusal_breakdown: RefusalBreakdown::default(),
+            consecutive_signature_invalid: 0,
+            key_mismatch_alarm: false,
             serial_errors: 0,
         })
     }
@@ -167,6 +267,10 @@ impl<S: MotorSerial> MotorConsumer<S> {
                     last_linear: released.linear_mps,
                 };
                 self.releases += 1;
+                // A valid release proves the pinned key matches the signer:
+                // the uniform-signature-failure evidence is void — clear it.
+                self.consecutive_signature_invalid = 0;
+                self.key_mismatch_alarm = false;
                 match self
                     .serial
                     .write_twist(released.linear_mps, released.angular_rad_s)
@@ -182,9 +286,44 @@ impl<S: MotorSerial> MotorConsumer<S> {
             }
             Err(refusal) => {
                 // 🔴 Refusals are NOT liveness: last_valid_at_ms untouched.
-                self.refusals += 1;
+                self.refusal_breakdown.count(&refusal);
+                // Key-mismatch detection: only an UNBROKEN run of
+                // SignatureInvalid is the rotation-misorder signature. Any
+                // other refusal class breaks the run (tokens that fail for
+                // other reasons still parsed/verified structure under the
+                // pinned key path, or carry no signature at all).
+                if matches!(
+                    refusal,
+                    RosReleaseRefusal::Denied(ReleaseDenied::SignatureInvalid)
+                ) {
+                    self.consecutive_signature_invalid =
+                        self.consecutive_signature_invalid.saturating_add(1);
+                    if self.consecutive_signature_invalid >= DEFAULT_SIGNATURE_INVALID_ALARM_STREAK
+                    {
+                        // LATCHED (until a valid release): the loud, distinct
+                        // diagnostic — see KEY_MISMATCH_ALARM_EXPLANATION.
+                        self.key_mismatch_alarm = true;
+                    }
+                } else {
+                    self.consecutive_signature_invalid = 0;
+                }
                 FrameOutcome::Refused(refusal)
             }
+        }
+    }
+
+    /// The read-only health surface (the Part-1 loud diagnostic): per-class
+    /// refusal counters, the consecutive-`SignatureInvalid` streak, and the
+    /// latched key-mismatch alarm with its operator sentence.
+    #[must_use]
+    pub fn health(&self) -> ConsumerHealth {
+        ConsumerHealth {
+            releases: self.releases,
+            refusals: self.refusal_breakdown,
+            serial_errors: self.serial_errors,
+            consecutive_signature_invalid: self.consecutive_signature_invalid,
+            key_mismatch_alarm: self.key_mismatch_alarm,
+            silent: self.state == DriveState::Silent,
         }
     }
 
@@ -244,10 +383,11 @@ impl<S: MotorSerial> MotorConsumer<S> {
         self.releases
     }
 
-    /// Gate refusals — the counter the Tier-2 rogue-flood test watches.
+    /// Total gate refusals — the counter the Tier-2 rogue-flood test
+    /// watches. Per-class detail is on [`MotorConsumer::health`].
     #[must_use]
     pub fn refusal_count(&self) -> u64 {
-        self.refusals
+        self.refusal_breakdown.total()
     }
 
     /// Serial write failures on legitimately released frames.
@@ -409,6 +549,80 @@ mod tests {
         );
         assert_eq!(m.release_count(), 1);
         assert!(m.refusal_count() >= 1);
+    }
+
+    /// Part 1.3 — fail-closed-and-mute is a defect: a sustained run of
+    /// SignatureInvalid (the rotation-misorder signature) must latch the
+    /// DISTINCT key-mismatch alarm with its operator sentence; mixed
+    /// refusals must not; a valid release clears it.
+    #[test]
+    fn sustained_signature_invalid_latches_the_loud_key_mismatch_alarm() {
+        let mut m = consumer();
+        // Tokens signed by a DIFFERENT governor key — exactly what a
+        // rotation done out of order produces.
+        let wrong = SigningKey::from_bytes(&[9u8; 32]);
+        for k in 0..DEFAULT_SIGNATURE_INVALID_ALARM_STREAK as u64 {
+            let p = RosTwistPayload {
+                sequence: k + 1,
+                issued_at_ms: 10_000 + k,
+                linear_mps: 0.2,
+                angular_rad_s: 0.0,
+            };
+            let t = kirra_release_token::ros_twist::issue_ros_release(&p, &wrong);
+            let out = m.on_frame(&p.encode(), Some(&t), 10_000 + k);
+            assert!(matches!(
+                out,
+                FrameOutcome::Refused(RosReleaseRefusal::Denied(ReleaseDenied::SignatureInvalid))
+            ));
+        }
+        let h = m.health();
+        assert!(h.key_mismatch_alarm, "alarm must latch at the streak");
+        assert_eq!(
+            h.alarm_explanation(),
+            Some(KEY_MISMATCH_ALARM_EXPLANATION),
+            "the alarm must carry the operator sentence"
+        );
+        assert_eq!(
+            h.refusals.signature_invalid,
+            u64::from(DEFAULT_SIGNATURE_INVALID_ALARM_STREAK),
+            "per-class counter must be distinguishable from other refusals"
+        );
+        // Nothing was actuated and the fence is intact.
+        assert!(m.serial.writes.is_empty());
+
+        // A VALID release (correct key again) clears the alarm.
+        let (p_ok, t_ok) = frame(100, 11_000, 0.2);
+        assert!(matches!(
+            m.on_frame(&p_ok, Some(&t_ok), 11_000),
+            FrameOutcome::Released { .. }
+        ));
+        assert!(!m.health().key_mismatch_alarm);
+        assert_eq!(m.health().consecutive_signature_invalid, 0);
+    }
+
+    /// A MIXED refusal stream (unsigned frames interleaved with wrong-key
+    /// tokens) is not the rotation-misorder signature and must not alarm.
+    #[test]
+    fn mixed_refusals_do_not_latch_the_key_mismatch_alarm() {
+        let mut m = consumer();
+        let wrong = SigningKey::from_bytes(&[9u8; 32]);
+        for k in 0..(2 * DEFAULT_SIGNATURE_INVALID_ALARM_STREAK as u64) {
+            let p = RosTwistPayload {
+                sequence: k + 1,
+                issued_at_ms: 10_000 + k,
+                linear_mps: 0.2,
+                angular_rad_s: 0.0,
+            };
+            if k % 2 == 0 {
+                let t = kirra_release_token::ros_twist::issue_ros_release(&p, &wrong);
+                m.on_frame(&p.encode(), Some(&t), 10_000 + k);
+            } else {
+                m.on_frame(&p.encode(), None, 10_000 + k); // NoToken breaks the run
+            }
+        }
+        let h = m.health();
+        assert!(!h.key_mismatch_alarm);
+        assert!(h.refusals.signature_invalid > 0 && h.refusals.no_token > 0);
     }
 
     #[test]

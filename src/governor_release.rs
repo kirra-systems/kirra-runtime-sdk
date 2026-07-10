@@ -130,6 +130,19 @@ mod tests {
         assert_eq!(id, governor_key_id(&sk.verifying_key()));
     }
 
+    /// The lean crate's `verifying_key_id_hex` (used by consumer enrollment
+    /// diagnostics) must stay byte-identical to the root `audit_chain`
+    /// key-id discipline `governor_key_id` wraps — one key names ONE id
+    /// everywhere it appears in logs.
+    #[test]
+    fn lean_key_id_matches_the_audit_chain_discipline() {
+        let vk = SigningKey::from_bytes(&[42u8; 32]).verifying_key();
+        assert_eq!(
+            governor_key_id(&vk),
+            kirra_release_token::ros_twist::verifying_key_id_hex(&vk)
+        );
+    }
+
     #[test]
     fn signer_mints_strictly_advancing_gate_accepted_tokens() {
         let sk = SigningKey::from_bytes(&[42u8; 32]);
