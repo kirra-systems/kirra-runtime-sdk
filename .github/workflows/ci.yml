@@ -1028,6 +1028,13 @@ jobs:
         # the DD review asked for after finding six unwired "DONE" cores.
         # See ci/check_orphan_cores.py + ci/orphan_cores_baseline.json.
         run: python3 ci/check_orphan_cores.py
+      - name: Mick actuation fence (no path from the intent layer to the motors)
+        # The doer-checker thesis, structurally: kirra-mick and the sidecar
+        # binaries must have NO dependency route to the release-token mint,
+        # the serial consumer, the ROS 2 node, or any serial/DDS/ROS external
+        # crate — and no actuation seam tokens in their source. See
+        # ci/check_mick_actuation_fence.py.
+        run: python3 ci/check_mick_actuation_fence.py
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Clippy
