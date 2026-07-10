@@ -344,7 +344,12 @@ pub fn longitudinal_safe_distance(
     // finite-positive above — yield ±Inf at worst, never NaN). Output is
     // identical for every input; the property "this function never forms a
     // NaN" is what the Kani R1/R2 harnesses machine-check.
-    let rt2 = reaction_time.powi(2);
+    // Spelled `x * x` (not `.powi(2)`) so the Kani/CBMC proof of this
+    // function models a plain IEEE multiplication instead of the loop-based
+    // `__builtin_powi` over-approximation, whose under-constrained result
+    // admits spurious monotonicity counterexamples (R2). Bit-identical on
+    // hardware: LLVM lowers `powi(2)` to a single `fmul`.
+    let rt2 = reaction_time * reaction_time;
     if !rt2.is_finite() {
         // finite² can overflow to +Inf; guarded here so the products below
         // are finite×finite (0 × Inf would be the one product-formed NaN).
@@ -371,8 +376,8 @@ pub fn longitudinal_safe_distance(
     // `raw` was NaN → failsafe — fails closed directly. Divisors are
     // finite-positive-nonzero when used, so 0/0 is impossible and a finite
     // division never forms NaN.
-    let v_after_sq = v_after.powi(2); // ±Inf² → +Inf; never NaN
-    let lead_sq = lead_vel.powi(2); // finite² → +Inf at worst; never NaN
+    let v_after_sq = v_after * v_after; // ±Inf² → +Inf; never NaN
+    let lead_sq = lead_vel * lead_vel; // finite² → +Inf at worst; never NaN
     let twice_brake_min = 2.0 * brake_min;
     let twice_brake_max = 2.0 * brake_max;
     let d_brake_ego = if twice_brake_min.is_finite() {
