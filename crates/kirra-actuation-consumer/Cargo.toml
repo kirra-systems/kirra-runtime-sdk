@@ -36,3 +36,8 @@ hex = "0.4"
 kirra-core = { path = "../kirra-core" }
 kirra-planner = { path = "../kirra-planner" }
 kirra-trajectory = { path = "../kirra-trajectory" }
+# The SPOKEN loop drill (tests/spoken_governed_loop.rs): the speech shell's
+# seams (WAV gate, STT/TTS traits, narration renderer) wrapped around the same
+# chokepoint. Same safe direction as above — kirra-sidecars is itself fenced.
+kirra-sidecars = { path = "../kirra-sidecars" }
+serde_json = "1"

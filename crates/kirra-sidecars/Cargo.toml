@@ -11,6 +11,11 @@
 #   * `mick_service`    — Mick `POST /intent`: typed text → LlmBrain (Ollama) →
 #     fail-closed typed intent, published read-only on `GET /intent/last` for
 #     the DOER (occy_doer) to consume. Never a command.
+#   * `speech_shell`    — the voice UX shell (push-to-talk): external STT/TTS
+#     OS processes (whisper.cpp / Piper — never crate deps); the transcript
+#     enters the loop ONLY as text through mick_service's POST /intent, and
+#     TTS speaks the #893 narration verbatim. Input transduction + output
+#     rendering; no new intent path (docs/testing/SPEECH_KITT_DEMO.md).
 #
 # 🔴 FENCED (ci/check_mick_actuation_fence.py): this crate must have NO path to
 # actuation — no release-token mint, no serial consumer, no ROS/DDS transport.
