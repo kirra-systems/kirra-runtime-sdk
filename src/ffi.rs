@@ -933,3 +933,470 @@ mod ffi_nonfinite_tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0033 — the ROS-path verify-before-release gate over the C ABI.
+// ---------------------------------------------------------------------------
+//
+// Settled decision 1(c): the token verification, the strictly-advancing
+// sequence watermark, the freshness rule, and the refusal taxonomy live in ONE
+// Rust implementation — `kirra_release_token::ros_twist::RosReleaseGate` —
+// and this narrow surface exposes exactly that to the Python motor-consumer
+// node. NOTHING here re-implements crypto, watermark, or freshness logic; the
+// three exports below are allocate / drive / free around the one gate.
+//
+// EVERY EXPORT HERE IS SAFETY-RELEVANT SURFACE AREA. What a caller can do
+// wrong, and what each mistake costs:
+//
+// - **Feed the gate different bytes than it actuates.** The gate verifies the
+//   32-byte payload image the caller PRESENTS; if the caller then writes a
+//   twist derived from anywhere else (its own JSON parse, a cached value),
+//   the fence is void. Rule: actuate ONLY the `out_*` values this ABI returns
+//   on `KIRRA_ROS_RELEASE_OK` — they are decoded FROM the verified bytes.
+// - **Treat a refusal as retryable-in-place.** Any non-zero return means DO
+//   NOT actuate this frame — hold the safe state. A refusal must also NOT be
+//   counted as liveness (a flood of invalid tokens must starve into the safe
+//   stop exactly as silence does).
+// - **Share one gate across threads.** The gate is single-owner mutable state
+//   (the watermark). Concurrent calls are undefined behavior. One actuation
+//   path, one gate, one thread.
+// - **Recreate the gate casually.** A fresh gate has an empty watermark and
+//   accepts any FRESH token (resync-from-zero, ADR-0033 decision 3). That is
+//   the intended restart semantics — but it means gate lifetime should match
+//   consumer-process lifetime, not per-frame.
+// - **Widen `freshness_window_ms`.** After a consumer restart the freshness
+//   window is the ONLY replay barrier (the watermark is in-memory by
+//   decision). The window is load-bearing; ADR-0033 proposes ≈ 2 control
+//   periods (≤ 200 ms at 10 Hz).
+
+/// Verified, fresh, strictly-advancing, decodable — RELEASE the `out_*` twist.
+pub const KIRRA_ROS_RELEASE_OK: i32 = 0;
+/// No token presented (deny verdict upstream / rogue publisher) — DO NOT actuate.
+pub const KIRRA_ROS_REFUSE_NO_TOKEN: i32 = 1;
+/// Token does not approve these exact bytes (substitution / stale approval) —
+/// DO NOT actuate.
+pub const KIRRA_ROS_REFUSE_DIGEST_MISMATCH: i32 = 2;
+/// Signature does not verify against the governor key (forged / tampered /
+/// wrong signer / cross-path replay) — DO NOT actuate.
+pub const KIRRA_ROS_REFUSE_SIGNATURE_INVALID: i32 = 3;
+/// Verified bytes do not decode to a finite command — DO NOT actuate.
+pub const KIRRA_ROS_REFUSE_UNDECODABLE: i32 = 4;
+/// `issued_at_ms` outside the freshness window (stale or future-dated) — DO
+/// NOT actuate. After a consumer restart this is the only replay barrier.
+pub const KIRRA_ROS_REFUSE_STALE: i32 = 5;
+/// Sequence does not STRICTLY advance past the last released one (replay /
+/// reorder) — DO NOT actuate.
+pub const KIRRA_ROS_REFUSE_SEQUENCE_NOT_ADVANCED: i32 = 6;
+/// Malformed call (null pointer, wrong length, invalid key point, null gate)
+/// — fail-closed, DO NOT actuate.
+pub const KIRRA_ROS_REFUSE_BAD_ARGS: i32 = -1;
+
+/// Allocate a ROS release gate pinned to the governor verifying key.
+///
+/// Returns null on a malformed key (wrong length / not a valid Ed25519 point)
+/// — a caller that proceeds without checking for null has NO fence.
+///
+/// Failure modes: null/short `vk_ptr` → null; a WRONG-but-valid key → a gate
+/// that refuses every genuine token (fail-closed, robot stops).
+///
+/// # Safety
+///
+/// - `vk_ptr` must address `vk_len` readable bytes (must be 32) that outlive
+///   the call and are not mutated during it.
+/// - The returned pointer is owned by the caller and MUST be released with
+///   `kirra_ros_release_gate_free` exactly once; it is NOT thread-safe.
+///
+/// Per CERT-005 RSR-001: every pub extern "C" fn that dereferences a raw
+/// pointer must be marked unsafe fn.
+#[no_mangle]
+pub unsafe extern "C" fn kirra_ros_release_gate_new(
+    vk_ptr: *const u8,
+    vk_len: usize,
+    freshness_window_ms: u64,
+) -> *mut kirra_release_token::ros_twist::RosReleaseGate {
+    if vk_ptr.is_null() || vk_len != 32 {
+        return std::ptr::null_mut();
+    }
+    let mut vk_arr = [0u8; 32];
+    // SAFETY: non-null + exact-length verified above; caller owns validity.
+    vk_arr.copy_from_slice(unsafe { std::slice::from_raw_parts(vk_ptr, 32) });
+    let vk = match ed25519_dalek::VerifyingKey::from_bytes(&vk_arr) {
+        Ok(k) => k,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    Box::into_raw(Box::new(
+        kirra_release_token::ros_twist::RosReleaseGate::new(vk, freshness_window_ms),
+    ))
+}
+
+/// Release a gate allocated by `kirra_ros_release_gate_new`.
+///
+/// Failure modes: double-free / freeing a foreign pointer is undefined
+/// behavior (caller responsibility, as at every C boundary). Null is a no-op.
+///
+/// # Safety
+///
+/// - `gate` must be null or a pointer returned by `kirra_ros_release_gate_new`
+///   that has not already been freed, with no other live references.
+///
+/// Per CERT-005 RSR-001: every pub extern "C" fn that dereferences a raw
+/// pointer must be marked unsafe fn.
+#[no_mangle]
+pub unsafe extern "C" fn kirra_ros_release_gate_free(
+    gate: *mut kirra_release_token::ros_twist::RosReleaseGate,
+) {
+    if !gate.is_null() {
+        // SAFETY: per contract, `gate` came from Box::into_raw in _new and is
+        // freed at most once.
+        drop(unsafe { Box::from_raw(gate) });
+    }
+}
+
+/// The verify-before-release step for one frame: token → strict Ed25519 over
+/// EXACTLY `payload_ptr[0..32]` → finite decode → freshness vs `now_ms` →
+/// strictly-advancing sequence. Mirrors `ActuatorStation::release` semantics;
+/// only `KIRRA_ROS_RELEASE_OK` advances the watermark — every refusal leaves
+/// it untouched.
+///
+/// On `KIRRA_ROS_RELEASE_OK` the decoded twist is written to `out_linear_mps`
+/// / `out_angular_rad_s` / `out_sequence` — actuate THOSE values and nothing
+/// else. On any other return the outputs are NOT written; do not read them.
+///
+/// `token_ptr == null` (with `token_len == 0`) is the explicit no-token case
+/// and refuses with `KIRRA_ROS_REFUSE_NO_TOKEN` — it is a legal call shape,
+/// not a bad-args case, so the caller's refusal accounting stays truthful.
+///
+/// Failure modes beyond the taxonomy: passing a stale `now_ms` (not the
+/// caller's real clock) silently widens the freshness window — the caller
+/// must pass its current wall clock in milliseconds.
+///
+/// # Safety
+///
+/// - `gate` must be a live pointer from `kirra_ros_release_gate_new`, called
+///   from ONE thread only.
+/// - `payload_ptr` must address `payload_len` (= 32) readable bytes;
+///   `token_ptr` must be null (no token) or address `token_len` (= 96)
+///   readable bytes; `out_*` must be valid writable pointers. All regions
+///   must outlive the call, un-aliased and un-mutated during it.
+///
+/// Per CERT-005 RSR-001: every pub extern "C" fn that dereferences a raw
+/// pointer must be marked unsafe fn.
+#[no_mangle]
+pub unsafe extern "C" fn kirra_ros_release(
+    gate: *mut kirra_release_token::ros_twist::RosReleaseGate,
+    payload_ptr: *const u8,
+    payload_len: usize,
+    token_ptr: *const u8,
+    token_len: usize,
+    now_ms: u64,
+    out_linear_mps: *mut f64,
+    out_angular_rad_s: *mut f64,
+    out_sequence: *mut u64,
+) -> i32 {
+    use kirra_release_token::ros_twist::{RosReleaseRefusal, ROS_TWIST_PAYLOAD_LEN};
+    use kirra_release_token::{ReleaseDenied, ReleaseToken};
+
+    if gate.is_null()
+        || payload_ptr.is_null()
+        || payload_len != ROS_TWIST_PAYLOAD_LEN
+        || out_linear_mps.is_null()
+        || out_angular_rad_s.is_null()
+        || out_sequence.is_null()
+    {
+        return KIRRA_ROS_REFUSE_BAD_ARGS;
+    }
+    // The no-token shape must be EXACT (null + 0); a non-null token must be
+    // exactly 96 bytes. Anything else is malformed, not "no token".
+    let token: Option<ReleaseToken> = if token_ptr.is_null() {
+        if token_len != 0 {
+            return KIRRA_ROS_REFUSE_BAD_ARGS;
+        }
+        None
+    } else {
+        if token_len != 96 {
+            return KIRRA_ROS_REFUSE_BAD_ARGS;
+        }
+        let mut token_arr = [0u8; 96];
+        // SAFETY: non-null + exact-length verified above.
+        token_arr.copy_from_slice(unsafe { std::slice::from_raw_parts(token_ptr, 96) });
+        Some(ReleaseToken::from_bytes(&token_arr))
+    };
+    let mut payload_arr = [0u8; ROS_TWIST_PAYLOAD_LEN];
+    // SAFETY: non-null + exact-length verified above.
+    payload_arr
+        .copy_from_slice(unsafe { std::slice::from_raw_parts(payload_ptr, ROS_TWIST_PAYLOAD_LEN) });
+
+    // SAFETY: per contract, `gate` is live and single-threaded here.
+    let gate = unsafe { &mut *gate };
+    match gate.release(&payload_arr, token.as_ref(), now_ms) {
+        Ok(released) => {
+            // SAFETY: out pointers verified non-null above; caller owns validity.
+            unsafe {
+                *out_linear_mps = released.linear_mps;
+                *out_angular_rad_s = released.angular_rad_s;
+                *out_sequence = released.sequence;
+            }
+            KIRRA_ROS_RELEASE_OK
+        }
+        Err(RosReleaseRefusal::NoToken) => KIRRA_ROS_REFUSE_NO_TOKEN,
+        Err(RosReleaseRefusal::Denied(ReleaseDenied::DigestMismatch)) => {
+            KIRRA_ROS_REFUSE_DIGEST_MISMATCH
+        }
+        Err(RosReleaseRefusal::Denied(ReleaseDenied::SignatureInvalid)) => {
+            KIRRA_ROS_REFUSE_SIGNATURE_INVALID
+        }
+        Err(RosReleaseRefusal::Undecodable(_)) => KIRRA_ROS_REFUSE_UNDECODABLE,
+        Err(RosReleaseRefusal::Stale { .. }) => KIRRA_ROS_REFUSE_STALE,
+        Err(RosReleaseRefusal::SequenceNotAdvanced { .. }) => {
+            KIRRA_ROS_REFUSE_SEQUENCE_NOT_ADVANCED
+        }
+    }
+}
+
+#[cfg(test)]
+mod ros_release_ffi_tests {
+    use super::*;
+    use kirra_release_token::ros_twist::{issue_ros_release, RosTwistPayload};
+
+    fn mint(seq: u64, issued: u64, linear: f64) -> ([u8; 32], [u8; 96]) {
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let p = RosTwistPayload {
+            sequence: seq,
+            issued_at_ms: issued,
+            linear_mps: linear,
+            angular_rad_s: 0.1,
+        };
+        (p.encode(), issue_ros_release(&p, &sk).to_bytes())
+    }
+
+    fn vk_bytes() -> [u8; 32] {
+        ed25519_dalek::SigningKey::from_bytes(&[42u8; 32])
+            .verifying_key()
+            .to_bytes()
+    }
+
+    #[test]
+    fn ffi_gate_releases_honest_and_refuses_replay_tamper_stale_and_no_token() {
+        let vk = vk_bytes();
+        let gate = unsafe { kirra_ros_release_gate_new(vk.as_ptr(), 32, 200) };
+        assert!(!gate.is_null());
+        let (mut lin, mut ang, mut seq) = (0.0f64, 0.0f64, 0u64);
+
+        let (p1, t1) = mint(1, 10_000, 0.5);
+        // Honest release.
+        let code = unsafe {
+            kirra_ros_release(
+                gate,
+                p1.as_ptr(),
+                32,
+                t1.as_ptr(),
+                96,
+                10_000,
+                &mut lin,
+                &mut ang,
+                &mut seq,
+            )
+        };
+        assert_eq!(code, KIRRA_ROS_RELEASE_OK);
+        assert_eq!((lin, seq), (0.5, 1));
+
+        // Replay → sequence rule.
+        let code = unsafe {
+            kirra_ros_release(
+                gate,
+                p1.as_ptr(),
+                32,
+                t1.as_ptr(),
+                96,
+                10_010,
+                &mut lin,
+                &mut ang,
+                &mut seq,
+            )
+        };
+        assert_eq!(code, KIRRA_ROS_REFUSE_SEQUENCE_NOT_ADVANCED);
+
+        // Token over different bytes.
+        let (p2, _t2) = mint(2, 10_020, 0.6);
+        let code = unsafe {
+            kirra_ros_release(
+                gate,
+                p2.as_ptr(),
+                32,
+                t1.as_ptr(),
+                96,
+                10_020,
+                &mut lin,
+                &mut ang,
+                &mut seq,
+            )
+        };
+        assert_eq!(code, KIRRA_ROS_REFUSE_DIGEST_MISMATCH);
+
+        // No token (null + 0) — legal shape, refused as NO_TOKEN.
+        let code = unsafe {
+            kirra_ros_release(
+                gate,
+                p2.as_ptr(),
+                32,
+                std::ptr::null(),
+                0,
+                10_020,
+                &mut lin,
+                &mut ang,
+                &mut seq,
+            )
+        };
+        assert_eq!(code, KIRRA_ROS_REFUSE_NO_TOKEN);
+
+        // Stale (issued 10_030, presented at 10_030 + 201 > 200 window).
+        let (p3, t3) = mint(3, 10_030, 0.7);
+        let code = unsafe {
+            kirra_ros_release(
+                gate,
+                p3.as_ptr(),
+                32,
+                t3.as_ptr(),
+                96,
+                10_231 + 1,
+                &mut lin,
+                &mut ang,
+                &mut seq,
+            )
+        };
+        assert_eq!(code, KIRRA_ROS_REFUSE_STALE);
+
+        // Refusals never advanced the watermark: sequence 3 still releases fresh.
+        let code = unsafe {
+            kirra_ros_release(
+                gate,
+                p3.as_ptr(),
+                32,
+                t3.as_ptr(),
+                96,
+                10_030,
+                &mut lin,
+                &mut ang,
+                &mut seq,
+            )
+        };
+        assert_eq!(code, KIRRA_ROS_RELEASE_OK);
+        assert_eq!(seq, 3);
+
+        unsafe { kirra_ros_release_gate_free(gate) };
+    }
+
+    #[test]
+    fn ffi_gate_bad_args_fail_closed() {
+        let vk = vk_bytes();
+        // Malformed key → null gate.
+        assert!(unsafe { kirra_ros_release_gate_new(std::ptr::null(), 32, 200) }.is_null());
+        assert!(unsafe { kirra_ros_release_gate_new(vk.as_ptr(), 31, 200) }.is_null());
+
+        let gate = unsafe { kirra_ros_release_gate_new(vk.as_ptr(), 32, 200) };
+        let (p, t) = mint(1, 10_000, 0.5);
+        let (mut lin, mut ang, mut seq) = (0.0f64, 0.0f64, 0u64);
+        // Null gate / null payload / wrong lengths / non-null token with wrong
+        // length / null outs — all BAD_ARGS, none advance the watermark.
+        for code in [
+            unsafe {
+                kirra_ros_release(
+                    std::ptr::null_mut(),
+                    p.as_ptr(),
+                    32,
+                    t.as_ptr(),
+                    96,
+                    10_000,
+                    &mut lin,
+                    &mut ang,
+                    &mut seq,
+                )
+            },
+            unsafe {
+                kirra_ros_release(
+                    gate,
+                    std::ptr::null(),
+                    32,
+                    t.as_ptr(),
+                    96,
+                    10_000,
+                    &mut lin,
+                    &mut ang,
+                    &mut seq,
+                )
+            },
+            unsafe {
+                kirra_ros_release(
+                    gate,
+                    p.as_ptr(),
+                    31,
+                    t.as_ptr(),
+                    96,
+                    10_000,
+                    &mut lin,
+                    &mut ang,
+                    &mut seq,
+                )
+            },
+            unsafe {
+                kirra_ros_release(
+                    gate,
+                    p.as_ptr(),
+                    32,
+                    t.as_ptr(),
+                    95,
+                    10_000,
+                    &mut lin,
+                    &mut ang,
+                    &mut seq,
+                )
+            },
+            unsafe {
+                kirra_ros_release(
+                    gate,
+                    p.as_ptr(),
+                    32,
+                    std::ptr::null(),
+                    96,
+                    10_000,
+                    &mut lin,
+                    &mut ang,
+                    &mut seq,
+                )
+            },
+            unsafe {
+                kirra_ros_release(
+                    gate,
+                    p.as_ptr(),
+                    32,
+                    t.as_ptr(),
+                    96,
+                    10_000,
+                    std::ptr::null_mut(),
+                    &mut ang,
+                    &mut seq,
+                )
+            },
+        ] {
+            assert_eq!(code, KIRRA_ROS_REFUSE_BAD_ARGS);
+        }
+        // The gate is untouched by all of the above: the honest frame releases.
+        let code = unsafe {
+            kirra_ros_release(
+                gate,
+                p.as_ptr(),
+                32,
+                t.as_ptr(),
+                96,
+                10_000,
+                &mut lin,
+                &mut ang,
+                &mut seq,
+            )
+        };
+        assert_eq!(code, KIRRA_ROS_RELEASE_OK);
+        unsafe { kirra_ros_release_gate_free(gate) };
+        // Null free is a no-op.
+        unsafe { kirra_ros_release_gate_free(std::ptr::null_mut()) };
+    }
+}

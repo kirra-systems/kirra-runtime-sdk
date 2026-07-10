@@ -50,6 +50,13 @@ use kirra_contract_channel::GovernorContractView;
 /// from (file / dev-fixed; TPM-unseal deferred). See [`provisioning`].
 pub mod provisioning;
 
+/// ADR-0033 — the ROS-path release token (verify-before-release at the motor
+/// boundary of the `ros2_ws` deployment topology): its own payload type and
+/// domain pair, plus [`ros_twist::RosReleaseGate`], the ONE motor-side
+/// verify/watermark/freshness/refusal implementation every consumer shape
+/// (Rust consumer, C ABI, Tier-1 guard) shares. See [`ros_twist`].
+pub mod ros_twist;
+
 /// WP-13 (MGA G-7) — the Uptane four-role OTA metadata model (root / targets /
 /// snapshot / timestamp): role-separated keys, rollback + freeze protection,
 /// and key rotation. Pure metadata + verification core; see [`uptane`].

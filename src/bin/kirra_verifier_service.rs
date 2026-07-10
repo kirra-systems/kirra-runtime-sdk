@@ -1070,11 +1070,45 @@ async fn main() {
         );
     }
 
+    // ADR-0033 — provision the ROS-path release-token signer. Minting is
+    // opt-in by configuration: `KIRRA_GOVERNOR_SIGNING_KEY_SOURCE` set →
+    // provision (fail-closed: a CONFIGURED-but-broken source aborts startup —
+    // never silently run token-less when the operator asked for tokens);
+    // unset → no signer, the 200 body is byte-identical to before, and a
+    // verifying consumer downstream refuses into its safe stop. The dev-fixed
+    // key stays refused unless KIRRA_GOVERNOR_SIGNING_KEY_ALLOW_DEV is set
+    // (provisioning module, ADR-0031 Clause E).
+    let ros_release_signer = match std::env::var("KIRRA_GOVERNOR_SIGNING_KEY_SOURCE") {
+        Ok(v) if !v.trim().is_empty() => {
+            match kirra_release_token::provisioning::provision_from_env() {
+                Ok(signing_key) => {
+                    let signer = Arc::new(kirra_verifier::governor_release::RosReleaseSigner::new(
+                        signing_key,
+                        now_ms(), // sequence seed — see RosReleaseSigner docs
+                    ));
+                    tracing::info!(
+                        key_id = %signer.key_id(),
+                        "ADR-0033: ROS release-token minting ENABLED on the actuator path"
+                    );
+                    Some(signer)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = ?e,
+                        "FATAL: KIRRA_GOVERNOR_SIGNING_KEY_SOURCE is set but provisioning failed — refusing to start (fail-closed; a configured signer must never silently degrade to token-less)"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => None,
+    };
+
     // Assemble the production router. Extracted into `build_app` (issue #72)
     // so the EXACT assembled router — identical routes, middleware layer
     // order, and state wiring — is what the binary-internal posture-gate
     // test exercises, rather than a representative stand-in.
-    let app = build_app(Arc::clone(&svc_state));
+    let app = build_app_with_release_signer(Arc::clone(&svc_state), ros_release_signer);
 
     // SG-008 (ASIL D): fail closed BEFORE binding the listener. Build the boot
     // facts and evaluate the startup-invariant predicate; on any violation, log
@@ -1396,7 +1430,19 @@ struct OperatorStopRequest {
 /// every request (before auth and the actuator envelope); the identity/admin/
 /// actuator-posture layering inside each group is the fail-closed security
 /// boundary. Do not reorder, drop, or rewire any of this.
+// Only the binary-internal test modules call the signer-less form; production
+// main always goes through `build_app_with_release_signer`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_app(svc_state: Arc<ServiceState>) -> Router {
+    // Test/back-compat assembly: no ROS release signer (the 200 body carries
+    // no token). Production main goes through the _with_release_signer form.
+    build_app_with_release_signer(svc_state, None)
+}
+
+fn build_app_with_release_signer(
+    svc_state: Arc<ServiceState>,
+    ros_release_signer: Option<Arc<kirra_verifier::governor_release::RosReleaseSigner>>,
+) -> Router {
     let identity_gated_routes = Router::new()
         .route("/system/posture/stream", get(system_posture_stream))
         .route("/federation/reports/submit", post(submit_federated_report))
@@ -1569,7 +1615,17 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&svc_state),
             enforce_actuator_safety_envelope,
-        ))
+        ));
+    // ADR-0033 — thread the ROS release-token signer to the 200 arm ONLY via
+    // an optional Extension. Note the deny paths (envelope 400, scope 401/403,
+    // posture 503) are produced by the middleware layers, which never see this
+    // extension — the "deny path never mints a token" invariant is structural
+    // here and pinned by tests/ros_release_mint_integration.rs.
+    let actuator_routes = match ros_release_signer {
+        Some(signer) => actuator_routes.layer(Extension(signer)),
+        None => actuator_routes,
+    };
+    let actuator_routes = actuator_routes
         // WS-1 (#G7): SCOPE_ACTUATOR_COMMAND — the admin token OR an `operator`-role
         // principal. Auth runs before the envelope; the transport gate runs first of all.
         .layer(middleware::from_fn_with_state(
@@ -1804,6 +1860,10 @@ mod console_phase_a_tests;
 #[cfg(test)]
 #[path = "kirra_verifier_service/store_offload_tests.rs"]
 mod store_offload_tests;
+
+#[cfg(test)]
+#[path = "kirra_verifier_service/ros_release_mint_tests.rs"]
+mod ros_release_mint_tests;
 
 #[cfg(test)]
 #[path = "kirra_verifier_service/federation_submit_e2e_tests.rs"]

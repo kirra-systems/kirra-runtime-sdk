@@ -2106,6 +2106,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-actuation-consumer"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "kirra-release-token",
+]
+
+[[package]]
 name = "kirra-capture-schema"
 version = "0.1.0"
 dependencies = [
