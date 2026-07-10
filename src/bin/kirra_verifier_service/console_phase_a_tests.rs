@@ -40,6 +40,7 @@ fn build_state() -> Arc<ServiceState> {
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
+        last_actuator_verdict: kirra_verifier::posture_cache::empty_last_verdict_cell(),
     })
 }
 

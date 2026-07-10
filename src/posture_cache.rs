@@ -197,12 +197,44 @@ pub struct ServiceState {
     /// monitor is disabled (the enabled flag gates use, not allocation).
     pub perception_cap: crate::gateway::perception_monitor::SharedPerceptionCap,
 
+    /// Part 3 (#891 narration) — the latched LAST actuator-envelope verdict:
+    /// read-only telemetry for the auditor-tier `GET /system/verdicts/last`
+    /// sidecar. Written once per actuator command by the envelope middleware
+    /// (O(1), uncontended single-writer RwLock — alongside the audit
+    /// `try_send` that path already performs); NEVER read on the verdict
+    /// path. This is narration, not a command surface.
+    pub last_actuator_verdict: LastVerdictCell,
+
     /// Whether the perception monitor is deployed/enabled. **Defaults false** —
     /// when false, `resolve_perception_cap` returns `None` (state 1: no-op), so
     /// the composition is a pure no-op until a real perception ingest (#126)
     /// wires and enables the monitor. A disabled monitor's absence is NOT a
     /// fault; only a *configured* monitor going silent fails closed (state 3).
     pub perception_monitor_enabled: bool,
+}
+
+/// Part 3 (#891 narration) — the latched last actuator-envelope verdict.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct LastActuatorVerdict {
+    /// Wall clock (ms) when the verdict was computed.
+    pub at_ms: u64,
+    /// The enforcement action ("Allow" / "ClampLinear" / "ClampSteering" /
+    /// "ClampBoth" / "DenyBreach").
+    pub action: &'static str,
+    /// The deny code token when denied (`DenyCode::reason()`), else None.
+    pub deny_code: Option<&'static str>,
+    /// The operator sentence for the deny code (`explain_deny_token`).
+    pub explanation: Option<&'static str>,
+}
+
+/// Shared cell for the latched verdict. `None` until the first actuator
+/// command after boot.
+pub type LastVerdictCell = std::sync::Arc<std::sync::RwLock<Option<LastActuatorVerdict>>>;
+
+/// Fresh empty cell (constructor helper for `ServiceState` builders).
+#[must_use]
+pub fn empty_last_verdict_cell() -> LastVerdictCell {
+    std::sync::Arc::new(std::sync::RwLock::new(None))
 }
 
 /// Returns current time as milliseconds since UNIX epoch.

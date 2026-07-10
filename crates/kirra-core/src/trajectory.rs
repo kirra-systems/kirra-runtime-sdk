@@ -97,3 +97,20 @@ pub struct PerceivedObject {
     /// being map/world-frame absolute — see PMON-003 §4 / D4.
     pub vel: Point,
 }
+
+#[cfg(test)]
+mod verdict_shape_tests {
+    use super::*;
+
+    /// Part 3 (#891 narration) hot-type pin: `TrajectoryVerdict` sits in the
+    /// WCET-critical loop, so narration must ride a SIDE-CHANNEL
+    /// (`kirra-trajectory::validation::TrajectoryRefusalReason`), never a
+    /// field here. This pins the type at one byte — growing it (e.g. adding
+    /// a reason payload) fails this test and is a WCET-relevant change that
+    /// needs its own review.
+    #[test]
+    fn trajectory_verdict_stays_one_byte() {
+        assert_eq!(core::mem::size_of::<TrajectoryVerdict>(), 1);
+        assert_eq!(core::mem::size_of::<Option<TrajectoryVerdict>>(), 1);
+    }
+}

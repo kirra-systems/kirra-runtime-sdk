@@ -175,6 +175,7 @@ mod verdict_handler_tests {
             posture_engine_tx: std::sync::OnceLock::new(),
             perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
+            last_actuator_verdict: kirra_verifier::posture_cache::empty_last_verdict_cell(),
         })
     }
 
@@ -292,4 +293,18 @@ mod verdict_handler_tests {
             .expect("response");
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
+}
+
+/// Part 3 (#891 narration) — the read-only last-verdict sidecar: the latched
+/// most-recent actuator-envelope verdict with its deny code + operator
+/// sentence. Auditor tier (`SCOPE_AUDIT_READ`), mounted beside
+/// `/verdicts/{id}`; pure telemetry — no command surface, no state change.
+/// `last` is null until the first actuator command after boot.
+pub(crate) async fn last_verdict(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
+    let last = svc
+        .last_actuator_verdict
+        .read()
+        .ok()
+        .and_then(|g| g.clone());
+    Json(serde_json::json!({ "last": last }))
 }

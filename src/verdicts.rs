@@ -117,6 +117,12 @@ pub fn explain_deny_token(token: &str) -> &'static str {
              verification failed (torn/stale/corrupt per the frozen channel contract). An \
              untrusted frame is never interpreted — rejected fail-closed."
         }
+        "TRAJECTORY_MRC_FALLBACK" => {
+            "The slow-loop checker refused to promote the proposed trajectory (containment, \
+             per-pose kinematics, RSS, occlusion, VRU, or posture — the refusal reason \
+             side-channel carries which), so the fast loop holds the minimal-risk fallback. \
+             The doer proposes; the checker disposed."
+        }
         "TRAJECTORY_HORIZON_EXCEEDED" => {
             "The proposed trajectory carried more poses than the bounded validation \
              horizon. The bound is what makes the checker's worst-case execution time \
@@ -163,6 +169,17 @@ mod tests {
                 "explanation for {code:?} is too thin"
             );
         }
+    }
+
+    /// The slow-loop capture deny code (`record_from_trajectory_verdict`,
+    /// kirra-core capture) must have a specific explanation — it previously
+    /// fell through to EXPLAIN_UNKNOWN (the Part-3 known gap).
+    #[test]
+    fn trajectory_mrc_fallback_has_a_specific_explanation() {
+        assert_ne!(
+            explain_deny_token("TRAJECTORY_MRC_FALLBACK"),
+            EXPLAIN_UNKNOWN
+        );
     }
 
     #[test]

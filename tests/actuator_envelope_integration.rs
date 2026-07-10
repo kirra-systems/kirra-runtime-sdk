@@ -51,6 +51,7 @@ fn build_state_with_posture(posture: FleetPosture) -> Arc<ServiceState> {
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
+        last_actuator_verdict: kirra_verifier::posture_cache::empty_last_verdict_cell(),
     })
 }
 
@@ -569,6 +570,7 @@ async fn test_perception_cap_enabled_fresh_clamps_to_published_cap() {
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap,
         perception_monitor_enabled: true,
+        last_actuator_verdict: kirra_verifier::posture_cache::empty_last_verdict_cell(),
     });
 
     // 10 m/s steady (current==linear so no accel/steer clamp) → clamp to cap 3.0.
@@ -637,6 +639,7 @@ async fn test_perception_cap_enabled_stale_controlled_stop() {
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap,
         perception_monitor_enabled: true,
+        last_actuator_verdict: kirra_verifier::posture_cache::empty_last_verdict_cell(),
     });
 
     let (status, v) = send_json(
@@ -705,6 +708,7 @@ fn build_state_with_capture() -> (
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
+        last_actuator_verdict: kirra_verifier::posture_cache::empty_last_verdict_cell(),
     });
     (svc, rx)
 }
@@ -830,4 +834,78 @@ async fn a3_drop_counters_count_audit_and_capture_overflow() {
         1,
         "audit drop counted"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Part 3 (#891 narration) — the last-verdict latch.
+// ---------------------------------------------------------------------------
+
+/// The envelope middleware latches EVERY verdict (allow and deny) with the
+/// deny code + operator sentence on deny — the read-only source the
+/// auditor-tier `GET /system/verdicts/last` sidecar serves. The latch is
+/// narration: it must never change the response itself (statuses asserted
+/// unchanged here).
+#[tokio::test]
+async fn envelope_latches_last_verdict_with_deny_narration() {
+    let svc = build_state_with_posture(FleetPosture::Nominal);
+    assert!(svc.last_actuator_verdict.read().unwrap().is_none());
+
+    // An admissible command → 200 → latched as Allow, no deny narration.
+    let app = build_actuator_app(Arc::clone(&svc));
+    let ok_cmd = serde_json::json!({
+        "linear_velocity_mps": 1.0, "steering_angle_deg": 0.0,
+        "current_velocity_mps": 0.9, "current_steering_angle_deg": 0.0,
+        "delta_time_s": 0.1,
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/actuator/motion/command")
+                .header("content-type", "application/json")
+                .body(Body::from(ok_cmd.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        let g = svc.last_actuator_verdict.read().unwrap();
+        let v = g.as_ref().expect("latched after the first command");
+        assert_eq!(v.action, "Allow");
+        assert_eq!(v.deny_code, None);
+        assert_eq!(v.explanation, None);
+    }
+
+    // A zero-dt command → 400 deny → latched with code + sentence.
+    let app = build_actuator_app(Arc::clone(&svc));
+    let deny_cmd = serde_json::json!({
+        "linear_velocity_mps": 1.0, "steering_angle_deg": 0.0,
+        "current_velocity_mps": 0.9, "current_steering_angle_deg": 0.0,
+        "delta_time_s": 0.0, // zero dt → INVALID_TIME_DELTA deny
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/actuator/motion/command")
+                .header("content-type", "application/json")
+                .body(Body::from(deny_cmd.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    {
+        let g = svc.last_actuator_verdict.read().unwrap();
+        let v = g.as_ref().expect("latched");
+        assert_eq!(v.action, "DenyBreach");
+        assert_eq!(v.deny_code, Some("INVALID_TIME_DELTA"));
+        let explanation = v.explanation.expect("deny carries the operator sentence");
+        assert!(explanation.len() > 40);
+        assert_eq!(
+            explanation,
+            kirra_verifier::verdicts::explain_deny_token("INVALID_TIME_DELTA")
+        );
+    }
 }

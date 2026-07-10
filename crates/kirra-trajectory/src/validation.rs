@@ -259,7 +259,7 @@ pub fn validate_trajectory_slow(
 // The slow-loop checker legitimately takes many distinct, non-groupable inputs
 // (trajectory, corridor, objects, config, odom, posture, + two optional caps).
 #[allow(clippy::too_many_arguments)]
-pub fn validate_trajectory_slow_capped(
+pub fn validate_trajectory_slow_explained(
     trajectory: &[TrajectoryPoint],
     corridor: &dyn CorridorSource,
     objects: &[PerceivedObject],
@@ -271,7 +271,7 @@ pub fn validate_trajectory_slow_capped(
     predicted_modes: Option<&[PredictedMode<'_>]>,
     pedestrians: Option<&crate::vru::PedestrianScene<'_>>,
     frame_trust: FrameTrust,
-) -> TrajectoryVerdict {
+) -> (TrajectoryVerdict, Option<TrajectoryRefusalReason>) {
     // ----- Posture short-circuit (M1) ----------------------------------
     //
     // A LockedOut fleet must not be commanded — the safe response is to
@@ -281,13 +281,19 @@ pub fn validate_trajectory_slow_capped(
     // an integrator inspecting verdicts in a LockedOut state always sees
     // `MRCFallback` regardless of the trajectory shape.
     if posture == FleetPosture::LockedOut {
-        return TrajectoryVerdict::MRCFallback;
+        return (
+            TrajectoryVerdict::MRCFallback,
+            Some(TrajectoryRefusalReason::PostureLockedOut),
+        );
     }
 
     // Reject empty / single-point trajectories outright (the per-pose
     // loop needs ≥ 2 points to compute deltas). Conservative MRC.
     if trajectory.len() < 2 {
-        return TrajectoryVerdict::MRCFallback;
+        return (
+            TrajectoryVerdict::MRCFallback,
+            Some(TrajectoryRefusalReason::TooFewPoints),
+        );
     }
 
     // ----- A) Containment (SG2) ----------------------------------------
@@ -333,7 +339,10 @@ pub fn validate_trajectory_slow_capped(
         frame_trust,
     );
     if !matches!(containment_verdict, EnforceAction::Allow) {
-        return TrajectoryVerdict::MRCFallback;
+        return (
+            TrajectoryVerdict::MRCFallback,
+            Some(TrajectoryRefusalReason::ContainmentBreach),
+        );
     }
 
     // ----- B) Per-pose kinematics (P0–P6) ------------------------------
@@ -410,8 +419,11 @@ pub fn validate_trajectory_slow_capped(
             | EnforceAction::ClampBoth { .. } => {
                 clamp_seen = true;
             }
-            EnforceAction::DenyBreach(_) => {
-                return TrajectoryVerdict::MRCFallback;
+            EnforceAction::DenyBreach(code) => {
+                return (
+                    TrajectoryVerdict::MRCFallback,
+                    Some(TrajectoryRefusalReason::KinematicsDenied(code)),
+                );
             }
         }
 
@@ -442,7 +454,10 @@ pub fn validate_trajectory_slow_capped(
                 let v_seg = a.velocity_mps.abs().max(b.velocity_mps.abs());
                 let posture_factor = if degraded { ab.mrc_posture_factor } else { 1.0 };
                 if !omega.is_finite() || omega.abs() > ab.omega_max(v_seg, posture_factor) {
-                    return TrajectoryVerdict::MRCFallback;
+                    return (
+                        TrajectoryVerdict::MRCFallback,
+                        Some(TrajectoryRefusalReason::AngularRateBreach),
+                    );
                 }
                 // Issue #70 / ADR-0029 — Degraded converge-to-stop-and-HOLD on
                 // the ANGULAR channel. The magnitude bound above only caps |ω|;
@@ -458,7 +473,10 @@ pub fn validate_trajectory_slow_capped(
                 // SAFETY: SG8 | REQ: courier-angular-degraded-stop-and-hold | TEST: courier_degraded_angular_reinitiation_from_stop_mrcs,courier_degraded_angular_speed_increase_mrcs,courier_degraded_angular_converging_to_stop_is_admitted,courier_degraded_angular_gate_is_degraded_only,ackermann_degraded_has_no_angular_stop_gate
                 if degraded && degraded_angular_violation(prev_omega, omega, ab.stop_epsilon_rad_s)
                 {
-                    return TrajectoryVerdict::MRCFallback;
+                    return (
+                        TrajectoryVerdict::MRCFallback,
+                        Some(TrajectoryRefusalReason::DegradedAngularHoldBreach),
+                    );
                 }
                 prev_omega = omega;
             }
@@ -495,7 +513,10 @@ pub fn validate_trajectory_slow_capped(
         // itself is already finiteness-guaranteed by the per-pose loop above,
         // which rejects any NaN-derived command; objects are the unguarded seam.)
         if !object_fields_finite(obj) {
-            return TrajectoryVerdict::MRCFallback;
+            return (
+                TrajectoryVerdict::MRCFallback,
+                Some(TrajectoryRefusalReason::NonFinitePerceptionObject),
+            );
         }
         for traj_point in trajectory {
             // EP-08: measure the pair in the lane's frame. Curved corridor →
@@ -570,7 +591,10 @@ pub fn validate_trajectory_slow_capped(
             // was why a car centered in the ego lane could not be overtaken.
             // EP-08: per-class footprint-overlap gate (was the global 2.5 m).
             if dy_ego.abs() < config.rss_longitudinal_overlap_m && lon_unsafe {
-                return TrajectoryVerdict::MRCFallback;
+                return (
+                    TrajectoryVerdict::MRCFallback,
+                    Some(TrajectoryRefusalReason::RssLongitudinalBreach),
+                );
             }
 
             // Lateral RSS — required side gap. A side collision needs the footprints ABREAST
@@ -643,7 +667,10 @@ pub fn validate_trajectory_slow_capped(
                     )
                 };
                 if dy_ego.abs() < lat_required {
-                    return TrajectoryVerdict::MRCFallback;
+                    return (
+                        TrajectoryVerdict::MRCFallback,
+                        Some(TrajectoryRefusalReason::RssLateralBreach),
+                    );
                 }
             }
         }
@@ -663,7 +690,10 @@ pub fn validate_trajectory_slow_capped(
         // Pass the SAME (posture-/perception-capped) lateral-accel budget the
         // snapshot lateral branch uses, so both passes agree on the side gap.
         if predictive_rss_breach(trajectory, modes, config, kinematics.max_lateral_accel_mps2) {
-            return TrajectoryVerdict::MRCFallback;
+            return (
+                TrajectoryVerdict::MRCFallback,
+                Some(TrajectoryRefusalReason::PredictiveRssBreach),
+            );
         }
     }
 
@@ -675,7 +705,10 @@ pub fn validate_trajectory_slow_capped(
     // stopped hazard. Absent input → skipped, so the Nominal path is unchanged.
     if let Some(vis) = visibility_range_m {
         if outruns_assured_clear_distance(trajectory, vis, config.max_decel_mps2) {
-            return TrajectoryVerdict::MRCFallback;
+            return (
+                TrajectoryVerdict::MRCFallback,
+                Some(TrajectoryRefusalReason::OcclusionOutrunsVisibility),
+            );
         }
     }
 
@@ -717,16 +750,54 @@ pub fn validate_trajectory_slow_capped(
             config.max_accel_mps2,     // #779 F2 (RSS response-phase term)
             ego_reach_m,               // #779 F1
         ) {
-            return TrajectoryVerdict::MRCFallback;
+            return (
+                TrajectoryVerdict::MRCFallback,
+                Some(TrajectoryRefusalReason::VruReachableSetBreach),
+            );
         }
     }
 
     // ----- E) Aggregate ------------------------------------------------
     if clamp_seen {
-        TrajectoryVerdict::Clamp
+        (TrajectoryVerdict::Clamp, None)
     } else {
-        TrajectoryVerdict::Accept
+        (TrajectoryVerdict::Accept, None)
     }
+}
+
+/// As [`validate_trajectory_slow_explained`], discarding the reason — the
+/// pre-narration signature every existing caller uses. Behavior identical:
+/// the reason is a SIDE-CHANNEL (Part 3 / #891 narration); the verdict type
+/// and the decision logic are byte-for-byte the same body.
+// The slow-loop checker legitimately takes many distinct, non-groupable inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn validate_trajectory_slow_capped(
+    trajectory: &[TrajectoryPoint],
+    corridor: &dyn CorridorSource,
+    objects: &[PerceivedObject],
+    config: &VehicleConfig,
+    latest_odom: Option<&EgoOdom>,
+    posture: FleetPosture,
+    effective_perception_cap: Option<f64>,
+    visibility_range_m: Option<f64>,
+    predicted_modes: Option<&[PredictedMode<'_>]>,
+    pedestrians: Option<&crate::vru::PedestrianScene<'_>>,
+    frame_trust: FrameTrust,
+) -> TrajectoryVerdict {
+    validate_trajectory_slow_explained(
+        trajectory,
+        corridor,
+        objects,
+        config,
+        latest_odom,
+        posture,
+        effective_perception_cap,
+        visibility_range_m,
+        predicted_modes,
+        pedestrians,
+        frame_trust,
+    )
+    .0
 }
 
 /// RSS Rule 4 — the **assured-clear-distance** speed bound. The ego must be able to
@@ -1641,5 +1712,297 @@ mod rss_frame_tests {
         let frenet = CenterlineFrenet::from_boundaries(&l, &r).unwrap();
         let bad = obj_at(f64::NAN, 0.0, 1.0, 0.0);
         assert!(rss_frenet_frame(&frenet, &traj_point(5.0, 0.0, 0.0), &bad).is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Part 3 (#891 narration) — the trajectory refusal SIDE-CHANNEL.
+// ---------------------------------------------------------------------------
+
+/// WHY the slow-loop checker collapsed a trajectory to `MRCFallback` — the
+/// narration side-channel.
+///
+/// 🔴 DELIBERATELY NOT a field on [`TrajectoryVerdict`]: that enum sits in
+/// the WCET-critical loop and its size/shape are pinned
+/// (`kirra_core::trajectory::trajectory_verdict_stays_one_byte`). The reason
+/// rides ALONGSIDE the verdict out of [`validate_trajectory_slow_explained`];
+/// every pre-existing entry point discards it, so the checker's decision
+/// logic and the hot type are byte-for-byte unchanged.
+///
+/// One variant per refusal site in the checker body, in body order. The
+/// per-pose kinematics site carries the kernel's own `DenyCode`, so the
+/// narration can name the exact envelope violation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrajectoryRefusalReason {
+    /// Posture short-circuit: a LockedOut fleet is never commanded.
+    PostureLockedOut,
+    /// Fewer than two poses — no segment to validate; conservative MRC.
+    TooFewPoints,
+    /// SG2 containment: some pose's footprint left the drivable corridor
+    /// (or the frame-integrity gate refused the corridor).
+    ContainmentBreach,
+    /// A per-pose kinematics segment was DENIED (not merely clamped); the
+    /// kernel's deny code says which invariant.
+    KinematicsDenied(kirra_core::kinematics_contract::DenyCode),
+    /// ADR-0029 diff-drive yaw bound: |ω| exceeded ω_max(v) or was non-finite.
+    AngularRateBreach,
+    /// Issue #70 / ADR-0029 Degraded angular converge-to-stop-and-HOLD breach.
+    DegradedAngularHoldBreach,
+    /// H-2: a perceived object carried NaN/Inf fields — unlocalizable, a
+    /// perception fault.
+    NonFinitePerceptionObject,
+    /// SG1 snapshot RSS: longitudinal gap below the required safe distance
+    /// with lateral overlap.
+    RssLongitudinalBreach,
+    /// SG1 snapshot RSS: lateral gap below the required side clearance while
+    /// abreast or under a lateral cut-in.
+    RssLateralBreach,
+    /// Multi-modal predictive RSS: a predicted object mode meets the ego in
+    /// space-time (or a mode was unevaluable — fail-closed per mode, #824).
+    PredictiveRssBreach,
+    /// RSS Rule 4: the trajectory outruns the assured-clear (visibility)
+    /// distance — it commands a speed it could not stop from within what it
+    /// can see.
+    OcclusionOutrunsVisibility,
+    /// WS-2 VRU bound: a pedestrian's omnidirectional reachable set meets the
+    /// ego envelope at a time-matched pose (or a non-finite pedestrian).
+    VruReachableSetBreach,
+}
+
+impl TrajectoryRefusalReason {
+    /// Stable machine code (SCREAMING_SNAKE, the capture/`DenyCode` wire
+    /// vocabulary). `KinematicsDenied` keeps one umbrella code — the inner
+    /// `DenyCode::reason()` is carried separately by emitters that want the
+    /// per-pose detail.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::PostureLockedOut => "TRAJECTORY_POSTURE_LOCKED_OUT",
+            Self::TooFewPoints => "TRAJECTORY_TOO_FEW_POINTS",
+            Self::ContainmentBreach => "TRAJECTORY_CONTAINMENT_BREACH",
+            Self::KinematicsDenied(_) => "TRAJECTORY_KINEMATICS_DENIED",
+            Self::AngularRateBreach => "TRAJECTORY_ANGULAR_RATE_BREACH",
+            Self::DegradedAngularHoldBreach => "TRAJECTORY_DEGRADED_ANGULAR_HOLD",
+            Self::NonFinitePerceptionObject => "TRAJECTORY_NONFINITE_OBJECT",
+            Self::RssLongitudinalBreach => "TRAJECTORY_RSS_LONGITUDINAL",
+            Self::RssLateralBreach => "TRAJECTORY_RSS_LATERAL",
+            Self::PredictiveRssBreach => "TRAJECTORY_RSS_PREDICTIVE",
+            Self::OcclusionOutrunsVisibility => "TRAJECTORY_OCCLUSION_OUTRUN",
+            Self::VruReachableSetBreach => "TRAJECTORY_VRU_BREACH",
+        }
+    }
+
+    /// The operator sentence — the `explain_deny_token` pattern
+    /// (`src/verdicts.rs`) extended to the trajectory checker. Every variant
+    /// gets a SPECIFIC sentence; the exhaustive match makes a new refusal
+    /// site without a sentence a compile error, and the lock-step test below
+    /// pins distinctness.
+    #[must_use]
+    pub fn explain(&self) -> &'static str {
+        match self {
+            Self::PostureLockedOut => {
+                "The fleet posture was LockedOut when this trajectory arrived. Under LockedOut \
+                 no trajectory is evaluated — the vehicle executes its minimal-risk safe stop \
+                 and recovery requires operator clearance."
+            }
+            Self::TooFewPoints => {
+                "The proposed trajectory carried fewer than two poses, so no motion segment \
+                 could be validated. Refused conservatively — an unvalidatable proposal is \
+                 never driven."
+            }
+            Self::ContainmentBreach => {
+                "At least one pose's vehicle footprint left the perceived drivable corridor \
+                 (SG2), or the corridor frame failed its integrity gate. The planner proposes; \
+                 the checker refused the departure and the vehicle holds its minimal-risk stop."
+            }
+            Self::KinematicsDenied(_) => {
+                "A trajectory segment violated the per-pose kinematic envelope severely enough \
+                 to be DENIED rather than clamped (see the carried per-pose deny code for the \
+                 exact invariant — non-finite values, invalid time step, or a Degraded \
+                 stop-and-hold breach). The whole trajectory collapses to the minimal-risk stop."
+            }
+            Self::AngularRateBreach => {
+                "A segment commanded a yaw rate above the platform's rollover-bounded ω_max for \
+                 its speed (or a non-finite yaw rate). Differential-drive in-place rotation is \
+                 bounded directly; the trajectory was refused (ADR-0029, SG3)."
+            }
+            Self::DegradedAngularHoldBreach => {
+                "The fleet posture was Degraded and a segment re-initiated or increased \
+                 rotation instead of converging the yaw axis to a stop. Degraded is \
+                 decel-to-stop-and-HOLD on BOTH axes (issue #70, ADR-0029); the trajectory \
+                 was refused."
+            }
+            Self::NonFinitePerceptionObject => {
+                "A perceived object carried NaN or infinite fields, making it unlocalizable — \
+                 the checker cannot even prove it is behind the vehicle or laterally clear. A \
+                 perception fault fails closed to the minimal-risk stop (H-2, SG9)."
+            }
+            Self::RssLongitudinalBreach => {
+                "An object in the vehicle's path was closer than the RSS longitudinal safe \
+                 distance for the closing speed — continuing would not leave room to stop if \
+                 the object braked. Refused (SG1, IEEE 2846 §5)."
+            }
+            Self::RssLateralBreach => {
+                "An object abreast of (or laterally closing on) the trajectory was inside the \
+                 required RSS side clearance — a cut-in or squeeze the vehicle could not \
+                 respond to. Refused (SG1)."
+            }
+            Self::PredictiveRssBreach => {
+                "A predicted motion mode of a tracked object meets the trajectory in space-time \
+                 (a cut-in or turn-in the instantaneous snapshot showed as clear), or a mode \
+                 could not be evaluated at all — one dangerous hypothesis is enough to refuse \
+                 (fail-closed per mode, #824)."
+            }
+            Self::OcclusionOutrunsVisibility => {
+                "The trajectory commands a speed from which the vehicle could not stop within \
+                 its assured-clear (visible) distance — it outruns what it can see, treating \
+                 unobserved space as potentially occupied (RSS Rule 4). Refused."
+            }
+            Self::VruReachableSetBreach => {
+                "A pedestrian's reachable envelope (any direction, at pedestrian max speed) \
+                 meets the vehicle's swept envelope at a time-matched pose — or a pedestrian \
+                 carried non-finite fields. Refused omnidirectionally; kerbside lateral \
+                 clearance does not exempt a VRU (WS-2, SG1)."
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod refusal_reason_tests {
+    use super::*;
+
+    /// The lock-step coverage test (mirrors
+    /// `verdicts.rs::every_deny_code_has_a_specific_explanation`): every
+    /// trajectory refusal reason has a specific, distinct explanation and a
+    /// distinct stable code. A new refusal site added without extending the
+    /// enum can't compile (the site must name a reason); a new variant
+    /// without sentences can't compile (exhaustive match); this test pins
+    /// distinctness and substance.
+    #[test]
+    fn every_trajectory_refusal_reason_has_a_specific_distinct_explanation() {
+        use kirra_core::kinematics_contract::DenyCode;
+        let all = [
+            TrajectoryRefusalReason::PostureLockedOut,
+            TrajectoryRefusalReason::TooFewPoints,
+            TrajectoryRefusalReason::ContainmentBreach,
+            TrajectoryRefusalReason::KinematicsDenied(DenyCode::NanInfLinearVelocity),
+            TrajectoryRefusalReason::AngularRateBreach,
+            TrajectoryRefusalReason::DegradedAngularHoldBreach,
+            TrajectoryRefusalReason::NonFinitePerceptionObject,
+            TrajectoryRefusalReason::RssLongitudinalBreach,
+            TrajectoryRefusalReason::RssLateralBreach,
+            TrajectoryRefusalReason::PredictiveRssBreach,
+            TrajectoryRefusalReason::OcclusionOutrunsVisibility,
+            TrajectoryRefusalReason::VruReachableSetBreach,
+        ];
+        let mut codes = std::collections::HashSet::new();
+        let mut sentences = std::collections::HashSet::new();
+        for r in &all {
+            assert!(codes.insert(r.code()), "duplicate code {}", r.code());
+            assert!(
+                r.code().starts_with("TRAJECTORY_"),
+                "code vocabulary: {}",
+                r.code()
+            );
+            let s = r.explain();
+            assert!(s.len() > 40, "explanation too thin for {}", r.code());
+            assert!(
+                sentences.insert(s),
+                "duplicate explanation for {}",
+                r.code()
+            );
+        }
+    }
+
+    /// The side-channel carries the right reason at representative sites and
+    /// the discarding wrapper returns the identical verdict.
+    #[test]
+    fn explained_reasons_match_their_sites_and_wrapper_is_identical() {
+        let corridor = crate::corridor::MockCorridorSource::straight_5m_half_width(200.0);
+        let config = crate::config::VehicleConfig::default_urban();
+        let traj: Vec<TrajectoryPoint> = (0..5)
+            .map(|i| TrajectoryPoint {
+                pose: crate::state::Pose {
+                    x_m: 5.0 + (i as f64) * 0.5,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+                velocity_mps: 5.0,
+                time_from_start_s: (i as f64) * 0.1,
+            })
+            .collect();
+
+        // LockedOut short-circuit.
+        let (v, r) = validate_trajectory_slow_explained(
+            &traj,
+            &corridor,
+            &[],
+            &config,
+            None,
+            FleetPosture::LockedOut,
+            None,
+            None,
+            None,
+            None,
+            FrameTrust::Trusted,
+        );
+        assert_eq!(v, TrajectoryVerdict::MRCFallback);
+        assert_eq!(r, Some(TrajectoryRefusalReason::PostureLockedOut));
+
+        // Too few points.
+        let (v, r) = validate_trajectory_slow_explained(
+            &traj[..1],
+            &corridor,
+            &[],
+            &config,
+            None,
+            FleetPosture::Nominal,
+            None,
+            None,
+            None,
+            None,
+            FrameTrust::Trusted,
+        );
+        assert_eq!(v, TrajectoryVerdict::MRCFallback);
+        assert_eq!(r, Some(TrajectoryRefusalReason::TooFewPoints));
+
+        // The pre-narration wrapper returns the identical verdict for both.
+        assert_eq!(
+            validate_trajectory_slow_capped(
+                &traj[..1],
+                &corridor,
+                &[],
+                &config,
+                None,
+                FleetPosture::Nominal,
+                None,
+                None,
+                None,
+                None,
+                FrameTrust::Trusted,
+            ),
+            TrajectoryVerdict::MRCFallback
+        );
+
+        // An admissible trajectory carries NO reason.
+        let (v, r) = validate_trajectory_slow_explained(
+            &traj,
+            &corridor,
+            &[],
+            &config,
+            None,
+            FleetPosture::Nominal,
+            None,
+            None,
+            None,
+            None,
+            FrameTrust::Trusted,
+        );
+        assert!(matches!(
+            v,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ));
+        assert_eq!(r, None);
     }
 }
