@@ -362,8 +362,33 @@ pub fn longitudinal_safe_distance(
         return RSS_FAILSAFE_DISTANCE_M;
     }
     let v_after = ego_vel + v_gain;
-    let d_brake_ego = v_after.powi(2) / (2.0 * brake_min);
-    let d_brake_lead = lead_vel.powi(2) / (2.0 * brake_max);
+
+    // The one NaN a division can form here is Inf/Inf: the squared numerator
+    // AND the doubled denominator can each overflow to +Inf independently
+    // (review catch on the first cut of this restructure). Divide only when
+    // the divisor is finite; a divisor that overflowed (an absurdly strong
+    // brake) keeps the old finite/Inf → 0 flush, and Inf/Inf — whose old
+    // `raw` was NaN → failsafe — fails closed directly. Divisors are
+    // finite-positive-nonzero when used, so 0/0 is impossible and a finite
+    // division never forms NaN.
+    let v_after_sq = v_after.powi(2); // ±Inf² → +Inf; never NaN
+    let lead_sq = lead_vel.powi(2); // finite² → +Inf at worst; never NaN
+    let twice_brake_min = 2.0 * brake_min;
+    let twice_brake_max = 2.0 * brake_max;
+    let d_brake_ego = if twice_brake_min.is_finite() {
+        v_after_sq / twice_brake_min
+    } else if v_after_sq.is_finite() {
+        0.0
+    } else {
+        return RSS_FAILSAFE_DISTANCE_M;
+    };
+    let d_brake_lead = if twice_brake_max.is_finite() {
+        lead_sq / twice_brake_max
+    } else if lead_sq.is_finite() {
+        0.0
+    } else {
+        return RSS_FAILSAFE_DISTANCE_M;
+    };
     if !(d_brake_ego.is_finite() && d_brake_lead.is_finite()) {
         return RSS_FAILSAFE_DISTANCE_M;
     }
