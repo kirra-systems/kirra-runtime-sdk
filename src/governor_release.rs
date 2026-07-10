@@ -81,15 +81,18 @@ impl RosReleaseSigner {
     /// Mint a release token over the ENFORCED twist. Called ONLY from the
     /// actuator handler's 200 arm, after the epoch fence — the deny paths
     /// (400/403/503) structurally cannot reach this. (The invariant "the deny
-    /// path never mints a token" is pinned by
-    /// `tests/ros_release_mint_integration.rs`.)
+    /// path never mints a token" is pinned by the bin-internal
+    /// `src/bin/kirra_verifier_service/ros_release_mint_tests.rs`.)
     pub fn mint(
         &self,
         linear_mps: f64,
         angular_rad_s: f64,
         issued_at_ms: u64,
     ) -> (RosTwistPayload, ReleaseToken) {
-        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        // Relaxed: the counter needs uniqueness/monotonicity only (atomic RMW
+        // guarantees both regardless of ordering); no other memory synchronizes
+        // on it, and this sits on the actuation response path.
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let payload = RosTwistPayload {
             sequence,
             issued_at_ms,

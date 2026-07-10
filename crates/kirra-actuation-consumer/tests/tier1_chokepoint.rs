@@ -108,7 +108,7 @@ fn run_child_governor() {
     );
 
     // (e) the deny-path response: the verifier's deny arm NEVER mints (pinned
-    // by tests/ros_release_mint_integration.rs in the root crate), so what
+    // by the root crate's bin-internal ros_release_mint_tests.rs), so what
     // arrives on the bus is the enforced-stop bytes with no token.
     let e = payload(5, 0.0, 0.0);
     out += &format!("FRAME e {} -\n", hex::encode(e.encode()));
