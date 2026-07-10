@@ -57,9 +57,12 @@ Allocation to prove:
 WCET-enabling code properties (verify, then bound): panic-free or
 panic=abort→safe-state on the check path; **no heap allocation** on the hot path
 (stack-only / bounded); **bounded loops** (horizon length, agent cap); input-size
-caps (the 16 KiB body bound already in place). Once bounded, the proven WCET sets
+caps (the 16 KiB body bound already in place). Once bounded, the WCET bound sets
 the SG9 timeout and confirms the per-cycle FTTI for SG1/2/3/7/9 — and any change
-that breaks the bound is a safety regression caught in CI.
+that breaks the bound is a safety regression caught in CI. Today's evidence for
+that bound is the structural boundedness argument (`src/wcet_gate.rs`) plus the
+host-indicative CI-measured p99.9 — **not a certified WCET**; the QNX/`SCHED_FIFO`
+target measurement is tracked in #274.
 
 ---
 
@@ -76,14 +79,17 @@ As an SEooC, the manual states the conditions under which the ASIL-D claim holds
    coverage model (ADR-0003).
 4. **FFI requirements** — separate compute, in-line egress, input validation.
 5. **Toolchain** — Ferrocene qualification scope.
-6. **Coverage & WCET** — the achieved MC/DC and the proven WCET bound.
+6. **Coverage & WCET** — the measured decision coverage (100% branch-pair on
+   the targeted check-path decisions; true MC/DC toolchain-blocked, #65) and
+   the WCET evidence (structural boundedness + host-indicative p99.9 — not a
+   certified WCET; target measurement tracked in #274).
 
 ---
 
 ## 5. Actions (S3 checklist)
 
 - [x] Verify no-alloc + panic-freedom on the Governor check path; bound the WCET — **done** on branch `s3-wcet-pass-b`. Pass A removed per-verdict heap allocs + set `panic = "abort"`. Pass B1+B2 made the verdict path lock-free in production. The structural boundedness argument lives in `src/wcet_gate.rs` (O(1) per call; no loops, no recursion, no alloc, no locks). CI-measured steady-state p99.9 = 170–352 ns; max with OS jitter ≤ 219 µs (target hardware re-measure under S8/#120).
-- [x] Set the SG9 timeout to the proven WCET; wire a CI guard against regressions — **done**. `GOVERNOR_VERDICT_WCET_TARGET_MICROS = 100` (deployment target). CI guard at `GOVERNOR_VERDICT_WCET_CI_THRESHOLD_MICROS = 1000` (generous for shared-runner variance). Six tests in `wcet_gate::ci_gate_tests` cover Allow / P0-NaN-Deny / P2-Clamp / P6-Clamp / posture-route Nominal / posture-route Stale-FailClosed. Target re-validated on D3 independent compute under S8 (#120).
+- [x] Set the SG9 timeout from the measured timing evidence (host-indicative — a certified WCET awaits the target measurement, #274); wire a CI guard against regressions — **done**. `GOVERNOR_VERDICT_WCET_TARGET_MICROS = 100` (deployment target). CI guard at `GOVERNOR_VERDICT_WCET_CI_THRESHOLD_MICROS = 1000` (generous for shared-runner variance). Six tests in `wcet_gate::ci_gate_tests` cover Allow / P0-NaN-Deny / P2-Clamp / P6-Clamp / posture-route Nominal / posture-route Stale-FailClosed. Target re-validated on D3 independent compute under S8 (#120).
 - [x] Measure MC/DC on the safety-critical functions; extend tests to 100% — **done** on branch `s3-mcdc-ferrocene`. See `docs/safety/OCCY_MCDC_EVIDENCE.md` (KIRRA-OCCY-MCDC-001). Measurement under nightly llvm-cov fell back to `--branch` pair coverage (cargo-llvm-cov 0.8.7 `--mcdc` passes `-Z coverage-options=mcdc` to rustc, but `1.98.0-nightly` (`f8a08b688`, 2026-05-30) only accepts `block|branch|condition` — the value was renamed upstream and the driver has not yet been respun; the regression is documented in OCCY_MCDC_EVIDENCE.md §6.3). On the targeted Governor check-path decisions the pair table went from **49/56 → 56/56** branch pairs covered, with 17 added pair-completing tests in `src/gateway/cmd_vel.rs`, `src/gateway/containment.rs`, `src/gateway/policy.rs`, and `parko/crates/parko-core/src/rss.rs`. File-level branch coverage on those files: cmd_vel 100%, kinematics_contract 100%, policy 100%, posture_cache 100%, parko-core rss 100%. Residual unflipped file-level branches in containment / posture_engine_v2 are `tracing::warn!` macro expansions and helper-fn ray-cast clauses — not safety-critical condition flips. Every added test passes identically under stable rustc (`cargo test --workspace`, 399 + new in kirra; 72 + new in parko-core). The MC/DC INSTRUMENTATION is a measurement tool; production code ships unchanged on stable / Ferrocene.
 - [x] Complete the SG→requirement→code→test traceability matrix; extract in CI — **done** (S3 traceability build, commit `3026535`). `docs/safety/TRACEABILITY.md` defines the parseable `// SAFETY: SGx | REQ: ... | TEST: ...` convention; `docs/safety/TRACEABILITY_MATRIX.md` is auto-generated via `scripts/extract_safety_traceability.sh`; `src/traceability_gate.rs::ci_gate_tests` is the Rust CI gate (every ENFORCED SG has ≥ 1 tagged site; every tagged site has non-empty REQ + TEST; SG ids in range; tag-count floor).
 - [x] Document FFI evidence (D3 separation + input validation) — **done**. See `docs/safety/OCCY_FFI_EVIDENCE.md` (KIRRA-OCCY-FFI-001) — spatial / temporal / communication isolation evidence consolidation; D3 independent-compute deployment is the assumption of use.

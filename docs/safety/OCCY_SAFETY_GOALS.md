@@ -192,7 +192,9 @@ action).**
   error** → both miss a hazard → UCA-1/2. *Constraint: re-derive at worst-case
   bounds (ConservativeWorldView); resolve independence in S2 (the (iii)→(ii)
   decision).*
-- Unbounded Governor timeout → UCA-3. *Constraint: proven WCET bound → S3.*
+- Unbounded Governor timeout → UCA-3. *Constraint: bounded verdict time —
+  structural boundedness argument + host-indicative p99.9, not certified WCET
+  (target re-measure #274) → S3.*
 - Non-finite (NaN) propagation → silent Accept → UCA-1. *Constraint: is_finite
   trap, fail-closed → already in 1.C / SG9.*
 - Missing map prior at a commit zone → UCA-2. *Constraint: map-anchored
