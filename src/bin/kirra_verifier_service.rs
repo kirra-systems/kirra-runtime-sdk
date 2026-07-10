@@ -745,6 +745,7 @@ async fn main() {
         // deployment enables the monitor + starts the publisher worker.
         perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
+        last_actuator_verdict: kirra_verifier::posture_cache::empty_last_verdict_cell(),
     });
 
     {
@@ -1070,8 +1071,7 @@ async fn main() {
         );
     }
 
-    // ADR-0033 — the ROS-path release-token signer (opt-in via env; a
-    // configured-but-broken source aborts startup). See actuator.rs.
+    // ADR-0033 ROS release-token signer (opt-in; fail-closed — actuator.rs).
     let ros_release_signer = provision_ros_release_signer();
 
     // Assemble the production router. Extracted into `build_app` (issue #72)
@@ -1558,6 +1558,7 @@ fn build_app(
         // EP-17 — one denial as a signed, explained artifact (reads the
         // chained record + the denied command's raw inputs → audit-read tier).
         .route("/verdicts/{verdict_id}", get(verdicts::get_verdict_handler))
+        .route("/system/verdicts/last", get(verdicts::last_verdict))
         .layer(middleware::from_fn_with_state(
             svc_state.clone(),
             require_audit_scope,
@@ -1577,7 +1578,6 @@ fn build_app(
             Arc::clone(&svc_state),
             enforce_actuator_safety_envelope,
         ));
-    // ADR-0033 — thread the signer to the 200 arm ONLY (see actuator.rs).
     let actuator_routes = layer_release_signer(actuator_routes, ros_release_signer)
         // WS-1 (#G7): SCOPE_ACTUATOR_COMMAND — the admin token OR an `operator`-role
         // principal. Auth runs before the envelope; the transport gate runs first of all.

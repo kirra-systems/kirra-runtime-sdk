@@ -42,6 +42,7 @@ fn build_state(initial: Option<CachedFleetPosture>) -> Arc<ServiceState> {
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
+        last_actuator_verdict: kirra_verifier::posture_cache::empty_last_verdict_cell(),
     })
 }
 
@@ -862,5 +863,20 @@ async fn health_exempt_under_lockedout_on_real_router() {
         status,
         StatusCode::OK,
         "/health must remain reachable under LockedOut on the real router (exempt); got {status}"
+    );
+}
+
+/// Part 3 (#891 narration): the last-verdict sidecar is mounted in the
+/// auditor tier on the REAL assembled router — an unauthenticated GET is
+/// refused (the route exists but the scope gate holds), proving the
+/// narration surface is read-only telemetry behind RBAC, not an open (or
+/// admin-token) endpoint.
+#[tokio::test]
+async fn last_verdict_sidecar_is_auditor_gated_on_the_real_router() {
+    let svc = state_with(FleetPosture::Nominal);
+    let status = status_through_real_app(svc, "GET", "/system/verdicts/last").await;
+    assert!(
+        status == StatusCode::UNAUTHORIZED || status == StatusCode::SERVICE_UNAVAILABLE,
+        "unauthenticated access to the narration sidecar must be refused (got {status})"
     );
 }

@@ -389,6 +389,30 @@ pub async fn enforce_actuator_safety_envelope(
         }
     }
 
+    // Part 3 (#891 narration): latch this verdict for the auditor-tier
+    // read-only sidecar (`GET /system/verdicts/last`). O(1) single-writer
+    // store, never read on this path; a poisoned lock is skipped — the
+    // narration layer must never panic (or block) the command path. Sits
+    // beside the capture/audit try_sends this path already performs.
+    {
+        let (action, deny_code) = match &verdict {
+            EnforceAction::Allow => ("Allow", None),
+            EnforceAction::ClampLinear(_) => ("ClampLinear", None),
+            EnforceAction::ClampSteering(_) => ("ClampSteering", None),
+            EnforceAction::ClampBoth { .. } => ("ClampBoth", None),
+            EnforceAction::DenyBreach(code) => ("DenyBreach", Some(code.reason())),
+        };
+        // try_write: contention skips the latch — narration never blocks.
+        if let Ok(mut cell) = svc.last_actuator_verdict.try_write() {
+            *cell = Some(crate::posture_cache::LastActuatorVerdict {
+                at_ms: now,
+                action,
+                deny_code,
+                explanation: deny_code.map(crate::verdicts::explain_deny_token),
+            });
+        }
+    }
+
     match verdict {
         EnforceAction::Allow => {
             // Thread the verdict to the handler so the response reports it.
@@ -1012,6 +1036,7 @@ mod actuator_middleware_tests {
             posture_engine_tx: std::sync::OnceLock::new(),
             perception_cap,
             perception_monitor_enabled: false,
+            last_actuator_verdict: crate::posture_cache::empty_last_verdict_cell(),
         })
     }
 
