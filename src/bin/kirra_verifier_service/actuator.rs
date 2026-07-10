@@ -139,3 +139,54 @@ pub(crate) async fn handle_actuator_motion_command(
 
     (StatusCode::OK, Json(body)).into_response()
 }
+
+/// ADR-0033 — provision the ROS-path release-token signer at startup. Minting
+/// is opt-in by configuration: `KIRRA_GOVERNOR_SIGNING_KEY_SOURCE` set →
+/// provision via the fail-closed ADR-0031 Clause E machinery (a
+/// CONFIGURED-but-broken source aborts startup — never silently run
+/// token-less when the operator asked for tokens); unset → no signer, the
+/// 200 body is byte-identical to before, and a verifying consumer downstream
+/// refuses into its safe stop. The dev-fixed key stays refused unless
+/// `KIRRA_GOVERNOR_SIGNING_KEY_ALLOW_DEV` is set (provisioning module).
+pub(crate) fn provision_ros_release_signer() -> Option<Arc<RosReleaseSigner>> {
+    match std::env::var("KIRRA_GOVERNOR_SIGNING_KEY_SOURCE") {
+        Ok(v) if !v.trim().is_empty() => {
+            match kirra_release_token::provisioning::provision_from_env() {
+                Ok(signing_key) => {
+                    let signer = Arc::new(RosReleaseSigner::new(
+                        signing_key,
+                        now_ms(), // sequence seed — see RosReleaseSigner docs
+                    ));
+                    tracing::info!(
+                        key_id = %signer.key_id(),
+                        "ADR-0033: ROS release-token minting ENABLED on the actuator path"
+                    );
+                    Some(signer)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = ?e,
+                        "FATAL: KIRRA_GOVERNOR_SIGNING_KEY_SOURCE is set but provisioning failed — refusing to start (fail-closed; a configured signer must never silently degrade to token-less)"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// ADR-0033 — thread the signer to the actuator handler's 200 arm ONLY, via
+/// an optional router `Extension`. The deny paths (envelope 400, scope
+/// 401/403, posture/fence 503) are produced by middleware layers that never
+/// see this extension — the "deny path never mints a token" invariant is
+/// structural here and pinned by `ros_release_mint_tests.rs`.
+pub(crate) fn layer_release_signer<S: Clone + Send + Sync + 'static>(
+    routes: Router<S>,
+    signer: Option<Arc<RosReleaseSigner>>,
+) -> Router<S> {
+    match signer {
+        Some(s) => routes.layer(Extension(s)),
+        None => routes,
+    }
+}

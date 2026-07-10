@@ -58,7 +58,7 @@ fn seed_node(svc: &Arc<ServiceState>, node_id: &str) {
 }
 
 async fn get(svc: Arc<ServiceState>, path: &str) -> (StatusCode, String) {
-    let resp = build_app(svc)
+    let resp = build_app(svc, None)
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -121,7 +121,7 @@ async fn grant_without_supervisor_env_is_fail_closed_503() {
     // multithreaded test cannot do (INV-13); those are covered by the pure
     // `supervisor_key_ok` truth table + the store-level audit/grant tests.
     let svc = build_state();
-    let resp = build_app(svc)
+    let resp = build_app(svc, None)
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -551,7 +551,7 @@ async fn post_json(
     if let Some(k) = supervisor_key {
         rb = rb.header("x-kirra-supervisor-key", k);
     }
-    let resp = build_app(svc)
+    let resp = build_app(svc, None)
         .oneshot(rb.body(Body::from(body)).unwrap())
         .await
         .expect("router");
