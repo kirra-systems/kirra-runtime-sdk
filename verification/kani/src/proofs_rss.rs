@@ -65,6 +65,12 @@ mod proofs {
     /// is the precondition `occlusion_limited_speed`'s bisection relies on
     /// (`lead_vel = 0`, exactly its call shape).
     #[kani::proof]
+    // kissat: with the squares now spelled as exact IEEE multiplications
+    // (rss.rs dropped `__builtin_powi`, whose cheap over-approximation both
+    // admitted a spurious counterexample AND made this relational two-
+    // evaluation proof artificially easy), the default CaDiCaL run exceeds
+    // the CI job timeout. Kissat solves this instance class far faster.
+    #[kani::solver(kissat)]
     fn r2_longitudinal_monotone_in_closing_speed_on_grid() {
         let v1_raw: u16 = kani::any();
         let v2_raw: u16 = kani::any();
