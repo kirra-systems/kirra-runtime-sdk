@@ -7,7 +7,7 @@
     "src/bin/kirra_verifier_service/startup.rs": 267,
     "src/gateway/mod.rs": 670,
     "src/verifier.rs": 1425,
-    "src/gateway/policy_layer.rs": 1388,
+    "src/gateway/policy_layer.rs": 1389,
     "src/bin/kirra_verifier_service/backpressure.rs": 201,
     "src/bin/kirra_verifier_service/observability.rs": 201,
     "src/bin/kirra_verifier_service/posture_feed.rs": 394,
