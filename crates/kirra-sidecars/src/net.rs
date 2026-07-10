@@ -104,7 +104,12 @@ mod tests {
 
     #[test]
     fn nonlocal_or_unparseable_binds_are_refused_without_the_flag() {
-        for addr in ["0.0.0.0:8100", "192.168.1.7:8100", "example.com:80", "garbage"] {
+        for addr in [
+            "0.0.0.0:8100",
+            "192.168.1.7:8100",
+            "example.com:80",
+            "garbage",
+        ] {
             assert!(enforce_bind_policy(addr, false).is_err(), "{addr}");
         }
         // The explicit opt-in admits them (the operator owns the boundary).
@@ -115,7 +120,10 @@ mod tests {
     fn rate_limiter_sheds_a_burst_and_recovers_by_refill() {
         let mut rl = RateLimiter::new(3.0, 1.0);
         let t0 = 10_000;
-        assert!(rl.admit(t0) && rl.admit(t0) && rl.admit(t0), "burst up to capacity");
+        assert!(
+            rl.admit(t0) && rl.admit(t0) && rl.admit(t0),
+            "burst up to capacity"
+        );
         assert!(!rl.admit(t0), "over-burst is shed");
         assert!(!rl.admit(t0 + 500), "half a second refills half a token");
         assert!(rl.admit(t0 + 1_100), "a second refills one");

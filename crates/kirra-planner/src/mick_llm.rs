@@ -646,7 +646,10 @@ mod tests {
             "newlines/tabs collapse to spaces (no fake prompt sections)"
         );
         let long = "x".repeat(2 * MICK_MAX_REQUEST_CHARS);
-        assert_eq!(sanitize_request(&long).chars().count(), MICK_MAX_REQUEST_CHARS);
+        assert_eq!(
+            sanitize_request(&long).chars().count(),
+            MICK_MAX_REQUEST_CHARS
+        );
         assert_eq!(sanitize_request("  \n\t  "), "", "whitespace-only → empty");
     }
 

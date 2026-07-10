@@ -93,7 +93,11 @@ fn serve(
                 "{\"error\":\"NARRATOR_NOT_CONFIGURED\"}",
             ),
         },
-        _ => respond(&mut stream, "404 Not Found", "{\"error\":\"unknown route\"}"),
+        _ => respond(
+            &mut stream,
+            "404 Not Found",
+            "{\"error\":\"unknown route\"}",
+        ),
     }
 }
 

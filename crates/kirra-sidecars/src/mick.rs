@@ -200,7 +200,9 @@ mod tests {
     #[test]
     fn accepted_intent_is_latched_and_wire_round_trips_through_the_one_parse() {
         let mut svc = service(r#"{"intent":"go_to","x_m":12.0,"y_m":-2.0}"#);
-        let (intent, accepted) = svc.handle_text(&req("take me to the dock"), 10_000).unwrap();
+        let (intent, accepted) = svc
+            .handle_text(&req("take me to the dock"), 10_000)
+            .unwrap();
         assert_eq!(
             intent,
             MickIntent::GoTo {
@@ -228,9 +230,14 @@ mod tests {
     #[test]
     fn unparseable_llm_output_fails_closed_and_never_latches() {
         let mut svc = service("just floor it, trust me");
-        let err = svc.handle_text(&req("go as fast as you can"), 10_000).unwrap_err();
+        let err = svc
+            .handle_text(&req("go as fast as you can"), 10_000)
+            .unwrap_err();
         assert_eq!(err, "MICK_JSON_PARSE_ERROR");
-        assert!(svc.last().is_none(), "a rejected reply must not become an intent");
+        assert!(
+            svc.last().is_none(),
+            "a rejected reply must not become an intent"
+        );
 
         // Same for a schema-valid-but-nonfinite reply.
         let mut svc = service(r#"{"intent":"go_to","x_m":1e999,"y_m":0.0}"#);
@@ -249,7 +256,11 @@ mod tests {
         // drive the SAME service with an empty request (fails pre-model).
         let before = svc.last().cloned();
         assert!(svc.handle_text(&req("   "), 11_000).is_err());
-        assert_eq!(svc.last().cloned(), before, "failure leaves the latch as-was");
+        assert_eq!(
+            svc.last().cloned(),
+            before,
+            "failure leaves the latch as-was"
+        );
     }
 
     #[test]
@@ -274,6 +285,9 @@ mod tests {
                 shed += 1;
             }
         }
-        assert!(shed >= 6, "the burst bound must shed a same-instant flood: {shed}");
+        assert!(
+            shed >= 6,
+            "the burst bound must shed a same-instant flood: {shed}"
+        );
     }
 }

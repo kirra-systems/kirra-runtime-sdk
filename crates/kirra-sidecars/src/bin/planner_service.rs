@@ -57,7 +57,11 @@ fn serve(mut stream: TcpStream, limiter: &mut RateLimiter) {
                 ),
             }
         }
-        _ => respond(&mut stream, "404 Not Found", "{\"error\":\"unknown route\"}"),
+        _ => respond(
+            &mut stream,
+            "404 Not Found",
+            "{\"error\":\"unknown route\"}",
+        ),
     }
 }
 

@@ -23,11 +23,11 @@
 //! * rate limiting and the loopback bind policy live in the binary
 //!   (`net::RateLimiter` / `net::enforce_bind_policy`).
 
+use kirra_core::frame_integrity::FrameTrust;
 use kirra_planner::{
     plan_for_intent, EgoState, FleetPosture, GeometricPlanner, GeometricPlannerConfig, Goal,
     MickIntent, PlanInput, Pose, ProposalKind,
 };
-use kirra_core::frame_integrity::FrameTrust;
 use kirra_trajectory::corridor::{CorridorSource, Point};
 use kirra_trajectory::state::{PerceivedObject, TrajectoryVerdict};
 use kirra_trajectory::validation::validate_trajectory_slow_explained;
@@ -225,10 +225,7 @@ fn validate_finite(req: &PlanRequest) -> Result<(), SeamRejection> {
         .iter()
         .chain(req.right.iter())
         .all(|p| finite(&[p[0], p[1]]));
-    let obj_ok = req
-        .objects
-        .iter()
-        .all(|o| finite(&[o.x, o.y, o.vx, o.vy]));
+    let obj_ok = req.objects.iter().all(|o| finite(&[o.x, o.y, o.vx, o.vy]));
     // The optional vehicle overrides feed the checker's VehicleConfig and the
     // planner preset — a NaN footprint would mask comparisons downstream, so
     // they get the same gate (review: Copilot on #894).
@@ -276,8 +273,12 @@ fn validate_in_map(req: &PlanRequest, target: (f64, f64)) -> Result<(), SeamReje
         return Ok(());
     }
     let all = req.left.iter().chain(req.right.iter());
-    let (mut min_x, mut min_y, mut max_x, mut max_y) =
-        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
     for p in all {
         min_x = min_x.min(p[0]);
         min_y = min_y.min(p[1]);
@@ -477,7 +478,9 @@ mod tests {
     #[test]
     fn goal_only_request_still_grounds_as_goto_and_reports_a_verdict() {
         let resp = handle_plan(&base_request()).expect("seam admits");
-        assert!(resp.verdict == "Accept" || resp.verdict == "Clamp" || resp.verdict == "MRCFallback");
+        assert!(
+            resp.verdict == "Accept" || resp.verdict == "Clamp" || resp.verdict == "MRCFallback"
+        );
         assert!(!resp.trajectory.is_empty(), "a proposal is always returned");
     }
 
@@ -489,7 +492,9 @@ mod tests {
         assert!(!resp.trajectory.is_empty());
         // The string form (the /intent/last relay shape) parses identically.
         let mut req = base_request();
-        req.intent = Some(serde_json::json!(r#"{"intent":"go_to","x_m":40.0,"y_m":0.0}"#));
+        req.intent = Some(serde_json::json!(
+            r#"{"intent":"go_to","x_m":40.0,"y_m":0.0}"#
+        ));
         handle_plan(&req).expect("string-embedded intent admits");
     }
 
@@ -564,11 +569,17 @@ mod tests {
         // Direct goal.
         let mut req = base_request();
         req.goal = Xy { x: 9e6, y: 0.0 };
-        assert_eq!(handle_plan(&req).unwrap_err().code, "INTENT_GOAL_OUT_OF_MAP");
+        assert_eq!(
+            handle_plan(&req).unwrap_err().code,
+            "INTENT_GOAL_OUT_OF_MAP"
+        );
         // And an intent-carried target gets the SAME bound.
         let mut req = base_request();
         req.intent = Some(serde_json::json!({"intent":"go_to","x_m":9e6,"y_m":0.0}));
-        assert_eq!(handle_plan(&req).unwrap_err().code, "INTENT_GOAL_OUT_OF_MAP");
+        assert_eq!(
+            handle_plan(&req).unwrap_err().code,
+            "INTENT_GOAL_OUT_OF_MAP"
+        );
     }
 
     /// The #893 narration rides on a refused proposal: a corridor far too

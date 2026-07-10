@@ -39,9 +39,7 @@ use kirra_planner::{
     Pose, TrajectoryPoint,
 };
 use kirra_release_token::ros_twist::issue_ros_release;
-use kirra_trajectory::validation::{
-    validate_trajectory_slow_explained, TrajectoryRefusalReason,
-};
+use kirra_trajectory::validation::{validate_trajectory_slow_explained, TrajectoryRefusalReason};
 use kirra_trajectory::{MockCorridorSource, TrajectoryVerdict, VehicleConfig};
 
 /// The demo governor key (test provenance only; a deployment provisions per
@@ -292,8 +290,15 @@ fn mick_unsafe_intent_is_refused_narrated_and_nothing_reaches_the_motors() {
     };
     let plan_ok = plan_for_intent(&mut doer_ok, &intent_ok, &w);
     let (verdict_ok, reason_ok) = check(&plan_ok.trajectory, &corr, FleetPosture::Nominal);
-    assert_eq!(verdict_ok, TrajectoryVerdict::Accept, "the control must admit");
-    assert_eq!(reason_ok, None, "an admitted proposal carries no refusal reason");
+    assert_eq!(
+        verdict_ok,
+        TrajectoryVerdict::Accept,
+        "the control must admit"
+    );
+    assert_eq!(
+        reason_ok, None,
+        "an admitted proposal carries no refusal reason"
+    );
 
     let admitted_payload = RosTwistPayload {
         sequence: 2,

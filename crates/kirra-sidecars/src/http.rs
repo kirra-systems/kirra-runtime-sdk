@@ -23,7 +23,11 @@ pub struct Request {
 /// respond with (fail-closed: an unreadable or over-cap request never reaches
 /// a handler).
 pub fn read_request(stream: &mut TcpStream) -> Result<Request, &'static str> {
-    let mut reader = BufReader::new(stream.try_clone().map_err(|_| "500 Internal Server Error")?);
+    let mut reader = BufReader::new(
+        stream
+            .try_clone()
+            .map_err(|_| "500 Internal Server Error")?,
+    );
     let mut request_line = String::new();
     reader
         .read_line(&mut request_line)
@@ -46,7 +50,9 @@ pub fn read_request(stream: &mut TcpStream) -> Result<Request, &'static str> {
     let path = parts.next().unwrap_or("").to_string();
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
-        reader.read_exact(&mut body).map_err(|_| "400 Bad Request")?;
+        reader
+            .read_exact(&mut body)
+            .map_err(|_| "400 Bad Request")?;
     }
     Ok(Request { method, path, body })
 }

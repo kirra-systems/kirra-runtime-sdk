@@ -35,7 +35,11 @@ fn serve(mut stream: TcpStream) {
                 &serde_json::json!({"error": format!("{e}")}).to_string(),
             ),
         },
-        _ => respond(&mut stream, "404 Not Found", "{\"error\":\"unknown route\"}"),
+        _ => respond(
+            &mut stream,
+            "404 Not Found",
+            "{\"error\":\"unknown route\"}",
+        ),
     }
 }
 

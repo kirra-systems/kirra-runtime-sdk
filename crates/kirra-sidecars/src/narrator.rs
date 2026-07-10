@@ -149,7 +149,10 @@ mod tests {
         let v = fetch_last_verdict(&cfg).expect("relay succeeds");
         assert_eq!(v["last"]["explanation"], "why");
         let seen = handle.join().unwrap();
-        assert!(seen.starts_with("GET /system/verdicts/last HTTP/1.1"), "{seen}");
+        assert!(
+            seen.starts_with("GET /system/verdicts/last HTTP/1.1"),
+            "{seen}"
+        );
         assert!(
             seen.to_ascii_lowercase()
                 .contains("authorization: bearer auditor-tok"),
@@ -164,10 +167,16 @@ mod tests {
             .unwrap()
             .is_ok());
         // Half-configured (either half, including empty strings) → startup error.
-        assert!(NarratorConfig::resolve(Some("u".into()), None).unwrap().is_err());
-        assert!(NarratorConfig::resolve(None, Some("t".into())).unwrap().is_err());
-        assert!(NarratorConfig::resolve(Some("u".into()), Some(String::new()))
+        assert!(NarratorConfig::resolve(Some("u".into()), None)
             .unwrap()
             .is_err());
+        assert!(NarratorConfig::resolve(None, Some("t".into()))
+            .unwrap()
+            .is_err());
+        assert!(
+            NarratorConfig::resolve(Some("u".into()), Some(String::new()))
+                .unwrap()
+                .is_err()
+        );
     }
 }
