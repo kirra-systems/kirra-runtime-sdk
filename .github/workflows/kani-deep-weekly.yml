@@ -1,0 +1,49 @@
+# EP-15 follow-up — the weekly DEEP Kani lane. The per-PR `kani-proofs` job in
+# ci.yml runs the default harness set (fast, BLOCKING). Harnesses behind the
+# `deep-proofs` feature of `verification/kani` run here instead: today that is
+# R2 (closing-speed monotonicity of `longitudinal_safe_distance` on the full
+# integer-scaled parameter lattice), whose exact-IEEE relational instance blew
+# the per-PR 45-minute job budget on BOTH default CaDiCaL and kissat — the
+# final UNSAT solve alone ran 43+ minutes without returning (PR #888 CI runs).
+# This lane gives the solver the same scheduled multi-hour budget the EP-22
+# deep-fuzz campaign uses. Every deep property keeps a BLOCKING per-PR concrete
+# mirror in the kani crate's `cargo test` (for R2: the full speed-grid walk
+# swept along all four parameter axes), so demotion here never leaves a
+# property with zero per-PR coverage. Kept in its OWN workflow so the
+# `schedule` trigger does not fan the whole ci.yml job graph out weekly.
+name: Kani deep proofs (weekly)
+
+on:
+  schedule:
+    # 04:37 UTC Sunday (off the hour to dodge the top-of-hour scheduler surge;
+    # offset from the deep-fuzz campaign's 03:23 slot).
+    - cron: "37 4 * * 0"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kani-deep-weekly
+  cancel-in-progress: true
+
+jobs:
+  kani-deep:
+    name: Kani deep proofs (deep-proofs feature, multi-hour solver budget)
+    runs-on: ubuntu-latest
+    # The whole point of this lane is budget: the R2 UNSAT solve is known to
+    # exceed 45 min and its true cost is unmeasured — give it the full window.
+    timeout-minutes: 480
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Install Kani
+        # No install-flake tolerance here (unlike the per-PR lane): this lane
+        # exists ONLY to run the proofs, so a skipped run must read as red.
+        run: cargo install kani-verifier --locked && cargo kani setup
+      - name: Run ALL Kani proofs with deep harnesses enabled (BLOCKING)
+        # `--features deep-proofs` compiles the deep harnesses IN ADDITION to
+        # the default set (re-running the fast set costs minutes against an
+        # 8 h budget and means a new deep harness joins this campaign with no
+        # workflow edit — the no-silent-caps rule).
+        run: cd verification/kani && cargo kani --features deep-proofs
