@@ -305,6 +305,6 @@ pub(crate) async fn last_verdict(State(svc): State<Arc<ServiceState>>) -> impl I
         .last_actuator_verdict
         .read()
         .ok()
-        .and_then(|g| g.clone());
+        .and_then(|g| (*g).clone());
     Json(serde_json::json!({ "last": last }))
 }

@@ -2006,3 +2006,164 @@ mod refusal_reason_tests {
         assert_eq!(r, None);
     }
 }
+
+#[cfg(test)]
+mod boundary_mutation_killers {
+    //! WP-08 mutation-gate killers for the three boundary operators the
+    //! `_explained` rename re-exposed to the diff gate (`>`→`>=`, `<`→`<=`).
+    //! Each test sits EXACTLY on the operator's boundary using binary-exact
+    //! arithmetic, so the original admits and the boundary-flipped mutant
+    //! refuses.
+    use super::*;
+    use kirra_core::corridor::Point as CorridorPoint;
+
+    fn straight(n: usize, v: f64, dt: f64) -> Vec<TrajectoryPoint> {
+        (0..n)
+            .map(|i| TrajectoryPoint {
+                pose: crate::state::Pose {
+                    x_m: 5.0 + (i as f64) * v * dt,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+                velocity_mps: v,
+                time_from_start_s: (i as f64) * dt,
+            })
+            .collect()
+    }
+
+    fn object_at(dx_from_origin: f64, y: f64, vel_y: f64) -> PerceivedObject {
+        PerceivedObject {
+            id: 1,
+            pos: CorridorPoint {
+                x_m: dx_from_origin,
+                y_m: y,
+            },
+            velocity_mps: vel_y.abs(),
+            heading_rad: 0.0,
+            vel: CorridorPoint {
+                x_m: 0.0,
+                y_m: vel_y,
+            },
+        }
+    }
+
+    /// ω exactly AT ω_max is admitted (`>` strict); the `>=` mutant refuses.
+    /// dt = 0.25 keeps ω·dt / dt binary-exact, so the recomputed ω equals
+    /// ω_max bit-for-bit.
+    #[test]
+    fn yaw_exactly_at_omega_max_is_admitted() {
+        let cfg = crate::config::VehicleConfig::courier();
+        let ab = cfg.angular.expect("courier is diff-drive");
+        let omega_max = ab.omega_max(0.0, 1.0);
+        let dt = 0.25;
+        let traj: Vec<TrajectoryPoint> = (0..2)
+            .map(|i| TrajectoryPoint {
+                pose: crate::state::Pose {
+                    x_m: 5.0,
+                    y_m: 0.0,
+                    heading_rad: (i as f64) * omega_max * dt,
+                },
+                velocity_mps: 0.0,
+                time_from_start_s: (i as f64) * dt,
+            })
+            .collect();
+        let corridor = crate::corridor::MockCorridorSource::straight_5m_half_width(200.0);
+        let (v, r) = validate_trajectory_slow_explained(
+            &traj,
+            &corridor,
+            &[],
+            &cfg,
+            None,
+            FleetPosture::Nominal,
+            None,
+            None,
+            None,
+            None,
+            FrameTrust::Trusted,
+        );
+        assert_ne!(
+            v,
+            TrajectoryVerdict::MRCFallback,
+            "at-the-bound yaw admits: {r:?}"
+        );
+    }
+
+    /// An object laterally at EXACTLY the longitudinal-overlap gate width,
+    /// longitudinally unsafe: the strict `<` excludes it from the overlap
+    /// refusal (and the lateral branch admits it — still object, gap above
+    /// the zero-velocity side requirement); the `<=` mutant refuses.
+    #[test]
+    fn object_exactly_at_overlap_width_is_admitted() {
+        let cfg = crate::config::VehicleConfig::default_urban();
+        let traj = straight(5, 5.0, 0.1); // x: 5.0 → 7.0
+                                          // Stationary object 4–6 m ahead (longitudinally UNSAFE at 5 m/s),
+                                          // laterally at exactly the overlap width.
+        let obj = object_at(11.0, cfg.rss_longitudinal_overlap_m, 0.0);
+        let corridor = crate::corridor::MockCorridorSource::straight_5m_half_width(200.0);
+        let (v, r) = validate_trajectory_slow_explained(
+            &traj,
+            &corridor,
+            &[obj],
+            &cfg,
+            None,
+            FleetPosture::Nominal,
+            None,
+            None,
+            None,
+            None,
+            FrameTrust::Trusted,
+        );
+        assert_ne!(
+            v,
+            TrajectoryVerdict::MRCFallback,
+            "dy == overlap width sits OUTSIDE the strict overlap gate: {r:?}"
+        );
+    }
+
+    /// A laterally-closing object whose gap is EXACTLY the required side
+    /// clearance is admitted (`<` strict); the `<=` mutant refuses. The test
+    /// recomputes `lat_required` with the checker's own constants and places
+    /// the object at that exact offset (pose y = 0 keeps the subtraction
+    /// bit-exact).
+    #[test]
+    fn object_exactly_at_lateral_requirement_is_admitted() {
+        let cfg = crate::config::VehicleConfig::default_urban();
+        let kin = cfg.to_kinematics_contract();
+        let obj_lat_vel = 0.5; // a cut-in (above RSS_LATERAL_MOTION_EPS_MPS)
+        let lat_required = lateral_safe_distance_split(
+            0.0,
+            obj_lat_vel,
+            kin.max_lateral_accel_mps2,
+            RSS_LAT_BRAKE_FRACTION * kin.max_lateral_accel_mps2,
+            RSS_REACTION_TIME_S,
+            RSS_MU_LATERAL_M,
+        );
+        assert!(
+            lat_required > 0.0 && lat_required < cfg.rss_lateral_alignment_tolerance_m,
+            "fixture sanity: lat_required = {lat_required}"
+        );
+        // Slow ego (longitudinally SAFE against a non-closing object) with the
+        // object inside the lateral-conflict window.
+        let traj = straight(5, 1.0, 0.1); // x: 5.0 → 5.4
+        let obj = object_at(11.0, lat_required, obj_lat_vel);
+        let corridor = crate::corridor::MockCorridorSource::straight_5m_half_width(200.0);
+        let (v, r) = validate_trajectory_slow_explained(
+            &traj,
+            &corridor,
+            &[obj],
+            &cfg,
+            None,
+            FleetPosture::Nominal,
+            None,
+            None,
+            None,
+            None,
+            FrameTrust::Trusted,
+        );
+        assert_ne!(
+            v,
+            TrajectoryVerdict::MRCFallback,
+            "dy == lat_required sits OUTSIDE the strict lateral gate: {r:?}"
+        );
+    }
+}

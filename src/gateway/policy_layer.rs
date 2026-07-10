@@ -402,7 +402,10 @@ pub async fn enforce_actuator_safety_envelope(
             EnforceAction::ClampBoth { .. } => ("ClampBoth", None),
             EnforceAction::DenyBreach(code) => ("DenyBreach", Some(code.reason())),
         };
-        if let Ok(mut cell) = svc.last_actuator_verdict.write() {
+        // try_write: under contention (a concurrent sidecar read) the latch
+        // is SKIPPED for this verdict rather than blocking the command path —
+        // narration is best-effort by contract.
+        if let Ok(mut cell) = svc.last_actuator_verdict.try_write() {
             *cell = Some(crate::posture_cache::LastActuatorVerdict {
                 at_ms: now,
                 action,
