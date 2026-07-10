@@ -190,6 +190,17 @@ impl MickIntent {
     /// acceptance only* — the typed-schema, unknown-tag, and finiteness checks below
     /// are unchanged, so a genuinely malformed payload still fails closed.
     pub fn from_llm_json(raw: &str) -> Result<Self, &'static str> {
+        Self::parse_llm_json(raw).map(|(intent, _)| intent)
+    }
+
+    /// As [`MickIntent::from_llm_json`], additionally returning the exact
+    /// accepted JSON slice — the `{…}` object that passed the fail-closed
+    /// parse. This is the wire artifact a service re-emits downstream (the
+    /// Mick sidecar's `/intent/last`), so every consumer re-parses THE SAME
+    /// bytes with THE SAME parse — no second serializer, no second parser,
+    /// no drift. Same fail-closed semantics; the slice exists only for an
+    /// `Ok` intent.
+    pub fn parse_llm_json(raw: &str) -> Result<(Self, &str), &'static str> {
         let json = extract_first_json_object(raw).ok_or("MICK_JSON_PARSE_ERROR")?;
         let parsed: IntentJson = serde_json::from_str(json).map_err(|_| "MICK_JSON_PARSE_ERROR")?;
         let intent = match parsed {
@@ -218,7 +229,7 @@ impl MickIntent {
         if !intent.is_finite() {
             return Err("MICK_NONFINITE_INTENT");
         }
-        Ok(intent)
+        Ok((intent, json))
     }
 
     fn is_finite(&self) -> bool {

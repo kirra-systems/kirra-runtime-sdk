@@ -23,8 +23,8 @@ per-run scorecard (intervention rate, mean clamp per axis) prints at the end.
   --shadow   autopilot drives; the governor is evaluated but NOT applied (pure
              observation + data collection, non-intrusive).
   --enforce  apply the governor-enforced control (the real doer-checker loop). [default]
-  --occy URL the DOER is REAL Occy via the planner endpoint (cargo run -p kirra-mick
-             --example planner_service) instead of the built-in lane-follower; the
+  --occy URL the DOER is REAL Occy via the planner endpoint (cargo run -p
+             kirra-sidecars --bin planner_service) instead of the built-in lane-follower; the
              corridor is built from the map waypoints and Occy's trajectory drives.
 
 SAFETY: tune the DOER from this data (propose checker-admissible commands more

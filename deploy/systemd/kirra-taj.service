@@ -1,7 +1,7 @@
 # deploy/systemd/kirra-taj.service
 #
-# systemd unit for the Taj perception sidecar (the kirra-mick `taj_service`
-# example): a small HTTP endpoint (POST /perception) that turns a LaserScan into
+# systemd unit for the Taj perception sidecar (the kirra-sidecars `taj_service`
+# binary): a small HTTP endpoint (POST /perception) that turns a LaserScan into
 # the geometric corridor + an assured-clear-distance speed cap for the cmd_vel
 # path. Perception PRODUCER, not the safety authority — no secrets, no state.
 #

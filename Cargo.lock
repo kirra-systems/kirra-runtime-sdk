@@ -2111,7 +2111,10 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
+ "kirra-core",
+ "kirra-planner",
  "kirra-release-token",
+ "kirra-trajectory",
 ]
 
 [[package]]
@@ -2348,6 +2351,20 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "kirra-sidecars"
+version = "0.1.0"
+dependencies = [
+ "kirra-core",
+ "kirra-mick",
+ "kirra-planner",
+ "kirra-taj",
+ "kirra-trajectory",
+ "reqwest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

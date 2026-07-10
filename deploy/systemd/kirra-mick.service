@@ -1,0 +1,43 @@
+# deploy/systemd/kirra-mick.service
+#
+# systemd unit for the Mick typed-intent sidecar (the kirra-sidecars
+# `mick_service` binary): typed text in (POST /intent), a fail-closed TYPED
+# INTENT out (GET /intent/last) for the occy_doer bridge to consume — never a
+# command. FENCED: the binary has no dependency route to actuation
+# (ci/check_mick_actuation_fence.py). Requires a local Ollama serving the
+# configured model; without one every request fails closed (422, no intent).
+#
+# Companion to kirra-planner/kirra-taj; install/enable via deploy/systemd/install.sh.
+
+[Unit]
+Description=Kirra Mick intent sidecar (POST /intent — typed text to typed intent)
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+After=network-online.target
+Wants=network-online.target
+PartOf=kirra.target
+
+[Service]
+Type=simple
+ExecStart=/opt/kirra/mick_service
+Environment=KIRRA_MICK_ADDR=127.0.0.1:8102
+# Ollama endpoint + model (defaults: http://localhost:11434, gemma3:4b) and
+# the optional narrator pair (KIRRA_VERIFIER_URL + KIRRA_MICK_AUDITOR_TOKEN —
+# an auditor-role principal token, NEVER the admin token) come from the
+# shared env file. '-' makes it non-fatal if absent.
+EnvironmentFile=-/etc/kirra/kirra.env
+Restart=always
+RestartSec=3
+# Least privilege.
+User=kirra
+Group=kirra
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

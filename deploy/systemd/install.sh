@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
-# Install the Kirra governor stack (verifier + Occy planner + Taj perception) as
-# systemd services that come up on boot. Single-box (the Orin): everything local.
+# Install the Kirra governor stack (verifier + Occy planner + Taj perception +
+# Mick intent) as systemd services that come up on boot. Single-box (the Orin):
+# everything local.
 #
 #   sudo deploy/systemd/install.sh
 #
 # What it does (idempotent):
 #   1. creates the `kirra` system user,
-#   2. copies the three release binaries to /opt/kirra/,
+#   2. copies the four release binaries to /opt/kirra/,
 #   3. generates /etc/kirra/kirra.env with strong RANDOM secrets if absent
 #      (never overwrites an existing one; no secret is ever committed),
 #   4. installs the unit files + a PartOf= drop-in so `kirra.target` owns the
@@ -16,7 +17,7 @@
 #
 # Build the binaries first (or run scripts/orin_bringup.sh):
 #   cargo build --release --bin kirra_verifier_service
-#   cargo build --release -p kirra-mick --example planner_service --example taj_service
+#   cargo build --release -p kirra-sidecars
 set -euo pipefail
 
 [[ $EUID -eq 0 ]] || { echo "error: run as root (sudo deploy/systemd/install.sh)"; exit 1; }
@@ -39,14 +40,15 @@ fi
 echo "== 2. binaries -> $OPT =="
 declare -A SRC=(
   [kirra_verifier_service]="$REL/kirra_verifier_service"
-  [planner_service]="$REL/examples/planner_service"
-  [taj_service]="$REL/examples/taj_service"
+  [planner_service]="$REL/planner_service"
+  [taj_service]="$REL/taj_service"
+  [mick_service]="$REL/mick_service"
 )
 for name in "${!SRC[@]}"; do
   [[ -x "${SRC[$name]}" ]] || {
     echo "error: missing ${SRC[$name]} — build it first:"
     echo "  cargo build --release --bin kirra_verifier_service"
-    echo "  cargo build --release -p kirra-mick --example planner_service --example taj_service"
+    echo "  cargo build --release -p kirra-sidecars"
     exit 1
   }
 done
@@ -80,6 +82,7 @@ echo "== 4. unit files + verifier PartOf drop-in =="
 install -m 0644 "$UNITS/kirra-verifier.service" /etc/systemd/system/kirra-verifier.service
 install -m 0644 "$UNITS/kirra-planner.service"  /etc/systemd/system/kirra-planner.service
 install -m 0644 "$UNITS/kirra-taj.service"      /etc/systemd/system/kirra-taj.service
+install -m 0644 "$UNITS/kirra-mick.service"     /etc/systemd/system/kirra-mick.service
 install -m 0644 "$UNITS/kirra.target"           /etc/systemd/system/kirra.target
 # Make kirra.target own the verifier too, without editing the committed unit.
 dropin=/etc/systemd/system/kirra-verifier.service.d
@@ -88,14 +91,14 @@ cat > "$dropin/10-kirra-target.conf" <<'EOF'
 [Unit]
 PartOf=kirra.target
 EOF
-echo "  installed 4 units + PartOf drop-in"
+echo "  installed 5 units + PartOf drop-in"
 
 echo "== 5. enable + start =="
 systemctl daemon-reload
-systemctl enable kirra.target kirra-verifier.service kirra-planner.service kirra-taj.service >/dev/null
+systemctl enable kirra.target kirra-verifier.service kirra-planner.service kirra-taj.service kirra-mick.service >/dev/null
 systemctl restart kirra.target
 echo
 echo "done — the Kirra stack is enabled on boot."
-echo "  status:  systemctl status kirra.target kirra-verifier kirra-planner kirra-taj"
+echo "  status:  systemctl status kirra.target kirra-verifier kirra-planner kirra-taj kirra-mick"
 echo "  logs:    journalctl -u kirra-verifier -f"
-echo "  stack:   verifier :8090  ·  planner :8100  ·  taj :8101"
+echo "  stack:   verifier :8090  ·  planner :8100  ·  taj :8101  ·  mick :8102"

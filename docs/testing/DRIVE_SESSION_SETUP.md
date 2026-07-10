@@ -63,7 +63,7 @@ The harnesses above use a built-in controller as the doer. To drive egos with th
 **actual planner**, run the Occy planner endpoint and point the harness at it:
 
 ```bash
-cargo run -p kirra-mick --example planner_service          # Occy on :8100 (POST /plan)
+cargo run -p kirra-sidecars --bin planner_service          # Occy on :8100 (POST /plan)
 
 KIRRA_VERIFIER_URL=http://localhost:8090 \
   python3 scripts/carla_drive_session.py --town Town03 --egos 3 --occy http://localhost:8100

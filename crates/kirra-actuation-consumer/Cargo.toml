@@ -26,3 +26,13 @@ ed25519-dalek = "2"
 
 [dev-dependencies]
 hex = "0.4"
+# The governed-loop demo drill (tests/mick_governed_loop.rs) drives the REAL
+# doer side — Mick's fail-closed intent parse, plan_for_intent grounding, and
+# the #893-narrated slow-loop checker — against this crate's chokepoint.
+# Dev-only: these never enter the shipped consumer, and the doer crates are
+# themselves fenced FROM actuation (ci/check_mick_actuation_fence.py); here
+# the dependency points the safe direction (the actuation crate's TEST HARNESS
+# consumes the doer, never the reverse).
+kirra-core = { path = "../kirra-core" }
+kirra-planner = { path = "../kirra-planner" }
+kirra-trajectory = { path = "../kirra-trajectory" }

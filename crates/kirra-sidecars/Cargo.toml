@@ -1,0 +1,46 @@
+# crates/kirra-sidecars — the SHIPPED doer-side service binaries (promoted from
+# `kirra-mick --example` targets, which were load-bearing for the governed loop
+# but unshippable):
+#
+#   * `planner_service` — Occy `POST /plan`: grounds a goal OR a typed Mick
+#     intent (the SAME fail-closed `MickIntent::from_llm_json` parse) with the
+#     real planner, then reports the KIRRA slow-loop checker's verdict + the
+#     #893 narration reason alongside the proposal.
+#   * `taj_service`     — Taj `POST /perception`: LaserScan → geometric corridor
+#     + assured-clear-distance speed cap.
+#   * `mick_service`    — Mick `POST /intent`: typed text → LlmBrain (Ollama) →
+#     fail-closed typed intent, published read-only on `GET /intent/last` for
+#     the DOER (occy_doer) to consume. Never a command.
+#
+# 🔴 FENCED (ci/check_mick_actuation_fence.py): this crate must have NO path to
+# actuation — no release-token mint, no serial consumer, no ROS/DDS transport.
+# The binaries here PROPOSE and NARRATE; enforcement is the verifier + the
+# verifying motor consumer, in other processes, behind cryptographic seams.
+#
+# Config conventions mirror the verifier's env discipline (src/env_config.rs):
+# every variable is read once at boot, a malformed value ABORTS startup
+# (fail-closed, never a silent default), and the bind policy refuses a
+# non-loopback listen address unless KIRRA_SIDECAR_ALLOW_NONLOCAL is set.
+[package]
+name = "kirra-sidecars"
+version = "0.1.0"
+edition = "2021"
+description = "Shipped doer-side sidecar services: Occy planner, Taj perception, and the Mick typed-intent endpoint"
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+kirra-core = { path = "../kirra-core" }
+kirra-planner = { path = "../kirra-planner" }
+# The lean slow-loop CHECKER (no ROS/tokio): the planner sidecar reports
+# KIRRA's verdict + narration reason on every proposal it serves.
+kirra-trajectory = { path = "../kirra-trajectory" }
+kirra-taj = { path = "../kirra-taj" }
+# The live LLM transport (OllamaClient) behind the MickBrain seam.
+kirra-mick = { path = "../kirra-mick" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Narrator client only (GET /system/verdicts/last with the AUDITOR token).
+# Same pin/features as kirra-mick's transport.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
