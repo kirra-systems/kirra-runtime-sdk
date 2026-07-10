@@ -82,3 +82,64 @@ key's own zeroize-on-drop storage.
 (`tss-esapi`, the `tpm` feature) + hardware. The seam already routes `tpm:<handle>` to
 a single refusal point (`provision_signing_key` → `TpmUnsealUnsupported`), so landing
 it is an additive change at one call site — no consumer rewiring.
+
+## 7. Consumer verifying-key enrollment and rotation order (ADR-0033)
+
+The sections above provision the **signing** key on the verifier. The other
+half of the pair — the **verifying** key pinned on the ROS/R2 motor consumer
+(ADR-0033; `RosReleaseGate::new` admits only a pinned key) — is provisioned by
+`kirra-consumer-ctl` (`crates/kirra-actuation-consumer/src/enrollment.rs`):
+
+```
+kirra-consumer-ctl enroll --key-hex <64-hex-vk> --path /etc/kirra/governor_vk.pin
+kirra-consumer-ctl show   --path /etc/kirra/governor_vk.pin
+```
+
+Properties: **idempotent** (re-enrolling the identical key succeeds without a
+write); **refuses to overwrite silently** (a different key needs an explicit
+`--rotate`, and a corrupt pin is refused as tamper evidence rather than
+replaced); writes are **atomic** (temp + rename — no torn pin). The pin is a
+PUBLIC key: the requirement is integrity, not secrecy — keep the pin file
+inside the same OS-ownership boundary as the serial device (the ADR-0033
+layer-2 dedicated user; whoever can write the pin decides which governor the
+consumer obeys).
+
+### Rotation order — this order is load-bearing
+
+1. **Re-enroll the consumer** with the NEW verifying key
+   (`kirra-consumer-ctl enroll --rotate …`) and restart the consumer. The
+   consumer now trusts the new key; the verifier is still signing under the
+   old one, so every token is refused `SignatureInvalid` and the platform
+   holds its safe stop — **expected and bounded** by how long step 2 takes.
+2. **Rotate the verifier's signing key** (`KIRRA_GOVERNOR_SIGNING_KEY_SOURCE`
+   → the new seed; restart the verifier). Tokens verify again; motion
+   resumes on the next valid release (the key-mismatch alarm self-clears).
+
+Consumer-first is deliberate: the safe-stop window sits between the two
+steps either way, but consumer-first bounds it to an operator-controlled
+moment with both hands already on the system.
+
+### Done out of order — the failure mode, loudly
+
+If the verifier signs under the new key while any consumer still pins the
+old one, that consumer refuses **everything**: `SignatureInvalid` on every
+frame → liveness starves → decel-to-stop → output silence. **Permanent safe
+stop** until re-enrolled. Fail-closed and safe — and NOT mute: after
+`DEFAULT_SIGNATURE_INVALID_ALARM_STREAK` (10) consecutive signature failures
+the consumer latches the **key-mismatch alarm**
+(`MotorConsumer::health().key_mismatch_alarm` +
+`KEY_MISMATCH_ALARM_EXPLANATION`), a diagnostic DISTINCT from staleness or a
+dead link, naming the likely cause and this recovery:
+
+**Recovery:** `kirra-consumer-ctl enroll --rotate` with the CURRENT governor
+verifying key → restart the consumer → the next valid release clears the
+alarm and resumes motion. (A mixed refusal stream does not latch the alarm —
+only the uniform signature-failure signature of a key mismatch does.)
+
+### First-provisioning assumption (stated, not assumed away)
+
+`enroll` presumes an operator-authenticated channel to the consumer host
+(the same trust `kirra-ota-ctl enroll` presumes): the first pin is only as
+trustworthy as the channel that delivered the key hex. Bootstrapping that
+first pin from a signed enrollment bundle / attested first boot is a tracked
+follow-up, not something this procedure claims to solve.

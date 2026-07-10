@@ -543,3 +543,130 @@ mod tests {
         assert_eq!(ReleaseToken::from_bytes(&token.to_bytes()), token);
     }
 }
+
+/// Forensic key id for a pinned/offered verifying key: lowercase hex SHA-256
+/// of the raw 32 public-key bytes — byte-identical to the root crate's
+/// `audit_chain::verifying_key_id` discipline (asserted there by
+/// `governor_release` tests), reproduced here so the lean consumer side can
+/// name keys in diagnostics without pulling the heavy crate.
+#[must_use]
+pub fn verifying_key_id_hex(vk: &VerifyingKey) -> String {
+    let mut h = Sha256::new();
+    h.update(vk.as_bytes());
+    let digest = h.finalize();
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        use core::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+impl RosReleaseRefusal {
+    /// Stable machine code for this refusal (SCREAMING_SNAKE, the capture /
+    /// metrics vocabulary style). Wire-stable: consumers may key on these.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NoToken => "ROS_RELEASE_NO_TOKEN",
+            Self::Denied(ReleaseDenied::DigestMismatch) => "ROS_RELEASE_DIGEST_MISMATCH",
+            Self::Denied(ReleaseDenied::SignatureInvalid) => "ROS_RELEASE_SIGNATURE_INVALID",
+            Self::Undecodable(_) => "ROS_RELEASE_UNDECODABLE",
+            Self::Stale { .. } => "ROS_RELEASE_STALE",
+            Self::SequenceNotAdvanced { .. } => "ROS_RELEASE_SEQUENCE_NOT_ADVANCED",
+        }
+    }
+
+    /// The operator sentence for this refusal — what a field engineer reads
+    /// on the consumer's health surface. Same discipline as the verifier's
+    /// `explain_deny_token` table: every variant gets a SPECIFIC sentence
+    /// (never a generic fallback), pinned by the exhaustive match here plus
+    /// the lock-step test below. Fail-closed is correct; fail-closed-and-mute
+    /// is a defect — these sentences are how the fence says why it refused.
+    #[must_use]
+    pub fn explain(&self) -> &'static str {
+        match self {
+            Self::NoToken => {
+                "The command arrived without a release token. Either the checker denied it \
+                 (denials never carry a token) or the publisher is not the checker at all — \
+                 the command was refused and nothing was actuated."
+            }
+            Self::Denied(ReleaseDenied::DigestMismatch) => {
+                "The release token does not approve these exact command bytes — the bytes were \
+                 substituted or reordered after signing. The command was refused."
+            }
+            Self::Denied(ReleaseDenied::SignatureInvalid) => {
+                "The release token's signature does not verify against the pinned governor \
+                 verifying key. If this is sustained, the likely cause is a key rotation done \
+                 out of order (verifier signing under a new key before this consumer was \
+                 re-enrolled) or a wrong consumer pin — re-enroll the pin (see \
+                 GOVERNOR_KEY_PROVISIONING.md, consumer rotation order)."
+            }
+            Self::Undecodable(_) => {
+                "The token verified but the command bytes do not decode to a finite twist \
+                 (NaN/Inf). The command was refused — the checker never signs non-finite \
+                 commands, so this indicates corruption."
+            }
+            Self::Stale { .. } => {
+                "The release token is outside the freshness window (too old or future-dated). \
+                 A replayed pre-restart token, a stalled bus, or clock skew between verifier \
+                 and consumer produces this."
+            }
+            Self::SequenceNotAdvanced { .. } => {
+                "The release sequence does not advance past the last released command — a \
+                 replayed or reordered release. The original command already actuated; this \
+                 copy was refused."
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod refusal_explanation_tests {
+    use super::*;
+
+    /// Lock-step coverage (the `every_deny_code_has_a_specific_explanation`
+    /// pattern): every refusal variant has a SPECIFIC, distinct operator
+    /// sentence and a distinct stable code. The exhaustive `match` in
+    /// `explain`/`code` makes a NEW variant a compile error; this test pins
+    /// that no two variants share a sentence and none is empty/generic.
+    #[test]
+    fn every_refusal_variant_has_a_specific_distinct_explanation() {
+        let all: [RosReleaseRefusal; 6] = [
+            RosReleaseRefusal::NoToken,
+            RosReleaseRefusal::Denied(ReleaseDenied::DigestMismatch),
+            RosReleaseRefusal::Denied(ReleaseDenied::SignatureInvalid),
+            RosReleaseRefusal::Undecodable(RosTwistDecodeError::NonFiniteValue),
+            RosReleaseRefusal::Stale {
+                issued_at_ms: 0,
+                now_ms: 1,
+                window_ms: 0,
+            },
+            RosReleaseRefusal::SequenceNotAdvanced {
+                presented: 0,
+                last_released: 0,
+            },
+        ];
+        let mut sentences = std::collections::HashSet::new();
+        let mut codes = std::collections::HashSet::new();
+        for r in &all {
+            let s = r.explain();
+            let c = r.code();
+            assert!(s.len() > 40, "explanation must be a real sentence: {c}");
+            assert!(sentences.insert(s), "duplicate explanation for {c}");
+            assert!(codes.insert(c), "duplicate code {c}");
+            assert!(c.starts_with("ROS_RELEASE_"), "code vocabulary: {c}");
+        }
+    }
+
+    #[test]
+    fn key_id_matches_the_audit_chain_discipline_shape() {
+        let vk = SigningKey::from_bytes(&[42u8; 32]).verifying_key();
+        let id = verifying_key_id_hex(&vk);
+        assert_eq!(id.len(), 64);
+        assert!(id
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert_eq!(id, verifying_key_id_hex(&vk), "deterministic");
+    }
+}

@@ -248,3 +248,57 @@ a component from bypassing it on the bus or the serial port.* `OCCY_DFA.md` PO-2
 carries a scoping note to that effect; `ASSUMPTIONS_OF_USE.md` carries the
 serial-port-exclusivity assumption (`AOU-ACTUATION-SERIAL-001`) until the Tier-3
 sentinel enforces it.
+
+---
+
+## Addendum A (2026-07-10) — verifier-restart sequence continuity
+
+**Context.** Settled decision 3 (restart semantics) covers CONSUMER restarts:
+resync-from-zero plus the freshness window. Implementation (#891) surfaced the
+mirror case this ADR did not settle: a VERIFIER restart. A verifier whose
+sequence counter restarted from zero would mint sequences BELOW a live
+consumer's watermark; every release would refuse `SequenceNotAdvanced` and the
+path would deadlock until the consumer itself restarted (its empty watermark
+resyncing the baseline).
+
+**Decision (ratifying the #891 implementation).** The verifier's mint counter
+is seeded from the boot wall clock (milliseconds since epoch) and incremented
+by one per mint (`src/governor_release.rs`, `RosReleaseSigner`). Sequences
+stay monotonic across verifier restarts whenever (a) the wall clock is
+monotonic across those restarts and (b) the long-run mint rate stays under
+one command per millisecond — the R2 control rate of 10–20 Hz gives ~50×
+headroom on (b).
+
+**The coupling this introduces — named, not buried.** The release-token
+watermark's monotonicity now rests on **clock monotonicity**. This is a new
+edge in the system's clock-dependency graph, and it is the same shape of
+common-mode clock concern raised as **B4 in the stop-gate review** and
+reflected in the clock-diversity gap against `docs/safety/OCCY_DFA.md` §3's
+common-cause table (which today carries no explicit shared-clock row; the
+freshness window of decision 3 already depends on verifier/consumer clock
+agreement, and this addendum adds the sequence dependency on the verifier's
+own clock across reboots). An assessor tracing clock dependencies must find
+all three in one place:
+
+1. **Freshness window** (decision 3) — verifier↔consumer clock agreement
+   within the window; skew beyond it refuses (fail-closed).
+2. **Sequence continuity** (this addendum) — verifier boot-clock
+   monotonicity across restarts; a backwards step at reboot mints
+   non-advancing sequences, the consumer refuses, motion stops
+   (fail-closed), recovery = consumer restart (resync) or clock repair.
+3. **The boundary timing rule** — `AOU-TIMESYNC-001`
+   (`ASSUMPTIONS_OF_USE.md`) and the two-clock-domain non-mixing rule
+   (`docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md` §5) govern timestamp
+   provenance on the enforced path generally.
+
+Every failure mode in this list degrades to refusal → safe stop, never to a
+release — which is why the coupling is acceptable — but it is a shared-cause
+dependency on time and belongs in the DFA's field of view. **Follow-up
+recorded:** add a shared-clock common-cause row to the `OCCY_DFA.md` §3 table
+citing this addendum, rather than editing that ratified analysis silently
+here.
+
+**Rejected alternative.** A durable mint counter (SQLite write per mint) was
+rejected for the same reasons decision 3 rejected the durable consumer
+watermark: a write on the actuation response path and a corruptible file, in
+exchange for closing a window that fail-closed refusal already bounds.
