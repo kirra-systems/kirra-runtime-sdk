@@ -38,7 +38,7 @@ Enable it (the launch builds nothing — build the sidecars once, then launch st
 
 ```bash
 # build the Rust sidecars once (or run scripts/orin_bringup.sh)
-cargo build --release -p kirra-mick --example planner_service --example taj_service
+cargo build --release -p kirra-sidecars
 
 # one launch brings up the sidecars + the ROS safety nodes
 ros2 launch kirra_safety kirra_with_robot.launch.py \

@@ -26,6 +26,8 @@ the same `objects` list (richer than Taj's geometric clusters) — this node's s
 unchanged. Mick (the LLM) fits by publishing the goal/intent instead of RViz.
 """
 
+import json
+import math
 import time
 
 import rclpy
@@ -46,12 +48,25 @@ except ImportError:
 
 ZERO = Twist()
 
+# Mick intents this bridge grounds. Positional intents become the goal;
+# `hold` clears it. Anything else is ignored (logged once) — the doer stays
+# the ONLY consumer of intents, and an unknown/partial intent NEVER becomes
+# motion (fail-closed, mirrors MickIntent::from_llm_json's posture).
+MICK_POSITIONAL_INTENTS = ('go_to', 'route_to', 'yield', 'cross_when_clear', 'creep_through')
+
 
 class OccyDoer(Node):
     def __init__(self):
         super().__init__('occy_doer')
         self.declare_parameter('taj_url', 'http://localhost:8101')
         self.declare_parameter('planner_url', 'http://localhost:8100')
+        # The Mick typed-intent sidecar (kirra-sidecars mick_service). Empty =
+        # off (goals come from /goal_pose only). When set, the doer polls
+        # GET /intent/last each tick and grounds NEW intents: a positional
+        # intent (go_to / route_to / ...) becomes the goal (ego frame at
+        # receipt → odom), `hold` clears it. Mick publishes INTENTS, never
+        # commands — this bridge is the only consumer.
+        self.declare_parameter('mick_url', '')
         self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('goal_topic', '/goal_pose')
         self.declare_parameter('scan_topic', '/scan')
@@ -83,6 +98,9 @@ class OccyDoer(Node):
 
         self._taj = self.get_parameter('taj_url').value.rstrip('/')
         self._planner = self.get_parameter('planner_url').value.rstrip('/')
+        self._mick = self.get_parameter('mick_url').value.rstrip('/')
+        self._mick_seq = 0          # last consumed intent seq (apply-once)
+        self._mick_ignored = set()  # unknown tags already logged
         self._cruise = self.get_parameter('cruise_speed_mps').value
         self._max_v = self.get_parameter('max_speed_mps').value
         self._max_w = self.get_parameter('max_yaw_rate_rps').value
@@ -136,6 +154,46 @@ class OccyDoer(Node):
     def _on_scan(self, msg: LaserScan):
         self._scan = (msg, time.monotonic())
 
+    # --- Mick intent consumption (intents, never commands) -------------------
+    def _poll_mick(self):
+        """Ground a NEW Mick intent, fail-closed at every step.
+
+        Any fault — Mick unreachable, malformed JSON, an unknown tag, a
+        non-finite coordinate — leaves the current goal untouched (the same
+        outcome as no /goal_pose arriving). A rejected intent NEVER becomes a
+        default goal or motion.
+        """
+        if not self._mick or self._pose is None:
+            return
+        try:
+            wire = requests.get(f'{self._mick}/intent/last', timeout=self._timeout_s).json()
+            intent = wire.get('intent')
+            seq = int(wire.get('seq', 0))
+            if not isinstance(intent, dict) or seq <= self._mick_seq:
+                return  # nothing new (apply-once by seq)
+            self._mick_seq = seq
+            tag = intent.get('intent')
+            if tag == 'hold':
+                self._goal = None
+                self.get_logger().info(f'mick intent #{seq}: hold — goal cleared')
+            elif tag in MICK_POSITIONAL_INTENTS:
+                x, y = float(intent['x_m']), float(intent['y_m'])
+                if not (math.isfinite(x) and math.isfinite(y)):
+                    raise ValueError('non-finite intent target')
+                # Ego-frame (+ahead, +left) at receipt → odom frame.
+                rx, ry, ryaw, _ = self._pose
+                gx = rx + x * math.cos(ryaw) - y * math.sin(ryaw)
+                gy = ry + x * math.sin(ryaw) + y * math.cos(ryaw)
+                self._goal = (gx, gy)
+                self.get_logger().info(
+                    f'mick intent #{seq}: {tag} ego({x:.1f},{y:.1f}) -> goal ({gx:.2f},{gy:.2f})')
+            elif tag not in self._mick_ignored:
+                self._mick_ignored.add(tag)
+                self.get_logger().info(
+                    f'mick intent #{seq}: `{tag}` carries no goal for this bridge — ignored')
+        except Exception as e:  # noqa: BLE001 — any fault keeps the current goal (fail-soft)
+            self.get_logger().debug(f'mick poll: {e}')
+
     # --- the doer loop ------------------------------------------------------
     def _hold(self, why: str):
         self._pub.publish(ZERO)
@@ -144,6 +202,7 @@ class OccyDoer(Node):
     def _tick(self):
         if not REQUESTS_AVAILABLE:
             return self._hold('no-requests')
+        self._poll_mick()
         if self._pose is None or self._goal is None:
             return self._hold('awaiting pose/goal')
         if self._scan is None or (time.monotonic() - self._scan[1]) > self._scan_stale_s:

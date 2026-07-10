@@ -1,9 +1,10 @@
 # deploy/systemd/kirra-planner.service
 #
-# systemd unit for the Occy planner sidecar (the kirra-mick `planner_service`
-# example): a small HTTP endpoint (POST /plan) that grounds a Mick intent with the
-# real planner + checker. It is a DOER-side sidecar — not safety-critical, no
-# secrets, no persistent state — so the sandbox is simpler than the verifier's.
+# systemd unit for the Occy planner sidecar (the kirra-sidecars `planner_service`
+# binary): a small HTTP endpoint (POST /plan) that grounds a goal or a typed Mick
+# intent with the real planner + checker and narrates a refusal (#893). It is a
+# DOER-side sidecar — not safety-critical, no secrets, no persistent state — so
+# the sandbox is simpler than the verifier's.
 #
 # Companion to kirra-verifier.service; install/enable via deploy/systemd/install.sh.
 

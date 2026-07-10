@@ -20,11 +20,11 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 # Where the Rust sidecar binaries (planner_service, taj_service) live. Built by
-# `cargo build --release -p kirra-mick --example {planner_service,taj_service}` (or
+# `cargo build --release -p kirra-sidecars` (or
 # scripts/orin_bringup.sh). Overridable via KIRRA_SIDECAR_DIR or the sidecar_dir arg.
 DEFAULT_SIDECAR_DIR = os.environ.get(
     'KIRRA_SIDECAR_DIR',
-    os.path.join(os.path.expanduser('~'), 'kirra-runtime-sdk', 'target', 'release', 'examples'),
+    os.path.join(os.path.expanduser('~'), 'kirra-runtime-sdk', 'target', 'release'),
 )
 
 
@@ -60,12 +60,12 @@ def generate_launch_description():
     planner_url_arg = DeclareLaunchArgument(
         'planner_url',
         default_value='http://localhost:8100',
-        description='Occy planner sidecar URL (kirra-mick example planner_service).',
+        description='Occy planner sidecar URL (kirra-sidecars planner_service binary).',
     )
     taj_url_arg = DeclareLaunchArgument(
         'taj_url',
         default_value='http://localhost:8101',
-        description='Taj perception sidecar URL (kirra-mick example taj_service)',
+        description='Taj perception sidecar URL (kirra-sidecars taj_service binary)',
     )
     # --- Rust sidecars folded into this launch (single-box: everything on the Orin) ---
     start_sidecars_arg = DeclareLaunchArgument(

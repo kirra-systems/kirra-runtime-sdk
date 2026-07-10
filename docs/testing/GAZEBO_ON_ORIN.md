@@ -31,7 +31,7 @@ sudo apt-get install -y ros-humble-gazebo-ros-pkgs ros-humble-robot-state-publis
 
 # Build the Rust sidecars + verifier once (or run scripts/orin_bringup.sh)
 cd ~/kirra-runtime-sdk
-cargo build --release -p kirra-mick --example planner_service --example taj_service
+cargo build --release -p kirra-sidecars
 cargo build --release --bin kirra_verifier_service
 
 # Build the ROS package

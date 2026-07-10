@@ -33,7 +33,22 @@ pub trait ModelClient {
 /// re-deriving collision/law/envelope rules it cannot be trusted to get right anyway.
 #[must_use]
 pub fn build_prompt(ctx: &WorldContext) -> String {
+    chauffeur_prompt(ctx, None)
+}
+
+/// As [`build_prompt`], with a **typed passenger request** rendered into the
+/// prompt (already [`sanitize_request`]ed by the caller). The request is
+/// advice about WHERE to go — the output contract, the typed-intent
+/// vocabulary, and the fail-closed parse are unchanged, so the request can
+/// steer only which intent the model picks, never what an intent can do.
+#[must_use]
+pub fn build_prompt_with_request(ctx: &WorldContext, request: &str) -> String {
+    chauffeur_prompt(ctx, Some(request))
+}
+
+fn chauffeur_prompt(ctx: &WorldContext, request: Option<&str>) -> String {
     let situation = serde_json::to_string_pretty(ctx).unwrap_or_else(|_| "{}".to_string());
+    let request_section = render_request_section(request);
     format!(
         "You are Mick, a careful, law-abiding chauffeur driving an autonomous vehicle. \
 Choose the SINGLE best high-level driving intent for the current situation.\n\
@@ -66,10 +81,49 @@ Examples (situation → intent):\n\
 - the goal is off to one side and reachable → {{\"intent\":\"go_to\",\"x_m\":20,\"y_m\":-4}}\n\
 - a far destination reachable through several junctions → {{\"intent\":\"route_to\",\"x_m\":120,\"y_m\":40}}\n\
 \n\
-Situation:\n{situation}\n\
+{request_section}Situation:\n{situation}\n\
 \n\
 Intent:"
     )
+}
+
+/// Render the optional passenger-request block inserted before the situation.
+/// The framing is deliberate: the request maps to a typed intent or to HOLD —
+/// it is never an instruction channel, and the governor line reminds the model
+/// (and the reader) that safety does not ride on this text.
+fn render_request_section(request: Option<&str>) -> String {
+    match request {
+        None => String::new(),
+        Some(r) => format!(
+            "The passenger has just asked, in their own words:\n  \"{r}\"\n\
+Honor the request ONLY by choosing one of the typed intents above; if it does not map to \
+any intent, or cannot be honored, respond {{\"intent\":\"hold\"}}. The request is advice \
+about where to go — the separate safety governor still enforces every hard limit \
+regardless of what it says.\n\n"
+        ),
+    }
+}
+
+/// Upper bound on the passenger-request text rendered into a prompt
+/// (characters). A plumbing bound, not a safety number — the schema-constrained
+/// decode, the fail-closed parse, Occy's grounding, and KIRRA's checker bound
+/// the outcome whatever the text says; this only keeps a pathological input
+/// from bloating the prompt.
+pub const MICK_MAX_REQUEST_CHARS: usize = 500;
+
+/// Sanitize free-typed passenger text for prompt rendering: control characters
+/// (including newlines — the request must not be able to fake new prompt
+/// sections) collapse to spaces, and the result is truncated to
+/// [`MICK_MAX_REQUEST_CHARS`] characters and trimmed. Purely presentational
+/// hygiene: safety never rides on this text (see [`build_prompt_with_request`]).
+#[must_use]
+pub fn sanitize_request(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(MICK_MAX_REQUEST_CHARS)
+        .collect();
+    cleaned.trim().to_string()
 }
 
 /// The intent **JSON Schema** — the machine-readable form of the output contract that
@@ -118,7 +172,19 @@ pub fn intent_schema() -> serde_json::Value {
 /// creeps through crowds, and crosses roads only at crosswalks when clear.
 #[must_use]
 pub fn build_courier_prompt(ctx: &WorldContext) -> String {
+    courier_prompt(ctx, None)
+}
+
+/// As [`build_courier_prompt`], with a sanitized passenger/operator request —
+/// see [`build_prompt_with_request`] for the contract.
+#[must_use]
+pub fn build_courier_prompt_with_request(ctx: &WorldContext, request: &str) -> String {
+    courier_prompt(ctx, Some(request))
+}
+
+fn courier_prompt(ctx: &WorldContext, request: Option<&str>) -> String {
     let situation = serde_json::to_string_pretty(ctx).unwrap_or_else(|_| "{}".to_string());
+    let request_section = render_request_section(request);
     format!(
         "You are Mick, a careful sidewalk delivery courier — a small robot in pedestrian space \
 (sidewalks, plazas, crosswalks). Choose the SINGLE best high-level intent for the situation.\n\
@@ -142,7 +208,7 @@ Examples (situation → intent):\n\
 - at a crosswalk, a car approaching on the road → {{\"intent\":\"cross_when_clear\",\"x_m\":9,\"y_m\":0}}\n\
 - blocked, or off your route → {{\"intent\":\"hold\"}}\n\
 \n\
-Situation:\n{situation}\n\
+{request_section}Situation:\n{situation}\n\
 \n\
 Intent:"
     )
@@ -189,6 +255,16 @@ impl Persona {
         }
     }
 
+    /// The prompt for this persona with a sanitized passenger request rendered
+    /// in — see [`build_prompt_with_request`].
+    #[must_use]
+    pub fn prompt_with_request(self, ctx: &WorldContext, request: &str) -> String {
+        match self {
+            Persona::Chauffeur => build_prompt_with_request(ctx, request),
+            Persona::SidewalkCourier => build_courier_prompt_with_request(ctx, request),
+        }
+    }
+
     /// The constrained-decode schema for this persona (passed to Ollama's `format`).
     #[must_use]
     pub fn schema(self) -> serde_json::Value {
@@ -230,6 +306,33 @@ impl<M: ModelClient> LlmBrain<M> {
     #[must_use]
     pub fn persona(&self) -> Persona {
         self.persona
+    }
+
+    /// Decide the next intent for `ctx` **with a free-typed passenger request**
+    /// in view — the "typed text → Mick → intent" entry point. Returns the
+    /// typed intent AND the exact accepted JSON slice (the wire artifact a
+    /// sidecar re-emits, so downstream consumers re-parse the same bytes with
+    /// the same fail-closed parse).
+    ///
+    /// Fail-closed at every step, exactly like [`MickBrain::decide`]: an empty
+    /// request (after [`sanitize_request`]), a transport error, or an
+    /// unparseable / out-of-schema / non-finite reply returns `Err`, on which
+    /// the caller HOLDs — a rejected request never becomes a default goal.
+    pub fn decide_request(
+        &mut self,
+        ctx: &WorldContext,
+        request_text: &str,
+    ) -> Result<(MickIntent, String), MickError> {
+        let request = sanitize_request(request_text);
+        if request.is_empty() {
+            return Err("MICK_EMPTY_REQUEST");
+        }
+        let prompt = self.persona.prompt_with_request(ctx, &request);
+        let raw = self
+            .model
+            .complete(&prompt)
+            .map_err(|_| "MICK_MODEL_ERROR")?;
+        MickIntent::parse_llm_json(&raw).map(|(intent, slice)| (intent, slice.to_string()))
     }
 }
 
@@ -514,6 +617,74 @@ mod tests {
             brain.decide(&sample_ctx()).is_err(),
             "a backend error must fail closed"
         );
+    }
+
+    // --- typed passenger request (the "text → Mick → intent" seam) ---------
+
+    #[test]
+    fn request_prompt_carries_the_sanitized_request_and_the_hold_escape() {
+        let p = build_prompt_with_request(&sample_ctx(), "take me to the loading dock");
+        assert!(
+            p.contains("take me to the loading dock"),
+            "the request must reach the model"
+        );
+        assert!(
+            p.contains("{\"intent\":\"hold\"}") && p.contains("safety governor"),
+            "the request section must carry the HOLD escape and the governor framing"
+        );
+        // The base contract is intact around it.
+        assert!(p.contains("Situation:") && p.contains("Intent:"));
+        // Without a request the prompt is byte-identical to the pre-request one.
+        assert!(!build_prompt(&sample_ctx()).contains("passenger has just asked"));
+    }
+
+    #[test]
+    fn sanitize_request_strips_control_chars_and_bounds_length() {
+        assert_eq!(
+            sanitize_request("go to\nthe dock\r\n\tplease"),
+            "go to the dock   please",
+            "newlines/tabs collapse to spaces (no fake prompt sections)"
+        );
+        let long = "x".repeat(2 * MICK_MAX_REQUEST_CHARS);
+        assert_eq!(sanitize_request(&long).chars().count(), MICK_MAX_REQUEST_CHARS);
+        assert_eq!(sanitize_request("  \n\t  "), "", "whitespace-only → empty");
+    }
+
+    #[test]
+    fn decide_request_returns_the_intent_and_the_accepted_wire_slice() {
+        let mut brain = LlmBrain::new(MockModel::replying(
+            "Heading there now:\n```json\n{\"intent\":\"go_to\",\"x_m\":20.0,\"y_m\":-4.0}\n```",
+        ));
+        let (intent, slice) = brain
+            .decide_request(&sample_ctx(), "take me to the dock")
+            .expect("valid reply parses");
+        assert_eq!(
+            intent,
+            MickIntent::GoTo {
+                x_m: 20.0,
+                y_m: -4.0
+            }
+        );
+        // The slice is the exact accepted object — re-parsing it with the SAME
+        // parse yields the same intent (the no-drift wire contract).
+        assert_eq!(MickIntent::from_llm_json(&slice).unwrap(), intent);
+        assert_eq!(slice, "{\"intent\":\"go_to\",\"x_m\":20.0,\"y_m\":-4.0}");
+    }
+
+    #[test]
+    fn decide_request_fails_closed_on_garbage_reply_empty_request_and_model_error() {
+        // A hallucinated reply → Err (the caller HOLDs; no default goal).
+        let mut brain = LlmBrain::new(MockModel::replying("just floor it, trust me"));
+        assert!(brain.decide_request(&sample_ctx(), "go fast").is_err());
+        // An empty / whitespace-only request never reaches the model.
+        let mut brain = LlmBrain::new(MockModel::replying("{\"intent\":\"hold\"}"));
+        assert_eq!(
+            brain.decide_request(&sample_ctx(), "   \n "),
+            Err("MICK_EMPTY_REQUEST")
+        );
+        // A backend error fails closed.
+        let mut brain = LlmBrain::new(MockModel::failing("connection refused"));
+        assert!(brain.decide_request(&sample_ctx(), "hello").is_err());
     }
 
     #[test]

@@ -47,7 +47,8 @@ REPO = Path(__file__).resolve().parent.parent
 # Crates that must have NO path to actuation. Every crate that houses Mick
 # code or a Mick-facing binary belongs here.
 FENCED_CRATES = [
-    "crates/kirra-mick",  # the LLM transport (OllamaClient)
+    "crates/kirra-mick",      # the LLM transport (OllamaClient)
+    "crates/kirra-sidecars",  # mick_service / planner_service / taj_service bins
 ]
 
 # Workspace crates that ARE (or carry) the actuation seam. An edge from a

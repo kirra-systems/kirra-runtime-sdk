@@ -48,8 +48,8 @@ echo "== 2. build the four components + governance plane (release) =="
 # The stack demo (Taj→Mick→Occy→KIRRA), the HTTP sidecars (Occy planner + Taj
 # perception), and the verifier service. Release on the Orin.
 cargo build --release -p kirra-mick --example taj_occy_kirra_stack
-cargo build --release -p kirra-mick --example planner_service
-cargo build --release -p kirra-mick --example taj_service
+cargo build --release -p kirra-sidecars --bin planner_service
+cargo build --release -p kirra-sidecars --bin taj_service
 cargo build --release --bin kirra_verifier_service
 
 echo "== 3. run the headless stack demo (Taj · Mick · Occy · KIRRA) =="
@@ -67,10 +67,10 @@ if [[ "$SERVE" == "1" ]]; then
   ./target/release/kirra_verifier_service &
   VER=$!
   echo "  starting Occy planner endpoint on 127.0.0.1:8100 (POST /plan)…"
-  ./target/release/examples/planner_service &
+  ./target/release/planner_service &
   PLAN=$!
   echo "  starting Taj perception sidecar on $KIRRA_TAJ_ADDR (POST /perception — the cmd_vel speed cap)…"
-  ./target/release/examples/taj_service &
+  ./target/release/taj_service &
   TAJ=$!
   trap 'kill $VER $PLAN $TAJ 2>/dev/null || true' EXIT INT TERM
 

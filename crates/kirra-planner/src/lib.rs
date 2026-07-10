@@ -79,8 +79,9 @@ pub mod mick_llm;
 pub mod mick_capture;
 pub use mick_capture::{IntentStats, MickDecisionRecord, MickEvalLog, MickEvalSummary};
 pub use mick_llm::{
-    build_courier_prompt, build_prompt, courier_intent_schema, intent_schema, LlmBrain, MockModel,
-    ModelClient, ModelError, Persona,
+    build_courier_prompt, build_courier_prompt_with_request, build_prompt,
+    build_prompt_with_request, courier_intent_schema, intent_schema, sanitize_request, LlmBrain,
+    MockModel, ModelClient, ModelError, Persona, MICK_MAX_REQUEST_CHARS,
 };
 
 pub mod learned;

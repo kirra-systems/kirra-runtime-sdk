@@ -2351,6 +2351,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-sidecars"
+version = "0.1.0"
+dependencies = [
+ "kirra-core",
+ "kirra-mick",
+ "kirra-planner",
+ "kirra-taj",
+ "kirra-trajectory",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kirra-taj"
 version = "0.1.0"
 dependencies = [

@@ -32,6 +32,23 @@ Twist (hold) — and even if it didn't, the interceptor + governor are the safet
 
 ## Run it
 
+### Typed text via Mick (no speech)
+
+With the Mick sidecar running (`kirra-sidecars mick_service`, `:8102`) and the doer
+launched with `mick_url:=http://localhost:8102`, a typed request becomes the goal:
+
+```bash
+curl -s localhost:8102/intent -X POST -H 'content-type: application/json'      -d '{"text":"head to the loading dock, about 8 meters ahead"}'
+# → {"ok":true,"seq":1,"intent":{"intent":"go_to","x_m":8.0,"y_m":0.0}}
+```
+
+The doer polls `GET /intent/last`, grounds a NEW positional intent as the goal
+(ego frame at receipt → odom) and clears it on `hold`. Fail-closed end-to-end: an
+unparseable model reply never latches an intent, an unreachable Mick keeps the
+current goal, and KIRRA still bounds every proposal — Mick publishes INTENTS,
+never commands (the actuation fence is CI-enforced:
+`ci/check_mick_actuation_fence.py`).
+
 ```bash
 # sidecars + verifier (systemd, or scripts/orin_bringup.sh --serve, or the launch starts them)
 ros2 launch kirra_safety kirra_with_robot.launch.py \
