@@ -544,12 +544,18 @@ impl AdaptorState {
     /// `current_verdict`) rather than a stale prior Accept. On
     /// `Pending` (initial / transitional), removes too — Pending is
     /// reserved for absence.
+    /// `effective_ceiling` (B1 fix): the checker's per-pose velocity envelope
+    /// from `validate_trajectory_slow_with_envelope` — `Some` on a `Clamp`
+    /// verdict, `None` on `Accept`. Attached to the installed record so the
+    /// fast loop conforms a `Clamp`-verdict command to the DERATED ceiling, not
+    /// the planner's original speed. Ignored on the removal (MRC/Pending) arm.
     pub fn update_trajectory(
         &self,
         asset_id: impl Into<String>,
         trajectory_id: u64,
         points: Vec<TrajectoryPoint>,
         verdict: TrajectoryVerdict,
+        effective_ceiling: Option<Vec<f64>>,
         now_ms: u64,
     ) {
         let asset_id = asset_id.into();
@@ -561,7 +567,8 @@ impl AdaptorState {
                     points,
                     verdict,
                     now_ms,
-                );
+                )
+                .with_effective_ceiling(effective_ceiling);
                 self.install(record);
             }
             TrajectoryVerdict::MRCFallback | TrajectoryVerdict::Pending => {

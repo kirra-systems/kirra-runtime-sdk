@@ -53,7 +53,8 @@ use crate::state::{
     AdaptorState, TrajectoryPoint, TrajectoryVerdict, SUBSCRIPTION_STALENESS_TIMEOUT_MS,
 };
 use crate::validation::{
-    check_command_conforms, validate_trajectory_slow_capped, ConformanceVerdict, IncomingControl,
+    check_command_conforms, validate_trajectory_slow_with_envelope, ConformanceVerdict,
+    IncomingControl,
 };
 
 /// Horizon / step for the multi-modal predictive-RSS mode rollout in the slow loop (matches the
@@ -613,6 +614,7 @@ pub async fn run_adapter(
                         traj.trajectory_id,
                         traj.points.clone(),
                         TrajectoryVerdict::MRCFallback,
+                        None,
                         now_ms_fresh(),
                     );
                     continue;
@@ -694,7 +696,10 @@ pub async fn run_adapter(
             );
             let predicted_modes: Vec<_> = predicted_owned.iter().map(|m| m.as_mode()).collect();
 
-            let verdict = validate_trajectory_slow_capped(
+            // B1 fix: take the effective per-pose velocity envelope alongside
+            // the verdict. On a `Clamp` it carries the checker's derated
+            // ceiling to the fast loop's conformance gate; `None` on Accept.
+            let (verdict, _reason, effective_ceiling) = validate_trajectory_slow_with_envelope(
                 &traj.points,
                 slow_corridor.as_ref(),
                 &objects,
@@ -736,6 +741,7 @@ pub async fn run_adapter(
                 traj.trajectory_id,
                 traj.points.clone(),
                 verdict,
+                effective_ceiling,
                 now_mono,
             );
             let elapsed_us = start.elapsed().as_micros();

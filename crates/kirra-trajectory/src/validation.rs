@@ -272,6 +272,57 @@ pub fn validate_trajectory_slow_explained(
     pedestrians: Option<&crate::vru::PedestrianScene<'_>>,
     frame_trust: FrameTrust,
 ) -> (TrajectoryVerdict, Option<TrajectoryRefusalReason>) {
+    let (verdict, reason, _envelope) = validate_trajectory_slow_with_envelope(
+        trajectory,
+        corridor,
+        objects,
+        config,
+        latest_odom,
+        posture,
+        effective_perception_cap,
+        visibility_range_m,
+        predicted_modes,
+        pedestrians,
+        frame_trust,
+    );
+    (verdict, reason)
+}
+
+/// As [`validate_trajectory_slow_explained`], additionally returning the
+/// **effective per-pose velocity ceiling** the checker computed (B1 fix).
+///
+/// On a `Clamp` verdict the checker derated at least one pose's commanded
+/// velocity (a per-pose `EnforceAction::ClampLinear`/`ClampBoth`, or the
+/// composed perception cap). The third element is `Some(ceilings)` — a
+/// `Vec<f64>` aligned index-for-index with `trajectory`, where `ceilings[k]`
+/// is the maximum velocity permissible at pose `k` (the derated value where a
+/// clamp fired, the planner's own velocity elsewhere). The ROS fast-loop
+/// `check_command_conforms` gates against THIS envelope, so a command at the
+/// planner's original (unclamped) speed on a `Clamp` verdict now fails
+/// conformance → MRC, instead of passing (the finding).
+///
+/// `None` on every other verdict (`Accept` needs no derate; a refusal drives
+/// the MRC directly), so the `Accept` fast path is byte-identical to before.
+/// The verdict enum stays one byte — the envelope rides here on the slow-loop
+/// return, never on `TrajectoryVerdict` (the #893 side-channel discipline).
+#[allow(clippy::too_many_arguments)]
+pub fn validate_trajectory_slow_with_envelope(
+    trajectory: &[TrajectoryPoint],
+    corridor: &dyn CorridorSource,
+    objects: &[PerceivedObject],
+    config: &VehicleConfig,
+    latest_odom: Option<&EgoOdom>,
+    posture: FleetPosture,
+    effective_perception_cap: Option<f64>,
+    visibility_range_m: Option<f64>,
+    predicted_modes: Option<&[PredictedMode<'_>]>,
+    pedestrians: Option<&crate::vru::PedestrianScene<'_>>,
+    frame_trust: FrameTrust,
+) -> (
+    TrajectoryVerdict,
+    Option<TrajectoryRefusalReason>,
+    Option<Vec<f64>>,
+) {
     // ----- Posture short-circuit (M1) ----------------------------------
     //
     // A LockedOut fleet must not be commanded — the safe response is to
@@ -284,6 +335,7 @@ pub fn validate_trajectory_slow_explained(
         return (
             TrajectoryVerdict::MRCFallback,
             Some(TrajectoryRefusalReason::PostureLockedOut),
+            None,
         );
     }
 
@@ -293,6 +345,7 @@ pub fn validate_trajectory_slow_explained(
         return (
             TrajectoryVerdict::MRCFallback,
             Some(TrajectoryRefusalReason::TooFewPoints),
+            None,
         );
     }
 
@@ -342,6 +395,7 @@ pub fn validate_trajectory_slow_explained(
         return (
             TrajectoryVerdict::MRCFallback,
             Some(TrajectoryRefusalReason::ContainmentBreach),
+            None,
         );
     }
 
@@ -384,6 +438,13 @@ pub fn validate_trajectory_slow_explained(
     );
     let initial_steering_deg = current_steering_deg_from_odom(latest_odom, config);
     let mut clamp_seen = false;
+    // B1 fix — the effective per-pose velocity ceiling, aligned index-for-index
+    // with `trajectory`. Seeded to each pose's PLANNER velocity; a per-pose
+    // `ClampLinear`/`ClampBoth` on the segment ENDING at pose `k` lowers
+    // `ceilings[k]` to the checker's own enforced value. Only surfaced on a
+    // `Clamp` verdict (see the aggregate below); an `Accept` returns `None` so
+    // the fast path is byte-identical.
+    let mut ceilings: Vec<f64> = trajectory.iter().map(|p| p.velocity_mps).collect();
     let mut prev_steering_deg = initial_steering_deg;
     // ADR-0029: the angular channel's "current" yaw rate for the Degraded
     // converge-to-stop-and-HOLD gate. Seeded from odometry (the vehicle's
@@ -414,15 +475,24 @@ pub fn validate_trajectory_slow_explained(
         };
         match verdict {
             EnforceAction::Allow => {}
-            EnforceAction::ClampLinear(_)
-            | EnforceAction::ClampSteering(_)
-            | EnforceAction::ClampBoth { .. } => {
+            // B1 fix: capture the checker's own enforced velocity — do NOT
+            // discard it. `cmd` was built from segment (i → i+1), so the
+            // clamped linear velocity bounds pose `i + 1`. `ClampSteering`
+            // leaves the velocity ceiling at the planner value (only the
+            // steering axis was derated). `min` guards against a (never-
+            // observed) clamp that reported ABOVE the planner speed.
+            EnforceAction::ClampLinear(v) | EnforceAction::ClampBoth { linear: v, .. } => {
+                clamp_seen = true;
+                ceilings[i + 1] = ceilings[i + 1].min(v);
+            }
+            EnforceAction::ClampSteering(_) => {
                 clamp_seen = true;
             }
             EnforceAction::DenyBreach(code) => {
                 return (
                     TrajectoryVerdict::MRCFallback,
                     Some(TrajectoryRefusalReason::KinematicsDenied(code)),
+                    None,
                 );
             }
         }
@@ -457,6 +527,7 @@ pub fn validate_trajectory_slow_explained(
                     return (
                         TrajectoryVerdict::MRCFallback,
                         Some(TrajectoryRefusalReason::AngularRateBreach),
+                        None,
                     );
                 }
                 // Issue #70 / ADR-0029 — Degraded converge-to-stop-and-HOLD on
@@ -476,6 +547,7 @@ pub fn validate_trajectory_slow_explained(
                     return (
                         TrajectoryVerdict::MRCFallback,
                         Some(TrajectoryRefusalReason::DegradedAngularHoldBreach),
+                        None,
                     );
                 }
                 prev_omega = omega;
@@ -516,6 +588,7 @@ pub fn validate_trajectory_slow_explained(
             return (
                 TrajectoryVerdict::MRCFallback,
                 Some(TrajectoryRefusalReason::NonFinitePerceptionObject),
+                None,
             );
         }
         for traj_point in trajectory {
@@ -594,6 +667,7 @@ pub fn validate_trajectory_slow_explained(
                 return (
                     TrajectoryVerdict::MRCFallback,
                     Some(TrajectoryRefusalReason::RssLongitudinalBreach),
+                    None,
                 );
             }
 
@@ -670,6 +744,7 @@ pub fn validate_trajectory_slow_explained(
                     return (
                         TrajectoryVerdict::MRCFallback,
                         Some(TrajectoryRefusalReason::RssLateralBreach),
+                        None,
                     );
                 }
             }
@@ -693,6 +768,7 @@ pub fn validate_trajectory_slow_explained(
             return (
                 TrajectoryVerdict::MRCFallback,
                 Some(TrajectoryRefusalReason::PredictiveRssBreach),
+                None,
             );
         }
     }
@@ -708,6 +784,7 @@ pub fn validate_trajectory_slow_explained(
             return (
                 TrajectoryVerdict::MRCFallback,
                 Some(TrajectoryRefusalReason::OcclusionOutrunsVisibility),
+                None,
             );
         }
     }
@@ -753,15 +830,20 @@ pub fn validate_trajectory_slow_explained(
             return (
                 TrajectoryVerdict::MRCFallback,
                 Some(TrajectoryRefusalReason::VruReachableSetBreach),
+                None,
             );
         }
     }
 
     // ----- E) Aggregate ------------------------------------------------
     if clamp_seen {
-        (TrajectoryVerdict::Clamp, None)
+        // Carry the derated envelope to the fast loop (B1). Even a pure
+        // `ClampSteering` (velocity ceilings == planner speeds) returns the
+        // envelope, so conformance always gates a `Clamp` verdict against an
+        // explicit ceiling rather than silently against the planner points.
+        (TrajectoryVerdict::Clamp, None, Some(ceilings))
     } else {
-        (TrajectoryVerdict::Accept, None)
+        (TrajectoryVerdict::Accept, None, None)
     }
 }
 
@@ -1124,22 +1206,37 @@ pub fn check_command_conforms(
     // B. Nearest pose by elapsed time-since-promotion. Saturate the
     // subtraction so a fast-loop call that lands BEFORE `promoted_at_ms`
     // (clock skew at promotion) treats elapsed = 0 — the first pose of
-    // the trajectory.
+    // the trajectory. We take the INDEX (not just the pose) so the effective
+    // velocity ceiling (B1) can be read at the same index.
     let elapsed_s = (now_ms.saturating_sub(trajectory.promoted_at_ms) as f64) / 1000.0;
-    let nearest = trajectory
+    let nearest_idx = trajectory
         .points
         .iter()
-        .find(|p| p.time_from_start_s >= elapsed_s);
-    let nearest = match nearest {
-        Some(p) => p,
+        .position(|p| p.time_from_start_s >= elapsed_s);
+    let nearest_idx = match nearest_idx {
+        Some(idx) => idx,
         // Trajectory exhausted — every pose's time_from_start_s is in
         // the past. The fast loop must MRC; the slow loop is expected
         // to have promoted a fresh trajectory by now.
         None => return ConformanceVerdict::MRCFallback,
     };
+    let nearest = &trajectory.points[nearest_idx];
 
-    // C. Velocity bound
-    if cmd.velocity_mps > nearest.velocity_mps + VELOCITY_TOLERANCE_MPS {
+    // C. Velocity bound — against the EFFECTIVE ceiling (B1 fix).
+    //
+    // On a `Clamp` verdict the slow loop derated at least one pose; the
+    // permissible ceiling is the checker's own enforced value, carried on
+    // `effective_velocity_ceiling` aligned to `points`. Gating against the
+    // ORIGINAL `nearest.velocity_mps` here is the finding — a command at the
+    // planner's unclamped speed would pass despite the checker requiring a
+    // derate. When the envelope is absent (an `Accept` verdict → `None`), the
+    // ceiling IS the planner velocity, so the `Accept` path is byte-identical.
+    let velocity_ceiling = trajectory
+        .effective_velocity_ceiling
+        .as_ref()
+        .and_then(|c| c.get(nearest_idx).copied())
+        .unwrap_or(nearest.velocity_mps);
+    if cmd.velocity_mps > velocity_ceiling + VELOCITY_TOLERANCE_MPS {
         return ConformanceVerdict::MRCFallback;
     }
 
