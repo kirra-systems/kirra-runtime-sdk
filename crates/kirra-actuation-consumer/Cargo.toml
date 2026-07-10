@@ -1,0 +1,28 @@
+# ADR-0033 — the verifying motor-consumer core (Tier-1, hardware-mocked).
+#
+# The DEPLOYMENT shape this crate is the core of: a dedicated consumer process
+# is the SOLE owner of the Rosmaster serial device; every command must pass the
+# verify-before-release gate (kirra-release-token::ros_twist::RosReleaseGate)
+# before a single byte reaches the port. This crate holds everything that does
+# NOT need the physical robot: the release gate consumption, the fail-closed
+# liveness supervisor (SS-002: starve → active commanded stop → silence, never
+# hold-last-command), and the serial SEAM (`MotorSerial`, the NvbootctrlRunner
+# command-seam precedent) behind which the real Rosmaster protocol will land
+# when hardware access exists. Per ADR-0033's ordering constraint, on the real
+# R2 THIS consumer is the motor bringup — no vendor /cmd_vel driver ships first.
+#
+# The Tier-1 regression guard (tests/tier1_chokepoint.rs) is the evidence
+# artifact: cross-process, no ROS, CI-blocking (workspace member → the Test lane
+# runs it on every PR).
+[package]
+name = "kirra-actuation-consumer"
+version = "0.1.0"
+publish = false
+edition = "2021"
+
+[dependencies]
+kirra-release-token = { path = "../kirra-release-token" }
+ed25519-dalek = "2"
+
+[dev-dependencies]
+hex = "0.4"

@@ -1070,11 +1070,15 @@ async fn main() {
         );
     }
 
+    // ADR-0033 — the ROS-path release-token signer (opt-in via env; a
+    // configured-but-broken source aborts startup). See actuator.rs.
+    let ros_release_signer = provision_ros_release_signer();
+
     // Assemble the production router. Extracted into `build_app` (issue #72)
     // so the EXACT assembled router — identical routes, middleware layer
     // order, and state wiring — is what the binary-internal posture-gate
     // test exercises, rather than a representative stand-in.
-    let app = build_app(Arc::clone(&svc_state));
+    let app = build_app(Arc::clone(&svc_state), ros_release_signer);
 
     // SG-008 (ASIL D): fail closed BEFORE binding the listener. Build the boot
     // facts and evaluate the startup-invariant predicate; on any violation, log
@@ -1396,7 +1400,10 @@ struct OperatorStopRequest {
 /// every request (before auth and the actuator envelope); the identity/admin/
 /// actuator-posture layering inside each group is the fail-closed security
 /// boundary. Do not reorder, drop, or rewire any of this.
-fn build_app(svc_state: Arc<ServiceState>) -> Router {
+fn build_app(
+    svc_state: Arc<ServiceState>,
+    ros_release_signer: Option<Arc<kirra_verifier::governor_release::RosReleaseSigner>>,
+) -> Router {
     let identity_gated_routes = Router::new()
         .route("/system/posture/stream", get(system_posture_stream))
         .route("/federation/reports/submit", post(submit_federated_report))
@@ -1569,7 +1576,9 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&svc_state),
             enforce_actuator_safety_envelope,
-        ))
+        ));
+    // ADR-0033 — thread the signer to the 200 arm ONLY (see actuator.rs).
+    let actuator_routes = layer_release_signer(actuator_routes, ros_release_signer)
         // WS-1 (#G7): SCOPE_ACTUATOR_COMMAND — the admin token OR an `operator`-role
         // principal. Auth runs before the envelope; the transport gate runs first of all.
         .layer(middleware::from_fn_with_state(
@@ -1804,6 +1813,10 @@ mod console_phase_a_tests;
 #[cfg(test)]
 #[path = "kirra_verifier_service/store_offload_tests.rs"]
 mod store_offload_tests;
+
+#[cfg(test)]
+#[path = "kirra_verifier_service/ros_release_mint_tests.rs"]
+mod ros_release_mint_tests;
 
 #[cfg(test)]
 #[path = "kirra_verifier_service/federation_submit_e2e_tests.rs"]

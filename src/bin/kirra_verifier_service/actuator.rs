@@ -6,6 +6,8 @@
 // root re-export (`use actuator::*`) lets build_app/tests name them unqualified.
 
 use super::*;
+use kirra_verifier::gateway::contract_profiles::{contract_for, global_vehicle_class};
+use kirra_verifier::governor_release::RosReleaseSigner;
 use kirra_verifier::verifier_store::FenceError;
 
 pub(crate) async fn handle_actuator_motion_command(
@@ -15,6 +17,13 @@ pub(crate) async fn handle_actuator_motion_command(
     // (post-clamp) command, but only this tells us WHETHER a clamp happened, so
     // the response can report it instead of always claiming "Allow".
     Extension(outcome): Extension<EnforcementOutcome>,
+    // ADR-0033 — the ROS-path release-token signer, layered onto the actuator
+    // router at startup ONLY when `KIRRA_GOVERNOR_SIGNING_KEY_SOURCE` is
+    // configured (fail-closed provisioning). Absent → the 200 response carries
+    // no token (byte-identical legacy body) and a verifying consumer downstream
+    // refuses everything into its safe stop — fail-closed at the boundary that
+    // matters, without breaking non-consumer deployments.
+    signer: Option<Extension<Arc<RosReleaseSigner>>>,
     Json(cmd): Json<ProposedVehicleCommand>,
 ) -> impl IntoResponse {
     let now = now_ms();
@@ -93,5 +102,91 @@ pub(crate) async fn handle_actuator_motion_command(
 
     // Response speaks the ROS interceptor's schema (action / enforced_*) AND
     // the legacy keys (now accurate). See `EnforcementOutcome::response_body`.
-    (StatusCode::OK, Json(outcome.response_body())).into_response()
+    let mut body = outcome.response_body();
+
+    // ADR-0033 — mint the ROS-path release token, 200 arm ONLY, after the
+    // epoch fence (a fenced request returns 503 above and never reaches this;
+    // the deny paths are middleware 4xx and structurally cannot reach a signer).
+    // The token binds the ENFORCED twist: the payload's little-endian image is
+    // the wire truth the consumer verifies and decodes — the JSON floats in
+    // this body are observability, never the trust path.
+    if let Some(Extension(signer)) = signer {
+        // The steering→angular mapping is the interceptor's bicycle relation
+        // (`cmd_vel_interceptor.py:311`): angular_rad_s = tan(steering_rad) ×
+        // |v| / wheelbase, with the wheelbase of the ACTIVE vehicle class —
+        // a physical constant of the platform, identical across that class's
+        // nominal and MRC profiles.
+        let wheelbase_m = contract_for(global_vehicle_class()).wheelbase_m;
+        let angular_rad_s = (outcome.enforced_steering_angle_deg.to_radians()).tan()
+            * outcome.enforced_linear_velocity_mps.abs()
+            / wheelbase_m;
+        let (payload, token) =
+            signer.mint(outcome.enforced_linear_velocity_mps, angular_rad_s, now);
+        body["release"] = serde_json::json!({
+            // The signed 32-byte payload image (hex) — the consumer verifies
+            // the token over EXACTLY these bytes and decodes its twist FROM
+            // them (no cross-language float re-canonicalization).
+            "payload_hex": hex::encode(payload.encode()),
+            // The canonical 96-byte token (hex): digest(32) || signature(64).
+            "token_hex": hex::encode(token.to_bytes()),
+            "sequence": payload.sequence,
+            "issued_at_ms": payload.issued_at_ms,
+            // Forensic key id (hex SHA-256 of the verifying key) — lets a
+            // consumer log WHICH key signed without trusting this field.
+            "key_id": signer.key_id(),
+        });
+    }
+
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// ADR-0033 — provision the ROS-path release-token signer at startup. Minting
+/// is opt-in by configuration: `KIRRA_GOVERNOR_SIGNING_KEY_SOURCE` set →
+/// provision via the fail-closed ADR-0031 Clause E machinery (a
+/// CONFIGURED-but-broken source aborts startup — never silently run
+/// token-less when the operator asked for tokens); unset → no signer, the
+/// 200 body is byte-identical to before, and a verifying consumer downstream
+/// refuses into its safe stop. The dev-fixed key stays refused unless
+/// `KIRRA_GOVERNOR_SIGNING_KEY_ALLOW_DEV` is set (provisioning module).
+pub(crate) fn provision_ros_release_signer() -> Option<Arc<RosReleaseSigner>> {
+    match std::env::var("KIRRA_GOVERNOR_SIGNING_KEY_SOURCE") {
+        Ok(v) if !v.trim().is_empty() => {
+            match kirra_release_token::provisioning::provision_from_env() {
+                Ok(signing_key) => {
+                    let signer = Arc::new(RosReleaseSigner::new(
+                        signing_key,
+                        now_ms(), // sequence seed — see RosReleaseSigner docs
+                    ));
+                    tracing::info!(
+                        key_id = %signer.key_id(),
+                        "ADR-0033: ROS release-token minting ENABLED on the actuator path"
+                    );
+                    Some(signer)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = ?e,
+                        "FATAL: KIRRA_GOVERNOR_SIGNING_KEY_SOURCE is set but provisioning failed — refusing to start (fail-closed; a configured signer must never silently degrade to token-less)"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// ADR-0033 — thread the signer to the actuator handler's 200 arm ONLY, via
+/// an optional router `Extension`. The deny paths (envelope 400, scope
+/// 401/403, posture/fence 503) are produced by middleware layers that never
+/// see this extension — the "deny path never mints a token" invariant is
+/// structural here and pinned by `ros_release_mint_tests.rs`.
+pub(crate) fn layer_release_signer<S: Clone + Send + Sync + 'static>(
+    routes: Router<S>,
+    signer: Option<Arc<RosReleaseSigner>>,
+) -> Router<S> {
+    match signer {
+        Some(s) => routes.layer(Extension(s)),
+        None => routes,
+    }
 }

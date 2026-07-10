@@ -458,7 +458,7 @@ mod g7_transport_security_router_tests {
         if let Some(p) = proto {
             b = b.header("x-forwarded-proto", p);
         }
-        build_app(svc)
+        build_app(svc, None)
             .oneshot(b.body(Body::empty()).unwrap())
             .await
             .expect("router should not panic")
@@ -495,7 +495,7 @@ mod g7_transport_security_router_tests {
     /// → 403 before the unauthenticated challenge handler runs.
     #[tokio::test]
     async fn attestation_challenge_is_gated_by_secure_transport() {
-        let status = build_app(state_requiring_secure_transport(true))
+        let status = build_app(state_requiring_secure_transport(true), None)
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -516,7 +516,7 @@ mod g7_transport_security_router_tests {
     /// The carved-out auditor read routes (WS-1) carry the same transport boundary.
     #[tokio::test]
     async fn auditor_routes_are_gated_by_secure_transport() {
-        let status = build_app(state_requiring_secure_transport(true))
+        let status = build_app(state_requiring_secure_transport(true), None)
             .oneshot(
                 Request::builder()
                     .method("GET")

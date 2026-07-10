@@ -57,7 +57,7 @@ async fn status_through_real_app(svc: Arc<ServiceState>, method: &str, path: &st
         .uri(path)
         .body(Body::empty())
         .expect("build request");
-    build_app(svc)
+    build_app(svc, None)
         .oneshot(req)
         .await
         .expect("router service should not panic")
@@ -534,7 +534,7 @@ async fn assignment_req(
         .uri(uri)
         .body(Body::empty())
         .expect("build request");
-    let resp = build_app(svc)
+    let resp = build_app(svc, None)
         .oneshot(req)
         .await
         .expect("router service should not panic");
@@ -676,7 +676,7 @@ async fn degraded_actuator_write_reaches_inner_envelope_on_real_router() {
         if let Some(tok) = bearer {
             rb = rb.header(header::AUTHORIZATION, format!("Bearer {tok}"));
         }
-        build_app(svc)
+        build_app(svc, None)
             .oneshot(
                 rb.body(Body::from(body.to_string()))
                     .expect("build request"),
@@ -781,7 +781,7 @@ async fn metrics_scrape_returns_fleet_safety_series_under_lockedout() {
         "precondition: LockedOut denies the functional read"
     );
 
-    let resp = build_app(Arc::clone(&svc))
+    let resp = build_app(Arc::clone(&svc), None)
         .oneshot(
             Request::builder()
                 .method("GET")
