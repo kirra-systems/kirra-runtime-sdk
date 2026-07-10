@@ -57,12 +57,13 @@ Allocation to prove:
 WCET-enabling code properties (verify, then bound): panic-free or
 panic=abort→safe-state on the check path; **no heap allocation** on the hot path
 (stack-only / bounded); **bounded loops** (horizon length, agent cap); input-size
-caps (the 16 KiB body bound already in place). Once bounded, the WCET bound sets
-the SG9 timeout and confirms the per-cycle FTTI for SG1/2/3/7/9 — and any change
-that breaks the bound is a safety regression caught in CI. Today's evidence for
-that bound is the structural boundedness argument (`src/wcet_gate.rs`) plus the
-host-indicative CI-measured p99.9 — **not a certified WCET**; the QNX/`SCHED_FIFO`
-target measurement is tracked in #274.
+caps (the 16 KiB body bound already in place). Once a target-measured WCET
+exists, it sets the SG9 timeout and confirms the per-cycle FTTI for
+SG1/2/3/7/9 — and any change that breaks the bound is a safety regression
+caught in CI. Today the verdict time is bounded by construction (the structural
+boundedness argument in `src/wcet_gate.rs`) with the host-indicative
+CI-measured p99.9 as corroboration — **not a certified WCET**; the
+QNX/`SCHED_FIFO` target measurement is tracked in #274.
 
 ---
 
