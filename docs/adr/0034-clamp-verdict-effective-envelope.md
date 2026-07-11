@@ -37,10 +37,14 @@ to the fast loop, and gate `Clamp`-verdict conformance against it.
 
 **Representation — Option A (chosen): a field on `AcceptedTrajectory`.**
 `effective_velocity_ceiling: Option<Vec<f64>>`, aligned index-for-index with
-`points`. `Some(ceilings)` on `Clamp` (the checker's own enforced value per
-pose, the planner velocity where no clamp fired); `None` on `Accept` (the fast
-path stays byte-identical). `check_command_conforms` gates against
-`ceiling[nearest]` when present, else the planner velocity (unchanged).
+`points`. `Some(ceilings)` when a **velocity** clamp fired (the checker's own
+enforced value per pose, the planner velocity where no clamp fired); `None` on
+`Accept` **and** on a pure steering clamp (no velocity derate → the planner
+velocity is the correct ceiling). `check_command_conforms` gates against
+`ceiling[nearest]` when present; a `Some`-but-missing entry **fails closed**
+(MRC), never falling back to the planner speed. The envelope is materialized
+LAZILY (only when a velocity clamp is first observed), so the `Accept` /
+no-velocity-derate slow-loop path allocates nothing extra.
 
 **Rejected — Option B: a payload on `TrajectoryVerdict::Clamp`.**
 `TrajectoryVerdict` is pinned at **one byte** (`trajectory_verdict_stays_one_byte`,

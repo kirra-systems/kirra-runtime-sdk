@@ -439,12 +439,13 @@ pub fn validate_trajectory_slow_with_envelope(
     let initial_steering_deg = current_steering_deg_from_odom(latest_odom, config);
     let mut clamp_seen = false;
     // B1 fix — the effective per-pose velocity ceiling, aligned index-for-index
-    // with `trajectory`. Seeded to each pose's PLANNER velocity; a per-pose
-    // `ClampLinear`/`ClampBoth` on the segment ENDING at pose `k` lowers
-    // `ceilings[k]` to the checker's own enforced value. Only surfaced on a
-    // `Clamp` verdict (see the aggregate below); an `Accept` returns `None` so
-    // the fast path is byte-identical.
-    let mut ceilings: Vec<f64> = trajectory.iter().map(|p| p.velocity_mps).collect();
+    // with `trajectory`. LAZILY materialized: stays `None` (zero heap) until a
+    // velocity clamp actually fires, so the common `Accept` path allocates
+    // NOTHING extra on the slow loop (review: Copilot #898). Materialized from
+    // the PLANNER velocities on first clamp; a per-pose `ClampLinear`/`ClampBoth`
+    // on the segment ENDING at pose `k` lowers `ceilings[k]` to the checker's
+    // own enforced value.
+    let mut ceilings: Option<Vec<f64>> = None;
     let mut prev_steering_deg = initial_steering_deg;
     // ADR-0029: the angular channel's "current" yaw rate for the Degraded
     // converge-to-stop-and-HOLD gate. Seeded from odometry (the vehicle's
@@ -477,13 +478,17 @@ pub fn validate_trajectory_slow_with_envelope(
             EnforceAction::Allow => {}
             // B1 fix: capture the checker's own enforced velocity — do NOT
             // discard it. `cmd` was built from segment (i → i+1), so the
-            // clamped linear velocity bounds pose `i + 1`. `ClampSteering`
-            // leaves the velocity ceiling at the planner value (only the
-            // steering axis was derated). `min` guards against a (never-
-            // observed) clamp that reported ABOVE the planner speed.
+            // clamped linear velocity bounds pose `i + 1`. `v` is the enforced
+            // speed and is `<= planner velocity` by the contract
+            // (`ClampLinear`/`ClampBoth` only ever derate DOWN), so it replaces
+            // the seeded planner value directly. `ClampSteering` leaves the
+            // velocity ceiling at the planner value (only the steering axis was
+            // derated).
             EnforceAction::ClampLinear(v) | EnforceAction::ClampBoth { linear: v, .. } => {
                 clamp_seen = true;
-                ceilings[i + 1] = ceilings[i + 1].min(v);
+                let ceilings = ceilings
+                    .get_or_insert_with(|| trajectory.iter().map(|p| p.velocity_mps).collect());
+                ceilings[i + 1] = v;
             }
             EnforceAction::ClampSteering(_) => {
                 clamp_seen = true;
@@ -837,11 +842,14 @@ pub fn validate_trajectory_slow_with_envelope(
 
     // ----- E) Aggregate ------------------------------------------------
     if clamp_seen {
-        // Carry the derated envelope to the fast loop (B1). Even a pure
-        // `ClampSteering` (velocity ceilings == planner speeds) returns the
-        // envelope, so conformance always gates a `Clamp` verdict against an
-        // explicit ceiling rather than silently against the planner points.
-        (TrajectoryVerdict::Clamp, None, Some(ceilings))
+        // Carry the derated velocity envelope to the fast loop (B1). `ceilings`
+        // is `Some` iff a VELOCITY clamp fired; a pure `ClampSteering` (no
+        // velocity derate) leaves it `None`, and conformance then gates against
+        // the planner velocity — which is correct, since the velocity axis was
+        // not derated (the steering derate is bounded separately by the fast
+        // loop's hard-steering-limit check, unchanged). Either way the verdict
+        // is `Clamp`.
+        (TrajectoryVerdict::Clamp, None, ceilings)
     } else {
         (TrajectoryVerdict::Accept, None, None)
     }
@@ -1231,11 +1239,20 @@ pub fn check_command_conforms(
     // planner's unclamped speed would pass despite the checker requiring a
     // derate. When the envelope is absent (an `Accept` verdict → `None`), the
     // ceiling IS the planner velocity, so the `Accept` path is byte-identical.
-    let velocity_ceiling = trajectory
-        .effective_velocity_ceiling
-        .as_ref()
-        .and_then(|c| c.get(nearest_idx).copied())
-        .unwrap_or(nearest.velocity_mps);
+    let velocity_ceiling = match trajectory.effective_velocity_ceiling.as_ref() {
+        // A `Clamp` verdict carries the envelope: the ceiling MUST exist at
+        // this pose. A `Some`-but-missing entry (envelope shorter than
+        // `points`) FAILS CLOSED — a dropped derate must never silently fall
+        // back to the planner speed, which would reintroduce B1 (review:
+        // Copilot #898).
+        Some(ceilings) => match ceilings.get(nearest_idx) {
+            Some(&c) => c,
+            None => return ConformanceVerdict::MRCFallback,
+        },
+        // No envelope (an `Accept` verdict): the planner velocity IS the
+        // ceiling — byte-identical to before this field existed.
+        None => nearest.velocity_mps,
+    };
     if cmd.velocity_mps > velocity_ceiling + VELOCITY_TOLERANCE_MPS {
         return ConformanceVerdict::MRCFallback;
     }

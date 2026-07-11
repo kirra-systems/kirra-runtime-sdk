@@ -216,10 +216,22 @@ fn b1_clamp_verdict_derates_the_conformance_ceiling() {
     )
     .with_effective_ceiling(Some(ceilings.clone()));
 
-    // Sanity: the checker really derated below the planner's 5 m/s.
+    // Sanity — AND per-index pins (kill any index-shift mutant in the envelope
+    // accumulation, e.g. `i + 1` → `i * 1`): pose 0 is the CURRENT pose, never
+    // derated by a segment, so its ceiling stays the planner speed; every
+    // downstream pose is clamped to the cap; the LAST pose is clamped too (an
+    // off-by-one at the tail would leave it at the planner speed).
+    assert_eq!(
+        ceilings[0], 5.0,
+        "pose 0 (current) must keep the planner speed, not be derated: {ceilings:?}"
+    );
     assert!(
         ceilings.iter().skip(1).all(|&c| c <= cap + 1e-9),
         "post-current poses must be clamped to the cap: {ceilings:?}"
+    );
+    assert!(
+        *ceilings.last().unwrap() <= cap + 1e-9,
+        "the last pose must be clamped (no tail off-by-one): {ceilings:?}"
     );
 
     let cfg = VehicleConfig::default_urban();
@@ -260,6 +272,52 @@ fn b1_clamp_verdict_derates_the_conformance_ceiling() {
     assert_eq!(
         check_command_conforms(&over_ceiling, &traj, &ego, &cfg, now),
         ConformanceVerdict::MRCFallback,
+    );
+
+    // Boundary pin (kills `>` → `>=`): a command EXACTLY at
+    // `ceiling + VELOCITY_TOLERANCE_MPS` is the last ACCEPTED value — the gate
+    // is `>`, strict. `>=` would MRC it.
+    let exactly_at_bound = IncomingControl {
+        velocity_mps: cap + VELOCITY_TOLERANCE_MPS,
+        steering_rad: 0.0,
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&exactly_at_bound, &traj, &ego, &cfg, now),
+        ConformanceVerdict::Accept,
+        "a command exactly at ceiling + tolerance must PASS (the bound is strict `>`)"
+    );
+}
+
+/// Copilot #898 fail-closed hardening: a `Clamp` verdict whose envelope is
+/// `Some` but SHORTER than `points` (a missing ceiling entry at the nearest
+/// pose) must MRC — never silently fall back to the planner speed (which would
+/// reintroduce B1). Also kills any mutant on that fail-closed arm.
+#[test]
+fn b1_short_ceiling_on_a_clamp_verdict_fails_closed() {
+    let promoted = 100_000;
+    let now = promoted + 50; // nearest pose = index 1
+    let traj = AcceptedTrajectory::with_verdict(
+        "av_01",
+        1,
+        straight_pts_at(10.0, 10, 5.0, 0.1),
+        TrajectoryVerdict::Clamp,
+        promoted,
+    )
+    // Envelope length 1 — index 1 (the nearest pose) is MISSING.
+    .with_effective_ceiling(Some(vec![5.0]));
+    let cfg = VehicleConfig::default_urban();
+    // Even a modest command must MRC: the derate for this pose is unknown, so
+    // fail closed rather than trust the planner speed.
+    let cmd = IncomingControl {
+        velocity_mps: 1.0,
+        steering_rad: 0.0,
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::MRCFallback,
+        "a Some-but-short ceiling must fail closed, not fall back to planner speed"
     );
 }
 

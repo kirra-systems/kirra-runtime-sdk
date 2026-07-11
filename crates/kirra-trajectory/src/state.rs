@@ -99,8 +99,10 @@ impl AcceptedTrajectory {
     /// slow loop calls this on a `Clamp` verdict with the envelope from
     /// [`crate::validation::validate_trajectory_slow_with_envelope`]; the fast
     /// loop's `check_command_conforms` then gates against it. Chainable off
-    /// [`with_verdict`](Self::with_verdict). A `None` argument is a no-op (the
-    /// `Accept` path), keeping the record byte-identical to the pre-fix shape.
+    /// [`with_verdict`](Self::with_verdict). A `None` argument is a no-op — the
+    /// `Accept` path — leaving conformance behaviour byte-identical to before
+    /// this field existed (the field is present on every record; only its value
+    /// changes).
     #[must_use]
     pub fn with_effective_ceiling(mut self, ceiling: Option<Vec<f64>>) -> Self {
         self.effective_velocity_ceiling = ceiling;
