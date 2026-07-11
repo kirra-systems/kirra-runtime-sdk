@@ -1061,6 +1061,12 @@ jobs:
           # harness drives the REAL publisher/consumer main() through the
           # signal-shutdown paths; an unguarded second rclpy.shutdown() fails it.
           python3 robot/teardown_smoke_test.py
+          # Detecting-installer contract (R2 golden build): detect/verify/install
+          # are fail-closed (wrong car-type mode, unknown platform, missing
+          # devices all refuse with remediation) and SELECT-NOT-INFER holds (the
+          # rendered config carries names + mapping values, never a computed
+          # safety parameter). See installer/ + docs/hardware/R2_GOLDEN_BUILD.md.
+          python3 installer/test_installer.py
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Clippy

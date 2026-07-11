@@ -1,0 +1,57 @@
+# KIRRA platform mapping table — detected/declared platform NAME → validated
+# configuration. THE core data asset of the detecting installer (gap analysis
+# Part 4 item 8).
+#
+# 🔴 SELECT-NOT-INFER: every value here is reviewed configuration, cited to a
+# source. The installer copies these values verbatim; it never computes one
+# from a hardware probe. Safety numbers (envelopes, wheelbase, decel) live in
+# the compiled contract profiles selected by `profile_class`, NOT here.
+#
+# Provenance: docs/hardware/HARDWARE_FINDINGS_R2X3.md (the bench investigation
+# that produced the car-type table and the R2/X3 cross-labeling finding).
+#
+# FUTURE: this file becomes an Uptane-signed artifact (plan phase B1/B3); today
+# it is repo-reviewed content, signed transitively with the release.
+
+schema_version = 1
+
+[platform.r2]
+# Yahboom Rosmaster R2 — Ackermann chassis (steering servo). The GOLDEN target.
+drive_model = "ackermann"
+required_car_type = 5          # board must report CARTYPE_R2; wrong mode → REFUSE
+# ⚠ VENDOR BASE IMAGE REQUIRED: the R2 drive model only works on Yahboom's R2
+# software image. A car-type flip alone on the X3 image breaks the drive path
+# (one-wheel drive — findings doc). The installer VERIFIES mode 5 and working
+# metadata; it cannot create the R2 base image.
+base_image = "yahboom-r2 (vendor artifact — operator-flashed; see docs/hardware/R2_GOLDEN_BUILD.md)"
+# INTERIM until the measurement-gated `r2` contract profile lands (Track-A A2):
+# courier is the closest reviewed class; the demo envelope stays the backstop.
+profile_class = "courier"
+motor_port = "/dev/myserial"
+[platform.r2.lidar]
+model = "ydlidar-tg30"
+driver = "ydlidar_ros2_driver"
+serial_port = "/dev/ydlidar"
+baud = 512000
+scan_topic = "/scan"
+qos = "sensor-data"            # BEST_EFFORT — the TG30 publishes best-effort
+[platform.r2.cameras]
+policy = "detect-report-only"  # no camera driver config exists in-repo yet
+
+[platform.x3]
+# Yahboom Rosmaster X3 — mecanum drive model (also: R2 hardware running the
+# cross-labeled X3 image reports this mode; the straight-line demo path).
+drive_model = "mecanum"
+required_car_type = 1
+base_image = "yahboom-x3 (vendor artifact)"
+profile_class = "courier"
+motor_port = "/dev/myserial"
+[platform.x3.lidar]
+model = "ydlidar-tg30"
+driver = "ydlidar_ros2_driver"
+serial_port = "/dev/ydlidar"
+baud = 512000
+scan_topic = "/scan"
+qos = "sensor-data"
+[platform.x3.cameras]
+policy = "detect-report-only"

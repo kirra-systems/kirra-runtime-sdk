@@ -162,6 +162,9 @@ def install_stubs(ctx: StubContext) -> None:
 
         def create_receive_threading(self) -> None: ...
 
+        def get_car_type_from_machine(self) -> int:
+            return 1  # matches KIRRA_EXPECTED_CAR_TYPE below
+
         def set_car_motion(self, vx: float, vy: float, vz: float) -> None:
             self.motions.append((vx, vy, vz))
 
@@ -273,6 +276,7 @@ def main() -> int:
         "KIRRA_DEMO_VX_MAX": "0.15",
         "KIRRA_DEMO_VZ_MAX": "0.4",
         "KIRRA_MOTOR_PORT": "/dev/stub-serial",
+        "KIRRA_EXPECTED_CAR_TYPE": "1",
     })
     ctx.spin_downs_context = True  # our handler already shut it down...
     ctx.spin_raises = ExternalShutdownException()  # ...and spin surfaces it
