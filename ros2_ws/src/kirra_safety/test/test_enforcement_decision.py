@@ -113,3 +113,42 @@ def test_stop_reason_is_a_short_tag():
     d = decide_enforcement(200, {"action": "Allow"}, PROPOSED)
     assert isinstance(d, Stop)
     assert isinstance(d.reason, str) and d.reason
+
+
+# ---------------------------------------------------------------------------
+# Track-A A3 — wheelbase_consistent (single wheelbase source)
+# ---------------------------------------------------------------------------
+
+# Same standalone-module import style as the header import above (the
+# sys.path insert makes `enforcement_decision` importable from any cwd;
+# the packaged `kirra_safety.` form only resolves in an installed/colcon
+# environment — review #904).
+from enforcement_decision import (  # noqa: E402
+    wheelbase_consistent, WHEELBASE_TOLERANCE_M,
+)
+
+
+def test_wheelbase_exact_match_is_consistent():
+    assert wheelbase_consistent(0.229, 0.229)
+
+
+def test_wheelbase_float_jitter_within_tolerance_is_consistent():
+    assert wheelbase_consistent(0.229, 0.229 + WHEELBASE_TOLERANCE_M / 2)
+
+
+def test_wheelbase_real_mismatch_is_inconsistent():
+    # The exact live bug shape: interceptor default 0.2 vs courier 0.5 /
+    # robotaxi 2.8 / the measured 0.229 — every pair must FAIL the check.
+    for param, reported in ((0.2, 0.5), (0.2, 2.8), (0.2, 0.229), (0.5, 0.229)):
+        assert not wheelbase_consistent(param, reported), (param, reported)
+
+
+def test_wheelbase_missing_or_nonfinite_reported_fails_closed():
+    # A verifier that mints but cannot say which wheelbase it used is a fault.
+    for bad in (None, float("nan"), float("inf"), "0.229", True):
+        assert not wheelbase_consistent(0.229, bad), bad
+
+
+def test_wheelbase_bad_param_fails_closed():
+    for bad in (None, float("nan"), "0.229"):
+        assert not wheelbase_consistent(bad, 0.229), bad

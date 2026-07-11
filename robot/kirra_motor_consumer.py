@@ -30,6 +30,8 @@ Config — ALL required, NO defaults (fail-closed; a missing var aborts):
     KIRRA_DEMO_VX_MAX          demo linear cap (m/s) — Step 3 backstop
     KIRRA_DEMO_VZ_MAX          demo angular cap (rad/s) — Step 3 backstop
     KIRRA_MOTOR_PORT           motor serial device (e.g. /dev/myserial)
+    KIRRA_EXPECTED_CAR_TYPE    board drive-model register value the platform
+                               mapping expects (R2=5, X3=1); mismatch → refuse
 Optional:
     KIRRA_RELEASE_TOPIC        (default /kirra/release)
     KIRRA_CONSUMER_LIB         explicit path to libkirra_consumer_ffi.so
@@ -105,6 +107,7 @@ def main() -> int:
     vx_max = _req_float("KIRRA_DEMO_VX_MAX")
     vz_max = _req_float("KIRRA_DEMO_VZ_MAX")
     motor_port = _req("KIRRA_MOTOR_PORT")
+    expected_car_type = _req_int("KIRRA_EXPECTED_CAR_TYPE")
     topic = os.environ.get("KIRRA_RELEASE_TOPIC", "/kirra/release")
 
     # The verify core (fail-closed: raises on a NULL handle).
@@ -121,6 +124,35 @@ def main() -> int:
     # 🔴 OWN the motor board. This is the sole opener/writer of /dev/myserial.
     bot = Rosmaster(com=motor_port)
     bot.create_receive_threading()
+
+    # 🔴 Drive-model assertion (hardware finding, HARDWARE_FINDINGS_R2X3.md):
+    # the board's car-type register selects the DRIVE MODEL the same
+    # set_car_motion bytes execute under — mecanum mixing (1) vs Ackermann (5)
+    # — it is RAM-volatile, and R2 hardware shipped reporting 1 (cross-labeled
+    # image). A consumer validated against one model must never drive a board
+    # configured for another: read the register (with settle retries) and
+    # REFUSE to start on mismatch/unreadable. KIRRA_EXPECTED_CAR_TYPE comes
+    # from the platform mapping (kirra-install), never guessed here.
+    observed_type = None
+    for _ in range(8):  # ~2 s total; the register needs receive-thread settle
+        time.sleep(0.25)
+        try:
+            t = bot.get_car_type_from_machine()
+        except Exception:  # noqa: BLE001 — unreadable is fail-closed below
+            t = None
+        if t is not None:
+            observed_type = int(t)
+            break
+    if observed_type != expected_car_type:
+        print(
+            f"FATAL: board car-type register reads {observed_type!r} but this "
+            f"deployment expects {expected_car_type} (platform mapping). The "
+            f"drive model does not match what governed commands were validated "
+            f"against — refusing to start (fail-closed). Fix: flash/configure "
+            f"the correct vendor base image for this platform.",
+            file=sys.stderr,
+        )
+        return 2
 
     def safe_stop() -> None:
         # SS-002 shutdown guarantee: command zero, best-effort, idempotent.

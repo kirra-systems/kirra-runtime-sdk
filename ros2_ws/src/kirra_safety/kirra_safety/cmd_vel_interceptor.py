@@ -25,7 +25,9 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import String, Float64
 
-from kirra_safety.enforcement_decision import decide_enforcement, Forward
+from kirra_safety.enforcement_decision import (
+    decide_enforcement, Forward, wheelbase_consistent,
+)
 from kirra_safety.perception_cap import apply_perception_cap, DISABLED
 
 try:
@@ -46,7 +48,11 @@ class CmdVelInterceptor(Node):
         self.declare_parameter('kirra_url', 'http://localhost:8090')
         self.declare_parameter('kirra_token', '')
         self.declare_parameter('kirra_client_id', 'ros2-interceptor-01')
-        self.declare_parameter('wheelbase_m', 0.2)
+        # Track-A A3: REQUIRED, no default. The wheelbase must be the active
+        # vehicle class's contract wheelbase (the same L the P6 lateral-accel
+        # check uses); the verifier reports its value on every release and this
+        # node fail-closes on mismatch. 0.0 is the unset sentinel — refused.
+        self.declare_parameter('wheelbase_m', 0.0)
         self.declare_parameter('max_speed_mps', 1.8)
         self.declare_parameter('input_topic', '/cmd_vel')
         self.declare_parameter('output_topic', '/cmd_vel_safe')
@@ -65,6 +71,26 @@ class CmdVelInterceptor(Node):
         self._kirra_token = self.get_parameter('kirra_token').value
         self._client_id = self.get_parameter('kirra_client_id').value
         self._wheelbase_m = self.get_parameter('wheelbase_m').value
+        import math as _math
+        if (isinstance(self._wheelbase_m, bool)
+                or not isinstance(self._wheelbase_m, (int, float))
+                or not _math.isfinite(self._wheelbase_m)
+                or self._wheelbase_m <= 0.0):
+            # bool is an int subclass: `wheelbase_m: true` would otherwise
+            # pass as an effective 1.0 m wheelbase (review #904) — rejected,
+            # matching _is_finite_number's explicit bool refusal.
+            # Fail-closed: an unset/invalid wheelbase would silently scale every
+            # commanded yaw by L_i/L_v (what Kirra approves != what executes).
+            self.get_logger().fatal(
+                'wheelbase_m parameter is REQUIRED (finite, > 0) and must equal the '
+                'active vehicle class contract wheelbase — refusing to start '
+                f'(got {self._wheelbase_m!r}).'
+            )
+            raise SystemExit(2)
+        # Latched by the per-release cross-check: once a mismatch between this
+        # parameter and the verifier-reported conversion wheelbase is seen, the
+        # node publishes stop for every subsequent command until fixed+restarted.
+        self._wheelbase_mismatch = False
         self._max_speed_mps = self.get_parameter('max_speed_mps').value
         self._timeout_s = self.get_parameter('timeout_ms').value / 1000.0
         self._fallback = self.get_parameter('fallback_on_timeout').value
@@ -187,6 +213,14 @@ class CmdVelInterceptor(Node):
             self._publish_stop('NO_REQUESTS_LIB')
             return
 
+        # Track-A A3: a detected wheelbase mismatch is LATCHED — every
+        # subsequent command stops until the config is fixed and the node
+        # restarted. Motion under a wrong wheelbase would execute a yaw the
+        # checker never approved (scaled by L_i/L_v).
+        if self._wheelbase_mismatch:
+            self._publish_stop('WHEELBASE_MISMATCH_LATCHED')
+            return
+
         proposed = self._twist_to_proposed_command(msg)
         # Taj tightens the proposed speed BEFORE the governor (perception derate); the
         # governor then bounds whatever survives. Fail-closed on a stale/absent cap.
@@ -206,6 +240,31 @@ class CmdVelInterceptor(Node):
                     parsed = resp.json()
                 except ValueError:
                     parsed = None
+
+                # Track-A A3 — single wheelbase source. When the verifier minted a
+                # release, it reports the wheelbase its steering→angular conversion
+                # used (the active class contract's L, the same L the P6 check ran
+                # against). It must equal THIS node's Twist→steering wheelbase, or
+                # executed yaw = commanded yaw × L_i/L_v — what Kirra approved is
+                # not what the motors would do. Mismatch → stop + LATCH (fatal
+                # config error, never a warn-and-continue). No release object (no
+                # signer provisioned) → nothing to check; behavior unchanged.
+                release = parsed.get('release') if isinstance(parsed, dict) else None
+                if isinstance(release, dict):
+                    reported_wb = release.get('wheelbase_m')
+                    if not wheelbase_consistent(self._wheelbase_m, reported_wb):
+                        self._wheelbase_mismatch = True
+                        self._publish_stop('WHEELBASE_MISMATCH')
+                        self._publish_action('BLOCKED:WHEELBASE_MISMATCH')
+                        self.get_logger().fatal(
+                            '\U0001f534 WHEELBASE MISMATCH: this node converts Twist→steering '
+                            f'with wheelbase_m={self._wheelbase_m!r} but the verifier checked/'
+                            f'minted with {reported_wb!r} (the active class contract). What '
+                            'Kirra approves would not be what the motors execute. LATCHED to '
+                            'stop: set this node\'s wheelbase_m to the class contract value '
+                            'and restart.'
+                        )
+                        return
 
                 # Pure, fail-closed decision (see enforcement_decision.py). A 200
                 # is only ever Allow / ClampLinear / ClampSteering (denials are

@@ -166,6 +166,24 @@ async fn enforced_200_mints_a_token_that_verifies_over_exactly_the_enforced_byte
     assert_eq!(released.sequence, release["sequence"].as_u64().unwrap());
     // Straight steering → zero angular under the bicycle relation.
     assert_eq!(released.angular_rad_s, 0.0);
+
+    // Track-A A3 (single wheelbase source): the release object must carry the
+    // wheelbase the mint's steering→angular conversion used, and it must be
+    // EXACTLY the active class contract's wheelbase — the same L the P6
+    // lateral-accel check runs against. The ROS interceptor cross-checks its
+    // own `wheelbase_m` parameter against this field and fail-closes on
+    // mismatch, so this assertion is what makes that cross-check meaningful.
+    let reported_wheelbase = release["wheelbase_m"]
+        .as_f64()
+        .expect("release must report the conversion wheelbase (A3)");
+    let contract_wheelbase = kirra_verifier::gateway::contract_profiles::contract_for(
+        kirra_verifier::gateway::contract_profiles::global_vehicle_class(),
+    )
+    .wheelbase_m;
+    assert_eq!(
+        reported_wheelbase, contract_wheelbase,
+        "the reported wheelbase must be the active class contract's wheelbase"
+    );
 }
 
 #[tokio::test]

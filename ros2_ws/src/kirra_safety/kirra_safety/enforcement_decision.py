@@ -74,3 +74,31 @@ def decide_enforcement(status_code, parsed, proposed=None):
         return Stop("MALFORMED_200_NONFINITE_ENFORCED_VALUE")
 
     return Forward(str(action), float(enforced_v), float(enforced_s))
+
+
+# ---------------------------------------------------------------------------
+# Track-A A3 — single wheelbase source
+# ---------------------------------------------------------------------------
+
+# Absolute tolerance for the wheelbase cross-check (meters). The two values are
+# the SAME physical constant carried through config and one JSON float
+# round-trip, so any real difference is a config error, not noise; 1e-6 m
+# (a micrometer) admits float serialization jitter and nothing else.
+WHEELBASE_TOLERANCE_M = 1e-6
+
+
+def wheelbase_consistent(param_m, reported_m):
+    """True iff the interceptor's configured wheelbase matches the wheelbase the
+    verifier reports it used for the steering→angular conversion (the active
+    class contract's wheelbase — the same L the P6 lateral-accel check runs
+    against).
+
+    FAIL-CLOSED shape: a missing/non-finite/non-numeric REPORTED value returns
+    False (a verifier that mints releases but cannot say which wheelbase it
+    used is a fault, not a pass). The caller latches a permanent stop on False:
+    a mismatch means executed yaw = commanded yaw × (param/reported) — what
+    Kirra approved is not what the motors would do.
+    """
+    if not _is_finite_number(param_m) or not _is_finite_number(reported_m):
+        return False
+    return abs(float(param_m) - float(reported_m)) <= WHEELBASE_TOLERANCE_M
