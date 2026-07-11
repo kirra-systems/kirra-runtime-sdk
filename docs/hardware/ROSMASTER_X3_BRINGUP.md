@@ -206,15 +206,63 @@ ramp — through the same FFI, minus the wheels. It runs in CI.
 
 Kept a **separate launch step** from the motor consumer. This is the input
 Taj→Occy→Kirra needs so the governed loop is real, not synthetic.
+🔴 **Perception bringup only** — this step publishes and verifies `/scan`;
+wiring `/scan` → Taj → Occy → Kirra → the (fenced) motor consumer is the
+*next* milestone, done deliberately with its own elevated re-test. The motor
+consumer is untouched by this step.
+
+### Which launch file (and why)
+
+`sllidar_ros2` ships per-model launch files that differ mainly by **baud**:
+`sllidar_a2m12_launch.py` / `sllidar_a3_launch.py` / `sllidar_s1_launch.py`
+(256000), `sllidar_s2_launch.py` (1000000), `sllidar_c1_launch.py` (460800) —
+all for faster units this robot does not have. The **4ROS is an A-class
+RPLIDAR** (`RPLIDAR_TYPE=4ROS`, SLAMTEC driver), so the right profile is the
+generic **`sllidar_launch.py`** — the A-series default: serial channel,
+**115200 baud**, `frame_id:=laser`, `angle_compensate:=true`. If `/scan` does
+not appear at 115200 (wrong-baud symptom: driver reports a timeout / no
+device health), the unit is not A-class-clocked — try the 256000 profiles
+before anything else.
+
+### The two-symlink wrinkle (rplidar vs ydlidar)
+
+`/dev/rplidar` **and** `/dev/ydlidar` both symlink to `ttyUSB0` on this image.
+`RPLIDAR_TYPE=4ROS` settles it: the unit is an RPLIDAR, so the driver is
+**`sllidar_ros2`** — never the ydlidar driver. Before launching, confirm no
+ydlidar node is holding the port:
+
+```bash
+ros2 node list          # must show NO ydlidar node
+fuser -v /dev/ttyUSB0   # must show no other process on the port
+```
+
+### Launch + verify (robot stationary)
 
 ```bash
 export RPLIDAR_TYPE=4ROS
 ros2 launch sllidar_ros2 sllidar_launch.py \
-    serial_port:=/dev/rplidar
-# Confirm real scans:
-ros2 topic hz /scan
-ros2 topic echo /scan --once
+    serial_port:=/dev/rplidar \
+    serial_baudrate:=115200 \
+    frame_id:=laser
+
+# In a second terminal — BOTH checks must pass:
+ros2 topic hz /scan          # steady rate, ~5–10 Hz for an A-series unit
+ros2 topic echo /scan --once # real ranges, not all 0.0 / inf
 ```
+
+Acceptance (stationary sanity):
+
+- `ros2 topic hz` reports a **steady** rate (A-series scan rate is ~5.5–10 Hz;
+  a wildly jittering or ~0 rate means a serial/baud problem, not a real scan).
+- The `ranges` array holds mostly **finite values plausible for the room**
+  (indoors: roughly 0.15–12 m for an A-class unit). All-`inf`/all-zero means
+  the motor isn't spinning or the wrong driver/baud is talking to the port.
+- `angle_min`/`angle_max` span ≈ ±π and `range_min`/`range_max` are sane
+  (≈0.15 / ≈12 m for A-series).
+
+Record the observed rate in the bringup log; it becomes the freshness budget
+input when the live loop is wired (`KIRRA_SUBSCRIPTION_STALENESS_MS` must
+exceed one real scan period with margin).
 
 ---
 

@@ -1057,6 +1057,10 @@ jobs:
           cargo build --locked -p kirra-consumer-ffi
           cargo build --locked -p kirra-release-token --bin kirra_ros_release_mint
           python3 robot/ffi_smoke_test.py
+          # Teardown exactly-once guard (hardware first-run finding): stub-rclpy
+          # harness drives the REAL publisher/consumer main() through the
+          # signal-shutdown paths; an unguarded second rclpy.shutdown() fails it.
+          python3 robot/teardown_smoke_test.py
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Clippy
