@@ -387,7 +387,10 @@ def main() -> int:
                 f"signing (ADR-0031); a crypto edge in the verdict core folds the "
                 f"signing op into the verdict WCET and voids the FTTI decomposition."
             )
-        print(f"ok   {rel}: crypto dependency closure clean (0 signing edges)")
+        # Only claim "clean" when it actually is — a breach is reported in the
+        # failures block below, not contradicted by a premature ok line (Copilot).
+        if not breaches:
+            print(f"ok   {rel}: crypto dependency closure clean (0 signing edges)")
 
     # 2. Symbol fence (per-unit dimensions).
     for rel, is_crate, dims in SYMBOL_UNITS:
