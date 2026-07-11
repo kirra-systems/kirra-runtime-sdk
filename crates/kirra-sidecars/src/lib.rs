@@ -26,4 +26,5 @@ pub mod mick;
 pub mod narrator;
 pub mod net;
 pub mod planner;
+pub mod speech;
 pub mod taj;

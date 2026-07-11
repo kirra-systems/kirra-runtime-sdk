@@ -2114,7 +2114,9 @@ dependencies = [
  "kirra-core",
  "kirra-planner",
  "kirra-release-token",
+ "kirra-sidecars",
  "kirra-trajectory",
+ "serde_json",
 ]
 
 [[package]]
