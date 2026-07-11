@@ -25,6 +25,18 @@ pub struct AcceptedTrajectory {
     pub trajectory_id: u64,
     pub points: Vec<TrajectoryPoint>,
     pub verdict: TrajectoryVerdict,
+    /// B1 fix — the effective per-pose velocity ceiling the checker computed,
+    /// aligned index-for-index with `points`. `Some` ONLY on a `Clamp`
+    /// verdict (the slow loop derated at least one pose); `check_command_conforms`
+    /// gates the command against `effective_velocity_ceiling[nearest]` instead
+    /// of the ORIGINAL planner velocity, so a command at the unclamped speed on
+    /// a `Clamp` verdict fails conformance → MRC. `None` on `Accept` (no derate)
+    /// → the fast path is byte-identical to before this field existed.
+    ///
+    /// The derate rides HERE, on the heap-backed slow-loop record — never on
+    /// `TrajectoryVerdict`, which stays a pinned one byte (the #893
+    /// side-channel discipline; see `trajectory_verdict_stays_one_byte`).
+    pub effective_velocity_ceiling: Option<Vec<f64>>,
     /// Wall-clock ms when this trajectory was promoted into the slot. The
     /// fast loop computes age against `now_ms` for staleness.
     pub promoted_at_ms: u64,
@@ -55,6 +67,7 @@ impl AcceptedTrajectory {
             trajectory_id,
             points,
             verdict: TrajectoryVerdict::Accept,
+            effective_velocity_ceiling: None,
             promoted_at_ms,
             max_age_ms: DEFAULT_MAX_AGE_MS,
         }
@@ -76,9 +89,24 @@ impl AcceptedTrajectory {
             trajectory_id,
             points,
             verdict,
+            effective_velocity_ceiling: None,
             promoted_at_ms,
             max_age_ms: DEFAULT_MAX_AGE_MS,
         }
+    }
+
+    /// Attach the checker's effective per-pose velocity ceiling (B1 fix). The
+    /// slow loop calls this on a `Clamp` verdict with the envelope from
+    /// [`crate::validation::validate_trajectory_slow_with_envelope`]; the fast
+    /// loop's `check_command_conforms` then gates against it. Chainable off
+    /// [`with_verdict`](Self::with_verdict). A `None` argument is a no-op — the
+    /// `Accept` path — leaving conformance behaviour byte-identical to before
+    /// this field existed (the field is present on every record; only its value
+    /// changes).
+    #[must_use]
+    pub fn with_effective_ceiling(mut self, ceiling: Option<Vec<f64>>) -> Self {
+        self.effective_velocity_ceiling = ceiling;
+        self
     }
 
     /// Wall-clock staleness check. Uses `saturating_sub` so a clock skew
