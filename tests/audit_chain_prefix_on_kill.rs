@@ -26,6 +26,20 @@ use kirra_verifier::verifier_store::VerifierStore;
 const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WRITER_ENV: &str = "KIRRA_AUDIT_POWERLOSS_DB";
 
+/// The crash-writer must have committed at least this many chained entries
+/// before we SIGKILL it, so the kill is guaranteed to land WHILE it is actively
+/// appending — regardless of how long the reexec child takes to start. Well
+/// within a healthy burst (the writer commits hundreds per 100 ms when warm).
+/// This replaces a fixed pre-kill `sleep`, which raced the reexec-child startup
+/// and flaked to 0 committed entries on a loaded runner (#894 CI).
+const READY_THRESHOLD: u64 = 50;
+/// Poll cadence while waiting for that burst, and its ceiling. `5 ms × 600 ≈ 3 s`
+/// — generous headroom on any real runner; exceeding it means the writer is
+/// genuinely not progressing (a real regression), which fails LOUDLY rather
+/// than hanging.
+const READY_POLL_STEP: Duration = Duration::from_millis(5);
+const MAX_READY_POLLS: u32 = 600;
+
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
 fn temp_db(tag: &str) -> std::path::PathBuf {
@@ -75,10 +89,12 @@ fn powerloss_writer_child() {
     }
 }
 
-/// Spawn the crash-writer, let it append for a (jittered) interval, SIGKILL it
-/// mid-append, then reopen the DB from the file and assert the chain verifies INTACT
-/// with entries that survived. Repeated across several kill timings so the kill lands
-/// at different points relative to a commit boundary.
+/// Spawn the crash-writer, WAIT until it has committed a healthy burst (polled via
+/// an observer connection — not a fixed sleep, so the kill can't race the reexec
+/// child's startup), add a small per-trial jitter, SIGKILL it mid-append, then
+/// reopen the DB from the file and assert the chain verifies INTACT with entries
+/// that survived. Repeated across several jitter offsets so the kill lands at
+/// different points relative to a commit boundary.
 #[test]
 fn audit_chain_survives_sigkill_mid_append() {
     let self_exe = std::env::current_exe().expect("current exe");
@@ -86,6 +102,12 @@ fn audit_chain_survives_sigkill_mid_append() {
     for trial in 0..6u64 {
         let db = temp_db(&format!("kill{trial}"));
         cleanup(&db); // fresh
+
+        // Pre-create the schema via an OBSERVER connection BEFORE spawning the
+        // child: the child then opens an already-schema'd DB (no schema-creation
+        // race), and this read connection can poll the child's commit progress.
+        // WAL mode admits one writer + concurrent readers, so it sees the commits.
+        let observer = VerifierStore::new(db.to_str().unwrap()).expect("open observer");
 
         let mut child = Command::new(&self_exe)
             .args(["--exact", "--nocapture", "powerloss_writer_child"])
@@ -95,9 +117,31 @@ fn audit_chain_survives_sigkill_mid_append() {
             .spawn()
             .expect("spawn crash-writer");
 
-        // Let it commit a healthy burst (each insert is sub-ms → hundreds land), with
-        // jitter so the SIGKILL lands at varied points in the write stream.
-        std::thread::sleep(Duration::from_millis(180 + trial * 35));
+        // Wait until the child has committed a healthy burst, THEN kill — so the
+        // SIGKILL is guaranteed to land mid-append INDEPENDENT of reexec-startup
+        // latency (the old fixed `sleep` raced it and flaked to 0 committed under
+        // load). Bounded by MAX_READY_POLLS so a genuinely stuck writer fails
+        // LOUDLY rather than hanging.
+        let mut committed = 0u64;
+        let mut polls = 0u32;
+        while committed < READY_THRESHOLD {
+            assert!(
+                polls < MAX_READY_POLLS,
+                "trial {trial}: the crash-writer never committed {READY_THRESHOLD} entries \
+                 ({committed} seen after {polls} polls) — writer not making progress"
+            );
+            std::thread::sleep(READY_POLL_STEP);
+            committed = observer
+                .verify_audit_chain_full(None)
+                .map(|f| f.total_entries)
+                .unwrap_or(0); // a transient SQLITE_BUSY under the write load → retry
+            polls += 1;
+        }
+        // Small per-trial jitter so the kill lands at varied offsets PAST the
+        // readiness point (preserving the original "different points relative to a
+        // commit boundary" coverage), without depending on absolute startup time.
+        std::thread::sleep(Duration::from_millis(trial * 7));
+        drop(observer); // release the reader before the crash-reopen (cold-boot analogue)
 
         child.kill().expect("SIGKILL the writer"); // abrupt termination == power loss
         let _ = child.wait();
