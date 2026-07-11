@@ -185,16 +185,27 @@ def main() -> int:
     node.create_timer(control_period_ms / 1000.0, on_timer)
 
     # Guaranteed stop on any exit path (SIGINT / SIGTERM / exception / normal).
+    # Same double-shutdown class as the publisher's hardware finding: shutdown
+    # must be GUARDED (a second signal, or a race with teardown, must not call
+    # rcl_shutdown twice), and spin's ExternalShutdownException — which rclpy
+    # raises once the context is shut down from a signal handler — must be
+    # caught, not tracebacked. Teardown-only; the safe_stop ordering (stop the
+    # wheels BEFORE shutting down) is unchanged.
+    from rclpy.executors import ExternalShutdownException
+
     def handle_signal(signum, _frame):  # noqa: ANN001
         node.get_logger().warn(f"signal {signum} → safe stop + shutdown")
         safe_stop()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass  # clean signal-driven exit; the finally below stops the wheels
     finally:
         # Belt-and-braces: even a panic/spin-exit stops the wheels.
         safe_stop()
@@ -203,6 +214,8 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             pass
         consumer.close()
+        if rclpy.ok():
+            rclpy.shutdown()
     return 0
 
 

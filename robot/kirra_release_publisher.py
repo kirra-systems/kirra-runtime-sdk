@@ -105,7 +105,14 @@ def main() -> int:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # GUARDED shutdown (hardware first-run finding): rclpy.init() installs
+        # its own SIGINT/SIGTERM handlers, so on Ctrl-C / `timeout`'s SIGTERM
+        # the context is ALREADY shut down by the time this finally runs — an
+        # unconditional shutdown() here was a guaranteed second call
+        # (RCLError: rcl_shutdown already called) after every publish window.
+        # Exactly-once teardown: shutdown only if the context is still up.
+        if rclpy.ok():
+            rclpy.shutdown()
     return 0
 
 
