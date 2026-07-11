@@ -42,6 +42,21 @@ const MAX_READY_POLLS: u32 = 600;
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
+/// A transient SQLite BUSY/LOCKED — expected when the readiness poll's
+/// `COUNT(*)` races the crash-writer's `Immediate` write transactions (rare in
+/// WAL mode, but possible during a checkpoint). Treated as "retry", distinct
+/// from a real query error (which must fail loudly, not be swallowed as 0).
+fn is_transient_lock(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(err, _)
+            if matches!(
+                err.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
 fn temp_db(tag: &str) -> std::path::PathBuf {
     // Wall-clock-free unique name: pid + a process-local counter.
     let n = UNIQ.fetch_add(1, Ordering::Relaxed);
@@ -131,10 +146,18 @@ fn audit_chain_survives_sigkill_mid_append() {
                  ({committed} seen after {polls} polls) — writer not making progress"
             );
             std::thread::sleep(READY_POLL_STEP);
-            committed = observer
-                .verify_audit_chain_full(None)
-                .map(|f| f.total_entries)
-                .unwrap_or(0); // a transient SQLITE_BUSY under the write load → retry
+            // `audit_chain_len` is the light `COUNT(*)` — we only need the row
+            // count, NOT the full chain re-verification (signature/keyring walk)
+            // `verify_audit_chain_full` runs (review: Copilot #899). A transient
+            // BUSY/LOCKED under the writer's load is expected → keep the last
+            // count and retry; ANY OTHER error is a real failure and must NOT be
+            // masked as "0 committed" (which would loop to the misleading
+            // "writer not making progress" assertion) — surface it loudly.
+            committed = match observer.audit_chain_len() {
+                Ok(n) => n,
+                Err(e) if is_transient_lock(&e) => committed,
+                Err(e) => panic!("trial {trial}: audit_chain_len query failed unexpectedly: {e}"),
+            };
             polls += 1;
         }
         // Small per-trial jitter so the kill lands at varied offsets PAST the

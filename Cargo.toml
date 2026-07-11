@@ -163,6 +163,11 @@ kirra-ota-installer = { path = "crates/kirra-ota-installer" }
 # per-connection, so tampering a row written by one connection from a second
 # connection (the audit-chain tamper scenario, SG-010) requires an on-disk file.
 tempfile = "3"
+# Already a normal dependency (bundled); declared here too so the power-loss
+# drill (tests/audit_chain_prefix_on_kill.rs) can classify a BUSY/LOCKED
+# `rusqlite::Error` on its readiness-poll `COUNT(*)` as transient. Same version
+# → no new locked package.
+rusqlite = { version = "0.31", features = ["bundled"] }
 # R5: the demo-seed test exercises parko-kirra's `VerifierStore`-backed clearance
 # delivery, so it needs the opt-in `verifier-sink` feature.
 parko-kirra = { path = "parko/crates/parko-kirra", features = ["verifier-sink"] }
