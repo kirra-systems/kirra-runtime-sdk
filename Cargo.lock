@@ -2142,6 +2142,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-consumer-ffi"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "kirra-actuation-consumer",
+ "kirra-release-token",
+]
+
+[[package]]
 name = "kirra-contract-channel"
 version = "0.1.0"
 

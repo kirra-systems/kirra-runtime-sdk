@@ -64,6 +64,7 @@ FORBIDDEN_WORKSPACE = {
     "kirra-inline-governor":    "the EP-01 in-line SHM enforcement path",
     "kirra-ros2-adapter":       "the ROS 2 node (cmd_vel / actuator topics)",
     "kirra-hv-carrier":         "the hypervisor shared-memory command carrier",
+    "kirra-consumer-ffi":       "the C-ABI motor consumer (drives set_car_motion on the X3)",
 }
 
 # External crates that would give a fenced crate transport to an actuator:

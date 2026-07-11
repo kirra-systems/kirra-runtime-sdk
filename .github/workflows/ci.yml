@@ -1046,6 +1046,17 @@ jobs:
         run: |
           python3 ci/check_verdict_core_purity.py --self-test
           python3 ci/check_verdict_core_purity.py
+      - name: Consumer FFI boundary smoke test (ADR-0033 Python↔Rust)
+        # Proves the Yahboom X3 verifying-consumer boundary WITHOUT hardware:
+        # loads libkirra_consumer_ffi via ctypes, mints frames with the governor
+        # stand-in, and asserts the Rust core's decisions across the FFI
+        # (valid+clamp / unsigned refuse / wrong-key alarm / replay / decel ramp)
+        # — the same (a)/(b)/(c) the elevated first-run test checks, minus the
+        # wheels. See robot/ffi_smoke_test.py + docs/hardware/ROSMASTER_X3_BRINGUP.md.
+        run: |
+          cargo build --locked -p kirra-consumer-ffi
+          cargo build --locked -p kirra-release-token --bin kirra_ros_release_mint
+          python3 robot/ffi_smoke_test.py
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Clippy
