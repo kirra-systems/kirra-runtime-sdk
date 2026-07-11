@@ -273,8 +273,26 @@ pub unsafe extern "C" fn kirra_consumer_on_frame(
     now_ms: u64,
     out: *mut KirraFrameResult,
 ) {
-    if h.is_null() || payload.is_null() || out.is_null() {
+    if out.is_null() {
         return;
+    }
+    // Fail-closed default FIRST (Copilot #901): a caller that reuses an output
+    // struct must never observe a stale `write=1` from a previous call when
+    // this call bails on a NULL handle/payload. Refused, no write, no motion.
+    // SAFETY: caller guarantees `out` is a writable KirraFrameResult.
+    core::ptr::write(
+        out,
+        KirraFrameResult {
+            kind: 2,
+            refusal_code: -1,
+            write: 0,
+            sequence: 0,
+            linear: 0.0,
+            angular: 0.0,
+        },
+    );
+    if h.is_null() || payload.is_null() {
+        return; // *out already says "refused / do not actuate".
     }
     // SAFETY: caller guarantees `h` is a live handle.
     let consumer = &mut *h;
@@ -345,8 +363,22 @@ pub unsafe extern "C" fn kirra_consumer_on_tick(
     now_ms: u64,
     out: *mut KirraTickResult,
 ) {
-    if h.is_null() || out.is_null() {
+    if out.is_null() {
         return;
+    }
+    // Fail-closed default first (Copilot #901): stale-struct reuse must read
+    // as "no write", never a leftover ramp step.
+    // SAFETY: caller guarantees `out` is a writable KirraTickResult.
+    core::ptr::write(
+        out,
+        KirraTickResult {
+            write: 0,
+            linear: 0.0,
+            angular: 0.0,
+        },
+    );
+    if h.is_null() {
+        return; // *out already says "no write".
     }
     // SAFETY: caller guarantees `h` is a live handle.
     let consumer = &mut *h;
@@ -374,8 +406,30 @@ pub unsafe extern "C" fn kirra_consumer_on_tick(
 /// - `h` is a live handle; `out` points to a writable [`KirraHealth`].
 #[no_mangle]
 pub unsafe extern "C" fn kirra_consumer_health(h: *const KirraConsumer, out: *mut KirraHealth) {
-    if h.is_null() || out.is_null() {
+    if out.is_null() {
         return;
+    }
+    // Zeroed snapshot first (Copilot #901): a NULL handle must not leave stale
+    // counters/alarm state visible in a reused struct.
+    // SAFETY: caller guarantees `out` is a writable KirraHealth.
+    core::ptr::write(
+        out,
+        KirraHealth {
+            releases: 0,
+            refusals_total: 0,
+            no_token: 0,
+            digest_mismatch: 0,
+            signature_invalid: 0,
+            undecodable: 0,
+            stale: 0,
+            sequence_not_advanced: 0,
+            consecutive_signature_invalid: 0,
+            key_mismatch_alarm: 0,
+            silent: 0,
+        },
+    );
+    if h.is_null() {
+        return; // *out is the zeroed snapshot.
     }
     // SAFETY: caller guarantees `h` is a live handle.
     let health = (*h).inner.health();
@@ -593,6 +647,64 @@ mod tests {
             let mut hp = std::mem::zeroed::<KirraHealth>();
             kirra_consumer_health(h, &mut hp);
             assert_eq!(hp.silent, 1, "after the ramp, the consumer is silent");
+            kirra_consumer_free(h);
+        }
+    }
+
+    /// Copilot #901: an early bail (NULL handle/payload) must OVERWRITE `*out`
+    /// with a fail-closed "do not actuate" result — a caller reusing an output
+    /// struct must never observe a stale `write=1` / stale health from the
+    /// previous call.
+    #[test]
+    fn null_inputs_overwrite_out_with_fail_closed_defaults() {
+        unsafe {
+            let h = new_consumer(sk().verifying_key().to_bytes());
+            // Seed `out` with a stale RELEASED decision, then call with a NULL
+            // handle: the stale write=1 must be clobbered to refused/no-write.
+            let (p, t) = frame(1, 10_000, 0.1, 0.0);
+            let mut out = std::mem::zeroed::<KirraFrameResult>();
+            kirra_consumer_on_frame(h, p.as_ptr(), t.as_ptr(), 96, 10_000, &mut out);
+            assert_eq!(out.write, 1, "precondition: stale struct holds write=1");
+            kirra_consumer_on_frame(
+                core::ptr::null_mut(),
+                p.as_ptr(),
+                t.as_ptr(),
+                96,
+                10_000,
+                &mut out,
+            );
+            assert_eq!(
+                out.write, 0,
+                "NULL handle must fail closed, not leak stale write=1"
+            );
+            assert_eq!(out.kind, 2, "NULL handle reads as Refused");
+
+            // Same for a NULL payload.
+            kirra_consumer_on_frame(h, core::ptr::null(), t.as_ptr(), 96, 10_000, &mut out);
+            assert_eq!(out.write, 0, "NULL payload must fail closed");
+
+            // on_tick with NULL handle: stale ramp step must read as no-write.
+            let mut tk = KirraTickResult {
+                write: 1,
+                linear: 0.15,
+                angular: 0.0,
+            };
+            kirra_consumer_on_tick(core::ptr::null_mut(), 10_000, &mut tk);
+            assert_eq!(
+                tk.write, 0,
+                "NULL handle tick must not leak a stale ramp step"
+            );
+
+            // health with NULL handle: zeroed snapshot, no stale alarm.
+            let mut hp = std::mem::zeroed::<KirraHealth>();
+            hp.key_mismatch_alarm = 1; // stale
+            hp.releases = 99;
+            kirra_consumer_health(core::ptr::null(), &mut hp);
+            assert_eq!(
+                hp.key_mismatch_alarm, 0,
+                "NULL handle must zero the snapshot"
+            );
+            assert_eq!(hp.releases, 0);
             kirra_consumer_free(h);
         }
     }

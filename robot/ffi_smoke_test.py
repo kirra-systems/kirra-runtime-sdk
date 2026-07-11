@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from kirra_ffi import KirraConsumer  # noqa: E402
+from kirra_ffi import KirraConsumer, split_frame  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 # The dev/demo governor key (well-known [42u8;32]) — DEV ONLY, matches the Rust
@@ -51,10 +51,11 @@ def pubkey(seed: str = DEV_SEED) -> bytes:
 
 
 def split(frame: bytes) -> tuple[bytes, bytes | None]:
-    """payload(32) [|| token(96)] → (payload, token|None)."""
-    payload = frame[:32]
-    token = frame[32:] if len(frame) > 32 else None
-    return payload, token
+    """The strict wire parse the motor consumer uses (kirra_ffi.split_frame);
+    minted frames are always well-formed, so None here is a test bug."""
+    parsed = split_frame(frame)
+    assert parsed is not None, f"minted frame has malformed length {len(frame)}"
+    return parsed
 
 
 def new_consumer(vk: bytes) -> KirraConsumer:
@@ -163,6 +164,16 @@ def main() -> int:
     r = c.on_frame(payload, token, 10_000)
     check(r.kind == 2 and r.refusal_code == 2, f"(f) wrong-key must be SIGNATURE_INVALID, got code={r.refusal_code}")
     print(f"(f) wrong-key → kind=Refused code=SIGNATURE_INVALID write={r.write}")
+
+    # (g) Malformed wire lengths are rejected by the strict parse the motor
+    # consumer uses (Copilot #901): never sliced into an oversized token, never
+    # a crash — the frame is simply not a frame.
+    for n in (0, 31, 33, 127, 129, 256):
+        check(split_frame(b"\x00" * n) is None, f"(g) length {n} must parse as malformed")
+    check(split_frame(b"\x00" * 32) == (b"\x00" * 32, None), "(g) exact 32 → unsigned")
+    p128 = split_frame(b"\x01" * 128)
+    check(p128 is not None and len(p128[1]) == 96, "(g) exact 128 → token of exactly 96")
+    print("(g) malformed lengths (0/31/33/127/129/256) → rejected by the strict parse")
 
     print()
     if failures:

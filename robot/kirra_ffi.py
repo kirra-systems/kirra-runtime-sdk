@@ -35,6 +35,23 @@ REFUSAL_NAMES = {
 }
 
 
+def split_frame(data: bytes) -> "tuple[bytes, bytes | None] | None":
+    """Strict wire parse of a release frame (Copilot #901 review).
+
+    Exactly 32 bytes → (payload, None)          — an unsigned command.
+    Exactly 128 bytes → (payload, token[96])    — a signed command.
+    ANY other length → None                     — malformed; the caller must
+    ignore it (never actuate, never crash). A >128-byte frame must NOT be
+    sliced into an oversized token: that raised ValueError inside the ROS
+    callback and let hostile input take down the consumer.
+    """
+    if len(data) == PAYLOAD_LEN:
+        return data, None
+    if len(data) == PAYLOAD_LEN + TOKEN_LEN:
+        return data[:PAYLOAD_LEN], data[PAYLOAD_LEN:]
+    return None
+
+
 class KirraFrameResult(ctypes.Structure):
     _fields_ = [
         ("kind", ctypes.c_int32),          # 0 Released, 1 SerialError, 2 Refused

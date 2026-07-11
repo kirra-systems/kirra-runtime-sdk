@@ -71,6 +71,13 @@ def main() -> int:
     linear = float(os.environ.get("KIRRA_PUB_LINEAR", "0.15"))
     angular = float(os.environ.get("KIRRA_PUB_ANGULAR", "0.0"))
     rate_hz = float(os.environ.get("KIRRA_PUB_RATE_HZ", "10"))
+    # Fail fast on a nonsensical rate (Copilot #901): 0 divides, NaN/Inf breaks
+    # sleep(). This script drives the guided first-run test — a bad knob must be
+    # a clear error, not a crash mid-procedure.
+    import math
+    if not (math.isfinite(rate_hz) and rate_hz > 0):
+        print(f"FATAL: KIRRA_PUB_RATE_HZ must be finite and > 0, got {rate_hz}", file=sys.stderr)
+        return 2
 
     import rclpy
     from rclpy.node import Node

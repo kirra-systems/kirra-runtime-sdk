@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from kirra_ffi import KirraConsumer, REFUSAL_NAMES  # noqa: E402
+from kirra_ffi import KirraConsumer, REFUSAL_NAMES, split_frame  # noqa: E402
 
 
 def _req(name: str) -> str:
@@ -147,12 +147,17 @@ def main() -> int:
     def on_msg(msg: UInt8MultiArray) -> None:
         nonlocal alarm_announced
         data = bytes(msg.data)
-        # payload(32) [|| token(96)]. Any other length → no usable token.
-        payload = data[:32]
-        if len(payload) < 32:
-            node.get_logger().warn("release frame shorter than 32 bytes — ignored")
+        # STRICT wire parse (Copilot #901): exactly 32 (unsigned) or exactly
+        # 128 (signed). Anything else is malformed — ignored with a warn, never
+        # sliced into an oversized token (which raised ValueError in the
+        # callback and let hostile input take down the consumer).
+        parsed = split_frame(data)
+        if parsed is None:
+            node.get_logger().warn(
+                f"malformed release frame ({len(data)} bytes; expected 32 or 128) — ignored"
+            )
             return
-        token = data[32:] if len(data) >= 128 else None
+        payload, token = parsed
         res = consumer.on_frame(payload, token, now_ms())
         if res.write == 1:
             actuate(res.linear, res.angular)
