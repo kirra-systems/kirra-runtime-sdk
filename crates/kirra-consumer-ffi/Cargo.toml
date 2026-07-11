@@ -1,0 +1,41 @@
+# crates/kirra-consumer-ffi/Cargo.toml
+#
+# ADR-0033 decision (c): the Rust verify core exposed over a C ABI so the
+# Python motor consumer (Rosmaster_Lib on the Yahboom X3) can drive the ONE
+# verify-before-release gate WITHOUT reimplementing any crypto / watermark /
+# freshness / liveness semantics in Python (the two-sources-of-truth risk).
+#
+# This crate adds NO verification logic. It instantiates the existing
+# `MotorConsumer<S>` (kirra-actuation-consumer) with a *capture* serial seam and
+# marshals its decisions across the C boundary; Python performs the actual
+# `set_car_motion` on whatever twist the Rust core decides. The demo-envelope
+# clamp is a config-injected output saturation applied in the capture seam
+# (defense-in-depth; Kirra's checker remains the authority).
+[package]
+name = "kirra-consumer-ffi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "C-ABI surface over the ADR-0033 verifying motor consumer (kirra-actuation-consumer) for the Python Rosmaster consumer."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[lib]
+name = "kirra_consumer_ffi"
+# cdylib = the .so Python ctypes loads; rlib = so the in-crate #[test] FFI
+# self-tests and any Rust consumer can link it too.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The verify core — reused verbatim, NOT reimplemented. The gate, the refusal
+# taxonomy, the SS-002 liveness/decel ramp, and the #892 key-mismatch alarm all
+# live here; this crate only marshals them.
+kirra-actuation-consumer = { path = "../kirra-actuation-consumer" }
+# The token/payload wire types (ReleaseToken 96B, RosTwistPayload 32B) the C
+# boundary marshals. Same crate the consumer's gate is built from.
+kirra-release-token = { path = "../kirra-release-token" }
+# Only to reconstruct a VerifyingKey from the 32 pinned public-key bytes handed
+# across the boundary. No signing happens here — this is the actuation path,
+# past the verdict (ADR-0031 separation is upheld: the checker signed upstream).
+ed25519-dalek = { version = "2" }

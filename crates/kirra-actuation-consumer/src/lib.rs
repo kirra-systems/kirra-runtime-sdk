@@ -402,6 +402,16 @@ impl<S: MotorSerial> MotorConsumer<S> {
     pub fn serial(&self) -> &S {
         &self.serial
     }
+
+    /// Mutably borrow the serial seam. Used by the C-ABI surface
+    /// (`kirra-consumer-ffi`) to reset its one-slot capture record between
+    /// `on_frame`/`on_tick` calls so it can tell whether the core wrote this
+    /// call. This lends the seam ONLY — it cannot reach the gate, the
+    /// watermark, or the liveness state (those stay private), so it grants no
+    /// path to bypass verification.
+    pub fn serial_mut(&mut self) -> &mut S {
+        &mut self.serial
+    }
 }
 
 #[cfg(test)]
