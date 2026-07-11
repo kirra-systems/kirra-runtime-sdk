@@ -119,7 +119,11 @@ def test_stop_reason_is_a_short_tag():
 # Track-A A3 — wheelbase_consistent (single wheelbase source)
 # ---------------------------------------------------------------------------
 
-from kirra_safety.enforcement_decision import (  # noqa: E402
+# Same standalone-module import style as the header import above (the
+# sys.path insert makes `enforcement_decision` importable from any cwd;
+# the packaged `kirra_safety.` form only resolves in an installed/colcon
+# environment — review #904).
+from enforcement_decision import (  # noqa: E402
     wheelbase_consistent, WHEELBASE_TOLERANCE_M,
 )
 

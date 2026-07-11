@@ -72,8 +72,13 @@ class CmdVelInterceptor(Node):
         self._client_id = self.get_parameter('kirra_client_id').value
         self._wheelbase_m = self.get_parameter('wheelbase_m').value
         import math as _math
-        if not (isinstance(self._wheelbase_m, (int, float))
-                and _math.isfinite(self._wheelbase_m) and self._wheelbase_m > 0.0):
+        if (isinstance(self._wheelbase_m, bool)
+                or not isinstance(self._wheelbase_m, (int, float))
+                or not _math.isfinite(self._wheelbase_m)
+                or self._wheelbase_m <= 0.0):
+            # bool is an int subclass: `wheelbase_m: true` would otherwise
+            # pass as an effective 1.0 m wheelbase (review #904) — rejected,
+            # matching _is_finite_number's explicit bool refusal.
             # Fail-closed: an unset/invalid wheelbase would silently scale every
             # commanded yaw by L_i/L_v (what Kirra approves != what executes).
             self.get_logger().fatal(
