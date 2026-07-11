@@ -25,6 +25,7 @@ behavior change (frames not published / safe stop not written).
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -211,14 +212,19 @@ def main() -> int:
         rc = -1
     check(rc == 0, f"(1) publisher must exit 0 on the signal path, got {rc}")
     node = StubNode.last
-    check(node is not None and len(node.pub.published) == 3,
-          "(1) publisher must still publish its frames (behavior unchanged)")
-    check(node is not None and node.destroyed == 1, "(1) node destroyed exactly once")
+    # Guard the dereferences (Copilot #903): if main() bailed before creating
+    # the node, this must report a clean check failure, not an AttributeError.
+    check(node is not None, "(1) publisher must have created its node")
+    if node is not None:
+        check(len(node.pub.published) == 3,
+              "(1) publisher must still publish its frames (behavior unchanged)")
+        check(node.destroyed == 1, "(1) node destroyed exactly once")
+        check(all(len(f) == 128 for f in node.pub.published),
+              "(1) valid mode still emits 128-byte signed frames")
+        print(f"(1) publisher/SIGTERM → exit 0, {len(node.pub.published)} frames, "
+              f"no double shutdown")
     check(ctx.shutdown_calls == 0,
           "(1) context was signal-shutdown; the guard must SKIP the second call")
-    check(all(len(f) == 128 for f in node.pub.published),
-          "(1) valid mode still emits 128-byte signed frames")
-    print(f"(1) publisher/SIGTERM → exit 0, {len(node.pub.published)} frames, no double shutdown")
 
     # ------------------------------------------------------------------
     # 2. Publisher, KeyboardInterrupt with the context still up: shutdown
@@ -252,9 +258,12 @@ def main() -> int:
     #    signal handler downed the context (the Humble behavior). Must exit
     #    cleanly, write the (0,0,0) safe stop, and not double-shutdown.
     # ------------------------------------------------------------------
-    vk = os.popen(
-        f"{mint} --seed {'2a' * 32} pubkey"
-    ).read().strip()
+    # subprocess (not os.popen — Copilot #903): no shell, and check=True makes
+    # a mint failure fail THIS test loudly instead of feeding an empty key on.
+    vk = subprocess.run(
+        [mint, "--seed", "2a" * 32, "pubkey"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
     os.environ.update({
         "KIRRA_GOVERNOR_VK_HEX": vk,
         "KIRRA_FRESHNESS_WINDOW_MS": "200",
