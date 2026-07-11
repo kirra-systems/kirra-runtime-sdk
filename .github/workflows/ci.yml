@@ -1035,6 +1035,17 @@ jobs:
         # crate — and no actuation seam tokens in their source. See
         # ci/check_mick_actuation_fence.py.
         run: python3 ci/check_mick_actuation_fence.py
+      - name: Verdict-core purity fence (crypto separation + no_std kernel)
+        # ADR-0031, structurally: the safety verdict is computed BEFORE signing,
+        # so kirra-core + kirra-trajectory must have NO crypto (signing) edge,
+        # and the QNX judge (kirra_judge.rs) must stay no_std / zero-alloc /
+        # async-free / fs-free. A crypto edge in the verdict core would fold the
+        # signing op into the verdict WCET and void the FTTI decomposition. The
+        # self-test runs first (non-vacuity proof) so a broken fence can't pass
+        # green. See ci/check_verdict_core_purity.py.
+        run: |
+          python3 ci/check_verdict_core_purity.py --self-test
+          python3 ci/check_verdict_core_purity.py
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Clippy
