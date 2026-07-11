@@ -134,6 +134,15 @@ pub(crate) async fn handle_actuator_motion_command(
             // Forensic key id (hex SHA-256 of the verifying key) — lets a
             // consumer log WHICH key signed without trusting this field.
             "key_id": signer.key_id(),
+            // Track-A A3 (single wheelbase source): the wheelbase this mint's
+            // steering→angular conversion used — by construction the ACTIVE
+            // class contract's wheelbase, i.e. the same L the P6 lateral-accel
+            // check ran against. Observability, not trust path (that is the
+            // signed payload bytes): the ROS interceptor cross-checks its own
+            // `wheelbase_m` parameter against this on every release and
+            // fail-closes on mismatch — closing the L_i≠L_v round-trip
+            // scaling bug class (executed yaw = commanded yaw × L_i/L_v).
+            "wheelbase_m": wheelbase_m,
         });
     }
 
