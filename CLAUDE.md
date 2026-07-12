@@ -569,6 +569,11 @@ with only an error log. Per-instance identity is carried on the snapshot but
 byte-identical prior behaviour): `KIRRA_PERCEPTION_DERATE_ENABLED` (Track-C perception-derate cap),
 `KIRRA_PERCEPTION_REDUNDANCY_ENABLED` (the True-Redundancy divergence monitor — enables the
 `~/input/objects_secondary` channel-B subscription; enabled-but-silent-B → fail closed),
+`KIRRA_VRU_CHANNEL_ENABLED` (#789 follow-up 1 — enables the `~/input/pedestrians` subscription
+feeding the omnidirectional pedestrian bound; the pure `vru_channel::resolve_vru_channel` makes
+the three-way decision DISARMED→checker no-op / armed+fresh→live `PedestrianScene` / armed+silent→
+MRC-floor cap, so an armed-but-silent VRU sensor STOPS the ego rather than driving blind; producer
+must publish at rate per AOU-VRU-RATE-001),
 `KIRRA_SUBSCRIPTION_STALENESS_MS` (subscription/channel freshness budget).
 
 ---

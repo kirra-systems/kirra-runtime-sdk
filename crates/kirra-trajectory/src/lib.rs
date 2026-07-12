@@ -27,6 +27,9 @@ pub mod vru;
 pub mod prediction;
 // Perception redundancy cross-check (True-Redundancy analog) — pure, no ROS.
 pub mod perception_redundancy;
+// VRU perception-channel resolver (#789 follow-up 1) — arms the pedestrian bound
+// from a live channel, fail-closed on silence/staleness. Pure, no ROS.
+pub mod vru_channel;
 
 // Phase 2A Adversarial Review Hardening
 pub mod redundancy_hardening;
