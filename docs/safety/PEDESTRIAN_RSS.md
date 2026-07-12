@@ -209,6 +209,11 @@ live producer:**
    ego. Corridor-clipped disc growth (a distance-to-path term) and/or per-zone
    `v_ped_max`, keeping the pure disc for the sidewalk-courier ODD. **Availability,
    strictly after soundness** — a relaxation, never a silent default; own review.
+   **Design proposal (review-gated, no code yet): [`PEDESTRIAN_RSS_F6_DESIGN.md`](PEDESTRIAN_RSS_F6_DESIGN.md)**
+   — the corridor-geodesic subset argument (`TRUE ⊆ GEODESIC ⊆ EUCLIDEAN`), the
+   impassability evidence gate (the load-bearing input), fail-closed→pure-disc
+   fallbacks, and the open ODD/evidence decisions for sign-off before any bound
+   change.
 1. **Node VRU channel** — a `~/input/pedestrians` subscription on the ros2
    adapter (staleness-budgeted like the object channels: an ARMED but
    silent/stale channel fails closed to `Some(empty…)`→cap, never silently
