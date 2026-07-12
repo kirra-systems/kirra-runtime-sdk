@@ -1010,6 +1010,7 @@ mod tests {
         let scene = PedestrianScene {
             pedestrians: &peds,
             params: VruRssParams::default(),
+            barriers: &[],
         };
         let with_vru = validate_trajectory_slow_capped(
             &traj,
