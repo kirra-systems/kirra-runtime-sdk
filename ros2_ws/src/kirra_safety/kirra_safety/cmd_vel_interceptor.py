@@ -23,10 +23,10 @@ import threading
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String, Float64
+from std_msgs.msg import String, Float64, UInt8MultiArray
 
 from kirra_safety.enforcement_decision import (
-    decide_enforcement, Forward, wheelbase_consistent,
+    decide_enforcement, Forward, wheelbase_consistent, release_frame,
 )
 from kirra_safety.perception_cap import apply_perception_cap, DISABLED
 
@@ -66,6 +66,12 @@ class CmdVelInterceptor(Node):
         self.declare_parameter('use_perception_cap', False)
         self.declare_parameter('perception_cap_topic', '/kirra/perception_speed_cap')
         self.declare_parameter('perception_cap_stale_ms', 300)
+        # ADR-0033 live-loop relay: when the verifier's 200 carries a `release`
+        # object (signer provisioned), its payload_hex||token_hex bytes are
+        # republished as one 128-byte frame on this topic for the verifying
+        # motor consumer (robot/kirra_motor_consumer.py). Pure carriage — the
+        # consumer's Ed25519 verify over exactly these bytes is the trust path.
+        self.declare_parameter('release_topic', '/kirra/release')
 
         self._kirra_url = self.get_parameter('kirra_url').value
         self._kirra_token = self.get_parameter('kirra_token').value
@@ -113,6 +119,21 @@ class CmdVelInterceptor(Node):
         # Publishers
         self._pub_safe = self.create_publisher(Twist, output_topic, 10)
         self._pub_action = self.create_publisher(String, enforcement_topic, 10)
+        # The governed-frame relay to the verifying motor consumer. Reliable +
+        # depth 1 (the output-side freshness discipline: a gated command must
+        # not be silently dropped, but an OLDER queued frame must never reach
+        # the consumer after a newer verdict — mirrors the ros2-adapter's
+        # actuator_output_qos, node.rs). Logged-once when the first frame
+        # flows / when a release is malformed.
+        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+        self._pub_release = self.create_publisher(
+            UInt8MultiArray,
+            self.get_parameter('release_topic').value,
+            QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                       history=HistoryPolicy.KEEP_LAST, depth=1),
+        )
+        self._release_relay_announced = False
+        self._release_malformed_announced = False
 
         # Subscriber
         self._sub = self.create_subscription(
@@ -279,6 +300,14 @@ class CmdVelInterceptor(Node):
                     self._pub_safe.publish(safe_twist)
                     self._publish_action(f'{decision.action}:v={decision.enforced_v:.2f}{cap_suffix}')
 
+                    # ADR-0033 live-loop relay: republish the verifier-minted
+                    # signed frame (payload||token, 128 bytes) for the verifying
+                    # motor consumer. ONLY on a Forward decision — a wheelbase
+                    # mismatch or contract-violating 200 returned above and
+                    # relays nothing. No/malformed release → nothing published;
+                    # the consumer starves into its decel-to-zero (fail-closed).
+                    self._relay_release(release)
+
                     with self._lock:
                         self._current_velocity_mps = decision.enforced_v
                         self._current_steering_deg = decision.enforced_s
@@ -336,6 +365,39 @@ class CmdVelInterceptor(Node):
         else:
             self._publish_stop('CONNECTION_ERROR')
             self._publish_action('CONNECTION_ERROR:STOP')
+
+    def _relay_release(self, release):
+        """Republish the gateway 200's release object as the 128-byte wire
+        frame the verifying motor consumer parses (`split_frame`). Strictness
+        lives in the pure `release_frame`; a None (absent OR malformed release)
+        publishes nothing — starving the consumer into decel is the fail-closed
+        outcome, never a guessed frame."""
+        if release is None:
+            return  # no signer provisioned upstream — nothing to relay
+        frame = release_frame(release)
+        if frame is None:
+            # Latched (review #905): commands arrive at rate, so an unfixed
+            # malformed release would otherwise warn every cycle. Re-armed by
+            # the next VALID frame, so a fresh malformed episode logs again.
+            if not self._release_malformed_announced:
+                self._release_malformed_announced = True
+                self.get_logger().warn(
+                    'release object present but malformed — no frame relayed '
+                    '(consumer starves into decel-to-zero, fail-closed); '
+                    'latched until a valid release flows'
+                )
+            return
+        self._release_malformed_announced = False
+        out = UInt8MultiArray()
+        out.data = list(frame)
+        self._pub_release.publish(out)
+        if not self._release_relay_announced:
+            self._release_relay_announced = True
+            self.get_logger().info(
+                f'release relay ACTIVE: signed frames flowing to '
+                f'{self.get_parameter("release_topic").value} '
+                f'(key_id={release.get("key_id", "?")!r})'
+            )
 
     def _publish_stop(self, reason: str):
         self._pub_safe.publish(ZERO_TWIST)

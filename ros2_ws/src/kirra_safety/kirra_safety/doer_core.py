@@ -36,6 +36,21 @@ def goal_reached(goal_base_x, goal_base_y, tolerance_m):
     return math.hypot(goal_base_x, goal_base_y) <= tolerance_m
 
 
+def staleness_budget_valid(value_s):
+    """True only for a finite number > 0 — a usable scan-staleness budget.
+
+    The staleness budget is a SAFETY number (how old perception may be and
+    still produce motion), so it follows the no-default convention: the node
+    declares a 0.0 unset-sentinel and refuses to start unless the operator set
+    a real value. bool is rejected explicitly (an int subclass: `true` in a
+    params YAML would otherwise pass as a 1-second budget — the #904
+    wheelbase lesson).
+    """
+    if isinstance(value_s, bool) or not isinstance(value_s, (int, float)):
+        return False
+    return math.isfinite(value_s) and value_s > 0.0
+
+
 def extend_corridor_back(left, right, back_m):
     """Prepend a straight back-extension to each corridor polyline.
 

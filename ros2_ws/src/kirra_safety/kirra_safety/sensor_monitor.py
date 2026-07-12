@@ -14,10 +14,23 @@ import json
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import LaserScan, Imu, Image
 from nav_msgs.msg import Odometry
 from diagnostic_msgs.msg import DiagnosticArray
 from std_msgs.msg import String
+
+# Lidar-ingress QoS (hardware finding: the TG30 driver publishes /scan
+# BEST_EFFORT; a default RELIABLE subscription silently matches ZERO messages —
+# this monitor would then report the lidar FAULTED while the driver is healthy,
+# degrading the fleet for a QoS mismatch). BestEffort subscriptions match both
+# BestEffort and Reliable publishers. Depth 1: this callback only counts
+# arrivals, a backlog adds nothing.
+SCAN_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+)
 
 try:
     import requests
@@ -83,7 +96,7 @@ class SensorMonitor(Node):
         }
 
         # Subscriptions
-        self.create_subscription(LaserScan, '/scan', self._on_scan, 10)
+        self.create_subscription(LaserScan, '/scan', self._on_scan, SCAN_QOS)
         self.create_subscription(Image, '/camera/depth/image_raw', self._on_depth, 10)
         self.create_subscription(Imu, '/imu/data', self._on_imu, 10)
         self.create_subscription(Odometry, '/odom', self._on_odom, 10)

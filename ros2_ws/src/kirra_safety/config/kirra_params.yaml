@@ -14,6 +14,16 @@ cmd_vel_interceptor:
     use_perception_cap: false    # opt-in: apply Taj's assured-clear-distance cap before the governor
     perception_cap_topic: "/kirra/perception_speed_cap"
     perception_cap_stale_ms: 300 # cap older than this is a perception fault -> fail-closed stop
+    release_topic: "/kirra/release"  # ADR-0033 relay: verifier-minted signed frames -> motor consumer
+
+occy_doer:
+  ros__parameters:
+    # REQUIRED (the node refuses to start without it): newest-scan staleness
+    # budget in seconds -- perception older than this and the doer HOLDS
+    # instead of proposing motion. 0.25 s = 2.5 scan periods of the
+    # bench-verified TG30 at ~10 Hz (HARDWARE_FINDINGS_R2X3.md deployment);
+    # a different lidar rate needs a deployment-review update here.
+    scan_stale_s: 0.25
 
 perception_governor:
   ros__parameters:

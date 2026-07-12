@@ -266,6 +266,39 @@ exceed one real scan period with margin).
 
 ---
 
+## 6b. The live loop — lidar → Taj → Occy → interceptor → signed release → consumer
+
+With the consumer (§1–5) and lidar (§6) proven separately, three wiring fixes
+close the perception-to-wheels chain:
+
+1. **`/scan` ingress QoS** — the TG30 driver publishes BEST_EFFORT; the three
+   kirra_safety subscribers (`occy_doer`, `perception_governor`,
+   `sensor_monitor`) previously used the default RELIABLE profile, which
+   silently matches **zero messages** (no error — just an eternally stale
+   scan, a dead cap topic, and a false lidar fault). All three now subscribe
+   BestEffort + KeepLast(1), the house sensor-ingress discipline
+   (`kirra-ros2-adapter::ingress_sensor_qos`).
+2. **The release relay** — the verifier's actuator 200 carries the ADR-0033
+   `release` object (signed payload+token), but nothing republished it for
+   the consumer. The `cmd_vel_interceptor` now relays it as the 128-byte
+   `payload(32)‖token(96)` frame on `release_topic` (default
+   `/kirra/release`) — strict pure-carriage (`release_frame`): a malformed
+   release publishes **nothing** and the consumer starves into its
+   decel-to-zero. Relay happens ONLY on a Forward decision; a wheelbase
+   mismatch or contract-violating 200 relays nothing.
+3. **`scan_stale_s` is now REQUIRED** on `occy_doer` (0.0 unset-sentinel →
+   refuse to start), replacing the silent 0.5 s default: the staleness budget
+   is a safety number and is operator-set per deployment
+   (`ros2_ws/src/kirra_safety/config/kirra_params.yaml` carries 0.25 s = 2.5
+   scan periods of the TG30 at ~10 Hz).
+
+Acceptance: `robot/live_loop_elevated.sh` — four phases, WHEELS ELEVATED:
+(a) nominal governed motion through the full chain, (b) obstacle →
+**perception-driven refusal** (Taj cap collapses → stop, then recovery),
+(c) dead lidar → hold, (d) dead verifier → consumer liveness decel-to-zero.
+
+---
+
 ## 7. Explicitly NOT in this bringup
 
 - **Speech / mic / TTS** — no audio hardware yet; voice is the last layer, on top

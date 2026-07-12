@@ -102,3 +102,46 @@ def wheelbase_consistent(param_m, reported_m):
     if not _is_finite_number(param_m) or not _is_finite_number(reported_m):
         return False
     return abs(float(param_m) - float(reported_m)) <= WHEELBASE_TOLERANCE_M
+
+
+# ---------------------------------------------------------------------------
+# Live-loop relay — gateway `release` object -> /kirra/release wire frame
+# ---------------------------------------------------------------------------
+
+# ADR-0033 wire shape (mirrors robot/kirra_ffi.py::split_frame, the consumer's
+# strict parse): payload(32) || token(96) = one 128-byte governed frame.
+RELEASE_PAYLOAD_LEN = 32
+RELEASE_TOKEN_LEN = 96
+
+
+def release_frame(release):
+    """Build the 128-byte `payload(32) || token(96)` wire frame from a gateway
+    200's `release` object, or return None when no valid frame exists.
+
+    STRICT: `release` must be a dict whose `payload_hex` / `token_hex` are hex
+    strings decoding to EXACTLY 32 and 96 bytes. Anything else -> None, and the
+    relay publishes NOTHING — the verifying motor consumer then starves into
+    its decel-to-zero, the same fail-closed outcome as a verifier with no
+    signer provisioned. Never publish a "best effort" frame: the consumer's
+    strict parser would discard a malformed one anyway, but a sliced/padded
+    frame must not even be offered (review #901's oversized-token lesson).
+
+    This is pure CARRIAGE: the bytes are relayed exactly as the verifier
+    hex-encoded them. The trust path is the consumer's Ed25519 verify over
+    exactly these bytes — this function never re-encodes floats or
+    reinterprets the payload.
+    """
+    if not isinstance(release, dict):
+        return None
+    payload_hex = release.get("payload_hex")
+    token_hex = release.get("token_hex")
+    if not isinstance(payload_hex, str) or not isinstance(token_hex, str):
+        return None
+    try:
+        payload = bytes.fromhex(payload_hex)
+        token = bytes.fromhex(token_hex)
+    except ValueError:
+        return None
+    if len(payload) != RELEASE_PAYLOAD_LEN or len(token) != RELEASE_TOKEN_LEN:
+        return None
+    return payload + token

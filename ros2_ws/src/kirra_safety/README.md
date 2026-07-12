@@ -4,9 +4,9 @@ ROS2 safety interlock package for the Kirra runtime legitimacy engine.
 
 Provides the nodes that enforce kinematic contracts, derive a perception speed cap, drive the robot to a goal, monitor sensor health, and gate motion commands based on fleet posture:
 
-- **cmd_vel_interceptor** — intercepts `/cmd_vel`, enforces via Kirra, publishes to `/cmd_vel_safe`
+- **cmd_vel_interceptor** — intercepts `/cmd_vel`, enforces via Kirra, publishes to `/cmd_vel_safe`; when the verifier mints ADR-0033 release tokens, it also relays each signed frame (`payload(32)‖token(96)`, 128 bytes) on `/kirra/release` for the verifying motor consumer (`robot/kirra_motor_consumer.py`) — pure carriage, strict parse, malformed release → nothing published (the consumer decels to zero)
 - **perception_governor** — turns `/scan` into Taj's corridor and an assured-clear-distance (ACD) speed cap on `/kirra/perception_speed_cap` (see below)
-- **occy_doer** — the DOER: drives the robot to a `/goal_pose` using Occy + Taj + KIRRA, publishing proposals to `/cmd_vel_raw` (see [`docs/testing/OCCY_DOER_BRIDGE.md`](../../../../docs/testing/OCCY_DOER_BRIDGE.md))
+- **occy_doer** — the DOER: drives the robot to a `/goal_pose` using Occy + Taj + KIRRA, publishing proposals to `/cmd_vel_raw` (see [`docs/testing/OCCY_DOER_BRIDGE.md`](../../../../docs/testing/OCCY_DOER_BRIDGE.md)). `scan_stale_s` is REQUIRED (no default — a safety number; `config/kirra_params.yaml` carries the deployment value): perception older than the budget holds the robot
 - **sensor_monitor** — reports LiDAR, IMU, camera, and odometry health to Kirra
 - **posture_subscriber** — bridges the Kirra SSE posture stream to ROS2 topics and triggers emergency stops on `LockedOut` transitions
 

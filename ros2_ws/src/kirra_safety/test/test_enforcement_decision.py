@@ -152,3 +152,60 @@ def test_wheelbase_missing_or_nonfinite_reported_fails_closed():
 def test_wheelbase_bad_param_fails_closed():
     for bad in (None, float("nan"), "0.229"):
         assert not wheelbase_consistent(bad, 0.229), bad
+
+
+# ---------------------------------------------------------------------------
+# Live-loop relay — release_frame (release object -> 128-byte wire frame)
+# ---------------------------------------------------------------------------
+
+from enforcement_decision import (  # noqa: E402
+    release_frame, RELEASE_PAYLOAD_LEN, RELEASE_TOKEN_LEN,
+)
+
+PAYLOAD = bytes(range(RELEASE_PAYLOAD_LEN))            # 32 distinct bytes
+TOKEN = bytes(255 - (i % 256) for i in range(RELEASE_TOKEN_LEN))  # 96 bytes
+
+
+def _release(payload=PAYLOAD, token=TOKEN, **extra):
+    r = {"payload_hex": payload.hex(), "token_hex": token.hex()}
+    r.update(extra)
+    return r
+
+
+def test_release_frame_valid_is_exact_carriage():
+    frame = release_frame(_release())
+    assert frame == PAYLOAD + TOKEN            # byte-exact, payload first
+    assert len(frame) == 128                    # the consumer's strict length
+
+
+def test_release_frame_extra_keys_ignored():
+    # sequence/issued_at_ms/key_id/wheelbase_m ride alongside — carriage only
+    # cares about the two hex fields.
+    assert release_frame(_release(sequence=7, key_id="ab" * 32)) == PAYLOAD + TOKEN
+
+
+def test_release_frame_absent_or_non_dict_is_none():
+    for bad in (None, [], "release", 42, True):
+        assert release_frame(bad) is None, bad
+
+
+def test_release_frame_missing_or_non_string_hex_is_none():
+    assert release_frame({"payload_hex": PAYLOAD.hex()}) is None      # no token
+    assert release_frame({"token_hex": TOKEN.hex()}) is None          # no payload
+    assert release_frame(_release() | {"payload_hex": None}) is None
+    assert release_frame(_release() | {"token_hex": 123}) is None
+    assert release_frame(_release() | {"payload_hex": list(PAYLOAD)}) is None
+
+
+def test_release_frame_undecodable_hex_is_none():
+    assert release_frame(_release() | {"payload_hex": "zz" * 32}) is None
+    assert release_frame(_release() | {"token_hex": TOKEN.hex()[:-1]}) is None  # odd length
+
+
+def test_release_frame_wrong_lengths_are_none():
+    # The #901 lesson made structural: never slice/pad — off-by-one either
+    # side of both fields is refused, no frame offered at all.
+    for n in (0, RELEASE_PAYLOAD_LEN - 1, RELEASE_PAYLOAD_LEN + 1):
+        assert release_frame(_release(payload=bytes(n))) is None, n
+    for n in (0, RELEASE_TOKEN_LEN - 1, RELEASE_TOKEN_LEN + 1):
+        assert release_frame(_release(token=bytes(n))) is None, n

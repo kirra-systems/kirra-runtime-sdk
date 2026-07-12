@@ -24,8 +24,21 @@ robot rather than freezing the last cap.
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float64, String
+
+# Lidar-ingress QoS (hardware finding: the TG30 driver publishes /scan
+# BEST_EFFORT; a default RELIABLE subscription silently matches ZERO messages —
+# the cap topic then goes stale and the interceptor fail-closes, but the cause
+# is invisible). BestEffort + KeepLast(1) mirrors the house sensor-ingress
+# discipline (kirra-ros2-adapter ingress_sensor_qos); depth 1 also stops a
+# post-stall backlog of stale scans from queueing Taj POSTs.
+SCAN_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+)
 
 try:
     import requests
@@ -61,7 +74,7 @@ class PerceptionGovernor(Node):
         scan_topic = self.get_parameter('scan_topic').value
         self._pub_cap = self.create_publisher(Float64, self.get_parameter('cap_topic').value, 10)
         self._pub_health = self.create_publisher(String, self.get_parameter('health_topic').value, 10)
-        self.create_subscription(LaserScan, scan_topic, self._on_scan, 10)
+        self.create_subscription(LaserScan, scan_topic, self._on_scan, SCAN_QOS)
 
         if not REQUESTS_AVAILABLE:
             self.get_logger().error(
