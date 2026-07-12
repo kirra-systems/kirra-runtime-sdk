@@ -2778,6 +2778,7 @@ fn vru_scene(peds: &[PerceivedPedestrian]) -> PedestrianScene<'_> {
     PedestrianScene {
         pedestrians: peds,
         params: VruRssParams::default(),
+        barriers: &[],
     }
 }
 
