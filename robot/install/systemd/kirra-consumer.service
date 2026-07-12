@@ -1,0 +1,31 @@
+# kirra-consumer.service — the KIRRA verifying motor consumer as a service.
+#
+# ⚠ PROVIDED, NOT YET HARDWARE-VALIDATED: the validated bringup mode is a
+# terminal run (docs/hardware/ROSMASTER_X3_BRINGUP.md §5). install_kirra.sh
+# stages this unit but does NOT enable it. Enable deliberately, after an
+# elevated re-test with the service-managed consumer:
+#   sudo systemctl enable --now kirra-consumer
+#
+# TODO-CAPTURE (robot-specific): User= below must be a user in the `dialout`
+# group with access to /dev/myserial (the vendor image's default user, e.g.
+# `jetson`). Confirm on the unit: groups <user>.
+
+[Unit]
+Description=KIRRA verifying motor consumer (ADR-0033 chokepoint — sole /dev/myserial writer)
+After=multi-user.target
+
+[Service]
+Type=simple
+User=jetson
+EnvironmentFile=/etc/kirra/robot.env
+# ROS 2 needs its environment sourced; exec keeps python3 as the main PID so
+# SIGTERM reaches the consumer's signal handler (safe stop before shutdown,
+# robot/kirra_motor_consumer.py:228-235).
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && exec python3 /opt/kirra/robot/kirra_motor_consumer.py'
+# on-failure only: a fail-closed config abort (exit 2 — missing env, car-type
+# mismatch) must NOT hot-loop the board opener.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
