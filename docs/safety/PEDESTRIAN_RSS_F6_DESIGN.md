@@ -7,7 +7,8 @@
 > *"availability, strictly after soundness"* (`PEDESTRIAN_RSS.md` §6) — it
 > **relaxes a now-sound safety bound**, so the module's standing rule applies:
 > a relaxation is *"allowed only to RELAX this bound with validated evidence,
-> never to weaken it silently"* (`vru.rs` module doc; §2.1 of the design doc).
+> never to weaken it silently"* (`vru.rs` module doc; the soundness principle
+> is §2 below).
 > This document is that evidence-and-design gate; it does not itself change the
 > bound.
 
@@ -106,7 +107,7 @@ is not evidenced. Two ways to supply that evidence (a decision for review —
 
 Until such evidence exists for an ODD, **F6 is inert for that ODD** — the bound
 is the pure disc, by construction (§5). This mirrors how the directed-cone
-refinement (§2.1) stays inert without validated tracking.
+refinement (`PEDESTRIAN_RSS.md` §2.1) stays inert without validated tracking.
 
 ### 3.3 The "behind a receding ego" case falls out
 
@@ -220,8 +221,10 @@ stays the default and the `None` branch is byte-identical to today.
 5. **Fail-closed fallbacks (§5)** each get a unit test asserting the pure-disc
    verdict.
 6. **WCET.** `O(T·P·B)` with `B ≤ MAX_BARRIERS` (a new fail-closed input bound
-   mirroring `MAX_PEDESTRIANS`); allocation-free; the `wcet_gate` argument
-   extended.
+   mirroring `MAX_PEDESTRIANS`); allocation-free. Recorded the same way F9 was
+   — as the `O(…)` boundedness statement in the `vru.rs` module doc (the
+   checker crate carries no `wcet_gate`; that lane lives in the governor crate's
+   `src/wcet_gate.rs` and is a separate concern).
 
 ## 8. What this design deliberately does NOT decide (needs your sign-off)
 
