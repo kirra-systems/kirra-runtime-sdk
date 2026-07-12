@@ -133,6 +133,7 @@ class CmdVelInterceptor(Node):
                        history=HistoryPolicy.KEEP_LAST, depth=1),
         )
         self._release_relay_announced = False
+        self._release_malformed_announced = False
 
         # Subscriber
         self._sub = self.create_subscription(
@@ -375,11 +376,18 @@ class CmdVelInterceptor(Node):
             return  # no signer provisioned upstream — nothing to relay
         frame = release_frame(release)
         if frame is None:
-            self.get_logger().warn(
-                'release object present but malformed — no frame relayed '
-                '(consumer starves into decel-to-zero, fail-closed)'
-            )
+            # Latched (review #905): commands arrive at rate, so an unfixed
+            # malformed release would otherwise warn every cycle. Re-armed by
+            # the next VALID frame, so a fresh malformed episode logs again.
+            if not self._release_malformed_announced:
+                self._release_malformed_announced = True
+                self.get_logger().warn(
+                    'release object present but malformed — no frame relayed '
+                    '(consumer starves into decel-to-zero, fail-closed); '
+                    'latched until a valid release flows'
+                )
             return
+        self._release_malformed_announced = False
         out = UInt8MultiArray()
         out.data = list(frame)
         self._pub_release.publish(out)
