@@ -303,11 +303,13 @@ else
     # SHA256SUMS (see .github/workflows/release.yml), so each of those is now a
     # hard failure, not a skip.
     #
-    # NOTE — integrity, NOT authenticity: SHA256SUMS is fetched over the SAME
-    # channel as the binary, so this defends against corruption and a binary-only
-    # swap, but NOT against an attacker who can replace BOTH artifacts. Signed
-    # releases (cosign keyless over SHA256SUMS, verified against the repo's GitHub
-    # OIDC identity) are the tracked authenticity follow-up — see INSTALL.md.
+    # NOTE — checksum alone is integrity, NOT authenticity: SHA256SUMS is
+    # fetched over the SAME channel as the binary, so it defends against
+    # corruption and a binary-only swap, but NOT against an attacker who can
+    # replace BOTH artifacts. Authenticity comes from the cosign step below
+    # (#798 roadmap — dogfooding the product's own fail-closed-trust pitch):
+    # every release signs SHA256SUMS keyless under the repo's release-workflow
+    # GitHub OIDC identity, pinned EXACTLY to this version's tag.
     if [ -z "${CHECKSUM_URL}" ]; then
         fatal "No SHA256SUMS published for this release — refusing to install an UNVERIFIED binary. Every Kirra release publishes one; its absence indicates a tampered or incomplete release."
     fi
@@ -316,6 +318,60 @@ else
     CHECKSUMS="${TMPDIR}/SHA256SUMS"
     curl -fsSL "${CHECKSUM_URL}" -o "${CHECKSUMS}" || \
         fatal "Could not download SHA256SUMS (${CHECKSUM_URL}) — refusing to install an UNVERIFIED binary."
+
+    # ------------------------------------------------------------------
+    # Authenticity — cosign keyless verification of SHA256SUMS (#798).
+    #
+    # EXACT identity (no regexp): a signature minted by any other tag,
+    # branch, or workflow of this repo — or by any other repo — does not
+    # verify. With cosign installed (or KIRRA_REQUIRE_SIGNED=1) this is
+    # REQUIRED and fail-closed. Without cosign we do NOT silently skip
+    # (that was the H-4 anti-pattern): we warn loudly, print the exact
+    # manual command, and name the flag that makes it mandatory. cosign
+    # is not packaged in Debian/Ubuntu, so hard-requiring it by default
+    # would break every fresh install — the flag is the operator's
+    # fail-closed opt-in until cosign ships preinstalled.
+    # ------------------------------------------------------------------
+    IDENTITY="https://github.com/${GITHUB_REPO}/.github/workflows/release.yml@refs/tags/${VERSION}"
+    BUNDLE_URL=$(echo "${RELEASE_JSON}" | \
+        grep -o '"browser_download_url": "[^"]*SHA256SUMS\.cosign\.bundle"' | \
+        head -1 | \
+        sed 's/"browser_download_url": "//;s/"//')
+    if command -v cosign &>/dev/null || [ "${KIRRA_REQUIRE_SIGNED:-0}" = "1" ]; then
+        command -v cosign &>/dev/null || \
+            fatal "KIRRA_REQUIRE_SIGNED=1 but cosign is not installed. Install cosign (https://docs.sigstore.dev/cosign/system_config/installation/) and re-run."
+        if [ -z "${BUNDLE_URL}" ]; then
+            fatal "No SHA256SUMS.cosign.bundle published for this release — refusing: signed releases always publish one; its absence indicates a tampered or incomplete release."
+        fi
+        curl -fsSL "${BUNDLE_URL}" -o "${CHECKSUMS}.cosign.bundle" || \
+            fatal "Could not download the signature bundle (${BUNDLE_URL}) — refusing to install an UNAUTHENTICATED binary."
+        info "Verifying SHA256SUMS signature (cosign keyless, exact identity)..."
+        cosign verify-blob \
+            --bundle "${CHECKSUMS}.cosign.bundle" \
+            --certificate-identity "${IDENTITY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${CHECKSUMS}" || \
+            fatal "cosign verification FAILED for SHA256SUMS — the checksums are not authentically from the ${VERSION} release build. Aborting."
+        success "SHA256SUMS authenticity verified (signed by ${IDENTITY})"
+    else
+        # Review #907: the manual instructions must be SELF-CONTAINED — the
+        # files this installer downloaded live in a temp dir that is removed
+        # on exit, so the commands below fetch their own copies.
+        warn "cosign is not installed — SHA256SUMS is verified for INTEGRITY only, not authenticity."
+        warn "Easiest: install cosign (https://docs.sigstore.dev/cosign/system_config/installation/)"
+        warn "and RE-RUN this installer — verification then runs automatically and fail-closed."
+        if [ -n "${BUNDLE_URL}" ]; then
+            warn "Or verify manually (self-contained; run in any empty directory):"
+            warn "  curl -fsSLO '${CHECKSUM_URL}'"
+            warn "  curl -fsSLO '${BUNDLE_URL}'"
+            warn "  cosign verify-blob --bundle SHA256SUMS.cosign.bundle \\"
+            warn "    --certificate-identity '${IDENTITY}' \\"
+            warn "    --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS"
+        else
+            warn "This release publishes no SHA256SUMS.cosign.bundle (pre-signing release) — authenticity cannot be verified for it."
+        fi
+        warn "Set KIRRA_REQUIRE_SIGNED=1 to make signature verification mandatory (fail-closed)."
+    fi
 
     # Exact-field match on the SHA256SUMS filename column ($2), not a substring
     # `grep -F` — so a sibling artifact (e.g. a future `…tar.gz.sig`) whose name

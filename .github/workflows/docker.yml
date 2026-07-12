@@ -44,14 +44,29 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # #798 F6 — the images previously shipped with a signature but NO
+          # SBOM and NO provenance. BuildKit attestations close both: an SBOM
+          # attestation per platform and max-detail SLSA provenance, attached
+          # to the image in the registry (inspect with
+          # `docker buildx imagetools inspect <image>@<digest>`).
+          sbom: true
+          provenance: mode=max
 
       # WS-0.6 — keyless cosign signature over the pushed image, BY DIGEST
       # (a tag is mutable; the digest is the artifact). The signature is
-      # stored in the registry next to the image and recorded in Rekor;
-      # verify with:
+      # stored in the registry next to the image and recorded in Rekor.
+      #
+      # #798 F7 — verify with an EXACT or ANCHORED identity, never `@.*`
+      # (which matched every build of this workflow, including any branch
+      # push). For a release image, pin the exact tag:
       #   cosign verify ghcr.io/<image>@<digest> \
-      #     --certificate-identity-regexp 'https://github.com/kirra-systems/kirra-runtime-sdk/\.github/workflows/docker\.yml@.*' \
+      #     --certificate-identity \
+      #       'https://github.com/kirra-systems/kirra-runtime-sdk/.github/workflows/docker.yml@refs/tags/vX.Y.Z' \
       #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      # For a main-branch image, the identity is
+      #   ...docker.yml@refs/heads/main
+      # If a regexp is unavoidable, ANCHOR it end-to-end:
+      #   --certificate-identity-regexp '^https://github\.com/kirra-systems/kirra-runtime-sdk/\.github/workflows/docker\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)[0-9]*)?$'
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Sign image (keyless, GitHub OIDC)
@@ -91,6 +106,10 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # #798 F6 — SBOM + max-detail SLSA provenance attestations, same as
+          # the verifier image above.
+          sbom: true
+          provenance: mode=max
 
       # WS-0.6 — same keyless by-digest signature as the verifier image.
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3

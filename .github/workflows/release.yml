@@ -112,11 +112,34 @@ jobs:
         # OIDC signing token — see the per-job permissions above.)
         run: cd dashboard && npm ci && npm run build
 
+      - name: Generate dashboard npm SBOM (CycloneDX)
+        # #798 F6 — the dashboard/dist bundle ships in EVERY tarball but had
+        # no SBOM. `npm sbom` (built into npm ≥9.5 — no extra unpinned tool)
+        # reads the tree `npm ci` just installed from the committed lockfile;
+        # --omit dev scopes it to what actually ships.
+        env:
+          VERSION: ${{ github.ref_name }}  # #775 F5 — tag as data
+        run: |
+          cd dashboard
+          npm sbom --sbom-format cyclonedx --omit dev \
+            > "../kirra-${VERSION}-dashboard-npm.cdx.json"
+          if [ ! -s "../kirra-${VERSION}-dashboard-npm.cdx.json" ]; then
+            echo "::error::npm sbom produced an empty dashboard SBOM"
+            exit 1
+          fi
+
       - name: Upload dashboard artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: kirra-dashboard-dist
           path: dashboard/dist/
+          retention-days: 1
+
+      - name: Upload dashboard SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: kirra-sbom-npm
+          path: kirra-*.cdx.json
           retention-days: 1
 
   build:
@@ -222,62 +245,53 @@ jobs:
               -cf - -C staging . | gzip -n > "${ARCHIVE_NAME}"
           echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "${GITHUB_ENV}"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: kirra-${{ matrix.target_name }}
-          path: kirra-*.tar.gz
-          retention-days: 1
-
-  # WS-0.6 — CycloneDX SBOM for the shipped binaries. Generated from the
-  # committed lockfile (--locked: the SBOM must describe what the build jobs
-  # actually built, never a re-resolve). One SBOM per release, named with
-  # the version so it travels with the artifacts.
-  sbom:
-    name: Generate SBOM (CycloneDX)
-    needs: preflight
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env:
-      VERSION: ${{ github.ref_name }}  # #775 F5
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-
+      # WS-0.6 / #798 F5 — CycloneDX SBOMs, generated INSIDE the build matrix
+      # with `--target` so each SBOM describes the dependency graph of the
+      # binary actually shipped for that triple. The previous standalone job
+      # resolved on the HOST (no --target): target-conditional dep arms
+      # (getrandom/libc/nix, per-arch crypto backends, gnu-vs-musl) made that
+      # an approximation — verified concretely: the x86_64-musl and
+      # aarch64-musl graphs differ (curve25519-dalek-derive is x86_64-only).
+      # Each SBOM records its triple as the `kirra:cargo:target` property;
+      # the release job asserts count == bins × targets and per-file triple.
       - name: Install cargo-cyclonedx
         # #775 F1/F10 — pin the tool version (was: unpinned; an upstream naming
         # or behaviour change would silently alter the release SBOM).
         run: cargo install cargo-cyclonedx --version 0.5.9 --locked
 
-      - name: Generate SBOM for the release binaries
+      - name: Generate per-target SBOMs (CycloneDX)
         run: |
-          # $VERSION from job env (#775 F5).
-          # `--describe binaries` emits one SBOM per workspace binary; the
-          # release ships exactly two (kirra_verifier_service and
-          # kirra_carla_client, both from the root crate — their SBOMs land
-          # in the repo root). Keep those two, version-prefixed so they are
-          # self-identifying next to the tarballs; the committed Cargo.lock
-          # is what cargo metadata resolves, so the SBOM describes what the
-          # build jobs actually built.
-          cargo cyclonedx --describe binaries --format json --spec-version 1.5 -q
+          # $VERSION from job env (#775 F5); matrix values are workflow-defined.
+          TARGET="${{ matrix.target }}"
+          # `--describe binaries` emits one SBOM per workspace binary from the
+          # committed lockfile (what the build above actually built); the
+          # release ships exactly two, both from the root crate.
+          cargo cyclonedx --describe binaries --format json --spec-version 1.5 \
+            --target "${TARGET}" -q
           for bin in kirra_verifier_service kirra_carla_client; do
-            mv "./${bin}_bin.cdx.json" "kirra-${VERSION}-${bin}.cdx.json"
+            src="./${bin}_bin.cdx.json"
+            if [ ! -s "${src}" ]; then
+              echo "::error::cargo-cyclonedx produced no SBOM for ${bin} (${TARGET})"
+              exit 1
+            fi
+            # Record the triple IN the SBOM (self-identifying beyond the
+            # filename); the release job cross-checks this against the name.
+            jq --arg t "${TARGET}" \
+              '.metadata.properties = ((.metadata.properties // []) + [{"name":"kirra:cargo:target","value":$t}])' \
+              "${src}" > "kirra-${VERSION}-${bin}-${TARGET}.cdx.json"
           done
           # Trial outputs for non-shipped workspace binaries are not release
           # artifacts — drop them so the upload glob can't pick one up.
           find . -name '*_bin.cdx.json' -delete
-          find . -name '*.cdx.json' -not -name "kirra-${VERSION}-*" -delete
-          ls -l ./*.cdx.json
+          ls -l ./kirra-*.cdx.json
 
-      - name: Upload SBOM artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: kirra-sbom
-          path: kirra-*.cdx.json
+          name: kirra-${{ matrix.target_name }}
+          path: |
+            kirra-*.tar.gz
+            kirra-*.cdx.json
           retention-days: 1
 
   # EP-18 — the safety-case-as-code bundle: reviewed evidence manifests +
@@ -378,8 +392,16 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [build, sbom, qnx-artifact, safety-case]
+    needs: [build, build-dashboard, qnx-artifact, safety-case]
     runs-on: ubuntu-latest
+    # #798 F7 — the signing job runs in a GitHub Environment so the OIDC
+    # signing identity can be put behind REQUIRED REVIEWERS: a pushed tag then
+    # builds everything but cannot SIGN or publish until a human approves the
+    # deployment. The protection rules are repo settings (owner action, not
+    # code) — see docs/releases/SUPPLY_CHAIN_OWNER_ACTIONS.md. Referencing the
+    # environment here is safe before that: an unconfigured environment is
+    # created on first run with no rules (current behavior unchanged).
+    environment: release
     # #775 F1 — the ONLY job granted the OIDC signing identity + release-write.
     # It runs no third-party build scripts (checkout, download, checksum, cosign,
     # gh-release), so the token is not exposed to untrusted code.
@@ -400,6 +422,39 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Assert SBOM completeness (#798 F5/F6)
+        # The SBOM set must be ARTIFACT-ACCURATE before anything is signed:
+        # one SBOM per (shipped bin × target), each recording the triple it
+        # was resolved for, plus the dashboard npm bundle. A missing or
+        # mislabeled SBOM fails the release here — before the signing step —
+        # so an approximate SBOM can never enter the trust chain again.
+        run: |
+          cd dist
+          fail=0
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf; do
+            for bin in kirra_verifier_service kirra_carla_client; do
+              f="kirra-${VERSION}-${bin}-${target}.cdx.json"
+              if [ ! -s "$f" ]; then
+                echo "::error::missing SBOM: $f"; fail=1; continue
+              fi
+              rec=$(jq -r '.metadata.properties[]? | select(.name=="kirra:cargo:target") | .value' "$f")
+              if [ "$rec" != "$target" ]; then
+                echo "::error::$f records target '$rec' (expected '$target')"; fail=1
+              fi
+            done
+          done
+          if [ ! -s "kirra-${VERSION}-dashboard-npm.cdx.json" ]; then
+            echo "::error::missing dashboard npm SBOM"; fail=1
+          fi
+          count=$(find . -maxdepth 1 -name '*.cdx.json' | wc -l)
+          if [ "$count" -ne 7 ]; then
+            echo "::error::expected exactly 7 SBOMs (2 bins x 3 targets + dashboard), found $count:"
+            ls ./*.cdx.json || true
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] && echo "OK: SBOM set complete and target-accurate (7/7)"
+          exit "$fail"
 
       - name: Generate checksums
         run: |
@@ -451,27 +506,43 @@ jobs:
             exit 1
           fi
           # WS-0.6: verification instructions travel with every release.
+          # #798 F7 — EXACT identity, interpolated per release (the notes are
+          # generated per-release, so nothing is lost by being exact). The old
+          # `@refs/tags/.*` regexp accepted a signature from ANY tag build —
+          # including a malicious tag pushed by any writer — as valid for any
+          # artifact. The heredoc stays quoted (no shell interpolation near
+          # the signing job); the version is substituted as data by sed below.
           cat >> release_notes.md <<'VERIFY'
 
           ---
           ### Verify artifact signatures (cosign, keyless)
 
-          Every artifact (tarballs, SBOM, `SHA256SUMS`) carries a
+          Every artifact (tarballs, SBOMs, `SHA256SUMS`) carries a
           `.cosign.bundle` — signature + signing certificate + transparency-log
-          proof, verifiable offline:
+          proof, verifiable offline. The identity below is EXACT for this
+          release: a signature minted by any other tag, branch, or workflow
+          does not verify.
 
           ```sh
           cosign verify-blob \
             --bundle <artifact>.cosign.bundle \
-            --certificate-identity-regexp \
-              'https://github.com/kirra-systems/kirra-runtime-sdk/\.github/workflows/release\.yml@refs/tags/.*' \
+            --certificate-identity \
+              'https://github.com/kirra-systems/kirra-runtime-sdk/.github/workflows/release.yml@refs/tags/@VERSION@' \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             <artifact>
           ```
 
-          The `kirra-*.cdx.json` files are the CycloneDX SBOM for the shipped
-          binaries, generated from the committed lockfile.
+          The `kirra-@VERSION@-<bin>-<target-triple>.cdx.json` files are
+          per-target CycloneDX SBOMs — one per shipped binary per platform,
+          resolved with `--target` so each describes the dependency graph of
+          the binary it sits next to (the triple is also recorded inside each
+          SBOM as the `kirra:cargo:target` property).
+          `kirra-@VERSION@-dashboard-npm.cdx.json` covers the bundled
+          dashboard's npm runtime dependencies.
           VERIFY
+          # $VERSION is preflight-validated (== the Cargo.toml version), so it
+          # is plain vX.Y.Z[-rc...] data — substituted with a non-/ delimiter.
+          sed -i "s|@VERSION@|${VERSION}|g" release_notes.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
