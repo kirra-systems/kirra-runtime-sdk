@@ -382,6 +382,16 @@ fn segments_properly_cross(p1: Point, p2: Point, q1: Point, q2: Point) -> bool {
         && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
 }
 
+/// Every vertex of a barrier is finite (a well-formed segment). A barrier that
+/// fails this is a corrupt map input; the breach gate fails the WHOLE set closed
+/// to the pure disc (see the barrier gate in [`pedestrian_breach`]) — mirroring
+/// the over-bound [`MAX_BARRIERS`] rule — so a single malformed barrier can never
+/// fabricate a distance-shrinking detour, and (unlike a silent per-barrier skip)
+/// the fail-closed action is observable.
+fn barrier_finite(bar: &BarrierSegment) -> bool {
+    bar.a.x_m.is_finite() && bar.a.y_m.is_finite() && bar.b.x_m.is_finite() && bar.b.y_m.is_finite()
+}
+
 /// A **lower bound on the geodesic distance** from `ped` to `pose` that respects
 /// impassable `barriers` (#789 F6, `PEDESTRIAN_RSS_F6_DESIGN.md` §3). Guarantees
 /// `euclidean ≤ dist_geo ≤ true_geodesic`:
@@ -396,9 +406,9 @@ fn segments_properly_cross(p1: Point, p2: Point, q1: Point, q2: Point) -> bool {
 ///   crossed one, whose endpoint-bend the `min` under-cuts (so the bound stays
 ///   SOUND — the `min` is load-bearing for this half).
 ///
-/// A barrier with a non-finite vertex is SKIPPED (contributes no detour), so a
-/// corrupt barrier can only ever leave the conservative euclidean distance,
-/// never fabricate a distance-shrinking one. `O(B)`, allocation-free.
+/// PRECONDITION: every barrier vertex is finite ([`barrier_finite`]) — the caller
+/// (the breach gate) has already failed a malformed set closed to `&[]`, so this
+/// hot path carries no per-barrier validation branch. `O(B)`, allocation-free.
 fn barrier_aware_distance(ped: Point, pose: Point, barriers: &[BarrierSegment]) -> f64 {
     let e = euclid(ped, pose);
     if barriers.is_empty() {
@@ -406,14 +416,6 @@ fn barrier_aware_distance(ped: Point, pose: Point, barriers: &[BarrierSegment]) 
     }
     let mut best = f64::INFINITY;
     for bar in barriers {
-        // Skip a corrupt barrier (fail to no-relaxation, never a spurious detour).
-        if !(bar.a.x_m.is_finite()
-            && bar.a.y_m.is_finite()
-            && bar.b.x_m.is_finite()
-            && bar.b.y_m.is_finite())
-        {
-            continue;
-        }
         if segments_properly_cross(ped, pose, bar.a, bar.b) {
             let d_a = euclid(ped, bar.a) + euclid(bar.a, pose);
             let d_b = euclid(ped, bar.b) + euclid(bar.b, pose);
@@ -469,10 +471,15 @@ pub fn pedestrian_breach(
     // a loose param set can never weaken the bound regardless of how it was built.
     let params = scene.params.sanitized();
     // F6 — the barrier set is bounded (WCET) and fail-closed to the pure disc: an
-    // over-bound barrier set is a malformed map input, so we IGNORE all barriers
-    // (euclidean, the more conservative bound) rather than run an unbounded loop or
-    // relax on corrupt input. `&[]` (the only case today) is the pure disc.
-    let barriers: &[BarrierSegment] = if scene.barriers.len() > MAX_BARRIERS {
+    // over-bound OR malformed (non-finite vertex) barrier set is a corrupt map
+    // input, so we IGNORE ALL barriers (euclidean, the more conservative bound)
+    // rather than run an unbounded loop or relax on corrupt input. Whole-set
+    // invalidation (not a per-barrier skip) keeps the fail-closed action
+    // observable and consistent with the over-bound rule. `&[]` (the only case
+    // today) is the pure disc.
+    let barriers: &[BarrierSegment] = if scene.barriers.len() > MAX_BARRIERS
+        || scene.barriers.iter().any(|b| !barrier_finite(b))
+    {
         &[]
     } else {
         scene.barriers
@@ -1060,7 +1067,9 @@ mod tests {
             return true;
         }
         let params = scene.params.sanitized();
-        let barriers: &[BarrierSegment] = if scene.barriers.len() > MAX_BARRIERS {
+        let barriers: &[BarrierSegment] = if scene.barriers.len() > MAX_BARRIERS
+            || scene.barriers.iter().any(|b| !barrier_finite(b))
+        {
             &[]
         } else {
             scene.barriers
@@ -1167,24 +1176,118 @@ mod tests {
         assert!(breaches(&traj, &sc));
     }
 
+    /// `euclid` computes the exact 2-D distance. Fully-asymmetric operands (both
+    /// coords distinct and non-zero) so every arithmetic mutation diverges.
+    #[test]
+    fn euclid_is_the_exact_2d_distance() {
+        // (5,9)→(1,2): dx=4, dy=7 → √(16+49)=√65.
+        let d = euclid(Point { x_m: 5.0, y_m: 9.0 }, Point { x_m: 1.0, y_m: 2.0 });
+        assert!((d - 65.0_f64.sqrt()).abs() < 1e-12, "got {d}");
+    }
+
+    /// `orient` computes the exact signed area (2-D cross). A single asymmetric
+    /// triple pins every term — any `+`/`-`/`*`/`/` flip changes the value.
+    #[test]
+    fn orient_is_the_exact_signed_area() {
+        // a=(1,2) b=(4,6) c=(3,9): (4-1)(9-2) − (6-2)(3-1) = 21 − 8 = 13.
+        let o = orient(
+            Point { x_m: 1.0, y_m: 2.0 },
+            Point { x_m: 4.0, y_m: 6.0 },
+            Point { x_m: 3.0, y_m: 9.0 },
+        );
+        assert!((o - 13.0).abs() < 1e-12, "got {o}");
+        // Sign flips with orientation (c on the other side of a→b).
+        let o_rev = orient(
+            Point { x_m: 1.0, y_m: 2.0 },
+            Point { x_m: 4.0, y_m: 6.0 },
+            Point {
+                x_m: 3.0,
+                y_m: -9.0,
+            },
+        );
+        assert!(o_rev < 0.0, "opposite side → negative, got {o_rev}");
+    }
+
     /// `barrier_aware_distance` is bracketed by euclidean below and a real
     /// single-endpoint detour: no barriers → euclidean exactly; a crossing wall
-    /// → the `‖ped−e‖+‖e−pose‖` detour (never below euclidean).
+    /// → the `‖ped−e‖+‖e−pose‖` detour (never below euclidean). ASYMMETRIC
+    /// endpoints (`d_a ≠ d_b`) in both orders so the `min` cannot mask a mutation
+    /// of either leg's `+`.
     #[test]
     fn barrier_aware_distance_is_bracketed_by_euclidean_and_a_detour() {
         let ped_p = Point { x_m: 8.0, y_m: 0.0 };
         let pose_p = Point { x_m: 0.0, y_m: 0.0 };
-        let e = euclid(ped_p, pose_p);
+        let e = euclid(ped_p, pose_p); // 8.0
         assert_eq!(barrier_aware_distance(ped_p, pose_p, &[]), e);
-        // A vertical wall at x=4 spanning y∈[-3,3] crosses the ped→pose x-axis
-        // segment; each endpoint detour is 5+5 = 10 m.
-        let bars = [seg(4.0, -3.0, 4.0, 3.0)];
-        let d = barrier_aware_distance(ped_p, pose_p, &bars);
+
+        // Symmetric wall y∈[-3,3]: each endpoint detour is 5+5 = 10 m.
+        let d = barrier_aware_distance(ped_p, pose_p, &[seg(4.0, -3.0, 4.0, 3.0)]);
         assert!(d >= e, "the clip only ever relaxes (≥ euclidean)");
+        assert!((d - 10.0).abs() < 1e-9, "single-detour 5+5, got {d}");
+
+        // Asymmetric wall y∈[-1,10], endpoint a=(4,-1) is the nearer bend:
+        // d_a = 2√17 ≈ 8.246 (the min), d_b = 2√116 ≈ 21.54. Pins leg-a's `+`.
+        let d_lo_a = barrier_aware_distance(ped_p, pose_p, &[seg(4.0, -1.0, 4.0, 10.0)]);
+        let want_a = 2.0 * 17.0_f64.sqrt();
         assert!(
-            (d - 10.0).abs() < 1e-9,
-            "single-detour lower bound 5+5, got {d}"
+            (d_lo_a - want_a).abs() < 1e-9,
+            "min via endpoint a, got {d_lo_a}"
         );
+
+        // Endpoints swapped → endpoint b=(4,-1) is now the nearer bend. Pins
+        // leg-b's `+` (which the previous config's `min` would otherwise mask).
+        let d_lo_b = barrier_aware_distance(ped_p, pose_p, &[seg(4.0, 10.0, 4.0, -1.0)]);
+        assert!(
+            (d_lo_b - want_a).abs() < 1e-9,
+            "min via endpoint b, got {d_lo_b}"
+        );
+    }
+
+    /// `segments_properly_cross` agrees with an INDEPENDENT parametric
+    /// line-intersection reference (exact integer arithmetic) over an exhaustive
+    /// small grid. The two derivations differ (double orientation-sign test vs a
+    /// solved `(t,u)` interior check), so any mutation of `orient` or the sign
+    /// logic diverges on some grid configuration.
+    #[test]
+    fn properly_cross_matches_independent_parametric_reference() {
+        // Exact integer parametric reference: P(t)=p1+t·(p2−p1), Q(u)=q1+u·(q2−q1);
+        // a PROPER crossing iff a unique solution with 0<t<1 and 0<u<1.
+        fn ref_cross(p1: (i64, i64), p2: (i64, i64), q1: (i64, i64), q2: (i64, i64)) -> bool {
+            let (rx, ry) = (p2.0 - p1.0, p2.1 - p1.1);
+            let (sx, sy) = (q2.0 - q1.0, q2.1 - q1.1);
+            let denom = rx * sy - ry * sx;
+            if denom == 0 {
+                return false; // parallel or collinear (or a degenerate point)
+            }
+            let (qpx, qpy) = (q1.0 - p1.0, q1.1 - p1.1);
+            let mut tn = qpx * sy - qpy * sx; // t = tn/denom
+            let mut un = qpx * ry - qpy * rx; // u = un/denom
+            let mut d = denom;
+            if d < 0 {
+                d = -d;
+                tn = -tn;
+                un = -un;
+            }
+            tn > 0 && tn < d && un > 0 && un < d
+        }
+        let pt_of = |v: (i64, i64)| Point {
+            x_m: v.0 as f64,
+            y_m: v.1 as f64,
+        };
+        // A compact asymmetric grid; exhaustive over all 4 segment endpoints.
+        let coords: [(i64, i64); 6] = [(0, 0), (2, 0), (0, 2), (2, 2), (1, 3), (3, 1)];
+        for &p1 in &coords {
+            for &p2 in &coords {
+                for &q1 in &coords {
+                    for &q2 in &coords {
+                        let got =
+                            segments_properly_cross(pt_of(p1), pt_of(p2), pt_of(q1), pt_of(q2));
+                        let want = ref_cross(p1, p2, q1, q2);
+                        assert_eq!(got, want, "cross({p1:?},{p2:?},{q1:?},{q2:?})");
+                    }
+                }
+            }
+        }
     }
 
     /// An impassable barrier BETWEEN ego and pedestrian relaxes the bound: a
@@ -1277,15 +1380,21 @@ mod tests {
         );
     }
 
-    /// A barrier with a non-finite vertex is SKIPPED (contributes no detour), so
-    /// a corrupt barrier can only ever leave the conservative euclidean distance
-    /// — never fabricate a distance-shrinking one.
+    /// A non-finite barrier fails the WHOLE set closed to the pure disc: a scene
+    /// pairing a VALID crossing wall (which alone would admit) with one corrupt
+    /// (NaN-vertex) barrier breaches — the valid wall's relaxation is discarded
+    /// along with the corrupt one, so a corrupt barrier can never launder a
+    /// pedestrian out of the reachable set (and, unlike a silent per-barrier skip,
+    /// this is observable — the valid wall's admit is withdrawn).
     #[test]
-    fn a_non_finite_barrier_is_skipped_not_laundered() {
+    fn a_non_finite_barrier_fails_the_whole_set_closed() {
         let traj = [pt(0.0, 2.0, 0.0)];
         let peds = [ped(8.0, 0.0)];
-        // The one otherwise-crossing wall has a NaN vertex → skipped → euclidean.
-        let barriers = [seg(4.0, f64::NAN, 4.0, 3.0)];
+        // The valid wall ALONE admits (proven by `impassable_barrier_admits…`).
+        let valid_wall = seg(4.0, -3.0, 4.0, 3.0);
+        // Pairing it with a NaN-vertex barrier invalidates the whole set → the
+        // bound reverts to the pure disc → 8 m < 9.54 → breaches.
+        let barriers = [valid_wall, seg(4.0, f64::NAN, 4.0, 3.0)];
         let sc = PedestrianScene {
             pedestrians: &peds,
             params: VruRssParams::default(),
@@ -1293,8 +1402,27 @@ mod tests {
         };
         assert!(
             breaches(&traj, &sc),
-            "a corrupt barrier must be skipped, not laundered into a spurious detour"
+            "one corrupt barrier must fail the whole set closed to the pure disc"
         );
+        // Each vertex coordinate matters: the same corrupt barrier with the NaN in
+        // any single position still invalidates the set (guards `barrier_finite`).
+        for corrupt in [
+            seg(f64::NAN, 0.0, 4.0, 3.0),
+            seg(4.0, f64::NAN, 4.0, 3.0),
+            seg(4.0, -3.0, f64::INFINITY, 3.0),
+            seg(4.0, -3.0, 4.0, f64::NAN),
+        ] {
+            let bars = [valid_wall, corrupt];
+            let sc = PedestrianScene {
+                pedestrians: &peds,
+                params: VruRssParams::default(),
+                barriers: &bars,
+            };
+            assert!(
+                breaches(&traj, &sc),
+                "a non-finite vertex in any position must invalidate the set"
+            );
+        }
     }
 
     proptest::proptest! {
