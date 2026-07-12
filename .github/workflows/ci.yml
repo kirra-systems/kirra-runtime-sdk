@@ -1067,6 +1067,13 @@ jobs:
           # rendered config carries names + mapping values, never a computed
           # safety parameter). See installer/ + docs/hardware/R2_GOLDEN_BUILD.md.
           python3 installer/test_installer.py
+          # kirra_safety pure-decision suites (no ROS needed — the nodes'
+          # fail-closed cores are deliberately rclpy-free): enforcement
+          # decision, the A3 wheelbase cross-check, the ADR-0033 release-frame
+          # carriage (strict 32/96 parse, never slice/pad), perception cap,
+          # and the doer geometry + staleness-budget validation.
+          python3 -m pip install --quiet pytest
+          python3 -m pytest ros2_ws/src/kirra_safety/test/ -q
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Clippy

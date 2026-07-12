@@ -31,12 +31,14 @@ import time
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Twist, PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 
 from kirra_safety.doer_core import (
     yaw_from_quaternion, goal_to_base, goal_reached, decide, extend_corridor_back,
+    staleness_budget_valid,
 )
 
 try:
@@ -46,6 +48,19 @@ except ImportError:
     REQUESTS_AVAILABLE = False
 
 ZERO = Twist()
+
+# Lidar-ingress QoS (hardware finding: the TG30 driver publishes /scan
+# BEST_EFFORT; a default RELIABLE subscription silently matches ZERO messages —
+# no error, just an eternally stale scan). BestEffort + KeepLast(1) is the
+# house sensor-ingress discipline (kirra-ros2-adapter ingress_sensor_qos,
+# node.rs: freshness over buffering — no stale backlog after a stall), and a
+# BestEffort subscription is compatible with BOTH BestEffort and Reliable
+# publishers, so this never regresses a Reliable lidar.
+SCAN_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+)
 
 # Mick intents this bridge grounds. Positional intents become the goal;
 # `hold` clears it. Anything else is ignored (logged once) — the doer stays
@@ -77,7 +92,14 @@ class OccyDoer(Node):
         self.declare_parameter('lookahead_m', 0.8)
         self.declare_parameter('goal_tolerance_m', 0.25)
         self.declare_parameter('forward_extent_m', 8.0)
-        self.declare_parameter('scan_stale_s', 0.5)
+        # REQUIRED, no default — 0.0 is the unset sentinel. How old the newest
+        # scan may be before this node stops proposing motion (holds). A
+        # safety number: it bounds how blind the doer can be while still
+        # moving, so it is operator-set per deployment (lidar rate dependent —
+        # e.g. ~0.25 s for a 10 Hz TG30), never silently defaulted. Mirrors
+        # the ros2-adapter's KIRRA_SUBSCRIPTION_STALENESS_MS discipline and
+        # the interceptor's required wheelbase_m.
+        self.declare_parameter('scan_stale_s', 0.0)
         self.declare_parameter('http_timeout_ms', 60)
         # The robot's footprint/kinematics for the CHECKER. A small differential robot MUST
         # pass these, or the planner's default urban-car (4.8 m) footprint can't fit a
@@ -107,6 +129,16 @@ class OccyDoer(Node):
         self._goal_tol = self.get_parameter('goal_tolerance_m').value
         self._extent = self.get_parameter('forward_extent_m').value
         self._scan_stale_s = self.get_parameter('scan_stale_s').value
+        if not staleness_budget_valid(self._scan_stale_s):
+            # Fail-closed: an unset/invalid staleness budget would either let
+            # the doer plan on arbitrarily old perception or come from a typo
+            # the operator believes is in effect. Refuse to start.
+            self.get_logger().fatal(
+                'scan_stale_s parameter is REQUIRED (finite, > 0 seconds) — '
+                f'refusing to start (got {self._scan_stale_s!r}). Set it to the '
+                'deployment lidar staleness budget (e.g. 0.25 for a 10 Hz scan).'
+            )
+            raise SystemExit(2)
         self._timeout_s = self.get_parameter('http_timeout_ms').value / 1000.0
         self._back_m = self.get_parameter('corridor_back_m').value
         self._vehicle = {
@@ -128,7 +160,7 @@ class OccyDoer(Node):
         self._pub = self.create_publisher(Twist, self.get_parameter('cmd_topic').value, 10)
         self.create_subscription(Odometry, self.get_parameter('odom_topic').value, self._on_odom, 20)
         self.create_subscription(PoseStamped, self.get_parameter('goal_topic').value, self._on_goal, 10)
-        self.create_subscription(LaserScan, self.get_parameter('scan_topic').value, self._on_scan, 10)
+        self.create_subscription(LaserScan, self.get_parameter('scan_topic').value, self._on_scan, SCAN_QOS)
         self.create_timer(1.0 / self.get_parameter('plan_hz').value, self._tick)
 
         if not REQUESTS_AVAILABLE:

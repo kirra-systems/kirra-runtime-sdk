@@ -87,3 +87,33 @@ def test_decide_holds_on_refused_verdict():
             "trajectory": [{"x": 1.0, "y": 0.0, "v": 1.0}]}
     v, w, reason = decide(plan, 1.0, 1.2, 2.0)
     assert (v, w) == (0.0, 0.0) and reason.startswith("HOLD")
+
+
+# ---------------------------------------------------------------------------
+# scan_stale_s required-config validation (staleness_budget_valid)
+# ---------------------------------------------------------------------------
+
+from doer_core import staleness_budget_valid  # noqa: E402
+
+
+def test_staleness_budget_accepts_real_positive_seconds():
+    for good in (0.25, 0.5, 1, 2.0):
+        assert staleness_budget_valid(good), good
+
+
+def test_staleness_budget_rejects_unset_sentinel_and_nonpositive():
+    # 0.0 is the declared unset sentinel; negatives are config errors.
+    for bad in (0.0, 0, -0.25, -1):
+        assert not staleness_budget_valid(bad), bad
+
+
+def test_staleness_budget_rejects_nonfinite_and_nonnumeric():
+    for bad in (float("nan"), float("inf"), float("-inf"), None, "0.25", [0.25]):
+        assert not staleness_budget_valid(bad), bad
+
+
+def test_staleness_budget_rejects_bool():
+    # bool is an int subclass: `scan_stale_s: true` in a params YAML would
+    # otherwise pass as a 1-second budget (the #904 wheelbase lesson).
+    assert not staleness_budget_valid(True)
+    assert not staleness_budget_valid(False)
