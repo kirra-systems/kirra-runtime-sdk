@@ -35,7 +35,7 @@ import os
 import sys
 import time
 
-PROBE_PWM = int(os.environ.get("PROBE_PWM", "20"))  # signed PWM %, low by design
+PROBE_PWM = abs(int(os.environ.get("PROBE_PWM", "20")))  # positive magnitude; sign is recorded separately
 PROBE_HOLD_S = 1.5
 HARD_CAP = 40  # refuse any probe PWM above this — a fat-finger guard
 ENC_MOVE_THRESHOLD = 5  # |encoder delta| above this = "this channel moved"
@@ -50,7 +50,7 @@ def confirm(question):
 
 
 def main():
-    if abs(PROBE_PWM) > HARD_CAP:
+    if PROBE_PWM > HARD_CAP:
         sys.exit(f"PROBE_PWM={PROBE_PWM} exceeds the {HARD_CAP} probe cap — refusing.")
 
     try:
@@ -65,8 +65,11 @@ def main():
     print("=" * 66)
     if not confirm("Robot ELEVATED, all wheels free to spin, e-stop in hand?"):
         sys.exit("Elevate the robot first. Aborting.")
-    if not confirm("Is the KIRRA consumer / vendor motor node STOPPED (this must own the port)?"):
-        sys.exit("Stop the consumer first — it owns /dev/myserial. Aborting.")
+    if not confirm(
+        "Is the KIRRA consumer / vendor motor node STOPPED? "
+        "(it normally owns /dev/myserial exclusively; this probe needs that port)"
+    ):
+        sys.exit("Stop the consumer first — it normally owns /dev/myserial. Aborting.")
 
     print(f"\nOpening motor board on {port} ...")
     try:
