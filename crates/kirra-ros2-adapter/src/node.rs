@@ -56,7 +56,7 @@ use crate::validation::{
     check_command_conforms, validate_trajectory_slow_with_envelope, ConformanceVerdict,
     IncomingControl,
 };
-use crate::vru_channel::{resolve_vru_channel, vru_channel_enabled};
+use crate::vru_channel::{resolve_vru_channel, VRU_CHANNEL_ENABLED_ENV};
 use kirra_trajectory::vru::{PedestrianScene, VruRssParams};
 
 /// Horizon / step for the multi-modal predictive-RSS mode rollout in the slow loop (matches the
@@ -88,6 +88,21 @@ fn subscription_staleness_timeout_ms() -> u64 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(SUBSCRIPTION_STALENESS_TIMEOUT_MS)
+}
+
+/// VRU / pedestrian channel enable gate (#789 follow-up 1) — reads
+/// `KIRRA_VRU_CHANNEL_ENABLED`. Adapter INTEGRATION glue (env I/O), kept out of
+/// the pure checker crate so its mutation gate covers only the tested
+/// `resolve_vru_channel` decision. Truthy = `1`/`true`/`yes` (case-insensitive);
+/// unset/anything else = disarmed (byte-identical no-op), mirroring
+/// `perception_redundancy_enabled`.
+fn vru_channel_enabled() -> bool {
+    std::env::var(VRU_CHANNEL_ENABLED_ENV)
+        .map(|v| {
+            let t = v.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
 }
 
 /// Capacity of the trajectory channel between the ROS subscription side
@@ -721,9 +736,19 @@ pub async fn run_adapter(
             // cap (never a silent no-op). `snapshot_pedestrians` already applies
             // the fail-closed freshness; `resolve_vru_channel` disambiguates its
             // overloaded `None` against the enable gate.
+            // Short-circuit: only READ the pedestrian snapshot when the channel is
+            // armed. `snapshot_pedestrians` takes the RwLock and (on a never-seen
+            // channel) logs a fail-closed error every tick — so evaluating it
+            // eagerly on a DISARMED, default-off deployment would break the
+            // byte-identical claim (lock + error spam). Disarmed → `None`, untouched.
+            let vru_enabled = vru_channel_enabled();
             let vru = resolve_vru_channel(
-                vru_channel_enabled(),
-                slow_state.snapshot_pedestrians(now_mono, subscription_staleness_timeout_ms()),
+                vru_enabled,
+                if vru_enabled {
+                    slow_state.snapshot_pedestrians(now_mono, subscription_staleness_timeout_ms())
+                } else {
+                    None
+                },
             );
             let effective_perception_cap =
                 more_restrictive_cap(effective_perception_cap, vru.perception_cap());

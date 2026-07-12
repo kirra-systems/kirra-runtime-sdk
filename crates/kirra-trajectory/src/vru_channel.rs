@@ -47,21 +47,10 @@ use crate::vru::PerceivedPedestrian;
 /// Environment gate for the VRU perception channel (mirrors
 /// `PERCEPTION_REDUNDANCY_ENABLED_ENV`). Truthy = `1`/`true`/`yes`
 /// (case-insensitive); unset or anything else = disarmed (byte-identical no-op).
+/// The `std::env` READ lives in the adapter node (integration glue), not here —
+/// this pure checker module keeps only the tested [`resolve_vru_channel`]
+/// decision, so the mutation gate covers only safety logic, not env I/O.
 pub const VRU_CHANNEL_ENABLED_ENV: &str = "KIRRA_VRU_CHANNEL_ENABLED";
-
-/// Read the VRU-channel enable gate from the environment. Disarmed unless
-/// explicitly truthy — a typo never silently arms an enforcement path, and (the
-/// conservative default) a disarmed channel is the byte-identical pre-wiring
-/// state.
-#[must_use]
-pub fn vru_channel_enabled() -> bool {
-    std::env::var(VRU_CHANNEL_ENABLED_ENV)
-        .map(|v| {
-            let t = v.trim();
-            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
-        })
-        .unwrap_or(false)
-}
 
 /// The per-tick decision for the VRU channel — the three-way distinction the
 /// checker's `Option` cannot express on its own.
@@ -102,9 +91,12 @@ impl VruResolution {
 }
 
 /// Resolve the VRU channel for one slow-loop tick from the enable gate and the
-/// already-fail-closed [`snapshot`] the state layer produced.
+/// already-fail-closed `snapshot` the state layer produced.
 ///
-/// * `enabled` — [`vru_channel_enabled`] (the DISARMED gate).
+/// * `enabled` — the adapter's VRU enable gate (`KIRRA_VRU_CHANNEL_ENABLED`,
+///   read in the node). The caller MUST only evaluate `snapshot` when `enabled`
+///   (short-circuit), so a disarmed deployment never touches the pedestrian lock
+///   or logs — the byte-identical no-op.
 /// * `snapshot` — `AdaptorState::snapshot_pedestrians(now, budget)`: `Some(peds)`
 ///   when the channel is fresh (possibly empty), `None` when silent / stale /
 ///   poisoned (already failed closed by the freshness layer).
@@ -114,7 +106,6 @@ impl VruResolution {
 /// the checker (which the checker would read as "no VRU channel", a no-op). Only
 /// a `DISARMED` channel yields the no-op `None`.
 ///
-/// [`snapshot`]: VruResolution
 /// [`FailClosedStale`]: VruResolution::FailClosedStale
 #[must_use]
 pub fn resolve_vru_channel(
