@@ -56,6 +56,8 @@ use crate::validation::{
     check_command_conforms, validate_trajectory_slow_with_envelope, ConformanceVerdict,
     IncomingControl,
 };
+use crate::vru_channel::{resolve_vru_channel, VRU_CHANNEL_ENABLED_ENV};
+use kirra_trajectory::vru::{PedestrianScene, VruRssParams};
 
 /// Horizon / step for the multi-modal predictive-RSS mode rollout in the slow loop (matches the
 /// planner's prediction horizon; the checker time-matches each sample to a trajectory pose).
@@ -86,6 +88,21 @@ fn subscription_staleness_timeout_ms() -> u64 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(SUBSCRIPTION_STALENESS_TIMEOUT_MS)
+}
+
+/// VRU / pedestrian channel enable gate (#789 follow-up 1) — reads
+/// `KIRRA_VRU_CHANNEL_ENABLED`. Adapter INTEGRATION glue (env I/O), kept out of
+/// the pure checker crate so its mutation gate covers only the tested
+/// `resolve_vru_channel` decision. Truthy = `1`/`true`/`yes` (case-insensitive);
+/// unset/anything else = disarmed (byte-identical no-op), mirroring
+/// `perception_redundancy_enabled`.
+fn vru_channel_enabled() -> bool {
+    std::env::var(VRU_CHANNEL_ENABLED_ENV)
+        .map(|v| {
+            let t = v.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
 }
 
 /// Capacity of the trajectory channel between the ROS subscription side
@@ -329,6 +346,24 @@ pub async fn run_adapter(
     } else {
         None
     };
+    // VRU / pedestrian subscription (#789 follow-up 1) — a DEDICATED pedestrian
+    // topic (a producer such as kirra-taj's `classify_pedestrians`) feeding the
+    // omnidirectional reachable-set bound. Registered ONLY when the VRU gate is
+    // enabled, so a deployment without a VRU source adds no subscription and the
+    // checker's `pedestrians: None` no-op path stays byte-identical. Remap
+    // `~/input/pedestrians` to the detector's topic in the launch file. When
+    // enabled but the channel is silent/stale, the slow loop FAILS CLOSED (MRC
+    // cap), never treats silence as "no pedestrians".
+    let ped_stream = if vru_channel_enabled() {
+        Some(
+            node.subscribe::<r2r::autoware_perception_msgs::msg::PredictedObjects>(
+                "~/input/pedestrians",
+                ingress_sensor_qos(), // N1
+            )?,
+        )
+    } else {
+        None
+    };
     let _map_sub = node.subscribe_untyped(
         "~/input/map",
         "autoware_map_msgs/msg/LaneletMapBin",
@@ -524,6 +559,33 @@ pub async fn run_adapter(
         });
     }
 
+    // VRU / pedestrian drain — only spawned when the gate is enabled and the
+    // subscription was registered above. Each message REPLACES the pedestrian
+    // snapshot and stamps its freshness (`update_pedestrians`); the slow loop
+    // reads it via `snapshot_pedestrians` with fail-closed staleness. If this
+    // stream closes (the detector dies), the channel goes stale → the slow loop
+    // fails closed (MRC), the intended fail-safe.
+    if let Some(ped_stream) = ped_stream {
+        let ped_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut s = ped_stream;
+            while let Some(msg) = s.next().await {
+                let now = now_ms_fresh();
+                tracing::info!(
+                    target: "kirra::ingress",
+                    topic = "pedestrians",
+                    stamp_ms = now,
+                    "subscription_callback"
+                );
+                let parsed = crate::parsing::parse_pedestrians(&msg);
+                ped_state.update_pedestrians(parsed, now);
+            }
+            tracing::error!(
+                "pedestrian subscription stream closed — VRU channel will fail closed (MRC)"
+            );
+        });
+    }
+
     let odom_state = Arc::clone(&state);
     tokio::spawn(async move {
         let mut s = odom_stream;
@@ -666,6 +728,38 @@ pub async fn run_adapter(
             let effective_perception_cap =
                 more_restrictive_cap(effective_perception_cap, redundancy_cap);
 
+            // VRU / pedestrian channel (#789 follow-up 1) — resolve the three-way
+            // decision the checker's `Option` cannot express: DISARMED → the
+            // no-op `None`; armed + FRESH → a live `PedestrianScene` (the
+            // omnidirectional stopping bound now enforces "don't run over
+            // pedestrians"); armed + SILENT/STALE → fail closed to an MRC-floor
+            // cap (never a silent no-op). `snapshot_pedestrians` already applies
+            // the fail-closed freshness; `resolve_vru_channel` disambiguates its
+            // overloaded `None` against the enable gate.
+            // Short-circuit: only READ the pedestrian snapshot when the channel is
+            // armed. `snapshot_pedestrians` takes the RwLock and (on a never-seen
+            // channel) logs a fail-closed error every tick — so evaluating it
+            // eagerly on a DISARMED, default-off deployment would break the
+            // byte-identical claim (lock + error spam). Disarmed → `None`, untouched.
+            let vru_enabled = vru_channel_enabled();
+            let vru = resolve_vru_channel(
+                vru_enabled,
+                if vru_enabled {
+                    slow_state.snapshot_pedestrians(now_mono, subscription_staleness_timeout_ms())
+                } else {
+                    None
+                },
+            );
+            let effective_perception_cap =
+                more_restrictive_cap(effective_perception_cap, vru.perception_cap());
+            let pedestrian_scene = vru.scene().map(|peds| PedestrianScene {
+                pedestrians: peds,
+                params: VruRssParams::default(),
+                // F6 corridor-clip barriers are supplied only by a per-ODD map
+                // profile (a further reviewed change); none is wired → pure disc.
+                barriers: &[],
+            });
+
             // Sustained-divergence → posture escalation (orthogonal to the per-tick MRC cap
             // above): a divergence (or lost redundant channel) that PERSISTS is a
             // perception-integrity fault that escalates the EFFECTIVE fleet posture — Degraded,
@@ -716,12 +810,15 @@ pub async fn run_adapter(
                 // worst-cases over them, refusing a trajectory a predicted cut-in / turn-in
                 // breaches even though the snapshot showed the object laterally clear.
                 Some(&predicted_modes),
-                // WS-2 pedestrian/VRU RSS: no VRU perception channel is wired on the
-                // node yet -> None (no-op, byte-identical). The `~/input/pedestrians`
-                // subscription + classification ingest is the tracked follow-up
-                // (docs/safety/PEDESTRIAN_RSS.md par.6); once wired, the live scene
-                // arms the omnidirectional reachable-set bound in the checker.
-                None,
+                // WS-2 pedestrian/VRU RSS (#789 follow-up 1) — LIVE: the scene
+                // resolved from the `~/input/pedestrians` channel above. Armed +
+                // fresh → the omnidirectional reachable-set bound refuses any
+                // trajectory that comes within a pedestrian's grown stopping disc
+                // (MRC). DISARMED → `None`, byte-identical no-op. Armed + silent
+                // → `None` HERE but the MRC-floor cap already folded into
+                // `effective_perception_cap` above stops the ego (never a silent
+                // no-op — see `resolve_vru_channel`).
+                pedestrian_scene.as_ref(),
                 // Frame/localization integrity (S-FI1): the LIVE frame trust resolved from the
                 // integrator's per-tick `update_frame_integrity` report. With no source wired
                 // this returns `Trusted` — the AOU-LOCALIZATION-001 seam (byte-for-byte the

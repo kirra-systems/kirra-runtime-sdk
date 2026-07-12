@@ -29,7 +29,9 @@
 
 use crate::corridor::Point;
 use crate::geometry::quat_to_yaw;
-use crate::state::{EgoOdom, IncomingTrajectory, PerceivedObject, Pose, TrajectoryPoint};
+use crate::state::{
+    EgoOdom, IncomingTrajectory, PerceivedObject, PerceivedPedestrian, Pose, TrajectoryPoint,
+};
 
 /// Convert an `autoware_planning_msgs::msg::Trajectory` to the kernel's
 /// trajectory envelope `IncomingTrajectory`. `received_ms` is set by the
@@ -138,6 +140,48 @@ pub fn parse_predicted_objects(
                 // (previously discarded after the magnitude collapse) so the
                 // Track-C kinematic ceiling sees the reported map-frame velocity.
                 vel: Point { x_m: vx, y_m: vy },
+            }
+        })
+        .collect()
+}
+
+/// Convert an `autoware_perception_msgs::msg::PredictedObjects` message received
+/// on the DEDICATED `~/input/pedestrians` topic into the kernel's
+/// [`PerceivedPedestrian`]s (#789 follow-up 1). Every object on that topic is a
+/// pedestrian — the producer (e.g. kirra-taj's `classify_pedestrians`) has
+/// already classified — so there is NO re-filtering here; a mis-published
+/// non-pedestrian only ever ADDS an omnidirectional stopping bound (fail-safe).
+///
+/// `age_s` is `0.0`: the measurement is treated as fresh-at-receipt, exactly as
+/// the object / channel-B parsers do — the slow loop's staleness budget bounds
+/// how old a *snapshot* may be, and mixing the producer's header-stamp clock
+/// domain in here would violate AOU-TIMESYNC-001. Position + velocity vector map
+/// straight across (same ego-world frame as `PerceivedObject`).
+pub fn parse_pedestrians(
+    msg: &r2r::autoware_perception_msgs::msg::PredictedObjects,
+) -> Vec<PerceivedPedestrian> {
+    msg.objects
+        .iter()
+        .map(|obj| {
+            let id = obj
+                .object_id
+                .uuid
+                .iter()
+                .take(8)
+                .fold(0u64, |acc, b| (acc << 8) | (*b as u64));
+            let pose = &obj.kinematics.initial_pose_with_covariance.pose;
+            let twist = &obj.kinematics.initial_twist_with_covariance.twist;
+            PerceivedPedestrian {
+                id,
+                pos: Point {
+                    x_m: pose.position.x as f64,
+                    y_m: pose.position.y as f64,
+                },
+                vel: Point {
+                    x_m: twist.linear.x as f64,
+                    y_m: twist.linear.y as f64,
+                },
+                age_s: 0.0,
             }
         })
         .collect()

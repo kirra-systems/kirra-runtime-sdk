@@ -223,15 +223,27 @@ live producer:**
    proptest-pinned), so **the bound is unchanged in every deployment**. What remains
    is the per-ODD map enablement (a reviewed boundary-type → impassability profile
    feeding real barriers), still a further separate change.
-1. **Node VRU channel** — a `~/input/pedestrians` subscription on the ros2
-   adapter (staleness-budgeted like the object channels: an ARMED but
-   silent/stale channel fails closed to `Some(empty…)`→cap, never silently
-   disarms), feeding the live scene into the D2 argument.
-2. **Classification ingest** — today nothing produces
-   `PerceivedPedestrian`s; Taj Phase-B semantic classes (the detector seam)
-   or an integrator-supplied VRU topic must classify. Until then the gate
-   is armed-but-unfed by construction, and *that is stated here rather than
-   papered over*.
+1. **Node VRU channel — WIRED (#789 follow-up 1).** A `~/input/pedestrians`
+   subscription on the ros2 adapter (`node.rs`, `parse_pedestrians`), gated by
+   `KIRRA_VRU_CHANNEL_ENABLED` (default off → the checker's `None` no-op,
+   byte-identical). Staleness-budgeted exactly like the object channels via the
+   WP-10 `AdaptorState::{update,snapshot}_pedestrians`. The safety-critical
+   three-way decision lives in the pure, tested `vru_channel::resolve_vru_channel`
+   (`kirra-trajectory`): **DISARMED** → `None` no-op; **armed + fresh** (possibly
+   an empty "road clear" list) → a live `PedestrianScene` into the checker's D2
+   argument (the omnidirectional bound now refuses driving into a pedestrian's
+   stopping disc → MRC); **armed + silent/stale** → an MRC-floor perception cap
+   (`Some(0.0)`) composed into the Track-C derate — the ego STOPS, never a silent
+   no-op. `AOU-VRU-RATE-001`: an armed producer must publish at rate (empty when
+   clear); silence is a fault. This closes the "vehicle can't see pedestrians"
+   gap: once a producer publishes, the vehicle stops for pedestrians.
+2. **Classification ingest** — the `~/input/pedestrians` topic expects an
+   already-classified pedestrian stream (a producer such as kirra-taj's
+   `classify_pedestrians`, or an integrator VRU topic); the node re-classifies
+   nothing (every object on that dedicated topic is treated as a pedestrian,
+   fail-safe). Until such a producer is deployed the channel stays disarmed (or
+   armed-but-fed-by-the-integrator); *that is stated here rather than papered
+   over*.
 3. **KPI corpus rows** — pedestrian scenarios in the WS-3.1 gate corpus
    (admissibility of stop-near-VRU proposals; refusal of drive-through
    proposals) once the seam has a producer.

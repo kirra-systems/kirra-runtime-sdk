@@ -42,7 +42,7 @@ pub mod perception_ingest;
 // `crate::{config,validation,prediction,perception_redundancy}::*` imports resolve
 // unchanged. `state` stays local (it owns the ROS runtime `AdaptorState`) but
 // re-exports the relocated `AcceptedTrajectory` / `EgoOdom` contract types.
-pub use kirra_trajectory::{config, perception_redundancy, prediction, validation};
+pub use kirra_trajectory::{config, perception_redundancy, prediction, validation, vru_channel};
 
 // `posture_tracker` was relocated to the kernel
 // (`kirra_core::posture_tracker`) by M2b so the parko-ros2 node
