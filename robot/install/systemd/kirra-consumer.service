@@ -6,17 +6,20 @@
 # elevated re-test with the service-managed consumer:
 #   sudo systemctl enable --now kirra-consumer
 #
-# TODO-CAPTURE (robot-specific): User= below must be a user in the `dialout`
-# group with access to /dev/myserial (the vendor image's default user, e.g.
-# `jetson`). Confirm on the unit: groups <user>.
+# User= is a placeholder rendered by install_kirra.sh to the INVOKING user
+# (review #906: a hard-coded `jetson` fails on images without that user).
+# The rendered user must be in the `dialout` group for /dev/myserial access —
+# the installer checks and warns. Confirm on the unit: groups <user>.
 
 [Unit]
 Description=KIRRA verifying motor consumer (ADR-0033 chokepoint — sole /dev/myserial writer)
-After=multi-user.target
+# No After=multi-user.target: combined with WantedBy=multi-user.target it
+# forms an ordering cycle (review #906). DDS/serial are local; no ordering
+# dependency is needed.
 
 [Service]
 Type=simple
-User=jetson
+User=__KIRRA_ROBOT_USER__
 EnvironmentFile=/etc/kirra/robot.env
 # ROS 2 needs its environment sourced; exec keeps python3 as the main PID so
 # SIGTERM reaches the consumer's signal handler (safe stop before shutdown,

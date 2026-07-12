@@ -155,8 +155,20 @@ echo "  capture_from_robot.sh + README.md 'Config capture'."
 
 # ---- 6. systemd (staged, NOT enabled) ---------------------------------------
 echo "== 6. systemd unit (optional; staged, not enabled) =="
-sudo install -m 0644 "${HERE}/systemd/kirra-consumer.service" \
-  /etc/systemd/system/kirra-consumer.service
+# Render the unit's User= to the invoking user (review #906: never hard-code
+# an image-specific username). Serial access needs dialout membership.
+ROBOT_USER="$(id -un)"
+if id -nG "${ROBOT_USER}" | tr ' ' '\n' | grep -qx dialout; then
+  ok "user '${ROBOT_USER}' is in dialout (serial access)"
+else
+  warn "user '${ROBOT_USER}' is NOT in dialout — the consumer (and this unit) cannot open /dev/myserial. Fix: sudo usermod -aG dialout ${ROBOT_USER} (then re-login)."
+fi
+TMP_UNIT="$(mktemp)"
+sed "s/^User=__KIRRA_ROBOT_USER__$/User=${ROBOT_USER}/" \
+  "${HERE}/systemd/kirra-consumer.service" > "${TMP_UNIT}"
+grep -q "^User=${ROBOT_USER}$" "${TMP_UNIT}" || fail "failed to render User= into the systemd unit"
+sudo install -m 0644 "${TMP_UNIT}" /etc/systemd/system/kirra-consumer.service
+rm -f "${TMP_UNIT}"
 sudo systemctl daemon-reload
 warn "kirra-consumer.service staged but NOT enabled: the consumer-as-a-service path has NOT been hardware-validated (the validated mode is a terminal run). Enable deliberately after an elevated re-test: sudo systemctl enable --now kirra-consumer"
 
