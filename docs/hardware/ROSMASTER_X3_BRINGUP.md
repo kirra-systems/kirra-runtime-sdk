@@ -204,6 +204,16 @@ ramp — through the same FFI, minus the wheels. It runs in CI.
 
 ## 6. Lidar — separately (real perception for the governed loop)
 
+> ⚠ **SUPERSEDED (the doc bug):** the sllidar/RPLIDAR/115200 content below was
+> written from the image's `RPLIDAR_TYPE=4ROS` marker and turned out to be
+> WRONG for this unit — the validated hardware is a **YDLIDAR TG30** on
+> **`ydlidar_ros2_driver`**, port **`/dev/ydlidar`**, **baud 512000**, ~10 Hz,
+> BEST_EFFORT `/scan` (`installer/platform_map.toml:31-37`;
+> `robot/install/README.md` carries the install-grade version). This section
+> is kept as the provenance record of the miss — it is the motivating example
+> for the detecting installer (detection knowledge in docs/humans fails; the
+> platform mapping is the reviewed source of truth).
+
 Kept a **separate launch step** from the motor consumer. This is the input
 Taj→Occy→Kirra needs so the governed loop is real, not synthetic.
 🔴 **Perception bringup only** — this step publishes and verifies `/scan`;
