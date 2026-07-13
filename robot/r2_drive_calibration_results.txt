@@ -50,9 +50,27 @@ PHASE B (encoder scale): wheel=RL
   full_turns          = 2.0
   delta_ticks (RL/m1) = 1669
   ticks_per_rev       = 834.5   (single 2-turn sample)
-  wheel_diameter_m    = (NOT measured — m/s conversion pending)
-  => with a measured diameter D: m_per_tick = pi*D / 834.5, then Phase A ticks/s
-     becomes m/s and yields V_PER_PWM. STILL OPEN: RR ticks/rev + diameter.
+  wheel_diameter      = 2 5/8 in = 66.675 mm = 0.066675 m  (measured with calipers)
+  wheel_circumf_m     = pi*D     = 0.209465 m
+  m_per_tick (RL)     = C/834.5  = 0.00025101 m/tick
+
+  DERIVED — left-channel (M1) ground speed = ticks/s * m_per_tick:
+    pwm   m/s (rear-left)
+    15    0.149
+    20    0.204
+    25    0.269
+    30    0.346
+    35    0.439
+    40    0.681   (anomalous row, excluded from the fit)
+    V_PER_PWM (left) ≈ 0.0145 (m/s)/PWM,  offset -0.069 m/s,  deadband ~PWM 4.7
+    (i.e. m/s ≈ 0.0145*PWM - 0.069 over 15..35; a governed 0.3 m/s -> ~27 PWM)
+
+  SCOPE: this m/s map is valid for the LEFT channel only — it uses RL's own
+  encoder scale. RR's m/s still needs RR's ticks/rev (Phase B on RR). Measuring
+  RR ALSO resolves whether the ~28% Phase-A L/R gap is real speed drift or an
+  encoder-scale difference — one capture closes both. If the two encoders prove
+  identical (same ticks/rev), the same m_per_tick applies to RR and the gap is
+  real motor drift (→ per-wheel PWM trim or closed loop, §9).
 
 ------------------------------------------------------------------
 PHASE C (steering↔angle): MECHANISM CONFIRMED, angles NOT yet measured
