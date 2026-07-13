@@ -1,0 +1,26 @@
+# crates/kirra-policy-types/Cargo.toml
+#
+# ADR-0035 Stage 0a — the command-classification policy types, extracted from the
+# heavy `kirra-verifier` root crate as the first slice of the layered
+# decomposition. Contents:
+#   - `OperationalCommand`     — the doer-agnostic command classification enum
+#                                (ReadTelemetry / WriteState / ActuatorMotion /
+#                                SystemMutation / Unknown)
+#   - `classify_http_command`  — the pure, total method+path → OperationalCommand
+#                                classifier (the SG-006/#69 fail-closed allowlist)
+#
+# Zero dependencies (std only): a genuine leaf. `kirra-verifier` depends on this
+# crate and its `gateway::policy` module is now a `pub use` re-export shim, so
+# every existing `crate::gateway::policy::{OperationalCommand, classify_http_command}`
+# path (posture gate, industrial adapters, tests) resolves unchanged.
+
+[package]
+name = "kirra-policy-types"
+version = "0.1.0"
+edition = "2021"
+description = "Command-classification policy types for Kirra — the doer-agnostic OperationalCommand enum and the pure HTTP method+path classifier (SG-006 fail-closed allowlist). No service/DB deps."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]

@@ -210,7 +210,11 @@ src/
 │                               boundedness argument; GOVERNOR_VERDICT_WCET_*_MICROS)
 ├── gateway/
 │   ├── mod.rs
-│   ├── policy.rs             — classify_command (path+method → OperationalCommand)
+│   ├── policy.rs             — re-export shim → kirra_policy_types (ADR-0035
+│   │                           Stage 0a de-monolith): OperationalCommand +
+│   │                           classify_http_command moved to the zero-dep
+│   │                           kirra-policy-types leaf crate; existing
+│   │                           crate::gateway::policy::* paths unchanged
 │   ├── policy_layer.rs       — Tower KirraPolicyLayer/KirraPolicyService
 │   ├── cmd_vel.rs            — CmdVel validation, DEFAULT_CMD_VEL_LIMITS
 │   ├── interceptor.rs        — gateway interceptor
@@ -253,6 +257,7 @@ trusted for safety; the checker is the invariant.
 
 | Crate | Role |
 |-------|------|
+| `crates/kirra-policy-types` | **ADR-0035 Stage 0a (de-monolith).** Zero-dependency leaf: `OperationalCommand` (the doer-agnostic command-classification enum) + `classify_http_command` (the pure, total method+path classifier — SG-006/#69 fail-closed allowlist). The verifier's `gateway::policy` is a `pub use` re-export shim. First slice of the layered split; `kirra-industrial` (Stage 1) will depend on this. |
 | `crates/kirra-core` | Lean shared types (no heavy deps): `corridor` (`CorridorSource`, `Point`, `MockCorridorSource`), `trajectory` (`PerceivedObject`, `Pose`, `TrajectoryPoint`, `TrajectoryVerdict`), `containment` (`MAX_TRAJECTORY_HORIZON`), `FleetPosture`, `kinematics_sim`, `capture`, `perception_monitor`, `KirraKernelGovernor`. Almost everything else depends on this, NOT on the heavy adapter. |
 | `crates/kirra-ros2-adapter` | **The #131 Option-B CHECKER (re-export wiring) + ROS 2 node.** The checker modules named below — `validation.rs`, `prediction.rs`, `perception_redundancy.rs` — actually live in the lean **`crates/kirra-trajectory`** crate and are re-exported here; `state.rs` (`AdaptorState`) stays adapter-local and re-exports only the checker contract types (`AcceptedTrajectory`, `EgoOdom`, …) from `kirra_trajectory::state`. The adapter's own code is the `ros2`-gated `node.rs` plus that thin `state.rs`. `validation.rs` — `validate_trajectory_slow` / `validate_trajectory_slow_capped`: containment + per-pose kinematics + **RSS** (the §4 conjunction: danger needs BOTH longitudinal AND lateral unsafe) + **occlusion (RSS Rule 4)** + **multi-modal predictive RSS** (`predictive_rss_breach` over `PredictedMode`s). `prediction.rs` — the multi-modal **mode producer** (`predicted_modes_from_objects` / `slow_loop_modes`: CV always, CTRV when a tracker yaw is fresh). `perception_redundancy.rs` — the True-Redundancy `cross_check` + `resolve_redundancy_cap`. `state.rs` — `AdaptorState` (primary + secondary object channels, yaw channel). `node.rs` (**ros2-gated**) — slow/fast dual-rate loops, subscriptions. |
 | `crates/kirra-planner` | **Occy, the geometric DOER + the Mick intent seam.** `GeometricPlanner` / `Planner` trait / `PlanInput` / `PlanOutput`. `mick.rs` — `plan_for_intent` grounds a `MickIntent` (`GoTo` / `LaneChange` / `Cruise` / `Overtake` / `PullOver` / `TurnAt` / **`RouteTo`** multi-junction). `learned.rs` — `LearnedPlanner` (speed-only Hydra-MDP) + **`LearnedManeuverPlanner`** (2-D lateral×speed vocabulary, routes around). `behavior.rs` — `TrafficControl` (signs/signals + **`OccludedApproach`** speed cap). `fast_loop.rs`, `mick_llm.rs`, `mick_capture.rs`. |
