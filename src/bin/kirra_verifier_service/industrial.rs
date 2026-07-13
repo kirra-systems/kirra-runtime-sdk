@@ -245,8 +245,25 @@ pub(crate) async fn evaluate_ethernet_ip_adapter(
 
     let posture_str = format!("{:?}", posture);
     let eval = EtherNetIpAdapter::evaluate(&msg);
-    let (allowed, denial_reason) =
+    let (mut allowed, mut denial_reason) =
         kirra_verifier::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
+    // MAGNITUDE BOUND (parity with the unified `dispatch_adapter` path and the DNP3
+    // handler): a posture-admitted CIP Set_Attribute_Single must also lie within the
+    // configured per-attribute envelope — else REFUSE (fail-closed; also on an
+    // undecodable value, or on any unconfigured target under KIRRA_CIP_STRICT_BOUNDS).
+    // Only applied on the posture-allowed path; a posture denial outranks and is
+    // reported as-is. Without this the dedicated route accepted out-of-range writes
+    // the unified `/industrial/evaluate` path rejects.
+    if allowed {
+        if let Err(reason) =
+            <EtherNetIpAdapter as kirra_verifier::adapters::IndustrialAdapter>::bound_magnitude(
+                &msg,
+            )
+        {
+            allowed = false;
+            denial_reason = Some(reason.to_string());
+        }
+    }
     let audit_ref = now_ms().to_string();
 
     if !allowed {
@@ -321,8 +338,24 @@ pub(crate) async fn evaluate_canopen_adapter(
 
     let posture_str = format!("{:?}", posture);
     let eval = CanOpenAdapter::evaluate(&msg);
-    let (allowed, denial_reason) =
+    let (mut allowed, mut denial_reason) =
         kirra_verifier::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
+    // MAGNITUDE BOUND (parity with the unified `dispatch_adapter` path and the DNP3
+    // handler): a posture-admitted SDO expedited-download must also lie within the
+    // configured per-target envelope — else REFUSE (fail-closed; also on an
+    // undecodable/segmented/width-mismatched value, or on any unconfigured target
+    // under KIRRA_CANOPEN_STRICT_BOUNDS). Non-SDO frames (NMT/EMCY) self-report no
+    // scalar and pass through. Only applied on the posture-allowed path; a posture
+    // denial outranks. Without this the dedicated route accepted out-of-range SDO
+    // downloads the unified `/industrial/evaluate` path rejects.
+    if allowed {
+        if let Err(reason) =
+            <CanOpenAdapter as kirra_verifier::adapters::IndustrialAdapter>::bound_magnitude(&msg)
+        {
+            allowed = false;
+            denial_reason = Some(reason.to_string());
+        }
+    }
     let audit_ref = now_ms().to_string();
 
     // #84: resolve the CANopen bus node-id to a FLEET node so an NMT-offline

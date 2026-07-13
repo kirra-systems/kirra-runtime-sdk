@@ -4,12 +4,16 @@
 // handler, since the gate is shared across all four industrial handlers).
 // ---------------------------------------------------------------------------
 
-use super::{evaluate_dnp3_adapter, ReplayGuarded};
+use super::{
+    evaluate_canopen_adapter, evaluate_dnp3_adapter, evaluate_ethernet_ip_adapter, ReplayGuarded,
+};
 use axum::body::to_bytes;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::Json;
+use kirra_verifier::adapters::canopen::CanOpenMessage;
 use kirra_verifier::adapters::dnp3::Dnp3Message;
+use kirra_verifier::adapters::ethernet_ip::EtherNetIpMessage;
 use kirra_verifier::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
 use kirra_verifier::verifier_store::VerifierStore;
@@ -133,5 +137,99 @@ async fn distinct_sources_have_independent_sequences() {
     assert_eq!(
         post(svc.clone(), read_msg("plc-b"), 1, now).await["allowed"],
         true
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Dedicated CANopen / EtherNet-IP magnitude-bound WIRING (regression guard).
+//
+// BUG (external runtime review, "Bug 1"): the dedicated /industrial/canopen and
+// /industrial/ethernet-ip handlers classified against posture but never invoked
+// the adapter's configured magnitude bound, so an out-of-range SDO download / CIP
+// Set_Attribute_Single that the unified path (dispatch_adapter -> A::bound_magnitude)
+// and the DNP3 handler both reject was ACCEPTED on the dedicated route. The fix adds
+// the same `if allowed { A::bound_magnitude(msg) }` block both siblings already run.
+//
+// These drive the real handlers through the added bound branch on the admit path
+// (Nominal + unconfigured global bounds -> posture-only -> admitted), confirming the
+// block is reached and the verdict shape is intact. The DENY-path *logic* both
+// handlers now call is covered by the adapters' explicit-bounds unit tests
+// (out_of_range_setpoint_is_denied, out_of_range_set_attribute_is_denied); a deny
+// *route* test needs seeded global bounds, which INVARIANT #13 (no set_var in the
+// parallel runner) precludes — the same reason the unified path's bound wiring also
+// lacks a route test. Injectable bounds (a shared evaluate_protocol_message<A>) is
+// the follow-up that would make the deny path route-testable.
+
+async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+    let bytes = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    serde_json::from_slice(&bytes).expect("json body")
+}
+
+/// An SDO expedited download (ccs=1, e=1, s=1) of `value` to (index, sub) on `node`.
+fn sdo_download(node: u8, index: u16, sub: u8, value: &[u8]) -> CanOpenMessage {
+    let width = value.len();
+    let n = (4 - width) as u8;
+    let cs = (1u8 << 5) | (n << 2) | 0x02 | 0x01;
+    let idx = index.to_le_bytes();
+    let mut data = vec![cs, idx[0], idx[1], sub];
+    data.extend_from_slice(value);
+    data.resize(8, 0x00);
+    CanOpenMessage {
+        node_id: node,
+        function_code: 0xA, // SDOReceive (download channel)
+        data,
+        source_node: "rtu-1".into(),
+    }
+}
+
+fn cip_set_attr(class: u16, instance: u16, attr: u16, value: &[u8]) -> EtherNetIpMessage {
+    EtherNetIpMessage {
+        command_code: 0x0065,
+        session_handle: 1,
+        status: 0,
+        service_code: 0x10, // Set_Attribute_Single (a write)
+        class_id: class,
+        instance_id: instance,
+        attribute_id: attr,
+        data: value.to_vec(),
+        source_node: "plc_01".into(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canopen_dedicated_handler_admits_write_and_reaches_bound_branch() {
+    let g = ReplayGuarded {
+        sequence: 1,
+        timestamp_ms: now_ms(),
+        message: sdo_download(5, 0x6042, 0, &100i16.to_le_bytes()),
+    };
+    let resp = evaluate_canopen_adapter(State(svc()), Ok(Json(g)))
+        .await
+        .into_response();
+    let v = body_json(resp).await;
+    assert_eq!(v["protocol"], "canopen");
+    assert_eq!(
+        v["allowed"], true,
+        "Nominal + unconfigured SDO target -> admitted (bound is posture-only when unconfigured): {v}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ethernet_ip_dedicated_handler_admits_write_and_reaches_bound_branch() {
+    let g = ReplayGuarded {
+        sequence: 1,
+        timestamp_ms: now_ms(),
+        message: cip_set_attr(0x0A, 1, 3, &100i16.to_le_bytes()),
+    };
+    let resp = evaluate_ethernet_ip_adapter(State(svc()), Ok(Json(g)))
+        .await
+        .into_response();
+    let v = body_json(resp).await;
+    assert_eq!(v["protocol"], "ethernet_ip");
+    assert_eq!(
+        v["allowed"], true,
+        "Nominal + unconfigured CIP target -> admitted (bound is posture-only when unconfigured): {v}"
     );
 }
