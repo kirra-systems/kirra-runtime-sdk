@@ -66,41 +66,120 @@ pub(crate) fn spawn_local_asset_posture_feed(svc: Arc<ServiceState>) {
         }
     };
 
-    tokio::spawn(async move {
-        // Subscribe BEFORE the initial sync so a transition occurring in the
-        // window between the initial cache read and entering recv() is
-        // buffered by the broadcast channel rather than lost.
-        let mut rx = svc.app.posture_tx.subscribe();
-        tracing::info!(
-            asset_id = %asset_id,
-            "verifier→fabric posture feed: started (single-local-asset model)"
-        );
+    // Bug 7: SUPERVISE the feed. Previously this was a bare `tokio::spawn` whose
+    // `JoinHandle` was dropped, so a panic in the loop KILLED the feed SILENTLY —
+    // the local fabric asset then held its last-pushed posture forever while real
+    // fleet posture moved on, and `route_command` reads that asset posture with
+    // NO staleness guard (`FabricRouter::route_command`), so a stale `Nominal`
+    // would keep ADMITTING fabric commands: a fail-OPEN on the one enforcement
+    // path this feed backs.
+    //
+    // `spawn_supervised` restarts a TRANSIENT panic — each restart re-subscribes
+    // and re-syncs from the authoritative posture cache, so it self-heals and
+    // recovers any transition missed while it was down. A DETERMINISTIC panic
+    // that exhausts the restart budget runs the escalation below. `critical=true`
+    // drives that budget-exhaustion escalation; `run-forever=false` because the
+    // loop returns ONLY on broadcast `Closed` (all senders dropped ⇒ a legitimate
+    // shutdown exit — the process is going away — mirroring the posture-engine
+    // worker), which must NOT be treated as a crash.
+    //
+    // The escalation is PROPORTIONATE, not fleet-wide: a wedged fabric-mirror
+    // feed cannot touch the verifier's OWN actuator spine (that gate reads
+    // `posture_cache`, not the fabric asset posture), so we pin exactly the
+    // affected local asset to LockedOut rather than forcing the whole fleet
+    // LockedOut. See `force_local_asset_lockedout`.
+    let escalate: kirra_verifier::supervisor::Escalation = {
+        let svc = Arc::clone(&svc);
+        let asset_id = asset_id.clone();
+        Arc::new(move || force_local_asset_lockedout(&svc, &asset_id))
+    };
 
-        // Initial sync: the synchronous startup recalc already populated the
-        // cache before this task subscribed, so reflect it once now.
-        sync_local_asset_posture(&svc, &asset_id);
+    kirra_verifier::supervisor::spawn_supervised(
+        "local_asset_posture_feed",
+        /* critical    */ true,
+        /* run-forever  */ false,
+        Some(escalate),
+        move || {
+            let svc = Arc::clone(&svc);
+            let asset_id = asset_id.clone();
+            async move {
+                // Subscribe BEFORE the initial sync so a transition occurring in
+                // the window between the initial cache read and entering recv() is
+                // buffered by the broadcast channel rather than lost. On a
+                // supervised restart this re-subscribe + re-sync is exactly what
+                // recovers the feed's view after a transient fault.
+                let mut rx = svc.app.posture_tx.subscribe();
+                tracing::info!(
+                    asset_id = %asset_id,
+                    "verifier→fabric posture feed: started (single-local-asset model)"
+                );
 
-        loop {
-            match rx.recv().await {
-                Ok(_event) => sync_local_asset_posture(&svc, &asset_id),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    // A lag only means we may have missed a transition; the
-                    // cache is authoritative, so re-sync from it.
-                    tracing::warn!(
-                        skipped = n,
-                        "verifier→fabric posture feed lagged; re-syncing from cache"
-                    );
-                    sync_local_asset_posture(&svc, &asset_id);
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    tracing::warn!(
-                        "verifier→fabric posture feed: broadcast channel closed; feed stopping"
-                    );
-                    break;
+                // Initial sync: the synchronous startup recalc already populated
+                // the cache before this task subscribed, so reflect it once now.
+                sync_local_asset_posture(&svc, &asset_id);
+
+                loop {
+                    match rx.recv().await {
+                        Ok(_event) => sync_local_asset_posture(&svc, &asset_id),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            // A lag only means we may have missed a transition; the
+                            // cache is authoritative, so re-sync from it.
+                            tracing::warn!(
+                                skipped = n,
+                                "verifier→fabric posture feed lagged; re-syncing from cache"
+                            );
+                            sync_local_asset_posture(&svc, &asset_id);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            tracing::warn!(
+                                "verifier→fabric posture feed: broadcast channel closed; feed stopping"
+                            );
+                            break;
+                        }
+                    }
                 }
             }
-        }
-    });
+        },
+    );
+}
+
+/// Fail-closed escalation for a wedged posture feed (Bug 7).
+///
+/// Invoked once by the supervisor when the feed exhausts its restart budget (a
+/// DETERMINISTIC panic, not a transient blip). A feed that can no longer run
+/// stops mirroring real fleet posture into the local fabric asset; because
+/// `FabricRouter::route_command` reads that asset posture with NO staleness
+/// guard, a stale `Nominal` would keep admitting fabric commands (fail-OPEN).
+///
+/// Rather than escalate the WHOLE fleet to LockedOut — which would also brick
+/// the verifier's own actuator spine, untouched by a fabric-mirror bug — pin
+/// exactly the affected local asset to `LockedOut`. `route_command` then denies
+/// it (`DenyCode::AssetLockedOut`) until a recovered feed lifts it back to real
+/// posture. Runs the same bounded cross-asset propagation pass the live feed
+/// uses, so a LockedOut local asset also degrades its fabric dependents.
+pub(crate) fn force_local_asset_lockedout(svc: &ServiceState, asset_id: &str) {
+    let now = now_ms();
+    let next_gen = svc
+        .fabric_router
+        .asset_posture(asset_id)
+        .map(|p| p.generation.saturating_add(1))
+        .unwrap_or(1);
+    svc.fabric_router.update_asset_posture_and_propagate(
+        asset_id,
+        AssetPosture {
+            asset_id: asset_id.to_string(),
+            posture: FleetPosture::LockedOut,
+            generation: next_gen,
+            computed_at_ms: now,
+            contributing_nodes: vec![],
+            blocked_by: vec!["POSTURE_FEED_WEDGED_FAILCLOSED".to_string()],
+        },
+    );
+    tracing::error!(
+        asset_id = %asset_id,
+        "verifier→fabric posture feed WEDGED (supervisor restart-budget exhausted): \
+         local fabric asset pinned LockedOut (fail-closed); a recovered feed lifts it"
+    );
 }
 
 /// Wire the Active-mode posture-freshness background tasks onto `svc`: the
