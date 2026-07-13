@@ -603,23 +603,27 @@ async fn node_assignment_is_denied_under_lockedout() {
     );
 }
 
-/// LockedOut blocks a functional READ on the production router — proving
-/// the gate is mounted on the real assembly, not just the test stand-in.
+/// Bug 2: the documented public read-only observability read `GET /fleet/posture`
+/// is posture-EXEMPT on the production router — it stays reachable (200) UNDER
+/// LockedOut, so an operator/monitor can still SEE the fleet is LockedOut instead
+/// of getting an ambiguous 503 (mirroring `/metrics`, already exempt). A GET
+/// cannot actuate; the gate blocks COMMANDS, not reads. The proof that the gate
+/// still blocks a NON-exempt read under LockedOut lives in
+/// `node_assignment_is_denied_under_lockedout` (the still-gated assignment feed).
 #[tokio::test]
-async fn lockedout_blocks_read_on_real_router() {
+async fn lockedout_allows_public_readonly_observability_on_real_router() {
     let status =
         status_through_real_app(state_with(FleetPosture::LockedOut), "GET", "/fleet/posture").await;
     assert_eq!(
         status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "the real assembled router must deny GET /fleet/posture under LockedOut; got {status}"
+        StatusCode::OK,
+        "GET /fleet/posture must stay reachable under LockedOut (Bug 2 exemption); got {status}"
     );
 }
 
-/// Posture-dependence on the SAME route + real handler: under Nominal the
-/// gate steps aside and the production `get_fleet_posture` handler returns
-/// 200 (empty fleet). The LockedOut→503 / Nominal→200 contrast is what
-/// proves it is the posture gate — not a blanket 503 — that is wired in.
+/// The exempt observability read reaches the real `get_fleet_posture` handler
+/// (200, empty fleet) under Nominal too — confirming the exemption routes the
+/// request through to the handler rather than short-circuiting it.
 #[tokio::test]
 async fn nominal_passes_read_through_to_real_handler() {
     let status =
@@ -773,13 +777,21 @@ async fn ws1_scope_gated_routes_fail_closed_on_real_router() {
 async fn metrics_scrape_returns_fleet_safety_series_under_lockedout() {
     let svc = state_with(FleetPosture::LockedOut);
 
-    // A functional read denied by the gate first, so the scrape can show
-    // a non-zero locked_out denial.
-    let denied = status_through_real_app(Arc::clone(&svc), "GET", "/fleet/posture").await;
+    // A still-gated functional read denied by the gate first, so the scrape can
+    // show a non-zero locked_out denial. `/fleet/posture` is now posture-exempt
+    // (Bug 2), so use the still-gated campaign-assignment read to produce the
+    // denial (the gate denies at the outer layer before the handler, so no
+    // campaign seeding is needed).
+    let denied = status_through_real_app(
+        Arc::clone(&svc),
+        "GET",
+        "/fleet/campaigns/assignment/node-1",
+    )
+    .await;
     assert_eq!(
         denied,
         StatusCode::SERVICE_UNAVAILABLE,
-        "precondition: LockedOut denies the functional read"
+        "precondition: LockedOut denies the still-gated functional read"
     );
 
     let resp = build_app(Arc::clone(&svc), None)

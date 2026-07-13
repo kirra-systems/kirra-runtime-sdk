@@ -362,13 +362,19 @@ Admin token or an `integrator`-role principal.
 - `POST /attestation/verify`
 
 ### Public read-only
-- `GET /health`, `GET /ready`
+All unauthenticated. The observability GETs marked **posture-exempt** below bypass
+the posture-routing gate (`is_posture_exempt`, GET/HEAD only), so they survive
+LockedOut and a cold/stale posture cache — a GET cannot actuate, and blocking it
+would remove fleet observability exactly when an operator needs to distinguish
+"LockedOut" from "service down" (Bug 2). Their sibling WRITES on the same prefix
+(e.g. `POST /federation/reports/submit`) stay posture-gated.
+- `GET /health`, `GET /ready` — posture-exempt (liveness)
 - `GET /metrics` — Prometheus fleet-safety series (WS-0.5) + WS-4 OTA rollout series (`kirra_ota_campaigns_total{state}`, `kirra_ota_campaign_rollout_percent{campaign_id}`, `kirra_ota_campaign_applied_nodes{campaign_id}` via `campaign_metrics_prometheus`) + WP-15 cert-lifecycle census (`kirra_cert_principals{state="active|revoked|expired|expiring_soon|no_expiry"}` via `cert_expiry_prometheus`); posture-exempt so the scrape survives LockedOut
-- `GET /attestation/status/:node_id`
-- `GET /fleet/posture`, `GET /fleet/posture/:node_id`
-- `GET /fleet/history/:node_id`, `GET /fleet/flapping/:node_id`
-- `GET /fleet/campaigns/assignment/:node_id?cohorts=a,b` — WS-4 node-facing OTA artifact assignment (which signed governor digest this node should run under the active campaigns; posture-gated → denied under LockedOut). EP-13: relays the campaign's signed Uptane metadata set (`uptane_metadata`) when present — the verifier is an untrusted carrier; verification is end-to-end at the node
-- `GET /federation/reports/:asset_id`
+- `GET /attestation/status/:node_id` — posture-exempt (Bug 2)
+- `GET /fleet/posture`, `GET /fleet/posture/:node_id` — posture-exempt (Bug 2)
+- `GET /fleet/history/:node_id`, `GET /fleet/flapping/:node_id` — posture-exempt (Bug 2)
+- `GET /fleet/campaigns/assignment/:node_id?cohorts=a,b` — WS-4 node-facing OTA artifact assignment (which signed governor digest this node should run under the active campaigns; **posture-GATED → denied under LockedOut**, deliberately NOT exempt — it drives a node's install decision, not observability). EP-13: relays the campaign's signed Uptane metadata set (`uptane_metadata`) when present — the verifier is an untrusted carrier; verification is end-to-end at the node
+- `GET /federation/reports/:asset_id` — posture-exempt (Bug 2)
 
 ---
 

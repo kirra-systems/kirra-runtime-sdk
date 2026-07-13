@@ -162,6 +162,34 @@ mutation, `POST /console/clearance-grants`.** That mutation is:
 So the `/console` exemption removes these routes from *posture* routing while the
 single console mutation retains its own (supervisor-key) authentication.
 
+### Tier 3 — Documented public read-only observability (Bug 2)
+
+`GET`/`HEAD` on the documented "public read-only" observability endpoints:
+`/fleet/posture`, `/fleet/posture/{node_id}`, `/fleet/history/{node_id}`,
+`/fleet/flapping/{node_id}`, `/attestation/status/{node_id}`, and
+`/federation/reports/{asset_id}`.
+
+Before Bug 2 these were posture-GATED, so they returned **503 under `LockedOut`
+and under a cold/stale posture cache** — removing fleet observability at the exact
+moment an operator or external monitor most needs to distinguish "fleet
+`LockedOut`" from "service down". A `GET` **cannot reach an actuator** (the gate
+exists to block COMMANDS, not reads), and `/metrics` — already Tier 1 — already
+exposes fleet posture during `LockedOut`, so exempting these JSON reads leaks
+nothing new and makes behaviour consistent with the documented contract.
+
+**Method-scoped — GET/HEAD only.** The exemption is guarded by request method so a
+sibling WRITE sharing a prefix stays fully posture-gated: notably
+`POST /federation/reports/submit` (identity-gated) is NOT exempt even though
+`GET /federation/reports/{asset_id}` is. **Deliberately NOT exempt** (still gated):
+`/fleet/campaigns/assignment/{node_id}` (it drives a node's install decision, not
+observability — denial under `LockedOut` is intended), the `/fabric/*` reads (not
+in the documented public-read-only set), and every admin/auditor read.
+
+This tier only widens *read* reachability; it never un-gates a mutation. The
+directional pin (`console_exemption_set_is_pinned`) asserts each Tier-3 path is
+exempt for `GET`/`HEAD`, NOT exempt for a write method, and that the
+`/federation/reports/submit` write stays gated.
+
 ### Why this matters — the regression it guards
 
 Losing the `/console` exemption locks the operator out of the recovery affordance
@@ -181,9 +209,12 @@ posture-exempt prefix without its own auth, this entry must be re-evaluated.**
 
 ### Verification (this branch)
 
-`is_posture_exempt` (`src/gateway/policy_layer.rs`) matches exactly
-`/health | /health/live | /ready | /metrics`, plus `path == "/console"` and
-`path.starts_with("/console/")`; `enforce_posture_routing` returns early for those
-and 503-gates everything else against the fail-closed posture snapshot. The
-exemption set is unit-pinned by `console_exemption_set_is_pinned`
+`is_posture_exempt(method, path)` (`src/gateway/policy_layer.rs`) exempts, for ALL
+methods, `/health | /health/live | /ready | /metrics` plus `path == "/console"` and
+`path.starts_with("/console/")`; and, for `GET`/`HEAD` ONLY, the Tier-3
+observability reads (`/fleet/posture`, `/fleet/posture/`, `/fleet/history/`,
+`/fleet/flapping/`, `/attestation/status/`, `/federation/reports/`).
+`enforce_posture_routing` returns early for those and 503-gates everything else
+against the fail-closed posture snapshot. The exemption set is unit-pinned in both
+directions (and, for Tier 3, per-method) by `console_exemption_set_is_pinned`
 (`src/gateway/policy_layer.rs`).

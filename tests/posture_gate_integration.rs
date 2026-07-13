@@ -226,11 +226,29 @@ async fn test_bare_options_without_preflight_headers_is_gated() {
 async fn test_cold_start_read_denied_but_health_reachable() {
     // Two separate apps because Router consumption by oneshot is not
     // shareable across calls.
-    let read_status = req_status(build_test_app(build_state_cold()), "GET", "/fleet/posture").await;
+    // A still-gated functional READ (the campaign-assignment feed) is denied 503
+    // cold — the gate fails closed on an empty posture cache.
+    let read_status = req_status(
+        build_test_app(build_state_cold()),
+        "GET",
+        "/fleet/campaigns/assignment/node-1",
+    )
+    .await;
     assert_eq!(
         read_status,
         StatusCode::SERVICE_UNAVAILABLE,
-        "Cold-start functional READ must be denied 503; got {read_status}"
+        "Cold-start gated functional READ must be denied 503; got {read_status}"
+    );
+
+    // Bug 2: the documented public read-only observability read is EXEMPT, so it
+    // stays reachable cold (200) — a monitor can read fleet posture at startup
+    // before the first posture computation lands.
+    let posture_status =
+        req_status(build_test_app(build_state_cold()), "GET", "/fleet/posture").await;
+    assert_eq!(
+        posture_status,
+        StatusCode::OK,
+        "cold-start GET /fleet/posture must stay reachable (Bug 2 exemption); got {posture_status}"
     );
 
     let health_status = req_status(build_test_app(build_state_cold()), "GET", "/health").await;
@@ -242,18 +260,37 @@ async fn test_cold_start_read_denied_but_health_reachable() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. LockedOut posture: a functional READ is denied 503. This is the
-// "LockedOut blocks reads" property — now actually enforced.
+// 3. LockedOut posture: a still-gated functional READ is denied 503, while the
+// documented public read-only observability read is EXEMPT (Bug 2) and stays
+// reachable so an operator can SEE the LockedOut fleet.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_lockedout_blocks_functional_reads() {
-    let svc = build_state_with_posture(FleetPosture::LockedOut);
-    let status = req_status(build_test_app(svc), "GET", "/fleet/posture").await;
+async fn test_lockedout_blocks_gated_reads_but_allows_public_observability() {
+    // A still-gated read (the campaign-assignment feed) is denied under LockedOut.
+    let gated = req_status(
+        build_test_app(build_state_with_posture(FleetPosture::LockedOut)),
+        "GET",
+        "/fleet/campaigns/assignment/node-1",
+    )
+    .await;
     assert_eq!(
-        status,
+        gated,
         StatusCode::SERVICE_UNAVAILABLE,
-        "LockedOut must block functional read /fleet/posture; got {status}"
+        "LockedOut must block the still-gated functional read; got {gated}"
+    );
+
+    // Bug 2: the exempt observability read stays reachable under LockedOut.
+    let observability = req_status(
+        build_test_app(build_state_with_posture(FleetPosture::LockedOut)),
+        "GET",
+        "/fleet/posture",
+    )
+    .await;
+    assert_eq!(
+        observability,
+        StatusCode::OK,
+        "LockedOut must still allow the exempt read /fleet/posture (Bug 2); got {observability}"
     );
 }
 

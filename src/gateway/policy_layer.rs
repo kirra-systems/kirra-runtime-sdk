@@ -626,18 +626,48 @@ pub async fn enforce_actuator_safety_envelope(
 /// documented in `docs/safety/SECURITY_BOUNDARIES.md` ("Posture-Routing Gate —
 /// the Exemption Registry", #306). The set is pinned by
 /// `console_exemption_set_is_pinned` below.
-fn is_posture_exempt(path: &str) -> bool {
-    matches!(path, "/health" | "/health/live" | "/ready" | "/metrics")
-        // Operator console (#103 SG6 / Phase A): the observe-and-recover plane.
-        // It MUST be reachable regardless of fleet posture — it is exactly the
-        // plane an operator uses to SEE a LockedOut fleet and record a supervisor
-        // clearance grant; a posture-gated console would lock the operator out of
-        // the recovery affordance when it is most needed. Its one mutation
-        // (`POST /console/clearance-grants`) is gated by the supervisor key IN THE
-        // HANDLER (an out-of-band operator action, not a fleet command), not by
-        // fleet posture. Reads under `/console` are QM.
+fn is_posture_exempt(method: &axum::http::Method, path: &str) -> bool {
+    // Exempt for ALL methods: liveness/observability probes + the whole operator
+    // console plane.
+    //
+    // Operator console (#103 SG6 / Phase A): the observe-and-recover plane. It
+    // MUST be reachable regardless of fleet posture — it is exactly the plane an
+    // operator uses to SEE a LockedOut fleet and record a supervisor clearance
+    // grant; a posture-gated console would lock the operator out of the recovery
+    // affordance when it is most needed. Its one mutation
+    // (`POST /console/clearance-grants`) is gated by the supervisor key IN THE
+    // HANDLER (an out-of-band operator action, not a fleet command), not by fleet
+    // posture. Reads under `/console` are QM.
+    if matches!(path, "/health" | "/health/live" | "/ready" | "/metrics")
         || path == "/console"
         || path.starts_with("/console/")
+    {
+        return true;
+    }
+
+    // Bug 2 — the documented "public read-only" fleet-observability endpoints.
+    // A GET/HEAD cannot reach an actuator (the posture gate exists to block
+    // COMMANDS, not reads), and `/metrics` already exposes fleet posture during
+    // LockedOut — so gating these JSON reads only removes observability at the
+    // exact moment (LockedOut, or a cold/stale posture cache at startup) an
+    // operator or external monitor most needs to distinguish "fleet LockedOut"
+    // from "service down". Exempt them for GET/HEAD ONLY, so a sibling WRITE on
+    // the same prefix stays fail-closed — notably `POST /federation/reports/submit`
+    // (identity-gated) vs `GET /federation/reports/{asset_id}`.
+    //
+    // Deliberately NOT exempt (stay posture-gated): `/fleet/campaigns/assignment/*`
+    // (tells a node which artifact to run — denial under LockedOut is intended),
+    // the `/fabric/*` reads (not in the documented public-read-only set), and every
+    // admin/auditor read. Writes/commands/unknown stay fail-closed in all postures.
+    if matches!(method, &axum::http::Method::GET | &axum::http::Method::HEAD) {
+        return path == "/fleet/posture"
+            || path.starts_with("/fleet/posture/")
+            || path.starts_with("/fleet/history/")
+            || path.starts_with("/fleet/flapping/")
+            || path.starts_with("/attestation/status/")
+            || path.starts_with("/federation/reports/");
+    }
+    false
 }
 
 /// The HA fence verdict for a `WriteState`/`SystemMutation` at the outer gate.
@@ -700,7 +730,7 @@ pub async fn enforce_posture_routing(
     // hot path. Borrows end at the last use below, before `next.run(req)` moves
     // the request, so NLL keeps the function well-formed (S3 / #115).
     let path = req.uri().path();
-    if is_posture_exempt(path) {
+    if is_posture_exempt(req.method(), path) {
         return Ok(next.run(req).await);
     }
 
@@ -1150,8 +1180,10 @@ mod actuator_middleware_tests {
     /// `is_posture_exempt` must keep this green.
     #[test]
     fn console_exemption_set_is_pinned() {
-        // EXEMPT: liveness/observability + the whole /console plane (reads AND the
-        // supervisor-gated grant — the grant's gate is the key, not posture).
+        use axum::http::Method;
+        // EXEMPT for ALL methods: liveness/observability + the whole /console
+        // plane (reads AND the supervisor-gated grant — the grant's gate is the
+        // key, not posture).
         for p in [
             "/health",
             "/health/live",
@@ -1163,20 +1195,76 @@ mod actuator_middleware_tests {
             "/console/escalations",
             "/console/clearance-grants",
         ] {
-            assert!(is_posture_exempt(p), "{p} MUST be posture-exempt");
+            assert!(
+                is_posture_exempt(&Method::GET, p),
+                "{p} MUST be posture-exempt (GET)"
+            );
+            assert!(
+                is_posture_exempt(&Method::POST, p),
+                "{p} MUST be posture-exempt (POST — e.g. the console clearance grant)"
+            );
+        }
+        // Bug 2 — the documented public read-only fleet-observability endpoints:
+        // EXEMPT for GET/HEAD (survive LockedOut + a cold/stale cache), but their
+        // sibling WRITES on the same prefix stay fail-closed.
+        for p in [
+            "/fleet/posture",
+            "/fleet/posture/node-1",
+            "/fleet/history/node-1",
+            "/fleet/flapping/node-1",
+            "/attestation/status/node-1",
+            "/federation/reports/asset-1",
+        ] {
+            assert!(
+                is_posture_exempt(&Method::GET, p),
+                "{p} MUST be posture-exempt for GET (observability under LockedOut)"
+            );
+            assert!(
+                is_posture_exempt(&Method::HEAD, p),
+                "{p} MUST be posture-exempt for HEAD"
+            );
+            assert!(
+                !is_posture_exempt(&Method::POST, p),
+                "{p} must NOT be exempt for a write method"
+            );
+        }
+        // The identity-gated report-submit WRITE shares the /federation/reports/
+        // prefix with the exempt GET read — it MUST stay posture-gated.
+        assert!(
+            !is_posture_exempt(&Method::POST, "/federation/reports/submit"),
+            "the report-submit write must stay posture-gated"
+        );
+        // Still gated even for GET (not in the documented public-read-only set /
+        // intentionally denied under LockedOut): the campaign assignment feed and
+        // the fabric reads.
+        for p in [
+            "/fleet/campaigns/assignment/node-1",
+            "/fabric/state",
+            "/fabric/telemetry",
+        ] {
+            assert!(
+                !is_posture_exempt(&Method::GET, p),
+                "{p} must stay posture-gated even for GET"
+            );
         }
         // NOT EXEMPT: prefix-confusion guard — a near-miss must not ride in on a
-        // loose prefix, and a normal gated path stays gated.
+        // loose prefix, and a normal gated path stays gated (either method).
         for p in [
             "/consoleX",
             "/console-x",
             "/consol",
             "/con",
-            "/fleet/posture",
             "/attestation/register",
             "/",
         ] {
-            assert!(!is_posture_exempt(p), "{p} must NOT be posture-exempt");
+            assert!(
+                !is_posture_exempt(&Method::GET, p),
+                "{p} must NOT be posture-exempt (GET)"
+            );
+            assert!(
+                !is_posture_exempt(&Method::POST, p),
+                "{p} must NOT be posture-exempt (POST)"
+            );
         }
     }
 
