@@ -2,7 +2,16 @@
 //
 // ADR-0035 Stage 0a: the command-classification policy types, extracted verbatim
 // from the root crate's `src/gateway/policy.rs` (pure move — behaviour-identical).
-// A zero-dependency leaf; `kirra-verifier::gateway::policy` re-exports these.
+// `kirra-verifier::gateway::policy` re-exports these.
+//
+// ADR-0035 Stage 0b added two sibling modules (also pure moves): `cmd_vel` (the
+// kinematic cmd_vel gate) and `action_claim` (posture-aware action-claim
+// evaluation, the half the industrial layer consumes). The crate is no longer
+// zero-dependency: `action_claim` uses `kirra_core::FleetPosture` and the claim
+// payload is serde-deserialized — but it stays a lean leaf (no service/DB deps).
+
+pub mod action_claim;
+pub mod cmd_vel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationalCommand {

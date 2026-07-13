@@ -2,7 +2,7 @@ pub mod canopen;
 pub mod dnp3;
 pub mod ethernet_ip;
 
-use crate::gateway::policy::OperationalCommand;
+use kirra_policy_types::OperationalCommand;
 
 // ---------------------------------------------------------------------------
 // IndustrialAdapter — one trait for every binary-frame industrial protocol

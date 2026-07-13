@@ -1,0 +1,35 @@
+# crates/kirra-industrial/Cargo.toml
+#
+# ADR-0035 Stage 1 — the industrial-protocol adapter layer, extracted from the
+# heavy `kirra-verifier` root crate. Contents (pure moves from the root):
+#   - `protocol_adapter` — IndustrialProtocol / IndustrialEvent, the unified +
+#                          per-protocol industrial-event → action-claim mapping
+#                          and posture evaluation, freshness classification, and
+#                          the replay-key slug (QW2).
+#   - `adapters`         — the per-fieldbus decoders + bounds: the
+#                          `IndustrialAdapter` trait, ScalarType/BoundSpec,
+#                          and the CANopen / DNP3 / EtherNet-IP adapters
+#                          (each with its own env-configured magnitude bounds).
+#
+# A clean leaf on the layered DAG: depends only on `kirra-policy-types` (for
+# `OperationalCommand` + the `action_claim` cluster, both landed in Stage 0) and
+# `kirra-core` (for the shared `FleetPosture`), plus serde. No service/DB deps.
+# `kirra-verifier`'s `protocol_adapter` and `adapters` modules are now `pub use`
+# re-export shims, so every existing `kirra_verifier::protocol_adapter::*` /
+# `kirra_verifier::adapters::*` path resolves unchanged.
+
+[package]
+name = "kirra-industrial"
+version = "0.1.0"
+edition = "2021"
+description = "Industrial-protocol adapter layer for Kirra — CANopen / DNP3 / EtherNet-IP fieldbus decoders + bounds and the posture-gated industrial-event evaluation. Depends only on kirra-policy-types + kirra-core; no service/DB deps."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+kirra-core = { path = "../kirra-core" }
+kirra-policy-types = { path = "../kirra-policy-types" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"

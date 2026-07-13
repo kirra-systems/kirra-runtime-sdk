@@ -9,18 +9,30 @@
 #   - `classify_http_command`  — the pure, total method+path → OperationalCommand
 #                                classifier (the SG-006/#69 fail-closed allowlist)
 #
-# Zero dependencies (std only): a genuine leaf. `kirra-verifier` depends on this
-# crate and its `gateway::policy` module is now a `pub use` re-export shim, so
-# every existing `crate::gateway::policy::{OperationalCommand, classify_http_command}`
-# path (posture gate, industrial adapters, tests) resolves unchanged.
+# ADR-0035 Stage 0b additionally moved here (pure moves, behaviour-identical):
+#   - `cmd_vel`      — CmdVel / CmdVelLimits / DEFAULT_CMD_VEL_LIMITS /
+#                      validate_cmd_vel (finite + per-axis-bounded cmd_vel gate)
+#   - `action_claim` — ActionClaim / ActionDecision / evaluate_action_claim
+#                      (the posture-aware action-claim evaluation the industrial
+#                      layer consumes; depends on `kirra_core::FleetPosture`)
+# `kirra-verifier`'s `gateway::cmd_vel` and the claim cluster in
+# `src/action_filter.rs` are now `pub use` re-export shims. The governor-trait-
+# generic `ActionFilter<C>` stays in the root crate (it needs the governor traits
+# still in `lib.rs`; their relocation is a later ADR-0035 stage).
+#
+# Deps: `kirra-core` (for the shared `FleetPosture`) + serde/serde_json (the
+# claim payload is wire-deserialized). Still a lean leaf — no service/DB deps.
 
 [package]
 name = "kirra-policy-types"
 version = "0.1.0"
 edition = "2021"
-description = "Command-classification policy types for Kirra — the doer-agnostic OperationalCommand enum and the pure HTTP method+path classifier (SG-006 fail-closed allowlist). No service/DB deps."
+description = "Command-classification policy types for Kirra — the doer-agnostic OperationalCommand enum, the pure HTTP method+path classifier (SG-006 fail-closed allowlist), the cmd_vel kinematic gate, and posture-aware action-claim evaluation. No service/DB deps."
 repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
 license-file = "../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
 [dependencies]
+kirra-core = { path = "../kirra-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
