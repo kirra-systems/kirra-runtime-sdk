@@ -234,9 +234,11 @@ def phase_c(bot, lines):
     try:
         bot.set_car_type(5)
         time.sleep(0.3)
-    except Exception as exc:  # noqa: BLE001 - record and continue; the sweep will show no motion
-        print(f"   (set_car_type(5) failed: {exc})")
-        lines.append(f"PHASE C: set_car_type(5) FAILED: {exc} — steering will not actuate")
+    except Exception as exc:  # noqa: BLE001 - without type 5 the servo can't move; abort the phase
+        print(f"   set_car_type(5) FAILED: {exc} — the servo will not actuate; skipping phase C.")
+        lines.append(f"PHASE C (steering↔angle): ABORTED — set_car_type(5) FAILED: {exc}")
+        lines.append("  (no sweep recorded; the AKM servo cannot actuate without car-type 5)")
+        return
 
     # Record the live centre default IF the getter is implemented. On this image
     # get_akm_default_angle returns the sentinel -1 (unimplemented) even with the

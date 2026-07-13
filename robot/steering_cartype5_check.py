@@ -50,6 +50,15 @@ def main():
         sys.exit(f"Could not open {port}: {exc} (device busy = consumer still holds it)")
 
     try:
+        # Board reads (get_*) only reflect MCU report frames once the vendor
+        # receive thread + auto-report are running; without them a getter can
+        # read stale/None. Start them before any read so the -1 observation is
+        # a real board response, not an unstarted-thread artifact.
+        bot.create_receive_threading()
+        time.sleep(0.1)
+        bot.set_auto_report_state(True)
+        time.sleep(0.2)
+
         # -1 here is the unimplemented-getter sentinel on this image, NOT an
         # AKM-inactive flag — the servo actuates under type 5 regardless.
         print("AKM default angle BEFORE set_car_type(5):", bot.get_akm_default_angle())
