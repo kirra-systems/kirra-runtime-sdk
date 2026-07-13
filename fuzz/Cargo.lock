@@ -885,6 +885,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-industrial"
+version = "0.1.0"
+dependencies = [
+ "kirra-core",
+ "kirra-policy-types",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "kirra-policy-types"
 version = "0.1.0"
 dependencies = [
@@ -922,6 +933,7 @@ dependencies = [
  "kirra-contract-channel",
  "kirra-core",
  "kirra-fleet-types",
+ "kirra-industrial",
  "kirra-policy-types",
  "kirra-release-token",
  "parko-core",

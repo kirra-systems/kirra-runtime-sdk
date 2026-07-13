@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crate::gateway::policy::OperationalCommand;
+use kirra_policy_types::OperationalCommand;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
