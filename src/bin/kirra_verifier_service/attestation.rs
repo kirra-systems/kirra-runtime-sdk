@@ -135,11 +135,16 @@ pub(crate) async fn issue_challenge(
     // about to sign. 429 (not 503): 503 is posture denial; a client must be able
     // to tell "rate limited" from "fleet not Nominal".
     let now = now_ms();
+    // Recover a poisoned lock rather than panic (the codebase idiom, e.g.
+    // `store_handle.rs`): a prior holder panicking must not turn this
+    // unauthenticated endpoint into a 500 panic path. The critical section is a
+    // hashmap lookup + float ops with no panic site, so the recovered limiter
+    // state is consistent and continues to rate-limit.
     let admitted = svc
         .app
         .challenge_rate_limiter
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .allow(&node_id, now);
     if !admitted {
         return (
