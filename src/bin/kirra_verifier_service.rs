@@ -1827,5 +1827,9 @@ mod federation_submit_e2e_tests;
 mod industrial_replay_handler_tests;
 
 #[cfg(test)]
+#[path = "kirra_verifier_service/industrial_dedicated_bounds_tests.rs"]
+mod industrial_dedicated_bounds_tests;
+
+#[cfg(test)]
 #[path = "kirra_verifier_service/store_offload_guard.rs"]
 mod store_offload_guard;
