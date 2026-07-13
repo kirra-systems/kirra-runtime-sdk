@@ -46,11 +46,26 @@ impl TrustPropagation {
     }
 }
 
+/// Bug 7b — a posture is STALE once its `computed_at_ms` is older than `ttl_ms`.
+/// `saturating_sub` makes a future timestamp (clock skew) read as fresh rather
+/// than underflow-panic; a fed asset's freshness is refreshed far faster than
+/// the TTL under healthy operation, so a future stamp is benign.
+fn is_posture_stale(computed_at_ms: u64, now_ms: u64, ttl_ms: u64) -> bool {
+    now_ms.saturating_sub(computed_at_ms) > ttl_ms
+}
+
 pub struct FabricRouter {
     governors: DashMap<String, AssetGovernor>,
     assets: DashMap<String, FabricAsset>,
     asset_postures: DashMap<String, AssetPosture>,
     fabric_generation: AtomicU64,
+    /// Bug 7b — per-asset fail-closed freshness contracts. An asset present here
+    /// (a FED asset — the verifier→fabric feed calls `set_asset_freshness`) has
+    /// its posture treated as `LockedOut` once `computed_at_ms` is older than the
+    /// mapped TTL, so a wedged/stalled feed can no longer admit fabric commands
+    /// against a frozen posture. An UNFED peer is absent here and is never
+    /// staleness-checked — its interim Degraded seed must not be bricked.
+    fed_asset_freshness: DashMap<String, u64>,
 }
 
 impl FabricRouter {
@@ -60,6 +75,7 @@ impl FabricRouter {
             assets: DashMap::new(),
             asset_postures: DashMap::new(),
             fabric_generation: AtomicU64::new(1),
+            fed_asset_freshness: DashMap::new(),
         }
     }
 
@@ -127,13 +143,59 @@ impl FabricRouter {
             .get(asset_id)
             .ok_or_else(|| FabricError::AssetNotFound(asset_id.to_string()))?;
 
-        let posture = self
-            .asset_postures
-            .get(asset_id)
-            .map(|p| p.posture)
-            .unwrap_or(FleetPosture::LockedOut); // fail-closed if posture unknown
+        // Bug 7b: apply the fail-closed freshness guard (a fed asset with a
+        // stale posture reads LockedOut). `now_ms()` is read here to match the
+        // fabric router's established internal-clock idiom (`fabric_state`,
+        // `update_asset_posture_and_propagate`); the pure staleness logic is
+        // unit-tested through `effective_posture_for` with an injected `now_ms`.
+        let posture = self.effective_posture_for(asset_id, now_ms());
 
         Ok(governor.evaluate_command(cmd, &posture, effective_perception_cap))
+    }
+
+    /// The posture the governor must gate on, applying the Bug 7b fail-closed
+    /// freshness guard. For an asset under a freshness CONTRACT (a FED asset —
+    /// the verifier→fabric feed calls [`set_asset_freshness`](Self::set_asset_freshness)),
+    /// a posture whose `computed_at_ms` is older than the contract TTL reads as
+    /// `LockedOut`, exactly as the verifier's own actuator gate fail-closes on a
+    /// stale posture cache: a wedged/stalled feed — or a stale upstream cache the
+    /// feed stops mirroring — can no longer admit fabric commands against a
+    /// frozen `Nominal`. An asset with NO contract (an unfed peer) is never
+    /// staleness-checked. An unknown asset is `LockedOut` (fail-closed).
+    fn effective_posture_for(&self, asset_id: &str, now_ms: u64) -> FleetPosture {
+        let Some(p) = self.asset_postures.get(asset_id) else {
+            return FleetPosture::LockedOut; // unknown → fail-closed
+        };
+        if let Some(ttl) = self.fed_asset_freshness.get(asset_id) {
+            if is_posture_stale(p.computed_at_ms, now_ms, *ttl) {
+                return FleetPosture::LockedOut;
+            }
+        }
+        p.posture
+    }
+
+    /// Register a fail-closed freshness contract for a FED asset (Bug 7b): its
+    /// posture reads `LockedOut` once `computed_at_ms` is older than `ttl_ms`.
+    /// Only fed assets (the single verifier→fabric local asset) get this; unfed
+    /// peers are never staleness-checked. Idempotent — safe to call on both the
+    /// Active-start and standby→promotion wiring paths.
+    pub fn set_asset_freshness(&self, asset_id: &str, ttl_ms: u64) {
+        self.fed_asset_freshness
+            .insert(asset_id.to_string(), ttl_ms);
+    }
+
+    /// Bug 7b freshness heartbeat: refresh ONLY `computed_at_ms` on the existing
+    /// posture record — no generation bump, no propagation pass. The
+    /// verifier→fabric feed calls this on every sync whose posture VALUE is
+    /// unchanged, so a HEALTHY feed keeps a fed asset fresh (defeating the
+    /// staleness guard) without the churn a full `update_asset_posture` would
+    /// cause. A wedged feed stops reaching this call (or its stale-cache guard
+    /// returns first), so `computed_at_ms` freezes and the asset goes stale →
+    /// `LockedOut`. No-op for an unknown asset.
+    pub fn touch_asset_freshness(&self, asset_id: &str, now_ms: u64) {
+        if let Some(mut p) = self.asset_postures.get_mut(asset_id) {
+            p.computed_at_ms = now_ms;
+        }
     }
 
     /// Low-level posture write. Used by:
@@ -494,6 +556,108 @@ mod tests {
         let router = FabricRouter::new();
         let result = router.route_command("nonexistent", &safe_cmd(), None);
         assert!(matches!(result, Err(FabricError::AssetNotFound(_))));
+    }
+
+    // --- Bug 7b: fail-closed freshness guard on the fed local asset ---
+
+    #[test]
+    fn is_posture_stale_flags_only_past_ttl_and_never_underflows() {
+        assert!(
+            !is_posture_stale(1_000, 1_500, 1_000),
+            "within TTL is fresh"
+        );
+        assert!(
+            !is_posture_stale(1_000, 2_000, 1_000),
+            "exactly at TTL is fresh"
+        );
+        assert!(is_posture_stale(1_000, 2_001, 1_000), "past TTL is stale");
+        // A future timestamp (clock skew) must read as fresh, not underflow-panic.
+        assert!(
+            !is_posture_stale(5_000, 1_000, 1_000),
+            "future stamp must saturate to fresh"
+        );
+    }
+
+    #[test]
+    fn fed_asset_reads_locked_out_once_stale() {
+        let router = FabricRouter::new();
+        router.register_asset(&make_asset(
+            "local",
+            AssetType::Robot,
+            KinematicProfileType::RobotNominal,
+        ));
+        // A live feed lifted it to Nominal at t=1000, under a 5s freshness contract.
+        router.set_asset_freshness("local", 5_000);
+        let mut p = nominal_posture("local");
+        p.computed_at_ms = 1_000;
+        router.update_asset_posture("local", p);
+
+        // Within TTL → the stored Nominal is served.
+        assert_eq!(
+            router.effective_posture_for("local", 3_000),
+            FleetPosture::Nominal
+        );
+        // Past TTL (now 7000, stamp 1000, TTL 5000) → fail-closed LockedOut.
+        assert_eq!(
+            router.effective_posture_for("local", 7_000),
+            FleetPosture::LockedOut,
+            "a fed asset whose feed stopped advancing must fail closed, not serve stale Nominal"
+        );
+    }
+
+    #[test]
+    fn unfed_peer_is_never_staleness_checked() {
+        let router = FabricRouter::new();
+        router.register_asset(&make_asset(
+            "peer",
+            AssetType::Robot,
+            KinematicProfileType::RobotNominal,
+        ));
+        // No `set_asset_freshness` → the peer carries no freshness contract.
+        let mut p = nominal_posture("peer");
+        p.computed_at_ms = 1_000;
+        router.update_asset_posture("peer", p);
+        assert_eq!(
+            router.effective_posture_for("peer", 10_000_000),
+            FleetPosture::Nominal,
+            "an unfed peer must never be staleness-bricked (it only degrades via propagation)"
+        );
+    }
+
+    #[test]
+    fn touch_freshness_advances_timestamp_without_generation_churn() {
+        let router = FabricRouter::new();
+        router.register_asset(&make_asset(
+            "local",
+            AssetType::Robot,
+            KinematicProfileType::RobotNominal,
+        ));
+        let mut p = nominal_posture("local");
+        p.computed_at_ms = 1_000;
+        router.update_asset_posture("local", p);
+        let gen_before = router.fabric_generation.load(Ordering::SeqCst);
+
+        router.touch_asset_freshness("local", 9_999);
+
+        assert_eq!(
+            router.asset_posture("local").unwrap().computed_at_ms,
+            9_999,
+            "a freshness heartbeat must refresh computed_at_ms"
+        );
+        assert_eq!(
+            router.fabric_generation.load(Ordering::SeqCst),
+            gen_before,
+            "a freshness heartbeat must NOT bump the fabric generation (no churn)"
+        );
+    }
+
+    #[test]
+    fn unknown_asset_effective_posture_is_locked_out() {
+        let router = FabricRouter::new();
+        assert_eq!(
+            router.effective_posture_for("nope", 1_000),
+            FleetPosture::LockedOut
+        );
     }
 
     #[test]

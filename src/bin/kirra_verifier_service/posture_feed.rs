@@ -88,6 +88,20 @@ pub(crate) fn spawn_local_asset_posture_feed(svc: Arc<ServiceState>) {
     // `posture_cache`, not the fabric asset posture), so we pin exactly the
     // affected local asset to LockedOut rather than forcing the whole fleet
     // LockedOut. See `force_local_asset_lockedout`.
+    //
+    // Bug 7b: register a fail-closed FRESHNESS contract for the fed local asset,
+    // so `route_command` reads it as LockedOut once its posture goes stale — the
+    // fabric path then inherits the same staleness fail-close the verifier's own
+    // gate applies to `posture_cache`. This closes the STALL/stale-cache gap the
+    // supervisor (which only catches panics/returns) cannot: a healthy feed
+    // heartbeats `computed_at_ms` on every sync (below), so the asset only goes
+    // stale when the feed genuinely stops advancing OR the upstream cache itself
+    // is stale (the feed then stops mirroring). TTL = POSTURE_CACHE_TTL_MS, the
+    // same freshness the verifier's own posture cache carries (the feed is woken
+    // at least every POSTURE_REFRESH_INTERVAL_MS = TTL/2).
+    svc.fabric_router
+        .set_asset_freshness(&asset_id, POSTURE_CACHE_TTL_MS);
+
     let escalate: kirra_verifier::supervisor::Escalation = {
         let svc = Arc::clone(&svc);
         let asset_id = asset_id.clone();
@@ -428,7 +442,14 @@ pub(crate) fn sync_local_asset_posture(svc: &ServiceState, asset_id: &str) {
     let current = svc.fabric_router.asset_posture(asset_id);
     if let Some(ref existing) = current {
         if existing.posture == fleet {
-            return; // unchanged — nothing to do
+            // Bug 7b: unchanged posture VALUE. Do NOT bump the generation or run
+            // a propagation pass (avoid churn), but DO refresh the freshness
+            // heartbeat so a healthy feed keeps a fed asset out of the staleness
+            // guard. The stale/empty-cache guards above return BEFORE here, so a
+            // stale upstream cache correctly lets `computed_at_ms` freeze → the
+            // fed asset goes stale → LockedOut in `route_command`.
+            svc.fabric_router.touch_asset_freshness(asset_id, now);
+            return;
         }
     }
     let next_gen = current
