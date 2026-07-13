@@ -39,6 +39,29 @@ From `robot/motor_channel_probe_results.txt` (PR #911 probe, elevated):
   four pulses.
 - Encoder cross-check agreed with the visual on both driven channels.
 
+### 2a. Steering requires car-type 5 (bench-confirmed, PR #913 follow-up)
+
+The first calibration run saw **no servo motion** during the Phase C steering
+sweep. Cause (confirmed on the bench, `r2_drive_calibration_results.txt`): the
+AKM steering servo **only actuates when the board is in car-type 5**. Under the
+default cross-labeled X3 image (car-type 1) `set_akm_steering_angle` is silently
+ignored. After `set_car_type(5)` the front wheels swing as commanded.
+
+- This is **not** a Path-B problem — it's the reason Path B works. Type 5 is
+  known to *break* `set_car_motion` drive (`PLATFORM_R2_PENDING.md`), but Path B
+  **never uses `set_car_motion`**; it drives with `set_motor`, which is car-type
+  **independent** (the Phase A drive sweep ran fine without ever touching
+  car-type). So the Path-B trio is: `set_car_type(5)` (servo on) +
+  `set_motor(+v,0,0,+v)` (drive, any type) + `set_akm_steering_angle(cmd)` (steer).
+- `get_akm_default_angle()` returns the sentinel **−1** on this image **even with
+  the servo actuating** — it is an unimplemented getter, **not** an
+  "AKM-inactive" flag. The physical centre trim must therefore be read from the
+  protractor sweep, never from this call.
+- `set_car_type` is **RAM-volatile** (reverts on reboot). Because the *currently
+  live* consumer still uses `set_car_motion`, any bench tool that sets type 5
+  must **restore type 1 on exit** (or reboot) so the live drive path is not left
+  broken. The calibration script does this in its `finally`.
+
 ## 3. The drive stack (three layers)
 
 ```
@@ -95,7 +118,9 @@ guessed:
    is physically straight. The library initialises this default to **100**;
    `PLATFORM_R2_PENDING.md` earlier noted the `[60,120]` **midpoint (90)** — both
    are provisional. The physical straight-ahead centre is the value MEASURED here
-   (read the live value with `get_akm_default_angle`), not assumed.
+   from the protractor sweep — **not** `get_akm_default_angle`, which returns the
+   sentinel **−1** (unimplemented) on this image even with the servo actuating
+   (see §2a).
 4. **Max road-wheel angle at full lock** → `δ_max`.
 5. **Rear track `t`** — only if the Ackermann rear differential (§4) is chosen.
 6. **Wheelbase `L`** ≈0.229 m — re-confirm on this platform.
@@ -115,6 +140,12 @@ but in our code.** It does NOT relax the safety architecture:
   the Ackermann pair `set_motor(pwm,0,0,pwm)` + `set_akm_steering_angle(cmd)`.
   The translation runs **after** verify — the same place the X3 firmware mixing
   runs after verify. The token still gates the enforced bytes.
+- **The consumer must set car-type 5 once at init** (§2a) so the AKM servo
+  actuates, and it MUST NOT call `set_car_motion` thereafter (type 5 breaks it —
+  which is fine, Path B does not use it). This replaces the current
+  `KIRRA_EXPECTED_CAR_TYPE` type-1 assertion for the R2 platform. Because type 5
+  is RAM-volatile, the consumer re-asserts it on every start (it does not rely on
+  a persisted board setting).
 - **`safe_stop` becomes** `set_motor(0,0,0,0)` **+** `set_akm_steering_angle(0)`
   (replacing `set_car_motion(0,0,0)` at `:160`), preserving SS-002 stop-on-fault.
 - **Fail-closed at the last hop**: any non-finite `(v, ω)` or `δ`, a `v=0,ω≠0`
@@ -135,6 +166,9 @@ measured and §6 re-validated.
 # Inputs: v (m/s), omega (rad/s) — ALREADY governed/bounded by KIRRA upstream.
 # Calibrations (measured, from the r2 profile): L, V_PER_PWM, K, delta_max,
 # center_trim, PWM_MAX.
+# ONCE at consumer init (NOT per command): bot.set_car_type(5)  # enables the AKM
+#   servo (§2a); drive via set_motor is car-type independent. Never call
+#   set_car_motion after this.
 def r2_ackermann_last_hop(v, omega):
     if not (isfinite(v) and isfinite(omega)):     return mrc_stop()
     if abs(v) <= STOP_EPS and abs(omega) > W_EPS: return mrc_stop()  # not Ackermann-achievable

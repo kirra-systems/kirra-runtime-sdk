@@ -1,0 +1,87 @@
+R2 DRIVE CALIBRATION RESULTS — Path-B Step 2 (measured, not invented)
+======================================================================
+
+Provenance: robot/r2_drive_calibration_elevated.py, run ELEVATED on the Yahboom
+R2 (Jetson Orin, hostname `yahboom`, cross-labeled X3 image / car-type 1).
+Channel map assumed (robot/motor_channel_probe_results.txt, PR #911):
+  set_motor s1=M1=REAR-LEFT(+fwd), s4=M4=REAR-RIGHT(+fwd); steering on AKM path.
+These feed the §5 gaps in docs/hardware/R2_PATH_B_ACKERMANN_DRIVE.md.
+
+STATUS: PARTIAL. Phase A captured in full; Phase B partial (ticks/rev only, no
+diameter); Phase C's servo-actuation MECHANISM confirmed but its protractor
+angles not yet measured; Phase D not measured. The floor-blocking gaps that
+remain are called out at the bottom.
+
+------------------------------------------------------------------
+PHASE A (PWM↔speed): both rear wheels driven together (M1=RL, M4=RR = +PWM)
+------------------------------------------------------------------
+  hold_per_rung_s = 1.5   (dt≈1.506 s each)
+
+  pwm   d_m1(ticks)  d_m4(ticks)  ticks/s_m1  ticks/s_m4  L/R_ratio(m1/m4)
+  15    892          1240         592.2       823.3       0.719
+  20    1222         1721         811.4       1142.8      0.710
+  25    1612         2242         1070.3      1488.6      0.719
+  30    2076         2853         1378.5      1894.4      0.728
+  35    2631         3479         1747.0      2310.0      0.756
+  40    4085         4115         2712.3      2732.2      0.993   <-- ANOMALOUS
+
+  Derived (least-squares intent, endpoints 15..35 — the +40 row is excluded as
+  a suspected encoder glitch / stiction release, see note):
+    M4 (rear-right): ticks/s ≈ 74.3 * PWM - 293   (deadband ~PWM 4)
+    M1 (rear-left):  ticks/s ≈ 57.7 * PWM - 274   (deadband ~PWM 5)
+    left/right slope ratio ≈ 0.78
+
+  NOTE: set_motor bypasses the firmware speed PID — this is an OPEN-LOOP map.
+  NOTE: the left rear reads ~28% fewer ticks/s than the right at equal PWM,
+        consistently across 15..35. The +40 row (M1 jumps 2631->4085 while M4
+        rises proportionately, ratio snaps to 0.99) is anomalous — discard it;
+        do not operate there.
+  CAVEAT: this ticks/s ratio conflates a TRUE speed mismatch with any difference
+        in the two encoders' ticks/rev. Only RL's ticks/rev was measured (Phase
+        B) — RR's is unknown, so the "28%" cannot yet be split into real drift
+        vs encoder-scale. Measure RR ticks/rev to resolve it. Either way, equal
+        PWM is NOT guaranteed straight → informs the §9 open-loop-vs-closed-loop
+        decision (v0 needs per-wheel trim or encoder speed-matching, not naive
+        equal PWM).
+
+------------------------------------------------------------------
+PHASE B (encoder scale): wheel=RL
+------------------------------------------------------------------
+  full_turns          = 2.0
+  delta_ticks (RL/m1) = 1669
+  ticks_per_rev       = 834.5   (single 2-turn sample)
+  wheel_diameter_m    = (NOT measured — m/s conversion pending)
+  => with a measured diameter D: m_per_tick = pi*D / 834.5, then Phase A ticks/s
+     becomes m/s and yields V_PER_PWM. STILL OPEN: RR ticks/rev + diameter.
+
+------------------------------------------------------------------
+PHASE C (steering↔angle): MECHANISM CONFIRMED, angles NOT yet measured
+------------------------------------------------------------------
+  REQUIRES car-type 5. The first run (type 1, default X3 image) saw NO servo
+  motion. After set_car_type(5) the front wheels swing as commanded — confirmed
+  on the bench (steering_cartype5_check.py). set_motor drive is car-type
+  independent, so type 5 is enabled only for the servo and restored to type 1 on
+  exit (the live set_car_motion consumer needs it). See §2a of the proposal.
+
+  get_akm_default_angle() = -1 BEFORE and AFTER set_car_type(5), WITH the servo
+  actuating → the getter is UNIMPLEMENTED on this image (a sentinel), NOT an
+  "AKM inactive" flag. The centre trim must come from the protractor sweep.
+
+  STILL OPEN (floor-blocking for turns): road-wheel angle at each command
+  [-45..+45] → K (command-units per radian), linearity, delta_max, and the
+  LEFT/RIGHT sign check (does a NEGATIVE command steer LEFT?).
+
+------------------------------------------------------------------
+PHASE D (geometry): NOT measured
+------------------------------------------------------------------
+  wheelbase_L_m  = (not measured; ~0.229 expected, re-confirm)
+  rear_track_t_m = (not measured; only needed if the Ackermann rear differential
+                    is chosen over equal-PWM v0)
+
+==================================================================
+REMAINING FLOOR-BLOCKING CAPTURES (next bench pass, elevated):
+  1. Phase B on RR (+ wheel diameter) — closes m/s AND resolves the real-vs-
+     encoder-scale question behind the ~28% L/R imbalance.
+  2. Phase C protractor sweep under car-type 5 — K, delta_max, sign check.
+  3. Phase D — tape-measured L and (if differential chosen) t.
+==================================================================

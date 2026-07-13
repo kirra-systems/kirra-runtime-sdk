@@ -20,10 +20,13 @@ Four phases (each optional; skip any you cannot do this bench):
   B  encoder scale                — hand-rotate ONE rear wheel a known number of
                                      turns → ticks/rev; with the measured wheel
                                      diameter this converts ticks/s → m/s.
-  C  steering command ↔ road-wheel angle — sweep set_akm_steering_angle over
-                                     [-45..+45]; operator reads the physical
-                                     road-wheel angle per command → K, linearity,
-                                     δ_max, sign check; records the live centre.
+  C  steering command ↔ road-wheel angle — enables car-type 5 (REQUIRED for the
+                                     AKM servo to actuate — type 1 ignores it),
+                                     sweeps set_akm_steering_angle over [-45..+45];
+                                     operator reads the physical road-wheel angle
+                                     per command → K, linearity, δ_max, sign check.
+                                     Restores car-type 1 on exit (the live
+                                     set_car_motion consumer needs it).
   D  geometry                      — tape-measured wheelbase L (re-confirm ~0.229 m)
                                      and rear track t.
 
@@ -221,15 +224,34 @@ def phase_c(bot, lines):
         lines.append("PHASE C (steering↔angle): SKIPPED")
         return
 
-    # Record the live centre default (the physical straight-ahead trim).
+    # BENCH FINDING (PR #913 follow-up): the AKM steering servo only actuates when
+    # the board is in car-type 5. The default X3 image (type 1) silently ignores
+    # set_akm_steering_angle — which is why the first calibration run saw no servo
+    # motion. set_motor drive is car-type INDEPENDENT, so enabling type 5 here does
+    # not disturb Phase A. It IS restored to type 1 in main()'s finally, because the
+    # currently-live consumer still uses set_car_motion (which type 5 breaks).
+    print("   Enabling car-type 5 (Ackermann) so the AKM servo actuates ...")
+    try:
+        bot.set_car_type(5)
+        time.sleep(0.3)
+    except Exception as exc:  # noqa: BLE001 - record and continue; the sweep will show no motion
+        print(f"   (set_car_type(5) failed: {exc})")
+        lines.append(f"PHASE C: set_car_type(5) FAILED: {exc} — steering will not actuate")
+
+    # Record the live centre default IF the getter is implemented. On this image
+    # get_akm_default_angle returns the sentinel -1 (unimplemented) even with the
+    # servo actuating — so -1 means "not readable", NOT "steering inactive"; the
+    # physical centre trim is established from the sweep below, not this value.
     live_center = None
     try:
         live_center = bot.get_akm_default_angle()
     except Exception as exc:  # noqa: BLE001 - not fatal; just record that we couldn't
         print(f"   (get_akm_default_angle unavailable: {exc})")
+    center_note = " (-1 = getter unimplemented on this image; use the sweep)" if live_center == -1 else ""
     lines.append("PHASE C (steering↔angle): set_akm_steering_angle sweep, command units [-45,+45], neg=left")
-    lines.append(f"  live_default_angle (get_akm_default_angle) = {live_center}")
-    print(f"   live steering default (centre trim) = {live_center}")
+    lines.append("  REQUIRES car-type 5 (set_car_type(5)); type 1 ignores the AKM servo.")
+    lines.append(f"  live_default_angle (get_akm_default_angle) = {live_center}{center_note}")
+    print(f"   live steering default (centre trim) = {live_center}{center_note}")
 
     cmds = _parse_int_list(os.environ.get("CALIB_STEER_CMDS", DEFAULT_STEER_CMDS), "CALIB_STEER_CMDS")
     over = [c for c in cmds if abs(c) > 45]
@@ -355,7 +377,11 @@ def main():
             bot.set_akm_steering_angle(0)
         except Exception:  # noqa: BLE001 - best-effort centre
             pass
-        print("\n\nInterrupted - motors stopped, steering centred.")
+        try:
+            bot.set_car_type(1)  # restore X3/type-1 so the live set_car_motion consumer still drives
+        except Exception:  # noqa: BLE001 - best-effort restore (reboot also restores it)
+            pass
+        print("\n\nInterrupted - motors stopped, steering centred, car-type restored to 1.")
         if lines:
             _write_results(lines)  # persist whatever was captured before the interrupt
     finally:
@@ -367,7 +393,14 @@ def main():
             bot.set_akm_steering_angle(0)
         except Exception:  # noqa: BLE001 - best-effort centre
             pass
-        print("\nAll channels commanded to 0, steering centred. Calibration complete.")
+        # Phase C may have set car-type 5 for the servo; restore type 1 so the live
+        # set_car_motion consumer still drives until Path B is wired (RAM-volatile,
+        # so a reboot also restores it — this just avoids requiring one).
+        try:
+            bot.set_car_type(1)
+        except Exception:  # noqa: BLE001 - best-effort restore
+            pass
+        print("\nAll channels commanded to 0, steering centred, car-type restored to 1. Calibration complete.")
 
 
 if __name__ == "__main__":
