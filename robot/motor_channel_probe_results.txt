@@ -65,9 +65,11 @@ Values still to CAPTURE on the bench (do NOT invent — see the drive proposal,
 docs/hardware/R2_PATH_B_ACKERMANN_DRIVE.md):
   - PWM ↔ ground-speed calibration (map set_motor % → m/s).
   - Road-wheel angle ↔ servo command-units (set_akm_steering_angle is [-45,+45]
-    command units about a 90 default; command units ≠ road-wheel degrees).
-  - Steering center trim (set_akm_default_angle) and max road-wheel angle at
-    full lock.
+    command units about the servo centre default; command units ≠ road-wheel
+    degrees).
+  - Steering center trim (set_akm_default_angle; library-initialised default 100,
+    range [60,120] — the physical centre is the measured value) and max
+    road-wheel angle at full lock.
   - Rear track width (only if the Ackermann rear-wheel speed differential is
     implemented; equal-PWM v0 does not need it).
   - Wheelbase L: ≈0.229 m measured previously (PLATFORM_R2_PENDING.md), to be

@@ -87,11 +87,15 @@ guessed:
    *Without this the drive cannot honor a `m/s` command* — only a normalized
    fraction of full PWM. Floor-blocking.
 2. **Road-wheel angle ↔ servo command-units.** `set_akm_steering_angle` is
-   `[-45,+45]` **command units** about a 90 default — command units ≠ road-wheel
-   degrees. Measure road-wheel angle (protractor) at several commands → `K`
-   (command-units per radian) + linearity. Floor-blocking for turns.
-3. **Steering centre trim** (`set_akm_default_angle`, `[60,120]`, default 100) so
-   `δ = 0` is physically straight.
+   `[-45,+45]` **command units** about the servo centre default (see 3) —
+   command units ≠ road-wheel degrees. Measure road-wheel angle (protractor) at
+   several commands → `K` (command-units per radian) + linearity. Floor-blocking
+   for turns.
+3. **Steering centre trim** (`set_akm_default_angle`, range `[60,120]`) so `δ = 0`
+   is physically straight. The library initialises this default to **100**;
+   `PLATFORM_R2_PENDING.md` earlier noted the `[60,120]` **midpoint (90)** — both
+   are provisional. The physical straight-ahead centre is the value MEASURED here
+   (read the live value with `get_akm_default_angle`), not assumed.
 4. **Max road-wheel angle at full lock** → `δ_max`.
 5. **Rear track `t`** — only if the Ackermann rear differential (§4) is chosen.
 6. **Wheelbase `L`** ≈0.229 m — re-confirm on this platform.
