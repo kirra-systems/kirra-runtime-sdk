@@ -9,11 +9,14 @@
 // legitimate node can still attest with the same outstanding nonce.
 // ---------------------------------------------------------------------------
 
-use super::{register_node, verify_attestation, RegisterNodeRequest, VerifyAttestationRequest};
+use super::{
+    issue_challenge, register_node, verify_attestation, RegisterNodeRequest,
+    VerifyAttestationRequest,
+};
 
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -80,6 +83,43 @@ fn svc_with_registered_node(ak_pem: String) -> Arc<ServiceState> {
         perception_monitor_enabled: false,
         last_actuator_verdict: kirra_verifier::posture_cache::empty_last_verdict_cell(),
     })
+}
+
+/// Bug 3: the unauthenticated challenge endpoint rate-limits a per-node flood.
+/// The per-node burst is admitted (200), then the next immediate request is
+/// shed as 429 + `Retry-After` — bounding the CSPRNG/prune cost and defeating
+/// the nonce-churn DoS where each new challenge overwrites the victim's nonce.
+#[tokio::test]
+async fn challenge_endpoint_rate_limits_a_per_node_flood() {
+    use kirra_verifier::challenge_rate_limit::CHALLENGE_PER_NODE_BURST;
+    // The challenge handler only checks Active + registered; a dummy AK is fine.
+    let svc = svc_with_registered_node("dummy-ak-pem".to_string());
+
+    for i in 0..CHALLENGE_PER_NODE_BURST {
+        let resp = issue_challenge(State(Arc::clone(&svc)), Path(NODE.to_string()))
+            .await
+            .into_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "burst request {i} must be admitted"
+        );
+    }
+    let limited = issue_challenge(State(Arc::clone(&svc)), Path(NODE.to_string()))
+        .await
+        .into_response();
+    assert_eq!(
+        limited.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "the request past the per-node burst must be rate-limited"
+    );
+    assert!(
+        limited
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .is_some(),
+        "a 429 must advertise Retry-After"
+    );
 }
 
 async fn verify(svc: Arc<ServiceState>, nonce: u64, proof_hex: String) -> StatusCode {

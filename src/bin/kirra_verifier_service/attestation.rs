@@ -126,12 +126,38 @@ pub(crate) async fn issue_challenge(
         )
             .into_response();
     }
+    // Bug 3: rate-limit challenge issuance (per-node + global backstop) BEFORE
+    // the CSPRNG draw + pending-map prune. Placed AFTER the registered-node check
+    // so only real nodes get a per-node bucket (the map is bounded by the
+    // registered set) and an unregistered-id flood stays a cheap 404. A flood on
+    // a registered victim is capped by its per-node bucket — defeating the
+    // nonce-churn DoS where each new challenge overwrites the nonce the victim is
+    // about to sign. 429 (not 503): 503 is posture denial; a client must be able
+    // to tell "rate limited" from "fleet not Nominal".
+    let now = now_ms();
+    let admitted = svc
+        .app
+        .challenge_rate_limiter
+        .lock()
+        .unwrap()
+        .allow(&node_id, now);
+    if !admitted {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(
+                axum::http::header::RETRY_AFTER,
+                kirra_verifier::challenge_rate_limit::CHALLENGE_RETRY_AFTER_SECS.to_string(),
+            )],
+            Json(json!({ "error": "challenge rate limit exceeded — retry" })),
+        )
+            .into_response();
+    }
     // #147: the challenge nonce comes from a CSPRNG (OsRng), NEVER the wall
     // clock. A `SystemTime`-derived nonce is predictable and can collide within
     // a single nanosecond; single-use + TTL + node-binding are enforced by the
     // challenge store and the verify-then-consume order in `verify_attestation`.
     let nonce = kirra_verifier::verifier::generate_challenge_nonce();
-    svc.app.issue_challenge(&node_id, nonce, now_ms());
+    svc.app.issue_challenge(&node_id, nonce, now);
     (
         StatusCode::OK,
         Json(json!({ "node_id": node_id, "nonce": nonce })),
