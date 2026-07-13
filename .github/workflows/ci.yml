@@ -883,7 +883,19 @@ jobs:
     # primary gating safety check.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      # Pin the toolchain to the repo's rust-toolchain.toml channel (1.94.1) WITH
+      # its declared components (rustfmt, clippy) up-front — do NOT rely on the
+      # bare `# stable` install. Otherwise the gating `cargo test` step (working
+      # in `parko/`, which walks up to the 1.94.1 pin) triggers rustup to install
+      # the ENTIRE 1.94.1 toolchain ON DEMAND mid-test; that path flaked with
+      # "recovering from a partially installed toolchain … conflict: bin/cargo-clippy"
+      # on a corrupted runner cache. Pre-installing the complete toolchain here
+      # (matching the "Test" job's pinned pattern) means cargo finds everything
+      # present and never takes the fragile on-demand-install path.
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.94.1"
+          components: rustfmt, clippy
       - name: Install ONNX Runtime v1.23.2 (cross-backend equivalence test)
         # The OpenVINO test suite includes a cross-backend equivalence
         # test (`ort_ov_output_equivalence_on_mnist`) that loads the SAME

@@ -2313,6 +2313,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-policy-types"
+version = "0.1.0"
+
+[[package]]
 name = "kirra-proposal-bench"
 version = "0.1.0"
 dependencies = [
@@ -2422,6 +2426,7 @@ dependencies = [
  "kirra-fleet-types",
  "kirra-inline-governor",
  "kirra-ota-installer",
+ "kirra-policy-types",
  "kirra-release-token",
  "parko-core",
  "parko-kirra",
