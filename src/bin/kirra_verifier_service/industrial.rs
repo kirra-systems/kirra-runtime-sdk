@@ -112,8 +112,12 @@ pub(crate) async fn evaluate_industrial_adapter(
     let protocol_name = format!("{:?}", req.protocol);
 
     // Replay/freshness gate (IEC 62443) — reject a stale/replayed message before
-    // evaluation. Key the per-source sequence by protocol:source_id.
-    let replay_key = format!("{protocol_name}:{}", req.source_id);
+    // evaluation. Key the per-source sequence by the CANONICAL protocol slug (NOT
+    // the `Debug` repr) so a source's sequence namespace is SHARED with the
+    // dedicated per-protocol endpoint (`replay_slug` is the single source of
+    // truth); otherwise the same physical source has two independent namespaces
+    // and a message replayed across endpoints is not detected.
+    let replay_key = format!("{}:{}", req.protocol.replay_slug(), req.source_id);
     if let Some(reason) = enforce_industrial_replay(
         &svc,
         &protocol_name,
@@ -234,7 +238,11 @@ pub(crate) async fn evaluate_ethernet_ip_adapter(
     };
 
     // Replay/freshness gate before evaluation.
-    let replay_key = format!("ethernet_ip:{}", msg.source_node);
+    let replay_key = format!(
+        "{}:{}",
+        IndustrialProtocol::EthernetIp.replay_slug(),
+        msg.source_node
+    );
     if let Some(reason) =
         enforce_industrial_replay(&svc, "ethernet_ip", &replay_key, sequence, timestamp_ms).await
     {
@@ -327,7 +335,11 @@ pub(crate) async fn evaluate_canopen_adapter(
     };
 
     // Replay/freshness gate before evaluation.
-    let replay_key = format!("canopen:{}", msg.source_node);
+    let replay_key = format!(
+        "{}:{}",
+        IndustrialProtocol::CanOpen.replay_slug(),
+        msg.source_node
+    );
     if let Some(reason) =
         enforce_industrial_replay(&svc, "canopen", &replay_key, sequence, timestamp_ms).await
     {
@@ -513,7 +525,11 @@ pub(crate) async fn evaluate_dnp3_adapter(
     };
 
     // Replay/freshness gate before evaluation.
-    let replay_key = format!("dnp3:{}", msg.source_node);
+    let replay_key = format!(
+        "{}:{}",
+        IndustrialProtocol::Dnp3.replay_slug(),
+        msg.source_node
+    );
     if let Some(reason) =
         enforce_industrial_replay(&svc, "dnp3", &replay_key, sequence, timestamp_ms).await
     {

@@ -14,6 +14,32 @@ pub enum IndustrialProtocol {
     Dnp3,
 }
 
+impl IndustrialProtocol {
+    /// Canonical lowercase slug for the replay-sequence namespace, SHARED by the
+    /// unified `/industrial/evaluate` path and the per-protocol dedicated endpoints
+    /// (`/industrial/{canopen,dnp3,ethernet-ip}/evaluate`). The replay key is
+    /// `"{slug}:{source}"`, so the SAME physical source maps to ONE sequence
+    /// namespace regardless of which endpoint carried the message — closing a
+    /// replay-protection split where the unified path keyed by the enum's `Debug`
+    /// repr (`CanOpen:`/`Dnp3:`) while the dedicated handlers used lowercase slugs
+    /// (`canopen:`/`dnp3:`), so a sequence advanced on one endpoint did not block a
+    /// replay on the other (IEC 62443 message-freshness).
+    ///
+    /// Explicit table — deliberately NOT derived from serde `rename_all`
+    /// (`snake_case` yields `can_open`/`opc_ua`, which do not match the deployed
+    /// `canopen`/`opcua` dedicated-endpoint keys).
+    #[must_use]
+    pub const fn replay_slug(&self) -> &'static str {
+        match self {
+            Self::Modbus => "modbus",
+            Self::OpcUa => "opcua",
+            Self::EthernetIp => "ethernet_ip",
+            Self::CanOpen => "canopen",
+            Self::Dnp3 => "dnp3",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct IndustrialEvent {
     pub protocol: IndustrialProtocol,
@@ -759,6 +785,26 @@ mod unified_tests {
         assert_eq!(
             r.denial_reason.as_deref(),
             Some("DNP3_ANALOG_OUTPUT_ENVELOPE_UNCONFIGURED")
+        );
+    }
+
+    /// Cursor QW2: the canonical replay slug must exactly match the strings the
+    /// dedicated per-protocol endpoints key their replay namespace by, so the
+    /// unified `/industrial/evaluate` path and the dedicated endpoints share ONE
+    /// sequence namespace per source. If a dedicated handler's key literal is ever
+    /// changed, this pin fails until `replay_slug` is updated in lock-step.
+    #[test]
+    fn replay_slug_matches_dedicated_endpoint_keys() {
+        assert_eq!(IndustrialProtocol::EthernetIp.replay_slug(), "ethernet_ip");
+        assert_eq!(IndustrialProtocol::CanOpen.replay_slug(), "canopen");
+        assert_eq!(IndustrialProtocol::Dnp3.replay_slug(), "dnp3");
+        assert_eq!(IndustrialProtocol::Modbus.replay_slug(), "modbus");
+        assert_eq!(IndustrialProtocol::OpcUa.replay_slug(), "opcua");
+        // The slug is NOT the serde/Debug form — that is the whole point (Debug
+        // `CanOpen` / serde `can_open` would split the namespace vs `canopen`).
+        assert_ne!(
+            IndustrialProtocol::CanOpen.replay_slug(),
+            format!("{:?}", IndustrialProtocol::CanOpen)
         );
     }
 }

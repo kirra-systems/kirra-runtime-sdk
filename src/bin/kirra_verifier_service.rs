@@ -41,7 +41,7 @@ use kirra_verifier::posture_engine_v2::{
     resolve_posture_snapshot_silent, resolve_posture_with_reason, LockoutReason,
 };
 use kirra_verifier::protocol_adapter::{
-    evaluate_unified_industrial_request, UnifiedIndustrialRequest,
+    evaluate_unified_industrial_request, IndustrialProtocol, UnifiedIndustrialRequest,
 };
 use kirra_verifier::security::{admin_token_ok, constant_time_compare};
 use kirra_verifier::standby_monitor::{

@@ -251,32 +251,52 @@ pub(crate) fn wire_active_posture_freshness(svc: &Arc<ServiceState>) {
     // — load-bearing: without it the cache goes stale one TTL after the last
     // event and the gate fails closed fleet-wide. It is also the engine-liveness
     // signal (if the loop stops, the cache stales and the gate fail-closes).
+    //
+    // SUPERVISED (Cursor QW1): previously a bare `tokio::spawn` whose `JoinHandle`
+    // was dropped, so a panic killed this liveness loop SILENTLY and the cache
+    // then staled fleet-wide (503) with recovery only via a process restart.
+    // Route it through `spawn_supervised` so a transient panic self-heals. It is
+    // NonCritical (a dead loop fails CLOSED — stale cache → the gate denies — so
+    // no LockedOut escalation is warranted, matching the other refresh-class
+    // monitors) but run-forever (the loop must never return; an exit is a fault →
+    // restart).
     let refresh_tx = posture_tx;
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_millis(
-            kirra_verifier::posture_cache::POSTURE_REFRESH_INTERVAL_MS,
-        ));
-        // Coalesce missed refresh windows instead of bursting catch-up recalcs
-        // after runtime starvation (the trigger only re-stamps the cache; bursts
-        // add no freshness and the posture worker already coalesces). Delay
-        // re-paces from the actual wake time.
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // First tick fires immediately; skip it (the caller's initial recalc
-        // already covered the populated-cache precondition).
-        tick.tick().await;
-        loop {
-            tick.tick().await;
-            if refresh_tx
-                .try_send(kirra_verifier::posture_engine_v2::PostureRecalcTrigger::PeriodicRefresh)
-                .is_err()
-            {
-                tracing::error!(
-                    "posture periodic refresh: worker channel unavailable — \
-                     cache will go stale (gate will fail-close fleet-wide)"
-                );
+    kirra_verifier::supervisor::spawn_supervised(
+        "posture_refresh_loop",
+        /* critical    */ false,
+        /* run-forever  */ true,
+        /* escalate     */ None,
+        move || {
+            let refresh_tx = refresh_tx.clone();
+            async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_millis(
+                    kirra_verifier::posture_cache::POSTURE_REFRESH_INTERVAL_MS,
+                ));
+                // Coalesce missed refresh windows instead of bursting catch-up
+                // recalcs after runtime starvation (the trigger only re-stamps the
+                // cache; bursts add no freshness and the posture worker already
+                // coalesces). Delay re-paces from the actual wake time.
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // First tick fires immediately; skip it (the caller's initial
+                // recalc already covered the populated-cache precondition).
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    if refresh_tx
+                        .try_send(
+                            kirra_verifier::posture_engine_v2::PostureRecalcTrigger::PeriodicRefresh,
+                        )
+                        .is_err()
+                    {
+                        tracing::error!(
+                            "posture periodic refresh: worker channel unavailable — \
+                             cache will go stale (gate will fail-close fleet-wide)"
+                        );
+                    }
+                }
             }
-        }
-    });
+        },
+    );
     tracing::info!(
         interval_ms = kirra_verifier::posture_cache::POSTURE_REFRESH_INTERVAL_MS,
         ttl_ms = kirra_verifier::posture_cache::POSTURE_CACHE_TTL_MS,
