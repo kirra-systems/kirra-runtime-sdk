@@ -436,6 +436,16 @@ pub struct AppState {
     /// the telemetry watchdog). The task loop records each cycle; `GET /metrics`
     /// exports `kirra_task_deadline_*`. Lock-free; observability only.
     pub deadline_registry: Arc<crate::execution_manager::DeadlineRegistry>,
+
+    /// Bug 3 — rate limiter for the UNAUTHENTICATED
+    /// `POST /attestation/challenge/{node_id}` endpoint. A two-tier token bucket
+    /// (per-node + global backstop) that bounds challenge issuance, defeating a
+    /// targeted nonce-churn DoS (a flood on one node keeps overwriting the nonce
+    /// it is about to sign) and the CSPRNG/prune CPU amplification of a flood.
+    /// The limiter is `&mut`-checked under this mutex; the critical section is a
+    /// hashmap lookup + a few float ops (held microscopically). Lives on
+    /// `AppState` next to `pending_challenges`/`issue_challenge`.
+    pub challenge_rate_limiter: Arc<Mutex<crate::challenge_rate_limit::ChallengeRateLimiter>>,
 }
 
 impl AppState {
@@ -493,6 +503,12 @@ impl AppState {
             fleet_metrics: crate::metrics::FleetSafetyMetrics::new(),
             deadline_registry: Arc::new(crate::execution_manager::DeadlineRegistry::from_manifest(
                 crate::execution_manager::TASK_MANIFEST,
+            )),
+            // Bug 3: seed the challenge limiter clock-free (last_ms = 0). The
+            // buckets start full; the first real `allow(_, now)` refills from 0,
+            // clamped to capacity, so a 0 baseline is a no-op vs. seeding `now`.
+            challenge_rate_limiter: Arc::new(Mutex::new(
+                crate::challenge_rate_limit::ChallengeRateLimiter::with_defaults(0),
             )),
         }
     }

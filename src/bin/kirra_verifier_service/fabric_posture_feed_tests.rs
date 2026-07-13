@@ -8,7 +8,7 @@
 // and run the bounded cross-asset propagation pass.
 // ---------------------------------------------------------------------------
 
-use super::sync_local_asset_posture;
+use super::{force_local_asset_lockedout, sync_local_asset_posture};
 
 use std::sync::Arc;
 
@@ -130,6 +130,42 @@ fn unchanged_posture_does_not_bump_generation() {
     assert_eq!(
         after.generation, gen_before,
         "an unchanged posture must not bump the generation (no churn)"
+    );
+}
+
+/// Bug 7: when the supervisor escalates a wedged feed, the local asset is
+/// pinned LockedOut so `route_command` fail-closes — no stale posture is left
+/// admitting fabric commands. Mirrors the escalation the supervisor invokes on
+/// restart-budget exhaustion.
+#[test]
+fn feed_escalation_pins_local_asset_locked_out() {
+    // A LIVE feed had lifted the asset to Nominal (route_command would admit).
+    let svc = state(Some(fresh(FleetPosture::Nominal)));
+    sync_local_asset_posture(&svc, LOCAL);
+    assert_eq!(
+        svc.fabric_router.asset_posture(LOCAL).unwrap().posture,
+        FleetPosture::Nominal,
+        "precondition: a healthy feed leaves the asset at the live fleet posture"
+    );
+
+    // The feed wedges (deterministic panic exhausts the restart budget) → the
+    // supervisor runs the escalation.
+    force_local_asset_lockedout(&svc, LOCAL);
+
+    let after = svc.fabric_router.asset_posture(LOCAL).unwrap();
+    assert_eq!(
+        after.posture,
+        FleetPosture::LockedOut,
+        "a wedged feed must fail the local asset CLOSED, not leave it stale-Nominal"
+    );
+    assert_eq!(
+        after.blocked_by,
+        vec!["POSTURE_FEED_WEDGED_FAILCLOSED".to_string()],
+        "the fail-closed reason must be tagged for operators"
+    );
+    assert!(
+        after.generation >= 2,
+        "escalation supersedes the prior live-feed generation"
     );
 }
 
