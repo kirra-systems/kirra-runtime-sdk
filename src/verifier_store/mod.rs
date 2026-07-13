@@ -593,6 +593,10 @@ mod operators;
 mod ota_campaigns;
 mod posture;
 mod principals;
+// ADR-0035 Stage 2 (trait-seam inversion) — the API-principal storage trait + its
+// in-memory reference backend (the 3rd VerifierStorage-family seam after EpochFence
+// and NodeStore), extending the seam program toward the persistence/authority split.
+pub use principals::{assert_principal_store_contract, InMemoryPrincipalStore, PrincipalStore};
 // WP-18 3/3 (G-9 store half) — the backend-portable HA epoch-fence trait + its
 // in-memory reference backend (SQLite realizes it via `ha_state` + BEGIN IMMEDIATE,
 // a future Postgres backend via SELECT … FOR UPDATE).
