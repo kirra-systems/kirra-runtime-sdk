@@ -1135,6 +1135,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-policy-types"
+version = "0.1.0"
+
+[[package]]
 name = "kirra-release-token"
 version = "0.1.0"
 dependencies = [
@@ -1170,6 +1174,7 @@ dependencies = [
  "kirra-contract-channel",
  "kirra-core",
  "kirra-fleet-types",
+ "kirra-policy-types",
  "kirra-release-token",
  "parko-core",
  "reqwest",
