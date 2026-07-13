@@ -72,8 +72,13 @@ def confirm(question):
     return ask(question + " [y/N]").lower() == "y"
 
 
-def ask_float(question):
-    """Prompt until a finite float is given, or blank to skip (returns None)."""
+def ask_float(question, positive=False):
+    """Prompt until a finite float is given, or blank to skip (returns None).
+
+    positive=True additionally rejects values <= 0 (a physical magnitude — turn
+    count, wheel diameter — where a zero/negative would silently corrupt a
+    derived calibration value).
+    """
     while True:
         raw = ask(question + " (blank to skip)")
         if raw == "":
@@ -81,11 +86,14 @@ def ask_float(question):
         try:
             val = float(raw)
         except ValueError:
-            print("   not a number — try again.")
+            print("   not a number - try again.")
             continue
         # reject NaN/inf explicitly (val != val is the NaN test)
         if val != val or val in (float("inf"), float("-inf")):
-            print("   non-finite — try again.")
+            print("   non-finite - try again.")
+            continue
+        if positive and val <= 0:
+            print("   must be strictly positive - try again.")
             continue
         return val
 
@@ -116,6 +124,12 @@ def phase_a(bot, lines):
     over = [p for p in ladder if abs(p) > HARD_CAP]
     if over:
         sys.exit(f"ladder rung(s) {over} exceed the {HARD_CAP} PWM cap — refusing.")
+    # The ladder is a low-POSITIVE forward sweep: the prompts and actuation say
+    # "+PWM", and a negative rung would drive in reverse while printing "+-15".
+    # Reject non-positive rungs rather than silently reversing.
+    nonpos = [p for p in ladder if p <= 0]
+    if nonpos:
+        sys.exit(f"ladder rung(s) {nonpos} are not strictly positive — refusing (forward sweep only).")
     if not ladder:
         lines.append("PHASE A (PWM↔speed): SKIPPED (empty ladder)")
         return
@@ -168,8 +182,8 @@ def phase_b(bot, lines):
         print("  unrecognised wheel — skipping phase B.")
         lines.append("PHASE B (encoder scale): SKIPPED (bad wheel label)")
         return
-    turns = ask_float(f"  How many full turns will you rotate {which}?")
-    if turns is None or turns == 0:
+    turns = ask_float(f"  How many full turns will you rotate {which}?", positive=True)
+    if turns is None:
         lines.append("PHASE B (encoder scale): SKIPPED (no turn count)")
         return
 
@@ -180,7 +194,7 @@ def phase_b(bot, lines):
     d = [b - a for a, b in zip(enc_before, enc_after)]
     d_wheel = d[idx]
     ticks_per_rev = d_wheel / turns if turns else float("nan")
-    diam = ask_float("  Measured wheel diameter (m)?")
+    diam = ask_float("  Measured wheel diameter (m)?", positive=True)
     print(f"   {which}: Δticks={d_wheel} over {turns} turns → {ticks_per_rev:.1f} ticks/rev")
 
     lines.append(f"PHASE B (encoder scale): wheel={which}")
@@ -329,7 +343,19 @@ def main():
 
         _write_results(lines)
     except KeyboardInterrupt:
-        print("\n\n⚠ Interrupted — stopping all motors and centring steering.")
+        # De-energize FIRST, before any file I/O: if Ctrl-C lands mid-rung, the
+        # wheels/steering must not stay energized through a disk write. The
+        # finally block stops again (harmless). ASCII-only so a non-UTF-8 locale
+        # can never raise UnicodeEncodeError on the safety-critical stop path.
+        try:
+            bot.set_motor(0, 0, 0, 0)
+        except Exception:  # noqa: BLE001 - best-effort stop
+            pass
+        try:
+            bot.set_akm_steering_angle(0)
+        except Exception:  # noqa: BLE001 - best-effort centre
+            pass
+        print("\n\nInterrupted - motors stopped, steering centred.")
         if lines:
             _write_results(lines)  # persist whatever was captured before the interrupt
     finally:
