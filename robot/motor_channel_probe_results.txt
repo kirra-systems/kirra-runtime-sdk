@@ -1,0 +1,74 @@
+R2 MOTOR-CHANNEL PROBE RESULTS — Path-B Step 1 (channel → wheel → forward-sign)
+==============================================================================
+
+Provenance
+----------
+Robot     : Yahboom R2 (Ackermann) on Jetson Orin, hostname `yahboom`
+            (banner reports my_robot_type: x3 — the cross-labeled X3 image; this
+            is irrelevant to set_motor, which is car-type independent).
+Tool      : robot/motor_channel_probe_elevated.py (merged in PR #911)
+Library   : Rosmaster_Lib 3.3.9 (installed egg; set_motor confirmed byte-identical
+            to the analyzed source — packet [0xFF,0xFC,len,0x10,s1,s2,s3,s4,ck],
+            NO car-type byte, i.e. the firmware kinematics mixer is bypassed).
+Condition : robot ELEVATED, wheels free, +20 PWM per channel, 1.5 s each,
+            steering centered (set_akm_steering_angle(0)) and held.
+Method    : one channel pulsed at a time, explicit 0 on the other three; the
+            moving wheel recorded visually AND cross-checked against the
+            per-channel encoder delta (get_motor_encoder m1..m4).
+
+Verbatim probe output
+---------------------
+  -- Pulse channel M1 now? [y/N] y
+     encoder delta (m1..m4): [1371, 0, 0, 0]   moved-index: [1]
+     Which WHEEL turned for M1? RL   Direction at +20? forward
+  -- Pulse channel M2 now? [y/N] y
+     encoder delta (m1..m4): [0, 0, 0, 0]      moved-index: []
+     Which WHEEL turned for M2? none
+  -- Pulse channel M3 now? [y/N] y
+     encoder delta (m1..m4): [0, 0, 0, 0]      moved-index: []
+     Which WHEEL turned for M3? none
+  -- Pulse channel M4 now? [y/N] y
+     encoder delta (m1..m4): [0, 0, 0, 1554]   moved-index: [4]
+     Which WHEEL turned for M4? RR   Direction at +20? forward
+  (M4 wheel answer was typed "aaRR"; the "aa" is an input typo — the wheel is RR,
+   confirmed by the m4 encoder delta. The auto-summary's rear-drive list dropped
+   M4 only because "AARR" != "RR"; the mapping below is the corrected record.)
+
+CONFIRMED MAP
+-------------
+  set_motor(s1, s2, s3, s4)   # signed PWM %, [-100, 100]; car-type independent
+
+  s1 = M1 = REAR-LEFT  drive   forward-sign = +   (encoder m1, Δ +1371 @ +20)
+  s2 = M2 = (unpopulated)      —                  (encoder flat)
+  s3 = M3 = (unpopulated)      —                  (encoder flat)
+  s4 = M4 = REAR-RIGHT drive   forward-sign = +   (encoder m4, Δ +1554 @ +20)
+
+  => STRAIGHT-AHEAD FORWARD DRIVE:  set_motor(+v, 0, 0, +v)
+
+  Steering: NOT a motor channel — no servo motion observed during any pulse,
+  consistent with the AKM path (set_akm_steering_angle, FUNC 0x31). Steering
+  stayed centered throughout.
+
+Key findings
+------------
+1. Both rear-drive channels take POSITIVE for robot-forward (NO mirror-sign flip
+   needed). The motor polarity/gearing is already matched, so straight drive is
+   `+v` on both M1 and M4 — simpler than a mirror-mounted differential pair.
+2. Visual observation and encoder cross-check AGREE on both driven channels
+   (M1→m1, M4→m4) and both dead channels have flat encoders — unambiguous.
+3. Open-loop note (not a fault): at the same +20 PWM the two encoder deltas
+   differ ~12% (1371 vs 1554). `set_motor` bypasses the firmware speed PID, so a
+   naive equal-PWM command may drift slightly rather than track perfectly
+   straight. Encoder-closed-loop speed matching is a later refinement.
+
+Values still to CAPTURE on the bench (do NOT invent — see the drive proposal,
+docs/hardware/R2_PATH_B_ACKERMANN_DRIVE.md):
+  - PWM ↔ ground-speed calibration (map set_motor % → m/s).
+  - Road-wheel angle ↔ servo command-units (set_akm_steering_angle is [-45,+45]
+    command units about a 90 default; command units ≠ road-wheel degrees).
+  - Steering center trim (set_akm_default_angle) and max road-wheel angle at
+    full lock.
+  - Rear track width (only if the Ackermann rear-wheel speed differential is
+    implemented; equal-PWM v0 does not need it).
+  - Wheelbase L: ≈0.229 m measured previously (PLATFORM_R2_PENDING.md), to be
+    re-confirmed on this platform before it becomes a profile value.

@@ -23,7 +23,19 @@ down — the difference between "the image mysteriously doesn't steer" and
 3. **Therefore the blocking dependency is external**: Yahboom's
    **Ultimate-Orin NX R2 image** (drive AND steering wired together).
    **Not yet obtained — emailing Yahboom is the critical path.** Only that
-   image unblocks this layer.
+   image unblocks this layer via `set_car_motion` (Path A).
+
+> **Path B (no vendor firmware) — proposal, in review.** The read-only
+> investigation confirmed `set_car_motion` is a pure pass-through and the
+> car-type kinematics are firmware-side; `set_motor` (no car-type byte) drives
+> the motor channels directly, bypassing the broken mixer. A bench probe mapped
+> the channels (`robot/motor_channel_probe_results.txt`: M1=rear-left, M4=rear-right,
+> both `+`=forward; steering on the AKM path). The open-source Ackermann drive
+> that uses this — rear wheels via `set_motor`, steering via
+> `set_akm_steering_angle`, KIRRA-governed — is proposed in
+> `docs/hardware/R2_PATH_B_ACKERMANN_DRIVE.md` (calibration measurements pending
+> before it can drive). Path B and Path A are alternatives; either unblocks R2
+> drive+steer.
 
 ## What Layer B WILL contain (once unblocked)
 
