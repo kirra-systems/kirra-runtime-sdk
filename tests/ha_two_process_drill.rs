@@ -437,18 +437,24 @@ fn two_process_failover_drill_lease_gate_on() {
         // the lease trigger to fire well under the ~10 s legacy path.
         LEASE_BOUND_MS,
     );
-    // Non-fatal: flag (don't fail) a run that clears the gate but is over the
-    // bare product target — a soft signal if the measured latency trends up,
-    // without reintroducing the phase-dependent hard-5 s flake.
-    if promoted_ms > LEASE_TARGET_MS {
-        eprintln!(
-            "HA-DRILL-NOTE[lease]: promotion {promoted_ms} ms exceeded the \
-             {LEASE_TARGET_MS} ms product target but is within the \
-             {CI_JITTER_MARGIN_MS} ms CI-jitter margin (gate {LEASE_BOUND_MS} ms)"
+    // Report HONESTLY which bar this run cleared: the 5 s product target, or
+    // only the relaxed CI-jitter gate above it. The result line must never
+    // claim "≤5 s met" for a run that was over the target but under the gate —
+    // that would mask a latency trend behind the jitter margin (the ≤5 s
+    // property itself is proven deterministically in `src/lease.rs`; this line
+    // is an end-to-end observation, not the proof).
+    if promoted_ms <= LEASE_TARGET_MS {
+        println!(
+            "HA-DRILL-RESULT[lease]: ≤5 s product target MET ({promoted_ms} ms \
+             ≤ target {LEASE_TARGET_MS} ms; gate {LEASE_BOUND_MS} ms)"
+        );
+    } else {
+        // Over target but under the gate: the test still PASSES (the hard
+        // assertion is against LEASE_BOUND_MS, in run_drill), but say so plainly.
+        println!(
+            "HA-DRILL-RESULT[lease]: over the {LEASE_TARGET_MS} ms product target, \
+             within the {CI_JITTER_MARGIN_MS} ms CI-jitter margin ({promoted_ms} ms \
+             ≤ gate {LEASE_BOUND_MS} ms) — target NOT met this run, watch the trend"
         );
     }
-    println!(
-        "HA-DRILL-RESULT[lease]: ≤5 s product property met ({promoted_ms} ms, \
-         target {LEASE_TARGET_MS} ms, gate {LEASE_BOUND_MS} ms)"
-    );
 }
