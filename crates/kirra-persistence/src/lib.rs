@@ -621,6 +621,10 @@ pub use ota_campaigns::{
     assert_ota_campaign_store_contract, InMemOtaError, InMemoryOtaCampaignStore, OtaCampaignStore,
 };
 mod posture;
+pub use posture::{
+    assert_posture_engine_state_store_contract, InMemPostureStateError,
+    InMemoryPostureEngineStateStore, PostureEngineStateStore,
+};
 mod principals;
 // ADR-0035 Stage 2 (trait-seam inversion) — the API-principal storage trait + its
 // in-memory reference backend (the 3rd VerifierStorage-family seam after EpochFence
