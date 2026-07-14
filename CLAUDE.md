@@ -116,7 +116,12 @@ src/
 │                               WP-18 store-trait 2/N: nodes.rs adds the NodeStore trait
 │                               (save_node/load_node/load_nodes/node_exists/count_nodes)
 │                               the same way — VerifierStore impls it + InMemoryNodeStore is
-│                               the 2nd backend + a shared conformance test (upsert/load/count)
+│                               the 2nd backend + a shared conformance test (upsert/load/count).
+│                               federation.rs adds the FederationStore seam the same way
+│                               (the PORTABLE subset: trusted-controller key registry +
+│                               anti-replay primitives — burn_federation_nonce /
+│                               has_seen_federation_nonce / industrial_seq_check_and_advance;
+│                               the audit-chained save_federated_report_chained stays inherent)
 ├── posture_cache.rs          — SharedPostureCache, CachedFleetPosture, ServiceState,
 │                               OperationalCommand, should_route_command, POSTURE_CACHE_TTL_MS
 ├── posture_engine.rs         — recalculate_and_broadcast, derive_fleet_posture,

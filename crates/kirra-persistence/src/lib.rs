@@ -607,6 +607,7 @@ pub use cert_principals::{
 };
 mod epoch;
 mod federation;
+pub use federation::{assert_federation_store_contract, FederationStore, InMemoryFederationStore};
 mod operators;
 // ADR-0035 Stage 2 (trait-seam inversion) — the operator-registry storage trait + its
 // in-memory reference backend (registry CRUD only; the audit-chained clearance-grant
