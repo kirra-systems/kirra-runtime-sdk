@@ -95,9 +95,13 @@ impl VerifierStore {
 // the contract is genuinely backend-portable.
 //
 // The two writers are `&mut self` (mirroring the inherent signatures verbatim —
-// this is a pure ADDITIVE seam, no inherent change), so the in-memory backend
-// needs no interior mutability and the conformance driver takes `&mut S`. That's
-// the one honest shape difference from `NodeStore` (whose `save_node` is `&self`).
+// this is a pure ADDITIVE seam, no inherent change), so the conformance driver
+// takes `&mut S` (the one honest shape difference from `NodeStore`'s `&self`
+// `save_node`). The registry also enforces one domain failure mode the portable
+// contract must preserve on EVERY backend: `token_sha256` is `UNIQUE` (one token
+// hash pins to at most one principal), so registering a hash already held by a
+// DIFFERENT principal must ERROR — hence the in-memory backend's `Error` is a
+// real enum ([`InMemPrincipalError`]), not `Infallible` (matching `CertPrincipalStore`).
 // ---------------------------------------------------------------------------
 
 /// The API-principal registry storage contract — register/rotate a per-principal
@@ -105,11 +109,13 @@ impl VerifierStore {
 /// by token hash, and list all principals. Backend-agnostic; only ever holds the
 /// token HASH, never plaintext.
 pub trait PrincipalStore {
-    /// Backend error type (SQLite: `rusqlite::Error`; in-memory: [`std::convert::Infallible`]).
+    /// Backend error type (SQLite: `rusqlite::Error`; in-memory: [`InMemPrincipalError`]).
     type Error;
 
     /// Register or rotate a principal by `principal_id`: overwrite the token hash +
     /// role and CLEAR any prior revocation (a fresh token reactivates a principal).
+    /// Errors if `token_sha256` is already held by a DIFFERENT principal (the
+    /// `UNIQUE(token_sha256)` constraint — one token authorizes one principal).
     fn register_api_principal(
         &mut self,
         principal_id: &str,
@@ -166,10 +172,22 @@ impl PrincipalStore for VerifierStore {
     }
 }
 
+/// The failure mode of the in-memory [`PrincipalStore`] backend — the one the
+/// portable contract preserves across every backend (the SQLite backend surfaces
+/// the same condition as a `rusqlite::Error` from the `UNIQUE(token_sha256)`
+/// constraint).
+#[derive(Debug, PartialEq, Eq)]
+pub enum InMemPrincipalError {
+    /// `token_sha256` is already held by a DIFFERENT principal (the `UNIQUE`
+    /// column) — one token hash authorizes at most one principal.
+    TokenHashConflict,
+}
+
 /// The in-memory [`PrincipalStore`] backend — a portability-proof reference
 /// modelling the `api_principals` table as a map keyed by `principal_id`, each
 /// row carrying the CURRENT token hash + role + timestamps. Realizes the SAME
-/// register/rotate/revoke/resolve semantics WITHOUT a database. Single-process.
+/// register/rotate/revoke/resolve semantics — INCLUDING the unique-token-hash
+/// refusal — WITHOUT a database. Single-process.
 #[derive(Debug, Default)]
 pub struct InMemoryPrincipalStore {
     rows: std::collections::HashMap<String, InMemoryPrincipalRow>,
@@ -195,7 +213,7 @@ impl InMemoryPrincipalRow {
 }
 
 impl PrincipalStore for InMemoryPrincipalStore {
-    type Error = std::convert::Infallible;
+    type Error = InMemPrincipalError;
 
     fn register_api_principal(
         &mut self,
@@ -203,7 +221,19 @@ impl PrincipalStore for InMemoryPrincipalStore {
         token_sha256: &str,
         role: &str,
         now_ms: u64,
-    ) -> std::result::Result<(), std::convert::Infallible> {
+    ) -> std::result::Result<(), InMemPrincipalError> {
+        // UNIQUE(token_sha256): the hash may already be held only by the SAME
+        // principal (an idempotent re-register); a DIFFERENT id is a conflict, and
+        // is rejected BEFORE any mutation so a refused registration persists nothing.
+        if let Some((holder, _)) = self
+            .rows
+            .iter()
+            .find(|(_, r)| r.token_sha256 == token_sha256)
+        {
+            if holder != principal_id {
+                return Err(InMemPrincipalError::TokenHashConflict);
+            }
+        }
         // Upsert by principal_id; rotation overwrites the hash/role and CLEARS
         // revocation — matching the SQLite `ON CONFLICT … SET … revoked_at_ms = NULL`.
         self.rows.insert(
@@ -222,7 +252,7 @@ impl PrincipalStore for InMemoryPrincipalStore {
         &mut self,
         principal_id: &str,
         now_ms: u64,
-    ) -> std::result::Result<bool, std::convert::Infallible> {
+    ) -> std::result::Result<bool, InMemPrincipalError> {
         match self.rows.get_mut(principal_id) {
             Some(row) if row.revoked_at_ms.is_none() => {
                 row.revoked_at_ms = Some(now_ms);
@@ -236,7 +266,7 @@ impl PrincipalStore for InMemoryPrincipalStore {
     fn load_api_principal_by_token_hash(
         &self,
         token_sha256: &str,
-    ) -> std::result::Result<Option<ApiPrincipalRecord>, std::convert::Infallible> {
+    ) -> std::result::Result<Option<ApiPrincipalRecord>, InMemPrincipalError> {
         Ok(self
             .rows
             .iter()
@@ -246,7 +276,7 @@ impl PrincipalStore for InMemoryPrincipalStore {
 
     fn load_api_principals(
         &self,
-    ) -> std::result::Result<Vec<ApiPrincipalRecord>, std::convert::Infallible> {
+    ) -> std::result::Result<Vec<ApiPrincipalRecord>, InMemPrincipalError> {
         let mut out: Vec<ApiPrincipalRecord> = self
             .rows
             .iter()
@@ -336,6 +366,38 @@ where
     store
         .register_api_principal("svc-b", "hash-b", "operator", 5_000)
         .unwrap();
+
+    // UNIQUE(token_sha256): the same hash under a DIFFERENT principal errors and
+    // persists nothing; the SAME principal re-registering its own hash is fine.
+    assert!(
+        store
+            .register_api_principal("svc-c", "hash-b", "operator", 6_000)
+            .is_err(),
+        "a second principal on the same token hash must conflict"
+    );
+    assert!(
+        store
+            .load_api_principal_by_token_hash("hash-b")
+            .unwrap()
+            .expect("still the original holder")
+            .principal_id
+            == "svc-b",
+        "the conflicting registration persisted nothing"
+    );
+    assert!(
+        store
+            .load_api_principal_by_token_hash("hash-a2")
+            .unwrap()
+            .is_some(),
+        "svc-c must not have been created"
+    );
+    assert!(
+        store
+            .register_api_principal("svc-b", "hash-b", "auditor", 7_000)
+            .is_ok(),
+        "same principal re-registering its own hash is fine"
+    );
+
     let ids: Vec<String> = store
         .load_api_principals()
         .unwrap()
