@@ -69,12 +69,14 @@ impl VerifierStore {
             ],
         )?;
         let id = tx.last_insert_rowid();
-        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
+        ChainedAuditAppender {
+            signing_key: self.signing_key.as_ref(),
+        }
+        .append_within(
             &tx,
             "OperatorClearanceGrantIssued",
             &payload,
             granted_at_ms as i64,
-            self.signing_key.as_ref(),
         )?;
         tx.commit()?;
         Ok(id)
@@ -161,13 +163,10 @@ impl VerifierStore {
         created_at_ms: u64,
     ) -> Result<()> {
         let tx = Self::audit_tx(&mut self.conn)?; // #685: Immediate — non-forking audit append
-        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
-            &tx,
-            event_type,
-            payload_json,
-            created_at_ms as i64,
-            self.signing_key.as_ref(),
-        )?;
+        ChainedAuditAppender {
+            signing_key: self.signing_key.as_ref(),
+        }
+        .append_within(&tx, event_type, payload_json, created_at_ms as i64)?;
         tx.commit()
     }
 
@@ -238,13 +237,10 @@ impl VerifierStore {
             "UPDATE clearance_grants SET outcome = ?2, outcome_detail = ?3 WHERE id = ?1",
             params![grant_rowid, outcome, detail],
         )?;
-        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
-            &tx,
-            event_type,
-            &payload,
-            now_ms as i64,
-            self.signing_key.as_ref(),
-        )?;
+        ChainedAuditAppender {
+            signing_key: self.signing_key.as_ref(),
+        }
+        .append_within(&tx, event_type, &payload, now_ms as i64)?;
         tx.commit()
     }
 
