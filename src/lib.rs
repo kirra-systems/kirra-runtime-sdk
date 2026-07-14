@@ -52,7 +52,6 @@ pub mod env_config;
 pub mod ffi;
 pub mod gateway;
 pub mod governor_guard;
-pub mod health;
 pub mod kinematics_contract;
 pub mod kirra_core;
 pub mod metrics;

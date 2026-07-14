@@ -4,7 +4,6 @@
     "kirra_map::lanelet2": "Feature-gated Lanelet2 cxx FFI bridge (`lanelet2` feature, off by default); its consumer is the ros2+lanelet2 node build, outside the default-feature textual scan.",
     "kirra_planner::lanelet2": "Same feature-gated Lanelet2 bridge, planner side — consumed only under the `lanelet2` feature build.",
     "kirra_trajectory::redundancy_hardening": "Verification-hardening module by design: its consumers are the property/hardening test suites; it backs the True-Redundancy cross_check evidence, not a runtime path.",
-    "kirra_verifier::health": "GENUINE ORPHAN (legacy DeploymentLivenessStatus helpers; the live /health route is implemented in the service bin). TODO: wire or delete — kept this cycle to hold the gate's introduction mechanical.",
     "kirra_verifier::traceability_gate": "CI gate by design: runs as a test lane (SAFETY:/REQ:/TEST: tag coverage); a runtime consumer would be wrong.",
     "kirra_verifier::wcet_gate": "CI gate by design: the O(1) structural-boundedness WCET guard runs as a test lane; a runtime consumer would be wrong.",
     "parko_core::detector": "Detection decode path (BBox/Detection/decode_detections) awaiting the real-perception integration (external track, MGA G-4); test-covered, no runtime consumer until sensors land.",

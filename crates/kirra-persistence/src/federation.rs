@@ -367,3 +367,277 @@ impl VerifierStore {
         Ok(out)
     }
 }
+
+// ---------------------------------------------------------------------------
+// WP-18 store-trait family — the `FederationStore` seam.
+//
+// The PORTABLE subset of the federation family: the trusted-controller key
+// registry + the durable anti-replay primitives (nonce set + the per-source
+// monotonic sequence gate). These are the coordination writes a non-SQLite
+// backend must realize; the audit-chained `save_federated_report_chained`
+// commit stays inherent + SQLite-specific (audit-appender + epoch-fence
+// coupled), exactly as `NodeStore` leaves the audit-chained node ops inherent.
+//
+// The trait method names MATCH the inherent `VerifierStore` methods, so the
+// SQLite impl's `self.method()` resolves to the INHERENT method (inherent wins
+// over the trait) — delegation, not recursion.
+// ---------------------------------------------------------------------------
+
+/// The federation coordination storage contract — the trusted-controller key
+/// registry plus the two durable anti-replay primitives (single-use nonce claim
+/// and the per-source strictly-advancing sequence gate). Backend-agnostic.
+pub trait FederationStore {
+    /// Backend error type (SQLite: `rusqlite::Error`; in-memory: [`std::convert::Infallible`]).
+    type Error;
+
+    /// Upsert a trusted controller's base64 Ed25519 public key by `controller_id`
+    /// (INSERT-OR-REPLACE — re-registering an id overwrites its key).
+    fn save_trusted_federation_controller(
+        &self,
+        controller_id: &str,
+        public_key_b64: &str,
+        registered_at_ms: u64,
+    ) -> std::result::Result<(), Self::Error>;
+
+    /// Load a controller's stored base64 public key, or `None` if unregistered.
+    fn load_trusted_federation_controller_key(
+        &self,
+        controller_id: &str,
+    ) -> std::result::Result<Option<String>, Self::Error>;
+
+    /// Has this nonce already been recorded (a read-only replay pre-check)?
+    fn has_seen_federation_nonce(&self, nonce_hex: &str) -> std::result::Result<bool, Self::Error>;
+
+    /// Atomically claim a nonce: `Ok(true)` on first use (proceed), `Ok(false)`
+    /// on replay (reject). The single-use burn primitive.
+    fn burn_federation_nonce(&self, nonce_hex: &str) -> std::result::Result<bool, Self::Error>;
+
+    /// Per-source strictly-advancing sequence gate: `Ok(true)` iff `sequence` is
+    /// strictly greater than the source's high-water (advances it); `Ok(false)` on
+    /// a replay/regress (`<=`, no advance). A new source establishes the baseline.
+    fn industrial_seq_check_and_advance(
+        &self,
+        source_id: &str,
+        sequence: u64,
+        now_ms: u64,
+    ) -> std::result::Result<bool, Self::Error>;
+}
+
+/// The production SQLite backend: delegates to the inherent `VerifierStore`
+/// methods. `self.method()` resolves to the INHERENT method (inherent wins over
+/// the trait), so this is delegation, not recursion.
+impl FederationStore for VerifierStore {
+    type Error = rusqlite::Error;
+
+    fn save_trusted_federation_controller(
+        &self,
+        controller_id: &str,
+        public_key_b64: &str,
+        registered_at_ms: u64,
+    ) -> Result<()> {
+        self.save_trusted_federation_controller(controller_id, public_key_b64, registered_at_ms)
+    }
+    fn load_trusted_federation_controller_key(
+        &self,
+        controller_id: &str,
+    ) -> Result<Option<String>> {
+        self.load_trusted_federation_controller_key(controller_id)
+    }
+    fn has_seen_federation_nonce(&self, nonce_hex: &str) -> Result<bool> {
+        self.has_seen_federation_nonce(nonce_hex)
+    }
+    fn burn_federation_nonce(&self, nonce_hex: &str) -> Result<bool> {
+        self.burn_federation_nonce(nonce_hex)
+    }
+    fn industrial_seq_check_and_advance(
+        &self,
+        source_id: &str,
+        sequence: u64,
+        now_ms: u64,
+    ) -> Result<bool> {
+        self.industrial_seq_check_and_advance(source_id, sequence, now_ms)
+    }
+}
+
+/// The in-memory [`FederationStore`] backend — a portability-proof reference
+/// modelling the controller registry as a map, the nonce table as a set, and the
+/// per-source sequence gate as a map. Realizes the SAME upsert / burn / strict-
+/// advance semantics WITHOUT a database. Interior mutability (the trait methods
+/// are `&self`, matching the SQLite `Connection`'s `&self` writes). Single-process.
+///
+/// `Error = Infallible` is honest: every method RECOVERS from a poisoned `Mutex`
+/// (`lock().unwrap_or_else(PoisonError::into_inner)`) rather than unwrapping — the
+/// maps carry no cross-call invariant a torn write could break, so recovered data
+/// is safe to use.
+#[derive(Debug, Default)]
+pub struct InMemoryFederationStore {
+    controllers: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    nonces: std::sync::Mutex<std::collections::HashSet<String>>,
+    seq_highwater: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+}
+
+impl FederationStore for InMemoryFederationStore {
+    type Error = std::convert::Infallible;
+
+    fn save_trusted_federation_controller(
+        &self,
+        controller_id: &str,
+        public_key_b64: &str,
+        _registered_at_ms: u64,
+    ) -> std::result::Result<(), std::convert::Infallible> {
+        self.controllers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(controller_id.to_string(), public_key_b64.to_string());
+        Ok(())
+    }
+    fn load_trusted_federation_controller_key(
+        &self,
+        controller_id: &str,
+    ) -> std::result::Result<Option<String>, std::convert::Infallible> {
+        Ok(self
+            .controllers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(controller_id)
+            .cloned())
+    }
+    fn has_seen_federation_nonce(
+        &self,
+        nonce_hex: &str,
+    ) -> std::result::Result<bool, std::convert::Infallible> {
+        Ok(self
+            .nonces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(nonce_hex))
+    }
+    fn burn_federation_nonce(
+        &self,
+        nonce_hex: &str,
+    ) -> std::result::Result<bool, std::convert::Infallible> {
+        // `HashSet::insert` returns true iff the value was NOT already present —
+        // exactly the SQLite `INSERT OR IGNORE` "newly claimed" semantics.
+        Ok(self
+            .nonces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(nonce_hex.to_string()))
+    }
+    fn industrial_seq_check_and_advance(
+        &self,
+        source_id: &str,
+        sequence: u64,
+        _now_ms: u64,
+    ) -> std::result::Result<bool, std::convert::Infallible> {
+        let mut map = self.seq_highwater.lock().unwrap_or_else(|e| e.into_inner());
+        match map.get(source_id) {
+            // Existing source: STRICT advance only (mirrors the SQL conditional
+            // `WHERE ?2 > last_sequence` compare-and-set).
+            Some(&hw) if sequence <= hw => Ok(false),
+            _ => {
+                map.insert(source_id.to_string(), sequence);
+                Ok(true)
+            }
+        }
+    }
+}
+
+/// The federation-coordination contract, driven through the [`FederationStore`]
+/// trait so it runs IDENTICALLY against every backend: controller key upsert +
+/// read-back + unknown-is-None, the nonce burn (first-claim true / replay false)
+/// with its `has_seen` pre-check, and the per-source strict-advance sequence gate
+/// (baseline accept, replay/equal reject without advancing, strict advance).
+///
+/// `pub` (not `#[cfg(test)]`) by design: the shared backend-conformance suite,
+/// like the other store seams. Panics on any violation — call it from a test.
+///
+/// PRECONDITION: `store` must start empty.
+pub fn assert_federation_store_contract<S: FederationStore>(store: &S)
+where
+    S::Error: core::fmt::Debug,
+{
+    // --- controller key registry ---
+    assert!(store
+        .load_trusted_federation_controller_key("ctrl-A")
+        .unwrap()
+        .is_none());
+    store
+        .save_trusted_federation_controller("ctrl-A", "AAAAkey", 1)
+        .unwrap();
+    assert_eq!(
+        store
+            .load_trusted_federation_controller_key("ctrl-A")
+            .unwrap()
+            .as_deref(),
+        Some("AAAAkey")
+    );
+    // Re-register overwrites the key in place (upsert), never duplicates.
+    store
+        .save_trusted_federation_controller("ctrl-A", "BBBBkey", 2)
+        .unwrap();
+    assert_eq!(
+        store
+            .load_trusted_federation_controller_key("ctrl-A")
+            .unwrap()
+            .as_deref(),
+        Some("BBBBkey")
+    );
+
+    // --- nonce burn / replay ---
+    assert!(!store.has_seen_federation_nonce("nonce-1").unwrap());
+    assert!(
+        store.burn_federation_nonce("nonce-1").unwrap(),
+        "first claim of a nonce must succeed"
+    );
+    assert!(
+        store.has_seen_federation_nonce("nonce-1").unwrap(),
+        "a burned nonce must read as seen"
+    );
+    assert!(
+        !store.burn_federation_nonce("nonce-1").unwrap(),
+        "re-claiming a burned nonce must be rejected (replay)"
+    );
+    // A distinct nonce is independent.
+    assert!(store.burn_federation_nonce("nonce-2").unwrap());
+
+    // --- per-source strict-advance sequence gate ---
+    // Baseline: any first sequence from a new source is accepted.
+    assert!(store
+        .industrial_seq_check_and_advance("src-A", 5, 100)
+        .unwrap());
+    // Replay (equal) and regress (<) are both rejected WITHOUT advancing.
+    assert!(!store
+        .industrial_seq_check_and_advance("src-A", 5, 101)
+        .unwrap());
+    assert!(!store
+        .industrial_seq_check_and_advance("src-A", 3, 102)
+        .unwrap());
+    // Strict advance is accepted and moves the high-water.
+    assert!(store
+        .industrial_seq_check_and_advance("src-A", 6, 103)
+        .unwrap());
+    assert!(!store
+        .industrial_seq_check_and_advance("src-A", 6, 104)
+        .unwrap());
+    // A different source keeps its own independent high-water.
+    assert!(store
+        .industrial_seq_check_and_advance("src-B", 1, 105)
+        .unwrap());
+}
+
+#[cfg(test)]
+mod federation_store_contract_tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_backend_satisfies_the_federation_store_contract() {
+        let store = VerifierStore::new(":memory:").expect("in-memory store");
+        assert_federation_store_contract(&store);
+    }
+
+    #[test]
+    fn in_memory_backend_satisfies_the_federation_store_contract() {
+        assert_federation_store_contract(&InMemoryFederationStore::default());
+    }
+}
