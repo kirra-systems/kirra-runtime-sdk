@@ -41,7 +41,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ed25519_dalek::{Signature, VerifyingKey};
 use rusqlite::Result;
 
-use crate::verifier_store::VerifierStore;
+use crate::VerifierStore;
 
 /// Which principal store a key is resolved from. The role names the *intent* of the
 /// lookup; `FederationController` and `FleetGrant` resolve from the SAME table (the
@@ -106,7 +106,7 @@ impl<'a> KeyRegistry<'a> {
             },
             KeyRole::AuditSigning => match self.store.audit_verifying_key() {
                 // The live in-memory signer (the hot path).
-                Some(vk) if crate::audit_chain::verifying_key_id(&vk) == principal_id => {
+                Some(vk) if kirra_audit_hash::verifying_key_id(&vk) == principal_id => {
                     Some(vk.to_bytes())
                 }
                 // #329 residual CLOSED: fall back to the durable `audit_key_ledger`,
@@ -153,10 +153,10 @@ impl<'a> KeyRegistry<'a> {
 }
 
 /// SPKI PEM → raw 32-byte Ed25519 key, via the existing, tested SPKI parser
-/// ([`crate::attestation::parse_ed25519_public_pem`]) — NOT a hand-rolled offset.
+/// ([`kirra_audit_hash::parse_ed25519_public_pem`]) — NOT a hand-rolled offset.
 /// `None` on any malformed PEM.
 fn pem_to_key_bytes(pem: &str) -> Option<[u8; 32]> {
-    crate::attestation::parse_ed25519_public_pem(pem).map(|vk| vk.to_bytes())
+    kirra_audit_hash::parse_ed25519_public_pem(pem).map(|vk| vk.to_bytes())
 }
 
 /// base64 raw key → 32 bytes. A wrong-length or undecodable key is rejected with a
@@ -184,8 +184,8 @@ fn b64_to_key_bytes(b64: &str) -> Option<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verifier::{NodeTrustState, RegisteredNode};
     use ed25519_dalek::{Signer, SigningKey};
+    use kirra_core::{NodeTrustState, RegisteredNode};
 
     /// A deterministic keypair + its SPKI PEM (the in-repo RFC-8410 12-byte prefix
     /// convention) — derived from a seed, NOT a hardcoded key.
@@ -382,7 +382,7 @@ mod tests {
         }
 
         let vk = sk.verifying_key();
-        let fp = crate::audit_chain::verifying_key_id(&vk);
+        let fp = kirra_audit_hash::verifying_key_id(&vk);
         store.set_signing_key(sk.clone());
         let reg = KeyRegistry::new(&store);
 
@@ -426,7 +426,7 @@ mod tests {
         let b = keypair(21).0;
         let c = keypair(22).0;
         let mut store = store();
-        let kid = |k: &SigningKey| crate::audit_chain::verifying_key_id(&k.verifying_key());
+        let kid = |k: &SigningKey| kirra_audit_hash::verifying_key_id(&k.verifying_key());
 
         // Bootstrap genesis A (live), then rotate A→B→C. The live signer is now C;
         // A and B are RETIRED but recorded as self-attested ledger rows.

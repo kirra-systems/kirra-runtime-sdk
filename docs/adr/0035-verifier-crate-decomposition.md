@@ -354,6 +354,22 @@ domain types — none of which can live below persistence in the target DAG toda
       Verified byte-identical + test-count-preserving: root lib 607 + persistence 153 = the prior
       760; power-loss drill / two_node_rollout / ha_failover green; full workspace builds.
 
+  - **Slice-4 follow-up — `KeyRegistry` wire-or-delete (WIRE):** the baselined orphan is closed
+    by RELOCATION, not deletion — the #329/ADR-0008 unified resolver embodies real, tested
+    capability (multi-role resolve + the rotated-out audit-key-ledger fallback) and had a natural
+    consumer waiting. `KeyRegistry` moved into `kirra-persistence` (`key_registry.rs`, +8 tests →
+    persistence 161, root 599; total 760 unchanged), and `fleet_trust_store::resolve_fleet_pubkey`
+    now DELEGATES to it — removing the slice-4 inlined base64 decode (a duplication) and giving
+    `KeyRegistry` a genuine runtime consumer via the `FleetTrustStore` seam. The enabling move:
+    the pure SPKI parser `parse_ed25519_public_pem` (no store dep) relocated from root
+    `attestation.rs` into the `kirra-audit-hash` leaf (which already holds `verifying_key_id`), so
+    persistence's `KeyRegistry` and the root attestation / TPM-quote paths share ONE vetted parser
+    (root re-exports it → `crate::attestation::parse_ed25519_public_pem` unchanged). The root
+    `key_registry` module is deleted outright (nothing in root imported it — a shim would just be a
+    new consumer-less orphan); the `kirra_verifier::key_registry` baseline entry is dropped. The
+    `.trim()` whitespace tolerance the fleet path needs is now single-sourced in `KeyRegistry`
+    (resolving the merged-PR review note in one place).
+
 **Alternative considered — domain-types-first only (no audit inversion):** relocate
 C2 types and move `verifier_store` wholesale into a persistence crate that *keeps*
 depending on `audit_chain`. Rejected as the end state: it drags the signed-audit

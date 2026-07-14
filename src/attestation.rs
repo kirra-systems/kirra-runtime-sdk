@@ -75,9 +75,7 @@
 //   transport-layer protections (TLS) and side-channel/timing resistance of the
 //   underlying crypto, which are deployment/library concerns, not this gate.
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use ed25519_dalek::pkcs8::DecodePublicKey;
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::Signature;
 
 /// Domain-separation tag for the attestation challenge payload. Bumping this
 /// (v1 → v2) is how a future payload-format change is made unambiguous.
@@ -185,19 +183,11 @@ fn pcr16_digest_eq(a: &str, b: &str) -> bool {
 
 /// Parse an Ed25519 public key from a PEM-encoded SubjectPublicKeyInfo.
 ///
-/// The PEM armor (`-----BEGIN/END PUBLIC KEY-----` lines + whitespace) is
-/// stripped here as plain text; the resulting DER is parsed by the vetted
-/// `spki` parser via `VerifyingKey::from_public_key_der`. Returns `None` on
-/// any malformation — callers fail closed.
-pub fn parse_ed25519_public_pem(pem: &str) -> Option<VerifyingKey> {
-    let der_b64: String = pem
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with("-----"))
-        .collect();
-    let der = B64.decode(der_b64.as_bytes()).ok()?;
-    VerifyingKey::from_public_key_der(&der).ok()
-}
+/// Relocated to the pure `kirra-audit-hash` leaf (a key primitive with no store
+/// dependency) so the persistence-layer `KeyRegistry` and these root attestation /
+/// TPM-quote paths share ONE vetted SPKI parser. Re-exported here so every existing
+/// `crate::attestation::parse_ed25519_public_pem` path is unchanged.
+pub use kirra_audit_hash::parse_ed25519_public_pem;
 
 // ---------------------------------------------------------------------------
 // Operator-proven identity (#314 Phase 1) — the attestation pattern applied to
@@ -417,7 +407,10 @@ pub fn verify_attestation_proof_with_pcr16(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
+    // `VerifyingKey`/`B64` are used only by the test helpers here (the shared SPKI
+    // parser moved to `kirra_audit_hash`), so scope them to the test module.
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 

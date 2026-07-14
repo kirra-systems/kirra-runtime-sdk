@@ -637,6 +637,7 @@ mod fabric;
 // ledger — append/verify — stays inherent, the authority tier).
 pub use fabric::{assert_fabric_asset_store_contract, FabricAssetStore, InMemoryFabricAssetStore};
 mod fleet_trust_store; // ADR-0035 slice 4: `impl FleetTrustStore for VerifierStore` (orphan rule → must live with the type)
+pub mod key_registry; // ADR-0035 slice-4 follow-up: the #329/ADR-0008 unified KeyRegistry over VerifierStore (relocated from root; fleet_trust_store delegates to it)
 pub mod migrations; // WP-18/G-20 versioned schema migration framework (user_version)
 pub mod migrations_postgres; // WP-18 slice 3 — Postgres SchemaBackend over an injected executor seam
 
