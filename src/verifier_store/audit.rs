@@ -404,7 +404,7 @@ impl VerifierStore {
     }
 
     /// Load audit records with `sequence >= from_sequence` in ASCENDING sequence
-    /// order (up to `limit`) as [`ShippedAuditRecord`](crate::audit_shipper::ShippedAuditRecord)s — the WORM off-box shipper
+    /// order (up to `limit`) as [`ShippedAuditRecord`](kirra_core::ShippedAuditRecord)s — the WORM off-box shipper
     /// source (`crate::audit_shipper`). `from_sequence` is the INCLUSIVE next
     /// sequence to ship (the chain is 0-based — the genesis row is sequence 0 — so
     /// an inclusive lower bound is required to ship it). Rows without a `sequence`
@@ -413,7 +413,7 @@ impl VerifierStore {
         &self,
         from_sequence: u64,
         limit: u64,
-    ) -> Result<Vec<crate::audit_shipper::ShippedAuditRecord>> {
+    ) -> Result<Vec<kirra_core::ShippedAuditRecord>> {
         // CHECKED domain conversions to the SQLite INTEGER (i64) space. A
         // `from_sequence`/`limit` beyond `i64::MAX` (only reachable from a
         // corrupted persisted cursor) SATURATES to `i64::MAX` rather than wrapping
@@ -444,7 +444,7 @@ impl VerifierStore {
                     )),
                 )
             })?;
-            Ok(crate::audit_shipper::ShippedAuditRecord {
+            Ok(kirra_core::ShippedAuditRecord {
                 sequence,
                 event_type: row.get(1)?,
                 event_json: row.get(2)?,
@@ -463,7 +463,7 @@ impl VerifierStore {
     /// retrievable-verdict handle the deny arm binds into the
     /// `KINEMATIC_CONTRACT_VIOLATION` payload). `None` when no such record.
     ///
-    /// The id shape is validated HERE (`crate::verdicts::is_valid_verdict_id`
+    /// The id shape is validated HERE (`kirra_audit_hash::is_valid_verdict_id`
     /// — 32 lowercase hex chars; invalid → `Ok(None)`) so LIKE metacharacters
     /// can never widen the pattern, regardless of caller discipline (the
     /// retrieval handler also pre-validates, for its 400-vs-404 split); this
@@ -472,8 +472,8 @@ impl VerifierStore {
     pub fn load_audit_record_by_verdict_id(
         &self,
         verdict_id: &str,
-    ) -> Result<Option<crate::audit_shipper::ShippedAuditRecord>> {
-        if !crate::verdicts::is_valid_verdict_id(verdict_id) {
+    ) -> Result<Option<kirra_core::ShippedAuditRecord>> {
+        if !kirra_audit_hash::is_valid_verdict_id(verdict_id) {
             return Ok(None);
         }
         let like = format!("%\"verdict_id\":\"{verdict_id}\"%");
@@ -496,7 +496,7 @@ impl VerifierStore {
                     )),
                 )
             })?;
-            Ok(crate::audit_shipper::ShippedAuditRecord {
+            Ok(kirra_core::ShippedAuditRecord {
                 sequence,
                 event_type: row.get(1)?,
                 event_json: row.get(2)?,

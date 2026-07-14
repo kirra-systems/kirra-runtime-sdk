@@ -15,6 +15,37 @@
 //! format and invalidates every stored signature/hash.
 
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Monotonic per-process discriminator folded into each minted verdict id so two
+/// denials of the SAME payload in the SAME millisecond still get distinct ids.
+static VERDICT_MINT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Mint a verdict id: 32 lowercase hex chars (the first 16 bytes of a SHA-256
+/// over the event time, a monotonic counter, and the payload bytes).
+/// Collision-resistant across concurrent denials and restarts for any realistic
+/// denial volume; the id is a HANDLE (retrieval key), not a secret. (EP-17 — a
+/// content-addressed audit id, so it lives with the audit hash primitives.)
+#[must_use]
+pub fn mint_verdict_id(now_ms: u64, payload_json: &str) -> String {
+    let n = VERDICT_MINT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut h = Sha256::new();
+    h.update(now_ms.to_be_bytes());
+    h.update(n.to_be_bytes());
+    h.update(payload_json.as_bytes());
+    let digest = h.finalize();
+    hex::encode(&digest[..16])
+}
+
+/// Is `s` a well-formed verdict id (exactly 32 lowercase hex chars)? The retrieval
+/// handler validates BEFORE the id is interpolated into a SQL LIKE pattern, so
+/// `%`/`_` metacharacters can never widen the match.
+#[must_use]
+pub fn is_valid_verdict_id(s: &str) -> bool {
+    s.len() == 32
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 
 /// V1 canonical signing payload — kept ONLY for verifying pre-migration
 /// rows. Format: `{prev_hash}:{entry_hash}:{event_type}:{timestamp_ms}`.

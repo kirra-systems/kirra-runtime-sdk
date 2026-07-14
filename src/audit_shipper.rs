@@ -9,7 +9,7 @@
 //!
 //! **The WORM guarantee.** [`verify_shipped_chain`] recomputes every record hash
 //! from the record's own content (the same domain-separated construction the
-//! store uses — [`AuditChainLinker::compute_record_hash_v2`]) and checks
+//! store uses — [`kirra_audit_hash::compute_record_hash_v2`]) and checks
 //! (a) the recomputed hash matches, (b) each record's `previous_hash` links to
 //! the prior record's hash, and (c) sequences are contiguous ascending. Any
 //! single-field mutation breaks the hash; a dropped record breaks contiguity; a
@@ -21,48 +21,34 @@
 
 use std::io::Write as _;
 
-use serde::{Deserialize, Serialize};
+// `ShippedAuditRecord` (the off-box shipped-record wire type) moved to the lean
+// `kirra-core` crate (ADR-0035 — the kirra-persistence enabling work) so the
+// persistence layer that PRODUCES it and this off-box re-verifier that CONSUMES it
+// can both name it without depending on each other. Re-exported so every existing
+// `crate::audit_shipper::ShippedAuditRecord` path is unchanged.
+pub use kirra_core::ShippedAuditRecord;
 
-use crate::audit_chain::AuditChainLinker;
-
-/// One audit-chain record in its off-box shipped form — the raw chain fields
-/// needed to INDEPENDENTLY re-verify the hash chain without the source database.
-/// (Deliberately distinct from `AuditExportEntry`, which is the DESC-paginated
-/// human/API export view and omits `sequence`/`hash_version`.)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ShippedAuditRecord {
-    pub sequence: u64,
-    pub event_type: String,
-    pub event_json: String,
-    pub previous_hash_hex: String,
-    pub record_hash_hex: String,
-    pub created_at_ms: i64,
-    pub hash_version: i64,
-    pub signature_b64: Option<String>,
-    pub key_id: Option<String>,
-}
-
-impl ShippedAuditRecord {
-    /// Recompute this record's hash from its own content, dispatching on
-    /// `hash_version` exactly as the store does (v2 binds `event_type` + `sequence`
-    /// and is domain-separated; v1 is the legacy `prev || json || ts` form).
-    fn recompute_hash(&self) -> String {
-        match self.hash_version {
-            2 => AuditChainLinker::compute_record_hash_v2(
-                &self.previous_hash_hex,
-                &self.event_type,
-                &self.event_json,
-                self.created_at_ms,
-                self.sequence,
-            ),
-            // hash_version 1 (and any pre-v2 legacy row): the original
-            // `prev || canonical_json || created_at_ms` construction.
-            _ => AuditChainLinker::compute_record_hash_v1(
-                &self.previous_hash_hex,
-                &self.event_json,
-                self.created_at_ms,
-            ),
-        }
+/// Recompute a shipped record's hash from its own content, dispatching on
+/// `hash_version` exactly as the store does (v2 binds `event_type` + `sequence`
+/// and is domain-separated; v1 is the legacy `prev || json || ts` form). A free
+/// function (not an inherent impl) because `ShippedAuditRecord` now lives in
+/// another crate; it calls the pure `kirra_audit_hash` primitives directly.
+fn recompute_hash(rec: &ShippedAuditRecord) -> String {
+    match rec.hash_version {
+        2 => kirra_audit_hash::compute_record_hash_v2(
+            &rec.previous_hash_hex,
+            &rec.event_type,
+            &rec.event_json,
+            rec.created_at_ms,
+            rec.sequence,
+        ),
+        // hash_version 1 (and any pre-v2 legacy row): the original
+        // `prev || canonical_json || created_at_ms` construction.
+        _ => kirra_audit_hash::compute_record_hash_v1(
+            &rec.previous_hash_hex,
+            &rec.event_json,
+            rec.created_at_ms,
+        ),
     }
 }
 
@@ -121,7 +107,7 @@ pub fn verify_shipped_chain(records: &[ShippedAuditRecord]) -> ShippedChainVerdi
                 };
             }
         }
-        if r.recompute_hash() != r.record_hash_hex {
+        if recompute_hash(r) != r.record_hash_hex {
             return ShippedChainVerdict::HashMismatch {
                 sequence: r.sequence,
             };
@@ -442,7 +428,7 @@ mod tests {
         ts: i64,
     ) -> ShippedAuditRecord {
         let record_hash =
-            AuditChainLinker::compute_record_hash_v2(prev_hash, event_type, json, ts, sequence);
+            kirra_audit_hash::compute_record_hash_v2(prev_hash, event_type, json, ts, sequence);
         ShippedAuditRecord {
             sequence,
             event_type: event_type.to_string(),
