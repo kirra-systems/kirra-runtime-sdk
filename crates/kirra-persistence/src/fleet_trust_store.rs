@@ -38,14 +38,14 @@ impl FleetTrustStore for VerifierStore {
         principal_id: &str,
         role: FleetKeyRole,
     ) -> Result<Option<Vec<u8>>, String> {
-        // Both fleet roles resolve from the trusted-federation-controller registry
-        // (ADR-0008); map to the unified `KeyRegistry` role and delegate. The
-        // registry returns the raw 32-byte key; the transport base64-encodes it for
-        // verify.
+        // Map the fleet role 1:1 to its `KeyRegistry` counterpart, preserving caller
+        // intent (both resolve from the same trusted-federation-controller registry
+        // today per ADR-0008, but the distinct `FleetGrant` variant keeps that intent
+        // legible for any future role-specific behaviour/logging). The registry
+        // returns the raw 32-byte key; the transport base64-encodes it for verify.
         let kr_role = match role {
-            FleetKeyRole::FederationController | FleetKeyRole::FleetGrant => {
-                KeyRole::FederationController
-            }
+            FleetKeyRole::FederationController => KeyRole::FederationController,
+            FleetKeyRole::FleetGrant => KeyRole::FleetGrant,
         };
         KeyRegistry::new(self)
             .resolve_ed25519_pubkey(principal_id, kr_role)
