@@ -130,13 +130,13 @@ impl VerifierStore {
     }
 
     /// Shared body of every chained posture-event write. Runs the posture-row
-    /// INSERT, the `AuditChainLinker` append, and (when `generation` is `Some`)
-    /// the monotonic high-water UPSERT in ONE `Immediate` transaction on the
-    /// GIVEN connection. Callers pass either the NORMAL `conn` (checkpoint-bounded
-    /// durability, INV-12 throughput path) or the FULL `durable_conn` (per-commit
-    /// fsync — hard-power-loss durable at write time, #772 F2). Threading the
-    /// connection + signing key as params keeps the durable and normal variants a
-    /// single source of truth so they cannot drift.
+    /// INSERT, the injected audit append (via the `AuditAppender` seam), and (when
+    /// `generation` is `Some`) the monotonic high-water UPSERT in ONE `Immediate`
+    /// transaction on the GIVEN connection. Callers pass either the NORMAL `conn`
+    /// (checkpoint-bounded durability, INV-12 throughput path) or the FULL
+    /// `durable_conn` (per-commit fsync — hard-power-loss durable at write time,
+    /// #772 F2). Threading the connection + appender as params keeps the durable and
+    /// normal variants a single source of truth so they cannot drift.
     ///
     /// Returns whether the high-water ADVANCED (`false` when `generation` is
     /// `None`, or when the monotonic guard rejected a stale/equal generation).

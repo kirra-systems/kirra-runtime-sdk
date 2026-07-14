@@ -18,10 +18,11 @@
 // re-verifies the chain, and an atomicity test proves a failing appender rolls the
 // whole caller-owned transaction back).
 
-/// Appends an audit event INTO a caller-owned transaction. The implementation owns
-/// whatever signing material the chain needs; the persistence layer depends only on
-/// this trait, so the append happens atomically with the caller's table write while
-/// the store stays ignorant of `audit_chain` internals and the signing key.
+/// Appends an audit event INTO a caller-owned transaction. The implementation
+/// supplies whatever signing material the chain needs (the production impl below
+/// borrows the store's key; the trait imposes no ownership); the persistence layer
+/// depends only on this trait, so the append happens atomically with the caller's
+/// table write while the store stays ignorant of `audit_chain` internals and the key.
 ///
 /// `append_within` MUST NOT commit or roll back `tx` — it only stages its rows so
 /// the CALLER's `tx.commit()` makes the table write and the audit append all-or-
