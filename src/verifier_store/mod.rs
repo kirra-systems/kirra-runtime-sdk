@@ -585,6 +585,11 @@ mod nodes;
 pub use nodes::{assert_node_store_contract, InMemoryNodeStore, NodeStore};
 mod attestation;
 mod audit;
+// ADR-0035 Addendum A, Stage 2.5 step 1 (prototype on `posture`) — the injected
+// audit-append seam that inverts the C1 audit-chaining coupling while preserving
+// the row+append one-transaction atomicity.
+mod audit_appender;
+pub use audit_appender::{AuditAppender, ChainedAuditAppender};
 mod av_subsystem;
 // ADR-0035 Stage 2 (trait-seam inversion) — the AV-subsystem diagnostic-meta storage
 // trait + its in-memory reference backend (confidence floor + telemetry stamp +
