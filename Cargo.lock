@@ -2298,6 +2298,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-ota-campaign"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "kirra-core",
+ "kirra-release-token",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "kirra-ota-installer"
 version = "0.1.0"
 dependencies = [
@@ -2442,6 +2454,7 @@ dependencies = [
  "kirra-fleet-types",
  "kirra-industrial",
  "kirra-inline-governor",
+ "kirra-ota-campaign",
  "kirra-ota-installer",
  "kirra-policy-types",
  "kirra-release-token",

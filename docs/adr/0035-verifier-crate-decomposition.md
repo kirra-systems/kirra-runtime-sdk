@@ -232,6 +232,21 @@ domain types — none of which can live below persistence in the target DAG toda
    predicate into a lower shared crate (candidate: extend `kirra-fleet-types`, or a
    new `kirra-domain-types` leaf) so a storage trait can name them. `posture` /
    `attestation` skip this step (C1-only).
+
+   **Status (2026-07-14) — C1 done, C2 in progress.** Step 1 (the `AuditAppender`
+   inversion) is COMPLETE across every `verifier_store` C1 family (#924/#925): no
+   write path names `crate::audit_chain` — only the read-side `compute_record_hash`
+   verify calls remain. Step 2 is proceeding as a per-domain slice, each moving one
+   pure domain module to its own lean crate with a `pub use` re-export shim (the
+   `kirra-fleet-types` idiom) so every existing `crate::<mod>::*` path resolves
+   unchanged. Already relocated when this ADR was written: `FederatedTrustReport{,V2}`
+   → `kirra-fleet-types` (the `crate::federation*` shims). **C2 slice 1 (this
+   change):** the OTA campaign engine (`Campaign` / `CampaignState` /
+   `NodeArtifactStatus` / `summarize_campaigns` / `resolve_node_assignment` /
+   `campaign_metrics_prometheus`) → the new lean `kirra-ota-campaign` crate (deps:
+   `kirra-core` for `FleetPosture`, `kirra-release-token` for the uptane set), clearing
+   the `verifier_store::ota_campaigns` C2 coupling. Remaining C2: `CausalLogEntry` /
+   `FabricAsset` (the `fabric` family), then the seam step.
 3. **Seam each hard family** as CRUD, exactly like the clean six, now that C1+C2
    are broken. Then `kirra-persistence` can be extracted mechanically (Stage 2
    proper), depending only on the domain-types leaf + the injected `AuditAppender`
