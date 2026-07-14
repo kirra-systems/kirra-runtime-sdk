@@ -1410,7 +1410,7 @@ impl VerifierStore {
     /// `ensure_hash_v2_migration_anchor` (and any chained audit write) fails —
     /// used to exercise the fail-closed promotion-abort path (#78). Never
     /// compiled into production builds.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn break_audit_chain_table_for_test(&self) {
         self.conn
             .execute("DROP TABLE IF EXISTS audit_log_chain", [])
@@ -1421,7 +1421,7 @@ impl VerifierStore {
     /// `ensure_hash_v2_migration_anchor` actually WRITES the `HASH_V2_MIGRATION`
     /// marker (on a clean chain `v1_total == 0`, so the anchor is a no-op). Lets
     /// a test prove the anchor was ensured during promotion (#78).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn seed_legacy_v1_audit_row_for_test(&self) {
         self.conn
             .execute(
@@ -1434,7 +1434,7 @@ impl VerifierStore {
     }
 
     /// TEST-ONLY: count `audit_log_chain` rows of a given `event_type`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn count_audit_events_for_test(&self, event_type: &str) -> i64 {
         self.conn
             .query_row(
@@ -1448,7 +1448,7 @@ impl VerifierStore {
 
 #[cfg(test)]
 mod verdict_lookup_tests {
-    use crate::verifier_store::VerifierStore;
+    use crate::VerifierStore;
 
     fn store() -> VerifierStore {
         VerifierStore::new(":memory:").expect("in-memory store")

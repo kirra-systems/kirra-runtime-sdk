@@ -900,6 +900,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-persistence"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "kirra-audit-hash",
+ "kirra-core",
+ "kirra-fabric-types",
+ "kirra-fleet-types",
+ "kirra-ota-campaign",
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kirra-policy-types"
 version = "0.1.0"
 dependencies = [
@@ -941,6 +957,7 @@ dependencies = [
  "kirra-fleet-types",
  "kirra-industrial",
  "kirra-ota-campaign",
+ "kirra-persistence",
  "kirra-policy-types",
  "kirra-release-token",
  "parko-core",

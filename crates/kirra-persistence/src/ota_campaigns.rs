@@ -678,7 +678,7 @@ mod ota_campaign_store_contract_tests {
 
 #[cfg(test)]
 mod tests {
-    use crate::verifier_store::VerifierStore;
+    use crate::VerifierStore;
     use kirra_core::FleetPosture;
     use kirra_ota_campaign::{AdvanceOutcome, Campaign, CampaignState, HaltReason};
 

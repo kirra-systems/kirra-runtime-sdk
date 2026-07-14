@@ -177,7 +177,7 @@ impl VerifierStore {
 
     /// TEST-ONLY: remove the singleton HA row to simulate an epoch-read/disk
     /// wedge at the fence boundary. Production code never deletes this row.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn delete_ha_state_for_test(&mut self) {
         self.durable_mut()
             .execute("DELETE FROM ha_state WHERE id = 1", [])

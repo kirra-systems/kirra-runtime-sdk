@@ -103,7 +103,6 @@ pub mod adapters;
 pub mod challenge_rate_limit; // Bug 3 — rate limit for the public attestation-challenge endpoint
 pub mod execution_manager; // WP-20/G-11 declarative task manifest + startup dependency DAG
 pub mod fabric;
-pub mod fleet_trust_store;
 pub mod kinematics_sim;
 pub mod lease; // WP-19/G-21 lease-based failover timing model (pure)
 pub mod protocol_adapter;

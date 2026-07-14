@@ -8,8 +8,8 @@ impl VerifierStore {
     /// `#[cfg(test)]` after the audit-chain-bypass fix so production code
     /// cannot reintroduce a write that misses the SHA-256 hash chain.
     /// Production writes go through `save_posture_event_chained` exclusively.
-    #[cfg(test)]
-    pub(crate) fn save_posture_event(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn save_posture_event(
         &self,
         node_id: &str,
         event_type: &str,
@@ -283,7 +283,7 @@ impl VerifierStore {
         reason: Option<&str>,
         created_at_ms: u64,
     ) -> Result<()> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             self.durable_posture_writes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -333,7 +333,7 @@ impl VerifierStore {
         if generation >= i64::MAX as u64 {
             return Err(rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX));
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             self.durable_posture_writes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -362,7 +362,7 @@ impl VerifierStore {
     /// TEST-ONLY (#772 F6): how many incident-class durable posture-event writes
     /// this store has performed. The gating test asserts a TRANSITION bumps this
     /// and a `POSTURE_CACHE_REFRESHED` does not.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn durable_posture_write_count(&self) -> u64 {
         self.durable_posture_writes
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -371,13 +371,13 @@ impl VerifierStore {
     /// TEST-ONLY (#772 F3): force the durable posture-event writes to fail at
     /// entry (no DB touch), so the recalc's fall-back-to-NORMAL-write path can be
     /// exercised without a real fsync/BUSY fault.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_fail_durable_posture_writes(&self, fail: bool) {
         self.fail_durable_posture_writes
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn injected_durable_fault() -> rusqlite::Error {
         rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
