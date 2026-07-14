@@ -413,8 +413,8 @@ mod standby_store_tests {
     fn test_posture_event_analytics_queries() {
         // #396: window/group queries return the expected rows.
         let store = in_memory();
-        let nominal = serde_json::to_string(&crate::verifier::FleetPosture::Nominal).unwrap();
-        let degraded = serde_json::to_string(&crate::verifier::FleetPosture::Degraded).unwrap();
+        let nominal = serde_json::to_string(&kirra_core::FleetPosture::Nominal).unwrap();
+        let degraded = serde_json::to_string(&kirra_core::FleetPosture::Degraded).unwrap();
         store
             .save_posture_event("a", "E", &nominal, None, 1_000)
             .unwrap();
@@ -1038,11 +1038,11 @@ mod durability_tests {
         c.query_row("PRAGMA synchronous", [], |r| r.get(0)).unwrap()
     }
 
-    fn report(nonce: &str) -> crate::federation::FederatedTrustReport {
-        crate::federation::FederatedTrustReport {
+    fn report(nonce: &str) -> kirra_fleet_types::federation::FederatedTrustReport {
+        kirra_fleet_types::federation::FederatedTrustReport {
             source_controller_id: "ctrl-A".to_string(),
             asset_id: "asset-1".to_string(),
-            posture: crate::verifier::FleetPosture::Nominal,
+            posture: kirra_core::FleetPosture::Nominal,
             issued_at_ms: 1_000,
             expires_at_ms: 9_000,
             nonce_hex: nonce.to_string(),
@@ -1872,7 +1872,7 @@ mod key_durability_165_tests {
         // #165 work is entirely boot-time (admit_signing_key) + rotation-time
         // (record_key_rotation), off the hot path. This compiles & runs with no
         // VerifierStore in scope, demonstrating the independence.
-        use crate::gateway::kinematics_contract::{
+        use kirra_core::kinematics_contract::{
             validate_vehicle_command, EnforceAction, ProposedVehicleCommand,
             VehicleKinematicsContract,
         };
@@ -2077,7 +2077,7 @@ mod epoch_fence_79_tests {
         FederatedTrustReport {
             source_controller_id: "ctrl-A".to_string(),
             asset_id: "asset-1".to_string(),
-            posture: crate::verifier::FleetPosture::Nominal,
+            posture: kirra_core::FleetPosture::Nominal,
             issued_at_ms: 1_000,
             expires_at_ms: 9_000,
             nonce_hex: nonce.to_string(),
@@ -2785,9 +2785,9 @@ mod causal_chain_87_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod federation_v2_wiring_tests {
-    use crate::federation_reconciliation::authoritative_posture;
-    use crate::verifier::FleetPosture;
     use crate::verifier_store::*;
+    use kirra_core::FleetPosture;
+    use kirra_fleet_types::federation_reconciliation::authoritative_posture;
 
     fn rep(
         nonce: &str,

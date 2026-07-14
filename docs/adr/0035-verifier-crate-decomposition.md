@@ -323,12 +323,16 @@ domain types — none of which can live below persistence in the target DAG toda
       `verdicts` / `audit_shipper` re-export from the leaves so root paths are unchanged;
       `audit_shipper`'s `recompute_hash` became a free fn (calls `kirra_audit_hash`) since
       the record type is now external — which also freed `audit_shipper` of `audit_chain`.
-   3.5. **Repoint the shim paths (pre-slice-4 mechanical cleanup).** `verifier_store` still
-      NAMES already-relocated types via their ROOT re-export shims (`crate::verifier::*` →
-      `kirra_core`, `crate::federation*` → `kirra_fleet_types`, `crate::ota_campaign::*` →
-      `kirra_ota_campaign`, `crate::fabric::{asset,causal_log}` → `kirra_fabric_types`).
-      After extraction `crate::` is the persistence crate, so these must name the leaves
-      directly. Plus one test-only `crate::gateway::kinematics_contract` use to resolve.
+   3.5. **Repoint the shim paths — DONE.** `verifier_store` named already-relocated types via
+      their ROOT re-export shims; all repointed to the leaves directly: `crate::verifier::{FleetPosture,
+      NodeTrustState, RegisteredNode}` → `kirra_core`, `crate::federation{,_reconciliation}::*` →
+      `kirra_fleet_types`, `crate::ota_campaign::*` → `kirra_ota_campaign`,
+      `crate::fabric::{asset,causal_log}::*` → `kirra_fabric_types`, and the test-only
+      `crate::gateway::kinematics_contract::*` → `kirra_core::kinematics_contract` (also a shim).
+      Two residual doc-links (`KeyRegistry`, `StoreHandle`) demoted to plain spans. RESULT:
+      `verifier_store` now names ZERO root-crate items — only its own `crate::verifier_store::*`
+      submodules, the leaf crates, and external crates. Byte-identical (repointing to the same
+      types via re-export); 760 lib + power-loss + rollout green.
    4. **Then** move `verifier_store` wholesale into `kirra-persistence`, depending only on the
       domain-type leaves + the pure-audit leaf + the injected `AuditAppender` contract.
 

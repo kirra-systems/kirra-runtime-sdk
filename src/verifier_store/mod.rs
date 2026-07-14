@@ -7,9 +7,9 @@
 // descendant-module visibility, so the split is a pure move (no new public
 // surface beyond a few `pub(crate)` helpers needed across domains).
 
-use crate::federation::FederatedTrustReport;
-use crate::verifier::{NodeTrustState, RegisteredNode};
 use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
+use kirra_core::{NodeTrustState, RegisteredNode};
+use kirra_fleet_types::federation::FederatedTrustReport;
 use rusqlite::{params, Connection, Result};
 use std::collections::HashMap;
 
@@ -376,7 +376,7 @@ pub struct VerifierStore {
     durable_conn: Option<Connection>,
     pub signing_key: Option<ed25519_dalek::SigningKey>,
     /// The database path this store was opened from (`":memory:"` for in-memory).
-    /// Retained so a [`StoreHandle`](crate::store_handle::StoreHandle) can open
+    /// Retained so a `StoreHandle` (root crate) can open
     /// independent READ-ONLY replica connections to the same WAL file.
     db_path: String,
     /// #772 F6 — TEST-ONLY invocation counter for the incident-class durable
@@ -1197,7 +1197,7 @@ impl VerifierStore {
 
     /// The PUBLIC half of the in-memory audit signing key, or `None` if no key is
     /// installed. Read-only exposure (#329 residual): lets the
-    /// [`crate::key_registry::KeyRegistry`] resolve the chain's verifying key through
+    /// `KeyRegistry` (root crate) resolve the chain's verifying key through
     /// the unified registry. There is exactly ONE audit signer and it is volatile
     /// (no rotation, no persisted history) — that wider residual is still deferred.
     pub fn audit_verifying_key(&self) -> Option<ed25519_dalek::VerifyingKey> {
