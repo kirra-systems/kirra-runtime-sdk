@@ -613,6 +613,12 @@ mod operators;
 // methods stay inherent, belonging to the harder persistence tier).
 pub use operators::{assert_operator_store_contract, InMemoryOperatorStore, OperatorStore};
 mod ota_campaigns;
+// ADR-0035 Stage 2.5 seam step (family 1) — the OTA-campaign storage trait + its
+// in-memory reference backend (campaign persistence/reads + node-adoption CRUD;
+// the audit-chained `update_campaign` stays inherent, riding the AuditAppender seam).
+pub use ota_campaigns::{
+    assert_ota_campaign_store_contract, InMemOtaError, InMemoryOtaCampaignStore, OtaCampaignStore,
+};
 mod posture;
 mod principals;
 // ADR-0035 Stage 2 (trait-seam inversion) — the API-principal storage trait + its

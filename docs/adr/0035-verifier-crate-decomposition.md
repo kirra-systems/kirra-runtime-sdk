@@ -260,6 +260,19 @@ domain types — none of which can live below persistence in the target DAG toda
    proper), depending only on the domain-types leaf + the injected `AuditAppender`
    contract.
 
+   **Status (2026-07-14) — seam step underway. Family 1 (`ota_campaigns`):** the
+   `OtaCampaignStore` trait + `InMemoryOtaCampaignStore` reference backend +
+   `assert_ota_campaign_store_contract` (run against both), modelling the
+   backend-portable STORAGE surface — campaign insert/reads (`insert_campaign`,
+   `load_campaign`, `load_campaigns`, `load_active_campaigns`) and the non-audit
+   node-adoption CRUD (`upsert_node_artifact_status`, `load_node_artifact_statuses`)
+   with its monotonic + attested-per-digest invariants. Matching OperatorStore's
+   discipline, the audit-lifecycle `update_campaign` (R156 `event_type` + signed
+   audit append) stays INHERENT-ONLY, riding the `AuditAppender` seam — it belongs to
+   the authority tier, not the storage contract. `insert_campaign` IS modelled; the
+   SQLite backend additionally audit-chains it, a side effect orthogonal to the
+   storage contract. Next: family 2 (`fabric`).
+
 **Alternative considered — domain-types-first only (no audit inversion):** relocate
 C2 types and move `verifier_store` wholesale into a persistence crate that *keeps*
 depending on `audit_chain`. Rejected as the end state: it drags the signed-audit

@@ -306,6 +306,370 @@ fn corrupt_row_err(field: &str, value: &str) -> rusqlite::Error {
     )
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0035 Stage 2.5 seam step (family 1) — the OTA-campaign storage trait
+//
+// The ota_campaigns family, seamed as CRUD exactly like the clean six
+// (NodeStore/OperatorStore idiom): the trait shares the inherent method names, so
+// inherent methods win resolution — every existing `store.insert_campaign(...)` /
+// `store.load_campaign(...)` caller is untouched and the SQLite impl delegates via
+// `self.method()` WITHOUT recursion. A second in-memory backend + a shared
+// conformance test prove the family's STORAGE contract is genuinely
+// backend-portable (SQLite realizes it over the `ota_campaigns` /
+// `node_artifact_status` tables).
+//
+// Scope, matching OperatorStore's discipline: this trait models the pure,
+// backend-portable STORAGE surface — campaign persistence + reads and the
+// non-audit node-adoption CRUD. `update_campaign` stays INHERENT-ONLY: it carries
+// the R156 `event_type` and appends a signed audit entry in the same tx (a
+// safety-authority concern already inverted via the `AuditAppender` seam), so it
+// belongs to the harder persistence tier, not this storage contract — the same
+// reason OperatorStore left `save_clearance_grant_chained` inherent. `insert_campaign`
+// IS modelled (its contract is "persist a Draft; a duplicate id conflicts"); the
+// SQLite backend additionally audit-chains it, a side effect ORTHOGONAL to — and
+// invisible to — the storage contract exercised here.
+// ---------------------------------------------------------------------------
+
+/// The OTA-campaign storage contract — persist a campaign + read it back
+/// (by id / all / active-only), and upsert/read the per-node artifact-adoption
+/// reports. Backend-agnostic; the audit-chaining of lifecycle mutations is a
+/// separate (SQLite-backend) concern layered via [`AuditAppender`].
+pub trait OtaCampaignStore {
+    /// Backend error type (SQLite: `rusqlite::Error`; in-memory: [`InMemOtaError`]).
+    type Error;
+
+    /// Persist a freshly-authored (`Draft`) campaign. INSERT semantics — a
+    /// duplicate `campaign_id` is an error (never a silent overwrite).
+    fn insert_campaign(&mut self, campaign: &Campaign) -> std::result::Result<(), Self::Error>;
+
+    /// Load one campaign by id, or `None` if absent. A stored row that no longer
+    /// parses is a fail-closed error, never a silent `None`.
+    fn load_campaign(
+        &self,
+        campaign_id: &str,
+    ) -> std::result::Result<Option<Campaign>, Self::Error>;
+
+    /// Every campaign, newest first (`created_at_ms` DESC, then `campaign_id` ASC).
+    fn load_campaigns(&self) -> std::result::Result<Vec<Campaign>, Self::Error>;
+
+    /// Only the *active* campaigns (`Staged` / `Rolling`), oldest first
+    /// (`created_at_ms` ASC, then `campaign_id` ASC) — the sweep-monitor set.
+    fn load_active_campaigns(&self) -> std::result::Result<Vec<Campaign>, Self::Error>;
+
+    /// Upsert a node's artifact-adoption report (keyed by `node_id`). MONOTONIC on
+    /// `reported_at_ms` (a stale report is a no-op); `attested` is monotonic per
+    /// digest (a later unsigned report for the SAME digest cannot clear attestation;
+    /// a different digest resets it).
+    fn upsert_node_artifact_status(
+        &mut self,
+        st: &NodeArtifactStatus,
+    ) -> std::result::Result<(), Self::Error>;
+
+    /// Every node's latest adoption report, newest first
+    /// (`reported_at_ms` DESC, then `node_id` ASC).
+    fn load_node_artifact_statuses(
+        &self,
+    ) -> std::result::Result<Vec<NodeArtifactStatus>, Self::Error>;
+}
+
+/// The production SQLite backend: delegates to the inherent `VerifierStore` methods
+/// over the `ota_campaigns` / `node_artifact_status` tables. `self.method()`
+/// resolves to the INHERENT method (inherent wins over the trait), so this is
+/// delegation, not recursion.
+impl OtaCampaignStore for VerifierStore {
+    type Error = rusqlite::Error;
+
+    fn insert_campaign(&mut self, campaign: &Campaign) -> Result<()> {
+        self.insert_campaign(campaign)
+    }
+    fn load_campaign(&self, campaign_id: &str) -> Result<Option<Campaign>> {
+        self.load_campaign(campaign_id)
+    }
+    fn load_campaigns(&self) -> Result<Vec<Campaign>> {
+        self.load_campaigns()
+    }
+    fn load_active_campaigns(&self) -> Result<Vec<Campaign>> {
+        self.load_active_campaigns()
+    }
+    fn upsert_node_artifact_status(&mut self, st: &NodeArtifactStatus) -> Result<()> {
+        self.upsert_node_artifact_status(st)
+    }
+    fn load_node_artifact_statuses(&self) -> Result<Vec<NodeArtifactStatus>> {
+        self.load_node_artifact_statuses()
+    }
+}
+
+/// In-memory [`OtaCampaignStore`] error: the one failure the storage contract can
+/// produce WITHOUT a database — a duplicate `campaign_id` on insert (SQLite raises
+/// the same via the `PRIMARY KEY` constraint). A real enum (not `Infallible`)
+/// because the contract genuinely has a reject-before-mutate case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InMemOtaError {
+    /// `insert_campaign` for an already-present `campaign_id`.
+    DuplicateCampaign(String),
+}
+
+impl std::fmt::Display for InMemOtaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateCampaign(id) => write!(f, "duplicate campaign_id: {id}"),
+        }
+    }
+}
+
+impl std::error::Error for InMemOtaError {}
+
+/// The in-memory [`OtaCampaignStore`] backend — a portability-proof reference
+/// modelling the `ota_campaigns` + `node_artifact_status` tables as maps keyed by
+/// `campaign_id` / `node_id`. Realizes the SAME insert-conflict, ordering,
+/// active-filter, monotonic-upsert, and attested-per-digest semantics WITHOUT a
+/// database, so the family's storage contract is exercised against two backends.
+/// It does NOT audit-chain (that is the SQLite backend's `AuditAppender` concern,
+/// outside this storage contract). Single-process; `&mut self` writes need no
+/// interior mutability (matching the inherent `&mut self` writers).
+#[derive(Debug, Default)]
+pub struct InMemoryOtaCampaignStore {
+    campaigns: std::collections::HashMap<String, Campaign>,
+    statuses: std::collections::HashMap<String, NodeArtifactStatus>,
+}
+
+impl OtaCampaignStore for InMemoryOtaCampaignStore {
+    type Error = InMemOtaError;
+
+    fn insert_campaign(&mut self, campaign: &Campaign) -> std::result::Result<(), InMemOtaError> {
+        if self.campaigns.contains_key(&campaign.campaign_id) {
+            // Reject BEFORE mutate — mirrors SQLite's plain INSERT conflict.
+            return Err(InMemOtaError::DuplicateCampaign(
+                campaign.campaign_id.clone(),
+            ));
+        }
+        self.campaigns
+            .insert(campaign.campaign_id.clone(), campaign.clone());
+        Ok(())
+    }
+
+    fn load_campaign(
+        &self,
+        campaign_id: &str,
+    ) -> std::result::Result<Option<Campaign>, InMemOtaError> {
+        Ok(self.campaigns.get(campaign_id).cloned())
+    }
+
+    fn load_campaigns(&self) -> std::result::Result<Vec<Campaign>, InMemOtaError> {
+        let mut all: Vec<Campaign> = self.campaigns.values().cloned().collect();
+        // Newest first: created_at_ms DESC, then campaign_id ASC.
+        all.sort_by(|a, b| {
+            b.created_at_ms
+                .cmp(&a.created_at_ms)
+                .then_with(|| a.campaign_id.cmp(&b.campaign_id))
+        });
+        Ok(all)
+    }
+
+    fn load_active_campaigns(&self) -> std::result::Result<Vec<Campaign>, InMemOtaError> {
+        let mut active: Vec<Campaign> = self
+            .campaigns
+            .values()
+            .filter(|c| matches!(c.state, CampaignState::Staged | CampaignState::Rolling))
+            .cloned()
+            .collect();
+        // Oldest first: created_at_ms ASC, then campaign_id ASC.
+        active.sort_by(|a, b| {
+            a.created_at_ms
+                .cmp(&b.created_at_ms)
+                .then_with(|| a.campaign_id.cmp(&b.campaign_id))
+        });
+        Ok(active)
+    }
+
+    fn upsert_node_artifact_status(
+        &mut self,
+        st: &NodeArtifactStatus,
+    ) -> std::result::Result<(), InMemOtaError> {
+        match self.statuses.get(&st.node_id) {
+            // Fresh node — plain insert.
+            None => {
+                self.statuses.insert(st.node_id.clone(), st.clone());
+            }
+            Some(prev) => {
+                // MONOTONIC: a report NOT newer than the stored one is a no-op.
+                if st.reported_at_ms >= prev.reported_at_ms {
+                    // `attested` is monotonic PER DIGEST: a later report for the
+                    // SAME digest cannot clear unforgeable evidence; a different
+                    // digest is a fresh claim that must re-earn attestation.
+                    let attested =
+                        st.attested || (prev.attested && prev.applied_digest == st.applied_digest);
+                    let mut next = st.clone();
+                    next.attested = attested;
+                    self.statuses.insert(st.node_id.clone(), next);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn load_node_artifact_statuses(
+        &self,
+    ) -> std::result::Result<Vec<NodeArtifactStatus>, InMemOtaError> {
+        let mut all: Vec<NodeArtifactStatus> = self.statuses.values().cloned().collect();
+        // Newest first: reported_at_ms DESC, then node_id ASC.
+        all.sort_by(|a, b| {
+            b.reported_at_ms
+                .cmp(&a.reported_at_ms)
+                .then_with(|| a.node_id.cmp(&b.node_id))
+        });
+        Ok(all)
+    }
+}
+
+/// The OTA-campaign storage contract, driven through [`OtaCampaignStore`] so it
+/// runs IDENTICALLY against every backend: insert→load roundtrip, duplicate-id
+/// conflict, newest-first listing, the active-only (`Staged`/`Rolling`) filter with
+/// oldest-first order, and the node-adoption upsert's monotonic + attested-per-digest
+/// invariants.
+///
+/// `pub` (not `#[cfg(test)]`) by design — the shared backend-conformance suite,
+/// mirroring `assert_node_store_contract`. Panics on any violation; call from a test.
+///
+/// PRECONDITION: `store` must start empty.
+pub fn assert_ota_campaign_store_contract<S: OtaCampaignStore>(store: &mut S)
+where
+    S::Error: core::fmt::Debug,
+{
+    fn draft(id: &str, created_at_ms: u64) -> Campaign {
+        Campaign::new(
+            id,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "v1",
+            vec!["fleet".to_string()],
+            vec![50, 100],
+            created_at_ms,
+        )
+        .expect("valid draft")
+    }
+
+    // Empty store.
+    assert!(store.load_campaign("camp-1").unwrap().is_none());
+    assert!(store.load_campaigns().unwrap().is_empty());
+    assert!(store.load_active_campaigns().unwrap().is_empty());
+    assert!(store.load_node_artifact_statuses().unwrap().is_empty());
+
+    // Insert → load roundtrip.
+    let c1 = draft("camp-1", 1_000);
+    store.insert_campaign(&c1).unwrap();
+    assert_eq!(store.load_campaign("camp-1").unwrap().as_ref(), Some(&c1));
+
+    // Duplicate id conflicts (never a silent overwrite).
+    assert!(
+        store.insert_campaign(&draft("camp-1", 9_999)).is_err(),
+        "duplicate campaign_id must conflict"
+    );
+
+    // A second campaign, armed into `Staged` (active); listing is newest-first.
+    let mut c2 = draft("camp-2", 2_000);
+    c2.arm(2_100).unwrap();
+    store.insert_campaign(&c2).unwrap();
+    let all_ids: Vec<String> = store
+        .load_campaigns()
+        .unwrap()
+        .into_iter()
+        .map(|c| c.campaign_id)
+        .collect();
+    assert_eq!(all_ids, vec!["camp-2", "camp-1"], "newest first");
+
+    // Active filter: camp-1 is Draft (excluded), camp-2 is Staged (included).
+    let active_ids: Vec<String> = store
+        .load_active_campaigns()
+        .unwrap()
+        .into_iter()
+        .map(|c| c.campaign_id)
+        .collect();
+    assert_eq!(active_ids, vec!["camp-2"], "only Staged/Rolling are active");
+
+    // Node adoption: monotonic upsert + attested-per-digest.
+    let dg_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let dg_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let report = |node: &str, digest: &str, at: u64, attested: bool| NodeArtifactStatus {
+        node_id: node.to_string(),
+        applied_digest: digest.to_string(),
+        campaign_id: Some("camp-1".to_string()),
+        artifact_version: Some("v1".to_string()),
+        reported_at_ms: at,
+        attested,
+    };
+    // Signed report → attested.
+    store
+        .upsert_node_artifact_status(&report("robot-1", dg_a, 1_000, true))
+        .unwrap();
+    // A STALE report is a no-op (timestamp older).
+    store
+        .upsert_node_artifact_status(&report("robot-1", dg_b, 500, false))
+        .unwrap();
+    {
+        let r = store.load_node_artifact_statuses().unwrap();
+        let r1 = r.iter().find(|r| r.node_id == "robot-1").unwrap();
+        assert_eq!(r1.reported_at_ms, 1_000, "stale report must not overwrite");
+        assert_eq!(r1.applied_digest, dg_a, "stale digest must not win");
+        assert!(r1.attested);
+    }
+    // A LATER UNSIGNED report for the SAME digest preserves attestation.
+    store
+        .upsert_node_artifact_status(&report("robot-1", dg_a, 2_000, false))
+        .unwrap();
+    assert!(
+        store
+            .load_node_artifact_statuses()
+            .unwrap()
+            .iter()
+            .find(|r| r.node_id == "robot-1")
+            .unwrap()
+            .attested,
+        "same-digest unsigned report preserves attested"
+    );
+    // A DIFFERENT digest resets attestation.
+    store
+        .upsert_node_artifact_status(&report("robot-1", dg_b, 3_000, false))
+        .unwrap();
+    assert!(
+        !store
+            .load_node_artifact_statuses()
+            .unwrap()
+            .iter()
+            .find(|r| r.node_id == "robot-1")
+            .unwrap()
+            .attested,
+        "a different digest resets attested"
+    );
+
+    // A second node; both are listed, newest first.
+    store
+        .upsert_node_artifact_status(&report("robot-2", dg_a, 4_000, false))
+        .unwrap();
+    let node_ids: Vec<String> = store
+        .load_node_artifact_statuses()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.node_id)
+        .collect();
+    assert_eq!(node_ids, vec!["robot-2", "robot-1"], "newest report first");
+}
+
+#[cfg(test)]
+mod ota_campaign_store_contract_tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_backend_satisfies_the_ota_campaign_store_contract() {
+        let mut store = VerifierStore::new(":memory:").expect("in-memory store");
+        assert_ota_campaign_store_contract(&mut store);
+    }
+
+    #[test]
+    fn in_memory_backend_satisfies_the_ota_campaign_store_contract() {
+        assert_ota_campaign_store_contract(&mut InMemoryOtaCampaignStore::default());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::ota_campaign::{AdvanceOutcome, Campaign, CampaignState, HaltReason};
