@@ -20,27 +20,11 @@ const CHALLENGE_TTL_MS: u64 = 30_000;
 // `FleetPosture` / `NodeTrustState` moved to the lean `kirra-core` crate (de-monolith
 // Stage 1) so the governor/contract surface need not pull this heavy module. Re-exported
 // here so every existing `crate::verifier::FleetPosture` path keeps the same type.
-pub use kirra_core::{FleetPosture, NodeTrustState};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegisteredNode {
-    pub node_id: String,
-    pub status: NodeTrustState,
-    pub registered_at_ms: u64,
-    /// Timestamp of the most recent trust-state change (0 if never attested).
-    pub last_trust_update_ms: u64,
-    /// AK public key in PEM format. Populated on registration when provided;
-    /// reserved for future TPM quote verification.
-    pub ak_public_pem: Option<String>,
-    /// Expected SHA-256 hex digest of PCR16 at attestation time.
-    pub expected_pcr16_digest_hex: Option<String>,
-    /// #397 console — optional site/location label for fleet rollups. NULLABLE;
-    /// captured at registration. Never gates trust/posture.
-    pub site: Option<String>,
-    /// #398 console — optional firmware version label for version rollups.
-    /// NULLABLE; captured at registration. Never gates trust/posture.
-    pub firmware_version: Option<String>,
-}
+// `RegisteredNode` moved to `kirra-core` alongside `NodeTrustState` (ADR-0035 — the
+// `kirra-persistence` enabling work: the persistence layer must name it without the
+// verifier service tree). Re-exported here so every existing
+// `crate::verifier::RegisteredNode` path keeps the same type.
+pub use kirra_core::{FleetPosture, NodeTrustState, RegisteredNode};
 
 #[derive(Debug, Clone)]
 pub struct ChallengeEntry {

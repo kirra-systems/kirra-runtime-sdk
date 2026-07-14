@@ -280,10 +280,32 @@ domain types — none of which can live below persistence in the target DAG toda
    chained data, so it is the authority tier, out of the storage seam. **With both
    hard families seamed, every `verifier_store` domain now has a backend-portable
    storage-trait contract** (the clean six + these two), and the audit-authority
-   surface is cleanly the inherent-only residue. `kirra-persistence` can now be
-   extracted mechanically: move `verifier_store` wholesale, depending only on the
-   domain-types leaves (`kirra-fleet-types` / `kirra-ota-campaign` /
-   `kirra-fabric-types`) + the injected `AuditAppender` contract.
+   surface is cleanly the inherent-only residue.
+
+   **Correction (2026-07-14) — the extraction is NOT yet mechanical.** A dependency
+   audit of `verifier_store` after the seam step found it still names several ROOT-crate
+   items that would cycle if the module moved to its own crate:
+   - `crate::audit_chain::*` (~30 refs) — `verifying_key_id`, `AuditChainLinker`,
+     `compute_{record,causal_record}_hash`, `canonical_*_payload`, `CausalRecordHashInput`.
+     The `AuditAppender` seam broke the WRITE path, but the verify/read path + the
+     `ChainedAuditAppender` impl + the pure hash/canonical helpers still live in root.
+   - `crate::verifier::RegisteredNode` (root data struct); `crate::audit_shipper::ShippedAuditRecord`;
+     `crate::verdicts::is_valid_verdict_id`; `crate::key_registry::KeyRegistry`.
+
+   So `kirra-persistence` needs a few ENABLING slices first, each the familiar
+   relocate-to-a-leaf + re-export-shim move, before the wholesale move is truly
+   mechanical:
+   1. **`RegisteredNode` → `kirra-core`** (DONE — alongside `NodeTrustState`; re-exported
+      as `crate::verifier::RegisteredNode`, byte-identical).
+   2. **Split `audit_chain`'s PURE core** (the hash + canonical-payload functions +
+      `verifying_key_id` + `CausalRecordHashInput`) into a lean crate; keep the stateful
+      `AuditChainLinker`/keyring in root (authority). The `AuditAppender` TRAIT moves down
+      with persistence; the `ChainedAuditAppender` IMPL stays in root and is injected. This
+      is the crux enabling slice.
+   3. **Relocate/invert** the smaller couplings (`ShippedAuditRecord`, `is_valid_verdict_id`,
+      `KeyRegistry`).
+   4. **Then** move `verifier_store` wholesale into `kirra-persistence`, depending only on the
+      domain-type leaves + the pure-audit leaf + the injected `AuditAppender` contract.
 
 **Alternative considered — domain-types-first only (no audit inversion):** relocate
 C2 types and move `verifier_store` wholesale into a persistence crate that *keeps*
