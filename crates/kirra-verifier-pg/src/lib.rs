@@ -8,12 +8,14 @@
 //!   the injected [`PgExecutor`] seam);
 //! - the [`EpochFence`] HA write-ownership contract (durable CAS + fail-closed
 //!   actuator fence);
-//! - the [`NodeStore`] node-identity registry contract.
+//! - the [`NodeStore`] node-identity registry contract;
+//! - the [`PostureEngineStateStore`] contract (the `posture_engine_state` KV store
+//!   + the monotonic generation high-water, fail-closed on a corrupt value).
 //!
 //! This crate is the promised integrator binding: [`LivePgExecutor`] is the
 //! "~10-line adapter" the seam documentation describes (execute →
 //! `batch_execute`, version read → a `SELECT`, transaction →
-//! `BEGIN`/`COMMIT`/`ROLLBACK`), and [`PgVerifierStore`] realizes BOTH storage
+//! `BEGIN`/`COMMIT`/`ROLLBACK`), and [`PgVerifierStore`] realizes those storage
 //! contracts over a real server:
 //!
 //! - the epoch CAS is the same `UPDATE … WHERE id = 1 AND epoch = $1`
@@ -38,7 +40,7 @@ use kirra_verifier::verifier::{NodeTrustState, RegisteredNode};
 use kirra_verifier::verifier_store::migrations_postgres::{
     PgExecutor, PgMigration, PgMigrationError, PostgresBackend,
 };
-use kirra_verifier::verifier_store::{EpochFence, FenceError, NodeStore};
+use kirra_verifier::verifier_store::{EpochFence, FenceError, NodeStore, PostureEngineStateStore};
 
 /// The Postgres schema version THIS binary supports (mirrors the SQLite
 /// `SCHEMA_VERSION` discipline: a newer stamp in the database is refused
@@ -63,6 +65,10 @@ CREATE TABLE IF NOT EXISTS nodes (
     last_trust_update_ms      BIGINT NOT NULL,
     ak_public_pem             TEXT,
     expected_pcr16_digest_hex TEXT
+);
+CREATE TABLE IF NOT EXISTS posture_engine_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 INSERT INTO ha_state (id, epoch, active_instance_id, updated_at_ms)
     VALUES (1, 0, NULL, 0) ON CONFLICT (id) DO NOTHING;
@@ -142,6 +148,11 @@ pub enum PgStoreError {
     Pg(postgres::Error),
     /// `NodeTrustState` could not be encoded to `status_json`.
     Encode(serde_json::Error),
+    /// A stored `last_generation` value is non-numeric or out-of-domain
+    /// (`>= i64::MAX`) — CORRUPTION, surfaced fail-closed exactly as the SQLite /
+    /// in-memory backends' `load_last_generation` does (never silently read as 0,
+    /// which would reintroduce restart generation time-reversal).
+    CorruptGeneration(String),
 }
 
 impl std::fmt::Display for PgStoreError {
@@ -149,6 +160,9 @@ impl std::fmt::Display for PgStoreError {
         match self {
             PgStoreError::Pg(e) => write!(f, "postgres error: {e}"),
             PgStoreError::Encode(e) => write!(f, "status_json encode error: {e}"),
+            PgStoreError::CorruptGeneration(v) => {
+                write!(f, "corrupt last_generation value: {v:?}")
+            }
         }
     }
 }
@@ -158,6 +172,7 @@ impl std::error::Error for PgStoreError {
         match self {
             PgStoreError::Pg(e) => Some(e),
             PgStoreError::Encode(e) => Some(e),
+            PgStoreError::CorruptGeneration(_) => None,
         }
     }
 }
@@ -375,5 +390,87 @@ impl EpochFence for PgVerifierStore {
             });
         }
         tx.commit().map_err(|_| FenceError::EpochUnreadable)
+    }
+}
+
+impl PostureEngineStateStore for PgVerifierStore {
+    type Error = PgStoreError;
+
+    fn load_last_generation(&self) -> Result<u64, PgStoreError> {
+        let row = self.lock().query_opt(
+            "SELECT value FROM posture_engine_state WHERE key = 'last_generation'",
+            &[],
+        )?;
+        match row {
+            // Genuinely absent row → 0 (fresh store), like SQLite's
+            // `QueryReturnedNoRows => Ok(0)`.
+            None => Ok(0),
+            // Present but non-numeric OR out-of-domain (`>= i64::MAX`) → CORRUPTION,
+            // fail closed. Same verdict as `VerifierStore::load_last_generation`.
+            Some(r) => {
+                let s: String = r.get(0);
+                let parsed = s
+                    .parse::<u64>()
+                    .map_err(|_| PgStoreError::CorruptGeneration(s.clone()))?;
+                if parsed >= i64::MAX as u64 {
+                    return Err(PgStoreError::CorruptGeneration(s));
+                }
+                Ok(parsed)
+            }
+        }
+    }
+
+    fn save_last_generation(&self, generation: u64) -> Result<bool, PgStoreError> {
+        // The monotonic guard is done in RUST (not a SQL `CAST` upsert) because
+        // Postgres `CAST('garbage' AS BIGINT)` ERRORS where SQLite's `CAST` yields 0.
+        // Doing it here preserves the heal-on-corrupt parity — an absent row inserts
+        // unconditionally, a corrupt current value counts as 0 so a positive
+        // generation overwrites it — matching the SQLite + in-memory backends. The
+        // single-connection `Mutex` makes the read-then-write atomic within this
+        // writer (generation writes come from the one epoch-owning Active instance).
+        let mut c = self.lock();
+        let row = c.query_opt(
+            "SELECT value FROM posture_engine_state WHERE key = 'last_generation'",
+            &[],
+        )?;
+        match row {
+            None => {
+                c.execute(
+                    "INSERT INTO posture_engine_state (key, value) VALUES ('last_generation', $1)",
+                    &[&generation.to_string()],
+                )?;
+                Ok(true)
+            }
+            Some(r) => {
+                let cur = r.get::<_, String>(0).parse::<u64>().unwrap_or(0);
+                if generation <= cur {
+                    Ok(false)
+                } else {
+                    c.execute(
+                        "UPDATE posture_engine_state SET value = $1 WHERE key = 'last_generation'",
+                        &[&generation.to_string()],
+                    )?;
+                    Ok(true)
+                }
+            }
+        }
+    }
+
+    fn load_engine_state(&self, key: &str) -> Result<Option<String>, PgStoreError> {
+        let row = self.lock().query_opt(
+            "SELECT value FROM posture_engine_state WHERE key = $1",
+            &[&key],
+        )?;
+        Ok(row.map(|r| r.get::<_, String>(0)))
+    }
+
+    fn save_engine_state(&self, key: &str, value: &str) -> Result<(), PgStoreError> {
+        // Blind upsert (INSERT-OR-REPLACE) — NOT the monotonic guard.
+        self.lock().execute(
+            "INSERT INTO posture_engine_state (key, value) VALUES ($1, $2) \
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            &[&key, &value],
+        )?;
+        Ok(())
     }
 }
