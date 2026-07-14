@@ -587,12 +587,29 @@ mod attestation;
 mod audit;
 mod av_subsystem;
 mod cert_principals;
+// ADR-0035 Stage 2 (trait-seam inversion) — the cert-principal storage trait + its
+// in-memory reference backend (a richer seam: models the UNIQUE-fingerprint conflict
+// and the fail-closed expiry-overflow refusal as portable contract failure modes).
+pub use cert_principals::{
+    assert_cert_principal_store_contract, CertPrincipalStore, InMemCertError,
+    InMemoryCertPrincipalStore,
+};
 mod epoch;
 mod federation;
 mod operators;
+// ADR-0035 Stage 2 (trait-seam inversion) — the operator-registry storage trait + its
+// in-memory reference backend (registry CRUD only; the audit-chained clearance-grant
+// methods stay inherent, belonging to the harder persistence tier).
+pub use operators::{assert_operator_store_contract, InMemoryOperatorStore, OperatorStore};
 mod ota_campaigns;
 mod posture;
 mod principals;
+// ADR-0035 Stage 2 (trait-seam inversion) — the API-principal storage trait + its
+// in-memory reference backend (the 3rd VerifierStorage-family seam after EpochFence
+// and NodeStore), extending the seam program toward the persistence/authority split.
+pub use principals::{
+    assert_principal_store_contract, InMemPrincipalError, InMemoryPrincipalStore, PrincipalStore,
+};
 // WP-18 3/3 (G-9 store half) — the backend-portable HA epoch-fence trait + its
 // in-memory reference backend (SQLite realizes it via `ha_state` + BEGIN IMMEDIATE,
 // a future Postgres backend via SELECT … FOR UPDATE).
