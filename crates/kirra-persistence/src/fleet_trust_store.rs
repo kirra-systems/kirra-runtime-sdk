@@ -18,7 +18,10 @@ use crate::VerifierStore;
 /// `None` on undecodable input or a wrong length — fail-closed (an unresolvable
 /// key can never be treated as valid).
 fn b64_to_key_bytes(b64: &str) -> Option<[u8; 32]> {
-    let raw = B64.decode(b64.as_bytes()).ok()?;
+    // `.trim()` mirrors the prior `KeyRegistry` decode path — a stored controller
+    // key copy/pasted with a trailing newline/space must still resolve (dropping it
+    // here was a behavioural regression vs the pre-extraction path).
+    let raw = B64.decode(b64.trim()).ok()?;
     <[u8; 32]>::try_from(raw.as_slice()).ok()
 }
 
