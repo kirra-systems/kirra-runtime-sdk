@@ -26,12 +26,19 @@ impl VerifierStore {
             "registration_source": source,
             "registered_at_ms": registered_at_ms,
         });
-        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
+        // ADR-0035 Addendum A, Stage 2.5 step 1: the audit append goes through the
+        // injected `AuditAppender` seam (into this tx), not a direct
+        // `AuditChainLinker` + signing-key call — the row + append stay atomic on
+        // `tx.commit()`. `ChainedAuditAppender` delegates to the same appender, so
+        // the audit-chain bytes are byte-identical to the prior call.
+        ChainedAuditAppender {
+            signing_key: self.signing_key.as_ref(),
+        }
+        .append_within(
             &tx,
             "NODE_IDENTITY_REGISTERED",
             &audit_payload.to_string(),
             registered_at_ms as i64,
-            self.signing_key.as_ref(),
         )?;
 
         tx.commit()
@@ -47,5 +54,38 @@ impl VerifierStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod attestation_appender_seam_tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    /// ADR-0035 Addendum A: identity registration now appends its
+    /// `NODE_IDENTITY_REGISTERED` audit event through the injected `AuditAppender`
+    /// seam. Behaviour-preserving: the row persists AND the resulting signed chain
+    /// fully verifies (byte-identical to the prior direct `AuditChainLinker` call).
+    #[test]
+    fn identity_registration_through_the_seam_produces_a_verifiable_chain() {
+        let mut store = VerifierStore::new(":memory:").expect("store");
+        let sk = SigningKey::from_bytes(&[9u8; 32]);
+        store.set_signing_key(sk.clone());
+
+        store
+            .register_attestation_identity("node-1", "fp-abc", "self-report", 1_000)
+            .unwrap();
+
+        assert_eq!(
+            store.load_registered_fingerprint("node-1").unwrap(),
+            Some("fp-abc".to_string())
+        );
+        assert!(
+            store
+                .verify_audit_chain_full(Some(&sk.verifying_key()))
+                .unwrap()
+                .verified(),
+            "the chain built through the injected appender must fully verify"
+        );
     }
 }

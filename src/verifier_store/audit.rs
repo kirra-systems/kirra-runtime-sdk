@@ -1155,13 +1155,14 @@ impl VerifierStore {
             // #79 HA epoch fence — FIRST statement, before any mutation. A node
             // fenced after the request-path gate cannot land a stale rotation.
             Self::assert_epoch_held(&tx, held_epoch)?;
-            crate::audit_chain::AuditChainLinker::append_audit_event_tx(
-                &tx,
-                "KEY_ROTATION",
-                &payload.to_string(),
-                now_ms as i64,
-                old_key.as_ref(),
-            )?;
+            // The KEY_ROTATION row is signed by the OUTGOING key (`old_key`) so the
+            // chain verifies up to the rotation boundary under the old key. The
+            // injected appender simply HOLDS that key — byte-identical to the prior
+            // direct call.
+            ChainedAuditAppender {
+                signing_key: old_key.as_ref(),
+            }
+            .append_within(&tx, "KEY_ROTATION", &payload.to_string(), now_ms as i64)?;
             tx.execute(
                 "INSERT INTO audit_key_ledger \
                  (key_id, prev_key_id, role, pubkey_b64, signature_b64, created_at_ms) \
@@ -1224,13 +1225,10 @@ impl VerifierStore {
         let payload = format!(
             "{{\"genesis_key_id\":\"{genesis_id}\",\"backfilled_rows\":{null_count},\"migrated_at_ms\":{now_ms}}}"
         );
-        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
-            &tx,
-            "KEY_ID_BACKFILL",
-            &payload,
-            now_ms as i64,
-            self.signing_key.as_ref(),
-        )?;
+        ChainedAuditAppender {
+            signing_key: self.signing_key.as_ref(),
+        }
+        .append_within(&tx, "KEY_ID_BACKFILL", &payload, now_ms as i64)?;
         tx.commit()?;
         Ok(())
     }
@@ -1340,13 +1338,10 @@ impl VerifierStore {
             "{{\"v1_head_record_hash\":\"{v1_head}\",\"v1_total_count\":{v1_total},\"migrated_at_ms\":{now_ms}}}"
         );
         let tx = Self::audit_tx(&mut self.conn)?; // #685: Immediate — non-forking audit append
-        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
-            &tx,
-            "HASH_V2_MIGRATION",
-            &payload,
-            now_ms as i64,
-            self.signing_key.as_ref(),
-        )?;
+        ChainedAuditAppender {
+            signing_key: self.signing_key.as_ref(),
+        }
+        .append_within(&tx, "HASH_V2_MIGRATION", &payload, now_ms as i64)?;
         tx.commit()
     }
 
