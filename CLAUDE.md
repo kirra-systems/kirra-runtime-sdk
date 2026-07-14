@@ -121,7 +121,11 @@ src/
 │                               (the PORTABLE subset: trusted-controller key registry +
 │                               anti-replay primitives — burn_federation_nonce /
 │                               has_seen_federation_nonce / industrial_seq_check_and_advance;
-│                               the audit-chained save_federated_report_chained stays inherent)
+│                               the audit-chained save_federated_report_chained stays inherent).
+│                               posture.rs adds the PostureEngineStateStore seam the same way
+│                               (the posture_engine_state KV store + the MONOTONIC generation
+│                               high-water — load/save_last_generation + load/save_engine_state;
+│                               the audit-chained save_posture_event_chained* stays inherent)
 ├── posture_cache.rs          — SharedPostureCache, CachedFleetPosture, ServiceState,
 │                               OperationalCommand, should_route_command, POSTURE_CACHE_TTL_MS
 ├── posture_engine.rs         — recalculate_and_broadcast, derive_fleet_posture,
