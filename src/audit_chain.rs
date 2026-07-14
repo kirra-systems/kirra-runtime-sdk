@@ -132,7 +132,7 @@ impl AuditChainLinker {
     /// caller-owned transaction.
     ///
     /// ADR-0035 slice 2b: the write mechanics were relocated to the persistence
-    /// layer ([`crate::verifier_store::append_audit_event_tx`]) — the write touches
+    /// layer ([`kirra_persistence::append_audit_event_tx`]) — the write touches
     /// only the persistence-owned `audit_log_chain` / `audit_anchor_head` tables and
     /// the pure `kirra_audit_hash` primitives. This associated function DELEGATES to
     /// it so `AuditChainLinker::append_audit_event_tx` callers (the typed wrappers
@@ -144,7 +144,7 @@ impl AuditChainLinker {
         created_at_ms: i64,
         signing_key: Option<&ed25519_dalek::SigningKey>,
     ) -> Result<()> {
-        crate::verifier_store::append_audit_event_tx(
+        kirra_persistence::append_audit_event_tx(
             tx,
             event_type,
             event_json_payload,

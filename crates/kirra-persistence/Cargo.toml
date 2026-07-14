@@ -1,0 +1,52 @@
+# crates/kirra-persistence/Cargo.toml
+#
+# ADR-0035 slice 4 — the persistence layer, extracted wholesale from the
+# `kirra-verifier` root crate. `VerifierStore` (rusqlite WAL-mode SQLite; all
+# tables + per-table domain method groups), the versioned migration framework, the
+# storage-trait seams (EpochFence / NodeStore / OperatorStore / PrincipalStore /
+# CertPrincipalStore / AvSubsystemStore / OtaCampaignStore / FabricAssetStore) with
+# their in-memory reference backends + shared conformance suites, and the
+# audit-chain WRITE mechanics (`append_audit_event_tx`, behind the `AuditAppender`
+# seam).
+#
+# The enabling slices (1–3.5) removed every root-crate reference first, so this is a
+# mechanical move: the crate depends ONLY on the lean leaf crates (domain types +
+# pure audit hashing) + the storage/crypto externals — never back on the verifier
+# service tree. The root crate keeps `src/verifier_store.rs` as a
+# `pub use kirra_persistence::*;` shim, so every existing
+# `crate::verifier_store::*` / `kirra_verifier::verifier_store::*` path (service
+# binary, the `kirra-verifier-pg` backend, tests) resolves unchanged.
+
+[package]
+name = "kirra-persistence"
+version = "0.1.0"
+edition = "2021"
+description = "Kirra persistence layer — VerifierStore (rusqlite WAL SQLite), versioned migrations, the backend-portable storage-trait seams + in-memory backends, and the audit-chain write mechanics. Depends only on the lean domain/audit leaf crates."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[features]
+# Exposes the `*_for_test` VerifierStore helpers (audit-event counts, chain-tamper,
+# HA-state reset, durable-write fault injection) as compiled-in `pub` methods so a
+# DOWNSTREAM crate's tests can use them (a dependency is built without its own
+# `#[cfg(test)]`). The root crate's dev-dependency enables this; production builds
+# leave it off. Off by default — these helpers never compile into a normal build.
+test-support = []
+
+[dependencies]
+# Domain-type + pure-audit leaf crates (the C2 relocations + the audit-hash split).
+kirra-core = { path = "../kirra-core" }
+kirra-audit-hash = { path = "../kirra-audit-hash" }
+kirra-fleet-types = { path = "../kirra-fleet-types" }
+kirra-ota-campaign = { path = "../kirra-ota-campaign" }
+kirra-fabric-types = { path = "../kirra-fabric-types" }
+# Storage + crypto externals (same specs as the root crate).
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+ed25519-dalek = "2"
+
+[dev-dependencies]
+tempfile = "3"

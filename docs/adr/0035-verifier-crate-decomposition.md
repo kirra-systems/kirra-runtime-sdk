@@ -333,8 +333,26 @@ domain types — none of which can live below persistence in the target DAG toda
       `verifier_store` now names ZERO root-crate items — only its own `crate::verifier_store::*`
       submodules, the leaf crates, and external crates. Byte-identical (repointing to the same
       types via re-export); 760 lib + power-loss + rollout green.
-   4. **Then** move `verifier_store` wholesale into `kirra-persistence`, depending only on the
-      domain-type leaves + the pure-audit leaf + the injected `AuditAppender` contract.
+   4. **Move `verifier_store` wholesale into `kirra-persistence` — DONE.** `git mv`'d the whole
+      module dir; `mod.rs`→`lib.rs`; rewrote `crate::verifier_store::` self-refs → `crate::`;
+      `src/verifier_store.rs` is now a `pub use kirra_persistence::*;` shim so every existing
+      path resolves unchanged. The crate depends ONLY on the leaf crates (`kirra-core` /
+      `kirra-audit-hash` / `kirra-fleet-types` / `kirra-ota-campaign` / `kirra-fabric-types`) +
+      storage/crypto externals — never back on the verifier tree. Root's `audit_chain` delegates
+      to `kirra_persistence::append_audit_event_tx` (now `pub`, a legitimate cross-crate API,
+      resolving the #928 review note). Two frictions the enabling audit hadn't reached (they live
+      OUTSIDE `verifier_store/`):
+      - **`impl FleetTrustStore for VerifierStore`** (`src/fleet_trust_store.rs`) — both types now
+        external to root → orphan rule. Relocated into `kirra-persistence` (owns `VerifierStore`);
+        its fleet-role key resolution inlined (a base64 decode) so it needs neither the root
+        `KeyRegistry` nor `crate::attestation`.
+      - **`KeyRegistry`** — its sole in-root consumer was that impl; after the inline it is
+        unused-in-root (baselined orphan; follow-up: relocate to persistence or delete).
+      - **`#[cfg(test)]` store helpers** used by ROOT tests (a dependency compiles without its own
+        test cfg) → a `test-support` feature on `kirra-persistence` gates them + the durable-write
+        fault-injection instrumentation; the root crate's dev-dependency enables it.
+      Verified byte-identical + test-count-preserving: root lib 607 + persistence 153 = the prior
+      760; power-loss drill / two_node_rollout / ha_failover green; full workspace builds.
 
 **Alternative considered — domain-types-first only (no audit inversion):** relocate
 C2 types and move `verifier_store` wholesale into a persistence crate that *keeps*

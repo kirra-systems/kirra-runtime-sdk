@@ -3,7 +3,7 @@
 
 #[cfg(test)]
 mod attestation_registry_tests {
-    use crate::verifier_store::*;
+    use crate::*;
 
     fn in_memory() -> VerifierStore {
         VerifierStore::new(":memory:").unwrap()
@@ -326,7 +326,7 @@ mod attestation_registry_tests {
 
 #[cfg(test)]
 mod standby_store_tests {
-    use crate::verifier_store::*;
+    use crate::*;
 
     fn in_memory() -> VerifierStore {
         VerifierStore::new(":memory:").unwrap()
@@ -482,7 +482,7 @@ mod standby_store_tests {
 /// chained writer covers a posture event and the chain remains verifiable.
 #[cfg(test)]
 mod audit_chain_bypass_tests {
-    use crate::verifier_store::*;
+    use crate::*;
 
     fn in_memory() -> VerifierStore {
         VerifierStore::new(":memory:").unwrap()
@@ -562,7 +562,7 @@ mod audit_chain_bypass_tests {
 /// signatures. Pre-v2 these were undetected by the hash-only check.
 #[cfg(test)]
 mod audit_hash_v2_tests {
-    use crate::verifier_store::*;
+    use crate::*;
 
     fn in_memory() -> VerifierStore {
         VerifierStore::new(":memory:").unwrap()
@@ -761,7 +761,7 @@ mod audit_hash_v2_tests {
 /// fail-closed unknown-key-id case.
 #[cfg(test)]
 mod audit_key_rotation_tests {
-    use crate::verifier_store::*;
+    use crate::*;
     use ed25519_dalek::SigningKey;
     use kirra_audit_hash::verifying_key_id;
 
@@ -785,8 +785,7 @@ mod audit_key_rotation_tests {
     fn append(s: &mut VerifierStore, event_type: &str, ts: i64) {
         let sk = s.signing_key.clone();
         let tx = s.conn.transaction().unwrap();
-        crate::verifier_store::append_audit_event_tx(&tx, event_type, "{}", ts, sk.as_ref())
-            .unwrap();
+        crate::append_audit_event_tx(&tx, event_type, "{}", ts, sk.as_ref()).unwrap();
         tx.commit().unwrap();
     }
 
@@ -1008,7 +1007,7 @@ mod audit_key_rotation_tests {
 /// durability, the in-memory fallback, and the shutdown checkpoint.
 #[cfg(test)]
 mod durability_tests {
-    use crate::verifier_store::*;
+    use crate::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static CTR: AtomicU64 = AtomicU64::new(0);
@@ -1395,7 +1394,7 @@ mod durability_tests {
 
 #[cfg(test)]
 mod key_durability_165_tests {
-    use crate::verifier_store::*;
+    use crate::*;
     use ed25519_dalek::SigningKey;
     use kirra_audit_hash::verifying_key_id;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1536,8 +1535,7 @@ mod key_durability_165_tests {
         {
             let sk = s.signing_key.clone();
             let tx = s.conn.transaction().unwrap();
-            crate::verifier_store::append_audit_event_tx(&tx, "TEST", "{}", 1_500, sk.as_ref())
-                .unwrap();
+            crate::append_audit_event_tx(&tx, "TEST", "{}", 1_500, sk.as_ref()).unwrap();
             tx.commit().unwrap();
         }
         // Verify while passing a MUTATED key: genesis must resolve from the
@@ -1602,8 +1600,7 @@ mod key_durability_165_tests {
         })
         .to_string();
         let tx = s.conn.transaction().unwrap();
-        crate::verifier_store::append_audit_event_tx(&tx, "KEY_ROTATION", &payload, ts, Some(old))
-            .unwrap();
+        crate::append_audit_event_tx(&tx, "KEY_ROTATION", &payload, ts, Some(old)).unwrap();
         tx.commit().unwrap();
     }
 
@@ -1707,8 +1704,7 @@ mod key_durability_165_tests {
         {
             let sk = s.signing_key.clone();
             let tx = s.conn.transaction().unwrap();
-            crate::verifier_store::append_audit_event_tx(&tx, "TEST", "{}", 10, sk.as_ref())
-                .unwrap();
+            crate::append_audit_event_tx(&tx, "TEST", "{}", 10, sk.as_ref()).unwrap();
             tx.commit().unwrap();
         }
         assert_eq!(
@@ -1775,16 +1771,14 @@ mod key_durability_165_tests {
         {
             let sk = s.signing_key.clone();
             let tx = s.conn.transaction().unwrap();
-            crate::verifier_store::append_audit_event_tx(&tx, "TEST", "{}", 10, sk.as_ref())
-                .unwrap();
+            crate::append_audit_event_tx(&tx, "TEST", "{}", 10, sk.as_ref()).unwrap();
             tx.commit().unwrap();
         }
         s.record_key_rotation(b.clone(), "r", 20, held).unwrap();
         {
             let sk = s.signing_key.clone();
             let tx = s.conn.transaction().unwrap();
-            crate::verifier_store::append_audit_event_tx(&tx, "TEST", "{}", 30, sk.as_ref())
-                .unwrap();
+            crate::append_audit_event_tx(&tx, "TEST", "{}", 30, sk.as_ref()).unwrap();
             tx.commit().unwrap();
         }
         let r = s.verify_audit_chain_full(Some(&a.verifying_key())).unwrap();
@@ -1917,7 +1911,7 @@ mod key_durability_165_tests {
 // here. See RTM_GAP_REPORT.md (SG-010).
 #[cfg(test)]
 mod sg_010_audit_tamper_tests {
-    use crate::verifier_store::*;
+    use crate::*;
     use ed25519_dalek::SigningKey;
 
     /// Writes three signed audit rows to a file-backed store, returning the
@@ -2070,7 +2064,7 @@ mod sg_010_audit_tamper_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod epoch_fence_79_tests {
-    use crate::verifier_store::*;
+    use crate::*;
     use ed25519_dalek::SigningKey;
 
     fn report(nonce: &str) -> FederatedTrustReport {
@@ -2253,7 +2247,7 @@ mod epoch_fence_79_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod audit_anchor_head_77_tests {
-    use crate::verifier_store::*;
+    use crate::*;
     use base64::engine::general_purpose::STANDARD as b64e;
     use ed25519_dalek::SigningKey;
     use rusqlite::params;
@@ -2523,7 +2517,7 @@ mod audit_anchor_head_77_tests {
 // out-of-band via the `raw_conn` seam (what a tamperer with disk access does).
 #[cfg(test)]
 mod causal_chain_87_tests {
-    use crate::verifier_store::*;
+    use crate::*;
     use ed25519_dalek::SigningKey;
     use rusqlite::params;
 
@@ -2785,7 +2779,7 @@ mod causal_chain_87_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod federation_v2_wiring_tests {
-    use crate::verifier_store::*;
+    use crate::*;
     use kirra_core::FleetPosture;
     use kirra_fleet_types::federation_reconciliation::authoritative_posture;
 
@@ -2895,7 +2889,7 @@ mod federation_v2_wiring_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod industrial_seq_tests {
-    use crate::verifier_store::VerifierStore;
+    use crate::VerifierStore;
 
     #[test]
     fn first_message_from_a_source_is_accepted_then_monotonic() {

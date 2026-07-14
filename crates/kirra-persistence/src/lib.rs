@@ -385,13 +385,13 @@ pub struct VerifierStore {
     /// while a 20 Hz `POSTURE_CACHE_REFRESHED` does NOT — the load-bearing INV-12
     /// gate that is otherwise invisible on an in-memory store (where `durable_conn`
     /// falls back to `conn`). Never compiled into production.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     durable_posture_writes: std::sync::atomic::AtomicU64,
     /// #772 F3 — TEST-ONLY fault seam: when set, the durable posture-event writes
     /// return `Err` at entry WITHOUT touching the DB, so a test can exercise the
     /// recalc's "durable write failed → count it, fall back to the NORMAL write,
     /// do NOT suppress the transition" path. Never compiled into production.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fail_durable_posture_writes: std::sync::atomic::AtomicBool,
 }
 
@@ -636,6 +636,7 @@ mod fabric;
 // + its in-memory reference backend (asset CRUD only; the audit-chained causal
 // ledger — append/verify — stays inherent, the authority tier).
 pub use fabric::{assert_fabric_asset_store_contract, FabricAssetStore, InMemoryFabricAssetStore};
+mod fleet_trust_store; // ADR-0035 slice 4: `impl FleetTrustStore for VerifierStore` (orphan rule → must live with the type)
 pub mod migrations; // WP-18/G-20 versioned schema migration framework (user_version)
 pub mod migrations_postgres; // WP-18 slice 3 — Postgres SchemaBackend over an injected executor seam
 
@@ -1076,9 +1077,9 @@ impl VerifierStore {
             durable_conn,
             signing_key: None,
             db_path: path.to_string(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             durable_posture_writes: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             fail_durable_posture_writes: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -1118,9 +1119,9 @@ impl VerifierStore {
             durable_conn: None,
             signing_key: None,
             db_path: path.to_string(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             durable_posture_writes: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             fail_durable_posture_writes: std::sync::atomic::AtomicBool::new(false),
         })
     }

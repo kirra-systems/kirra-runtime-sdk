@@ -67,7 +67,7 @@ These have been blocked or reverted multiple times. Any submission that violates
 | `NodeTrustState` | `src/verifier.rs` | `Trusted` / `Untrusted(String)` / `Unknown` |
 | `OperationalCommand` | `src/posture_cache.rs` | `ReadTelemetry` / `WriteState` / `SystemMutation` / `Unknown` |
 | `VerifierOperationMode` | `src/verifier.rs` | `Active` / `PassiveStandby`; runtime state held in `mode_active: Arc<AtomicBool>` |
-| `VerifierStore` | `src/verifier_store/` (module dir: `mod.rs` + per-table submodules) | rusqlite WAL-mode SQLite; wrapped in `Arc<Mutex<VerifierStore>>` in AppState |
+| `VerifierStore` | `crates/kirra-persistence` (extracted ADR-0035 slice 4; `lib.rs` + per-table submodules), re-exported via the `src/verifier_store.rs` shim | rusqlite WAL-mode SQLite; wrapped in `Arc<Mutex<VerifierStore>>` in AppState. The persistence crate depends only on the lean domain/audit leaf crates; `crate::verifier_store::*` / `kirra_verifier::verifier_store::*` paths resolve through the shim. Test-only `*_for_test` helpers are behind its `test-support` feature (root enables it as a dev-dep) |
 | `PostureStreamEvent` | `src/verifier.rs` | Broadcast channel payload for SSE stream |
 | `TransportIdentityConfig` | `src/verifier.rs` | `trusted_ingress_mode` + `client_id_header` from env |
 | `FederatedTrustReport` | `src/federation.rs` | Ed25519-signed cross-controller trust report |

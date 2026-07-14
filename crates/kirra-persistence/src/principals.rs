@@ -409,7 +409,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::verifier_store::VerifierStore;
+    use crate::VerifierStore;
 
     fn store() -> VerifierStore {
         VerifierStore::new(":memory:").expect("in-memory store")
