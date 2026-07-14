@@ -414,7 +414,7 @@ fn audit_signing_payload(
     created_at_ms: i64,
     sequence: Option<i64>,
 ) -> String {
-    use crate::audit_chain::{canonical_signing_payload, canonical_signing_payload_v2};
+    use kirra_audit_hash::{canonical_signing_payload, canonical_signing_payload_v2};
     match hash_version {
         2 => canonical_signing_payload_v2(
             prev,
@@ -461,7 +461,7 @@ fn extend_keyring_from_rotation(
     let Some(nvk) = audit_decode_vk(npk) else {
         return;
     };
-    if crate::audit_chain::verifying_key_id(&nvk) == nkid {
+    if kirra_audit_hash::verifying_key_id(&nvk) == nkid {
         keyring.insert(nkid.to_string(), nvk);
     }
 }
@@ -545,7 +545,7 @@ fn ledger_row_is_self_attested(r: &LedgerRow) -> bool {
     let Some(vk) = audit_decode_vk(&r.pubkey_b64) else {
         return false;
     };
-    if crate::audit_chain::verifying_key_id(&vk) != r.key_id {
+    if kirra_audit_hash::verifying_key_id(&vk) != r.key_id {
         return false; // content-addressing violated
     }
     let payload = ledger_signing_payload(

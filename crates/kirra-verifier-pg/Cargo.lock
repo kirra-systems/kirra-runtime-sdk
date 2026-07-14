@@ -827,6 +827,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-audit-hash"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "kirra-capture-schema"
 version = "0.1.0"
 dependencies = [
@@ -924,6 +933,7 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
+ "kirra-audit-hash",
  "kirra-capture-schema",
  "kirra-contract-channel",
  "kirra-core",

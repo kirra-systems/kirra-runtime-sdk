@@ -119,6 +119,33 @@ pub enum NodeTrustState {
     Unknown,
 }
 
+/// A node in the fleet registry — its identity, trust state, and the attestation
+/// material captured at registration. Plain persisted data (the `nodes` table);
+/// carries no behaviour. Relocated to the lean foundation (ADR-0035 — the
+/// `kirra-persistence` enabling work) alongside [`NodeTrustState`] so the
+/// persistence layer can name it without the verifier service tree. The root
+/// `kirra-verifier` crate re-exports it (as `kirra_verifier::verifier::RegisteredNode`)
+/// so its existing `crate::verifier::RegisteredNode` paths are unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisteredNode {
+    pub node_id: String,
+    pub status: NodeTrustState,
+    pub registered_at_ms: u64,
+    /// Timestamp of the most recent trust-state change (0 if never attested).
+    pub last_trust_update_ms: u64,
+    /// AK public key in PEM format. Populated on registration when provided;
+    /// reserved for future TPM quote verification.
+    pub ak_public_pem: Option<String>,
+    /// Expected SHA-256 hex digest of PCR16 at attestation time.
+    pub expected_pcr16_digest_hex: Option<String>,
+    /// #397 console — optional site/location label for fleet rollups. NULLABLE;
+    /// captured at registration. Never gates trust/posture.
+    pub site: Option<String>,
+    /// #398 console — optional firmware version label for version rollups.
+    /// NULLABLE; captured at registration. Never gates trust/posture.
+    pub firmware_version: Option<String>,
+}
+
 /// The fleet's safety posture — the spine the whole governor hangs on. `Nominal` →
 /// full operation; `Degraded` → controlled decel-to-stop-and-hold envelope; `LockedOut`
 /// → MRC, human reset required.
