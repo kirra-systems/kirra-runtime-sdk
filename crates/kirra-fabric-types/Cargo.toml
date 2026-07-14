@@ -1,0 +1,40 @@
+# crates/kirra-fabric-types/Cargo.toml
+#
+# ADR-0035 Stage 2.5 step 2 (C2 domain-type relocation) — the lean FABRIC-PLANE
+# domain types, extracted from the heavy `kirra-verifier` root crate so the
+# persistence layer (`verifier_store::fabric`) can name the `FabricAsset` /
+# `CausalLogEntry` contract WITHOUT depending on the fabric service tree
+# (`fabric::router` = axum, `fabric::governor`, `fabric::causal_log::FabricCausalLog`
+# = the store-backed facade). This clears the `verifier_store::fabric` C2 coupling.
+#
+# Contents (the PURE data types the store marshals — no service/DB/audit deps):
+#   - `asset`          — `FabricAsset` + `AssetType` / `KinematicProfileType`,
+#                        `AssetPosture`, `FabricState`
+#   - `CausalLogEntry` — the forensic causal-ledger record (hash-chain fields as
+#                        plain data; the hashing/signing FACADE `FabricCausalLog`
+#                        stays in the verifier crate, over the store)
+#   - `CAUSAL_EXPORT_MAX_PAGE`
+#
+# `kirra-verifier` depends on this crate and RE-EXPORTS it (`src/fabric/asset.rs` is
+# a `pub use kirra_fabric_types::asset::*;` shim; `src/fabric/causal_log.rs`
+# re-exports `CausalLogEntry` / `CAUSAL_EXPORT_MAX_PAGE`) so every existing
+# `crate::fabric::asset::*` / `crate::fabric::causal_log::CausalLogEntry` path
+# (store, service binary, router, telemetry, tests) resolves unchanged.
+
+[package]
+name = "kirra-fabric-types"
+version = "0.1.0"
+edition = "2021"
+description = "Lean fabric-plane domain types for Kirra — FabricAsset (+ asset/kinematic-profile enums) and the CausalLogEntry forensic-ledger record. No service/DB/audit deps."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# FleetPosture (carried on AssetPosture) lives in the lean foundation.
+kirra-core = { path = "../kirra-core" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# The serde round-trip tests that moved with the types.
+serde_json = "1"

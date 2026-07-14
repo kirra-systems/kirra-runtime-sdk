@@ -245,8 +245,16 @@ domain types — none of which can live below persistence in the target DAG toda
    `NodeArtifactStatus` / `summarize_campaigns` / `resolve_node_assignment` /
    `campaign_metrics_prometheus`) → the new lean `kirra-ota-campaign` crate (deps:
    `kirra-core` for `FleetPosture`, `kirra-release-token` for the uptane set), clearing
-   the `verifier_store::ota_campaigns` C2 coupling. Remaining C2: `CausalLogEntry` /
-   `FabricAsset` (the `fabric` family), then the seam step.
+   the `verifier_store::ota_campaigns` C2 coupling. **C2 slice 2:** the fabric-plane
+   domain types (`FabricAsset` + the asset/kinematic-profile enums, `CausalLogEntry`,
+   `CAUSAL_EXPORT_MAX_PAGE`) → the new lean `kirra-fabric-types` crate, clearing the
+   `verifier_store::fabric` coupling. The store-backed `FabricCausalLog` facade and
+   the `KinematicProfileType → VehicleKinematicsContract` mapping (genuine
+   verifier-crate behaviour) STAY behind — the latter moves from an inherent impl to
+   the `KinematicProfileContracts` extension trait, since the orphan rule forbids an
+   inherent impl on the now-external enum. With both `verifier_store` C2 families
+   cleared, the remaining work is the seam step (CRUD-trait each hard family), after
+   which `kirra-persistence` extracts mechanically.
 3. **Seam each hard family** as CRUD, exactly like the clean six, now that C1+C2
    are broken. Then `kirra-persistence` can be extracted mechanically (Stage 2
    proper), depending only on the domain-types leaf + the injected `AuditAppender`
