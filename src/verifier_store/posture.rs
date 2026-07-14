@@ -130,20 +130,27 @@ impl VerifierStore {
     }
 
     /// Shared body of every chained posture-event write. Runs the posture-row
-    /// INSERT, the `AuditChainLinker` append, and (when `generation` is `Some`)
-    /// the monotonic high-water UPSERT in ONE `Immediate` transaction on the
-    /// GIVEN connection. Callers pass either the NORMAL `conn` (checkpoint-bounded
-    /// durability, INV-12 throughput path) or the FULL `durable_conn` (per-commit
-    /// fsync — hard-power-loss durable at write time, #772 F2). Threading the
-    /// connection + signing key as params keeps the durable and normal variants a
-    /// single source of truth so they cannot drift.
+    /// INSERT, the injected audit append (via the `AuditAppender` seam), and (when
+    /// `generation` is `Some`) the monotonic high-water UPSERT in ONE `Immediate`
+    /// transaction on the GIVEN connection. Callers pass either the NORMAL `conn`
+    /// (checkpoint-bounded durability, INV-12 throughput path) or the FULL
+    /// `durable_conn` (per-commit fsync — hard-power-loss durable at write time,
+    /// #772 F2). Threading the connection + appender as params keeps the durable and
+    /// normal variants a single source of truth so they cannot drift.
     ///
     /// Returns whether the high-water ADVANCED (`false` when `generation` is
     /// `None`, or when the monotonic guard rejected a stale/equal generation).
     #[allow(clippy::too_many_arguments)] // faithful pass-through of the write's columns
     fn write_posture_event_chained_tx(
         conn: &mut Connection,
-        signing_key: Option<&ed25519_dalek::SigningKey>,
+        // ADR-0035 Addendum A, Stage 2.5 step 1: the audit append now goes through
+        // an INJECTED `AuditAppender` instead of a direct `AuditChainLinker` +
+        // signing-key call. The store still owns the transaction (`tx` below), so
+        // the posture row and the audit append stay all-or-nothing — the appender
+        // only stages its rows into `tx`; this method's `tx.commit()` is what makes
+        // them atomic. The production caller injects `ChainedAuditAppender`, so the
+        // audit-chain bytes are byte-identical to the prior direct call.
+        appender: &dyn AuditAppender,
         node_id: &str,
         event_type: &str,
         posture_json: &str,
@@ -164,13 +171,7 @@ impl VerifierStore {
                 created_at_ms as i64
             ],
         )?;
-        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
-            &tx,
-            event_type,
-            posture_json,
-            created_at_ms as i64,
-            signing_key,
-        )?;
+        appender.append_within(&tx, event_type, posture_json, created_at_ms as i64)?;
         let advanced = match generation {
             Some(g) => {
                 // Monotonic max-write — identical guard to `save_last_generation`,
@@ -208,7 +209,9 @@ impl VerifierStore {
         // `self.signing_key` — different fields, so both live at once.
         Self::write_posture_event_chained_tx(
             &mut self.conn,
-            self.signing_key.as_ref(),
+            &ChainedAuditAppender {
+                signing_key: self.signing_key.as_ref(),
+            },
             node_id,
             event_type,
             posture_json,
@@ -252,7 +255,9 @@ impl VerifierStore {
         }
         Self::write_posture_event_chained_tx(
             &mut self.conn,
-            self.signing_key.as_ref(),
+            &ChainedAuditAppender {
+                signing_key: self.signing_key.as_ref(),
+            },
             node_id,
             event_type,
             posture_json,
@@ -294,7 +299,9 @@ impl VerifierStore {
         let conn = self.durable_conn.as_mut().unwrap_or(&mut self.conn);
         Self::write_posture_event_chained_tx(
             conn,
-            self.signing_key.as_ref(),
+            &ChainedAuditAppender {
+                signing_key: self.signing_key.as_ref(),
+            },
             node_id,
             event_type,
             posture_json,
@@ -340,7 +347,9 @@ impl VerifierStore {
         let conn = self.durable_conn.as_mut().unwrap_or(&mut self.conn);
         Self::write_posture_event_chained_tx(
             conn,
-            self.signing_key.as_ref(),
+            &ChainedAuditAppender {
+                signing_key: self.signing_key.as_ref(),
+            },
             node_id,
             event_type,
             posture_json,
@@ -459,5 +468,149 @@ impl VerifierStore {
             params![key, value],
         )?;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0035 Addendum A, Stage 2.5 step 1 (prototype) — proof-of-mechanics that the
+// injected `AuditAppender` seam (a) still produces a byte-identical, verifiable
+// signed chain, (b) participates ATOMICALLY in the store's transaction (a failing
+// appender rolls the posture row back too), and (c) receives the store's event.
+// These drive the private `write_posture_event_chained_tx` with CUSTOM appenders,
+// which is only possible because the append is now injected rather than hardwired.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod audit_appender_seam_tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    fn count_posture_events(store: &VerifierStore) -> i64 {
+        store
+            .conn
+            .query_row("SELECT COUNT(*) FROM posture_events", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// An appender that always fails — to prove the caller-owned transaction rolls
+    /// back the posture row when the injected append errors (atomicity).
+    struct FailingAppender;
+    impl AuditAppender for FailingAppender {
+        fn append_within(
+            &self,
+            _tx: &rusqlite::Transaction<'_>,
+            _event_type: &str,
+            _payload: &str,
+            _created_at_ms: i64,
+        ) -> rusqlite::Result<()> {
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        }
+    }
+
+    /// An appender that records what it was asked to append (and stages no audit
+    /// row) — to prove the store routes its event through the seam verbatim.
+    struct RecordingAppender {
+        seen: std::cell::RefCell<Vec<(String, String, i64)>>,
+    }
+    impl AuditAppender for RecordingAppender {
+        fn append_within(
+            &self,
+            _tx: &rusqlite::Transaction<'_>,
+            event_type: &str,
+            payload: &str,
+            created_at_ms: i64,
+        ) -> rusqlite::Result<()> {
+            self.seen.borrow_mut().push((
+                event_type.to_string(),
+                payload.to_string(),
+                created_at_ms,
+            ));
+            Ok(())
+        }
+    }
+
+    /// (a) The production path (which now injects `ChainedAuditAppender`) produces a
+    /// signed chain that fully verifies — byte-identical to the prior direct call.
+    #[test]
+    fn chained_appender_seam_produces_a_verifiable_chain() {
+        let mut store = VerifierStore::new(":memory:").expect("store");
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        store.set_signing_key(sk.clone());
+
+        store
+            .save_posture_event_chained(
+                "node-1",
+                "POSTURE_TRANSITION",
+                "{\"p\":\"Nominal\"}",
+                None,
+                1_000,
+            )
+            .unwrap();
+
+        let result = store
+            .verify_audit_chain_full(Some(&sk.verifying_key()))
+            .unwrap();
+        assert!(
+            result.verified(),
+            "the chain built through the injected appender must fully verify"
+        );
+        assert_eq!(count_posture_events(&store), 1);
+    }
+
+    /// (b) THE CRUX: the injected append participates in the store's transaction.
+    /// A failing appender aborts the whole write — the posture row is rolled back,
+    /// so atomicity (the power-loss invariant) survives the dependency inversion.
+    #[test]
+    fn injected_appender_failure_rolls_back_the_posture_row_atomically() {
+        let mut store = VerifierStore::new(":memory:").expect("store");
+        assert_eq!(count_posture_events(&store), 0);
+
+        let r = VerifierStore::write_posture_event_chained_tx(
+            &mut store.conn,
+            &FailingAppender,
+            "node-1",
+            "POSTURE_TRANSITION",
+            "{}",
+            None,
+            1_000,
+            None,
+        );
+        assert!(r.is_err(), "a failing appender must abort the write");
+        assert_eq!(
+            count_posture_events(&store),
+            0,
+            "the posture row must roll back with the failed audit append (atomic)"
+        );
+    }
+
+    /// (c) The store routes its event through the seam verbatim (type + payload +
+    /// timestamp), so any injected appender sees exactly what the table row carries.
+    #[test]
+    fn store_delegates_the_event_to_the_injected_appender() {
+        let mut store = VerifierStore::new(":memory:").expect("store");
+        let recorder = RecordingAppender {
+            seen: std::cell::RefCell::new(Vec::new()),
+        };
+        VerifierStore::write_posture_event_chained_tx(
+            &mut store.conn,
+            &recorder,
+            "node-1",
+            "POSTURE_CACHE_REFRESHED",
+            "{\"p\":\"Degraded\"}",
+            None,
+            4_242,
+            None,
+        )
+        .unwrap();
+        let seen = recorder.seen.borrow();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0],
+            (
+                "POSTURE_CACHE_REFRESHED".to_string(),
+                "{\"p\":\"Degraded\"}".to_string(),
+                4_242
+            ),
+            "the injected appender receives the row's event verbatim"
+        );
     }
 }
