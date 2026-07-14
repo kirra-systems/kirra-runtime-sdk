@@ -269,3 +269,234 @@ impl VerifierStore {
             .optional()
     }
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0035 Stage 2 (trait-seam inversion) — the operator-registry storage trait
+//
+// The operator IDENTITY registry CRUD (register/rotate the Ed25519 PUBLIC key,
+// revoke, load, list), lifted off `VerifierStore` as a `VerifierStorage`-family
+// seam like `NodeStore` / `PrincipalStore`. Scope is deliberately JUST the
+// operator registry — the clearance-GRANT methods above stay inherent-only
+// because they are audit-chained (they append signed `AuditChainLinker` events),
+// a coupling that belongs to the harder persistence tier, not a portable CRUD
+// seam. Inherent methods win resolution, so the SQLite impl delegates via
+// `self.method()` without recursion and every existing caller is untouched.
+// ---------------------------------------------------------------------------
+
+/// The operator-registry storage contract — register/rotate an operator's Ed25519
+/// PUBLIC key, revoke it, load one by id / list all. Backend-agnostic identity CRUD
+/// (only the PUBLIC key is ever stored). Mirrors [`super::NodeStore`].
+pub trait OperatorStore {
+    /// Backend error type (SQLite: `rusqlite::Error`; in-memory: [`std::convert::Infallible`]).
+    type Error;
+
+    /// Register or rotate an operator by `operator_id`: overwrite the public key and
+    /// CLEAR any prior revocation (a fresh key reactivates an operator).
+    fn register_operator(
+        &mut self,
+        operator_id: &str,
+        pubkey_pem: &str,
+        now_ms: u64,
+    ) -> std::result::Result<(), Self::Error>;
+
+    /// Revoke an operator. Returns `true` iff an ACTIVE operator transitioned to
+    /// revoked; `false` if absent or already revoked.
+    fn revoke_operator(
+        &mut self,
+        operator_id: &str,
+        now_ms: u64,
+    ) -> std::result::Result<bool, Self::Error>;
+
+    /// Load one operator by id (active or revoked), or `None` if unregistered.
+    fn load_operator(
+        &self,
+        operator_id: &str,
+    ) -> std::result::Result<Option<OperatorRecord>, Self::Error>;
+
+    /// List every registered operator, ordered by `operator_id`.
+    fn load_operators(&self) -> std::result::Result<Vec<OperatorRecord>, Self::Error>;
+}
+
+/// The production SQLite backend: delegates to the inherent `VerifierStore` methods
+/// over the `operators` table. `self.method()` resolves to the INHERENT method
+/// (inherent wins), so this is delegation, not recursion.
+impl OperatorStore for VerifierStore {
+    type Error = rusqlite::Error;
+
+    fn register_operator(
+        &mut self,
+        operator_id: &str,
+        pubkey_pem: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.register_operator(operator_id, pubkey_pem, now_ms)
+    }
+    fn revoke_operator(&mut self, operator_id: &str, now_ms: u64) -> Result<bool> {
+        self.revoke_operator(operator_id, now_ms)
+    }
+    fn load_operator(&self, operator_id: &str) -> Result<Option<OperatorRecord>> {
+        self.load_operator(operator_id)
+    }
+    fn load_operators(&self) -> Result<Vec<OperatorRecord>> {
+        self.load_operators()
+    }
+}
+
+/// The in-memory [`OperatorStore`] backend — a portability-proof reference modelling
+/// the `operators` table as a map keyed by `operator_id`. Realizes the SAME
+/// register/rotate/revoke/load semantics WITHOUT a database. Single-process.
+#[derive(Debug, Default)]
+pub struct InMemoryOperatorStore {
+    rows: std::collections::HashMap<String, InMemoryOperatorRow>,
+}
+
+#[derive(Debug, Clone)]
+struct InMemoryOperatorRow {
+    pubkey_pem: String,
+    registered_at_ms: u64,
+    revoked_at_ms: Option<u64>,
+}
+
+impl InMemoryOperatorRow {
+    fn to_record(&self, operator_id: &str) -> OperatorRecord {
+        OperatorRecord {
+            operator_id: operator_id.to_string(),
+            pubkey_pem: self.pubkey_pem.clone(),
+            registered_at_ms: self.registered_at_ms,
+            revoked_at_ms: self.revoked_at_ms,
+        }
+    }
+}
+
+impl OperatorStore for InMemoryOperatorStore {
+    type Error = std::convert::Infallible;
+
+    fn register_operator(
+        &mut self,
+        operator_id: &str,
+        pubkey_pem: &str,
+        now_ms: u64,
+    ) -> std::result::Result<(), std::convert::Infallible> {
+        // Upsert by id; rotation overwrites the key and CLEARS revocation —
+        // matching the SQLite `ON CONFLICT … SET … revoked_at_ms = NULL`.
+        self.rows.insert(
+            operator_id.to_string(),
+            InMemoryOperatorRow {
+                pubkey_pem: pubkey_pem.to_string(),
+                registered_at_ms: now_ms,
+                revoked_at_ms: None,
+            },
+        );
+        Ok(())
+    }
+
+    fn revoke_operator(
+        &mut self,
+        operator_id: &str,
+        now_ms: u64,
+    ) -> std::result::Result<bool, std::convert::Infallible> {
+        match self.rows.get_mut(operator_id) {
+            Some(row) if row.revoked_at_ms.is_none() => {
+                row.revoked_at_ms = Some(now_ms);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn load_operator(
+        &self,
+        operator_id: &str,
+    ) -> std::result::Result<Option<OperatorRecord>, std::convert::Infallible> {
+        Ok(self
+            .rows
+            .get(operator_id)
+            .map(|row| row.to_record(operator_id)))
+    }
+
+    fn load_operators(&self) -> std::result::Result<Vec<OperatorRecord>, std::convert::Infallible> {
+        let mut out: Vec<OperatorRecord> = self
+            .rows
+            .iter()
+            .map(|(id, row)| row.to_record(id))
+            .collect();
+        out.sort_by(|a, b| a.operator_id.cmp(&b.operator_id));
+        Ok(out)
+    }
+}
+
+/// The operator-registry contract, driven through the [`OperatorStore`] trait so it
+/// runs IDENTICALLY against every backend: empty read, register→load roundtrip (id +
+/// key + active), rotation (key overwrites, revocation clears), revoke idempotence +
+/// reports the transition + loads-while-revoked, and the ordered listing.
+///
+/// `pub` (not `#[cfg(test)]`) by design — the shared backend-conformance suite, run
+/// below against the SQLite and in-memory backends. Panics on violation; call from a
+/// test. PRECONDITION: `store` must start empty.
+pub fn assert_operator_store_contract<S: OperatorStore>(store: &mut S)
+where
+    S::Error: core::fmt::Debug,
+{
+    // Empty registry.
+    assert!(store.load_operator("op-a").unwrap().is_none());
+    assert!(store.load_operators().unwrap().is_empty());
+
+    // Register + load (id + key preserved, active).
+    store.register_operator("op-a", "PEM-A", 1_000).unwrap();
+    let rec = store.load_operator("op-a").unwrap().expect("op-a present");
+    assert_eq!(rec.operator_id, "op-a");
+    assert_eq!(rec.pubkey_pem, "PEM-A");
+    assert!(rec.is_active());
+
+    // Revoke transitions once, then no-op; the record still loads while revoked.
+    assert!(
+        store.revoke_operator("op-a", 2_000).unwrap(),
+        "first revoke transitions"
+    );
+    assert!(
+        !store.revoke_operator("op-a", 3_000).unwrap(),
+        "second revoke is a no-op"
+    );
+    assert!(
+        !store.revoke_operator("absent", 3_000).unwrap(),
+        "absent operator → false"
+    );
+    assert!(store
+        .load_operator("op-a")
+        .unwrap()
+        .expect("loads while revoked")
+        .revoked_at_ms
+        .is_some());
+
+    // Rotation overwrites the key and reactivates.
+    store.register_operator("op-a", "PEM-A2", 4_000).unwrap();
+    let rotated = store.load_operator("op-a").unwrap().unwrap();
+    assert_eq!(rotated.pubkey_pem, "PEM-A2");
+    assert!(rotated.is_active(), "rotation clears revocation");
+
+    // A second operator; listing is ordered by id.
+    store.register_operator("op-b", "PEM-B", 5_000).unwrap();
+    let ids: Vec<String> = store
+        .load_operators()
+        .unwrap()
+        .into_iter()
+        .map(|o| o.operator_id)
+        .collect();
+    assert_eq!(ids, ["op-a", "op-b"], "listing ordered by operator_id");
+}
+
+#[cfg(test)]
+mod operator_store_contract_tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_backend_satisfies_the_operator_store_contract() {
+        let mut store = VerifierStore::new(":memory:").expect("in-memory store");
+        assert_operator_store_contract(&mut store);
+    }
+
+    #[test]
+    fn in_memory_backend_satisfies_the_operator_store_contract() {
+        assert_operator_store_contract(&mut InMemoryOperatorStore::default());
+    }
+}
