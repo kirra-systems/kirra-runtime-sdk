@@ -306,10 +306,16 @@ domain types — none of which can live below persistence in the target DAG toda
       in root and delegates its `compute_record_hash*` methods to the crate; root's
       `audit_chain` re-exports the crate so `crate::audit_chain::<fn>` paths are unchanged,
       and `verifier_store`'s verify/read path now names `kirra_audit_hash::*` directly.
-      REMAINDER (slice 2b): the WRITE seam — `ChainedAuditAppender` (in `verifier_store`)
-      still names `crate::audit_chain::AuditChainLinker::append_audit_event_tx`. Invert it:
-      the `AuditAppender` TRAIT moves down with persistence; the `ChainedAuditAppender` IMPL
-      stays in root and is injected at store construction.
+      SLICE 2b (DONE — the write seam): rather than injecting the impl up, the append
+      MECHANICS moved DOWN. `append_audit_event_tx` writes the persistence-owned
+      `audit_log_chain` / `audit_anchor_head` tables using only `kirra_audit_hash` +
+      Ed25519, so it was relocated INTO `verifier_store::audit_appender` (as a free fn);
+      `ChainedAuditAppender` calls it locally, and root's
+      `AuditChainLinker::append_audit_event_tx` now DELEGATES down to it (its typed
+      wrappers + external callers unchanged). This needed no store-construction churn and
+      no cycle (persistence → `kirra_audit_hash`; root → persistence). Result:
+      `verifier_store` has ZERO `crate::audit_chain` code references (production + tests);
+      only a prose comment names it. Byte-identical (power-loss drill + tamper tests green).
    3. **Relocate/invert** the smaller couplings (`ShippedAuditRecord`, `is_valid_verdict_id`,
       `KeyRegistry`).
    4. **Then** move `verifier_store` wholesale into `kirra-persistence`, depending only on the

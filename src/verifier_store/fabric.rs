@@ -61,7 +61,7 @@ impl VerifierStore {
 
     /// Append a causal-log event to the hash-chained, signed, persisted ledger.
     ///
-    /// Mirrors [`crate::audit_chain::AuditChainLinker::append_audit_event_tx`]:
+    /// Mirrors the audit ledger's [`super::append_audit_event_tx`]:
     /// reads the prev `(record_hash, sequence)` (fail-closed on real read
     /// errors; only `QueryReturnedNoRows` is genesis), computes the record hash
     /// (binding the causality edges), signs the canonical causal payload, records

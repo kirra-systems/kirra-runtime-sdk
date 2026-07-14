@@ -589,7 +589,7 @@ mod audit;
 // audit-append seam that inverts the C1 audit-chaining coupling while preserving
 // the row+append one-transaction atomicity.
 mod audit_appender;
-pub use audit_appender::{AuditAppender, ChainedAuditAppender};
+pub use audit_appender::{append_audit_event_tx, AuditAppender, ChainedAuditAppender};
 mod av_subsystem;
 // ADR-0035 Stage 2 (trait-seam inversion) — the AV-subsystem diagnostic-meta storage
 // trait + its in-memory reference backend (confidence floor + telemetry stamp +
