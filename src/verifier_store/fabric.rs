@@ -4,7 +4,7 @@
 use super::*;
 
 impl VerifierStore {
-    pub fn save_fabric_asset(&self, asset: &crate::fabric::asset::FabricAsset) -> Result<()> {
+    pub fn save_fabric_asset(&self, asset: &kirra_fabric_types::asset::FabricAsset) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO fabric_assets
              (asset_id, asset_type, display_name, kinematic_profile, registered_at_ms, last_seen_ms, metadata_json)
@@ -22,7 +22,7 @@ impl VerifierStore {
         Ok(())
     }
 
-    pub fn load_fabric_assets(&self) -> Result<Vec<crate::fabric::asset::FabricAsset>> {
+    pub fn load_fabric_assets(&self) -> Result<Vec<kirra_fabric_types::asset::FabricAsset>> {
         let mut stmt = self.conn.prepare(
             "SELECT asset_id, asset_type, display_name, kinematic_profile, registered_at_ms, last_seen_ms, metadata_json
              FROM fabric_assets ORDER BY registered_at_ms"
@@ -42,11 +42,11 @@ impl VerifierStore {
         for row in rows {
             let (asset_id, asset_type_s, display_name, profile_s, reg_ms, last_ms, meta_s) = row?;
             let asset_type = serde_json::from_str(&asset_type_s)
-                .unwrap_or(crate::fabric::asset::AssetType::Unknown);
+                .unwrap_or(kirra_fabric_types::asset::AssetType::Unknown);
             let kinematic_profile = serde_json::from_str(&profile_s)
-                .unwrap_or(crate::fabric::asset::KinematicProfileType::Custom);
+                .unwrap_or(kirra_fabric_types::asset::KinematicProfileType::Custom);
             let metadata = serde_json::from_str(&meta_s).unwrap_or_default();
-            assets.push(crate::fabric::asset::FabricAsset {
+            assets.push(kirra_fabric_types::asset::FabricAsset {
                 asset_id,
                 asset_type,
                 display_name,
@@ -61,7 +61,7 @@ impl VerifierStore {
 
     /// Append a causal-log event to the hash-chained, signed, persisted ledger.
     ///
-    /// Mirrors [`crate::audit_chain::AuditChainLinker::append_audit_event_tx`]:
+    /// Mirrors the audit ledger's [`super::append_audit_event_tx`]:
     /// reads the prev `(record_hash, sequence)` (fail-closed on real read
     /// errors; only `QueryReturnedNoRows` is genesis), computes the record hash
     /// (binding the causality edges), signs the canonical causal payload, records
@@ -72,7 +72,7 @@ impl VerifierStore {
         &mut self,
         event: &CausalEventInput<'_>,
         signing_key: Option<&ed25519_dalek::SigningKey>,
-    ) -> Result<crate::fabric::causal_log::CausalLogEntry> {
+    ) -> Result<kirra_fabric_types::CausalLogEntry> {
         let CausalEventInput {
             entry_id,
             asset_id,
@@ -176,7 +176,7 @@ impl VerifierStore {
 
         tx.commit()?;
 
-        Ok(crate::fabric::causal_log::CausalLogEntry {
+        Ok(kirra_fabric_types::CausalLogEntry {
             entry_id: entry_id.to_string(),
             sequence,
             timestamp_ms,
@@ -195,9 +195,7 @@ impl VerifierStore {
 
     /// Decode one `fabric_causal_log` row from a query row. Column order must
     /// match the SELECT in the loaders below.
-    fn causal_entry_from_row(
-        row: &rusqlite::Row,
-    ) -> Result<crate::fabric::causal_log::CausalLogEntry> {
+    fn causal_entry_from_row(row: &rusqlite::Row) -> Result<kirra_fabric_types::CausalLogEntry> {
         let entry_id: String = row.get(0)?;
         let sequence: i64 = row.get(1)?;
         let timestamp_ms: i64 = row.get(2)?;
@@ -211,7 +209,7 @@ impl VerifierStore {
         let record_hash: String = row.get(10)?;
         let signature_b64: Option<String> = row.get(11)?;
         let key_id: Option<String> = row.get(12)?;
-        Ok(crate::fabric::causal_log::CausalLogEntry {
+        Ok(kirra_fabric_types::CausalLogEntry {
             entry_id,
             sequence: sequence.max(0) as u64,
             timestamp_ms: timestamp_ms.max(0) as u64,
@@ -229,7 +227,7 @@ impl VerifierStore {
     }
 
     /// Load every causal-log entry in chain (id ASC) order.
-    pub fn load_causal_entries(&self) -> Result<Vec<crate::fabric::causal_log::CausalLogEntry>> {
+    pub fn load_causal_entries(&self) -> Result<Vec<kirra_fabric_types::CausalLogEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT entry_id, sequence, timestamp_ms, asset_id, event_type, payload, \
              caused_by, affects_assets, fabric_generation, previous_hash_hex, \
@@ -252,7 +250,7 @@ impl VerifierStore {
         to_ms: u64,
         limit: u32,
         offset: u32,
-    ) -> Result<Vec<crate::fabric::causal_log::CausalLogEntry>> {
+    ) -> Result<Vec<kirra_fabric_types::CausalLogEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT entry_id, sequence, timestamp_ms, asset_id, event_type, payload, \
              caused_by, affects_assets, fabric_generation, previous_hash_hex, \
@@ -532,13 +530,13 @@ pub trait FabricAssetStore {
     /// overwrites, never duplicates).
     fn save_fabric_asset(
         &self,
-        asset: &crate::fabric::asset::FabricAsset,
+        asset: &kirra_fabric_types::asset::FabricAsset,
     ) -> std::result::Result<(), Self::Error>;
 
     /// Load every registered asset, ordered by `registered_at_ms` (ascending).
     fn load_fabric_assets(
         &self,
-    ) -> std::result::Result<Vec<crate::fabric::asset::FabricAsset>, Self::Error>;
+    ) -> std::result::Result<Vec<kirra_fabric_types::asset::FabricAsset>, Self::Error>;
 }
 
 /// The production SQLite backend: delegates to the inherent `VerifierStore` methods
@@ -547,10 +545,10 @@ pub trait FabricAssetStore {
 impl FabricAssetStore for VerifierStore {
     type Error = rusqlite::Error;
 
-    fn save_fabric_asset(&self, asset: &crate::fabric::asset::FabricAsset) -> Result<()> {
+    fn save_fabric_asset(&self, asset: &kirra_fabric_types::asset::FabricAsset) -> Result<()> {
         self.save_fabric_asset(asset)
     }
-    fn load_fabric_assets(&self) -> Result<Vec<crate::fabric::asset::FabricAsset>> {
+    fn load_fabric_assets(&self) -> Result<Vec<kirra_fabric_types::asset::FabricAsset>> {
         self.load_fabric_assets()
     }
 }
@@ -566,7 +564,8 @@ impl FabricAssetStore for VerifierStore {
 /// another thread can never make a `FabricAssetStore` op panic.
 #[derive(Debug, Default)]
 pub struct InMemoryFabricAssetStore {
-    assets: std::sync::Mutex<std::collections::HashMap<String, crate::fabric::asset::FabricAsset>>,
+    assets:
+        std::sync::Mutex<std::collections::HashMap<String, kirra_fabric_types::asset::FabricAsset>>,
 }
 
 impl FabricAssetStore for InMemoryFabricAssetStore {
@@ -574,7 +573,7 @@ impl FabricAssetStore for InMemoryFabricAssetStore {
 
     fn save_fabric_asset(
         &self,
-        asset: &crate::fabric::asset::FabricAsset,
+        asset: &kirra_fabric_types::asset::FabricAsset,
     ) -> std::result::Result<(), std::convert::Infallible> {
         self.assets
             .lock()
@@ -585,8 +584,9 @@ impl FabricAssetStore for InMemoryFabricAssetStore {
 
     fn load_fabric_assets(
         &self,
-    ) -> std::result::Result<Vec<crate::fabric::asset::FabricAsset>, std::convert::Infallible> {
-        let mut all: Vec<crate::fabric::asset::FabricAsset> = self
+    ) -> std::result::Result<Vec<kirra_fabric_types::asset::FabricAsset>, std::convert::Infallible>
+    {
+        let mut all: Vec<kirra_fabric_types::asset::FabricAsset> = self
             .assets
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -616,7 +616,7 @@ pub fn assert_fabric_asset_store_contract<S: FabricAssetStore>(store: &S)
 where
     S::Error: core::fmt::Debug,
 {
-    use crate::fabric::asset::{AssetType, FabricAsset, KinematicProfileType};
+    use kirra_fabric_types::asset::{AssetType, FabricAsset, KinematicProfileType};
     fn asset(id: &str, at: u64, atype: AssetType, profile: KinematicProfileType) -> FabricAsset {
         let mut metadata = std::collections::HashMap::new();
         metadata.insert("site".to_string(), "dock-7".to_string());

@@ -17,38 +17,12 @@
 // its pin is a git blob hash) — mapping tokens here keeps the talisman
 // untouched while every variant still gets a reviewed operator sentence.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use sha2::{Digest, Sha256};
-
-/// Monotonic per-process discriminator folded into each minted id so two
-/// denials of the SAME payload in the SAME millisecond still get distinct ids.
-static VERDICT_MINT_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Mint a verdict id: 32 lowercase hex chars (the first 16 bytes of a SHA-256
-/// over the event time, a monotonic counter, and the payload bytes).
-/// Collision-resistant across concurrent denials and restarts for any
-/// realistic denial volume; the id is a HANDLE (retrieval key), not a secret.
-#[must_use]
-pub fn mint_verdict_id(now_ms: u64, payload_json: &str) -> String {
-    let n = VERDICT_MINT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut h = Sha256::new();
-    h.update(now_ms.to_be_bytes());
-    h.update(n.to_be_bytes());
-    h.update(payload_json.as_bytes());
-    let digest = h.finalize();
-    hex::encode(&digest[..16])
-}
-
-/// Is `s` a well-formed verdict id (exactly 32 lowercase hex chars)? The
-/// retrieval handler validates BEFORE the id is interpolated into a SQL LIKE
-/// pattern, so `%`/`_` metacharacters can never widen the match.
-#[must_use]
-pub fn is_valid_verdict_id(s: &str) -> bool {
-    s.len() == 32
-        && s.bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
+// The verdict-id codec (`mint_verdict_id` / `is_valid_verdict_id`) is a
+// content-addressed SHA-256 audit id — it moved to the lean `kirra-audit-hash`
+// crate (ADR-0035 — the kirra-persistence enabling work) so the persistence layer
+// can validate ids without naming this module. Re-exported so every existing
+// `crate::verdicts::{mint,is_valid}_verdict_id` path (deny arm, handler) is unchanged.
+pub use kirra_audit_hash::{is_valid_verdict_id, mint_verdict_id};
 
 /// Fallback explanation for a token this build does not recognize (a NEWER
 /// verifier wrote the record). Deliberately loud about being generic.

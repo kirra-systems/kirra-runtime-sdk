@@ -2,7 +2,7 @@
 // OTA governor-artifact campaigns (WS-4 · Track 3 · Fleet Plane) — persistence for
 // the `crate::ota_campaign` control-plane state machine.
 //
-// The engine (`crate::ota_campaign::Campaign`) owns all transition logic and the
+// The engine (`kirra_ota_campaign::Campaign`) owns all transition logic and the
 // fail-closed halt-on-regression rule; this module only persists a campaign and,
 // on every lifecycle mutation, appends an R156-shaped audit-chain entry IN THE
 // SAME atomic tx (the `record_grant_outcome` template — a forked chain is
@@ -11,7 +11,7 @@
 // restart (a halted rollout must never silently resume).
 
 use super::*;
-use crate::ota_campaign::{Campaign, CampaignState, HaltReason, NodeArtifactStatus};
+use kirra_ota_campaign::{Campaign, CampaignState, HaltReason, NodeArtifactStatus};
 
 impl VerifierStore {
     /// Persist a freshly-authored campaign (`Draft`) and append the
@@ -678,9 +678,9 @@ mod ota_campaign_store_contract_tests {
 
 #[cfg(test)]
 mod tests {
-    use crate::ota_campaign::{AdvanceOutcome, Campaign, CampaignState, HaltReason};
-    use crate::verifier::FleetPosture;
     use crate::verifier_store::VerifierStore;
+    use kirra_core::FleetPosture;
+    use kirra_ota_campaign::{AdvanceOutcome, Campaign, CampaignState, HaltReason};
 
     const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -905,7 +905,7 @@ mod tests {
 
     #[test]
     fn node_artifact_status_upserts_latest_wins() {
-        use crate::ota_campaign::NodeArtifactStatus;
+        use kirra_ota_campaign::NodeArtifactStatus;
         let mut s = store();
         let st = |digest: &str, at: u64| NodeArtifactStatus {
             node_id: "robot-01".into(),
@@ -953,7 +953,7 @@ mod tests {
 
     #[test]
     fn attested_flag_is_monotonic_per_digest() {
-        use crate::ota_campaign::NodeArtifactStatus;
+        use kirra_ota_campaign::NodeArtifactStatus;
         let other = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
         let mut s = store();
         let mk = |digest: &str, at: u64, attested: bool| NodeArtifactStatus {

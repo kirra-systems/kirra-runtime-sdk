@@ -1,7 +1,6 @@
 // src/audit_chain.rs
 
-use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
-use rusqlite::{params, Result, Transaction};
+use rusqlite::{Result, Transaction};
 
 /// Event payload written to the audit chain when an RSS safe-distance
 /// violation is detected. All fields are included in the SHA-256 hash.
@@ -129,6 +128,15 @@ impl AuditChainLinker {
         )
     }
 
+    /// Append one event to the hash-chained, signed audit ledger, into a
+    /// caller-owned transaction.
+    ///
+    /// ADR-0035 slice 2b: the write mechanics were relocated to the persistence
+    /// layer ([`crate::verifier_store::append_audit_event_tx`]) — the write touches
+    /// only the persistence-owned `audit_log_chain` / `audit_anchor_head` tables and
+    /// the pure `kirra_audit_hash` primitives. This associated function DELEGATES to
+    /// it so `AuditChainLinker::append_audit_event_tx` callers (the typed wrappers
+    /// above, tests, external callers) are unchanged and the chain bytes identical.
     pub fn append_audit_event_tx(
         tx: &Transaction,
         event_type: &str,
@@ -136,103 +144,25 @@ impl AuditChainLinker {
         created_at_ms: i64,
         signing_key: Option<&ed25519_dalek::SigningKey>,
     ) -> Result<()> {
-        // Read previous (record_hash, sequence). Distinguish empty-table
-        // (legitimate genesis) from real read errors — the pre-v2 code
-        // silently forked to genesis on any error, hiding a corrupted
-        // store behind a brand-new chain. Now: real errors propagate.
-        let prev = tx.query_row(
-            "SELECT record_hash_hex, sequence FROM audit_log_chain \
-             ORDER BY id DESC LIMIT 1",
-            [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
-        );
-        let (previous_hash, prev_seq) = match prev {
-            Ok((h, seq)) => (h, seq.unwrap_or(-1)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => ("0".repeat(64), -1),
-            Err(e) => return Err(e), // FAIL CLOSED — never fork-to-genesis on read error
-        };
-        // Genesis -> 0; first v2 row after a v1 tail (prev_seq NULL -> -1) -> 0.
-        let sequence: u64 = (prev_seq + 1) as u64;
-
-        let record_hash = Self::compute_record_hash_v2(
-            &previous_hash,
+        crate::verifier_store::append_audit_event_tx(
+            tx,
             event_type,
             event_json_payload,
             created_at_ms,
-            sequence,
-        );
-
-        let signature_b64: Option<String> = signing_key.map(|key| {
-            use ed25519_dalek::Signer;
-            let payload = canonical_signing_payload_v2(
-                &previous_hash,
-                &record_hash,
-                event_type,
-                created_at_ms,
-                sequence,
-            );
-            let sig = key.sign(payload.as_bytes());
-            b64e.encode(sig.to_bytes())
-        });
-
-        // Record the content-addressed id of the SIGNING key (#76). The
-        // verifier selects the verifying key per row by this id, so rows signed
-        // under a prior key still verify after rotation. `key_id` is unsigned
-        // metadata: tampering it makes the row verify under the WRONG key and
-        // fail (no need to bind it into the existing signed payload, which keeps
-        // v1/v2 signatures unchanged).
-        let key_id: Option<String> = signing_key.map(|key| verifying_key_id(&key.verifying_key()));
-
-        tx.execute(
-            "INSERT INTO audit_log_chain
-             (event_type, event_json, previous_hash_hex, record_hash_hex,
-              created_at_ms, signature_b64, hash_version, sequence, key_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, ?7, ?8)",
-            params![
-                event_type,
-                event_json_payload,
-                previous_hash,
-                record_hash,
-                created_at_ms,
-                signature_b64,
-                sequence as i64,
-                key_id,
-            ],
-        )?;
-
-        // #77: advance the signed anchor-HEAD high-water mark to this new tail,
-        // IN THE SAME TRANSACTION as the row above. This is the whole point: the
-        // head and the row it points to commit atomically on the same connection,
-        // so the head can never be more (or less) durable than the chain tail.
-        // #74 INTERACTION: the chain is synchronous=NORMAL and its last rows may
-        // be lost on an ungraceful power cut — but because the head update rides
-        // the SAME commit as each row, a lost tail row takes its head update with
-        // it, leaving head == the recovered tail. No false truncation alarm.
-        let head_sig: Option<String> = signing_key.map(|key| {
-            use ed25519_dalek::Signer;
-            let payload = canonical_anchor_head_payload(sequence, &record_hash);
-            b64e.encode(key.sign(payload.as_bytes()).to_bytes())
-        });
-        tx.execute(
-            "INSERT INTO audit_anchor_head (id, sequence, record_hash_hex, signature_b64, key_id)
-             VALUES (1, ?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET
-                 sequence        = excluded.sequence,
-                 record_hash_hex = excluded.record_hash_hex,
-                 signature_b64   = excluded.signature_b64,
-                 key_id          = excluded.key_id",
-            params![sequence as i64, record_hash, head_sig, key_id],
-        )?;
-
-        Ok(())
+            signing_key,
+        )
     }
 }
 
 #[cfg(test)]
 mod audit_signing_tests {
     use super::*;
+    // `params!` + base64 encoding are used only by these tests now that the write
+    // mechanics moved to `verifier_store` (slice 2b); import them locally so the
+    // production module carries no unused import.
+    use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
     use ed25519_dalek::{Signature, SigningKey, Verifier};
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
 
     fn setup_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

@@ -306,12 +306,33 @@ domain types — none of which can live below persistence in the target DAG toda
       in root and delegates its `compute_record_hash*` methods to the crate; root's
       `audit_chain` re-exports the crate so `crate::audit_chain::<fn>` paths are unchanged,
       and `verifier_store`'s verify/read path now names `kirra_audit_hash::*` directly.
-      REMAINDER (slice 2b): the WRITE seam — `ChainedAuditAppender` (in `verifier_store`)
-      still names `crate::audit_chain::AuditChainLinker::append_audit_event_tx`. Invert it:
-      the `AuditAppender` TRAIT moves down with persistence; the `ChainedAuditAppender` IMPL
-      stays in root and is injected at store construction.
-   3. **Relocate/invert** the smaller couplings (`ShippedAuditRecord`, `is_valid_verdict_id`,
-      `KeyRegistry`).
+      SLICE 2b (DONE — the write seam): rather than injecting the impl up, the append
+      MECHANICS moved DOWN. `append_audit_event_tx` writes the persistence-owned
+      `audit_log_chain` / `audit_anchor_head` tables using only `kirra_audit_hash` +
+      Ed25519, so it was relocated INTO `verifier_store::audit_appender` (as a free fn);
+      `ChainedAuditAppender` calls it locally, and root's
+      `AuditChainLinker::append_audit_event_tx` now DELEGATES down to it (its typed
+      wrappers + external callers unchanged). This needed no store-construction churn and
+      no cycle (persistence → `kirra_audit_hash`; root → persistence). Result:
+      `verifier_store` has ZERO `crate::audit_chain` code references (production + tests);
+      only a prose comment names it. Byte-identical (power-loss drill + tamper tests green).
+   3. **Relocate the smaller couplings** — DONE. `ShippedAuditRecord` (the off-box
+      shipped-record WIRE type — must stay DB-free for the independent re-verifier) →
+      `kirra-core`; `mint_verdict_id` / `is_valid_verdict_id` (content-addressed SHA-256
+      audit ids) → `kirra-audit-hash`; `KeyRegistry` was only doc-links (no code coupling).
+      `verdicts` / `audit_shipper` re-export from the leaves so root paths are unchanged;
+      `audit_shipper`'s `recompute_hash` became a free fn (calls `kirra_audit_hash`) since
+      the record type is now external — which also freed `audit_shipper` of `audit_chain`.
+   3.5. **Repoint the shim paths — DONE.** `verifier_store` named already-relocated types via
+      their ROOT re-export shims; all repointed to the leaves directly: `crate::verifier::{FleetPosture,
+      NodeTrustState, RegisteredNode}` → `kirra_core`, `crate::federation{,_reconciliation}::*` →
+      `kirra_fleet_types`, `crate::ota_campaign::*` → `kirra_ota_campaign`,
+      `crate::fabric::{asset,causal_log}::*` → `kirra_fabric_types`, and the test-only
+      `crate::gateway::kinematics_contract::*` → `kirra_core::kinematics_contract` (also a shim).
+      Two residual doc-links (`KeyRegistry`, `StoreHandle`) demoted to plain spans. RESULT:
+      `verifier_store` now names ZERO root-crate items — only its own `crate::verifier_store::*`
+      submodules, the leaf crates, and external crates. Byte-identical (repointing to the same
+      types via re-export); 760 lib + power-loss + rollout green.
    4. **Then** move `verifier_store` wholesale into `kirra-persistence`, depending only on the
       domain-type leaves + the pure-audit leaf + the injected `AuditAppender` contract.
 

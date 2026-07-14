@@ -319,7 +319,7 @@ impl VerifierStore {
     pub fn load_federated_report_v2s_for_asset(
         &self,
         asset_id: &str,
-    ) -> Result<Vec<crate::federation_reconciliation::FederatedTrustReportV2>> {
+    ) -> Result<Vec<kirra_fleet_types::federation_reconciliation::FederatedTrustReportV2>> {
         let mut stmt = self.conn.prepare(
             "SELECT source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms, source_generation
              FROM federated_trust_reports
@@ -347,20 +347,22 @@ impl VerifierStore {
         for row in rows {
             let (source, aid, posture_json, issued, expires, generation) = row?;
             // Fail-closed: a corrupt posture is skipped, never coerced to Nominal.
-            let Ok(posture) = serde_json::from_str::<crate::verifier::FleetPosture>(&posture_json)
+            let Ok(posture) = serde_json::from_str::<kirra_core::FleetPosture>(&posture_json)
             else {
                 continue;
             };
-            out.push(crate::federation_reconciliation::FederatedTrustReportV2 {
-                source_controller_id: source,
-                asset_id: aid,
-                posture,
-                issued_at_ms: issued,
-                expires_at_ms: expires,
-                nonce_hex: String::new(),
-                signature_b64: String::new(),
-                source_generation: generation,
-            });
+            out.push(
+                kirra_fleet_types::federation_reconciliation::FederatedTrustReportV2 {
+                    source_controller_id: source,
+                    asset_id: aid,
+                    posture,
+                    issued_at_ms: issued,
+                    expires_at_ms: expires,
+                    nonce_hex: String::new(),
+                    signature_b64: String::new(),
+                    source_generation: generation,
+                },
+            );
         }
         Ok(out)
     }

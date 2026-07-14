@@ -413,8 +413,8 @@ mod standby_store_tests {
     fn test_posture_event_analytics_queries() {
         // #396: window/group queries return the expected rows.
         let store = in_memory();
-        let nominal = serde_json::to_string(&crate::verifier::FleetPosture::Nominal).unwrap();
-        let degraded = serde_json::to_string(&crate::verifier::FleetPosture::Degraded).unwrap();
+        let nominal = serde_json::to_string(&kirra_core::FleetPosture::Nominal).unwrap();
+        let degraded = serde_json::to_string(&kirra_core::FleetPosture::Degraded).unwrap();
         store
             .save_posture_event("a", "E", &nominal, None, 1_000)
             .unwrap();
@@ -562,7 +562,6 @@ mod audit_chain_bypass_tests {
 /// signatures. Pre-v2 these were undetected by the hash-only check.
 #[cfg(test)]
 mod audit_hash_v2_tests {
-    use crate::audit_chain::AuditChainLinker;
     use crate::verifier_store::*;
 
     fn in_memory() -> VerifierStore {
@@ -637,8 +636,8 @@ mod audit_hash_v2_tests {
         let prev = "0".repeat(64);
         let ts = 1_000;
         let seq = 0;
-        let h_ab_c = AuditChainLinker::compute_record_hash_v2(&prev, "AB", "C", ts, seq);
-        let h_a_bc = AuditChainLinker::compute_record_hash_v2(&prev, "A", "BC", ts, seq);
+        let h_ab_c = kirra_audit_hash::compute_record_hash_v2(&prev, "AB", "C", ts, seq);
+        let h_a_bc = kirra_audit_hash::compute_record_hash_v2(&prev, "A", "BC", ts, seq);
         assert_ne!(
             h_ab_c, h_a_bc,
             "v2 must not collide on field-boundary slides — length-prefixing prevents this"
@@ -658,7 +657,7 @@ mod audit_hash_v2_tests {
         let prev_v1 = "0".repeat(64);
         let v1_ts: i64 = 1_000;
         let v1_payload = "{\"legacy\":true}";
-        let v1_hash = AuditChainLinker::compute_record_hash_v1(&prev_v1, v1_payload, v1_ts);
+        let v1_hash = kirra_audit_hash::compute_record_hash_v1(&prev_v1, v1_payload, v1_ts);
         store
             .conn
             .execute(
@@ -721,7 +720,7 @@ mod audit_hash_v2_tests {
         assert_eq!(count, 0, "no v1 rows → no migration marker needed");
 
         // Simulate an upgraded DB: one v1 row, then run the anchor.
-        let h = AuditChainLinker::compute_record_hash_v1(&"0".repeat(64), "{}", 100);
+        let h = kirra_audit_hash::compute_record_hash_v1(&"0".repeat(64), "{}", 100);
         store
             .conn
             .execute(
@@ -762,9 +761,9 @@ mod audit_hash_v2_tests {
 /// fail-closed unknown-key-id case.
 #[cfg(test)]
 mod audit_key_rotation_tests {
-    use crate::audit_chain::{verifying_key_id, AuditChainLinker};
     use crate::verifier_store::*;
     use ed25519_dalek::SigningKey;
+    use kirra_audit_hash::verifying_key_id;
 
     fn store_with_key(seed: u8) -> (VerifierStore, SigningKey) {
         let mut s = VerifierStore::new(":memory:").expect("store");
@@ -786,7 +785,8 @@ mod audit_key_rotation_tests {
     fn append(s: &mut VerifierStore, event_type: &str, ts: i64) {
         let sk = s.signing_key.clone();
         let tx = s.conn.transaction().unwrap();
-        AuditChainLinker::append_audit_event_tx(&tx, event_type, "{}", ts, sk.as_ref()).unwrap();
+        crate::verifier_store::append_audit_event_tx(&tx, event_type, "{}", ts, sk.as_ref())
+            .unwrap();
         tx.commit().unwrap();
     }
 
@@ -1038,11 +1038,11 @@ mod durability_tests {
         c.query_row("PRAGMA synchronous", [], |r| r.get(0)).unwrap()
     }
 
-    fn report(nonce: &str) -> crate::federation::FederatedTrustReport {
-        crate::federation::FederatedTrustReport {
+    fn report(nonce: &str) -> kirra_fleet_types::federation::FederatedTrustReport {
+        kirra_fleet_types::federation::FederatedTrustReport {
             source_controller_id: "ctrl-A".to_string(),
             asset_id: "asset-1".to_string(),
-            posture: crate::verifier::FleetPosture::Nominal,
+            posture: kirra_core::FleetPosture::Nominal,
             issued_at_ms: 1_000,
             expires_at_ms: 9_000,
             nonce_hex: nonce.to_string(),
@@ -1395,9 +1395,9 @@ mod durability_tests {
 
 #[cfg(test)]
 mod key_durability_165_tests {
-    use crate::audit_chain::{verifying_key_id, AuditChainLinker};
     use crate::verifier_store::*;
     use ed25519_dalek::SigningKey;
+    use kirra_audit_hash::verifying_key_id;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static CTR: AtomicU64 = AtomicU64::new(0);
@@ -1536,7 +1536,8 @@ mod key_durability_165_tests {
         {
             let sk = s.signing_key.clone();
             let tx = s.conn.transaction().unwrap();
-            AuditChainLinker::append_audit_event_tx(&tx, "TEST", "{}", 1_500, sk.as_ref()).unwrap();
+            crate::verifier_store::append_audit_event_tx(&tx, "TEST", "{}", 1_500, sk.as_ref())
+                .unwrap();
             tx.commit().unwrap();
         }
         // Verify while passing a MUTATED key: genesis must resolve from the
@@ -1601,7 +1602,7 @@ mod key_durability_165_tests {
         })
         .to_string();
         let tx = s.conn.transaction().unwrap();
-        AuditChainLinker::append_audit_event_tx(&tx, "KEY_ROTATION", &payload, ts, Some(old))
+        crate::verifier_store::append_audit_event_tx(&tx, "KEY_ROTATION", &payload, ts, Some(old))
             .unwrap();
         tx.commit().unwrap();
     }
@@ -1706,7 +1707,8 @@ mod key_durability_165_tests {
         {
             let sk = s.signing_key.clone();
             let tx = s.conn.transaction().unwrap();
-            AuditChainLinker::append_audit_event_tx(&tx, "TEST", "{}", 10, sk.as_ref()).unwrap();
+            crate::verifier_store::append_audit_event_tx(&tx, "TEST", "{}", 10, sk.as_ref())
+                .unwrap();
             tx.commit().unwrap();
         }
         assert_eq!(
@@ -1773,14 +1775,16 @@ mod key_durability_165_tests {
         {
             let sk = s.signing_key.clone();
             let tx = s.conn.transaction().unwrap();
-            AuditChainLinker::append_audit_event_tx(&tx, "TEST", "{}", 10, sk.as_ref()).unwrap();
+            crate::verifier_store::append_audit_event_tx(&tx, "TEST", "{}", 10, sk.as_ref())
+                .unwrap();
             tx.commit().unwrap();
         }
         s.record_key_rotation(b.clone(), "r", 20, held).unwrap();
         {
             let sk = s.signing_key.clone();
             let tx = s.conn.transaction().unwrap();
-            AuditChainLinker::append_audit_event_tx(&tx, "TEST", "{}", 30, sk.as_ref()).unwrap();
+            crate::verifier_store::append_audit_event_tx(&tx, "TEST", "{}", 30, sk.as_ref())
+                .unwrap();
             tx.commit().unwrap();
         }
         let r = s.verify_audit_chain_full(Some(&a.verifying_key())).unwrap();
@@ -1868,7 +1872,7 @@ mod key_durability_165_tests {
         // #165 work is entirely boot-time (admit_signing_key) + rotation-time
         // (record_key_rotation), off the hot path. This compiles & runs with no
         // VerifierStore in scope, demonstrating the independence.
-        use crate::gateway::kinematics_contract::{
+        use kirra_core::kinematics_contract::{
             validate_vehicle_command, EnforceAction, ProposedVehicleCommand,
             VehicleKinematicsContract,
         };
@@ -2073,7 +2077,7 @@ mod epoch_fence_79_tests {
         FederatedTrustReport {
             source_controller_id: "ctrl-A".to_string(),
             asset_id: "asset-1".to_string(),
-            posture: crate::verifier::FleetPosture::Nominal,
+            posture: kirra_core::FleetPosture::Nominal,
             issued_at_ms: 1_000,
             expires_at_ms: 9_000,
             nonce_hex: nonce.to_string(),
@@ -2781,9 +2785,9 @@ mod causal_chain_87_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod federation_v2_wiring_tests {
-    use crate::federation_reconciliation::authoritative_posture;
-    use crate::verifier::FleetPosture;
     use crate::verifier_store::*;
+    use kirra_core::FleetPosture;
+    use kirra_fleet_types::federation_reconciliation::authoritative_posture;
 
     fn rep(
         nonce: &str,

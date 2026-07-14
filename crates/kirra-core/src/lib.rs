@@ -146,6 +146,26 @@ pub struct RegisteredNode {
     pub firmware_version: Option<String>,
 }
 
+/// One audit-chain record in its off-box SHIPPED form — the raw chain fields
+/// needed to INDEPENDENTLY re-verify the hash chain without the source database.
+/// A wire type (serde-serialized off-box), relocated to the lean foundation
+/// (ADR-0035 — the kirra-persistence enabling work) so BOTH the persistence layer
+/// that produces it and the off-box shipper that re-verifies it can name it without
+/// either depending on the other. (Deliberately distinct from the DESC-paginated
+/// human/API export view, which omits `sequence`/`hash_version`.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShippedAuditRecord {
+    pub sequence: u64,
+    pub event_type: String,
+    pub event_json: String,
+    pub previous_hash_hex: String,
+    pub record_hash_hex: String,
+    pub created_at_ms: i64,
+    pub hash_version: i64,
+    pub signature_b64: Option<String>,
+    pub key_id: Option<String>,
+}
+
 /// The fleet's safety posture — the spine the whole governor hangs on. `Nominal` →
 /// full operation; `Degraded` → controlled decel-to-stop-and-hold envelope; `LockedOut`
 /// → MRC, human reset required.
