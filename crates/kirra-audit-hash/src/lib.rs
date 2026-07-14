@@ -175,6 +175,29 @@ pub fn verifying_key_id(vk: &ed25519_dalek::VerifyingKey) -> String {
     hex::encode(h.finalize())
 }
 
+/// Parse an Ed25519 public key from a PEM-encoded SubjectPublicKeyInfo.
+///
+/// The PEM armor (`-----BEGIN/END PUBLIC KEY-----` lines + whitespace) is
+/// stripped here as plain text; the resulting DER is parsed by the vetted
+/// `spki`/`pkcs8` parser via `VerifyingKey::from_public_key_der`. Returns `None`
+/// on any malformation — callers fail closed.
+///
+/// A pure key primitive (PEM → raw key), shared by the root attestation/TPM-quote
+/// paths and the persistence-layer `KeyRegistry` so neither hand-rolls the SPKI
+/// offset (ADR-0035 — the `key_registry` relocation).
+#[must_use]
+pub fn parse_ed25519_public_pem(pem: &str) -> Option<ed25519_dalek::VerifyingKey> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use ed25519_dalek::pkcs8::DecodePublicKey;
+    let der_b64: String = pem
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("-----"))
+        .collect();
+    let der = B64.decode(der_b64.as_bytes()).ok()?;
+    ed25519_dalek::VerifyingKey::from_public_key_der(&der).ok()
+}
+
 /// V1 (legacy) record hash: prev || event_json || created_at_ms.
 /// Does NOT bind `event_type` — retained ONLY to verify pre-migration rows.
 pub fn compute_record_hash_v1(

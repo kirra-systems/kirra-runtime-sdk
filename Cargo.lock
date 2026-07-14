@@ -2123,6 +2123,7 @@ dependencies = [
 name = "kirra-audit-hash"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "ed25519-dalek",
  "hex",
  "sha2 0.10.9",
@@ -2355,6 +2356,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
