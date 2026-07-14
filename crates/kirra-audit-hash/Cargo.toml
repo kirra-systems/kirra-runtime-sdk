@@ -30,5 +30,7 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 sha2 = "0.10"
 # Hex encoding of digests (matches the on-disk `*_hex` columns).
 hex = "0.4"
-# `verifying_key_id` hashes the raw 32-byte Ed25519 verifying key.
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+# `verifying_key_id` hashes the raw 32-byte Ed25519 verifying key. VerifyingKey +
+# `as_bytes()` only — no key generation, so the `rand_core` feature is not needed
+# (keeping this leaf's feature surface minimal under feature unification).
+ed25519-dalek = "2"

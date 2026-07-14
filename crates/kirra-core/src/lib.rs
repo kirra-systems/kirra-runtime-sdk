@@ -123,8 +123,9 @@ pub enum NodeTrustState {
 /// material captured at registration. Plain persisted data (the `nodes` table);
 /// carries no behaviour. Relocated to the lean foundation (ADR-0035 — the
 /// `kirra-persistence` enabling work) alongside [`NodeTrustState`] so the
-/// persistence layer can name it without the verifier service tree; re-exported as
-/// `crate::verifier::RegisteredNode` in the root crate so existing paths are unchanged.
+/// persistence layer can name it without the verifier service tree. The root
+/// `kirra-verifier` crate re-exports it (as `kirra_verifier::verifier::RegisteredNode`)
+/// so its existing `crate::verifier::RegisteredNode` paths are unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisteredNode {
     pub node_id: String,
