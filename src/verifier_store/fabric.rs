@@ -83,11 +83,11 @@ impl VerifierStore {
             fabric_generation,
             timestamp_ms,
         } = *event;
-        use crate::audit_chain::{
+        use ed25519_dalek::Signer;
+        use kirra_audit_hash::{
             canonical_causal_anchor_head_payload, canonical_causal_signing_payload,
             compute_causal_record_hash, verifying_key_id,
         };
-        use ed25519_dalek::Signer;
 
         let tx = self.conn.unchecked_transaction()?;
 
@@ -106,7 +106,7 @@ impl VerifierStore {
         };
         let sequence: u64 = (prev_seq + 1) as u64;
 
-        let record_hash = compute_causal_record_hash(&crate::audit_chain::CausalRecordHashInput {
+        let record_hash = compute_causal_record_hash(&kirra_audit_hash::CausalRecordHashInput {
             previous_hash: &previous_hash,
             entry_id,
             asset_id,
@@ -294,7 +294,7 @@ impl VerifierStore {
         &self,
         verifying_key: Option<&ed25519_dalek::VerifyingKey>,
     ) -> Result<CausalChainVerifyResult> {
-        use crate::audit_chain::{
+        use kirra_audit_hash::{
             canonical_causal_anchor_head_payload, canonical_causal_signing_payload,
             compute_causal_record_hash,
         };
@@ -365,7 +365,7 @@ impl VerifierStore {
             let caused_by: Vec<String> = serde_json::from_str(&caused_by_json).unwrap_or_default();
             let affects_assets: Vec<String> =
                 serde_json::from_str(&affects_json).unwrap_or_default();
-            let recalc = compute_causal_record_hash(&crate::audit_chain::CausalRecordHashInput {
+            let recalc = compute_causal_record_hash(&kirra_audit_hash::CausalRecordHashInput {
                 previous_hash: &previous_hash_hex,
                 entry_id: &entry_id,
                 asset_id: &asset_id,

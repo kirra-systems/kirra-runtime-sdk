@@ -91,7 +91,7 @@ impl VerifierStore {
         for r in self.audit_key_ledger_rows()? {
             if r.key_id == genesis_id {
                 if let Some(vk) = audit_decode_vk(&r.pubkey_b64) {
-                    if crate::audit_chain::verifying_key_id(&vk) == genesis_id {
+                    if kirra_audit_hash::verifying_key_id(&vk) == genesis_id {
                         return Ok(Some(vk));
                     }
                 }
@@ -117,13 +117,13 @@ impl VerifierStore {
         let genesis_id = match (&durable_genesis, fallback_vk) {
             // Durable anchor wins — a mutated env key can never re-root trust.
             (Some(gvk), _) => {
-                let gid = crate::audit_chain::verifying_key_id(gvk);
+                let gid = kirra_audit_hash::verifying_key_id(gvk);
                 keyring.insert(gid.clone(), *gvk);
                 Some(gid)
             }
             // Pre-#165 fallback: the passed-in (env) key is the genesis.
             (None, Some(fvk)) => {
-                let gid = crate::audit_chain::verifying_key_id(fvk);
+                let gid = kirra_audit_hash::verifying_key_id(fvk);
                 keyring.insert(gid.clone(), *fvk);
                 Some(gid)
             }
@@ -162,7 +162,7 @@ impl VerifierStore {
                     // Content-addressed sanity: only carry rows whose announced
                     // id matches the announced pubkey.
                     if let Some(vk) = audit_decode_vk(pk) {
-                        if crate::audit_chain::verifying_key_id(&vk) == kid {
+                        if kirra_audit_hash::verifying_key_id(&vk) == kid {
                             out.push((kid.to_string(), pk.to_string()));
                         }
                     }
@@ -223,7 +223,7 @@ impl VerifierStore {
         // via `assert_epoch_held`. Do not broaden this exemption.
         use ed25519_dalek::Signer;
         let env_vk = env_key.verifying_key();
-        let k_env = crate::audit_chain::verifying_key_id(&env_vk);
+        let k_env = kirra_audit_hash::verifying_key_id(&env_vk);
         let env_pub_b64 = b64e.encode(env_vk.as_bytes());
 
         // Optional operator-pinned genesis check (only meaningful once an anchor
@@ -679,7 +679,7 @@ impl VerifierStore {
         // included); the passed-in `genesis_vk` is only the pre-#165 fallback.
         let (mut keyring, genesis_id_opt) = self.audit_keyring_seed(Some(genesis_vk))?;
         let genesis_id =
-            genesis_id_opt.unwrap_or_else(|| crate::audit_chain::verifying_key_id(genesis_vk));
+            genesis_id_opt.unwrap_or_else(|| kirra_audit_hash::verifying_key_id(genesis_vk));
 
         let mut stmt = self.conn.prepare(
             "SELECT event_json, previous_hash_hex, record_hash_hex, created_at_ms, \
@@ -769,7 +769,7 @@ impl VerifierStore {
             // weakness retained for legacy rows); v2 binds event_type and
             // sequence so this same cheap check catches relabeling/reorder.
             let recalc = match hash_version {
-                1 => crate::audit_chain::AuditChainLinker::compute_record_hash_v1(
+                1 => kirra_audit_hash::compute_record_hash_v1(
                     &previous_hash_hex,
                     &event_json,
                     created_at_ms,
@@ -788,7 +788,7 @@ impl VerifierStore {
                         }
                     }
                     prev_v2_seq = sequence_opt;
-                    crate::audit_chain::AuditChainLinker::compute_record_hash_v2(
+                    kirra_audit_hash::compute_record_hash_v2(
                         &previous_hash_hex,
                         &event_type,
                         &event_json,
@@ -920,7 +920,7 @@ impl VerifierStore {
                                     None => (false, "HEAD_KEY_UNKNOWN".to_string()),
                                     Some(vk) => {
                                         let payload =
-                                            crate::audit_chain::canonical_anchor_head_payload(
+                                            kirra_audit_hash::canonical_anchor_head_payload(
                                                 h_seq.max(0) as u64,
                                                 &h_hash,
                                             );
@@ -974,7 +974,7 @@ impl VerifierStore {
         // Reconstruct the full keyring once (the page is DESC/paginated, so we
         // can't replay rotations within a page) — then annotate each row's
         // signature status under the key its key_id names (#76).
-        let genesis_id = verifying_key.map(crate::audit_chain::verifying_key_id);
+        let genesis_id = verifying_key.map(kirra_audit_hash::verifying_key_id);
         let keyring = match verifying_key {
             Some(g) => self.build_audit_keyring(g)?,
             None => std::collections::HashMap::new(),
@@ -1107,7 +1107,7 @@ impl VerifierStore {
         use ed25519_dalek::Signer;
         let new_vk = new_signing_key.verifying_key();
         let new_public_key_b64 = b64e.encode(new_vk.as_bytes());
-        let new_key_id = crate::audit_chain::verifying_key_id(&new_vk);
+        let new_key_id = kirra_audit_hash::verifying_key_id(&new_vk);
 
         // The OLD key signs the in-chain KEY_ROTATION row (so it verifies under a
         // key already trusted). Clone it out before borrowing self mutably for
@@ -1115,7 +1115,7 @@ impl VerifierStore {
         let old_key = self.signing_key.clone();
         let old_key_id = old_key
             .as_ref()
-            .map(|k| crate::audit_chain::verifying_key_id(&k.verifying_key()));
+            .map(|k| kirra_audit_hash::verifying_key_id(&k.verifying_key()));
 
         let payload = serde_json::json!({
             "new_public_key_b64": new_public_key_b64,
@@ -1196,7 +1196,7 @@ impl VerifierStore {
         // Genesis id from the current signing key (the only key the chain has
         // ever been signed under, pre-rotation). No signing key → nothing to do.
         let genesis_id = match self.signing_key.as_ref() {
-            Some(sk) => crate::audit_chain::verifying_key_id(&sk.verifying_key()),
+            Some(sk) => kirra_audit_hash::verifying_key_id(&sk.verifying_key()),
             None => return Ok(()),
         };
         // Idempotent: already anchored?
@@ -1263,7 +1263,7 @@ impl VerifierStore {
                 return Ok(false);
             }
             let recalc = match hash_version {
-                1 => crate::audit_chain::AuditChainLinker::compute_record_hash_v1(
+                1 => kirra_audit_hash::compute_record_hash_v1(
                     &previous_hash_hex,
                     &event_json,
                     created_at_ms,
@@ -1278,7 +1278,7 @@ impl VerifierStore {
                         return Ok(false);
                     }
                     prev_v2_seq = sequence_opt;
-                    crate::audit_chain::AuditChainLinker::compute_record_hash_v2(
+                    kirra_audit_hash::compute_record_hash_v2(
                         &previous_hash_hex,
                         &event_type,
                         &event_json,
@@ -1386,9 +1386,9 @@ impl VerifierStore {
                 Some(key) => {
                     use ed25519_dalek::Signer;
                     let payload =
-                        crate::audit_chain::canonical_anchor_head_payload(seq, &record_hash);
+                        kirra_audit_hash::canonical_anchor_head_payload(seq, &record_hash);
                     let sig = b64e.encode(key.sign(payload.as_bytes()).to_bytes());
-                    let kid = crate::audit_chain::verifying_key_id(&key.verifying_key());
+                    let kid = kirra_audit_hash::verifying_key_id(&key.verifying_key());
                     (Some(sig), Some(kid))
                 }
                 None => (None, None),

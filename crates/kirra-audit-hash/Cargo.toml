@@ -1,0 +1,34 @@
+# crates/kirra-audit-hash/Cargo.toml
+#
+# ADR-0035 — the kirra-persistence enabling work (slice 2). The PURE audit/causal
+# chain primitives — the SHA-256 record-hash computations, the domain-separated
+# canonical signing/anchor-head payload encoders, the content-addressed
+# `verifying_key_id`, and `CausalRecordHashInput` — extracted from the heavy
+# `src/audit_chain.rs` (which also holds the rusqlite-backed `AuditChainLinker`
+# append machinery) so the persistence layer (`verifier_store`) can compute + verify
+# hashes WITHOUT depending on the root crate's audit module. No rusqlite, no state.
+#
+# The STATEFUL `AuditChainLinker` (append-into-a-transaction) stays in the root crate
+# (the safety-authority layer) and calls these functions; root's `audit_chain`
+# re-exports this crate so every existing `crate::audit_chain::<fn>` path is unchanged.
+#
+# Byte-exactness is load-bearing: these encoders define the on-disk audit-chain
+# format. The functions were moved VERBATIM — same domain tags, same length-prefixing,
+# same little-endian field order — so every stored signature/hash verifies identically.
+
+[package]
+name = "kirra-audit-hash"
+version = "0.1.0"
+edition = "2021"
+description = "Pure audit/causal hash-chain primitives for Kirra — SHA-256 record hashes, domain-separated canonical signing/anchor-head payloads, content-addressed key ids. No DB, no state."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# The vetted SHA-256 — the digest primitive (same crate+version the root uses).
+sha2 = "0.10"
+# Hex encoding of digests (matches the on-disk `*_hex` columns).
+hex = "0.4"
+# `verifying_key_id` hashes the raw 32-byte Ed25519 verifying key.
+ed25519-dalek = { version = "2", features = ["rand_core"] }

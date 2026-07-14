@@ -297,11 +297,19 @@ domain types — none of which can live below persistence in the target DAG toda
    mechanical:
    1. **`RegisteredNode` → `kirra-core`** (DONE — alongside `NodeTrustState`; re-exported
       as `crate::verifier::RegisteredNode`, byte-identical).
-   2. **Split `audit_chain`'s PURE core** (the hash + canonical-payload functions +
-      `verifying_key_id` + `CausalRecordHashInput`) into a lean crate; keep the stateful
-      `AuditChainLinker`/keyring in root (authority). The `AuditAppender` TRAIT moves down
-      with persistence; the `ChainedAuditAppender` IMPL stays in root and is injected. This
-      is the crux enabling slice.
+   2. **Split `audit_chain`'s PURE core** into a lean crate — DONE for the hash side:
+      `kirra-audit-hash` now holds the SHA-256 record-hash computations
+      (`compute_record_hash_v1/v2`, `compute_causal_record_hash`), the domain-separated
+      canonical signing/anchor-head encoders, `verifying_key_id`, and
+      `CausalRecordHashInput` — moved VERBATIM (byte-identical on-disk format; power-loss
+      drill + tamper tests green). The stateful `AuditChainLinker` (append-into-a-tx) stays
+      in root and delegates its `compute_record_hash*` methods to the crate; root's
+      `audit_chain` re-exports the crate so `crate::audit_chain::<fn>` paths are unchanged,
+      and `verifier_store`'s verify/read path now names `kirra_audit_hash::*` directly.
+      REMAINDER (slice 2b): the WRITE seam — `ChainedAuditAppender` (in `verifier_store`)
+      still names `crate::audit_chain::AuditChainLinker::append_audit_event_tx`. Invert it:
+      the `AuditAppender` TRAIT moves down with persistence; the `ChainedAuditAppender` IMPL
+      stays in root and is injected at store construction.
    3. **Relocate/invert** the smaller couplings (`ShippedAuditRecord`, `is_valid_verdict_id`,
       `KeyRegistry`).
    4. **Then** move `verifier_store` wholesale into `kirra-persistence`, depending only on the
