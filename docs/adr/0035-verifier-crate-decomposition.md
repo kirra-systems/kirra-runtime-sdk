@@ -147,3 +147,114 @@ replay) gate behaviour preservation.
 Stages land as independent PRs in order (0 → 5); Stage 0 is the gating
 prerequisite and the proof-of-mechanics. Do not begin Stage 1 until Stage 0 is
 merged, and do not begin Stage 3 until Stages 0–2 are merged.
+
+---
+
+## Addendum A (2026-07-14) — Stage 2 execution finding: `verifier_store` is not a clean leaf, and how the hard tier is actually cut
+
+**Status of this addendum:** Accepted (records what execution discovered; revises
+the Stage 2 plan). Stages 0–1 landed as written (#919, #921). Stage 2 is landing
+incrementally as documented below (#922, #923).
+
+### What the plan assumed vs. what execution found
+
+The original Stage 2 line ("move `verifier_store/*` + `StoreHandle` behind the
+existing `EpochFence`/`NodeStore` traits — the least-invasive of the big three
+because the seams exist") **understated the coupling**. Measured against the tree:
+
+- `verifier_store` is ~10.6k LOC across 17 files and is consumed by ~46 files.
+- The `EpochFence` + `NodeStore` trait seams cover **2 of ~8 table families**. The
+  rest (`api_principals`, `operators`, `cert_principals`, `av_subsystem`, `audit`,
+  `federation`, `ota_campaigns`, `posture`, `attestation`, `fabric`) had **no
+  seam** — they marshal domain types and/or append signed audit events directly.
+- So a clean `kirra-persistence` crate **cannot be one mechanical move**: the
+  domain types the store persists (audit-chain records, `FederatedTrustReport`,
+  `Campaign`, causal-log entries, `FabricAsset`, verdict ids, `KeyRegistry`, ~4.7k
+  LOC) currently sit *beside* the store in the root crate, not *below* it, so a
+  persistence crate would not compile independently.
+
+### Decision: trait-seam inversion, family by family (revised Stage 2)
+
+Rather than a big-bang crate move, Stage 2 extends the established storage-trait
+seam program (`EpochFence`, `NodeStore`) one table-family at a time. Each seam is
+a pure ADDITIVE PR: a backend-agnostic trait sharing the inherent method names
+(inherent wins resolution → the SQLite impl delegates without recursion, every
+existing caller untouched), a 2nd in-memory reference backend, and a shared
+`assert_*_store_contract` conformance suite run against both. Once every family is
+behind a trait, consumers depend on traits (not the concrete `VerifierStore`), and
+the eventual crate extraction becomes mechanical.
+
+**Clean tier — DONE (6 of ~8 families).** `PrincipalStore` (#922), `OperatorStore`
+(#922), `CertPrincipalStore` (#922), `AvSubsystemStore` (#923), on top of the
+pre-existing `EpochFence` + `NodeStore`. These are pure CRUD/registry/meta over a
+single table with no audit-chaining. Two of them model a real domain failure mode
+in the in-memory backend's error type rather than `Infallible`
+(`CertPrincipalStore`'s `UNIQUE(cert_sha256)` + `i64::MAX` expiry refusal;
+`PrincipalStore`'s `UNIQUE(token_sha256)`; `AvSubsystemStore`'s increment-on-absent).
+
+### The hard tier — two distinct couplings
+
+The remaining families (`audit`, `federation`, `ota_campaigns`, `posture`,
+`attestation`, `fabric`) cannot be seamed as pure CRUD. They share two *distinct*
+couplings that must be broken first (measured call-site counts in parentheses):
+
+- **C1 — audit-chaining.** The method opens a transaction, writes its table row,
+  AND appends a signed, hash-chained `crate::audit_chain::AuditChainLinker` event
+  **within the same transaction**, using the store's `signing_key` field. Present
+  in `posture` (3), `ota_campaigns` (2), `federation` (2), `operators` clearance
+  grants (4), `fabric` (1), `attestation` (1), and the core `audit` module (7).
+  The atomicity (row + audit append in ONE tx) is load-bearing — the power-loss
+  drill (`audit_chain_prefix_on_kill`) proves the chain never forks — so the audit
+  append **cannot simply move up** to the authority layer without losing it.
+- **C2 — domain-type marshalling.** The method takes/returns a safety-authority
+  domain type: `federation` (`FederatedTrustReport`, `authoritative_posture`),
+  `ota_campaigns` (`Campaign`, `NodeArtifactStatus`), `fabric` (`CausalLogEntry`,
+  `FabricAsset`), `audit` (verdict-id validation, `authoritative_posture`).
+  `posture` and `attestation` are **C1-only** (they marshal primitives/local rows).
+
+The clean-seam recipe doesn't extend here because a portable storage trait for
+these would have to *name* `audit_chain` types, the Ed25519 signing key, AND the
+domain types — none of which can live below persistence in the target DAG today.
+
+### Proposed sequencing for the hard tier (Stage 2.5, before the crate extraction)
+
+1. **Invert the audit-append dependency (breaks C1).** Introduce an injected
+   `AuditAppender` seam: a trait that appends a signed event **into a caller-owned
+   transaction** (`append_within(&tx, event_type, payload, at_ms)`). The store
+   method keeps owning the transaction (atomicity preserved) but calls the injected
+   appender instead of reaching up to `crate::audit_chain` + `self.signing_key`.
+   The `AuditChainLinker` impl and the signing key move to the safety-authority
+   layer and are injected at construction. This is the crux move — it removes the
+   store's dependency on the signing key and the chain-hash logic while keeping the
+   one-transaction guarantee the power-loss drill depends on.
+2. **Relocate the C2 domain types.** Move `FederatedTrustReport{,V2}`, `Campaign` /
+   `NodeArtifactStatus`, `CausalLogEntry` / `FabricAsset`, and the verdict-id
+   predicate into a lower shared crate (candidate: extend `kirra-fleet-types`, or a
+   new `kirra-domain-types` leaf) so a storage trait can name them. `posture` /
+   `attestation` skip this step (C1-only).
+3. **Seam each hard family** as CRUD, exactly like the clean six, now that C1+C2
+   are broken. Then `kirra-persistence` can be extracted mechanically (Stage 2
+   proper), depending only on the domain-types leaf + the injected `AuditAppender`
+   contract.
+
+**Alternative considered — domain-types-first only (no audit inversion):** relocate
+C2 types and move `verifier_store` wholesale into a persistence crate that *keeps*
+depending on `audit_chain`. Rejected as the end state: it drags the signed-audit
+machinery (a safety-authority concern) into the persistence layer, inverting the
+intended DAG (persistence must not know audit semantics). It may still be a useful
+*intermediate* if the `AuditAppender` inversion proves too large for one step.
+
+### Interaction with later stages
+
+The signing key lives on `VerifierStore`/`AppState` today, so step 1 above
+partially overlaps Stage 3 (the `AppState` decomposition) — the `AuditAppender`
+injection is the natural place to relocate signing-key ownership to the
+safety-authority layer. Sequence step 1 as the leading edge of Stage 3 rather than
+duplicating the work.
+
+### Non-goals for the hard tier (unchanged)
+
+No behaviour change: byte-identical verdicts, the SAME audit chain bytes, the same
+fail-closed semantics and one-transaction atomicity. The power-loss, loom, and
+deterministic-replay suites gate this; any tempting semantic change is a separate
+ADR/PR.
