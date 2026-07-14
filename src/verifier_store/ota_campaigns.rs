@@ -338,8 +338,12 @@ pub trait OtaCampaignStore {
     /// Backend error type (SQLite: `rusqlite::Error`; in-memory: [`InMemOtaError`]).
     type Error;
 
-    /// Persist a freshly-authored (`Draft`) campaign. INSERT semantics — a
-    /// duplicate `campaign_id` is an error (never a silent overwrite).
+    /// Persist a new campaign (typically freshly-authored `Draft`, but the storage
+    /// layer accepts any state — lifecycle validity is the engine's concern, not
+    /// the store's; the conformance suite relies on this to seed a `Staged`
+    /// campaign for the active-filter check without the inherent, audit-chained
+    /// `update_campaign`). INSERT semantics — a duplicate `campaign_id` is an error,
+    /// never a silent overwrite.
     fn insert_campaign(&mut self, campaign: &Campaign) -> std::result::Result<(), Self::Error>;
 
     /// Load one campaign by id, or `None` if absent. A stored row that no longer
@@ -492,7 +496,9 @@ impl OtaCampaignStore for InMemoryOtaCampaignStore {
                 self.statuses.insert(st.node_id.clone(), st.clone());
             }
             Some(prev) => {
-                // MONOTONIC: a report NOT newer than the stored one is a no-op.
+                // MONOTONIC: a report OLDER than the stored one is a no-op; an
+                // equal-or-newer timestamp proceeds (the `>=` mirrors the SQLite
+                // backend's `WHERE excluded.reported_at_ms >= …` guard exactly).
                 if st.reported_at_ms >= prev.reported_at_ms {
                     // `attested` is monotonic PER DIGEST: a later report for the
                     // SAME digest cannot clear unforgeable evidence; a different
