@@ -49,12 +49,14 @@ impl VerifierStore {
                 campaign.uptane_metadata_json,
             ],
         )?;
-        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
+        ChainedAuditAppender {
+            signing_key: self.signing_key.as_ref(),
+        }
+        .append_within(
             &tx,
             "OtaCampaignCreated",
             &payload,
             campaign.updated_at_ms as i64,
-            self.signing_key.as_ref(),
         )?;
         tx.commit()
     }
@@ -89,13 +91,10 @@ impl VerifierStore {
             // No such campaign — do NOT write an audit entry for a phantom mutation.
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
-            &tx,
-            event_type,
-            &payload,
-            campaign.updated_at_ms as i64,
-            self.signing_key.as_ref(),
-        )?;
+        ChainedAuditAppender {
+            signing_key: self.signing_key.as_ref(),
+        }
+        .append_within(&tx, event_type, &payload, campaign.updated_at_ms as i64)?;
         tx.commit()
     }
 

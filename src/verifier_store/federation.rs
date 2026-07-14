@@ -128,12 +128,14 @@ impl VerifierStore {
             "nonce_hex": report.nonce_hex,
             "received_at_ms": received_at_ms,
         });
-        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
+        ChainedAuditAppender {
+            signing_key: signing_key.as_ref(),
+        }
+        .append_within(
             &tx,
             "FEDERATED_TRUST_REPORT_ACCEPTED",
             &audit.to_string(),
             received_at_ms as i64,
-            signing_key.as_ref(),
         )?;
 
         // Item 20 — in-chain AUDIT_GAP marker. A forward generation jump means this
@@ -152,12 +154,14 @@ impl VerifierStore {
                 "missing_through_generation": gen - 1,
                 "skipped_generations": gen - hw - 1,
             });
-            crate::audit_chain::AuditChainLinker::append_audit_event_tx(
+            ChainedAuditAppender {
+                signing_key: signing_key.as_ref(),
+            }
+            .append_within(
                 &tx,
                 "FEDERATION_GENERATION_GAP",
                 &gap.to_string(),
                 received_at_ms as i64,
-                signing_key.as_ref(),
             )?;
         }
 
