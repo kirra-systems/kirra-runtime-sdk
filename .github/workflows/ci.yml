@@ -1087,7 +1087,11 @@ jobs:
           python3 -m pip install --quiet pytest
           python3 -m pytest ros2_ws/src/kirra_safety/test/ -q
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        # `--locked` pins cargo-audit's OWN committed lockfile so a transitive dep
+        # that later bumps its MSRV above our pinned toolchain (e.g. kstring 2.0.3
+        # requiring rustc 1.96 while we pin 1.94) cannot break this install. Without
+        # it cargo resolves deps to latest-compatible and the tool fails to build.
+        run: cargo install cargo-audit --locked
       - name: Clippy
         # --all-targets lints tests/benches/examples too — test-code lint debt
         # had been slipping past the lib+bins-only default (review follow-up).
