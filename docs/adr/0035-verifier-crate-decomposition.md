@@ -271,7 +271,19 @@ domain types — none of which can live below persistence in the target DAG toda
    audit append) stays INHERENT-ONLY, riding the `AuditAppender` seam — it belongs to
    the authority tier, not the storage contract. `insert_campaign` IS modelled; the
    SQLite backend additionally audit-chains it, a side effect orthogonal to the
-   storage contract. Next: family 2 (`fabric`).
+   storage contract. **Family 2 (`fabric`):** the `FabricAssetStore` trait +
+   `InMemoryFabricAssetStore` + `assert_fabric_asset_store_contract` over the pure
+   asset-registry surface (`save_fabric_asset`, `load_fabric_assets`). The forensic
+   CAUSAL LEDGER stays inherent — `append_causal_event` is a hash-chained signed
+   write (the causal analogue of the audit chain) and `load_causal_entries*` /
+   `count_causal_entries` / `verify_causal_chain_integrity` read/verify that signed
+   chained data, so it is the authority tier, out of the storage seam. **With both
+   hard families seamed, every `verifier_store` domain now has a backend-portable
+   storage-trait contract** (the clean six + these two), and the audit-authority
+   surface is cleanly the inherent-only residue. `kirra-persistence` can now be
+   extracted mechanically: move `verifier_store` wholesale, depending only on the
+   domain-types leaves (`kirra-fleet-types` / `kirra-ota-campaign` /
+   `kirra-fabric-types`) + the injected `AuditAppender` contract.
 
 **Alternative considered — domain-types-first only (no audit inversion):** relocate
 C2 types and move `verifier_store` wholesale into a persistence crate that *keeps*

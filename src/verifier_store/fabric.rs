@@ -500,3 +500,211 @@ impl VerifierStore {
         })
     }
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0035 Stage 2.5 seam step (family 2) — the fabric-asset storage trait
+//
+// The fabric family's pure-CRUD core — the ASSET REGISTRY — seamed as CRUD like
+// the clean six (NodeStore idiom): the trait shares the inherent method names, so
+// inherent methods win resolution (every existing `store.save_fabric_asset(...)` /
+// `store.load_fabric_assets(...)` caller is untouched and the SQLite impl delegates
+// via `self.method()` WITHOUT recursion). A second in-memory backend + a shared
+// conformance test prove the registry contract is backend-portable.
+//
+// Scope, matching OperatorStore / OtaCampaignStore: this trait models the pure,
+// non-audit asset registry only. The forensic CAUSAL LEDGER stays INHERENT-ONLY —
+// `append_causal_event` is a hash-chained, signed write (the causal analogue of the
+// audit chain), and `load_causal_entries*` / `count_causal_entries` /
+// `verify_causal_chain_integrity` read/verify that chained, key-signed data. It is
+// the authority tier, not a portable storage contract, so it is deliberately out of
+// this seam (the same reason `update_campaign` and the clearance-grant writes stay
+// inherent).
+// ---------------------------------------------------------------------------
+
+/// The fabric-asset registry storage contract — upsert a `FabricAsset` by
+/// `asset_id` and read the registry back (ordered by `registered_at_ms`).
+/// Backend-agnostic; carries none of the causal-ledger audit machinery.
+pub trait FabricAssetStore {
+    /// Backend error type (SQLite: `rusqlite::Error`; in-memory: [`std::convert::Infallible`]).
+    type Error;
+
+    /// Upsert an asset by `asset_id` (INSERT-OR-REPLACE — re-saving the same id
+    /// overwrites, never duplicates).
+    fn save_fabric_asset(
+        &self,
+        asset: &crate::fabric::asset::FabricAsset,
+    ) -> std::result::Result<(), Self::Error>;
+
+    /// Load every registered asset, ordered by `registered_at_ms` (ascending).
+    fn load_fabric_assets(
+        &self,
+    ) -> std::result::Result<Vec<crate::fabric::asset::FabricAsset>, Self::Error>;
+}
+
+/// The production SQLite backend: delegates to the inherent `VerifierStore` methods
+/// over the `fabric_assets` table. `self.method()` resolves to the INHERENT method
+/// (inherent wins over the trait), so this is delegation, not recursion.
+impl FabricAssetStore for VerifierStore {
+    type Error = rusqlite::Error;
+
+    fn save_fabric_asset(&self, asset: &crate::fabric::asset::FabricAsset) -> Result<()> {
+        self.save_fabric_asset(asset)
+    }
+    fn load_fabric_assets(&self) -> Result<Vec<crate::fabric::asset::FabricAsset>> {
+        self.load_fabric_assets()
+    }
+}
+
+/// The in-memory [`FabricAssetStore`] backend — a portability-proof reference
+/// modelling the `fabric_assets` table as a map keyed by `asset_id`. Realizes the
+/// SAME upsert + ordered-load semantics WITHOUT a database. Interior mutability
+/// (the trait's `save` is `&self`, matching the SQLite `Connection`'s `&self`
+/// writes). Single-process only.
+///
+/// `Error = Infallible` is honest: `INSERT OR REPLACE` never conflicts, and every
+/// method RECOVERS from a poisoned `Mutex` rather than unwrapping, so a panic in
+/// another thread can never make a `FabricAssetStore` op panic.
+#[derive(Debug, Default)]
+pub struct InMemoryFabricAssetStore {
+    assets: std::sync::Mutex<std::collections::HashMap<String, crate::fabric::asset::FabricAsset>>,
+}
+
+impl FabricAssetStore for InMemoryFabricAssetStore {
+    type Error = std::convert::Infallible;
+
+    fn save_fabric_asset(
+        &self,
+        asset: &crate::fabric::asset::FabricAsset,
+    ) -> std::result::Result<(), std::convert::Infallible> {
+        self.assets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(asset.asset_id.clone(), asset.clone());
+        Ok(())
+    }
+
+    fn load_fabric_assets(
+        &self,
+    ) -> std::result::Result<Vec<crate::fabric::asset::FabricAsset>, std::convert::Infallible> {
+        let mut all: Vec<crate::fabric::asset::FabricAsset> = self
+            .assets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        // Ordered by registered_at_ms ASC (then asset_id for a deterministic tie-break).
+        all.sort_by(|a, b| {
+            a.registered_at_ms
+                .cmp(&b.registered_at_ms)
+                .then_with(|| a.asset_id.cmp(&b.asset_id))
+        });
+        Ok(all)
+    }
+}
+
+/// The fabric-asset registry contract, driven through [`FabricAssetStore`] so it
+/// runs IDENTICALLY against every backend: empty read, save→load roundtrip (all
+/// fields — type, kinematic profile, metadata — preserved), the UPSERT invariant
+/// (re-saving an id overwrites, never duplicates), and `registered_at_ms` ordering.
+///
+/// `pub` (not `#[cfg(test)]`) by design — the shared backend-conformance suite,
+/// mirroring `assert_node_store_contract`. Panics on any violation; call from a test.
+///
+/// PRECONDITION: `store` must start empty.
+pub fn assert_fabric_asset_store_contract<S: FabricAssetStore>(store: &S)
+where
+    S::Error: core::fmt::Debug,
+{
+    use crate::fabric::asset::{AssetType, FabricAsset, KinematicProfileType};
+    fn asset(id: &str, at: u64, atype: AssetType, profile: KinematicProfileType) -> FabricAsset {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("site".to_string(), "dock-7".to_string());
+        FabricAsset {
+            asset_id: id.to_string(),
+            asset_type: atype,
+            display_name: format!("asset {id}"),
+            kinematic_profile: profile,
+            registered_at_ms: at,
+            last_seen_ms: at,
+            metadata,
+        }
+    }
+
+    // Empty registry.
+    assert!(store.load_fabric_assets().unwrap().is_empty());
+
+    // Save + read back (all fields preserved).
+    let a1 = asset(
+        "drone-1",
+        2_000,
+        AssetType::Drone,
+        KinematicProfileType::DroneNominal,
+    );
+    store.save_fabric_asset(&a1).unwrap();
+    let loaded = store.load_fabric_assets().unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].asset_id, "drone-1");
+    assert_eq!(loaded[0].asset_type, AssetType::Drone);
+    assert_eq!(
+        loaded[0].kinematic_profile,
+        KinematicProfileType::DroneNominal
+    );
+    assert_eq!(
+        loaded[0].metadata.get("site").map(String::as_str),
+        Some("dock-7")
+    );
+
+    // A second asset registered EARLIER — load orders by registered_at_ms ASC.
+    let a2 = asset(
+        "robot-1",
+        1_000,
+        AssetType::Robot,
+        KinematicProfileType::RobotNominal,
+    );
+    store.save_fabric_asset(&a2).unwrap();
+    let ids: Vec<String> = store
+        .load_fabric_assets()
+        .unwrap()
+        .into_iter()
+        .map(|a| a.asset_id)
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["robot-1", "drone-1"],
+        "ordered by registered_at_ms ASC"
+    );
+
+    // UPSERT: re-saving drone-1 with a new type/name overwrites, count stays 2.
+    let a1b = asset(
+        "drone-1",
+        2_000,
+        AssetType::AutonomousVehicle,
+        KinematicProfileType::AutomotiveNominal,
+    );
+    store.save_fabric_asset(&a1b).unwrap();
+    let all = store.load_fabric_assets().unwrap();
+    assert_eq!(all.len(), 2, "upsert must not duplicate");
+    let d1 = all.iter().find(|a| a.asset_id == "drone-1").unwrap();
+    assert_eq!(
+        d1.asset_type,
+        AssetType::AutonomousVehicle,
+        "upsert overwrites"
+    );
+}
+
+#[cfg(test)]
+mod fabric_asset_store_contract_tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_backend_satisfies_the_fabric_asset_store_contract() {
+        let store = VerifierStore::new(":memory:").expect("in-memory store");
+        assert_fabric_asset_store_contract(&store);
+    }
+
+    #[test]
+    fn in_memory_backend_satisfies_the_fabric_asset_store_contract() {
+        assert_fabric_asset_store_contract(&InMemoryFabricAssetStore::default());
+    }
+}

@@ -632,6 +632,10 @@ pub use principals::{
 // a future Postgres backend via SELECT … FOR UPDATE).
 pub use epoch::{assert_fence_contract, EpochFence, HaLease, InMemFenceError, InMemoryEpochFence};
 mod fabric;
+// ADR-0035 Stage 2.5 seam step (family 2) — the fabric-asset registry storage trait
+// + its in-memory reference backend (asset CRUD only; the audit-chained causal
+// ledger — append/verify — stays inherent, the authority tier).
+pub use fabric::{assert_fabric_asset_store_contract, FabricAssetStore, InMemoryFabricAssetStore};
 pub mod migrations; // WP-18/G-20 versioned schema migration framework (user_version)
 pub mod migrations_postgres; // WP-18 slice 3 — Postgres SchemaBackend over an injected executor seam
 
