@@ -850,6 +850,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-fabric-types"
+version = "0.1.0"
+dependencies = [
+ "kirra-core",
+ "serde",
+]
+
+[[package]]
 name = "kirra-fleet-types"
 version = "0.1.0"
 dependencies = [
@@ -869,6 +877,17 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "kirra-ota-campaign"
+version = "0.1.0"
+dependencies = [
+ "kirra-core",
+ "kirra-release-token",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -908,8 +927,10 @@ dependencies = [
  "kirra-capture-schema",
  "kirra-contract-channel",
  "kirra-core",
+ "kirra-fabric-types",
  "kirra-fleet-types",
  "kirra-industrial",
+ "kirra-ota-campaign",
  "kirra-policy-types",
  "kirra-release-token",
  "parko-core",

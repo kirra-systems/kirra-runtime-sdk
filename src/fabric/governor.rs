@@ -10,8 +10,24 @@ pub struct AssetGovernor {
     pub profile: KinematicProfileType,
 }
 
-impl KinematicProfileType {
-    pub fn nominal_contract(&self) -> VehicleKinematicsContract {
+/// Per-profile kinematic envelope selection.
+///
+/// Defined as an extension trait rather than an inherent impl: `KinematicProfileType`
+/// now lives in the lean `kirra-fabric-types` crate (ADR-0035 Stage 2.5 C2 slice 2)
+/// while these contracts map to the verifier-crate `VehicleKinematicsContract`, and
+/// Rust's orphan rule forbids an inherent impl on a type from another crate. Call
+/// sites are unchanged — `profile.nominal_contract()` still resolves because the
+/// trait is in scope throughout this module (its only callers). External callers
+/// import `crate::fabric::governor::KinematicProfileContracts` to bring it in scope.
+pub trait KinematicProfileContracts {
+    /// The full (Nominal-posture) envelope for this profile.
+    fn nominal_contract(&self) -> VehicleKinematicsContract;
+    /// The authoritative Degraded (MRC) envelope for this profile.
+    fn mrc_contract(&self) -> VehicleKinematicsContract;
+}
+
+impl KinematicProfileContracts for KinematicProfileType {
+    fn nominal_contract(&self) -> VehicleKinematicsContract {
         match self {
             Self::AutomotiveNominal => VehicleKinematicsContract::nominal_reference_profile(),
             Self::AutomotiveMRC => VehicleKinematicsContract::mrc_fallback_profile(),
@@ -81,7 +97,7 @@ impl KinematicProfileType {
     /// Non-automotive platforms keep the per-platform `0.3× / 0.4× / 0.5×` derate;
     /// each factor is derived from that platform's HARA / safety case (ADR-0012),
     /// not chosen for convenience.
-    pub fn mrc_contract(&self) -> VehicleKinematicsContract {
+    fn mrc_contract(&self) -> VehicleKinematicsContract {
         // Automotive: the validated canonical MRC is authoritative (ADR-0012 item 1).
         if matches!(self, Self::AutomotiveNominal) {
             return VehicleKinematicsContract::mrc_fallback_profile();

@@ -613,6 +613,12 @@ mod operators;
 // methods stay inherent, belonging to the harder persistence tier).
 pub use operators::{assert_operator_store_contract, InMemoryOperatorStore, OperatorStore};
 mod ota_campaigns;
+// ADR-0035 Stage 2.5 seam step (family 1) — the OTA-campaign storage trait + its
+// in-memory reference backend (campaign persistence/reads + node-adoption CRUD;
+// the audit-chained `update_campaign` stays inherent, riding the AuditAppender seam).
+pub use ota_campaigns::{
+    assert_ota_campaign_store_contract, InMemOtaError, InMemoryOtaCampaignStore, OtaCampaignStore,
+};
 mod posture;
 mod principals;
 // ADR-0035 Stage 2 (trait-seam inversion) — the API-principal storage trait + its
@@ -626,6 +632,10 @@ pub use principals::{
 // a future Postgres backend via SELECT … FOR UPDATE).
 pub use epoch::{assert_fence_contract, EpochFence, HaLease, InMemFenceError, InMemoryEpochFence};
 mod fabric;
+// ADR-0035 Stage 2.5 seam step (family 2) — the fabric-asset registry storage trait
+// + its in-memory reference backend (asset CRUD only; the audit-chained causal
+// ledger — append/verify — stays inherent, the authority tier).
+pub use fabric::{assert_fabric_asset_store_contract, FabricAssetStore, InMemoryFabricAssetStore};
 pub mod migrations; // WP-18/G-20 versioned schema migration framework (user_version)
 pub mod migrations_postgres; // WP-18 slice 3 — Postgres SchemaBackend over an injected executor seam
 

@@ -19,7 +19,7 @@
 # runtime (ORT etc.) is absent, strict-fail only in the CI lane that installs
 # it (see parko-onnx's PARKO_ONNX_REQUIRE_ORT).
 [workspace]
-members = [".", "crates/kirra-core", "crates/kirra-policy-types", "crates/kirra-industrial", "crates/kirra-contract-channel", "crates/kirra-hv-carrier", "crates/kirra-inline-governor", "crates/kirra-l3-e2e", "crates/kirra-release-token", "crates/kirra-timing", "crates/kirra-wcet-bench", "crates/kirra-trajectory", "crates/kirra-fleet-types", "crates/kirra-ros2-adapter", "crates/kirra-capture-schema", "crates/kirra-collector", "crates/kirra-governor-service", "crates/kirra-wire-client", "crates/kirra-proposal-bench", "crates/kirra-planner", "crates/kirra-mick", "crates/kirra-map", "crates/kirra-taj", "crates/kirra-fleet-transport", "crates/kirra-doer-eval", "crates/kirra-kpi-gate", "crates/kirra-ota-installer", "crates/kirra-replay", "crates/kirra-actuation-consumer", "crates/kirra-sidecars", "crates/kirra-consumer-ffi"]
+members = [".", "crates/kirra-core", "crates/kirra-policy-types", "crates/kirra-industrial", "crates/kirra-contract-channel", "crates/kirra-hv-carrier", "crates/kirra-inline-governor", "crates/kirra-l3-e2e", "crates/kirra-release-token", "crates/kirra-timing", "crates/kirra-wcet-bench", "crates/kirra-trajectory", "crates/kirra-fleet-types", "crates/kirra-ros2-adapter", "crates/kirra-capture-schema", "crates/kirra-collector", "crates/kirra-governor-service", "crates/kirra-wire-client", "crates/kirra-proposal-bench", "crates/kirra-planner", "crates/kirra-mick", "crates/kirra-map", "crates/kirra-taj", "crates/kirra-fleet-transport", "crates/kirra-doer-eval", "crates/kirra-kpi-gate", "crates/kirra-ota-installer", "crates/kirra-ota-campaign", "crates/kirra-fabric-types", "crates/kirra-replay", "crates/kirra-actuation-consumer", "crates/kirra-sidecars", "crates/kirra-consumer-ffi"]
 resolver = "2"
 
 [package]
@@ -111,6 +111,8 @@ kirra-contract-channel = { path = "crates/kirra-contract-channel" }
 # `src/governor_release.rs` re-exports it (adding only the root-local key-id
 # helper) so there is one digest/sign/verify implementation, not two.
 kirra-release-token = { path = "crates/kirra-release-token", features = ["serde"] }
+kirra-ota-campaign = { path = "crates/kirra-ota-campaign" }
+kirra-fabric-types = { path = "crates/kirra-fabric-types" }
 parko-core = { path = "parko/crates/parko-core" }
 # Governor-free wire schema for capture records, shared verbatim with the offline
 # collector (docs/COLLECTOR_DESIGN.md [C1]). Re-exported by `crate::capture`.

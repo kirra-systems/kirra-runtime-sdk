@@ -232,10 +232,58 @@ domain types — none of which can live below persistence in the target DAG toda
    predicate into a lower shared crate (candidate: extend `kirra-fleet-types`, or a
    new `kirra-domain-types` leaf) so a storage trait can name them. `posture` /
    `attestation` skip this step (C1-only).
+
+   **Status (2026-07-14) — C1 done, C2 in progress.** Step 1 (the `AuditAppender`
+   inversion) is COMPLETE across every `verifier_store` C1 family (#924/#925): no
+   write path names `crate::audit_chain` — only the read-side `compute_record_hash`
+   verify calls remain. Step 2 is proceeding as a per-domain slice, each moving one
+   pure domain module to its own lean crate with a `pub use` re-export shim (the
+   `kirra-fleet-types` idiom) so every existing `crate::<mod>::*` path resolves
+   unchanged. Already relocated when this ADR was written: `FederatedTrustReport{,V2}`
+   → `kirra-fleet-types` (the `crate::federation*` shims). **C2 slice 1 (this
+   change):** the OTA campaign engine (`Campaign` / `CampaignState` /
+   `NodeArtifactStatus` / `summarize_campaigns` / `resolve_node_assignment` /
+   `campaign_metrics_prometheus`) → the new lean `kirra-ota-campaign` crate (deps:
+   `kirra-core` for `FleetPosture`, `kirra-release-token` for the uptane set), clearing
+   the `verifier_store::ota_campaigns` C2 coupling. **C2 slice 2:** the fabric-plane
+   domain types (`FabricAsset` + the asset/kinematic-profile enums, `CausalLogEntry`,
+   `CAUSAL_EXPORT_MAX_PAGE`) → the new lean `kirra-fabric-types` crate, clearing the
+   `verifier_store::fabric` coupling. The store-backed `FabricCausalLog` facade and
+   the `KinematicProfileType → VehicleKinematicsContract` mapping (genuine
+   verifier-crate behaviour) STAY behind — the latter moves from an inherent impl to
+   the `KinematicProfileContracts` extension trait, since the orphan rule forbids an
+   inherent impl on the now-external enum. With both `verifier_store` C2 families
+   cleared, the remaining work is the seam step (CRUD-trait each hard family), after
+   which `kirra-persistence` extracts mechanically.
 3. **Seam each hard family** as CRUD, exactly like the clean six, now that C1+C2
    are broken. Then `kirra-persistence` can be extracted mechanically (Stage 2
    proper), depending only on the domain-types leaf + the injected `AuditAppender`
    contract.
+
+   **Status (2026-07-14) — seam step underway. Family 1 (`ota_campaigns`):** the
+   `OtaCampaignStore` trait + `InMemoryOtaCampaignStore` reference backend +
+   `assert_ota_campaign_store_contract` (run against both), modelling the
+   backend-portable STORAGE surface — campaign insert/reads (`insert_campaign`,
+   `load_campaign`, `load_campaigns`, `load_active_campaigns`) and the non-audit
+   node-adoption CRUD (`upsert_node_artifact_status`, `load_node_artifact_statuses`)
+   with its monotonic + attested-per-digest invariants. Matching OperatorStore's
+   discipline, the audit-lifecycle `update_campaign` (R156 `event_type` + signed
+   audit append) stays INHERENT-ONLY, riding the `AuditAppender` seam — it belongs to
+   the authority tier, not the storage contract. `insert_campaign` IS modelled; the
+   SQLite backend additionally audit-chains it, a side effect orthogonal to the
+   storage contract. **Family 2 (`fabric`):** the `FabricAssetStore` trait +
+   `InMemoryFabricAssetStore` + `assert_fabric_asset_store_contract` over the pure
+   asset-registry surface (`save_fabric_asset`, `load_fabric_assets`). The forensic
+   CAUSAL LEDGER stays inherent — `append_causal_event` is a hash-chained signed
+   write (the causal analogue of the audit chain) and `load_causal_entries*` /
+   `count_causal_entries` / `verify_causal_chain_integrity` read/verify that signed
+   chained data, so it is the authority tier, out of the storage seam. **With both
+   hard families seamed, every `verifier_store` domain now has a backend-portable
+   storage-trait contract** (the clean six + these two), and the audit-authority
+   surface is cleanly the inherent-only residue. `kirra-persistence` can now be
+   extracted mechanically: move `verifier_store` wholesale, depending only on the
+   domain-types leaves (`kirra-fleet-types` / `kirra-ota-campaign` /
+   `kirra-fabric-types`) + the injected `AuditAppender` contract.
 
 **Alternative considered — domain-types-first only (no audit inversion):** relocate
 C2 types and move `verifier_store` wholesale into a persistence crate that *keeps*

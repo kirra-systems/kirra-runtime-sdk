@@ -1,33 +1,15 @@
 use crate::posture_cache::now_ms;
 use crate::store_handle::StoreHandle;
 use crate::verifier_store::VerifierStore;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Max number of entries returned by a single causal-log export page (#87).
-/// Bounds the response so a forensic export can never load an unbounded ledger.
-pub const CAUSAL_EXPORT_MAX_PAGE: u32 = 1000;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CausalLogEntry {
-    pub entry_id: String,
-    /// #87: monotone chain position (genesis = 0).
-    pub sequence: u64,
-    pub timestamp_ms: u64,
-    pub asset_id: String,
-    pub event_type: String,
-    pub payload: String,
-    pub caused_by: Vec<String>,
-    pub affects_assets: Vec<String>,
-    pub fabric_generation: u64,
-    /// #87: hash of the predecessor record (genesis = 64 zeros).
-    pub previous_hash: String,
-    /// #87: hash of THIS record, binding the causality edges + prev + sequence.
-    pub record_hash: String,
-    pub signature_b64: Option<String>,
-    /// #87: content-addressed id of the signing key (None when unsigned).
-    pub key_id: Option<String>,
-}
+// ADR-0035 Stage 2.5 C2 slice 2: the pure `CausalLogEntry` record + the
+// `CAUSAL_EXPORT_MAX_PAGE` bound were relocated to the lean `kirra-fabric-types`
+// crate so `verifier_store::fabric` names them without this service-layer facade
+// module. Re-exported so every existing `crate::fabric::causal_log::CausalLogEntry`
+// / `CAUSAL_EXPORT_MAX_PAGE` path resolves unchanged. The hashing/signing FACADE
+// (`FabricCausalLog`, over the shared `VerifierStore`) stays here.
+pub use kirra_fabric_types::{CausalLogEntry, CAUSAL_EXPORT_MAX_PAGE};
 
 /// Forensic, tamper-evident, hash-chained, signed, PERSISTED causal ledger (#87).
 ///

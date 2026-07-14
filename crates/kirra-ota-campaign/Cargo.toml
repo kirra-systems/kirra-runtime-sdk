@@ -1,0 +1,46 @@
+# crates/kirra-ota-campaign/Cargo.toml
+#
+# ADR-0035 Stage 2.5 step 2 (C2 domain-type relocation) — the OTA governor-artifact
+# CAMPAIGN ENGINE, extracted from the heavy `kirra-verifier` root crate so the
+# persistence layer (`verifier_store::ota_campaigns`) can depend on the shared
+# `Campaign` / `CampaignState` / `NodeArtifactStatus` contract WITHOUT the campaign
+# state machine living inside the verifier service tree. This clears the last C2
+# coupling that blocked a mechanical `kirra-persistence` extraction.
+#
+# Contents (moved verbatim from `src/ota_campaign.rs`, the PURE control-plane core):
+#   - `Campaign` + `CampaignState` state machine (Draft→Staged→Rolling→{Completed|Halted})
+#   - the fail-closed `advance` / halt-on-regression rule
+#   - `NodeArtifactStatus`, `summarize_campaigns`, `resolve_node_assignment`
+#   - `campaign_metrics_prometheus`
+#
+# `kirra-verifier` depends on this crate and RE-EXPORTS it (`src/ota_campaign.rs` is
+# a `pub use kirra_ota_campaign::*;` shim) so every existing
+# `crate::ota_campaign::*` / `kirra_verifier::ota_campaign::*` path (store, service
+# binary, campaign monitor, metrics, tests) resolves unchanged.
+
+[package]
+name = "kirra-ota-campaign"
+version = "0.1.0"
+edition = "2021"
+description = "Lean OTA governor-artifact campaign engine for Kirra — the pure Campaign/CampaignState state machine, fail-closed halt-on-regression, node-assignment resolution, and rollout metrics. No service/DB deps."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# FleetPosture (the fail-closed advance gate reads it) lives in the lean foundation.
+kirra-core = { path = "../kirra-core" }
+# UptaneMetadataSet — a campaign's optional signed metadata set is validated to
+# authorize its artifact digest at authoring time. `serde` feature = the persistable
+# derives (the metadata is stored as submitted and served unchanged to nodes).
+kirra-release-token = { path = "../kirra-release-token", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Deterministic rollout bucketing: SHA-256(campaign_id ":" node_id) → 0..=99.
+# Same vetted primitive the audit chain + root use.
+sha2 = "0.10"
+
+[dev-dependencies]
+# The uptane-metadata authoring tests mint signed metadata sets over an Ed25519
+# fleet root — same crate + version as the release-token/attestation paths.
+ed25519-dalek = "2"
