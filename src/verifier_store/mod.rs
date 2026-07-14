@@ -586,6 +586,12 @@ pub use nodes::{assert_node_store_contract, InMemoryNodeStore, NodeStore};
 mod attestation;
 mod audit;
 mod av_subsystem;
+// ADR-0035 Stage 2 (trait-seam inversion) — the AV-subsystem diagnostic-meta storage
+// trait + its in-memory reference backend (confidence floor + telemetry stamp +
+// recovery-streak counters; models the increment-on-unregistered failure mode).
+pub use av_subsystem::{
+    assert_av_subsystem_store_contract, AvSubsystemStore, InMemAvError, InMemoryAvSubsystemStore,
+};
 mod cert_principals;
 // ADR-0035 Stage 2 (trait-seam inversion) — the cert-principal storage trait + its
 // in-memory reference backend (a richer seam: models the UNIQUE-fingerprint conflict
