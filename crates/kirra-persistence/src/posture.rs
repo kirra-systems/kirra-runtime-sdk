@@ -490,7 +490,10 @@ impl VerifierStore {
 /// The posture-engine-state storage contract — the arbitrary KV store plus the
 /// monotonic generation high-water. Backend-agnostic durable coordination state.
 pub trait PostureEngineStateStore {
-    /// Backend error type (SQLite: `rusqlite::Error`; in-memory: [`std::convert::Infallible`]).
+    /// Backend error type (SQLite: `rusqlite::Error`; in-memory: [`InMemPostureStateError`]).
+    /// Non-`Infallible` because `load_last_generation` must fail CLOSED on a corrupt
+    /// high-water on both backends (a divergence there would allow restart generation
+    /// time-reversal).
     type Error;
 
     /// Read the persisted posture generation high-water (0 when never written).
@@ -529,6 +532,31 @@ impl PostureEngineStateStore for VerifierStore {
     }
 }
 
+/// Error from the in-memory [`PostureEngineStateStore`]: a stored `last_generation`
+/// that is non-numeric or out-of-domain (`>= i64::MAX`) — CORRUPTION, surfaced
+/// fail-closed exactly as the SQLite backend's `load_last_generation` does (never
+/// silently read as `0`, which would reintroduce the restart generation
+/// time-reversal the high-water exists to prevent). Reachable through the trait
+/// only via a blind `save_engine_state("last_generation", <non-numeric>)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InMemPostureStateError {
+    /// The `last_generation` cell holds a value that is not a valid in-domain `u64`.
+    CorruptGeneration(String),
+}
+
+impl core::fmt::Display for InMemPostureStateError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            InMemPostureStateError::CorruptGeneration(v) => write!(
+                f,
+                "in-memory posture_engine_state: corrupt last_generation value {v:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for InMemPostureStateError {}
+
 /// The in-memory [`PostureEngineStateStore`] backend — a portability-proof
 /// reference modelling `posture_engine_state` as a `key → value` map, with the
 /// generation high-water stored under the `last_generation` key (as the SQLite
@@ -536,40 +564,60 @@ impl PostureEngineStateStore for VerifierStore {
 /// a database. Interior mutability (the trait methods are `&self`, matching the
 /// SQLite `Connection`'s `&self` writes). Single-process.
 ///
-/// `Error = Infallible` is honest: the one method that can fault on SQLite
-/// (`load_last_generation`, on a CORRUPT stored value) cannot here — the in-memory
-/// value is stored as a real `u64`, never a parseable-but-corrupt string, so there
-/// is no fallible parse. Every method RECOVERS from a poisoned `Mutex`.
+/// `Error = InMemPostureStateError` (not `Infallible`) BECAUSE `last_generation` is
+/// modelled as a string cell exactly like SQLite's `posture_engine_state.value`, so
+/// a corrupt value written via a blind `save_engine_state` is REACHABLE — and
+/// `load_last_generation` must fail CLOSED on it just as the SQLite backend does,
+/// never silently read it as `0`. `save_last_generation` mirrors SQLite's CAST-based
+/// guard (a corrupt current value counts as `0`, so a positive generation heals it —
+/// SQLite does not error there either). Every method RECOVERS from a poisoned `Mutex`.
 #[derive(Debug, Default)]
 pub struct InMemoryPostureEngineStateStore {
     state: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
 
 impl PostureEngineStateStore for InMemoryPostureEngineStateStore {
-    type Error = std::convert::Infallible;
+    type Error = InMemPostureStateError;
 
-    fn load_last_generation(&self) -> std::result::Result<u64, std::convert::Infallible> {
-        Ok(self
+    fn load_last_generation(&self) -> std::result::Result<u64, InMemPostureStateError> {
+        match self
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get("last_generation")
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0))
+        {
+            // Genuinely absent row → 0 (fresh store), exactly like SQLite's
+            // `QueryReturnedNoRows => Ok(0)`.
+            None => Ok(0),
+            // Present but non-numeric OR out-of-domain (`>= i64::MAX`, which the
+            // SQLite monotonic CAST guard cannot represent) → CORRUPTION, fail
+            // closed. Mirrors `VerifierStore::load_last_generation`.
+            Some(s) => {
+                let parsed = s
+                    .parse::<u64>()
+                    .map_err(|_| InMemPostureStateError::CorruptGeneration(s.clone()))?;
+                if parsed >= i64::MAX as u64 {
+                    return Err(InMemPostureStateError::CorruptGeneration(s.clone()));
+                }
+                Ok(parsed)
+            }
+        }
     }
     fn save_last_generation(
         &self,
         generation: u64,
-    ) -> std::result::Result<bool, std::convert::Infallible> {
+    ) -> std::result::Result<bool, InMemPostureStateError> {
         let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // Mirror the SQL `WHERE CAST(?1) > CAST(value)` guard: an ABSENT row inserts
+        // unconditionally (first write); a PRESENT row's value is compared, with a
+        // corrupt value counting as `0` (SQLite's `CAST('garbage') = 0`), so a
+        // positive generation overwrites it. `save` never errors on corruption — only
+        // `load` fails closed (matching the SQLite backend exactly).
         match map
             .get("last_generation")
-            .and_then(|s| s.parse::<u64>().ok())
+            .map(|s| s.parse::<u64>().unwrap_or(0))
         {
-            // Present + stale/equal → reject (mirrors the SQL monotonic
-            // `WHERE CAST(?1) > CAST(value)` guard).
             Some(cur) if generation <= cur => Ok(false),
-            // Absent (first write) or strictly greater → store.
             _ => {
                 map.insert("last_generation".to_string(), generation.to_string());
                 Ok(true)
@@ -579,7 +627,7 @@ impl PostureEngineStateStore for InMemoryPostureEngineStateStore {
     fn load_engine_state(
         &self,
         key: &str,
-    ) -> std::result::Result<Option<String>, std::convert::Infallible> {
+    ) -> std::result::Result<Option<String>, InMemPostureStateError> {
         Ok(self
             .state
             .lock()
@@ -591,7 +639,7 @@ impl PostureEngineStateStore for InMemoryPostureEngineStateStore {
         &self,
         key: &str,
         value: &str,
-    ) -> std::result::Result<(), std::convert::Infallible> {
+    ) -> std::result::Result<(), InMemPostureStateError> {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -654,7 +702,8 @@ where
         store.load_engine_state("heartbeat").unwrap().as_deref(),
         Some("2000")
     );
-    // The generation high-water shares the `last_generation` cell.
+    // The generation high-water shares the `last_generation` cell — BOTH directions:
+    // (a) a monotonic write is visible through the blind KV read,
     assert_eq!(
         store
             .load_engine_state("last_generation")
@@ -662,6 +711,26 @@ where
             .as_deref(),
         Some("7"),
         "the high-water is observable through the KV read (same cell)"
+    );
+    // (b) and a blind KV write on that cell is visible through the typed read — and
+    // bypasses the monotonic guard (a LOWER value is accepted by the blind writer).
+    store.save_engine_state("last_generation", "3").unwrap();
+    assert_eq!(
+        store.load_last_generation().unwrap(),
+        3,
+        "a blind KV write on the last_generation cell is observable via the typed read"
+    );
+
+    // --- fail-closed on corruption (a key SQLite invariant, posture.rs load path) ---
+    // A non-numeric `last_generation` is CORRUPTION, surfaced as an ERROR by BOTH
+    // backends — never silently read as 0 (which would allow restart generation
+    // time-reversal). Terminal check: it leaves the cell corrupt.
+    store
+        .save_engine_state("last_generation", "not-a-number")
+        .unwrap();
+    assert!(
+        store.load_last_generation().is_err(),
+        "a corrupt high-water must fail closed on every backend, not read as 0"
     );
 }
 
