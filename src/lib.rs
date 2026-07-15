@@ -95,6 +95,10 @@ pub mod federation;
 pub mod federation_reconciliation;
 pub mod traceability_gate;
 pub mod wcet_gate;
+// ADR-0035 Stage 3g: the off-verdict-path async writer handles (audit/capture
+// Senders + the capture join-key sequence), grouped as `app.writers`. A root
+// leaf (not kirra-safety-authority — async plumbing, not a decision surface).
+pub mod writer_handles;
 // R2: `impl FleetTrustStore for VerifierStore` — the narrow durable seam the QM
 // fleet transport drives instead of depending on this crate's `VerifierStore`.
 pub mod adapters;
