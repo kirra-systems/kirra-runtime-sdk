@@ -77,6 +77,12 @@ void SafetyManager::evaluate(const SafetyInputs& inputs) noexcept {
     if (!inputs.battery_voltage_safe) {
         raise(Fault::battery_undervoltage, false);
     }
+    if (!inputs.supply_stable) {
+        raise(Fault::brownout, true);
+    }
+    if (!inputs.watchdog_healthy) {
+        raise(Fault::watchdog_precursor, true);
+    }
     if (!inputs.battery_current_safe) {
         raise(Fault::battery_overcurrent, true);
     }
@@ -151,19 +157,29 @@ bool SafetyManager::controlled_stop_required() const noexcept {
 bool SafetyManager::bridge_must_be_disabled() const noexcept {
     constexpr auto immediate_disable_faults =
         bit(Fault::emergency_stop) |
+        bit(Fault::brownout) |
         bit(Fault::battery_overcurrent) |
         bit(Fault::motor_overtemperature) |
         bit(Fault::control_deadline_missed) |
         bit(Fault::encoder_implausible) |
         bit(Fault::motor_runaway) |
         bit(Fault::steering_implausible) |
+        bit(Fault::watchdog_precursor) |
         bit(Fault::self_test_failed);
-    return state_ == SafetyState::boot ||
-           state_ == SafetyState::self_test ||
-           state_ == SafetyState::standby ||
-           state_ == SafetyState::fault_latched ||
-           state_ == SafetyState::firmware_update ||
-           ((active_faults_ | latched_faults_) & immediate_disable_faults) != 0U;
+    // Fail-closed / default-deny: enumerate the states in which the H-bridge MAY
+    // be enabled (armed pre-charge, active drive, controlled-stop deceleration),
+    // and require a clean immediate-disable set. An unknown / corrupt `state_`
+    // value therefore DISABLES the bridge. The prior form allow-listed the *safe*
+    // states, so any unlisted state_ left the bridge enabled by default (a
+    // fail-OPEN default on a bit-flip / out-of-range value). This is behaviour-
+    // identical for every valid state.
+    const bool bridge_permitted_state =
+        state_ == SafetyState::armed ||
+        state_ == SafetyState::active ||
+        state_ == SafetyState::controlled_stop;
+    const bool immediate_disable =
+        ((active_faults_ | latched_faults_) & immediate_disable_faults) != 0U;
+    return !bridge_permitted_state || immediate_disable;
 }
 
 void SafetyManager::raise(const Fault fault, const bool latch) noexcept {

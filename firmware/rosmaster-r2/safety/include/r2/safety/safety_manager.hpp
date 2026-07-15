@@ -46,6 +46,12 @@ struct SafetyInputs {
     bool motor_runaway;
     bool control_deadline_met;
     bool communication_healthy;
+    // Power-supply rails within the brownout threshold (true = stable). A false
+    // raises Fault::brownout — the "fail-closed on brownout" safety guarantee.
+    bool supply_stable;
+    // Watchdog serviced within its window (true = healthy). A false raises
+    // Fault::watchdog_precursor — the "fail-closed on watchdog" safety guarantee.
+    bool watchdog_healthy;
     bool motion_stopped;
 };
 

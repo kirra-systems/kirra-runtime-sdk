@@ -1,4 +1,5 @@
 #include "r2/application/configuration.hpp"
+#include "r2/boot/image_verifier.hpp"
 #include "r2/control/motion_controller.hpp"
 #include "r2/diagnostics/metrics.hpp"
 #include "r2/kinematics/ackermann.hpp"
@@ -278,7 +279,7 @@ void test_safety() {
     CHECK(manager.motion_permitted());
 
     const r2::safety::SafetyInputs healthy{
-        false, true, true, true, true, true, true, true, false, true, true, false};
+        false, true, true, true, true, true, true, true, false, true, true, true, true, false};
     manager.evaluate(healthy);
     CHECK(manager.motion_permitted());
 
@@ -306,6 +307,30 @@ void test_safety() {
     manager.evaluate(healthy);
     CHECK(manager.clear_recoverable_faults(true));
     CHECK(manager.state() == r2::safety::SafetyState::standby);
+
+    // H3: brownout is wired and fails closed (latched + bridge disabled).
+    r2::safety::SafetyManager brownout_mgr{};
+    brownout_mgr.begin_self_test();
+    brownout_mgr.complete_self_test(true);
+    CHECK(brownout_mgr.arm());
+    CHECK(brownout_mgr.activate());
+    auto brownout = healthy;
+    brownout.supply_stable = false;
+    brownout_mgr.evaluate(brownout);
+    CHECK(brownout_mgr.state() == r2::safety::SafetyState::fault_latched);
+    CHECK(brownout_mgr.bridge_must_be_disabled());
+
+    // H3: watchdog precursor is wired and fails closed (latched + bridge disabled).
+    r2::safety::SafetyManager watchdog_mgr{};
+    watchdog_mgr.begin_self_test();
+    watchdog_mgr.complete_self_test(true);
+    CHECK(watchdog_mgr.arm());
+    CHECK(watchdog_mgr.activate());
+    auto watchdog = healthy;
+    watchdog.watchdog_healthy = false;
+    watchdog_mgr.evaluate(watchdog);
+    CHECK(watchdog_mgr.state() == r2::safety::SafetyState::fault_latched);
+    CHECK(watchdog_mgr.bridge_must_be_disabled());
 
     r2::safety::SafetyManager illegal{};
     CHECK(!illegal.disarm());
@@ -390,6 +415,17 @@ void test_diagnostics() {
     CHECK(histogram.maximum_us() == 11U);
 }
 
+void test_image_verifier_failclosed() {
+    // H4: a default-constructed / zero-initialized image verdict MUST read as a
+    // rejection, never as `accepted`. (The static_assert in the header enforces
+    // this at compile time; this keeps the header in a compiled TU so the guard
+    // stays live, and documents the contract for a future verify() backend.)
+    const r2::boot::VerificationResult defaulted{};
+    CHECK(defaulted == r2::boot::VerificationResult::rejected);
+    CHECK(defaulted != r2::boot::VerificationResult::accepted);
+    CHECK(static_cast<std::uint8_t>(r2::boot::VerificationResult::rejected) == 0U);
+}
+
 }  // namespace
 
 int main() {
@@ -400,6 +436,7 @@ int main() {
     test_safety();
     test_configuration_rollback();
     test_diagnostics();
+    test_image_verifier_failclosed();
     if (failures != 0) {
         std::fprintf(stderr, "%d test assertion(s) failed\n", failures);
         return 1;
