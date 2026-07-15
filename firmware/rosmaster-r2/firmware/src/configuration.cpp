@@ -219,10 +219,8 @@ bool ConfigurationStore::commit(const PlatformConfiguration& configuration) noex
     candidate.generation = has_current ? current.generation + 1U : 1U;
 
     std::uint32_t target = slot_a_address_;
-    if (a_valid && !b_valid) {
-        target = slot_b_address_;
-    } else if (a_valid && b_valid &&
-               generation_is_newer(slot_a.generation, slot_b.generation)) {
+    if (a_valid &&
+        (!b_valid || generation_is_newer(slot_a.generation, slot_b.generation))) {
         target = slot_b_address_;
     }
     return write_slot(target, candidate);
