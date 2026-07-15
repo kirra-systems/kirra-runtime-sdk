@@ -196,14 +196,18 @@ void test_motion_controller_composition() {
         geometry, limits, {gains, gains}};
 
     r2::control::MotionOutput output{};
+    double previous_steering = 0.0;
     for (std::size_t index = 0U; index < 200U; ++index) {
         output = controller.update({1.0, 0.5}, 0.0, 0.0, 0.001);
+        CHECK(std::abs(output.steering_angle_rad - previous_steering) <=
+              limits.maximum_steering_rate_rad_s * 0.001 + 1.0e-12);
+        previous_steering = output.steering_angle_rad;
     }
     CHECK(output.status == r2::kinematics::KinematicsStatus::ok);
     CHECK(output.left_motor_command > 0.0);
     CHECK(output.right_motor_command > 0.0);
     CHECK(output.steering_angle_rad > 0.0);
-    CHECK(output.steering_angle_rad <= limits.maximum_steering_rate_rad_s * 0.001);
+    CHECK(output.steering_angle_rad <= geometry.maximum_road_wheel_angle_rad);
 
     output = controller.update({0.0, 1.0}, 0.0, 0.0, 0.001);
     CHECK(output.status ==
