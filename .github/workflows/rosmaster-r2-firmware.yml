@@ -83,9 +83,8 @@ jobs:
           ctest --test-dir /tmp/r2-coverage --output-on-failure
       - name: Coverage floor
         run: |
-          lcov --capture --directory /tmp/r2-coverage --output-file /tmp/r2.info \
-            --ignore-errors mismatch
+          lcov --capture --directory /tmp/r2-coverage --output-file /tmp/r2.info
           lcov --remove /tmp/r2.info '/usr/*' '*/tests/*' \
-            --output-file /tmp/r2.filtered.info --ignore-errors unused
+            --output-file /tmp/r2.filtered.info
           line_rate="$(lcov --summary /tmp/r2.filtered.info | awk '/lines/{gsub(/%/,"",$2); print $2}')"
           awk -v rate="$line_rate" 'BEGIN { exit !(rate >= 80.0) }'
