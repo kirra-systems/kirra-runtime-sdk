@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.21)
 project(kirra_rosmaster_r2_firmware VERSION 0.1.0 LANGUAGES CXX)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 option(R2_BUILD_TESTS "Build host-based unit and integration tests" ON)
 option(R2_BUILD_SIMULATION "Build the deterministic host simulation" ON)
 option(R2_ENABLE_SANITIZERS "Enable address and undefined-behavior sanitizers" OFF)
