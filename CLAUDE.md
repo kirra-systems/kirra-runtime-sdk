@@ -31,7 +31,7 @@ These have been blocked or reverted multiple times. Any submission that violates
 
 3. **`verify_attestation` must never mock trust** (`let status = NodeTrustState::Trusted` without verification). It MUST cryptographically verify a per-node proof: the node's Ed25519 signature over the `(node_id, nonce)` challenge payload, checked against the registered per-node `ak_public_pem` via `attestation::verify_attestation_proof` (issue #73). Fail-closed — no registered AK / malformed key / malformed proof / bad signature → reject; never accept by default. (The prior `HMAC(KIRRA_ADMIN_TOKEN, nonce)` proof was admin-asserted, not node-proven, and is removed. PCR16 measured-boot: BOTH paths are LIVE — the self-report binding (`verify_attestation_proof_with_pcr16`) and the genuine TPM2 **quote**. `tpm_quote::verify_tpm_quote` (`src/tpm_quote.rs`) is wired into `/attestation/verify` under a per-node `require_tpm_quote` policy: a node required to quote must present one whose TPM-signed `pcrDigest` equals `SHA256(registered_pcr16_value)` (`expected_single_pcr_digest_hex`) over a bounded PCR16 selection, bound to the challenge nonce — `verify_strict`, fail-closed (401 auth / 403 boot-state), and nonce-preserving (runs before `consume_challenge`, so a failed quote is retryable). What remains for Gate C #3 is the on-device rooting only: Orin Secure Boot + dm-verity + a provisioned TPM AK (the quote sig is Ed25519 today → RSA/ECC on a real TPM).)
 
-4. **`FleetNodePosture` and the gray/black two-set DAG algorithm must never be replaced with a mock**. The real traversal in `AppState::recursive_calculate` must remain intact.
+4. **`FleetNodePosture` and the gray/black two-set DAG algorithm must never be replaced with a mock**. The real traversal was moved VERBATIM to `kirra_safety_authority::dag::recursive_calculate` (ADR-0035 Stage 3d) and is invoked via the `AppState::calculate_posture*` / `calculate_fleet_posture` delegators — the algorithm is byte-identical and must remain intact (proven by `shared_memo_equivalence_tests`).
 
 5. **`pending_challenges: DashMap<String, ChallengeEntry>` must never be removed**. Nonces are volatile, never persisted, and expire after `CHALLENGE_TTL_MS = 30_000` ms.
 
@@ -438,10 +438,13 @@ AUDIT_SHIP_INTERVAL_MS      = 5_000      // WORM off-box audit-ship cycle interv
 
 ## Key Algorithms
 
-**Gray/Black DAG Traversal** (`AppState::recursive_calculate`):
+**Gray/Black DAG Traversal** (`kirra_safety_authority::dag::recursive_calculate`, ADR-0035 Stage 3d; `AppState::calculate_posture*` delegate to it):
 - Gray set = nodes currently on the active call stack (cycle detection)
 - Black set = nodes fully evaluated (memoization, handles diamond DAGs)
-- Cycle or depth ≥ 10 → `FleetPosture::LockedOut` with `CYCLE_DETECTED` tag
+- Cycle (gray-set back-edge) → `FleetPosture::LockedOut` tagged `CYCLE_DETECTED`
+- Depth backstop is a DYNAMIC bound `max(nodes+edges, MAX_DEPENDENCY_DEPTH)` (10 is
+  a floor, not a fixed cap): exceeding it → `LockedOut` tagged `MAX_DEPTH_EXCEEDED`
+  (distinct from the cycle tag; unreachable on a valid acyclic graph)
 - LockedOut dep propagates LockedOut (not Degraded) upward
 
 **`should_route_command(cache, now_ms, command)`**:

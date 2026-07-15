@@ -941,6 +941,7 @@ dependencies = [
 name = "kirra-safety-authority"
 version = "0.1.0"
 dependencies = [
+ "dashmap",
  "ed25519-dalek",
  "hex",
  "kirra-audit-hash",
