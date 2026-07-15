@@ -15,10 +15,10 @@ stateDiagram-v2
     Standby --> Armed: authenticated arm + local preconditions
     Armed --> Active: fresh HOLD_ZERO + explicit activate
     Active --> ControlledStop: timeout / recoverable fault
-    ControlledStop --> Standby: speed zero + fault absent
+    ControlledStop --> Standby: speed zero; active fault remains non-armable
     Active --> FaultLatched: severe fault
     Armed --> FaultLatched: severe fault
-    FaultLatched --> Standby: recoverable latch absent + local physical acknowledgement
+    FaultLatched --> Standby: active cause absent + local acknowledgement clears recoverable latch
     FaultLatched --> Boot: POST/config fault + reset
     Standby --> FirmwareUpdate: authenticated request
     FirmwareUpdate --> Boot: verified image / reset
@@ -50,6 +50,10 @@ updates require standby and disabled outputs.
 Current, thermal and steering-feedback policies are capability-gated. If the
 stock PCB lacks those sensors, production claims must say “not monitored” and a
 board revision is required; firmware must not synthesize health.
+`imu_sane` and `communication_healthy` at the safety-manager boundary are
+already debounce/hysteresis-filtered monitor verdicts; their monitor services
+own the documented healthy streaks. A single raw healthy sample is not passed
+as recovery.
 
 ## Dual watchdog and deadline supervision
 
