@@ -693,6 +693,7 @@ pub(crate) async fn console_estop_request(
     //     watchdog): set the sticky flag THEN force the cache, so any surviving
     //     recalc keeps producing LockedOut. The console asks; the governor acts.
     svc.app
+        .escalation
         .supervisor_tripped
         .store(true, std::sync::atomic::Ordering::SeqCst);
     kirra_verifier::posture_engine::force_lockout(&svc.posture_cache, now);

@@ -183,15 +183,19 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // ticks clear the flag.
     // SAFETY: SG9 | REQ: governor-divergence-posture-coupling | TEST: test_divergence_degraded_active_escalates_nominal,test_divergence_lockout_active_forces_locked_out,test_divergence_flags_default_inert
     let escalate = (app
+        .escalation
         .rss_active_violation
         .load(std::sync::atomic::Ordering::SeqCst)
         || app
+            .escalation
             .flood_condition_active
             .load(std::sync::atomic::Ordering::SeqCst)
         || app
+            .escalation
             .frame_degraded_active
             .load(std::sync::atomic::Ordering::SeqCst)
         || app
+            .escalation
             .divergence_degraded_active
             .load(std::sync::atomic::Ordering::SeqCst))
         && dag_posture == FleetPosture::Nominal;
@@ -206,12 +210,15 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // absolute LockedOut priority with `supervisor_tripped`: both are sticky
     // human-reset conditions that override the DAG and the operational escalation.
     let new_posture = if app
+        .escalation
         .supervisor_tripped
         .load(std::sync::atomic::Ordering::SeqCst)
         || app
+            .escalation
             .frame_lockout_active
             .load(std::sync::atomic::Ordering::SeqCst)
         || app
+            .escalation
             .divergence_lockout_active
             .load(std::sync::atomic::Ordering::SeqCst)
     {
@@ -407,12 +414,15 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // (`crates/kirra-loom-models`) fails (finds a downgrade interleaving) if this
     // read is moved BEFORE the generation grab. Do not reorder.
     let sticky_lockout = app
+        .escalation
         .supervisor_tripped
         .load(std::sync::atomic::Ordering::SeqCst)
         || app
+            .escalation
             .frame_lockout_active
             .load(std::sync::atomic::Ordering::SeqCst)
         || app
+            .escalation
             .divergence_lockout_active
             .load(std::sync::atomic::Ordering::SeqCst);
     let cache_written = replace_cache_if_newer(cache, new_cached, sticky_lockout);
@@ -784,7 +794,9 @@ mod posture_engine_tests {
 
         // Healthy empty DAG would normally be Nominal (see the test above).
         // Trip the C2 supervisor flag: recalc must force LockedOut regardless.
-        app.supervisor_tripped.store(true, Ordering::SeqCst);
+        app.escalation
+            .supervisor_tripped
+            .store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         {
             let guard = cache.read().unwrap();
@@ -1067,7 +1079,9 @@ mod posture_engine_tests {
     fn test_flood_active_nominal_escalates_to_degraded() {
         let app = active_app();
         let cache = empty_cache();
-        app.flood_condition_active.store(true, Ordering::SeqCst);
+        app.escalation
+            .flood_condition_active
+            .store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(
             cache_posture(&cache),
@@ -1082,7 +1096,9 @@ mod posture_engine_tests {
         let app = active_app();
         let cache = empty_cache();
         insert_node(&app, "n", NodeTrustState::Untrusted("test".to_string())); // DAG → LockedOut
-        app.flood_condition_active.store(true, Ordering::SeqCst);
+        app.escalation
+            .flood_condition_active
+            .store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(
             cache_posture(&cache),
@@ -1096,7 +1112,9 @@ mod posture_engine_tests {
         let app = active_app();
         let cache = empty_cache();
         insert_node(&app, "n", NodeTrustState::Unknown); // DAG → Degraded
-        app.flood_condition_active.store(true, Ordering::SeqCst);
+        app.escalation
+            .flood_condition_active
+            .store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(
             cache_posture(&cache),
@@ -1115,7 +1133,9 @@ mod posture_engine_tests {
     fn test_divergence_degraded_active_escalates_nominal() {
         let app = active_app();
         let cache = empty_cache();
-        app.divergence_degraded_active.store(true, Ordering::SeqCst);
+        app.escalation
+            .divergence_degraded_active
+            .store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(
             cache_posture(&cache),
@@ -1131,7 +1151,9 @@ mod posture_engine_tests {
     fn test_divergence_lockout_active_forces_locked_out() {
         let app = active_app();
         let cache = empty_cache();
-        app.divergence_lockout_active.store(true, Ordering::SeqCst);
+        app.escalation
+            .divergence_lockout_active
+            .store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(
             cache_posture(&cache),
@@ -1161,7 +1183,9 @@ mod posture_engine_tests {
     fn test_frame_degraded_active_escalates_nominal() {
         let app = active_app();
         let cache = empty_cache();
-        app.frame_degraded_active.store(true, Ordering::SeqCst);
+        app.escalation
+            .frame_degraded_active
+            .store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(
             cache_posture(&cache),
@@ -1176,7 +1200,9 @@ mod posture_engine_tests {
     fn test_frame_degraded_active_locked_out_stays_locked_out() {
         let app = active_app();
         let cache = empty_cache();
-        app.frame_lockout_active.store(true, Ordering::SeqCst);
+        app.escalation
+            .frame_lockout_active
+            .store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(
             cache_posture(&cache),
@@ -1190,8 +1216,12 @@ mod posture_engine_tests {
     fn test_frame_and_rss_compose() {
         let app = active_app();
         let cache = empty_cache();
-        app.frame_degraded_active.store(true, Ordering::SeqCst);
-        app.rss_active_violation.store(true, Ordering::SeqCst);
+        app.escalation
+            .frame_degraded_active
+            .store(true, Ordering::SeqCst);
+        app.escalation
+            .rss_active_violation
+            .store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(
             cache_posture(&cache),
@@ -1205,11 +1235,15 @@ mod posture_engine_tests {
     fn test_frame_degraded_clears_auto_recovers_to_nominal() {
         let app = active_app();
         let cache = empty_cache();
-        app.frame_degraded_active.store(true, Ordering::SeqCst);
+        app.escalation
+            .frame_degraded_active
+            .store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded));
 
-        app.frame_degraded_active.store(false, Ordering::SeqCst);
+        app.escalation
+            .frame_degraded_active
+            .store(false, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(
             cache_posture(&cache),
@@ -1223,8 +1257,12 @@ mod posture_engine_tests {
     fn test_flood_and_rss_compose() {
         let app = active_app();
         let cache = empty_cache();
-        app.flood_condition_active.store(true, Ordering::SeqCst);
-        app.rss_active_violation.store(true, Ordering::SeqCst);
+        app.escalation
+            .flood_condition_active
+            .store(true, Ordering::SeqCst);
+        app.escalation
+            .rss_active_violation
+            .store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(
             cache_posture(&cache),
@@ -1239,11 +1277,15 @@ mod posture_engine_tests {
     fn test_flood_clears_auto_recovers_to_nominal() {
         let app = active_app();
         let cache = empty_cache();
-        app.flood_condition_active.store(true, Ordering::SeqCst);
+        app.escalation
+            .flood_condition_active
+            .store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded));
 
-        app.flood_condition_active.store(false, Ordering::SeqCst);
+        app.escalation
+            .flood_condition_active
+            .store(false, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(
             cache_posture(&cache),
@@ -1258,7 +1300,7 @@ mod posture_engine_tests {
         let app = active_app();
         let cache = empty_cache();
         assert!(
-            !app.flood_condition_active.load(Ordering::SeqCst),
+            !app.escalation.flood_condition_active.load(Ordering::SeqCst),
             "the flag defaults false"
         );
         recalculate_and_broadcast(&app, &cache);
@@ -1276,7 +1318,9 @@ mod posture_engine_tests {
     fn test_flood_transition_flows_through_audit_gated_path() {
         let app = active_app();
         let cache = empty_cache();
-        app.flood_condition_active.store(true, Ordering::SeqCst);
+        app.escalation
+            .flood_condition_active
+            .store(true, Ordering::SeqCst);
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded));
 

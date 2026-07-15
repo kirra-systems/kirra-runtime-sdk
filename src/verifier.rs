@@ -231,7 +231,7 @@ pub fn request_transport_is_secure(
 
 // ADR-0035 Stage 3 (slice 3a): `RssRecoveryStreak` moved to
 // `kirra-safety-authority`; re-exported so `crate::verifier::RssRecoveryStreak`
-// (the `AppState.rss_recovery_streak` field type) resolves unchanged.
+// (the `AppState.escalation.rss_recovery_streak` field type) resolves unchanged.
 pub use kirra_safety_authority::RssRecoveryStreak;
 
 pub struct AppState {
@@ -297,65 +297,15 @@ pub struct AppState {
     /// at startup. When enabled, the `require_secure_transport` middleware
     /// fail-closes a request not asserted to have arrived over TLS.
     pub transport_security: TransportSecurityConfig,
-    /// True while an RSS safe-distance violation is active (recalculate elevates to Degraded).
-    pub rss_active_violation: Arc<AtomicBool>,
-    /// #99 — true while flood conditions are present. Read by the posture engine
-    /// to escalate Nominal → Degraded (SG4 operational layer), exactly like
-    /// `rss_active_violation`. The SETTER (a flood detector, or a bridge from
-    /// sustained #98 WATER_UNTRAVERSABLE vetoes) is a deferred cross-subsystem
-    /// follow-up; this flag is read-only in the current code (defaults false).
-    pub flood_condition_active: Arc<AtomicBool>,
-    /// C2 supervisor trip flag (review finding C2). Set by `supervisor::spawn_supervised`
-    /// when a CRITICAL background safety loop (the telemetry watchdog, the posture
-    /// engine worker, the HA heartbeat writer / promotion monitor) crashes past its
-    /// restart budget. The posture engine reads it and forces `FleetPosture::LockedOut`
-    /// unconditionally (highest priority, overriding the DAG), so a wedged safety loop
-    /// fails the whole fleet closed instead of silently leaving actuators live. Sticky:
-    /// once tripped it stays tripped until process restart (a recovered loop within the
-    /// restart window clears the supervisor's local counter but NOT this flag — recovery
-    /// from a forced fleet lockout is an explicit human/HA action, matching LockedOut's
-    /// human-reset semantics). Defaults false.
-    pub supervisor_tripped: Arc<AtomicBool>,
-    /// Recovery streak for clearing an active RSS violation.
-    pub rss_recovery_streak: Arc<Mutex<RssRecoveryStreak>>,
-    /// S-FI1d — true while frame/localization integrity is below full `Trusted`
-    /// (a `Degraded` *or* `Untrusted` verdict). Read by the posture engine to
-    /// escalate Nominal → Degraded, exactly like `rss_active_violation`. Set
-    /// IMMEDIATELY on the first sub-trusted tick (fail-closed-immediately, no
-    /// grace period); cleared by an `AV_RECOVERY_STREAK_THRESHOLD`-long run of
-    /// `Trusted` ticks (auto-recovery). Defaults false. (AOU-LOCALIZATION-001.)
-    pub frame_degraded_active: Arc<AtomicBool>,
-    /// S-FI1d — true once frame integrity has been `Untrusted` for a SUSTAINED
-    /// run (an inverted streak): a transient localization loss is the
-    /// frame-trust-minimal Degraded MRC (decel-to-stop, auto-recovering), but a
-    /// sustained / repeated fault is a genuine failure (sensor death, possible
-    /// GNSS spoofing) and escalates to `LockedOut`. STICKY like
-    /// `supervisor_tripped` — recovery is an explicit human/HA reset, matching
-    /// LockedOut semantics. Defaults false.
-    pub frame_lockout_active: Arc<AtomicBool>,
-    /// Recovery streak for clearing `frame_degraded_active` (consecutive
-    /// `Trusted` ticks within the recovery window).
-    pub frame_recovery_streak: Arc<Mutex<RssRecoveryStreak>>,
-    /// Inverted streak counting consecutive `Untrusted` ticks toward the
-    /// `frame_lockout_active` escalation (sustained-fault detection).
-    pub frame_untrusted_streak: Arc<Mutex<RssRecoveryStreak>>,
-    /// S-DG1 — a posture-significant governor divergence is ACTIVE (the parko
-    /// comparator's leaky-bucket accumulator crossed its significance
-    /// threshold): two independently-derived safety governors disagree and we
-    /// cannot tell which is wrong. Escalates Nominal → Degraded
-    /// (decel-to-stop MRC) immediately; auto-recovers via the recovery
-    /// streak once agreeing ticks resume. Defaults false (inert until the
-    /// comparator's `PostureSignalSink` is wired).
-    pub divergence_degraded_active: Arc<AtomicBool>,
-    /// S-DG1 — the comparator's own sustained-divergence escalation
-    /// (`escalated_to_lockout`) was reported: a persistent disagreement is a
-    /// genuine fault (a real governor bug or corrupted input), not a
-    /// transient. STICKY like `supervisor_tripped` / `frame_lockout_active` —
-    /// recovery is an explicit human/HA reset. Defaults false.
-    pub divergence_lockout_active: Arc<AtomicBool>,
-    /// Recovery streak for clearing `divergence_degraded_active` (consecutive
-    /// agreeing ticks within the recovery window).
-    pub divergence_recovery_streak: Arc<Mutex<RssRecoveryStreak>>,
+    /// ADR-0035 Stage 3 (slice 3c): the fleet-escalation / hysteresis state —
+    /// the RSS / flood / supervisor-trip / frame-integrity (S-FI1d) / governor-
+    /// divergence (S-DG1) flags + their recovery/untrusted streaks, plus the H-3
+    /// `av_registry_dirty` watchdog flag — lifted VERBATIM onto
+    /// `kirra_safety_authority::EscalationState`. Reached as
+    /// `app.escalation.<field>`; each field's semantics are UNCHANGED (documented
+    /// on the struct in the safety-authority crate). All are `Arc<…>` interior-
+    /// mutable, so the move is pure relocation — no `&mut self`, no behaviour change.
+    pub escalation: kirra_safety_authority::EscalationState,
     /// #104 — the currently-open post-incident forensic sequence (correlation id
     /// + ordinal), or `None` when no incident is open. Volatile; the durable
     /// forensic record lives in the signed audit chain.
@@ -388,14 +338,6 @@ pub struct AppState {
     /// side channel); surfaced so an integrator can see how much training data the
     /// channel sizing is shedding.
     pub capture_drops: Arc<AtomicU64>,
-    /// H-3 — set when an AV subsystem is (de)registered, so the telemetry watchdog
-    /// refreshes its watched-node list on the NEXT sweep instead of waiting up to
-    /// `AV_WATCHDOG_NODE_REFRESH_MS` (30 s). Without this a node registered just
-    /// after a refresh was unmonitored for ~28 s — a fail-OPEN window where a
-    /// freshly-registered sensor could go silent/faulty undetected, breaking the
-    /// SG-003 detection-latency bound (TIMEOUT + one sweep). The watchdog swaps it
-    /// back to false when it refreshes. Defaults false.
-    pub av_registry_dirty: Arc<AtomicBool>,
     /// WS-0.5 — fleet-safety Prometheus counters (posture transitions, gate
     /// denials, HA promotions), exported by `GET /metrics` on the verifier
     /// binary. Lock-free; incremented on the observed paths, never gating
@@ -442,36 +384,15 @@ impl AppState {
             posture_tx,
             transport_identity: TransportIdentityConfig::from_env(),
             transport_security: TransportSecurityConfig::from_env(),
-            rss_active_violation: Arc::new(AtomicBool::new(false)),
-            flood_condition_active: Arc::new(AtomicBool::new(false)),
-            supervisor_tripped: Arc::new(AtomicBool::new(false)),
-            rss_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak {
-                count: 0,
-                start_ms: 0,
-            })),
-            frame_degraded_active: Arc::new(AtomicBool::new(false)),
-            frame_lockout_active: Arc::new(AtomicBool::new(false)),
-            frame_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak {
-                count: 0,
-                start_ms: 0,
-            })),
-            frame_untrusted_streak: Arc::new(Mutex::new(RssRecoveryStreak {
-                count: 0,
-                start_ms: 0,
-            })),
-            divergence_degraded_active: Arc::new(AtomicBool::new(false)),
-            divergence_lockout_active: Arc::new(AtomicBool::new(false)),
-            divergence_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak {
-                count: 0,
-                start_ms: 0,
-            })),
+            // ADR-0035 Stage 3c: the escalation/hysteresis flags + streaks (incl.
+            // av_registry_dirty) now live on EscalationState; identical initial state.
+            escalation: kirra_safety_authority::EscalationState::new(),
             current_incident: Arc::new(Mutex::new(None)),
             post_incident_write_failures: Arc::new(AtomicU64::new(0)),
             incident_durability_failures: Arc::new(AtomicU64::new(0)),
             command_source_write_failures: Arc::new(AtomicU64::new(0)),
             audit_write_drops: Arc::new(AtomicU64::new(0)),
             capture_drops: Arc::new(AtomicU64::new(0)),
-            av_registry_dirty: Arc::new(AtomicBool::new(false)),
             fleet_metrics: crate::metrics::FleetSafetyMetrics::new(),
             deadline_registry: Arc::new(crate::execution_manager::DeadlineRegistry::from_manifest(
                 crate::execution_manager::TASK_MANIFEST,

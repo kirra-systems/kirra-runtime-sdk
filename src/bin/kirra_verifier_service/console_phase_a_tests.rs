@@ -1037,6 +1037,7 @@ async fn estop_request_commands_mrc_and_chains_both_events() {
     // The governor commanded the sticky MRC under its own authority.
     assert!(
         svc.app
+            .escalation
             .supervisor_tripped
             .load(std::sync::atomic::Ordering::SeqCst),
         "an accepted e-stop must set the sticky supervisor_tripped flag (force_lockout)"
@@ -1085,6 +1086,7 @@ async fn clearance_signature_is_not_accepted_as_an_estop() {
     );
     assert!(
         !svc.app
+            .escalation
             .supervisor_tripped
             .load(std::sync::atomic::Ordering::SeqCst),
         "a rejected e-stop must NOT command the MRC"
@@ -1109,6 +1111,7 @@ async fn estop_unknown_operator_rejected_403() {
     );
     assert!(!svc
         .app
+        .escalation
         .supervisor_tripped
         .load(std::sync::atomic::Ordering::SeqCst));
     let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
@@ -1161,6 +1164,7 @@ async fn standby_instance_rejects_estop_request() {
     );
     assert!(!svc
         .app
+        .escalation
         .supervisor_tripped
         .load(std::sync::atomic::Ordering::SeqCst));
 }

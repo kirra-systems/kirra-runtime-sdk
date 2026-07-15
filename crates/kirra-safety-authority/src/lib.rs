@@ -8,13 +8,19 @@
 //! slice moves only the **pure, `AppState`-free safety-DECISION surface** so the
 //! crate / shim / MSRV / guardrail mechanics are proven first:
 //!
-//! - [`FleetNodePosture`] — the per-node posture record the DAG emits;
-//! - [`derive_fleet_posture`] — the pure fleet-fold (LockedOut > Degraded > Nominal);
-//! - [`RssRecoveryStreak`] — the in-memory RSS recovery-streak counter;
-//! - [`LockoutReason`] — the structured fail-closed reason codes.
+//! - [`FleetNodePosture`] — the per-node posture record the DAG emits (3a);
+//! - [`derive_fleet_posture`] — the pure fleet-fold (LockedOut > Degraded > Nominal) (3a);
+//! - [`RssRecoveryStreak`] — the in-memory RSS recovery-streak counter (3a);
+//! - [`LockoutReason`] — the structured fail-closed reason codes (3a);
+//! - [`attestation`] — issue #73's per-node Ed25519 challenge-response + PCR16
+//!   measured-boot binding (INVARIANT #3's real crypto) (3b);
+//! - [`EscalationState`] — the fleet-escalation / hysteresis flags + streaks the
+//!   posture engine / supervisor / watchdog read, embedded on `AppState` as
+//!   `app.escalation` (3c — the first `AppState` FIELD migration).
 //!
-//! `kirra-verifier` re-exports every item from its original module path (a
-//! `pub use` shim), so no consumer is touched by this extraction.
+//! `kirra-verifier` re-exports the pure-decision items and the attestation module
+//! from their original module paths (a `pub use` shim) and embeds `EscalationState`
+//! as one `AppState` field, so consumers reach a flag as `app.escalation.<field>`.
 
 use std::sync::Arc;
 
@@ -51,6 +57,72 @@ pub struct FleetNodePosture {
 pub struct RssRecoveryStreak {
     pub count: u32,
     pub start_ms: u64,
+}
+
+/// ADR-0035 Stage 3 (slice 3c) — the fleet-escalation / hysteresis state the
+/// posture engine, supervisor, and telemetry watchdog read to escalate or force
+/// posture, lifted verbatim off the `AppState` god-object into the safety-authority
+/// crate. Every field is `Arc<…>` interior-mutable (shared-ref access only — no
+/// `&mut self`), so `AppState` embeds this as one field and callers reach a flag as
+/// `app.escalation.<field>` (the field-façade step of the decomposition).
+///
+/// Field semantics are UNCHANGED from their prior `AppState` definitions:
+/// - `rss_active_violation` / `flood_condition_active` — Nominal→Degraded escalators;
+/// - `supervisor_tripped` — sticky, forces LockedOut when a critical loop wedges;
+/// - `rss_recovery_streak` — clears an active RSS violation;
+/// - `frame_degraded_active` (escalator) / `frame_lockout_active` (sticky) +
+///   `frame_recovery_streak` / `frame_untrusted_streak` (S-FI1d localization integrity);
+/// - `divergence_degraded_active` (escalator) / `divergence_lockout_active` (sticky) +
+///   `divergence_recovery_streak` (S-DG1 diverse-governor disagreement);
+/// - `av_registry_dirty` — H-3 watchdog watched-node-list refresh flag.
+pub struct EscalationState {
+    pub rss_active_violation: Arc<std::sync::atomic::AtomicBool>,
+    pub flood_condition_active: Arc<std::sync::atomic::AtomicBool>,
+    pub supervisor_tripped: Arc<std::sync::atomic::AtomicBool>,
+    pub rss_recovery_streak: Arc<std::sync::Mutex<RssRecoveryStreak>>,
+    pub frame_degraded_active: Arc<std::sync::atomic::AtomicBool>,
+    pub frame_lockout_active: Arc<std::sync::atomic::AtomicBool>,
+    pub frame_recovery_streak: Arc<std::sync::Mutex<RssRecoveryStreak>>,
+    pub frame_untrusted_streak: Arc<std::sync::Mutex<RssRecoveryStreak>>,
+    pub divergence_degraded_active: Arc<std::sync::atomic::AtomicBool>,
+    pub divergence_lockout_active: Arc<std::sync::atomic::AtomicBool>,
+    pub divergence_recovery_streak: Arc<std::sync::Mutex<RssRecoveryStreak>>,
+    pub av_registry_dirty: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl EscalationState {
+    /// All flags cleared, all streaks at `(0, 0)` — the exact defaults the prior
+    /// `AppState::new` set inline (byte-identical initial state).
+    pub fn new() -> Self {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Mutex;
+        let streak = || {
+            Arc::new(Mutex::new(RssRecoveryStreak {
+                count: 0,
+                start_ms: 0,
+            }))
+        };
+        Self {
+            rss_active_violation: Arc::new(AtomicBool::new(false)),
+            flood_condition_active: Arc::new(AtomicBool::new(false)),
+            supervisor_tripped: Arc::new(AtomicBool::new(false)),
+            rss_recovery_streak: streak(),
+            frame_degraded_active: Arc::new(AtomicBool::new(false)),
+            frame_lockout_active: Arc::new(AtomicBool::new(false)),
+            frame_recovery_streak: streak(),
+            frame_untrusted_streak: streak(),
+            divergence_degraded_active: Arc::new(AtomicBool::new(false)),
+            divergence_lockout_active: Arc::new(AtomicBool::new(false)),
+            divergence_recovery_streak: streak(),
+            av_registry_dirty: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl Default for EscalationState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Folds per-node postures into the single fleet posture, fail-closed:
