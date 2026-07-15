@@ -197,7 +197,8 @@ The Linux bridge maps R2CP to `ros2_control`:
 - state: wheel position/velocity, steering, IMU and battery;
 - lifecycle activation performs capability/version/time-sync/calibration checks;
 - deactivation sends stop, waits for ACK, then observes standby;
-- `ros2_control` update rate is 100–250 Hz; the MCU interpolates at 1 kHz.
+- `ros2_control` update rate is 100–250 Hz; the MCU holds the latest fresh target
+  and applies bounded command shaping at 1 kHz.
 
 Autoware `AckermannControlCommand` is translated on Linux after the Kirra
 governor. An optional Twist adapter computes curvature but rejects zero-speed yaw.

@@ -1,5 +1,7 @@
 #include "r2/safety/safety_manager.hpp"
 
+#include <cstdint>
+
 namespace r2::safety {
 
 void SafetyManager::begin_self_test() noexcept {

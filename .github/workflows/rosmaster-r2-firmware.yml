@@ -16,12 +16,12 @@ permissions:
 
 jobs:
   host-verification:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Install analysis tools
-        run: sudo apt-get update && sudo apt-get install -y clang-tidy cppcheck doxygen graphviz lcov
+        run: sudo apt-get update && sudo apt-get install -y clang-tidy-18 cppcheck doxygen graphviz lcov
       - name: Configure
         run: >
           cmake -S firmware/rosmaster-r2 -B /tmp/r2-build
@@ -42,7 +42,7 @@ jobs:
             firmware/rosmaster-r2/protocol/src/wire.cpp \
             firmware/rosmaster-r2/safety/src/safety_manager.cpp \
             firmware/rosmaster-r2/firmware/src/configuration.cpp; do
-            clang-tidy -p /tmp/r2-build "$source"
+            clang-tidy-18 -p /tmp/r2-build "$source"
           done
       - name: cppcheck
         run: >
@@ -69,7 +69,7 @@ jobs:
         run: doxygen Doxyfile
 
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7

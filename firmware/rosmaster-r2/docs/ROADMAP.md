@@ -70,8 +70,9 @@ electrical measurements support real-time/safety claims.
 - independent reviewer reproduces motor/encoder/steering mapping;
 - missing safety hardware becomes an explicit board-change requirement.
 
-Current status: repository evidence baseline and portable manifest are complete;
-physical unit closure remains required.
+Current status: the initial repository evidence baseline and non-enabling
+portable capability manifest are complete; source page-level extraction and
+physical-unit closure remain required.
 
 ## Phase 2 — HAL and drivers
 
@@ -355,7 +356,8 @@ physical unit closure remains required.
 
 **Deliverables**
 
-- signed A/B bootloader/update, anti-rollback and key ceremony;
+- signed A/B bootloader/update, best-effort F103 software rollback floor and key
+  ceremony; tamper-resistant anti-rollback requires a secure element/revised MCU;
 - static analysis, MISRA review/deviations, coverage and independent review;
 - environmental/HIL endurance, EMC/pre-compliance and manufacturing fixtures;
 - release SBOM, reproducible build, traceability and service manuals;

@@ -1,4 +1,5 @@
 #include "r2/control/motion_controller.hpp"
+#include "r2/kinematics/ackermann.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -11,7 +12,7 @@ namespace {
 }
 
 [[nodiscard]] bool valid_nonnegative(const double value) noexcept {
-    return std::isfinite(value) && value >= 0.0;
+    return std::isfinite(value) && value >= 0.0 && value <= 10'000.0;
 }
 
 [[nodiscard]] bool valid_gains(const PidGains& gains) noexcept {
@@ -169,10 +170,15 @@ MotionController::MotionController(const kinematics::VehicleGeometry geometry,
       configuration_valid_(
           kinematics::valid_geometry(geometry) &&
           valid_positive(limits.maximum_speed_mps) &&
+          limits.maximum_speed_mps <= 5.0 &&
           valid_positive(limits.maximum_acceleration_mps2) &&
+          limits.maximum_acceleration_mps2 <= 10.0 &&
           valid_positive(limits.maximum_deceleration_mps2) &&
+          limits.maximum_deceleration_mps2 <= 20.0 &&
           valid_positive(limits.maximum_jerk_mps3) &&
+          limits.maximum_jerk_mps3 <= 100.0 &&
           valid_positive(limits.maximum_steering_rate_rad_s) &&
+          limits.maximum_steering_rate_rad_s <= 20.0 &&
           left_pid_.valid() &&
           right_pid_.valid()) {}
 
@@ -193,6 +199,8 @@ MotionOutput MotionController::update(const kinematics::BodyCommand& requested,
         !std::isfinite(requested.yaw_rate_rad_s) ||
         !std::isfinite(measured_left_mps) ||
         !std::isfinite(measured_right_mps) ||
+        std::abs(measured_left_mps) > 100.0 ||
+        std::abs(measured_right_mps) > 100.0 ||
         !valid_positive(dt_s) ||
         !valid_positive(limits_.maximum_steering_rate_rad_s)) {
         reset();

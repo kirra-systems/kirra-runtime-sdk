@@ -18,7 +18,8 @@ stateDiagram-v2
     ControlledStop --> Standby: speed zero + fault absent
     Active --> FaultLatched: severe fault
     Armed --> FaultLatched: severe fault
-    FaultLatched --> Standby: fault absent + physical acknowledgement
+    FaultLatched --> Standby: recoverable latch absent + local physical acknowledgement
+    FaultLatched --> Boot: POST/config fault + reset
     Standby --> FirmwareUpdate: authenticated request
     FirmwareUpdate --> Boot: verified image / reset
 ```
@@ -58,7 +59,8 @@ board revision is required; firmware must not synthesize health.
 3. Optional WWDG catches an erroneously fast service pattern.
 4. The control task measures start jitter and execution time from a free-running
    timer. One overrun immediately disables PWM before reset.
-5. After watchdog reset, reset cause is persisted and motion remains standby.
+5. After watchdog reset, outputs remain disabled through Boot/SelfTest; Standby
+   is reached only after successful POST and reset-cause persistence.
 
 The control task cannot service the hardware watchdog directly; otherwise a live
 control loop could mask a dead safety/link service.

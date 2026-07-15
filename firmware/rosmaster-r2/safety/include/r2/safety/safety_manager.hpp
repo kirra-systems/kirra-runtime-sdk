@@ -15,7 +15,7 @@ enum class SafetyState : std::uint8_t {
     firmware_update,
 };
 
-enum class Fault : std::uint64_t {
+enum class Fault : std::uint16_t {
     none = 0U,
     emergency_stop = 1ULL << 0U,
     command_timeout = 1ULL << 1U,

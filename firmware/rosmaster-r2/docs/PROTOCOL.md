@@ -60,6 +60,15 @@ HKDF-SHA-256. Keys never traverse R2CP. Commands without a valid tag are not
 liveness events. Crypto requires a reviewed library and on-target WCET tests;
 the framing layer intentionally contains no home-grown crypto.
 
+STM32F103 has no hardware TRNG. The SBC supplies a CSPRNG challenge; the MCU
+must first transactionally advance a persistent boot counter, then derives its
+unique nonce as `HMAC(device_key, "R2CP-MCU-NONCE" || boot_counter ||
+sbc_nonce)`. Failure to read, advance and verify that counter prevents arming.
+HELLO and CAPABILITIES are transcript-authenticated before either side accepts
+capabilities. HKDF uses separate `R2CP-SBC-TO-MCU-V1` and
+`R2CP-MCU-TO-SBC-V1` labels, and both sides exchange key-confirmation tags over
+the full transcript. Nonce uniqueness, rather than MCU entropy, is required.
+
 Link authentication is not Kirra authorization. The production target also
 binds every motion payload to Kirra's exact enforced command: either the MCU
 verifies the Kirra release token, or a dedicated Kirra signer emits an
@@ -79,7 +88,7 @@ serial ACL and startup sentinel are the explicit interim trust boundary.
 | `0x12` | ARM | SBC→MCU | authenticated request/response |
 | `0x13` | ACTIVATE | SBC→MCU | authenticated request/response |
 | `0x14` | DISARM | SBC→MCU | authenticated request/response |
-| `0x15` | ACKNOWLEDGE_FAULT | SBC→MCU | authenticated + physical acknowledgement |
+| `0x15` | ACKNOWLEDGE_FAULT | SBC→MCU | authenticated clear request |
 | `0x20` | ROBOT_STATE | MCU→SBC | best effort |
 | `0x21` | ODOMETRY | MCU→SBC | best effort |
 | `0x22` | IMU | MCU→SBC | best effort |
@@ -129,6 +138,9 @@ ARM, ACTIVATE, DISARM and ACKNOWLEDGE_FAULT carry a session epoch, request ID an
 authorization tag. They invoke only legal local state transitions; DISARM from
 Active requests controlled stop rather than jumping to Standby. A self-test or
 configuration fault requires reboot and successful POST, not a remote clear.
+ACKNOWLEDGE_FAULT only requests a clear; a separately wired local
+acknowledgement input must also be observed by the MCU. A network packet is
+never itself physical acknowledgement.
 
 ### COMMAND_ACK
 

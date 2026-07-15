@@ -182,6 +182,17 @@ void test_kinematics() {
     const auto non_finite =
         r2::kinematics::inverse_ackermann(geometry, {NAN, 0.0});
     CHECK(non_finite.status == r2::kinematics::KinematicsStatus::non_finite_input);
+    const auto overflowing = r2::kinematics::inverse_ackermann(
+        geometry, {0.002, std::numeric_limits<double>::max()});
+    CHECK(overflowing.status ==
+          r2::kinematics::KinematicsStatus::non_finite_input);
+    const auto forward_overflow = r2::kinematics::forward_ackermann(
+        geometry,
+        std::numeric_limits<double>::max(),
+        std::numeric_limits<double>::max(),
+        0.55);
+    CHECK(forward_overflow.longitudinal_velocity_mps == 0.0);
+    CHECK(forward_overflow.yaw_rate_rad_s == 0.0);
 }
 
 void test_control() {
@@ -251,6 +262,9 @@ void test_motion_controller_composition() {
           r2::kinematics::KinematicsStatus::invalid_configuration);
     CHECK(output.left_motor_command == 0.0);
     CHECK(output.right_motor_command == 0.0);
+
+    output = controller.update({1.0, 0.0}, 101.0, 0.0, 0.001);
+    CHECK(output.status == r2::kinematics::KinematicsStatus::non_finite_input);
 }
 
 void test_safety() {
