@@ -273,8 +273,10 @@ pub type PostureEngineSender = mpsc::Sender<PostureRecalcTrigger>;
 //  hysteresis defined in recovery_hysteresis.)
 pub fn apply_rss_state(app: &Arc<AppState>, rss: &RssState, now_ms: u64) {
     if !rss.safe {
-        app.rss_active_violation.store(true, Ordering::SeqCst);
-        if let Ok(mut streak) = app.rss_recovery_streak.lock() {
+        app.escalation
+            .rss_active_violation
+            .store(true, Ordering::SeqCst);
+        if let Ok(mut streak) = app.escalation.rss_recovery_streak.lock() {
             streak.count = 0;
             streak.start_ms = 0;
         }
@@ -283,8 +285,8 @@ pub fn apply_rss_state(app: &Arc<AppState>, rss: &RssState, now_ms: u64) {
             lat_margin = rss.lateral_margin,
             "RSS violation active — fleet posture will be escalated to Degraded"
         );
-    } else if app.rss_active_violation.load(Ordering::SeqCst) {
-        if let Ok(mut streak) = app.rss_recovery_streak.lock() {
+    } else if app.escalation.rss_active_violation.load(Ordering::SeqCst) {
+        if let Ok(mut streak) = app.escalation.rss_recovery_streak.lock() {
             // Window expiry: discard streak and start fresh from this tick.
             if streak.start_ms > 0
                 && now_ms.saturating_sub(streak.start_ms) >= AV_RECOVERY_WINDOW_MS
@@ -297,7 +299,9 @@ pub fn apply_rss_state(app: &Arc<AppState>, rss: &RssState, now_ms: u64) {
             }
             streak.count += 1;
             if streak.count >= AV_RECOVERY_STREAK_THRESHOLD {
-                app.rss_active_violation.store(false, Ordering::SeqCst);
+                app.escalation
+                    .rss_active_violation
+                    .store(false, Ordering::SeqCst);
                 streak.count = 0;
                 streak.start_ms = 0;
                 tracing::info!(
@@ -336,8 +340,8 @@ pub fn apply_frame_integrity_state(app: &Arc<AppState>, trust: FrameTrust, now_m
     match trust {
         FrameTrust::Trusted => {
             // Recovery: only meaningful while a frame degradation is active.
-            if app.frame_degraded_active.load(Ordering::SeqCst) {
-                if let Ok(mut streak) = app.frame_recovery_streak.lock() {
+            if app.escalation.frame_degraded_active.load(Ordering::SeqCst) {
+                if let Ok(mut streak) = app.escalation.frame_recovery_streak.lock() {
                     if streak.start_ms > 0
                         && now_ms.saturating_sub(streak.start_ms) >= AV_RECOVERY_WINDOW_MS
                     {
@@ -349,7 +353,9 @@ pub fn apply_frame_integrity_state(app: &Arc<AppState>, trust: FrameTrust, now_m
                     }
                     streak.count += 1;
                     if streak.count >= AV_RECOVERY_STREAK_THRESHOLD {
-                        app.frame_degraded_active.store(false, Ordering::SeqCst);
+                        app.escalation
+                            .frame_degraded_active
+                            .store(false, Ordering::SeqCst);
                         streak.count = 0;
                         streak.start_ms = 0;
                         tracing::info!(
@@ -360,7 +366,7 @@ pub fn apply_frame_integrity_state(app: &Arc<AppState>, trust: FrameTrust, now_m
                 }
             }
             // A trusted tick breaks any sustained-untrusted run.
-            if let Ok(mut s) = app.frame_untrusted_streak.lock() {
+            if let Ok(mut s) = app.escalation.frame_untrusted_streak.lock() {
                 s.count = 0;
                 s.start_ms = 0;
             }
@@ -370,25 +376,29 @@ pub fn apply_frame_integrity_state(app: &Arc<AppState>, trust: FrameTrust, now_m
         FrameTrust::Degraded => {
             // Immediate Degraded; reset both streaks (not a recovery, not a
             // sustained-untrusted tick).
-            app.frame_degraded_active.store(true, Ordering::SeqCst);
-            if let Ok(mut s) = app.frame_recovery_streak.lock() {
+            app.escalation
+                .frame_degraded_active
+                .store(true, Ordering::SeqCst);
+            if let Ok(mut s) = app.escalation.frame_recovery_streak.lock() {
                 s.count = 0;
                 s.start_ms = 0;
             }
-            if let Ok(mut s) = app.frame_untrusted_streak.lock() {
+            if let Ok(mut s) = app.escalation.frame_untrusted_streak.lock() {
                 s.count = 0;
                 s.start_ms = 0;
             }
         }
         FrameTrust::Untrusted => {
             // Immediate Degraded MRC; a trusted recovery must restart from scratch.
-            app.frame_degraded_active.store(true, Ordering::SeqCst);
-            if let Ok(mut s) = app.frame_recovery_streak.lock() {
+            app.escalation
+                .frame_degraded_active
+                .store(true, Ordering::SeqCst);
+            if let Ok(mut s) = app.escalation.frame_recovery_streak.lock() {
                 s.count = 0;
                 s.start_ms = 0;
             }
             // Inverted streak toward the sticky LockedOut escalation.
-            if let Ok(mut streak) = app.frame_untrusted_streak.lock() {
+            if let Ok(mut streak) = app.escalation.frame_untrusted_streak.lock() {
                 if streak.start_ms > 0
                     && now_ms.saturating_sub(streak.start_ms) >= AV_RECOVERY_WINDOW_MS
                 {
@@ -400,7 +410,9 @@ pub fn apply_frame_integrity_state(app: &Arc<AppState>, trust: FrameTrust, now_m
                 }
                 streak.count += 1;
                 if streak.count >= AV_RECOVERY_STREAK_THRESHOLD {
-                    app.frame_lockout_active.store(true, Ordering::SeqCst);
+                    app.escalation
+                        .frame_lockout_active
+                        .store(true, Ordering::SeqCst);
                     tracing::error!(
                         reason = %LockoutReason::FrameIntegrityUntrusted,
                         streak = streak.count,
@@ -445,13 +457,17 @@ pub fn apply_governor_divergence_state(
 ) {
     if significant {
         // Immediate Degraded; any in-progress recovery restarts from scratch.
-        app.divergence_degraded_active.store(true, Ordering::SeqCst);
-        if let Ok(mut s) = app.divergence_recovery_streak.lock() {
+        app.escalation
+            .divergence_degraded_active
+            .store(true, Ordering::SeqCst);
+        if let Ok(mut s) = app.escalation.divergence_recovery_streak.lock() {
             s.count = 0;
             s.start_ms = 0;
         }
         if escalated {
-            app.divergence_lockout_active.store(true, Ordering::SeqCst);
+            app.escalation
+                .divergence_lockout_active
+                .store(true, Ordering::SeqCst);
             tracing::error!(
                 reason = %LockoutReason::GovernorDivergence,
                 "Sustained diverse-governor disagreement (comparator escalation) — \
@@ -460,8 +476,12 @@ pub fn apply_governor_divergence_state(
         }
     } else {
         // Agreement tick: only meaningful while a divergence is active.
-        if app.divergence_degraded_active.load(Ordering::SeqCst) {
-            if let Ok(mut streak) = app.divergence_recovery_streak.lock() {
+        if app
+            .escalation
+            .divergence_degraded_active
+            .load(Ordering::SeqCst)
+        {
+            if let Ok(mut streak) = app.escalation.divergence_recovery_streak.lock() {
                 if streak.start_ms > 0
                     && now_ms.saturating_sub(streak.start_ms) >= AV_RECOVERY_WINDOW_MS
                 {
@@ -473,7 +493,8 @@ pub fn apply_governor_divergence_state(
                 }
                 streak.count += 1;
                 if streak.count >= AV_RECOVERY_STREAK_THRESHOLD {
-                    app.divergence_degraded_active
+                    app.escalation
+                        .divergence_degraded_active
                         .store(false, Ordering::SeqCst);
                     streak.count = 0;
                     streak.start_ms = 0;
@@ -509,7 +530,8 @@ pub fn start_posture_engine_worker(
         let app = Arc::clone(&app);
         let cache = cache.clone();
         Arc::new(move || {
-            app.supervisor_tripped
+            app.escalation
+                .supervisor_tripped
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             crate::posture_engine::force_lockout(&cache, now_ms_engine());
         })
@@ -748,8 +770,11 @@ mod posture_engine_v2_tests {
     fn test_divergence_significant_escalates_immediately() {
         let app = frame_app();
         apply_governor_divergence_state(&app, true, false, 1_000);
-        assert!(app.divergence_degraded_active.load(Ordering::SeqCst));
-        assert!(!app.divergence_lockout_active.load(Ordering::SeqCst),
+        assert!(app
+            .escalation
+            .divergence_degraded_active
+            .load(Ordering::SeqCst));
+        assert!(!app.escalation.divergence_lockout_active.load(Ordering::SeqCst),
             "a significant-but-not-escalated tick is the transient decel-to-stop MRC, not LockedOut");
     }
 
@@ -759,8 +784,14 @@ mod posture_engine_v2_tests {
     fn test_divergence_escalated_sets_sticky_lockout() {
         let app = frame_app();
         apply_governor_divergence_state(&app, true, true, 1_000);
-        assert!(app.divergence_degraded_active.load(Ordering::SeqCst));
-        assert!(app.divergence_lockout_active.load(Ordering::SeqCst));
+        assert!(app
+            .escalation
+            .divergence_degraded_active
+            .load(Ordering::SeqCst));
+        assert!(app
+            .escalation
+            .divergence_lockout_active
+            .load(Ordering::SeqCst));
     }
 
     /// A full agreeing streak within the window clears the degradation
@@ -769,12 +800,17 @@ mod posture_engine_v2_tests {
     fn test_divergence_agreement_recovery_clears_degraded() {
         let app = frame_app();
         apply_governor_divergence_state(&app, true, false, 1_000);
-        assert!(app.divergence_degraded_active.load(Ordering::SeqCst));
+        assert!(app
+            .escalation
+            .divergence_degraded_active
+            .load(Ordering::SeqCst));
         for i in 0..AV_RECOVERY_STREAK_THRESHOLD {
             apply_governor_divergence_state(&app, false, false, 1_010 + i as u64 * 10);
         }
         assert!(
-            !app.divergence_degraded_active.load(Ordering::SeqCst),
+            !app.escalation
+                .divergence_degraded_active
+                .load(Ordering::SeqCst),
             "a full agreeing recovery streak must clear divergence_degraded_active"
         );
     }
@@ -795,7 +831,9 @@ mod posture_engine_v2_tests {
             );
         }
         assert!(
-            app.divergence_degraded_active.load(Ordering::SeqCst),
+            app.escalation
+                .divergence_degraded_active
+                .load(Ordering::SeqCst),
             "agreeing ticks spread past the window must never clear the degradation"
         );
     }
@@ -810,11 +848,15 @@ mod posture_engine_v2_tests {
             apply_governor_divergence_state(&app, false, false, 1_010 + i as u64 * 10);
         }
         assert!(
-            !app.divergence_degraded_active.load(Ordering::SeqCst),
+            !app.escalation
+                .divergence_degraded_active
+                .load(Ordering::SeqCst),
             "the degraded flag earn-back still works under a sticky lockout"
         );
         assert!(
-            app.divergence_lockout_active.load(Ordering::SeqCst),
+            app.escalation
+                .divergence_lockout_active
+                .load(Ordering::SeqCst),
             "agreement must never clear the sticky divergence lockout"
         );
     }
@@ -824,9 +866,9 @@ mod posture_engine_v2_tests {
         let app = frame_app();
         // A SINGLE Degraded tick sets the flag — no grace period.
         apply_frame_integrity_state(&app, FrameTrust::Degraded, 1_000);
-        assert!(app.frame_degraded_active.load(Ordering::SeqCst));
+        assert!(app.escalation.frame_degraded_active.load(Ordering::SeqCst));
         assert!(
-            !app.frame_lockout_active.load(Ordering::SeqCst),
+            !app.escalation.frame_lockout_active.load(Ordering::SeqCst),
             "Degraded must not by itself lock out"
         );
     }
@@ -836,9 +878,9 @@ mod posture_engine_v2_tests {
         let app = frame_app();
         // First Untrusted tick → immediate Degraded, not yet LockedOut.
         apply_frame_integrity_state(&app, FrameTrust::Untrusted, 1_000);
-        assert!(app.frame_degraded_active.load(Ordering::SeqCst));
+        assert!(app.escalation.frame_degraded_active.load(Ordering::SeqCst));
         assert!(
-            !app.frame_lockout_active.load(Ordering::SeqCst),
+            !app.escalation.frame_lockout_active.load(Ordering::SeqCst),
             "a single Untrusted tick is the transient decel-to-stop MRC, not LockedOut"
         );
         // Sustained Untrusted within the window → sticky LockedOut.
@@ -846,7 +888,7 @@ mod posture_engine_v2_tests {
             apply_frame_integrity_state(&app, FrameTrust::Untrusted, 1_000 + i as u64 * 10);
         }
         assert!(
-            app.frame_lockout_active.load(Ordering::SeqCst),
+            app.escalation.frame_lockout_active.load(Ordering::SeqCst),
             "sustained Untrusted ({AV_RECOVERY_STREAK_THRESHOLD} ticks) must escalate to LockedOut"
         );
     }
@@ -855,13 +897,13 @@ mod posture_engine_v2_tests {
     fn test_frame_trusted_recovery_clears_degraded() {
         let app = frame_app();
         apply_frame_integrity_state(&app, FrameTrust::Degraded, 1_000);
-        assert!(app.frame_degraded_active.load(Ordering::SeqCst));
+        assert!(app.escalation.frame_degraded_active.load(Ordering::SeqCst));
         // A full streak of Trusted ticks within the window clears the degradation.
         for i in 0..AV_RECOVERY_STREAK_THRESHOLD {
             apply_frame_integrity_state(&app, FrameTrust::Trusted, 1_010 + i as u64 * 10);
         }
         assert!(
-            !app.frame_degraded_active.load(Ordering::SeqCst),
+            !app.escalation.frame_degraded_active.load(Ordering::SeqCst),
             "a full Trusted recovery streak must clear frame_degraded_active"
         );
     }
@@ -873,7 +915,7 @@ mod posture_engine_v2_tests {
             apply_frame_integrity_state(&app, FrameTrust::Untrusted, 1_000 + i as u64 * 10);
         }
         assert!(
-            app.frame_lockout_active.load(Ordering::SeqCst),
+            app.escalation.frame_lockout_active.load(Ordering::SeqCst),
             "precondition: locked out"
         );
         // Trusted recovery does NOT clear a sustained-fault lockout (human reset only).
@@ -881,7 +923,7 @@ mod posture_engine_v2_tests {
             apply_frame_integrity_state(&app, FrameTrust::Trusted, 2_000 + i as u64 * 10);
         }
         assert!(
-            app.frame_lockout_active.load(Ordering::SeqCst),
+            app.escalation.frame_lockout_active.load(Ordering::SeqCst),
             "frame_lockout_active must be sticky — only a human/HA reset clears it"
         );
     }

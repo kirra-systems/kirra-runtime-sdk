@@ -170,7 +170,8 @@ pub fn spawn_telemetry_watchdog_with_clock(
         let app = Arc::clone(&app);
         let tx = posture_engine_tx.clone();
         Arc::new(move || {
-            app.supervisor_tripped
+            app.escalation
+                .supervisor_tripped
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = tx.try_send(PostureRecalcTrigger::PeriodicRefresh);
         })
@@ -349,6 +350,7 @@ fn watchdog_sweep_once_inner(
     // up by this load (it reads the committed DB), and if it lands after the load
     // the flag is set again → caught on the next sweep (≤ one AV_WATCHDOG_SWEEP_MS).
     let registry_dirty = app
+        .escalation
         .av_registry_dirty
         .swap(false, std::sync::atomic::Ordering::AcqRel);
     if registry_dirty
@@ -418,7 +420,8 @@ fn watchdog_sweep_once_inner(
                 // periodic refresh is unaffected (it re-fires on the 30 s timer),
                 // and a redundant set just triggers one extra refresh attempt.
                 if registry_dirty {
-                    app.av_registry_dirty
+                    app.escalation
+                        .av_registry_dirty
                         .store(true, std::sync::atomic::Ordering::Release);
                 }
                 tracing::error!(
@@ -642,7 +645,8 @@ fn force_watchdog_lockout(
     reason: &'static str,
 ) {
     if sticky {
-        app.supervisor_tripped
+        app.escalation
+            .supervisor_tripped
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     if let Some(cache) = posture_cache {
@@ -687,7 +691,8 @@ pub(crate) fn escalate_on_sustained_overrun(
             "telemetry watchdog SUSTAINED deadline overrun — the dead-man's switch cannot \
              hold its detection-latency bound; escalating fleet to LockedOut (C2 fail-closed)"
         );
-        app.supervisor_tripped
+        app.escalation
+            .supervisor_tripped
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = posture_engine_tx.try_send(PostureRecalcTrigger::PeriodicRefresh);
     }
@@ -1229,7 +1234,7 @@ mod watchdog_di_tests {
             "a FULL channel must force the shared cache to LockedOut immediately"
         );
         assert!(
-            !app.supervisor_tripped.load(Ordering::SeqCst),
+            !app.escalation.supervisor_tripped.load(Ordering::SeqCst),
             "a transient FULL channel must NOT trip the sticky supervisor lockout (auto-recoverable)"
         );
     }
@@ -1278,7 +1283,7 @@ mod watchdog_di_tests {
             "a CLOSED channel must force the shared cache to LockedOut immediately"
         );
         assert!(
-            app.supervisor_tripped.load(Ordering::SeqCst),
+            app.escalation.supervisor_tripped.load(Ordering::SeqCst),
             "a CLOSED channel (dead engine) must trip the sticky supervisor lockout"
         );
     }
@@ -1457,7 +1462,8 @@ mod watchdog_di_tests {
         );
 
         // H-3: registration sets the dirty flag → the next sweep refreshes promptly.
-        app.av_registry_dirty
+        app.escalation
+            .av_registry_dirty
             .store(true, std::sync::atomic::Ordering::Release);
         watchdog_sweep_once(
             &app,
@@ -1471,7 +1477,8 @@ mod watchdog_di_tests {
             "H-3: a dirty registry must force a prompt refresh so the fresh node is monitored within one sweep"
         );
         assert!(
-            !app.av_registry_dirty
+            !app.escalation
+                .av_registry_dirty
                 .load(std::sync::atomic::Ordering::Acquire),
             "the watchdog must clear av_registry_dirty after refreshing"
         );
@@ -1664,7 +1671,8 @@ mod sustained_overrun_tests {
         }
 
         assert!(
-            app.supervisor_tripped
+            app.escalation
+                .supervisor_tripped
                 .load(std::sync::atomic::Ordering::SeqCst),
             "a sustained sweep overrun must set the sticky supervisor_tripped flag (C2)"
         );
@@ -1697,7 +1705,8 @@ mod sustained_overrun_tests {
         }
 
         assert!(
-            !app.supervisor_tripped
+            !app.escalation
+                .supervisor_tripped
                 .load(std::sync::atomic::Ordering::SeqCst),
             "isolated slow sweeps (nominal jitter) must never trip the supervisor"
         );
@@ -1718,6 +1727,7 @@ mod sustained_overrun_tests {
             escalate_on_sustained_overrun(&app, &tx, &mut tracker, 1_000 + i * 100, true);
         }
         assert!(!app
+            .escalation
             .supervisor_tripped
             .load(std::sync::atomic::Ordering::SeqCst));
         assert!(rx.try_recv().is_err());

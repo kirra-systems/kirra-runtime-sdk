@@ -897,6 +897,7 @@ pub(crate) async fn handle_register_av_asset(
     // fail-OPEN window in which a silent/faulty fresh sensor would go undetected
     // (breaking the SG-003 detection-latency bound).
     svc.app
+        .escalation
         .av_registry_dirty
         .store(true, std::sync::atomic::Ordering::Release);
 
