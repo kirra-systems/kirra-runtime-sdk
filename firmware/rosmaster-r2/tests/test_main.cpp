@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 namespace {
 
@@ -62,12 +63,18 @@ public:
             fail_next_write = false;
             return false;
         }
+        if (fail_after_bytes < length) {
+            std::memcpy(bytes.data() + address, source, fail_after_bytes);
+            fail_after_bytes = std::numeric_limits<std::size_t>::max();
+            return false;
+        }
         std::memcpy(bytes.data() + address, source, length);
         return true;
     }
 
     std::array<std::uint8_t, 4'096U> bytes{};
     bool fail_next_write{false};
+    std::size_t fail_after_bytes{std::numeric_limits<std::size_t>::max()};
 };
 
 r2::application::PlatformConfiguration calibrated_configuration() {
@@ -235,6 +242,15 @@ void test_motion_controller_composition() {
     output = controller.update({NAN, 0.0}, 0.0, 0.0, 0.001);
     CHECK(output.status == r2::kinematics::KinematicsStatus::non_finite_input);
     controller.reset();
+
+    constexpr r2::control::PidGains bad_gains{NAN, 0.0, 0.0, 0.0, 0.0};
+    r2::control::MotionController invalid_controller{
+        geometry, limits, {bad_gains, gains}};
+    output = invalid_controller.update({1.0, 0.0}, 0.0, 0.0, 0.001);
+    CHECK(output.status ==
+          r2::kinematics::KinematicsStatus::invalid_configuration);
+    CHECK(output.left_motor_command == 0.0);
+    CHECK(output.right_motor_command == 0.0);
 }
 
 void test_safety() {
@@ -310,6 +326,11 @@ void test_configuration_rollback() {
     CHECK(store.load(loaded));
     CHECK(loaded.generation == 1U);
     CHECK(near(loaded.maximum_speed_mps, 1.0, 1.0e-6));
+
+    flash.fail_after_bytes = 24U;
+    CHECK(!store.commit(configuration));
+    CHECK(store.load(loaded));
+    CHECK(loaded.generation == 1U);
 
     CHECK(store.commit(configuration));
     CHECK(store.load(loaded));

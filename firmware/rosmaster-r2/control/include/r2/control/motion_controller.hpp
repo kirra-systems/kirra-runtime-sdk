@@ -53,6 +53,7 @@ public:
                                 double minimum_output,
                                 double maximum_output) noexcept;
     void reset() noexcept;
+    [[nodiscard]] bool valid() const noexcept;
 
 private:
     PidGains gains_;
@@ -89,6 +90,7 @@ private:
     VelocityPid left_pid_;
     VelocityPid right_pid_;
     double steering_angle_rad_{0.0};
+    bool configuration_valid_{false};
 };
 
 }  // namespace r2::control

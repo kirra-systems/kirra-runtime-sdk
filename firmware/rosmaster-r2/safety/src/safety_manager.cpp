@@ -11,6 +11,7 @@ void SafetyManager::begin_self_test() noexcept {
 void SafetyManager::complete_self_test(const bool passed) noexcept {
     if (state_ != SafetyState::self_test) {
         raise(Fault::self_test_failed, true);
+        state_ = SafetyState::fault_latched;
         return;
     }
     if (!passed) {

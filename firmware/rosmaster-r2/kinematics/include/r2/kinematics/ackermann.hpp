@@ -25,6 +25,7 @@ struct AckermannSetpoint {
 
 enum class KinematicsStatus : std::uint8_t {
     ok,
+    invalid_configuration,
     invalid_geometry,
     non_finite_input,
     infeasible_stationary_turn,

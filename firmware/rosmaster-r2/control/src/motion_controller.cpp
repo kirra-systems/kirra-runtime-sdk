@@ -154,6 +154,10 @@ void VelocityPid::reset() noexcept {
     initialized_ = false;
 }
 
+bool VelocityPid::valid() const noexcept {
+    return gains_valid_;
+}
+
 MotionController::MotionController(const kinematics::VehicleGeometry geometry,
                                    const MotionLimits limits,
                                    const WheelPidGains wheel_gains) noexcept
@@ -161,12 +165,30 @@ MotionController::MotionController(const kinematics::VehicleGeometry geometry,
       limits_(limits),
       speed_limiter_(limits),
       left_pid_(wheel_gains.left),
-      right_pid_(wheel_gains.right) {}
+      right_pid_(wheel_gains.right),
+      configuration_valid_(
+          kinematics::valid_geometry(geometry) &&
+          valid_positive(limits.maximum_speed_mps) &&
+          valid_positive(limits.maximum_acceleration_mps2) &&
+          valid_positive(limits.maximum_deceleration_mps2) &&
+          valid_positive(limits.maximum_jerk_mps3) &&
+          valid_positive(limits.maximum_steering_rate_rad_s) &&
+          left_pid_.valid() &&
+          right_pid_.valid()) {}
 
 MotionOutput MotionController::update(const kinematics::BodyCommand& requested,
                                       const double measured_left_mps,
                                       const double measured_right_mps,
                                       const double dt_s) noexcept {
+    if (!configuration_valid_) {
+        reset();
+        return {
+            0.0,
+            0.0,
+            0.0,
+            kinematics::KinematicsStatus::invalid_configuration,
+        };
+    }
     if (!std::isfinite(requested.longitudinal_velocity_mps) ||
         !std::isfinite(requested.yaw_rate_rad_s) ||
         !std::isfinite(measured_left_mps) ||
