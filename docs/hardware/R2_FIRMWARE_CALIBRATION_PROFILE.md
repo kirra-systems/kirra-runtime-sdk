@@ -30,13 +30,16 @@ drives the motors and servo directly. Therefore:
 
 ## Derived constants (from the measured primitives)
 
+All derived values below are approximate / rounded; recompute from the measured
+primitives (`wheel_diameter_m`, `ticks_per_rev`) before use.
+
 ```
-wheel_diameter_m   = 0.066675           (2 5/8 in, calipers)         -> wheel_radius_m = 0.0333375
-wheel_circumf_m    = pi*D = 0.209465
-ticks_per_rev (RL) = 834.5              (single 2-turn sample, LEFT only)
-m_per_tick (RL)    = C/834.5 = 2.5101e-4 m/tick
-V_PER_PWM (left)   = 0.0145 (m/s)/PWM, offset -0.069, deadband ~PWM 4.7   (OPEN-LOOP, LEFT only)
-L/R tick imbalance = ~28% at equal PWM (RL reads fewer) — UNRESOLVED: real drift vs encoder-scale
+wheel_diameter_m  D = 0.066675                       (2 5/8 in, calipers)  ->  wheel_radius_m = D/2 = 0.0333375
+wheel_circumf_m   C = pi * D ~= 0.209466
+ticks_per_rev (RL)  = 834.5                          (single 2-turn sample, LEFT only)
+m_per_tick (RL)     = C / 834.5 ~= 2.5101e-4 m/tick
+V_PER_PWM (left)    = 0.0145 (m/s)/PWM, offset -0.069, deadband ~PWM 4.7    (OPEN-LOOP, LEFT only)
+L/R tick imbalance  = ~28% at equal PWM (RL reads fewer) — UNRESOLVED: real drift vs encoder-scale
 ```
 
 ## Table A — `PlatformConfiguration` (`firmware/.../application/configuration.hpp`)
@@ -53,7 +56,7 @@ L/R tick imbalance = ~28% at equal PWM (RL reads fewer) — UNRESOLVED: real dri
 | `battery_divider_ratio` | — | **refused** | ❌ `HARDWARE_FINDINGS_R2X3.md` explicitly declined to commit the 4.03 divider as an R2 default. Measure per unit. |
 | `maximum_speed_mps` / `_acceleration_mps2` / `_deceleration_mps2` / `_jerk_mps3` / `_steering_rate_rad_s` | policy envelope | design, not bench | These are the KIRRA envelope (the `r2` contract profile), not a bench measurement. Set from the class contract, not from this data. |
 | `command_timeout_ms` | keep default `100` | design | unchanged. |
-| `calibrated` | **stays `false`** | — | Must remain false until RR ticks/rev + δ_max + servo-µs land. Per the config review, an uncalibrated record must immobilise, not feed these zeros into control. |
+| `calibrated` | **stays `false`** | — | Must remain false until RR ticks/rev + δ_max + servo-µs land. Per the config review, an uncalibrated record must immobilize, not feed these zeros into control. |
 
 ## Table B — direction / rear-wheel engagement → HAL/BSP + `board_manifest`
 
