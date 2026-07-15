@@ -436,16 +436,25 @@ impl PostureEngineStateStore for PgVerifierStore {
         // (conflict) path; a first insert is unconditional. `rows == 1` on insert or an
         // accepted strict advance, `0` when the guard rejects a stale/equal generation.
         //
-        // The comparison casts stored TEXT to BIGINT (mirroring SQLite's `CAST`
-        // monotonic guard). Unlike SQLite's `CAST('garbage') = 0`, Postgres errors on a
-        // non-numeric existing value — a fail-CLOSED difference that is never reached in
-        // normal operation (writes only ever store valid integers) and never exercised
-        // by the conformance suite (its only corrupt write is the terminal `load`
-        // check); erroring on a corrupt high-water is at least as safe as SQLite's heal.
+        // The `CASE` guards the cast of the STORED value: a non-numeric existing value
+        // counts as 0, so a positive generation OVERWRITES it — the exact
+        // heal-on-corrupt-save parity SQLite gives via `CAST('garbage') = 0` (and the
+        // in-memory backend via `parse().unwrap_or(0)`). Only `load_last_generation`
+        // fails closed on a corrupt high-water; `save` heals, matching every backend.
+        //
+        // The comparison is `::numeric` (arbitrary precision), NOT `::bigint`: a stored
+        // value that is all-digits but out of the i64/u64 domain (a huge digit string
+        // written via a blind `save_engine_state`) would OVERFLOW a `::bigint` cast and
+        // re-raise the very crash this heals. `::numeric` never overflows — such a value
+        // simply compares greater than any real generation, so the monotonic guard keeps
+        // it (never a crash). `EXCLUDED.value` is `$1` (a valid u64 string), likewise
+        // overflow-free as `numeric`.
         let n = self.lock().execute(
             "INSERT INTO posture_engine_state (key, value) VALUES ('last_generation', $1) \
              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value \
-             WHERE posture_engine_state.value::bigint < EXCLUDED.value::bigint",
+             WHERE (CASE WHEN posture_engine_state.value ~ '^[0-9]+$' \
+                         THEN posture_engine_state.value::numeric ELSE 0 END) \
+                   < EXCLUDED.value::numeric",
             &[&generation.to_string()],
         )?;
         Ok(n == 1)
