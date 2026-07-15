@@ -195,7 +195,10 @@ void test_motion_controller_composition() {
     r2::control::MotionController controller{
         geometry, limits, {gains, gains}};
 
-    auto output = controller.update({1.0, 0.5}, 0.0, 0.0, 0.001);
+    r2::control::MotionOutput output{};
+    for (std::size_t index = 0U; index < 200U; ++index) {
+        output = controller.update({1.0, 0.5}, 0.0, 0.0, 0.001);
+    }
     CHECK(output.status == r2::kinematics::KinematicsStatus::ok);
     CHECK(output.left_motor_command > 0.0);
     CHECK(output.right_motor_command > 0.0);

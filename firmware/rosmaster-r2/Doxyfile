@@ -4,6 +4,7 @@ OUTPUT_DIRECTORY       = build
 INPUT                  = README.md hal drivers protocol kinematics control diagnostics safety firmware bootloader docs
 RECURSIVE              = YES
 FILE_PATTERNS          = *.hpp *.cpp *.md
+EXCLUDE                = drivers/README.md bootloader/README.md
 USE_MDFILE_AS_MAINPAGE = README.md
 EXTRACT_ALL            = YES
 EXTRACT_PRIVATE        = NO
