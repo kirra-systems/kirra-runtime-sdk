@@ -14,7 +14,17 @@ struct ImageManifest {
     std::uint8_t signature_ed25519[64];
 };
 
+// NOTE: software integrity + version rollback checks only. On the STM32F103 the
+// verifier key and bootloader live in mutable flash with no hardware root of
+// trust, so this is NOT hardware-backed secure boot / tamper-resistant rollback
+// (see PR scope note). A reviewed crypto backend + a provisioned RoT remain
+// explicit phase gates.
 enum class VerificationResult : std::uint8_t {
+    // Fail-closed: `rejected` is value 0 so a default-constructed / zeroed /
+    // memset verdict reads as a rejection, never as `accepted`. Every `verify`
+    // implementation MUST return an explicit non-`rejected` value only on a
+    // fully-passed check.
+    rejected = 0,
     accepted,
     malformed_manifest,
     wrong_product,
@@ -24,6 +34,10 @@ enum class VerificationResult : std::uint8_t {
     invalid_signature,
     rollback_attempt,
 };
+
+// The zero/default verdict must be the reject state (fail-closed default).
+static_assert(static_cast<std::uint8_t>(VerificationResult::rejected) == 0U,
+              "a default/zero-initialized image verdict must fail closed (reject)");
 
 class ImageReader {
 public:
