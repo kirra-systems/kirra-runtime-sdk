@@ -36,11 +36,15 @@ struct PlatformConfiguration {
 [[nodiscard]] PlatformConfiguration factory_defaults() noexcept;
 [[nodiscard]] bool valid_configuration(const PlatformConfiguration& configuration) noexcept;
 
+struct ConfigurationSlotAddresses {
+    std::uint32_t a;
+    std::uint32_t b;
+};
+
 class ConfigurationStore {
 public:
     ConfigurationStore(hal::PersistentStorage& storage,
-                       std::uint32_t slot_a_address,
-                       std::uint32_t slot_b_address) noexcept;
+                       ConfigurationSlotAddresses addresses) noexcept;
 
     [[nodiscard]] bool load(PlatformConfiguration& configuration) const noexcept;
     [[nodiscard]] bool commit(const PlatformConfiguration& configuration) noexcept;

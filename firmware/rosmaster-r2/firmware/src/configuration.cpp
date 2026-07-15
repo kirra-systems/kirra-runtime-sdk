@@ -161,11 +161,10 @@ bool valid_configuration(const PlatformConfiguration& configuration) noexcept {
 }
 
 ConfigurationStore::ConfigurationStore(hal::PersistentStorage& storage,
-                                       const std::uint32_t slot_a_address,
-                                       const std::uint32_t slot_b_address) noexcept
+                                       const ConfigurationSlotAddresses addresses) noexcept
     : storage_(storage),
-      slot_a_address_(slot_a_address),
-      slot_b_address_(slot_b_address) {}
+      slot_a_address_(addresses.a),
+      slot_b_address_(addresses.b) {}
 
 bool ConfigurationStore::load(PlatformConfiguration& configuration) const noexcept {
     PlatformConfiguration slot_a{};

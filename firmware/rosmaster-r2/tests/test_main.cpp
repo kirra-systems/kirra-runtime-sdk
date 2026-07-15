@@ -220,7 +220,7 @@ void test_safety() {
 void test_configuration_rollback() {
     MemoryFlash flash{};
     flash.bytes.fill(0xFFU);
-    r2::application::ConfigurationStore store{flash, 0U, 128U};
+    r2::application::ConfigurationStore store{flash, {0U, 128U}};
     r2::application::PlatformConfiguration loaded{};
     CHECK(!store.load(loaded));
     CHECK(!loaded.calibrated);
