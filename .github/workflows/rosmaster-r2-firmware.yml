@@ -1,0 +1,91 @@
+name: ROSMASTER R2 firmware
+
+on:
+  pull_request:
+    paths:
+      - "firmware/rosmaster-r2/**"
+      - ".github/workflows/rosmaster-r2-firmware.yml"
+  push:
+    branches: [main]
+    paths:
+      - "firmware/rosmaster-r2/**"
+      - ".github/workflows/rosmaster-r2-firmware.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  host-verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install analysis tools
+        run: sudo apt-get update && sudo apt-get install -y clang-tidy cppcheck doxygen graphviz lcov
+      - name: Configure
+        run: >
+          cmake -S firmware/rosmaster-r2 -B /tmp/r2-build
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DR2_ENABLE_SANITIZERS=ON
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: Build
+        run: cmake --build /tmp/r2-build --parallel
+      - name: Unit and integration tests
+        run: ctest --test-dir /tmp/r2-build --output-on-failure
+      - name: Deterministic simulation
+        run: /tmp/r2-build/r2_deterministic_sim
+      - name: clang-tidy
+        run: |
+          for source in \
+            firmware/rosmaster-r2/kinematics/src/ackermann.cpp \
+            firmware/rosmaster-r2/control/src/motion_controller.cpp \
+            firmware/rosmaster-r2/protocol/src/wire.cpp \
+            firmware/rosmaster-r2/safety/src/safety_manager.cpp \
+            firmware/rosmaster-r2/firmware/src/configuration.cpp; do
+            clang-tidy -p /tmp/r2-build "$source"
+          done
+      - name: cppcheck
+        run: >
+          cppcheck --enable=warning,style,performance,portability
+          --error-exitcode=1 --inline-suppr --std=c++17
+          -Ifirmware/rosmaster-r2/hal/include
+          -Ifirmware/rosmaster-r2/kinematics/include
+          -Ifirmware/rosmaster-r2/control/include
+          -Ifirmware/rosmaster-r2/protocol/include
+          -Ifirmware/rosmaster-r2/diagnostics/include
+          -Ifirmware/rosmaster-r2/safety/include
+          -Ifirmware/rosmaster-r2/firmware/include
+          -Ifirmware/rosmaster-r2/bootloader/include
+          firmware/rosmaster-r2/hal
+          firmware/rosmaster-r2/kinematics
+          firmware/rosmaster-r2/control
+          firmware/rosmaster-r2/protocol
+          firmware/rosmaster-r2/diagnostics
+          firmware/rosmaster-r2/safety
+          firmware/rosmaster-r2/firmware
+          firmware/rosmaster-r2/bootloader
+      - name: API documentation
+        working-directory: firmware/rosmaster-r2
+        run: doxygen Doxyfile
+
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install coverage tools
+        run: sudo apt-get update && sudo apt-get install -y lcov
+      - name: Build and test with coverage
+        run: |
+          cmake -S firmware/rosmaster-r2 -B /tmp/r2-coverage \
+            -DR2_ENABLE_COVERAGE=ON -DR2_BUILD_SIMULATION=OFF
+          cmake --build /tmp/r2-coverage --parallel
+          ctest --test-dir /tmp/r2-coverage --output-on-failure
+      - name: Coverage floor
+        run: |
+          lcov --capture --directory /tmp/r2-coverage --output-file /tmp/r2.info \
+            --ignore-errors mismatch
+          lcov --remove /tmp/r2.info '/usr/*' '*/tests/*' \
+            --output-file /tmp/r2.filtered.info --ignore-errors unused
+          line_rate="$(lcov --summary /tmp/r2.filtered.info | awk '/lines/{gsub(/%/,"",$2); print $2}')"
+          awk -v rate="$line_rate" 'BEGIN { exit !(rate >= 80.0) }'
