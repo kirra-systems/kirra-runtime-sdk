@@ -1,6 +1,6 @@
 //! EP-10 (MGA G-9) — the **live Postgres backend** for the verifier storage seams.
 //!
-//! The root crate defines five backend seams and proves each against SQLite +
+//! The root crate defines six backend seams and proves each against SQLite +
 //! an in-memory model:
 //!
 //! - the schema-migration engine (`verifier_store::migrations::run_migrations_generic`)
@@ -13,7 +13,9 @@
 //!   + the monotonic generation high-water, fail-closed on a corrupt value);
 //! - the [`FederationStore`] contract (the trusted-controller key registry + the
 //!   durable anti-replay primitives: single-use nonce burn + the per-source
-//!   strictly-advancing sequence gate).
+//!   strictly-advancing sequence gate);
+//! - the [`OperatorStore`] contract (the per-operator Ed25519 identity registry +
+//!   revocation).
 //!
 //! This crate is the promised integrator binding: [`LivePgExecutor`] is the
 //! "~10-line adapter" the seam documentation describes (execute →
@@ -44,13 +46,14 @@ use kirra_verifier::verifier_store::migrations_postgres::{
     PgExecutor, PgMigration, PgMigrationError, PostgresBackend,
 };
 use kirra_verifier::verifier_store::{
-    EpochFence, FederationStore, FenceError, NodeStore, PostureEngineStateStore,
+    EpochFence, FederationStore, FenceError, NodeStore, OperatorRecord, OperatorStore,
+    PostureEngineStateStore,
 };
 
 /// The Postgres schema version THIS binary supports (mirrors the SQLite
 /// `SCHEMA_VERSION` discipline: a newer stamp in the database is refused
 /// fail-closed by the shared engine).
-pub const PG_SCHEMA_VERSION: i64 = 4;
+pub const PG_SCHEMA_VERSION: i64 = 5;
 
 /// Baseline (v1) DDL — idempotent, applied on every open BEFORE the versioned
 /// steps run (v1 is the engine's baseline; steps are v ≥ 2). The two tables
@@ -115,6 +118,17 @@ const PG_MIGRATIONS: &[PgMigration] = &[
                   source_id     TEXT PRIMARY KEY, \
                   last_sequence BIGINT NOT NULL, \
                   last_seen_ms  BIGINT NOT NULL \
+              )",
+    },
+    // v5 — the operator registry (the OperatorStore seam): per-operator Ed25519
+    // identity + revocation. `revoked_at_ms` NULL = active.
+    PgMigration {
+        version: 5,
+        sql: "CREATE TABLE IF NOT EXISTS operators ( \
+                  operator_id      TEXT PRIMARY KEY, \
+                  pubkey_pem       TEXT NOT NULL, \
+                  registered_at_ms BIGINT NOT NULL, \
+                  revoked_at_ms    BIGINT \
               )",
     },
 ];
@@ -616,5 +630,78 @@ impl FederationStore for PgVerifierStore {
             &[&source_id, &seq, &now],
         )?;
         Ok(n == 1)
+    }
+}
+
+impl PgVerifierStore {
+    fn row_to_operator(row: &postgres::Row) -> OperatorRecord {
+        OperatorRecord {
+            operator_id: row.get(0),
+            pubkey_pem: row.get(1),
+            registered_at_ms: row.get::<_, i64>(2) as u64,
+            revoked_at_ms: row.get::<_, Option<i64>>(3).map(|v| v as u64),
+        }
+    }
+}
+
+impl OperatorStore for PgVerifierStore {
+    type Error = PgStoreError;
+
+    fn register_operator(
+        &mut self,
+        operator_id: &str,
+        pubkey_pem: &str,
+        now_ms: u64,
+    ) -> Result<(), PgStoreError> {
+        // Fail-closed on an out-of-domain timestamp (see FederationStore).
+        let reg_ms = i64::try_from(now_ms).map_err(|_| PgStoreError::OutOfDomain {
+            field: "now_ms",
+            value: now_ms,
+        })?;
+        // Register or rotate: overwrite the key and CLEAR any prior revocation (a
+        // fresh key reactivates), matching the SQLite upsert.
+        self.lock().execute(
+            "INSERT INTO operators (operator_id, pubkey_pem, registered_at_ms, revoked_at_ms) \
+             VALUES ($1, $2, $3, NULL) \
+             ON CONFLICT (operator_id) DO UPDATE SET \
+                 pubkey_pem = EXCLUDED.pubkey_pem, \
+                 registered_at_ms = EXCLUDED.registered_at_ms, \
+                 revoked_at_ms = NULL",
+            &[&operator_id, &pubkey_pem, &reg_ms],
+        )?;
+        Ok(())
+    }
+
+    fn revoke_operator(&mut self, operator_id: &str, now_ms: u64) -> Result<bool, PgStoreError> {
+        let rev_ms = i64::try_from(now_ms).map_err(|_| PgStoreError::OutOfDomain {
+            field: "now_ms",
+            value: now_ms,
+        })?;
+        // Conditional update — `rows == 1` iff an ACTIVE operator transitioned to
+        // revoked; `0` if absent or already revoked.
+        let n = self.lock().execute(
+            "UPDATE operators SET revoked_at_ms = $2 \
+             WHERE operator_id = $1 AND revoked_at_ms IS NULL",
+            &[&operator_id, &rev_ms],
+        )?;
+        Ok(n > 0)
+    }
+
+    fn load_operator(&self, operator_id: &str) -> Result<Option<OperatorRecord>, PgStoreError> {
+        let row = self.lock().query_opt(
+            "SELECT operator_id, pubkey_pem, registered_at_ms, revoked_at_ms \
+             FROM operators WHERE operator_id = $1",
+            &[&operator_id],
+        )?;
+        Ok(row.as_ref().map(Self::row_to_operator))
+    }
+
+    fn load_operators(&self) -> Result<Vec<OperatorRecord>, PgStoreError> {
+        let rows = self.lock().query(
+            "SELECT operator_id, pubkey_pem, registered_at_ms, revoked_at_ms \
+             FROM operators ORDER BY operator_id",
+            &[],
+        )?;
+        Ok(rows.iter().map(Self::row_to_operator).collect())
     }
 }
