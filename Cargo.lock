@@ -2434,6 +2434,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-safety-authority"
+version = "0.1.0"
+dependencies = [
+ "kirra-core",
+ "serde",
+]
+
+[[package]]
 name = "kirra-sidecars"
 version = "0.1.0"
 dependencies = [
@@ -2498,6 +2506,7 @@ dependencies = [
  "kirra-persistence",
  "kirra-policy-types",
  "kirra-release-token",
+ "kirra-safety-authority",
  "parko-core",
  "parko-kirra",
  "proptest",

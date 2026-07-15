@@ -1,0 +1,37 @@
+# crates/kirra-safety-authority/Cargo.toml
+#
+# ADR-0035 Stage 3 (slice 3a — the leading edge) — the first extraction toward a
+# `SafetyAuthority` crate that will eventually own the posture engine + gray/black
+# DAG + actuator gate + attestation lifted off the `AppState` god-object.
+#
+# This FIRST slice moves only the PURE, AppState-free safety-DECISION surface, to
+# prove the crate/shim/MSRV/guardrail mechanics before anything touches the DAG or
+# actuator core (see the Stage-3 risk register):
+#   - `FleetNodePosture`      — the per-node posture record the DAG emits
+#   - `derive_fleet_posture`  — the pure fleet-fold (LockedOut > Degraded > Nominal)
+#   - `RssRecoveryStreak`     — the in-memory RSS recovery streak counter
+#   - `LockoutReason`         — the structured fail-closed reason codes
+#
+# `kirra-verifier` depends on this crate and RE-EXPORTS it (each original location
+# keeps a `pub use kirra_safety_authority::…` shim) so every existing
+# `crate::verifier::FleetNodePosture` / `crate::posture_engine::derive_fleet_posture`
+# / `crate::posture_engine_v2::LockoutReason` path resolves unchanged. No consumer
+# is edited in this slice.
+[package]
+name = "kirra-safety-authority"
+version = "0.1.0"
+edition = "2021"
+description = "Kirra safety-authority core (ADR-0035 Stage 3) — the pure, AppState-free posture-decision surface: FleetNodePosture, the fleet-fold, the RSS recovery streak, and the fail-closed LockoutReason codes. No service/DB deps."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# FleetPosture + NodeTrustState (the posture record's fields, and the fleet-fold's
+# lattice) live in the lean foundation crate.
+kirra-core = { path = "../kirra-core" }
+# The posture record + reason codes serialize exactly as they did in the root
+# (SSE payloads, verdict bodies) — same derives, byte-identical. The `rc` feature
+# is REQUIRED: `FleetNodePosture` interns its ids as `Arc<str>` (review P5), and
+# serde only implements `Serialize`/`Deserialize` for `Arc`/`Rc` under `rc`.
+serde = { version = "1", features = ["derive", "rc"] }
