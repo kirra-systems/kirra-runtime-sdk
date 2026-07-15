@@ -17,7 +17,7 @@
 //! - the [`OperatorStore`] contract (the per-operator Ed25519 identity registry +
 //!   revocation);
 //! - the [`PrincipalStore`] contract (the API-principal registry — scoped bearer
-//!   tokens stored as their SHA-256, `UNIQUE(token)` one-token-one-principal);
+//!   tokens stored ONLY as their SHA-256, `UNIQUE(token_sha256)` one-token-one-principal);
 //! - the [`CertPrincipalStore`] contract (the mTLS cert-principal registry — a
 //!   fingerprint-pinned client cert + optional X.509 expiry, fail-closed).
 //!
