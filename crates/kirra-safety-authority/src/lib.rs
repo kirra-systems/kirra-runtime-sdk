@@ -21,6 +21,12 @@ use std::sync::Arc;
 use kirra_core::{FleetPosture, NodeTrustState};
 use serde::{Deserialize, Serialize};
 
+// ADR-0035 Stage 3 (slice 3b): node-attestation proof verification (issue #73 —
+// INVARIANT #3's per-node Ed25519 challenge-response + PCR16 measured-boot binding).
+// Pure crypto, no AppState coupling; the root re-exports it via a `crate::attestation`
+// shim. Its own test suite (moved with it) is the behaviour-preservation proof.
+pub mod attestation;
+
 /// One node's contribution to the fleet posture: its local trust state, the
 /// posture propagated to it through the dependency DAG, and the interned ids of
 /// the dependencies that blocked it (if any).

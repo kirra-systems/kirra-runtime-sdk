@@ -1215,6 +1215,9 @@ dependencies = [
 name = "kirra-safety-authority"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "kirra-audit-hash",
  "kirra-core",
  "serde",
 ]
