@@ -962,8 +962,12 @@ impl PgVerifierStore {
             display_name: row.get(2),
             kinematic_profile: serde_json::from_str(&profile_s)
                 .unwrap_or(KinematicProfileType::Custom),
-            registered_at_ms: row.get::<_, i64>(4) as u64,
-            last_seen_ms: row.get::<_, i64>(5) as u64,
+            // Fail-CLOSED read (matches the save-path guard + `not_after_ms`): a
+            // corrupt NEGATIVE stored timestamp maps to 0 rather than wrapping to a
+            // huge u64 that would corrupt ordering/visibility. `u64::try_from` fails
+            // only for negatives → 0.
+            registered_at_ms: u64::try_from(row.get::<_, i64>(4)).unwrap_or(0),
+            last_seen_ms: u64::try_from(row.get::<_, i64>(5)).unwrap_or(0),
             metadata: serde_json::from_str(&meta_s).unwrap_or_default(),
         }
     }
@@ -1019,7 +1023,7 @@ impl FabricAssetStore for PgVerifierStore {
         let rows = self.lock().query(
             "SELECT asset_id, asset_type, display_name, kinematic_profile, registered_at_ms, \
                     last_seen_ms, metadata_json \
-             FROM fabric_assets ORDER BY registered_at_ms",
+             FROM fabric_assets ORDER BY registered_at_ms, asset_id",
             &[],
         )?;
         Ok(rows.iter().map(Self::row_to_fabric_asset).collect())
