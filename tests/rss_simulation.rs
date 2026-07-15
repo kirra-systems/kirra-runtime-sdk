@@ -59,7 +59,8 @@ fn build_app() -> (Arc<AppState>, SharedPostureCache) {
 }
 
 fn reset_rss_state(app: &Arc<AppState>) {
-    app.escalation.rss_active_violation
+    app.escalation
+        .rss_active_violation
         .store(false, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut streak) = app.escalation.rss_recovery_streak.lock() {
         streak.count = 0;
