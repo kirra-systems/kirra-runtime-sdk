@@ -1,0 +1,273 @@
+#include "r2/control/motion_controller.hpp"
+#include "r2/kinematics/ackermann.hpp"
+
+#include <algorithm>
+#include <cmath>
+
+namespace r2::control {
+namespace {
+
+[[nodiscard]] bool valid_positive(const double value) noexcept {
+    return std::isfinite(value) && value > 0.0;
+}
+
+[[nodiscard]] bool valid_nonnegative(const double value) noexcept {
+    return std::isfinite(value) && value >= 0.0 && value <= 10'000.0;
+}
+
+[[nodiscard]] bool valid_gains(const PidGains& gains) noexcept {
+    return valid_nonnegative(gains.proportional) &&
+           valid_nonnegative(gains.integral) &&
+           valid_nonnegative(gains.derivative) &&
+           valid_nonnegative(gains.feedforward) &&
+           valid_nonnegative(gains.anti_windup);
+}
+
+[[nodiscard]] double approach(const double current,
+                              const double target,
+                              const double maximum_step) noexcept {
+    return current + std::clamp(target - current, -maximum_step, maximum_step);
+}
+
+}  // namespace
+
+JerkLimitedAxis::JerkLimitedAxis(const MotionLimits& limits) noexcept : limits_(limits) {}
+
+double JerkLimitedAxis::update(const double requested_velocity_mps,
+                               const double dt_s) noexcept {
+    if (!std::isfinite(requested_velocity_mps) || !valid_positive(dt_s) ||
+        !valid_positive(limits_.maximum_speed_mps) ||
+        !valid_positive(limits_.maximum_acceleration_mps2) ||
+        !valid_positive(limits_.maximum_deceleration_mps2) ||
+        !valid_positive(limits_.maximum_jerk_mps3)) {
+        reset();
+        return 0.0;
+    }
+
+    // The absolute envelope is applied before rate shaping. A stale internal
+    // value is also clamped so a configuration reduction takes effect at once.
+    const auto target = std::clamp(requested_velocity_mps,
+                                   -limits_.maximum_speed_mps,
+                                   limits_.maximum_speed_mps);
+    velocity_mps_ = std::clamp(velocity_mps_,
+                               -limits_.maximum_speed_mps,
+                               limits_.maximum_speed_mps);
+
+    const auto requested_acceleration = (target - velocity_mps_) / dt_s;
+    const auto accelerating =
+        std::abs(target) > std::abs(velocity_mps_) &&
+        target * velocity_mps_ >= 0.0;
+    const auto acceleration_limit = accelerating
+                                        ? limits_.maximum_acceleration_mps2
+                                        : limits_.maximum_deceleration_mps2;
+    const auto bounded_acceleration =
+        std::clamp(requested_acceleration, -acceleration_limit, acceleration_limit);
+    acceleration_mps2_ = approach(
+        acceleration_mps2_,
+        bounded_acceleration,
+        limits_.maximum_jerk_mps3 * dt_s);
+
+    const auto previous_error = target - velocity_mps_;
+    const auto candidate = velocity_mps_ + acceleration_mps2_ * dt_s;
+    const auto new_error = target - candidate;
+    if (previous_error == 0.0 || previous_error * new_error <= 0.0) {
+        velocity_mps_ = target;
+        acceleration_mps2_ = 0.0;
+    } else {
+        velocity_mps_ = std::clamp(candidate,
+                                   -limits_.maximum_speed_mps,
+                                   limits_.maximum_speed_mps);
+    }
+    return velocity_mps_;
+}
+
+void JerkLimitedAxis::reset(const double velocity_mps) noexcept {
+    velocity_mps_ = std::isfinite(velocity_mps) ? velocity_mps : 0.0;
+    acceleration_mps2_ = 0.0;
+}
+
+double JerkLimitedAxis::velocity_mps() const noexcept {
+    return velocity_mps_;
+}
+
+double JerkLimitedAxis::acceleration_mps2() const noexcept {
+    return acceleration_mps2_;
+}
+
+VelocityPid::VelocityPid(const PidGains& gains) noexcept
+    : gains_(gains), gains_valid_(valid_gains(gains)) {}
+
+double VelocityPid::update(const double target_mps,
+                           const double measured_mps,
+                           const double dt_s,
+                           const double minimum_output,
+                           const double maximum_output) noexcept {
+    if (!gains_valid_ ||
+        !std::isfinite(target_mps) || !std::isfinite(measured_mps) ||
+        !valid_positive(dt_s) || !std::isfinite(minimum_output) ||
+        !std::isfinite(maximum_output) || minimum_output >= maximum_output) {
+        reset();
+        return 0.0;
+    }
+
+    const auto error = target_mps - measured_mps;
+    const auto derivative = initialized_
+                                ? -(measured_mps - previous_measurement_) / dt_s
+                                : 0.0;
+    previous_measurement_ = measured_mps;
+    initialized_ = true;
+
+    const auto unsaturated =
+        gains_.feedforward * target_mps +
+        gains_.proportional * error +
+        integral_ +
+        gains_.derivative * derivative;
+    const auto output = std::clamp(unsaturated, minimum_output, maximum_output);
+    if (!std::isfinite(output)) {
+        reset();
+        return 0.0;
+    }
+
+    const auto pushes_high_saturation = unsaturated > maximum_output && error > 0.0;
+    const auto pushes_low_saturation = unsaturated < minimum_output && error < 0.0;
+    if (!pushes_high_saturation && !pushes_low_saturation) {
+        integral_ += gains_.integral * error * dt_s;
+    } else {
+        // Tracking correction may unwind an existing integral, but must never
+        // create an opposite-sign integral merely to cancel a bounded command.
+        const auto correction = gains_.anti_windup * (output - unsaturated) * dt_s;
+        if (integral_ * correction < 0.0) {
+            integral_ = std::abs(correction) >= std::abs(integral_)
+                            ? 0.0
+                            : integral_ + correction;
+        }
+    }
+    if (!std::isfinite(integral_)) {
+        reset();
+        return 0.0;
+    }
+    return output;
+}
+
+void VelocityPid::reset() noexcept {
+    integral_ = 0.0;
+    previous_measurement_ = 0.0;
+    initialized_ = false;
+}
+
+bool VelocityPid::valid() const noexcept {
+    return gains_valid_;
+}
+
+MotionController::MotionController(const kinematics::VehicleGeometry& geometry,
+                                   const MotionLimits& limits,
+                                   const WheelPidGains& wheel_gains) noexcept
+    : geometry_(geometry),
+      limits_(limits),
+      speed_limiter_(limits),
+      left_pid_(wheel_gains.left),
+      right_pid_(wheel_gains.right),
+      configuration_valid_(
+          kinematics::valid_geometry(geometry) &&
+          valid_positive(limits.maximum_speed_mps) &&
+          limits.maximum_speed_mps <= 5.0 &&
+          valid_positive(limits.maximum_acceleration_mps2) &&
+          limits.maximum_acceleration_mps2 <= 10.0 &&
+          valid_positive(limits.maximum_deceleration_mps2) &&
+          limits.maximum_deceleration_mps2 <= 20.0 &&
+          valid_positive(limits.maximum_jerk_mps3) &&
+          limits.maximum_jerk_mps3 <= 100.0 &&
+          valid_positive(limits.maximum_steering_rate_rad_s) &&
+          limits.maximum_steering_rate_rad_s <= 20.0 &&
+          left_pid_.valid() &&
+          right_pid_.valid()) {}
+
+MotionOutput MotionController::update(const kinematics::BodyCommand& requested,
+                                      const double measured_left_mps,
+                                      const double measured_right_mps,
+                                      const double dt_s) noexcept {
+    if (!configuration_valid_) {
+        reset();
+        return {
+            0.0,
+            0.0,
+            0.0,
+            kinematics::KinematicsStatus::invalid_configuration,
+        };
+    }
+    if (!std::isfinite(requested.longitudinal_velocity_mps) ||
+        !std::isfinite(requested.yaw_rate_rad_s) ||
+        !std::isfinite(measured_left_mps) ||
+        !std::isfinite(measured_right_mps) ||
+        std::abs(measured_left_mps) > 100.0 ||
+        std::abs(measured_right_mps) > 100.0 ||
+        !valid_positive(dt_s) ||
+        !valid_positive(limits_.maximum_steering_rate_rad_s)) {
+        reset();
+        return {0.0, 0.0, 0.0, kinematics::KinematicsStatus::non_finite_input};
+    }
+    if (std::abs(requested.longitudinal_velocity_mps) <= 1.0e-3 &&
+        std::abs(requested.yaw_rate_rad_s) > 1.0e-3) {
+        reset();
+        return {
+            0.0,
+            0.0,
+            0.0,
+            kinematics::KinematicsStatus::infeasible_stationary_turn,
+        };
+    }
+
+    const auto bounded_speed =
+        speed_limiter_.update(requested.longitudinal_velocity_mps, dt_s);
+    const auto requested_curvature =
+        std::abs(requested.longitudinal_velocity_mps) > 1.0e-3
+            ? requested.yaw_rate_rad_s / requested.longitudinal_velocity_mps
+            : 0.0;
+    const auto bounded_yaw_rate = bounded_speed * requested_curvature;
+    const auto kinematic = kinematics::inverse_ackermann(
+        geometry_, {bounded_speed, bounded_yaw_rate});
+    if (kinematic.status != kinematics::KinematicsStatus::ok) {
+        reset();
+        return {0.0, 0.0, 0.0, kinematic.status};
+    }
+
+    steering_angle_rad_ = approach(
+        steering_angle_rad_,
+        kinematic.value.steering_angle_rad,
+        limits_.maximum_steering_rate_rad_s * dt_s);
+
+    const auto applied_yaw_rate =
+        bounded_speed * std::tan(steering_angle_rad_) / geometry_.wheelbase_m;
+    const auto applied_kinematic = kinematics::inverse_ackermann(
+        geometry_, {bounded_speed, applied_yaw_rate});
+    if (applied_kinematic.status != kinematics::KinematicsStatus::ok) {
+        reset();
+        return {0.0, 0.0, 0.0, applied_kinematic.status};
+    }
+
+    const auto left_command =
+        left_pid_.update(applied_kinematic.value.left_rear_velocity_mps,
+                         measured_left_mps, dt_s, -1.0, 1.0);
+    const auto right_command =
+        right_pid_.update(applied_kinematic.value.right_rear_velocity_mps,
+                          measured_right_mps, dt_s, -1.0, 1.0);
+    if (!std::isfinite(left_command) || !std::isfinite(right_command)) {
+        reset();
+        return {0.0, 0.0, 0.0, kinematics::KinematicsStatus::non_finite_input};
+    }
+    return {
+        left_command,
+        right_command,
+        steering_angle_rad_,
+        kinematics::KinematicsStatus::ok,
+    };
+}
+
+void MotionController::reset() noexcept {
+    speed_limiter_.reset();
+    left_pid_.reset();
+    right_pid_.reset();
+    steering_angle_rad_ = 0.0;
+}
+
+}  // namespace r2::control
