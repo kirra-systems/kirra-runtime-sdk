@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use kirra_verifier::verifier::{NodeTrustState, RegisteredNode};
 use kirra_verifier::verifier_store::migrations_postgres::PgMigrationError;
 use kirra_verifier::verifier_store::{
-    assert_fence_contract, assert_node_store_contract, assert_posture_engine_state_store_contract,
-    EpochFence, FenceError, NodeStore,
+    assert_federation_store_contract, assert_fence_contract, assert_node_store_contract,
+    assert_posture_engine_state_store_contract, EpochFence, FenceError, NodeStore,
 };
 use kirra_verifier_pg::{PgVerifierStore, PG_SCHEMA_VERSION};
 
@@ -178,6 +178,18 @@ fn live_pg_satisfies_the_posture_engine_state_store_contract() {
     // including the fail-closed-on-corrupt-generation invariant (the Postgres
     // backend surfaces it as `PgStoreError::CorruptGeneration`).
     assert_posture_engine_state_store_contract(&store);
+}
+
+#[test]
+fn live_pg_satisfies_the_federation_store_contract() {
+    let Some((_, _, store)) = isolated_store("federation") else {
+        return;
+    };
+    // The SAME suite SQLite and the in-memory model pass in the root crate: the
+    // controller key registry, the single-use nonce burn / has-seen, and the
+    // per-source strictly-advancing sequence gate — realized here with atomic
+    // Postgres upserts (ON CONFLICT DO NOTHING / conditional DO UPDATE).
+    assert_federation_store_contract(&store);
 }
 
 #[test]
