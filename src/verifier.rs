@@ -5,7 +5,6 @@ use crate::verifier_store::VerifierStore;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
@@ -258,27 +257,15 @@ pub struct AppState {
     /// so their callers are unchanged. All are `Arc<Atomic*>` interior-mutable, so
     /// the move is pure relocation — no `&mut self`, no ordering change.
     pub ha_fence: kirra_safety_authority::HaFenceState,
-    /// Pass B2 (S3 / #115): bounded mpsc Sender for the audit-writer task.
-    /// The deny arm of the actuator-safety-envelope middleware does
-    /// `audit_writer_tx.get().try_send(job)` to push the kinematic-violation
-    /// audit record off the verdict path. `None` (writer not installed)
-    /// causes the deny arm to fall back to the previous inline lock+save
-    /// path — production main always installs the writer at startup; tests
-    /// that don't may still exercise the verdict path. Use
-    /// `install_audit_writer` once to install.
-    pub audit_writer_tx:
-        std::sync::OnceLock<tokio::sync::mpsc::Sender<crate::audit_writer::AuditWriteJob>>,
-    /// Learning-loop capture channel (Phase 1, #190) — sibling of
-    /// `audit_writer_tx`. The actuator gateway `try_send`s a small
-    /// `CaptureRecord` here off the verdict path. `None` (writer not installed,
-    /// e.g. capture disabled or tests) → the gateway emit is a pure no-op.
-    /// Installed once via `install_capture_writer` at startup, only when
-    /// `capture::capture_enabled()`.
-    pub capture_writer_tx:
-        std::sync::OnceLock<tokio::sync::mpsc::Sender<crate::capture::CaptureRecord>>,
-    /// Monotonic per-decision sequence for the capture join key. Incremented at
-    /// the gateway emit; non-safety (capture only).
-    pub capture_decision_seq: Arc<AtomicU64>,
+    /// ADR-0035 Stage 3 (slice 3g): the off-verdict-path async writer handles —
+    /// the audit-writer + learning-capture mpsc Senders (`OnceLock`, None-fallback)
+    /// and the monotonic capture join-key sequence — grouped VERBATIM onto
+    /// `crate::writer_handles::WriterHandles` (per-field semantics UNCHANGED,
+    /// documented on the struct). Reached as `app.writers.<field>`;
+    /// `install_audit_writer` / `install_capture_writer` stay as delegators so
+    /// their callers are unchanged. Off-verdict-path async plumbing, not a
+    /// safety-decision surface — grouped in a root leaf, not kirra-safety-authority.
+    pub writers: crate::writer_handles::WriterHandles,
     /// Bounded broadcast channel for real-time posture stream subscribers.
     pub posture_tx: broadcast::Sender<PostureStreamEvent>,
     /// Transport identity enforcement config — reads from env at startup.
@@ -354,9 +341,10 @@ impl AppState {
                 mode == VerifierOperationMode::Active,
                 initial_db_epoch,
             ),
-            audit_writer_tx: std::sync::OnceLock::new(),
-            capture_writer_tx: std::sync::OnceLock::new(),
-            capture_decision_seq: Arc::new(AtomicU64::new(0)),
+            // ADR-0035 Stage 3g: the audit/capture Senders + capture join-key
+            // sequence now live on WriterHandles; identical initial state
+            // (both writers uninstalled, capture sequence at 0).
+            writers: crate::writer_handles::WriterHandles::new(),
             posture_tx,
             transport_identity: TransportIdentityConfig::from_env(),
             transport_security: TransportSecurityConfig::from_env(),
@@ -392,25 +380,24 @@ impl AppState {
     /// Install the audit-writer mpsc Sender. Called once at startup, after
     /// `audit_writer::spawn_audit_writer`. Subsequent calls are ignored
     /// (OnceLock semantics) and logged as a duplicate-install warning.
+    /// ADR-0035 Stage 3g: thin delegator to `WriterHandles::install_audit_writer`
+    /// (the Sender moved to `app.writers`); every caller is unchanged.
     pub fn install_audit_writer(
         &self,
         tx: tokio::sync::mpsc::Sender<crate::audit_writer::AuditWriteJob>,
     ) {
-        if self.audit_writer_tx.set(tx).is_err() {
-            tracing::warn!("audit writer Sender already installed — ignoring duplicate install");
-        }
+        self.writers.install_audit_writer(tx);
     }
 
     /// Install the capture-writer mpsc Sender (learning-loop Phase 1, #190).
     /// Called once at startup, after `capture::spawn_capture_writer`, and only
     /// when `capture::capture_enabled()`. Mirrors `install_audit_writer`.
+    /// ADR-0035 Stage 3g: thin delegator to `WriterHandles::install_capture_writer`.
     pub fn install_capture_writer(
         &self,
         tx: tokio::sync::mpsc::Sender<crate::capture::CaptureRecord>,
     ) {
-        if self.capture_writer_tx.set(tx).is_err() {
-            tracing::warn!("capture writer Sender already installed — ignoring duplicate install");
-        }
+        self.writers.install_capture_writer(tx);
     }
 
     /// Returns the current VerifierOperationMode derived from the atomic.

@@ -368,9 +368,10 @@ pub async fn enforce_actuator_safety_envelope(
     // not replacing it. Gated SOLELY by writer presence (mirrors the audit
     // emit): the `KIRRA_CAPTURE_ENABLED` env decides INSTALLATION at startup, so
     // default-off / tests → `get()` is `None` → pure no-op (INV-3).
-    if let Some(tx) = svc.app.capture_writer_tx.get() {
+    if let Some(tx) = svc.app.writers.capture_writer_tx.get() {
         let rec = crate::capture::record_from_verdict(
             svc.app
+                .writers
                 .capture_decision_seq
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             now,
@@ -542,7 +543,7 @@ pub async fn enforce_actuator_safety_envelope(
                 reason: "Proposed vehicle command violates non-physical invariants",
             };
 
-            if let Some(tx) = svc.app.audit_writer_tx.get() {
+            if let Some(tx) = svc.app.writers.audit_writer_tx.get() {
                 match tx.try_send(job) {
                     Ok(()) => {}
                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
