@@ -37,3 +37,7 @@ postgres = "0.19"
 # The `nodes.status_json` column round-trips `NodeTrustState` exactly as the
 # SQLite backend does (same serde encoding, same Unknown fallback on corrupt).
 serde_json = "1"
+# The FabricAssetStore seam names `FabricAsset` directly (its enum fields +
+# metadata map are JSON-serialized into TEXT columns, exactly as SQLite). Already
+# transitive via kirra-verifier; declared direct so the impl can name the type.
+kirra-fabric-types = { path = "../kirra-fabric-types" }

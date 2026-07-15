@@ -983,6 +983,7 @@ dependencies = [
 name = "kirra-verifier-pg"
 version = "0.1.0"
 dependencies = [
+ "kirra-fabric-types",
  "kirra-verifier",
  "postgres",
  "serde_json",

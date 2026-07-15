@@ -19,10 +19,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use kirra_verifier::verifier::{NodeTrustState, RegisteredNode};
 use kirra_verifier::verifier_store::migrations_postgres::PgMigrationError;
 use kirra_verifier::verifier_store::{
-    assert_cert_principal_store_contract, assert_federation_store_contract, assert_fence_contract,
-    assert_node_store_contract, assert_operator_store_contract,
-    assert_posture_engine_state_store_contract, assert_principal_store_contract, EpochFence,
-    FenceError, NodeStore,
+    assert_cert_principal_store_contract, assert_fabric_asset_store_contract,
+    assert_federation_store_contract, assert_fence_contract, assert_node_store_contract,
+    assert_operator_store_contract, assert_posture_engine_state_store_contract,
+    assert_principal_store_contract, EpochFence, FenceError, NodeStore,
 };
 use kirra_verifier_pg::{PgVerifierStore, PG_SCHEMA_VERSION};
 
@@ -226,6 +226,16 @@ fn live_pg_satisfies_the_cert_principal_store_contract() {
     // expiry (a `not_after_ms > i64::MAX` is refused, a corrupt negative reads as
     // expired-at-epoch) — held identical across all three backends.
     assert_cert_principal_store_contract(&mut store);
+}
+
+#[test]
+fn live_pg_satisfies_the_fabric_asset_store_contract() {
+    let Some((_, _, store)) = isolated_store("fabricassets") else {
+        return;
+    };
+    // Upsert-by-id + ordered load, with the enum fields + metadata map JSON-round-
+    // tripped through TEXT columns (same encoding + lenient decode as SQLite).
+    assert_fabric_asset_store_contract(&store);
 }
 
 #[test]

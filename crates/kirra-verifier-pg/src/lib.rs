@@ -1,6 +1,6 @@
 //! EP-10 (MGA G-9) — the **live Postgres backend** for the verifier storage seams.
 //!
-//! The root crate defines eight backend seams and proves each against SQLite +
+//! The root crate defines nine backend seams and proves each against SQLite +
 //! an in-memory model:
 //!
 //! - the schema-migration engine (`verifier_store::migrations::run_migrations_generic`)
@@ -19,7 +19,9 @@
 //! - the [`PrincipalStore`] contract (the API-principal registry — scoped bearer
 //!   tokens stored ONLY as their SHA-256, `UNIQUE(token_sha256)` one-token-one-principal);
 //! - the [`CertPrincipalStore`] contract (the mTLS cert-principal registry — a
-//!   fingerprint-pinned client cert + optional X.509 expiry, fail-closed).
+//!   fingerprint-pinned client cert + optional X.509 expiry, fail-closed);
+//! - the [`FabricAssetStore`] contract (the fabric asset registry — id, type,
+//!   kinematic profile, metadata).
 //!
 //! This crate is the promised integrator binding: [`LivePgExecutor`] is the
 //! "~10-line adapter" the seam documentation describes (execute →
@@ -45,19 +47,21 @@
 
 use std::sync::Mutex;
 
+use kirra_fabric_types::asset::{AssetType, FabricAsset, KinematicProfileType};
 use kirra_verifier::verifier::{NodeTrustState, RegisteredNode};
 use kirra_verifier::verifier_store::migrations_postgres::{
     PgExecutor, PgMigration, PgMigrationError, PostgresBackend,
 };
 use kirra_verifier::verifier_store::{
-    ApiPrincipalRecord, CertPrincipalRecord, CertPrincipalStore, EpochFence, FederationStore,
-    FenceError, NodeStore, OperatorRecord, OperatorStore, PostureEngineStateStore, PrincipalStore,
+    ApiPrincipalRecord, CertPrincipalRecord, CertPrincipalStore, EpochFence, FabricAssetStore,
+    FederationStore, FenceError, NodeStore, OperatorRecord, OperatorStore, PostureEngineStateStore,
+    PrincipalStore,
 };
 
 /// The Postgres schema version THIS binary supports (mirrors the SQLite
 /// `SCHEMA_VERSION` discipline: a newer stamp in the database is refused
 /// fail-closed by the shared engine).
-pub const PG_SCHEMA_VERSION: i64 = 7;
+pub const PG_SCHEMA_VERSION: i64 = 8;
 
 /// Baseline (v1) DDL — idempotent, applied on every open BEFORE the versioned
 /// steps run (v1 is the engine's baseline; steps are v ≥ 2). The two tables
@@ -162,6 +166,21 @@ const PG_MIGRATIONS: &[PgMigration] = &[
                   created_at_ms BIGINT NOT NULL, \
                   revoked_at_ms BIGINT, \
                   not_after_ms  BIGINT \
+              )",
+    },
+    // v8 — the fabric asset registry (the FabricAssetStore seam): the enum fields
+    // (`asset_type`, `kinematic_profile`) and the `metadata` map are JSON-serialized
+    // into TEXT columns, exactly as the SQLite backend.
+    PgMigration {
+        version: 8,
+        sql: "CREATE TABLE IF NOT EXISTS fabric_assets ( \
+                  asset_id          TEXT PRIMARY KEY, \
+                  asset_type        TEXT NOT NULL, \
+                  display_name      TEXT NOT NULL, \
+                  kinematic_profile TEXT NOT NULL, \
+                  registered_at_ms  BIGINT NOT NULL, \
+                  last_seen_ms      BIGINT NOT NULL, \
+                  metadata_json     TEXT NOT NULL DEFAULT '{}' \
               )",
     },
 ];
@@ -926,5 +945,87 @@ impl CertPrincipalStore for PgVerifierStore {
             &[],
         )?;
         Ok(rows.iter().map(Self::row_to_cert_principal).collect())
+    }
+}
+
+impl PgVerifierStore {
+    fn row_to_fabric_asset(row: &postgres::Row) -> FabricAsset {
+        // Same lenient decode as the SQLite backend: an undecodable enum falls back
+        // (asset_type → Unknown, profile → Custom), a bad metadata blob → empty map —
+        // never a panic or a skipped row.
+        let asset_type_s: String = row.get(1);
+        let profile_s: String = row.get(3);
+        let meta_s: String = row.get(6);
+        FabricAsset {
+            asset_id: row.get(0),
+            asset_type: serde_json::from_str(&asset_type_s).unwrap_or(AssetType::Unknown),
+            display_name: row.get(2),
+            kinematic_profile: serde_json::from_str(&profile_s)
+                .unwrap_or(KinematicProfileType::Custom),
+            // Fail-CLOSED read (matches the save-path guard + `not_after_ms`): a
+            // corrupt NEGATIVE stored timestamp maps to 0 rather than wrapping to a
+            // huge u64 that would corrupt ordering/visibility. `u64::try_from` fails
+            // only for negatives → 0.
+            registered_at_ms: u64::try_from(row.get::<_, i64>(4)).unwrap_or(0),
+            last_seen_ms: u64::try_from(row.get::<_, i64>(5)).unwrap_or(0),
+            metadata: serde_json::from_str(&meta_s).unwrap_or_default(),
+        }
+    }
+}
+
+impl FabricAssetStore for PgVerifierStore {
+    type Error = PgStoreError;
+
+    fn save_fabric_asset(&self, asset: &FabricAsset) -> Result<(), PgStoreError> {
+        // Fail-closed on out-of-domain timestamps (the #936 lesson) rather than
+        // wrapping a u64 to a negative BIGINT.
+        let reg_ms =
+            i64::try_from(asset.registered_at_ms).map_err(|_| PgStoreError::OutOfDomain {
+                field: "registered_at_ms",
+                value: asset.registered_at_ms,
+            })?;
+        let last_ms = i64::try_from(asset.last_seen_ms).map_err(|_| PgStoreError::OutOfDomain {
+            field: "last_seen_ms",
+            value: asset.last_seen_ms,
+        })?;
+        // The enum fields + metadata map are JSON-serialized into TEXT, exactly as
+        // the SQLite backend (same encoding → same bytes round-trip).
+        let asset_type = serde_json::to_string(&asset.asset_type).unwrap_or_default();
+        let profile = serde_json::to_string(&asset.kinematic_profile).unwrap_or_default();
+        let metadata = serde_json::to_string(&asset.metadata).unwrap_or_else(|_| "{}".to_string());
+        // Upsert by asset_id (SQLite: INSERT OR REPLACE).
+        self.lock().execute(
+            "INSERT INTO fabric_assets \
+                 (asset_id, asset_type, display_name, kinematic_profile, registered_at_ms, \
+                  last_seen_ms, metadata_json) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             ON CONFLICT (asset_id) DO UPDATE SET \
+                 asset_type        = EXCLUDED.asset_type, \
+                 display_name      = EXCLUDED.display_name, \
+                 kinematic_profile = EXCLUDED.kinematic_profile, \
+                 registered_at_ms  = EXCLUDED.registered_at_ms, \
+                 last_seen_ms      = EXCLUDED.last_seen_ms, \
+                 metadata_json     = EXCLUDED.metadata_json",
+            &[
+                &asset.asset_id,
+                &asset_type,
+                &asset.display_name,
+                &profile,
+                &reg_ms,
+                &last_ms,
+                &metadata,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn load_fabric_assets(&self) -> Result<Vec<FabricAsset>, PgStoreError> {
+        let rows = self.lock().query(
+            "SELECT asset_id, asset_type, display_name, kinematic_profile, registered_at_ms, \
+                    last_seen_ms, metadata_json \
+             FROM fabric_assets ORDER BY registered_at_ms, asset_id",
+            &[],
+        )?;
+        Ok(rows.iter().map(Self::row_to_fabric_asset).collect())
     }
 }
