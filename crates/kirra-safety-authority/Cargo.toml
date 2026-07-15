@@ -28,8 +28,11 @@ publish = false # proprietary (see COPYRIGHT) — not for crates.io
 
 [dependencies]
 # FleetPosture + NodeTrustState (the posture record's fields, and the fleet-fold's
-# lattice) live in the lean foundation crate.
+# lattice) + RegisteredNode (the DAG's node registry value) live in the foundation.
 kirra-core = { path = "../kirra-core" }
+# The gray/black DAG traversal (slice 3d) reads the node/edge maps directly; they
+# are `DashMap`s on `AppState`, passed by reference into the pure traversal.
+dashmap = "6"
 # The posture record + reason codes serialize exactly as they did in the root
 # (SSE payloads, verdict bodies) — same derives, byte-identical. The `rc` feature
 # is REQUIRED: `FleetNodePosture` interns its ids as `Arc<str>` (review P5), and

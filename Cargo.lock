@@ -2438,6 +2438,7 @@ name = "kirra-safety-authority"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "dashmap",
  "ed25519-dalek",
  "hex",
  "hmac 0.13.0",

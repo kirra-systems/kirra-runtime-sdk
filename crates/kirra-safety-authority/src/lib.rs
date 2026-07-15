@@ -33,6 +33,12 @@ use serde::{Deserialize, Serialize};
 // shim. Its own test suite (moved with it) is the behaviour-preservation proof.
 pub mod attestation;
 
+// ADR-0035 Stage 3 (slice 3d): the gray/black two-set dependency-DAG posture
+// traversal (INVARIANT #4), moved VERBATIM out of `AppState`. It reads only the
+// node/edge maps (passed as params), so `AppState` keeps its `calculate_*` methods
+// as thin delegators — every caller unchanged, the algorithm never mocked.
+pub mod dag;
+
 /// One node's contribution to the fleet posture: its local trust state, the
 /// posture propagated to it through the dependency DAG, and the interned ids of
 /// the dependencies that blocked it (if any).
