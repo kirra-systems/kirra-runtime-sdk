@@ -410,6 +410,27 @@ void test_safety_configuration_invalid() {
     // configuration_invalid requires a reset + POST to clear — physical ack alone
     // is insufficient (matches the requires_reset_and_post policy).
     CHECK(!mgr.clear_recoverable_faults(true));
+
+    // The configuration_invalid latch must persist across a subsequent fully-healthy
+    // evaluation — active faults clear, but the latched fault still requires reset+POST.
+    const r2::safety::SafetyInputs healthy = [] {
+        r2::safety::SafetyInputs in{};
+        in.command_fresh = true;
+        in.battery_voltage_safe = true;
+        in.battery_current_safe = true;
+        in.thermal_safe = true;
+        in.encoder_plausible = true;
+        in.steering_plausible = true;
+        in.imu_sane = true;
+        in.control_deadline_met = true;
+        in.communication_healthy = true;
+        in.supply_stable = true;
+        in.watchdog_healthy = true;
+        in.configuration_valid = true;
+        return in;
+    }();
+    mgr.evaluate(healthy);
+    CHECK(!mgr.clear_recoverable_faults(true));
 }
 
 void test_configuration_rollback() {
