@@ -61,32 +61,78 @@ pub struct RssRecoveryStreak {
 
 /// ADR-0035 Stage 3 (slice 3c) — the fleet-escalation / hysteresis state the
 /// posture engine, supervisor, and telemetry watchdog read to escalate or force
-/// posture, lifted verbatim off the `AppState` god-object into the safety-authority
-/// crate. Every field is `Arc<…>` interior-mutable (shared-ref access only — no
-/// `&mut self`), so `AppState` embeds this as one field and callers reach a flag as
+/// posture, lifted VERBATIM off the `AppState` god-object into the safety-authority
+/// crate (per-field semantics preserved on each field below). Every field is
+/// `Arc<…>` interior-mutable (shared-ref access only — no `&mut self`), so
+/// `AppState` embeds this as one field and callers reach a flag as
 /// `app.escalation.<field>` (the field-façade step of the decomposition).
-///
-/// Field semantics are UNCHANGED from their prior `AppState` definitions:
-/// - `rss_active_violation` / `flood_condition_active` — Nominal→Degraded escalators;
-/// - `supervisor_tripped` — sticky, forces LockedOut when a critical loop wedges;
-/// - `rss_recovery_streak` — clears an active RSS violation;
-/// - `frame_degraded_active` (escalator) / `frame_lockout_active` (sticky) +
-///   `frame_recovery_streak` / `frame_untrusted_streak` (S-FI1d localization integrity);
-/// - `divergence_degraded_active` (escalator) / `divergence_lockout_active` (sticky) +
-///   `divergence_recovery_streak` (S-DG1 diverse-governor disagreement);
-/// - `av_registry_dirty` — H-3 watchdog watched-node-list refresh flag.
 pub struct EscalationState {
+    /// True while an RSS safe-distance violation is active (recalculate elevates to Degraded).
     pub rss_active_violation: Arc<std::sync::atomic::AtomicBool>,
+    /// #99 — true while flood conditions are present. Read by the posture engine
+    /// to escalate Nominal → Degraded (SG4 operational layer), exactly like
+    /// `rss_active_violation`. The SETTER (a flood detector, or a bridge from
+    /// sustained #98 WATER_UNTRAVERSABLE vetoes) is a deferred cross-subsystem
+    /// follow-up; this flag is read-only in the current code (defaults false).
     pub flood_condition_active: Arc<std::sync::atomic::AtomicBool>,
+    /// C2 supervisor trip flag (review finding C2). Set by `supervisor::spawn_supervised`
+    /// when a CRITICAL background safety loop (the telemetry watchdog, the posture
+    /// engine worker, the HA heartbeat writer / promotion monitor) crashes past its
+    /// restart budget. The posture engine reads it and forces `FleetPosture::LockedOut`
+    /// unconditionally (highest priority, overriding the DAG), so a wedged safety loop
+    /// fails the whole fleet closed instead of silently leaving actuators live. Sticky:
+    /// once tripped it stays tripped until process restart (a recovered loop within the
+    /// restart window clears the supervisor's local counter but NOT this flag — recovery
+    /// from a forced fleet lockout is an explicit human/HA action, matching LockedOut's
+    /// human-reset semantics). Defaults false.
     pub supervisor_tripped: Arc<std::sync::atomic::AtomicBool>,
+    /// Recovery streak for clearing an active RSS violation.
     pub rss_recovery_streak: Arc<std::sync::Mutex<RssRecoveryStreak>>,
+    /// S-FI1d — true while frame/localization integrity is below full `Trusted`
+    /// (a `Degraded` *or* `Untrusted` verdict). Read by the posture engine to
+    /// escalate Nominal → Degraded, exactly like `rss_active_violation`. Set
+    /// IMMEDIATELY on the first sub-trusted tick (fail-closed-immediately, no
+    /// grace period); cleared by an `AV_RECOVERY_STREAK_THRESHOLD`-long run of
+    /// `Trusted` ticks (auto-recovery). Defaults false. (AOU-LOCALIZATION-001.)
     pub frame_degraded_active: Arc<std::sync::atomic::AtomicBool>,
+    /// S-FI1d — true once frame integrity has been `Untrusted` for a SUSTAINED
+    /// run (an inverted streak): a transient localization loss is the
+    /// frame-trust-minimal Degraded MRC (decel-to-stop, auto-recovering), but a
+    /// sustained / repeated fault is a genuine failure (sensor death, possible
+    /// GNSS spoofing) and escalates to `LockedOut`. STICKY like
+    /// `supervisor_tripped` — recovery is an explicit human/HA reset, matching
+    /// LockedOut semantics. Defaults false.
     pub frame_lockout_active: Arc<std::sync::atomic::AtomicBool>,
+    /// Recovery streak for clearing `frame_degraded_active` (consecutive
+    /// `Trusted` ticks within the recovery window).
     pub frame_recovery_streak: Arc<std::sync::Mutex<RssRecoveryStreak>>,
+    /// Inverted streak counting consecutive `Untrusted` ticks toward the
+    /// `frame_lockout_active` escalation (sustained-fault detection).
     pub frame_untrusted_streak: Arc<std::sync::Mutex<RssRecoveryStreak>>,
+    /// S-DG1 — a posture-significant governor divergence is ACTIVE (the parko
+    /// comparator's leaky-bucket accumulator crossed its significance
+    /// threshold): two independently-derived safety governors disagree and we
+    /// cannot tell which is wrong. Escalates Nominal → Degraded
+    /// (decel-to-stop MRC) immediately; auto-recovers via the recovery
+    /// streak once agreeing ticks resume. Defaults false (inert until the
+    /// comparator's `PostureSignalSink` is wired).
     pub divergence_degraded_active: Arc<std::sync::atomic::AtomicBool>,
+    /// S-DG1 — the comparator's own sustained-divergence escalation
+    /// (`escalated_to_lockout`) was reported: a persistent disagreement is a
+    /// genuine fault (a real governor bug or corrupted input), not a
+    /// transient. STICKY like `supervisor_tripped` / `frame_lockout_active` —
+    /// recovery is an explicit human/HA reset. Defaults false.
     pub divergence_lockout_active: Arc<std::sync::atomic::AtomicBool>,
+    /// Recovery streak for clearing `divergence_degraded_active` (consecutive
+    /// agreeing ticks within the recovery window).
     pub divergence_recovery_streak: Arc<std::sync::Mutex<RssRecoveryStreak>>,
+    /// H-3 — set when an AV subsystem is (de)registered, so the telemetry watchdog
+    /// refreshes its watched-node list on the NEXT sweep instead of waiting up to
+    /// `AV_WATCHDOG_NODE_REFRESH_MS` (30 s). Without this a node registered just
+    /// after a refresh was unmonitored for ~28 s — a fail-OPEN window where a
+    /// freshly-registered sensor could go silent/faulty undetected, breaking the
+    /// SG-003 detection-latency bound (TIMEOUT + one sweep). The watchdog swaps it
+    /// back to false when it refreshes. Defaults false.
     pub av_registry_dirty: Arc<std::sync::atomic::AtomicBool>,
 }
 
