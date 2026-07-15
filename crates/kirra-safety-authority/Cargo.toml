@@ -35,3 +35,21 @@ kirra-core = { path = "../kirra-core" }
 # is REQUIRED: `FleetNodePosture` interns its ids as `Arc<str>` (review P5), and
 # serde only implements `Serialize`/`Deserialize` for `Arc`/`Rc` under `rc`.
 serde = { version = "1", features = ["derive", "rc"] }
+
+# --- Stage 3b: the attestation module's crypto (issue #73) ---
+# Ed25519 verify + SPKI/DER public-key parsing (`pkcs8` feature) — the vetted
+# primitive the whole repo's attestation/federation path uses.
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
+# hex-decoding the presented signature proof.
+hex = "0.4"
+# `verifying_key_id` + `parse_ed25519_public_pem` — the shared key-id/PEM helpers
+# already extracted to the audit-hash leaf crate (slice 2).
+kirra-audit-hash = { path = "../kirra-audit-hash" }
+
+[dev-dependencies]
+# The attestation test suite: SPKI round-trip (base64), the legacy-HMAC-proof
+# rejection test (hmac/sha2), and the property tests (proptest).
+base64 = "0.22"
+hmac = "0.13"
+sha2 = "0.11"
+proptest = "1"

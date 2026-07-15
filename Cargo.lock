@@ -2437,8 +2437,15 @@ dependencies = [
 name = "kirra-safety-authority"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "hex",
+ "hmac 0.13.0",
+ "kirra-audit-hash",
  "kirra-core",
+ "proptest",
  "serde",
+ "sha2 0.11.0",
 ]
 
 [[package]]
