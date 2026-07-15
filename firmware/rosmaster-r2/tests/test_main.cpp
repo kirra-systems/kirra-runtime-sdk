@@ -278,8 +278,25 @@ void test_safety() {
     CHECK(manager.activate());
     CHECK(manager.motion_permitted());
 
-    const r2::safety::SafetyInputs healthy{
-        false, true, true, true, true, true, true, true, false, true, true, true, true, false};
+    // Named field assignment (not a positional aggregate list): value-init zeroes
+    // every field to the fault-asserting `false`, then only the healthy signals are
+    // set true by name. Resilient to future SafetyInputs field add/reorder — a new
+    // field defaults to the safe value instead of silently shifting the columns.
+    const r2::safety::SafetyInputs healthy = [] {
+        r2::safety::SafetyInputs in{};
+        in.command_fresh = true;
+        in.battery_voltage_safe = true;
+        in.battery_current_safe = true;
+        in.thermal_safe = true;
+        in.encoder_plausible = true;
+        in.steering_plausible = true;
+        in.imu_sane = true;
+        in.control_deadline_met = true;
+        in.communication_healthy = true;
+        in.supply_stable = true;
+        in.watchdog_healthy = true;
+        return in;
+    }();
     manager.evaluate(healthy);
     CHECK(manager.motion_permitted());
 
