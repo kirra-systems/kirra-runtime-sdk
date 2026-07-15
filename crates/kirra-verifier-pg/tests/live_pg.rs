@@ -19,9 +19,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use kirra_verifier::verifier::{NodeTrustState, RegisteredNode};
 use kirra_verifier::verifier_store::migrations_postgres::PgMigrationError;
 use kirra_verifier::verifier_store::{
-    assert_cert_principal_store_contract, assert_fabric_asset_store_contract,
-    assert_federation_store_contract, assert_fence_contract, assert_node_store_contract,
-    assert_operator_store_contract, assert_ota_campaign_store_contract,
+    assert_av_subsystem_store_contract, assert_cert_principal_store_contract,
+    assert_fabric_asset_store_contract, assert_federation_store_contract, assert_fence_contract,
+    assert_node_store_contract, assert_operator_store_contract, assert_ota_campaign_store_contract,
     assert_posture_engine_state_store_contract, assert_principal_store_contract, EpochFence,
     FenceError, NodeStore,
 };
@@ -250,6 +250,19 @@ fn live_pg_satisfies_the_ota_campaign_store_contract() {
     // model run. Campaign cohorts/stages JSON-round-trip through TEXT; `attested`
     // round-trips through a native BOOLEAN; the v9 migration installs both tables.
     assert_ota_campaign_store_contract(&mut store);
+}
+
+#[test]
+fn live_pg_satisfies_the_av_subsystem_store_contract() {
+    let Some((_, _, store)) = isolated_store("avsubsystem") else {
+        return;
+    };
+    // Register upsert (re-register resets the streak), floor/telemetry reads, the
+    // recovery-streak lifecycle (increment stamps start only on the 0→1 edge via the
+    // same CASE, both resets, the preserving reset keeps telemetry), and the
+    // increment-on-absent fail-closed error — the SAME contract SQLite + the
+    // in-memory model run. The v10 migration installs `av_subsystem_meta`.
+    assert_av_subsystem_store_contract(&store);
 }
 
 #[test]
