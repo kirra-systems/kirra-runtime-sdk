@@ -336,7 +336,7 @@ pub(crate) async fn require_client_identity(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let cfg = &svc.app.transport_identity;
+    let cfg = &svc.app.transport.identity;
     if !validate_client_identity_headers(
         cfg.trusted_ingress_mode,
         &cfg.client_id_header,
@@ -358,7 +358,7 @@ pub(crate) async fn require_secure_transport(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let cfg = &svc.app.transport_security;
+    let cfg = &svc.app.transport.security;
     if !request_transport_is_secure(
         cfg.require_secure_transport,
         &cfg.forwarded_proto_header,
@@ -426,7 +426,7 @@ mod g7_transport_security_router_tests {
     fn state_requiring_secure_transport(require: bool) -> Arc<ServiceState> {
         let store = VerifierStore::new(":memory:").expect("in-memory store");
         let mut app = AppState::new(store, VerifierOperationMode::Active);
-        app.transport_security = TransportSecurityConfig {
+        app.transport.security = TransportSecurityConfig {
             require_secure_transport: require,
             forwarded_proto_header: "x-forwarded-proto".to_string(),
         };

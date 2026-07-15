@@ -229,6 +229,33 @@ pub fn request_transport_is_secure(
     }
 }
 
+/// ADR-0035 Stage 3 (slice 3h) — the two transport-layer enforcement configs
+/// grouped into one `AppState` field façade (`app.transport`), the same shape as
+/// the earlier slices. Both are read from env at startup and consulted by the
+/// request middleware (`identity` gates the `x-kirra-client-id` header; `security`
+/// fail-closes a request not asserted to have arrived over TLS). A root-crate
+/// config grouping (not a safety-decision surface). Per-field semantics UNCHANGED.
+#[derive(Debug, Clone)]
+pub struct TransportConfig {
+    /// Transport identity enforcement config — reads from env at startup.
+    pub identity: TransportIdentityConfig,
+    /// Transport SECURITY (TLS-required) enforcement config (#G7) — reads from env
+    /// at startup. When enabled, the `require_secure_transport` middleware
+    /// fail-closes a request not asserted to have arrived over TLS.
+    pub security: TransportSecurityConfig,
+}
+
+impl TransportConfig {
+    /// Read both transport configs from env — byte-identical to the prior two
+    /// inline `*::from_env()` calls in `AppState::new`.
+    pub fn from_env() -> Self {
+        Self {
+            identity: TransportIdentityConfig::from_env(),
+            security: TransportSecurityConfig::from_env(),
+        }
+    }
+}
+
 // ADR-0035 Stage 3 (slice 3a): `RssRecoveryStreak` moved to
 // `kirra-safety-authority`; re-exported so `crate::verifier::RssRecoveryStreak`
 // (the `AppState.escalation.rss_recovery_streak` field type) resolves unchanged.
@@ -268,12 +295,11 @@ pub struct AppState {
     pub writers: crate::writer_handles::WriterHandles,
     /// Bounded broadcast channel for real-time posture stream subscribers.
     pub posture_tx: broadcast::Sender<PostureStreamEvent>,
-    /// Transport identity enforcement config — reads from env at startup.
-    pub transport_identity: TransportIdentityConfig,
-    /// Transport SECURITY (TLS-required) enforcement config (#G7) — reads from env
-    /// at startup. When enabled, the `require_secure_transport` middleware
-    /// fail-closes a request not asserted to have arrived over TLS.
-    pub transport_security: TransportSecurityConfig,
+    /// ADR-0035 Stage 3 (slice 3h): the two transport-layer enforcement configs
+    /// (`identity` + `security`) grouped onto `TransportConfig`. Reached as
+    /// `app.transport.identity` / `app.transport.security`; per-field semantics
+    /// UNCHANGED (documented on the struct). A root-crate config grouping.
+    pub transport: TransportConfig,
     /// ADR-0035 Stage 3 (slice 3c): the fleet-escalation / hysteresis state —
     /// the RSS / flood / supervisor-trip / frame-integrity (S-FI1d) / governor-
     /// divergence (S-DG1) flags + their recovery/untrusted streaks, plus the H-3
@@ -346,8 +372,9 @@ impl AppState {
             // (both writers uninstalled, capture sequence at 0).
             writers: crate::writer_handles::WriterHandles::new(),
             posture_tx,
-            transport_identity: TransportIdentityConfig::from_env(),
-            transport_security: TransportSecurityConfig::from_env(),
+            // ADR-0035 Stage 3h: the two transport configs now live on
+            // TransportConfig; identical initial state (both read from env).
+            transport: TransportConfig::from_env(),
             // ADR-0035 Stage 3c: the escalation/hysteresis flags + streaks (incl.
             // av_registry_dirty) now live on EscalationState; identical initial state.
             escalation: kirra_safety_authority::EscalationState::new(),
