@@ -53,6 +53,10 @@ struct SafetyInputs {
     // Fault::watchdog_precursor — the "fail-closed on watchdog" safety guarantee.
     bool watchdog_healthy;
     bool motion_stopped;
+    // Active platform configuration passes all validity checks (true = valid). A
+    // false raises Fault::configuration_invalid — the "fail-closed on invalid
+    // configuration" safety guarantee.
+    bool configuration_valid;
 };
 
 class SafetyManager {

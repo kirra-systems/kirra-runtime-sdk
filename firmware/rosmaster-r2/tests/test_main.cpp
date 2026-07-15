@@ -295,6 +295,7 @@ void test_safety() {
         in.communication_healthy = true;
         in.supply_stable = true;
         in.watchdog_healthy = true;
+        in.configuration_valid = true;
         return in;
     }();
     manager.evaluate(healthy);
@@ -348,6 +349,23 @@ void test_safety() {
     watchdog_mgr.evaluate(watchdog);
     CHECK(watchdog_mgr.state() == r2::safety::SafetyState::fault_latched);
     CHECK(watchdog_mgr.bridge_must_be_disabled());
+
+    // H5: configuration_invalid is wired and fails closed — latches the system,
+    //     disables the bridge, blocks arming, and requires reset+POST to clear.
+    r2::safety::SafetyManager config_mgr{};
+    config_mgr.begin_self_test();
+    config_mgr.complete_self_test(true);
+    auto invalid_config = healthy;
+    invalid_config.configuration_valid = false;
+    config_mgr.evaluate(invalid_config);
+    CHECK(config_mgr.state() == r2::safety::SafetyState::fault_latched);
+    CHECK((config_mgr.latched_faults() & r2::safety::bit(r2::safety::Fault::configuration_invalid)) != 0U);
+    CHECK(config_mgr.bridge_must_be_disabled());
+    CHECK(!config_mgr.arm());
+    // configuration_invalid is in requires_reset_and_post — clear_recoverable_faults
+    // must refuse even with physical acknowledgement and no active faults.
+    config_mgr.evaluate(healthy);
+    CHECK(!config_mgr.clear_recoverable_faults(true));
 
     r2::safety::SafetyManager illegal{};
     CHECK(!illegal.disarm());

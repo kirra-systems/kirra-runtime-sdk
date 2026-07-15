@@ -107,6 +107,9 @@ void SafetyManager::evaluate(const SafetyInputs& inputs) noexcept {
     if (!inputs.communication_healthy) {
         raise(Fault::communication_corrupt, false);
     }
+    if (!inputs.configuration_valid) {
+        raise(Fault::configuration_invalid, true);
+    }
 
     if (latched_faults_ != 0U) {
         state_ = SafetyState::fault_latched;
