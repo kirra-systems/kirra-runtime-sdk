@@ -59,6 +59,7 @@ private:
     double integral_{0.0};
     double previous_measurement_{0.0};
     bool initialized_{false};
+    bool gains_valid_{false};
 };
 
 struct MotionOutput {

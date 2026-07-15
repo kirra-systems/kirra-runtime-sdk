@@ -1,5 +1,9 @@
 # R2 Control Protocol (R2CP) v1
 
+> **Specification status:** framing/CRC/sequence core is implemented and
+> host-tested. Payload codecs, authorization, session handshake, reliability and
+> target carrier are design requirements, not shipped MCU capabilities.
+
 ## Scope
 
 R2CP is the bounded point-to-point protocol between the Linux hardware bridge
@@ -8,7 +12,8 @@ UART is the first carrier; CAN-FD may carry the same logical messages later.
 
 ## Carrier
 
-- UART: 8-N-1, DMA RX/TX, validated ≥921600 baud for the latency target.
+- UART candidate: 8-N-1, DMA RX/TX, initially ≥921600 baud; target validation is
+  required before claiming the latency target.
 - Frame: COBS-encoded canonical bytes followed by `0x00`.
 - Maximum decoded frame: 216 bytes; maximum payload: 192 bytes.
 - Multi-byte integers: little-endian; IEEE-754 binary32 is allowed only in
@@ -55,6 +60,13 @@ HKDF-SHA-256. Keys never traverse R2CP. Commands without a valid tag are not
 liveness events. Crypto requires a reviewed library and on-target WCET tests;
 the framing layer intentionally contains no home-grown crypto.
 
+Link authentication is not Kirra authorization. The production target also
+binds every motion payload to Kirra's exact enforced command: either the MCU
+verifies the Kirra release token, or a dedicated Kirra signer emits an
+authorization MAC under a per-device key unavailable to the bridge. Until that
+path is target-benchmarked, ADR-0033's privileged Linux token-verifying consumer,
+serial ACL and startup sentinel are the explicit interim trust boundary.
+
 ## Message catalogue
 
 | ID | Name | Direction | Reliability |
@@ -64,6 +76,10 @@ the framing layer intentionally contains no home-grown crypto.
 | `0x03/04` | TIME_SYNC_REQUEST/RESPONSE | SBC↔MCU | correlated |
 | `0x10` | MOTION_COMMAND | SBC→MCU | latest-value + ACK |
 | `0x11` | COMMAND_ACK | MCU→SBC | best effort |
+| `0x12` | ARM | SBC→MCU | authenticated request/response |
+| `0x13` | ACTIVATE | SBC→MCU | authenticated request/response |
+| `0x14` | DISARM | SBC→MCU | authenticated request/response |
+| `0x15` | ACKNOWLEDGE_FAULT | SBC→MCU | authenticated + physical acknowledgement |
 | `0x20` | ROBOT_STATE | MCU→SBC | best effort |
 | `0x21` | ODOMETRY | MCU→SBC | best effort |
 | `0x22` | IMU | MCU→SBC | best effort |
@@ -105,6 +121,14 @@ auth_tag[16]`.
 `valid_for_us` is bounded to 20–1000 ms by configuration. MCU reception time and
 source-time mapping both must show freshness. `mode` is STOP, TRACK or HOLD_ZERO;
 there is no raw PWM or servo-pulse command in normal operation.
+Command acceleration and jerk may only tighten the calibrated MCU envelope:
+`effective = min(valid_positive_command_limit, calibrated_hard_limit)`. They
+can never raise a hard limit.
+
+ARM, ACTIVATE, DISARM and ACKNOWLEDGE_FAULT carry a session epoch, request ID and
+authorization tag. They invoke only legal local state transitions; DISARM from
+Active requests controlled stop rather than jumping to Standby. A self-test or
+configuration fault requires reboot and successful POST, not a remote clear.
 
 ### COMMAND_ACK
 
@@ -167,7 +191,7 @@ published and inflates odometry timestamp covariance.
 
 ## Version negotiation and startup
 
-1. physical outputs disabled;
+1. physical outputs disabled and a new random/authenticated session epoch;
 2. MCU completes POST and loads a valid configuration;
 3. HELLO nonces and capabilities exchanged;
 4. protocol major, deployment profile and authentication established;
@@ -176,8 +200,10 @@ published and inflates odometry timestamp covariance.
 7. first fresh STOP/HOLD_ZERO command establishes sequence;
 8. explicit activation permits TRACK.
 
-Any restart returns to disabled standby. A transport reconnect cannot replay a
-pre-restart command into motion.
+Any application restart returns to Boot/SelfTest, not Standby, and invalidates
+the session. A transport reconnect cannot replay a pre-restart command into
+motion. Bootloader mode establishes a separate nonce/epoch and accepts only the
+update message subset under the update authorization key.
 
 ## Fuzz and fault-injection obligations
 

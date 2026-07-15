@@ -95,6 +95,7 @@ public:
 class PersistentStorage {
 public:
     virtual ~PersistentStorage() = default;
+    [[nodiscard]] virtual std::size_t erase_block_size() const noexcept = 0;
     [[nodiscard]] virtual bool read(std::uint32_t address,
                                     std::uint8_t* destination,
                                     std::size_t length) const noexcept = 0;

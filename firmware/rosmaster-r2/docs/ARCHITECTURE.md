@@ -1,18 +1,22 @@
 # R2 firmware architecture
 
+> **Design status:** portable core implemented and host-tested. RTOS, STM32 BSP,
+> crypto, Linux bridge and every target timing/memory figure remain requirements
+> pending physical-board and HIL evidence.
+
 ## Decision summary
 
 - **MCU:** retain STM32F103RCT6 for hardware compatibility; plan an STM32G4/H7
   control-board revision for CAN-FD, hardware crypto and stronger diagnostics.
-- **RTOS:** FreeRTOS with static allocation, tickless idle outside active control,
-  and direct-to-task notifications. Zephyr is the preferred future-board option.
+- **RTOS candidate:** FreeRTOS with static allocation, tickless idle outside
+  active control, and direct-to-task notifications; confirm footprint/latency on
+  target. Zephyr is the preferred future-board candidate.
 - **Hot link:** fixed-layout R2CP frames, COBS, CRC32C, sequence/timestamps and
   bounded ACKs over DMA UART at a validated high baud rate.
 - **ROS integration:** a Linux lifecycle bridge is the sole device owner. The MCU
   is not a DDS participant.
-- **ROS middleware:** CycloneDDS is the target default after on-Orin comparison;
-  Fast DDS remains supported for vendor-image compatibility. Zenoh is optional
-  at the cross-host/fleet boundary.
+- **ROS middleware candidates:** CycloneDDS and Fast DDS require an on-Orin
+  workload/security comparison. Zenoh is optional at the cross-host/fleet boundary.
 - **Local Linux IPC:** iceoryx2 only across processes carrying high-rate fixed
   samples; direct calls remain faster and simpler inside one process.
 
@@ -59,9 +63,13 @@ Owns perception, SLAM, localization, mapping, planning, behavior/mission logic,
 logging, fleet DDS/Zenoh, Autoware adapters and rich UI. It proposes velocity and
 curvature; it cannot bypass MCU limits or stale-command shutdown.
 
-Kirra's verifier/governor still bounds autonomy commands on Linux. The MCU adds
-an independent final physical envelope and liveness boundary; it does not copy
-the high-level safety policy.
+Kirra's verifier/governor still bounds autonomy commands on Linux. Production
+authority requires the MCU to verify a Kirra authorization over the exact
+enforced command, or the ADR-0033 interim topology in which a release-token
+verifying, privileged Linux consumer is the sole serial owner and enforces its
+ACL/startup sentinel. R2CP HMAC authenticates the link; it is not by itself a
+Kirra verdict. The MCU adds an independent physical envelope and liveness
+boundary; it does not copy the high-level policy.
 
 ## RTOS decision
 
@@ -75,8 +83,9 @@ the high-level safety policy.
 | POSIX | No | Partial | Strong | No |
 | Integration risk | Lowest | Medium | High on this MCU | Medium |
 
-**FreeRTOS wins this board** because RAM margin, mature F103 ports and control of
-every allocation outweigh Zephyr's superior DeviceTree and test ecosystem.
+**FreeRTOS is the provisional baseline** because expected RAM margin, mature
+F103 ports and control of every allocation may outweigh Zephyr's superior
+DeviceTree and test ecosystem.
 Static tasks, queues and timers are mandatory. NuttX's POSIX surface is overhead
 without value on a 48 KiB controller. ThreadX is viable only when a commercial,
 version-matched safety/support package is a product requirement.
@@ -121,13 +130,16 @@ SBC timestamp
   → synchronous PWM update event
 ```
 
-The target `<2 ms` is command-byte arrival to PWM latch at p99.9 under SBC load.
-It is not achievable at 115200 baud. Measurement includes USB/UART buffering,
-Linux scheduling and the next control release; it excludes DDS planning time.
+The target `<2 ms` is measured from a GPIO marker immediately before the Linux
+bridge submits the first frame byte to a GPIO marker at PWM latch, p99.9 under
+SBC load. It includes complete serialization, USB/UART buffering, parsing and
+the next control release; it excludes upstream planning. A roughly 70-byte v1
+motion frame alone takes about 6.1 ms at 115200 baud, so that carrier cannot pass.
 
 ## Memory budget
 
-Preliminary F103 target budget; linker map and stack painting replace estimates:
+Unverified F103 requirement budget; linker map and stack painting must replace
+these allocations:
 
 | Region | Budget |
 |---|---:|
@@ -159,7 +171,8 @@ Pipeline:
 5. filter encoder speed with a bounded IIR/outlier gate;
 6. apply feedforward + PID with back-calculation anti-windup;
 7. evaluate wheel disagreement/slip against yaw gyro;
-8. latch both PWM channels on one timer event;
+8. latch both PWM channels using a verified TIM1/TIM8 master/slave update route,
+   or measure/document bounded sequential skew if the route is unavailable;
 9. integrate midpoint odometry and covariance at 200 Hz.
 
 Covariance starts from calibrated encoder quantization, wheel-radius uncertainty,
@@ -174,8 +187,8 @@ optimistic covariance.
 | Full DDS on MCU | Rejected: inappropriate for 48 KiB SRAM and the hard loop |
 | DDS-XRCE / micro-ROS | Conditional telemetry experiment only; Agent/session state must not gate actuation |
 | Custom R2CP | Selected for safety command/status: bounded memory and wire time |
-| CycloneDDS | Preferred ROS 2 RMW candidate; validate on the actual Orin graph |
-| Fast DDS | Supported compatibility option; likely easiest on existing Humble image |
+| CycloneDDS | ROS 2 RMW candidate; compare on the actual Orin graph |
+| Fast DDS | Compatibility candidate; likely easiest on existing Humble image |
 | Zenoh bridge | Use for Wi-Fi/multi-robot/fleet only when benchmarks show a benefit |
 
 The Linux bridge maps R2CP to `ros2_control`:
@@ -201,6 +214,11 @@ intra-process or direct calls under the real load. It cannot provide a stock
 Linux worst-case guarantee; prior Kirra evidence saw microsecond normal latency
 but tens-of-milliseconds maxima. One process with direct calls is preferable
 when separation is not required.
+
+Timing histograms are single-writer objects. ISR/control owners copy them into
+immutable diagnostic snapshots under a bounded critical section or versioned
+SPSC handoff; diagnostics never reads live 64-bit counters concurrently on the
+Cortex-M3.
 
 ## Extension strategy
 

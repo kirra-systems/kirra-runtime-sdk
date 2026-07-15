@@ -31,7 +31,7 @@ target_include_directories(r2_platform_core PUBLIC
 
 target_compile_features(r2_platform_core PUBLIC cxx_std_17)
 target_compile_options(r2_platform_core PRIVATE
-    -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+    -Wall -Wextra -Wpedantic -Werror -Wconversion -Wsign-conversion
     -Wshadow -Wdouble-promotion -Wformat=2 -Wundef
     -fno-exceptions -fno-rtti
 )
@@ -51,7 +51,7 @@ if(R2_BUILD_TESTS)
     add_executable(r2_platform_tests tests/test_main.cpp)
     target_link_libraries(r2_platform_tests PRIVATE r2_platform_core)
     target_compile_options(r2_platform_tests PRIVATE
-        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+        -Wall -Wextra -Wpedantic -Werror -Wconversion -Wsign-conversion
         -Wshadow -Wdouble-promotion -Wformat=2 -Wundef
         -fno-exceptions -fno-rtti
     )
@@ -62,7 +62,7 @@ if(R2_BUILD_SIMULATION)
     add_executable(r2_deterministic_sim simulation/r2_sim.cpp)
     target_link_libraries(r2_deterministic_sim PRIVATE r2_platform_core)
     target_compile_options(r2_deterministic_sim PRIVATE
-        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+        -Wall -Wextra -Wpedantic -Werror -Wconversion -Wsign-conversion
         -Wshadow -Wdouble-promotion -Wformat=2 -Wundef
         -fno-exceptions -fno-rtti
     )

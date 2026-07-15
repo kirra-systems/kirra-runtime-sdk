@@ -1,5 +1,9 @@
 # Safety, diagnostics and production design
 
+> **Design status:** portable state/configuration primitives are implemented.
+> Electrical safety mechanisms, watchdogs, boot crypto, flash layout and every
+> timing claim require target implementation and evidence.
+
 ## Safety state machine
 
 ```mermaid
@@ -19,9 +23,10 @@ stateDiagram-v2
     FirmwareUpdate --> Boot: verified image / reset
 ```
 
-Only `Active` permits ordinary motion. `ControlledStop` runs a local bounded
-deceleration to zero and then disables the bridge; it never holds the last
-command. E-stop, runaway, overcurrent, overtemperature, encoder/steering
+Only `Active` permits ordinary motion. `ControlledStop` grants authority only to
+an internally generated bounded deceleration, remains there until measured
+speed is below the calibrated stop threshold, then enters disabled Standby; it
+never holds the last command. E-stop, runaway, overcurrent, overtemperature, encoder/steering
 plausibility and missed control deadline disable immediately. Configuration and
 updates require standby and disabled outputs.
 
@@ -109,7 +114,7 @@ bootloader without aggressive sizing. Proposed compatible map:
 
 | Address | Size | Purpose |
 |---|---:|---|
-| `0x08000000` | 24 KiB | immutable bootloader + public key |
+| `0x08000000` | 24 KiB | software write-protected bootloader + public key |
 | `0x08006000` | 104 KiB | application A |
 | `0x08020000` | 104 KiB | application B |
 | `0x0803A000` | 8 KiB | configuration A/B + calibration |
@@ -127,7 +132,7 @@ The bootloader verifies:
 1. manifest magic/schema/product/hardware compatibility;
 2. image length and SHA-256 digest;
 3. Ed25519 signature under a compiled production public key;
-4. monotonic security version against protected boot metadata;
+4. best-effort monotonic security version against software-protected boot metadata;
 5. trial/confirmed state and reset budget.
 
 Update is receive-to-inactive-slot, hash-as-written, readback, signature verify,
@@ -136,7 +141,8 @@ bounded attempt count. Power loss at every write boundary leaves the previous
 confirmed slot bootable. Development keys are compile-time distinct and cannot
 verify in production builds.
 
-STM32F103 does **not** provide a modern immutable secure-boot root or hardware
+STM32F103 does **not** provide an immutable secure-boot root, tamper-resistant
+rollback floor or hardware
 key vault. RDP and write protection improve resistance but do not create the
 same root as a secure element/TrustZone MCU. RDP level 2 is irreversible and
 must not be enabled before manufacturing recovery validation. High-assurance

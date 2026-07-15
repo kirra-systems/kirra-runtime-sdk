@@ -32,6 +32,10 @@ int failures = 0;
 
 class MemoryFlash final : public r2::hal::PersistentStorage {
 public:
+    std::size_t erase_block_size() const noexcept override {
+        return r2::application::kConfigurationSlotBytes;
+    }
+
     bool read(const std::uint32_t address,
               std::uint8_t* destination,
               const std::size_t length) const noexcept override {
@@ -62,7 +66,7 @@ public:
         return true;
     }
 
-    std::array<std::uint8_t, 512U> bytes{};
+    std::array<std::uint8_t, 4'096U> bytes{};
     bool fail_next_write{false};
 };
 
@@ -130,6 +134,15 @@ void test_crc_and_protocol() {
     CHECK(tracker.accept(0U));
     CHECK(!tracker.accept(0U));
     CHECK(!tracker.accept(20U));
+
+    frame.type = static_cast<r2::protocol::MessageType>(0xFEU);
+    CHECK(!r2::protocol::encode(frame, encoded));
+    frame.type = r2::protocol::MessageType::motion_command;
+    frame.flags = 0x80U;
+    CHECK(!r2::protocol::encode(frame, encoded));
+
+    r2::protocol::SequenceTracker invalid_tracker{0x8000'0000U};
+    CHECK(!invalid_tracker.accept(1U));
 }
 
 void test_kinematics() {
@@ -183,6 +196,10 @@ void test_control() {
     }
     const auto recovered = pid.update(0.0, 0.0, 0.001, -1.0, 1.0);
     CHECK(std::abs(recovered) < 1.0);
+
+    constexpr r2::control::PidGains invalid_gains{NAN, 1.0, 0.0, 0.0, 1.0};
+    r2::control::VelocityPid invalid_pid{invalid_gains};
+    CHECK(invalid_pid.update(1.0, 0.0, 0.001, -1.0, 1.0) == 0.0);
 }
 
 void test_motion_controller_composition() {
@@ -231,7 +248,7 @@ void test_safety() {
     CHECK(manager.motion_permitted());
 
     const r2::safety::SafetyInputs healthy{
-        false, true, true, true, true, true, true, true, false, true, true};
+        false, true, true, true, true, true, true, true, false, true, true, false};
     manager.evaluate(healthy);
     CHECK(manager.motion_permitted());
 
@@ -239,7 +256,15 @@ void test_safety() {
     stale.command_fresh = false;
     manager.evaluate(stale);
     CHECK(manager.state() == r2::safety::SafetyState::controlled_stop);
+    CHECK(manager.controlled_stop_required());
     CHECK(!manager.bridge_must_be_disabled());
+
+    stale.motion_stopped = true;
+    manager.evaluate(stale);
+    CHECK(manager.state() == r2::safety::SafetyState::standby);
+    CHECK(manager.bridge_must_be_disabled());
+    CHECK(manager.arm());
+    CHECK(manager.activate());
 
     auto estop = healthy;
     estop.emergency_stop_asserted = true;
@@ -250,12 +275,22 @@ void test_safety() {
     manager.evaluate(healthy);
     CHECK(manager.clear_recoverable_faults(true));
     CHECK(manager.state() == r2::safety::SafetyState::standby);
+
+    r2::safety::SafetyManager illegal{};
+    CHECK(!illegal.disarm());
+    CHECK(!illegal.clear_recoverable_faults(true));
+    illegal.begin_self_test();
+    illegal.complete_self_test(false);
+    CHECK(illegal.state() == r2::safety::SafetyState::fault_latched);
+    illegal.evaluate(healthy);
+    CHECK(!illegal.clear_recoverable_faults(true));
+    CHECK(!illegal.request_firmware_update());
 }
 
 void test_configuration_rollback() {
     MemoryFlash flash{};
     flash.bytes.fill(0xFFU);
-    r2::application::ConfigurationStore store{flash, {0U, 128U}};
+    r2::application::ConfigurationStore store{flash, {0U, 2'048U}};
     r2::application::PlatformConfiguration loaded{};
     CHECK(!store.load(loaded));
     CHECK(!loaded.calibrated);
@@ -279,6 +314,35 @@ void test_configuration_rollback() {
     CHECK(store.load(loaded));
     CHECK(loaded.generation == 2U);
     CHECK(near(loaded.maximum_speed_mps, 1.2, 1.0e-6));
+
+    MemoryFlash conflicting_flash{};
+    conflicting_flash.bytes.fill(0xFFU);
+    r2::application::ConfigurationStore conflicting_store{
+        conflicting_flash, {0U, 2'048U}};
+    configuration.maximum_speed_mps = 1.0F;
+    CHECK(conflicting_store.commit(configuration));
+    std::memcpy(conflicting_flash.bytes.data() + 2'048U,
+                conflicting_flash.bytes.data(),
+                r2::application::kConfigurationImageBytes);
+    const float conflicting_speed = 1.4F;
+    std::uint32_t speed_bits = 0U;
+    std::memcpy(&speed_bits, &conflicting_speed, sizeof(speed_bits));
+    for (std::size_t index = 0U; index < 4U; ++index) {
+        conflicting_flash.bytes[2'048U + 28U + index] =
+            static_cast<std::uint8_t>(speed_bits >> (index * 8U));
+    }
+    const auto crc = r2::protocol::crc32c(
+        conflicting_flash.bytes.data() + 2'048U, 76U);
+    for (std::size_t index = 0U; index < 4U; ++index) {
+        conflicting_flash.bytes[2'048U + 76U + index] =
+            static_cast<std::uint8_t>(crc >> (index * 8U));
+    }
+    CHECK(!conflicting_store.load(loaded));
+    CHECK(!loaded.calibrated);
+
+    r2::application::ConfigurationStore overlapping_store{
+        conflicting_flash, {0U, 128U}};
+    CHECK(!overlapping_store.commit(configuration));
 }
 
 void test_diagnostics() {

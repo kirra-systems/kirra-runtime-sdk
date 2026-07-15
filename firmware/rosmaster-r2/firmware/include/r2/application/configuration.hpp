@@ -9,7 +9,7 @@ namespace r2::application {
 
 inline constexpr std::uint16_t kConfigurationSchema = 1U;
 inline constexpr std::size_t kConfigurationImageBytes = 80U;
-inline constexpr std::size_t kConfigurationSlotBytes = 128U;
+inline constexpr std::size_t kConfigurationSlotBytes = 2'048U;
 
 struct PlatformConfiguration {
     std::uint16_t schema{kConfigurationSchema};
@@ -58,6 +58,7 @@ private:
     hal::PersistentStorage& storage_;
     std::uint32_t slot_a_address_;
     std::uint32_t slot_b_address_;
+    bool layout_valid_;
 };
 
 }  // namespace r2::application

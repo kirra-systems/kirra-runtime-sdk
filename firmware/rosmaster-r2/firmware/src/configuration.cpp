@@ -164,9 +164,18 @@ ConfigurationStore::ConfigurationStore(hal::PersistentStorage& storage,
                                        const ConfigurationSlotAddresses addresses) noexcept
     : storage_(storage),
       slot_a_address_(addresses.a),
-      slot_b_address_(addresses.b) {}
+      slot_b_address_(addresses.b),
+      layout_valid_(
+          storage.erase_block_size() >= kConfigurationImageBytes &&
+          addresses.a % storage.erase_block_size() == 0U &&
+          addresses.b % storage.erase_block_size() == 0U &&
+          addresses.a != addresses.b) {}
 
 bool ConfigurationStore::load(PlatformConfiguration& configuration) const noexcept {
+    if (!layout_valid_) {
+        configuration = factory_defaults();
+        return false;
+    }
     PlatformConfiguration slot_a{};
     PlatformConfiguration slot_b{};
     const auto a_valid = read_slot(slot_a_address_, slot_a);
@@ -175,7 +184,14 @@ bool ConfigurationStore::load(PlatformConfiguration& configuration) const noexce
         configuration = factory_defaults();
         return false;
     }
-    if (a_valid && (!b_valid || generation_is_newer(slot_a.generation, slot_b.generation))) {
+    if (a_valid && b_valid && slot_a.generation == slot_b.generation) {
+        if (serialize(slot_a) != serialize(slot_b)) {
+            configuration = factory_defaults();
+            return false;
+        }
+        configuration = slot_a;
+    } else if (a_valid &&
+               (!b_valid || generation_is_newer(slot_a.generation, slot_b.generation))) {
         configuration = slot_a;
     } else {
         configuration = slot_b;
@@ -184,19 +200,31 @@ bool ConfigurationStore::load(PlatformConfiguration& configuration) const noexce
 }
 
 bool ConfigurationStore::commit(const PlatformConfiguration& configuration) noexcept {
-    if (!valid_configuration(configuration)) {
+    if (!layout_valid_ || !valid_configuration(configuration)) {
         return false;
     }
+    PlatformConfiguration slot_a{};
+    PlatformConfiguration slot_b{};
+    const auto a_valid = read_slot(slot_a_address_, slot_a);
+    const auto b_valid = read_slot(slot_b_address_, slot_b);
+    if (a_valid && b_valid &&
+        slot_a.generation == slot_b.generation &&
+        serialize(slot_a) != serialize(slot_b)) {
+        return false;
+    }
+
     PlatformConfiguration current{};
     const auto has_current = load(current);
     auto candidate = configuration;
     candidate.generation = has_current ? current.generation + 1U : 1U;
 
-    const auto target = !has_current ||
-                                (read_slot(slot_a_address_, current) &&
-                                 current.generation + 1U == candidate.generation)
-                            ? slot_b_address_
-                            : slot_a_address_;
+    std::uint32_t target = slot_a_address_;
+    if (a_valid && !b_valid) {
+        target = slot_b_address_;
+    } else if (a_valid && b_valid &&
+               generation_is_newer(slot_a.generation, slot_b.generation)) {
+        target = slot_b_address_;
+    }
     return write_slot(target, candidate);
 }
 
@@ -212,7 +240,7 @@ bool ConfigurationStore::write_slot(
     const std::uint32_t address,
     const PlatformConfiguration& configuration) noexcept {
     const auto image = serialize(configuration);
-    if (!storage_.erase(address, kConfigurationSlotBytes) ||
+    if (!storage_.erase(address, storage_.erase_block_size()) ||
         !storage_.write(address, image.data(), image.size())) {
         return false;
     }

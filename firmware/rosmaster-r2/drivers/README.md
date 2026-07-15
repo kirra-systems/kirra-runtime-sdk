@@ -9,9 +9,9 @@ Required drivers:
 | Driver | Implementation strategy | Completion evidence |
 |---|---|---|
 | Clock/timebase | 64-bit extension of free-running hardware timer | drift/overflow/reset tests |
-| Motor bridge | TIM1/TIM8 preload, synchronous update, hardware-off default | oscilloscope truth table |
+| Motor bridge | TIM1/TIM8 preload; verify master/slave trigger or bound sequential skew; hardware-off default | reference-manual route + oscilloscope truth table |
 | Encoders | TIM2/3/4/5 quadrature + 10 kHz extension snapshot | 2× max edge-rate campaign |
-| Steering | hardware PWM preferred over lesson software PWM | pulse jitter/endpoints |
+| Steering | timer-assisted/DMA GPIO scheduling on documented S1–S4, or require PCB reroute to true timer PWM | pulse jitter/endpoints |
 | IMU | separate ICM20948 SPI and MPU9250 I²C implementations | board option + six-face test |
 | Battery ADC | timer-triggered ADC + DMA + calibrated reference | supply sweep |
 | E-stop | hardware cut/break plus diagnostic GPIO | electrical <10 ms measurement |

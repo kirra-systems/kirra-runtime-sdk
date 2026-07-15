@@ -1,5 +1,9 @@
 # ROSMASTER R2 clean-room hardware reference
 
+> **Evidence status:** repository research complete; target-unit electrical
+> verification incomplete. No row enables actuation until the R2 harness
+> manifest is continuity-verified.
+
 ## Provenance and confidence
 
 Research is pinned to:
@@ -18,6 +22,25 @@ board capability but not necessarily the R2 harness. `Corroborated` means a
 non-official reconstruction agrees and must still be checked. `Unknown` means
 the firmware must not enable the function.
 
+### Source registry
+
+Manifest `source_id` values resolve here:
+
+| ID | Immutable or official source | Applicability |
+|---|---|---|
+| `YB-GPIO` | [`ROS-robot-expansion-board@856d965` README](https://github.com/YahboomTechnology/ROS-robot-expansion-board/blob/856d96585d8eaf240c63271b34102a5bc46cdd7c/README.md) plus R2 hardware-course GPIO lessons | Shared board; unit revision unverified |
+| `YB-BUZZER` | [official key/buzzer lesson](https://www.yahboom.net/public/upload/upload-html/1689906389/3.%20Key%20control%20buzzer%20sounding.html) | Shared board |
+| `YB-UART` | [`myserial.rules@856d965`](https://github.com/YahboomTechnology/ROS-robot-expansion-board/blob/856d96585d8eaf240c63271b34102a5bc46cdd7c/2.Python%20basic%20control/0.%20Bind%20PCB%20port%20devices/myserial.rules) and R2 expansion-board PDF blob `65884ccdc81b01821137d029976452cdc46f9577` | CH340 identity official; PA9/PA10 requires unit inspection |
+| `YB-MOTOR` | [official motor lesson](https://www.yahboom.net/public/upload/upload-html/1689907246/12.%20Control%20motor%20forward%20and%20reverse.html), R2 PDF blob `80941c1…` | Shared four-channel capability |
+| `CORR-MOTOR` | [`Tchaikovsky66/Rosmaster@9452f7b` motor map](https://github.com/Tchaikovsky66/Rosmaster/blob/9452f7b28c3e943f72d182b6a200fdbb3fe8cefd/BSP/MOTOR/motor.h#L15-L28) | Corroboration only |
+| `YB-ENCODER` | [official encoder lesson](https://www.yahboom.net/public/upload/upload-html/1689907268/13.%20Timer%20Capture%20Encoder%20Data.html), R2 PDF blob `e45111f…` | Shared timer capability |
+| `YB-SERVO` | [official PWM-servo lesson](https://www.yahboom.net/public/upload/upload-html/1689906624/9.%20Timer%20interrupt%20control%20PWM%20servos.html) | Shared outputs; R2 connector unknown |
+| `YB-R2-IMU` | [official ICM20948 lesson](http://www.yahboom.net/public/upload/upload-html/1703065902/11.%20Nine-axis%20attitude%20sensor%20to%20obtain%20data-ICM20948.html), R2 PDF blob `8eb4e05…`; conflicting shared-board README above says MPU9250 | Mutually exclusive candidates; disabled until inspection |
+| `KIRRA-BENCH-R2` | `docs/hardware/HARDWARE_FINDINGS_R2X3.md` and `docs/hardware/R2_PATH_B_ACKERMANN_DRIVE.md` | Existing physical unit, not a lot-wide netlist |
+
+Ellipsized PDF blob prefixes are discovery aids; the pinned repository path and
+full commit are normative until page-level extracts are captured in Phase 1.
+
 ## Board and transport
 
 | Item | Finding | Evidence |
@@ -33,10 +56,12 @@ The factory procedure is not authenticated OTA. BOOT0/RESET strongly indicates
 the STM32 ROM loader. A clean-room bootloader must preserve a recoverable ROM
 loader path.
 
-At 115200 baud, 24 bytes require about 2.08 ms on the wire (10 UART bits per
-byte), before CH340 and Linux delay. The required sub-2 ms command latency is
-therefore impossible at the factory rate. The production link requires a
-validated ≥921600-baud mode, direct TTL UART, or a revised CAN-FD interface.
+The v1 motion command is about 68 decoded bytes and at most 70 encoded bytes
+including delimiter. At 115200 baud that is about 6.1 ms on the wire (10 UART
+bits per byte), before CH340 and Linux delay. The required sub-2 ms end-to-end
+command latency is therefore impossible at the factory rate. Production needs
+a successfully validated high-rate UART candidate (initially ≥921600 baud),
+direct TTL UART, or a revised CAN-FD interface.
 
 ## GPIO and peripheral map
 

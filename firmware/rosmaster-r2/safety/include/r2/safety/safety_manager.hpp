@@ -46,6 +46,7 @@ struct SafetyInputs {
     bool motor_runaway;
     bool control_deadline_met;
     bool communication_healthy;
+    bool motion_stopped;
 };
 
 class SafetyManager {
@@ -54,8 +55,8 @@ public:
     void complete_self_test(bool passed) noexcept;
     [[nodiscard]] bool arm() noexcept;
     [[nodiscard]] bool activate() noexcept;
-    void disarm() noexcept;
-    void request_firmware_update() noexcept;
+    [[nodiscard]] bool disarm() noexcept;
+    [[nodiscard]] bool request_firmware_update() noexcept;
     void evaluate(const SafetyInputs& inputs) noexcept;
     [[nodiscard]] bool clear_recoverable_faults(bool physical_acknowledgement) noexcept;
 
@@ -63,6 +64,7 @@ public:
     [[nodiscard]] std::uint64_t active_faults() const noexcept;
     [[nodiscard]] std::uint64_t latched_faults() const noexcept;
     [[nodiscard]] bool motion_permitted() const noexcept;
+    [[nodiscard]] bool controlled_stop_required() const noexcept;
     [[nodiscard]] bool bridge_must_be_disabled() const noexcept;
 
 private:

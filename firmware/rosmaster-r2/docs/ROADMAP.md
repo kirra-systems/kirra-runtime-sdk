@@ -3,6 +3,37 @@
 Benchmarks are gates, not estimates. Host timing is indicative; only target and
 electrical measurements support real-time/safety claims.
 
+## Phase 0 — system safety and security baseline
+
+**Deliverables**
+
+- system requirements, operating domain, hazards, threat model and trust boundary;
+- fault-tolerant times, safe-state definitions and requirements-to-test IDs;
+- Kirra release-authorization binding, device-key custody and recovery policy;
+- toolchain/evidence strategy and change-control baseline.
+
+**Risks**
+
+- architecture work encodes unstated safety assumptions;
+- link authentication is mistaken for command authorization;
+- performance targets lack a measurable endpoint.
+
+**Validation tests**
+
+- independent hazard/threat-model review and traceability walk;
+- fault-response timing analysis for every safety mechanism;
+- red-team bypass analysis from ROS/DDS and direct device access.
+
+**Benchmarks**
+
+- every safety goal has a quantitative FTTI and verification method;
+- 100% of motion-authority paths terminate at one verified MCU/consumer boundary.
+
+**Exit criteria**
+
+- safety, security and systems owners approve the baseline;
+- unresolved assumptions are explicit gates on all later phases.
+
 ## Phase 1 — hardware reverse engineering
 
 **Deliverables**
@@ -223,6 +254,8 @@ physical unit closure remains required.
 - lifecycle `ros2_control` hardware plugin and sole device ownership;
 - Ackermann command/state interfaces, IMU/battery/odometry/diagnostics mapping;
 - Autoware command adapter after Kirra governance;
+- Kirra release-token verification (or device-key authorization MAC), serial
+  ACL/startup sentinel and explicit R2CP key custody;
 - SROS2 profile and optional iceoryx2/Zenoh adapters.
 
 **Risks**
@@ -234,6 +267,7 @@ physical unit closure remains required.
 **Validation tests**
 
 - launch tests, rogue publisher/device-open attempts and lifecycle restarts;
+- unsigned/tampered/replayed Kirra authorization and direct serial-open attempts;
 - ros2_control controller switching and stale command;
 - clock skew/step and DDS loss/load campaigns;
 - Autoware closed-loop simulation.

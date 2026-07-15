@@ -16,6 +16,7 @@ inline constexpr std::size_t kMaximumDecodedFrame =
     kHeaderSize + kMaximumPayload + kCrcSize;
 inline constexpr std::size_t kMaximumEncodedFrame =
     kMaximumDecodedFrame + (kMaximumDecodedFrame / 254U) + 2U;
+inline constexpr std::uint8_t kKnownFlagMask = 0x0FU;
 
 enum class MessageType : std::uint8_t {
     hello = 1U,
@@ -24,6 +25,10 @@ enum class MessageType : std::uint8_t {
     time_sync_response = 4U,
     motion_command = 16U,
     command_acknowledgement = 17U,
+    arm = 18U,
+    activate = 19U,
+    disarm = 20U,
+    acknowledge_fault = 21U,
     robot_state = 32U,
     odometry = 33U,
     imu = 34U,
@@ -47,6 +52,8 @@ enum class DecodeStatus : std::uint8_t {
     unsupported_version,
     invalid_length,
     crc_mismatch,
+    unknown_message,
+    invalid_flags,
 };
 
 struct Frame {

@@ -129,6 +129,35 @@ void put_u64(std::uint8_t* output, const std::uint64_t value) noexcept {
     return true;
 }
 
+[[nodiscard]] bool known_message_type(const std::uint8_t raw) noexcept {
+    switch (static_cast<MessageType>(raw)) {
+        case MessageType::hello:
+        case MessageType::capabilities:
+        case MessageType::time_sync_request:
+        case MessageType::time_sync_response:
+        case MessageType::motion_command:
+        case MessageType::command_acknowledgement:
+        case MessageType::arm:
+        case MessageType::activate:
+        case MessageType::disarm:
+        case MessageType::acknowledge_fault:
+        case MessageType::robot_state:
+        case MessageType::odometry:
+        case MessageType::imu:
+        case MessageType::battery:
+        case MessageType::diagnostics:
+        case MessageType::fault_event:
+        case MessageType::configuration_get:
+        case MessageType::configuration_set:
+        case MessageType::calibration:
+        case MessageType::enter_bootloader:
+        case MessageType::firmware_block:
+        case MessageType::firmware_commit:
+            return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 std::uint32_t crc32c(const std::uint8_t* data, const std::size_t length) noexcept {
@@ -145,7 +174,9 @@ std::uint32_t crc32c(const std::uint8_t* data, const std::size_t length) noexcep
 }
 
 bool encode(const Frame& frame, EncodedFrame& output) noexcept {
-    if (frame.payload_length > kMaximumPayload) {
+    if (frame.payload_length > kMaximumPayload ||
+        !known_message_type(static_cast<std::uint8_t>(frame.type)) ||
+        (frame.flags & static_cast<std::uint8_t>(~kKnownFlagMask)) != 0U) {
         output.length = 0U;
         return false;
     }
@@ -180,6 +211,7 @@ bool encode(const Frame& frame, EncodedFrame& output) noexcept {
 DecodeStatus decode(const std::uint8_t* encoded,
                     std::size_t encoded_length,
                     Frame& output) noexcept {
+    output = Frame{};
     if (encoded == nullptr || encoded_length == 0U) {
         return DecodeStatus::empty;
     }
@@ -217,6 +249,12 @@ DecodeStatus decode(const std::uint8_t* encoded,
     if (get_u32(&decoded[body_length]) != crc32c(decoded.data(), body_length)) {
         return DecodeStatus::crc_mismatch;
     }
+    if (!known_message_type(decoded[4])) {
+        return DecodeStatus::unknown_message;
+    }
+    if ((decoded[5] & static_cast<std::uint8_t>(~kKnownFlagMask)) != 0U) {
+        return DecodeStatus::invalid_flags;
+    }
 
     output.type = static_cast<MessageType>(decoded[4]);
     output.flags = decoded[5];
@@ -232,6 +270,10 @@ SequenceTracker::SequenceTracker(const std::uint32_t maximum_forward_jump) noexc
     : maximum_forward_jump_(maximum_forward_jump) {}
 
 bool SequenceTracker::accept(const std::uint32_t candidate) noexcept {
+    if (maximum_forward_jump_ == 0U ||
+        maximum_forward_jump_ > 0x7FFF'FFFFU) {
+        return false;
+    }
     if (!initialized_) {
         initialized_ = true;
         last_ = candidate;

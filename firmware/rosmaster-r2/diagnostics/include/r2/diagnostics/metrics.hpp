@@ -6,6 +6,9 @@
 
 namespace r2::diagnostics {
 
+// Single-writer accumulator. It is intentionally not atomic: the owning
+// control/ISR context must publish an immutable copy through a bounded critical
+// section or versioned SPSC handoff before another task reads it.
 class TimingHistogram {
 public:
     static constexpr std::size_t kBucketCount = 16U;

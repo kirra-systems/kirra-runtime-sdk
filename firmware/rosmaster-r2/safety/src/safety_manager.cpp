@@ -15,6 +15,7 @@ void SafetyManager::complete_self_test(const bool passed) noexcept {
     }
     if (!passed) {
         raise(Fault::self_test_failed, true);
+        state_ = SafetyState::fault_latched;
         return;
     }
     state_ = SafetyState::standby;
@@ -36,16 +37,29 @@ bool SafetyManager::activate() noexcept {
     return true;
 }
 
-void SafetyManager::disarm() noexcept {
-    if (state_ != SafetyState::firmware_update) {
-        state_ = SafetyState::standby;
+bool SafetyManager::disarm() noexcept {
+    if (state_ == SafetyState::standby) {
+        return true;
     }
+    if (state_ == SafetyState::armed) {
+        state_ = SafetyState::standby;
+        return true;
+    }
+    if (state_ == SafetyState::active) {
+        state_ = SafetyState::controlled_stop;
+        return true;
+    }
+    return false;
 }
 
-void SafetyManager::request_firmware_update() noexcept {
-    if (state_ == SafetyState::standby && active_faults_ == 0U) {
+bool SafetyManager::request_firmware_update() noexcept {
+    if (state_ == SafetyState::standby &&
+        active_faults_ == 0U &&
+        latched_faults_ == 0U) {
         state_ = SafetyState::firmware_update;
+        return true;
     }
+    return false;
 }
 
 void SafetyManager::evaluate(const SafetyInputs& inputs) noexcept {
@@ -87,15 +101,22 @@ void SafetyManager::evaluate(const SafetyInputs& inputs) noexcept {
 
     if (latched_faults_ != 0U) {
         state_ = SafetyState::fault_latched;
+    } else if (state_ == SafetyState::controlled_stop) {
+        if (inputs.motion_stopped) {
+            state_ = SafetyState::standby;
+        }
     } else if (active_faults_ != 0U) {
         transition_to_safe_state();
-    } else if (state_ == SafetyState::controlled_stop) {
-        state_ = SafetyState::standby;
     }
 }
 
 bool SafetyManager::clear_recoverable_faults(const bool physical_acknowledgement) noexcept {
-    if (!physical_acknowledgement || active_faults_ != 0U) {
+    constexpr auto requires_reset_and_post =
+        bit(Fault::self_test_failed) | bit(Fault::configuration_invalid);
+    if (state_ != SafetyState::fault_latched ||
+        !physical_acknowledgement ||
+        active_faults_ != 0U ||
+        (latched_faults_ & requires_reset_and_post) != 0U) {
         return false;
     }
     latched_faults_ = 0U;
@@ -118,6 +139,10 @@ std::uint64_t SafetyManager::latched_faults() const noexcept {
 bool SafetyManager::motion_permitted() const noexcept {
     return state_ == SafetyState::active && active_faults_ == 0U &&
            latched_faults_ == 0U;
+}
+
+bool SafetyManager::controlled_stop_required() const noexcept {
+    return state_ == SafetyState::controlled_stop && !bridge_must_be_disabled();
 }
 
 bool SafetyManager::bridge_must_be_disabled() const noexcept {
