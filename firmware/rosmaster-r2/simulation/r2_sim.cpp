@@ -11,7 +11,8 @@ int main() {
     constexpr r2::kinematics::VehicleGeometry geometry{0.23, 0.19, 0.033, 0.55};
     constexpr r2::control::MotionLimits limits{1.5, 1.0, 2.0, 8.0, 2.0};
     constexpr r2::control::PidGains gains{0.8, 1.2, 0.01, 0.4, 4.0};
-    r2::control::MotionController controller{geometry, limits, gains, gains};
+    r2::control::MotionController controller{
+        geometry, limits, {gains, gains}};
 
     constexpr double dt_s = 0.001;
     constexpr std::size_t steps = 20'000U;

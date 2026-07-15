@@ -138,13 +138,12 @@ void VelocityPid::reset() noexcept {
 
 MotionController::MotionController(const kinematics::VehicleGeometry geometry,
                                    const MotionLimits limits,
-                                   const PidGains left_gains,
-                                   const PidGains right_gains) noexcept
+                                   const WheelPidGains wheel_gains) noexcept
     : geometry_(geometry),
       limits_(limits),
       speed_limiter_(limits),
-      left_pid_(left_gains),
-      right_pid_(right_gains) {}
+      left_pid_(wheel_gains.left),
+      right_pid_(wheel_gains.right) {}
 
 MotionOutput MotionController::update(const kinematics::BodyCommand& requested,
                                       const double measured_left_mps,

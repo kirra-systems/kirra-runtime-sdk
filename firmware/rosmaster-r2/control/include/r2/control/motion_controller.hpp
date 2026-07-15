@@ -22,6 +22,11 @@ struct PidGains {
     double anti_windup;
 };
 
+struct WheelPidGains {
+    PidGains left;
+    PidGains right;
+};
+
 class JerkLimitedAxis {
 public:
     explicit JerkLimitedAxis(MotionLimits limits) noexcept;
@@ -67,8 +72,7 @@ class MotionController {
 public:
     MotionController(kinematics::VehicleGeometry geometry,
                      MotionLimits limits,
-                     PidGains left_gains,
-                     PidGains right_gains) noexcept;
+                     WheelPidGains wheel_gains) noexcept;
 
     [[nodiscard]] MotionOutput update(
         const kinematics::BodyCommand& requested,
