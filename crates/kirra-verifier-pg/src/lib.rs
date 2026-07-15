@@ -288,7 +288,11 @@ impl PgExecutor for LivePgExecutor<'_> {
 pub enum PgStoreError {
     /// The underlying `postgres` driver failed.
     Pg(postgres::Error),
-    /// `NodeTrustState` could not be encoded to `status_json`.
+    /// A value could not be ENCODED to its JSON column on the WRITE path — the
+    /// node `status_json`, or a campaign's `cohorts`/`stages`. (The READ-path
+    /// inverse — a stored blob that no longer DECODES — is stored-row corruption,
+    /// surfaced as [`PgStoreError::CorruptGeneration`]/[`PgStoreError::CorruptCampaignRow`],
+    /// never this variant.)
     Encode(serde_json::Error),
     /// A stored `last_generation` value is non-numeric or out-of-domain
     /// (`>= i64::MAX`) — CORRUPTION, surfaced fail-closed exactly as the SQLite /
@@ -315,7 +319,7 @@ impl std::fmt::Display for PgStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PgStoreError::Pg(e) => write!(f, "postgres error: {e}"),
-            PgStoreError::Encode(e) => write!(f, "status_json encode error: {e}"),
+            PgStoreError::Encode(e) => write!(f, "JSON column encode error: {e}"),
             PgStoreError::CorruptGeneration(v) => {
                 write!(f, "corrupt last_generation value: {v:?}")
             }
@@ -1105,9 +1109,13 @@ impl PgVerifierStore {
         let state_s: String = row.get(7);
         let halt_s: Option<String> = row.get(8);
 
-        let cohorts: Vec<String> =
-            serde_json::from_str(&cohorts_json).map_err(PgStoreError::Encode)?;
-        let stages: Vec<u8> = serde_json::from_str(&stages_json).map_err(PgStoreError::Encode)?;
+        // A malformed stored blob is stored-row CORRUPTION (the read-path inverse of
+        // an encode failure), classified like SQLite's `json_decode_err` — NOT
+        // `Encode`, which is strictly the write-path direction.
+        let cohorts: Vec<String> = serde_json::from_str(&cohorts_json)
+            .map_err(|e| PgStoreError::CorruptCampaignRow(format!("cohorts_json decode: {e}")))?;
+        let stages: Vec<u8> = serde_json::from_str(&stages_json)
+            .map_err(|e| PgStoreError::CorruptCampaignRow(format!("stages_json decode: {e}")))?;
         let state = CampaignState::parse(&state_s)
             .ok_or_else(|| PgStoreError::CorruptCampaignRow(format!("state token {state_s:?}")))?;
         let halt_reason = match halt_s {
