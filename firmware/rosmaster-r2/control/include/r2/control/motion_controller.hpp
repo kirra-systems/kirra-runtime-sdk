@@ -72,9 +72,9 @@ struct MotionOutput {
 
 class MotionController {
 public:
-    MotionController(kinematics::VehicleGeometry geometry,
-                     MotionLimits limits,
-                     WheelPidGains wheel_gains) noexcept;
+    MotionController(const kinematics::VehicleGeometry& geometry,
+                     const MotionLimits& limits,
+                     const WheelPidGains& wheel_gains) noexcept;
 
     [[nodiscard]] MotionOutput update(
         const kinematics::BodyCommand& requested,

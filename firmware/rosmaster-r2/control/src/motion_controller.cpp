@@ -159,9 +159,9 @@ bool VelocityPid::valid() const noexcept {
     return gains_valid_;
 }
 
-MotionController::MotionController(const kinematics::VehicleGeometry geometry,
-                                   const MotionLimits limits,
-                                   const WheelPidGains wheel_gains) noexcept
+MotionController::MotionController(const kinematics::VehicleGeometry& geometry,
+                                   const MotionLimits& limits,
+                                   const WheelPidGains& wheel_gains) noexcept
     : geometry_(geometry),
       limits_(limits),
       speed_limiter_(limits),

@@ -1,5 +1,6 @@
 #include "r2/application/configuration.hpp"
 
+#include "r2/hal/interfaces.hpp"
 #include "r2/protocol/wire.hpp"
 
 #include <array>
