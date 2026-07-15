@@ -109,13 +109,24 @@ double VelocityPid::update(const double target_mps,
         gains_.derivative * derivative;
     const auto output = std::clamp(unsaturated, minimum_output, maximum_output);
 
-    integral_ +=
-        (gains_.integral * error + gains_.anti_windup * (output - unsaturated)) * dt_s;
+    const auto pushes_high_saturation = unsaturated > maximum_output && error > 0.0;
+    const auto pushes_low_saturation = unsaturated < minimum_output && error < 0.0;
+    if (!pushes_high_saturation && !pushes_low_saturation) {
+        integral_ += gains_.integral * error * dt_s;
+    } else {
+        // Tracking correction may unwind an existing integral, but must never
+        // create an opposite-sign integral merely to cancel a bounded command.
+        const auto correction = gains_.anti_windup * (output - unsaturated) * dt_s;
+        if (integral_ * correction < 0.0) {
+            integral_ = std::abs(correction) >= std::abs(integral_)
+                            ? 0.0
+                            : integral_ + correction;
+        }
+    }
     if (!std::isfinite(integral_)) {
         reset();
         return 0.0;
     }
-    integral_ = std::clamp(integral_, minimum_output, maximum_output);
     return output;
 }
 
@@ -147,6 +158,16 @@ MotionOutput MotionController::update(const kinematics::BodyCommand& requested,
         !valid_positive(limits_.maximum_steering_rate_rad_s)) {
         reset();
         return {0.0, 0.0, 0.0, kinematics::KinematicsStatus::non_finite_input};
+    }
+    if (std::abs(requested.longitudinal_velocity_mps) <= 1.0e-3 &&
+        std::abs(requested.yaw_rate_rad_s) > 1.0e-3) {
+        reset();
+        return {
+            0.0,
+            0.0,
+            0.0,
+            kinematics::KinematicsStatus::infeasible_stationary_turn,
+        };
     }
 
     const auto bounded_speed =
