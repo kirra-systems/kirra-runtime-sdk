@@ -1,8 +1,12 @@
 # R2 Control Protocol (R2CP) v1
 
 > **Specification status:** framing/CRC/sequence core is implemented and
-> host-tested. Payload codecs, authorization, session handshake, reliability and
-> target carrier are design requirements, not shipped MCU capabilities.
+> host-tested. The link-layer MAC seam (`encode_authenticated` /
+> `decode_authenticated`, AUTH_TAG flag) is implemented with a reference
+> portable HMAC-SHA-256 (see `protocol/include/r2/protocol/mac.hpp`); a
+> reviewed, target-benchmarked library is a named phase gate before hardware
+> deployment. Payload codecs, authorization, session handshake, reliability
+> and target carrier are design requirements, not shipped MCU capabilities.
 
 ## Scope
 

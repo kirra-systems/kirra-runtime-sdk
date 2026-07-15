@@ -18,6 +18,18 @@ inline constexpr std::size_t kMaximumEncodedFrame =
     kMaximumDecodedFrame + (kMaximumDecodedFrame / 254U) + 2U;
 inline constexpr std::uint8_t kKnownFlagMask = 0x0FU;
 
+// Flag bit 2: payload carries a 16-byte HMAC-SHA-256 truncated authentication
+// tag at the end.  The tag covers the canonical header (with payload_length
+// already counting the tag) and the application payload preceding the tag.
+// Set automatically by encode_authenticated; verified by decode_authenticated.
+inline constexpr std::uint8_t kFlagAuthTag = 0x04U;
+
+// Size of the per-link HMAC-SHA-256 key provisioned on each device.
+inline constexpr std::size_t kMacKeySize = 32U;
+// Size of the truncated HMAC-SHA-256 authentication tag appended to the payload
+// when kFlagAuthTag is set.
+inline constexpr std::size_t kMacTagSize = 16U;
+
 enum class MessageType : std::uint8_t {
     hello = 1U,
     capabilities = 2U,
@@ -54,6 +66,13 @@ enum class DecodeStatus : std::uint8_t {
     crc_mismatch,
     unknown_message,
     invalid_flags,
+    // Returned by decode_authenticated when:
+    //   • the AUTH_TAG flag (kFlagAuthTag) is absent, or
+    //   • the payload is shorter than kMacTagSize, or
+    //   • the HMAC-SHA-256 tag does not match the expected value.
+    // In all three cases the output frame is left zero-initialised (never
+    // partially populated with application data).
+    auth_mac_mismatch,
 };
 
 struct Frame {
@@ -76,6 +95,41 @@ struct EncodedFrame {
 [[nodiscard]] DecodeStatus decode(const std::uint8_t* encoded,
                                   std::size_t encoded_length,
                                   Frame& output) noexcept;
+
+// encode_authenticated: appends a 16-byte HMAC-SHA-256 tag (kMacTagSize) to
+// the payload, sets the kFlagAuthTag flag, and encodes the frame normally.
+// The tag covers the canonical header (with payload_length counting the tag)
+// and the application payload that precedes it; the frame's existing sequence
+// field is therefore bound into the tag, resisting replay with a modified seq.
+//
+// Preconditions:
+//   • frame.payload_length <= kMaximumPayload - kMacTagSize
+//   • frame.type must be a known MessageType
+//   • frame.flags bits 4–7 must be zero
+//
+// Returns false (and sets output.length = 0) on any constraint violation.
+// The caller must NOT set kFlagAuthTag in frame.flags; it is set by this function.
+[[nodiscard]] bool encode_authenticated(
+    const Frame& frame,
+    const std::array<std::uint8_t, kMacKeySize>& key,
+    EncodedFrame& output) noexcept;
+
+// decode_authenticated: decodes a frame and verifies its HMAC-SHA-256 tag.
+// The kFlagAuthTag flag MUST be set in the received frame; a frame without the
+// flag is rejected with auth_mac_mismatch (fail-closed: no positive trust on
+// unauthenticated frames).
+//
+// On success (DecodeStatus::ok):
+//   • output.payload_length and output.payload do NOT include the 16-byte tag.
+//   • kFlagAuthTag is cleared from output.flags (tag consumed by verification).
+//
+// On any failure the output frame is left as a zero-initialised Frame{} —
+// application data is never partially populated after a failed MAC check.
+[[nodiscard]] DecodeStatus decode_authenticated(
+    const std::uint8_t* encoded,
+    std::size_t encoded_length,
+    const std::array<std::uint8_t, kMacKeySize>& key,
+    Frame& output) noexcept;
 
 class SequenceTracker {
 public:

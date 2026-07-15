@@ -432,6 +432,120 @@ void test_diagnostics() {
     CHECK(histogram.maximum_us() == 11U);
 }
 
+void test_mac_authentication() {
+    // Provisioned per-link key (32-byte, non-zero for a realistic test)
+    std::array<std::uint8_t, r2::protocol::kMacKeySize> key{};
+    for (std::size_t i = 0U; i < key.size(); ++i) {
+        key[i] = static_cast<std::uint8_t>(i + 1U);
+    }
+
+    // ── T1: valid roundtrip ────────────────────────────────────────────────
+    r2::protocol::Frame frame{};
+    frame.type            = r2::protocol::MessageType::motion_command;
+    frame.flags           = 0U;
+    frame.sequence        = 42U;
+    frame.source_time_us  = 100'000U;
+    frame.payload_length  = 4U;
+    frame.payload[0]      = 0xAAU;
+    frame.payload[1]      = 0xBBU;
+    frame.payload[2]      = 0xCCU;
+    frame.payload[3]      = 0xDDU;
+
+    r2::protocol::EncodedFrame enc{};
+    CHECK(r2::protocol::encode_authenticated(frame, key, enc));
+    CHECK(enc.length > 0U);
+    CHECK(enc.bytes[enc.length - 1U] == 0U);
+
+    r2::protocol::Frame dec{};
+    CHECK(r2::protocol::decode_authenticated(enc.bytes.data(), enc.length, key, dec) ==
+          r2::protocol::DecodeStatus::ok);
+    // Payload is delivered without the appended MAC tag
+    CHECK(dec.type == frame.type);
+    CHECK(dec.sequence == frame.sequence);
+    CHECK(dec.source_time_us == frame.source_time_us);
+    CHECK(dec.payload_length == frame.payload_length);
+    CHECK(std::memcmp(dec.payload.data(), frame.payload.data(), frame.payload_length) == 0);
+    // AUTH_TAG flag is consumed by verification and cleared in the output
+    CHECK((dec.flags & r2::protocol::kFlagAuthTag) == 0U);
+
+    // ── T2: wrong key → auth_mac_mismatch ─────────────────────────────────
+    std::array<std::uint8_t, r2::protocol::kMacKeySize> wrong_key{};
+    wrong_key[0] = 0xFFU;  // differs from key[0] = 0x01
+    r2::protocol::Frame dec2{};
+    CHECK(r2::protocol::decode_authenticated(enc.bytes.data(), enc.length, wrong_key, dec2) ==
+          r2::protocol::DecodeStatus::auth_mac_mismatch);
+    // Output must not be populated on a failed MAC check
+    CHECK(dec2.sequence == 0U);
+    CHECK(dec2.payload_length == 0U);
+
+    // ── T3: forged frame – valid CRC32C but zero/wrong MAC tag ────────────
+    // Build with encode() (no HMAC) but with AUTH_TAG flag and a fake tag
+    // payload. CRC will be valid; MAC will not match.
+    r2::protocol::Frame forged{};
+    forged.type           = r2::protocol::MessageType::motion_command;
+    forged.flags          = r2::protocol::kFlagAuthTag;
+    forged.sequence       = 42U;
+    forged.source_time_us = 100'000U;
+    // Payload = kMacTagSize zeros (a plausible tag slot, but all-zero ≠ real HMAC)
+    forged.payload_length = static_cast<std::uint16_t>(r2::protocol::kMacTagSize);
+    // payload is zero-initialised (wrong tag)
+
+    r2::protocol::EncodedFrame forged_enc{};
+    CHECK(r2::protocol::encode(forged, forged_enc));  // CRC-only, no HMAC
+    r2::protocol::Frame forged_dec{};
+    CHECK(r2::protocol::decode_authenticated(
+              forged_enc.bytes.data(), forged_enc.length, key, forged_dec) ==
+          r2::protocol::DecodeStatus::auth_mac_mismatch);
+
+    // ── T4: absent AUTH_TAG flag → auth_mac_mismatch (fail-closed) ────────
+    r2::protocol::Frame plain{};
+    plain.type            = r2::protocol::MessageType::motion_command;
+    plain.sequence        = 42U;
+    plain.source_time_us  = 100'000U;
+    plain.payload_length  = 4U;
+    r2::protocol::EncodedFrame plain_enc{};
+    CHECK(r2::protocol::encode(plain, plain_enc));
+    r2::protocol::Frame plain_dec{};
+    CHECK(r2::protocol::decode_authenticated(
+              plain_enc.bytes.data(), plain_enc.length, key, plain_dec) ==
+          r2::protocol::DecodeStatus::auth_mac_mismatch);
+
+    // ── T5: sequence binding – different sequences produce different MACs ──
+    r2::protocol::Frame frame_s1 = frame;
+    r2::protocol::Frame frame_s2 = frame;
+    frame_s2.sequence = frame.sequence + 1U;
+
+    r2::protocol::EncodedFrame enc_s1{}, enc_s2{};
+    CHECK(r2::protocol::encode_authenticated(frame_s1, key, enc_s1));
+    CHECK(r2::protocol::encode_authenticated(frame_s2, key, enc_s2));
+
+    // Same payload and key but different sequence → different authenticated bytes
+    CHECK(enc_s1.length == enc_s2.length);
+    CHECK(std::memcmp(enc_s1.bytes.data(), enc_s2.bytes.data(), enc_s1.length) != 0);
+
+    // Both decode correctly under the correct key, yielding the original sequences
+    r2::protocol::Frame out_s1{}, out_s2{};
+    CHECK(r2::protocol::decode_authenticated(enc_s1.bytes.data(), enc_s1.length, key, out_s1) ==
+          r2::protocol::DecodeStatus::ok);
+    CHECK(out_s1.sequence == frame_s1.sequence);
+    CHECK(r2::protocol::decode_authenticated(enc_s2.bytes.data(), enc_s2.length, key, out_s2) ==
+          r2::protocol::DecodeStatus::ok);
+    CHECK(out_s2.sequence == frame_s2.sequence);
+
+    // Decode s1 bytes with s2's key (wrong key) must fail
+    CHECK(r2::protocol::decode_authenticated(enc_s1.bytes.data(), enc_s1.length, wrong_key, out_s1) ==
+          r2::protocol::DecodeStatus::auth_mac_mismatch);
+
+    // ── T6: encode_authenticated rejects oversized payload ────────────────
+    r2::protocol::Frame big{};
+    big.type           = r2::protocol::MessageType::motion_command;
+    big.payload_length =
+        static_cast<std::uint16_t>(r2::protocol::kMaximumPayload - r2::protocol::kMacTagSize + 1U);
+    r2::protocol::EncodedFrame big_enc{};
+    CHECK(!r2::protocol::encode_authenticated(big, key, big_enc));
+    CHECK(big_enc.length == 0U);
+}
+
 void test_image_verifier_failclosed() {
     // H4: a default-constructed / zero-initialized image verdict MUST read as a
     // rejection, never as `accepted`. (The static_assert in the header enforces
@@ -454,6 +568,7 @@ int main() {
     test_configuration_rollback();
     test_diagnostics();
     test_image_verifier_failclosed();
+    test_mac_authentication();
     if (failures != 0) {
         std::fprintf(stderr, "%d test assertion(s) failed\n", failures);
         return 1;
