@@ -19,8 +19,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use kirra_verifier::verifier::{NodeTrustState, RegisteredNode};
 use kirra_verifier::verifier_store::migrations_postgres::PgMigrationError;
 use kirra_verifier::verifier_store::{
-    assert_federation_store_contract, assert_fence_contract, assert_node_store_contract,
-    assert_posture_engine_state_store_contract, EpochFence, FenceError, NodeStore,
+    assert_cert_principal_store_contract, assert_federation_store_contract, assert_fence_contract,
+    assert_node_store_contract, assert_operator_store_contract,
+    assert_posture_engine_state_store_contract, assert_principal_store_contract, EpochFence,
+    FenceError, NodeStore,
 };
 use kirra_verifier_pg::{PgVerifierStore, PG_SCHEMA_VERSION};
 
@@ -190,6 +192,40 @@ fn live_pg_satisfies_the_federation_store_contract() {
     // per-source strictly-advancing sequence gate — realized here with atomic
     // Postgres upserts (ON CONFLICT DO NOTHING / conditional DO UPDATE).
     assert_federation_store_contract(&store);
+}
+
+#[test]
+fn live_pg_satisfies_the_operator_store_contract() {
+    let Some((_, _, mut store)) = isolated_store("operators") else {
+        return;
+    };
+    // The SAME suite SQLite + the in-memory model pass: register/rotate (clears
+    // revocation), the conditional revoke (true only on an active→revoked
+    // transition), and load/list. Takes `&mut` (register/revoke mutate).
+    assert_operator_store_contract(&mut store);
+}
+
+#[test]
+fn live_pg_satisfies_the_principal_store_contract() {
+    let Some((_, _, mut store)) = isolated_store("principals") else {
+        return;
+    };
+    // Register/rotate (clears revocation), conditional revoke, lookup by token hash,
+    // and the `UNIQUE(token_sha256)` guarantee (a hash already held by a DIFFERENT
+    // principal errors on the constraint) — realized here by the live PG UNIQUE index.
+    assert_principal_store_contract(&mut store);
+}
+
+#[test]
+fn live_pg_satisfies_the_cert_principal_store_contract() {
+    let Some((_, _, mut store)) = isolated_store("certprincipals") else {
+        return;
+    };
+    // Register (with optional X.509 expiry) / rotate / revoke, lookup by fingerprint,
+    // the `UNIQUE(cert_sha256)` one-cert-one-principal guarantee, and the fail-closed
+    // expiry (a `not_after_ms > i64::MAX` is refused, a corrupt negative reads as
+    // expired-at-epoch) — held identical across all three backends.
+    assert_cert_principal_store_contract(&mut store);
 }
 
 #[test]

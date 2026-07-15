@@ -1,6 +1,6 @@
 //! EP-10 (MGA G-9) — the **live Postgres backend** for the verifier storage seams.
 //!
-//! The root crate defines five backend seams and proves each against SQLite +
+//! The root crate defines eight backend seams and proves each against SQLite +
 //! an in-memory model:
 //!
 //! - the schema-migration engine (`verifier_store::migrations::run_migrations_generic`)
@@ -13,7 +13,13 @@
 //!   + the monotonic generation high-water, fail-closed on a corrupt value);
 //! - the [`FederationStore`] contract (the trusted-controller key registry + the
 //!   durable anti-replay primitives: single-use nonce burn + the per-source
-//!   strictly-advancing sequence gate).
+//!   strictly-advancing sequence gate);
+//! - the [`OperatorStore`] contract (the per-operator Ed25519 identity registry +
+//!   revocation);
+//! - the [`PrincipalStore`] contract (the API-principal registry — scoped bearer
+//!   tokens stored ONLY as their SHA-256, `UNIQUE(token_sha256)` one-token-one-principal);
+//! - the [`CertPrincipalStore`] contract (the mTLS cert-principal registry — a
+//!   fingerprint-pinned client cert + optional X.509 expiry, fail-closed).
 //!
 //! This crate is the promised integrator binding: [`LivePgExecutor`] is the
 //! "~10-line adapter" the seam documentation describes (execute →
@@ -44,13 +50,14 @@ use kirra_verifier::verifier_store::migrations_postgres::{
     PgExecutor, PgMigration, PgMigrationError, PostgresBackend,
 };
 use kirra_verifier::verifier_store::{
-    EpochFence, FederationStore, FenceError, NodeStore, PostureEngineStateStore,
+    ApiPrincipalRecord, CertPrincipalRecord, CertPrincipalStore, EpochFence, FederationStore,
+    FenceError, NodeStore, OperatorRecord, OperatorStore, PostureEngineStateStore, PrincipalStore,
 };
 
 /// The Postgres schema version THIS binary supports (mirrors the SQLite
 /// `SCHEMA_VERSION` discipline: a newer stamp in the database is refused
 /// fail-closed by the shared engine).
-pub const PG_SCHEMA_VERSION: i64 = 4;
+pub const PG_SCHEMA_VERSION: i64 = 7;
 
 /// Baseline (v1) DDL — idempotent, applied on every open BEFORE the versioned
 /// steps run (v1 is the engine's baseline; steps are v ≥ 2). The two tables
@@ -115,6 +122,46 @@ const PG_MIGRATIONS: &[PgMigration] = &[
                   source_id     TEXT PRIMARY KEY, \
                   last_sequence BIGINT NOT NULL, \
                   last_seen_ms  BIGINT NOT NULL \
+              )",
+    },
+    // v5 — the operator registry (the OperatorStore seam): per-operator Ed25519
+    // identity + revocation. `revoked_at_ms` NULL = active.
+    PgMigration {
+        version: 5,
+        sql: "CREATE TABLE IF NOT EXISTS operators ( \
+                  operator_id      TEXT PRIMARY KEY, \
+                  pubkey_pem       TEXT NOT NULL, \
+                  registered_at_ms BIGINT NOT NULL, \
+                  revoked_at_ms    BIGINT \
+              )",
+    },
+    // v6 — the API-principal registry (the PrincipalStore seam): per-principal
+    // scoped bearer tokens, stored ONLY as the SHA-256 hex. `UNIQUE(token_sha256)` —
+    // one token authorizes at most one principal (registering a hash already held by
+    // a DIFFERENT principal errors on the constraint). `revoked_at_ms` NULL = active.
+    PgMigration {
+        version: 6,
+        sql: "CREATE TABLE IF NOT EXISTS api_principals ( \
+                  principal_id  TEXT PRIMARY KEY, \
+                  token_sha256  TEXT NOT NULL UNIQUE, \
+                  role          TEXT NOT NULL, \
+                  created_at_ms BIGINT NOT NULL, \
+                  revoked_at_ms BIGINT \
+              )",
+    },
+    // v7 — the mTLS cert-principal registry (the CertPrincipalStore seam): a
+    // CA-verified client cert pinned by its SHA-256 leaf fingerprint, with an
+    // optional X.509 notAfter (`not_after_ms`). `UNIQUE(cert_sha256)` — one cert
+    // pins at most one principal. `revoked_at_ms` NULL = active.
+    PgMigration {
+        version: 7,
+        sql: "CREATE TABLE IF NOT EXISTS cert_principals ( \
+                  principal_id  TEXT PRIMARY KEY, \
+                  cert_sha256   TEXT NOT NULL UNIQUE, \
+                  role          TEXT NOT NULL, \
+                  created_at_ms BIGINT NOT NULL, \
+                  revoked_at_ms BIGINT, \
+                  not_after_ms  BIGINT \
               )",
     },
 ];
@@ -616,5 +663,268 @@ impl FederationStore for PgVerifierStore {
             &[&source_id, &seq, &now],
         )?;
         Ok(n == 1)
+    }
+}
+
+impl PgVerifierStore {
+    fn row_to_operator(row: &postgres::Row) -> OperatorRecord {
+        OperatorRecord {
+            operator_id: row.get(0),
+            pubkey_pem: row.get(1),
+            registered_at_ms: row.get::<_, i64>(2) as u64,
+            revoked_at_ms: row.get::<_, Option<i64>>(3).map(|v| v as u64),
+        }
+    }
+}
+
+impl OperatorStore for PgVerifierStore {
+    type Error = PgStoreError;
+
+    fn register_operator(
+        &mut self,
+        operator_id: &str,
+        pubkey_pem: &str,
+        now_ms: u64,
+    ) -> Result<(), PgStoreError> {
+        // Fail-closed on an out-of-domain timestamp (see FederationStore).
+        let reg_ms = i64::try_from(now_ms).map_err(|_| PgStoreError::OutOfDomain {
+            field: "now_ms",
+            value: now_ms,
+        })?;
+        // Register or rotate: overwrite the key and CLEAR any prior revocation (a
+        // fresh key reactivates), matching the SQLite upsert.
+        self.lock().execute(
+            "INSERT INTO operators (operator_id, pubkey_pem, registered_at_ms, revoked_at_ms) \
+             VALUES ($1, $2, $3, NULL) \
+             ON CONFLICT (operator_id) DO UPDATE SET \
+                 pubkey_pem = EXCLUDED.pubkey_pem, \
+                 registered_at_ms = EXCLUDED.registered_at_ms, \
+                 revoked_at_ms = NULL",
+            &[&operator_id, &pubkey_pem, &reg_ms],
+        )?;
+        Ok(())
+    }
+
+    fn revoke_operator(&mut self, operator_id: &str, now_ms: u64) -> Result<bool, PgStoreError> {
+        let rev_ms = i64::try_from(now_ms).map_err(|_| PgStoreError::OutOfDomain {
+            field: "now_ms",
+            value: now_ms,
+        })?;
+        // Conditional update — `rows == 1` iff an ACTIVE operator transitioned to
+        // revoked; `0` if absent or already revoked.
+        let n = self.lock().execute(
+            "UPDATE operators SET revoked_at_ms = $2 \
+             WHERE operator_id = $1 AND revoked_at_ms IS NULL",
+            &[&operator_id, &rev_ms],
+        )?;
+        Ok(n > 0)
+    }
+
+    fn load_operator(&self, operator_id: &str) -> Result<Option<OperatorRecord>, PgStoreError> {
+        let row = self.lock().query_opt(
+            "SELECT operator_id, pubkey_pem, registered_at_ms, revoked_at_ms \
+             FROM operators WHERE operator_id = $1",
+            &[&operator_id],
+        )?;
+        Ok(row.as_ref().map(Self::row_to_operator))
+    }
+
+    fn load_operators(&self) -> Result<Vec<OperatorRecord>, PgStoreError> {
+        let rows = self.lock().query(
+            "SELECT operator_id, pubkey_pem, registered_at_ms, revoked_at_ms \
+             FROM operators ORDER BY operator_id",
+            &[],
+        )?;
+        Ok(rows.iter().map(Self::row_to_operator).collect())
+    }
+}
+
+impl PgVerifierStore {
+    fn row_to_api_principal(row: &postgres::Row) -> ApiPrincipalRecord {
+        ApiPrincipalRecord {
+            principal_id: row.get(0),
+            role: row.get(1),
+            created_at_ms: row.get::<_, i64>(2) as u64,
+            revoked_at_ms: row.get::<_, Option<i64>>(3).map(|v| v as u64),
+        }
+    }
+}
+
+impl PrincipalStore for PgVerifierStore {
+    type Error = PgStoreError;
+
+    fn register_api_principal(
+        &mut self,
+        principal_id: &str,
+        token_sha256: &str,
+        role: &str,
+        now_ms: u64,
+    ) -> Result<(), PgStoreError> {
+        let created_ms = i64::try_from(now_ms).map_err(|_| PgStoreError::OutOfDomain {
+            field: "now_ms",
+            value: now_ms,
+        })?;
+        // Register / rotate: overwrite token hash + role and CLEAR revocation. A
+        // `token_sha256` already held by a DIFFERENT principal violates the UNIQUE
+        // constraint (only the principal_id conflict is handled by ON CONFLICT), so
+        // it surfaces as a driver error — the fail-closed "one token, one principal"
+        // guarantee, exactly like the SQLite backend.
+        self.lock().execute(
+            "INSERT INTO api_principals \
+                 (principal_id, token_sha256, role, created_at_ms, revoked_at_ms) \
+             VALUES ($1, $2, $3, $4, NULL) \
+             ON CONFLICT (principal_id) DO UPDATE SET \
+                 token_sha256  = EXCLUDED.token_sha256, \
+                 role          = EXCLUDED.role, \
+                 created_at_ms = EXCLUDED.created_at_ms, \
+                 revoked_at_ms = NULL",
+            &[&principal_id, &token_sha256, &role, &created_ms],
+        )?;
+        Ok(())
+    }
+
+    fn revoke_api_principal(
+        &mut self,
+        principal_id: &str,
+        now_ms: u64,
+    ) -> Result<bool, PgStoreError> {
+        let rev_ms = i64::try_from(now_ms).map_err(|_| PgStoreError::OutOfDomain {
+            field: "now_ms",
+            value: now_ms,
+        })?;
+        let n = self.lock().execute(
+            "UPDATE api_principals SET revoked_at_ms = $2 \
+             WHERE principal_id = $1 AND revoked_at_ms IS NULL",
+            &[&principal_id, &rev_ms],
+        )?;
+        Ok(n > 0)
+    }
+
+    fn load_api_principal_by_token_hash(
+        &self,
+        token_sha256: &str,
+    ) -> Result<Option<ApiPrincipalRecord>, PgStoreError> {
+        // Lookup by hash only; the record never carries the token back.
+        let row = self.lock().query_opt(
+            "SELECT principal_id, role, created_at_ms, revoked_at_ms \
+             FROM api_principals WHERE token_sha256 = $1",
+            &[&token_sha256],
+        )?;
+        Ok(row.as_ref().map(Self::row_to_api_principal))
+    }
+
+    fn load_api_principals(&self) -> Result<Vec<ApiPrincipalRecord>, PgStoreError> {
+        let rows = self.lock().query(
+            "SELECT principal_id, role, created_at_ms, revoked_at_ms \
+             FROM api_principals ORDER BY principal_id",
+            &[],
+        )?;
+        Ok(rows.iter().map(Self::row_to_api_principal).collect())
+    }
+}
+
+impl PgVerifierStore {
+    fn row_to_cert_principal(row: &postgres::Row) -> CertPrincipalRecord {
+        CertPrincipalRecord {
+            principal_id: row.get(0),
+            role: row.get(1),
+            created_at_ms: row.get::<_, i64>(2) as u64,
+            revoked_at_ms: row.get::<_, Option<i64>>(3).map(|v| v as u64),
+            // FAIL-CLOSED read (matches the SQLite backend, Copilot #857): a NEGATIVE
+            // stored `not_after_ms` — only reachable via corruption, since the write
+            // path refuses `> i64::MAX` — maps to `Some(0)` ("expired at epoch"), so a
+            // tampered expiry can only make a cert MORE restricted, never a huge
+            // never-expiring value. `u64::try_from` fails only for negatives → 0.
+            not_after_ms: row
+                .get::<_, Option<i64>>(4)
+                .map(|v| u64::try_from(v).unwrap_or(0)),
+        }
+    }
+}
+
+impl CertPrincipalStore for PgVerifierStore {
+    type Error = PgStoreError;
+
+    fn register_cert_principal(
+        &mut self,
+        principal_id: &str,
+        cert_sha256: &str,
+        role: &str,
+        not_after_ms: Option<u64>,
+        now_ms: u64,
+    ) -> Result<(), PgStoreError> {
+        let created_ms = i64::try_from(now_ms).map_err(|_| PgStoreError::OutOfDomain {
+            field: "now_ms",
+            value: now_ms,
+        })?;
+        // Refuse a `not_after_ms > i64::MAX` (never truncate to a negative that would
+        // read back as a huge never-expiring value — a fail-OPEN expiry). Bounded in
+        // practice (~292M years past epoch).
+        let not_after_i64 = match not_after_ms {
+            Some(v) => Some(i64::try_from(v).map_err(|_| PgStoreError::OutOfDomain {
+                field: "not_after_ms",
+                value: v,
+            })?),
+            None => None,
+        };
+        // A `cert_sha256` already pinned to a DIFFERENT principal violates the UNIQUE
+        // constraint (surfaces as a driver error — one cert, one principal).
+        self.lock().execute(
+            "INSERT INTO cert_principals \
+                 (principal_id, cert_sha256, role, created_at_ms, revoked_at_ms, not_after_ms) \
+             VALUES ($1, $2, $3, $4, NULL, $5) \
+             ON CONFLICT (principal_id) DO UPDATE SET \
+                 cert_sha256   = EXCLUDED.cert_sha256, \
+                 role          = EXCLUDED.role, \
+                 created_at_ms = EXCLUDED.created_at_ms, \
+                 revoked_at_ms = NULL, \
+                 not_after_ms  = EXCLUDED.not_after_ms",
+            &[
+                &principal_id,
+                &cert_sha256,
+                &role,
+                &created_ms,
+                &not_after_i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn revoke_cert_principal(
+        &mut self,
+        principal_id: &str,
+        now_ms: u64,
+    ) -> Result<bool, PgStoreError> {
+        let rev_ms = i64::try_from(now_ms).map_err(|_| PgStoreError::OutOfDomain {
+            field: "now_ms",
+            value: now_ms,
+        })?;
+        let n = self.lock().execute(
+            "UPDATE cert_principals SET revoked_at_ms = $2 \
+             WHERE principal_id = $1 AND revoked_at_ms IS NULL",
+            &[&principal_id, &rev_ms],
+        )?;
+        Ok(n > 0)
+    }
+
+    fn load_cert_principal_by_fingerprint(
+        &self,
+        cert_sha256: &str,
+    ) -> Result<Option<CertPrincipalRecord>, PgStoreError> {
+        let row = self.lock().query_opt(
+            "SELECT principal_id, role, created_at_ms, revoked_at_ms, not_after_ms \
+             FROM cert_principals WHERE cert_sha256 = $1",
+            &[&cert_sha256],
+        )?;
+        Ok(row.as_ref().map(Self::row_to_cert_principal))
+    }
+
+    fn load_cert_principals(&self) -> Result<Vec<CertPrincipalRecord>, PgStoreError> {
+        let rows = self.lock().query(
+            "SELECT principal_id, role, created_at_ms, revoked_at_ms, not_after_ms \
+             FROM cert_principals ORDER BY principal_id",
+            &[],
+        )?;
+        Ok(rows.iter().map(Self::row_to_cert_principal).collect())
     }
 }
