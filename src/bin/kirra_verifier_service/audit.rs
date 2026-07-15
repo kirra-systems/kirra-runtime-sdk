@@ -107,7 +107,11 @@ pub(crate) async fn handle_audit_rotate_key(
         kirra_verifier::audit_chain::verifying_key_id(&new_signing_key.verifying_key());
     // #79: pass our held fencing token so the durable write re-checks it INSIDE
     // the transaction, closing the gate→commit TOCTOU.
-    let held_epoch = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
+    let held_epoch = svc
+        .app
+        .ha_fence
+        .held_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
     // The mutation runs under one acquisition; the closure returns the
     // record_key_rotation result. The Fenced self-demote (a mode_active store)
     // happens OUTSIDE the closure — the lock is already released by then,
@@ -140,6 +144,7 @@ pub(crate) async fn handle_audit_rotate_key(
             // Mirror the gate: self-demote and reject fail-closed (no write
             // landed). Subsequent mutations hit the standby check above.
             svc.app
+                .ha_fence
                 .mode_active
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             tracing::error!(

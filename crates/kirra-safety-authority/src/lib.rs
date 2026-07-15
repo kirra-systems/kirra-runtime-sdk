@@ -20,6 +20,10 @@
 //! - [`OffPathWriteCounters`] — the off-verdict-path write-failure / drop
 //!   observability counters (must be 0, never gate the verdict path), embedded on
 //!   `AppState` as `app.off_path_writes` (3e — a second field-façade migration).
+//! - [`HaFenceState`] + [`mutation_fence_verdict`] — the HA split-brain fence
+//!   state + the pure fence decision (SG-009 / HA-L3), embedded on `AppState` as
+//!   `app.ha_fence` (3f — a third field-façade migration; `is_active`/`current_mode`
+//!   stay as delegators).
 //!
 //! `kirra-verifier` re-exports the pure-decision items and the attestation module
 //! from their original module paths (a `pub use` shim) and embeds `EscalationState`
@@ -48,6 +52,13 @@ pub mod dag;
 // (`app.off_path_writes`), exactly like `EscalationState` in 3c. std-only.
 pub mod counters;
 pub use counters::OffPathWriteCounters;
+
+// ADR-0035 Stage 3 (slice 3f): the HA split-brain fence state (`app.ha_fence`) +
+// the pure fence decision (SG-009 / HA-L3), lifted VERBATIM off `AppState`. The
+// atomics + the predicate that reads them live together; `AppState` keeps
+// `is_active()`/`current_mode()` as thin delegators. std-only.
+pub mod ha_fence;
+pub use ha_fence::{mutation_fence_verdict, HaFenceState, MutationFence};
 
 /// One node's contribution to the fleet posture: its local trust state, the
 /// posture propagated to it through the dependency DAG, and the interned ids of

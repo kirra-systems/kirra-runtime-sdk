@@ -60,7 +60,11 @@ pub(crate) async fn handle_actuator_motion_command(
     // no admitted event, and the handler rejects without releasing a command.
     // SAFETY: SG-009 / HA-L3 / REQ-HA-ACTUATOR-EPOCH-FENCE.
     let audit_str = audit.to_string();
-    let held = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
+    let held = svc
+        .app
+        .ha_fence
+        .held_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
     let final_epoch_assertion = svc.app.store.call(move |store| {
         store.assert_actuator_epoch_held(held)?;
         if let Err(e) = store.save_posture_event_chained(
@@ -77,6 +81,7 @@ pub(crate) async fn handle_actuator_motion_command(
         Ok(Ok(())) => {}
         Ok(Err(FenceError::EpochSuperseded { held, durable })) => {
             svc.app
+                .ha_fence
                 .mode_active
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             tracing::error!(
@@ -89,6 +94,7 @@ pub(crate) async fn handle_actuator_motion_command(
         }
         Ok(Err(FenceError::EpochUnreadable)) | Err(_) => {
             svc.app
+                .ha_fence
                 .mode_active
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             tracing::error!(
