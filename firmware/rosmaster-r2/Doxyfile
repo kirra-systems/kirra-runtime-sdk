@@ -1,6 +1,6 @@
 PROJECT_NAME           = "Kirra ROSMASTER R2 MCU Platform"
 PROJECT_NUMBER         = 0.1.0
-OUTPUT_DIRECTORY       = build/docs
+OUTPUT_DIRECTORY       = build
 INPUT                  = README.md hal drivers protocol kinematics control diagnostics safety firmware bootloader docs
 RECURSIVE              = YES
 FILE_PATTERNS          = *.hpp *.cpp *.md

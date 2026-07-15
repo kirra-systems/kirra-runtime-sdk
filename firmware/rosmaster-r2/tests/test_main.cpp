@@ -185,6 +185,34 @@ void test_control() {
     CHECK(std::abs(recovered) < 1.0);
 }
 
+void test_motion_controller_composition() {
+    constexpr r2::kinematics::VehicleGeometry geometry{
+        0.23, 0.19, 0.033, 0.55};
+    constexpr r2::control::MotionLimits limits{
+        1.5, 1.0, 2.0, 8.0, 2.0};
+    constexpr r2::control::PidGains gains{
+        0.8, 1.2, 0.01, 0.4, 4.0};
+    r2::control::MotionController controller{
+        geometry, limits, {gains, gains}};
+
+    auto output = controller.update({1.0, 0.5}, 0.0, 0.0, 0.001);
+    CHECK(output.status == r2::kinematics::KinematicsStatus::ok);
+    CHECK(output.left_motor_command > 0.0);
+    CHECK(output.right_motor_command > 0.0);
+    CHECK(output.steering_angle_rad > 0.0);
+    CHECK(output.steering_angle_rad <= limits.maximum_steering_rate_rad_s * 0.001);
+
+    output = controller.update({0.0, 1.0}, 0.0, 0.0, 0.001);
+    CHECK(output.status ==
+          r2::kinematics::KinematicsStatus::infeasible_stationary_turn);
+    CHECK(output.left_motor_command == 0.0);
+    CHECK(output.right_motor_command == 0.0);
+
+    output = controller.update({NAN, 0.0}, 0.0, 0.0, 0.001);
+    CHECK(output.status == r2::kinematics::KinematicsStatus::non_finite_input);
+    controller.reset();
+}
+
 void test_safety() {
     r2::safety::SafetyManager manager{};
     CHECK(manager.bridge_must_be_disabled());
@@ -261,6 +289,7 @@ int main() {
     test_crc_and_protocol();
     test_kinematics();
     test_control();
+    test_motion_controller_composition();
     test_safety();
     test_configuration_rollback();
     test_diagnostics();
