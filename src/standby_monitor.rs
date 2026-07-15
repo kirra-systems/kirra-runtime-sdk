@@ -20,7 +20,7 @@
 //   spawn_promotion_monitor(app, cache, on_promote)
 //     → every PROMOTION_POLL_MS, reads "primary_heartbeat_ms"
 //     → if age > PROMOTION_TIMEOUT_MS: promote
-//     → promotion: app.mode_active transitions false → true
+//     → promotion: app.ha_fence.mode_active transitions false → true
 //       then calls recalculate_and_broadcast() once to populate the
 //       cache and begin enforcing posture
 //     → fires on_promote() to (re)start the Active posture-freshness
@@ -41,10 +41,10 @@
 //     must be updated to Active BEFORE calling it, or the function returns early.
 //
 // SHARED STATE
-//   app.mode_active is an Arc<AtomicBool>.
+//   app.ha_fence.mode_active is an Arc<AtomicBool>.
 //   true = Active, false = PassiveStandby.
 //   Promotion: compare-and-swap false → true.
-//   This is the only write to app.mode_active outside of startup.
+//   This is the only write to app.ha_fence.mode_active outside of startup.
 //
 // ENV VARS
 //   KIRRA_INSTANCE_ID        — unique identifier for this instance (default: hostname)
@@ -428,7 +428,8 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
         if let Some(params) = &lease {
             let elapsed_ms = last_renew.elapsed().as_millis() as u64;
             if crate::lease::lease_expired(elapsed_ms, params) {
-                app.mode_active
+                app.ha_fence
+                    .mode_active
                     .store(false, std::sync::atomic::Ordering::SeqCst);
                 tracing::error!(
                     instance_id = %id,
@@ -476,7 +477,7 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
                 // heartbeat loop but left mode_active = true (the
                 // mutation gate would still let writes through until
                 // the next request-time epoch check).
-                let held = app_c.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
+                let held = app_c.ha_fence.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
                 let db_epoch = match store.current_epoch() {
                     Ok(e) => e,
                     // Review item "1": an unreadable epoch is a FAILED tick, not a
@@ -494,9 +495,9 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
                 // gate can read it lock-free. Release pairs with the gate's Acquire
                 // load. This runs every HEARTBEAT_INTERVAL_MS (~2000 ms) and is the
                 // cache repopulation path that bounds the gate's staleness.
-                app_c.cached_db_epoch.store(db_epoch, std::sync::atomic::Ordering::Release);
+                app_c.ha_fence.cached_db_epoch.store(db_epoch, std::sync::atomic::Ordering::Release);
                 if held != 0 && db_epoch != held {
-                    app_c.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    app_c.ha_fence.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
                     tracing::error!(
                         instance_id = %id_c,
                         held        = held,
@@ -517,7 +518,7 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
                         TakeoverRecordVerdict::Demote => {
                             // Mirror the epoch path: tear down the local Active
                             // flag too, not just the heartbeat loop.
-                            app_c.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                            app_c.ha_fence.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
                             tracing::error!(
                                 promoted_by = %promoted_by,
                                 instance_id = %id_c,
@@ -590,7 +591,8 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
                 // to promote on heartbeat silence. Self-demote (fail closed) so
                 // the old primary stops being a writer before the new one starts.
                 if should_self_demote_on_heartbeat_failures(consecutive_failures) {
-                    app.mode_active
+                    app.ha_fence
+                        .mode_active
                         .store(false, std::sync::atomic::Ordering::SeqCst);
                     tracing::error!(
                         instance_id          = %id,
@@ -690,7 +692,7 @@ impl HeartbeatFreshness {
 /// Polls the primary heartbeat every `PROMOTION_POLL_MS`. If the heartbeat
 /// age exceeds `PROMOTION_TIMEOUT_MS`, performs an atomic promotion:
 ///
-///   1. CAS app.mode_active: false → true
+///   1. CAS app.ha_fence.mode_active: false → true
 ///   2. Writes promotion record to audit chain (disk-first)
 ///   3. Calls recalculate_and_broadcast() — now runs as Active, populates cache
 ///   4. Task exits — promotion is complete and one-way
@@ -1127,12 +1129,14 @@ async fn perform_promotion(
     // compare it against the DB epoch on every write. If a later
     // promotion fences us, gate-level checks will detect held != db and
     // self-demote.
-    app.held_epoch
+    app.ha_fence
+        .held_epoch
         .store(new_epoch, std::sync::atomic::Ordering::SeqCst);
     // Pass B1 (S3 / #115): re-stamp the cached DB epoch atomically so the
     // gate sees this promotion without taking the store lock. Release pairs
     // with the gate's Acquire load at `policy_layer.rs::enforce_posture_routing`.
-    app.cached_db_epoch
+    app.ha_fence
+        .cached_db_epoch
         .store(new_epoch, std::sync::atomic::Ordering::Release);
 
     // Step 3: Flip the local mode atomic. By this point the durable
@@ -1140,6 +1144,7 @@ async fn perform_promotion(
     // step, not a split-brain guard. A racing local CAS failure here
     // (e.g. a force-promote already flipped us) is informational only.
     if app
+        .ha_fence
         .mode_active
         .compare_exchange(
             false,
@@ -1183,7 +1188,8 @@ async fn perform_promotion(
             // Fail-closed: we already claimed the durable epoch; if we can't persist
             // required promotion metadata, immediately self-demote so this instance
             // does not serve writes as a partially-promoted Active.
-            app.mode_active
+            app.ha_fence
+                .mode_active
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
@@ -1194,7 +1200,8 @@ async fn perform_promotion(
                 epoch = new_epoch,
                 "promotion ABORTED — failed to persist promotion record key"
             );
-            app.mode_active
+            app.ha_fence
+                .mode_active
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
@@ -1235,7 +1242,8 @@ async fn perform_promotion(
                 "promotion ABORTED — failed to persist promotion audit event"
             );
             // Fail-closed: do not remain Active if the required audit event cannot be persisted.
-            app.mode_active
+            app.ha_fence
+                .mode_active
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
@@ -1246,7 +1254,8 @@ async fn perform_promotion(
                 epoch = new_epoch,
                 "promotion ABORTED — failed to persist promotion audit event"
             );
-            app.mode_active
+            app.ha_fence
+                .mode_active
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
@@ -1298,7 +1307,8 @@ async fn perform_promotion(
                 error = %e, instance_id = %id, epoch = new_epoch,
                 "promotion ABORTED — cannot re-seed generation high-water from shared store; staying PassiveStandby (fail-closed) to avoid time-reversing generations"
             );
-            app.mode_active
+            app.ha_fence
+                .mode_active
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
@@ -1307,7 +1317,8 @@ async fn perform_promotion(
                 error = %e, instance_id = %id, epoch = new_epoch,
                 "promotion ABORTED — generation re-seed offload failed; staying PassiveStandby (fail-closed)"
             );
-            app.mode_active
+            app.ha_fence
+                .mode_active
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
@@ -1330,7 +1341,8 @@ async fn perform_promotion(
             "promotion ABORTED — initial posture recompute task failed"
         );
         // Fail-closed: avoid remaining Active without a fresh posture cache.
-        app.mode_active
+        app.ha_fence
+            .mode_active
             .store(false, std::sync::atomic::Ordering::SeqCst);
         return false;
     }
@@ -2001,7 +2013,7 @@ mod sg_009_promotion_act_tests {
 
         // 3. An epoch was durably claimed (the split-brain fence advanced).
         assert_eq!(
-            app.held_epoch.load(Ordering::SeqCst),
+            app.ha_fence.held_epoch.load(Ordering::SeqCst),
             1,
             "first promotion on a clean DB must claim epoch 1"
         );
@@ -2205,7 +2217,7 @@ mod sg_009_promotion_act_tests {
             "anchor failure must ABORT promotion — mode_active stays false (fail-closed)"
         );
         assert_eq!(
-            app.held_epoch.load(Ordering::SeqCst),
+            app.ha_fence.held_epoch.load(Ordering::SeqCst),
             0,
             "abort must occur before the in-memory epoch is cached (Step 2 not reached)"
         );

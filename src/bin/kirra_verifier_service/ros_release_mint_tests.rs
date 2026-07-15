@@ -61,6 +61,7 @@ async fn claim_epoch(svc: &Arc<ServiceState>) {
         .expect("claim query")
         .expect("epoch granted from genesis");
     svc.app
+        .ha_fence
         .held_epoch
         .store(claimed, std::sync::atomic::Ordering::SeqCst);
 }

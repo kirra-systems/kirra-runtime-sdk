@@ -78,7 +78,7 @@ fn claim_epoch(svc: &ServiceState, observed: u64, holder: &str, now_ms: u64) -> 
         .with(|store| store.try_claim_epoch(observed, holder, now_ms))
         .expect("epoch claim sql")
         .expect("epoch claim wins");
-    svc.app.held_epoch.store(claimed, Ordering::SeqCst);
+    svc.app.ha_fence.held_epoch.store(claimed, Ordering::SeqCst);
     claimed
 }
 
@@ -417,7 +417,7 @@ async fn test_actuator_live_epoch_fence_admits_the_owner() {
         Some(1),
         "fresh in-memory store claims epoch 1 from genesis 0"
     );
-    svc.app.held_epoch.store(1, Ordering::SeqCst);
+    svc.app.ha_fence.held_epoch.store(1, Ordering::SeqCst);
 
     let status = req_status(build_test_app(svc), "POST", "/actuator/motion/command").await;
     assert_eq!(
@@ -438,7 +438,7 @@ async fn test_actuator_live_epoch_fence_rejects_a_superseded_primary() {
             .with(|s| s.try_claim_epoch(0, "old", now).unwrap()),
         Some(1)
     );
-    svc.app.held_epoch.store(1, Ordering::SeqCst);
+    svc.app.ha_fence.held_epoch.store(1, Ordering::SeqCst);
     // ...then a NEW primary claims epoch 2 durably (failover). The old primary's
     // in-memory held_epoch (1) is now stale; its cached_db_epoch hasn't caught up.
     assert_eq!(

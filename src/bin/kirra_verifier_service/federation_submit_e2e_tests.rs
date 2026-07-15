@@ -39,7 +39,8 @@ fn service() -> Arc<ServiceState> {
             .with(|store| store.try_claim_epoch(0, "test-instance", 0))
             .unwrap()
             .expect("claim initial epoch on fresh store");
-        app.held_epoch
+        app.ha_fence
+            .held_epoch
             .store(claimed, std::sync::atomic::Ordering::SeqCst);
     }
     let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));

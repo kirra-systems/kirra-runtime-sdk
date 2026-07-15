@@ -5,7 +5,7 @@ use crate::verifier_store::VerifierStore;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
@@ -249,26 +249,15 @@ pub struct AppState {
     /// lock. Phase 2 of the DB-actor migration swaps the handle's internals for a
     /// dedicated-thread connection owner.
     pub store: crate::store_handle::StoreHandle,
-    /// Runtime-mutable operational mode.
-    /// true = Active (accepts mutations); false = PassiveStandby (read-only).
-    /// LOCAL only — coordinates this process. Distributed split-brain is
-    /// prevented by `held_epoch` against the durable `ha_state` row.
-    pub mode_active: Arc<AtomicBool>,
-    /// HA fencing token (durable epoch) currently claimed by this instance.
-    /// 0 = no claim yet. The mutation gate compares this to the DB epoch on
-    /// every state-mutating request; if they diverge this node has been
-    /// fenced (another instance promoted) and must self-demote.
-    pub held_epoch: Arc<AtomicU64>,
-    /// Pass B1 cache (S3 / #115): the most recently observed durable `ha_state`
-    /// epoch. The mutation gate (`policy_layer.rs::enforce_posture_routing`)
-    /// reads this atomically instead of taking `store.lock()` + `current_epoch()`
-    /// per request. Re-stamped by `perform_promotion` after a successful
-    /// `try_claim_epoch` (Release) and by the heartbeat writer on every
-    /// `HEARTBEAT_INTERVAL_MS` tick (Release). 0 = "not yet observed";
-    /// the gate treats 0 the same way the previous DB-read path treated
-    /// an unreadable epoch — fall through and rely on the existing
-    /// `held == 0` / non-Active checks for fail-closed.
-    pub cached_db_epoch: Arc<AtomicU64>,
+    /// ADR-0035 Stage 3 (slice 3f): the HA split-brain fence state — the
+    /// `mode_active` (Active vs PassiveStandby) + `held_epoch` / `cached_db_epoch`
+    /// durable-epoch fencing atomics — lifted VERBATIM onto
+    /// `kirra_safety_authority::HaFenceState` (per-field semantics UNCHANGED,
+    /// documented on the struct in the safety-authority crate). Reached as
+    /// `app.ha_fence.<field>`; `is_active()` / `current_mode()` stay as delegators
+    /// so their callers are unchanged. All are `Arc<Atomic*>` interior-mutable, so
+    /// the move is pure relocation — no `&mut self`, no ordering change.
+    pub ha_fence: kirra_safety_authority::HaFenceState,
     /// Pass B2 (S3 / #115): bounded mpsc Sender for the audit-writer task.
     /// The deny arm of the actuator-safety-envelope middleware does
     /// `audit_writer_tx.get().try_send(job)` to push the kinematic-violation
@@ -358,9 +347,13 @@ impl AppState {
             pending_challenges: DashMap::new(),
             pending_clearance_challenges: DashMap::new(),
             store: crate::store_handle::StoreHandle::new(store),
-            mode_active: Arc::new(AtomicBool::new(mode == VerifierOperationMode::Active)),
-            held_epoch: Arc::new(AtomicU64::new(0)),
-            cached_db_epoch: Arc::new(AtomicU64::new(initial_db_epoch)),
+            // ADR-0035 Stage 3f: the mode/epoch fence atomics now live on
+            // HaFenceState; identical initial state (Active flag + held=0 +
+            // cached_db_epoch seeded from the store's current durable epoch).
+            ha_fence: kirra_safety_authority::HaFenceState::new(
+                mode == VerifierOperationMode::Active,
+                initial_db_epoch,
+            ),
             audit_writer_tx: std::sync::OnceLock::new(),
             capture_writer_tx: std::sync::OnceLock::new(),
             capture_decision_seq: Arc::new(AtomicU64::new(0)),
@@ -389,9 +382,11 @@ impl AppState {
 
     /// Returns true if this instance is currently Active (accepting mutations).
     /// Reads the atomic — reflects runtime promotion that occurred after startup.
+    /// ADR-0035 Stage 3f: thin delegator to `HaFenceState::is_active` (the atomic
+    /// moved to `app.ha_fence`); every `app.is_active()` caller is unchanged.
     #[inline]
     pub fn is_active(&self) -> bool {
-        self.mode_active.load(Ordering::SeqCst)
+        self.ha_fence.is_active()
     }
 
     /// Install the audit-writer mpsc Sender. Called once at startup, after

@@ -849,6 +849,7 @@ async fn main() {
                         Some(new_epoch) => {
                             svc_state
                                 .app
+                                .ha_fence
                                 .held_epoch
                                 .store(new_epoch, std::sync::atomic::Ordering::SeqCst);
                             tracing::info!(
@@ -889,6 +890,7 @@ async fn main() {
     if effective_mode == VerifierOperationMode::PassiveStandby {
         svc_state
             .app
+            .ha_fence
             .mode_active
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }

@@ -991,6 +991,7 @@ async fn standby_instance_rejects_clearance_grant() {
     seed_node(&svc, "robot-01");
     // Demote this instance to passive standby.
     svc.app
+        .ha_fence
         .mode_active
         .store(false, std::sync::atomic::Ordering::SeqCst);
     // Any grant shape — the is_active guard fires FIRST, before auth.
@@ -1151,6 +1152,7 @@ async fn standby_instance_rejects_estop_request() {
     let svc = build_state();
     seed_node(&svc, "robot-01");
     svc.app
+        .ha_fence
         .mode_active
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let body =

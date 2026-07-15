@@ -352,10 +352,10 @@ async fn test_posture_gate_fences_diverged_epoch_and_demotes() {
     let svc = build_state_with_posture(FleetPosture::Nominal);
 
     // Arrange the fence: held != db, both non-zero.
-    svc.app.held_epoch.store(7, Ordering::SeqCst);
-    svc.app.cached_db_epoch.store(8, Ordering::SeqCst);
+    svc.app.ha_fence.held_epoch.store(7, Ordering::SeqCst);
+    svc.app.ha_fence.cached_db_epoch.store(8, Ordering::SeqCst);
     assert!(
-        svc.app.mode_active.load(Ordering::SeqCst),
+        svc.app.ha_fence.mode_active.load(Ordering::SeqCst),
         "test precondition: mode_active starts true on an Active instance"
     );
 
@@ -370,7 +370,7 @@ async fn test_posture_gate_fences_diverged_epoch_and_demotes() {
         "diverged epoch on a mutation must be fenced 503; got {status}"
     );
     assert!(
-        !svc.app.mode_active.load(Ordering::SeqCst),
+        !svc.app.ha_fence.mode_active.load(Ordering::SeqCst),
         "fenced mutation must clear mode_active (self-demote)"
     );
 }

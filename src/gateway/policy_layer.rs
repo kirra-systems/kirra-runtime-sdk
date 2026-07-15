@@ -24,6 +24,9 @@ use crate::gateway::policy::{classify_http_command, OperationalCommand};
 use crate::posture_cache::{now_ms as posture_now_ms, CachedFleetPosture, ServiceState};
 use crate::verifier::FleetPosture;
 use crate::verifier_store::FenceError;
+// ADR-0035 Stage 3f: the HA mutation-fence predicate + verdict enum (moved here
+// from this file into the safety-authority crate, beside the atomics they read).
+use kirra_safety_authority::{mutation_fence_verdict, MutationFence};
 
 /// Hard ceiling on an actuator-command request body. A `ProposedVehicleCommand`
 /// is ~5 × f64 plus serde overhead — a few hundred bytes serialized. 16 KiB is
@@ -76,7 +79,11 @@ pub async fn assert_actuator_epoch_or_demote(
     method: &'static str,
     path: &'static str,
 ) -> Result<(), StatusCode> {
-    let held = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
+    let held = svc
+        .app
+        .ha_fence
+        .held_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
     let outcome = svc
         .app
         .store
@@ -87,6 +94,7 @@ pub async fn assert_actuator_epoch_or_demote(
         Ok(Ok(())) => Ok(()),
         Ok(Err(FenceError::EpochSuperseded { held, durable })) => {
             svc.app
+                .ha_fence
                 .mode_active
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             tracing::error!(
@@ -101,6 +109,7 @@ pub async fn assert_actuator_epoch_or_demote(
         }
         Ok(Err(FenceError::EpochUnreadable)) | Err(_) => {
             svc.app
+                .ha_fence
                 .mode_active
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             tracing::error!(
@@ -674,38 +683,10 @@ fn is_posture_exempt(method: &axum::http::Method, path: &str) -> bool {
     false
 }
 
-/// The HA fence verdict for a `WriteState`/`SystemMutation` at the outer gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MutationFence {
-    /// Active instance with a fresh/uncontested epoch — admit (subject to the
-    /// posture check downstream).
-    Admit,
-    /// Not Active (demoted or standby) — refuse. This is the authoritative HA
-    /// fence: it does NOT depend on the epoch cache, which is defeated on a
-    /// disk-wedge self-demotion (the heartbeat loop stops, freezing
-    /// `cached_db_epoch == held_epoch` so the stale-epoch check can never fire).
-    DenyNotActive,
-    /// Active but the held epoch is stale vs the cached durable epoch — a newer
-    /// primary exists; self-demote and refuse (the fast first-line fence for the
-    /// non-top-tier writes, which have no in-transaction epoch re-check).
-    DenyStaleEpoch,
-}
-
-/// Pure fence predicate (stop-gate review H3) — no env, no store, unit-tested
-/// exhaustively over the finite domain {active, standby} × {0,1,2}² (the epoch
-/// class representatives). A non-Active instance is ALWAYS fenced (independent of
-/// the epoch cache); an Active instance is fenced only when its held epoch is
-/// present and disagrees with the present cached durable epoch (a `0` on either
-/// side = cold start / unclaimed → admit).
-fn mutation_fence_verdict(is_active: bool, held_epoch: u64, cached_db_epoch: u64) -> MutationFence {
-    if !is_active {
-        return MutationFence::DenyNotActive;
-    }
-    if cached_db_epoch != 0 && held_epoch != 0 && held_epoch != cached_db_epoch {
-        return MutationFence::DenyStaleEpoch;
-    }
-    MutationFence::Admit
-}
+// ADR-0035 Stage 3f: the HA fence verdict (`MutationFence`) + the pure predicate
+// (`mutation_fence_verdict`) + their exhaustive test moved VERBATIM to
+// `kirra_safety_authority::ha_fence` (beside the atomics they read). Imported
+// below; every caller here is unchanged.
 
 /// Global command-classification + posture-routing gate.
 ///
@@ -818,9 +799,14 @@ pub async fn enforce_posture_routing(
         // `cached_db_epoch` is re-stamped by `perform_promotion` (post-CAS) and
         // the heartbeat writer, both Release; Acquire here pairs with both.
         OperationalCommand::WriteState | OperationalCommand::SystemMutation => {
-            let held = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
+            let held = svc
+                .app
+                .ha_fence
+                .held_epoch
+                .load(std::sync::atomic::Ordering::SeqCst);
             let db = svc
                 .app
+                .ha_fence
                 .cached_db_epoch
                 .load(std::sync::atomic::Ordering::Acquire);
             match mutation_fence_verdict(svc.app.is_active(), held, db) {
@@ -838,6 +824,7 @@ pub async fn enforce_posture_routing(
                 }
                 MutationFence::DenyStaleEpoch => {
                     svc.app
+                        .ha_fence
                         .mode_active
                         .store(false, std::sync::atomic::Ordering::SeqCst);
                     // WS-0.5: count the fence denial for /metrics.
@@ -1012,42 +999,9 @@ mod actuator_middleware_tests {
         p
     }
 
-    // Stop-gate review H3 — the mutation fence must refuse a non-Active instance
-    // INDEPENDENT of the epoch cache (which is frozen == held on a disk-wedge
-    // self-demotion), and still self-demote an Active instance whose held epoch is
-    // stale. This drives the predicate over the FULL finite domain
-    // {active, standby} × {0,1,2}² (18 cases): `{0,1,2}` spans every distinction
-    // the predicate makes — held==0, db==0, held==db (both nonzero), and
-    // held!=db (both nonzero) — so it is genuinely exhaustive over the class
-    // representatives, not a hand-picked sample.
-    #[test]
-    fn mutation_fence_exhaustive_over_finite_domain() {
-        for is_active in [false, true] {
-            for held in 0u64..=2 {
-                for db in 0u64..=2 {
-                    // Expected verdict computed independently of the predicate,
-                    // straight from the H3 spec.
-                    let expected = if !is_active {
-                        // Not Active → ALWAYS fenced, including the frozen-cache
-                        // case (held == db) the stale-epoch check cannot catch.
-                        MutationFence::DenyNotActive
-                    } else if db != 0 && held != 0 && held != db {
-                        // Active + both epochs present + disagree → self-demote.
-                        MutationFence::DenyStaleEpoch
-                    } else {
-                        // Active + fresh/uncontested (a 0 on either side = cold
-                        // start / unclaimed, or held == db) → admit.
-                        MutationFence::Admit
-                    };
-                    assert_eq!(
-                        mutation_fence_verdict(is_active, held, db),
-                        expected,
-                        "is_active={is_active}, held={held}, db={db}"
-                    );
-                }
-            }
-        }
-    }
+    // ADR-0035 Stage 3f: `mutation_fence_exhaustive_over_finite_domain` moved with
+    // the predicate into `kirra_safety_authority::ha_fence` (the behaviour-
+    // preservation proof lives beside the code it proves).
 
     fn service_from_store(store: VerifierStore) -> Arc<ServiceState> {
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
@@ -1081,7 +1035,7 @@ mod actuator_middleware_tests {
             .with(|store| store.try_claim_epoch(observed, holder, now_ms))
             .expect("epoch claim sql")
             .expect("epoch claim wins");
-        svc.app.held_epoch.store(claimed, Ordering::SeqCst);
+        svc.app.ha_fence.held_epoch.store(claimed, Ordering::SeqCst);
         claimed
     }
 
@@ -1163,7 +1117,7 @@ mod actuator_middleware_tests {
             .expect("standby advances epoch");
         assert_eq!(advanced, 2);
         assert_eq!(
-            svc.app.held_epoch.load(Ordering::SeqCst),
+            svc.app.ha_fence.held_epoch.load(Ordering::SeqCst),
             1,
             "local held epoch remains stale until the actuator assertion fences it"
         );

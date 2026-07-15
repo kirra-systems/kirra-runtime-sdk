@@ -64,7 +64,11 @@ pub(crate) async fn submit_federated_report(
 
     // #79: held fencing token, read before locking the store. The durable commit
     // re-checks it INSIDE the transaction, closing the gate→commit TOCTOU.
-    let held_epoch = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
+    let held_epoch = svc
+        .app
+        .ha_fence
+        .held_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
 
     // The whole 5-step commit (key load → signature verify → nonce gate → chained
     // report+nonce-burn commit) runs under ONE lock; offload it to the blocking pool
@@ -206,6 +210,7 @@ pub(crate) async fn submit_federated_report(
             // gate: self-demote and reject fail-closed — the report was NOT persisted
             // and the nonce was NOT burned (the transaction was dropped in the closure).
             svc.app
+                .ha_fence
                 .mode_active
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             tracing::error!(
