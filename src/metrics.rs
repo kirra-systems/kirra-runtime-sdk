@@ -77,22 +77,22 @@ pub struct FleetMetricsSnapshot {
     /// True when this instance is Active (accepting mutations), false for
     /// PassiveStandby.
     pub mode_active: bool,
-    /// `AppState::audit_write_drops` — kinematic-deny audit records dropped
-    /// on a Full/Closed audit-writer channel (A3). MUST be 0 when healthy.
+    /// `AppState::off_path_writes.audit_write_drops` — kinematic-deny audit
+    /// records dropped on a Full/Closed audit-writer channel (A3). MUST be 0 when healthy.
     pub audit_write_drops: u64,
-    /// `AppState::capture_drops` — learning-capture records dropped on a
-    /// Full/Closed capture channel (non-safety).
+    /// `AppState::off_path_writes.capture_drops` — learning-capture records dropped
+    /// on a Full/Closed capture channel (non-safety).
     pub capture_drops: u64,
-    /// `AppState::post_incident_write_failures` — post-incident forensic
-    /// audit writes that could not be durably recorded (#104).
+    /// `AppState::off_path_writes.post_incident_write_failures` — post-incident
+    /// forensic audit writes that could not be durably recorded (#104).
     pub post_incident_write_failures: u64,
-    /// `AppState::incident_durability_failures` — incident-class transitions
+    /// `AppState::off_path_writes.incident_durability_failures` — incident-class transitions
     /// whose FULL-connection durable write failed and fell back to the
     /// checkpoint-bounded write (WS-0.3 / #772 F3). Row is in the chain but not
     /// power-loss durable at write time. Distinct from the "missing" counters.
     pub incident_durability_failures: u64,
-    /// `AppState::command_source_write_failures` — command-source handoff
-    /// audit writes that could not be durably recorded (#112).
+    /// `AppState::off_path_writes.command_source_write_failures` — command-source
+    /// handoff audit writes that could not be durably recorded (#112).
     pub command_source_write_failures: u64,
 }
 

@@ -17,10 +17,14 @@
 //! - [`EscalationState`] — the fleet-escalation / hysteresis flags + streaks the
 //!   posture engine / supervisor / watchdog read, embedded on `AppState` as
 //!   `app.escalation` (3c — the first `AppState` FIELD migration).
+//! - [`OffPathWriteCounters`] — the off-verdict-path write-failure / drop
+//!   observability counters (must be 0, never gate the verdict path), embedded on
+//!   `AppState` as `app.off_path_writes` (3e — a second field-façade migration).
 //!
 //! `kirra-verifier` re-exports the pure-decision items and the attestation module
 //! from their original module paths (a `pub use` shim) and embeds `EscalationState`
-//! as one `AppState` field, so consumers reach a flag as `app.escalation.<field>`.
+//! + `OffPathWriteCounters` as `AppState` fields, so consumers reach a flag as
+//! `app.escalation.<field>` / a counter as `app.off_path_writes.<field>`.
 
 use std::sync::Arc;
 
@@ -38,6 +42,12 @@ pub mod attestation;
 // node/edge maps (passed as params), so `AppState` keeps its `calculate_*` methods
 // as thin delegators — every caller unchanged, the algorithm never mocked.
 pub mod dag;
+
+// ADR-0035 Stage 3 (slice 3e): the off-verdict-path write-failure / drop
+// observability counters, lifted VERBATIM off `AppState` into a field façade
+// (`app.off_path_writes`), exactly like `EscalationState` in 3c. std-only.
+pub mod counters;
+pub use counters::OffPathWriteCounters;
 
 /// One node's contribution to the fleet posture: its local trust state, the
 /// posture propagated to it through the dependency DAG, and the interned ids of
