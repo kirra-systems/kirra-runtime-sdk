@@ -187,6 +187,13 @@ pub enum PgStoreError {
     /// in-memory backends' `load_last_generation` does (never silently read as 0,
     /// which would reintroduce restart generation time-reversal).
     CorruptGeneration(String),
+    /// A `u64` input (a timestamp or a replay sequence) exceeds the Postgres
+    /// `BIGINT` (i64) domain. Fail-closed: the store REFUSES rather than wrapping
+    /// to a negative value that would corrupt ordering or defeat the
+    /// strictly-advancing sequence gate (a wrapped-negative high-water would let a
+    /// later smaller sequence appear "greater"). Bounded in practice — a ms epoch
+    /// timestamp overflows i64 only past year 292M — but refused, never wrapped.
+    OutOfDomain { field: &'static str, value: u64 },
 }
 
 impl std::fmt::Display for PgStoreError {
@@ -196,6 +203,9 @@ impl std::fmt::Display for PgStoreError {
             PgStoreError::Encode(e) => write!(f, "status_json encode error: {e}"),
             PgStoreError::CorruptGeneration(v) => {
                 write!(f, "corrupt last_generation value: {v:?}")
+            }
+            PgStoreError::OutOfDomain { field, value } => {
+                write!(f, "{field} value {value} exceeds the BIGINT (i64) domain")
             }
         }
     }
@@ -207,6 +217,7 @@ impl std::error::Error for PgStoreError {
             PgStoreError::Pg(e) => Some(e),
             PgStoreError::Encode(e) => Some(e),
             PgStoreError::CorruptGeneration(_) => None,
+            PgStoreError::OutOfDomain { .. } => None,
         }
     }
 }
@@ -514,6 +525,12 @@ impl FederationStore for PgVerifierStore {
         public_key_b64: &str,
         registered_at_ms: u64,
     ) -> Result<(), PgStoreError> {
+        // Fail-closed on an out-of-domain timestamp rather than wrapping a `u64` to a
+        // negative `BIGINT` (bounded in practice — overflows i64 only past year 292M).
+        let reg_ms = i64::try_from(registered_at_ms).map_err(|_| PgStoreError::OutOfDomain {
+            field: "registered_at_ms",
+            value: registered_at_ms,
+        })?;
         // Upsert by controller_id (SQLite: INSERT OR REPLACE) — re-registering a
         // controller overwrites its key.
         self.lock().execute(
@@ -523,7 +540,7 @@ impl FederationStore for PgVerifierStore {
              ON CONFLICT (controller_id) DO UPDATE SET \
                  public_key_b64 = EXCLUDED.public_key_b64, \
                  registered_at_ms = EXCLUDED.registered_at_ms",
-            &[&controller_id, &public_key_b64, &(registered_at_ms as i64)],
+            &[&controller_id, &public_key_b64, &reg_ms],
         )?;
         Ok(())
     }
@@ -573,6 +590,17 @@ impl FederationStore for PgVerifierStore {
         sequence: u64,
         now_ms: u64,
     ) -> Result<bool, PgStoreError> {
+        // Fail-closed on an out-of-domain sequence/timestamp: a `u64` wrapped to a
+        // negative `BIGINT` would DEFEAT the gate (a wrapped-negative high-water lets a
+        // later smaller sequence compare "greater"), so refuse rather than wrap.
+        let seq = i64::try_from(sequence).map_err(|_| PgStoreError::OutOfDomain {
+            field: "sequence",
+            value: sequence,
+        })?;
+        let now = i64::try_from(now_ms).map_err(|_| PgStoreError::OutOfDomain {
+            field: "now_ms",
+            value: now_ms,
+        })?;
         // Atomic per-source strictly-advancing gate — the SAME conditional compare-
         // and-set as the SQLite backend: a first message from a new source inserts
         // (baseline accept), an existing source advances ONLY on a strictly greater
@@ -585,7 +613,7 @@ impl FederationStore for PgVerifierStore {
                  last_sequence = EXCLUDED.last_sequence, \
                  last_seen_ms = EXCLUDED.last_seen_ms \
              WHERE EXCLUDED.last_sequence > industrial_message_seq.last_sequence",
-            &[&source_id, &(sequence as i64), &(now_ms as i64)],
+            &[&source_id, &seq, &now],
         )?;
         Ok(n == 1)
     }
