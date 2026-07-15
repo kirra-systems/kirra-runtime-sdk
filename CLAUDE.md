@@ -441,7 +441,10 @@ AUDIT_SHIP_INTERVAL_MS      = 5_000      // WORM off-box audit-ship cycle interv
 **Gray/Black DAG Traversal** (`kirra_safety_authority::dag::recursive_calculate`, ADR-0035 Stage 3d; `AppState::calculate_posture*` delegate to it):
 - Gray set = nodes currently on the active call stack (cycle detection)
 - Black set = nodes fully evaluated (memoization, handles diamond DAGs)
-- Cycle or depth ≥ 10 → `FleetPosture::LockedOut` with `CYCLE_DETECTED` tag
+- Cycle (gray-set back-edge) → `FleetPosture::LockedOut` tagged `CYCLE_DETECTED`
+- Depth backstop is a DYNAMIC bound `max(nodes+edges, MAX_DEPENDENCY_DEPTH)` (10 is
+  a floor, not a fixed cap): exceeding it → `LockedOut` tagged `MAX_DEPTH_EXCEEDED`
+  (distinct from the cycle tag; unreachable on a valid acyclic graph)
 - LockedOut dep propagates LockedOut (not Degraded) upward
 
 **`should_route_command(cache, now_ms, command)`**:

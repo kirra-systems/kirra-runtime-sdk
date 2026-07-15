@@ -20,8 +20,14 @@ use kirra_core::{FleetPosture, NodeTrustState, RegisteredNode};
 
 use crate::FleetNodePosture;
 
-/// Maximum recursion depth for dependency graph traversal.
-/// Prevents stack overflow on pathologically deep (but acyclic) graphs.
+/// FLOOR on the dependency-graph traversal's stack-overflow backstop — NOT a fixed
+/// cap. The effective bound is dynamic:
+/// `max(nodes.len() + dependency_graph.len(), MAX_DEPENDENCY_DEPTH)` (see
+/// [`calculate_posture_memoized`]), so it covers the whole distinct-id universe and
+/// CANNOT fire on a valid acyclic graph (a cycle is always caught first). This
+/// constant only ensures a tiny fleet still carries a documented guard. A graph
+/// that exceeds the dynamic bound degrades to fail-closed `LockedOut` tagged
+/// `MAX_DEPTH_EXCEEDED` — DISTINCT from the `CYCLE_DETECTED` cycle verdict.
 pub const MAX_DEPENDENCY_DEPTH: usize = 10;
 
 /// Single-root posture with a fresh memo.
@@ -113,9 +119,11 @@ pub fn calculate_fleet_posture(
 
 /// The gray/black two-set DFS (INVARIANT #4). BYTE-IDENTICAL to the prior
 /// `AppState::recursive_calculate` — self-recursive, reads only `nodes` +
-/// `dependency_graph`.
+/// `dependency_graph`. `pub(crate)` (not `pub`): external callers use the stable
+/// `calculate_posture*` / `calculate_fleet_posture` entry points; the recursion
+/// helper is not part of the crate's public API.
 #[allow(clippy::too_many_arguments)]
-pub fn recursive_calculate(
+pub(crate) fn recursive_calculate(
     nodes: &DashMap<String, RegisteredNode>,
     dependency_graph: &DashMap<String, Vec<String>>,
     node_id: &str,
