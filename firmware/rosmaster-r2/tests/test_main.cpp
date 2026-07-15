@@ -263,6 +263,7 @@ void test_safety() {
     manager.evaluate(stale);
     CHECK(manager.state() == r2::safety::SafetyState::standby);
     CHECK(manager.bridge_must_be_disabled());
+    manager.evaluate(healthy);
     CHECK(manager.arm());
     CHECK(manager.activate());
 
