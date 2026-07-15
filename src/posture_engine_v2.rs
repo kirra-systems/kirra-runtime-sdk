@@ -16,49 +16,11 @@
 
 use std::fmt;
 
-/// Structured reason code for any fail-closed LockedOut condition.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum LockoutReason {
-    /// Gray/black DAG traversal produced LockedOut (cycle or depth exceeded).
-    DagLockedOut,
-    /// Posture cache entry has aged beyond POSTURE_CACHE_TTL_MS.
-    PostureCacheStale,
-    /// Posture cache contains None (cold start or operator reset).
-    PostureCacheEmpty,
-    /// Posture cache RwLock was poisoned. Requires process restart.
-    PostureCachePoisoned,
-    /// Posture engine failed to complete a recalculation cycle.
-    PostureEngineFailure,
-    /// Watchdog task determined a node's telemetry has timed out.
-    WatchdogTimeout,
-    /// An operator or administrative action explicitly locked out the fleet.
-    ManualLockout,
-    /// S-FI1d — frame/localization integrity was `Untrusted` for a sustained
-    /// run (sensor failure / possible GNSS spoofing). Sticky human-reset lockout.
-    FrameIntegrityUntrusted,
-    /// S-DG1 — the two diverse governors sustained a significant disagreement
-    /// (the parko comparator's own `escalated_to_lockout`). One of the two
-    /// safety authorities is wrong and we cannot tell which — a genuine fault,
-    /// not a transient. Sticky human-reset lockout.
-    GovernorDivergence,
-}
-
-impl fmt::Display for LockoutReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let code = match self {
-            Self::DagLockedOut => "DAG_LOCKED_OUT",
-            Self::PostureCacheStale => "POSTURE_CACHE_STALE",
-            Self::PostureCacheEmpty => "POSTURE_CACHE_EMPTY",
-            Self::PostureCachePoisoned => "POSTURE_CACHE_POISONED",
-            Self::PostureEngineFailure => "POSTURE_ENGINE_FAILURE",
-            Self::WatchdogTimeout => "WATCHDOG_TIMEOUT",
-            Self::ManualLockout => "MANUAL_LOCKOUT",
-            Self::FrameIntegrityUntrusted => "FRAME_INTEGRITY_UNTRUSTED",
-            Self::GovernorDivergence => "GOVERNOR_DIVERGENCE",
-        };
-        write!(f, "{code}")
-    }
-}
+// ADR-0035 Stage 3 (slice 3a): `LockoutReason` (the structured fail-closed reason
+// codes + its `Display` string mapping) moved to the lean `kirra-safety-authority`
+// crate; re-exported so every `crate::posture_engine_v2::LockoutReason` path
+// (this module's `resolve_posture_with_reason`, the handlers, tests) is unchanged.
+pub use kirra_safety_authority::LockoutReason;
 
 use crate::posture_cache::SharedPostureCache;
 use crate::verifier::FleetPosture;

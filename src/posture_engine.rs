@@ -81,21 +81,10 @@ pub fn next_generation() -> u64 {
 /// `recalculate_and_broadcast` (M-9), which overrides this to LockedOut.
 ///
 /// Pure function — no I/O, no side effects.
-pub fn derive_fleet_posture(node_postures: &[FleetNodePosture]) -> FleetPosture {
-    let mut any_degraded = false;
-    for np in node_postures {
-        match np.propagated_status {
-            FleetPosture::LockedOut => return FleetPosture::LockedOut,
-            FleetPosture::Degraded => any_degraded = true,
-            FleetPosture::Nominal => {}
-        }
-    }
-    if any_degraded {
-        FleetPosture::Degraded
-    } else {
-        FleetPosture::Nominal
-    }
-}
+// ADR-0035 Stage 3 (slice 3a): the pure fleet-fold moved to the lean
+// `kirra-safety-authority` crate; re-exported so `crate::posture_engine::derive_fleet_posture`
+// (and the `derive_fleet_posture` tests below) resolve unchanged.
+pub use kirra_safety_authority::derive_fleet_posture;
 
 // ---------------------------------------------------------------------------
 // Core engine — single authoritative write path to SharedPostureCache

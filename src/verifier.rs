@@ -98,21 +98,11 @@ pub struct BackupExport {
     pub posture_events: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FleetNodePosture {
-    /// Interned node id (review P5). One `Arc<str>` per distinct id is minted
-    /// per whole-fleet recalc (in `recursive_calculate`) and shared by
-    /// `Arc::clone` into the gray set, the `black` memo key, this field, and
-    /// every parent's `blocked_by` — so a node depended on by K others costs one
-    /// id allocation, not K+. Serializes/compares exactly like the prior
-    /// `String` (it derefs to `str`).
-    pub node_id: Arc<str>,
-    pub local_status: NodeTrustState,
-    pub propagated_status: FleetPosture,
-    /// Interned blocking-dependency ids — each is an `Arc::clone` of that dep's
-    /// own `node_id`, not a fresh allocation (review P5).
-    pub blocked_by: Vec<Arc<str>>,
-}
+// ADR-0035 Stage 3 (slice 3a): `FleetNodePosture` moved to the lean
+// `kirra-safety-authority` crate (the pure safety-decision surface). Re-exported
+// here so every `crate::verifier::FleetNodePosture` path (the DAG traversal that
+// mints it, SSE payloads, tests) resolves unchanged.
+pub use kirra_safety_authority::FleetNodePosture;
 
 /// Capacity of the bounded broadcast channel for posture stream events.
 /// A slow subscriber that falls this many events behind is dropped rather than
@@ -239,12 +229,10 @@ pub fn request_transport_is_secure(
     }
 }
 
-/// In-memory streak counter for RSS recovery hysteresis.
-/// Tracks consecutive safe RSS reports and the streak start timestamp.
-pub struct RssRecoveryStreak {
-    pub count: u32,
-    pub start_ms: u64,
-}
+// ADR-0035 Stage 3 (slice 3a): `RssRecoveryStreak` moved to
+// `kirra-safety-authority`; re-exported so `crate::verifier::RssRecoveryStreak`
+// (the `AppState.rss_recovery_streak` field type) resolves unchanged.
+pub use kirra_safety_authority::RssRecoveryStreak;
 
 pub struct AppState {
     pub nodes: DashMap<String, RegisteredNode>,
