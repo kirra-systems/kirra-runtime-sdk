@@ -1,6 +1,6 @@
 //! EP-10 (MGA G-9) — the **live Postgres backend** for the verifier storage seams.
 //!
-//! The root crate defines three backend seams and proves each against SQLite +
+//! The root crate defines four backend seams and proves each against SQLite +
 //! an in-memory model:
 //!
 //! - the schema-migration engine (`verifier_store::migrations::run_migrations_generic`)
@@ -45,7 +45,7 @@ use kirra_verifier::verifier_store::{EpochFence, FenceError, NodeStore, PostureE
 /// The Postgres schema version THIS binary supports (mirrors the SQLite
 /// `SCHEMA_VERSION` discipline: a newer stamp in the database is refused
 /// fail-closed by the shared engine).
-pub const PG_SCHEMA_VERSION: i64 = 2;
+pub const PG_SCHEMA_VERSION: i64 = 3;
 
 /// Baseline (v1) DDL — idempotent, applied on every open BEFORE the versioned
 /// steps run (v1 is the engine's baseline; steps are v ≥ 2). The two tables
@@ -66,10 +66,6 @@ CREATE TABLE IF NOT EXISTS nodes (
     ak_public_pem             TEXT,
     expected_pcr16_digest_hex TEXT
 );
-CREATE TABLE IF NOT EXISTS posture_engine_state (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
 INSERT INTO ha_state (id, epoch, active_instance_id, updated_at_ms)
     VALUES (1, 0, NULL, 0) ON CONFLICT (id) DO NOTHING;
 ";
@@ -79,11 +75,23 @@ INSERT INTO ha_state (id, epoch, active_instance_id, updated_at_ms)
 /// transactional step (DDL + version stamp commit together), so the live-PG
 /// conformance run exercises the engine's `apply_and_stamp` path, not just the
 /// baseline stamp.
-const PG_MIGRATIONS: &[PgMigration] = &[PgMigration {
-    version: 2,
-    sql: "ALTER TABLE nodes ADD COLUMN site TEXT; \
-          ALTER TABLE nodes ADD COLUMN firmware_version TEXT",
-}];
+const PG_MIGRATIONS: &[PgMigration] = &[
+    PgMigration {
+        version: 2,
+        sql: "ALTER TABLE nodes ADD COLUMN site TEXT; \
+              ALTER TABLE nodes ADD COLUMN firmware_version TEXT",
+    },
+    // v3 — the `posture_engine_state` KV table (the PostureEngineStateStore seam).
+    // A REAL versioned step (not a baseline addition), so the stamp reflects when
+    // the table entered the contract and the engine's `apply_and_stamp` path runs.
+    PgMigration {
+        version: 3,
+        sql: "CREATE TABLE IF NOT EXISTS posture_engine_state ( \
+                  key   TEXT PRIMARY KEY, \
+                  value TEXT NOT NULL \
+              )",
+    },
+];
 
 /// The "~10-line adapter" binding the root crate's [`PgExecutor`] seam to the
 /// sync `postgres` client, exactly as the seam documentation promises:
@@ -421,39 +429,26 @@ impl PostureEngineStateStore for PgVerifierStore {
     }
 
     fn save_last_generation(&self, generation: u64) -> Result<bool, PgStoreError> {
-        // The monotonic guard is done in RUST (not a SQL `CAST` upsert) because
-        // Postgres `CAST('garbage' AS BIGINT)` ERRORS where SQLite's `CAST` yields 0.
-        // Doing it here preserves the heal-on-corrupt parity — an absent row inserts
-        // unconditionally, a corrupt current value counts as 0 so a positive
-        // generation overwrites it — matching the SQLite + in-memory backends. The
-        // single-connection `Mutex` makes the read-then-write atomic within this
-        // writer (generation writes come from the one epoch-owning Active instance).
-        let mut c = self.lock();
-        let row = c.query_opt(
-            "SELECT value FROM posture_engine_state WHERE key = 'last_generation'",
-            &[],
+        // Single-statement conditional upsert — ATOMIC, so it is race-safe across
+        // connections exactly like the SQLite backend's monotonic upsert: there is no
+        // read-then-write window in which two racers could both read the old value and
+        // a lower generation clobber a higher one. The `WHERE` gates only the DO UPDATE
+        // (conflict) path; a first insert is unconditional. `rows == 1` on insert or an
+        // accepted strict advance, `0` when the guard rejects a stale/equal generation.
+        //
+        // The comparison casts stored TEXT to BIGINT (mirroring SQLite's `CAST`
+        // monotonic guard). Unlike SQLite's `CAST('garbage') = 0`, Postgres errors on a
+        // non-numeric existing value — a fail-CLOSED difference that is never reached in
+        // normal operation (writes only ever store valid integers) and never exercised
+        // by the conformance suite (its only corrupt write is the terminal `load`
+        // check); erroring on a corrupt high-water is at least as safe as SQLite's heal.
+        let n = self.lock().execute(
+            "INSERT INTO posture_engine_state (key, value) VALUES ('last_generation', $1) \
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value \
+             WHERE posture_engine_state.value::bigint < EXCLUDED.value::bigint",
+            &[&generation.to_string()],
         )?;
-        match row {
-            None => {
-                c.execute(
-                    "INSERT INTO posture_engine_state (key, value) VALUES ('last_generation', $1)",
-                    &[&generation.to_string()],
-                )?;
-                Ok(true)
-            }
-            Some(r) => {
-                let cur = r.get::<_, String>(0).parse::<u64>().unwrap_or(0);
-                if generation <= cur {
-                    Ok(false)
-                } else {
-                    c.execute(
-                        "UPDATE posture_engine_state SET value = $1 WHERE key = 'last_generation'",
-                        &[&generation.to_string()],
-                    )?;
-                    Ok(true)
-                }
-            }
-        }
+        Ok(n == 1)
     }
 
     fn load_engine_state(&self, key: &str) -> Result<Option<String>, PgStoreError> {
