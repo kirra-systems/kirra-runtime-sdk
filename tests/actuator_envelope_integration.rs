@@ -807,12 +807,18 @@ async fn a3_drop_counters_count_audit_and_capture_overflow() {
     .await;
     assert_eq!(s1, StatusCode::BAD_REQUEST, "DenyBreach must 400");
     assert_eq!(
-        svc.app.capture_drops.load(Ordering::Relaxed),
+        svc.app
+            .off_path_writes
+            .capture_drops
+            .load(Ordering::Relaxed),
         0,
         "first capture record fits"
     );
     assert_eq!(
-        svc.app.audit_write_drops.load(Ordering::Relaxed),
+        svc.app
+            .off_path_writes
+            .audit_write_drops
+            .load(Ordering::Relaxed),
         0,
         "first audit record fits"
     );
@@ -825,12 +831,18 @@ async fn a3_drop_counters_count_audit_and_capture_overflow() {
         "drop is off the verdict path — still 400"
     );
     assert_eq!(
-        svc.app.capture_drops.load(Ordering::Relaxed),
+        svc.app
+            .off_path_writes
+            .capture_drops
+            .load(Ordering::Relaxed),
         1,
         "capture drop counted"
     );
     assert_eq!(
-        svc.app.audit_write_drops.load(Ordering::Relaxed),
+        svc.app
+            .off_path_writes
+            .audit_write_drops
+            .load(Ordering::Relaxed),
         1,
         "audit drop counted"
     );

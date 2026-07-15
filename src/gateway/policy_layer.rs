@@ -374,6 +374,7 @@ pub async fn enforce_actuator_safety_envelope(
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 svc.app
+                    .off_path_writes
                     .capture_drops
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::warn!(
@@ -382,6 +383,7 @@ pub async fn enforce_actuator_safety_envelope(
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 svc.app
+                    .off_path_writes
                     .capture_drops
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::warn!("capture writer task GONE — verdict record dropped");
@@ -536,6 +538,7 @@ pub async fn enforce_actuator_safety_envelope(
                     Ok(()) => {}
                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                         svc.app
+                            .off_path_writes
                             .audit_write_drops
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::error!(
@@ -545,6 +548,7 @@ pub async fn enforce_actuator_safety_envelope(
                     }
                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                         svc.app
+                            .off_path_writes
                             .audit_write_drops
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::error!(

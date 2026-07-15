@@ -78,12 +78,29 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
         // Relaxed: monotonic observability counters — a best-effort snapshot
         // needs no ordering with other memory, and the scrape path should not
         // pay SeqCst fences.
-        audit_write_drops: svc.app.audit_write_drops.load(Ordering::Relaxed),
-        capture_drops: svc.app.capture_drops.load(Ordering::Relaxed),
-        post_incident_write_failures: svc.app.post_incident_write_failures.load(Ordering::Relaxed),
-        incident_durability_failures: svc.app.incident_durability_failures.load(Ordering::Relaxed),
+        audit_write_drops: svc
+            .app
+            .off_path_writes
+            .audit_write_drops
+            .load(Ordering::Relaxed),
+        capture_drops: svc
+            .app
+            .off_path_writes
+            .capture_drops
+            .load(Ordering::Relaxed),
+        post_incident_write_failures: svc
+            .app
+            .off_path_writes
+            .post_incident_write_failures
+            .load(Ordering::Relaxed),
+        incident_durability_failures: svc
+            .app
+            .off_path_writes
+            .incident_durability_failures
+            .load(Ordering::Relaxed),
         command_source_write_failures: svc
             .app
+            .off_path_writes
             .command_source_write_failures
             .load(Ordering::Relaxed),
     };

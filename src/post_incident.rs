@@ -90,7 +90,8 @@ fn new_correlation_id(ts: u64, generation: u64) -> String {
 }
 
 fn note_failure(app: &AppState, event_type: &str, why: &str) {
-    app.post_incident_write_failures
+    app.off_path_writes
+        .post_incident_write_failures
         .fetch_add(1, Ordering::SeqCst);
     tracing::error!(
         event_type,
@@ -228,7 +229,9 @@ pub fn record_posture_transition(
 /// healthy deployment; a non-zero value means that many forensic events are
 /// MISSING from the tamper-evident log.
 pub fn write_failures(app: &AppState) -> u64 {
-    app.post_incident_write_failures.load(Ordering::SeqCst)
+    app.off_path_writes
+        .post_incident_write_failures
+        .load(Ordering::SeqCst)
 }
 
 #[cfg(test)]

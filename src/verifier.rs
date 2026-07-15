@@ -311,34 +311,16 @@ pub struct AppState {
     /// + ordinal), or `None` when no incident is open. Volatile; the durable
     /// forensic record lives in the signed audit chain.
     pub current_incident: Arc<Mutex<Option<crate::post_incident::IncidentState>>>,
-    /// #104 — operator-observable count of post-incident audit writes that were
-    /// detected but could not be durably recorded (#245/#247 pattern). MUST be 0
-    /// in a healthy deployment; never gates the verdict path.
-    pub post_incident_write_failures: Arc<AtomicU64>,
-    /// WS-0.3 / #772 F3 — operator-observable count of INCIDENT-CLASS posture
-    /// transitions whose hard-power-loss-durable (FULL-connection) write failed
-    /// and fell back to the checkpoint-bounded NORMAL write. The row IS in the
-    /// chain (durable to the next checkpoint), only its at-write-time power-loss
-    /// durability was degraded — DISTINCT from `post_incident_write_failures`
-    /// (row MISSING from the chain). MUST be 0 in a healthy deployment; never
-    /// gates the verdict path (a durability fault must not suppress an escalation).
-    pub incident_durability_failures: Arc<AtomicU64>,
-    /// #112 — operator-observable count of command-source handoff audit writes
-    /// that were detected but could not be durably recorded (#245/#247 pattern).
-    /// MUST be 0 in a healthy deployment; never gates the verdict path.
-    pub command_source_write_failures: Arc<AtomicU64>,
-    /// A3 — operator-observable count of kinematic-DenyBreach AUDIT records that
-    /// were dropped because the bounded audit-writer channel was Full/Closed
-    /// (drop-on-full, INV-4: safety never waits). Drops were previously LOGGED
-    /// only; this counter makes the loss-rate observable (a non-zero / rising
-    /// value = the audit chain has sequence gaps — under-provisioned channel or a
-    /// dead writer). Never gates the verdict path.
-    pub audit_write_drops: Arc<AtomicU64>,
-    /// A3 — operator-observable count of learning-capture verdict records dropped
-    /// on a Full/Closed capture channel. Non-safety (capture is an off-verdict-path
-    /// side channel); surfaced so an integrator can see how much training data the
-    /// channel sizing is shedding.
-    pub capture_drops: Arc<AtomicU64>,
+    /// ADR-0035 Stage 3 (slice 3e): the off-verdict-path write-failure / drop
+    /// observability counters — `post_incident_write_failures`,
+    /// `incident_durability_failures`, `command_source_write_failures`,
+    /// `audit_write_drops`, `capture_drops` — lifted VERBATIM onto
+    /// `kirra_safety_authority::OffPathWriteCounters` (per-field semantics
+    /// UNCHANGED, documented on the struct in the safety-authority crate). Reached
+    /// as `app.off_path_writes.<field>`. Each MUST be 0 in a healthy deployment and
+    /// NONE ever gates the verdict path. All are `Arc<AtomicU64>` interior-mutable,
+    /// so the move is pure relocation — no `&mut self`, no behaviour change.
+    pub off_path_writes: kirra_safety_authority::OffPathWriteCounters,
     /// WS-0.5 — fleet-safety Prometheus counters (posture transitions, gate
     /// denials, HA promotions), exported by `GET /metrics` on the verifier
     /// binary. Lock-free; incremented on the observed paths, never gating
@@ -389,11 +371,9 @@ impl AppState {
             // av_registry_dirty) now live on EscalationState; identical initial state.
             escalation: kirra_safety_authority::EscalationState::new(),
             current_incident: Arc::new(Mutex::new(None)),
-            post_incident_write_failures: Arc::new(AtomicU64::new(0)),
-            incident_durability_failures: Arc::new(AtomicU64::new(0)),
-            command_source_write_failures: Arc::new(AtomicU64::new(0)),
-            audit_write_drops: Arc::new(AtomicU64::new(0)),
-            capture_drops: Arc::new(AtomicU64::new(0)),
+            // ADR-0035 Stage 3e: the five off-path counters now live on
+            // OffPathWriteCounters; identical initial state (all 0).
+            off_path_writes: kirra_safety_authority::OffPathWriteCounters::new(),
             fleet_metrics: crate::metrics::FleetSafetyMetrics::new(),
             deadline_registry: Arc::new(crate::execution_manager::DeadlineRegistry::from_manifest(
                 crate::execution_manager::TASK_MANIFEST,

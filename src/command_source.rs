@@ -63,7 +63,8 @@ impl CommandSource {
 }
 
 fn note_failure(app: &AppState, why: &str) {
-    app.command_source_write_failures
+    app.off_path_writes
+        .command_source_write_failures
         .fetch_add(1, Ordering::SeqCst);
     tracing::error!(
         error = %why,
@@ -116,7 +117,9 @@ pub fn record_handoff(
 /// healthy deployment; a non-zero value means that many provenance events are
 /// MISSING from the tamper-evident log.
 pub fn write_failures(app: &AppState) -> u64 {
-    app.command_source_write_failures.load(Ordering::SeqCst)
+    app.off_path_writes
+        .command_source_write_failures
+        .load(Ordering::SeqCst)
 }
 
 #[cfg(test)]
