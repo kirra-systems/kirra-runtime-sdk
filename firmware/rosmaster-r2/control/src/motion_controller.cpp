@@ -18,7 +18,7 @@ namespace {
 
 }  // namespace
 
-JerkLimitedAxis::JerkLimitedAxis(const MotionLimits limits) noexcept : limits_(limits) {}
+JerkLimitedAxis::JerkLimitedAxis(const MotionLimits& limits) noexcept : limits_(limits) {}
 
 double JerkLimitedAxis::update(const double requested_velocity_mps,
                                const double dt_s) noexcept {
@@ -81,7 +81,7 @@ double JerkLimitedAxis::acceleration_mps2() const noexcept {
     return acceleration_mps2_;
 }
 
-VelocityPid::VelocityPid(const PidGains gains) noexcept : gains_(gains) {}
+VelocityPid::VelocityPid(const PidGains& gains) noexcept : gains_(gains) {}
 
 double VelocityPid::update(const double target_mps,
                            const double measured_mps,

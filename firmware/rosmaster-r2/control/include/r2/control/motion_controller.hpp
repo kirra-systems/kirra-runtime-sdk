@@ -29,7 +29,7 @@ struct WheelPidGains {
 
 class JerkLimitedAxis {
 public:
-    explicit JerkLimitedAxis(MotionLimits limits) noexcept;
+    explicit JerkLimitedAxis(const MotionLimits& limits) noexcept;
 
     [[nodiscard]] double update(double requested_velocity_mps,
                                 double dt_s) noexcept;
@@ -45,7 +45,7 @@ private:
 
 class VelocityPid {
 public:
-    explicit VelocityPid(PidGains gains) noexcept;
+    explicit VelocityPid(const PidGains& gains) noexcept;
 
     [[nodiscard]] double update(double target_mps,
                                 double measured_mps,
