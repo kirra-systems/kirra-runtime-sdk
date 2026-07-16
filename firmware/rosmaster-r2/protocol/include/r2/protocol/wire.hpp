@@ -72,6 +72,10 @@ enum class DecodeStatus : std::uint8_t {
     crc_mismatch,
     unknown_message,
     invalid_flags,
+    // Returned by decode when the received frame carries kFlagAuthTag. The
+    // unauthenticated path fails closed and requires callers to use
+    // decode_authenticated() for tagged frames, so output remains Frame{}.
+    auth_required,
     // Returned by decode_authenticated when:
     //   • the AUTH_TAG flag (kFlagAuthTag) is absent, or
     //   • the payload is shorter than kMacTagSize, or
@@ -98,6 +102,12 @@ struct EncodedFrame {
 [[nodiscard]] std::uint32_t crc32c(const std::uint8_t* data,
                                    std::size_t length) noexcept;
 [[nodiscard]] bool encode(const Frame& frame, EncodedFrame& output) noexcept;
+// decode: decodes a frame through the unauthenticated path.
+//
+// Frames carrying kFlagAuthTag are rejected with auth_required; callers must
+// use decode_authenticated() so the appended HMAC tag is verified before any
+// payload is released. On any failure output remains a zero-initialised
+// Frame{}.
 [[nodiscard]] DecodeStatus decode(const std::uint8_t* encoded,
                                   std::size_t encoded_length,
                                   Frame& output) noexcept;
