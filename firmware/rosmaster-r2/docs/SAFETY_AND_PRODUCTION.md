@@ -55,6 +55,27 @@ already debounce/hysteresis-filtered monitor verdicts; their monitor services
 own the documented healthy streaks. A single raw healthy sample is not passed
 as recovery.
 
+### Momentary-fault latch policy
+
+`SafetyManager::evaluate()` raises four faults momentarily (they clear as soon
+as their input recovers) rather than latching on the first sample; this section
+records why, and the consecutive-tick escalation that backstops three of them
+(`SafetyManager::raise_persistent`, `kPersistentFaultLatchThreshold`).
+
+| Fault | On the boundary going bad | Sustained (≥ `kPersistentFaultLatchThreshold` consecutive ticks) | Rationale |
+|---|---|---|---|
+| `command_timeout` | drives controlled-stop | **stays momentary — never latches** | The vehicle is already halted safely; a link that returns must let motion resume without a physical reset. |
+| `battery_undervoltage` | active, controlled-stop | **escalates to latched** (acknowledgement-clearable) | A single sag under load is normal; a *sustained* undervoltage is a real power fault an operator must clear. |
+| `imu_invalid` | active, controlled-stop | **escalates to latched** (acknowledgement-clearable) | One bad sample is noise; a *sustained* invalid IMU is a real sensor fault. |
+| `communication_corrupt` | active, controlled-stop | **escalates to latched** (acknowledgement-clearable) | A burst of line noise is transient; *sustained* corruption is a real link fault (or an attacker). |
+
+The debounce counter resets on any tick the condition is not active, so only a
+continuously-held fault escalates. The escalated latched faults are *recoverable*
+— cleared by `clear_recoverable_faults(true)` (operator acknowledgement) — unlike
+`self_test_failed` / `configuration_invalid`, which require a reset + POST.
+`kPersistentFaultLatchThreshold` is expressed in `evaluate()` ticks; tune it to
+the control-loop cadence so it represents a meaningful sustained interval.
+
 ## Dual watchdog and deadline supervision
 
 1. A high-priority software supervisor expects independent alive counters from

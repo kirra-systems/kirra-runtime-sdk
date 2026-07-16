@@ -70,13 +70,25 @@ void SafetyManager::evaluate(const SafetyInputs& inputs) noexcept {
     if (inputs.emergency_stop_asserted) {
         raise(Fault::emergency_stop, true);
     }
+    // Fault-latch policy (see docs/SAFETY_AND_PRODUCTION.md §"Fault policy" →
+    // "Momentary-fault latch policy"):
+    //
+    // command_timeout — MOMENTARY (never latches). A stale command drives the
+    //   controlled-stop below; the vehicle halts safely. It must auto-recover
+    //   when fresh commands resume — a transient link dropout, with the vehicle
+    //   already stopped, must not demand a physical reset to move again.
     if (!inputs.command_fresh &&
         (state_ == SafetyState::active || state_ == SafetyState::controlled_stop)) {
         raise(Fault::command_timeout, false);
     }
-    if (!inputs.battery_voltage_safe) {
-        raise(Fault::battery_undervoltage, false);
-    }
+    // battery_undervoltage / imu_invalid / communication_corrupt — MOMENTARY
+    //   while transient (a single voltage sag, one bad IMU sample, a burst of
+    //   line noise auto-clears), but ESCALATE to a latched fault after
+    //   kPersistentFaultLatchThreshold consecutive ticks: a *sustained*
+    //   undervoltage / invalid IMU / corrupt link is a hard fault, not noise,
+    //   and must require operator acknowledgement (clear_recoverable_faults).
+    raise_persistent(Fault::battery_undervoltage, !inputs.battery_voltage_safe,
+                     undervoltage_streak_);
     if (!inputs.supply_stable) {
         raise(Fault::brownout, true);
     }
@@ -95,18 +107,15 @@ void SafetyManager::evaluate(const SafetyInputs& inputs) noexcept {
     if (!inputs.steering_plausible) {
         raise(Fault::steering_implausible, true);
     }
-    if (!inputs.imu_sane) {
-        raise(Fault::imu_invalid, false);
-    }
+    raise_persistent(Fault::imu_invalid, !inputs.imu_sane, imu_invalid_streak_);
     if (inputs.motor_runaway) {
         raise(Fault::motor_runaway, true);
     }
     if (!inputs.control_deadline_met) {
         raise(Fault::control_deadline_missed, true);
     }
-    if (!inputs.communication_healthy) {
-        raise(Fault::communication_corrupt, false);
-    }
+    raise_persistent(Fault::communication_corrupt, !inputs.communication_healthy,
+                     communication_streak_);
     if (!inputs.configuration_valid) {
         raise(Fault::configuration_invalid, true);
     }
@@ -188,6 +197,26 @@ bool SafetyManager::bridge_must_be_disabled() const noexcept {
 void SafetyManager::raise(const Fault fault, const bool latch) noexcept {
     active_faults_ |= bit(fault);
     if (latch) {
+        latched_faults_ |= bit(fault);
+    }
+}
+
+void SafetyManager::raise_persistent(const Fault fault,
+                                     const bool active,
+                                     std::uint32_t& streak) noexcept {
+    if (!active) {
+        // Transient: the condition cleared, so the debounce restarts. An already
+        // latched escalation is unaffected (latched_faults_ only clears via
+        // clear_recoverable_faults) — this only governs whether it re-escalates.
+        streak = 0U;
+        return;
+    }
+    raise(fault, false);
+    if (streak < kPersistentFaultLatchThreshold) {
+        ++streak;
+    }
+    if (streak >= kPersistentFaultLatchThreshold) {
+        // Sustained: escalate to a latched (acknowledgement-clearable) fault.
         latched_faults_ |= bit(fault);
     }
 }

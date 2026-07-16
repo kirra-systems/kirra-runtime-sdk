@@ -61,6 +61,16 @@ struct SafetyInputs {
     bool configuration_valid;
 };
 
+// Consecutive-tick debounce for the "sustained = hard fault" momentary faults
+// (battery_undervoltage, imu_invalid, communication_corrupt). A transient (a
+// single voltage sag, a bad IMU sample, a burst of line noise) is momentary and
+// auto-clears; the same condition held for this many CONSECUTIVE evaluate()
+// ticks is not noise but a real fault, and escalates to a latched fault that
+// requires operator acknowledgement. Expressed in control-loop ticks — tune to
+// the deployment's evaluate() cadence so it represents a meaningful sustained
+// interval (e.g. at a 100 Hz control loop this is ~0.5 s).
+inline constexpr std::uint32_t kPersistentFaultLatchThreshold = 50U;
+
 class SafetyManager {
 public:
     void begin_self_test() noexcept;
@@ -81,11 +91,21 @@ public:
 
 private:
     void raise(Fault fault, bool latch) noexcept;
+    // Raises `fault` momentarily while `active`, and escalates it to a latched
+    // fault once it has been continuously active for kPersistentFaultLatchThreshold
+    // ticks. `streak` is the caller-owned consecutive-active counter; it resets
+    // to zero on any tick the condition is not active (so only a *sustained*
+    // fault latches, never an intermittent one).
+    void raise_persistent(Fault fault, bool active, std::uint32_t& streak) noexcept;
     void transition_to_safe_state() noexcept;
 
     SafetyState state_{SafetyState::boot};
     std::uint64_t active_faults_{0U};
     std::uint64_t latched_faults_{0U};
+    // Per-fault consecutive-active tick counters backing raise_persistent().
+    std::uint32_t undervoltage_streak_{0U};
+    std::uint32_t imu_invalid_streak_{0U};
+    std::uint32_t communication_streak_{0U};
 };
 
 [[nodiscard]] constexpr std::uint64_t bit(const Fault fault) noexcept {
