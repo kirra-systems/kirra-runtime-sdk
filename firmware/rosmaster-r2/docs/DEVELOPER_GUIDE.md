@@ -29,12 +29,22 @@ cmake -S firmware/rosmaster-r2 -B /tmp/r2-target \
 cmake --build /tmp/r2-target --parallel   # builds libr2_platform_core.a (armv7-m)
 ```
 
-Cross-compiling disables the host tests, simulation and fuzzer automatically
-(they are host-only). This is a build-only lane — a static library needs no
-linker script. The linker script / flash map, startup + vector table, the
-concrete HAL drivers (#967) and the flashable application image (#968) are the
-remaining follow-ups after the BSP closure gates in `drivers/README.md`; the
-host target is not flashable.
+Cross-compiling also links the flashable **safe-boot image** for application
+slot A (`r2_firmware_image.elf` + `.bin`): startup/vector table
+(`firmware/src/startup_stm32f103.cpp`) + the `SafeHal` entry
+(`firmware/src/main_target.cpp`) against `firmware/link/stm32f103rc_app_a.ld`.
+It links the whole safety core and boots into a latched-safe, bridge-disabled
+state. The `target-build` CI lane size-checks it against the 104 KiB slot / 48
+KiB SRAM (currently ~31 KiB flash, ~4 KiB static RAM). Cross-compiling disables
+the host tests, simulation and fuzzer automatically (they are host-only).
+
+This is a build/link + size lane only — the image is **not** run on silicon
+here. Before it drives hardware: the concrete STM32 HAL drivers (#967), a real
+time base (SysTick/timer feeding the clock + loop cadence; `SafeClock` is frozen
+at 0), the 72 MHz PLL clock tree, and a per-link HMAC key in place of the zero
+placeholder. Slot B / configuration / metadata regions and a hardware root of
+trust are separate phase gates (see `drivers/README.md` and the flash map in
+`docs/SAFETY_AND_PRODUCTION.md`).
 
 ## Coding rules
 

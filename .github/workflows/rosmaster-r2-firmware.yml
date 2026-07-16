@@ -137,10 +137,22 @@ jobs:
         run: >
           cmake -S firmware/rosmaster-r2 -B /tmp/r2-target
           -DCMAKE_TOOLCHAIN_FILE=$PWD/firmware/rosmaster-r2/cmake/arm-none-eabi-cortex-m3.cmake
-      - name: Cross-compile the safety core
+      - name: Cross-compile the safety core + link the target image
         run: cmake --build /tmp/r2-target --parallel
       - name: Confirm ARM object output
         run: |
           arm-none-eabi-objdump -f /tmp/r2-target/libr2_platform_core.a \
             | grep -q 'architecture: armv7'
           arm-none-eabi-size /tmp/r2-target/libr2_platform_core.a
+      - name: Size-check the flashable image against slot A
+        run: |
+          test -f /tmp/r2-target/r2_firmware_image.elf
+          test -f /tmp/r2-target/r2_firmware_image.bin
+          arm-none-eabi-size /tmp/r2-target/r2_firmware_image.elf
+          read text data bss _ _ < <(arm-none-eabi-size /tmp/r2-target/r2_firmware_image.elf | tail -1)
+          flash=$((text + data)); ram=$((data + bss))
+          echo "flash=${flash} B (slot 106496) ram=${ram} B (SRAM 49152)"
+          # Application slot A is 104 KiB; SRAM is 48 KiB. Fail closed if either
+          # is exceeded — the 104 KiB slot is a hard exit criterion.
+          test "${flash}" -le 106496
+          test "${ram}" -le 49152

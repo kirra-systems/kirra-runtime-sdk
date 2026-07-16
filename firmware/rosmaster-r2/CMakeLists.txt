@@ -64,6 +64,56 @@ if(R2_ENABLE_COVERAGE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_link_options(r2_platform_core PUBLIC --coverage)
 endif()
 
+# Flashable target image (cross-compile only). Links the whole safety core plus
+# the startup/vector table and the SafeHal safe-boot entry against the slot-A
+# linker script, producing r2_firmware_image.elf + .bin. Build/link + size
+# verification only (the target-build CI lane size-checks it against the 104 KiB
+# slot); it is not run on silicon here. Host builds skip this entirely.
+if(CMAKE_CROSSCOMPILING)
+    set(R2_TARGET_LINKER_SCRIPT
+        "${CMAKE_CURRENT_SOURCE_DIR}/firmware/link/stm32f103rc_app_a.ld")
+    add_executable(r2_firmware_image
+        firmware/src/startup_stm32f103.cpp
+        firmware/src/main_target.cpp
+    )
+    target_link_libraries(r2_firmware_image PRIVATE r2_platform_core)
+    target_compile_options(r2_firmware_image PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -Wconversion -Wsign-conversion
+        -Wshadow -Wdouble-promotion -Wformat=2 -Wundef
+        -fno-exceptions -fno-rtti
+        # Single-core MCU, no hosted atexit: drop the thread-safe-static guards
+        # and the __cxa_atexit/__dso_handle destructor registration (main never
+        # returns, so local-static destructors never run anyway).
+        -fno-threadsafe-statics -fno-use-cxa-atexit
+    )
+    target_link_options(r2_firmware_image PRIVATE
+        "-T${R2_TARGET_LINKER_SCRIPT}"
+        -nostartfiles
+        --specs=nano.specs
+        --specs=nosys.specs
+        -Wl,--gc-sections
+        -Wl,-Map=r2_firmware_image.map
+    )
+    set_target_properties(r2_firmware_image PROPERTIES
+        SUFFIX ".elf"
+        LINK_DEPENDS "${R2_TARGET_LINKER_SCRIPT}")
+
+    # Emit a raw .bin next to the .elf for flashing/inspection and report size.
+    find_program(R2_OBJCOPY arm-none-eabi-objcopy)
+    find_program(R2_SIZE arm-none-eabi-size)
+    if(R2_OBJCOPY)
+        add_custom_command(TARGET r2_firmware_image POST_BUILD
+            COMMAND ${R2_OBJCOPY} -O binary
+                    $<TARGET_FILE:r2_firmware_image> r2_firmware_image.bin
+            VERBATIM)
+    endif()
+    if(R2_SIZE)
+        add_custom_command(TARGET r2_firmware_image POST_BUILD
+            COMMAND ${R2_SIZE} $<TARGET_FILE:r2_firmware_image>
+            VERBATIM)
+    endif()
+endif()
+
 if(R2_BUILD_TESTS)
     include(CTest)
     add_executable(r2_platform_tests tests/test_main.cpp)
