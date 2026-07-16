@@ -76,8 +76,8 @@ impl VerifierStore {
         Ok(ApiPrincipalRecord {
             principal_id: row.get(0)?,
             role: row.get(1)?,
-            created_at_ms: row.get::<_, i64>(2)? as u64,
-            revoked_at_ms: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+            created_at_ms: row.get::<_, i64>(2)?.max(0) as u64,
+            revoked_at_ms: row.get::<_, Option<i64>>(3)?.map(|v| v.max(0) as u64),
         })
     }
 }

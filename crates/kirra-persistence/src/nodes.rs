@@ -4,6 +4,21 @@
 use super::*;
 
 impl VerifierStore {
+    /// TEST-ONLY: overwrite a node's stored `registered_at_ms` BIGINT with an
+    /// arbitrary raw value (e.g. a NEGATIVE one that the type-safe `u64` API can
+    /// never produce) to exercise the fail-closed read heal — a corrupt/tampered
+    /// negative timestamp must read back as `0`, never a wrapped huge `u64`.
+    /// Never compiled into production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn force_node_registered_at_ms_for_test(&self, node_id: &str, raw: i64) {
+        self.conn
+            .execute(
+                "UPDATE nodes SET registered_at_ms = ?1 WHERE node_id = ?2",
+                params![raw, node_id],
+            )
+            .expect("test seam: force node registered_at_ms");
+    }
+
     pub fn save_node(&self, node: &RegisteredNode) -> Result<()> {
         let status_json =
             serde_json::to_string(&node.status).map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -43,8 +58,8 @@ impl VerifierStore {
             Ok(RegisteredNode {
                 node_id: row.get(0)?,
                 status,
-                registered_at_ms: row.get::<_, i64>(2)? as u64,
-                last_trust_update_ms: row.get::<_, i64>(3)? as u64,
+                registered_at_ms: row.get::<_, i64>(2)?.max(0) as u64,
+                last_trust_update_ms: row.get::<_, i64>(3)?.max(0) as u64,
                 ak_public_pem: row.get(4)?,
                 expected_pcr16_digest_hex: row.get(5)?,
                 site: row.get(6)?,
@@ -74,8 +89,8 @@ impl VerifierStore {
                     Ok(RegisteredNode {
                         node_id: row.get(0)?,
                         status,
-                        registered_at_ms: row.get::<_, i64>(2)? as u64,
-                        last_trust_update_ms: row.get::<_, i64>(3)? as u64,
+                        registered_at_ms: row.get::<_, i64>(2)?.max(0) as u64,
+                        last_trust_update_ms: row.get::<_, i64>(3)?.max(0) as u64,
                         ak_public_pem: row.get(4)?,
                         expected_pcr16_digest_hex: row.get(5)?,
                         site: row.get(6)?,

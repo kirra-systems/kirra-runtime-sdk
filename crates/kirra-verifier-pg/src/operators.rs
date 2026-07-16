@@ -10,8 +10,8 @@ impl PgVerifierStore {
         OperatorRecord {
             operator_id: row.get(0),
             pubkey_pem: row.get(1),
-            registered_at_ms: row.get::<_, i64>(2) as u64,
-            revoked_at_ms: row.get::<_, Option<i64>>(3).map(|v| v as u64),
+            registered_at_ms: row.get::<_, i64>(2).max(0) as u64,
+            revoked_at_ms: row.get::<_, Option<i64>>(3).map(|v| v.max(0) as u64),
         }
     }
 }

@@ -10,8 +10,8 @@ impl PgVerifierStore {
         CertPrincipalRecord {
             principal_id: row.get(0),
             role: row.get(1),
-            created_at_ms: row.get::<_, i64>(2) as u64,
-            revoked_at_ms: row.get::<_, Option<i64>>(3).map(|v| v as u64),
+            created_at_ms: row.get::<_, i64>(2).max(0) as u64,
+            revoked_at_ms: row.get::<_, Option<i64>>(3).map(|v| v.max(0) as u64),
             // FAIL-CLOSED read (matches the SQLite backend, Copilot #857): a NEGATIVE
             // stored `not_after_ms` — only reachable via corruption, since the write
             // path refuses `> i64::MAX` — maps to `Some(0)` ("expired at epoch"), so a

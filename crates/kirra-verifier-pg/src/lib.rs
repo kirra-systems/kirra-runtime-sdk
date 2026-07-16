@@ -453,8 +453,8 @@ impl PgVerifierStore {
         RegisteredNode {
             node_id: row.get(0),
             status,
-            registered_at_ms: row.get::<_, i64>(2) as u64,
-            last_trust_update_ms: row.get::<_, i64>(3) as u64,
+            registered_at_ms: row.get::<_, i64>(2).max(0) as u64,
+            last_trust_update_ms: row.get::<_, i64>(3).max(0) as u64,
             ak_public_pem: row.get(4),
             expected_pcr16_digest_hex: row.get(5),
             site: row.get(6),
