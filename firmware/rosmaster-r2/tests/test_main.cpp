@@ -4,6 +4,9 @@
 #include "r2/diagnostics/metrics.hpp"
 #include "r2/kinematics/ackermann.hpp"
 #include "r2/protocol/wire.hpp"
+// Included here (not just from wire.cpp) so the MAC known-answer test can pin the
+// SHA-256 / HMAC-SHA-256 primitive against fixed vectors — see test_mac_known_answer_vectors().
+#include "r2/protocol/mac.hpp"
 #include "r2/safety/safety_manager.hpp"
 
 #include <array>
@@ -505,6 +508,169 @@ void test_diagnostics() {
     CHECK(histogram.maximum_us() == 11U);
 }
 
+void test_mac_known_answer_vectors() {
+    // Known-answer tests pin the SHA-256 / HMAC-SHA-256 primitive against fixed
+    // published vectors. Without these, every encode<->decode roundtrip in
+    // test_mac_authentication() shares the same hmac_sha256_truncated(), so a
+    // deterministic-but-wrong hash would still pass every one of them. These KATs
+    // catch that class of defect (a wrong constant, shift, or endianness bug).
+
+    // KAT-1: SHA-256("abc") — NIST FIPS 180-2 example B.1. Pins the hash core
+    // independently of the HMAC/wire layers.
+    {
+        const std::array<std::uint8_t, 3U> msg{{'a', 'b', 'c'}};
+        r2::protocol::internal::Sha256Ctx ctx{};
+        r2::protocol::internal::sha256_init(ctx);
+        r2::protocol::internal::sha256_update(ctx, msg.data(), msg.size());
+        const auto digest = r2::protocol::internal::sha256_finalize(ctx);
+        const std::array<std::uint8_t, 32U> expected{{
+            0xbaU, 0x78U, 0x16U, 0xbfU, 0x8fU, 0x01U, 0xcfU, 0xeaU,
+            0x41U, 0x41U, 0x40U, 0xdeU, 0x5dU, 0xaeU, 0x22U, 0x23U,
+            0xb0U, 0x03U, 0x61U, 0xa3U, 0x96U, 0x17U, 0x7aU, 0x9cU,
+            0xb4U, 0x10U, 0xffU, 0x61U, 0xf2U, 0x00U, 0x15U, 0xadU}};
+        CHECK(digest == expected);
+    }
+
+    // KAT-2: HMAC-SHA-256 (truncated to 128 bits) — RFC 4231 Test Case 2.
+    // key = "Jefe", data = "what do ya want for nothing?".
+    // hmac_sha256_truncated takes a fixed 32-byte key; placing the 4-byte "Jefe"
+    // in the low bytes of a zero-filled 32-byte array produces the identical HMAC
+    // key block K0 ("Jefe" followed by zeros to the 64-byte block) as a native
+    // 4-byte key would, so RFC 4231's expected tag applies unchanged. Full tag:
+    //   5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843
+    // truncated to the first 16 bytes => 5bdcc146bf60754e6a042426089575c7.
+    {
+        std::array<std::uint8_t, r2::protocol::kMacKeySize> key{};
+        key[0] = 0x4aU;  // 'J'
+        key[1] = 0x65U;  // 'e'
+        key[2] = 0x66U;  // 'f'
+        key[3] = 0x65U;  // 'e'
+        const std::array<std::uint8_t, 28U> msg{{
+            'w', 'h', 'a', 't', ' ', 'd', 'o', ' ', 'y', 'a', ' ', 'w', 'a', 'n',
+            't', ' ', 'f', 'o', 'r', ' ', 'n', 'o', 't', 'h', 'i', 'n', 'g', '?'}};
+        const auto tag = r2::protocol::internal::hmac_sha256_truncated(
+            key, msg.data(), msg.size());
+        const std::array<std::uint8_t, 16U> expected{{
+            0x5bU, 0xdcU, 0xc1U, 0x46U, 0xbfU, 0x60U, 0x75U, 0x4eU,
+            0x6aU, 0x04U, 0x24U, 0x26U, 0x08U, 0x95U, 0x75U, 0xc7U}};
+        CHECK(tag == expected);
+    }
+}
+
+void test_mac_authentication() {
+    // Provisioned per-link key (32-byte, non-zero for a realistic test)
+    std::array<std::uint8_t, r2::protocol::kMacKeySize> key{};
+    for (std::size_t i = 0U; i < key.size(); ++i) {
+        key[i] = static_cast<std::uint8_t>(i + 1U);
+    }
+
+    // ── T1: valid roundtrip ────────────────────────────────────────────────
+    r2::protocol::Frame frame{};
+    frame.type            = r2::protocol::MessageType::motion_command;
+    frame.flags           = 0U;
+    frame.sequence        = 42U;
+    frame.source_time_us  = 100'000U;
+    frame.payload_length  = 4U;
+    frame.payload[0]      = 0xAAU;
+    frame.payload[1]      = 0xBBU;
+    frame.payload[2]      = 0xCCU;
+    frame.payload[3]      = 0xDDU;
+
+    r2::protocol::EncodedFrame enc{};
+    CHECK(r2::protocol::encode_authenticated(frame, key, enc));
+    CHECK(enc.length > 0U);
+    CHECK(enc.bytes[enc.length - 1U] == 0U);
+
+    r2::protocol::Frame dec{};
+    CHECK(r2::protocol::decode_authenticated(enc.bytes.data(), enc.length, key, dec) ==
+          r2::protocol::DecodeStatus::ok);
+    // Payload is delivered without the appended MAC tag
+    CHECK(dec.type == frame.type);
+    CHECK(dec.sequence == frame.sequence);
+    CHECK(dec.source_time_us == frame.source_time_us);
+    CHECK(dec.payload_length == frame.payload_length);
+    CHECK(std::memcmp(dec.payload.data(), frame.payload.data(), frame.payload_length) == 0);
+    // AUTH_TAG flag is consumed by verification and cleared in the output
+    CHECK((dec.flags & r2::protocol::kFlagAuthTag) == 0U);
+
+    // ── T2: wrong key → auth_mac_mismatch ─────────────────────────────────
+    std::array<std::uint8_t, r2::protocol::kMacKeySize> wrong_key{};
+    wrong_key[0] = 0xFFU;  // differs from key[0] = 0x01
+    r2::protocol::Frame dec2{};
+    CHECK(r2::protocol::decode_authenticated(enc.bytes.data(), enc.length, wrong_key, dec2) ==
+          r2::protocol::DecodeStatus::auth_mac_mismatch);
+    // Output must not be populated on a failed MAC check
+    CHECK(dec2.sequence == 0U);
+    CHECK(dec2.payload_length == 0U);
+
+    // ── T3: forged frame – valid CRC32C but zero/wrong MAC tag ────────────
+    // Build with encode() (no HMAC) but with AUTH_TAG flag and a fake tag
+    // payload. CRC will be valid; MAC will not match.
+    r2::protocol::Frame forged{};
+    forged.type           = r2::protocol::MessageType::motion_command;
+    forged.flags          = r2::protocol::kFlagAuthTag;
+    forged.sequence       = 42U;
+    forged.source_time_us = 100'000U;
+    // Payload = kMacTagSize zeros (a plausible tag slot, but all-zero ≠ real HMAC)
+    forged.payload_length = static_cast<std::uint16_t>(r2::protocol::kMacTagSize);
+    // payload is zero-initialised (wrong tag)
+
+    r2::protocol::EncodedFrame forged_enc{};
+    CHECK(r2::protocol::encode(forged, forged_enc));  // CRC-only, no HMAC
+    r2::protocol::Frame forged_dec{};
+    CHECK(r2::protocol::decode_authenticated(
+              forged_enc.bytes.data(), forged_enc.length, key, forged_dec) ==
+          r2::protocol::DecodeStatus::auth_mac_mismatch);
+
+    // ── T4: absent AUTH_TAG flag → auth_mac_mismatch (fail-closed) ────────
+    r2::protocol::Frame plain{};
+    plain.type            = r2::protocol::MessageType::motion_command;
+    plain.sequence        = 42U;
+    plain.source_time_us  = 100'000U;
+    plain.payload_length  = 4U;
+    r2::protocol::EncodedFrame plain_enc{};
+    CHECK(r2::protocol::encode(plain, plain_enc));
+    r2::protocol::Frame plain_dec{};
+    CHECK(r2::protocol::decode_authenticated(
+              plain_enc.bytes.data(), plain_enc.length, key, plain_dec) ==
+          r2::protocol::DecodeStatus::auth_mac_mismatch);
+
+    // ── T5: sequence binding – different sequences produce different MACs ──
+    r2::protocol::Frame frame_s1 = frame;
+    r2::protocol::Frame frame_s2 = frame;
+    frame_s2.sequence = frame.sequence + 1U;
+
+    r2::protocol::EncodedFrame enc_s1{}, enc_s2{};
+    CHECK(r2::protocol::encode_authenticated(frame_s1, key, enc_s1));
+    CHECK(r2::protocol::encode_authenticated(frame_s2, key, enc_s2));
+
+    // Same payload and key but different sequence → different authenticated bytes
+    CHECK(enc_s1.length == enc_s2.length);
+    CHECK(std::memcmp(enc_s1.bytes.data(), enc_s2.bytes.data(), enc_s1.length) != 0);
+
+    // Both decode correctly under the correct key, yielding the original sequences
+    r2::protocol::Frame out_s1{}, out_s2{};
+    CHECK(r2::protocol::decode_authenticated(enc_s1.bytes.data(), enc_s1.length, key, out_s1) ==
+          r2::protocol::DecodeStatus::ok);
+    CHECK(out_s1.sequence == frame_s1.sequence);
+    CHECK(r2::protocol::decode_authenticated(enc_s2.bytes.data(), enc_s2.length, key, out_s2) ==
+          r2::protocol::DecodeStatus::ok);
+    CHECK(out_s2.sequence == frame_s2.sequence);
+
+    // Decode s1 bytes with s2's key (wrong key) must fail
+    CHECK(r2::protocol::decode_authenticated(enc_s1.bytes.data(), enc_s1.length, wrong_key, out_s1) ==
+          r2::protocol::DecodeStatus::auth_mac_mismatch);
+
+    // ── T6: encode_authenticated rejects oversized payload ────────────────
+    r2::protocol::Frame big{};
+    big.type           = r2::protocol::MessageType::motion_command;
+    big.payload_length =
+        static_cast<std::uint16_t>(r2::protocol::kMaximumPayload - r2::protocol::kMacTagSize + 1U);
+    r2::protocol::EncodedFrame big_enc{};
+    CHECK(!r2::protocol::encode_authenticated(big, key, big_enc));
+    CHECK(big_enc.length == 0U);
+}
+
 void test_image_verifier_failclosed() {
     // H4: a default-constructed / zero-initialized image verdict MUST read as a
     // rejection, never as `accepted`. (The static_assert in the header enforces
@@ -528,6 +694,8 @@ int main() {
     test_configuration_rollback();
     test_diagnostics();
     test_image_verifier_failclosed();
+    test_mac_known_answer_vectors();
+    test_mac_authentication();
     if (failures != 0) {
         std::fprintf(stderr, "%d test assertion(s) failed\n", failures);
         return 1;
