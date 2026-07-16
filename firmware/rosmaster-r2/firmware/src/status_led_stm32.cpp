@@ -27,8 +27,15 @@ constexpr std::uint32_t kPc13Bit = 1U << 13U;
 }  // namespace
 
 void status_led_init() noexcept {
-    reg(kRccApb2Enr) = reg(kRccApb2Enr) | kIopcEn;
-    reg(kGpioCCrh) = (reg(kGpioCCrh) & ~kPc13CfgMask) | kPc13Cfg;
+    // Read-modify-write each register through a single volatile read and a single
+    // volatile write (no repeated MMIO accesses in one expression).
+    std::uint32_t apb2enr = reg(kRccApb2Enr);
+    apb2enr |= kIopcEn;
+    reg(kRccApb2Enr) = apb2enr;
+
+    std::uint32_t crh = reg(kGpioCCrh);
+    crh = (crh & ~kPc13CfgMask) | kPc13Cfg;
+    reg(kGpioCCrh) = crh;
 }
 
 void status_led_write(const bool on) noexcept {

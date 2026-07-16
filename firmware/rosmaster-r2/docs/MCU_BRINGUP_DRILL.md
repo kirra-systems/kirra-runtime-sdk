@@ -103,8 +103,9 @@ bit set). Capture the fault and share it.
 
 If you have no ST-Link/J-Link and are flashing over the STM32 serial bootloader
 (below), you can't use GDB — but the image gives a **visible sign of life**: it
-blinks the status LED (PC13, per `hal/include/r2/hal/board_manifest.hpp`) every
-control cycle.
+drives the status LED (PC13, per `hal/include/r2/hal/board_manifest.hpp`),
+toggling it every `half_period` control cycles so it blinks steadily while the
+loop runs.
 
 - **LED blinking** → the reset path, runtime init and control loop all ran; the
   image is alive and looping in the latched-safe state. Boot confirmed.
