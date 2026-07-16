@@ -88,3 +88,30 @@ jobs:
             --output-file /tmp/r2.filtered.info
           line_rate="$(lcov --summary /tmp/r2.filtered.info | awk '/lines/{gsub(/%/,"",$2); print $2}')"
           awk -v rate="$line_rate" 'BEGIN { exit !(rate >= 80.0) }'
+
+  decoder-fuzz:
+    # Coverage-guided libFuzzer run against the untrusted R2CP decode path.
+    # The same oracle (fuzz/decode_fuzz.hpp::decode_one) also runs deterministically
+    # under ASAN/UBSAN on every PR inside host-verification's ctest sweep; this job
+    # adds a bounded coverage-guided run seeded from fuzz/corpus.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Clang + fuzzer runtime
+        run: sudo apt-get update && sudo apt-get install -y clang-18 libclang-rt-18-dev
+      - name: Configure (libFuzzer)
+        run: >
+          cmake -S firmware/rosmaster-r2 -B /tmp/r2-fuzz
+          -DCMAKE_CXX_COMPILER=clang++-18
+          -DR2_BUILD_FUZZERS=ON
+          -DR2_BUILD_TESTS=OFF
+          -DR2_BUILD_SIMULATION=OFF
+      - name: Build fuzzer
+        run: cmake --build /tmp/r2-fuzz --parallel
+      - name: Fuzz (bounded, seeded)
+        run: >
+          ASAN_OPTIONS=detect_leaks=0
+          /tmp/r2-fuzz/r2_decode_fuzz
+          -max_total_time=60 -print_final_stats=1 -error_exitcode=1
+          firmware/rosmaster-r2/fuzz/corpus
