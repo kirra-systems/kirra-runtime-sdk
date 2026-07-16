@@ -21,7 +21,7 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 # the pure transition logic it drives lives in the lib and is tested there.
 [[bin]]
 name = "kirra-ota-ctl"
-path = "src/bin/kirra_ota_ctl.rs"
+path = "src/bin/kirra_ota_ctl/main.rs"
 
 [dependencies]
 # The vetted SHA-256 — the SAME digest primitive the audit chain, release token,
