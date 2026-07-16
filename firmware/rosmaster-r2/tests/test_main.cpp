@@ -771,6 +771,119 @@ void test_decode_fuzz() {
           r2::protocol::DecodeStatus::ok);
 }
 
+void test_fault_latch_debounce() {
+    // #953: the four momentary faults' latch policy.
+    //   • battery_undervoltage / imu_invalid / communication_corrupt escalate to
+    //     a latched (ack-clearable) fault after kPersistentFaultLatchThreshold
+    //     CONSECUTIVE active ticks — transient noise auto-clears, sustained
+    //     faults latch.
+    //   • command_timeout stays momentary forever (controlled-stop covers it and
+    //     it must auto-recover on fresh commands).
+    const auto make_healthy = []() noexcept {
+        r2::safety::SafetyInputs in{};
+        in.command_fresh = true;
+        in.battery_voltage_safe = true;
+        in.battery_current_safe = true;
+        in.thermal_safe = true;
+        in.encoder_plausible = true;
+        in.steering_plausible = true;
+        in.imu_sane = true;
+        in.control_deadline_met = true;
+        in.communication_healthy = true;
+        in.supply_stable = true;
+        in.watchdog_healthy = true;
+        in.configuration_valid = true;
+        return in;
+    };
+    const std::uint32_t threshold = r2::safety::kPersistentFaultLatchThreshold;
+    const std::uint64_t undervoltage_bit =
+        r2::safety::bit(r2::safety::Fault::battery_undervoltage);
+
+    // battery_undervoltage: a single transient tick is active but NOT latched,
+    // and recovers cleanly; a sustained run escalates to latched.
+    {
+        r2::safety::SafetyManager mgr{};
+        mgr.begin_self_test();
+        mgr.complete_self_test(true);
+        r2::safety::SafetyInputs sag = make_healthy();
+        sag.battery_voltage_safe = false;
+
+        mgr.evaluate(sag);
+        CHECK((mgr.active_faults() & undervoltage_bit) != 0U);
+        CHECK((mgr.latched_faults() & undervoltage_bit) == 0U);
+        mgr.evaluate(make_healthy());  // debounce resets on the healthy tick
+        CHECK(mgr.latched_faults() == 0U);
+
+        for (std::uint32_t i = 0U; i < threshold - 1U; ++i) {
+            mgr.evaluate(sag);
+            CHECK((mgr.latched_faults() & undervoltage_bit) == 0U);  // not yet
+        }
+        mgr.evaluate(sag);  // the threshold-th consecutive tick escalates
+        CHECK((mgr.latched_faults() & undervoltage_bit) != 0U);
+        CHECK(mgr.state() == r2::safety::SafetyState::fault_latched);
+
+        // The latch survives a healthy tick and is acknowledgement-clearable
+        // (a recoverable fault — not reset+POST like self_test/configuration).
+        mgr.evaluate(make_healthy());
+        CHECK((mgr.latched_faults() & undervoltage_bit) != 0U);
+        CHECK(mgr.clear_recoverable_faults(true));
+        CHECK(mgr.state() == r2::safety::SafetyState::standby);
+    }
+
+    // imu_invalid: sustained run latches.
+    {
+        r2::safety::SafetyManager mgr{};
+        mgr.begin_self_test();
+        mgr.complete_self_test(true);
+        r2::safety::SafetyInputs bad = make_healthy();
+        bad.imu_sane = false;
+        for (std::uint32_t i = 0U; i < threshold; ++i) {
+            mgr.evaluate(bad);
+        }
+        CHECK((mgr.latched_faults() & r2::safety::bit(r2::safety::Fault::imu_invalid)) != 0U);
+        CHECK(mgr.state() == r2::safety::SafetyState::fault_latched);
+    }
+
+    // communication_corrupt: sustained run latches.
+    {
+        r2::safety::SafetyManager mgr{};
+        mgr.begin_self_test();
+        mgr.complete_self_test(true);
+        r2::safety::SafetyInputs bad = make_healthy();
+        bad.communication_healthy = false;
+        for (std::uint32_t i = 0U; i < threshold; ++i) {
+            mgr.evaluate(bad);
+        }
+        CHECK((mgr.latched_faults() & r2::safety::bit(r2::safety::Fault::communication_corrupt)) != 0U);
+        CHECK(mgr.state() == r2::safety::SafetyState::fault_latched);
+    }
+
+    // command_timeout: intentionally momentary — never latches, even when the
+    // command stays stale far past the threshold, and auto-recovers on resume.
+    {
+        r2::safety::SafetyManager mgr{};
+        mgr.begin_self_test();
+        mgr.complete_self_test(true);
+        mgr.evaluate(make_healthy());
+        CHECK(mgr.arm());
+        CHECK(mgr.activate());
+        r2::safety::SafetyInputs stale = make_healthy();
+        stale.command_fresh = false;
+        for (std::uint32_t i = 0U; i < threshold + 10U; ++i) {
+            mgr.evaluate(stale);
+            CHECK((mgr.latched_faults() &
+                   r2::safety::bit(r2::safety::Fault::command_timeout)) == 0U);
+        }
+        CHECK(mgr.latched_faults() == 0U);
+        CHECK(mgr.state() == r2::safety::SafetyState::controlled_stop);
+
+        r2::safety::SafetyInputs resumed = make_healthy();
+        resumed.motion_stopped = true;
+        mgr.evaluate(resumed);
+        CHECK(mgr.state() == r2::safety::SafetyState::standby);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -780,6 +893,7 @@ int main() {
     test_motion_controller_composition();
     test_safety();
     test_safety_configuration_invalid();
+    test_fault_latch_debounce();
     test_configuration_rollback();
     test_diagnostics();
     test_image_verifier_failclosed();
