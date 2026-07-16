@@ -8,17 +8,28 @@
 > Ackermann math in KIRRA-governed code. Written for review; the calibration
 > gaps in §5 MUST be measured on the bench before this can drive correctly.
 >
-> **Slice 1 landed (this is now real code, still inert):** the L1 Ackermann
-> geometry + L2 calibration + fail-closed last-hop of §§3-7 is implemented as a
-> PURE module, `robot/r2_drive.py` (`translate(v, omega, cal) -> R2Actuation`),
-> with exhaustive host tests (`robot/r2_drive_test.py`, in the CI robot smoke
-> step). It does NO serial I/O and imports no ROS/vendor lib, so it is
-> host-verified without a robot. It is NOT called by the consumer yet, and
-> `R2DriveCalibration` REFUSES construction on any missing/invalid field — so
-> with the §5 measurements still open, no profile can be built and the path
-> cannot run. What remains before it drives: the §5 bench calibration, the §6
-> consumer wiring (swap the verify-gated last hop + set car-type 5 at init),
-> and the §9 sign-offs.
+> **Slices 1-2 landed (real code, still inert + OFF by default):**
+> - **Slice 1** — the L1 Ackermann geometry + L2 calibration + fail-closed
+>   last-hop of §§3-7 as a PURE module, `robot/r2_drive.py`
+>   (`translate(v, omega, cal) -> R2Actuation`), with exhaustive host tests
+>   (`robot/r2_drive_test.py`). No serial I/O, no ROS/vendor imports —
+>   host-verified without a robot.
+> - **Slice 2** — the §6 consumer wiring, behind the off-by-default
+>   `KIRRA_DRIVE_MODE` flag (default `x3_set_car_motion` = byte-identical
+>   existing path; `r2_ackermann` = Path B). In r2 mode the consumer sets
+>   car-type 5 at init (+verifies, fail-closed), applies the measured centre
+>   trim, swaps the verify-gated last hop to `set_motor` + AKM steering, and
+>   never calls `set_car_motion`. `robot/teardown_smoke_test.py` case (5)
+>   covers the INIT + safe-stop dispatch (car-type 5 + trim set, r2 safe stop,
+>   no `set_car_motion`; it does not drive the actuation callbacks); the
+>   last-hop actuation semantics are covered by `robot/r2_drive_test.py`. The
+>   x3 path is unchanged (cases 1-4 still pass).
+>
+> It STILL cannot drive: `R2DriveCalibration` (built from `KIRRA_R2_*` via
+> `calibration_from_env`) REFUSES construction on any missing/invalid field, so
+> with the §5 measurements open the r2 path fails closed at startup. What
+> remains: the §5 bench calibration, the §9 sign-offs, and on-hardware
+> validation (§8) — then flip `KIRRA_DRIVE_MODE=r2_ackermann`.
 
 ## 1. Why Path B
 
@@ -149,10 +160,13 @@ but in our code.** It does NOT relax the safety architecture:
 - **The verify chokepoint is unchanged.** In `kirra_motor_consumer.py`, actuation
   happens only after the Rust verify core releases the token (ADR-0033). Path B
   swaps exactly one call: the released last-hop
-  `set_car_motion(linear, 0.0, angular)` (`kirra_motor_consumer.py:177`) becomes
-  the Ackermann pair `set_motor(pwm,0,0,pwm)` + `set_akm_steering_angle(cmd)`.
-  The translation runs **after** verify — the same place the X3 firmware mixing
-  runs after verify. The token still gates the enforced bytes.
+  `set_car_motion(linear, 0.0, angular)` becomes the Ackermann pair
+  `set_motor(pwm,0,0,pwm)` + `set_akm_steering_angle(cmd)` (via
+  `r2_drive.apply_actuation(bot, translate(...))`). The translation runs
+  **after** verify — the same place the X3 firmware mixing runs after verify.
+  The token still gates the enforced bytes. **Landed (slice 2)** behind
+  `KIRRA_DRIVE_MODE=r2_ackermann`; the default (`x3_set_car_motion`) is
+  byte-identical.
 - **The consumer must set car-type 5 once at init** (§2a) so the AKM servo
   actuates, and it MUST NOT call `set_car_motion` thereafter (type 5 breaks it —
   which is fine, Path B does not use it). This replaces the current

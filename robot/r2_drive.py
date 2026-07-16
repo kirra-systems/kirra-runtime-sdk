@@ -220,3 +220,75 @@ def translate(v: float, omega: float, cal: R2DriveCalibration) -> R2Actuation:
     pwm = int(_clamp(float(pwm), -cal.pwm_max, cal.pwm_max))
 
     return R2Actuation(is_mrc=False, reason="ok", pwm_left=pwm, pwm_right=pwm, steer_cmd=steer_cmd)
+
+
+# --------------------------------------------------------------------------
+# Consumer-wiring helpers (still hardware-free / duck-typed).
+#
+# These let `kirra_motor_consumer.py` adopt Path B without inlining any logic:
+# the env loader is fail-closed, and the actuation/stop appliers take any
+# "Rosmaster-like" object (anything exposing set_motor / set_akm_steering_angle)
+# so they are unit-testable against a recording fake, no vendor lib required.
+# --------------------------------------------------------------------------
+
+# The per-field env var names an operator sets for R2 drive mode. Every value is
+# bench-measured (`r2_drive_calibration_results.txt`); there are NO defaults for
+# the required ones — a missing/blank var fails the load closed.
+_ENV_REQUIRED = {
+    "wheelbase_m": "KIRRA_R2_WHEELBASE_M",
+    "v_per_pwm": "KIRRA_R2_V_PER_PWM",
+    "pwm_max": "KIRRA_R2_PWM_MAX",
+    "steer_units_per_rad": "KIRRA_R2_STEER_UNITS_PER_RAD",
+    "delta_max_rad": "KIRRA_R2_DELTA_MAX_RAD",
+    "steer_sign": "KIRRA_R2_STEER_SIGN",
+    "center_trim": "KIRRA_R2_CENTER_TRIM",
+}
+_ENV_OPTIONAL_DEADBAND = "KIRRA_R2_DRIVE_DEADBAND_PWM"
+
+
+def calibration_from_env(env) -> R2DriveCalibration:
+    """Build an `R2DriveCalibration` from `KIRRA_R2_*` env vars, fail-closed.
+
+    `env` is a mapping (e.g. `os.environ`). A missing/blank required var, or a
+    non-numeric value, raises `R2CalibrationError` — so R2 drive mode cannot
+    start until every measured value is provided. Range validation is the
+    dataclass's (`__post_init__`). The deadband is optional (default 0.0 → the
+    reviewed §7 proportional drive).
+    """
+    kwargs: dict = {}
+    for field, var in _ENV_REQUIRED.items():
+        raw = env.get(var)
+        if raw is None or str(raw).strip() == "":
+            raise R2CalibrationError(f"{var} is unset — R2 drive mode requires a measured value")
+        try:
+            kwargs[field] = float(raw)
+        except (TypeError, ValueError):
+            raise R2CalibrationError(f"{var} must be a number, got {raw!r}") from None
+    dead = env.get(_ENV_OPTIONAL_DEADBAND)
+    if dead is not None and str(dead).strip() != "":
+        try:
+            kwargs["drive_deadband_pwm"] = float(dead)
+        except (TypeError, ValueError):
+            raise R2CalibrationError(f"{_ENV_OPTIONAL_DEADBAND} must be a number, got {dead!r}") from None
+    return R2DriveCalibration(**kwargs)
+
+
+def apply_actuation(bot, act: R2Actuation) -> None:
+    """Apply an `R2Actuation` to a Rosmaster-like `bot`.
+
+    Order: steer, then drive (proposal §7). `bot` must expose
+    `set_akm_steering_angle(cmd)` and `set_motor(s1, s2, s3, s4)`. An MRC or
+    commanded-stop decision already carries zeros, so this same call stops the
+    platform — no special-casing at the call site.
+    """
+    bot.set_akm_steering_angle(act.steer_cmd)
+    bot.set_motor(act.pwm_left, 0, 0, act.pwm_right)
+
+
+def r2_safe_stop(bot) -> None:
+    """The R2 SS-002 safe stop: zero both rear motors + centre the steering.
+
+    Replaces the x3 `set_car_motion(0,0,0)` for Path B (proposal §6).
+    """
+    bot.set_motor(0, 0, 0, 0)
+    bot.set_akm_steering_angle(0)

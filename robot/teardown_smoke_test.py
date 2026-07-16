@@ -159,14 +159,33 @@ def install_stubs(ctx: StubContext) -> None:
             Rosmaster.last = self
             self.com = com
             self.motions: list[tuple[float, float, float]] = []
+            # R2 Path-B recorders (unused by the x3 cases).
+            self.motor_writes: list[tuple[int, int, int, int]] = []
+            self.steer_writes: list[int] = []
+            self.default_angle: "int | None" = None
+            self._car_type = 1  # default X3; set_car_type(5) flips it for r2
 
         def create_receive_threading(self) -> None: ...
 
         def get_car_type_from_machine(self) -> int:
-            return 1  # matches KIRRA_EXPECTED_CAR_TYPE below
+            # Reflects set_car_type — x3 cases never call it, so this stays 1
+            # (matches KIRRA_EXPECTED_CAR_TYPE below); r2 sets it to 5.
+            return self._car_type
 
         def set_car_motion(self, vx: float, vy: float, vz: float) -> None:
             self.motions.append((vx, vy, vz))
+
+        def set_car_type(self, car_type: int) -> None:
+            self._car_type = int(car_type)
+
+        def set_motor(self, s1: int, s2: int, s3: int, s4: int) -> None:
+            self.motor_writes.append((s1, s2, s3, s4))
+
+        def set_akm_steering_angle(self, cmd: int) -> None:
+            self.steer_writes.append(int(cmd))
+
+        def set_akm_default_angle(self, angle: int) -> None:
+            self.default_angle = int(angle)
 
     rosmaster_lib.Rosmaster = Rosmaster
 
@@ -311,6 +330,56 @@ def main() -> int:
     check(ctx.shutdown_calls == 1,
           f"(4) context up → shutdown exactly once, got {ctx.shutdown_calls}")
     print("(4) consumer/normal exit → exit 0, safe stop written, shutdown exactly once")
+
+    # ------------------------------------------------------------------
+    # 5. Motor consumer in R2 Path-B mode (off-by-default flag ON). This
+    #    harness's spin is a no-op, so it does NOT drive the subscription/
+    #    timer actuation callbacks — it covers the INIT + TEARDOWN dispatch:
+    #    car-type 5 set (+ centre trim), and the r2 safe stop (set_motor 0 +
+    #    centre), with set_car_motion NEVER used. The last-hop actuation
+    #    semantics (translate → set_motor/AKM ordering, MRC zeros) are covered
+    #    by robot/r2_drive_test.py. KIRRA_EXPECTED_CAR_TYPE is cleared first so
+    #    this also enforces that r2 mode does NOT require the x3-only knob.
+    # ------------------------------------------------------------------
+    ctx.spin_downs_context = False
+    ctx.spin_raises = None
+    os.environ.pop("KIRRA_EXPECTED_CAR_TYPE", None)  # r2 mode must not need it
+    os.environ.update({
+        "KIRRA_DRIVE_MODE": "r2_ackermann",
+        # Measured-calibration stand-ins (test fixtures, not hardware values).
+        "KIRRA_R2_WHEELBASE_M": "0.229",
+        "KIRRA_R2_V_PER_PWM": "0.0145",
+        "KIRRA_R2_PWM_MAX": "60",
+        "KIRRA_R2_STEER_UNITS_PER_RAD": "140",
+        "KIRRA_R2_DELTA_MAX_RAD": "0.5",
+        "KIRRA_R2_STEER_SIGN": "-1",
+        "KIRRA_R2_CENTER_TRIM": "90",
+    })
+    try:
+        rc = kirra_motor_consumer.main()
+    except BaseException as e:  # noqa: BLE001
+        failures.append(f"(5) consumer r2 mode raised: {e!r}")
+        rc = -1
+    finally:
+        for k in ("KIRRA_DRIVE_MODE", "KIRRA_R2_WHEELBASE_M", "KIRRA_R2_V_PER_PWM",
+                  "KIRRA_R2_PWM_MAX", "KIRRA_R2_STEER_UNITS_PER_RAD",
+                  "KIRRA_R2_DELTA_MAX_RAD", "KIRRA_R2_STEER_SIGN",
+                  "KIRRA_R2_CENTER_TRIM"):
+            os.environ.pop(k, None)
+    check(rc == 0, f"(5) r2-mode consumer must exit 0, got {rc}")
+    bot = sys.modules["Rosmaster_Lib"].Rosmaster.last
+    check(bot is not None, "(5) r2-mode consumer must have opened the board")
+    if bot is not None:
+        check(bot._car_type == 5, "(5) r2 mode must set car-type 5 (AKM servo enable)")
+        check(bot.default_angle == 90, "(5) r2 mode must apply the measured centre trim")
+        check(len(bot.motions) == 0,
+              "(5) r2 mode must NEVER call set_car_motion (type 5 breaks it)")
+        check(bot.motor_writes and bot.motor_writes[-1] == (0, 0, 0, 0),
+              "(5) r2 safe stop must zero both rear motors via set_motor")
+        check(bot.steer_writes and bot.steer_writes[-1] == 0,
+              "(5) r2 safe stop must centre the steering")
+    print("(5) consumer/r2 mode → exit 0, car-type 5 + trim set, "
+          "no set_car_motion, safe stop zeros motors + centre (init + teardown)")
 
     print()
     if failures:
