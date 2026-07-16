@@ -53,6 +53,12 @@ struct SafetyInputs {
     // Fault::watchdog_precursor — the "fail-closed on watchdog" safety guarantee.
     bool watchdog_healthy;
     bool motion_stopped;
+    // Active configuration passes valid_configuration() AND has calibrated=true.
+    // Set to false for any uncalibrated record (including factory_defaults()) to
+    // raise Fault::configuration_invalid and prevent arming. The caller is
+    // responsible for evaluating
+    // `r2::application::valid_configuration(cfg) && cfg.calibrated`.
+    bool configuration_valid;
 };
 
 class SafetyManager {

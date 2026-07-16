@@ -295,6 +295,7 @@ void test_safety() {
         in.communication_healthy = true;
         in.supply_stable = true;
         in.watchdog_healthy = true;
+        in.configuration_valid = true;
         return in;
     }();
     manager.evaluate(healthy);
@@ -358,6 +359,78 @@ void test_safety() {
     illegal.evaluate(healthy);
     CHECK(!illegal.clear_recoverable_faults(true));
     CHECK(!illegal.request_firmware_update());
+}
+
+void test_safety_configuration_invalid() {
+    // H5: an uncalibrated configuration (factory_defaults() has calibrated=false)
+    // must surface as Fault::configuration_invalid, prevent arming, disable the
+    // bridge, and be unrecoverable without a reset + POST.
+    const auto defaults = r2::application::factory_defaults();
+    CHECK(!defaults.calibrated);
+    // factory_defaults() is structurally valid (schema and timeout in range) but
+    // not calibrated; the gate is in evaluate(), not valid_configuration().
+    CHECK(r2::application::valid_configuration(defaults));
+
+    r2::safety::SafetyManager mgr{};
+    mgr.begin_self_test();
+    mgr.complete_self_test(true);
+    CHECK(mgr.state() == r2::safety::SafetyState::standby);
+
+    // Build inputs that are otherwise fully healthy but report an uncalibrated
+    // configuration (configuration_valid=false).
+    const r2::safety::SafetyInputs uncalibrated = [] {
+        r2::safety::SafetyInputs in{};
+        in.command_fresh = true;
+        in.battery_voltage_safe = true;
+        in.battery_current_safe = true;
+        in.thermal_safe = true;
+        in.encoder_plausible = true;
+        in.steering_plausible = true;
+        in.imu_sane = true;
+        in.control_deadline_met = true;
+        in.communication_healthy = true;
+        in.supply_stable = true;
+        in.watchdog_healthy = true;
+        in.configuration_valid = false;
+        return in;
+    }();
+
+    mgr.evaluate(uncalibrated);
+
+    // Fault must be both active and latched.
+    CHECK((mgr.active_faults() & r2::safety::bit(r2::safety::Fault::configuration_invalid)) != 0U);
+    CHECK((mgr.latched_faults() & r2::safety::bit(r2::safety::Fault::configuration_invalid)) != 0U);
+
+    // State machine must be in fault_latched; arming and motion are refused.
+    CHECK(mgr.state() == r2::safety::SafetyState::fault_latched);
+    CHECK(!mgr.arm());
+    CHECK(!mgr.motion_permitted());
+    CHECK(mgr.bridge_must_be_disabled());
+
+    // configuration_invalid requires a reset + POST to clear — physical ack alone
+    // is insufficient (matches the requires_reset_and_post policy).
+    CHECK(!mgr.clear_recoverable_faults(true));
+
+    // The configuration_invalid latch must persist across a subsequent fully-healthy
+    // evaluation — active faults clear, but the latched fault still requires reset+POST.
+    const r2::safety::SafetyInputs healthy = [] {
+        r2::safety::SafetyInputs in{};
+        in.command_fresh = true;
+        in.battery_voltage_safe = true;
+        in.battery_current_safe = true;
+        in.thermal_safe = true;
+        in.encoder_plausible = true;
+        in.steering_plausible = true;
+        in.imu_sane = true;
+        in.control_deadline_met = true;
+        in.communication_healthy = true;
+        in.supply_stable = true;
+        in.watchdog_healthy = true;
+        in.configuration_valid = true;
+        return in;
+    }();
+    mgr.evaluate(healthy);
+    CHECK(!mgr.clear_recoverable_faults(true));
 }
 
 void test_configuration_rollback() {
@@ -451,6 +524,7 @@ int main() {
     test_control();
     test_motion_controller_composition();
     test_safety();
+    test_safety_configuration_invalid();
     test_configuration_rollback();
     test_diagnostics();
     test_image_verifier_failclosed();
