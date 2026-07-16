@@ -256,6 +256,9 @@ DecodeStatus decode(const std::uint8_t* encoded,
     if ((decoded[5] & static_cast<std::uint8_t>(~kKnownFlagMask)) != 0U) {
         return DecodeStatus::invalid_flags;
     }
+    if ((decoded[5] & kFlagAuthTag) != 0U) {
+        return DecodeStatus::auth_required;
+    }
 
     output.type = static_cast<MessageType>(decoded[4]);
     output.flags = decoded[5];

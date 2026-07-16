@@ -593,6 +593,16 @@ void test_mac_authentication() {
     // AUTH_TAG flag is consumed by verification and cleared in the output
     CHECK((dec.flags & r2::protocol::kFlagAuthTag) == 0U);
 
+    // Plain decode must refuse AUTH_TAG frames and leave output zero-initialised.
+    r2::protocol::Frame plain_decode_of_auth{};
+    plain_decode_of_auth.type = r2::protocol::MessageType::motion_command;
+    plain_decode_of_auth.payload[0] = 0x5AU;
+    CHECK(r2::protocol::decode(enc.bytes.data(), enc.length, plain_decode_of_auth) ==
+          r2::protocol::DecodeStatus::auth_required);
+    CHECK(plain_decode_of_auth.sequence == 0U);
+    CHECK(plain_decode_of_auth.payload_length == 0U);
+    CHECK(plain_decode_of_auth.payload[0] == 0U);
+
     // ── T2: wrong key → auth_mac_mismatch ─────────────────────────────────
     std::array<std::uint8_t, r2::protocol::kMacKeySize> wrong_key{};
     wrong_key[0] = 0xFFU;  // differs from key[0] = 0x01
@@ -634,6 +644,10 @@ void test_mac_authentication() {
     CHECK(r2::protocol::decode_authenticated(
               plain_enc.bytes.data(), plain_enc.length, key, plain_dec) ==
           r2::protocol::DecodeStatus::auth_mac_mismatch);
+    CHECK(r2::protocol::decode(plain_enc.bytes.data(), plain_enc.length, plain_dec) ==
+          r2::protocol::DecodeStatus::ok);
+    CHECK(plain_dec.payload_length == plain.payload_length);
+    CHECK(plain_dec.sequence == plain.sequence);
 
     // ── T5: sequence binding – different sequences produce different MACs ──
     r2::protocol::Frame frame_s1 = frame;
