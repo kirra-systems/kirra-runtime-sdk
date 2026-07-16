@@ -32,6 +32,8 @@ add_library(r2_platform_core STATIC
     safety/src/safety_manager.cpp
     firmware/src/configuration.cpp
     firmware/src/control_loop.cpp
+    firmware/src/runner.cpp
+    firmware/src/safe_hal.cpp
 )
 
 target_include_directories(r2_platform_core PUBLIC

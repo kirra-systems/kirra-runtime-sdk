@@ -74,6 +74,19 @@ or a dedicated brownout/PVD comparator seam, so `steering_plausible` and
 is serviced every tick). ACKNOWLEDGE_FAULT is not honored from the network — a
 packet is never physical acknowledgement.
 
+The platform drives the loop through `run_cycle` (`r2/application/runner.hpp`),
+which derives `dt` from the monotonic clock and ticks the `Application` once per
+cycle; the loop and the idle between cycles are the platform's (a timer ISR or
+superloop on the MCU). A genuine overrun is passed through as a large `dt` so the
+control-deadline check catches the stall rather than the runner masking it.
+
+Before the concrete STM32 drivers (#967) exist, the bring-up image boots the
+`Application` against `SafeHal` (`r2/application/safe_hal.hpp`) — fail-closed HAL
+seams (asserted e-stop, invalid battery/IMU samples, a silent transport, disabled
+actuators). A driverless boot therefore lands directly in a latched-safe,
+bridge-disabled state: the platform is immobilized until real, healthy peripherals
+are wired in one seam at a time. This is asserted by the host tests.
+
 ## Fault policy
 
 | Detection | Reaction | Latch / recovery |
