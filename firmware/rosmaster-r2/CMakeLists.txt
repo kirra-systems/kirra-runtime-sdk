@@ -11,6 +11,20 @@ option(R2_ENABLE_SANITIZERS "Enable address and undefined-behavior sanitizers" O
 option(R2_ENABLE_COVERAGE "Enable GCC/Clang coverage instrumentation" OFF)
 option(R2_BUILD_FUZZERS "Build the libFuzzer decoder target (requires a Clang toolchain)" OFF)
 
+# When cross-compiling for the MCU target (see cmake/arm-none-eabi-cortex-m3.cmake),
+# only the portable r2_platform_core static library is built — the host tests,
+# deterministic simulation and libFuzzer targets are host-only. This slice of
+# #968 proves the safety core is freestanding-clean; the linker script, startup
+# and target image are follow-up slices.
+if(CMAKE_CROSSCOMPILING)
+    set(R2_BUILD_TESTS OFF)
+    set(R2_BUILD_SIMULATION OFF)
+    set(R2_BUILD_FUZZERS OFF)
+    set(R2_ENABLE_SANITIZERS OFF)
+    set(R2_ENABLE_COVERAGE OFF)
+    message(STATUS "R2: cross-compiling r2_platform_core for ${CMAKE_SYSTEM_PROCESSOR} (host targets disabled)")
+endif()
+
 add_library(r2_platform_core STATIC
     kinematics/src/ackermann.cpp
     control/src/motion_controller.cpp

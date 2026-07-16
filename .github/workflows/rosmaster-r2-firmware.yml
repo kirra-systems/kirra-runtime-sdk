@@ -116,3 +116,29 @@ jobs:
           /tmp/r2-fuzz/r2_decode_fuzz
           -max_total_time=60 -print_final_stats=1 -error_exitcode=1
           firmware/rosmaster-r2/fuzz/corpus
+
+  target-build:
+    # Cross-compile the portable r2_platform_core static library for the target
+    # MCU (STM32F103RCT6, Cortex-M3) with arm-none-eabi-gcc. Build-only: it
+    # proves the safety core (kinematics / control loop / protocol / safety
+    # manager / configuration) carries no host dependency and links no host
+    # libc. The linker script, startup/vector table and full flashable image
+    # are follow-up slices of #968; a static-library build needs no linker
+    # script, so no on-target run happens here (host timing stays indicative).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install ARM cross toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
+      - name: Configure (Cortex-M3 target)
+        run: >
+          cmake -S firmware/rosmaster-r2 -B /tmp/r2-target
+          -DCMAKE_TOOLCHAIN_FILE=$PWD/firmware/rosmaster-r2/cmake/arm-none-eabi-cortex-m3.cmake
+      - name: Cross-compile the safety core
+        run: cmake --build /tmp/r2-target --parallel
+      - name: Confirm ARM object output
+        run: |
+          arm-none-eabi-objdump -f /tmp/r2-target/libr2_platform_core.a \
+            | grep -q 'architecture: armv7'
+          arm-none-eabi-size /tmp/r2-target/libr2_platform_core.a

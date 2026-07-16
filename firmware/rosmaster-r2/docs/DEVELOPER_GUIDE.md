@@ -19,9 +19,22 @@ cd firmware/rosmaster-r2
 doxygen Doxyfile
 ```
 
-Target builds will use a pinned `arm-none-eabi` toolchain, linker script and
-board-revision CMake preset after the BSP closure gates in `drivers/README.md`
-are complete. The host target is not flashable.
+Target core cross-build (STM32F103RCT6, Cortex-M3) — proves the portable
+`r2_platform_core` (kinematics, control loop, protocol, safety manager,
+configuration) carries no host dependency:
+
+```bash
+cmake -S firmware/rosmaster-r2 -B /tmp/r2-target \
+  -DCMAKE_TOOLCHAIN_FILE="$PWD/firmware/rosmaster-r2/cmake/arm-none-eabi-cortex-m3.cmake"
+cmake --build /tmp/r2-target --parallel   # builds libr2_platform_core.a (armv7-m)
+```
+
+Cross-compiling disables the host tests, simulation and fuzzer automatically
+(they are host-only). This is a build-only lane — a static library needs no
+linker script. The linker script / flash map, startup + vector table, the
+concrete HAL drivers (#967) and the flashable application image (#968) are the
+remaining follow-ups after the BSP closure gates in `drivers/README.md`; the
+host target is not flashable.
 
 ## Coding rules
 
