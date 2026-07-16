@@ -71,7 +71,10 @@ SECTIONS
         __exidx_end = .;
     } >FLASH
 
-    /* C++ static constructors / init arrays (run by __libc_init_array). */
+    /* C++ static constructors / init arrays. Run manually by Reset_Handler
+       (startup_stm32f103.cpp) over __init_array_start.._end — NOT via newlib's
+       __libc_init_array, so the image needs no crti/crtn _init under
+       -nostartfiles. */
     .preinit_array :
     {
         . = ALIGN(4);
