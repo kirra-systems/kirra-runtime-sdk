@@ -1,11 +1,24 @@
 # R2 Path-B Ackermann drive — proposal (review before any code / robot testing)
 
-> **Status: PROPOSAL. No code is wired and nothing here has driven the robot.**
-> This is the design for an open-source R2 drive that bypasses the (broken, on
-> this cross-labeled X3 image) firmware `set_car_motion` kinematics and instead
-> drives the two rear motors directly + steers the servo, doing the Ackermann
-> math in KIRRA-governed code. Written for review; the calibration gaps in §5
-> MUST be measured on the bench before this can drive correctly.
+> **Status: PROPOSAL. The pure translation core is implemented + host-tested;
+> it is INERT — no consumer wiring, no calibration, nothing has driven the
+> robot.** This is the design for an open-source R2 drive that bypasses the
+> (broken, on this cross-labeled X3 image) firmware `set_car_motion` kinematics
+> and instead drives the two rear motors directly + steers the servo, doing the
+> Ackermann math in KIRRA-governed code. Written for review; the calibration
+> gaps in §5 MUST be measured on the bench before this can drive correctly.
+>
+> **Slice 1 landed (this is now real code, still inert):** the L1 Ackermann
+> geometry + L2 calibration + fail-closed last-hop of §§3-7 is implemented as a
+> PURE module, `robot/r2_drive.py` (`translate(v, omega, cal) -> R2Actuation`),
+> with exhaustive host tests (`robot/r2_drive_test.py`, in the CI robot smoke
+> step). It does NO serial I/O and imports no ROS/vendor lib, so it is
+> host-verified without a robot. It is NOT called by the consumer yet, and
+> `R2DriveCalibration` REFUSES construction on any missing/invalid field — so
+> with the §5 measurements still open, no profile can be built and the path
+> cannot run. What remains before it drives: the §5 bench calibration, the §6
+> consumer wiring (swap the verify-gated last hop + set car-type 5 at init),
+> and the §9 sign-offs.
 
 ## 1. Why Path B
 
@@ -157,10 +170,13 @@ but in our code.** It does NOT relax the safety architecture:
   profile (`robot/install/PLATFORM_R2_PENDING.md`). The interceptor wheelbase cross-check
   (`ros2_ws/.../cmd_vel_interceptor.py`) uses `L` from that profile.
 
-## 7. Reference algorithm (illustrative — NOT wired)
+## 7. Reference algorithm (now realized as a pure module)
 
-Pseudocode for review only; not committed as runnable code, and inert until §5 is
-measured and §6 re-validated.
+Slice 1 committed this as real, host-tested code: `robot/r2_drive.py`
+(`translate(v, omega, cal) -> R2Actuation`) + `robot/r2_drive_test.py`. It is
+still INERT — the consumer does not call it (§6 wiring pending) and no
+`R2DriveCalibration` can be built until §5 is measured (the dataclass fails
+closed on any missing field). The pseudocode below matches the module 1:1.
 
 ```
 # Inputs: v (m/s), omega (rad/s) — ALREADY governed/bounded by KIRRA upstream.
@@ -206,9 +222,11 @@ def mrc_stop():
 - **Open-loop vs encoder-closed-loop** speed (m/s tracking vs PWM proportional).
   Open-loop v0 will not perfectly track a `m/s` command (§ probe: ~12% wheel
   mismatch at equal PWM) — acceptable for low-speed v0, or close the loop.
-- **Where the Ackermann translation lives** — in `kirra_motor_consumer.py` (one
-  swapped last-hop, simplest) vs a small dedicated `r2_drive` module the consumer
-  calls. Either keeps the verify gate ahead of it.
+- **Where the Ackermann translation lives** — RESOLVED (slice 1): a small
+  dedicated pure module, `robot/r2_drive.py`, that the consumer will call after
+  verify. Chosen over inlining in `kirra_motor_consumer.py` so the translation
+  is host-testable in isolation (the ADR-0033 chokepoint stays thin). The verify
+  gate remains ahead of it. The remaining §9 items below are still open.
 - **`v=0, ω≠0` policy** — confirmed as an upstream KIRRA refusal + last-hop MRC
   (Ackermann cannot execute it).
 
