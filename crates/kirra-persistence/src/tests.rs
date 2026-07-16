@@ -410,6 +410,36 @@ mod standby_store_tests {
     }
 
     #[test]
+    fn test_negative_stored_timestamp_heals_to_zero() {
+        // Fail-closed read discipline: a corrupt/tampered NEGATIVE BIGINT
+        // timestamp (impossible via the u64 API, only via direct SQL) must read
+        // back as 0 — never wrap to a huge u64. The `.max(0)` guard on the
+        // registered_at_ms read path. The live-Postgres backend applies the
+        // byte-identical `.max(0)` guard (PgVerifierStore::row_to_node), kept in
+        // lock-step so both backends heal negative timestamps the same way.
+        let store = in_memory();
+        store
+            .save_node(&RegisteredNode {
+                node_id: "n1".into(),
+                status: NodeTrustState::Trusted,
+                registered_at_ms: 1_000,
+                last_trust_update_ms: 1_000,
+                ak_public_pem: None,
+                expected_pcr16_digest_hex: None,
+                site: None,
+                firmware_version: None,
+            })
+            .unwrap();
+        // Corrupt the stored timestamp to a negative BIGINT.
+        store.force_node_registered_at_ms_for_test("n1", -5);
+        let loaded = store.load_node("n1").unwrap().expect("node present");
+        assert_eq!(
+            loaded.registered_at_ms, 0,
+            "a negative stored timestamp must heal to 0, not wrap to a huge u64"
+        );
+    }
+
+    #[test]
     fn test_posture_event_analytics_queries() {
         // #396: window/group queries return the expected rows.
         let store = in_memory();

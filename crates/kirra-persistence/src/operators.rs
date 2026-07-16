@@ -126,8 +126,8 @@ impl VerifierStore {
                     Ok(OperatorRecord {
                         operator_id: row.get(0)?,
                         pubkey_pem: row.get(1)?,
-                        registered_at_ms: row.get::<_, i64>(2)? as u64,
-                        revoked_at_ms: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                        registered_at_ms: row.get::<_, i64>(2)?.max(0) as u64,
+                        revoked_at_ms: row.get::<_, Option<i64>>(3)?.map(|v| v.max(0) as u64),
                     })
                 },
             )
@@ -145,8 +145,8 @@ impl VerifierStore {
             Ok(OperatorRecord {
                 operator_id: row.get(0)?,
                 pubkey_pem: row.get(1)?,
-                registered_at_ms: row.get::<_, i64>(2)? as u64,
-                revoked_at_ms: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                registered_at_ms: row.get::<_, i64>(2)?.max(0) as u64,
+                revoked_at_ms: row.get::<_, Option<i64>>(3)?.map(|v| v.max(0) as u64),
             })
         })?;
         rows.collect()
@@ -201,7 +201,7 @@ impl VerifierStore {
                         rowid: row.get(0)?,
                         node_id: row.get(1)?,
                         operator_id: row.get(2)?,
-                        granted_at_ms: row.get::<_, i64>(3)? as u64,
+                        granted_at_ms: row.get::<_, i64>(3)?.max(0) as u64,
                     })
                 },
             )
@@ -255,8 +255,8 @@ impl VerifierStore {
                 params![node_id],
                 |row| {
                     Ok(ClearanceGrantState {
-                        granted_at_ms: row.get::<_, i64>(0)? as u64,
-                        consumed_at_ms: row.get::<_, Option<i64>>(1)?.map(|v| v as u64),
+                        granted_at_ms: row.get::<_, i64>(0)?.max(0) as u64,
+                        consumed_at_ms: row.get::<_, Option<i64>>(1)?.map(|v| v.max(0) as u64),
                         outcome: row.get(2)?,
                         outcome_detail: row.get(3)?,
                     })

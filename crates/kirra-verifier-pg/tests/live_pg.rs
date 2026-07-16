@@ -287,6 +287,33 @@ fn a_corrupt_status_json_loads_as_unknown_not_a_panic() {
 }
 
 #[test]
+fn a_negative_stored_timestamp_heals_to_zero() {
+    let Some((url, schema, store)) = isolated_store("negts") else {
+        return;
+    };
+    let mut c = raw_client_in_schema(&url, &schema);
+    // A corrupt/tampered NEGATIVE BIGINT timestamp (the type-safe u64 API can
+    // never write one) must read back as 0 — never wrap to a huge u64. This is
+    // the byte-identical `.max(0)` guard the SQLite backend applies
+    // (test_negative_stored_timestamp_heals_to_zero there), kept in lock-step.
+    c.execute(
+        "INSERT INTO nodes (node_id, status_json, registered_at_ms, last_trust_update_ms) \
+         VALUES ('negts', '\"Trusted\"', -5, -9)",
+        &[],
+    )
+    .unwrap();
+    let n = store.load_node("negts").unwrap().unwrap();
+    assert_eq!(
+        n.registered_at_ms, 0,
+        "negative registered_at_ms must heal to 0"
+    );
+    assert_eq!(
+        n.last_trust_update_ms, 0,
+        "negative last_trust_update_ms must heal to 0"
+    );
+}
+
+#[test]
 fn two_connections_racing_the_cas_produce_exactly_one_winner() {
     // The drill only a LIVE server can run honestly: two independent
     // connections (two OS-level sessions) observe epoch 0 and claim
