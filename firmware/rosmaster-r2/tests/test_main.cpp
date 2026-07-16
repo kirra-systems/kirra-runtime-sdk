@@ -8,6 +8,9 @@
 // SHA-256 / HMAC-SHA-256 primitive against fixed vectors — see test_mac_known_answer_vectors().
 #include "r2/protocol/mac.hpp"
 #include "r2/safety/safety_manager.hpp"
+// Shared decoder fuzz oracle (fuzz/ is on this target's include path); the same
+// decode_one() drives the libFuzzer target in fuzz/decode_fuzz_libfuzzer.cpp.
+#include "decode_fuzz.hpp"
 
 #include <array>
 #include <cmath>
@@ -696,6 +699,78 @@ void test_image_verifier_failclosed() {
     CHECK(static_cast<std::uint8_t>(r2::boot::VerificationResult::rejected) == 0U);
 }
 
+void test_decode_fuzz() {
+    // Deterministic, sanitizer-exercised sweep of the untrusted decode entry
+    // points — the per-PR complement to the libFuzzer target
+    // (fuzz/decode_fuzz_libfuzzer.cpp). A fixed-seed xorshift generates both
+    // raw-random buffers and byte-mutated valid frames; every input must satisfy
+    // the decode invariants (no partial frame on rejection, bounded output, no
+    // AUTH_TAG leak) and must not trip ASAN/UBSAN. Reproducible: same seed every
+    // run, so a discovered crash is replayable.
+    std::uint64_t state = 0x9E3779B97F4A7C15ULL;
+    const auto next = [&state]() noexcept -> std::uint64_t {
+        state ^= state << 13U;
+        state ^= state >> 7U;
+        state ^= state << 17U;
+        return state;
+    };
+
+    std::array<std::uint8_t, r2::protocol::kMacKeySize> key{};
+    for (std::size_t i = 0U; i < key.size(); ++i) {
+        key[i] = static_cast<std::uint8_t>(0xA5U ^ static_cast<std::uint8_t>(i));
+    }
+
+    // Two valid encoded frames used as mutation bases: a plain frame and an
+    // authenticated one, so mutations explore both decode paths near-valid.
+    r2::protocol::Frame base{};
+    base.type = r2::protocol::MessageType::motion_command;
+    base.sequence = 7U;
+    base.source_time_us = 1234U;
+    base.payload_length = 8U;
+    for (std::size_t i = 0U; i < 8U; ++i) {
+        base.payload[i] = static_cast<std::uint8_t>(i + 1U);
+    }
+    r2::protocol::EncodedFrame enc_plain{};
+    r2::protocol::EncodedFrame enc_auth{};
+    CHECK(r2::protocol::encode(base, enc_plain));
+    CHECK(r2::protocol::encode_authenticated(base, key, enc_auth));
+
+    std::array<std::uint8_t, 320U> buf{};
+    bool all_invariants_hold = true;
+    for (int iteration = 0; iteration < 20000; ++iteration) {
+        std::size_t length = 0U;
+        const std::uint64_t mode = next() % 3U;
+        if (mode == 0U) {
+            length = static_cast<std::size_t>(next() % (buf.size() + 1U));
+            for (std::size_t i = 0U; i < length; ++i) {
+                buf[i] = static_cast<std::uint8_t>(next());
+            }
+        } else {
+            const r2::protocol::EncodedFrame& src = (mode == 1U) ? enc_plain : enc_auth;
+            length = src.length;
+            for (std::size_t i = 0U; i < length; ++i) {
+                buf[i] = src.bytes[i];
+            }
+            const std::uint64_t mutations = (next() % 4U) + 1U;
+            for (std::uint64_t m = 0U; m < mutations && length > 0U; ++m) {
+                const std::size_t pos = static_cast<std::size_t>(next() % length);
+                buf[pos] = static_cast<std::uint8_t>(next());
+            }
+        }
+        all_invariants_hold =
+            all_invariants_hold && r2::protocol::fuzz::decode_one(buf.data(), length);
+    }
+    CHECK(all_invariants_hold);
+
+    // The unmutated valid frames must still round-trip cleanly through their
+    // respective decode paths (guards against an over-strict oracle).
+    r2::protocol::Frame out{};
+    CHECK(r2::protocol::decode(enc_plain.bytes.data(), enc_plain.length, out) ==
+          r2::protocol::DecodeStatus::ok);
+    CHECK(r2::protocol::decode_authenticated(enc_auth.bytes.data(), enc_auth.length, key, out) ==
+          r2::protocol::DecodeStatus::ok);
+}
+
 }  // namespace
 
 int main() {
@@ -710,6 +785,7 @@ int main() {
     test_image_verifier_failclosed();
     test_mac_known_answer_vectors();
     test_mac_authentication();
+    test_decode_fuzz();
     if (failures != 0) {
         std::fprintf(stderr, "%d test assertion(s) failed\n", failures);
         return 1;
