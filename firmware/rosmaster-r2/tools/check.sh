@@ -21,7 +21,9 @@ if command -v clang-tidy >/dev/null 2>&1; then
     "$root/protocol/src/wire.cpp" \
     "$root/safety/src/safety_manager.cpp" \
     "$root/firmware/src/configuration.cpp" \
-    "$root/firmware/src/control_loop.cpp")
+    "$root/firmware/src/control_loop.cpp" \
+    "$root/firmware/src/runner.cpp" \
+    "$root/firmware/src/safe_hal.cpp")
 else
   printf 'warning: clang-tidy is not installed; static analysis skipped\n' >&2
 fi

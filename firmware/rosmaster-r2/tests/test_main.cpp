@@ -1,5 +1,7 @@
 #include "r2/application/configuration.hpp"
 #include "r2/application/control_loop.hpp"
+#include "r2/application/runner.hpp"
+#include "r2/application/safe_hal.hpp"
 #include "r2/boot/image_verifier.hpp"
 #include "r2/control/motion_controller.hpp"
 #include "r2/diagnostics/metrics.hpp"
@@ -1338,6 +1340,92 @@ void test_control_loop_gating() {
     }
 }
 
+// ── Application runner (#968) ───────────────────────────────────────────────
+// run_cycle() derives dt from the monotonic clock and drives one Application
+// tick. Driven end-to-end it reproduces the happy path (arm → activate → motion
+// actuates), proving the dt derivation and per-cycle wiring.
+void test_application_runner() {
+    std::array<std::uint8_t, r2::protocol::kMacKeySize> key{};
+    for (std::size_t i = 0U; i < key.size(); ++i) {
+        key[i] = static_cast<std::uint8_t>(i + 1U);
+    }
+    constexpr double kNominalDt = 0.01;
+    constexpr std::uint64_t kDtUs = 10'000U;
+
+    app_test::TestClock clock{};
+    app_test::TestMotors motors{};
+    app_test::TestSteering steering{};
+    app_test::TestEncoders encoders{};
+    app_test::TestImu imu{};
+    app_test::TestBattery battery{};
+    app_test::TestEstop estop{};
+    app_test::TestWatchdog watchdog{};
+    app_test::TestTransport transport{};
+    battery.sample_ = app_test::healthy_battery();
+    imu.sample_ = app_test::healthy_imu();
+
+    const r2::application::HalBundle hal{clock,  motors,  steering, encoders, imu,
+                                         battery, estop,  watchdog, transport};
+    r2::application::Application app{
+        hal, app_test::make_config(app_test::calibrated_platform(), key)};
+    app.initialize();
+
+    r2::application::RunnerState runner{};
+    CHECK(!runner.initialized);
+
+    transport.push(app_test::make_control_frame(key, r2::protocol::MessageType::arm, 1U));
+    r2::application::run_cycle(app, clock, runner, kNominalDt);
+    CHECK(runner.initialized);
+    CHECK(app.safety_state() == r2::safety::SafetyState::armed);
+    CHECK(watchdog.services_ == 1U);
+
+    clock.advance(kDtUs);
+    transport.clear();
+    transport.push(app_test::make_control_frame(key, r2::protocol::MessageType::activate, 2U));
+    transport.push(app_test::make_motion_frame(key, 3U, 1.0F, 0.0F, 1U, true));
+    r2::application::run_cycle(app, clock, runner, kNominalDt);
+    CHECK(app.safety_state() == r2::safety::SafetyState::active);
+    CHECK(runner.last_us == clock.now_);
+
+    for (int cycle = 0; cycle < 4; ++cycle) {
+        clock.advance(kDtUs);
+        r2::application::run_cycle(app, clock, runner, kNominalDt);
+    }
+    CHECK(app.safety_state() == r2::safety::SafetyState::active);
+    CHECK(motors.output_enabled());
+    CHECK(motors.left_ > 0);
+    CHECK(motors.right_ > 0);
+}
+
+// A boot with no concrete drivers present (SafeHal) must immobilize: the
+// fail-closed seams (asserted e-stop, invalid battery/IMU, silent transport,
+// disabled actuators) drive the SafetyManager to a latched-safe, bridge-
+// disabled state and never permit motion, no matter how long it runs.
+void test_safe_hal_immobilized() {
+    std::array<std::uint8_t, r2::protocol::kMacKeySize> key{};
+    for (std::size_t i = 0U; i < key.size(); ++i) {
+        key[i] = static_cast<std::uint8_t>(i + 1U);
+    }
+
+    r2::application::SafeHal safe{};
+    r2::application::Application app{
+        safe.bundle(), app_test::make_config(app_test::calibrated_platform(), key)};
+    app.initialize();
+
+    r2::application::RunnerState runner{};
+    for (int cycle = 0; cycle < 64; ++cycle) {
+        r2::application::run_cycle(app, safe.clock, runner, 0.01);
+        CHECK(app.bridge_disabled());
+        CHECK(!safe.motors.output_enabled());
+        CHECK(app.last_left_duty_q15() == 0);
+        CHECK(app.last_right_duty_q15() == 0);
+    }
+    // The asserted e-stop latches the platform into the safe state.
+    CHECK(app.safety_state() == r2::safety::SafetyState::fault_latched);
+    CHECK((app.latched_faults() &
+           r2::safety::bit(r2::safety::Fault::emergency_stop)) != 0U);
+}
+
 }  // namespace
 
 int main() {
@@ -1356,6 +1444,8 @@ int main() {
     test_decode_fuzz();
     test_control_loop_decode();
     test_control_loop_gating();
+    test_application_runner();
+    test_safe_hal_immobilized();
     if (failures != 0) {
         std::fprintf(stderr, "%d test assertion(s) failed\n", failures);
         return 1;
