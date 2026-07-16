@@ -79,6 +79,11 @@ def test_calibration_rejects_bad_fields() -> None:
         dict(center_trim=121.0),
         dict(drive_deadband_pwm=-0.1),
         dict(drive_deadband_pwm=float("nan")),
+        # bool subclasses int — a YAML/JSON `true` must NOT pass as 1.0.
+        dict(wheelbase_m=True),
+        dict(v_per_pwm=True),
+        dict(steer_sign=True),
+        dict(pwm_max=False),
     ]
     for override in bad_cases:
         try:

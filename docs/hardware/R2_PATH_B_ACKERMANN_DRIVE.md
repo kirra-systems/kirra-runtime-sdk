@@ -1,4 +1,4 @@
-# R2 Path-B Ackermann drive — proposal (review before any code / robot testing)
+# R2 Path-B Ackermann drive — proposal (pure core landed + host-tested; INERT — review before consumer wiring / robot testing)
 
 > **Status: PROPOSAL. The pure translation core is implemented + host-tested;
 > it is INERT — no consumer wiring, no calibration, nothing has driven the

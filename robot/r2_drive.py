@@ -75,6 +75,11 @@ class R2CalibrationError(ValueError):
 
 
 def _finite(x: object) -> bool:
+    # Reject bool explicitly: it subclasses int, so without this a YAML/JSON
+    # mistake like `wheelbase_m: true` would pass as 1.0 and slip through the
+    # range checks — weakening the fail-closed calibration validation.
+    if isinstance(x, bool):
+        return False
     return isinstance(x, (int, float)) and math.isfinite(float(x))
 
 
