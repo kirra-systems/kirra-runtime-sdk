@@ -228,7 +228,9 @@ def main() -> int:
             else:
                 bot.set_car_motion(0.0, 0.0, 0.0)
         except Exception as e:  # noqa: BLE001 — shutdown must not raise past here.
-            print(f"safe_stop raised: {e}", file=sys.stderr)
+            # Keep the primitive identifiable in the field: drive_mode selects
+            # r2_safe_stop (set_motor+centre) vs set_car_motion(0,0,0).
+            print(f"safe_stop raised (drive_mode={drive_mode}): {e}", file=sys.stderr)
 
     rclpy.init()
     node = Node("kirra_motor_consumer")

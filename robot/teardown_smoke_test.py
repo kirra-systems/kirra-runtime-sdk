@@ -332,13 +332,18 @@ def main() -> int:
     print("(4) consumer/normal exit → exit 0, safe stop written, shutdown exactly once")
 
     # ------------------------------------------------------------------
-    # 5. Motor consumer in R2 Path-B mode (off-by-default flag ON): the
-    #    last hop must be set_motor + AKM steering, NEVER set_car_motion;
-    #    init must set car-type 5 and apply the centre trim; the safe stop
-    #    must zero the motors + centre. Proves the mode dispatch end-to-end.
+    # 5. Motor consumer in R2 Path-B mode (off-by-default flag ON). This
+    #    harness's spin is a no-op, so it does NOT drive the subscription/
+    #    timer actuation callbacks — it covers the INIT + TEARDOWN dispatch:
+    #    car-type 5 set (+ centre trim), and the r2 safe stop (set_motor 0 +
+    #    centre), with set_car_motion NEVER used. The last-hop actuation
+    #    semantics (translate → set_motor/AKM ordering, MRC zeros) are covered
+    #    by robot/r2_drive_test.py. KIRRA_EXPECTED_CAR_TYPE is cleared first so
+    #    this also enforces that r2 mode does NOT require the x3-only knob.
     # ------------------------------------------------------------------
     ctx.spin_downs_context = False
     ctx.spin_raises = None
+    os.environ.pop("KIRRA_EXPECTED_CAR_TYPE", None)  # r2 mode must not need it
     os.environ.update({
         "KIRRA_DRIVE_MODE": "r2_ackermann",
         # Measured-calibration stand-ins (test fixtures, not hardware values).
@@ -373,8 +378,8 @@ def main() -> int:
               "(5) r2 safe stop must zero both rear motors via set_motor")
         check(bot.steer_writes and bot.steer_writes[-1] == 0,
               "(5) r2 safe stop must centre the steering")
-    print("(5) consumer/r2 mode → exit 0, car-type 5 + trim set, set_motor path, "
-          "no set_car_motion, safe stop zeros motors + centre")
+    print("(5) consumer/r2 mode → exit 0, car-type 5 + trim set, "
+          "no set_car_motion, safe stop zeros motors + centre (init + teardown)")
 
     print()
     if failures:

@@ -19,9 +19,11 @@
 >   existing path; `r2_ackermann` = Path B). In r2 mode the consumer sets
 >   car-type 5 at init (+verifies, fail-closed), applies the measured centre
 >   trim, swaps the verify-gated last hop to `set_motor` + AKM steering, and
->   never calls `set_car_motion`. Proven end-to-end against stubs in
->   `robot/teardown_smoke_test.py` case (5); the x3 path is unchanged (cases
->   1-4 still pass).
+>   never calls `set_car_motion`. `robot/teardown_smoke_test.py` case (5)
+>   covers the INIT + safe-stop dispatch (car-type 5 + trim set, r2 safe stop,
+>   no `set_car_motion`; it does not drive the actuation callbacks); the
+>   last-hop actuation semantics are covered by `robot/r2_drive_test.py`. The
+>   x3 path is unchanged (cases 1-4 still pass).
 >
 > It STILL cannot drive: `R2DriveCalibration` (built from `KIRRA_R2_*` via
 > `calibration_from_env`) REFUSES construction on any missing/invalid field, so
