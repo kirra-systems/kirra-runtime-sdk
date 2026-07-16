@@ -450,19 +450,19 @@ pub struct JunctionContext {
 /// id sequence) would select that span.
 #[derive(Debug, Clone, Default)]
 pub struct LaneGraph {
-    lanes: BTreeMap<u64, Lane>,
+    pub(crate) lanes: BTreeMap<u64, Lane>,
     /// Right-of-way: `priority lane → lanes that must yield to it`. Populated from a
     /// Lanelet2 `right_of_way` regulatory element. Drives [`cedes_to_ego`] so the cede
     /// list is *derived from the map* rather than integrator-supplied.
     ///
     /// [`cedes_to_ego`]: Self::cedes_to_ego
-    priority_over: BTreeMap<u64, BTreeSet<u64>>,
+    pub(crate) priority_over: BTreeMap<u64, BTreeSet<u64>>,
     /// **Junction occlusion**: `approach lane → assured-clear sight distance (m)` toward the
     /// junction's cross-traffic conflict. Populated from the map + perception (a building /
     /// hedge / parked car limits the view at the approach). Drives the occluded-junction
     /// approach speed cap so the ego CREEPS into a blind junction (RSS Rule 4 applied laterally
     /// at the junction). A lane absent from this map has an open view (no occlusion cap).
-    occlusion_sight: BTreeMap<u64, f64>,
+    pub(crate) occlusion_sight: BTreeMap<u64, f64>,
 }
 
 impl LaneGraph {
@@ -473,274 +473,6 @@ impl LaneGraph {
             lanes: BTreeMap::new(),
             priority_over: BTreeMap::new(),
             occlusion_sight: BTreeMap::new(),
-        }
-    }
-
-    /// Record that approach `lane` has limited cross-traffic visibility — `sight_distance_m` of
-    /// assured-clear sight toward the junction conflict (a blind corner). Drives the occluded-
-    /// approach speed cap. A non-finite / negative distance is ignored (fail-safe: treated as no
-    /// occlusion datum rather than a spurious 0-speed creep).
-    pub fn set_occluded_approach(&mut self, lane: u64, sight_distance_m: f64) {
-        if sight_distance_m.is_finite() && sight_distance_m >= 0.0 {
-            self.occlusion_sight.insert(lane, sight_distance_m);
-        }
-    }
-
-    /// Builder form of [`set_occluded_approach`](Self::set_occluded_approach).
-    #[must_use]
-    pub fn with_occluded_approach(mut self, lane: u64, sight_distance_m: f64) -> Self {
-        self.set_occluded_approach(lane, sight_distance_m);
-        self
-    }
-
-    /// The assured-clear sight distance (m) toward the junction conflict for `lane`, or `None`
-    /// if the approach has an open view (no occlusion datum). The source the occluded-approach
-    /// speed cap is derived from.
-    #[must_use]
-    pub fn sight_distance(&self, lane: u64) -> Option<f64> {
-        self.occlusion_sight.get(&lane).copied()
-    }
-
-    /// **Derive** each approach lane's assured-clear sight distance from occluder geometry,
-    /// populating the same `occlusion_sight` map [`set_occluded_approach`](Self::set_occluded_approach)
-    /// writes — so the occluded-junction speed cap binds from the **map's footprints** instead of
-    /// the hand-fed [`with_occluded_approach`](Self::with_occluded_approach) datum (the honest-scope
-    /// follow-up named in ADR-0016).
-    ///
-    /// For every lane that advances along +x toward its terminus (the conflict line — the
-    /// straight-approach frame the junction model already uses), the worst (minimum) sight over all
-    /// [`corner_sight_distance`] candidates is recorded. A lane no occluder shadows is left with an
-    /// open view (no cap). Fail-safe and additive: non-finite footprints are dropped, a −x /
-    /// degenerate lane is skipped, and an existing hand-set datum is only **tightened** (the
-    /// derivation never relaxes a stricter integrator value).
-    // SAFETY: SG1 SG9 | REQ: occlusion-sight-derived-from-geometry | TEST: derived_sight_is_the_gap_from_the_corner_building_to_the_conflict_line,a_building_closer_to_the_junction_yields_less_sight,a_building_reaching_the_conflict_line_is_fully_blind,no_occluder_leaves_an_open_view,an_in_lane_or_far_lateral_box_does_not_bound_sight,the_worst_of_two_corners_wins,derivation_only_tightens_an_existing_datum_and_fails_safe,occlusion_creep_is_driven_by_map_occluder_geometry_not_a_hand_fed_datum
-    pub fn derive_occluded_approaches(&mut self, occluders: &[Occluder]) {
-        // Collect first (immutable borrow of lanes) then write (mutable borrow of the map).
-        let mut derived: Vec<(u64, f64)> = Vec::new();
-        for lane in self.lanes.values() {
-            let (Some(first), Some(last)) = (lane.centerline.first(), lane.centerline.last())
-            else {
-                continue; // degenerate lane — no approach geometry
-            };
-            if last.x_m <= first.x_m {
-                continue; // not a +x approach (oncoming / vertical) — outside the model, skip
-            }
-            let conflict_x = lane.stop_line_x();
-            let lane_y = last.y_m;
-            let sight = occluders
-                .iter()
-                .filter_map(|occ| corner_sight_distance(occ, conflict_x, lane_y, lane.half_width_m))
-                .fold(f64::INFINITY, f64::min);
-            if sight.is_finite() {
-                derived.push((lane.id, sight));
-            }
-        }
-        for (id, sight) in derived {
-            // Tighten-only: keep the stricter of an existing datum and the derived one.
-            let tightened = self
-                .occlusion_sight
-                .get(&id)
-                .map_or(sight, |&prev| prev.min(sight));
-            self.set_occluded_approach(id, tightened);
-        }
-    }
-
-    /// Builder form of [`derive_occluded_approaches`](Self::derive_occluded_approaches).
-    #[must_use]
-    pub fn with_derived_occlusion(mut self, occluders: &[Occluder]) -> Self {
-        self.derive_occluded_approaches(occluders);
-        self
-    }
-
-    /// Record that `priority_lane` has right-of-way over `yielding_lane` — traffic in
-    /// the yielding lane must cede to traffic in the priority lane at their conflict.
-    pub fn add_right_of_way(&mut self, priority_lane: u64, yielding_lane: u64) {
-        self.priority_over
-            .entry(priority_lane)
-            .or_default()
-            .insert(yielding_lane);
-    }
-
-    /// Builder form of [`add_right_of_way`](Self::add_right_of_way).
-    #[must_use]
-    pub fn with_right_of_way(mut self, priority_lane: u64, yielding_lane: u64) -> Self {
-        self.add_right_of_way(priority_lane, yielding_lane);
-        self
-    }
-
-    /// **Derive** junction right-of-way from each approach lane's traffic **control**, populating
-    /// the same `priority_over` relation [`add_right_of_way`](Self::add_right_of_way) writes — so
-    /// the cede list falls out of the map's signs instead of being integrator-supplied (the
-    /// roadmap-#4 follow-up: the upstream right-of-way *derivation* from the lane graph + controls).
-    ///
-    /// Rule (MUTCD / Vienna Convention, the uncontrolled-vs-controlled core): where two **crossing**
-    /// approaches share a junction (their termini within [`JUNCTION_CONFLICT_RADIUS_M`], headings at
-    /// least [`ROW_CROSSING_MIN_RAD`] apart), an approach carrying a STOP or YIELD control yields to
-    /// a conflicting approach with **no** control — the uncontrolled (through) road has priority.
-    /// Only this unambiguous case asserts a relation; every ambiguous one is left **unasserted**, so
-    /// the ego then yields to that agent and KIRRA's RSS backstops regardless (fail-safe):
-    ///
-    /// * both uncontrolled, or both controlled (an all-way stop — first-come, not a static relation): none.
-    /// * a TRAFFIC LIGHT on either approach: none — its priority is the live signal state each tick,
-    ///   not static map structure (handled by the signal path).
-    /// * parallel (same / opposing) approaches: none — a following / head-on relation, not RoW.
-    ///
-    /// Additive and road-correct: it only **adds** priority assertions the rules grant; an
-    /// integrator-set relation is kept. Degenerate / non-finite-terminus lanes are skipped.
-    // SAFETY: SG5 | REQ: junction-right-of-way-derived-from-controls | TEST: through_road_has_priority_over_a_stop_controlled_side_road,two_uncontrolled_approaches_assert_no_priority,an_all_way_stop_asserts_no_priority,a_traffic_light_defers_to_the_signal_state_not_static_priority,parallel_approaches_get_no_right_of_way,distinct_junctions_do_not_interact,derivation_is_additive_to_a_hand_set_relation,junction_context_falls_out_of_derived_right_of_way
-    pub fn derive_right_of_way_from_controls(&mut self) {
-        // Snapshot the approach geometry first (immutable borrow), then mutate `priority_over`.
-        struct Approach {
-            id: u64,
-            tx: f64,
-            ty: f64,
-            heading: f64,
-            control: Option<LaneControl>,
-        }
-        let approaches: Vec<Approach> = self
-            .lanes
-            .values()
-            .filter_map(|l| {
-                let t = l.centerline.last()?;
-                (t.x_m.is_finite() && t.y_m.is_finite()).then_some(Approach {
-                    id: l.id,
-                    tx: t.x_m,
-                    ty: t.y_m,
-                    heading: l.heading_rad,
-                    control: l.control,
-                })
-            })
-            .collect();
-
-        let mut grants: Vec<(u64, u64)> = Vec::new(); // (priority_lane, yielding_lane)
-        for i in 0..approaches.len() {
-            for j in (i + 1)..approaches.len() {
-                let (a, b) = (&approaches[i], &approaches[j]);
-                // Same junction? (termini within the junction-box radius)
-                let (dx, dy) = (a.tx - b.tx, a.ty - b.ty);
-                if dx.hypot(dy) > JUNCTION_CONFLICT_RADIUS_M {
-                    continue;
-                }
-                // Crossing? (not parallel same / opposing)
-                let dh = wrap_pi(a.heading - b.heading).abs();
-                if !(ROW_CROSSING_MIN_RAD..=std::f64::consts::PI - ROW_CROSSING_MIN_RAD)
-                    .contains(&dh)
-                {
-                    continue;
-                }
-                // Uncontrolled beats stop/yield-controlled. A traffic light (or matching control
-                // classes) asserts nothing.
-                let give = |c: Option<LaneControl>| {
-                    matches!(c, Some(LaneControl::Stop | LaneControl::Yield))
-                };
-                if a.control.is_none() && give(b.control) {
-                    grants.push((a.id, b.id));
-                } else if b.control.is_none() && give(a.control) {
-                    grants.push((b.id, a.id));
-                }
-            }
-        }
-        for (priority, yielding) in grants {
-            self.add_right_of_way(priority, yielding);
-        }
-    }
-
-    /// Builder form of [`derive_right_of_way_from_controls`](Self::derive_right_of_way_from_controls).
-    #[must_use]
-    pub fn with_derived_right_of_way(mut self) -> Self {
-        self.derive_right_of_way_from_controls();
-        self
-    }
-
-    /// The lanes that must yield to `priority_lane` (empty if it has no asserted priority).
-    pub fn lanes_yielding_to(&self, priority_lane: u64) -> impl Iterator<Item = u64> + '_ {
-        self.priority_over
-            .get(&priority_lane)
-            .into_iter()
-            .flatten()
-            .copied()
-    }
-
-    /// Derive the **`cedes_to_ego_ids`** list for an ego in `ego_lane`: every perceived
-    /// object currently in a lane that yields to the ego's lane (per the map's
-    /// right-of-way). This closes the gap where `cedes_to_ego_ids` was
-    /// integrator-supplied — it now falls out of the Lanelet2 right-of-way relations.
-    /// An object off the mapped road, or in a non-yielding lane, is **not** included
-    /// (fail-safe: the ego asserts priority only where the map grants it; KIRRA still
-    /// backstops every crossing agent regardless).
-    #[must_use]
-    pub fn cedes_to_ego(&self, ego_lane: u64, objects: &[PerceivedObject]) -> Vec<u64> {
-        let Some(yielding) = self.priority_over.get(&ego_lane) else {
-            return Vec::new();
-        };
-        objects
-            .iter()
-            .filter(|o| self.lane_at(o.pos).is_some_and(|l| yielding.contains(&l)))
-            .map(|o| o.id)
-            .collect()
-    }
-
-    /// The lanes that have right-of-way **over** `ego_lane` — i.e. the lanes the ego
-    /// must yield to. The inverse of [`lanes_yielding_to`](Self::lanes_yielding_to),
-    /// read from the **same** `priority_over` map: lane `p` is returned iff
-    /// `ego_lane ∈ priority_over[p]`.
-    pub fn lanes_with_priority_over(&self, ego_lane: u64) -> impl Iterator<Item = u64> + '_ {
-        self.priority_over
-            .iter()
-            .filter(move |(_, yields)| yields.contains(&ego_lane))
-            .map(|(p, _)| *p)
-    }
-
-    /// The counterpart to [`cedes_to_ego`](Self::cedes_to_ego): the perceived objects
-    /// the ego must **yield to / wait for** at a junction — those in a lane that has
-    /// right-of-way over `ego_lane`. This is the map-derived **non-yielding** set
-    /// (Parko's SG5 `NonYieldingScene` / the Occy junction-negotiation "still yield to
-    /// everyone not on the cede list"), produced from the *same* `priority_over`
-    /// relation as `cedes_to_ego` — so the two are **consistent by construction**: no
-    /// agent can be both "cedes to me" and "I yield to it" unless the map itself
-    /// asserts mutual priority (a map error). Fail-safe: an off-map object is excluded;
-    /// KIRRA backstops every crossing agent regardless.
-    ///
-    /// Cross-stack note: Parko (a separate workspace) owns the runtime
-    /// `NonYieldingScene` / `CommitZoneMap` veto; this method is the map-side *source*
-    /// either path consumes, mapped to that path's types at the deployment boundary.
-    #[must_use]
-    pub fn non_yielding_to_ego(&self, ego_lane: u64, objects: &[PerceivedObject]) -> Vec<u64> {
-        let priority_lanes: BTreeSet<u64> = self.lanes_with_priority_over(ego_lane).collect();
-        if priority_lanes.is_empty() {
-            return Vec::new();
-        }
-        objects
-            .iter()
-            .filter(|o| {
-                self.lane_at(o.pos)
-                    .is_some_and(|l| priority_lanes.contains(&l))
-            })
-            .map(|o| o.id)
-            .collect()
-    }
-
-    /// **The junction integration entry point.** Resolve the ego's lane from its
-    /// *pose* (the input a deployment actually has — not a lane id) and derive BOTH
-    /// consumer-ready sets from the one right-of-way map, in a single pass:
-    ///
-    /// * `cedes_to_ego` → drop straight into Occy's `PlanInput.cedes_to_ego_ids`;
-    /// * `must_yield_to` → map to Parko SG5's `NonYieldingScene` at the parko boundary.
-    ///
-    /// This is the deployment-integration step packaged: it turns *ego pose + perceived
-    /// objects* into the two junction sets either path consumes, consistent by
-    /// construction (both from `priority_over`). Fail-safe: an ego off the mapped road
-    /// yields empty sets (no `ego_lane`) — the path's own gates (Occy's snapshot yield,
-    /// Parko's fail-closed veto, KIRRA's RSS) still apply.
-    #[must_use]
-    pub fn junction_context(&self, ego_pos: Point, objects: &[PerceivedObject]) -> JunctionContext {
-        match self.lane_at(ego_pos) {
-            Some(ego_lane) => JunctionContext {
-                ego_lane: Some(ego_lane),
-                cedes_to_ego: self.cedes_to_ego(ego_lane, objects),
-                must_yield_to: self.non_yielding_to_ego(ego_lane, objects),
-            },
-            None => JunctionContext::default(),
         }
     }
 
@@ -783,146 +515,6 @@ impl LaneGraph {
         Some(other.opposes(ego))
     }
 
-    /// Shortest lane **route** from `from` to `to` (inclusive) over the connectivity
-    /// graph: longitudinal **successors** (cost 1) and lateral **neighbors** (cost 3,
-    /// so the router prefers driving forward and only changes lanes when the route
-    /// requires it). This is the lane *selection* a Lanelet2 routing graph provides —
-    /// the sequence whose drivable span [`corridor_over`](Self::corridor_over) /
-    /// per-lane [`corridor`](Lane::corridor) then materialize.
-    ///
-    /// Returns the lane-id sequence, or `None` if either endpoint is unknown, `to` is
-    /// unreachable, or the route would exceed [`MAX_ROUTE_LANES`] (fail-closed).
-    /// Deterministic — ties are broken by lane id.
-    #[must_use]
-    pub fn route(&self, from: u64, to: u64) -> Option<Vec<u64>> {
-        use std::cmp::Reverse;
-        use std::collections::BinaryHeap;
-
-        self.lane(from)?;
-        self.lane(to)?;
-        if from == to {
-            return Some(vec![from]);
-        }
-
-        const SUCCESSOR_COST: u32 = 1;
-        const LANE_CHANGE_COST: u32 = 3;
-
-        let mut dist: BTreeMap<u64, u32> = BTreeMap::new();
-        let mut prev: BTreeMap<u64, u64> = BTreeMap::new();
-        let mut heap: BinaryHeap<Reverse<(u32, u64)>> = BinaryHeap::new();
-        dist.insert(from, 0);
-        heap.push(Reverse((0, from)));
-
-        while let Some(Reverse((cost, lane_id))) = heap.pop() {
-            if lane_id == to {
-                break;
-            }
-            if cost > *dist.get(&lane_id).unwrap_or(&u32::MAX) {
-                continue; // a stale heap entry superseded by a cheaper path
-            }
-            let Some(lane) = self.lane(lane_id) else {
-                continue;
-            };
-            let edges: Vec<(u64, u32)> = lane
-                .successors()
-                .map(|s| (s, SUCCESSOR_COST))
-                .chain(lane.left_neighbor().map(|n| (n, LANE_CHANGE_COST)))
-                .chain(lane.right_neighbor().map(|n| (n, LANE_CHANGE_COST)))
-                .collect();
-            for (next, w) in edges {
-                if self.lane(next).is_none() {
-                    continue; // dangling edge — ignore (fail-closed: never invents a lane)
-                }
-                let nd = cost.saturating_add(w);
-                if nd < *dist.get(&next).unwrap_or(&u32::MAX) {
-                    dist.insert(next, nd);
-                    prev.insert(next, lane_id);
-                    heap.push(Reverse((nd, next)));
-                }
-            }
-        }
-
-        if !dist.contains_key(&to) {
-            return None;
-        }
-        let mut route = vec![to];
-        let mut cur = to;
-        while cur != from {
-            cur = *prev.get(&cur)?;
-            route.push(cur);
-            if route.len() > MAX_ROUTE_LANES {
-                return None; // pathological length → fail closed
-            }
-        }
-        route.reverse();
-        Some(route)
-    }
-
-    /// Route from `from` to the lane containing world point `goal` (resolved via
-    /// [`lane_at`](Self::lane_at)). `None` if the goal is off the mapped road or
-    /// unreachable.
-    #[must_use]
-    pub fn route_to_point(&self, from: u64, goal: Point) -> Option<Vec<u64>> {
-        let to = self.lane_at(goal)?;
-        self.route(from, to)
-    }
-
-    /// The geometric path an object at `start` would trace if it **FOLLOWS its lane** (and the
-    /// lowest-id successor chain at each junction) for `length_m` of travel — the **map-intention**
-    /// prediction hypothesis. The path begins at the projection of `start` onto the lane
-    /// centerline and extends forward along the road. `None` if `start` is off the mapped road.
-    ///
-    /// This is the third predicted mode (alongside the kinematic CV / CTRV rollouts): an object on
-    /// a CURVING lane traces the curve — which a constant-velocity / constant-turn-rate predictor
-    /// cannot know — so a vehicle that will follow a bend INTO the ego's path is caught; and one
-    /// keeping its own (diverging) lane stays in it, suppressing a spurious cut-in yield. The
-    /// planner's predictive yield worst-cases over the modes; KIRRA still backstops.
-    ///
-    /// Bounded: walks at most [`MAX_ROUTE_LANES`] lanes of successor chain, then truncates once the
-    /// accumulated forward length reaches `length_m`. Returns `None` if the result degenerates to
-    /// fewer than two vertices.
-    #[must_use]
-    pub fn lane_follow_path(&self, start: Point, length_m: f64) -> Option<Vec<Point>> {
-        let lane_id = self.lane_at(start)?;
-        let chain = self.forward_centerline(lane_id);
-        if chain.len() < 2 {
-            return None;
-        }
-        let (seg, proj) = project_onto_polyline(&chain, start);
-        let mut out = vec![proj];
-        let mut acc = 0.0;
-        let mut prev = proj;
-        for p in chain.iter().skip(seg + 1) {
-            acc += (p.x_m - prev.x_m).hypot(p.y_m - prev.y_m);
-            out.push(*p);
-            prev = *p;
-            if acc >= length_m.max(0.0) {
-                break;
-            }
-        }
-        (out.len() >= 2).then_some(out)
-    }
-
-    /// The centerline of `lane_id` concatenated with the lowest-id successor chain (seam-deduped),
-    /// bounded by [`MAX_ROUTE_LANES`] and cycle-guarded — the forward road geometry a lane-following
-    /// object would trace through junctions.
-    fn forward_centerline(&self, lane_id: u64) -> Vec<Point> {
-        let mut chain: Vec<Point> = Vec::new();
-        let mut visited: BTreeSet<u64> = BTreeSet::new();
-        let mut cur = lane_id;
-        while visited.insert(cur) && visited.len() <= MAX_ROUTE_LANES {
-            let Some(lane) = self.lanes.get(&cur) else {
-                break;
-            };
-            concat_dedup(&mut chain, &lane.centerline);
-            match lane.successors().min() {
-                Some(n) if !visited.contains(&n) => cur = n,
-                _ => break,
-            }
-        }
-        chain
-    }
-
     /// Number of lanes in the graph.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -934,321 +526,10 @@ impl LaneGraph {
     pub fn is_empty(&self) -> bool {
         self.lanes.is_empty()
     }
-
-    /// Derive the drivable [`LaneCorridor`] spanning the given laterally-adjacent
-    /// lanes — the **outer envelope**: the left boundary of the leftmost lane and
-    /// the right boundary of the rightmost lane. This is what makes a commanded
-    /// lane change checkable: the corridor covers the source *and* target lanes, so
-    /// the shifted trajectory stays contained. Returns `None` if any id is unknown
-    /// or the slice is empty.
-    #[must_use]
-    pub fn corridor_over(
-        &self,
-        lane_ids: &[u64],
-        confidence: f32,
-        age_ms: u64,
-    ) -> Option<LaneCorridor> {
-        let lanes = self.resolve(lane_ids)?;
-        // Leftmost = greatest mean-y; rightmost = least mean-y.
-        let leftmost = lanes
-            .iter()
-            .copied()
-            .max_by(|a, b| a.mean_y().total_cmp(&b.mean_y()))?;
-        let rightmost = lanes
-            .iter()
-            .copied()
-            .min_by(|a, b| a.mean_y().total_cmp(&b.mean_y()))?;
-        Some(LaneCorridor {
-            left: offset_polyline(&leftmost.centerline, leftmost.half_width_m),
-            right: offset_polyline(&rightmost.centerline, -rightmost.half_width_m),
-            confidence,
-            age_ms,
-        })
-    }
-
-    /// Materialize a **route** (a longitudinal lane-id sequence from
-    /// [`route`](Self::route)) into one continuous drivable [`LaneCorridor`] that
-    /// FOLLOWS the route through any turns — the longitudinal counterpart to
-    /// [`corridor_over`](Self::corridor_over) (which spans laterally-adjacent lanes for
-    /// a road *cross-section*). Each route lane's centerline is offset to its own
-    /// ±`half_width_m`, and the per-lane left/right boundary polylines are concatenated
-    /// end-to-end, so the corridor **curves through a junction** exactly as the route
-    /// lanes do. This is the handle the planner follows and KIRRA re-reads for an
-    /// intersection turn (a route `[ego_lane → junction_lane → exit_lane]`).
-    ///
-    /// Seam dedup: where one lane's offset boundary ends at the next lane's start (a
-    /// shared junction node), the duplicated vertex is dropped so the polyline carries
-    /// no zero-length segment. Returns `None` if `route` is empty, any id is unknown, or
-    /// the result degenerates to fewer than two vertices a side (fail-closed).
-    ///
-    /// **Geometry assumption (stated, not hidden):** the route lanes are expected to
-    /// connect end-to-end (lane *i*'s centerline terminus ≈ lane *i+1*'s start), as a
-    /// Lanelet2 successor chain does, and a junction *turn* lane carries a smooth **arc**
-    /// centerline so the offset stays kink-free — a hard L-corner would spike the
-    /// implied steering rate, which KIRRA would then (correctly) clamp/refuse. The
-    /// materializer trusts the map's geometry: it concatenates, it does not re-fit
-    /// corners. Typed lane boundaries along a route (for a mid-turn lane change) are a
-    /// tracked follow-up; a turn follows the route centerline and needs only the corridor.
-    #[must_use]
-    pub fn route_corridor(
-        &self,
-        route: &[u64],
-        confidence: f32,
-        age_ms: u64,
-    ) -> Option<LaneCorridor> {
-        let lanes = self.resolve(route)?;
-        let mut left: Vec<Point> = Vec::new();
-        let mut right: Vec<Point> = Vec::new();
-        for lane in lanes {
-            concat_dedup(
-                &mut left,
-                &offset_polyline(&lane.centerline, lane.half_width_m),
-            );
-            concat_dedup(
-                &mut right,
-                &offset_polyline(&lane.centerline, -lane.half_width_m),
-            );
-        }
-        (left.len() >= 2 && right.len() >= 2).then_some(LaneCorridor {
-            left,
-            right,
-            confidence,
-            age_ms,
-        })
-    }
-
-    /// Materialize a **wide** route corridor — the route's lanes PLUS their direct lateral
-    /// neighbors — as the *drivable area* a turn may borrow (the longitudinal counterpart to
-    /// [`corridor_over`], and the wide sibling of [`route_corridor`]). Per route lane the
-    /// outer envelope takes the LEFT edge of its left neighbor (if any, else its own) and the
-    /// RIGHT edge of its right neighbor (if any, else its own); the per-lane outer boundaries
-    /// are concatenated longitudinally (seam-deduped) so the area follows the route at full
-    /// width through any turns.
-    ///
-    /// This is what lets the planner route-around an obstacle or lane-change ACROSS a
-    /// crossable divider *within* a turn: [`route_corridor`] is the reference path (`map`);
-    /// this is the `drivable` width; the typed lines come from [`boundaries_relative_to`]
-    /// over the same lane + neighbors. Returns `None` if `route` is empty, any id is unknown,
-    /// or the result degenerates. **Scope:** one level of lateral neighbor each side (covers
-    /// a two-wide turn); the same smooth-arc geometry caveat as `route_corridor` applies.
-    #[must_use]
-    pub fn route_drivable(
-        &self,
-        route: &[u64],
-        confidence: f32,
-        age_ms: u64,
-    ) -> Option<LaneCorridor> {
-        let lanes = self.resolve(route)?;
-        let mut left: Vec<Point> = Vec::new();
-        let mut right: Vec<Point> = Vec::new();
-        for lane in lanes {
-            let left_lane = lane
-                .left_neighbor()
-                .and_then(|n| self.lanes.get(&n))
-                .unwrap_or(lane);
-            let right_lane = lane
-                .right_neighbor()
-                .and_then(|n| self.lanes.get(&n))
-                .unwrap_or(lane);
-            concat_dedup(
-                &mut left,
-                &offset_polyline(&left_lane.centerline, left_lane.half_width_m),
-            );
-            concat_dedup(
-                &mut right,
-                &offset_polyline(&right_lane.centerline, -right_lane.half_width_m),
-            );
-        }
-        (left.len() >= 2 && right.len() >= 2).then_some(LaneCorridor {
-            left,
-            right,
-            confidence,
-            age_ms,
-        })
-    }
-
-    /// Derive the typed lane boundaries across a span of lanes, expressed as
-    /// lateral offsets **relative to `ego_lane`'s centerline** (the frame Occy's
-    /// `lane_boundaries` input uses). Boundaries shared between adjacent lanes are
-    /// deduplicated by lateral position. Returns `None` if any id is unknown.
-    #[must_use]
-    pub fn boundaries_relative_to(
-        &self,
-        ego_lane: u64,
-        lane_ids: &[u64],
-    ) -> Option<Vec<LaneBoundary>> {
-        let ego_y = self.lanes.get(&ego_lane)?.mean_y();
-        let lanes = self.resolve(lane_ids)?;
-        let mut out: Vec<LaneBoundary> = Vec::new();
-        for lane in lanes {
-            let c = lane.mean_y() - ego_y;
-            for b in [
-                LaneBoundary {
-                    y_m: c + lane.half_width_m,
-                    line: lane.left_line,
-                },
-                LaneBoundary {
-                    y_m: c - lane.half_width_m,
-                    line: lane.right_line,
-                },
-            ] {
-                // Dedup a boundary already present at this lateral position (shared
-                // divider between two adjacent lanes appears on both).
-                if !out.iter().any(|e| (e.y_m - b.y_m).abs() <= 1e-6) {
-                    out.push(b);
-                }
-            }
-        }
-        Some(out)
-    }
-
-    /// Like [`boundaries_relative_to`](Self::boundaries_relative_to), but **curve-correct**: the
-    /// lateral offsets are measured in the EGO's Frenet frame at its current station (the
-    /// projection of `ego_pos` onto the ego lane's centerline), not from each lane's GLOBAL
-    /// `mean_y`. On a straight lane the two agree; on a CURVING lane `mean_y` averages the whole
-    /// arc and mis-places a neighbor's boundary relative to where the ego actually is — which can
-    /// mis-gate a lateral maneuver (admit crossing a solid line, or block a legal cross). This
-    /// measures each boundary's signed perpendicular offset from the ego station along the local
-    /// lane normal, so the lane-line crossing rules see the boundary where it really is.
-    ///
-    /// Returns `None` if any id is unknown or the ego centerline is degenerate. The same
-    /// gently-curved / roughly-parallel-lanes assumption as the rest of the lane geometry applies
-    /// (the nearest-point projection approximates the Frenet lateral for parallel lanes).
-    #[must_use]
-    pub fn boundaries_relative_to_at(
-        &self,
-        ego_lane: u64,
-        lane_ids: &[u64],
-        ego_pos: Point,
-    ) -> Option<Vec<LaneBoundary>> {
-        let ego = self.lanes.get(&ego_lane)?;
-        if ego.centerline.len() < 2 {
-            return None;
-        }
-        // Ego station: the projection of the ego onto its centerline, and the LEFT normal of the
-        // local tangent there (the Frenet lateral axis, +y to the ego's left).
-        let (seg, e) = project_onto_polyline(&ego.centerline, ego_pos);
-        let a = ego.centerline[seg];
-        let b = ego.centerline[seg + 1];
-        let (tx, ty) = (b.x_m - a.x_m, b.y_m - a.y_m);
-        let tlen = tx.hypot(ty).max(1e-9);
-        let (nx, ny) = (-ty / tlen, tx / tlen); // left normal
-
-        let lanes = self.resolve(lane_ids)?;
-        let mut out: Vec<LaneBoundary> = Vec::new();
-        for lane in lanes {
-            for (bd, line) in [
-                (
-                    offset_polyline(&lane.centerline, lane.half_width_m),
-                    lane.left_line,
-                ),
-                (
-                    offset_polyline(&lane.centerline, -lane.half_width_m),
-                    lane.right_line,
-                ),
-            ] {
-                if bd.len() < 2 {
-                    continue;
-                }
-                let (_, nearest) = project_onto_polyline(&bd, e);
-                // Signed lateral offset of the boundary from the ego station, along the ego normal.
-                let y = (nearest.x_m - e.x_m) * nx + (nearest.y_m - e.y_m) * ny;
-                if !out.iter().any(|x| (x.y_m - y).abs() <= 1e-6) {
-                    out.push(LaneBoundary { y_m: y, line });
-                }
-            }
-        }
-        Some(out)
-    }
-
-    /// Synthesize a two-lane **undivided** road from a single wide drivable
-    /// `corridor` — the unmarked-road / dirt-road case. On a road with no painted
-    /// centerline, perception (`kirra_taj`) reports
-    /// one wide corridor, and "follow the centerline" would drive the ego **down
-    /// the middle** — wrong, and unsafe w.r.t. oncoming traffic. The US rule of the
-    /// road (keep **right**, UVC §11-301) still applies even with no paint.
-    ///
-    /// This applies that rule **structurally**: split the road at its midline into
-    /// a right-half **ego** lane and a left-half **oncoming** lane, divided by an
-    /// [`LineType::Unmarked`] centerline (crossable — you may use the other half to
-    /// pass when clear). The ego then "keeps right" simply by following its
-    /// synthesized lane's corridor ([`Lane::corridor`]) — no special biasing logic,
-    /// it reuses the same lane-following the marked-road case uses.
-    ///
-    /// **Honest scope:** the *travel direction* of the oncoming lane (it runs the
-    /// opposite way) is not yet encoded — the oncoming lane is marked only
-    /// structurally (the left neighbor). Directionality is needed for the head-on
-    /// RSS check (the oncoming-traffic collision bound) and lands with it.
-    ///
-    /// Returns `None` if the corridor boundaries are empty/degenerate or not a
-    /// `+y`-left / `-y`-right road.
-    #[must_use]
-    pub fn from_undivided_corridor(
-        corridor: &dyn CorridorSource,
-        ego_lane_id: u64,
-        oncoming_lane_id: u64,
-    ) -> Option<Self> {
-        let left = corridor.left_boundary();
-        let right = corridor.right_boundary();
-        if left.len() < 2 || right.len() < 2 {
-            return None;
-        }
-        let left_y = mean_y_of(left);
-        let right_y = mean_y_of(right);
-        if left_y <= right_y {
-            return None; // not a +y-left / -y-right road
-        }
-        let (x0, x1) = x_extent(left, right)?;
-        let mid = 0.5 * (left_y + right_y);
-        let lane_half = 0.25 * (left_y - right_y); // a quarter of the total width
-        let ego_c = 0.5 * (mid + right_y); // center of the right half
-        let onc_c = 0.5 * (left_y + mid); // center of the left half
-
-        let mut g = LaneGraph::new();
-        // Ego (right half): unmarked centerline on the LEFT, road edge on the right.
-        g.add_lane(
-            Lane::straight(
-                ego_lane_id,
-                ego_c,
-                x0,
-                x1,
-                lane_half,
-                LineType::Unmarked,
-                LineType::Solid,
-            )
-            .with_edge(LaneEdge::LeftNeighbor {
-                to: oncoming_lane_id,
-            }),
-        );
-        // Oncoming (left half): road edge on the left, unmarked centerline on the
-        // right, and travel OPPOSING the ego (heading π) — the head-on direction.
-        g.add_lane(
-            Lane::straight(
-                oncoming_lane_id,
-                onc_c,
-                x0,
-                x1,
-                lane_half,
-                LineType::Solid,
-                LineType::Unmarked,
-            )
-            .with_heading(std::f64::consts::PI)
-            .with_edge(LaneEdge::RightNeighbor { to: ego_lane_id }),
-        );
-        Some(g)
-    }
-
-    /// Resolve a slice of ids to lane refs, or `None` if any is missing/empty.
-    fn resolve(&self, lane_ids: &[u64]) -> Option<Vec<&Lane>> {
-        if lane_ids.is_empty() {
-            return None;
-        }
-        lane_ids.iter().map(|id| self.lanes.get(id)).collect()
-    }
 }
 
 /// Wrap an angle to `(-π, π]`.
-fn wrap_pi(a: f64) -> f64 {
+pub(crate) fn wrap_pi(a: f64) -> f64 {
     use std::f64::consts::PI;
     let mut x = a % (2.0 * PI);
     if x > PI {
@@ -1260,13 +541,13 @@ fn wrap_pi(a: f64) -> f64 {
 }
 
 /// Mean lateral position of a boundary polyline.
-fn mean_y_of(pts: &[Point]) -> f64 {
+pub(crate) fn mean_y_of(pts: &[Point]) -> f64 {
     pts.iter().map(|p| p.y_m).sum::<f64>() / pts.len() as f64
 }
 
 /// Squared distance from point `p` to segment `a→b` (projection clamped to the segment), the
 /// kernel of the curved-lane [`Lane::contains`] test. Squared to avoid a `sqrt` per segment.
-fn point_segment_dist_sq(p: Point, a: Point, b: Point) -> f64 {
+pub(crate) fn point_segment_dist_sq(p: Point, a: Point, b: Point) -> f64 {
     let (_, d2) = project_point_segment(p, a, b);
     d2
 }
@@ -1274,7 +555,7 @@ fn point_segment_dist_sq(p: Point, a: Point, b: Point) -> f64 {
 /// The clamped projection of `p` onto segment `a→b`, plus its squared distance. The projection
 /// parameter is clamped to `[0, 1]` so a point off either end maps to the nearest endpoint
 /// (degenerate zero-length segment → `a`).
-fn project_point_segment(p: Point, a: Point, b: Point) -> (Point, f64) {
+pub(crate) fn project_point_segment(p: Point, a: Point, b: Point) -> (Point, f64) {
     let (abx, aby) = (b.x_m - a.x_m, b.y_m - a.y_m);
     let len_sq = abx * abx + aby * aby;
     let t = if len_sq <= f64::EPSILON {
@@ -1292,7 +573,7 @@ fn project_point_segment(p: Point, a: Point, b: Point) -> (Point, f64) {
 
 /// Project `p` onto the polyline, returning the index of the nearest segment and the clamped
 /// projected point on it. `poly` must have ≥ 2 vertices.
-fn project_onto_polyline(poly: &[Point], p: Point) -> (usize, Point) {
+pub(crate) fn project_onto_polyline(poly: &[Point], p: Point) -> (usize, Point) {
     let mut best = (0usize, poly[0], f64::INFINITY);
     for i in 0..poly.len().saturating_sub(1) {
         let (proj, d2) = project_point_segment(p, poly[i], poly[i + 1]);
@@ -1305,7 +586,7 @@ fn project_onto_polyline(poly: &[Point], p: Point) -> (usize, Point) {
 
 /// Longitudinal `[x_min, x_max]` spanned by two boundary polylines, or `None` if
 /// degenerate (non-finite or zero length).
-fn x_extent(a: &[Point], b: &[Point]) -> Option<(f64, f64)> {
+pub(crate) fn x_extent(a: &[Point], b: &[Point]) -> Option<(f64, f64)> {
     let x0 = a
         .iter()
         .chain(b)
@@ -1322,7 +603,7 @@ fn x_extent(a: &[Point], b: &[Point]) -> Option<(f64, f64)> {
 /// Append `pts` onto `acc`, dropping `pts`'s first vertex if it coincides (within a
 /// tolerance) with `acc`'s last — so concatenating consecutive route-lane boundary
 /// polylines at a shared junction node leaves no zero-length segment.
-fn concat_dedup(acc: &mut Vec<Point>, pts: &[Point]) {
+pub(crate) fn concat_dedup(acc: &mut Vec<Point>, pts: &[Point]) {
     let start = match (acc.last(), pts.first()) {
         (Some(last), Some(first)) if (last.x_m - first.x_m).hypot(last.y_m - first.y_m) <= 1e-6 => {
             1
@@ -1335,7 +616,7 @@ fn concat_dedup(acc: &mut Vec<Point>, pts: &[Point]) {
 /// Offset a centerline polyline laterally by `signed_offset` (>0 = +y/left side)
 /// along the local segment normal. Exact for straight lanes; correct for
 /// gently-curved polylines (per-vertex normal from the adjacent segments).
-fn offset_polyline(centerline: &[Point], signed_offset: f64) -> Vec<Point> {
+pub(crate) fn offset_polyline(centerline: &[Point], signed_offset: f64) -> Vec<Point> {
     let n = centerline.len();
     if n == 0 {
         return Vec::new();
@@ -1376,6 +657,10 @@ fn offset_polyline(centerline: &[Point], signed_offset: f64) -> Vec<Point> {
         })
         .collect()
 }
+
+mod junctions;
+mod occlusion;
+mod routing;
 
 #[cfg(test)]
 mod tests {
