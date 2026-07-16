@@ -99,6 +99,48 @@ first two flash words — `mdw 0x08000000 2` should read the initial SP
 (`0x2000C000`, top of the 48 KiB SRAM) then the reset-vector address (odd, Thumb
 bit set). Capture the fault and share it.
 
+## 4b. No debug probe? Confirm via the status-LED heartbeat
+
+If you have no ST-Link/J-Link and are flashing over the STM32 serial bootloader
+(below), you can't use GDB — but the image gives a **visible sign of life**: it
+blinks the status LED (PC13, per `hal/include/r2/hal/board_manifest.hpp`) every
+control cycle.
+
+- **LED blinking** → the reset path, runtime init and control loop all ran; the
+  image is alive and looping in the latched-safe state. Boot confirmed.
+- **LED solid or dark** → it never reached the loop (hardfault at reset, or a
+  wrong vector table / SP). Same failure modes as the GDB "faults" note above.
+
+The blink rate is approximate (the loop isn't paced by a real time base yet), so
+judge presence, not precision. If the board's LED isn't on PC13, change the pin
+in `firmware/src/status_led_stm32.cpp` (the single place it's defined).
+
+## 4c. Flashing over the serial bootloader (no probe)
+
+The STM32F103 has a ROM serial bootloader (USART1) entered with **BOOT0 = 1 at
+reset** (jumper/DIP/button on the control board). With `stm32flash`:
+
+```bash
+sudo apt-get install -y stm32flash
+PORT=/dev/ttyUSB0   # the STM32's UART bridge — confirm which one it is first
+
+# 1. BACK UP the existing firmware BEFORE writing anything (reversible!).
+stm32flash -r stock_stm32_backup.bin "$PORT"
+
+# 2. Write the bring-up image and run it.
+stm32flash -w build-target/r2_firmware_bringup.bin -v -g 0x08000000 "$PORT"
+
+# To restore the robot's original firmware later:
+stm32flash -w stock_stm32_backup.bin -v -g 0x08000000 "$PORT"
+```
+
+> **⚠ This erases the factory STM32 firmware** (the bring-up image spans the whole
+> flash). Keep `stock_stm32_backup.bin` safe — it's the only way back. Wheels off
+> the ground, motor bus disconnected.
+
+Identify the STM32's port (vs. e.g. the lidar's) with
+`udevadm info /dev/ttyUSB0 | grep -E "ID_VENDOR|ID_MODEL"`.
+
 ## 5. Next
 
 Once the safe boot is confirmed, drivers land seam-by-seam (#967), non-actuating

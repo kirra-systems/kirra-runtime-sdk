@@ -1,5 +1,6 @@
 #include "r2/application/configuration.hpp"
 #include "r2/application/control_loop.hpp"
+#include "r2/application/heartbeat.hpp"
 #include "r2/application/runner.hpp"
 #include "r2/application/safe_hal.hpp"
 #include "r2/boot/image_verifier.hpp"
@@ -1426,6 +1427,22 @@ void test_safe_hal_immobilized() {
            r2::safety::bit(r2::safety::Fault::emergency_stop)) != 0U);
 }
 
+// heartbeat_on (#967): square-wave blink phase — on for half_period, off for the
+// next half_period, repeating; zero half_period is disabled (always off).
+void test_heartbeat() {
+    using r2::application::heartbeat_on;
+    constexpr std::uint32_t hp = 250U;
+    CHECK(heartbeat_on(0U, hp));            // start of the ON half
+    CHECK(heartbeat_on(hp - 1U, hp));       // still ON at the edge
+    CHECK(!heartbeat_on(hp, hp));           // first OFF count
+    CHECK(!heartbeat_on((2U * hp) - 1U, hp));
+    CHECK(heartbeat_on(2U * hp, hp));       // back ON after a full period
+    CHECK(!heartbeat_on(3U * hp, hp));
+    // Disabled: a zero half-period never turns the LED on.
+    CHECK(!heartbeat_on(0U, 0U));
+    CHECK(!heartbeat_on(12345U, 0U));
+}
+
 }  // namespace
 
 int main() {
@@ -1446,6 +1463,7 @@ int main() {
     test_control_loop_gating();
     test_application_runner();
     test_safe_hal_immobilized();
+    test_heartbeat();
     if (failures != 0) {
         std::fprintf(stderr, "%d test assertion(s) failed\n", failures);
         return 1;

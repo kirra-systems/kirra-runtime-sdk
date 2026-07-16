@@ -14,8 +14,12 @@
 
 #include "r2/application/configuration.hpp"
 #include "r2/application/control_loop.hpp"
+#include "r2/application/heartbeat.hpp"
 #include "r2/application/runner.hpp"
 #include "r2/application/safe_hal.hpp"
+#include "r2/application/status_led_stm32.hpp"
+
+#include <cstdint>
 
 namespace {
 
@@ -23,6 +27,11 @@ namespace {
 // frozen, so run_cycle uses this nominal dt); a real image paces the loop from
 // a hardware timer and derives dt from a live monotonic clock.
 constexpr double kNominalDtSeconds = 0.001;  // 1 kHz
+
+// Status-LED blink half-period, in control cycles. Without a real time base the
+// loop free-runs, so this is an approximate rate — the point is a visible blink
+// (loop alive) versus a solid/dark LED (never reached the loop, or hardfaulted).
+constexpr std::uint32_t kHeartbeatHalfPeriodCycles = 250U;
 
 }  // namespace
 
@@ -43,8 +52,18 @@ extern "C" int r2_app_main() {
     static r2::application::Application app{safe_hal.bundle(), config};
     app.initialize();
 
+    // Sign of life: a blinking status LED proves the control loop is running.
+    // This is the only boot confirmation available when flashing over the serial
+    // bootloader with no debug probe attached. The LED is an observability output
+    // only — it does not gate or influence the safety loop.
+    r2::application::status_led_init();
+
     r2::application::RunnerState runner;
+    std::uint32_t heartbeat_counter = 0U;
     for (;;) {
         r2::application::run_cycle(app, safe_hal.clock, runner, kNominalDtSeconds);
+        r2::application::status_led_write(
+            r2::application::heartbeat_on(heartbeat_counter, kHeartbeatHalfPeriodCycles));
+        ++heartbeat_counter;
     }
 }

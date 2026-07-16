@@ -82,6 +82,7 @@ if(CMAKE_CROSSCOMPILING)
         add_executable(${target}
             firmware/src/startup_stm32f103.cpp
             firmware/src/main_target.cpp
+            firmware/src/status_led_stm32.cpp
         )
         target_link_libraries(${target} PRIVATE r2_platform_core)
         target_compile_options(${target} PRIVATE
