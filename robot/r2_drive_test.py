@@ -22,11 +22,40 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from r2_drive import (  # noqa: E402
     STEER_CMD_LIMIT,
+    R2Actuation,
     R2CalibrationError,
     R2DriveCalibration,
+    apply_actuation,
+    calibration_from_env,
     mrc_stop,
+    r2_safe_stop,
     translate,
 )
+
+
+class _FakeBot:
+    """Records the vendor calls the consumer would make — no hardware."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def set_motor(self, s1, s2, s3, s4) -> None:
+        self.calls.append(("set_motor", s1, s2, s3, s4))
+
+    def set_akm_steering_angle(self, cmd) -> None:
+        self.calls.append(("set_akm_steering_angle", cmd))
+
+
+def _full_env() -> dict:
+    return {
+        "KIRRA_R2_WHEELBASE_M": "0.229",
+        "KIRRA_R2_V_PER_PWM": "0.0145",
+        "KIRRA_R2_PWM_MAX": "60",
+        "KIRRA_R2_STEER_UNITS_PER_RAD": "140",
+        "KIRRA_R2_DELTA_MAX_RAD": "0.5",
+        "KIRRA_R2_STEER_SIGN": "-1",
+        "KIRRA_R2_CENTER_TRIM": "90",
+    }
 
 
 def _valid_cal(**overrides) -> R2DriveCalibration:
@@ -193,6 +222,83 @@ def test_commanded_zero_is_plain_stop_not_mrc() -> None:
 def test_mrc_stop_helper() -> None:
     out = mrc_stop("whatever")
     assert out.is_mrc and out.pwm_left == 0 and out.pwm_right == 0 and out.steer_cmd == 0
+
+
+# --------------------------------------------------------------------------
+# Consumer-wiring helpers (env loader + appliers), still hardware-free.
+# --------------------------------------------------------------------------
+
+def test_calibration_from_env_builds_valid() -> None:
+    cal = calibration_from_env(_full_env())
+    assert cal.wheelbase_m == 0.229 and cal.steer_sign == -1.0
+    assert cal.drive_deadband_pwm == 0.0  # optional, defaults to proportional
+
+
+def test_calibration_from_env_optional_deadband() -> None:
+    env = _full_env()
+    env["KIRRA_R2_DRIVE_DEADBAND_PWM"] = "4.7"
+    assert calibration_from_env(env).drive_deadband_pwm == 4.7
+
+
+def test_calibration_from_env_fails_closed_on_missing() -> None:
+    for var in list(_full_env()):
+        env = _full_env()
+        del env[var]
+        try:
+            calibration_from_env(env)
+        except R2CalibrationError:
+            continue
+        raise AssertionError(f"env loader accepted a missing {var}")
+
+
+def test_calibration_from_env_fails_closed_on_blank_and_nonnumeric() -> None:
+    for bad in ("", "   ", "nan-ish", "true"):
+        env = _full_env()
+        env["KIRRA_R2_V_PER_PWM"] = bad
+        try:
+            calibration_from_env(env)
+        except R2CalibrationError:
+            continue
+        raise AssertionError(f"env loader accepted v_per_pwm={bad!r}")
+
+
+def test_calibration_from_env_fails_closed_on_out_of_range() -> None:
+    # A syntactically-numeric but out-of-domain value must still fail (range
+    # validation in the dataclass): steer_sign=2 is not +/-1.
+    env = _full_env()
+    env["KIRRA_R2_STEER_SIGN"] = "2"
+    try:
+        calibration_from_env(env)
+    except R2CalibrationError:
+        return
+    raise AssertionError("env loader accepted steer_sign=2")
+
+
+def test_apply_actuation_order_is_steer_then_drive() -> None:
+    bot = _FakeBot()
+    apply_actuation(bot, R2Actuation(is_mrc=False, reason="ok", pwm_left=27, pwm_right=27, steer_cmd=-12))
+    assert bot.calls == [
+        ("set_akm_steering_angle", -12),
+        ("set_motor", 27, 0, 0, 27),
+    ]
+
+
+def test_apply_actuation_mrc_writes_zeros() -> None:
+    bot = _FakeBot()
+    apply_actuation(bot, mrc_stop("non_finite_command"))
+    assert bot.calls == [
+        ("set_akm_steering_angle", 0),
+        ("set_motor", 0, 0, 0, 0),
+    ]
+
+
+def test_r2_safe_stop_zeros_motors_and_centers() -> None:
+    bot = _FakeBot()
+    r2_safe_stop(bot)
+    assert bot.calls == [
+        ("set_motor", 0, 0, 0, 0),
+        ("set_akm_steering_angle", 0),
+    ]
 
 
 def _run_all() -> int:

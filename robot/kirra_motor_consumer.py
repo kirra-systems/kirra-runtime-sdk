@@ -30,11 +30,23 @@ Config — ALL required, NO defaults (fail-closed; a missing var aborts):
     KIRRA_DEMO_VX_MAX          demo linear cap (m/s) — Step 3 backstop
     KIRRA_DEMO_VZ_MAX          demo angular cap (rad/s) — Step 3 backstop
     KIRRA_MOTOR_PORT           motor serial device (e.g. /dev/myserial)
-    KIRRA_EXPECTED_CAR_TYPE    board drive-model register value the platform
-                               mapping expects (R2=5, X3=1); mismatch → refuse
+    KIRRA_EXPECTED_CAR_TYPE    (x3 mode only) board drive-model register value
+                               the platform mapping expects (X3=1); mismatch →
+                               refuse. Not read in r2_ackermann mode.
 Optional:
     KIRRA_RELEASE_TOPIC        (default /kirra/release)
     KIRRA_CONSUMER_LIB         explicit path to libkirra_consumer_ffi.so
+    KIRRA_DRIVE_MODE           actuation last-hop: "x3_set_car_motion" (default)
+                               or "r2_ackermann" (Path B). Off by default →
+                               existing behaviour byte-identical.
+
+r2_ackermann mode ADDITIONALLY requires the measured R2 calibration (fail-closed
+via r2_drive.calibration_from_env; a missing value aborts startup):
+    KIRRA_R2_WHEELBASE_M, KIRRA_R2_V_PER_PWM, KIRRA_R2_PWM_MAX,
+    KIRRA_R2_STEER_UNITS_PER_RAD, KIRRA_R2_DELTA_MAX_RAD, KIRRA_R2_STEER_SIGN,
+    KIRRA_R2_CENTER_TRIM  (+ optional KIRRA_R2_DRIVE_DEADBAND_PWM).
+In this mode the consumer sets car-type 5 at init (enables the AKM steering
+servo, §2a) and NEVER calls set_car_motion.
 """
 
 from __future__ import annotations
@@ -47,6 +59,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kirra_ffi import KirraConsumer, REFUSAL_NAMES, split_frame  # noqa: E402
+from r2_drive import (  # noqa: E402
+    R2CalibrationError,
+    apply_actuation,
+    calibration_from_env,
+    r2_safe_stop,
+    translate,
+)
+
+# Actuation last-hop selector (R2 Path B). Default = the existing X3 path
+# (set_car_motion), byte-identical. r2_ackermann swaps in the KIRRA-governed
+# Ackermann last-hop (set_motor + AKM steering) — see
+# docs/hardware/R2_PATH_B_ACKERMANN_DRIVE.md §6. Off by default.
+DRIVE_MODE_X3 = "x3_set_car_motion"
+DRIVE_MODE_R2 = "r2_ackermann"
+R2_CAR_TYPE = 5  # Ackermann drive model; RAM-volatile, re-asserted every start.
 
 
 def _req(name: str) -> str:
@@ -107,7 +134,23 @@ def main() -> int:
     vx_max = _req_float("KIRRA_DEMO_VX_MAX")
     vz_max = _req_float("KIRRA_DEMO_VZ_MAX")
     motor_port = _req("KIRRA_MOTOR_PORT")
-    expected_car_type = _req_int("KIRRA_EXPECTED_CAR_TYPE")
+    drive_mode = (os.environ.get("KIRRA_DRIVE_MODE") or DRIVE_MODE_X3).strip() or DRIVE_MODE_X3
+    if drive_mode not in (DRIVE_MODE_X3, DRIVE_MODE_R2):
+        print(f"FATAL: KIRRA_DRIVE_MODE must be {DRIVE_MODE_X3!r} or "
+              f"{DRIVE_MODE_R2!r}, got {drive_mode!r}", file=sys.stderr)
+        return 2
+    # x3 mode asserts the board's car-type register against the platform
+    # mapping; r2 mode SETS car-type 5 (below) and loads the measured
+    # calibration instead — fail-closed if any measured value is missing.
+    expected_car_type = _req_int("KIRRA_EXPECTED_CAR_TYPE") if drive_mode == DRIVE_MODE_X3 else None
+    r2_cal = None
+    if drive_mode == DRIVE_MODE_R2:
+        try:
+            r2_cal = calibration_from_env(os.environ)
+        except R2CalibrationError as e:
+            print(f"FATAL: R2 drive mode requires a measured calibration "
+                  f"profile: {e}", file=sys.stderr)
+            return 2
     topic = os.environ.get("KIRRA_RELEASE_TOPIC", "/kirra/release")
 
     # The verify core (fail-closed: raises on a NULL handle).
@@ -125,41 +168,67 @@ def main() -> int:
     bot = Rosmaster(com=motor_port)
     bot.create_receive_threading()
 
-    # 🔴 Drive-model assertion (hardware finding, HARDWARE_FINDINGS_R2X3.md):
-    # the board's car-type register selects the DRIVE MODEL the same
-    # set_car_motion bytes execute under — mecanum mixing (1) vs Ackermann (5)
-    # — it is RAM-volatile, and R2 hardware shipped reporting 1 (cross-labeled
-    # image). A consumer validated against one model must never drive a board
-    # configured for another: read the register (with settle retries) and
-    # REFUSE to start on mismatch/unreadable. KIRRA_EXPECTED_CAR_TYPE comes
-    # from the platform mapping (kirra-install), never guessed here.
-    observed_type = None
-    for _ in range(8):  # ~2 s total; the register needs receive-thread settle
-        time.sleep(0.25)
-        try:
-            t = bot.get_car_type_from_machine()
-        except Exception:  # noqa: BLE001 — unreadable is fail-closed below
-            t = None
-        if t is not None:
-            observed_type = int(t)
-            break
-    if observed_type != expected_car_type:
-        print(
-            f"FATAL: board car-type register reads {observed_type!r} but this "
-            f"deployment expects {expected_car_type} (platform mapping). The "
-            f"drive model does not match what governed commands were validated "
-            f"against — refusing to start (fail-closed). Fix: flash/configure "
-            f"the correct vendor base image for this platform.",
-            file=sys.stderr,
-        )
-        return 2
+    def _settle_car_type() -> "int | None":
+        # Read the board's car-type register with settle retries (~2 s total;
+        # the register needs receive-thread settle). Unreadable → None.
+        for _ in range(8):
+            time.sleep(0.25)
+            try:
+                t = bot.get_car_type_from_machine()
+            except Exception:  # noqa: BLE001 — unreadable is fail-closed by caller
+                t = None
+            if t is not None:
+                return int(t)
+        return None
+
+    if drive_mode == DRIVE_MODE_R2:
+        # 🔴 R2 Path-B init: enable the AKM steering servo by setting car-type 5
+        # (§2a — RAM-volatile, re-asserted every start). set_motor drive is
+        # car-type independent; set_car_motion is NEVER called in this mode
+        # (type 5 breaks its drive, which is fine — Path B does not use it).
+        # Verify the board accepted 5 (fail-closed: an inert servo must not
+        # silently drive), then apply the measured steering centre trim.
+        bot.set_car_type(R2_CAR_TYPE)
+        observed_type = _settle_car_type()
+        if observed_type != R2_CAR_TYPE:
+            print(
+                f"FATAL: set_car_type({R2_CAR_TYPE}) did not take — board reads "
+                f"{observed_type!r}. The AKM steering servo would be inert; "
+                f"refusing to start (fail-closed).",
+                file=sys.stderr,
+            )
+            return 2
+        bot.set_akm_default_angle(int(round(r2_cal.center_trim)))
+    else:
+        # 🔴 Drive-model assertion (hardware finding, HARDWARE_FINDINGS_R2X3.md):
+        # the board's car-type register selects the DRIVE MODEL the same
+        # set_car_motion bytes execute under — mecanum mixing (1) vs Ackermann
+        # (5) — it is RAM-volatile, and R2 hardware shipped reporting 1
+        # (cross-labeled image). A consumer validated against one model must
+        # never drive a board configured for another: read the register and
+        # REFUSE on mismatch/unreadable. KIRRA_EXPECTED_CAR_TYPE comes from the
+        # platform mapping (kirra-install), never guessed here.
+        observed_type = _settle_car_type()
+        if observed_type != expected_car_type:
+            print(
+                f"FATAL: board car-type register reads {observed_type!r} but this "
+                f"deployment expects {expected_car_type} (platform mapping). The "
+                f"drive model does not match what governed commands were validated "
+                f"against — refusing to start (fail-closed). Fix: flash/configure "
+                f"the correct vendor base image for this platform.",
+                file=sys.stderr,
+            )
+            return 2
 
     def safe_stop() -> None:
         # SS-002 shutdown guarantee: command zero, best-effort, idempotent.
         try:
-            bot.set_car_motion(0.0, 0.0, 0.0)
+            if drive_mode == DRIVE_MODE_R2:
+                r2_safe_stop(bot)  # set_motor(0,0,0,0) + centre steering
+            else:
+                bot.set_car_motion(0.0, 0.0, 0.0)
         except Exception as e:  # noqa: BLE001 — shutdown must not raise past here.
-            print(f"safe_stop: set_car_motion(0,0,0) raised: {e}", file=sys.stderr)
+            print(f"safe_stop raised: {e}", file=sys.stderr)
 
     rclpy.init()
     node = Node("kirra_motor_consumer")
@@ -172,9 +241,16 @@ def main() -> int:
     alarm_announced = False
 
     def actuate(linear: float, angular: float) -> None:
-        # v_y = 0 (skid-steer demo; no lateral). linear→v_x, angular→v_z, both
-        # already clamped by the Rust capture seam.
-        bot.set_car_motion(linear, 0.0, angular)
+        if drive_mode == DRIVE_MODE_R2:
+            # Path B: the Ackermann last-hop runs AFTER verify (the same place
+            # the x3 firmware mixing runs after verify). translate() is
+            # fail-closed; an MRC/stop decision carries zeros, so this same call
+            # stops the platform.
+            apply_actuation(bot, translate(linear, angular, r2_cal))
+        else:
+            # x3: v_y = 0 (skid-steer demo; no lateral). linear→v_x, angular→v_z,
+            # both already clamped by the Rust capture seam.
+            bot.set_car_motion(linear, 0.0, angular)
 
     def on_msg(msg: UInt8MultiArray) -> None:
         nonlocal alarm_announced
