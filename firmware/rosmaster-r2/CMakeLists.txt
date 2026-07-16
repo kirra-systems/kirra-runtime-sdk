@@ -64,94 +64,68 @@ if(R2_ENABLE_COVERAGE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_link_options(r2_platform_core PUBLIC --coverage)
 endif()
 
-# Flashable target image (cross-compile only). Links the whole safety core plus
-# the startup/vector table and the SafeHal safe-boot entry against the slot-A
-# linker script, producing r2_firmware_image.elf + .bin. Build/link + size
-# verification only (the target-build CI lane size-checks it against the 104 KiB
-# slot); it is not run on silicon here. Host builds skip this entirely.
+# Flashable target images (cross-compile only). Both link the whole safety core
+# plus the startup/vector table and the SafeHal safe-boot entry — identical in
+# every respect EXCEPT the linker script (slot-A behind the bootloader vs. the
+# standalone bring-up image at the reset base). The shared compile/link flags are
+# factored into one function so the two images cannot drift (a future
+# warning/ABI/GC change lands on both). Build/link + size verification only (the
+# target-build CI lane size-checks r2_firmware_image against the 104 KiB slot);
+# not run on silicon here. Host builds skip this entirely.
 if(CMAKE_CROSSCOMPILING)
-    set(R2_TARGET_LINKER_SCRIPT
-        "${CMAKE_CURRENT_SOURCE_DIR}/firmware/link/stm32f103rc_app_a.ld")
-    add_executable(r2_firmware_image
-        firmware/src/startup_stm32f103.cpp
-        firmware/src/main_target.cpp
-    )
-    target_link_libraries(r2_firmware_image PRIVATE r2_platform_core)
-    target_compile_options(r2_firmware_image PRIVATE
-        -Wall -Wextra -Wpedantic -Werror -Wconversion -Wsign-conversion
-        -Wshadow -Wdouble-promotion -Wformat=2 -Wundef
-        -fno-exceptions -fno-rtti
-        # Single-core MCU, no hosted atexit: drop the thread-safe-static guards
-        # and the __cxa_atexit/__dso_handle destructor registration (main never
-        # returns, so local-static destructors never run anyway).
-        -fno-threadsafe-statics -fno-use-cxa-atexit
-    )
-    target_link_options(r2_firmware_image PRIVATE
-        "-T${R2_TARGET_LINKER_SCRIPT}"
-        -nostartfiles
-        --specs=nano.specs
-        --specs=nosys.specs
-        -Wl,--gc-sections
-        -Wl,-Map=r2_firmware_image.map
-    )
-    set_target_properties(r2_firmware_image PROPERTIES
-        SUFFIX ".elf"
-        LINK_DEPENDS "${R2_TARGET_LINKER_SCRIPT}")
-
-    # Emit a raw .bin next to the .elf for flashing/inspection and report size.
     find_program(R2_OBJCOPY arm-none-eabi-objcopy)
     find_program(R2_SIZE arm-none-eabi-size)
-    if(R2_OBJCOPY)
-        add_custom_command(TARGET r2_firmware_image POST_BUILD
-            COMMAND ${R2_OBJCOPY} -O binary
-                    $<TARGET_FILE:r2_firmware_image> r2_firmware_image.bin
-            VERBATIM)
-    endif()
-    if(R2_SIZE)
-        add_custom_command(TARGET r2_firmware_image POST_BUILD
-            COMMAND ${R2_SIZE} $<TARGET_FILE:r2_firmware_image>
-            VERBATIM)
-    endif()
 
-    # Standalone bring-up image: the same startup + SafeHal entry linked at the
-    # reset base (0x08000000, whole flash) so it boots on bare silicon with no
-    # bootloader. For first hardware bring-up only (flash + halt/inspect); see
-    # docs/MCU_BRINGUP_DRILL.md.
-    set(R2_BRINGUP_LINKER_SCRIPT
+    # r2_add_firmware_image(<target> <linker_script>): assemble one image target
+    # from the common sources + flags, differing only in the linker script.
+    function(r2_add_firmware_image target linker_script)
+        add_executable(${target}
+            firmware/src/startup_stm32f103.cpp
+            firmware/src/main_target.cpp
+        )
+        target_link_libraries(${target} PRIVATE r2_platform_core)
+        target_compile_options(${target} PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -Wconversion -Wsign-conversion
+            -Wshadow -Wdouble-promotion -Wformat=2 -Wundef
+            -fno-exceptions -fno-rtti
+            # Single-core MCU, no hosted atexit: drop the thread-safe-static
+            # guards and the __cxa_atexit/__dso_handle destructor registration
+            # (main never returns, so local-static destructors never run anyway).
+            -fno-threadsafe-statics -fno-use-cxa-atexit
+        )
+        target_link_options(${target} PRIVATE
+            "-T${linker_script}"
+            -nostartfiles
+            --specs=nano.specs
+            --specs=nosys.specs
+            -Wl,--gc-sections
+            "-Wl,-Map=${target}.map"
+        )
+        set_target_properties(${target} PROPERTIES
+            SUFFIX ".elf"
+            LINK_DEPENDS "${linker_script}")
+        # Emit a raw .bin next to the .elf for flashing/inspection and report size.
+        if(R2_OBJCOPY)
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${R2_OBJCOPY} -O binary
+                        $<TARGET_FILE:${target}> ${target}.bin
+                VERBATIM)
+        endif()
+        if(R2_SIZE)
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${R2_SIZE} $<TARGET_FILE:${target}>
+                VERBATIM)
+        endif()
+    endfunction()
+
+    # Slot-A production image (0x08006000, behind the bootloader).
+    r2_add_firmware_image(r2_firmware_image
+        "${CMAKE_CURRENT_SOURCE_DIR}/firmware/link/stm32f103rc_app_a.ld")
+
+    # Standalone bring-up image (0x08000000, whole flash) — boots on bare silicon
+    # with no bootloader; for first hardware bring-up (see docs/MCU_BRINGUP_DRILL.md).
+    r2_add_firmware_image(r2_firmware_bringup
         "${CMAKE_CURRENT_SOURCE_DIR}/firmware/link/stm32f103rc_bringup.ld")
-    add_executable(r2_firmware_bringup
-        firmware/src/startup_stm32f103.cpp
-        firmware/src/main_target.cpp
-    )
-    target_link_libraries(r2_firmware_bringup PRIVATE r2_platform_core)
-    target_compile_options(r2_firmware_bringup PRIVATE
-        -Wall -Wextra -Wpedantic -Werror -Wconversion -Wsign-conversion
-        -Wshadow -Wdouble-promotion -Wformat=2 -Wundef
-        -fno-exceptions -fno-rtti
-        -fno-threadsafe-statics -fno-use-cxa-atexit
-    )
-    target_link_options(r2_firmware_bringup PRIVATE
-        "-T${R2_BRINGUP_LINKER_SCRIPT}"
-        -nostartfiles
-        --specs=nano.specs
-        --specs=nosys.specs
-        -Wl,--gc-sections
-        -Wl,-Map=r2_firmware_bringup.map
-    )
-    set_target_properties(r2_firmware_bringup PROPERTIES
-        SUFFIX ".elf"
-        LINK_DEPENDS "${R2_BRINGUP_LINKER_SCRIPT}")
-    if(R2_OBJCOPY)
-        add_custom_command(TARGET r2_firmware_bringup POST_BUILD
-            COMMAND ${R2_OBJCOPY} -O binary
-                    $<TARGET_FILE:r2_firmware_bringup> r2_firmware_bringup.bin
-            VERBATIM)
-    endif()
-    if(R2_SIZE)
-        add_custom_command(TARGET r2_firmware_bringup POST_BUILD
-            COMMAND ${R2_SIZE} $<TARGET_FILE:r2_firmware_bringup>
-            VERBATIM)
-    endif()
 endif()
 
 if(R2_BUILD_TESTS)

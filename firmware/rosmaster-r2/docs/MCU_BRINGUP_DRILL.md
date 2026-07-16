@@ -14,7 +14,8 @@ image boots and reaches the safe state. **Nothing actuates.**
 
 ## What you need
 
-- ST-Link V2 (or clone), or a J-Link.
+- ST-Link V2 (or clone). The OpenOCD commands below use `interface/stlink.cfg`;
+  for a J-Link, substitute `interface/jlink.cfg` (everything else is the same).
 - OpenOCD ≥ 0.11 and `arm-none-eabi-gdb`.
 - This repo, with `gcc-arm-none-eabi` installed.
 
@@ -37,10 +38,18 @@ openocd -f interface/stlink.cfg -f target/stm32f1x.cfg \
 
 `0xE0042000` is `DBGMCU_IDCODE`; the low 12 bits are the device ID. **0x414 =
 high-density F103 (STM32F103xC/D/E)**, which the RCT6 is. If you see a different
-ID, stop and reconcile the part against `hal/board_manifest.hpp`
+ID, stop and reconcile the part against `hal/include/r2/hal/board_manifest.hpp`
 (`kExpectedSharedBoardMcu = "STM32F103RCT6"`) before flashing.
 
 ## 3. Flash
+
+> **⚠ This image is linked at `0x08000000` and spans the whole 256 KiB flash.**
+> Flashing it **erases everything**, including any preinstalled bootloader +
+> public key (`0x08000000`) and both application slots. Only flash the bring-up
+> image to a blank or development part. On a board that already carries the
+> bootloader, flash the **slot-A** image (`r2_firmware_image.bin` at
+> `0x08006000`) through the bootloader instead, so the boot + key region is
+> preserved.
 
 ```bash
 openocd -f interface/stlink.cfg -f target/stm32f1x.cfg \
