@@ -29,6 +29,12 @@ inline constexpr std::size_t kMacKeySize = 32U;
 // Size of the truncated HMAC-SHA-256 authentication tag appended to the payload
 // when kFlagAuthTag is set.
 inline constexpr std::size_t kMacTagSize = 16U;
+// The wire tag width must stay in lock-step with the primitive: hmac_sha256_truncated
+// returns a 16-byte tag and constant_time_equal compares exactly 16 bytes. Changing
+// one without the others would silently desync verification, so pin it here.
+static_assert(kMacTagSize == 16U,
+              "kMacTagSize must match hmac_sha256_truncated() output and "
+              "constant_time_equal() width (16 bytes)");
 
 enum class MessageType : std::uint8_t {
     hello = 1U,

@@ -4,6 +4,9 @@
 #include "r2/diagnostics/metrics.hpp"
 #include "r2/kinematics/ackermann.hpp"
 #include "r2/protocol/wire.hpp"
+// Included here (not just from wire.cpp) so the MAC known-answer test can pin the
+// SHA-256 / HMAC-SHA-256 primitive against fixed vectors — see test_mac_known_answer_vectors().
+#include "r2/protocol/mac.hpp"
 #include "r2/safety/safety_manager.hpp"
 
 #include <array>
@@ -432,6 +435,55 @@ void test_diagnostics() {
     CHECK(histogram.maximum_us() == 11U);
 }
 
+void test_mac_known_answer_vectors() {
+    // Known-answer tests pin the SHA-256 / HMAC-SHA-256 primitive against fixed
+    // published vectors. Without these, every encode<->decode roundtrip in
+    // test_mac_authentication() shares the same hmac_sha256_truncated(), so a
+    // deterministic-but-wrong hash would still pass every one of them. These KATs
+    // catch that class of defect (a wrong constant, shift, or endianness bug).
+
+    // KAT-1: SHA-256("abc") — NIST FIPS 180-2 example B.1. Pins the hash core
+    // independently of the HMAC/wire layers.
+    {
+        const std::array<std::uint8_t, 3U> msg{{'a', 'b', 'c'}};
+        r2::protocol::internal::Sha256Ctx ctx{};
+        r2::protocol::internal::sha256_init(ctx);
+        r2::protocol::internal::sha256_update(ctx, msg.data(), msg.size());
+        const auto digest = r2::protocol::internal::sha256_finalize(ctx);
+        const std::array<std::uint8_t, 32U> expected{{
+            0xbaU, 0x78U, 0x16U, 0xbfU, 0x8fU, 0x01U, 0xcfU, 0xeaU,
+            0x41U, 0x41U, 0x40U, 0xdeU, 0x5dU, 0xaeU, 0x22U, 0x23U,
+            0xb0U, 0x03U, 0x61U, 0xa3U, 0x96U, 0x17U, 0x7aU, 0x9cU,
+            0xb4U, 0x10U, 0xffU, 0x61U, 0xf2U, 0x00U, 0x15U, 0xadU}};
+        CHECK(digest == expected);
+    }
+
+    // KAT-2: HMAC-SHA-256 (truncated to 128 bits) — RFC 4231 Test Case 2.
+    // key = "Jefe", data = "what do ya want for nothing?".
+    // hmac_sha256_truncated takes a fixed 32-byte key; placing the 4-byte "Jefe"
+    // in the low bytes of a zero-filled 32-byte array produces the identical HMAC
+    // key block K0 ("Jefe" followed by zeros to the 64-byte block) as a native
+    // 4-byte key would, so RFC 4231's expected tag applies unchanged. Full tag:
+    //   5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843
+    // truncated to the first 16 bytes => 5bdcc146bf60754e6a042426089575c7.
+    {
+        std::array<std::uint8_t, r2::protocol::kMacKeySize> key{};
+        key[0] = 0x4aU;  // 'J'
+        key[1] = 0x65U;  // 'e'
+        key[2] = 0x66U;  // 'f'
+        key[3] = 0x65U;  // 'e'
+        const std::array<std::uint8_t, 28U> msg{{
+            'w', 'h', 'a', 't', ' ', 'd', 'o', ' ', 'y', 'a', ' ', 'w', 'a', 'n',
+            't', ' ', 'f', 'o', 'r', ' ', 'n', 'o', 't', 'h', 'i', 'n', 'g', '?'}};
+        const auto tag = r2::protocol::internal::hmac_sha256_truncated(
+            key, msg.data(), msg.size());
+        const std::array<std::uint8_t, 16U> expected{{
+            0x5bU, 0xdcU, 0xc1U, 0x46U, 0xbfU, 0x60U, 0x75U, 0x4eU,
+            0x6aU, 0x04U, 0x24U, 0x26U, 0x08U, 0x95U, 0x75U, 0xc7U}};
+        CHECK(tag == expected);
+    }
+}
+
 void test_mac_authentication() {
     // Provisioned per-link key (32-byte, non-zero for a realistic test)
     std::array<std::uint8_t, r2::protocol::kMacKeySize> key{};
@@ -568,6 +620,7 @@ int main() {
     test_configuration_rollback();
     test_diagnostics();
     test_image_verifier_failclosed();
+    test_mac_known_answer_vectors();
     test_mac_authentication();
     if (failures != 0) {
         std::fprintf(stderr, "%d test assertion(s) failed\n", failures);
