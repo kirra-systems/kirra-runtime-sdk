@@ -112,6 +112,46 @@ if(CMAKE_CROSSCOMPILING)
             COMMAND ${R2_SIZE} $<TARGET_FILE:r2_firmware_image>
             VERBATIM)
     endif()
+
+    # Standalone bring-up image: the same startup + SafeHal entry linked at the
+    # reset base (0x08000000, whole flash) so it boots on bare silicon with no
+    # bootloader. For first hardware bring-up only (flash + halt/inspect); see
+    # docs/MCU_BRINGUP_DRILL.md.
+    set(R2_BRINGUP_LINKER_SCRIPT
+        "${CMAKE_CURRENT_SOURCE_DIR}/firmware/link/stm32f103rc_bringup.ld")
+    add_executable(r2_firmware_bringup
+        firmware/src/startup_stm32f103.cpp
+        firmware/src/main_target.cpp
+    )
+    target_link_libraries(r2_firmware_bringup PRIVATE r2_platform_core)
+    target_compile_options(r2_firmware_bringup PRIVATE
+        -Wall -Wextra -Wpedantic -Werror -Wconversion -Wsign-conversion
+        -Wshadow -Wdouble-promotion -Wformat=2 -Wundef
+        -fno-exceptions -fno-rtti
+        -fno-threadsafe-statics -fno-use-cxa-atexit
+    )
+    target_link_options(r2_firmware_bringup PRIVATE
+        "-T${R2_BRINGUP_LINKER_SCRIPT}"
+        -nostartfiles
+        --specs=nano.specs
+        --specs=nosys.specs
+        -Wl,--gc-sections
+        -Wl,-Map=r2_firmware_bringup.map
+    )
+    set_target_properties(r2_firmware_bringup PROPERTIES
+        SUFFIX ".elf"
+        LINK_DEPENDS "${R2_BRINGUP_LINKER_SCRIPT}")
+    if(R2_OBJCOPY)
+        add_custom_command(TARGET r2_firmware_bringup POST_BUILD
+            COMMAND ${R2_OBJCOPY} -O binary
+                    $<TARGET_FILE:r2_firmware_bringup> r2_firmware_bringup.bin
+            VERBATIM)
+    endif()
+    if(R2_SIZE)
+        add_custom_command(TARGET r2_firmware_bringup POST_BUILD
+            COMMAND ${R2_SIZE} $<TARGET_FILE:r2_firmware_bringup>
+            VERBATIM)
+    endif()
 endif()
 
 if(R2_BUILD_TESTS)
