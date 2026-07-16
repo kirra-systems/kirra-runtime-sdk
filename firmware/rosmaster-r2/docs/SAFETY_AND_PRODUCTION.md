@@ -31,6 +31,49 @@ never holds the last command. E-stop, runaway, overcurrent, overtemperature, enc
 plausibility and missed control deadline disable immediately. Configuration and
 updates require standby and disabled outputs.
 
+## Control-loop orchestration
+
+`r2::application::Application` (`firmware/include/r2/application/control_loop.hpp`)
+wires the abstract HAL seams (`r2/hal/interfaces.hpp`) to the `SafetyManager`,
+the `MotionController` and the authenticated R2CP decoder. It is portable and
+device-agnostic — it holds only references to the pure-virtual peripheral
+interfaces, so the same object runs against real silicon on the target and
+against mock seams in the host tests. One `tick(dt_s)` is the whole per-cycle
+pipeline:
+
+1. Service the independent watchdog.
+2. Drain the transport and run every inbound frame through
+   `decode_authenticated`. A frame that fails the HMAC check is dropped (no
+   positive trust); a structurally corrupt frame also degrades link health.
+   Only surviving frames reach the state machine (`arm`/`activate`/`disarm`) or
+   update the held motion command (`decode_motion_command`).
+3. Sample the sensors and build `SafetyInputs`, including
+   `configuration_valid = valid_configuration(cfg) && cfg.calibrated` and
+   `command_fresh` from the held command's age against the calibrated
+   `command_timeout_ms` (bounded further by the command's `valid_for_us`).
+4. `evaluate(inputs)`.
+5. Actuate, fail-closed: `bridge_must_be_disabled()` hard-cuts the H-bridge and
+   servo before any drive decision; motion is issued only while
+   `motion_permitted()` AND a fresh TRACK command is held; every other reachable
+   state drives the body command to zero so the jerk-limited controller
+   decelerates to rest with the bridge still braking. The steering angle maps to
+   the servo pulse through the calibrated `servo_minimum/center/maximum_us`.
+
+Consequently an uncalibrated or invalid configuration raises
+`configuration_invalid` and immobilizes the platform (arming is refused, the
+bridge stays disabled), and a command reaches an actuator only after passing
+both authentication and the safety gate.
+
+Assumptions of use / deferred hardware seams for this portable slice: the
+transport delivers one COBS-framed datagram per `read()`; `SafetyThresholds`
+(battery/thermal/IMU limits, plausibility factors) are calibration-owned and
+their `default_thresholds()` values are conservative placeholders, not a
+production calibration; and there is not yet a steering-position feedback sensor
+or a dedicated brownout/PVD comparator seam, so `steering_plausible` and
+`supply_stable` report nominal until those seams are wired (`watchdog_healthy`
+is serviced every tick). ACKNOWLEDGE_FAULT is not honored from the network — a
+packet is never physical acknowledgement.
+
 ## Fault policy
 
 | Detection | Reaction | Latch / recovery |

@@ -41,7 +41,8 @@ jobs:
             firmware/rosmaster-r2/control/src/motion_controller.cpp \
             firmware/rosmaster-r2/protocol/src/wire.cpp \
             firmware/rosmaster-r2/safety/src/safety_manager.cpp \
-            firmware/rosmaster-r2/firmware/src/configuration.cpp; do
+            firmware/rosmaster-r2/firmware/src/configuration.cpp \
+            firmware/rosmaster-r2/firmware/src/control_loop.cpp; do
             clang-tidy-18 -p /tmp/r2-build "$source"
           done
       - name: cppcheck

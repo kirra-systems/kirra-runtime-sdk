@@ -1,4 +1,5 @@
 #include "r2/application/configuration.hpp"
+#include "r2/application/control_loop.hpp"
 #include "r2/boot/image_verifier.hpp"
 #include "r2/control/motion_controller.hpp"
 #include "r2/diagnostics/metrics.hpp"
@@ -884,6 +885,459 @@ void test_fault_latch_debounce() {
     }
 }
 
+// ── Application control-loop tests (#962) ───────────────────────────────────
+// Mock HAL seams + the real Application/SafetyManager/MotionController wiring,
+// proving the fail-closed gating: authenticated command → actuation, fault →
+// bridge disabled, unauthenticated frame ignored, uncalibrated → immobilize.
+
+namespace app_test {
+
+class TestClock final : public r2::hal::MonotonicClock {
+public:
+    std::uint64_t now_us() const noexcept override { return now_; }
+    void advance(const std::uint64_t delta_us) noexcept { now_ += delta_us; }
+    std::uint64_t now_{1'000'000U};
+};
+
+class TestMotors final : public r2::hal::MotorBridge {
+public:
+    void set_duty_q15(const std::int16_t left, const std::int16_t right) noexcept override {
+        left_ = left;
+        right_ = right;
+        enabled_ = true;
+    }
+    void disable() noexcept override {
+        enabled_ = false;
+        left_ = 0;
+        right_ = 0;
+        ++disable_calls_;
+    }
+    bool output_enabled() const noexcept override { return enabled_; }
+    std::int16_t left_{0};
+    std::int16_t right_{0};
+    bool enabled_{false};
+    std::uint32_t disable_calls_{0U};
+};
+
+class TestSteering final : public r2::hal::SteeringActuator {
+public:
+    void set_pulse_us(const std::uint16_t pulse_us) noexcept override {
+        pulse_us_ = pulse_us;
+        disabled_ = false;
+    }
+    void disable() noexcept override { disabled_ = true; }
+    std::uint16_t pulse_us_{0U};
+    bool disabled_{false};
+};
+
+class TestEncoders final : public r2::hal::EncoderBank {
+public:
+    r2::hal::EncoderSnapshot snapshot() noexcept override { return sample_; }
+    r2::hal::EncoderSnapshot sample_{};
+};
+
+class TestImu final : public r2::hal::ImuDevice {
+public:
+    r2::hal::ImuSample sample() noexcept override { return sample_; }
+    r2::hal::ImuSample sample_{};
+};
+
+class TestBattery final : public r2::hal::BatteryMonitor {
+public:
+    r2::hal::BatterySample sample() noexcept override { return sample_; }
+    r2::hal::BatterySample sample_{};
+};
+
+class TestEstop final : public r2::hal::EmergencyStopInput {
+public:
+    bool asserted() const noexcept override { return asserted_; }
+    bool asserted_{false};
+};
+
+class TestWatchdog final : public r2::hal::IndependentWatchdog {
+public:
+    void service() noexcept override { ++services_; }
+    std::uint32_t services_{0U};
+};
+
+class TestTransport final : public r2::hal::Transport {
+public:
+    void push(const r2::protocol::EncodedFrame& frame) noexcept {
+        if (count_ < queue_.size()) {
+            queue_[count_++] = frame;
+        }
+    }
+    void clear() noexcept {
+        count_ = 0U;
+        read_index_ = 0U;
+    }
+    std::size_t read(std::uint8_t* destination, const std::size_t capacity) noexcept override {
+        if (read_index_ >= count_) {
+            return 0U;
+        }
+        const r2::protocol::EncodedFrame& frame = queue_[read_index_++];
+        if (frame.length == 0U || frame.length > capacity) {
+            return 0U;
+        }
+        std::memcpy(destination, frame.bytes.data(), frame.length);
+        return frame.length;
+    }
+    bool write(const std::uint8_t*, const std::size_t) noexcept override { return true; }
+    std::array<r2::protocol::EncodedFrame, 8> queue_{};
+    std::size_t count_{0U};
+    std::size_t read_index_{0U};
+};
+
+[[nodiscard]] r2::hal::BatterySample healthy_battery() noexcept {
+    r2::hal::BatterySample battery{};
+    battery.voltage_v = 12.0F;
+    battery.current_a = 1.0F;
+    battery.temperature_c = 25.0F;
+    battery.captured_at_us = 0U;
+    battery.voltage_valid = true;
+    battery.current_valid = true;
+    battery.temperature_valid = true;
+    return battery;
+}
+
+[[nodiscard]] r2::hal::ImuSample healthy_imu() noexcept {
+    r2::hal::ImuSample imu{};
+    imu.acceleration_mps2[2] = 9.81F;
+    imu.temperature_c = 25.0F;
+    imu.valid = true;
+    return imu;
+}
+
+[[nodiscard]] r2::application::PlatformConfiguration calibrated_platform() noexcept {
+    r2::application::PlatformConfiguration platform{};
+    platform.schema = r2::application::kConfigurationSchema;
+    platform.calibrated = true;
+    platform.generation = 1U;
+    platform.wheelbase_m = 0.25F;
+    platform.rear_track_m = 0.20F;
+    platform.wheel_radius_m = 0.05F;
+    platform.maximum_steering_angle_rad = 0.5F;
+    platform.maximum_speed_mps = 2.0F;
+    platform.maximum_acceleration_mps2 = 2.0F;
+    platform.maximum_deceleration_mps2 = 3.0F;
+    platform.maximum_jerk_mps3 = 10.0F;
+    platform.maximum_steering_rate_rad_s = 5.0F;
+    platform.battery_divider_ratio = 2.0F;
+    platform.servo_minimum_us = 1'000U;
+    platform.servo_center_us = 1'500U;
+    platform.servo_maximum_us = 2'000U;
+    platform.left_encoder_counts_per_revolution = 1'000U;
+    platform.right_encoder_counts_per_revolution = 1'000U;
+    platform.command_timeout_ms = 100U;
+    return platform;
+}
+
+[[nodiscard]] r2::application::ApplicationConfig make_config(
+    const r2::application::PlatformConfiguration& platform,
+    const std::array<std::uint8_t, r2::protocol::kMacKeySize>& key) noexcept {
+    r2::application::ApplicationConfig config{};
+    config.platform = platform;
+    config.thresholds = r2::application::default_thresholds();
+    config.link_key = key;
+    // Simple proportional + feed-forward wheel gains so a nonzero body command
+    // yields a nonzero duty in the happy-path assertion.
+    const r2::control::PidGains gains{1.0, 0.0, 0.0, 1.0, 0.0};
+    config.wheel_gains.left = gains;
+    config.wheel_gains.right = gains;
+    return config;
+}
+
+void put_u32_le(std::uint8_t* out, const std::uint32_t value) noexcept {
+    for (std::size_t index = 0U; index < 4U; ++index) {
+        out[index] = static_cast<std::uint8_t>(value >> (index * 8U));
+    }
+}
+
+void put_f32_le(std::uint8_t* out, const float value) noexcept {
+    std::uint32_t raw = 0U;
+    std::memcpy(&raw, &value, sizeof(raw));
+    put_u32_le(out, raw);
+}
+
+[[nodiscard]] r2::protocol::EncodedFrame make_motion_frame(
+    const std::array<std::uint8_t, r2::protocol::kMacKeySize>& key,
+    const std::uint32_t sequence,
+    const float velocity,
+    const float curvature,
+    const std::uint8_t mode,
+    const bool authenticate) noexcept {
+    r2::protocol::Frame frame{};
+    frame.type = r2::protocol::MessageType::motion_command;
+    frame.sequence = sequence;
+    frame.source_time_us = 0U;
+    std::array<std::uint8_t, r2::application::kMotionCommandPayloadBytes> payload{};
+    put_u32_le(&payload[0], sequence);       // command_id
+    put_u32_le(&payload[4], 100'000U);       // valid_for_us (100 ms)
+    put_f32_le(&payload[8], velocity);
+    put_f32_le(&payload[12], curvature);
+    put_f32_le(&payload[16], 2.0F);          // acceleration_limit_mps2
+    put_f32_le(&payload[20], 10.0F);         // jerk_limit_mps3
+    payload[24] = mode;
+    frame.payload_length = static_cast<std::uint16_t>(payload.size());
+    std::memcpy(frame.payload.data(), payload.data(), payload.size());
+    r2::protocol::EncodedFrame encoded{};
+    if (authenticate) {
+        (void)r2::protocol::encode_authenticated(frame, key, encoded);
+    } else {
+        (void)r2::protocol::encode(frame, encoded);
+    }
+    return encoded;
+}
+
+[[nodiscard]] r2::protocol::EncodedFrame make_control_frame(
+    const std::array<std::uint8_t, r2::protocol::kMacKeySize>& key,
+    const r2::protocol::MessageType type,
+    const std::uint32_t sequence) noexcept {
+    r2::protocol::Frame frame{};
+    frame.type = type;
+    frame.sequence = sequence;
+    frame.payload_length = 0U;
+    r2::protocol::EncodedFrame encoded{};
+    (void)r2::protocol::encode_authenticated(frame, key, encoded);
+    return encoded;
+}
+
+}  // namespace app_test
+
+void test_control_loop_decode() {
+    using r2::application::decode_motion_command;
+    using r2::application::MotionCommand;
+    using r2::application::MotionMode;
+
+    std::array<std::uint8_t, r2::protocol::kMacKeySize> key{};
+    for (std::size_t i = 0U; i < key.size(); ++i) {
+        key[i] = static_cast<std::uint8_t>(i + 3U);
+    }
+
+    // Well-formed TRACK command decodes with faithful fields.
+    {
+        const r2::protocol::EncodedFrame enc =
+            app_test::make_motion_frame(key, 7U, 1.25F, 0.5F, 1U, true);
+        r2::protocol::Frame frame{};
+        CHECK(r2::protocol::decode_authenticated(enc.bytes.data(), enc.length, key,
+                                                 frame) == r2::protocol::DecodeStatus::ok);
+        MotionCommand command{};
+        CHECK(decode_motion_command(frame, command));
+        CHECK(command.command_id == 7U);
+        CHECK(command.mode == MotionMode::track);
+        CHECK(near(static_cast<double>(command.velocity_mps), 1.25, 1.0e-6));
+        CHECK(near(static_cast<double>(command.curvature_per_m), 0.5, 1.0e-6));
+    }
+
+    // Unknown mode byte is rejected.
+    {
+        const r2::protocol::EncodedFrame enc =
+            app_test::make_motion_frame(key, 8U, 1.0F, 0.0F, 3U, true);
+        r2::protocol::Frame frame{};
+        CHECK(r2::protocol::decode_authenticated(enc.bytes.data(), enc.length, key,
+                                                 frame) == r2::protocol::DecodeStatus::ok);
+        MotionCommand command{};
+        CHECK(!decode_motion_command(frame, command));
+    }
+
+    // Non-finite velocity is rejected.
+    {
+        const r2::protocol::EncodedFrame enc = app_test::make_motion_frame(
+            key, 9U, std::numeric_limits<float>::quiet_NaN(), 0.0F, 1U, true);
+        r2::protocol::Frame frame{};
+        CHECK(r2::protocol::decode_authenticated(enc.bytes.data(), enc.length, key,
+                                                 frame) == r2::protocol::DecodeStatus::ok);
+        MotionCommand command{};
+        CHECK(!decode_motion_command(frame, command));
+    }
+
+    // Wrong message type / short payload rejected.
+    {
+        r2::protocol::Frame frame{};
+        frame.type = r2::protocol::MessageType::arm;
+        frame.payload_length = r2::application::kMotionCommandPayloadBytes;
+        MotionCommand command{};
+        CHECK(!decode_motion_command(frame, command));
+        frame.type = r2::protocol::MessageType::motion_command;
+        frame.payload_length = 4U;
+        CHECK(!decode_motion_command(frame, command));
+    }
+}
+
+void test_control_loop_gating() {
+    std::array<std::uint8_t, r2::protocol::kMacKeySize> key{};
+    for (std::size_t i = 0U; i < key.size(); ++i) {
+        key[i] = static_cast<std::uint8_t>(i + 1U);
+    }
+    constexpr double kDt = 0.01;
+    constexpr std::uint64_t kDtUs = 10'000U;
+
+    // ── Happy path: authenticated arm → activate → motion actuates ──────────
+    {
+        app_test::TestClock clock{};
+        app_test::TestMotors motors{};
+        app_test::TestSteering steering{};
+        app_test::TestEncoders encoders{};
+        app_test::TestImu imu{};
+        app_test::TestBattery battery{};
+        app_test::TestEstop estop{};
+        app_test::TestWatchdog watchdog{};
+        app_test::TestTransport transport{};
+        battery.sample_ = app_test::healthy_battery();
+        imu.sample_ = app_test::healthy_imu();
+
+        const r2::application::HalBundle hal{clock,  motors,  steering, encoders, imu,
+                                             battery, estop,  watchdog, transport};
+        r2::application::Application app{
+            hal, app_test::make_config(app_test::calibrated_platform(), key)};
+        app.initialize();
+        CHECK(app.safety_state() == r2::safety::SafetyState::standby);
+
+        transport.clear();
+        transport.push(app_test::make_control_frame(key, r2::protocol::MessageType::arm, 1U));
+        app.tick(kDt);
+        CHECK(app.safety_state() == r2::safety::SafetyState::armed);
+        CHECK(watchdog.services_ == 1U);
+
+        clock.advance(kDtUs);
+        transport.clear();
+        transport.push(app_test::make_control_frame(key, r2::protocol::MessageType::activate, 2U));
+        transport.push(app_test::make_motion_frame(key, 3U, 1.0F, 0.0F, 1U, true));
+        app.tick(kDt);
+        CHECK(app.safety_state() == r2::safety::SafetyState::active);
+        CHECK(app.command_held());
+        CHECK(!app.bridge_disabled());
+        CHECK(motors.output_enabled());
+        // The jerk-limited controller ramps from rest, so drive is issued over
+        // the next few cycles. The single held command stays fresh (age < the
+        // 100 ms budget) without re-transmission.
+        for (int cycle = 0; cycle < 4; ++cycle) {
+            clock.advance(kDtUs);
+            app.tick(kDt);
+        }
+        CHECK(app.safety_state() == r2::safety::SafetyState::active);
+        CHECK(motors.output_enabled());
+        CHECK(motors.left_ > 0);
+        CHECK(motors.right_ > 0);
+        // Straight-line command → steering holds servo center.
+        CHECK(app.last_steering_pulse_us() == 1'500U);
+    }
+
+    // ── Emergency stop hard-disables the bridge ─────────────────────────────
+    {
+        app_test::TestClock clock{};
+        app_test::TestMotors motors{};
+        app_test::TestSteering steering{};
+        app_test::TestEncoders encoders{};
+        app_test::TestImu imu{};
+        app_test::TestBattery battery{};
+        app_test::TestEstop estop{};
+        app_test::TestWatchdog watchdog{};
+        app_test::TestTransport transport{};
+        battery.sample_ = app_test::healthy_battery();
+        imu.sample_ = app_test::healthy_imu();
+
+        const r2::application::HalBundle hal{clock,  motors,  steering, encoders, imu,
+                                             battery, estop,  watchdog, transport};
+        r2::application::Application app{
+            hal, app_test::make_config(app_test::calibrated_platform(), key)};
+        app.initialize();
+        transport.push(app_test::make_control_frame(key, r2::protocol::MessageType::arm, 1U));
+        app.tick(kDt);
+        CHECK(app.safety_state() == r2::safety::SafetyState::armed);
+
+        clock.advance(kDtUs);
+        estop.asserted_ = true;
+        transport.clear();
+        transport.push(app_test::make_motion_frame(key, 2U, 1.0F, 0.0F, 1U, true));
+        app.tick(kDt);
+        CHECK(app.safety_state() == r2::safety::SafetyState::fault_latched);
+        CHECK(app.bridge_disabled());
+        CHECK(!motors.output_enabled());
+        CHECK(motors.disable_calls_ > 0U);
+        CHECK(steering.disabled_);
+        CHECK((app.latched_faults() &
+               r2::safety::bit(r2::safety::Fault::emergency_stop)) != 0U);
+    }
+
+    // ── Unauthenticated / wrong-key frames are ignored ──────────────────────
+    {
+        app_test::TestClock clock{};
+        app_test::TestMotors motors{};
+        app_test::TestSteering steering{};
+        app_test::TestEncoders encoders{};
+        app_test::TestImu imu{};
+        app_test::TestBattery battery{};
+        app_test::TestEstop estop{};
+        app_test::TestWatchdog watchdog{};
+        app_test::TestTransport transport{};
+        battery.sample_ = app_test::healthy_battery();
+        imu.sample_ = app_test::healthy_imu();
+
+        std::array<std::uint8_t, r2::protocol::kMacKeySize> wrong_key{};
+        for (std::size_t i = 0U; i < wrong_key.size(); ++i) {
+            wrong_key[i] = static_cast<std::uint8_t>(0xF0U ^ i);
+        }
+
+        const r2::application::HalBundle hal{clock,  motors,  steering, encoders, imu,
+                                             battery, estop,  watchdog, transport};
+        r2::application::Application app{
+            hal, app_test::make_config(app_test::calibrated_platform(), key)};
+        app.initialize();
+
+        // One tick carrying an authenticated arm (accepted) alongside a plaintext
+        // high-velocity motion command and a wrong-key motion command (both
+        // dropped). Only commands that survive decode_authenticated reach the
+        // state machine, so arm takes effect while neither forged command is held.
+        transport.push(app_test::make_control_frame(key, r2::protocol::MessageType::arm, 1U));
+        transport.push(app_test::make_motion_frame(key, 2U, 5.0F, 0.0F, 1U, false));
+        transport.push(app_test::make_motion_frame(wrong_key, 3U, 5.0F, 0.0F, 1U, true));
+        app.tick(kDt);
+        CHECK(app.safety_state() == r2::safety::SafetyState::armed);
+        CHECK(!app.command_held());
+        CHECK(app.last_left_duty_q15() == 0);
+        CHECK(app.last_right_duty_q15() == 0);
+    }
+
+    // ── Uncalibrated configuration immobilizes the platform ─────────────────
+    {
+        app_test::TestClock clock{};
+        app_test::TestMotors motors{};
+        app_test::TestSteering steering{};
+        app_test::TestEncoders encoders{};
+        app_test::TestImu imu{};
+        app_test::TestBattery battery{};
+        app_test::TestEstop estop{};
+        app_test::TestWatchdog watchdog{};
+        app_test::TestTransport transport{};
+        battery.sample_ = app_test::healthy_battery();
+        imu.sample_ = app_test::healthy_imu();
+
+        r2::application::PlatformConfiguration uncalibrated = app_test::calibrated_platform();
+        uncalibrated.calibrated = false;
+
+        const r2::application::HalBundle hal{clock,  motors,  steering, encoders, imu,
+                                             battery, estop,  watchdog, transport};
+        r2::application::Application app{hal, app_test::make_config(uncalibrated, key)};
+        app.initialize();
+        transport.push(app_test::make_control_frame(key, r2::protocol::MessageType::arm, 1U));
+        app.tick(kDt);
+        CHECK(app.safety_state() == r2::safety::SafetyState::fault_latched);
+        CHECK(app.bridge_disabled());
+        CHECK(!motors.output_enabled());
+        CHECK((app.latched_faults() &
+               r2::safety::bit(r2::safety::Fault::configuration_invalid)) != 0U);
+
+        // A subsequent activate cannot lift the latch.
+        clock.advance(kDtUs);
+        transport.clear();
+        transport.push(app_test::make_control_frame(key, r2::protocol::MessageType::activate, 2U));
+        app.tick(kDt);
+        CHECK(app.safety_state() == r2::safety::SafetyState::fault_latched);
+        CHECK(app.bridge_disabled());
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -900,6 +1354,8 @@ int main() {
     test_mac_known_answer_vectors();
     test_mac_authentication();
     test_decode_fuzz();
+    test_control_loop_decode();
+    test_control_loop_gating();
     if (failures != 0) {
         std::fprintf(stderr, "%d test assertion(s) failed\n", failures);
         return 1;
