@@ -60,10 +60,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kirra_ffi import KirraConsumer, REFUSAL_NAMES, split_frame  # noqa: E402
 from r2_drive import (  # noqa: E402
+    ClosedLoopSpeedMatcher,
     R2CalibrationError,
     apply_actuation,
     calibration_from_env,
+    closed_loop_enabled,
     r2_safe_stop,
+    speed_match_params_from_env,
     translate,
 )
 
@@ -144,6 +147,7 @@ def main() -> int:
     # calibration instead — fail-closed if any measured value is missing.
     expected_car_type = _req_int("KIRRA_EXPECTED_CAR_TYPE") if drive_mode == DRIVE_MODE_X3 else None
     r2_cal = None
+    r2_matcher = None  # closed-loop speed matcher (r2 mode + KIRRA_R2_CLOSED_LOOP)
     if drive_mode == DRIVE_MODE_R2:
         try:
             r2_cal = calibration_from_env(os.environ)
@@ -151,6 +155,17 @@ def main() -> int:
             print(f"FATAL: R2 drive mode requires a measured calibration "
                   f"profile: {e}", file=sys.stderr)
             return 2
+        # §9 closed-loop per-wheel speed matching — OPT-IN (default off → open-loop
+        # equal-PWM, byte-identical). Fail-closed: if the flag is on but the
+        # controller params are incomplete, refuse to start (never silently fall
+        # back to open-loop when closed-loop was requested).
+        if closed_loop_enabled(os.environ):
+            try:
+                r2_matcher = ClosedLoopSpeedMatcher(speed_match_params_from_env(os.environ, r2_cal))
+            except R2CalibrationError as e:
+                print(f"FATAL: KIRRA_R2_CLOSED_LOOP is on but its params are "
+                      f"incomplete: {e}", file=sys.stderr)
+                return 2
     topic = os.environ.get("KIRRA_RELEASE_TOPIC", "/kirra/release")
 
     # The verify core (fail-closed: raises on a NULL handle).
@@ -246,6 +261,10 @@ def main() -> int:
         f"envelope: vx_max={vx_max} m/s vz_max={vz_max} rad/s (DEMO backstop; "
         f"Kirra's checker is the authority). Vendor base node must NOT be running."
     )
+    if drive_mode == DRIVE_MODE_R2:
+        node.get_logger().info(
+            f"r2_ackermann drive: {'CLOSED-LOOP speed matching' if r2_matcher else 'open-loop equal-PWM'}"
+        )
 
     alarm_announced = False
 
@@ -255,7 +274,31 @@ def main() -> int:
             # the x3 firmware mixing runs after verify). translate() is
             # fail-closed; an MRC/stop decision carries zeros, so this same call
             # stops the platform.
-            apply_actuation(bot, translate(linear, angular, r2_cal))
+            act = translate(linear, angular, r2_cal)
+            if r2_matcher is None:
+                apply_actuation(bot, act)  # open-loop equal-PWM (default)
+                return
+            # §9 closed loop: translate() stays the safety front (non-finite /
+            # spin-in-place / at-rest all yield is_mrc or reason=="stopped" with
+            # zeros). Only when translate says "ok" do we KEEP its steer command
+            # and REPLACE the two drive PWMs with the per-wheel speed-matched ones.
+            if act.is_mrc or act.reason == "stopped":
+                apply_actuation(bot, act)  # zeros → stop; drop the loop's history
+                r2_matcher.reset()
+                return
+            enc = bot.get_motor_encoder()  # [m1(RL), m2, m3, m4(RR)]
+            pwm_left, pwm_right, fault = r2_matcher.step(
+                linear, enc[0], enc[3], time.monotonic()
+            )
+            if fault is not None:
+                # A stalled wheel / non-finite feedback → MRC stop (never keep
+                # driving a faulted loop). Reset so a stale delta can't resume it.
+                r2_safe_stop(bot)
+                r2_matcher.reset()
+                node.get_logger().warn(f"closed-loop MRC ({fault}) — motors stopped")
+                return
+            bot.set_akm_steering_angle(act.steer_cmd)
+            bot.set_motor(pwm_left, 0, 0, pwm_right)
         else:
             # x3: v_y = 0 (skid-steer demo; no lateral). linear→v_x, angular→v_z,
             # both already clamped by the Rust capture seam.

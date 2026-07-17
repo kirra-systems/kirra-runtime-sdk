@@ -59,6 +59,13 @@ export KIRRA_GOVERNOR_VK_HEX
 : "${KIRRA_R2_CENTER_TRIM:=90}";              export KIRRA_R2_CENTER_TRIM
 : "${KIRRA_R2_DRIVE_DEADBAND_PWM:=0}";        export KIRRA_R2_DRIVE_DEADBAND_PWM
 
+# §9 closed-loop calibration (only READ when KIRRA_R2_CLOSED_LOOP is set truthy;
+# harmless otherwise). Measured from the RR confirm. Export KIRRA_R2_CLOSED_LOOP=1
+# yourself (after the elevated tune) to enable per-wheel speed matching; the gains
+# (KIRRA_R2_SPEED_*) fall back to r2_drive's conservative defaults unless set.
+: "${KIRRA_R2_M_PER_TICK:=0.00025101}";       export KIRRA_R2_M_PER_TICK
+: "${KIRRA_R2_V_PER_PWM_RIGHT:=0.0194}";      export KIRRA_R2_V_PER_PWM_RIGHT
+
 # --- ADR-0033 timing + demo caps + hardware (validated first-run values) -------
 : "${KIRRA_FRESHNESS_WINDOW_MS:=200}";        export KIRRA_FRESHNESS_WINDOW_MS
 : "${KIRRA_CONTROL_PERIOD_MS:=100}";          export KIRRA_CONTROL_PERIOD_MS

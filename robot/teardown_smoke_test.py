@@ -164,8 +164,16 @@ def install_stubs(ctx: StubContext) -> None:
             self.steer_writes: list[int] = []
             self.default_angle: "int | None" = None
             self._car_type = 1  # default X3; set_car_type(5) flips it for r2
+            self._enc = [0, 0, 0, 0]  # cumulative encoder counts (closed-loop reads)
 
         def create_receive_threading(self) -> None: ...
+
+        def get_motor_encoder(self) -> "list[int]":
+            # Advance each channel a little per read so a closed-loop actuate()
+            # sees a non-zero speed (the no-op spin here does not call it, but the
+            # method must exist for the closed-loop path to be importable/runnable).
+            self._enc = [c + 10 for c in self._enc]
+            return list(self._enc)
 
         def get_car_type_from_machine(self) -> int:
             # Reflects set_car_type — x3 cases never call it, so this stays 1
@@ -380,6 +388,60 @@ def main() -> int:
               "(5) r2 safe stop must centre the steering")
     print("(5) consumer/r2 mode → exit 0, car-type 5 + trim set, "
           "no set_car_motion, safe stop zeros motors + centre (init + teardown)")
+
+    # ------------------------------------------------------------------
+    # 6. R2 closed-loop (§9) init: with KIRRA_R2_CLOSED_LOOP on, the consumer
+    #    must build the speed matcher (needs KIRRA_R2_M_PER_TICK +
+    #    KIRRA_R2_V_PER_PWM_RIGHT) and start; and fail-closed (rc != 0) when the
+    #    flag is on but those params are MISSING — never silently fall back to
+    #    open-loop. The no-op spin covers INIT; the loop math is r2_drive_test.py.
+    # ------------------------------------------------------------------
+    r2_env = {
+        "KIRRA_DRIVE_MODE": "r2_ackermann",
+        "KIRRA_R2_WHEELBASE_M": "0.229",
+        "KIRRA_R2_V_PER_PWM": "0.0145",
+        "KIRRA_R2_PWM_MAX": "60",
+        "KIRRA_R2_STEER_UNITS_PER_RAD": "140",
+        "KIRRA_R2_DELTA_MAX_RAD": "0.5",
+        "KIRRA_R2_STEER_SIGN": "-1",
+        "KIRRA_R2_CENTER_TRIM": "90",
+    }
+    cl_keys = list(r2_env) + ["KIRRA_R2_CLOSED_LOOP", "KIRRA_R2_M_PER_TICK", "KIRRA_R2_V_PER_PWM_RIGHT"]
+
+    # 6a. flag ON but params MISSING → fail closed.
+    os.environ.update(r2_env)
+    os.environ["KIRRA_R2_CLOSED_LOOP"] = "1"
+    os.environ.pop("KIRRA_R2_M_PER_TICK", None)
+    os.environ.pop("KIRRA_R2_V_PER_PWM_RIGHT", None)
+    try:
+        rc_missing = kirra_motor_consumer.main()
+    except BaseException:  # noqa: BLE001
+        rc_missing = -1
+    check(rc_missing != 0, "(6a) closed-loop ON with missing params must fail closed (rc != 0)")
+
+    # 6b. flag ON + params present → inits + exits 0 + safe-stops.
+    os.environ.update(r2_env)
+    os.environ.update({
+        "KIRRA_R2_CLOSED_LOOP": "1",
+        "KIRRA_R2_M_PER_TICK": "0.00025101",
+        "KIRRA_R2_V_PER_PWM_RIGHT": "0.0194",
+    })
+    try:
+        rc_cl = kirra_motor_consumer.main()
+    except BaseException as e:  # noqa: BLE001
+        failures.append(f"(6b) closed-loop consumer raised: {e!r}")
+        rc_cl = -1
+    finally:
+        for k in cl_keys:
+            os.environ.pop(k, None)
+    check(rc_cl == 0, f"(6b) closed-loop consumer must exit 0, got {rc_cl}")
+    bot_cl = sys.modules["Rosmaster_Lib"].Rosmaster.last
+    if bot_cl is not None:
+        check(bot_cl._car_type == 5, "(6b) closed-loop r2 mode must still set car-type 5")
+        check(bot_cl.motor_writes and bot_cl.motor_writes[-1] == (0, 0, 0, 0),
+              "(6b) closed-loop safe stop must zero both rear motors")
+    print("(6) consumer/r2 closed-loop → fail-closed on missing params; "
+          "inits + exits 0 + safe stop when params present")
 
     print()
     if failures:
