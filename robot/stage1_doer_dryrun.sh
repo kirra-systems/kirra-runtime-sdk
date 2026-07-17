@@ -24,6 +24,9 @@ REPO="$(cd "$HERE/.." && pwd)"
 cd "$REPO"
 
 # --- env: ROS + domain (guarded; matches run_consumer_r2.sh discipline) --------
+# ROS/colcon setup.bash reference unbound vars (COLCON_TRACE, AMENT_TRACE, ...),
+# which trip `set -u`. Source them with nounset OFF, then restore it.
+set +u
 if [ -z "${ROS_DISTRO:-}" ] && [ -f /opt/ros/humble/setup.bash ]; then
   # shellcheck disable=SC1091
   source /opt/ros/humble/setup.bash
@@ -32,6 +35,7 @@ if [ -f "$REPO/ros2_ws/install/setup.bash" ]; then
   # shellcheck disable=SC1091
   source "$REPO/ros2_ws/install/setup.bash"
 fi
+set -u
 : "${ROS_DOMAIN_ID:=28}"; export ROS_DOMAIN_ID
 
 MICK_URL="${KIRRA_MICK_URL:-http://127.0.0.1:8102}"
