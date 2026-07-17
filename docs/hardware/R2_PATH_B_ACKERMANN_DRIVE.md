@@ -1,8 +1,11 @@
-# R2 Path-B Ackermann drive — proposal (pure core landed + host-tested; INERT — review before consumer wiring / robot testing)
+# R2 Path-B Ackermann drive — calibrated + wheels-up validated; OFF by default, floor run pending
 
-> **Status: PROPOSAL. The pure translation core is implemented + host-tested;
-> it is INERT — no consumer wiring, no calibration, nothing has driven the
-> robot.** This is the design for an open-source R2 drive that bypasses the
+> **Status: OFF BY DEFAULT (`KIRRA_DRIVE_MODE` unset = byte-identical X3 path).
+> The pure translation core is implemented + host-tested; consumer wiring has
+> landed behind the flag; the §5 calibration is MEASURED and the §8.1 elevated
+> (wheels-up) acceptance PASSED. The one remaining gate before the flag goes on
+> the FLOOR is the tethered §8.2 run through the governed consumer.** This is the
+> design for an open-source R2 drive that bypasses the
 > (broken, on this cross-labeled X3 image) firmware `set_car_motion` kinematics
 > and instead drives the two rear motors directly + steers the servo, doing the
 > Ackermann math in KIRRA-governed code. Written for review; the calibration
@@ -25,11 +28,15 @@
 >   last-hop actuation semantics are covered by `robot/r2_drive_test.py`. The
 >   x3 path is unchanged (cases 1-4 still pass).
 >
-> It STILL cannot drive: `R2DriveCalibration` (built from `KIRRA_R2_*` via
-> `calibration_from_env`) REFUSES construction on any missing/invalid field, so
-> with the §5 measurements open the r2 path fails closed at startup. What
-> remains: the §5 bench calibration, the §9 sign-offs, and on-hardware
-> validation (§8) — then flip `KIRRA_DRIVE_MODE=r2_ackermann`.
+> **Calibrated + elevated-validated (2026-07-17):** the §5 measurements are DONE
+> (protractor steering sweep + drive bench, `robot/r2_drive_calibration_results.txt`;
+> profile in `robot/install/env.template`: `wheelbase 0.229`, `v_per_pwm 0.0145`,
+> `K 66`, `delta_max 0.68`, `steer_sign -1`, `center_trim 90`). The §8.1 ELEVATED
+> acceptance PASSED on hardware — straight / left / right / stop plus the
+> fail-closed cases (NaN → MRC, spin-in-place → MRC), wheels up. What remains
+> before `KIRRA_DRIVE_MODE=r2_ackermann` on the FLOOR: the RR-channel PWM↔m/s
+> confirm (v0 uses the LEFT slope for equal-PWM), the §9 sign-offs, and the
+> tethered §8.2 floor run through the governed consumer.
 
 ## 1. Why Path B
 
@@ -225,8 +232,13 @@ def mrc_stop():
    straight = both rear wheels same direction/speed; left/right steer sign;
    fail-closed on injected NaN / `v=0,ω≠0`; `safe_stop` zeros both.
 2. **Floor, tethered, low speed** — straight + gentle turns; confirm KIRRA bounds
-   and the verify gate hold end-to-end (a `first_run_elevated.sh`-style guided
-   acceptance, adapted for R2).
+   and the verify gate hold end-to-end. Realized as the guided script
+   **`robot/first_run_r2_floor.sh`** (a `first_run_elevated.sh`-style acceptance,
+   adapted for R2): it first RE-VALIDATES the governed consumer ELEVATED in
+   `r2_ackermann` mode — the §8.1 pass used the bench script and did NOT exercise
+   the consumer's car-type-5 init + verify-gated `set_motor`/AKM last hop — then
+   drives the tethered floor (valid→governed creep, governed turn, unsigned→still,
+   kill→stop), all through the ADR-0033 Ed25519 verify-before-release chokepoint.
 3. Only then: promote to the standing R2 config (`KIRRA_VEHICLE_CLASS=r2`,
    `KIRRA_EXPECTED_CAR_TYPE` per platform, interceptor wheelbase = profile `L`).
 

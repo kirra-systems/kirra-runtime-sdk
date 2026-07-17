@@ -73,7 +73,7 @@ PHASE B (encoder scale): wheel=RL
   real motor drift (→ per-wheel PWM trim or closed loop, §9).
 
 ------------------------------------------------------------------
-PHASE C (steering↔angle): MECHANISM CONFIRMED, angles NOT yet measured
+PHASE C (steering↔angle): MEASURED (protractor sweep, 2026-07-17)
 ------------------------------------------------------------------
   REQUIRES car-type 5. The first run (type 1, default X3 image) saw NO servo
   motion. After set_car_type(5) the front wheels swing as commanded — confirmed
@@ -85,9 +85,40 @@ PHASE C (steering↔angle): MECHANISM CONFIRMED, angles NOT yet measured
   actuating → the getter is UNIMPLEMENTED on this image (a sentinel), NOT an
   "AKM inactive" flag. The centre trim must come from the protractor sweep.
 
-  STILL OPEN (floor-blocking for turns): road-wheel angle at each command
-  [-45..+45] → K (command-units per radian), linearity, delta_max, and the
-  LEFT/RIGHT sign check (does a NEGATIVE command steer LEFT?).
+  MEASURED — protractor sweep under car-type 5. center_trim (set_akm_default_angle)
+  = 90, the straightest of {90,95,100,105,110} at command 0. Road-wheel angle at
+  each command (LEFT +, RIGHT −): absolute protractor reading, then deflection
+  from straight.
+
+    command   protractor   wheel angle
+    -45        46          ~38° LEFT
+    -30        59          ~25° LEFT
+    -15        70          ~14° LEFT
+    +15        95          ~11° RIGHT
+    +30       110          ~26° RIGHT
+    +45      ~125          ~39° RIGHT
+
+  Least-squares over the six points (straight ≈ 84 on this protractor placement —
+  an arbitrary zero; center_trim=90 is the SERVO default that physically centres
+  the wheel, independent of where the protractor reads 0):
+    slope        ≈ 0.867 wheel-deg per command-unit = 0.01513 rad/command-unit
+    K            ≈ 66  command-units per radian    → KIRRA_R2_STEER_UNITS_PER_RAD
+    delta_max    ≈ 0.68 rad (~39°) at command ±45  → KIRRA_R2_DELTA_MAX_RAD
+    steer_sign   = -1   (a NEGATIVE command steers LEFT) → KIRRA_R2_STEER_SIGN
+    center_trim  = 90                              → KIRRA_R2_CENTER_TRIM
+
+  ELEVATED ACCEPTANCE (proposal §8.1) — PASSED on hardware 2026-07-17, driving the
+  r2_drive Ackermann last-hop with the profile above (wheels up, e-stop in hand):
+    straight (v=0.2, ω=0)    → steer 0,   both rear +14 forward
+    left     (v=0.2, ω=+0.4) → steer -28  (front wheels LEFT)
+    right    (v=0.2, ω=-0.4) → steer +28  (front wheels RIGHT)
+    stop     (v=0,   ω=0)    → all zero
+    fail-closed: NaN → MRC (no motion); v=0,ω=0.5 spin-in-place → MRC (no motion)
+
+  STILL OPEN: RR-channel PWM↔m/s (v0 uses the LEFT slope 0.0145 for equal-PWM
+  drive); and the tethered FLOOR run through the governed consumer (§8.2) — the
+  guided procedure for that is robot/first_run_r2_floor.sh (elevated re-validation
+  through the real consumer, then tethered floor; ADR-0033 chokepoint in the loop).
 
 ------------------------------------------------------------------
 PHASE D (geometry): NOT measured
@@ -100,6 +131,7 @@ PHASE D (geometry): NOT measured
 REMAINING FLOOR-BLOCKING CAPTURES (next bench pass, elevated):
   1. Phase B on RR (+ wheel diameter) — closes m/s AND resolves the real-vs-
      encoder-scale question behind the ~28% L/R imbalance.
-  2. Phase C protractor sweep under car-type 5 — K, delta_max, sign check.
-  3. Phase D — tape-measured L and (if differential chosen) t.
+  2. Phase D — tape-measured L and (if differential chosen) t.
+  (Phase C protractor sweep under car-type 5 — K, delta_max, sign, center_trim —
+   is DONE: see the Phase C section above, measured 2026-07-17.)
 ==================================================================
