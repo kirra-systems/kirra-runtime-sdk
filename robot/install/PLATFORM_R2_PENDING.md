@@ -50,14 +50,30 @@ Each item lands only after on-hardware validation on the R2 image:
   `installer/kirra_install.py verify --platform r2` passing (mode-5 check,
   `installer/platform_map.toml:18-39`).
 - **Steering calibration measurements** (`robot/steering_bench_elevated.sh`,
-  Track-A A1/A5 — wheels elevated, protractor + tape):
-  - physical road-wheel angle at full lock (the future profile's
-    `max_steering_deg` — the vendor command envelope is `[-45,+45]` command
-    units about a 90 default, and command units ≠ road-wheel degrees until
-    measured);
-  - wheelbase confirmation (≈0.229 m measured on the bench — confirm on the
-    R2 image before it becomes a profile value);
-  - footprint (half-length / half-width), servo slew, `v_z` sign convention.
+  Track-A A1/A5 — wheels elevated, protractor + tape). **Status as of
+  2026-07-18 (partly MEASURED):**
+  - ✅ **road-wheel angle at full lock — MEASURED**: ~39° (0.68 rad) at
+    command ±45 (protractor sweep, `r2_drive_calibration_results.txt` Phase C,
+    2026-07-17). This is the future profile's `max_steering_deg`; command
+    units ≠ road-wheel degrees was the open question and it is now answered.
+    (Supersedes any earlier note that full-lock was unmeasured.)
+  - ✅ **footprint — MEASURED**: body 13 in × 8 in = 0.330 × 0.203 m →
+    half-length 0.165 m, half-width 0.102 m (bench tape). Now carried on the
+    doer side (`kirra_params.yaml` occy_doer, +small margin).
+  - ✅ **`v_z` / steering sign convention — MEASURED**: a NEGATIVE command
+    steers LEFT (`KIRRA_R2_STEER_SIGN=-1`, bench-verified).
+  - 🔶 **wheelbase — MEASURED ≈0.229 m (~9 in), front-to-rear CONFIRM owed**:
+    confirm the 9 in is true front-axle→rear-axle (not e.g. body/hub span)
+    before it becomes a profile value.
+  - ⬜ **STILL UNMEASURED (the one-pass bench list to unblock the `r2`
+    profile, task #85)**:
+    - front-to-rear wheelbase confirmation (tape, axle-center to axle-center);
+    - servo slew rate (steering-angle change per second at full command step —
+      time a full −45→+45 sweep; feeds the profile's `steering_rate`);
+    - front & rear overhang from the ego origin (base_link/lidar) — fixes
+      whether the footprint is front-, center-, or rear-biased (half_length
+      currently assumes a roughly-front origin);
+    - track width (left-wheel-center to right-wheel-center).
 - **The `r2` contract profile** (Track-A A2): a NEW compiled class named `r2`
   (not `x3`, not the interim `courier`) in the contract-profiles registry,
   with wheelbase / steering / envelope values **from the measurements above —

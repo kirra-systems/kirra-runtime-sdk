@@ -33,19 +33,27 @@ occy_doer:
     # accurate modelling, NOT a safety relaxation.
     #
     # NOTE the two distinct "space" surfaces (docs/CONTRACT_PROFILES.md):
-    #   * footprint (half_*): the robot's BODY. Keep it >= the real robot --
-    #     these are CONSERVATIVE estimates pending a tape-measure (see
-    #     R2_PATH_B / PLATFORM_R2_PENDING). NEVER shrink below reality.
+    #   * footprint (half_*): the robot's BODY. Keep it >= the real robot.
+    #     NEVER shrink below reality.
     #   * clearance TARGETS (lateral_clearance_target_m /
     #     rss_lateral_alignment_tolerance_m): extra room DEMANDED beyond the
     #     body. A 0.2 m robot honestly needs far less than an AV's 0.6 m.
     # This is the doer dry-run envelope only; the ACTUATION envelope (Stage 2)
     # is the verifier's per-class contract (courier interim until a measured
-    # `r2` class lands).
+    # `r2` class lands -- see robot/install/PLATFORM_R2_PENDING.md).
+    #
+    # PROVENANCE: footprint MEASURED (body 13 in x 8 in = 0.330 x 0.203 m ->
+    # half 0.165 x 0.102, +small margin); steering MEASURED (full lock ~39 deg
+    # / 0.68 rad @ cmd +/-45, r2_drive_calibration_results.txt Phase C
+    # 2026-07-17); wheelbase MEASURED ~0.229 m (front-to-rear CONFIRM still
+    # owed). Origin-offset / overhangs unmeasured -> the corridor_back
+    # extension (0.5 m) covers the rear; half_length assumes a roughly-front
+    # origin (lidar at base). Firm both up per PLATFORM_R2_PENDING.
     vehicle_class: "courier"                    # doer RSS-band label; numbers below win
-    wheelbase_m: 0.229                          # R2 physical wheelbase (matches KIRRA_R2_WHEELBASE_M)
-    half_length_m: 0.16                         # CONSERVATIVE (~0.30 m body); tape-measure to firm up
-    half_width_m: 0.12                          # CONSERVATIVE (~0.20 m body); tape-measure to firm up
+    wheelbase_m: 0.229                          # MEASURED ~9 in (front-to-rear CONFIRM pending)
+    half_length_m: 0.17                         # MEASURED body 13 in=0.330 m -> half 0.165 + margin
+    half_width_m: 0.11                          # MEASURED body 8 in=0.203 m -> half 0.102 + margin
+    max_steering_deg: 39.0                      # MEASURED full lock ~39 deg (0.68 rad) @ cmd +/-45 (calib Phase C)
     lateral_clearance_target_m: 0.15            # robot-scale (was courier 0.6)
     rss_lateral_alignment_tolerance_m: 0.15     # robot-scale (was courier 0.6)
 
