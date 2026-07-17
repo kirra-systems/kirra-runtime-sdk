@@ -169,15 +169,18 @@ def main() -> int:
     bot.create_receive_threading()
 
     def _settle_car_type() -> "int | None":
-        # Read the board's car-type register with settle retries (~2 s total;
-        # the register needs receive-thread settle). Unreadable → None.
-        for _ in range(8):
+        # Read the board's car-type register with settle retries (~3 s total; the
+        # register needs receive-thread settle after a car-type write). The valid
+        # range is 1..6, so the vendor lib's -1 is a "not-yet-reported" SENTINEL,
+        # NOT a reading — treat it (and None) as unread and keep polling; return
+        # the first NON-NEGATIVE value. Never-readable → None (caller fail-closes).
+        for _ in range(12):
             time.sleep(0.25)
             try:
                 t = bot.get_car_type_from_machine()
             except Exception:  # noqa: BLE001 — unreadable is fail-closed by caller
                 t = None
-            if t is not None:
+            if t is not None and int(t) >= 0:
                 return int(t)
         return None
 
