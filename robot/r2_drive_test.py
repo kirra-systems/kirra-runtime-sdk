@@ -489,6 +489,41 @@ def test_speed_match_params_from_env_fail_closed_on_missing() -> None:
         raise AssertionError(f"expected fail-closed for {env}")
 
 
+def test_speed_match_params_ema_validation() -> None:
+    for bad in (0.0, -0.1, 1.5, float("nan")):
+        try:
+            _valid_params(ema_alpha=bad)
+        except R2CalibrationError:
+            continue
+        raise AssertionError(f"expected R2CalibrationError for ema_alpha={bad}")
+    # 1.0 (no filter) and a mid value are valid.
+    _valid_params(ema_alpha=1.0)
+    _valid_params(ema_alpha=0.4)
+
+
+def test_matcher_ema_smooths_alternating_speed() -> None:
+    # Feed an ALTERNATING encoder delta (aliasing-like): +100 then +300 ticks per
+    # 0.1s. With alpha<1 the filtered speed the matcher acts on must sit BETWEEN
+    # the two raw samples (smoothed), not swing fully to each.
+    p = _valid_params(ema_alpha=0.3)
+    m = ClosedLoopSpeedMatcher(p)
+    m.step(0.30, 0, 0, 0.0)  # seed
+    enc = 0
+    t = 0.0
+    filtered = []
+    for i in range(8):
+        enc += 100 if i % 2 == 0 else 300
+        t += 0.1
+        m.step(0.30, enc, enc, t)
+        filtered.append(m._ema_left)
+    raw_low = 100 * p.m_per_tick / 0.1   # 0.25
+    raw_high = 300 * p.m_per_tick / 0.1  # 0.75
+    tail = filtered[-4:]
+    assert all(raw_low < f < raw_high for f in tail), f"EMA should sit between raw extremes: {tail}"
+    # And it should be far less jumpy than the raw sawtooth (spread << raw spread).
+    assert (max(tail) - min(tail)) < (raw_high - raw_low) * 0.6, f"EMA not smoothing enough: {tail}"
+
+
 def test_speed_match_params_from_env_rejects_nonnumeric() -> None:
     cal = _valid_cal()
     env = {"KIRRA_R2_M_PER_TICK": "abc", "KIRRA_R2_V_PER_PWM_RIGHT": "0.0194"}

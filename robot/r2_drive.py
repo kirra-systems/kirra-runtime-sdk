@@ -343,6 +343,12 @@ DEFAULT_MAX_PWM_STEP = 5.0         # per-cycle slew cap on each wheel's PWM
 DEFAULT_STALL_CYCLES = 5           # consecutive under-response cycles → fault
 DEFAULT_STALL_MIN_PWM = 10.0       # "commanding real effort" threshold
 DEFAULT_STALL_MIN_MPS = 0.02       # "not moving" threshold
+# EMA low-pass on the measured wheel speed. The MCU encoder auto-report cadence is
+# not phase-locked to the control loop, so raw per-cycle Δticks/dt ALIASES (a
+# high/low sawtooth every other cycle — seen on the bench). A first-order EMA
+# smooths that so the P-term acts on the real speed, not the sampling artifact.
+# alpha in (0, 1]: 1.0 = no filter (raw); smaller = smoother + more lag.
+DEFAULT_SPEED_EMA_ALPHA = 0.4
 
 
 @dataclass(frozen=True)
@@ -358,6 +364,10 @@ class SpeedMatchParams:
     stall_cycles:      consecutive under-response cycles before a fault, int >= 1.
     stall_min_pwm:     |PWM| at/above which a non-moving wheel counts as stalled, >= 0.
     stall_min_mps:     |speed| below which a wheel counts as "not moving", >= 0.
+    ema_alpha:         EMA weight on the NEW measured speed, in (0, 1]. 1.0 = no
+                       filter. Applied in ClosedLoopSpeedMatcher before the P-term
+                       to smooth aliased encoder reads. Default 1.0 (back-compat);
+                       the env loader defaults it to DEFAULT_SPEED_EMA_ALPHA.
     """
 
     m_per_tick: float
@@ -369,6 +379,7 @@ class SpeedMatchParams:
     stall_cycles: int
     stall_min_pwm: float
     stall_min_mps: float
+    ema_alpha: float = 1.0
 
     def __post_init__(self) -> None:
         for name in (
@@ -380,6 +391,7 @@ class SpeedMatchParams:
             "max_pwm_step",
             "stall_min_pwm",
             "stall_min_mps",
+            "ema_alpha",
         ):
             if not _finite(getattr(self, name)):
                 raise R2CalibrationError(f"{name} must be a finite number")
@@ -398,6 +410,8 @@ class SpeedMatchParams:
             raise R2CalibrationError("stall_cycles must be an int >= 1")
         if self.stall_min_pwm < 0.0 or self.stall_min_mps < 0.0:
             raise R2CalibrationError("stall_min_pwm/stall_min_mps must be >= 0")
+        if not (0.0 < self.ema_alpha <= 1.0):
+            raise R2CalibrationError("ema_alpha must be in (0, 1]")
 
 
 @dataclass
@@ -475,11 +489,21 @@ class ClosedLoopSpeedMatcher:
         self.params = params
         self.state = SpeedMatchState()
         self._prev = None  # (enc_left, enc_right, now_s) or None
+        self._ema_left = None  # filtered measured speed (None until first sample)
+        self._ema_right = None
 
     def reset(self) -> None:
         """Drop the prior sample + zero the controller (call on stop / MRC / fault)."""
         self.state = SpeedMatchState()
         self._prev = None
+        self._ema_left = None
+        self._ema_right = None
+
+    def _filter(self, meas: float, prev_ema) -> float:
+        # First-order EMA: seed on the first sample, else blend. Smooths the
+        # aliased per-cycle encoder speed (see DEFAULT_SPEED_EMA_ALPHA).
+        a = self.params.ema_alpha
+        return meas if prev_ema is None else a * meas + (1.0 - a) * prev_ema
 
     def _feedforward(self, target_v: float):
         p = self.params
@@ -507,7 +531,10 @@ class ClosedLoopSpeedMatcher:
             return self._feedforward(target_v)
         meas_v_left = (enc_left - prev[0]) * self.params.m_per_tick / dt
         meas_v_right = (enc_right - prev[1]) * self.params.m_per_tick / dt
-        return speed_match_step(target_v, meas_v_left, meas_v_right, self.params, self.state)
+        # Low-pass the aliased raw speed before the P-term / stall check.
+        self._ema_left = self._filter(meas_v_left, self._ema_left)
+        self._ema_right = self._filter(meas_v_right, self._ema_right)
+        return speed_match_step(target_v, self._ema_left, self._ema_right, self.params, self.state)
 
 
 # Closed-loop env vars. The enable flag is read by the consumer; the params come
@@ -520,6 +547,7 @@ _ENV_CL_MAX_STEP = "KIRRA_R2_SPEED_MAX_PWM_STEP"
 _ENV_CL_STALL_CYCLES = "KIRRA_R2_SPEED_STALL_CYCLES"
 _ENV_CL_STALL_MIN_PWM = "KIRRA_R2_SPEED_STALL_MIN_PWM"
 _ENV_CL_STALL_MIN_MPS = "KIRRA_R2_SPEED_STALL_MIN_MPS"
+_ENV_CL_EMA_ALPHA = "KIRRA_R2_SPEED_EMA_ALPHA"
 
 
 def closed_loop_enabled(env) -> bool:
@@ -573,4 +601,5 @@ def speed_match_params_from_env(env, cal: R2DriveCalibration) -> SpeedMatchParam
         stall_cycles=_opt_int(_ENV_CL_STALL_CYCLES, DEFAULT_STALL_CYCLES),
         stall_min_pwm=_opt_float(_ENV_CL_STALL_MIN_PWM, DEFAULT_STALL_MIN_PWM),
         stall_min_mps=_opt_float(_ENV_CL_STALL_MIN_MPS, DEFAULT_STALL_MIN_MPS),
+        ema_alpha=_opt_float(_ENV_CL_EMA_ALPHA, DEFAULT_SPEED_EMA_ALPHA),
     )

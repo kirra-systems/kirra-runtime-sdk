@@ -80,10 +80,12 @@ def _run_pass(bot, matcher, params, target_v: float, seconds: float, rate_hz: fl
     """
     period = 1.0 / rate_hz
     m_per_tick = params.m_per_tick
-    prev = None  # (enc_left, enc_right, t) for the DISPLAY speed (matcher keeps its own)
+    prev = None  # (enc_left, enc_right, t) for the RAW display speed
     print(f"\n  target={target_v:.3f} m/s  for {seconds:.1f}s @ {rate_hz:.0f}Hz  "
-          f"(KP={params.kp_pwm_per_mps}, slew={params.max_pwm_step}, pwm_max={params.pwm_max})")
-    print("   t(s)   meas_L   meas_R   pwm_L  pwm_R   note")
+          f"(KP={params.kp_pwm_per_mps}, slew={params.max_pwm_step}, "
+          f"ema={params.ema_alpha}, pwm_max={params.pwm_max})")
+    print("  filt_* = the EMA-filtered speed the controller ACTS on; raw_* = unfiltered.")
+    print("   t(s)   filt_L   filt_R   raw_L   raw_R   pwm_L  pwm_R   note")
     t0 = time.monotonic()
     matcher.reset()
     try:
@@ -96,15 +98,19 @@ def _run_pass(bot, matcher, params, target_v: float, seconds: float, rate_hz: fl
             pwm_left, pwm_right, fault = matcher.step(target_v, enc[0], enc[3], now)
             if fault is not None:
                 bot.set_motor(0, 0, 0, 0)
-                print(f"  {elapsed:6.2f}   ----     ----     0      0     FAULT: {fault} → motors STOPPED")
+                print(f"  {elapsed:6.2f}   -----    -----    -----   -----     0      0   FAULT: {fault} → STOPPED")
                 return f"fault:{fault}"
             bot.set_motor(pwm_left, 0, 0, pwm_right)
-            # Display speed from our own delta (independent of the matcher's).
+            # filt_* is the matcher's own EMA (what the P-term saw); raw_* is our
+            # independent unfiltered delta — the gap shows the aliasing the filter removes.
             if prev is not None:
                 dt = now - prev[2]
-                mvl = (enc[0] - prev[0]) * m_per_tick / dt if dt > 0 else 0.0
-                mvr = (enc[3] - prev[1]) * m_per_tick / dt if dt > 0 else 0.0
-                print(f"  {elapsed:6.2f}  {mvl:7.3f}  {mvr:7.3f}  {pwm_left:5d}  {pwm_right:5d}")
+                rvl = (enc[0] - prev[0]) * m_per_tick / dt if dt > 0 else 0.0
+                rvr = (enc[3] - prev[1]) * m_per_tick / dt if dt > 0 else 0.0
+                fvl = matcher._ema_left if matcher._ema_left is not None else rvl
+                fvr = matcher._ema_right if matcher._ema_right is not None else rvr
+                print(f"  {elapsed:6.2f}  {fvl:7.3f}  {fvr:7.3f}  {rvl:6.3f}  {rvr:6.3f}  "
+                      f"{pwm_left:5d}  {pwm_right:5d}")
             prev = (enc[0], enc[3], now)
             # pace to the next tick
             sleep_left = period - (time.monotonic() - now)
