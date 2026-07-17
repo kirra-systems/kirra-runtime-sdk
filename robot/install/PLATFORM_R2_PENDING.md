@@ -94,6 +94,31 @@ Each item lands only after on-hardware validation on the R2 image:
   mismatch, so a wrong value fails safe — but Layer B is where it becomes
   *correct*, derived from the profile, not a loose default).
 
+## THE FLIP — retire the `courier` interim (3 gated uncomment sites)
+
+The `r2` classes now **exist and compile** (SDK `contract_profiles.rs` kinematic
+envelope + parko `impact.rs` SG6 threshold; measured footprint + full-lock
+steering, dynamic limits VALIDATION-PENDING). The deployment switch is drafted as
+**three commented-out blocks** — when the gate below is met, the flip is exactly
+**three uncomments** (no new plumbing):
+
+| # | File | Change |
+|---|------|--------|
+| 1 | `installer/platform_map.toml` | `profile_class = "courier"` → `"r2"` |
+| 2 | `ros2_ws/src/kirra_safety/config/kirra_params.yaml` | interceptor `wheelbase_m: 0.2` → `0.229` (r2 contract == physical) |
+| 3 | `robot/install/env.template` (verifier env) | uncomment `KIRRA_VEHICLE_CLASS=r2`; on the R2 image also `KIRRA_EXPECTED_CAR_TYPE=5` |
+
+**🔴 GATE — do NOT uncomment until ALL hold:**
+1. The 4 remaining bench captures recorded (front-to-rear wheelbase confirm,
+   servo slew rate, overhang split, track width) — the ⬜ items above.
+2. The r2 **dynamic** limits benched (max speed / accel / brake), replacing the
+   conservative VALIDATION-PENDING estimates in `contract_profiles.rs`.
+3. Human review of the measurement-derived numbers.
+
+All three sites cross-reference each other; flipping only one **fails safe** (the
+interceptor's wheelbase cross-check latches a stop on a class/param mismatch), so
+a partial flip stops the robot rather than mis-driving it.
+
 ## Definition of done for Layer B
 
 1. Vendor R2 image flashed; drive + steering verified together (elevated).

@@ -4,6 +4,19 @@ cmd_vel_interceptor:
     kirra_token: ""              # Set via environment variable KIRRA_ADMIN_TOKEN or launch arg
     kirra_client_id: "ros2-interceptor-01"
     wheelbase_m: 0.2             # Hiwonder ROSOrin wheelbase (meters)
+    # ── R2-CLASS FLIP (draft, GATED — 2 of 3 uncomment sites) ─────────────────
+    # The interceptor cross-checks wheelbase_m against the wheelbase the verifier
+    # reports for its ACTIVE class contract; a mismatch (>1e-6) latches a
+    # PERMANENT stop (enforcement_decision.py WHEELBASE_TOLERANCE_M). The active
+    # class's contract wheelbase must be matched EXACTLY:
+    #   • courier interim → 0.5   • r2 class → 0.229 (== the physical, measured)
+    # When you flip to r2 (KIRRA_VEHICLE_CLASS=r2 + platform_map profile_class="r2"),
+    # comment the 0.2 line above and uncomment the r2 line below. Flip all THREE
+    # sites together — robot/install/PLATFORM_R2_PENDING.md "THE FLIP".
+    # NOTE: the current 0.2 matches NEITHER class — it is safe only while no
+    # verifier is in the loop (Stage-1 doer dry run); a Stage-2 courier run needs
+    # 0.5, a Stage-2 r2 run needs 0.229.
+    # wheelbase_m: 0.229         # r2 contract wheelbase (== physical, measured)
     max_speed_mps: 1.8           # ROSOrin spec max speed (m/s)
     input_topic: "/cmd_vel"
     output_topic: "/cmd_vel_safe"
