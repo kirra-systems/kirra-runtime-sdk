@@ -232,8 +232,13 @@ def mrc_stop():
    straight = both rear wheels same direction/speed; left/right steer sign;
    fail-closed on injected NaN / `v=0,ω≠0`; `safe_stop` zeros both.
 2. **Floor, tethered, low speed** — straight + gentle turns; confirm KIRRA bounds
-   and the verify gate hold end-to-end (a `first_run_elevated.sh`-style guided
-   acceptance, adapted for R2).
+   and the verify gate hold end-to-end. Realized as the guided script
+   **`robot/first_run_r2_floor.sh`** (a `first_run_elevated.sh`-style acceptance,
+   adapted for R2): it first RE-VALIDATES the governed consumer ELEVATED in
+   `r2_ackermann` mode — the §8.1 pass used the bench script and did NOT exercise
+   the consumer's car-type-5 init + verify-gated `set_motor`/AKM last hop — then
+   drives the tethered floor (valid→governed creep, governed turn, unsigned→still,
+   kill→stop), all through the ADR-0033 Ed25519 verify-before-release chokepoint.
 3. Only then: promote to the standing R2 config (`KIRRA_VEHICLE_CLASS=r2`,
    `KIRRA_EXPECTED_CAR_TYPE` per platform, interceptor wheelbase = profile `L`).
 

@@ -116,7 +116,9 @@ PHASE C (steering↔angle): MEASURED (protractor sweep, 2026-07-17)
     fail-closed: NaN → MRC (no motion); v=0,ω=0.5 spin-in-place → MRC (no motion)
 
   STILL OPEN: RR-channel PWM↔m/s (v0 uses the LEFT slope 0.0145 for equal-PWM
-  drive); and the tethered FLOOR run through the governed consumer (§8.2).
+  drive); and the tethered FLOOR run through the governed consumer (§8.2) — the
+  guided procedure for that is robot/first_run_r2_floor.sh (elevated re-validation
+  through the real consumer, then tethered floor; ADR-0033 chokepoint in the loop).
 
 ------------------------------------------------------------------
 PHASE D (geometry): NOT measured
