@@ -179,12 +179,16 @@ def main() -> int:
         print(f"  pass 1: {outcome}")
         conv = _confirm("Did BOTH wheels converge to ~target with BOUNDED PWM (no runaway)?")
 
+        stall_seconds = min(max(seconds, 6.0), SECONDS_HARD_CAP)
         print("\n── PASS 2: stall → MRC fault ──")
-        print("  During this pass, GENTLY hold/brake ONE rear wheel (gloved hand) so it")
-        print("  stops while commanded. Expected: the matcher trips a stall fault and")
-        print("  BOTH motors STOP (it must NOT ramp that wheel to the cap).")
-        if _confirm("Ready to run the stall test (you will hold one wheel)?"):
-            outcome2 = _run_pass(bot, matcher, params, target, seconds, rate_hz)
+        print("  As soon as it starts, FIRMLY grip ONE rear wheel (gloved) to a COMPLETE")
+        print(f"  STOP and HOLD it there (~2 s) — you have {stall_seconds:.0f}s. That wheel's")
+        print("  pwm will climb a little as the controller tries; that is expected + safe")
+        print("  (it is capped). KEEP HOLDING until you see 'FAULT: wheel_stall_...' and")
+        print("  BOTH motors stop. A light touch that only SLOWS the wheel will NOT trip")
+        print("  it — its filt_ column must reach ~0 and stay there for ~1 s.")
+        if _confirm("Ready to run the stall test (grip one wheel to a FULL stop)?"):
+            outcome2 = _run_pass(bot, matcher, params, target, stall_seconds, rate_hz)
             print(f"  pass 2: {outcome2}")
             stalled = outcome2.startswith("fault:") and _confirm(
                 "Did holding a wheel trip a FAULT and STOP both motors (no ramp-to-cap)?"
