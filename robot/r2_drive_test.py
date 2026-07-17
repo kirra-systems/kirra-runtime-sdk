@@ -533,7 +533,8 @@ def test_matcher_last_filtered_speeds_accessor() -> None:
     m.step(0.30, 120, 120, 0.1)  # 120 ticks / 0.1s * m_per_tick
     fl, fr = m.last_filtered_speeds()
     expected = 120 * p.m_per_tick / 0.1
-    assert fl is not None and abs(fl - expected) < 1e-9 and abs(fr - expected) < 1e-9
+    assert fl is not None and fr is not None
+    assert abs(fl - expected) < 1e-9 and abs(fr - expected) < 1e-9
 
 
 def test_speed_match_params_from_env_rejects_nonnumeric() -> None:

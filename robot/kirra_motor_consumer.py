@@ -288,9 +288,10 @@ def main() -> int:
         )
 
     alarm_announced = False
-    cl_debug_ctr = [0]  # throttle counter for the closed-loop debug log
+    cl_debug_ctr = 0  # throttle counter for the closed-loop debug log
 
     def actuate(linear: float, angular: float) -> None:
+        nonlocal cl_debug_ctr
         if drive_mode == DRIVE_MODE_R2:
             # Path B: the Ackermann last-hop runs AFTER verify (the same place
             # the x3 firmware mixing runs after verify). translate() is
@@ -324,12 +325,15 @@ def main() -> int:
             if r2_cl_debug:
                 # Throttled (~every 5th cycle) so the loop is observable over SSH
                 # without flooding: target, filtered L/R speed, commanded PWMs, steer.
-                cl_debug_ctr[0] += 1
-                if cl_debug_ctr[0] % 5 == 0:
+                cl_debug_ctr += 1
+                if cl_debug_ctr % 5 == 0:
                     fl, fr = r2_matcher.last_filtered_speeds()
+                    # NaN (not 0.0) before the first measured cycle — 0.0 would read
+                    # as a real "wheel stopped" sample and mislead debugging.
+                    fl = float("nan") if fl is None else fl
+                    fr = float("nan") if fr is None else fr
                     node.get_logger().info(
-                        f"cl tgt={linear:.3f} ema_L={0.0 if fl is None else fl:.3f} "
-                        f"ema_R={0.0 if fr is None else fr:.3f} "
+                        f"cl tgt={linear:.3f} ema_L={fl:.3f} ema_R={fr:.3f} "
                         f"pwm_L={pwm_left} pwm_R={pwm_right} steer={act.steer_cmd}"
                     )
         else:
