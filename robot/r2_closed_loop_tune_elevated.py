@@ -70,16 +70,26 @@ def _env_float(name: str, default: float) -> float:
     return v
 
 
-def _run_pass(bot, matcher, params, target_v: float, seconds: float, rate_hz: float) -> str:
+def _run_pass(bot, matcher, params, target_v: float, seconds: float, rate_hz: float,
+              inject_wheel=None, inject_after_s: float = 1.5) -> str:
     """Drive the closed loop for one window. Returns a short outcome tag.
 
     Prints per-cycle: measured L/R ground speed vs target and the commanded PWMs,
     so the operator can judge convergence + oscillation and watch for a runaway
     (there must be none — PWM is capped + slew-limited). A matcher fault (stall /
     non-finite) stops the motors immediately and ends the pass.
+
+    inject_wheel (0=RL, 3=RR or None): SOFTWARE stall injection. After
+    inject_after_s, the chosen wheel's encoder value fed to the matcher is FROZEN
+    (its computed speed → 0, as if the wheel jammed), so the matcher must trip a
+    stall fault and cut BOTH motors — a repeatable end-to-end proof of the
+    fault→MRC path without needing to physically hold a spinning wheel. The REAL
+    motors keep being commanded until the fault fires, so the operator still sees
+    the wheels actually STOP.
     """
     period = 1.0 / rate_hz
     m_per_tick = params.m_per_tick
+    frozen = None  # captured encoder value for the injected wheel
     prev = None  # (enc_left, enc_right, t) for the RAW display speed
     print(f"\n  target={target_v:.3f} m/s  for {seconds:.1f}s @ {rate_hz:.0f}Hz  "
           f"(KP={params.kp_pwm_per_mps}, slew={params.max_pwm_step}, "
@@ -95,6 +105,14 @@ def _run_pass(bot, matcher, params, target_v: float, seconds: float, rate_hz: fl
             if elapsed >= seconds:
                 break
             enc = bot.get_motor_encoder()  # [m1(RL), m2, m3, m4(RR)]
+            # Software stall injection: freeze the chosen wheel's encoder so the
+            # matcher sees it as stopped (Δticks → 0) while the real motor is still
+            # commanded — proves fault→motor-cut without a physical hold.
+            if inject_wheel is not None and elapsed >= inject_after_s:
+                if frozen is None:
+                    frozen = enc[inject_wheel]
+                enc = list(enc)
+                enc[inject_wheel] = frozen
             pwm_left, pwm_right, fault = matcher.step(target_v, enc[0], enc[3], now)
             if fault is not None:
                 bot.set_motor(0, 0, 0, 0)
@@ -180,18 +198,32 @@ def main() -> int:
         conv = _confirm("Did BOTH wheels converge to ~target with BOUNDED PWM (no runaway)?")
 
         stall_seconds = min(max(seconds, 6.0), SECONDS_HARD_CAP)
+        inject = os.environ.get("KIRRA_TUNE_INJECT_STALL", "").strip().lower()
+        inject_wheel = 0 if inject in ("left", "l", "rl") else 3 if inject in ("right", "r", "rr") else None
         print("\n── PASS 2: stall → MRC fault ──")
-        print("  As soon as it starts, FIRMLY grip ONE rear wheel (gloved) to a COMPLETE")
-        print(f"  STOP and HOLD it there (~2 s) — you have {stall_seconds:.0f}s. That wheel's")
-        print("  pwm will climb a little as the controller tries; that is expected + safe")
-        print("  (it is capped). KEEP HOLDING until you see 'FAULT: wheel_stall_...' and")
-        print("  BOTH motors stop. A light touch that only SLOWS the wheel will NOT trip")
-        print("  it — its filt_ column must reach ~0 and stay there for ~1 s.")
-        if _confirm("Ready to run the stall test (grip one wheel to a FULL stop)?"):
-            outcome2 = _run_pass(bot, matcher, params, target, stall_seconds, rate_hz)
+        if inject_wheel is not None:
+            side = "LEFT (RL)" if inject_wheel == 0 else "RIGHT (RR)"
+            print(f"  INJECTION MODE (KIRRA_TUNE_INJECT_STALL={inject}): after ~1.5 s the {side}")
+            print("  wheel's ENCODER is frozen in software (the controller sees it as jammed).")
+            print("  Expected: the matcher trips a stall fault and BOTH real motors STOP —")
+            print("  you'll SEE the wheels cut. This is the repeatable fault→MRC proof.")
+            ready = _confirm("Ready to run the injected stall test?")
+        else:
+            print("  As soon as it starts, FIRMLY grip ONE rear wheel (gloved) to a COMPLETE")
+            print(f"  STOP and HOLD it there (~2 s) — you have {stall_seconds:.0f}s. That wheel's")
+            print("  pwm will climb a little as the controller tries; that is expected + safe")
+            print("  (it is capped). KEEP HOLDING until you see 'FAULT: wheel_stall_...' and")
+            print("  BOTH motors stop. A light touch that only SLOWS the wheel will NOT trip")
+            print("  it — its filt_ column must reach ~0 and stay there for ~1 s.")
+            print("  (Hard to do by hand? Re-run with KIRRA_TUNE_INJECT_STALL=left for a")
+            print("   reliable software-injected stall instead.)")
+            ready = _confirm("Ready to run the stall test (grip one wheel to a FULL stop)?")
+        if ready:
+            outcome2 = _run_pass(bot, matcher, params, target, stall_seconds, rate_hz,
+                                 inject_wheel=inject_wheel)
             print(f"  pass 2: {outcome2}")
             stalled = outcome2.startswith("fault:") and _confirm(
-                "Did holding a wheel trip a FAULT and STOP both motors (no ramp-to-cap)?"
+                "Did the stall trip a FAULT and STOP both motors (no ramp-to-cap)?"
             )
         else:
             stalled = False
