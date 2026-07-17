@@ -25,6 +25,30 @@ occy_doer:
     # a different lidar rate needs a deployment-review update here.
     scan_stale_s: 0.25
 
+    # --- R2-SIZED footprint + clearance (doer-side; sent to the planner's
+    # CHECKER each tick). WITHOUT these the node falls back to occy_doer.py's
+    # courier-sized defaults (half 0.15/0.18, clearance 0.6/0.6) and judges a
+    # ~0.2 m robot as if it needed a courier's lane -> the corridor pinches
+    # shut and KIRRA MRCs even passable gaps. Setting the robot's REAL size is
+    # accurate modelling, NOT a safety relaxation.
+    #
+    # NOTE the two distinct "space" surfaces (docs/CONTRACT_PROFILES.md):
+    #   * footprint (half_*): the robot's BODY. Keep it >= the real robot --
+    #     these are CONSERVATIVE estimates pending a tape-measure (see
+    #     R2_PATH_B / PLATFORM_R2_PENDING). NEVER shrink below reality.
+    #   * clearance TARGETS (lateral_clearance_target_m /
+    #     rss_lateral_alignment_tolerance_m): extra room DEMANDED beyond the
+    #     body. A 0.2 m robot honestly needs far less than an AV's 0.6 m.
+    # This is the doer dry-run envelope only; the ACTUATION envelope (Stage 2)
+    # is the verifier's per-class contract (courier interim until a measured
+    # `r2` class lands).
+    vehicle_class: "courier"                    # doer RSS-band label; numbers below win
+    wheelbase_m: 0.229                          # R2 physical wheelbase (matches KIRRA_R2_WHEELBASE_M)
+    half_length_m: 0.16                         # CONSERVATIVE (~0.30 m body); tape-measure to firm up
+    half_width_m: 0.12                          # CONSERVATIVE (~0.20 m body); tape-measure to firm up
+    lateral_clearance_target_m: 0.15            # robot-scale (was courier 0.6)
+    rss_lateral_alignment_tolerance_m: 0.15     # robot-scale (was courier 0.6)
+
 perception_governor:
   ros__parameters:
     taj_url: "http://localhost:8101"   # the Taj perception sidecar (kirra-mick example taj_service)
