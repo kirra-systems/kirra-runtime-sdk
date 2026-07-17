@@ -129,6 +129,7 @@ PHASE D (geometry): NOT measured
 REMAINING FLOOR-BLOCKING CAPTURES (next bench pass, elevated):
   1. Phase B on RR (+ wheel diameter) — closes m/s AND resolves the real-vs-
      encoder-scale question behind the ~28% L/R imbalance.
-  2. Phase C protractor sweep under car-type 5 — K, delta_max, sign check.
-  3. Phase D — tape-measured L and (if differential chosen) t.
+  2. Phase D — tape-measured L and (if differential chosen) t.
+  (Phase C protractor sweep under car-type 5 — K, delta_max, sign, center_trim —
+   is DONE: see the Phase C section above, measured 2026-07-17.)
 ==================================================================

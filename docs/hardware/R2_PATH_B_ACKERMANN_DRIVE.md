@@ -1,8 +1,11 @@
-# R2 Path-B Ackermann drive — proposal (pure core landed + host-tested; INERT — review before consumer wiring / robot testing)
+# R2 Path-B Ackermann drive — calibrated + wheels-up validated; OFF by default, floor run pending
 
-> **Status: PROPOSAL. The pure translation core is implemented + host-tested;
-> it is INERT — no consumer wiring, no calibration, nothing has driven the
-> robot.** This is the design for an open-source R2 drive that bypasses the
+> **Status: OFF BY DEFAULT (`KIRRA_DRIVE_MODE` unset = byte-identical X3 path).
+> The pure translation core is implemented + host-tested; consumer wiring has
+> landed behind the flag; the §5 calibration is MEASURED and the §8.1 elevated
+> (wheels-up) acceptance PASSED. The one remaining gate before the flag goes on
+> the FLOOR is the tethered §8.2 run through the governed consumer.** This is the
+> design for an open-source R2 drive that bypasses the
 > (broken, on this cross-labeled X3 image) firmware `set_car_motion` kinematics
 > and instead drives the two rear motors directly + steers the servo, doing the
 > Ackermann math in KIRRA-governed code. Written for review; the calibration
