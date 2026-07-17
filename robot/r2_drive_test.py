@@ -524,6 +524,18 @@ def test_matcher_ema_smooths_alternating_speed() -> None:
     assert (max(tail) - min(tail)) < (raw_high - raw_low) * 0.6, f"EMA not smoothing enough: {tail}"
 
 
+def test_matcher_last_filtered_speeds_accessor() -> None:
+    p = _valid_params(ema_alpha=1.0)
+    m = ClosedLoopSpeedMatcher(p)
+    assert m.last_filtered_speeds() == (None, None)  # before any measured cycle
+    m.step(0.30, 0, 0, 0.0)      # feedforward seed — still no measured speed
+    assert m.last_filtered_speeds() == (None, None)
+    m.step(0.30, 120, 120, 0.1)  # 120 ticks / 0.1s * m_per_tick
+    fl, fr = m.last_filtered_speeds()
+    expected = 120 * p.m_per_tick / 0.1
+    assert fl is not None and abs(fl - expected) < 1e-9 and abs(fr - expected) < 1e-9
+
+
 def test_speed_match_params_from_env_rejects_nonnumeric() -> None:
     cal = _valid_cal()
     env = {"KIRRA_R2_M_PER_TICK": "abc", "KIRRA_R2_V_PER_PWM_RIGHT": "0.0194"}

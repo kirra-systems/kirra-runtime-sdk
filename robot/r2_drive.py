@@ -505,6 +505,12 @@ class ClosedLoopSpeedMatcher:
         a = self.params.ema_alpha
         return meas if prev_ema is None else a * meas + (1.0 - a) * prev_ema
 
+    def last_filtered_speeds(self):
+        """The most recent EMA-filtered (left, right) speeds the P-term acted on,
+        or (None, None) before the first measured cycle. Read-only, for
+        diagnostics/telemetry (the tune bench + the consumer's debug log)."""
+        return (self._ema_left, self._ema_right)
+
     def _feedforward(self, target_v: float):
         p = self.params
         pl = _clamp(target_v / p.v_per_pwm_left, -p.pwm_max, p.pwm_max)
