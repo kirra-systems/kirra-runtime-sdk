@@ -132,6 +132,37 @@ RR-CHANNEL CONFIRM (Phase A re-sweep + Phase B on RR): MEASURED 2026-07-17
       sign-offs; the flag is OFF, so nothing changes until then.
 
 ------------------------------------------------------------------
+CLOSED-LOOP TUNE — ELEVATED BENCH SIGN-OFF: PASSED 2026-07-17
+------------------------------------------------------------------
+  (robot/r2_closed_loop_tune_elevated.py, wheels up; the per-wheel EMA-filtered
+  speed matcher, r2_drive.ClosedLoopSpeedMatcher.)
+
+  WORKING GAINS (elevated starting point): KP=40, EMA_ALPHA=0.3, slew=5,
+  stall_cycles=5, stall_min_pwm=10, stall_min_mps=0.02, at target 0.15 m/s.
+
+  BENCH CRITERIA — all met:
+    * STABLE + BOUNDED (no runaway): with the EMA filter the filt_* speeds are
+      steady (the raw per-cycle reads alias ±, the filter removes it); PWMs stayed
+      12-16 / 7-9, far below the pwm_max 40 cap.
+    * STALL → MRC: proven via software encoder-freeze injection
+      (KIRRA_TUNE_INJECT_STALL=left). At freeze, filt_L decayed 0.07→0.006 over
+      ~0.9 s, pwm_L climbed 12→16 (BOUNDED, not to the cap), and after 5 sub-0.02
+      cycles the matcher tripped FAULT: wheel_stall_left → BOTH motors cut to 0.
+      (Physical hand-stop was tried first but unreliable at pwm ~13 — the injected
+      stall is the repeatable end-to-end proof; the pure stall LOGIC is also
+      host-tested in r2_drive_test.py.)
+
+  UNLOADED CAVEAT — L/R equalization is NOT signed off on the bench: filt_L ~0.10
+  vs filt_R ~0.15 (RL ~2/3 of RR), the same unloaded stiction imbalance. Forcing
+  them equal in the air would demand an extreme PWM ratio that would over-correct
+  under load. Equalization/straightness is a FLOOR task (tethered, loaded) — the
+  §8.2 open-loop creep already ran straight under load. The bench proves the loop
+  is SAFE (bounded + stall→MRC); the floor proves it's STRAIGHT.
+
+  NEXT: governed-consumer elevated run with KIRRA_R2_CLOSED_LOOP=1 (through the
+  ADR-0033 verify chokepoint), then the tethered floor to tune straightness.
+
+------------------------------------------------------------------
 PHASE C (steering↔angle): MEASURED (protractor sweep, 2026-07-17)
 ------------------------------------------------------------------
   REQUIRES car-type 5. The first run (type 1, default X3 image) saw NO servo
