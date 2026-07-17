@@ -90,7 +90,15 @@ def main() -> int:
     node.get_logger().info(f"publishing {mode} frames on {topic} at {rate_hz} Hz "
                            f"linear={linear} angular={angular}")
 
-    seq = 1
+    # Seed the sequence from the wall clock (ms), NOT a fixed 1. The consumer's
+    # accepted-sequence watermark persists for its whole lifetime and the rule is
+    # `sequence <= last_accepted => reject`; a fresh publisher process hardcoding
+    # seq=1 would be fully refused (SEQUENCE_NOT_ADVANCED) after the FIRST --valid
+    # window, since the consumer already accepted a higher seq. A monotonic-clock
+    # seed makes every new publisher run start strictly above any prior run, so
+    # multi-window guided tests (straight, then turn, then re-establish) all
+    # advance. Per-frame +1 keeps it strictly increasing within the run.
+    seq = int(time.time() * 1000)
     period = 1.0 / rate_hz
     try:
         while rclpy.ok():
