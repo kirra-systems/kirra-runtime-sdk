@@ -57,10 +57,22 @@ export KIRRA_GOVERNOR_VK_HEX
 : "${KIRRA_DEMO_VX_MAX:=0.15}";               export KIRRA_DEMO_VX_MAX
 : "${KIRRA_DEMO_VZ_MAX:=0.4}";                export KIRRA_DEMO_VZ_MAX
 : "${KIRRA_MOTOR_PORT:=/dev/myserial}";       export KIRRA_MOTOR_PORT
-# KIRRA_CONSUMER_LIB: use the installed copy if present, else let the loader
-# auto-search the repo target/ dirs (kirra_ffi.py). Only export when it exists.
+# KIRRA_CONSUMER_LIB: prefer an explicit, EXISTING path; else the installed copy;
+# else leave unset so the loader auto-searches the repo target/ dirs (kirra_ffi.py).
+# Self-heal a stale inherited path (e.g. /opt/kirra/... on a box without it) — a
+# dangling value would otherwise fail the loader instead of falling back.
+if [ -n "${KIRRA_CONSUMER_LIB:-}" ] && [ ! -f "${KIRRA_CONSUMER_LIB}" ]; then
+  echo "   note: KIRRA_CONSUMER_LIB=${KIRRA_CONSUMER_LIB} does not exist — unsetting so the loader auto-searches target/" >&2
+  unset KIRRA_CONSUMER_LIB
+fi
 if [ -z "${KIRRA_CONSUMER_LIB:-}" ] && [ -f /opt/kirra/lib/libkirra_consumer_ffi.so ]; then
   KIRRA_CONSUMER_LIB=/opt/kirra/lib/libkirra_consumer_ffi.so; export KIRRA_CONSUMER_LIB
+fi
+if [ -z "${KIRRA_CONSUMER_LIB:-}" ] \
+   && [ ! -f "$REPO/target/release/libkirra_consumer_ffi.so" ] \
+   && [ ! -f "$REPO/target/debug/libkirra_consumer_ffi.so" ]; then
+  echo "FATAL: libkirra_consumer_ffi.so not built and no installed copy. Build it: cargo build -p kirra-consumer-ffi --release" >&2
+  exit 1
 fi
 
 echo "── KIRRA consumer: r2_ackermann, VK=${KIRRA_GOVERNOR_VK_HEX:0:16}…, port=$KIRRA_MOTOR_PORT, domain=$ROS_DOMAIN_ID"
