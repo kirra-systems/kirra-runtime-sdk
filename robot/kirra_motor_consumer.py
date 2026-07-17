@@ -166,6 +166,13 @@ def main() -> int:
                 print(f"FATAL: KIRRA_R2_CLOSED_LOOP is on but its params are "
                       f"incomplete: {e}", file=sys.stderr)
                 return 2
+    # Opt-in closed-loop diagnostics: throttled per-cycle log of target + filtered
+    # L/R speed + commanded PWMs, so the loop is OBSERVABLE over SSH (accepted
+    # frames are otherwise silent). Off by default; log-only, no actuation change.
+    r2_cl_debug = (
+        r2_matcher is not None
+        and (os.environ.get("KIRRA_R2_CLOSED_LOOP_DEBUG") or "").strip().lower() in ("1", "true", "yes", "on")
+    )
     topic = os.environ.get("KIRRA_RELEASE_TOPIC", "/kirra/release")
 
     # The verify core (fail-closed: raises on a NULL handle).
@@ -281,8 +288,10 @@ def main() -> int:
         )
 
     alarm_announced = False
+    cl_debug_ctr = 0  # throttle counter for the closed-loop debug log
 
     def actuate(linear: float, angular: float) -> None:
+        nonlocal cl_debug_ctr
         if drive_mode == DRIVE_MODE_R2:
             # Path B: the Ackermann last-hop runs AFTER verify (the same place
             # the x3 firmware mixing runs after verify). translate() is
@@ -313,6 +322,20 @@ def main() -> int:
                 return
             bot.set_akm_steering_angle(act.steer_cmd)
             bot.set_motor(pwm_left, 0, 0, pwm_right)
+            if r2_cl_debug:
+                # Throttled (~every 5th cycle) so the loop is observable over SSH
+                # without flooding: target, filtered L/R speed, commanded PWMs, steer.
+                cl_debug_ctr += 1
+                if cl_debug_ctr % 5 == 0:
+                    fl, fr = r2_matcher.last_filtered_speeds()
+                    # NaN (not 0.0) before the first measured cycle — 0.0 would read
+                    # as a real "wheel stopped" sample and mislead debugging.
+                    fl = float("nan") if fl is None else fl
+                    fr = float("nan") if fr is None else fr
+                    node.get_logger().info(
+                        f"cl tgt={linear:.3f} ema_L={fl:.3f} ema_R={fr:.3f} "
+                        f"pwm_L={pwm_left} pwm_R={pwm_right} steer={act.steer_cmd}"
+                    )
         else:
             # x3: v_y = 0 (skid-steer demo; no lateral). linear→v_x, angular→v_z,
             # both already clamped by the Rust capture seam.
