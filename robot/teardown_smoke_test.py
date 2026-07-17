@@ -168,6 +168,12 @@ def install_stubs(ctx: StubContext) -> None:
 
         def create_receive_threading(self) -> None: ...
 
+        def set_auto_report_state(self, enable: bool, forever: bool = False) -> None:
+            # Closed-loop init enables MCU encoder auto-report before reading
+            # encoders; the stub records nothing but must accept the call so the
+            # closed-loop init path stays runnable under stubs.
+            self.auto_report = bool(enable)
+
         def get_motor_encoder(self) -> "list[int]":
             # Advance each channel a little per read so a closed-loop actuate()
             # sees a non-zero speed (the no-op spin here does not call it, but the

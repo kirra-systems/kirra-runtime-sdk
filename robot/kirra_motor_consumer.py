@@ -183,6 +183,20 @@ def main() -> int:
     bot = Rosmaster(com=motor_port)
     bot.create_receive_threading()
 
+    # Closed-loop speed matching reads the wheel encoders (get_motor_encoder),
+    # which ONLY update from the MCU's auto-report frames. Enable auto-report once
+    # here, fail-closed — without it every encoder read is a stale 0, so the
+    # matcher would see a dead wheel and immediately trip a stall→MRC fault (or
+    # never converge). Open-loop paths never read encoders, so this is scoped to
+    # the closed-loop consumer only (byte-identical otherwise).
+    if r2_matcher is not None:
+        try:
+            bot.set_auto_report_state(True)
+        except Exception as e:  # noqa: BLE001 — no encoder feed → refuse to start
+            print(f"FATAL: closed-loop drive needs encoder auto-report, but "
+                  f"set_auto_report_state(True) failed: {e}", file=sys.stderr)
+            return 2
+
     def _settle_car_type() -> "int | None":
         # Read the board's car-type register with settle retries (~3 s total; the
         # register needs receive-thread settle after a car-type write). The valid
