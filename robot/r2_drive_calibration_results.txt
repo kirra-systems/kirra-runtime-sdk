@@ -73,7 +73,9 @@ PHASE B (encoder scale): wheel=RL
 ------------------------------------------------------------------
 RR-CHANNEL CONFIRM (Phase A re-sweep + Phase B on RR): MEASURED 2026-07-17
 ------------------------------------------------------------------
-  (robot/r2_rr_channel_results.txt; a SECOND elevated session, same script.)
+  (Source: a SECOND elevated session with the same script, writing its raw output
+  to r2_rr_channel_results.txt ON THE UNIT — that raw file is NOT checked in; the
+  numbers below are transcribed from it into this reviewed record.)
 
   PHASE B (encoder scale): wheel=RR
     full_turns          = 5.0                (5-turn sample — finer than RL's 2)
@@ -85,10 +87,13 @@ RR-CHANNEL CONFIRM (Phase A re-sweep + Phase B on RR): MEASURED 2026-07-17
     m_per_tick (RR)     = 0.209465 / 825.6 = 0.00025371 m/tick
 
   >>> DECISIVE RESULT — L/R gap is REAL DRIFT, not encoder scale:
-      RR ticks/rev 825.6  vs  RL ticks/rev 834.5  ->  1.07% apart (identical
-      within hand-rotation error). The encoders share a scale, so the Phase-A
-      ticks/s L/R gap is a REAL wheel-speed difference at equal PWM — NOT an
-      encoder artifact. Equal PWM does NOT drive straight open-loop.
+      RR ticks/rev 825.6  vs  RL ticks/rev 834.5  ->  1.07% apart. The two
+      encoders share a scale to within ~1% (single hand-rotation samples: RR over
+      5 turns, RL over 2; the per-sample repeatability was not separately
+      quantified, but a ~1% spread is far smaller than the >30% Phase-A ticks/s
+      L/R gap, so that gap cannot be an encoder-scale artifact — it is a REAL
+      wheel-speed difference at equal PWM. Equal PWM does NOT drive straight
+      open-loop.)
 
   PHASE A re-sweep (this session, both rear wheels at equal +PWM):
     pwm   ticks/s M1(RL)  ticks/s M4(RR)   RL/RR ratio
