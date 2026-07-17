@@ -115,10 +115,32 @@ PHASE C (steering↔angle): MEASURED (protractor sweep, 2026-07-17)
     stop     (v=0,   ω=0)    → all zero
     fail-closed: NaN → MRC (no motion); v=0,ω=0.5 spin-in-place → MRC (no motion)
 
-  STILL OPEN: RR-channel PWM↔m/s (v0 uses the LEFT slope 0.0145 for equal-PWM
-  drive); and the tethered FLOOR run through the governed consumer (§8.2) — the
-  guided procedure for that is robot/first_run_r2_floor.sh (elevated re-validation
-  through the real consumer, then tethered floor; ADR-0033 chokepoint in the loop).
+  §8.2 FLOOR RUN THROUGH THE GOVERNED CONSUMER — PASSED on hardware 2026-07-17
+  (robot/first_run_r2_floor.sh, the ADR-0033 Ed25519 verify-before-release
+  chokepoint in the loop — NOT the bench script). Both stages, operator-confirmed:
+    STAGE A (elevated, wheels up):
+      A1 straight (v=0.15, ω=0)   → both rear wheels drive forward, front centred
+      A1 left     (v=0.15, ω=+0.3)→ front wheels steer LEFT while driving
+      A2 unsigned                 → wheels STILL + consumer logs REFUSED (NO_TOKEN)
+      A3 kill consumer            → wheels STOP + steering CENTRES (SS-002)
+    STAGE B (floor, tethered, e-stop in hand):
+      B1 straight creep           → slow, straight, tracked the tether (no veer/lunge)
+      B2 left arc (ω=+0.3)        → gentle LEFT arc, low speed, under control
+      B3 unsigned                 → STILL on the floor (REFUSED)
+      B4 kill consumer            → STOPS on the floor immediately
+  Run notes: two harness bugs were found + fixed en route to this pass —
+  (1) _settle_car_type() misread the vendor lib's -1 "not-yet-reported" sentinel
+      as a reading (cold-start FATAL "set_car_type(5) did not take — reads -1");
+  (2) the DEV publisher hardcoded seq=1 per process, so every --valid window after
+      the first was fully SEQUENCE_NOT_ADVANCED (consumer watermark persists for
+      its lifetime). Publisher now seeds seq from the wall clock (monotonic across
+      restarts), matching a real governor's sequence continuity (ADR-0033 PART 2).
+
+  STILL OPEN before the STANDING R2 config (doc §8 step 3 / §9): RR-channel
+  PWM↔m/s confirm (v0 uses the LEFT slope 0.0145 for equal-PWM drive);
+  KIRRA_VEHICLE_CLASS=r2 contract re-validation + interceptor wheelbase=L; and the
+  §9 open decisions (equal-PWM vs rear differential, open- vs closed-loop speed).
+  KIRRA_DRIVE_MODE stays OFF in env.template until those land.
 
 ------------------------------------------------------------------
 PHASE D (geometry): NOT measured

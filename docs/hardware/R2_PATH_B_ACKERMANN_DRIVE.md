@@ -1,10 +1,16 @@
-# R2 Path-B Ackermann drive — calibrated + wheels-up validated; OFF by default, floor run pending
+# R2 Path-B Ackermann drive — floor-validated through the governed consumer; OFF by default
 
 > **Status: OFF BY DEFAULT (`KIRRA_DRIVE_MODE` unset = byte-identical X3 path).
 > The pure translation core is implemented + host-tested; consumer wiring has
-> landed behind the flag; the §5 calibration is MEASURED and the §8.1 elevated
-> (wheels-up) acceptance PASSED. The one remaining gate before the flag goes on
-> the FLOOR is the tethered §8.2 run through the governed consumer.** This is the
+> landed behind the flag; the §5 calibration is MEASURED; the §8.1 elevated
+> (wheels-up) acceptance PASSED; and the §8.2 tethered FLOOR run through the REAL
+> governed consumer — the ADR-0033 Ed25519 verify-before-release chokepoint in the
+> loop — PASSED on hardware 2026-07-17 (`robot/first_run_r2_floor.sh`: elevated
+> straight/turn/unsigned/kill, then floor creep/arc/unsigned/kill; all
+> operator-confirmed). What still gates the STANDING R2 config (not tethered
+> low-speed operation): the RR-channel PWM↔m/s confirm, `KIRRA_VEHICLE_CLASS=r2`
+> contract re-validation + interceptor wheelbase, and the §9 open decisions —
+> so `KIRRA_DRIVE_MODE` stays commented in `env.template` for now.** This is the
 > design for an open-source R2 drive that bypasses the
 > (broken, on this cross-labeled X3 image) firmware `set_car_motion` kinematics
 > and instead drives the two rear motors directly + steers the servo, doing the
