@@ -133,8 +133,10 @@ PHASE C (steering↔angle): MEASURED (protractor sweep, 2026-07-17)
       as a reading (cold-start FATAL "set_car_type(5) did not take — reads -1");
   (2) the DEV publisher hardcoded seq=1 per process, so every --valid window after
       the first was fully SEQUENCE_NOT_ADVANCED (consumer watermark persists for
-      its lifetime). Publisher now seeds seq from the wall clock (monotonic across
-      restarts), matching a real governor's sequence continuity (ADR-0033 PART 2).
+      its lifetime). Publisher now seeds seq from the wall clock in nanoseconds
+      (time_ns) — restart-unique in practice, so a new run starts above the recent
+      watermark (NOT a hard monotonic guarantee: a backward clock step could still
+      collide; a real governor persists its sequence, ADR-0033 PART 2).
 
   STILL OPEN before the STANDING R2 config (doc §8 step 3 / §9): RR-channel
   PWM↔m/s confirm (v0 uses the LEFT slope 0.0145 for equal-PWM drive);

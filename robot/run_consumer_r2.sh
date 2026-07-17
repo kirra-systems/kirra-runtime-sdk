@@ -31,9 +31,19 @@ fi
 
 # --- governor key pin: derive the dev seed's pubkey unless already pinned ------
 DEV_SEED="${KIRRA_DEV_SEED:-2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a}"
-MINT="${KIRRA_MINT_BIN:-$REPO/target/release/kirra_ros_release_mint}"
+# Resolve the mint binary: an explicit override wins; else search release THEN
+# debug (the publisher + teardown harness do the same — a 'built debug' workflow
+# must work without an extra override).
+MINT="${KIRRA_MINT_BIN:-}"
+if [ -z "$MINT" ]; then
+  for prof in release debug; do
+    if [ -x "$REPO/target/$prof/kirra_ros_release_mint" ]; then
+      MINT="$REPO/target/$prof/kirra_ros_release_mint"; break
+    fi
+  done
+fi
 if [ -z "${KIRRA_GOVERNOR_VK_HEX:-}" ]; then
-  [ -x "$MINT" ] || { echo "FATAL: mint binary not found at $MINT — build it: cargo build -p kirra-release-token --bin kirra_ros_release_mint --release" >&2; exit 1; }
+  [ -n "$MINT" ] && [ -x "$MINT" ] || { echo "FATAL: kirra_ros_release_mint not found under target/{release,debug} (set KIRRA_MINT_BIN, or build: cargo build -p kirra-release-token --bin kirra_ros_release_mint --release)" >&2; exit 1; }
   KIRRA_GOVERNOR_VK_HEX="$("$MINT" --seed "$DEV_SEED" pubkey)"
 fi
 export KIRRA_GOVERNOR_VK_HEX

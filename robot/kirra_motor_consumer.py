@@ -177,11 +177,15 @@ def main() -> int:
         for _ in range(12):
             time.sleep(0.25)
             try:
-                t = bot.get_car_type_from_machine()
-            except Exception:  # noqa: BLE001 — unreadable is fail-closed by caller
+                raw = bot.get_car_type_from_machine()
+                # Guard the int() too: a non-numeric sentinel (str/float/None)
+                # must keep the poll going, never raise past the settle loop
+                # (fail-closed lives in the caller on a None return).
+                t = int(raw) if raw is not None else None
+            except Exception:  # noqa: BLE001 — unreadable/unconvertible → retry
                 t = None
-            if t is not None and int(t) >= 0:
-                return int(t)
+            if t is not None and t >= 0:
+                return t
         return None
 
     if drive_mode == DRIVE_MODE_R2:
