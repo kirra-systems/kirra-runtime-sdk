@@ -19,14 +19,21 @@ OUT="${1:-/etc/kirra/gov_2a.seed}"
 # 64 hex chars = 32 bytes. Default = the bench 2a seed the consumer pins; override
 # with KIRRA_GOV_SEED_HEX to pair with a differently-enrolled consumer.
 SEED_HEX="${KIRRA_GOV_SEED_HEX:-$(printf '2a%.0s' $(seq 1 32))}"
-if [ "${#SEED_HEX}" -ne 64 ]; then
-  echo "FATAL: seed must be 64 hex chars (32 bytes), got ${#SEED_HEX}" >&2
+# Validate STRICTLY as 64 HEX chars (not just length): rejects non-hex (which
+# would crash fromhex) AND closes any injection surface — the value is never
+# interpolated into a shell/python program, it is passed via the environment.
+if ! printf '%s' "$SEED_HEX" | grep -qiE '^[0-9a-f]{64}$'; then
+  echo "FATAL: seed must be exactly 64 hex chars (32 bytes)" >&2
   exit 1
 fi
 
 mkdir -p "$(dirname "$OUT")"
-# hex → raw 32 bytes (python3 is always present on this unit; avoids an xxd dep).
-python3 -c "import sys; sys.stdout.buffer.write(bytes.fromhex('$SEED_HEX'))" > "$OUT"
+# hex → raw 32 bytes. Seed material is load-bearing 0600, so create it that way
+# FROM THE START (umask 077 subshell → no world/group-readable window before the
+# chmod). The seed is read from the ENV, never string-interpolated into the -c
+# program, so a hostile value cannot inject python. chmod is belt-and-braces.
+( umask 077; SEED_HEX_ENV="$SEED_HEX" python3 -c \
+    "import os, sys; sys.stdout.buffer.write(bytes.fromhex(os.environ['SEED_HEX_ENV']))" > "$OUT" )
 chmod 600 "$OUT"
 
 echo "wrote 32-byte governor seed → $OUT (mode 600, ${#SEED_HEX}/2 = $(( ${#SEED_HEX} / 2 )) bytes)"

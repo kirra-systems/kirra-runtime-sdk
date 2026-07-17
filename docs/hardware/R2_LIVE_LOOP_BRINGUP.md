@@ -196,4 +196,4 @@ curl -s localhost:11434/api/tags # ollama (model list)
 - `robot/live_loop_elevated.sh` — the guided elevated acceptance for the full chain
 - `docs/safety/GOVERNOR_KEY_PROVISIONING.md` — signing-key sources (why dev-fixed ≠ 2a)
 - `ci/check_mick_actuation_fence.py` — the Mick actuation fence (why the LLM can't drive directly)
-- `ros2_ws/src/kirra_safety/kirra_with_robot.launch.py` — the launch stack
+- `ros2_ws/src/kirra_safety/launch/kirra_with_robot.launch.py` — the launch stack
