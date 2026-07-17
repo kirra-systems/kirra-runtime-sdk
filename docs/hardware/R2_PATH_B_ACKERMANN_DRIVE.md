@@ -25,11 +25,15 @@
 >   last-hop actuation semantics are covered by `robot/r2_drive_test.py`. The
 >   x3 path is unchanged (cases 1-4 still pass).
 >
-> It STILL cannot drive: `R2DriveCalibration` (built from `KIRRA_R2_*` via
-> `calibration_from_env`) REFUSES construction on any missing/invalid field, so
-> with the §5 measurements open the r2 path fails closed at startup. What
-> remains: the §5 bench calibration, the §9 sign-offs, and on-hardware
-> validation (§8) — then flip `KIRRA_DRIVE_MODE=r2_ackermann`.
+> **Calibrated + elevated-validated (2026-07-17):** the §5 measurements are DONE
+> (protractor steering sweep + drive bench, `robot/r2_drive_calibration_results.txt`;
+> profile in `robot/install/env.template`: `wheelbase 0.229`, `v_per_pwm 0.0145`,
+> `K 66`, `delta_max 0.68`, `steer_sign -1`, `center_trim 90`). The §8.1 ELEVATED
+> acceptance PASSED on hardware — straight / left / right / stop plus the
+> fail-closed cases (NaN → MRC, spin-in-place → MRC), wheels up. What remains
+> before `KIRRA_DRIVE_MODE=r2_ackermann` on the FLOOR: the RR-channel PWM↔m/s
+> confirm (v0 uses the LEFT slope for equal-PWM), the §9 sign-offs, and the
+> tethered §8.2 floor run through the governed consumer.
 
 ## 1. Why Path B
 
