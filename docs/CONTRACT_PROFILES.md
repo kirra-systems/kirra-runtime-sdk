@@ -90,7 +90,8 @@ These relations are asserted as structural invariants (see the validation gate).
 ### Ordering sanity (asserted)
 `r2.effective_cap (1.0) < courier.effective_cap (2.5) < delivery-av (11.0) <
 robotaxi (35.0)` and
-`courier.impact_spike (2.5) < delivery-av (8.0) < robotaxi (22.0)` (deviation units).
+`r2.impact_spike (1.5) < courier.impact_spike (2.5) < delivery-av (8.0) <
+robotaxi (22.0)` (deviation units).
 
 ---
 
@@ -115,6 +116,8 @@ geometry items remain to be bench-captured (see below).
 | `r2.lat_accel` | 1.0 | VALIDATION-PENDING — gentle |
 | `r2.wheelbase` | **0.229** | **MEASURED** ~9 in (front-to-rear CONFIRM owed); `KIRRA_R2_WHEELBASE_M` |
 | `r2.footprint` (w×l, overhangs) | **0.203 × 0.330** (0.05/0.05) | **MEASURED** body 8 in × 13 in (bench tape); **overhang split ESTIMATED** ((len−wb)/2) |
+| `r2.impact_spike` (SG6, parko; **deviation** `\|‖a‖−G\|`) | **1.5** | VALIDATION-PENDING — smallest deviation of the family, above the validate() 1.0 noise floor |
+| `r2.impact_confirm` (M / N consecutive) | **2 / 3** | VALIDATION-PENDING — debounce the bumps a small robot takes |
 
 **Remaining bench captures to firm up `r2` (the 4 items in PLATFORM_R2_PENDING):**
 front-to-rear wheelbase confirmation, servo slew rate (→ `r2.steering_rate`), the
