@@ -65,12 +65,66 @@ PHASE B (encoder scale): wheel=RL
     V_PER_PWM (left) ≈ 0.0145 (m/s)/PWM,  offset -0.069 m/s,  deadband ~PWM 4.7
     (i.e. m/s ≈ 0.0145*PWM - 0.069 over 15..35; a governed 0.3 m/s -> ~27 PWM)
 
-  SCOPE: this m/s map is valid for the LEFT channel only — it uses RL's own
-  encoder scale. RR's m/s still needs RR's ticks/rev (Phase B on RR). Measuring
-  RR ALSO resolves whether the ~28% Phase-A L/R gap is real speed drift or an
-  encoder-scale difference — one capture closes both. If the two encoders prove
-  identical (same ticks/rev), the same m_per_tick applies to RR and the gap is
-  real motor drift (→ per-wheel PWM trim or closed loop, §9).
+  SCOPE: this m/s map used RL's own encoder scale. The RR confirm below now
+  closes the RR m/s map AND resolves the L/R-gap question (see "RR-CHANNEL
+  CONFIRM"): RR's ticks/rev proved ~identical to RL's, so the gap is REAL
+  drivetrain drift, not an encoder-scale artifact.
+
+------------------------------------------------------------------
+RR-CHANNEL CONFIRM (Phase A re-sweep + Phase B on RR): MEASURED 2026-07-17
+------------------------------------------------------------------
+  (robot/r2_rr_channel_results.txt; a SECOND elevated session, same script.)
+
+  PHASE B (encoder scale): wheel=RR
+    full_turns          = 5.0                (5-turn sample — finer than RL's 2)
+    delta_ticks (RR/m4) = 4128
+    ticks_per_rev (RR)  = 825.6
+    wheel_diameter      = not re-measured; RR is the SAME wheel model as RL, so
+                          RL's caliper value (0.066675 m) applies (the ticks/rev
+                          match below justifies reusing it).
+    m_per_tick (RR)     = 0.209465 / 825.6 = 0.00025371 m/tick
+
+  >>> DECISIVE RESULT — L/R gap is REAL DRIFT, not encoder scale:
+      RR ticks/rev 825.6  vs  RL ticks/rev 834.5  ->  1.07% apart (identical
+      within hand-rotation error). The encoders share a scale, so the Phase-A
+      ticks/s L/R gap is a REAL wheel-speed difference at equal PWM — NOT an
+      encoder artifact. Equal PWM does NOT drive straight open-loop.
+
+  PHASE A re-sweep (this session, both rear wheels at equal +PWM):
+    pwm   ticks/s M1(RL)  ticks/s M4(RR)   RL/RR ratio
+    15    307.5          904.4            0.34
+    20    567.7          1225.8           0.46
+    25    824.1          1579.1           0.52
+    30    1140.3         1958.3           0.58
+    35    1479.8         2380.7           0.62
+    40    1873.2         2807.2           0.67
+    RR (M4) fit: ticks/s ~= 76.3*PWM - 290   (prior session: 74.3*PWM - 293 —
+      RR is STABLE across sessions, ~75 ticks/s/PWM).
+    RL (M1) this session ran much SLOWER than the prior run (307 vs 592 ticks/s
+      at PWM 15) with a bigger deadband — i.e. the imbalance is not a fixed
+      ratio; it VARIES session-to-session (stiction / battery / load), unloaded.
+
+  DERIVED — RR ground speed = M4 ticks/s * m_per_tick(RR):
+    V_PER_PWM (RR) ~= 76.3 * 0.00025371 = 0.0194 (m/s)/PWM,  offset -0.074 m/s
+    (m/s ~= 0.0194*PWM - 0.074).  Compare RL: 0.0145 (m/s)/PWM.
+    => at equal PWM, RR runs ~34% FASTER than RL → an open-loop equal-PWM drive
+       pulls toward the slower (RL) side.
+
+  INTERPRETATION / §9 recommendation (data-backed):
+    * Elevated/unloaded numbers EXAGGERATE the drift — unloaded stiction
+      dominates (RL barely moving at low PWM). On the FLOOR under load the §8.2
+      creep was operator-confirmed STRAIGHT, so equal-PWM is acceptable for the
+      v0 TETHERED LOW-SPEED use only.
+    * A fixed per-wheel PWM trim is FRAGILE here: the imbalance is real but
+      session-variable, so a static trim won't hold. For anything beyond
+      tethered creep (faster / untethered), CLOSE THE LOOP — per-wheel encoder
+      speed-matching (both encoders are trustworthy and identically scaled,
+      which the RR confirm just established).
+    * KIRRA_R2_V_PER_PWM is currently 0.0145 (RL slope). If we want the
+      commanded m/s to be a true CEILING (neither wheel exceeds it), switch it
+      to the FASTER RR slope 0.0194 so PWM stays low enough that RR <= target
+      (RL then merely undershoots). Operator decision, pending the §8-step-3
+      sign-offs; the flag is OFF, so nothing changes until then.
 
 ------------------------------------------------------------------
 PHASE C (steering↔angle): MEASURED (protractor sweep, 2026-07-17)
@@ -138,11 +192,13 @@ PHASE C (steering↔angle): MEASURED (protractor sweep, 2026-07-17)
       watermark (NOT a hard monotonic guarantee: a backward clock step could still
       collide; a real governor persists its sequence, ADR-0033 PART 2).
 
-  STILL OPEN before the STANDING R2 config (doc §8 step 3 / §9): RR-channel
-  PWM↔m/s confirm (v0 uses the LEFT slope 0.0145 for equal-PWM drive);
+  STILL OPEN before the STANDING R2 config (doc §8 step 3 / §9):
   KIRRA_VEHICLE_CLASS=r2 contract re-validation + interceptor wheelbase=L; and the
-  §9 open decisions (equal-PWM vs rear differential, open- vs closed-loop speed).
+  §9 open decisions (equal-PWM vs rear differential, open- vs closed-loop speed) —
+  now DATA-BACKED by the RR-channel confirm above (equal-PWM acceptable for
+  tethered creep; close the loop for anything faster/untethered).
   KIRRA_DRIVE_MODE stays OFF in env.template until those land.
+  (RR-channel PWM↔m/s confirm — DONE, see "RR-CHANNEL CONFIRM" above.)
 
 ------------------------------------------------------------------
 PHASE D (geometry): NOT measured
