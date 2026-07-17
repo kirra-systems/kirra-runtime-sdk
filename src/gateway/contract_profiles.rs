@@ -88,9 +88,20 @@ pub const DELIVERY_AV_ODD_SPEED_CAP_MPS: f64 = 11.0;
 /// None` — the deployment applies the cap, per the frozen instance's own doc).
 pub const ROBOTAXI_ODD_SPEED_CAP_MPS: f64 = URBAN_ODD_SPEED_CAP_MPS;
 
-// The ODD-cap ordering is a family invariant, pinned at COMPILE time: a sidewalk
-// robot's ceiling is below a road pod's is below a robotaxi's. (Compile-time
-// assertions are the clippy-approved way to assert on constants.)
+/// R2 (Yahboom Rosmaster R2 bench robot, ~1/10 RC scale) ODD operational speed
+/// cap (m/s). **VALIDATION-PENDING.**
+///
+/// Basis: a small indoor/tethered Ackermann robot operated well below walking
+/// pace; the tethered demo backstop is `KIRRA_DEMO_VX_MAX` = 0.15 m/s, and
+/// 1.0 m/s is a conservative operational ceiling above the demo yet below the
+/// courier sidewalk cap. NOT a certified value — see `docs/CONTRACT_PROFILES.md`
+/// (param `r2.odd_cap`). Below every other class's cap (compile-time asserted).
+pub const R2_ODD_SPEED_CAP_MPS: f64 = 1.0;
+
+// The ODD-cap ordering is a family invariant, pinned at COMPILE time: the bench
+// R2 is below a sidewalk courier is below a road pod is below a robotaxi.
+// (Compile-time assertions are the clippy-approved way to assert on constants.)
+const _: () = assert!(R2_ODD_SPEED_CAP_MPS < COURIER_ODD_SPEED_CAP_MPS);
 const _: () = assert!(COURIER_ODD_SPEED_CAP_MPS < DELIVERY_AV_ODD_SPEED_CAP_MPS);
 const _: () = assert!(DELIVERY_AV_ODD_SPEED_CAP_MPS < ROBOTAXI_ODD_SPEED_CAP_MPS);
 
@@ -108,6 +119,11 @@ pub enum VehicleClass {
     DeliveryAv,
     /// Robotaxi — full-speed mixed-traffic. The frozen reference instance.
     Robotaxi,
+    /// R2 — the Yahboom Rosmaster R2 bench robot (Ackermann, ~1/10 RC scale).
+    /// The first profile with MEASURED geometry (footprint + full-lock steering);
+    /// its dynamic limits are still VALIDATION-PENDING. Retires the interim
+    /// `courier` borrow once selected (`robot/install/PLATFORM_R2_PENDING.md`).
+    R2,
 }
 
 impl FromStr for VehicleClass {
@@ -124,9 +140,10 @@ impl FromStr for VehicleClass {
             "courier" => Ok(VehicleClass::Courier),
             "delivery-av" => Ok(VehicleClass::DeliveryAv),
             "robotaxi" => Ok(VehicleClass::Robotaxi),
+            "r2" => Ok(VehicleClass::R2),
             other => Err(format!(
                 "unknown vehicle class {other:?}; expected one of \
-                 courier | delivery-av | robotaxi (fail-closed — no default)"
+                 courier | delivery-av | robotaxi | r2 (fail-closed — no default)"
             )),
         }
     }
@@ -140,6 +157,7 @@ impl VehicleClass {
             VehicleClass::Courier => "courier",
             VehicleClass::DeliveryAv => "delivery-av",
             VehicleClass::Robotaxi => "robotaxi",
+            VehicleClass::R2 => "r2",
         }
     }
 }
@@ -158,6 +176,7 @@ pub fn contract_for(class: VehicleClass) -> VehicleKinematicsContract {
         VehicleClass::Robotaxi => VehicleKinematicsContract::nominal_reference_profile(),
         VehicleClass::DeliveryAv => delivery_av_nominal(),
         VehicleClass::Courier => courier_nominal(),
+        VehicleClass::R2 => r2_nominal(),
     }
 }
 
@@ -172,6 +191,7 @@ pub fn mrc_fallback_for(class: VehicleClass) -> VehicleKinematicsContract {
         VehicleClass::Robotaxi => VehicleKinematicsContract::mrc_fallback_profile(),
         VehicleClass::DeliveryAv => delivery_av_mrc(),
         VehicleClass::Courier => courier_mrc(),
+        VehicleClass::R2 => r2_mrc(),
     }
 }
 
@@ -346,6 +366,75 @@ fn delivery_av_mrc() -> VehicleKinematicsContract {
     }
 }
 
+// --- R2 (Yahboom Rosmaster R2 bench robot, Ackermann, ~1/10 RC scale) -------
+//
+// The FIRST profile with MEASURED geometry. Footprint + full-lock steering are
+// bench numbers; the DYNAMIC limits (speed / accel / brake / lateral / steering-
+// rate) and the overhang split are still VALIDATION-PENDING estimates — the four
+// remaining bench items in `robot/install/PLATFORM_R2_PENDING.md`. Retires the
+// interim `courier` borrow for the R2 (Track-A A2). Provenance below is per-field
+// (MEASURED vs VALIDATION-PENDING); every non-inherited number cites
+// `docs/CONTRACT_PROFILES.md` param `r2.*`.
+
+fn r2_nominal() -> VehicleKinematicsContract {
+    VehicleKinematicsContract {
+        // VALIDATION-PENDING: conservative mechanical max for a small robot; the
+        // ODD cap (1.0) sits below it so the effective ceiling is the cap. Bench
+        // max-speed NOT yet measured. (r2.max_speed)
+        max_speed_mps: 1.5,
+        // VALIDATION-PENDING: gentle low-speed acceleration. (r2.accel)
+        max_accel_mps2: 0.5,
+        // VALIDATION-PENDING: firm brake ≥ accel; short stop at ≤1 m/s. (r2.brake)
+        max_brake_mps2: 1.5,
+        // MEASURED: full-lock road-wheel angle ~39° (0.68 rad) at command ±45
+        // (robot/r2_drive_calibration_results.txt Phase C 2026-07-17;
+        // KIRRA_R2_DELTA_MAX_RAD=0.68). (r2.steering)
+        max_steering_deg: 39.0,
+        // VALIDATION-PENDING: servo slew NOT yet measured (time a full −45→+45
+        // sweep — one of the 4 remaining bench items). (r2.steering_rate)
+        max_steering_rate_deg_s: 30.0,
+        // VALIDATION-PENDING: short follow at ≤1 m/s indoor speeds. (r2.follow)
+        min_follow_distance_m: 0.5,
+        // VALIDATION-PENDING: gentle lateral comfort. (r2.lat_accel)
+        max_lateral_accel_mps2: 1.0,
+        // MEASURED ~9 in = 0.229 m (front-to-rear CONFIRM owed;
+        // KIRRA_R2_WHEELBASE_M). (r2.wheelbase)
+        wheelbase_m: 0.229,
+        // MEASURED body (bench tape): width 8 in = 0.203 m, length 13 in = 0.330 m.
+        // (r2.footprint)
+        width_m: 0.203,
+        length_m: 0.330,
+        // ESTIMATE (overhang split UNMEASURED): (length − wheelbase)/2 ≈ 0.05 m
+        // each → front+rear+wheelbase ≈ length. Firm up per PLATFORM_R2_PENDING.
+        // (r2.overhangs)
+        overhang_front_m: 0.05,
+        overhang_rear_m: 0.05,
+        // The bench-robot ODD ceiling (sibling of COURIER_ODD_SPEED_CAP_MPS).
+        odd_speed_cap_mps: Some(R2_ODD_SPEED_CAP_MPS),
+    }
+}
+
+fn r2_mrc() -> VehicleKinematicsContract {
+    VehicleKinematicsContract {
+        max_speed_mps: 0.5,     // VALIDATION-PENDING: degraded crawl (r2.mrc.max_speed)
+        max_accel_mps2: 0.3,    // VALIDATION-PENDING (r2.mrc.accel)
+        max_brake_mps2: 1.0,    // VALIDATION-PENDING: brake ≥ accel (r2.mrc.brake)
+        max_steering_deg: 20.0, // VALIDATION-PENDING: ≤ nominal 39 (r2.mrc.steering)
+        max_steering_rate_deg_s: 15.0, // VALIDATION-PENDING (r2.mrc.steering_rate)
+        min_follow_distance_m: 0.75, // VALIDATION-PENDING: ≥ nominal follow (r2.mrc.follow)
+        max_lateral_accel_mps2: 0.5, // VALIDATION-PENDING (r2.mrc.lat_accel)
+        // Footprint IDENTICAL to r2 nominal (the vehicle does not shrink).
+        wheelbase_m: 0.229,
+        width_m: 0.203,
+        length_m: 0.330,
+        overhang_front_m: 0.05,
+        overhang_rear_m: 0.05,
+        // MRC crawl (0.5) is already below the R2 ODD cap; leave None so min()
+        // selects 0.5 (the frozen-MRC idiom).
+        odd_speed_cap_mps: None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -364,6 +453,7 @@ mod tests {
             VehicleClass::Courier,
             VehicleClass::DeliveryAv,
             VehicleClass::Robotaxi,
+            VehicleClass::R2,
         ]
         .into_iter()
         .map(|c| (c, contract_for(c), mrc_fallback_for(c)))
@@ -387,11 +477,13 @@ mod tests {
             VehicleClass::from_str("ROBOTAXI").unwrap(),
             VehicleClass::Robotaxi
         );
+        assert_eq!(VehicleClass::from_str("R2").unwrap(), VehicleClass::R2);
         // round-trip through as_str
         for c in [
             VehicleClass::Courier,
             VehicleClass::DeliveryAv,
             VehicleClass::Robotaxi,
+            VehicleClass::R2,
         ] {
             assert_eq!(VehicleClass::from_str(c.as_str()).unwrap(), c);
         }
@@ -460,6 +552,28 @@ mod tests {
         );
         // (The documented ODD-cap consts agree with this ordering — pinned at
         // compile time via the `const _: () = assert!(...)` checks beside the consts.)
+    }
+
+    #[test]
+    fn r2_carries_measured_geometry_and_is_slowest() {
+        // The MEASURED values are pinned so a future edit that silently changes
+        // the bench footprint / full-lock steering fails loudly (they are facts,
+        // not tuning knobs). Provenance: r2_drive_calibration_results.txt Phase C
+        // + bench tape (body 13x8 in, wheelbase ~9 in).
+        let n = contract_for(VehicleClass::R2);
+        assert_eq!(n.width_m, 0.203, "R2 measured width (8 in)");
+        assert_eq!(n.length_m, 0.330, "R2 measured length (13 in)");
+        assert_eq!(n.wheelbase_m, 0.229, "R2 measured wheelbase (~9 in)");
+        assert_eq!(n.max_steering_deg, 39.0, "R2 measured full-lock steering");
+        // R2 is the slowest class: effective ceiling below the courier's.
+        let r2 = n.effective_max_speed_mps();
+        let courier = contract_for(VehicleClass::Courier).effective_max_speed_mps();
+        assert!(r2 < courier, "R2 {r2} !< courier {courier}");
+        // The MRC footprint is identical (the robot does not shrink degraded).
+        let m = mrc_fallback_for(VehicleClass::R2);
+        assert_eq!(m.width_m, n.width_m);
+        assert_eq!(m.length_m, n.length_m);
+        assert_eq!(m.wheelbase_m, n.wheelbase_m);
     }
 
     #[test]
