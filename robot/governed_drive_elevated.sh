@@ -89,6 +89,14 @@ INTENT_JSON="$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1
 echo "  POST /intent  ${INTENT_JSON}"
 curl -s "${MICK_URL}/intent" -XPOST -H 'content-type: application/json' -d "${INTENT_JSON}"; echo
 
+# ---- 3b. corridor probe (one-shot: is it boxed in?) ------------------------
+banner "3b/4  corridor probe — nearest obstacle + planner verdict (read-only)"
+echo "  (replays occy's scan->Taj->planner call once; 'obstacle within 1 m ahead'"
+echo "   means occy's 0.00 is the checker CORRECTLY refusing, not a fault)"
+python3 "$HOME/kirra-runtime-sdk/robot/inspect_corridor.py" 2>&1 \
+  | grep -iE 'nearest|corridor|object|planner|MRC|obstacle|EMPTY|v=|verdict|stop|forward' \
+  || echo "  (corridor probe failed — non-fatal; sidecars up?)"
+
 # ---- 4. live view ----------------------------------------------------------
 banner "4/4  LIVE — occy proposal / verdict / hold reason (Ctrl-C to stop)"
 echo "  If /cmd_vel_raw stays 0.00, read the 'hold:' reason below it:"
