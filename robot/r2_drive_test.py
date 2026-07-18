@@ -567,7 +567,7 @@ def test_odom_first_sample_only_anchors_no_motion() -> None:
 def test_odom_straight_advances_x_by_mean_distance() -> None:
     # delta=0 → pure forward. 4000 ticks both wheels → 4000*_MPT metres.
     st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
-    st = odom_step(st, 4000, 4000, 0.0, _MPT, _WB)
+    st = odom_step(st, 4000, 4000, 0.0, _MPT, _WB, max_step_m=100.0)
     assert abs(st.pose.x_m - 4000 * _MPT) < 1e-9
     assert abs(st.pose.y_m) < 1e-12
     assert abs(st.pose.yaw_rad) < 1e-12
@@ -578,7 +578,7 @@ def test_odom_reaches_one_metre_and_would_trip_goal() -> None:
     # ego x crosses the goal distance. Prove x converges to ~1.0 m.
     st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
     ticks = int(round(1.0 / _MPT))
-    st = odom_step(st, ticks, ticks, 0.0, _MPT, _WB)
+    st = odom_step(st, ticks, ticks, 0.0, _MPT, _WB, max_step_m=100.0)
     assert abs(st.pose.x_m - 1.0) < 1e-3
 
 
@@ -587,14 +587,14 @@ def test_odom_heading_from_steering_not_wheel_difference() -> None:
     # delta=0: a differential model would spin; the bicycle model must NOT — yaw
     # stays 0 and x advances by the mean.
     st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
-    st = odom_step(st, 5000, 3000, 0.0, _MPT, _WB)  # 34%-ish imbalance
+    st = odom_step(st, 5000, 3000, 0.0, _MPT, _WB, max_step_m=100.0)  # 34%-ish imbalance
     assert abs(st.pose.yaw_rad) < 1e-12, "wheel diff must not create yaw at delta=0"
     assert abs(st.pose.x_m - 4000 * _MPT) < 1e-9  # mean of 5000,3000
 
 
 def test_odom_positive_delta_turns_left() -> None:
     st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
-    st = odom_step(st, 4000, 4000, 0.30, _MPT, _WB)  # steering left
+    st = odom_step(st, 4000, 4000, 0.30, _MPT, _WB, max_step_m=100.0)  # steering left
     assert st.pose.yaw_rad > 0.0, "a positive road-wheel angle must yaw left (+)"
     # dyaw = d*tan(delta)/L with d=4000*_MPT
     d = 4000 * _MPT
@@ -607,17 +607,38 @@ def test_odom_backward_decrements_x() -> None:
     assert st.pose.x_m < 0.0 and abs(st.pose.x_m + 2000 * _MPT) < 1e-9
 
 
-def test_odom_tick_wrap_re_anchors_without_teleport() -> None:
+def test_odom_wrap_re_anchors_without_teleport() -> None:
     st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
-    st = odom_step(st, 4000, 4000, 0.0, _MPT, _WB)
+    st = odom_step(st, 4000, 4000, 0.0, _MPT, _WB, max_step_m=100.0)
     x_before = st.pose.x_m
-    # A garbage jump beyond max_tick_jump must hold the pose but re-anchor ticks.
-    st = odom_step(st, 4000 + 10_000_000, 4000, 0.0, _MPT, _WB, max_tick_jump=100_000)
+    # A non-physical jump (2500 m of implied travel) must hold the pose + re-anchor.
+    st = odom_step(st, 4000 + 10_000_000, 4000, 0.0, _MPT, _WB, max_step_m=100.0)
     assert st.pose.x_m == x_before, "a counter wrap must not teleport the pose"
     assert st.last_left_ticks == 4000 + 10_000_000  # re-anchored
     # A subsequent normal step integrates from the new baseline.
-    st = odom_step(st, 4000 + 10_000_000 + 4000, 8000, 0.0, _MPT, _WB)
+    st = odom_step(st, 4000 + 10_000_000 + 4000, 8000, 0.0, _MPT, _WB, max_step_m=100.0)
     assert abs(st.pose.x_m - (x_before + 4000 * _MPT)) < 1e-9
+
+
+def test_odom_16bit_wrap_is_caught_by_distance_bound() -> None:
+    # THE realistic case a tick-magnitude threshold would miss: a signed 16-bit
+    # counter wrap (~65536 ticks) implies ~16.4 m of travel in one step — a raw
+    # 100k-tick threshold would let it through, but the DISTANCE bound (default
+    # 1.0 m) rejects it. Guards finding: a 16-bit wrap must not teleport the pose.
+    st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
+    st = odom_step(st, 100, 100, 0.0, _MPT, _WB)
+    x_before = st.pose.x_m
+    st = odom_step(st, 100 - 65536, 100, 0.0, _MPT, _WB)  # 16-bit wrap on the left wheel
+    assert st.pose.x_m == x_before, "a 16-bit wrap (~65536 ticks) must be rejected, not integrated"
+
+
+def test_odom_large_but_physical_step_is_kept() -> None:
+    # A vigorous hand-spin (~0.2 m in one 50 ms step) is physical (< 1.0 m bound)
+    # and MUST be integrated, not mistaken for a wrap.
+    st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
+    ticks = int(round(0.2 / _MPT))
+    st = odom_step(st, ticks, ticks, 0.0, _MPT, _WB)
+    assert abs(st.pose.x_m - ticks * _MPT) < 1e-9, "a physical step must not be rejected"
 
 
 def test_odom_nonfinite_distance_holds_pose() -> None:

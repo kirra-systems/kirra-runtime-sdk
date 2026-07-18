@@ -63,6 +63,7 @@ from kirra_ffi import KirraConsumer, REFUSAL_NAMES, split_frame  # noqa: E402
 from r2_drive import (  # noqa: E402
     ClosedLoopSpeedMatcher,
     R2CalibrationError,
+    _wrap_angle,
     apply_actuation,
     calibration_from_env,
     closed_loop_enabled,
@@ -195,6 +196,12 @@ def main() -> int:
     odom_topic = os.environ.get("KIRRA_R2_ODOM_TOPIC", "/odom")
     odom_frame = os.environ.get("KIRRA_R2_ODOM_FRAME", "odom")
     odom_child_frame = os.environ.get("KIRRA_R2_ODOM_CHILD_FRAME", "base_link")
+    if odom_enabled and odom_m_per_tick <= 0.0:
+        # A 0/negative scale silently yields a never-advancing (or reversed) odom
+        # → the planner never sees the goal approach → the robot drives forever.
+        # It is a measured physical constant like the others: fail closed.
+        print("FATAL: KIRRA_R2_M_PER_TICK must be > 0 (odom)", file=sys.stderr)
+        return 2
     if odom_enabled and odom_period_ms <= 0:
         print("FATAL: KIRRA_R2_ODOM_PERIOD_MS must be > 0", file=sys.stderr)
         return 2
@@ -453,9 +460,7 @@ def main() -> int:
             dist = math.hypot(dx, dy)
             # Signed forward speed: project the step onto the entry heading.
             forward = dist if (dx * math.cos(prev.yaw_rad) + dy * math.sin(prev.yaw_rad)) >= 0.0 else -dist
-            dyaw = math.atan2(
-                math.sin(cur.yaw_rad - prev.yaw_rad), math.cos(cur.yaw_rad - prev.yaw_rad)
-            )
+            dyaw = _wrap_angle(cur.yaw_rad - prev.yaw_rad)  # correct across the ±pi seam
             msg = Odometry()
             msg.header.stamp = node.get_clock().now().to_msg()
             msg.header.frame_id = odom_frame
@@ -467,6 +472,15 @@ def main() -> int:
             msg.pose.pose.orientation.w = qw
             msg.twist.twist.linear.x = forward / dt
             msg.twist.twist.angular.z = dyaw / dt
+            # Honest covariance: this is UN-fused wheel dead-reckoning, loosely
+            # trusted. A modest diagonal (x,y,yaw / vx,wz) tells a downstream
+            # estimator not to treat it as ground truth; occy ignores it. The
+            # unset DOF rows stay 0 (planar robot). Indices: 6x6 row-major.
+            msg.pose.covariance[0] = 0.02   # x
+            msg.pose.covariance[7] = 0.02   # y
+            msg.pose.covariance[35] = 0.05  # yaw
+            msg.twist.covariance[0] = 0.05  # vx
+            msg.twist.covariance[35] = 0.10  # wz
             odom_pub.publish(msg)
 
         node.create_timer(odom_period_ms / 1000.0, on_odom_timer)

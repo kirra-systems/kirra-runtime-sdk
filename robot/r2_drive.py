@@ -307,26 +307,29 @@ def odom_step(
     delta_rad: float,
     m_per_tick: float,
     wheelbase_m: float,
-    max_tick_jump: int = 100_000,
+    max_step_m: float = 1.0,
 ) -> OdomState:
     """Fold one encoder sample into the accumulator (pure).
 
     The FIRST sample only anchors the tick baseline (no motion — there is no
-    prior count to difference against). A per-step tick delta whose magnitude
-    exceeds `max_tick_jump` is treated as a counter wrap / garbage frame: the
-    baseline is re-anchored and NO motion is integrated (a wrap must never
-    teleport the pose). Otherwise ticks → distance → `integrate_ackermann_odom`.
+    prior count to difference against). A per-step wheel travel whose magnitude
+    exceeds `max_step_m` is PHYSICALLY IMPOSSIBLE for this robot in one odom
+    period (<0.2 m/s → <~0.01 m/step) and is treated as an encoder-counter WRAP
+    or garbage frame: the baseline is re-anchored and NO motion is integrated (a
+    wrap must never teleport the pose). This bound is on DISTANCE, not tick
+    magnitude, so it is independent of the encoder counter's width — a 16- or
+    32-bit wrap (metres of implied travel) is caught the same way, unlike a raw
+    tick threshold that a 16-bit wrap (~65 k ticks) could slip under. Otherwise
+    ticks → distance → `integrate_ackermann_odom`.
     """
     if state.last_left_ticks is None or state.last_right_ticks is None:
         return OdomState(pose=state.pose, last_left_ticks=left_ticks, last_right_ticks=right_ticks)
-    dl = left_ticks - state.last_left_ticks
-    dr = right_ticks - state.last_right_ticks
-    if abs(dl) > max_tick_jump or abs(dr) > max_tick_jump:
-        # Re-anchor on a suspicious jump; hold the pose.
+    d_left = (left_ticks - state.last_left_ticks) * m_per_tick
+    d_right = (right_ticks - state.last_right_ticks) * m_per_tick
+    if abs(d_left) > max_step_m or abs(d_right) > max_step_m:
+        # Re-anchor on a non-physical jump; hold the pose.
         return OdomState(pose=state.pose, last_left_ticks=left_ticks, last_right_ticks=right_ticks)
-    new_pose = integrate_ackermann_odom(
-        state.pose, dl * m_per_tick, dr * m_per_tick, delta_rad, wheelbase_m
-    )
+    new_pose = integrate_ackermann_odom(state.pose, d_left, d_right, delta_rad, wheelbase_m)
     return OdomState(pose=new_pose, last_left_ticks=left_ticks, last_right_ticks=right_ticks)
 
 
