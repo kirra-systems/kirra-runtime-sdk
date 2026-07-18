@@ -682,9 +682,10 @@ fn is_posture_exempt(method: &axum::http::Method, path: &str) -> bool {
     // paths cannot inherit the exemption unintentionally — matching the GET/HEAD
     // discipline of the Bug 2 observability block below.
     if method == axum::http::Method::POST
-        && (matches!(path,
-            "/attestation/register" | "/attestation/verify" | "/attestation/identity/register")
-            || path.starts_with("/attestation/challenge/"))
+        && (matches!(
+            path,
+            "/attestation/register" | "/attestation/verify" | "/attestation/identity/register"
+        ) || path.starts_with("/attestation/challenge/"))
     {
         return true;
     }
