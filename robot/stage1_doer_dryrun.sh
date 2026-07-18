@@ -111,10 +111,13 @@ ros2 service call /occy_doer/set_logger_levels rcl_interfaces/srv/SetLoggerLevel
      "{levels: [{name: 'occy_doer', level: 10}]}" >/dev/null 2>&1 \
      && echo "  occy_doer log level -> DEBUG" || echo "  ⚠ could not set occy DEBUG (non-fatal)"
 
-# fire the LLM intent (go_to becomes the goal, grounded ego->odom at receipt)
+# fire the LLM intent (go_to becomes the goal, grounded ego->odom at receipt).
+# JSON-encode the body via python so quotes/backslashes/newlines in INTENT_TEXT
+# can't produce invalid JSON (shell string interpolation would break here).
 echo "  POST /intent  text=\"$INTENT_TEXT\""
+INTENT_JSON="$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "$INTENT_TEXT")"
 curl -s "$MICK_URL/intent" -XPOST -H 'content-type: application/json' \
-     -d "{\"text\":\"$INTENT_TEXT\"}" ; echo
+     -d "$INTENT_JSON" ; echo
 echo -n "  /intent/last -> "; curl -s "$MICK_URL/intent/last" ; echo
 
 # --- 5. live view: occy decision + the bounded proposal -------------------------

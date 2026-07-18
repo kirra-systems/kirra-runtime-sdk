@@ -36,7 +36,10 @@ import os
 import re
 import sys
 
-import requests
+try:
+    import requests
+except ImportError:
+    sys.exit("kitt_converse: python3-requests missing (pip3 install requests)")
 
 # Reuse Stage 1's read-only grounding + persona + speak (robot/ is on sys.path[0]).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

@@ -677,9 +677,14 @@ fn is_posture_exempt(method: &axum::http::Method, path: &str) -> bool {
     // are the CSPRNG-nonce challenge-response (which "provides its own
     // guarantee", #73). Same recovery-affordance rationale as the `/console`
     // plane above — reachable regardless of posture BECAUSE it is the way out.
-    if matches!(path,
-        "/attestation/register" | "/attestation/verify" | "/attestation/identity/register")
-        || path.starts_with("/attestation/challenge/")
+    // POST-only (the sole methods routed on these paths today): scope the
+    // exemption to the write verb so a future GET/HEAD sibling on one of these
+    // paths cannot inherit the exemption unintentionally — matching the GET/HEAD
+    // discipline of the Bug 2 observability block below.
+    if method == axum::http::Method::POST
+        && (matches!(path,
+            "/attestation/register" | "/attestation/verify" | "/attestation/identity/register")
+            || path.starts_with("/attestation/challenge/"))
     {
         return true;
     }
@@ -1231,6 +1236,12 @@ mod actuator_middleware_tests {
             assert!(
                 is_posture_exempt(&Method::POST, p),
                 "{p} MUST be posture-exempt (trust bootstrap out of empty-fleet LockedOut)"
+            );
+            // POST-only: a GET/HEAD sibling on the same path must NOT inherit the
+            // exemption (no such route today; pins the method constraint).
+            assert!(
+                !is_posture_exempt(&Method::GET, p),
+                "{p} must NOT be posture-exempt for GET (bootstrap exemption is POST-only)"
             );
         }
         // Prefix-confusion guard — a near-miss on a bootstrap route must NOT ride

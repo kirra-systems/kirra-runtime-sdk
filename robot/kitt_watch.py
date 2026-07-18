@@ -30,7 +30,10 @@ import re
 import sys
 import time
 
-import requests
+try:
+    import requests
+except ImportError:
+    sys.exit("kitt_watch: python3-requests missing (pip3 install requests)")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kitt_ask import MICK, VERIFIER, speak  # noqa: E402
