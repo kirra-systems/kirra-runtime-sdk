@@ -51,6 +51,7 @@ servo, §2a) and NEVER calls set_car_motion.
 
 from __future__ import annotations
 
+import math
 import os
 import signal
 import sys
@@ -65,9 +66,12 @@ from r2_drive import (  # noqa: E402
     apply_actuation,
     calibration_from_env,
     closed_loop_enabled,
+    odom_step,
+    odom_zero,
     r2_safe_stop,
     speed_match_params_from_env,
     translate,
+    yaw_to_quaternion_zw,
 )
 
 # Actuation last-hop selector (R2 Path B). Default = the existing X3 path
@@ -173,6 +177,28 @@ def main() -> int:
         r2_matcher is not None
         and (os.environ.get("KIRRA_R2_CLOSED_LOOP_DEBUG") or "").strip().lower() in ("1", "true", "yes", "on")
     )
+
+    # R2 wheel-odometry — OPT-IN (default OFF → byte-identical, no /odom publish).
+    # Publishes nav_msgs/Odometry from the rear-wheel encoders so the PLANNER sees
+    # the ego advance and STOPS at the goal. Without it the doer runs on a static-
+    # origin /odom crutch (never sees the goal approach) and a floor drive would
+    # command forward indefinitely. Ackermann dead-reckoning: forward travel from
+    # the mean rear-wheel distance, heading from the STEERING angle (never the
+    # per-wheel encoder difference — the R2's independent rear motors differ ~34%
+    # at equal PWM and would fabricate phantom yaw). r2 mode only.
+    odom_enabled = (
+        drive_mode == DRIVE_MODE_R2
+        and (os.environ.get("KIRRA_R2_ODOM_ENABLED") or "").strip().lower() in ("1", "true", "yes", "on")
+    )
+    odom_m_per_tick = _req_float("KIRRA_R2_M_PER_TICK") if odom_enabled else 0.0
+    odom_period_ms = _req_int("KIRRA_R2_ODOM_PERIOD_MS") if os.environ.get("KIRRA_R2_ODOM_PERIOD_MS") else 50
+    odom_topic = os.environ.get("KIRRA_R2_ODOM_TOPIC", "/odom")
+    odom_frame = os.environ.get("KIRRA_R2_ODOM_FRAME", "odom")
+    odom_child_frame = os.environ.get("KIRRA_R2_ODOM_CHILD_FRAME", "base_link")
+    if odom_enabled and odom_period_ms <= 0:
+        print("FATAL: KIRRA_R2_ODOM_PERIOD_MS must be > 0", file=sys.stderr)
+        return 2
+
     topic = os.environ.get("KIRRA_RELEASE_TOPIC", "/kirra/release")
 
     # The verify core (fail-closed: raises on a NULL handle).
@@ -190,17 +216,17 @@ def main() -> int:
     bot = Rosmaster(com=motor_port)
     bot.create_receive_threading()
 
-    # Closed-loop speed matching reads the wheel encoders (get_motor_encoder),
-    # which ONLY update from the MCU's auto-report frames. Enable auto-report once
-    # here, fail-closed — without it every encoder read is a stale 0, so the
-    # matcher would see a dead wheel and immediately trip a stall→MRC fault (or
-    # never converge). Open-loop paths never read encoders, so this is scoped to
-    # the closed-loop consumer only (byte-identical otherwise).
-    if r2_matcher is not None:
+    # Closed-loop speed matching AND wheel-odometry read the encoders
+    # (get_motor_encoder), which ONLY update from the MCU's auto-report frames.
+    # Enable auto-report once here, fail-closed — without it every encoder read is
+    # a stale 0, so the matcher would trip a stall→MRC fault (or never converge)
+    # and odom would never advance. Open-loop-without-odom paths never read
+    # encoders, so this is scoped to those consumers only (byte-identical otherwise).
+    if r2_matcher is not None or odom_enabled:
         try:
             bot.set_auto_report_state(True)
         except Exception as e:  # noqa: BLE001 — no encoder feed → refuse to start
-            print(f"FATAL: closed-loop drive needs encoder auto-report, but "
+            print(f"FATAL: encoder auto-report is required (closed-loop or odom) but "
                   f"set_auto_report_state(True) failed: {e}", file=sys.stderr)
             return 2
 
@@ -289,15 +315,19 @@ def main() -> int:
 
     alarm_announced = False
     cl_debug_ctr = 0  # throttle counter for the closed-loop debug log
+    last_delta_rad = 0.0  # steering angle of the last actuation (odom heading source)
 
     def actuate(linear: float, angular: float) -> None:
-        nonlocal cl_debug_ctr
+        nonlocal cl_debug_ctr, last_delta_rad
         if drive_mode == DRIVE_MODE_R2:
             # Path B: the Ackermann last-hop runs AFTER verify (the same place
             # the x3 firmware mixing runs after verify). translate() is
             # fail-closed; an MRC/stop decision carries zeros, so this same call
             # stops the platform.
             act = translate(linear, angular, r2_cal)
+            # The odom integrator's heading source: the kinematic road-wheel angle
+            # this actuation applied (0.0 for a stop/MRC). Latched for the odom timer.
+            last_delta_rad = act.delta_rad
             if r2_matcher is None:
                 apply_actuation(bot, act)  # open-loop equal-PWM (default)
                 return
@@ -380,6 +410,56 @@ def main() -> int:
             actuate(t.linear, t.angular)
 
     node.create_timer(control_period_ms / 1000.0, on_timer)
+
+    # R2 wheel-odometry publisher (opt-in). Reads the rear-wheel encoders each
+    # period and publishes an Ackermann dead-reckoning pose so the planner sees
+    # the ego advance and stops at the goal. Read-only w.r.t. actuation — never
+    # writes a motor; a transient encoder-read fault skips the tick (fail-soft).
+    if odom_enabled:
+        from nav_msgs.msg import Odometry  # robot-only dep; imported under the gate
+
+        odom_pub = node.create_publisher(Odometry, odom_topic, 10)
+        odom_state = odom_zero()
+
+        def on_odom_timer() -> None:
+            nonlocal odom_state
+            try:
+                enc = bot.get_motor_encoder()  # [m1(RL), m2, m3, m4(RR)]
+                left, right = int(enc[0]), int(enc[3])
+            except Exception:  # noqa: BLE001 — transient read fault → skip this tick
+                return
+            prev = odom_state.pose
+            odom_state = odom_step(
+                odom_state, left, right, last_delta_rad, odom_m_per_tick, r2_cal.wheelbase_m
+            )
+            cur = odom_state.pose
+            dt = odom_period_ms / 1000.0
+            dx, dy = cur.x_m - prev.x_m, cur.y_m - prev.y_m
+            dist = math.hypot(dx, dy)
+            # Signed forward speed: project the step onto the entry heading.
+            forward = dist if (dx * math.cos(prev.yaw_rad) + dy * math.sin(prev.yaw_rad)) >= 0.0 else -dist
+            dyaw = math.atan2(
+                math.sin(cur.yaw_rad - prev.yaw_rad), math.cos(cur.yaw_rad - prev.yaw_rad)
+            )
+            msg = Odometry()
+            msg.header.stamp = node.get_clock().now().to_msg()
+            msg.header.frame_id = odom_frame
+            msg.child_frame_id = odom_child_frame
+            msg.pose.pose.position.x = cur.x_m
+            msg.pose.pose.position.y = cur.y_m
+            qz, qw = yaw_to_quaternion_zw(cur.yaw_rad)
+            msg.pose.pose.orientation.z = qz
+            msg.pose.pose.orientation.w = qw
+            msg.twist.twist.linear.x = forward / dt
+            msg.twist.twist.angular.z = dyaw / dt
+            odom_pub.publish(msg)
+
+        node.create_timer(odom_period_ms / 1000.0, on_odom_timer)
+        node.get_logger().info(
+            f"R2 wheel-odometry ON → {odom_topic} @ {1000.0 / odom_period_ms:.0f} Hz "
+            f"(m/tick={odom_m_per_tick}, wheelbase={r2_cal.wheelbase_m} m; Ackermann "
+            f"dead-reckoning: heading from steering, distance from mean rear encoder)."
+        )
 
     # Guaranteed stop on any exit path (SIGINT / SIGTERM / exception / normal).
     # Same double-shutdown class as the publisher's hardware finding: shutdown
