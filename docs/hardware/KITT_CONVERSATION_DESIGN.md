@@ -116,7 +116,7 @@ audio-engineering effort, and the last mile, not the first.
 |---|---|---|
 | **0** ✅ | Speak one command; it drives (bounded) or explains the refusal | *done* — `speech_shell` + PTT button |
 | **1** ✅ | **Grounded Q&A** — "what's around us / why did we stop / are we OK" answered from real telemetry (SPEAK only) | *done* — `robot/kitt_ask.py` (read-only telemetry reader + KITT prompt; no motion path) |
-| **2** | **Multi-turn + persona** — conversation memory + KITT character; router splits chat vs directive; directive still goes through the ONE door | `kitt_service` dialogue manager |
+| **2** ✅ | **Multi-turn + persona** — conversation memory + KITT character; router splits chat vs directive; directive still goes through the ONE door | *done* — `robot/kitt_converse.py` (memory + persona + fail-closed router → mick `POST /intent`) |
 | **3** | **Proactive voice** — event subscriptions (MRC/arrival/posture) → spoken lines | event→speech bridge |
 | **4** | **Voice + polish** — the KITT Piper voice, listening chirp, arrival tones | audio assets |
 | **5** | **Full-duplex / barge-in** | streaming STT + duplex audio |
@@ -124,6 +124,28 @@ audio-engineering effort, and the last mile, not the first.
 Stage 1 is the natural next step and is **almost free**: the telemetry it needs is
 already exposed (posture GETs, `/narration/last`, the corridor snapshot), and it's
 pure SPEAK — it cannot affect safety, so it needs no new review of the spine.
+
+### Stage 2 — how to run (`robot/kitt_converse.py`)
+
+```bash
+./robot/kitt_converse.py                 # interactive: one utterance per line (Ctrl-D quits)
+echo "take us to the door" | ./robot/kitt_converse.py --once
+whisper-cli … | ./robot/kitt_converse.py # voice: pipe the transcript per line (PTT + STT)
+```
+
+One dialogue, two channels, with memory + persona. Per turn KITT emits a JSON
+`{say, directive}`; it speaks `say`, and **only if** `directive` is a clear
+movement request does it hand that TEXT to `mick_service POST /intent` — the
+same fail-closed door a human types into. **The door is the router:** KITT never
+builds an intent; mick's `MickIntent::parse_llm_json` is the authority, occy +
+the checker bound the result.
+
+Fail-closed routing (unit-checked in `parse_reply`): anything KITT can't parse as
+an unambiguous directive — prose, a `null`/`"none"`/empty directive, a question —
+resolves to **no directive → SPEAK only → no motion**. A misheard or hallucinated
+directive at worst becomes a checker-APPROVED bounded motion; an unparseable turn
+drives nothing. The only actuation-adjacent call in the whole script is the
+text-to-`/intent` POST — no publisher, no serial, no release token.
 
 ### Stage 1 — how to run (`robot/kitt_ask.py`)
 
