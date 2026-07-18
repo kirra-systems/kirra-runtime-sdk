@@ -38,6 +38,12 @@ occy_doer:
     # a different lidar rate needs a deployment-review update here.
     scan_stale_s: 0.25
 
+    # Mick typed-intent sidecar (kirra-sidecars mick_service). Empty = off
+    # (goals come from /goal_pose only). Set here so occy_doer polls GET
+    # /intent/last each tick and grounds NEW positional intents as its goal —
+    # the R2 voice/LLM goal path. Mick publishes INTENTS, never commands.
+    mick_url: "http://127.0.0.1:8102"
+
     # --- R2-SIZED footprint + clearance (doer-side; sent to the planner's
     # CHECKER each tick). WITHOUT these the node falls back to occy_doer.py's
     # courier-sized defaults (half 0.15/0.18, clearance 0.6/0.6) and judges a
