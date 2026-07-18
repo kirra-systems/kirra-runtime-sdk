@@ -659,6 +659,31 @@ fn is_posture_exempt(method: &axum::http::Method, path: &str) -> bool {
         return true;
     }
 
+    // Trust-BOOTSTRAP plane (node registration + attestation handshake). These
+    // establish or PROVE a node's trust identity; none can reach an actuator, so
+    // the posture gate — which exists to block COMMANDS — must not gate them.
+    //
+    // This is load-bearing for the M-9 empty-fleet fail-closed policy: a fresh
+    // Active verifier with zero live nodes is forced LockedOut ("no positive
+    // trust evidence"), which auto-recovers to the DAG posture "the instant a
+    // node is registered" — the posture-engine comment explicitly relies on
+    // "registration routes are not posture-gated" (src/posture_engine.rs, M-9).
+    // Without this exemption those routes classify as `WriteState` and LockedOut
+    // 503s them, so the ONLY path out of the empty-fleet lockout (register +
+    // attest the first node) is itself blocked BY the lockout — an
+    // un-bootstrappable deadlock. Each route keeps its own guarantee independent
+    // of fleet posture: `/attestation/register` + `/attestation/identity/register`
+    // are admin-token gated; `/attestation/challenge/*` + `/attestation/verify`
+    // are the CSPRNG-nonce challenge-response (which "provides its own
+    // guarantee", #73). Same recovery-affordance rationale as the `/console`
+    // plane above — reachable regardless of posture BECAUSE it is the way out.
+    if matches!(path,
+        "/attestation/register" | "/attestation/verify" | "/attestation/identity/register")
+        || path.starts_with("/attestation/challenge/")
+    {
+        return true;
+    }
+
     // Bug 2 — the documented "public read-only" fleet-observability endpoints.
     // A GET/HEAD cannot reach an actuator (the posture gate exists to block
     // COMMANDS, not reads), and `/metrics` already exposes fleet posture during
@@ -1193,6 +1218,34 @@ mod actuator_middleware_tests {
             !is_posture_exempt(&Method::POST, "/federation/reports/submit"),
             "the report-submit write must stay posture-gated"
         );
+        // Trust-BOOTSTRAP plane — EXEMPT for the handshake methods (POST) so the
+        // M-9 empty-fleet LockedOut can auto-recover: register + attest the first
+        // node is the ONLY way out and must not be blocked BY the lockout. None
+        // can actuate; each keeps its own gate (admin token / challenge-response).
+        for p in [
+            "/attestation/register",
+            "/attestation/verify",
+            "/attestation/identity/register",
+            "/attestation/challenge/node-1",
+        ] {
+            assert!(
+                is_posture_exempt(&Method::POST, p),
+                "{p} MUST be posture-exempt (trust bootstrap out of empty-fleet LockedOut)"
+            );
+        }
+        // Prefix-confusion guard — a near-miss on a bootstrap route must NOT ride
+        // in on a loose prefix (challenge exempts only on the trailing-slash form).
+        for p in [
+            "/attestation/registerX",
+            "/attestation/challenge",
+            "/attestation/challengeX",
+            "/attestation/verifyX",
+        ] {
+            assert!(
+                !is_posture_exempt(&Method::POST, p),
+                "{p} must NOT be posture-exempt (prefix-confusion near-miss)"
+            );
+        }
         // Still gated even for GET (not in the documented public-read-only set /
         // intentionally denied under LockedOut): the campaign assignment feed and
         // the fabric reads.
@@ -1213,7 +1266,7 @@ mod actuator_middleware_tests {
             "/console-x",
             "/consol",
             "/con",
-            "/attestation/register",
+            "/fleet/dependencies",
             "/",
         ] {
             assert!(
