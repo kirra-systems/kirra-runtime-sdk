@@ -115,7 +115,7 @@ audio-engineering effort, and the last mile, not the first.
 | Stage | Capability | Build |
 |---|---|---|
 | **0** ✅ | Speak one command; it drives (bounded) or explains the refusal | *done* — `speech_shell` + PTT button |
-| **1** | **Grounded Q&A** — "what's around us / why did we stop / are we OK" answered from real telemetry (SPEAK only) | read-only telemetry reader + a Q&A prompt; no motion path touched |
+| **1** ✅ | **Grounded Q&A** — "what's around us / why did we stop / are we OK" answered from real telemetry (SPEAK only) | *done* — `robot/kitt_ask.py` (read-only telemetry reader + KITT prompt; no motion path) |
 | **2** | **Multi-turn + persona** — conversation memory + KITT character; router splits chat vs directive; directive still goes through the ONE door | `kitt_service` dialogue manager |
 | **3** | **Proactive voice** — event subscriptions (MRC/arrival/posture) → spoken lines | event→speech bridge |
 | **4** | **Voice + polish** — the KITT Piper voice, listening chirp, arrival tones | audio assets |
@@ -124,6 +124,26 @@ audio-engineering effort, and the last mile, not the first.
 Stage 1 is the natural next step and is **almost free**: the telemetry it needs is
 already exposed (posture GETs, `/narration/last`, the corridor snapshot), and it's
 pure SPEAK — it cannot affect safety, so it needs no new review of the spine.
+
+### Stage 1 — how to run (`robot/kitt_ask.py`)
+
+```bash
+./robot/kitt_ask.py "what do you see?"       # answers from a live /scan → Taj
+./robot/kitt_ask.py "why did we stop?"       # answers from the #893 verdict relay
+./robot/kitt_ask.py "are we OK?"             # answers from /fleet/posture
+echo "what's around us" | ./robot/kitt_ask.py   # stdin form (e.g. from whisper-cli)
+export KIRRA_TTS_CMD="./speak.sh"            # optional → KITT speaks the answer aloud
+```
+
+Structural safety (why Stage 1 needs no spine review): `kitt_ask.py` makes only
+**read-only GETs** (posture, narration) + a Taj `/perception` **analysis** POST +
+an Ollama chat POST — there is **no `/intent` POST, no ROS publisher, no serial,
+no release token**. It is Channel A by construction: it can talk about the robot,
+never move it. Each telemetry source is fetched **fail-soft** — a missing source
+becomes "unavailable" in KITT's answer (proven: with everything offline it says
+"my voice module is offline, here is what I have" + the unavailable list, and
+never invents a fact). Grounding: the LLM is instructed to answer ONLY from the
+supplied telemetry; the persona phrases, the numbers are ground truth.
 
 ---
 
