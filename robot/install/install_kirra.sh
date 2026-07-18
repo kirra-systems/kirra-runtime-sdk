@@ -105,7 +105,7 @@ echo "== 3. install -> ${OPT} =="
 sudo install -d -m 0755 "${OPT}/lib" "${OPT}/bin" "${OPT}/robot"
 sudo install -m 0644 "${SO}"   "${OPT}/lib/libkirra_consumer_ffi.so"
 sudo install -m 0755 "${MINT}" "${OPT}/bin/kirra_ros_release_mint"
-for f in kirra_motor_consumer.py kirra_ffi.py kirra_release_publisher.py; do
+for f in kirra_motor_consumer.py kirra_ffi.py kirra_release_publisher.py r2_drive.py; do
   sudo install -m 0644 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
 done
 for f in first_run_elevated.sh live_loop_elevated.sh steering_bench_elevated.sh; do

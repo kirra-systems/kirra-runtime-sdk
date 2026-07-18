@@ -4,6 +4,19 @@ cmd_vel_interceptor:
     kirra_token: ""              # Set via environment variable KIRRA_ADMIN_TOKEN or launch arg
     kirra_client_id: "ros2-interceptor-01"
     wheelbase_m: 0.2             # Hiwonder ROSOrin wheelbase (meters)
+    # ── R2-CLASS FLIP (draft, GATED — 2 of 3 uncomment sites) ─────────────────
+    # The interceptor cross-checks wheelbase_m against the wheelbase the verifier
+    # reports for its ACTIVE class contract; a mismatch (>1e-6) latches a
+    # PERMANENT stop (enforcement_decision.py WHEELBASE_TOLERANCE_M). The active
+    # class's contract wheelbase must be matched EXACTLY:
+    #   • courier interim → 0.5   • r2 class → 0.229 (== the physical, measured)
+    # When you flip to r2 (KIRRA_VEHICLE_CLASS=r2 + platform_map profile_class="r2"),
+    # comment the 0.2 line above and uncomment the r2 line below. Flip all THREE
+    # sites together — robot/install/PLATFORM_R2_PENDING.md "THE FLIP".
+    # NOTE: the current 0.2 matches NEITHER class — it is safe only while no
+    # verifier is in the loop (Stage-1 doer dry run); a Stage-2 courier run needs
+    # 0.5, a Stage-2 r2 run needs 0.229.
+    # wheelbase_m: 0.229         # r2 contract wheelbase (== physical, measured)
     max_speed_mps: 1.8           # ROSOrin spec max speed (m/s)
     input_topic: "/cmd_vel"
     output_topic: "/cmd_vel_safe"
@@ -24,6 +37,44 @@ occy_doer:
     # bench-verified TG30 at ~10 Hz (HARDWARE_FINDINGS_R2X3.md deployment);
     # a different lidar rate needs a deployment-review update here.
     scan_stale_s: 0.25
+
+    # Mick typed-intent sidecar (kirra-sidecars mick_service). Empty = off
+    # (goals come from /goal_pose only). Set here so occy_doer polls GET
+    # /intent/last each tick and grounds NEW positional intents as its goal —
+    # the R2 voice/LLM goal path. Mick publishes INTENTS, never commands.
+    mick_url: "http://127.0.0.1:8102"
+
+    # --- R2-SIZED footprint + clearance (doer-side; sent to the planner's
+    # CHECKER each tick). WITHOUT these the node falls back to occy_doer.py's
+    # courier-sized defaults (half 0.15/0.18, clearance 0.6/0.6) and judges a
+    # ~0.2 m robot as if it needed a courier's lane -> the corridor pinches
+    # shut and KIRRA MRCs even passable gaps. Setting the robot's REAL size is
+    # accurate modelling, NOT a safety relaxation.
+    #
+    # NOTE the two distinct "space" surfaces (docs/CONTRACT_PROFILES.md):
+    #   * footprint (half_*): the robot's BODY. Keep it >= the real robot.
+    #     NEVER shrink below reality.
+    #   * clearance TARGETS (lateral_clearance_target_m /
+    #     rss_lateral_alignment_tolerance_m): extra room DEMANDED beyond the
+    #     body. A 0.2 m robot honestly needs far less than an AV's 0.6 m.
+    # This is the doer dry-run envelope only; the ACTUATION envelope (Stage 2)
+    # is the verifier's per-class contract (courier interim until a measured
+    # `r2` class lands -- see robot/install/PLATFORM_R2_PENDING.md).
+    #
+    # PROVENANCE: footprint MEASURED (body 13 in x 8 in = 0.330 x 0.203 m ->
+    # half 0.165 x 0.102, +small margin); steering MEASURED (full lock ~39 deg
+    # / 0.68 rad @ cmd +/-45, r2_drive_calibration_results.txt Phase C
+    # 2026-07-17); wheelbase MEASURED ~0.229 m (front-to-rear CONFIRM still
+    # owed). Origin-offset / overhangs unmeasured -> the corridor_back
+    # extension (0.5 m) covers the rear; half_length assumes a roughly-front
+    # origin (lidar at base). Firm both up per PLATFORM_R2_PENDING.
+    vehicle_class: "courier"                    # doer RSS-band label; numbers below win
+    wheelbase_m: 0.229                          # MEASURED ~9 in (front-to-rear CONFIRM pending)
+    half_length_m: 0.17                         # MEASURED body 13 in=0.330 m -> half 0.165 + margin
+    half_width_m: 0.11                          # MEASURED body 8 in=0.203 m -> half 0.102 + margin
+    max_steering_deg: 39.0                      # MEASURED full lock ~39 deg (0.68 rad) @ cmd +/-45 (calib Phase C)
+    lateral_clearance_target_m: 0.15            # robot-scale (was courier 0.6)
+    rss_lateral_alignment_tolerance_m: 0.15     # robot-scale (was courier 0.6)
 
 perception_governor:
   ros__parameters:

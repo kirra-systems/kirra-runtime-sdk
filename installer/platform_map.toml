@@ -27,6 +27,16 @@ base_image = "yahboom-r2 (vendor artifact — operator-flashed; see docs/hardwar
 # INTERIM until the measurement-gated `r2` contract profile lands (Track-A A2):
 # courier is the closest reviewed class; the demo envelope stays the backstop.
 profile_class = "courier"
+# ── R2-CLASS FLIP (draft, GATED — 1 of 3 uncomment sites) ─────────────────────
+# The `r2` kinematic + SG6 classes now EXIST (src/gateway/contract_profiles.rs +
+# parko impact.rs; measured footprint + full-lock steering). To retire the
+# courier interim: comment the `profile_class = "courier"` line above and
+# uncomment the line below — but ONLY AFTER the 4 remaining bench captures land
+# (front-to-rear wheelbase confirm, servo slew rate, overhang split, track width)
+# AND the r2 DYNAMIC limits are benched. Flip all THREE sites together (see
+# robot/install/PLATFORM_R2_PENDING.md "THE FLIP"): this, the verifier's
+# KIRRA_VEHICLE_CLASS, and the interceptor wheelbase_m (→ 0.229).
+# profile_class = "r2"
 motor_port = "/dev/myserial"
 [platform.r2.lidar]
 model = "ydlidar-tg30"

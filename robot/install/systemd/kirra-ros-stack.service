@@ -1,0 +1,45 @@
+# kirra-ros-stack.service — the ROS doer/interceptor stack as a service.
+#
+# Runs `ros2 launch kirra_safety kirra_with_robot.launch.py` — the occy_doer
+# bridge + cmd_vel_interceptor (the release relay) + perception_governor +
+# sensor_monitor + posture_subscriber. This is the DOER + interceptor side; the
+# governor stack (verifier + planner + taj + mick) is deploy/systemd/kirra.target,
+# and the motor consumer is kirra-consumer.service.
+#
+# ⚠ PROVIDED, NOT YET HARDWARE-VALIDATED as a service (the validated mode is a
+# terminal run — R2_LIVE_LOOP_BRINGUP.md). Enable deliberately after a wheels-up
+# re-test: `sudo systemctl enable --now kirra-ros-stack`. See
+# docs/hardware/R2_AUTOSTART_CHECKLIST.md.
+#
+# start_sidecars:=false — the planner + Taj sidecars are owned by kirra.target;
+# this unit must NOT also start them (double bind on :8100/:8101). It assumes
+# they are reachable (fail-soft: occy_doer HOLDS if a sidecar is down, never drives).
+#
+# User= is rendered by the installer to the invoking user (same idiom as
+# kirra-consumer.service). That user needs the ROS 2 toolchain + the built ws.
+
+[Unit]
+Description=Kirra ROS doer stack (occy_doer + cmd_vel_interceptor + perception_governor)
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+# Best-effort ordering only — the loop is fail-soft (occy holds if a service is
+# down), so this is for boot smoothness, not correctness. Not a hard Requires:
+# a missing governor stack must leave the doer HOLDING, never blocked-from-starting.
+After=network-online.target kirra.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__KIRRA_ROBOT_USER__
+EnvironmentFile=/etc/kirra/robot.env
+# ROS 2 + the workspace overlay must be sourced. KIRRA_ROS_WS_SETUP (from
+# robot.env) points at the built ws's install/setup.bash; the default matches a
+# repo checkout in the robot user's home. exec keeps ros2 as the main PID so
+# SIGTERM tears the launch down cleanly.
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && source "${KIRRA_ROS_WS_SETUP:-/home/__KIRRA_ROBOT_USER__/kirra-runtime-sdk/ros2_ws/install/setup.bash}" && exec ros2 launch kirra_safety kirra_with_robot.launch.py use_occy_doer:=true use_perception_cap:=true start_sidecars:=false kirra_url:=http://localhost:8090'
+# on-failure only: a fail-closed startup abort (e.g. occy_doer's REQUIRED
+# scan_stale_s unset → SystemExit 2) must not hot-loop.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

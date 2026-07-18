@@ -114,6 +114,10 @@ pub enum VehicleClass {
     DeliveryAv,
     /// Robotaxi — full-speed. The frozen reference; uses [`ImpactCfg::default`].
     Robotaxi,
+    /// R2 — the Yahboom Rosmaster R2 bench robot (~1/10 RC scale, ≤1 m/s). A
+    /// collision at that scale/speed is the SMALLEST decel deviation of the
+    /// family. Mirror of the SDK `contract_profiles::VehicleClass::R2`.
+    R2,
 }
 
 impl core::str::FromStr for VehicleClass {
@@ -129,9 +133,10 @@ impl core::str::FromStr for VehicleClass {
             "courier" => Ok(VehicleClass::Courier),
             "delivery-av" => Ok(VehicleClass::DeliveryAv),
             "robotaxi" => Ok(VehicleClass::Robotaxi),
+            "r2" => Ok(VehicleClass::R2),
             other => Err(format!(
                 "unknown vehicle class {other:?}; expected one of \
-                 courier | delivery-av | robotaxi (fail-closed — no default)"
+                 courier | delivery-av | robotaxi | r2 (fail-closed — no default)"
             )),
         }
     }
@@ -145,6 +150,7 @@ impl VehicleClass {
             VehicleClass::Courier => "courier",
             VehicleClass::DeliveryAv => "delivery-av",
             VehicleClass::Robotaxi => "robotaxi",
+            VehicleClass::R2 => "r2",
         }
     }
 }
@@ -188,6 +194,15 @@ pub fn impact_cfg_for_class(class: VehicleClass) -> ImpactCfg {
         // characterization. (CONTRACT_PROFILES.md courier.impact_spike)
         VehicleClass::Courier => ImpactCfg {
             spike_threshold_mps2: 2.5,
+            confirmation_m: 2,
+            confirmation_n: 3,
+        },
+        // VALIDATION-PENDING: the bench R2 (~1/10 scale, ≤1 m/s) — a collision is
+        // the SMALLEST decel deviation of the family, yet still ABOVE sensor noise
+        // (validate() floor 1.0); debounced 2-of-3 against the bumps a small robot
+        // takes. Needs bench characterization. (CONTRACT_PROFILES.md r2.impact_spike)
+        VehicleClass::R2 => ImpactCfg {
+            spike_threshold_mps2: 1.5,
             confirmation_m: 2,
             confirmation_n: 3,
         },
@@ -684,9 +699,11 @@ mod tests {
             VehicleClass::Courier,
             VehicleClass::DeliveryAv,
             VehicleClass::Robotaxi,
+            VehicleClass::R2,
         ] {
             assert_eq!(VehicleClass::from_str(c.as_str()), Ok(c));
         }
+        assert_eq!(VehicleClass::from_str("R2"), Ok(VehicleClass::R2));
         // typos / empty / unknown → Err (never a silent fallback)
         assert!(VehicleClass::from_str("").is_err());
         assert!(VehicleClass::from_str("robotax").is_err());
@@ -700,6 +717,7 @@ mod tests {
             VehicleClass::Courier,
             VehicleClass::DeliveryAv,
             VehicleClass::Robotaxi,
+            VehicleClass::R2,
         ] {
             let c = impact_cfg_for_class(class);
             assert!(
@@ -717,6 +735,10 @@ mod tests {
         let courier = impact_cfg_for_class(VehicleClass::Courier).spike_threshold_mps2;
         let delivery = impact_cfg_for_class(VehicleClass::DeliveryAv).spike_threshold_mps2;
         let robotaxi = impact_cfg_for_class(VehicleClass::Robotaxi).spike_threshold_mps2;
+        let r2 = impact_cfg_for_class(VehicleClass::R2).spike_threshold_mps2;
+        // R2 is the smallest deviation of the family, still above sensor noise.
+        assert!(r2 < courier, "r2 {r2} < courier {courier}");
+        assert!(r2 > 1.0, "r2 threshold {r2} above sensor noise");
         assert!(
             courier < delivery && delivery < robotaxi,
             "threshold ordering courier {courier} < delivery-av {delivery} < robotaxi {robotaxi}"
@@ -786,6 +808,7 @@ mod tests {
             VehicleClass::Courier,
             VehicleClass::DeliveryAv,
             VehicleClass::Robotaxi,
+            VehicleClass::R2,
         ] {
             let cfg = impact_cfg_for_class(class);
             assert!(

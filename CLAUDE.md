@@ -354,8 +354,19 @@ Admin token or an `integrator`-role principal.
 - `POST /fleet/campaigns/report` — WS-4 node adoption report (a node reports the governor digest it is now running → the fleet summary's `applied_nodes`; a write, so identity-gated, unlike the open read-only assignment GET; upsert by node_id, monotonic on `reported_at_ms`, not audit-chained). Optionally attestation-SIGNED: a base64 Ed25519 signature over `attestation::adoption_report_signing_payload(node_id, applied_digest, reported_at_ms)` verified against the node's registered `ak_public_pem` → `attested=true` (unforgeable attribution; `summary.attested_nodes`); invalid sig / no AK → 401 fail-closed; unsigned → accepted but `attested=false`
 - `POST /industrial/evaluate` — Evaluate Modbus/OPC-UA industrial event
 
+**Trust-BOOTSTRAP posture exemption:** the node-onboarding + attestation-handshake
+routes below — `POST /attestation/register`, `/attestation/identity/register`,
+`/attestation/challenge/:node_id`, `/attestation/verify` — are POSTURE-EXEMPT
+(`is_posture_exempt`, `src/gateway/policy_layer.rs`). They establish/prove a node's
+trust identity and cannot actuate, so the posture gate (which blocks COMMANDS) must
+not gate them. This is load-bearing for the M-9 empty-fleet policy: a fresh Active
+verifier with zero nodes is forced LockedOut and auto-recovers "the instant a node
+is registered" — which requires those routes to be reachable UNDER LockedOut (else
+the only way out of the lockout is blocked by the lockout — a bootstrap deadlock).
+Each keeps its own guarantee independent of posture (admin token / challenge-response).
+
 ### Tier 2 — Admin (`SCOPE_ADMIN`; Bearer `KIRRA_ADMIN_TOKEN` or `admin`-role principal)
-- `POST /attestation/register` — Register a node
+- `POST /attestation/register` — Register a node (posture-exempt — trust bootstrap)
 - `POST /fleet/dependencies` — Register dependency graph edges
 - `POST /system/backup/export` — Full state dump (admin-only; NOT in the auditor tier)
 - `POST /system/audit/rotate-signing-key` — Rotate the audit signing key

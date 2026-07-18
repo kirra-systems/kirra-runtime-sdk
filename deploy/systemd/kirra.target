@@ -13,9 +13,9 @@
 # Enabling it (install.sh does) also brings the stack up on boot.
 
 [Unit]
-Description=Kirra governor stack (verifier + Occy planner + Taj perception)
+Description=Kirra governor stack (verifier + Occy planner + Taj perception + Mick intent)
 Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
-Wants=kirra-verifier.service kirra-planner.service kirra-taj.service
+Wants=kirra-verifier.service kirra-planner.service kirra-taj.service kirra-mick.service
 After=network-online.target
 
 [Install]

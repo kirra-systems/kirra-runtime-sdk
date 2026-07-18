@@ -88,8 +88,47 @@ These relations are asserted as structural invariants (see the validation gate).
 > projection is the named future improvement, gated on a reliable quaternion.
 
 ### Ordering sanity (asserted)
-`courier.effective_cap (2.5) < delivery-av (11.0) < robotaxi (35.0)` and
-`courier.impact_spike (2.5) < delivery-av (8.0) < robotaxi (22.0)` (deviation units).
+`r2.effective_cap (1.0) < courier.effective_cap (2.5) < delivery-av (11.0) <
+robotaxi (35.0)` and
+`r2.impact_spike (1.5) < courier.impact_spike (2.5) < delivery-av (8.0) <
+robotaxi (22.0)` (deviation units).
+
+---
+
+## R2 (Yahboom Rosmaster R2 bench robot) — the first MEASURED-geometry class
+
+Unlike courier / delivery-av (every number VALIDATION-PENDING) and robotaxi
+(INHERITED-FROZEN), the `r2` class carries **MEASURED** geometry — it is the small
+Ackermann bench robot (~1/10 RC scale) the R2 hardware work drives. It **retires the
+interim `courier` borrow** for that platform (`robot/install/PLATFORM_R2_PENDING.md`,
+Track-A A2). Its dynamic limits are still VALIDATION-PENDING estimates, and four
+geometry items remain to be bench-captured (see below).
+
+| Param id | R2 value | Status / provenance |
+|---|---|---|
+| `r2.max_speed` | 1.5 | VALIDATION-PENDING — conservative small-robot mechanical max; bench max not measured |
+| `r2.odd_cap` | **1.0** | VALIDATION-PENDING — indoor/tethered ceiling above the `KIRRA_DEMO_VX_MAX` 0.15 demo, below courier 2.5 |
+| `r2.accel` | 0.5 | VALIDATION-PENDING — gentle low-speed |
+| `r2.brake` | 1.5 | VALIDATION-PENDING — brake ≥ accel |
+| `r2.steering` | **39.0** | **MEASURED** — full-lock ~39° (0.68 rad) @ cmd ±45, `r2_drive_calibration_results.txt` Phase C 2026-07-17 |
+| `r2.steering_rate` | 30.0 | VALIDATION-PENDING — **servo slew UNMEASURED** (time a full −45→+45 sweep) |
+| `r2.follow` | 0.5 | VALIDATION-PENDING — short follow at ≤1 m/s |
+| `r2.lat_accel` | 1.0 | VALIDATION-PENDING — gentle |
+| `r2.wheelbase` | **0.229** | **MEASURED** ~9 in (front-to-rear CONFIRM owed); `KIRRA_R2_WHEELBASE_M` |
+| `r2.footprint` (w×l, overhangs) | **0.203 × 0.330** (0.05/0.05) | **MEASURED** body 8 in × 13 in (bench tape); **overhang split ESTIMATED** ((len−wb)/2) |
+| `r2.impact_spike` (SG6, parko; **deviation** `\|‖a‖−G\|`) | **1.5** | VALIDATION-PENDING — smallest deviation of the family, above the validate() 1.0 noise floor |
+| `r2.impact_confirm` (M / N consecutive) | **2 / 3** | VALIDATION-PENDING — debounce the bumps a small robot takes |
+
+**Remaining bench captures to firm up `r2` (the 4 items in PLATFORM_R2_PENDING):**
+front-to-rear wheelbase confirmation, servo slew rate (→ `r2.steering_rate`), the
+front/rear overhang split, and track width. MEASURED values are pinned by a unit
+test (`r2_carries_measured_geometry_and_is_slowest`) so they cannot silently drift.
+
+> **Doer-side vs actuation-side.** This `r2` class is the **actuation** envelope
+> (the verifier's per-class contract, Stage 2). The **doer-side** clearance the
+> planner uses each tick (`kirra_params.yaml` occy_doer footprint + lateral
+> clearance) is a separate surface, already set to the same measured geometry — see
+> the "two space surfaces" note there.
 
 ---
 
@@ -141,7 +180,7 @@ instance is the zero-drift proof.
 ## Selection rule — FAIL-CLOSED
 
 `VehicleClass::from_str` accepts case-insensitive `"courier"` / `"delivery-av"` /
-`"robotaxi"`. **Any other string is an `Err`** (the `KIRRA_BACKEND` pattern): a
+`"robotaxi"` / `"r2"`. **Any other string is an `Err`** (the `KIRRA_BACKEND` pattern): a
 typo'd class must **never** silently select another class's (e.g. faster) envelope.
 There is no default class.
 
