@@ -1,0 +1,40 @@
+# kirra-kitt-watch.service — KITT proactive event speech as a service.
+#
+# Runs robot/kitt_watch.py: a READ-ONLY watcher that speaks on posture / checker-
+# deny transitions (docs/hardware/KITT_CONVERSATION_DESIGN.md Stage 3). CHANNEL A
+# ONLY — GETs + TTS, no /intent, no publisher, no serial. It cannot move the robot;
+# it narrates. Safe to autostart.
+#
+# ⚠ AUDIO-FROM-A-SYSTEM-SERVICE caveat: a system service has no login session, so
+# a Pulse/PipeWire-based KIRRA_TTS_CMD may have no sink. Use an ALSA-DIRECT speak
+# command (e.g. `piper … --output-raw | aplay -D hw:0 …`) and put the rendered
+# User in the `audio` group. If TTS can't reach the device, KITT degrades to
+# PRINTING (harmless) — validate audio in-service before relying on it. Until
+# then, running kitt_watch in a login shell is the honest interim.
+#
+# ⚠ NOT YET HARDWARE-VALIDATED as a service. Enable deliberately:
+# `sudo systemctl enable --now kirra-kitt-watch`. See R2_AUTOSTART_CHECKLIST.md.
+#
+# User= is rendered by the installer to the invoking user (needs the `audio` group).
+
+[Unit]
+Description=KIRRA KITT proactive event speech (read-only; posture + verdict narration)
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+# Best-effort: it polls the verifier + mick, but is fail-soft — an unreachable
+# source is silently skipped (never a false "recovered"), so no hard dependency.
+After=network-online.target kirra.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__KIRRA_ROBOT_USER__
+EnvironmentFile=/etc/kirra/robot.env
+# HTTP-only (no ROS). KIRRA_TTS_CMD (ALSA-direct, see caveat above) + the loop
+# URLs come from robot.env. exec keeps python3 as the main PID for clean SIGTERM.
+ExecStart=/bin/bash -c 'exec python3 /opt/kirra/robot/kitt_watch.py'
+# always: a transient network/LLM blip should not stop the narrator; it self-heals.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

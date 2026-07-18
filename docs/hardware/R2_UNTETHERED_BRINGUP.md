@@ -56,9 +56,12 @@ hardware-validated (the validated path is a terminal run).
 ```bash
 # after validating each as a service, wheels-up, one at a time:
 sudo systemctl enable --now kirra-consumer       # the verifying motor consumer
-# + equivalent units for: the verifier, the ros2 launch stack (occy/taj/planner/
-#   interceptor), Ollama, and the voice shell (§2). These units are NOT all
-#   written yet — the consumer one is staged; the rest are the untethered TODO.
+# The full unit set now EXISTS: kirra.target (verifier + planner + taj + mick,
+# deploy/systemd/), kirra-consumer (robot/install/), and the ROS doer stack +
+# KITT watcher (robot/install/systemd/kirra-ros-stack.service /
+# kirra-kitt-watch.service). The ordered validate-then-enable procedure + the
+# cold-boot acceptance test are in docs/hardware/R2_AUTOSTART_CHECKLIST.md.
+# What remains is per-service wheels-up validation, not authoring.
 ```
 
 🔴 **Gate:** each service must pass its wheels-up acceptance *as a service*
