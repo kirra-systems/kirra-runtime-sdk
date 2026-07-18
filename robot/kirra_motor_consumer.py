@@ -192,7 +192,13 @@ def main() -> int:
         and (os.environ.get("KIRRA_R2_ODOM_ENABLED") or "").strip().lower() in ("1", "true", "yes", "on")
     )
     odom_m_per_tick = _req_float("KIRRA_R2_M_PER_TICK") if odom_enabled else 0.0
-    odom_period_ms = _req_int("KIRRA_R2_ODOM_PERIOD_MS") if os.environ.get("KIRRA_R2_ODOM_PERIOD_MS") else 50
+    # Parse the period ONLY when odom is enabled — a stray/invalid
+    # KIRRA_R2_ODOM_PERIOD_MS must never fail-close a run that isn't using odom.
+    odom_period_ms = (
+        _req_int("KIRRA_R2_ODOM_PERIOD_MS")
+        if (odom_enabled and os.environ.get("KIRRA_R2_ODOM_PERIOD_MS"))
+        else 50
+    )
     odom_topic = os.environ.get("KIRRA_R2_ODOM_TOPIC", "/odom")
     odom_frame = os.environ.get("KIRRA_R2_ODOM_FRAME", "odom")
     odom_child_frame = os.environ.get("KIRRA_R2_ODOM_CHILD_FRAME", "base_link")

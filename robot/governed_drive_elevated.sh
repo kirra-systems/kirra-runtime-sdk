@@ -65,6 +65,11 @@ fi
 
 # ---- 2. /odom --------------------------------------------------------------
 banner "2/4  /odom"
+# Remove any stale static crutch left by a PRIOR run (a `ros2 topic pub … /odom`
+# process) BEFORE counting publishers — otherwise an orphaned crutch would be
+# mistaken for the consumer's real wheel-odometry below. The consumer's real
+# /odom is a python process, not `ros2 topic pub`, so it survives this.
+pkill -f "topic pub.*[/]odom" 2>/dev/null && sleep 1 || true
 if [[ "$(pub_count /odom)" != "0" && -n "$(pub_count /odom)" ]]; then
   # The consumer's real wheel-odometry (KIRRA_R2_ODOM_ENABLED) is publishing —
   # do NOT add a static crutch (two publishers would fight). This is the path
