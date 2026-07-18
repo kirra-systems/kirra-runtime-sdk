@@ -117,7 +117,7 @@ audio-engineering effort, and the last mile, not the first.
 | **0** ✅ | Speak one command; it drives (bounded) or explains the refusal | *done* — `speech_shell` + PTT button |
 | **1** ✅ | **Grounded Q&A** — "what's around us / why did we stop / are we OK" answered from real telemetry (SPEAK only) | *done* — `robot/kitt_ask.py` (read-only telemetry reader + KITT prompt; no motion path) |
 | **2** ✅ | **Multi-turn + persona** — conversation memory + KITT character; router splits chat vs directive; directive still goes through the ONE door | *done* — `robot/kitt_converse.py` (memory + persona + fail-closed router → mick `POST /intent`) |
-| **3** | **Proactive voice** — event subscriptions (MRC/arrival/posture) → spoken lines | event→speech bridge |
+| **3** ✅ | **Proactive voice** — event transitions (posture / checker deny / cache-stale) → spoken lines | *done* — `robot/kitt_watch.py` (read-only `/metrics` + `/narration/last` poll → transition-gated speech) |
 | **4** | **Voice + polish** — the KITT Piper voice, listening chirp, arrival tones | audio assets |
 | **5** | **Full-duplex / barge-in** | streaming STT + duplex audio |
 
@@ -146,6 +146,31 @@ resolves to **no directive → SPEAK only → no motion**. A misheard or halluci
 directive at worst becomes a checker-APPROVED bounded motion; an unparseable turn
 drives nothing. The only actuation-adjacent call in the whole script is the
 text-to-`/intent` POST — no publisher, no serial, no release token.
+
+### Stage 3 — how to run (`robot/kitt_watch.py`)
+
+```bash
+./robot/kitt_watch.py    # run alongside the loop; KITT speaks on events (Ctrl-C quits)
+```
+
+KITT talks to *you*, unprompted. A read-only watcher polls two signals and speaks
+only on a **state transition**:
+
+- **posture** (`GET /metrics` `kirra_fleet_posture` 0/1/2 + cache-stale) →
+  "I've dropped into a degraded mode," "I'm locking out and holding a safe stop,"
+  "all systems nominal," "I've lost a fresh read on my safety state."
+- **the checker's last verdict** (`GET /narration/last`, the #893 relay) → on a
+  NEW deny, "I've had to refuse a command. \<the checker's real reason\>."
+
+Discipline (unit-checked): announces ONLY on change (steady state is silent),
+establishes a baseline on the first poll without speaking (no boot chatter),
+rate-limits flaps, and stays silent for any signal that's unreachable (never a
+false "recovered" from missing data). Channel A only — read-only GETs + TTS, no
+`/intent`, no publisher, no serial: proactive **speech**, never proactive motion.
+
+> **Natural extension (Stage 3b):** a perception-driven "obstacle ahead" warning
+> — needs a light perception feed (a ROS subscribe to `/kirra/perception_health`
+> or `/cmd_vel_raw`), vs. today's HTTP-only posture+verdict events.
 
 ### Stage 1 — how to run (`robot/kitt_ask.py`)
 
