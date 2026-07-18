@@ -63,7 +63,11 @@ install -d -m 0750 -o kirra -g kirra "$ENVDIR"
 if [[ -f "$ENVFILE" ]]; then
   echo "  $ENVFILE exists — leaving it untouched (your secrets are preserved)"
 else
-  gen() { LC_ALL=C tr -dc 'a-f0-9' < /dev/urandom | head -c "$1"; }
+  # Read from a process-substitution FD so `head` closing the pipe SIGPIPEs the
+  # `tr` in the SUBSHELL, not a member of head's own pipeline — otherwise
+  # `set -o pipefail` sees the SIGPIPE'd tr and `set -e` aborts before any
+  # secret is written (and before the units install). head itself exits 0.
+  gen() { head -c "$1" < <(LC_ALL=C tr -dc 'a-f0-9' < /dev/urandom); }
   admin="$(gen 64)"          # admin bearer token (64 hex chars)
   reset="$(gen 48)"          # supervisor reset key (48 bytes, <= 64)
   umask 077
