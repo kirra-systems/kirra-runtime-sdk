@@ -420,14 +420,29 @@ def main() -> int:
 
         odom_pub = node.create_publisher(Odometry, odom_topic, 10)
         odom_state = odom_zero()
+        odom_debug = (os.environ.get("KIRRA_R2_ODOM_DEBUG") or "").strip().lower() in (
+            "1", "true", "yes", "on"
+        )
+        odom_dbg_ctr = 0
 
         def on_odom_timer() -> None:
-            nonlocal odom_state
+            nonlocal odom_state, odom_dbg_ctr
             try:
                 enc = bot.get_motor_encoder()  # [m1(RL), m2, m3, m4(RR)]
                 left, right = int(enc[0]), int(enc[3])
-            except Exception:  # noqa: BLE001 — transient read fault → skip this tick
+            except Exception as e:  # noqa: BLE001 — transient read fault → skip this tick
+                if odom_debug:
+                    node.get_logger().warn(f"odom: get_motor_encoder failed: {e}")
                 return
+            if odom_debug:
+                # ~1 Hz: raw rear encoder counts + integrated x, so a hand-spin
+                # (wheels up) shows whether the MCU auto-report is delivering.
+                odom_dbg_ctr += 1
+                if odom_dbg_ctr % max(1, int(round(1000.0 / odom_period_ms))) == 0:
+                    node.get_logger().info(
+                        f"odom raw: encL={left} encR={right} x={odom_state.pose.x_m:.3f} "
+                        f"yaw={odom_state.pose.yaw_rad:.3f} delta={last_delta_rad:.3f}"
+                    )
             prev = odom_state.pose
             odom_state = odom_step(
                 odom_state, left, right, last_delta_rad, odom_m_per_tick, r2_cal.wheelbase_m
