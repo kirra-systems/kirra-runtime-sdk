@@ -127,9 +127,53 @@ Untethered, `speech_shell` becomes a boot service (§1) driven by the PTT button
 the operator interface with zero network dependency. Everything it needs (whisper,
 Piper, Ollama) is on the box.
 
-> **Remaining for a robot-grade voice UX (beyond the demo):** the GPIO push-to-talk
-> button + audio-feedback tones, and mic placement/gain for a moving platform. The
-> transcription→intent→loop path itself is done and tested.
+### The GPIO push-to-talk button (`robot/ptt_button.py`)
+
+`speech_shell`'s interactive loop fires ONE bounded recording turn per stdin line
+("press Enter"). `robot/ptt_button.py` is a GPIO watcher that emits exactly one
+newline per button press, so a hardware button **becomes** the Enter key —
+**no change to the Rust binary**; the button is just another external OS process,
+like the STT/TTS/record commands.
+
+```
+  [ momentary button ]
+     pin ●───────────┐         one command:
+                     │           ./robot/run_voice_ptt.sh
+     GND ●───────────┘         (= python3 robot/ptt_button.py | speech_shell)
+   internal pull-up idles HIGH; press pulls LOW (falling edge = press)
+```
+
+**Wiring:** a normally-open momentary button between a free GPIO pin and GND. The
+script enables the internal pull-up — **no external resistor**. Confirm the pin is
+a real, unmuxed GPIO on your 40-pin header first.
+
+**Env** (all optional; the button pin is INPUT-only, so a wrong value cannot drive
+anything):
+
+| var | default | meaning |
+|---|---|---|
+| `KIRRA_PTT_GPIO_PIN` | `18` | button pin |
+| `KIRRA_PTT_PIN_MODE` | `BOARD` | `BOARD` (physical pin #) or `BCM` |
+| `KIRRA_PTT_ACTIVE` | `low` | `low` = button→GND (pull-up); `high` = button→3V3 (pull-down) |
+| `KIRRA_PTT_DEBOUNCE_MS` | `200` | press debounce |
+| `KIRRA_PTT_LED_PIN` | — | optional OUTPUT pin lit while pressed (recording feedback) |
+
+**Deps:** `sudo pip3 install Jetson.GPIO` + the running user in the `gpio` group
+with the Jetson udev rules (or run as root). The script fails closed with an
+install hint if `Jetson.GPIO` is unavailable.
+
+🔴 **The PTT button is a MIC trigger, NOT the e-stop.** A press starts one voice
+clip; a misheard/silent press dead-ends in `MickIntent::parse_llm_json` → no
+intent → no motion. It cannot inject a goal or bypass the checker — as safe as
+pressing Enter. The **e-stop is a separate hardware kill** in the motor-power line
+(§3); do not conflate the two circuits (losing the button = can't talk; losing
+the e-stop = can't stop — different criticality).
+
+> **Remaining for a robot-grade voice UX (beyond this button):** audio-feedback
+> tones (a "listening" chirp on press, distinct from the spoken narration), and
+> mic placement/gain for a moving platform. A **hold-to-talk** variant (record
+> only while held, vs. today's press → one bounded `-d 4` clip) is a follow-up —
+> it needs the recorder driven by button *state* rather than a fixed duration.
 
 ---
 
