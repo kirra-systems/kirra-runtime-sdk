@@ -192,7 +192,10 @@ decel-to-stop) *independently of software*.
   dead SBC must still be stoppable by a human reaching the robot or a fob.
 
 This is the one item where "it worked on wifi" does **not** carry over — plan the
-e-stop before the first untethered meter.
+e-stop before the first untethered meter. **Concrete design + BOM + test
+procedure: `docs/hardware/R2_ESTOP_SPEC.md`** (an energize-to-run safety relay in
+the motor feed, fail-safe on any fault, latching, with a two-part re-arm that
+reuses the ADR-0013 clearance grant so there's no post-reset lurch).
 
 ---
 
