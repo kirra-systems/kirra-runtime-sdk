@@ -174,6 +174,38 @@ specifically the tool-calling/truncation fixes are *welcome* — they harden the
 `{say, directive}` JSON contract; the smoketest confirms it. The FA4/vision gains
 don't reach the Orin — Ampere, text-only router.)
 
+### Update commands (copy-paste)
+
+**A — re-pull the same tag** (stealth in-place update, e.g. the Gemma-4 case):
+```bash
+cd ~/kirra-runtime-sdk
+ollama pull gemma3:4b                                              # new weights, same tag
+python3 robot/kitt_model_smoketest.py gemma3:4b --note "re-pull $(date -I)"   # RE-VET + re-pin
+sudo systemctl restart kirra-kitt-watch kirra-kitt-greet          # load them
+```
+No `robot.env` edit — the tag is unchanged. Boot speaks warning A5 if a re-pull
+ever slipped in unvetted.
+
+**B — switch to a different / bigger model:**
+```bash
+cd ~/kirra-runtime-sdk
+ollama pull gemma4:8b
+python3 robot/kitt_model_smoketest.py gemma4:8b --note "eval $(date -I)"      # gate the candidate
+sudo sed -i 's/^KIRRA_KITT_MODEL=.*/KIRRA_KITT_MODEL="gemma4:8b"/' /etc/kirra/robot.env
+sudo systemctl restart kirra-kitt-watch kirra-kitt-greet
+```
+Then measure end-to-end latency (`KITT_AUDIO_STACK.md` §5) — bigger = slower/more VRAM.
+
+**C — check anytime (no LLM call, no change):**
+```bash
+python3 robot/kitt_model_smoketest.py --pin-check
+#   OK → running digest == vetted pin | CHANGED → stealth update, re-run A | UNPINNED → vet once
+```
+Needs Ollama up (`ollama serve`) + `python3-requests`. Doer-quality gate only —
+the checker is untouched by any model change. The unattended OTA timer checks for
+a governed *software* update (`kirra-ota-ctl pull`); it never touches LLM weights
+— updating Gemma is always this deliberate pull + re-vet.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
