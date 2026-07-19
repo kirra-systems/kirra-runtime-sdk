@@ -57,6 +57,77 @@ python3 deploy/autoware-isolation/autoware_stub_publisher.py
 The stub logs `✓ received a governed control_cmd back from the checker` once the
 adapter's bounded output returns — that confirms the seam round-trips end to end.
 
+## Bench commands (copy-paste)
+
+Grounded in the real node identity: the adapter is `kirra_governor` in namespace
+`kirra`, so its `~/input/*` subscriptions resolve to `/kirra/kirra_governor/input/*`.
+
+**0 — code on the bench**
+```bash
+cd ~/kirra-runtime-sdk
+git checkout main && git pull          # ADR-0036 + this scaffold are on main
+```
+
+**1 — the wire-compat gate (the one new safety check)**
+```bash
+bash scripts/curated_interface/crossdistro_hash_check.sh \
+     /opt/ros/humble/share  /opt/ros/jazzy/share
+# PASS + no DRIFT → direct cross-distro DDS is wire-safe.
+# DRIFT <pkg/Msg>  → bridge THAT interface (kirra_bridge_cpp / domain_bridge).
+```
+Distros on different boxes? Run the per-distro gate on each and compare:
+```bash
+bash scripts/curated_interface/verify_hashes.sh /opt/ros/humble/share   # Humble box
+bash scripts/curated_interface/verify_hashes.sh /opt/ros/jazzy/share    # Jazzy box
+```
+Empty curated pkg? populate first: `bash scripts/curated_interface/extract_closures.sh /opt/ros/jazzy/share`.
+
+**2 — bring up the split (docker)**
+```bash
+export ROS_DOMAIN_ID=0
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export AUTOWARE_IMAGE=<your-autoware-humble-image>
+export KIRRA_IMAGE=<your-kirra-jazzy-image>
+
+docker compose -f deploy/autoware-isolation/docker-compose.yml up                       # real Autoware ⟷ KIRRA
+docker compose -f deploy/autoware-isolation/docker-compose.yml --profile stub up autoware-stub kirra   # stub doer ⟷ KIRRA
+```
+
+**3 — standalone on a Jazzy host (no docker), to see the seam live**
+
+Terminal A — curated msgs + stub doer (publish on the adapter's private ns):
+```bash
+source /opt/ros/jazzy/setup.bash
+export ROS_DOMAIN_ID=0
+cd ~/kirra-runtime-sdk/ros2_ws
+colcon build --packages-up-to autoware_planning_msgs autoware_perception_msgs \
+                              autoware_map_msgs autoware_control_msgs
+source install/setup.bash
+KIRRA_BOUNDARY_PREFIX=/kirra/kirra_governor/input \
+  python3 ~/kirra-runtime-sdk/deploy/autoware-isolation/autoware_stub_publisher.py
+```
+Terminal B — build + run the checker (adapter) node:
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/kirra-runtime-sdk/ros2_ws/install/setup.bash   # the autoware_*_msgs types r2r binds
+export ROS_DOMAIN_ID=0
+cd ~/kirra-runtime-sdk
+cargo build -p kirra-ros2-adapter --features ros2 --release
+./target/release/kirra_ros2_adapter_node --corridor-source mock
+# mock = explicit 5 m straight-line TEST corridor (WARN-bannered).
+# real map: --corridor-source lanelet2 --map-bin <map.osm.bin>  (needs ros-jazzy-lanelet2)
+```
+Terminal C — confirm the wire + the cross-distro type match:
+```bash
+source /opt/ros/jazzy/setup.bash; export ROS_DOMAIN_ID=0
+ros2 topic list | grep kirra_governor/input
+ros2 topic hz   /kirra/kirra_governor/input/trajectory      # stub is publishing
+ros2 topic info -v /kirra/kirra_governor/input/objects      # type + (Jazzy) RIHS hash — compare to Humble's
+```
+Governed round-trip: `ros2 topic list` for the adapter's output topic, then point the
+stub at it (`KIRRA_CONTROL_TOPIC=<that topic>`) — it logs `✓ received a governed
+control_cmd back from the checker` on the first bounded command.
+
 ## What this scaffold is / isn't
 - **Is:** the topology, the cross-distro wire-compat gate, and a doer stub so the
   Jazzy side is testable now.
