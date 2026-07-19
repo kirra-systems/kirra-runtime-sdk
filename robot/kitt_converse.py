@@ -48,6 +48,7 @@ from kitt_ask import (  # noqa: E402
     gather_stop_reason, speak,
 )
 import kitt_ota  # noqa: E402 — deterministic OTA voice commands (NOT the movement door)
+from kitt_persona import name_slot, operator_name  # noqa: E402
 
 MAX_TURNS = 10  # rolling conversation memory (user+assistant pairs kept)
 PERCEPTION_WORDS = ("see", "around", "ahead", "front", "obstacle", "clear",
@@ -76,7 +77,12 @@ def perception_relevant(text):
 def context_for(utterance):
     """Fresh live telemetry each turn (posture + last verdict always; the costly
     perception grab only when the utterance is about seeing)."""
-    parts = [gather_posture(), gather_stop_reason()]
+    op = operator_name()
+    parts = [
+        f"operator: {op} (address them by name when natural)" if op
+        else "operator: unknown (don't guess a name)",
+        gather_posture(), gather_stop_reason(),
+    ]
     if perception_relevant(utterance):
         parts.append(gather_perception())
     return "TELEMETRY (ground truth — answer only from this):\n- " + "\n- ".join(parts)
@@ -154,7 +160,7 @@ def handle_turn(history, utterance):
     if directive:
         result = offer_to_door(directive)
         if result == "ok":
-            spoken = say or "On my way — the governor will keep us safe."
+            spoken = say or f"On our way{name_slot()} — the governor will keep us honest."
         elif result == "reject":
             spoken = ("I heard a movement request, but I couldn't pin down a "
                       "safe destination — could you say it another way?")
@@ -177,6 +183,9 @@ def main():
         utterance = sys.stdin.read().strip()
         if utterance:
             handle_turn(history, utterance)
+        else:
+            # Empty transcript (e.g. PTT released with nothing intelligible) → F2.
+            speak(f"I didn't quite catch that{name_slot()}.")
         return
     print("kitt_converse: talk to KITT — one line per turn (Ctrl-D quits).",
           file=sys.stderr)

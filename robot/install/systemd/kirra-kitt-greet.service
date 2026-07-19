@@ -1,0 +1,36 @@
+# kirra-kitt-greet.service — KITT power-on greeting + shutdown line.
+#
+# Runs robot/kitt_boot.py: a one-shot that speaks a HONEST boot greeting once the
+# governor is actually up (it polls /metrics for a fresh, non-LockedOut posture
+# before claiming "governor nominal"), and speaks a power-down line on stop.
+# CHANNEL A ONLY (docs/kitt/KITT_VOICE_LINES.md rows A1–A3) — a read-only GET +
+# TTS, no /intent, no publisher, no serial. It cannot move the robot.
+#
+# ⚠ Same AUDIO-FROM-A-SYSTEM-SERVICE caveat as kirra-kitt-watch: use an ALSA-direct
+# KIRRA_TTS_CMD and put the rendered User in the `audio` group, or it degrades to
+# printing (harmless). Validate audio in-service before relying on the greeting.
+#
+# ⚠ NOT YET HARDWARE-VALIDATED as a service. Enable deliberately:
+# `sudo systemctl enable kirra-kitt-greet`. See R2_AUTOSTART_CHECKLIST.md.
+#
+# RemainAfterExit=yes so ExecStop fires the shutdown line on a clean stop/poweroff.
+[Unit]
+Description=KIRRA KITT power-on greeting + shutdown line (speak-only, posture-gated)
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+After=network-online.target kirra-verifier.service kirra.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=__KIRRA_ROBOT_USER__
+EnvironmentFile=/etc/kirra/robot.env
+# Greeting is posture-gated + deadline-bounded inside the script (default 20s);
+# cap the unit start a little above that so a wedged verifier can't hang boot.
+ExecStart=/opt/kirra/robot/kitt_boot.py greet
+ExecStop=/opt/kirra/robot/kitt_boot.py shutdown
+TimeoutStartSec=40
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
