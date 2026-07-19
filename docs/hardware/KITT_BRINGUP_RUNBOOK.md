@@ -36,6 +36,10 @@
 
 ## 1. Prerequisites (once)
 
+> Engine selection (whisper model size, piper voice), the latency budget, and the
+> **audio-from-a-systemd-service** fix are their own sheet:
+> `docs/hardware/KITT_AUDIO_STACK.md`. Read its §4 before enabling the KITT units.
+
 - **Audio hardware:** USB mic + speaker on the Orin. Verify ALSA sees them:
   `arecord -l` (capture) and `aplay -l` (playback).
 - **Offline speech engines:**
@@ -142,6 +146,7 @@ KITT confirms. Approach an obstacle → it warns, unprompted. That's KITT.
 | a spoken command didn't drive | checker refused (correct!) or door 422 | ask "why did we stop"; check the loop + verifier |
 
 ## References
+- `docs/hardware/KITT_AUDIO_STACK.md` — engine choices + tuning + the systemd-audio fix
 - `docs/hardware/KITT_CONVERSATION_DESIGN.md` — the architecture + the safety fence
 - `docs/hardware/R2_LIVE_LOOP_BRINGUP.md` — the governed loop (Stages 1–2)
 - `docs/hardware/R2_UNTETHERED_BRINGUP.md` — off-network + the hardware e-stop
