@@ -179,7 +179,24 @@ export function page(meta, body) {
 (function(){try{var t=localStorage.getItem("kirra-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme="dark";}})();</script>
   <script type="application/ld+json">${JSON.stringify(jsonld)}</script>${meta.extraHead || ""}
 </head>
-<body>
+<body>${meta.slug === "index" ? `
+  <div class="preloader" id="preloader" hidden aria-hidden="true">
+    <div class="preloader__inner">
+      <div class="preloader__mark">${MARK}<span class="preloader__ring"></span></div>
+      <div class="preloader__bar"><span id="preloaderFill"></span></div>
+      <div class="preloader__meta">
+        <span id="preloaderStatus">VERIFYING FLEET POSTURE</span>
+        <span id="preloaderPct">0%</span>
+      </div>
+    </div>
+  </div>
+  <script>/* arm the preloader only when JS runs, motion is allowed, and it hasn't shown this session */
+(function(){try{
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  if (sessionStorage.getItem("kirra-preloaded")) return;
+  document.getElementById("preloader").hidden = false;
+  document.documentElement.classList.add("is-preloading");
+}catch(e){}})();</script>` : ""}
   <a class="skip-link" href="#main">Skip to content</a>
 
   <header class="nav" id="nav">

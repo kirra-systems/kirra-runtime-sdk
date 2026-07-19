@@ -629,6 +629,32 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 0.92rem; min-widt
 }
 .footer__meta .mono { font-size: 0.76rem; }
 
+/* ---------- Preloader (homepage, once per session) ---------- */
+.preloader {
+  position: fixed; inset: 0; z-index: 400;
+  background: var(--bg);
+  display: grid; place-items: center;
+  transition: opacity 0.5s var(--ease-out), visibility 0.5s;
+}
+.preloader.is-done { opacity: 0; visibility: hidden; }
+html.is-preloading { overflow: hidden; }
+.preloader__inner { display: grid; justify-items: center; gap: 22px; width: min(320px, 80vw); }
+.preloader__mark { position: relative; width: 68px; height: 68px; display: grid; place-items: center; }
+.preloader__mark svg { width: 34px; height: 34px; }
+.preloader__ring {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 1px solid var(--line-strong); border-top-color: var(--accent);
+  animation: pre-spin 0.9s linear infinite;
+}
+@keyframes pre-spin { to { transform: rotate(360deg); } }
+.preloader__bar { width: 100%; height: 2px; background: var(--surface-3); border-radius: 2px; overflow: hidden; }
+.preloader__bar span { display: block; height: 100%; width: 0%; background: var(--accent); }
+.preloader__meta {
+  width: 100%; display: flex; justify-content: space-between; gap: 16px;
+  font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.18em; color: var(--ink-3);
+}
+#preloaderPct { color: var(--accent); font-variant-numeric: tabular-nums; }
+
 /* ---------- Reveal animations ---------- */
 [data-reveal] {
   opacity: 0; transform: translateY(22px);

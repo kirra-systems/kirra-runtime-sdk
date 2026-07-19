@@ -290,3 +290,4 @@ HTML (no client-side rendering of content) so every claim is crawlable.
 | Dark-first with signal cyan | Existing brand mark (cyan node-graph K) and `theme-color #04060c` from the prior site — continuity, not reinvention. |
 | Careers page has no job listings | No roles exist in the repository; inventing them would violate the no-fabrication rule. Culture claims cite commit-visible practices instead. |
 | Field Notes keeps the 3-tier feed fallback | Preserved from the prior implementation because its resilience design (Substack 403s from datacenter IPs) is documented in the old `notes.js` and the deploy workflow. |
+| Preloader ported from the old site | The "VERIFYING FLEET POSTURE" boot sequence was the prior site's most on-brand moment. Rebuilt dependency-free: homepage only, once per session, ~1.3 s, skipped under `prefers-reduced-motion`, armed only when JS runs (can never block a no-JS visit), 3 s hard failsafe. |

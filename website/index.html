@@ -30,6 +30,33 @@
   <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","name":"Kirra Systems","url":"https://kirrasystems.com","logo":"https://kirrasystems.com/assets/kirra-logo.png","sameAs":["https://github.com/kirra-systems/kirra-runtime-sdk"]},{"@type":"WebSite","name":"Kirra Systems","url":"https://kirrasystems.com"},{"@type":"SoftwareSourceCode","name":"kirra-runtime-sdk","codeRepository":"https://github.com/kirra-systems/kirra-runtime-sdk","programmingLanguage":"Rust","description":"Distributed runtime legitimacy engine and safety governor for AI-driven robotic and edge systems."}]}</script>
 </head>
 <body>
+  <div class="preloader" id="preloader" hidden aria-hidden="true">
+    <div class="preloader__inner">
+      <div class="preloader__mark"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <g stroke="currentColor" stroke-width="1.4" opacity="0.85">
+    <path d="M7 4v24M7 17 25 4M11.5 13.7 25 28"/>
+    <path d="M7 4l7 6.5M7 28l4.5-14.3M14 10.5 7 17" opacity="0.35"/>
+  </g>
+  <g fill="var(--accent, #3fd9c9)">
+    <circle cx="7" cy="4" r="2"/><circle cx="7" cy="17" r="2.4"/><circle cx="7" cy="28" r="2"/>
+    <circle cx="25" cy="4" r="2"/><circle cx="25" cy="28" r="2"/>
+    <circle cx="14" cy="10.5" r="1.5"/><circle cx="11.5" cy="13.7" r="1.5"/>
+  </g>
+</svg><span class="preloader__ring"></span></div>
+      <div class="preloader__bar"><span id="preloaderFill"></span></div>
+      <div class="preloader__meta">
+        <span id="preloaderStatus">VERIFYING FLEET POSTURE</span>
+        <span id="preloaderPct">0%</span>
+      </div>
+    </div>
+  </div>
+  <script>/* arm the preloader only when JS runs, motion is allowed, and it hasn't shown this session */
+(function(){try{
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  if (sessionStorage.getItem("kirra-preloaded")) return;
+  document.getElementById("preloader").hidden = false;
+  document.documentElement.classList.add("is-preloading");
+}catch(e){}})();</script>
   <a class="skip-link" href="#main">Skip to content</a>
 
   <header class="nav" id="nav">

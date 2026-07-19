@@ -22,6 +22,35 @@
     });
   }
 
+  /* ---------- Preloader (armed by an inline script; drives + dismisses) */
+  const pre = $("#preloader");
+  if (pre && !pre.hidden) {
+    const fill = $("#preloaderFill");
+    const pct = $("#preloaderPct");
+    const status = $("#preloaderStatus");
+    const MSGS = ["CHALLENGING NODES", "VERIFYING ATTESTATION", "DERIVING FLEET POSTURE", "POSTURE: NOMINAL"];
+    const DUR = 1300;
+    const t0 = performance.now();
+    const done = () => {
+      pre.classList.add("is-done");
+      document.documentElement.classList.remove("is-preloading");
+      try { sessionStorage.setItem("kirra-preloaded", "1"); } catch {}
+      setTimeout(() => pre.remove(), 600);
+    };
+    const tick = (t) => {
+      const p = Math.min((t - t0) / DUR, 1);
+      const eased = 1 - Math.pow(1 - p, 3);
+      const n = Math.round(eased * 100);
+      if (fill) fill.style.width = n + "%";
+      if (pct) pct.textContent = n + "%";
+      if (status) status.textContent = MSGS[Math.min(Math.floor(p * MSGS.length), MSGS.length - 1)];
+      if (p < 1) requestAnimationFrame(tick); else setTimeout(done, 180);
+    };
+    requestAnimationFrame(tick);
+    // hard safety: never hold the page longer than 3 s no matter what
+    setTimeout(() => { if (document.documentElement.classList.contains("is-preloading")) done(); }, 3000);
+  } else if (pre) pre.remove();
+
   /* ---------- Nav scroll state + mobile menu ---------- */
   const nav = $("#nav");
   if (nav) {
