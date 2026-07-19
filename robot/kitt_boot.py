@@ -59,6 +59,21 @@ def shutdown_line():
     return "Powering down. I've come to a safe stop — try not to miss me too much."
 
 
+def _maybe_warn_model_changed():
+    """Channel-A advisory if the running LLM's digest differs from the vetted pin
+    — a 'no version bump' stealth update (same tag, new weights). Best-effort and
+    lazy (needs requests + a live Ollama on the robot); never breaks boot, and
+    only speaks on a CONFIRMED change (unpinned/unavailable stay silent — no nag)."""
+    try:
+        from kitt_model_smoketest import pin_status  # lazy: pulls requests
+        status, _running, _pinned = pin_status()
+    except Exception:  # noqa: BLE001 — a model-pin advisory must never break boot
+        return
+    if status == "changed":
+        speak(f"A heads-up{name_slot()}: my language model has changed since it was "
+              "last vetted. I'd re-run the model check before trusting me to drive.")
+
+
 def _read_posture(timeout=2.0):
     """Worst-case posture code across nodes + freshness, from /metrics.
     Returns (code|None, fresh_bool). Lazy requests import so this module stays
@@ -96,6 +111,7 @@ def greet(deadline_s=None, poll_s=1.0):
             break
         time.sleep(poll_s)
     speak(greeting_line(last_code, last_fresh))
+    _maybe_warn_model_changed()
 
 
 def main():

@@ -59,6 +59,7 @@ Legend: **LIVE** = wired today (file:seam cited) · **GAP** = to be wired · the
 | A2 | Powered on, governor not ready by deadline (LockedOut / no read / stale) | **LIVE** `kitt_boot.py` | "I'm awake{name}, but still checking myself over. Give me a moment before we go anywhere." |
 | A3 | Shutting down | **LIVE** `kitt_boot.py` `shutdown_line` (systemd `ExecStop`) | "Powering down. I've come to a safe stop — try not to miss me too much." |
 | A4 | Idle / standing by | optional (not wired) | "Standing by{name}." (or silence) |
+| A5 | LLM digest changed since it was vetted (stealth update) | **LIVE** `kitt_boot.py` `_maybe_warn_model_changed` (only on a CONFIRMED change; unpinned/unavailable stay silent) | "A heads-up{name}: my language model has changed since it was last vetted. I'd re-run the model check before trusting me to drive." |
 
 ### B. Driving (you gave a command)
 
