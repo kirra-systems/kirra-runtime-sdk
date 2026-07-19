@@ -1,0 +1,29 @@
+# kirra-ota-check.service — STAGE-ONLY governed OTA check (boot + periodic).
+#
+# Runs `kirra-ota-ctl pull`: polls the verifier's assignment endpoint and, if a
+# new governor artifact is assigned, downloads + VERIFIES (SHA-256 + Uptane
+# signed metadata) + STAGES it into the inactive A/B slot. It NEVER commits —
+# "stage and ask": applying is a deliberate step (voice "apply update", or a
+# health-gated `kirra-ota-ctl probe`). A staged-but-uncommitted update is inert
+# until then, so this timer can never change the running governor unattended.
+#
+# Config (node id / verifier URL / slot paths) is read by kirra-ota-ctl from its
+# environment — set those in /etc/kirra/robot.env. `pull` hits the OPEN
+# assignment GET (no admin token); it is posture-gated at the verifier.
+#
+# Triggered by kirra-ota-check.timer. Staged, NOT enabled by install — enable
+# deliberately: sudo systemctl enable --now kirra-ota-check.timer
+[Unit]
+Description=KIRRA governed OTA check (stage-only; never auto-commits)
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+After=network-online.target kirra-verifier.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__KIRRA_ROBOT_USER__
+EnvironmentFile=/etc/kirra/robot.env
+ExecStart=/opt/kirra/bin/kirra-ota-ctl pull
+# Never fail the unit on "up to date"/transient — the timer just retries later.
+SuccessExitStatus=0 1
+Nice=10

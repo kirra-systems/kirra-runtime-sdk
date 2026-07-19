@@ -1,0 +1,19 @@
+# kirra-ota-check.timer — when to run the STAGE-ONLY OTA check.
+#
+#   sudo systemctl enable --now kirra-ota-check.timer
+#
+# Fires ~2 min after boot (so the robot is up and the verifier reachable) and
+# every 6 h thereafter. `Persistent=true` catches a missed window (robot was off).
+# The service only STAGES — applying stays a deliberate, health-gated step.
+[Unit]
+Description=Schedule the KIRRA stage-only OTA check
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=6h
+Persistent=true
+Unit=kirra-ota-check.service
+
+[Install]
+WantedBy=timers.target

@@ -47,6 +47,7 @@ from kitt_ask import (  # noqa: E402
     KITT_SYSTEM, MICK, MODEL, OLLAMA, gather_perception, gather_posture,
     gather_stop_reason, speak,
 )
+import kitt_ota  # noqa: E402 — deterministic OTA voice commands (NOT the movement door)
 
 MAX_TURNS = 10  # rolling conversation memory (user+assistant pairs kept)
 PERCEPTION_WORDS = ("see", "around", "ahead", "front", "obstacle", "clear",
@@ -133,6 +134,17 @@ def offer_to_door(directive_text):
 
 
 def handle_turn(history, utterance):
+    # System commands (OTA "check/apply update") are matched DETERMINISTICALLY and
+    # handled BEFORE the LLM/movement path — they run local kirra-ota-ctl, never
+    # the fenced mick /intent door, and a movement utterance never reaches here.
+    ota_reply = kitt_ota.handle(utterance)
+    if ota_reply is not None:
+        speak(ota_reply)
+        history.append({"role": "user", "content": utterance})
+        history.append({"role": "assistant", "content": ota_reply})
+        del history[: max(0, len(history) - 2 * MAX_TURNS)]
+        return
+
     context = context_for(utterance)
     say, directive = ask_llm(history, context, utterance)
     if say is None:
