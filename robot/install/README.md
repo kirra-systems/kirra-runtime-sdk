@@ -6,6 +6,17 @@ during the 2026-07 bringup (first governed motion + TG30 lidar). This is the
 seed of the golden-image product and the backup that makes a reflash
 non-destructive (see `REFLASH.md`).
 
+> **Companion installer — the KITT / voice operator layer.** This README covers
+> the base-image install (the fenced verifying consumer + FFI + lidar). The
+> conversational **KITT** layer (voice, persona, proactive narration, OTA voice
+> check) is staged separately by `install_robot_units.sh`, which installs the
+> `kitt_*` scripts + the `kirra-ros-stack` / `kirra-kitt-watch` /
+> `kirra-kitt-greet` / `kirra-ota-check` units (STAGED, not enabled). See
+> `docs/hardware/KITT_BRINGUP_RUNBOOK.md` (bring-up), `KITT_AUDIO_STACK.md`
+> (STT/TTS + the systemd-audio caveat), and `docs/kitt/KITT_VOICE_LINES.md`
+> (every spoken line). KITT is Channel-A speech + the one fenced `/intent` door —
+> it carries no actuation authority.
+
 **Layer split (the honesty constraint):**
 
 - **Layer A (this directory, scripted)** — everything base-agnostic and
