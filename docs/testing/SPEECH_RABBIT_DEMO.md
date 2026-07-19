@@ -1,4 +1,4 @@
-# The spoken governed loop — KITT demo (speech I/O over #894)
+# The spoken governed loop — Rabbit demo (speech I/O over #894)
 
 You speak; Mick proposes; Occy plans; KIRRA bounds; **the car says why — out
 loud.** Speech is a thin UX shell around the governed loop: input transduction

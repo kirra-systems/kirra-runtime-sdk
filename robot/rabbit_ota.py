@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""kitt_ota.py — the KITT "check for update" / "apply update" voice actions.
+"""rabbit_ota.py — the Rabbit "check for update" / "apply update" voice actions.
 
-WHY this is a SEPARATE path from the KITT movement router: an OTA check is a
-SYSTEM command, not a movement. KITT's conversational router only ever hands
+WHY this is a SEPARATE path from the Rabbit movement router: an OTA check is a
+SYSTEM command, not a movement. Rabbit's conversational router only ever hands
 *movement* directives to the ONE fenced door (mick POST /intent). OTA must NOT
 ride that door — it runs the local `kirra-ota-ctl` instead, matched
 DETERMINISTICALLY (keyword, not LLM) so an ambiguous utterance can never be
@@ -15,9 +15,9 @@ asked — voice is a convenience, never an authorization bypass. "Stage and ask"
 (auto-rollback on an unhealthy trial) — never a blind commit.
 
 Importable (the router calls `handle(text)`), or runnable standalone:
-    python3 robot/kitt_ota.py check     # stage-only pull
-    python3 robot/kitt_ota.py status
-    python3 robot/kitt_ota.py apply      # health-gated commit/rollback of a trial
+    python3 robot/rabbit_ota.py check     # stage-only pull
+    python3 robot/rabbit_ota.py status
+    python3 robot/rabbit_ota.py apply      # health-gated commit/rollback of a trial
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kitt_persona import name_slot  # noqa: E402 — stdlib-only helper, safe for this lean module
+from rabbit_persona import name_slot  # noqa: E402 — stdlib-only helper, safe for this lean module
 
 # The ota-ctl binary reads its OWN config from env (verifier URL, node id, slot
 # paths) — we do NOT duplicate that here, we just invoke it.
@@ -138,7 +138,7 @@ if __name__ == "__main__":
     action = sys.argv[1] if len(sys.argv) > 1 else "check"
     fn = {"check": check, "status": status, "apply": apply}.get(action)
     if fn is None:
-        sys.exit("usage: kitt_ota.py [check|status|apply]")
+        sys.exit("usage: rabbit_ota.py [check|status|apply]")
     state, spoken = fn()
     print(f"[{state}] {spoken}")
     sys.exit(0 if state in ("staged", "current", "ok", "none") else 1)

@@ -655,6 +655,70 @@ the harness CSV carries `wcet_status = TBD-QNX-TARGET`).
 
 ---
 
+## Robot Side — R2 / Rabbit operator & doer layer (`robot/`)
+
+`robot/` is the **doer-side operator layer** for the Rosmaster R2 on Jetson Orin
+NX — Python scripts + install tooling, NOT a Cargo crate. It holds no safety
+authority: every actuation goes through the ADR-0033 verify-token chokepoint, and
+every conversational path is fenced.
+
+**Governed drive chokepoint (ADR-0033):** `kirra_motor_consumer.py` (verifying
+consumer — reads the Ed25519 release token, verifies via `kirra_ffi.py` ctypes →
+`libkirra_consumer_ffi.so`, NO crypto in Python, then drives) + `r2_drive.py`
+(the pure R2 Path-B Ackermann last-hop — `translate`/`odom_step`, host-tested in
+`r2_drive_test.py`; `KIRRA_DRIVE_MODE=r2_ackermann` = set_motor + AKM steering,
+bypassing the broken X3 firmware mixer). Consumer `/odom` gated by
+`KIRRA_R2_ODOM_ENABLED`.
+
+**Rabbit — the conversational operator layer** (`docs/hardware/RABBIT_CONVERSATION_DESIGN.md`).
+Two output channels, only one reaches the wheels:
+- **Channel A (SPEAK)** — pure speech, zero actuation authority: `rabbit_ask.py`
+  (grounded Q&A), `rabbit_converse.py` (multi-turn persona + router), `rabbit_watch.py`
+  (proactive posture/deny narration), `rabbit_boot.py` (posture-gated boot greeting
+  + shutdown).
+- **Channel B (ACT)** — the ONLY motion path: a movement directive's TEXT → mick
+  `POST /intent` → `MickIntent::parse_llm_json` → Occy → the KIRRA checker. Rabbit
+  never builds an intent, a Twist, or a token. 🔴 Single-door invariant: system
+  commands (OTA) do NOT ride the movement door.
+- `rabbit_persona.py` — shared stdlib-only helpers: the `{name}` slot
+  (`operator_name`/`name_slot`), `speak()`, and the LLM model pin
+  (`read/write_model_pin`, `classify_model_pin`).
+- The doer LLM is local Ollama (`KIRRA_RABBIT_MODEL`, default `gemma3:4b`);
+  STT = whisper.cpp, TTS = piper (`docs/hardware/RABBIT_AUDIO_STACK.md`, incl. the
+  systemd-audio caveat). Deterministic (NON-LLM) speech — OTA (`rabbit_ota.py`),
+  proactive (`rabbit_watch.py`), boot (`rabbit_boot.py`) — are templates fired by real
+  events. Every spoken line is catalogued in `docs/rabbit/RABBIT_VOICE_LINES.md`.
+
+**Model-swap discipline** (the doer LLM is swappable with ZERO safety re-review —
+the checker is model-agnostic): `rabbit_model_smoketest.py` is the doer-contract
+gate — fires canned utterances through the REAL router contract (`STAGE2_SYSTEM` +
+`parse_reply`) and asserts JSON / drive→directive / chat→null / no-fabrication.
+On PASS it pins the model's Ollama **digest + vetted-at timestamp**
+(`~/.kirra_rabbit_model.pin`) — the "no version bump" stealth-update guard;
+`--pin-check` compares, boot warns (voice line A5) on drift. Commands:
+`RABBIT_BRINGUP_RUNBOOK.md` → "Swapping the LLM". Pure logic host-tested in
+`rabbit_voice_test.py`.
+
+**OTA voice check** (`rabbit_ota.py` + `kirra-ota-check.timer`): "stage and ask" —
+`kirra-ota-ctl pull` stages only; applying is a deliberate health-gated `probe`
+(`docs/hardware/R2_OTA_VOICE_CHECK.md`). Never touches LLM weights.
+
+**Install** (`robot/install/`): `install_robot_units.sh` stages the Rabbit scripts +
+systemd units (`kirra-ros-stack`, `kirra-rabbit-watch`, `kirra-rabbit-greet`,
+`kirra-ota-check`) — STAGED, not enabled (validate wheels-up first:
+`R2_AUTOSTART_CHECKLIST.md`). Base-image install (verifying consumer + FFI +
+lidar): `robot/install/README.md`. Bring-up: `docs/hardware/RABBIT_BRINGUP_RUNBOOK.md`.
+
+**Autoware distro isolation (ADR-0036):** the Autoware AV-stack doer stays pinned
+to Ubuntu 22.04/Humble in its own container while the rest of the stack (ros2
+adapter, checker, Occy/Taj) moves to 24.04/Jazzy; they meet only on 5 curated,
+hash-verified boundary topics (`ros2_ws/src/autoware_*_msgs`). Occy does NOT
+replace Autoware's L4 breadth (localization / control / mature fused perception /
+HD-maps) — KIRRA is the checker that bounds it. Scaffold: `deploy/autoware-isolation/`
++ `scripts/curated_interface/crossdistro_hash_check.sh`.
+
+---
+
 ## Common Mistakes to Reject
 
 - Using `State<Arc<AppState>>` in handlers — correct type is `State<Arc<ServiceState>>`

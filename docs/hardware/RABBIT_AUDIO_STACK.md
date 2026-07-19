@@ -1,12 +1,12 @@
-# KITT audio stack — STT, TTS, PTT, and the systemd-audio trap
+# Rabbit audio stack — STT, TTS, PTT, and the systemd-audio trap
 
-> The **audio-engineering** companion to `KITT_BRINGUP_RUNBOOK.md` (which is the
+> The **audio-engineering** companion to `RABBIT_BRINGUP_RUNBOOK.md` (which is the
 > *how to run it* sheet). This doc is the *how to choose and tune the engines*,
 > and — front and centre — **how to make audio work from a systemd service**,
 > because the whole KIRRA stack runs as services and that is the single most
 > likely thing to eat an evening.
 >
-> Everything here is **Channel A / the fenced door** (`KITT_CONVERSATION_DESIGN.md`):
+> Everything here is **Channel A / the fenced door** (`RABBIT_CONVERSATION_DESIGN.md`):
 > the mic and speaker are a doer-side UX layer. STT feeds the LLM *text*; TTS reads
 > its *words*; the one path to the wheels is the same fail-closed `MickIntent`
 > parse + checker a human typing hits. None of this can actuate.
@@ -16,7 +16,7 @@
 ```
   🎤 ─► [PTT trigger] ─► arecord (bounded clip) ─► whisper-cli (STT) ─► TEXT
                                                                           │
-                    kitt_converse.py: router + persona LLM (Ollama) ◄─────┘
+                    rabbit_converse.py: router + persona LLM (Ollama) ◄─────┘
                           │ (A) SPEAK                  │ (B) directive TEXT → mick /intent
                           ▼                            ▼   → Occy → KIRRA checker → wheels
                     speak.sh: piper (TTS) ─► aplay ─► 🔊
@@ -34,8 +34,8 @@ recipe below). The two dominant terms are the **fixed record window** and the
 | TTS (piper `medium`) | ~0.3–1 s | faster than real-time for a sentence |
 
 > **The deterministic lines skip both dominant terms.** The boot greeting
-> (`kitt_boot.py`), proactive warnings (`kitt_watch.py`), and OTA replies
-> (`kitt_ota.py`) do **no** record and **no** LLM — they render a template
+> (`rabbit_boot.py`), proactive warnings (`rabbit_watch.py`), and OTA replies
+> (`rabbit_ota.py`) do **no** record and **no** LLM — they render a template
 > straight to piper. That's why the safety-/reliability-relevant speech is
 > instant and the conversational speech is the only thing that waits.
 
@@ -64,7 +64,7 @@ the text comes back. Build with CUDA on the Orin if you can — it moves STT fro
 ```bash
 KIRRA_RECORD_CMD="arecord -d 4 -f S16_LE -r 16000 -c 1"   # 4 s, 16 kHz mono, the whisper-native rate
 ```
-The `-d 4` bound is the single biggest latency lever. To make KITT feel snappier,
+The `-d 4` bound is the single biggest latency lever. To make Rabbit feel snappier,
 either shorten it (`-d 2` for terse commands) or, as a follow-up, put a VAD in
 front so it stops on silence instead of waiting the full window.
 
@@ -81,10 +81,10 @@ exec piper --model en_US-lessac-medium.onnx --output-raw \
   | aplay -D hw:0,0 -r 22050 -f S16_LE -t raw -
 ```
 ```bash
-KIRRA_TTS_CMD="./speak.sh"      # unset → KITT prints instead of speaks (still works, just silent)
+KIRRA_TTS_CMD="./speak.sh"      # unset → Rabbit prints instead of speaks (still works, just silent)
 ```
 Match `aplay`'s `-r` to the voice's sample rate (piper medium voices are 22050 Hz;
-a mismatch = chipmunk/slow-mo). A distinctive "KITT voice" is Stage-4 polish — any
+a mismatch = chipmunk/slow-mo). A distinctive "Rabbit voice" is Stage-4 polish — any
 piper voice drops in here; the architecture doesn't care which.
 
 ## 3. PTT — push-to-talk (`ptt_button.py`), and why not always-listening
@@ -96,9 +96,9 @@ Push-to-talk is the right default, for three reasons beyond ergonomics:
 - **No hot-mic privacy issue** — the mic is closed until you hold the button.
 
 Trigger = **one newline on stdout per press**, piped into the voice front-end
-(`ptt_button.py | kitt_voice.sh`). It's just an external OS process standing in
+(`ptt_button.py | rabbit_voice.sh`). It's just an external OS process standing in
 for the Enter key — the Rust/Python loop is unchanged. Keyboard Enter is the
-zero-hardware fallback (`kitt_voice.sh` alone).
+zero-hardware fallback (`rabbit_voice.sh` alone).
 
 GPIO wiring (default): a normally-open momentary button between the pin and GND;
 the internal pull-up idles HIGH, a press pulls LOW.
@@ -120,10 +120,10 @@ Needs `Jetson.GPIO` + the user in the `gpio` group (udev rules), or root.
 
 ## 4. 🔴 Audio from a systemd service (read this before enabling the units)
 
-**The trap:** audio works perfectly when you run a KITT script by hand, then goes
+**The trap:** audio works perfectly when you run a Rabbit script by hand, then goes
 **silent the moment the same script runs as a systemd service** — with no error.
-Because the whole KIRRA stack runs as services (`kirra-kitt-watch`,
-`kirra-kitt-greet`, and any voice front-end you unit-ise), every KITT audio path
+Because the whole KIRRA stack runs as services (`kirra-rabbit-watch`,
+`kirra-rabbit-greet`, and any voice front-end you unit-ise), every Rabbit audio path
 will hit this. Budget for it here, not at 2 a.m.
 
 **Why it happens:** a `User=` systemd service has **no login/graphical session**.
@@ -165,12 +165,12 @@ than ALSA-direct. Prefer ALSA-direct unless you have a reason not to.
 # playback from a service context (no session):
 sudo systemd-run --uid=<user> --pty bash -c 'echo test | ./speak.sh'
 # or just enable the greet unit and watch it actually speak on boot:
-sudo systemctl start kirra-kitt-greet && journalctl -u kirra-kitt-greet -f
+sudo systemctl start kirra-rabbit-greet && journalctl -u kirra-rabbit-greet -f
 ```
 If it prints but doesn't speak, it's this section — re-check the `-D` device and
-the `audio` group. **KITT degrades to printing when TTS can't reach the device
+the `audio` group. **Rabbit degrades to printing when TTS can't reach the device
 (harmless), so silence is the symptom, not a crash.** The units
-(`kirra-kitt-watch`, `kirra-kitt-greet`) already carry this caveat inline; this
+(`kirra-rabbit-watch`, `kirra-rabbit-greet`) already carry this caveat inline; this
 section is the full fix.
 
 ---
@@ -199,9 +199,9 @@ Sum = PTT-release → spoken reply. If it's too slow: shorten `-d`, drop to
 | Greeting never speaks on boot | TTS device unreachable in-service | validate with `systemd-run --uid`; it degraded to print |
 
 ## References
-- `docs/hardware/KITT_BRINGUP_RUNBOOK.md` — the run-it-start-to-finish sheet
-- `docs/hardware/KITT_CONVERSATION_DESIGN.md` — the architecture + the safety fence
-- `docs/kitt/KITT_VOICE_LINES.md` — every spoken line (the deterministic paths that skip STT/LLM)
-- `robot/install/kitt.env.example` — the single env template these vars live in
-- `robot/install/systemd/kirra-kitt-{watch,greet}.service` — the units that carry the §4 caveat
-- `docs/testing/SPEECH_KITT_DEMO.md` — the built STT→intent→TTS loop
+- `docs/hardware/RABBIT_BRINGUP_RUNBOOK.md` — the run-it-start-to-finish sheet
+- `docs/hardware/RABBIT_CONVERSATION_DESIGN.md` — the architecture + the safety fence
+- `docs/rabbit/RABBIT_VOICE_LINES.md` — every spoken line (the deterministic paths that skip STT/LLM)
+- `robot/install/rabbit.env.example` — the single env template these vars live in
+- `robot/install/systemd/kirra-rabbit-{watch,greet}.service` — the units that carry the §4 caveat
+- `docs/testing/SPEECH_RABBIT_DEMO.md` — the built STT→intent→TTS loop

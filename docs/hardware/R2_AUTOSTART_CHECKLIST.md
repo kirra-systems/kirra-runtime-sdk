@@ -18,11 +18,11 @@
 | `kirra.target` (verifier + planner + taj + mick) | governor stack (mint + sidecars) | `kirra` (service acct, sandboxed) | `deploy/systemd/` (via `install.sh`) |
 | `kirra-consumer.service` | verifying motor consumer (ADR-0033 chokepoint) | robot user (`dialout`) | `robot/install/` (staged by `install_kirra.sh`) |
 | `kirra-ros-stack.service` | occy_doer + cmd_vel_interceptor + perception_governor | robot user (ROS + ws) | `robot/install/systemd/` |
-| `kirra-kitt-watch.service` | proactive event speech (Channel A) | robot user (`audio`) | `robot/install/systemd/` |
+| `kirra-rabbit-watch.service` | proactive event speech (Channel A) | robot user (`audio`) | `robot/install/systemd/` |
 | *(external)* `ollama.service` | the local LLM (mick's brain) | its own | the Ollama installer |
 | *(external)* lidar (`ydlidar_ros2_driver`) | `/scan` | robot user | vendor / your launch |
 
-`kitt_voice.sh` / `speech_shell` / `ptt_button.py` are **interactive** (a person
+`rabbit_voice.sh` / `speech_shell` / `ptt_button.py` are **interactive** (a person
 talks) — they are NOT boot services; run them in a session when you want to talk.
 
 ## Boot / dependency order
@@ -36,7 +36,7 @@ talks) — they are NOT boot services; run them in a session when you want to ta
                     │
                     ├─► kirra-ros-stack ─► occy_doer + interceptor  (holds if a sidecar is down)
                     ├─► kirra-consumer ──► wheels (decel-to-stops if no releases)
-                    └─► kirra-kitt-watch ► narration (silent if a source is down)
+                    └─► kirra-rabbit-watch ► narration (silent if a source is down)
         (external)  lidar ─► /scan       (occy holds 'stale-scan' without it)
 ```
 
@@ -53,7 +53,7 @@ sudo deploy/systemd/install.sh                      # installs + enables kirra.t
 #   __KIRRA_ROBOT_USER__  → your login user (in dialout + audio groups)
 #   copy binaries/scripts to /opt/kirra (install_kirra.sh does the consumer bits)
 sudo install_kirra.sh                               # stages kirra-consumer (not enabled)
-# render + install the ros-stack + kitt-watch units the same way (fill User=,
+# render + install the ros-stack + rabbit-watch units the same way (fill User=,
 # set KIRRA_ROS_WS_SETUP in /etc/kirra/robot.env), then daemon-reload.
 sudo systemctl daemon-reload
 ```
@@ -83,10 +83,10 @@ sudo systemctl start kirra-consumer && journalctl -u kirra-consumer -f
 sudo systemctl start kirra-ros-stack && journalctl -u kirra-ros-stack -f
 #    …acceptance passes…            → sudo systemctl enable kirra-ros-stack
 
-# 4. kitt-watch — confirm it SPEAKS on a posture/deny event (audio-in-service
+# 4. rabbit-watch — confirm it SPEAKS on a posture/deny event (audio-in-service
 #    caveat: needs an ALSA-direct KIRRA_TTS_CMD + the audio group).
-sudo systemctl start kirra-kitt-watch && journalctl -u kirra-kitt-watch -f
-#    …speaks on an event…           → sudo systemctl enable kirra-kitt-watch
+sudo systemctl start kirra-rabbit-watch && journalctl -u kirra-rabbit-watch -f
+#    …speaks on an event…           → sudo systemctl enable kirra-rabbit-watch
 ```
 
 ## The cold-boot test (the acceptance for Layer 1)
@@ -96,7 +96,7 @@ Only after all four are enabled AND individually validated:
 1. **Hardware e-stop in hand** (`R2_ESTOP_SPEC.md`), wheels-up first.
 2. Power the robot with **no laptop attached**.
 3. Confirm the stack comes up: `systemctl is-active kirra.target kirra-consumer
-   kirra-ros-stack kirra-kitt-watch` → all `active`; `curl localhost:8090/health`.
+   kirra-ros-stack kirra-rabbit-watch` → all `active`; `curl localhost:8090/health`.
 4. Give a goal (voice via a session, or a pre-loaded mission) → governed motion.
 5. **Fail-closed drill:** `systemctl stop kirra-verifier` mid-run → the consumer
    decel-to-stops (no runaway). Restart → recovers.
@@ -108,10 +108,10 @@ operation in scope.
 
 - ✅ Governor stack units + one-command install (`deploy/systemd/`).
 - ✅ Consumer unit staged (`install_kirra.sh`).
-- ✅ **ROS-stack + KITT-watch units authored** (`robot/install/systemd/`, this
+- ✅ **ROS-stack + Rabbit-watch units authored** (`robot/install/systemd/`, this
   change) — `start_sidecars:=false` so they don't double-bind `kirra.target`'s.
 - ⬜ **Per-service wheels-up validation + `enable`** — hardware, not yet done.
-- ⬜ **Audio-in-a-system-service** proven for `kirra-kitt-watch` (ALSA-direct) —
+- ⬜ **Audio-in-a-system-service** proven for `kirra-rabbit-watch` (ALSA-direct) —
   until then, run the narrator in a login session.
 - ⬜ An installer step that renders the two new units' `User=` +
   `KIRRA_ROS_WS_SETUP` (today: fill the placeholders by hand).

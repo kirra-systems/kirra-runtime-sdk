@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""kitt_boot.py — KITT's power-on greeting and shutdown line. **SPEAK-ONLY.**
+"""rabbit_boot.py — Rabbit's power-on greeting and shutdown line. **SPEAK-ONLY.**
 
-The boot greeting is deliberately NOT in kitt_watch.py (which stays silent on
+The boot greeting is deliberately NOT in rabbit_watch.py (which stays silent on
 boot by design — no false "recovered" chatter). It lives here as a one-shot the
 systemd greet unit runs AFTER the stack is up, and it is HONEST: it only claims
 "governor nominal" when it has actually read a FRESH, non-LockedOut posture from
@@ -12,15 +12,15 @@ of greeting into a lie.
             then speak the matching line (nominal / degraded / not-ready-yet).
   shutdown→ speak the power-down line.
 
-🔴 CHANNEL A ONLY (docs/kitt/KITT_VOICE_LINES.md, rows A1–A3). Read-only GET +
+🔴 CHANNEL A ONLY (docs/rabbit/RABBIT_VOICE_LINES.md, rows A1–A3). Read-only GET +
    TTS. No /intent, no publisher, no serial, no release token — it cannot move
    the robot. Proactive SPEECH, never proactive motion.
 
 Usage:
-  ./robot/kitt_boot.py greet       # power-on greeting (posture-gated)
-  ./robot/kitt_boot.py shutdown    # power-down line
+  ./robot/rabbit_boot.py greet       # power-on greeting (posture-gated)
+  ./robot/rabbit_boot.py shutdown    # power-down line
 Env: KIRRA_VERIFIER_URL (default http://localhost:8090), KIRRA_TTS_CMD,
-     KIRRA_KITT_OPERATOR, KIRRA_KITT_GREET_DEADLINE_MS (default 20000).
+     KIRRA_RABBIT_OPERATOR, KIRRA_RABBIT_GREET_DEADLINE_MS (default 20000).
 """
 from __future__ import annotations
 
@@ -30,10 +30,10 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kitt_persona import name_slot, speak  # noqa: E402
+from rabbit_persona import name_slot, speak  # noqa: E402
 
 VERIFIER = os.environ.get("KIRRA_VERIFIER_URL", "http://localhost:8090").rstrip("/")
-GREET_DEADLINE_S = int(os.environ.get("KIRRA_KITT_GREET_DEADLINE_MS", "20000")) / 1000.0
+GREET_DEADLINE_S = int(os.environ.get("KIRRA_RABBIT_GREET_DEADLINE_MS", "20000")) / 1000.0
 
 _FLEET_RE = re.compile(r"kirra_fleet_posture\{[^}]*\}\s+(\d+)")
 _STALE_RE = re.compile(r"kirra_posture_cache_stale\{[^}]*\}\s+1\b")
@@ -65,7 +65,7 @@ def _maybe_warn_model_changed():
     lazy (needs requests + a live Ollama on the robot); never breaks boot, and
     only speaks on a CONFIRMED change (unpinned/unavailable stay silent — no nag)."""
     try:
-        from kitt_model_smoketest import pin_status  # lazy: pulls requests
+        from rabbit_model_smoketest import pin_status  # lazy: pulls requests
         status, _running, _pinned = pin_status()
     except Exception:  # noqa: BLE001 — a model-pin advisory must never break boot
         return
@@ -121,7 +121,7 @@ def main():
     elif action == "shutdown":
         speak(shutdown_line())
     else:
-        sys.exit("usage: kitt_boot.py [greet|shutdown]")
+        sys.exit("usage: rabbit_boot.py [greet|shutdown]")
 
 
 if __name__ == "__main__":

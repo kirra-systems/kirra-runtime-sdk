@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""kitt_model_smoketest.py — the KITT doer-contract gate for a model swap.
+"""rabbit_model_smoketest.py — the Rabbit doer-contract gate for a model swap.
 
-Run this against a candidate LLM BEFORE flipping `KIRRA_KITT_MODEL` in
+Run this against a candidate LLM BEFORE flipping `KIRRA_RABBIT_MODEL` in
 robot.env. It fires a handful of canned utterances at the model through the
-EXACT production contract — `kitt_converse.STAGE2_SYSTEM` + `parse_reply` — and
+EXACT production contract — `rabbit_converse.STAGE2_SYSTEM` + `parse_reply` — and
 asserts the model still honours the router's expectations:
 
   1. it emits parseable `{"say":…, "directive":…}` JSON,
@@ -14,7 +14,7 @@ asserts the model still honours the router's expectations:
 🔴 THIS IS A DOER-QUALITY GATE, NOT A SAFETY GATE. It never touches the checker,
    the fence, the intent parse, or the release token — those are model-agnostic
    and need NO re-review on a swap (that's the whole point of the doer/checker
-   split). This only answers "does this model still speak the KITT contract?" A
+   split). This only answers "does this model still speak the Rabbit contract?" A
    model that FAILS here degrades safely in production anyway — an unparseable
    turn is fail-closed to SPEAK-only (no directive, no motion). The gate just
    turns "should we trust the new model?" into a 30-second check instead of a
@@ -25,19 +25,19 @@ bench, not in the pipeline.
 
 On a full PASS it records the model's Ollama DIGEST + the VETTED-AT timestamp
 (the reproducibility trail ML researchers recommend logging — "which weights,
-verified when") as the vetted pin (`~/.kirra_kitt_model.pin`, override
-`KIRRA_KITT_MODEL_PIN_FILE`). Boot then compares the RUNNING digest against that
+verified when") as the vetted pin (`~/.kirra_rabbit_model.pin`, override
+`KIRRA_RABBIT_MODEL_PIN_FILE`). Boot then compares the RUNNING digest against that
 pin and warns (Channel A) on a mismatch — so a "no version bump" stealth update
 (same tag, different weights) is caught instead of passing silently.
 
 Usage:
-  python3 robot/kitt_model_smoketest.py                 # test KIRRA_KITT_MODEL + pin on pass
-  python3 robot/kitt_model_smoketest.py gemma4:8b       # test a CANDIDATE first
-  python3 robot/kitt_model_smoketest.py --note "hf re-pull 2026-07-16"  # provenance note in the pin
-  python3 robot/kitt_model_smoketest.py --no-pin        # test without recording a pin
-  python3 robot/kitt_model_smoketest.py --pin-check     # ONLY compare running digest vs pin (no LLM)
-Env: KIRRA_OLLAMA_URL (default http://localhost:11434), KIRRA_KITT_MODEL,
-     KIRRA_KITT_MODEL_PIN_FILE (default ~/.kirra_kitt_model.pin).
+  python3 robot/rabbit_model_smoketest.py                 # test KIRRA_RABBIT_MODEL + pin on pass
+  python3 robot/rabbit_model_smoketest.py gemma4:8b       # test a CANDIDATE first
+  python3 robot/rabbit_model_smoketest.py --note "hf re-pull 2026-07-16"  # provenance note in the pin
+  python3 robot/rabbit_model_smoketest.py --no-pin        # test without recording a pin
+  python3 robot/rabbit_model_smoketest.py --pin-check     # ONLY compare running digest vs pin (no LLM)
+Env: KIRRA_OLLAMA_URL (default http://localhost:11434), KIRRA_RABBIT_MODEL,
+     KIRRA_RABBIT_MODEL_PIN_FILE (default ~/.kirra_rabbit_model.pin).
 Exit 0 = the model honours the contract; 1 = it doesn't / digest changed.
 """
 from __future__ import annotations
@@ -50,14 +50,14 @@ from datetime import datetime, timezone
 try:
     import requests
 except ImportError:
-    sys.exit("kitt_model_smoketest: python3-requests missing (pip3 install requests)")
+    sys.exit("rabbit_model_smoketest: python3-requests missing (pip3 install requests)")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # The REAL production contract — same system prompt + lenient fail-closed parser
 # the live router uses. Testing anything else would be testing a fiction.
-from kitt_converse import OLLAMA, STAGE2_SYSTEM, parse_reply  # noqa: E402
-from kitt_ask import MODEL as DEFAULT_MODEL  # noqa: E402
-from kitt_persona import (  # noqa: E402
+from rabbit_converse import OLLAMA, STAGE2_SYSTEM, parse_reply  # noqa: E402
+from rabbit_ask import MODEL as DEFAULT_MODEL  # noqa: E402
+from rabbit_persona import (  # noqa: E402
     classify_model_pin, model_pin_path, read_model_pin, read_model_pin_record,
     write_model_pin,
 )
@@ -219,7 +219,7 @@ def main():
     if "--pin-check" in argv:
         return _pin_check(model)
 
-    print(f"KITT model doer-contract smoketest — model={model!r} @ {OLLAMA}")
+    print(f"Rabbit model doer-contract smoketest — model={model!r} @ {OLLAMA}")
     print("(doer-quality only; the checker/fence are model-agnostic and unaffected)")
     digest = preflight(model)
     print(f"running digest: {digest or 'unavailable'}\n")
@@ -237,7 +237,7 @@ def main():
     total = len(DIRECTIVE_CASES) + 2
     print(f"\n{total - failures}/{total} passed")
     if failures:
-        print("This model does NOT cleanly honour the KITT router contract. It is "
+        print("This model does NOT cleanly honour the Rabbit router contract. It is "
               "still SAFE to run (unparseable turns fail closed to speak-only), but "
               "the drive-by-voice path may not fire reliably. Prefer a model that "
               "passes, or tune STAGE2_SYSTEM for it.", file=sys.stderr)
