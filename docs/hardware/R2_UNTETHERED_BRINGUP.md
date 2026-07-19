@@ -58,8 +58,8 @@ hardware-validated (the validated path is a terminal run).
 sudo systemctl enable --now kirra-consumer       # the verifying motor consumer
 # The full unit set now EXISTS: kirra.target (verifier + planner + taj + mick,
 # deploy/systemd/), kirra-consumer (robot/install/), and the ROS doer stack +
-# KITT watcher (robot/install/systemd/kirra-ros-stack.service /
-# kirra-kitt-watch.service). The ordered validate-then-enable procedure + the
+# Rabbit watcher (robot/install/systemd/kirra-ros-stack.service /
+# kirra-rabbit-watch.service). The ordered validate-then-enable procedure + the
 # cold-boot acceptance test are in docs/hardware/R2_AUTOSTART_CHECKLIST.md.
 # What remains is per-service wheels-up validation, not authoring.
 ```
@@ -82,7 +82,7 @@ service is a stationary robot, never a runaway.
 
 This is **already built and CI-covered** — `speech_shell`
 (`crates/kirra-sidecars/src/bin/speech_shell.rs` + `speech.rs`), documented in
-`docs/testing/SPEECH_KITT_DEMO.md`. You are wiring hardware to an existing seam,
+`docs/testing/SPEECH_RABBIT_DEMO.md`. You are wiring hardware to an existing seam,
 not adding a code path.
 
 ```
@@ -118,7 +118,7 @@ key.
   one-line `speak.sh` (`piper … --output-raw | aplay -r 22050 -f S16_LE -t raw -`).
   Fully offline. Unset `KIRRA_TTS_CMD` → narration prints instead of speaks.
 
-### Env (fail-closed on malformed — see SPEECH_KITT_DEMO.md §setup)
+### Env (fail-closed on malformed — see SPEECH_RABBIT_DEMO.md §setup)
 ```bash
 export KIRRA_STT_CMD="whisper-cli -m models/ggml-base.en.bin -np -nt -f"  # required
 export KIRRA_TTS_CMD="./speak.sh"          # optional; unset → print-only
@@ -241,7 +241,7 @@ swap them freely without touching the safety loop.
 1. **Hardware e-stop** (§3) — before the first untethered meter. Test it: drive a
    little (tethered/on wifi), hit the physical stop, confirm wheels cut.
 2. **Voice on wifi** (§2) — wire the mic/speaker, run `speech_shell` by hand per
-   `SPEECH_KITT_DEMO.md`, prove "creep forward" → intent → bounded proposal (the
+   `SPEECH_RABBIT_DEMO.md`, prove "creep forward" → intent → bounded proposal (the
    Stage-1 loop you already validated), with narration spoken back.
 3. **Autostart, one service at a time** (§1) — validate each as a service
    wheels-up, then `enable`.
@@ -251,7 +251,7 @@ swap them freely without touching the safety loop.
 
 ## References
 - `docs/hardware/R2_LIVE_LOOP_BRINGUP.md` — the tethered governed loop (Stages 1–2)
-- `docs/testing/SPEECH_KITT_DEMO.md` — the voice UX (whisper.cpp / Piper, env, CI)
+- `docs/testing/SPEECH_RABBIT_DEMO.md` — the voice UX (whisper.cpp / Piper, env, CI)
 - `robot/install/install_kirra.sh` — installer + the staged `kirra-consumer.service`
 - `ci/check_mick_actuation_fence.py` — why the LLM (and voice) can't drive directly
 - ADR-0033 — the on-device verify chokepoint (local, fail-closed)

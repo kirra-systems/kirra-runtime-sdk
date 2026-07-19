@@ -31,8 +31,8 @@ running governor unattended.
 
 ## 2. By voice ("check for update")
 
-Runs through the KITT conversational router (`robot/kitt_converse.py`), matched
-**deterministically** by keyword in `robot/kitt_ota.py` — NOT the LLM, and NOT
+Runs through the Rabbit conversational router (`robot/rabbit_converse.py`), matched
+**deterministically** by keyword in `robot/rabbit_ota.py` — NOT the LLM, and NOT
 the fenced Mick `/intent` movement door (an OTA check is a system command, not a
 movement; the two can never be confused).
 
@@ -48,7 +48,7 @@ version; it is never a blind commit.
 
 Standalone (for the timer log, or testing):
 ```bash
-python3 robot/kitt_ota.py check     # or status | apply
+python3 robot/rabbit_ota.py check     # or status | apply
 ```
 
 ## Caveats
@@ -56,7 +56,7 @@ python3 robot/kitt_ota.py check     # or status | apply
   published on the verifier/fleet this node points at. Standalone bench robot,
   no campaign → "you're up to date" (the plumbing is ready for when you push one).
 - **Governs the safety-critical governor artifact** — the OTA-managed binary,
-  with the full verify/rollback discipline. App-level bits (KITT scripts,
+  with the full verify/rollback discipline. App-level bits (Rabbit scripts,
   planner) are a separate `git pull` + rebuild if you want those too.
 - **Config:** `kirra-ota-ctl` reads node id / verifier URL / slot paths from its
   env — set them in `/etc/kirra/robot.env`. `KIRRA_OTA_CTL` overrides the binary

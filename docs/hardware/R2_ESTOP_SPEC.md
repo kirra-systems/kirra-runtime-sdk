@@ -16,9 +16,9 @@
 | R1 | **Software-independent.** The kill removes motor power through hardware; it works with the Jetson hung, the consumer crashed, or the code in any state. | The whole point — software can't stop software that's wedged. |
 | R2 | **Fail-safe / energize-to-run.** De-energized = stopped. Any fault (button pressed, RF lost, coil power lost, wire cut) opens the circuit → motors dead. | Loss of anything defaults to STOP, never to run. |
 | R3 | **Latching.** A hit stays stopped until a human deliberately resets (twist-release), never auto-clears. | Mirrors LockedOut's human-reset semantics. |
-| R4 | **Cuts DRIVE power, keeps COMPUTE alive** (if the topology allows). | The Jetson stays up to log the event + hold the software safe-state + let KITT announce it. A blunt whole-robot kill is the acceptable fallback if the rails can't be split. |
+| R4 | **Cuts DRIVE power, keeps COMPUTE alive** (if the topology allows). | The Jetson stays up to log the event + hold the software safe-state + let Rabbit announce it. A blunt whole-robot kill is the acceptable fallback if the rails can't be split. |
 | R5 | **Deliberate two-part re-arm.** Hardware twist-release restores power, but motion does NOT resume until a software clearance (ADR-0013 grant). | Prevents a post-reset lurch; defense in depth. |
-| R6 | **Sense line (advisory).** The e-stop state is readable by software (a GPIO input) so the consumer latches a hold + KITT says "emergency stop engaged." | Observability only — NEVER the stopping mechanism (R1 stands alone). |
+| R6 | **Sense line (advisory).** The e-stop state is readable by software (a GPIO input) so the consumer latches a hold + Rabbit says "emergency stop engaged." | Observability only — NEVER the stopping mechanism (R1 stands alone). |
 | R7 | **Reachable.** A mushroom head on the robot AND an RF fob for range. | You must be able to hit it from where you watch. |
 
 ## 2. Where it cuts (relative to the existing safety spine)
@@ -72,8 +72,8 @@ once you add RF.
 
 - **Sense (advisory):** a spare relay contact (or a voltage divider off the motor
   feed) into a Jetson **GPIO input**. A small watcher (mirror of `ptt_button.py`)
-  reads it; on "engaged" the **consumer latches a hold** like LockedOut and KITT
-  (`kitt_watch.py`) announces *"Emergency stop engaged."* This is observability —
+  reads it; on "engaged" the **consumer latches a hold** like LockedOut and Rabbit
+  (`rabbit_watch.py`) announces *"Emergency stop engaged."* This is observability —
   the hardware already cut power; software just stays consistent.
 - **Re-arm (deliberate, two-part):**
   1. **Hardware:** twist-release the mushroom (and/or RF re-arm) → motor power
@@ -110,7 +110,7 @@ Wheels-up first, then tethered floor:
 2. **RF loss = stop:** with the RF kill armed, power off the fob (or walk out of
    range) → motors drop out (fail-safe, R2).
 3. **Compute survives (R4):** during a kill, confirm the Jetson stays up — `curl
-   localhost:8090/health` still answers, and `kitt_watch` announced the sense event.
+   localhost:8090/health` still answers, and `rabbit_watch` announced the sense event.
 4. **No-lurch re-arm (R5):** twist-release → confirm the robot does NOT move until
    you issue the software clearance; then it resumes.
 5. **Software-independent (R1):** kill the consumer process (`pkill`), then hit the

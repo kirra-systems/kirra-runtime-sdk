@@ -17,7 +17,7 @@
 //!   speech_shell --wav clip.wav      # one turn from a recorded/synthesized WAV
 //!   speech_shell                     # interactive push-to-talk (needs KIRRA_RECORD_CMD)
 //!
-//! Env (fail-closed on malformed; see docs/testing/SPEECH_KITT_DEMO.md):
+//! Env (fail-closed on malformed; see docs/testing/SPEECH_RABBIT_DEMO.md):
 //!   KIRRA_STT_CMD     required   e.g. "whisper-cli -m models/ggml-base.en.bin -np -nt -f"
 //!   KIRRA_TTS_CMD     optional   e.g. "./speak.sh"  (text on stdin; unset → print only)
 //!   KIRRA_RECORD_CMD  optional   e.g. "arecord -d 4 -f S16_LE -r 16000 -c 1"
@@ -114,7 +114,7 @@ fn main() {
         std::env::var("KIRRA_MICK_URL").unwrap_or_else(|_| "http://127.0.0.1:8102".to_string());
 
     let Some((stt_prog, stt_args)) = env_cmd(STT_CMD_ENV) else {
-        eprintln!("speech_shell: {STT_CMD_ENV} is required (the external STT command — see docs/testing/SPEECH_KITT_DEMO.md)");
+        eprintln!("speech_shell: {STT_CMD_ENV} is required (the external STT command — see docs/testing/SPEECH_RABBIT_DEMO.md)");
         std::process::exit(1);
     };
     let stt = ProcessTranscriber::new(stt_prog, stt_args);

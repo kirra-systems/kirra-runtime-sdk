@@ -148,7 +148,7 @@ are pinned in-repo, so:
 ## Follow-ups
 - Autoware boundary inventory (step 1) — the immediate next work item.
 - Jazzy CI build lane (step 6).
-- Governed-loop bring-up smoke checklist (Jazzy), analogous to `robot/kitt_model_smoketest.py`.
+- Governed-loop bring-up smoke checklist (Jazzy), analogous to `robot/rabbit_model_smoketest.py`.
 
 ## References
 - ADR-0032 — Governor Deployment Platform (doer guest = "ROS 2 Jazzy"; Jetson is a doer, not the cert target)

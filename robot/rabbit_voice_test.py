@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Host tests for the pure KITT voice logic (`kitt_persona.py`, `kitt_boot.py`,
-`kitt_ota.py` matcher).
+"""Host tests for the pure Rabbit voice logic (`rabbit_persona.py`, `rabbit_boot.py`,
+`rabbit_ota.py` matcher).
 
-Pure and dependency-light by construction: `kitt_persona` is stdlib-only and
-`kitt_boot` imports `requests` LAZILY (inside `_read_posture`), so the boot
+Pure and dependency-light by construction: `rabbit_persona` is stdlib-only and
+`rabbit_boot` imports `requests` LAZILY (inside `_read_posture`), so the boot
 greeting decision and the `{name}` slot are exercised on a plain host with no
-network, no ROS, and no TTS. Runs standalone (`python3 robot/kitt_voice_test.py`,
+network, no ROS, and no TTS. Runs standalone (`python3 robot/rabbit_voice_test.py`,
 exit 1 on any failure); also importable under pytest.
 
 Covers: the `{name}` slot (known/unknown), the posture-GATED boot greeting
@@ -19,31 +19,31 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from kitt_boot import greeting_line, shutdown_line  # noqa: E402
-from kitt_ota import match_command  # noqa: E402
-from kitt_persona import (  # noqa: E402
+from rabbit_boot import greeting_line, shutdown_line  # noqa: E402
+from rabbit_ota import match_command  # noqa: E402
+from rabbit_persona import (  # noqa: E402
     classify_model_pin, name_slot, read_model_pin, read_model_pin_record,
     write_model_pin,
 )
 
 
 def _with_operator(value):
-    """Context helper: set/clear KIRRA_KITT_OPERATOR, restoring the prior value.
+    """Context helper: set/clear KIRRA_RABBIT_OPERATOR, restoring the prior value.
     Single-process test env twiddling (not the Rust INV-13 set_var concern)."""
     class _Ctx:
         def __enter__(self):
-            self.prev = os.environ.get("KIRRA_KITT_OPERATOR")
+            self.prev = os.environ.get("KIRRA_RABBIT_OPERATOR")
             if value is None:
-                os.environ.pop("KIRRA_KITT_OPERATOR", None)
+                os.environ.pop("KIRRA_RABBIT_OPERATOR", None)
             else:
-                os.environ["KIRRA_KITT_OPERATOR"] = value
+                os.environ["KIRRA_RABBIT_OPERATOR"] = value
             return self
 
         def __exit__(self, *a):
             if self.prev is None:
-                os.environ.pop("KIRRA_KITT_OPERATOR", None)
+                os.environ.pop("KIRRA_RABBIT_OPERATOR", None)
             else:
-                os.environ["KIRRA_KITT_OPERATOR"] = self.prev
+                os.environ["KIRRA_RABBIT_OPERATOR"] = self.prev
     return _Ctx()
 
 
@@ -183,5 +183,5 @@ def _run_all() -> int:
 
 
 if __name__ == "__main__":
-    print("KITT voice-logic host tests (pure, no hardware):")
+    print("Rabbit voice-logic host tests (pure, no hardware):")
     sys.exit(_run_all())

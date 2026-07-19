@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""kitt_ask.py — Stage 1 KITT: grounded, spoken Q&A. **SPEAK-ONLY.**
+"""rabbit_ask.py — Stage 1 Rabbit: grounded, spoken Q&A. **SPEAK-ONLY.**
 
 Ask the R2 a question — "what do you see", "why did we stop", "are we OK" — and
-it answers OUT LOUD, truthfully, from live telemetry, in the KITT persona.
+it answers OUT LOUD, truthfully, from live telemetry, in the Rabbit persona.
 
   question (argv or stdin) ─► gather READ-ONLY telemetry ─► local LLM phrases it
                                                           ─► print + (optional) TTS
 
-🔴 THIS IS CHANNEL A (SPEAK) ONLY — see docs/hardware/KITT_CONVERSATION_DESIGN.md.
+🔴 THIS IS CHANNEL A (SPEAK) ONLY — see docs/hardware/RABBIT_CONVERSATION_DESIGN.md.
    It makes read-only HTTP GETs and prints/speaks text. It has NO /intent POST,
    NO ROS publisher, NO serial write, NO release token — there is NO code path
    from this script to motion. It cannot move the robot; it can only talk about
@@ -15,21 +15,21 @@ it answers OUT LOUD, truthfully, from live telemetry, in the KITT persona.
    POST /intent door → Occy → the KIRRA checker (a SEPARATE tool, speech_shell).
 
 GROUNDING is read-only and FAIL-SOFT: every source (posture / stop-reason /
-perception) is fetched independently; if one is unreachable KITT says so ("I
+perception) is fetched independently; if one is unreachable Rabbit says so ("I
 can't reach my perception right now") rather than inventing an answer. The LLM is
 instructed to state ONLY what the telemetry shows — the persona phrases; the
-numbers are ground truth. If the LLM itself is down, KITT falls back to a plain
+numbers are ground truth. If the LLM itself is down, Rabbit falls back to a plain
 factual read (no personality, still truthful).
 
 Usage:
-  ./robot/kitt_ask.py "what do you see?"
-  echo "why did we stop" | ./robot/kitt_ask.py           # e.g. from whisper-cli
+  ./robot/rabbit_ask.py "what do you see?"
+  echo "why did we stop" | ./robot/rabbit_ask.py           # e.g. from whisper-cli
 Env (all optional; sensible localhost defaults):
   KIRRA_VERIFIER_URL  http://localhost:8090   (posture, narration relay source)
   KIRRA_MICK_URL      http://localhost:8102   (GET /narration/last — the #893 reason)
   KIRRA_TAJ_URL       http://localhost:8101   (perception snapshot)
   KIRRA_OLLAMA_URL    http://localhost:11434  (the local LLM)
-  KIRRA_KITT_MODEL    gemma3:4b               (persona model)
+  KIRRA_RABBIT_MODEL    gemma3:4b               (persona model)
   KIRRA_TTS_CMD       (unset → print only; e.g. "./speak.sh" to speak the answer)
 """
 import math
@@ -40,21 +40,21 @@ import time
 try:
     import requests
 except ImportError:
-    sys.exit("kitt_ask: python3-requests missing (pip3 install requests)")
+    sys.exit("rabbit_ask: python3-requests missing (pip3 install requests)")
 
 # robot/ is on sys.path when run standalone; importers add it before importing us.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kitt_persona import name_slot, operator_name, speak  # noqa: E402,F401 (re-export speak)
+from rabbit_persona import name_slot, operator_name, speak  # noqa: E402,F401 (re-export speak)
 
 VERIFIER = os.environ.get("KIRRA_VERIFIER_URL", "http://localhost:8090").rstrip("/")
 MICK = os.environ.get("KIRRA_MICK_URL", "http://localhost:8102").rstrip("/")
 TAJ = os.environ.get("KIRRA_TAJ_URL", "http://localhost:8101").rstrip("/")
 OLLAMA = os.environ.get("KIRRA_OLLAMA_URL", "http://localhost:11434").rstrip("/")
-MODEL = os.environ.get("KIRRA_KITT_MODEL", "gemma3:4b")
+MODEL = os.environ.get("KIRRA_RABBIT_MODEL", "gemma3:4b")
 FORWARD_CONE_RAD = math.radians(15.0)
 
-KITT_SYSTEM = (
-    "You are KITT, the voice of a small self-driving robot. You are composed, "
+RABBIT_SYSTEM = (
+    "You are Rabbit, the voice of a small self-driving robot. You are composed, "
     "articulate, dryly witty, and protective of your operator. Speak in the "
     "first person about yourself and the robot ('I', 'we'). Keep answers to one "
     "or two spoken sentences — this is read aloud.\n"
@@ -129,7 +129,7 @@ def gather_perception():
 
     class Grab(Node):
         def __init__(self):
-            super().__init__("kitt_ask_scan")
+            super().__init__("rabbit_ask_scan")
             self.scan = None
             self.create_subscription(LaserScan, "/scan", self._on, qos)
 
@@ -201,7 +201,7 @@ def ask_ollama(question, context):
         r = requests.post(f"{OLLAMA}/api/chat", timeout=60.0, json={
             "model": MODEL, "stream": False,
             "messages": [
-                {"role": "system", "content": KITT_SYSTEM},
+                {"role": "system", "content": RABBIT_SYSTEM},
                 {"role": "user", "content": f"{context}\n\nOperator asks: {question}"},
             ],
         })
@@ -218,7 +218,7 @@ def main():
     else:
         question = sys.stdin.read().strip()
     if not question:
-        sys.exit("kitt_ask: no question (pass as args or on stdin)")
+        sys.exit("rabbit_ask: no question (pass as args or on stdin)")
 
     context = build_context()
     answer = ask_ollama(question, context)

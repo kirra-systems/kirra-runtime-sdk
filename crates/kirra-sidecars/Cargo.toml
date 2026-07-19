@@ -15,7 +15,7 @@
 #     OS processes (whisper.cpp / Piper — never crate deps); the transcript
 #     enters the loop ONLY as text through mick_service's POST /intent, and
 #     TTS speaks the #893 narration verbatim. Input transduction + output
-#     rendering; no new intent path (docs/testing/SPEECH_KITT_DEMO.md).
+#     rendering; no new intent path (docs/testing/SPEECH_RABBIT_DEMO.md).
 #
 # 🔴 FENCED (ci/check_mick_actuation_fence.py): this crate must have NO path to
 # actuation — no release-token mint, no serial consumer, no ROS/DDS transport.
