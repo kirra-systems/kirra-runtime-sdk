@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Safety — Kirra Systems</title>
+  <meta name="description" content="Kirra's safety model: three fleet postures, controlled decel-to-stop in Degraded, minimum-risk maneuvers, recovery hysteresis, telemetry watchdogs, and a safe-state specification written against ISO 26262.">
+  <link rel="canonical" href="https://kirrasystems.com/safety.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Kirra Systems">
+  <meta property="og:title" content="Safety — Kirra Systems">
+  <meta property="og:description" content="Kirra's safety model: three fleet postures, controlled decel-to-stop in Degraded, minimum-risk maneuvers, recovery hysteresis, telemetry watchdogs, and a safe-state specification written against ISO 26262.">
+  <meta property="og:url" content="https://kirrasystems.com/safety.html">
+  <meta property="og:image" content="https://kirrasystems.com/assets/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Safety — Kirra Systems">
+  <meta name="twitter:description" content="Kirra's safety model: three fleet postures, controlled decel-to-stop in Degraded, minimum-risk maneuvers, recovery hysteresis, telemetry watchdogs, and a safe-state specification written against ISO 26262.">
+  <meta name="twitter:image" content="https://kirrasystems.com/assets/og.png">
+  <meta name="theme-color" content="#05070d">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="assets/kirra-logo.png" type="image/png">
+  <link rel="apple-touch-icon" href="assets/kirra-logo.png">
+  <link rel="preload" href="fonts/space-grotesk-var-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/inter-var-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="css/kirra.css">
+  <script>/* theme init before first paint — prevents flash */
+(function(){try{var t=localStorage.getItem("kirra-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme="dark";}})();</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"Safety — Kirra Systems","description":"Kirra's safety model: three fleet postures, controlled decel-to-stop in Degraded, minimum-risk maneuvers, recovery hysteresis, telemetry watchdogs, and a safe-state specification written against ISO 26262.","url":"https://kirrasystems.com/safety.html","isPartOf":{"@type":"WebSite","name":"Kirra Systems","url":"https://kirrasystems.com"}}</script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="nav" id="nav">
+    <div class="nav__inner">
+      <a href="index.html" class="nav__brand" aria-label="Kirra Systems home"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <g stroke="currentColor" stroke-width="1.4" opacity="0.85">
+    <path d="M7 4v24M7 17 25 4M11.5 13.7 25 28"/>
+    <path d="M7 4l7 6.5M7 28l4.5-14.3M14 10.5 7 17" opacity="0.35"/>
+  </g>
+  <g fill="var(--accent, #3fd9c9)">
+    <circle cx="7" cy="4" r="2"/><circle cx="7" cy="17" r="2.4"/><circle cx="7" cy="28" r="2"/>
+    <circle cx="25" cy="4" r="2"/><circle cx="25" cy="28" r="2"/>
+    <circle cx="14" cy="10.5" r="1.5"/><circle cx="11.5" cy="13.7" r="1.5"/>
+  </g>
+</svg><span>KIRRA</span></a>
+      <nav class="nav__links" id="navLinks" aria-label="Primary">
+        <a href="architecture.html">Architecture</a>
+        <a href="safety.html" aria-current="page">Safety</a>
+        <a href="performance.html">Performance</a>
+        <a href="certification.html">Certification</a>
+        <a href="field-notes.html">Field Notes</a>
+      </nav>
+      <button class="theme-toggle" id="themeToggle" aria-label="Toggle color theme">
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg>
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>
+      <a href="https://github.com/kirra-systems/kirra-runtime-sdk" class="nav__cta" target="_blank" rel="noopener"><span class="label">GitHub</span><span aria-hidden="true">↗</span></a>
+      <button class="nav__burger" id="navBurger" aria-label="Open menu" aria-expanded="false" aria-controls="navLinks">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
+    </div>
+  </header>
+  <nav class="subnav" aria-label="Platform sections">
+    <div class="subnav__inner">
+      <a href="architecture.html">architecture</a>
+      <a href="runtime.html">runtime</a>
+      <a href="safety.html" aria-current="page">safety</a>
+      <a href="planning.html">planning</a>
+      <a href="perception.html">perception</a>
+      <a href="prediction.html">prediction</a>
+      <a href="determinism.html">determinism</a>
+      <a href="performance.html">performance</a>
+      <a href="security.html">security</a>
+      <a href="certification.html">certification</a>
+      <a href="benchmarks.html">benchmarks</a>
+      <a href="open-source.html">open source</a>
+      <a href="documentation.html">docs</a>
+      <a href="research.html">research</a>
+    </div>
+  </nav>
+
+  <main id="main">
+
+
+    <section class="page-hero">
+      <div class="container">
+        <p class="eyebrow" data-reveal>Safety model</p>
+        <h1 data-reveal>Fail closed.<br>Recover deliberately.</h1>
+        <p class="lede" data-reveal>Kirra's safety model is three postures and a promise: when anything is unproven — a node unattested, a sensor silent, a cache stale, a command unclassified — the system moves toward stillness, and it never talks itself back into motion.</p>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-states">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>Posture state machine</p>
+          <h2 id="h-states" data-reveal>Three states. Asymmetric exits.</h2>
+          <p class="lede" data-reveal>Getting into a safe state is automatic and fast. Getting out is slow and
+          evidence-gated: Degraded recovers only after five consecutive healthy reports inside a ten-second
+          window, and LockedOut recovers only through a human. Down is easy; up requires proof.</p>
+        </div>
+        <div class="diagram-frame flow-anim" data-reveal>
+<svg viewBox="0 0 960 300" role="img" aria-labelledby="ssT ssD">
+  <title id="ssT">Fleet posture state machine</title>
+  <desc id="ssD">Nominal transitions to Degraded on a sensor fault or confidence drop, and recovers automatically after five consecutive healthy reports inside a ten-second window. Nominal or Degraded transition to LockedOut on attestation failure, dependency cycle, or stale posture. LockedOut requires operator clearance to exit — recovery is never a timer.</desc>
+  <g>
+    <rect class="dg-box" x="30" y="100" width="220" height="90" rx="14" style="stroke:var(--ok)"/>
+    <text class="dg-label" x="58" y="136">NOMINAL</text>
+    <text class="dg-sub" x="58" y="158">all classified commands admitted</text>
+  </g>
+  <g>
+    <rect class="dg-box" x="380" y="100" width="220" height="90" rx="14" style="stroke:var(--warn)"/>
+    <text class="dg-label" x="408" y="136">DEGRADED</text>
+    <text class="dg-sub" x="408" y="158">decel-to-stop-and-hold</text>
+  </g>
+  <g>
+    <rect class="dg-box dg-box--deny" x="730" y="100" width="220" height="90" rx="14"/>
+    <text class="dg-label" x="758" y="136">LOCKED OUT</text>
+    <text class="dg-sub" x="758" y="158">every command denied</text>
+  </g>
+  <path class="dg-edge dg-edge--flow" d="M250 122 L 378 122"/>
+  <text class="dg-mono" x="258" y="112">fault · low confidence</text>
+  <path class="dg-edge dg-edge--flow" d="M378 172 L 250 172"/>
+  <text class="dg-mono" x="256" y="192">5 healthy reports / 10 s window</text>
+  <path class="dg-edge dg-edge--deny" d="M600 122 L 728 122"/>
+  <text class="dg-mono" x="608" y="112">attestation fail · cycle · stale</text>
+  <path class="dg-edge dg-edge--deny" d="M140 100 C 200 20, 700 20, 810 98"/>
+  <text class="dg-mono" x="410" y="42">trust violation ⇒ direct lockout</text>
+  <path class="dg-edge" d="M728 172 C 690 230, 660 230, 602 250 L 602 250" stroke-dasharray="4 6"/>
+  <text class="dg-mono" x="620" y="250">operator clearance only — never a timer</text>
+</svg></div>
+        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/recovery_hysteresis.rs" target="_blank" rel="noopener">src/recovery_hysteresis.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/verifier.rs" target="_blank" rel="noopener">src/verifier.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/safety/SAFE_STATE_SPECIFICATION.md" target="_blank" rel="noopener">docs/safety/SAFE_STATE_SPECIFICATION.md</a></p>
+      </div>
+    </section>
+
+    <hr class="rule">
+
+    <section aria-labelledby="h-degraded">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>The Degraded contract</p>
+          <h2 id="h-degraded" data-reveal>Degraded is not a crawl.<br>It is a controlled stop.</h2>
+          <p class="lede" data-reveal>Motivated by the October 2023 Cruise incident — a post-collision pullover
+          executed at ~3 m/s under a 5 m/s “crawl ceiling” — Kirra's Degraded posture admits a command only if it
+          converges to a stop. The governor never authors re-acceleration.</p>
+        </div>
+        <div class="grid grid--3">
+          <div class="card" data-reveal>
+            <h3>Three conditions, all required</h3>
+            <p>(a) inside the minimum-risk decel envelope; (b) non-increasing speed — <code>|proposed| ≤ |current|</code>;
+            (c) no re-initiation: once at rest (≤0.05 m/s), any command to move again is denied and the vehicle
+            holds. A reversal through zero counts as re-initiation.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-core/src/kinematics_contract.rs" target="_blank" rel="noopener">crates/kirra-core/src/kinematics_contract.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/safety/SAFE_STATE_SPECIFICATION.md" target="_blank" rel="noopener">docs/safety/SAFE_STATE_SPECIFICATION.md</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <h3>Enforced at four points</h3>
+            <p>The same decel-to-stop gate runs at the HTTP actuator gateway, the fabric asset governor, the ROS 2
+            trajectory validator, and the parko MRC profile — which also gates the independent angular-velocity
+            channel for differential drive.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/adr/0011-degraded-http-actuator-503-vs-decel-gate.md" target="_blank" rel="noopener">docs/adr/0011-degraded-http-actuator-503-vs-decel-gate.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/tests/posture_gate_integration.rs" target="_blank" rel="noopener">tests/posture_gate_integration.rs</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <h3>Machine-checked</h3>
+            <p>Kani proofs K4 and K5 verify — over exhaustive <code>f64</code> case splits — that Degraded re-initiation
+            and speed increases are denied. Not tested on samples: proved on the domain.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/verification/kani/src/proofs_kinematics.rs#L166" target="_blank" rel="noopener">verification/kani/src/proofs_kinematics.rs:166</a></p>
+          </div>
+        </div>
+        <div class="compare-note" data-reveal style="margin-top:24px">
+          <strong>Two meanings of “MRC,” kept deliberately distinct:</strong> Degraded's MRC is a decel-to-stop
+          <em>envelope</em> that bounds a converging command; LockedOut's MRC is a safe-stop <em>maneuver</em> while all
+          commands are denied. The safe-state specification (KIRRA-SSS-001) assigns each to a fault-severity class,
+          with a 5.0 m/s MRC velocity ceiling.
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule">
+
+    <section aria-labelledby="h-watchdog">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>Liveness</p>
+          <h2 id="h-watchdog" data-reveal>Silence is a fault</h2>
+          <p class="lede" data-reveal>A safety system that only reacts to bad messages misses the worst failure of
+          all: no message. Kirra's watchdogs treat absence as evidence.</p>
+        </div>
+        <div class="table-wrap" data-reveal>
+          <table class="tbl">
+            <caption class="visually-hidden">Watchdog thresholds</caption>
+            <thead><tr><th scope="col">Signal</th><th scope="col">Threshold</th><th scope="col">Consequence</th></tr></thead>
+            <tbody>
+              <tr><td>AV telemetry silence</td><td class="mono">1,000 ms warn · 2,000 ms fault</td><td>Node marked untrusted; posture recomputed (sweep every 100 ms)</td></tr>
+              <tr><td>Posture cache age</td><td class="mono">&gt; 5,000 ms</td><td>Routing fails closed — treated as LockedOut</td></tr>
+              <tr><td>Attestation nonce age</td><td class="mono">&gt; 30,000 ms</td><td>Challenge expires; proof must restart</td></tr>
+              <tr><td>Federation report age</td><td class="mono">&gt; 5,000 ms</td><td>Report rejected (replay window)</td></tr>
+              <tr><td>Armed-but-silent VRU channel</td><td class="mono">freshness budget</td><td>MRC-floor speed cap — the ego stops rather than drives blind</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/telemetry_watchdog.rs" target="_blank" rel="noopener">src/telemetry_watchdog.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/posture_cache.rs" target="_blank" rel="noopener">src/posture_cache.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/vru_channel.rs" target="_blank" rel="noopener">crates/kirra-trajectory/src/vru_channel.rs</a></p>
+      </div>
+    </section>
+
+    <hr class="rule">
+
+    <section aria-labelledby="h-envelope">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>Per-class envelopes</p>
+          <h2 id="h-envelope" data-reveal>No default vehicle class</h2>
+          <p class="lede" data-reveal>A sidewalk courier and a robotaxi must not share an envelope. The vehicle class
+          is mandatory configuration — unset, empty, or unknown aborts startup, because a wrong class would select
+          another class's physics. Every number below is normative in the repository and marked validation-pending
+          until signed off.</p>
+        </div>
+        <div class="table-wrap" data-reveal>
+          <table class="tbl">
+            <caption class="visually-hidden">Vehicle class contract profiles</caption>
+            <thead><tr><th scope="col">Limit</th><th scope="col">Courier (sidewalk)</th><th scope="col">Delivery AV (road pod)</th><th scope="col">Robotaxi (frozen ref.)</th></tr></thead>
+            <tbody>
+              <tr><td>Max speed</td><td class="mono">3.0 m/s</td><td class="mono">12.0 m/s</td><td class="mono">35.0 m/s</td></tr>
+              <tr><td>ODD speed cap</td><td class="mono">2.5 m/s</td><td class="mono">11.0 m/s</td><td class="mono">22.35 m/s</td></tr>
+              <tr><td>Braking decel</td><td class="mono">3.0 m/s²</td><td class="mono">4.0 m/s²</td><td class="mono">4.5 m/s²</td></tr>
+              <tr><td>Lateral accel</td><td class="mono">1.5 m/s²</td><td class="mono">2.5 m/s²</td><td class="mono">3.5 m/s²</td></tr>
+              <tr><td>RSS lateral band</td><td class="mono">0.6 m</td><td class="mono">2.0 m</td><td class="mono">4.0 m</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/CONTRACT_PROFILES.md" target="_blank" rel="noopener">docs/CONTRACT_PROFILES.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/gateway/contract_profiles.rs" target="_blank" rel="noopener">src/gateway/contract_profiles.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/adr/0028-sidewalk-courier-odd.md" target="_blank" rel="noopener">docs/adr/0028-sidewalk-courier-odd.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/adr/0001-occy-odd-speed-cap.md" target="_blank" rel="noopener">docs/adr/0001-occy-odd-speed-cap.md</a></p>
+      </div>
+    </section>
+
+    <hr class="rule">
+
+    <section aria-labelledby="h-invariants">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>Invariants</p>
+          <h2 id="h-invariants" data-reveal>Rules that have survived being attacked</h2>
+          <p class="lede" data-reveal>The repository maintains a list of security invariants that submissions have
+          repeatedly tried to weaken — and that are rejected outright. A few of the load-bearing ones:</p>
+        </div>
+        <div class="grid grid--2">
+          <div class="card" data-reveal><h3>Envelope cap beats rate limits</h3><p>The governor clamps to the absolute hard boundary first, then applies rate-of-change limits. The envelope always wins.</p></div>
+          <div class="card" data-reveal><h3>Unknown is denied everywhere</h3><p>The <code>Unknown</code> command class is denied in all postures — including Nominal. The early return is never removed.</p></div>
+          <div class="card" data-reveal><h3>Attestation is never mocked</h3><p>Trust requires a per-node Ed25519 proof over a fresh challenge, checked against the registered key. No registered key, malformed proof, bad signature — rejected.</p></div>
+          <div class="card" data-reveal><h3>Actuator topics never replay</h3><p>DDS actuator topics must use Volatile durability, so a reconnecting subscriber can never receive a stale command as if it were fresh.</p></div>
+        </div>
+        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/SECURITY.md" target="_blank" rel="noopener">SECURITY.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/v1_security_invariants.md" target="_blank" rel="noopener">docs/v1_security_invariants.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/startup_sentinel.rs" target="_blank" rel="noopener">src/startup_sentinel.rs</a></p>
+      </div>
+    </section>
+
+
+    <section class="cta-band">
+      <div class="container">
+        <p class="eyebrow" style="justify-content:center">READ THE SOURCE</p>
+        <h2>Read the safe-state specification.</h2>
+        <p class="lede">KIRRA-SSS-001 assigns a safe state to every fault-severity class — and the repository's tests hold the code to it.</p>
+        <div class="hero__ctas">
+          <a class="btn btn--primary" href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener">View the repository <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="btn btn--ghost" href="documentation.html">Browse the documentation</a>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+<footer class="footer">
+  <div class="container">
+    <div class="footer__grid">
+      <div class="footer__brand">
+        <a class="nav__brand" href="index.html"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <g stroke="currentColor" stroke-width="1.4" opacity="0.85">
+    <path d="M7 4v24M7 17 25 4M11.5 13.7 25 28"/>
+    <path d="M7 4l7 6.5M7 28l4.5-14.3M14 10.5 7 17" opacity="0.35"/>
+  </g>
+  <g fill="var(--accent, #3fd9c9)">
+    <circle cx="7" cy="4" r="2"/><circle cx="7" cy="17" r="2.4"/><circle cx="7" cy="28" r="2"/>
+    <circle cx="25" cy="4" r="2"/><circle cx="25" cy="28" r="2"/>
+    <circle cx="14" cy="10.5" r="1.5"/><circle cx="11.5" cy="13.7" r="1.5"/>
+  </g>
+</svg><span>KIRRA</span></a>
+        <p>The fail-closed runtime safety governor for AI-driven machines. The doer proposes; the checker bounds it.</p>
+      </div>
+      <nav aria-label="Platform">
+        <h4>Platform</h4>
+        <ul>
+          <li><a href="architecture.html">Architecture</a></li>
+          <li><a href="runtime.html">Runtime</a></li>
+          <li><a href="determinism.html">Determinism</a></li>
+          <li><a href="performance.html">Performance</a></li>
+          <li><a href="security.html">Security</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Safety">
+        <h4>Safety</h4>
+        <ul>
+          <li><a href="safety.html">Safety model</a></li>
+          <li><a href="planning.html">Planning</a></li>
+          <li><a href="perception.html">Perception</a></li>
+          <li><a href="prediction.html">Prediction</a></li>
+          <li><a href="certification.html">Certification</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Evidence">
+        <h4>Evidence</h4>
+        <ul>
+          <li><a href="benchmarks.html">Benchmarks</a></li>
+          <li><a href="open-source.html">Open source</a></li>
+          <li><a href="documentation.html">Documentation</a></li>
+          <li><a href="research.html">Research</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Company">
+        <h4>Company</h4>
+        <ul>
+          <li><a href="field-notes.html">Field Notes</a></li>
+          <li><a href="careers.html">Careers</a></li>
+          <li><a href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener">GitHub ↗</a></li>
+          <li><a href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/SECURITY.md" target="_blank" rel="noopener">Security policy ↗</a></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="footer__meta">
+      <span>© <span data-year>2026</span> Kirra Systems</span>
+      <span class="mono">kirra-verifier v1.1.2 · Rust 2021 · MSRV 1.88</span>
+      <span>Every claim on this site links to its source in the repository.</span>
+    </div>
+  </div>
+</footer>
+  <script src="js/kirra.js" defer></script>
+</body>
+</html>

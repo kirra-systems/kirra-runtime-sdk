@@ -1,105 +1,38 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Kirra Systems — Fail-Closed Safety Governor for Autonomous Machines</title>
-  <meta name="description" content="Kirra is a fail-closed runtime safety governor for AI-driven robots and vehicles. Planners propose; a deterministic, formally checked envelope decides what reaches the actuators. Open source, in Rust.">
-  <link rel="canonical" href="https://kirrasystems.com/">
-  <meta property="og:type" content="website">
-  <meta property="og:site_name" content="Kirra Systems">
-  <meta property="og:title" content="Kirra Systems — Fail-Closed Safety Governor for Autonomous Machines">
-  <meta property="og:description" content="Kirra is a fail-closed runtime safety governor for AI-driven robots and vehicles. Planners propose; a deterministic, formally checked envelope decides what reaches the actuators. Open source, in Rust.">
-  <meta property="og:url" content="https://kirrasystems.com/">
-  <meta property="og:image" content="https://kirrasystems.com/assets/og.png">
-  <meta property="og:image:width" content="1200">
-  <meta property="og:image:height" content="630">
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Kirra Systems — Fail-Closed Safety Governor for Autonomous Machines">
-  <meta name="twitter:description" content="Kirra is a fail-closed runtime safety governor for AI-driven robots and vehicles. Planners propose; a deterministic, formally checked envelope decides what reaches the actuators. Open source, in Rust.">
-  <meta name="twitter:image" content="https://kirrasystems.com/assets/og.png">
-  <meta name="theme-color" content="#05070d">
-  <link rel="icon" href="favicon.svg" type="image/svg+xml">
-  <link rel="icon" href="assets/kirra-logo.png" type="image/png">
-  <link rel="apple-touch-icon" href="assets/kirra-logo.png">
-  <link rel="preload" href="fonts/space-grotesk-var-latin.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="fonts/inter-var-latin.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="css/kirra.css">
-  <script>/* theme init before first paint — prevents flash */
-(function(){try{var t=localStorage.getItem("kirra-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme="dark";}})();</script>
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","name":"Kirra Systems","url":"https://kirrasystems.com","logo":"https://kirrasystems.com/assets/kirra-logo.png","sameAs":["https://github.com/kirra-systems/kirra-runtime-sdk"]},{"@type":"WebSite","name":"Kirra Systems","url":"https://kirrasystems.com"},{"@type":"SoftwareSourceCode","name":"kirra-runtime-sdk","codeRepository":"https://github.com/kirra-systems/kirra-runtime-sdk","programmingLanguage":"Rust","description":"Distributed runtime legitimacy engine and safety governor for AI-driven robotic and edge systems."}]}</script>
-</head>
-<body>
-  <a class="skip-link" href="#main">Skip to content</a>
+import { SITE, ev, evRow, pill, LIVE, GATED, SPIKE } from "../template.mjs";
 
-  <header class="nav" id="nav">
-    <div class="nav__inner">
-      <a href="index.html" class="nav__brand" aria-label="Kirra Systems home"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
-  <g stroke="currentColor" stroke-width="1.4" opacity="0.85">
-    <path d="M7 4v24M7 17 25 4M11.5 13.7 25 28"/>
-    <path d="M7 4l7 6.5M7 28l4.5-14.3M14 10.5 7 17" opacity="0.35"/>
-  </g>
-  <g fill="var(--accent, #3fd9c9)">
-    <circle cx="7" cy="4" r="2"/><circle cx="7" cy="17" r="2.4"/><circle cx="7" cy="28" r="2"/>
-    <circle cx="25" cy="4" r="2"/><circle cx="25" cy="28" r="2"/>
-    <circle cx="14" cy="10.5" r="1.5"/><circle cx="11.5" cy="13.7" r="1.5"/>
-  </g>
-</svg><span>KIRRA</span></a>
-      <nav class="nav__links" id="navLinks" aria-label="Primary">
-        <a href="architecture.html">Architecture</a>
-        <a href="safety.html">Safety</a>
-        <a href="performance.html">Performance</a>
-        <a href="certification.html">Certification</a>
-        <a href="field-notes.html">Field Notes</a>
-      </nav>
-      <button class="theme-toggle" id="themeToggle" aria-label="Toggle color theme">
-        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg>
-        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
-      </button>
-      <a href="https://github.com/kirra-systems/kirra-runtime-sdk" class="nav__cta" target="_blank" rel="noopener"><span class="label">GitHub</span><span aria-hidden="true">↗</span></a>
-      <button class="nav__burger" id="navBurger" aria-label="Open menu" aria-expanded="false" aria-controls="navLinks">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
-      </button>
-    </div>
-  </header>
+export const meta = {
+  slug: "index",
+  title: "Kirra Systems",
+  desc: "Kirra is a fail-closed runtime safety governor for AI-driven robots and vehicles. Planners propose; a deterministic, formally checked envelope decides what reaches the actuators. Open source, in Rust.",
+  subnav: false,
+  jsonld: {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Organization",
+        name: "Kirra Systems",
+        url: "https://kirrasystems.com",
+        logo: "https://kirrasystems.com/assets/kirra-logo.png",
+        sameAs: ["https://github.com/kirra-systems/kirra-runtime-sdk"],
+      },
+      {
+        "@type": "WebSite",
+        name: "Kirra Systems",
+        url: "https://kirrasystems.com",
+      },
+      {
+        "@type": "SoftwareSourceCode",
+        name: "kirra-runtime-sdk",
+        codeRepository: "https://github.com/kirra-systems/kirra-runtime-sdk",
+        programmingLanguage: "Rust",
+        description: "Distributed runtime legitimacy engine and safety governor for AI-driven robotic and edge systems.",
+      },
+    ],
+  },
+};
 
-  <main id="main">
-
-    <!-- ═══════════ HERO ═══════════ -->
-    <section class="hero" aria-label="Introduction">
-      <canvas class="hero__canvas" id="heroField" aria-hidden="true"></canvas>
-      <div class="container">
-        <p class="hero__eyebrow eyebrow">Runtime legitimacy engine · Safety governor</p>
-        <h1>The AI proposes.<br>Kirra <span class="accent">bounds it.</span></h1>
-        <p class="lede">Kirra is a fail-closed runtime safety governor for AI-driven robots and vehicles.
-        Planners — geometric, learned, or LLM-driven — only ever <em>propose</em>. A deterministic,
-        machine-checked envelope decides what reaches the actuators, and denies by default when
-        anything is missing, stale, malformed, or unproven.</p>
-        <div class="hero__ctas">
-          <a class="btn btn--primary" href="architecture.html">Explore the architecture <span class="arrow" aria-hidden="true">→</span></a>
-          <a class="btn btn--ghost" href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener">Read the source ↗</a>
-        </div>
-        <p class="hero__proof">
-          <span><span class="tick" aria-hidden="true">✓</span> 3,305 tests across 330 files</span>
-          <span><span class="tick" aria-hidden="true">✓</span> 12 machine-checked Kani proofs</span>
-          <span><span class="tick" aria-hidden="true">✓</span> 27 blocking CI gates</span>
-          <span><span class="tick" aria-hidden="true">✓</span> bit-identical incident replay</span>
-          <span><span class="tick" aria-hidden="true">✓</span> open source · Rust</span>
-        </p>
-      </div>
-    </section>
-
-    <!-- ═══════════ DOER / CHECKER ═══════════ -->
-    <section id="architecture" aria-labelledby="h-arch">
-      <div class="container">
-        <div class="section-head">
-          <p class="eyebrow" data-reveal>The core idea</p>
-          <h2 id="h-arch" data-reveal>Doers are swappable.<br>The checker is the invariant.</h2>
-          <p class="lede" data-reveal>Every autonomy stack has a component that decides what the vehicle does next.
-          Kirra assumes that component is wrong — hallucinating, compromised, or simply buggy — and
-          makes safety a property of a separate, smaller, provable layer that no doer can bypass.</p>
-        </div>
-        <div class="diagram-frame flow-anim" data-reveal>
+/* ---------- architecture flow SVG (doer / checker / actuator) ---------- */
+const archSvg = `
 <svg viewBox="0 0 960 400" role="img" aria-labelledby="archTitle archDesc">
   <title id="archTitle">Kirra doer–checker architecture</title>
   <desc id="archDesc">Three untrusted doers — Mick, an LLM intent layer; Occy, a planner; and Taj, perception — send typed proposals into the Kirra checker, which applies the posture gate, kinematic envelope, RSS and containment. Accepted commands receive an Ed25519 release token verified by the actuator. Denied commands become minimum-risk maneuvers and are recorded in a hash-chained audit ledger.</desc>
@@ -157,57 +90,10 @@
     <text class="dg-label" x="398" y="342">Deny → MRC + audit ledger</text>
     <text class="dg-sub" x="398" y="362">SHA-256 hash-chained · verdict id</text>
   </g>
-</svg></div>
-        <p class="diagram-caption">
-          <span>Deny is the default: no registered proof, no posture, no envelope fit — no motion.</span>
-        </p>
-        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/README.md" target="_blank" rel="noopener">README.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-planner/src/lib.rs" target="_blank" rel="noopener">crates/kirra-planner/src/lib.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/validation.rs" target="_blank" rel="noopener">crates/kirra-trajectory/src/validation.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-release-token/src/lib.rs" target="_blank" rel="noopener">crates/kirra-release-token/src/lib.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/audit_chain.rs" target="_blank" rel="noopener">src/audit_chain.rs</a></p>
-        <div class="grid grid--3" style="margin-top:40px">
-          <div class="card" data-reveal>
-            <h3>Never trusted for safety</h3>
-            <p>An LLM can invent a 999&nbsp;m/s velocity or an action type that doesn't exist. Both die at the
-            typed parse or the envelope — and the attempt is permanently recorded in the hash-chained audit ledger.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/README.md#L40" target="_blank" rel="noopener">README.md:40</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-planner/src/mick_llm.rs" target="_blank" rel="noopener">crates/kirra-planner/src/mick_llm.rs</a></p>
-          </div>
-          <div class="card" data-reveal>
-            <h3>One safety authority</h3>
-            <p><code>validate_trajectory_slow</code> composes containment, per-pose kinematics, and RSS into a single
-            verdict: <code>Accept</code>, <code>Clamp</code>, or <code>MRCFallback</code>. First rejection wins.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/validation.rs#L206" target="_blank" rel="noopener">crates/kirra-trajectory/src/validation.rs:206</a></p>
-          </div>
-          <div class="card" data-reveal>
-            <h3>Frozen where it matters</h3>
-            <p>The kinematics checker core is pinned by git blob hash <code>ed00f4da…</code> — CI asserts the exact
-            bytes survive every change, and the Kani proofs run against the shipped source verbatim.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/verification/kani/" target="_blank" rel="noopener">verification/kani/</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L182" target="_blank" rel="noopener">.github/workflows/ci.yml:182</a></p>
-          </div>
-        </div>
-      </div>
-    </section>
+</svg>`;
 
-    <hr class="rule">
-
-    <!-- ═══════════ INTERACTIVE SAFETY PIPELINE ═══════════ -->
-    <section id="pipeline" aria-labelledby="h-pipeline">
-      <div class="container">
-        <div class="section-head">
-          <p class="eyebrow" data-reveal>Interactive — fleet posture</p>
-          <h2 id="h-pipeline" data-reveal>Three postures. No exceptions.</h2>
-          <p class="lede" data-reveal>Fleet trust state collapses to <strong>Nominal</strong>, <strong>Degraded</strong>, or
-          <strong>LockedOut</strong>, derived from a dependency-graph traversal over every node's attested state.
-          Flip the posture and watch what the gateway does to each command class — this table is the real
-          <code>should_route_command</code> decision, not an illustration.</p>
-        </div>
-        <div data-posture-demo data-posture-initial="nominal" data-reveal>
-          <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between;margin-bottom:20px">
-            <div class="posture-switch" role="group" aria-label="Select fleet posture">
-              <button data-posture="nominal" aria-pressed="true">NOMINAL</button>
-              <button data-posture="degraded" aria-pressed="false">DEGRADED</button>
-              <button data-posture="lockedout" aria-pressed="false">LOCKED OUT</button>
-            </div>
-            <p class="mono dim" data-posture-status style="font-size:0.8rem;max-width:52ch" aria-live="polite"></p>
-          </div>
-          <div class="diagram-frame flow-anim">
+/* ---------- posture pipeline SVG ---------- */
+const postureSvg = `
 <svg viewBox="0 0 960 210" role="img" aria-labelledby="pgTitle pgDesc">
   <title id="pgTitle">Command routing under fleet posture</title>
   <desc id="pgDesc">A command flows through classification, the posture gate, and the degraded decel-to-stop gate before reaching the actuator. Which stages pass depends on the selected fleet posture.</desc>
@@ -241,7 +127,95 @@
   </g>
   <path class="dg-edge dg-edge--deny" data-on="degraded lockedout" d="M528 134 L 528 172"/>
   <text class="dg-mono" data-on="degraded lockedout" x="544" y="176">denied writes → 503 · MRC · audit</text>
-</svg></div>
+</svg>`;
+
+/* ---------- page body ---------- */
+export const body = `
+    <!-- ═══════════ HERO ═══════════ -->
+    <section class="hero" aria-label="Introduction">
+      <canvas class="hero__canvas" id="heroField" aria-hidden="true"></canvas>
+      <div class="container">
+        <p class="hero__eyebrow eyebrow">Runtime legitimacy engine · Safety governor</p>
+        <h1>The AI proposes.<br>Kirra <span class="accent">bounds it.</span></h1>
+        <p class="lede">Kirra is a fail-closed runtime safety governor for AI-driven robots and vehicles.
+        Planners — geometric, learned, or LLM-driven — only ever <em>propose</em>. A deterministic,
+        machine-checked envelope decides what reaches the actuators, and denies by default when
+        anything is missing, stale, malformed, or unproven.</p>
+        <div class="hero__ctas">
+          <a class="btn btn--primary" href="architecture.html">Explore the architecture <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="btn btn--ghost" href="${SITE.repo}" target="_blank" rel="noopener">Read the source ↗</a>
+        </div>
+        <p class="hero__proof">
+          <span><span class="tick" aria-hidden="true">✓</span> 3,305 tests across 330 files</span>
+          <span><span class="tick" aria-hidden="true">✓</span> 12 machine-checked Kani proofs</span>
+          <span><span class="tick" aria-hidden="true">✓</span> 27 blocking CI gates</span>
+          <span><span class="tick" aria-hidden="true">✓</span> bit-identical incident replay</span>
+          <span><span class="tick" aria-hidden="true">✓</span> open source · Rust</span>
+        </p>
+      </div>
+    </section>
+
+    <!-- ═══════════ DOER / CHECKER ═══════════ -->
+    <section id="architecture" aria-labelledby="h-arch">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>The core idea</p>
+          <h2 id="h-arch" data-reveal>Doers are swappable.<br>The checker is the invariant.</h2>
+          <p class="lede" data-reveal>Every autonomy stack has a component that decides what the vehicle does next.
+          Kirra assumes that component is wrong — hallucinating, compromised, or simply buggy — and
+          makes safety a property of a separate, smaller, provable layer that no doer can bypass.</p>
+        </div>
+        <div class="diagram-frame flow-anim" data-reveal>${archSvg}</div>
+        <p class="diagram-caption">
+          <span>Deny is the default: no registered proof, no posture, no envelope fit — no motion.</span>
+        </p>
+        ${evRow("README.md", "crates/kirra-planner/src/lib.rs", "crates/kirra-trajectory/src/validation.rs", "crates/kirra-release-token/src/lib.rs", "src/audit_chain.rs")}
+        <div class="grid grid--3" style="margin-top:40px">
+          <div class="card" data-reveal>
+            <h3>Never trusted for safety</h3>
+            <p>An LLM can invent a 999&nbsp;m/s velocity or an action type that doesn't exist. Both die at the
+            typed parse or the envelope — and the attempt is permanently recorded in the hash-chained audit ledger.</p>
+            ${evRow("README.md:40", "crates/kirra-planner/src/mick_llm.rs")}
+          </div>
+          <div class="card" data-reveal>
+            <h3>One safety authority</h3>
+            <p><code>validate_trajectory_slow</code> composes containment, per-pose kinematics, and RSS into a single
+            verdict: <code>Accept</code>, <code>Clamp</code>, or <code>MRCFallback</code>. First rejection wins.</p>
+            ${evRow("crates/kirra-trajectory/src/validation.rs:206")}
+          </div>
+          <div class="card" data-reveal>
+            <h3>Frozen where it matters</h3>
+            <p>The kinematics checker core is pinned by git blob hash <code>ed00f4da…</code> — CI asserts the exact
+            bytes survive every change, and the Kani proofs run against the shipped source verbatim.</p>
+            ${evRow("verification/kani/", ".github/workflows/ci.yml:182")}
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule">
+
+    <!-- ═══════════ INTERACTIVE SAFETY PIPELINE ═══════════ -->
+    <section id="pipeline" aria-labelledby="h-pipeline">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>Interactive — fleet posture</p>
+          <h2 id="h-pipeline" data-reveal>Three postures. No exceptions.</h2>
+          <p class="lede" data-reveal>Fleet trust state collapses to <strong>Nominal</strong>, <strong>Degraded</strong>, or
+          <strong>LockedOut</strong>, derived from a dependency-graph traversal over every node's attested state.
+          Flip the posture and watch what the gateway does to each command class — this table is the real
+          <code>should_route_command</code> decision, not an illustration.</p>
+        </div>
+        <div data-posture-demo data-posture-initial="nominal" data-reveal>
+          <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between;margin-bottom:20px">
+            <div class="posture-switch" role="group" aria-label="Select fleet posture">
+              <button data-posture="nominal" aria-pressed="true">NOMINAL</button>
+              <button data-posture="degraded" aria-pressed="false">DEGRADED</button>
+              <button data-posture="lockedout" aria-pressed="false">LOCKED OUT</button>
+            </div>
+            <p class="mono dim" data-posture-status style="font-size:0.8rem;max-width:52ch" aria-live="polite"></p>
+          </div>
+          <div class="diagram-frame flow-anim">${postureSvg}</div>
           <div class="table-wrap" style="margin-top:20px">
             <table class="tbl">
               <caption class="visually-hidden">Command routing verdicts by fleet posture</caption>
@@ -263,7 +237,7 @@
           <p class="evidence-note">Observability GETs are posture-exempt so operators can distinguish “locked out” from “down” —
           a read cannot actuate. A stale posture cache (&gt;5&nbsp;s) fails closed exactly like LockedOut.
           Degraded is not a crawl: it is a controlled decel-to-stop-and-hold; the governor never authors re-acceleration.</p>
-          <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/posture_cache.rs" target="_blank" rel="noopener">src/posture_cache.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/posture_engine_v2.rs" target="_blank" rel="noopener">src/posture_engine_v2.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/gateway/policy_layer.rs" target="_blank" rel="noopener">src/gateway/policy_layer.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/safety/SAFE_STATE_SPECIFICATION.md" target="_blank" rel="noopener">docs/safety/SAFE_STATE_SPECIFICATION.md</a></p>
+          ${evRow("src/posture_cache.rs", "src/posture_engine_v2.rs", "src/gateway/policy_layer.rs", "docs/safety/SAFE_STATE_SPECIFICATION.md")}
         </div>
         <a class="card__more" href="safety.html" style="margin-top:24px">The full safety model <span aria-hidden="true">→</span></a>
       </div>
@@ -287,61 +261,61 @@
               <p class="timeline__step">01 · Propose</p>
               <h3>A doer emits a typed claim</h3>
               <p>Occy plans a trajectory; Mick grounds an LLM utterance into a typed <code>MickIntent</code> through one fail-closed parse. Free text never reaches the control path.</p>
-              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-planner/src/mick.rs" target="_blank" rel="noopener">crates/kirra-planner/src/mick.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-planner/src/mick_llm.rs" target="_blank" rel="noopener">crates/kirra-planner/src/mick_llm.rs</a></p>
+              ${evRow("crates/kirra-planner/src/mick.rs", "crates/kirra-planner/src/mick_llm.rs")}
             </li>
             <li class="timeline__item" data-reveal>
               <p class="timeline__step">02 · Classify</p>
               <h3>Total, pure classification</h3>
               <p><code>classify_http_command</code> is a fail-closed allowlist — anything it doesn't recognize is <code>Unknown</code>, and <code>Unknown</code> is denied in every posture, including Nominal.</p>
-              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-policy-types/src/lib.rs" target="_blank" rel="noopener">crates/kirra-policy-types/src/lib.rs</a></p>
+              ${evRow("crates/kirra-policy-types/src/lib.rs")}
             </li>
             <li class="timeline__item" data-reveal>
               <p class="timeline__step">03 · Posture</p>
               <h3>The fleet gate</h3>
               <p><code>should_route_command(cache, now_ms, command)</code> — a stale cache (&gt;5,000&nbsp;ms) is treated as LockedOut. Trust is recomputed from a cycle-safe DAG traversal over attested nodes.</p>
-              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/posture_cache.rs" target="_blank" rel="noopener">src/posture_cache.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-safety-authority/src/dag.rs" target="_blank" rel="noopener">crates/kirra-safety-authority/src/dag.rs</a></p>
+              ${evRow("src/posture_cache.rs", "crates/kirra-safety-authority/src/dag.rs")}
             </li>
             <li class="timeline__item" data-reveal>
               <p class="timeline__step">04 · Envelope</p>
               <h3>Hard boundary first</h3>
               <p><code>validate_vehicle_command</code> clamps to the absolute kinematic boundary before any rate limit — the envelope cap always wins. NaN or Inf anywhere is an immediate deny, proved for all 2⁶⁴ bit patterns.</p>
-              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-core/src/kinematics_contract.rs" target="_blank" rel="noopener">crates/kirra-core/src/kinematics_contract.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/verification/kani/src/proofs_kinematics.rs#L84" target="_blank" rel="noopener">verification/kani/src/proofs_kinematics.rs:84</a></p>
+              ${evRow("crates/kirra-core/src/kinematics_contract.rs", "verification/kani/src/proofs_kinematics.rs:84")}
             </li>
             <li class="timeline__item" data-reveal>
               <p class="timeline__step">05 · RSS</p>
               <h3>Formal distance keeping</h3>
               <p>Longitudinal <em>and</em> lateral safety evaluated as a conjunction, extended with occlusion-aware speed bounds at blind junctions and multi-modal prediction rolled forward in time.</p>
-              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/parko/crates/parko-core/src/rss.rs#L317" target="_blank" rel="noopener">parko/crates/parko-core/src/rss.rs:317</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/validation.rs#L999" target="_blank" rel="noopener">crates/kirra-trajectory/src/validation.rs:999</a></p>
+              ${evRow("parko/crates/parko-core/src/rss.rs:317", "crates/kirra-trajectory/src/validation.rs:999")}
             </li>
             <li class="timeline__item" data-reveal>
               <p class="timeline__step">06 · Verdict</p>
               <h3>Accept · Clamp · MRC</h3>
               <p>A denial mints a verdict id, binds the exact inputs into the audit chain, and returns an operator-readable explanation at <code>GET /verdicts/{id}</code>.</p>
-              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/verdicts.rs" target="_blank" rel="noopener">src/verdicts.rs</a></p>
+              ${evRow("src/verdicts.rs")}
             </li>
             <li class="timeline__item" data-reveal>
               <p class="timeline__step">07 · Release</p>
               <h3>Sign the enforced bytes</h3>
               <p>The governor signs an Ed25519 release token over <em>exactly</em> the bytes it validated. The crypto rides the actuation path — never inside the verdict's timing budget.</p>
-              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-release-token/src/lib.rs" target="_blank" rel="noopener">crates/kirra-release-token/src/lib.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/adr/0031-release-token-on-the-actuation-path.md" target="_blank" rel="noopener">docs/adr/0031-release-token-on-the-actuation-path.md</a></p>
+              ${evRow("crates/kirra-release-token/src/lib.rs", "docs/adr/0031-release-token-on-the-actuation-path.md")}
             </li>
             <li class="timeline__item" data-reveal>
               <p class="timeline__step">08 · Verify-before-release</p>
               <h3>The actuator checks everything</h3>
               <p>Token → strict signature over the presented bytes → strictly-advancing release sequence (equal = replay) → decode. A refusal never poisons the watermark.</p>
-              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-inline-governor/src/lib.rs" target="_blank" rel="noopener">crates/kirra-inline-governor/src/lib.rs</a></p>
+              ${evRow("crates/kirra-inline-governor/src/lib.rs")}
             </li>
             <li class="timeline__item" data-reveal>
               <p class="timeline__step">09 · Record</p>
               <h3>Tamper-evident memory</h3>
               <p>Every decision lands in a SHA-256 hash-chained ledger that survives <code>SIGKILL</code> mid-append as a valid prefix — proven by a power-loss drill in CI — and ships off-box to WORM storage.</p>
-              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/audit_chain.rs" target="_blank" rel="noopener">src/audit_chain.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/tests/audit_chain_prefix_on_kill.rs" target="_blank" rel="noopener">tests/audit_chain_prefix_on_kill.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/audit_shipper.rs" target="_blank" rel="noopener">src/audit_shipper.rs</a></p>
+              ${evRow("src/audit_chain.rs", "tests/audit_chain_prefix_on_kill.rs", "src/audit_shipper.rs")}
             </li>
             <li class="timeline__item" data-reveal>
               <p class="timeline__step">10 · Replay</p>
               <h3>Bit-identical reconstruction</h3>
               <p>Any captured session re-runs through the <em>real</em> checker and must reproduce every verdict to the exact bit (<code>f64::to_bits</code>, no epsilon). Incidents are reconstructed, not approximated.</p>
-              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-replay/src/lib.rs" target="_blank" rel="noopener">crates/kirra-replay/src/lib.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/REPLAY_INCIDENT_RECONSTRUCTION.md" target="_blank" rel="noopener">docs/REPLAY_INCIDENT_RECONSTRUCTION.md</a></p>
+              ${evRow("crates/kirra-replay/src/lib.rs", "docs/REPLAY_INCIDENT_RECONSTRUCTION.md")}
             </li>
           </ol>
         </div>
@@ -370,7 +344,7 @@
               <div class="barlist__row"><span class="barlist__label">iceoryx2 zero-copy</span><span class="barlist__track"><span class="barlist__fill" style="--w:31.7%"></span></span><span class="barlist__value">309 ns</span></div>
               <div class="barlist__row"><span class="barlist__label">UDP + serde proxy</span><span class="barlist__track"><span class="barlist__fill" style="--w:100%"></span></span><span class="barlist__value">976 ns</span></div>
             </div>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/tools/iceoryx2-spike/src/bin/latency_bench.rs" target="_blank" rel="noopener">tools/iceoryx2-spike/src/bin/latency_bench.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-hv-carrier/README.md" target="_blank" rel="noopener">crates/kirra-hv-carrier/README.md</a></p>
+            ${evRow("tools/iceoryx2-spike/src/bin/latency_bench.rs", "crates/kirra-hv-carrier/README.md")}
           </div>
           <div class="card" data-reveal>
             <h3>The frozen contract</h3>
@@ -380,8 +354,8 @@
             are eliminated by construction.</p>
             <p style="margin-top:12px">The verdict core is <code>no_std</code>, panic-free by policy, and gated for purity in CI —
             no allocation, no clock, no crypto inside the decision.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-contract-channel/src/lib.rs" target="_blank" rel="noopener">crates/kirra-contract-channel/src/lib.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md" target="_blank" rel="noopener">docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/ci/check_verdict_core_purity.py" target="_blank" rel="noopener">ci/check_verdict_core_purity.py</a></p>
-            <div class="evidence-row" style="margin-top:16px"><span class="pill pill--live">LIVE</span> <span class="dim" style="font-size:0.8rem">cross-process over POSIX SHM, in CI</span></div>
+            ${evRow("crates/kirra-contract-channel/src/lib.rs", "docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md", "ci/check_verdict_core_purity.py")}
+            <div class="evidence-row" style="margin-top:16px">${LIVE} <span class="dim" style="font-size:0.8rem">cross-process over POSIX SHM, in CI</span></div>
           </div>
         </div>
         <div class="chart" style="margin-top:20px" data-reveal>
@@ -400,7 +374,7 @@
           </div>
           <p class="evidence-note">Certified WCET is defined as QNX-target-under-FIFO measurement and has not been produced yet —
           the repository says so explicitly, and so do we. Host numbers are regression tripwires, not claims.</p>
-          <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/wcet_gate.rs#L92" target="_blank" rel="noopener">src/wcet_gate.rs:92</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-inline-governor/README.md" target="_blank" rel="noopener">crates/kirra-inline-governor/README.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/safety/WCET_MEASUREMENT_METHODOLOGY.md" target="_blank" rel="noopener">docs/safety/WCET_MEASUREMENT_METHODOLOGY.md</a></p>
+          ${evRow("src/wcet_gate.rs:92", "crates/kirra-inline-governor/README.md", "docs/safety/WCET_MEASUREMENT_METHODOLOGY.md")}
         </div>
       </div>
     </section>
@@ -420,22 +394,22 @@
           <div class="stat">
             <p class="stat__value"><span data-count="3305">0</span></p>
             <p class="stat__label">test functions across 330 files, run on every push</p>
-            <p class="stat__evidence"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L231" target="_blank" rel="noopener">ci.yml · Test</a></p>
+            <p class="stat__evidence">${ev(".github/workflows/ci.yml:231", "ci.yml · Test")}</p>
           </div>
           <div class="stat">
             <p class="stat__value"><span data-count="12">0</span></p>
             <p class="stat__label">Kani proof harnesses — model-checked over <em>all</em> inputs, not sampled</p>
-            <p class="stat__evidence"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/verification/kani/" target="_blank" rel="noopener">verification/kani</a></p>
+            <p class="stat__evidence">${ev("verification/kani/", "verification/kani")}</p>
           </div>
           <div class="stat">
             <p class="stat__value"><span data-count="27">0</span></p>
             <p class="stat__label">blocking CI lanes: Miri, Loom, fuzz, mutation, coverage floors, supply chain</p>
-            <p class="stat__evidence"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml" target="_blank" rel="noopener">ci.yml</a></p>
+            <p class="stat__evidence">${ev(".github/workflows/ci.yml", "ci.yml")}</p>
           </div>
           <div class="stat">
             <p class="stat__value"><span data-count="248">0</span></p>
             <p class="stat__label">scenario KPI corpus + 71 perception frames; 40k-sample Monte-Carlo nightly</p>
-            <p class="stat__evidence"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-kpi-gate/src/lib.rs" target="_blank" rel="noopener">kirra-kpi-gate</a></p>
+            <p class="stat__evidence">${ev("crates/kirra-kpi-gate/src/lib.rs", "kirra-kpi-gate")}</p>
           </div>
         </div>
         <div class="grid grid--3" style="margin-top:20px">
@@ -443,19 +417,19 @@
             <h3>Adversarial by default</h3>
             <p>4 fuzz targets run on every push and 90 minutes each, weekly. PR diffs to the checker face
             mutation testing: if a mutant survives your tests, the gate fails.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/fuzz/fuzz_targets/" target="_blank" rel="noopener">fuzz/fuzz_targets/</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L636" target="_blank" rel="noopener">.github/workflows/ci.yml:636</a></p>
+            ${evRow("fuzz/fuzz_targets/", ".github/workflows/ci.yml:636")}
           </div>
           <div class="card" data-reveal>
             <h3>Coverage that can't regress</h3>
             <p>Gated decision-coverage floors on the checker crates (77–79%, measured ≈80%) plus a Codecov
             ratchet: any PR dropping workspace coverage by &gt;0.5% fails.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L379" target="_blank" rel="noopener">.github/workflows/ci.yml:379</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/codecov.yml" target="_blank" rel="noopener">codecov.yml</a></p>
+            ${evRow(".github/workflows/ci.yml:379", "codecov.yml")}
           </div>
           <div class="card" data-reveal>
             <h3>Supply chain, pinned</h3>
             <p>cargo-deny + cargo-audit gate every dependency; GitHub Actions are pinned to 40-hex commit SHAs;
             container images are digest-pinned and keyless-signed with cosign.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/deny.toml" target="_blank" rel="noopener">deny.toml</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/scripts/pin-actions.sh" target="_blank" rel="noopener">scripts/pin-actions.sh</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/docker.yml" target="_blank" rel="noopener">.github/workflows/docker.yml</a></p>
+            ${evRow("deny.toml", "scripts/pin-actions.sh", ".github/workflows/docker.yml")}
           </div>
         </div>
         <a class="card__more" href="benchmarks.html" style="margin-top:28px">All benchmarks &amp; gates, with numbers <span aria-hidden="true">→</span></a>
@@ -496,22 +470,22 @@
         </div>
         <div class="grid grid--3">
           <div class="card" data-reveal>
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">ROSMASTER R2 · Jetson Orin NX</h3><span class="pill pill--live">LIVE</span></div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">ROSMASTER R2 · Jetson Orin NX</h3>${LIVE}</div>
             <p>An Ackermann-steer robot on a Jetson Orin NX 16&nbsp;GB is the physical testbed — first governed motion
             validated July 2026, with a TG30 lidar feeding the perception path.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/adr/0014-rosmaster-r2-orin-nx-kirra-integration.md" target="_blank" rel="noopener">docs/adr/0014-rosmaster-r2-orin-nx-kirra-integration.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/robot/install/README.md" target="_blank" rel="noopener">robot/install/README.md</a></p>
+            ${evRow("docs/adr/0014-rosmaster-r2-orin-nx-kirra-integration.md", "robot/install/README.md")}
           </div>
           <div class="card" data-reveal>
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">Clean-room MCU firmware</h3><span class="pill pill--live">LIVE</span></div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">Clean-room MCU firmware</h3>${LIVE}</div>
             <p>A from-scratch STM32F103 firmware foundation: jerk-limited PID, a fail-closed safety state machine,
             and COBS + CRC32C framing on the frozen SBC↔MCU wire protocol. Built in CI for Cortex-M3.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/firmware/rosmaster-r2/README.md" target="_blank" rel="noopener">firmware/rosmaster-r2/README.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/rosmaster-r2-firmware.yml" target="_blank" rel="noopener">.github/workflows/rosmaster-r2-firmware.yml</a></p>
+            ${evRow("firmware/rosmaster-r2/README.md", ".github/workflows/rosmaster-r2-firmware.yml")}
           </div>
           <div class="card" data-reveal>
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">QNX 8.0 target lane</h3><span class="pill pill--gated">HARDWARE-GATED</span></div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">QNX 8.0 target lane</h3>${GATED}</div>
             <p>The certification target is a QNX Hypervisor 8.0 safety partition. Today: reproducible cross-builds
             for x86_64 and aarch64 QNX in CI, and a shim→judge fault harness with committed VM results.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/adr/0032-governor-deployment-platform.md" target="_blank" rel="noopener">docs/adr/0032-governor-deployment-platform.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/tools/qnx-rtm-harness/results/qnx800-x86_64-vm-kvm.txt" target="_blank" rel="noopener">tools/qnx-rtm-harness/results/qnx800-x86_64-vm-kvm.txt</a></p>
+            ${evRow("docs/adr/0032-governor-deployment-platform.md", "tools/qnx-rtm-harness/results/qnx800-x86_64-vm-kvm.txt")}
           </div>
         </div>
       </div>
@@ -531,7 +505,7 @@
         <div class="hero__ctas" style="justify-content:center" data-reveal>
           <a class="btn btn--ghost" href="certification.html">Read the certification posture <span class="arrow" aria-hidden="true">→</span></a>
         </div>
-        <p class="evidence-row" style="justify-content:center" data-reveal><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/README.md#L117" target="_blank" rel="noopener">README — the claim, verbatim</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/safety/" target="_blank" rel="noopener">docs/safety — 65 artifacts</a></p>
+        <p class="evidence-row" style="justify-content:center" data-reveal>${ev("README.md:117", "README — the claim, verbatim")}${ev("docs/safety/", "docs/safety — 65 artifacts")}</p>
       </div>
     </section>
 
@@ -563,78 +537,9 @@
         <p class="lede">Clone it, run the 3,305 tests, kill the process mid-write, replay an incident bit-for-bit.
         The evidence is the product.</p>
         <div class="hero__ctas">
-          <a class="btn btn--primary" href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener">kirra-runtime-sdk on GitHub <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="btn btn--primary" href="${SITE.repo}" target="_blank" rel="noopener">kirra-runtime-sdk on GitHub <span class="arrow" aria-hidden="true">→</span></a>
           <a class="btn btn--ghost" href="open-source.html">Getting started</a>
         </div>
       </div>
     </section>
-
-  </main>
-
-<footer class="footer">
-  <div class="container">
-    <div class="footer__grid">
-      <div class="footer__brand">
-        <a class="nav__brand" href="index.html"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
-  <g stroke="currentColor" stroke-width="1.4" opacity="0.85">
-    <path d="M7 4v24M7 17 25 4M11.5 13.7 25 28"/>
-    <path d="M7 4l7 6.5M7 28l4.5-14.3M14 10.5 7 17" opacity="0.35"/>
-  </g>
-  <g fill="var(--accent, #3fd9c9)">
-    <circle cx="7" cy="4" r="2"/><circle cx="7" cy="17" r="2.4"/><circle cx="7" cy="28" r="2"/>
-    <circle cx="25" cy="4" r="2"/><circle cx="25" cy="28" r="2"/>
-    <circle cx="14" cy="10.5" r="1.5"/><circle cx="11.5" cy="13.7" r="1.5"/>
-  </g>
-</svg><span>KIRRA</span></a>
-        <p>The fail-closed runtime safety governor for AI-driven machines. The doer proposes; the checker bounds it.</p>
-      </div>
-      <nav aria-label="Platform">
-        <h4>Platform</h4>
-        <ul>
-          <li><a href="architecture.html">Architecture</a></li>
-          <li><a href="runtime.html">Runtime</a></li>
-          <li><a href="determinism.html">Determinism</a></li>
-          <li><a href="performance.html">Performance</a></li>
-          <li><a href="security.html">Security</a></li>
-        </ul>
-      </nav>
-      <nav aria-label="Safety">
-        <h4>Safety</h4>
-        <ul>
-          <li><a href="safety.html">Safety model</a></li>
-          <li><a href="planning.html">Planning</a></li>
-          <li><a href="perception.html">Perception</a></li>
-          <li><a href="prediction.html">Prediction</a></li>
-          <li><a href="certification.html">Certification</a></li>
-        </ul>
-      </nav>
-      <nav aria-label="Evidence">
-        <h4>Evidence</h4>
-        <ul>
-          <li><a href="benchmarks.html">Benchmarks</a></li>
-          <li><a href="open-source.html">Open source</a></li>
-          <li><a href="documentation.html">Documentation</a></li>
-          <li><a href="research.html">Research</a></li>
-        </ul>
-      </nav>
-      <nav aria-label="Company">
-        <h4>Company</h4>
-        <ul>
-          <li><a href="field-notes.html">Field Notes</a></li>
-          <li><a href="careers.html">Careers</a></li>
-          <li><a href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener">GitHub ↗</a></li>
-          <li><a href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/SECURITY.md" target="_blank" rel="noopener">Security policy ↗</a></li>
-        </ul>
-      </nav>
-    </div>
-    <div class="footer__meta">
-      <span>© <span data-year>2026</span> Kirra Systems</span>
-      <span class="mono">kirra-verifier v1.1.2 · Rust 2021 · MSRV 1.88</span>
-      <span>Every claim on this site links to its source in the repository.</span>
-    </div>
-  </div>
-</footer>
-  <script src="js/kirra.js" defer></script>
-  <script src="js/hero.js" defer></script>
-</body>
-</html>
+`;

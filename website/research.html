@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Research — Kirra Systems</title>
+  <meta name="description" content="Kirra's research threads: a diverse dual-governor comparator, an evolution-trained planner the checker can catch, local-LLM robotics with a structural actuation fence, and zero-copy transport evaluation.">
+  <link rel="canonical" href="https://kirrasystems.com/research.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Kirra Systems">
+  <meta property="og:title" content="Research — Kirra Systems">
+  <meta property="og:description" content="Kirra's research threads: a diverse dual-governor comparator, an evolution-trained planner the checker can catch, local-LLM robotics with a structural actuation fence, and zero-copy transport evaluation.">
+  <meta property="og:url" content="https://kirrasystems.com/research.html">
+  <meta property="og:image" content="https://kirrasystems.com/assets/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Research — Kirra Systems">
+  <meta name="twitter:description" content="Kirra's research threads: a diverse dual-governor comparator, an evolution-trained planner the checker can catch, local-LLM robotics with a structural actuation fence, and zero-copy transport evaluation.">
+  <meta name="twitter:image" content="https://kirrasystems.com/assets/og.png">
+  <meta name="theme-color" content="#05070d">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="assets/kirra-logo.png" type="image/png">
+  <link rel="apple-touch-icon" href="assets/kirra-logo.png">
+  <link rel="preload" href="fonts/space-grotesk-var-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/inter-var-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="css/kirra.css">
+  <script>/* theme init before first paint — prevents flash */
+(function(){try{var t=localStorage.getItem("kirra-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme="dark";}})();</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"Research — Kirra Systems","description":"Kirra's research threads: a diverse dual-governor comparator, an evolution-trained planner the checker can catch, local-LLM robotics with a structural actuation fence, and zero-copy transport evaluation.","url":"https://kirrasystems.com/research.html","isPartOf":{"@type":"WebSite","name":"Kirra Systems","url":"https://kirrasystems.com"}}</script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="nav" id="nav">
+    <div class="nav__inner">
+      <a href="index.html" class="nav__brand" aria-label="Kirra Systems home"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <g stroke="currentColor" stroke-width="1.4" opacity="0.85">
+    <path d="M7 4v24M7 17 25 4M11.5 13.7 25 28"/>
+    <path d="M7 4l7 6.5M7 28l4.5-14.3M14 10.5 7 17" opacity="0.35"/>
+  </g>
+  <g fill="var(--accent, #3fd9c9)">
+    <circle cx="7" cy="4" r="2"/><circle cx="7" cy="17" r="2.4"/><circle cx="7" cy="28" r="2"/>
+    <circle cx="25" cy="4" r="2"/><circle cx="25" cy="28" r="2"/>
+    <circle cx="14" cy="10.5" r="1.5"/><circle cx="11.5" cy="13.7" r="1.5"/>
+  </g>
+</svg><span>KIRRA</span></a>
+      <nav class="nav__links" id="navLinks" aria-label="Primary">
+        <a href="architecture.html">Architecture</a>
+        <a href="safety.html">Safety</a>
+        <a href="performance.html">Performance</a>
+        <a href="certification.html">Certification</a>
+        <a href="field-notes.html">Field Notes</a>
+      </nav>
+      <button class="theme-toggle" id="themeToggle" aria-label="Toggle color theme">
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg>
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>
+      <a href="https://github.com/kirra-systems/kirra-runtime-sdk" class="nav__cta" target="_blank" rel="noopener"><span class="label">GitHub</span><span aria-hidden="true">↗</span></a>
+      <button class="nav__burger" id="navBurger" aria-label="Open menu" aria-expanded="false" aria-controls="navLinks">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
+    </div>
+  </header>
+  <nav class="subnav" aria-label="Platform sections">
+    <div class="subnav__inner">
+      <a href="architecture.html">architecture</a>
+      <a href="runtime.html">runtime</a>
+      <a href="safety.html">safety</a>
+      <a href="planning.html">planning</a>
+      <a href="perception.html">perception</a>
+      <a href="prediction.html">prediction</a>
+      <a href="determinism.html">determinism</a>
+      <a href="performance.html">performance</a>
+      <a href="security.html">security</a>
+      <a href="certification.html">certification</a>
+      <a href="benchmarks.html">benchmarks</a>
+      <a href="open-source.html">open source</a>
+      <a href="documentation.html">docs</a>
+      <a href="research.html" aria-current="page">research</a>
+    </div>
+  </nav>
+
+  <main id="main">
+
+
+    <section class="page-hero">
+      <div class="container">
+        <p class="eyebrow" data-reveal>Research</p>
+        <h1 data-reveal>Questions we're answering<br>in public.</h1>
+        <p class="lede" data-reveal>Some of the repository is settled engineering. Some of it is active inquiry — spikes, prototypes, and experiments, each clearly labeled so nobody mistakes a research thread for a shipped guarantee. This page is the honest tour.</p>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-threads">
+      <div class="container">
+        <div class="grid grid--2">
+          <div class="card" data-reveal>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">Diverse dual governors</h3><span class="pill pill--live">LIVE</span></div>
+            <p>Two independently-implemented governors evaluate every cycle; a comparator accumulates divergence and
+            escalates the effective posture when they disagree. Diversity as a defense against common-mode bugs —
+            the CERT-006 thread, with property tests over the divergence logic.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/safety/COMPARATOR_DIVERSITY.md" target="_blank" rel="noopener">docs/safety/COMPARATOR_DIVERSITY.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/parko/crates/parko-kirra" target="_blank" rel="noopener">parko/crates/parko-kirra</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">A learnable doer, safely wrong</h3><span class="pill pill--live">LIVE</span></div>
+            <p>An evolution-strategy-trained planner deliberately built to be misalignable: train it on a
+            progress-only teacher and the checker catches it — quantified continuously by the KPI gate's
+            admissibility floors. The doer-invariance thesis, made falsifiable.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-planner/src/learned.rs" target="_blank" rel="noopener">crates/kirra-planner/src/learned.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-doer-eval" target="_blank" rel="noopener">crates/kirra-doer-eval</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">KITT: conversational robotics</h3><span class="pill pill--gated">HARDWARE-GATED</span></div>
+            <p>A talking robot with a structural guarantee: the LLM (a local Gemma via Ollama, with whisper.cpp ears
+            and Piper voice) has two channels — speak freely, or act through the one typed-intent door. A CI fence
+            proves no compile path from conversation to actuation. It can be KITT; it cannot drive you into a wall.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/hardware/KITT_CONVERSATION_DESIGN.md" target="_blank" rel="noopener">docs/hardware/KITT_CONVERSATION_DESIGN.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/ci/check_mick_actuation_fence.py" target="_blank" rel="noopener">ci/check_mick_actuation_fence.py</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/robot/kitt_model_smoketest.py" target="_blank" rel="noopener">robot/kitt_model_smoketest.py</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">Parko: vendor-neutral inference</h3><span class="pill pill--rnd">SPIKE</span></div>
+            <p>An early-prototype Rust inference substrate — ONNX Runtime (CPU/CUDA), OpenVINO, TensorRT skeleton —
+            with fail-closed backend selection (no silent CPU fallback) and cross-backend numerical-equivalence
+            tests. Real hardware benchmarks await the Jetson lane; the README says "not yet production," and so do we.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/parko/README.md" target="_blank" rel="noopener">parko/README.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/adr/0009-parko-tensorrt-precision-a2-native-nvinfer.md" target="_blank" rel="noopener">docs/adr/0009-parko-tensorrt-precision-a2-native-nvinfer.md</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">Zero-copy transport</h3><span class="pill pill--rnd">SPIKE</span></div>
+            <p>The iceoryx2 spike answers a narrow question — can the frozen contract ride a zero-copy channel with
+            the full fault matrix intact, on a minimal (empty) feature set? Yes, measured. Adoption remains a
+            deliberate, separate decision; the dependency stays quarantined until then.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/tools/iceoryx2-spike/README.md" target="_blank" rel="noopener">tools/iceoryx2-spike/README.md</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">Quantization under a governor</h3><span class="pill pill--rnd">SPIKE</span></div>
+            <p>What does int8 quantization do to a governed planner? The committed scorecard shows fp32 and int8-PTQ
+            byte-equal on admissibility — and a v2 model trading strict acceptance for progress, visible in numbers
+            because the eval harness measures exactly the axes the safety case cares about.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/parko/QUANTIZATION_DESIGN.md" target="_blank" rel="noopener">parko/QUANTIZATION_DESIGN.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/artifacts/doer-eval/scorecard.json" target="_blank" rel="noopener">artifacts/doer-eval/scorecard.json</a></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+
+    <section class="cta-band">
+      <div class="container">
+        <p class="eyebrow" style="justify-content:center">READ THE SOURCE</p>
+        <h2>Research with its status on the label.</h2>
+        <p class="lede">Spike means spike. Prototype means prototype. The interesting part is that the checker holds either way.</p>
+        <div class="hero__ctas">
+          <a class="btn btn--primary" href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener">View the repository <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="btn btn--ghost" href="documentation.html">Browse the documentation</a>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+<footer class="footer">
+  <div class="container">
+    <div class="footer__grid">
+      <div class="footer__brand">
+        <a class="nav__brand" href="index.html"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <g stroke="currentColor" stroke-width="1.4" opacity="0.85">
+    <path d="M7 4v24M7 17 25 4M11.5 13.7 25 28"/>
+    <path d="M7 4l7 6.5M7 28l4.5-14.3M14 10.5 7 17" opacity="0.35"/>
+  </g>
+  <g fill="var(--accent, #3fd9c9)">
+    <circle cx="7" cy="4" r="2"/><circle cx="7" cy="17" r="2.4"/><circle cx="7" cy="28" r="2"/>
+    <circle cx="25" cy="4" r="2"/><circle cx="25" cy="28" r="2"/>
+    <circle cx="14" cy="10.5" r="1.5"/><circle cx="11.5" cy="13.7" r="1.5"/>
+  </g>
+</svg><span>KIRRA</span></a>
+        <p>The fail-closed runtime safety governor for AI-driven machines. The doer proposes; the checker bounds it.</p>
+      </div>
+      <nav aria-label="Platform">
+        <h4>Platform</h4>
+        <ul>
+          <li><a href="architecture.html">Architecture</a></li>
+          <li><a href="runtime.html">Runtime</a></li>
+          <li><a href="determinism.html">Determinism</a></li>
+          <li><a href="performance.html">Performance</a></li>
+          <li><a href="security.html">Security</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Safety">
+        <h4>Safety</h4>
+        <ul>
+          <li><a href="safety.html">Safety model</a></li>
+          <li><a href="planning.html">Planning</a></li>
+          <li><a href="perception.html">Perception</a></li>
+          <li><a href="prediction.html">Prediction</a></li>
+          <li><a href="certification.html">Certification</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Evidence">
+        <h4>Evidence</h4>
+        <ul>
+          <li><a href="benchmarks.html">Benchmarks</a></li>
+          <li><a href="open-source.html">Open source</a></li>
+          <li><a href="documentation.html">Documentation</a></li>
+          <li><a href="research.html">Research</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Company">
+        <h4>Company</h4>
+        <ul>
+          <li><a href="field-notes.html">Field Notes</a></li>
+          <li><a href="careers.html">Careers</a></li>
+          <li><a href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener">GitHub ↗</a></li>
+          <li><a href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/SECURITY.md" target="_blank" rel="noopener">Security policy ↗</a></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="footer__meta">
+      <span>© <span data-year>2026</span> Kirra Systems</span>
+      <span class="mono">kirra-verifier v1.1.2 · Rust 2021 · MSRV 1.88</span>
+      <span>Every claim on this site links to its source in the repository.</span>
+    </div>
+  </div>
+</footer>
+  <script src="js/kirra.js" defer></script>
+</body>
+</html>

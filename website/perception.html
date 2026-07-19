@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Perception — Kirra Systems</title>
+  <meta name="description" content="Taj, Kirra's perception layer: geometric corridors from lidar, semantic hazard fusion that can only tighten, true-redundancy cross-checking between independent channels, and fail-closed perception derates.">
+  <link rel="canonical" href="https://kirrasystems.com/perception.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Kirra Systems">
+  <meta property="og:title" content="Perception — Kirra Systems">
+  <meta property="og:description" content="Taj, Kirra's perception layer: geometric corridors from lidar, semantic hazard fusion that can only tighten, true-redundancy cross-checking between independent channels, and fail-closed perception derates.">
+  <meta property="og:url" content="https://kirrasystems.com/perception.html">
+  <meta property="og:image" content="https://kirrasystems.com/assets/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Perception — Kirra Systems">
+  <meta name="twitter:description" content="Taj, Kirra's perception layer: geometric corridors from lidar, semantic hazard fusion that can only tighten, true-redundancy cross-checking between independent channels, and fail-closed perception derates.">
+  <meta name="twitter:image" content="https://kirrasystems.com/assets/og.png">
+  <meta name="theme-color" content="#05070d">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="assets/kirra-logo.png" type="image/png">
+  <link rel="apple-touch-icon" href="assets/kirra-logo.png">
+  <link rel="preload" href="fonts/space-grotesk-var-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/inter-var-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="css/kirra.css">
+  <script>/* theme init before first paint — prevents flash */
+(function(){try{var t=localStorage.getItem("kirra-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme="dark";}})();</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"Perception — Kirra Systems","description":"Taj, Kirra's perception layer: geometric corridors from lidar, semantic hazard fusion that can only tighten, true-redundancy cross-checking between independent channels, and fail-closed perception derates.","url":"https://kirrasystems.com/perception.html","isPartOf":{"@type":"WebSite","name":"Kirra Systems","url":"https://kirrasystems.com"}}</script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="nav" id="nav">
+    <div class="nav__inner">
+      <a href="index.html" class="nav__brand" aria-label="Kirra Systems home"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <g stroke="currentColor" stroke-width="1.4" opacity="0.85">
+    <path d="M7 4v24M7 17 25 4M11.5 13.7 25 28"/>
+    <path d="M7 4l7 6.5M7 28l4.5-14.3M14 10.5 7 17" opacity="0.35"/>
+  </g>
+  <g fill="var(--accent, #3fd9c9)">
+    <circle cx="7" cy="4" r="2"/><circle cx="7" cy="17" r="2.4"/><circle cx="7" cy="28" r="2"/>
+    <circle cx="25" cy="4" r="2"/><circle cx="25" cy="28" r="2"/>
+    <circle cx="14" cy="10.5" r="1.5"/><circle cx="11.5" cy="13.7" r="1.5"/>
+  </g>
+</svg><span>KIRRA</span></a>
+      <nav class="nav__links" id="navLinks" aria-label="Primary">
+        <a href="architecture.html">Architecture</a>
+        <a href="safety.html">Safety</a>
+        <a href="performance.html">Performance</a>
+        <a href="certification.html">Certification</a>
+        <a href="field-notes.html">Field Notes</a>
+      </nav>
+      <button class="theme-toggle" id="themeToggle" aria-label="Toggle color theme">
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg>
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>
+      <a href="https://github.com/kirra-systems/kirra-runtime-sdk" class="nav__cta" target="_blank" rel="noopener"><span class="label">GitHub</span><span aria-hidden="true">↗</span></a>
+      <button class="nav__burger" id="navBurger" aria-label="Open menu" aria-expanded="false" aria-controls="navLinks">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
+    </div>
+  </header>
+  <nav class="subnav" aria-label="Platform sections">
+    <div class="subnav__inner">
+      <a href="architecture.html">architecture</a>
+      <a href="runtime.html">runtime</a>
+      <a href="safety.html">safety</a>
+      <a href="planning.html">planning</a>
+      <a href="perception.html" aria-current="page">perception</a>
+      <a href="prediction.html">prediction</a>
+      <a href="determinism.html">determinism</a>
+      <a href="performance.html">performance</a>
+      <a href="security.html">security</a>
+      <a href="certification.html">certification</a>
+      <a href="benchmarks.html">benchmarks</a>
+      <a href="open-source.html">open source</a>
+      <a href="documentation.html">docs</a>
+      <a href="research.html">research</a>
+    </div>
+  </nav>
+
+  <main id="main">
+
+
+    <section class="page-hero">
+      <div class="container">
+        <p class="eyebrow" data-reveal>Perception · Taj</p>
+        <h1 data-reveal>Perception that admits<br>what it doesn't know.</h1>
+        <p class="lede" data-reveal>Taj builds the world model Kirra governs against — and every stage is designed around the honest failure: a corridor that can only shrink under uncertainty, redundancy that treats disagreement as a fault, and derates that stop the vehicle instead of guessing.</p>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-corridor">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>The corridor pipeline</p>
+          <h2 id="h-corridor" data-reveal>Fusion may tighten. Never loosen.</h2>
+          <p class="lede" data-reveal>Phase A derives a geometric drivable corridor and objects from lidar. Phase B
+          fuses semantic hazards — water, obstacles — and may only <em>clip</em> the corridor tighter. The rule
+          “fusion may never extend Phase A” is a hard zero in CI: a single <code>ForbiddenLoosen</code> differential
+          row fails the gate.</p>
+        </div>
+        <div class="grid grid--3">
+          <div class="card" data-reveal>
+            <h3>Hazard clipping</h3>
+            <p><code>clip_corridor_to_hazards</code> finds the binding hazard and pulls the corridor's far edge in.
+            The safety-weighted eval harness scores every frame as <code>UnsafeMiss</code>, <code>OverConservative</code>,
+            or <code>Correct</code> — because a miss and an over-caution are not the same kind of wrong.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-taj" target="_blank" rel="noopener">crates/kirra-taj</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <h3>Differential gating</h3>
+            <p>Phase A vs Phase B run over a shared ground-truth corpus with per-fault-family negative controls that
+            <em>must</em> breach — proving the gate can actually see the fault class it claims to catch.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-kpi-gate" target="_blank" rel="noopener">crates/kirra-kpi-gate</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/ci/scenario_kpi_thresholds.json" target="_blank" rel="noopener">ci/scenario_kpi_thresholds.json</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <h3>Plausibility guard</h3>
+            <p>Before objects reach the checker, a kinematic-plausibility contract bounds them — teleporting or
+            physically impossible tracks are rejected, with the guard's worst case under its own WCET CI gate.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-core/src/perception_monitor.rs" target="_blank" rel="noopener">crates/kirra-core/src/perception_monitor.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/wcet_gate.rs#L139" target="_blank" rel="noopener">src/wcet_gate.rs:139</a></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule">
+
+    <section aria-labelledby="h-redundancy">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>True redundancy</p>
+          <h2 id="h-redundancy" data-reveal>Two channels must agree — or the ego stops</h2>
+          <p class="lede" data-reveal>A single perception stack fails silently. Kirra's divergence monitor requires
+          two independent channels to agree: a phantom, a miss, a speed mismatch, or a silent secondary all resolve
+          to a zero-speed minimum-risk cap. Losing redundancy is itself a fault.</p>
+        </div>
+        <div class="diagram-frame flow-anim" data-reveal>
+<svg viewBox="0 0 960 250" role="img" aria-labelledby="rdT rdD">
+  <title id="rdT">True-redundancy perception cross-check</title>
+  <desc id="rdD">Two independent perception channels feed a cross-check. Agreement passes through. A phantom object, a missed object, a speed mismatch, or a silent secondary channel all resolve to a zero-speed minimum-risk cap.</desc>
+  <g>
+    <rect class="dg-box" x="20" y="30" width="200" height="70" rx="10"/>
+    <text class="dg-label" x="40" y="60">Channel A</text>
+    <text class="dg-sub" x="40" y="80">primary objects</text>
+    <rect class="dg-box" x="20" y="150" width="200" height="70" rx="10"/>
+    <text class="dg-label" x="40" y="180">Channel B</text>
+    <text class="dg-sub" x="40" y="200">independent secondary</text>
+  </g>
+  <path class="dg-edge dg-edge--flow" d="M220 65 C 300 65, 310 105, 378 118"/>
+  <path class="dg-edge dg-edge--flow" d="M220 185 C 300 185, 310 145, 378 132"/>
+  <g>
+    <rect class="dg-box dg-box--accent" x="380" y="90" width="200" height="70" rx="10"/>
+    <text class="dg-label" x="400" y="120">cross_check</text>
+    <text class="dg-sub" x="400" y="140">agree ⇒ pass through</text>
+  </g>
+  <path class="dg-edge dg-edge--flow" d="M580 112 L 700 112"/>
+  <text class="dg-mono" x="600" y="100">agreement</text>
+  <path class="dg-edge dg-edge--deny" d="M580 142 C 640 170, 650 190, 700 196"/>
+  <text class="dg-mono" x="596" y="188">phantom · miss · mismatch · silence</text>
+  <g>
+    <rect class="dg-box" x="702" y="80" width="240" height="60" rx="10"/>
+    <text class="dg-label" x="722" y="106">Checker sees objects</text>
+    <text class="dg-sub" x="722" y="126">normal RSS evaluation</text>
+    <rect class="dg-box dg-box--deny" x="702" y="166" width="240" height="60" rx="10"/>
+    <text class="dg-label" x="722" y="192">Speed cap → 0.0 m/s</text>
+    <text class="dg-sub" x="722" y="212">MRC floor via apply_perception_cap</text>
+  </g>
+</svg></div>
+        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/perception_redundancy.rs#L224" target="_blank" rel="noopener">crates/kirra-trajectory/src/perception_redundancy.rs:224</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-core/src/perception_monitor.rs" target="_blank" rel="noopener">crates/kirra-core/src/perception_monitor.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/adr/0018-perception-divergence-monitor.md" target="_blank" rel="noopener">docs/adr/0018-perception-divergence-monitor.md</a></p>
+        <div class="compare-note" data-reveal style="margin-top:24px">
+          <strong>Derate-only composition:</strong> every predictive perception bound — redundancy, occlusion, VRU —
+          is fail-closed and derate-only. Absent input is a no-op (the Nominal hot path is byte-identical);
+          a fault is a speed cap toward stillness, never a relaxation. The WCET-critical per-pose path is unchanged.
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule">
+
+    <section aria-labelledby="h-vru">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>Vulnerable road users</p>
+          <h2 id="h-vru" data-reveal>Armed and silent means stop</h2>
+          <p class="lede" data-reveal>The pedestrian channel has three states, resolved by a pure function:
+          disarmed — the checker no-ops; armed and fresh — a live pedestrian scene feeds an omnidirectional bound;
+          armed but silent — an MRC-floor cap. A dead pedestrian sensor stops the vehicle; it never lets it
+          drive blind.</p>
+        </div>
+        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/vru_channel.rs" target="_blank" rel="noopener">crates/kirra-trajectory/src/vru_channel.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/vru.rs" target="_blank" rel="noopener">crates/kirra-trajectory/src/vru.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/safety/PEDESTRIAN_RSS.md" target="_blank" rel="noopener">docs/safety/PEDESTRIAN_RSS.md</a></p>
+        <div class="grid grid--2" style="margin-top:28px">
+          <div class="card" data-reveal>
+            <h3>On real hardware</h3>
+            <p>The perception path runs on the ROSMASTER R2 testbed: a TG30 lidar at ~10 Hz feeding the corridor
+            pipeline on a Jetson Orin NX — the same code paths exercised in CI, validated during the July 2026
+            bring-up.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/robot/install/README.md" target="_blank" rel="noopener">robot/install/README.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/adr/0015-rosmaster-r2-perception-layer.md" target="_blank" rel="noopener">docs/adr/0015-rosmaster-r2-perception-layer.md</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <h3>Freshness is configuration</h3>
+            <p>Every subscription carries a staleness budget (<code>KIRRA_SUBSCRIPTION_STALENESS_MS</code>). Feeds
+            degrade explicitly — a stale tracker yaw quietly downgrades prediction to constant-velocity rather than
+            trusting old rotation data.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/prediction.rs#L199" target="_blank" rel="noopener">crates/kirra-trajectory/src/prediction.rs:199</a></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+
+    <section class="cta-band">
+      <div class="container">
+        <p class="eyebrow" style="justify-content:center">READ THE SOURCE</p>
+        <h2>Perception is a safety input, not a demo.</h2>
+        <p class="lede">Read the corridor pipeline, the redundancy monitor, and the eval harness that scores unsafe misses differently from over-caution.</p>
+        <div class="hero__ctas">
+          <a class="btn btn--primary" href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener">View the repository <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="btn btn--ghost" href="documentation.html">Browse the documentation</a>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+<footer class="footer">
+  <div class="container">
+    <div class="footer__grid">
+      <div class="footer__brand">
+        <a class="nav__brand" href="index.html"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <g stroke="currentColor" stroke-width="1.4" opacity="0.85">
+    <path d="M7 4v24M7 17 25 4M11.5 13.7 25 28"/>
+    <path d="M7 4l7 6.5M7 28l4.5-14.3M14 10.5 7 17" opacity="0.35"/>
+  </g>
+  <g fill="var(--accent, #3fd9c9)">
+    <circle cx="7" cy="4" r="2"/><circle cx="7" cy="17" r="2.4"/><circle cx="7" cy="28" r="2"/>
+    <circle cx="25" cy="4" r="2"/><circle cx="25" cy="28" r="2"/>
+    <circle cx="14" cy="10.5" r="1.5"/><circle cx="11.5" cy="13.7" r="1.5"/>
+  </g>
+</svg><span>KIRRA</span></a>
+        <p>The fail-closed runtime safety governor for AI-driven machines. The doer proposes; the checker bounds it.</p>
+      </div>
+      <nav aria-label="Platform">
+        <h4>Platform</h4>
+        <ul>
+          <li><a href="architecture.html">Architecture</a></li>
+          <li><a href="runtime.html">Runtime</a></li>
+          <li><a href="determinism.html">Determinism</a></li>
+          <li><a href="performance.html">Performance</a></li>
+          <li><a href="security.html">Security</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Safety">
+        <h4>Safety</h4>
+        <ul>
+          <li><a href="safety.html">Safety model</a></li>
+          <li><a href="planning.html">Planning</a></li>
+          <li><a href="perception.html">Perception</a></li>
+          <li><a href="prediction.html">Prediction</a></li>
+          <li><a href="certification.html">Certification</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Evidence">
+        <h4>Evidence</h4>
+        <ul>
+          <li><a href="benchmarks.html">Benchmarks</a></li>
+          <li><a href="open-source.html">Open source</a></li>
+          <li><a href="documentation.html">Documentation</a></li>
+          <li><a href="research.html">Research</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Company">
+        <h4>Company</h4>
+        <ul>
+          <li><a href="field-notes.html">Field Notes</a></li>
+          <li><a href="careers.html">Careers</a></li>
+          <li><a href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener">GitHub ↗</a></li>
+          <li><a href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/SECURITY.md" target="_blank" rel="noopener">Security policy ↗</a></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="footer__meta">
+      <span>© <span data-year>2026</span> Kirra Systems</span>
+      <span class="mono">kirra-verifier v1.1.2 · Rust 2021 · MSRV 1.88</span>
+      <span>Every claim on this site links to its source in the repository.</span>
+    </div>
+  </div>
+</footer>
+  <script src="js/kirra.js" defer></script>
+</body>
+</html>

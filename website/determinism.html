@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Determinism — Kirra Systems</title>
+  <meta name="description" content="Why Kirra's verdicts are reproducible: bit-identical incident replay, injected clocks, seqlock snapshots model-checked under Loom and Miri, and 12 Kani proofs over the shipped source.">
+  <link rel="canonical" href="https://kirrasystems.com/determinism.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Kirra Systems">
+  <meta property="og:title" content="Determinism — Kirra Systems">
+  <meta property="og:description" content="Why Kirra's verdicts are reproducible: bit-identical incident replay, injected clocks, seqlock snapshots model-checked under Loom and Miri, and 12 Kani proofs over the shipped source.">
+  <meta property="og:url" content="https://kirrasystems.com/determinism.html">
+  <meta property="og:image" content="https://kirrasystems.com/assets/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Determinism — Kirra Systems">
+  <meta name="twitter:description" content="Why Kirra's verdicts are reproducible: bit-identical incident replay, injected clocks, seqlock snapshots model-checked under Loom and Miri, and 12 Kani proofs over the shipped source.">
+  <meta name="twitter:image" content="https://kirrasystems.com/assets/og.png">
+  <meta name="theme-color" content="#05070d">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="assets/kirra-logo.png" type="image/png">
+  <link rel="apple-touch-icon" href="assets/kirra-logo.png">
+  <link rel="preload" href="fonts/space-grotesk-var-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/inter-var-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="css/kirra.css">
+  <script>/* theme init before first paint — prevents flash */
+(function(){try{var t=localStorage.getItem("kirra-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme="dark";}})();</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"Determinism — Kirra Systems","description":"Why Kirra's verdicts are reproducible: bit-identical incident replay, injected clocks, seqlock snapshots model-checked under Loom and Miri, and 12 Kani proofs over the shipped source.","url":"https://kirrasystems.com/determinism.html","isPartOf":{"@type":"WebSite","name":"Kirra Systems","url":"https://kirrasystems.com"}}</script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="nav" id="nav">
+    <div class="nav__inner">
+      <a href="index.html" class="nav__brand" aria-label="Kirra Systems home"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <g stroke="currentColor" stroke-width="1.4" opacity="0.85">
+    <path d="M7 4v24M7 17 25 4M11.5 13.7 25 28"/>
+    <path d="M7 4l7 6.5M7 28l4.5-14.3M14 10.5 7 17" opacity="0.35"/>
+  </g>
+  <g fill="var(--accent, #3fd9c9)">
+    <circle cx="7" cy="4" r="2"/><circle cx="7" cy="17" r="2.4"/><circle cx="7" cy="28" r="2"/>
+    <circle cx="25" cy="4" r="2"/><circle cx="25" cy="28" r="2"/>
+    <circle cx="14" cy="10.5" r="1.5"/><circle cx="11.5" cy="13.7" r="1.5"/>
+  </g>
+</svg><span>KIRRA</span></a>
+      <nav class="nav__links" id="navLinks" aria-label="Primary">
+        <a href="architecture.html">Architecture</a>
+        <a href="safety.html">Safety</a>
+        <a href="performance.html">Performance</a>
+        <a href="certification.html">Certification</a>
+        <a href="field-notes.html">Field Notes</a>
+      </nav>
+      <button class="theme-toggle" id="themeToggle" aria-label="Toggle color theme">
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg>
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>
+      <a href="https://github.com/kirra-systems/kirra-runtime-sdk" class="nav__cta" target="_blank" rel="noopener"><span class="label">GitHub</span><span aria-hidden="true">↗</span></a>
+      <button class="nav__burger" id="navBurger" aria-label="Open menu" aria-expanded="false" aria-controls="navLinks">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
+    </div>
+  </header>
+  <nav class="subnav" aria-label="Platform sections">
+    <div class="subnav__inner">
+      <a href="architecture.html">architecture</a>
+      <a href="runtime.html">runtime</a>
+      <a href="safety.html">safety</a>
+      <a href="planning.html">planning</a>
+      <a href="perception.html">perception</a>
+      <a href="prediction.html">prediction</a>
+      <a href="determinism.html" aria-current="page">determinism</a>
+      <a href="performance.html">performance</a>
+      <a href="security.html">security</a>
+      <a href="certification.html">certification</a>
+      <a href="benchmarks.html">benchmarks</a>
+      <a href="open-source.html">open source</a>
+      <a href="documentation.html">docs</a>
+      <a href="research.html">research</a>
+    </div>
+  </nav>
+
+  <main id="main">
+
+
+    <section class="page-hero">
+      <div class="container">
+        <p class="eyebrow" data-reveal>Determinism</p>
+        <h1 data-reveal>Same inputs.<br>Same bits. Every time.</h1>
+        <p class="lede" data-reveal>A safety verdict you can't reproduce is a safety verdict you can't audit. Kirra treats determinism as an engineering requirement with teeth: time is injected, concurrency is model-checked, floating point is compared bit-for-bit, and the checker core is frozen by hash.</p>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-replay">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>Incident replay</p>
+          <h2 id="h-replay" data-reveal>Reconstruction, not simulation</h2>
+          <p class="lede" data-reveal>Feed a captured session back through the <em>real</em> checker — the same
+          functions, the same per-class contract profiles — and every verdict must reproduce exactly:
+          <code>f64::to_bits</code> equality, no epsilon. If a single bit diverges, the tool exits non-zero.</p>
+        </div>
+        <div class="grid grid--3">
+          <div class="card" data-reveal>
+            <h3>Time never enters the verdict</h3>
+            <p>The fast-loop verdict is a pure function of its inputs — which is what makes bit-identical replay
+            possible at all. Time-dependent flows replay through an injected <code>VirtualClock</code> and a
+            deterministic scenario runner instead.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/clock.rs" target="_blank" rel="noopener">src/clock.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/scenario_runner.rs" target="_blank" rel="noopener">src/scenario_runner.rs</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <h3>Honest about the edges</h3>
+            <p>Records without complete context — slow-loop summaries, derate-enabled sessions, locked-out spans,
+            NaN inputs — are <em>classified</em>, never guessed. And the JSON float parse is exact
+            (<code>float_roundtrip</code>), because the default parse is one ulp off and one ulp is a divergence.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-replay/src/lib.rs" target="_blank" rel="noopener">crates/kirra-replay/src/lib.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/REPLAY_INCIDENT_RECONSTRUCTION.md" target="_blank" rel="noopener">docs/REPLAY_INCIDENT_RECONSTRUCTION.md</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <h3>One command away</h3>
+            <p><code>kirra-replay --class robotaxi session.jsonl</code> — incident reconstruction as a CLI, exit 1 on
+            divergence. Regulators and integrators run the same tool we do.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-replay/src/bin/kirra_replay.rs" target="_blank" rel="noopener">crates/kirra-replay/src/bin/kirra_replay.rs</a></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule">
+
+    <section aria-labelledby="h-concurrency">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>Concurrency</p>
+          <h2 id="h-concurrency" data-reveal>The schedules you'll never see in a test run</h2>
+          <p class="lede" data-reveal>Race conditions don't show up on demand. So the critical protocols are checked
+          under tools that enumerate schedules rather than hope for them.</p>
+        </div>
+        <div class="grid grid--2">
+          <div class="card" data-reveal>
+            <h3>Loom — model-checked protocols</h3>
+            <p>Four concurrency models run every interleaving CI can afford: posture generations stay unique and
+            monotone, the cache holds the highest generation under concurrent replacement, a sticky lockout is
+            never downgraded by a racing recalculation, and an accepted seqlock snapshot is never torn.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-loom-models/src/lib.rs" target="_blank" rel="noopener">crates/kirra-loom-models/src/lib.rs</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <h3>Miri — the memory model itself</h3>
+            <p>The contract channel — the seqlock the whole enforcement path reads through — runs under Miri with
+            multi-seed scheduling in CI, checking for undefined behavior at the Rust memory-model level, not just
+            observable bugs.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L254" target="_blank" rel="noopener">.github/workflows/ci.yml:254</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-contract-channel/src/seqlock.rs" target="_blank" rel="noopener">crates/kirra-contract-channel/src/seqlock.rs</a></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule">
+
+    <section aria-labelledby="h-proofs">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>Formal proofs</p>
+          <h2 id="h-proofs" data-reveal>Twelve properties, proved on the shipped source</h2>
+          <p class="lede" data-reveal>The Kani harnesses <code>#[path]</code>-include the production files verbatim —
+          the frozen kinematics core is proved <em>unmodified</em>, pinned by git blob hash
+          <code>ed00f4da…</code>. No proof-friendly rewrites; no divergence between what's proved and what ships.</p>
+        </div>
+        <div class="table-wrap" data-reveal>
+          <table class="tbl">
+            <caption class="visually-hidden">Kani proof inventory</caption>
+            <thead><tr><th scope="col">Family</th><th scope="col">Properties</th><th scope="col">Domain</th></tr></thead>
+            <tbody>
+              <tr><td>L1–L4 · HA lease algebra</td><td>TTL split is total &amp; split-brain-safe; promotion only after holder expiry; clock skew fails safe; on-cadence renewal never expires</td><td class="mono">all u64</td></tr>
+              <tr><td>K1–K5 · kinematics core</td><td>non-finite input always denied; non-positive dt denied; speed-ceiling clamp exact; Degraded re-initiation denied; Degraded speed increase denied</td><td class="mono">f64 is_finite case splits</td></tr>
+              <tr><td>R1–R3 · RSS primitives</td><td>longitudinal distance total; monotone in closing speed (weekly deep lane + exhaustive concrete mirror per PR); invalid brake ⇒ exact fail-safe</td><td class="mono">integer-scaled grids</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="evidence-note">Honest scope: the P6 trigonometric path is excluded from proof (transcendentals) and covered by
+        decision-coverage floors and property tests instead. The repository says exactly where the proofs end.</p>
+        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/verification/kani/src/proofs_lease.rs" target="_blank" rel="noopener">verification/kani/src/proofs_lease.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/verification/kani/src/proofs_kinematics.rs" target="_blank" rel="noopener">verification/kani/src/proofs_kinematics.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/verification/kani/src/proofs_rss.rs" target="_blank" rel="noopener">verification/kani/src/proofs_rss.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/kani-deep-weekly.yml" target="_blank" rel="noopener">.github/workflows/kani-deep-weekly.yml</a></p>
+      </div>
+    </section>
+
+
+    <section class="cta-band">
+      <div class="container">
+        <p class="eyebrow" style="justify-content:center">READ THE SOURCE</p>
+        <h2>Determinism you can falsify.</h2>
+        <p class="lede">Clone the repo, capture a session, flip one bit — and watch the replay tool refuse it.</p>
+        <div class="hero__ctas">
+          <a class="btn btn--primary" href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener">View the repository <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="btn btn--ghost" href="documentation.html">Browse the documentation</a>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+<footer class="footer">
+  <div class="container">
+    <div class="footer__grid">
+      <div class="footer__brand">
+        <a class="nav__brand" href="index.html"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <g stroke="currentColor" stroke-width="1.4" opacity="0.85">
+    <path d="M7 4v24M7 17 25 4M11.5 13.7 25 28"/>
+    <path d="M7 4l7 6.5M7 28l4.5-14.3M14 10.5 7 17" opacity="0.35"/>
+  </g>
+  <g fill="var(--accent, #3fd9c9)">
+    <circle cx="7" cy="4" r="2"/><circle cx="7" cy="17" r="2.4"/><circle cx="7" cy="28" r="2"/>
+    <circle cx="25" cy="4" r="2"/><circle cx="25" cy="28" r="2"/>
+    <circle cx="14" cy="10.5" r="1.5"/><circle cx="11.5" cy="13.7" r="1.5"/>
+  </g>
+</svg><span>KIRRA</span></a>
+        <p>The fail-closed runtime safety governor for AI-driven machines. The doer proposes; the checker bounds it.</p>
+      </div>
+      <nav aria-label="Platform">
+        <h4>Platform</h4>
+        <ul>
+          <li><a href="architecture.html">Architecture</a></li>
+          <li><a href="runtime.html">Runtime</a></li>
+          <li><a href="determinism.html">Determinism</a></li>
+          <li><a href="performance.html">Performance</a></li>
+          <li><a href="security.html">Security</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Safety">
+        <h4>Safety</h4>
+        <ul>
+          <li><a href="safety.html">Safety model</a></li>
+          <li><a href="planning.html">Planning</a></li>
+          <li><a href="perception.html">Perception</a></li>
+          <li><a href="prediction.html">Prediction</a></li>
+          <li><a href="certification.html">Certification</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Evidence">
+        <h4>Evidence</h4>
+        <ul>
+          <li><a href="benchmarks.html">Benchmarks</a></li>
+          <li><a href="open-source.html">Open source</a></li>
+          <li><a href="documentation.html">Documentation</a></li>
+          <li><a href="research.html">Research</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Company">
+        <h4>Company</h4>
+        <ul>
+          <li><a href="field-notes.html">Field Notes</a></li>
+          <li><a href="careers.html">Careers</a></li>
+          <li><a href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener">GitHub ↗</a></li>
+          <li><a href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/SECURITY.md" target="_blank" rel="noopener">Security policy ↗</a></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="footer__meta">
+      <span>© <span data-year>2026</span> Kirra Systems</span>
+      <span class="mono">kirra-verifier v1.1.2 · Rust 2021 · MSRV 1.88</span>
+      <span>Every claim on this site links to its source in the repository.</span>
+    </div>
+  </div>
+</footer>
+  <script src="js/kirra.js" defer></script>
+</body>
+</html>
