@@ -1,0 +1,75 @@
+# Autoware-on-Humble isolation topology (ADR-0036).
+#
+# Autoware (the DOER) stays on Ubuntu 22.04 / ROS 2 Humble in its OWN container;
+# the KIRRA checker + adapter (and the rest of the stack) run on 24.04 / Jazzy.
+# They meet ONLY on the 5 curated boundary topics over DDS
+# (autoware_{planning,perception,map,control}_msgs + nav_msgs/Odometry).
+#
+# 🔴 VERIFY WIRE-COMPAT FIRST — before trusting direct cross-distro DDS, run:
+#     bash scripts/curated_interface/crossdistro_hash_check.sh
+#   PASS  → the 5 interfaces are byte-identical Humble==Jazzy → direct DDS (below).
+#   DRIFT → the drifted interface needs kirra_bridge_cpp / domain_bridge instead.
+#
+# This is a TOPOLOGY SCAFFOLD: the `autoware` image + command are PLACEHOLDERS for
+# the integrator's real Autoware-on-Humble build. If Autoware isn't fully built
+# out yet, use the `stub` profile to validate the KIRRA/Jazzy side end-to-end
+# WITHOUT a real Autoware (it publishes the 5 boundary topics).
+#
+#   docker compose -f deploy/autoware-isolation/docker-compose.yml up            # real (placeholder) Autoware + KIRRA
+#   docker compose -f deploy/autoware-isolation/docker-compose.yml --profile stub up autoware-stub kirra   # stub doer + KIRRA
+#
+# DDS discovery uses host networking + a shared ROS_DOMAIN_ID. Pin the SAME
+# RMW on both sides (Fast DDS is the most interop-tested Humble↔Jazzy pairing).
+
+services:
+  # --- the DOER, pinned to Humble (the ONLY thing left on 22.04) --------------
+  autoware:
+    image: ${AUTOWARE_IMAGE:-ros:humble}      # ← replace with your real Autoware/Humble image
+    container_name: kirra-autoware-humble
+    network_mode: host
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+    # Replace the command with the Autoware launch that publishes trajectory /
+    # objects / map and subscribes the governed control_cmd.
+    command: ["bash", "-lc", "echo '[autoware] replace with your Autoware launch'; sleep infinity"]
+
+  # --- the CHECKER + adapter, on Jazzy ----------------------------------------
+  kirra:
+    image: ${KIRRA_IMAGE:-ros:jazzy}          # ← your KIRRA/Jazzy image (builds ros2_ws + the adapter)
+    container_name: kirra-checker-jazzy
+    depends_on: [autoware]
+    network_mode: host
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+    volumes:
+      - ../../ros2_ws:/ws:ro
+    # Build the curated msgs on Jazzy (they compile from .msg unchanged) + run
+    # the kirra-ros2-adapter node. Placeholder command — wire your entrypoint.
+    command: ["bash", "-lc", "echo '[kirra] build /ws + run the kirra-ros2-adapter node on Jazzy'; sleep infinity"]
+
+  # --- STUB doer: validate the KIRRA side WITHOUT a real Autoware --------------
+  # `--profile stub` so it never starts unless asked. Publishes minimal, valid
+  # messages on the 5 boundary topics at a fixed rate.
+  autoware-stub:
+    profiles: ["stub"]
+    image: ${KIRRA_IMAGE:-ros:jazzy}
+    container_name: kirra-autoware-stub
+    network_mode: host
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+    volumes:
+      - ./autoware_stub_publisher.py:/stub.py:ro
+      - ../../ros2_ws:/ws:ro
+    command:
+      - bash
+      - -lc
+      - |
+        source /opt/ros/jazzy/setup.bash
+        cd /tmp && cp -r /ws/src ./src && colcon build --packages-up-to \
+          autoware_planning_msgs autoware_perception_msgs autoware_map_msgs autoware_control_msgs \
+          >/tmp/build.log 2>&1 || { echo 'msg build failed — see /tmp/build.log'; tail -20 /tmp/build.log; }
+        source install/setup.bash 2>/dev/null || true
+        python3 /stub.py
