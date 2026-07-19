@@ -249,7 +249,7 @@ export const body = `
     <section id="lifecycle" aria-labelledby="h-life">
       <div class="container">
         <div class="grid grid--2" style="align-items:start;gap:48px">
-          <div class="section-head" style="position:sticky;top:calc(var(--nav-h) + 24px);margin-bottom:0">
+          <div class="section-head sticky-col">
             <p class="eyebrow" data-reveal>Data flow</p>
             <h2 id="h-life" data-reveal>The life of one command</h2>
             <p class="lede" data-reveal>From an AI's proposal to a verified actuator release — every stage is a

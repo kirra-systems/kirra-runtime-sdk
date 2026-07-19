@@ -516,6 +516,14 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 0.92rem; min-widt
 .tabs__panel h3 { margin-bottom: 8px; }
 .tabs__panel > p { color: var(--ink-2); }
 
+/* Sticky side column — only when the two-column layout actually exists;
+   on narrow viewports the grid stacks and a pinned heading would sit
+   under the scrolling content. */
+.sticky-col { margin-bottom: 0; }
+@media (min-width: 980px) {
+  .sticky-col { position: sticky; top: calc(var(--nav-h) + 24px); }
+}
+
 /* ---------- Timeline (scrolling data-flow) ---------- */
 .timeline { position: relative; padding-left: 36px; }
 .timeline::before {
