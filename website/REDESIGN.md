@@ -166,7 +166,7 @@ industry and verifiable in-repo.
 /benchmarks           Every number with provenance (KPI, coverage, latency, tests)
 /open-source          Quickstart, deployment paths, contribution gates
 /documentation        Curated map into the repo docs
-/research             Labeled research threads (diverse governors, KITT, parko, iox2)
+/research             Labeled research threads (diverse governors, Rabbit, parko, iox2)
 /field-notes          Substack feed (client-side, 3-tier fallback preserved)
 /careers              Culture-as-evidence; "the interview is a pull request"
 + 404, sitemap.xml, robots.txt

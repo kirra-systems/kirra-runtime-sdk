@@ -31,11 +31,12 @@ ${pageHero({
             ${evRow("crates/kirra-planner/src/learned.rs", "crates/kirra-doer-eval")}
           </div>
           <div class="card" data-reveal>
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">KITT: conversational robotics</h3>${GATED}</div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">Rabbit: conversational robotics</h3>${GATED}</div>
             <p>A talking robot with a structural guarantee: the LLM (a local Gemma via Ollama, with whisper.cpp ears
             and Piper voice) has two channels — speak freely, or act through the one typed-intent door. A CI fence
-            proves no compile path from conversation to actuation. It can be KITT; it cannot drive you into a wall.</p>
-            ${evRow("docs/hardware/KITT_CONVERSATION_DESIGN.md", "ci/check_mick_actuation_fence.py", "robot/kitt_model_smoketest.py")}
+            proves no compile path from conversation to actuation. Rabbit can chat all day; it cannot drive you
+            into a wall.</p>
+            ${evRow("docs/hardware/RABBIT_CONVERSATION_DESIGN.md", "ci/check_mick_actuation_fence.py", "robot/rabbit_model_smoketest.py")}
           </div>
           <div class="card" data-reveal>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0">Parko: vendor-neutral inference</h3>${SPIKE}</div>
