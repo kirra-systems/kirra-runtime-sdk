@@ -155,18 +155,24 @@ fire reliably, so prefer one that passes. Also measure end-to-end latency
 (`KITT_AUDIO_STACK.md` §5): a bigger model is slower and needs more VRAM.
 
 **"No version bump" stealth updates.** A model can change *in place* — same
-Ollama tag, different weights (e.g. tool-calling/output-format fixes). So the
-rule is **re-run the smoketest after any `ollama pull`, not just on a version
-string change** — the tag can lie. On a full pass the smoketest records the
-vetted **digest** (`~/.kirra_kitt_model.pin`); boot then compares the running
-digest and, on a mismatch, KITT says so (voice line A5) — a stealth swap is loud,
-not silent. Check anytime without the LLM:
+Ollama tag, different weights (e.g. the July 2026 Gemma-4 overhaul: tool-calling
+patches + reduced truncation, no version label change). So the rule is **re-run
+the smoketest after any `ollama pull`, not just on a version string change** — the
+tag can lie. On a full pass the smoketest records the vetted **digest** *and the
+vetted-at timestamp* (`~/.kirra_kitt_model.pin`) — the "which weights, verified
+when" trail researchers recommend logging for reproducibility; add provenance
+with `--note`:
 ```bash
-python3 robot/kitt_model_smoketest.py --pin-check    # running digest vs the vetted pin
+python3 robot/kitt_model_smoketest.py --note "hf re-pull 2026-07-16"   # test + pin with a dated note
+python3 robot/kitt_model_smoketest.py --pin-check                       # running digest vs pin (+ vetted-at), no LLM
 ```
-The robot itself is not changed by an upstream update until someone re-pulls
-(Ollama runs the local blob) — the pin catches the case where a re-pull silently
-brought new weights.
+Boot compares the running digest to the pin and, on a mismatch, KITT says so
+(voice line A5) — a stealth swap is loud, not silent. The robot itself is not
+changed by an upstream update until someone re-pulls (Ollama runs the local
+blob); the pin catches the re-pull that silently brought new weights. (For KITT
+specifically the tool-calling/truncation fixes are *welcome* — they harden the
+`{say, directive}` JSON contract; the smoketest confirms it. The FA4/vision gains
+don't reach the Orin — Ampere, text-only router.)
 
 ## Troubleshooting
 

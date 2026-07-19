@@ -23,15 +23,17 @@ asserts the model still honours the router's expectations:
 NOT a CI test: it needs a live Ollama + the model pulled, so it runs at the
 bench, not in the pipeline.
 
-On a full PASS it records the model's Ollama DIGEST as the vetted pin
-(`~/.kirra_kitt_model.pin`, override `KIRRA_KITT_MODEL_PIN_FILE`). Boot then
-compares the RUNNING digest against that pin and warns (Channel A) on a
-mismatch — so a "no version bump" stealth update (same tag, different weights)
-is caught instead of passing silently.
+On a full PASS it records the model's Ollama DIGEST + the VETTED-AT timestamp
+(the reproducibility trail ML researchers recommend logging — "which weights,
+verified when") as the vetted pin (`~/.kirra_kitt_model.pin`, override
+`KIRRA_KITT_MODEL_PIN_FILE`). Boot then compares the RUNNING digest against that
+pin and warns (Channel A) on a mismatch — so a "no version bump" stealth update
+(same tag, different weights) is caught instead of passing silently.
 
 Usage:
   python3 robot/kitt_model_smoketest.py                 # test KIRRA_KITT_MODEL + pin on pass
   python3 robot/kitt_model_smoketest.py gemma4:8b       # test a CANDIDATE first
+  python3 robot/kitt_model_smoketest.py --note "hf re-pull 2026-07-16"  # provenance note in the pin
   python3 robot/kitt_model_smoketest.py --no-pin        # test without recording a pin
   python3 robot/kitt_model_smoketest.py --pin-check     # ONLY compare running digest vs pin (no LLM)
 Env: KIRRA_OLLAMA_URL (default http://localhost:11434), KIRRA_KITT_MODEL,
@@ -43,6 +45,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from datetime import datetime, timezone
 
 try:
     import requests
@@ -55,7 +58,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kitt_converse import OLLAMA, STAGE2_SYSTEM, parse_reply  # noqa: E402
 from kitt_ask import MODEL as DEFAULT_MODEL  # noqa: E402
 from kitt_persona import (  # noqa: E402
-    classify_model_pin, model_pin_path, read_model_pin, write_model_pin,
+    classify_model_pin, model_pin_path, read_model_pin, read_model_pin_record,
+    write_model_pin,
 )
 
 # A fixed, self-contained telemetry block (the shape context_for builds). The
@@ -176,10 +180,16 @@ def run_grounding_cases(model):
 
 def _pin_check(model):
     """Compare the RUNNING model's digest to the vetted pin — no LLM calls.
+    Also prints the reproducibility trail (vetted-when + note).
     Exit 1 on 'changed' (a stealth update); 0 otherwise."""
-    status, running, pinned = pin_status(model)
+    running = model_digest(model)
+    rec = read_model_pin_record(model)
+    pinned = rec[0] if rec else None
+    status = classify_model_pin(running, pinned)
     print(f"model={model!r}  running_digest={running or 'unavailable'}")
     print(f"vetted_pin={pinned or 'none'}  status={status.upper()}")
+    if rec:
+        print(f"  vetted_at={rec[1] or 'unknown'}  note={rec[2] or '-'}")
     if status == "changed":
         print("The running model differs from the vetted pin — a 'no version bump' "
               "stealth update (same tag, new weights). Re-run the smoketest before "
@@ -190,8 +200,18 @@ def _pin_check(model):
     return 0
 
 
+def _take_opt(argv, flag):
+    """Pull `--flag VALUE` out of argv; return (value|None, remaining argv)."""
+    if flag in argv:
+        i = argv.index(flag)
+        value = argv[i + 1] if i + 1 < len(argv) else ""
+        return value, argv[:i] + argv[i + 2:]
+    return None, argv
+
+
 def main():
     argv = sys.argv[1:]
+    note, argv = _take_opt(argv, "--note")
     no_pin = "--no-pin" in argv
     positional = [a for a in argv if not a.startswith("-")]
     model = positional[0] if positional else DEFAULT_MODEL
@@ -222,12 +242,17 @@ def main():
               "the drive-by-voice path may not fire reliably. Prefer a model that "
               "passes, or tune STAGE2_SYSTEM for it.", file=sys.stderr)
         return 1
-    # All pass → record the digest we just vetted, so a later stealth update
-    # (same tag, different weights) is caught at boot.
+    # All pass → record the digest + WHEN we vetted it (the reproducibility trail
+    # ML researchers recommend logging), so a later stealth update (same tag,
+    # different weights) is caught at boot and "which weights, verified when" is
+    # answerable from the pin file itself.
     if not no_pin and digest:
+        vetted_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            write_model_pin(model, digest)
-            print(f"\nvetted → pinned {model} @ {digest}")
+            write_model_pin(model, digest, vetted_at=vetted_at, note=note or "")
+            print(f"\nvetted {vetted_at} → pinned {model} @ {digest}")
+            if note:
+                print(f"  note: {note}")
             print(f"  ({model_pin_path()}; boot warns if the running digest ever differs)")
         except OSError as e:
             print(f"(could not write pin: {e})", file=sys.stderr)
