@@ -60,6 +60,13 @@ sudo systemctl daemon-reload
 
 ## Enable — ONE service at a time, validate first
 
+**First, the readiness gate** (read-only — checks every prerequisite below and
+names the fix for each; run until it's green before enabling anything):
+
+```bash
+robot/install/preflight_autostart.sh      # exit 0 = ready to enable
+```
+
 For **each** unit: start it, confirm it does its job wheels-up, THEN enable for boot.
 
 ```bash
@@ -111,8 +118,14 @@ operation in scope.
 
 ## Bench tooling (automates the steps above)
 
-Three scripts turn the manual checklist into runnable commands:
+Four scripts turn the manual checklist into runnable commands:
 
+- **`robot/install/preflight_autostart.sh`** — the READINESS GATE (read-only):
+  verifies every prerequisite for a clean governed boot (units installed, key
+  pinned, `KIRRA_VEHICLE_CLASS` set, `robot.env` clean, dialout/audio groups,
+  device symlinks, vendor autostart cleared, ROS ws overlay) and names the fix
+  for each gap. Run until green BEFORE the one-service-at-a-time enable. Exit 0 =
+  ready.
 - **`robot/install/lint_robot_env.sh`** — validate `/etc/kirra/robot.env` for the
   two systemd-`EnvironmentFile` traps: inline `# comments` on value lines (systemd
   keeps them IN the value → the consumer fail-closes) and duplicate keys (last
@@ -129,8 +142,10 @@ Three scripts turn the manual checklist into runnable commands:
   stop the verifier → prove the consumer decel-stops (SS-002) + the interceptor
   denies → restart → prove recovery. 🔴 wheels elevated for Phase B.
 
-Order at the bench: `lint_robot_env.sh` → `disable_vendor_autostart.sh --disable`
-→ power-cycle → `cold_boot_drill.sh` → (wheels up) `cold_boot_drill.sh --fail-closed`.
+Order at the bench: `lint_robot_env.sh --fix` → `disable_vendor_autostart.sh
+--disable` → `preflight_autostart.sh` (until green) → enable services one at a
+time (above) → power-cycle → `cold_boot_drill.sh` → (wheels up)
+`cold_boot_drill.sh --fail-closed`.
 
 ## References
 - `docs/hardware/R2_UNTETHERED_BRINGUP.md` §1 — the autostart layer
