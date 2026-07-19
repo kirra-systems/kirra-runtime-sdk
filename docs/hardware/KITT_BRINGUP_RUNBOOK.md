@@ -133,6 +133,27 @@ KITT confirms. Approach an obstacle → it warns, unprompted. That's KITT.
 
 ---
 
+## Swapping the LLM (a newer/better model)
+
+The model is behind an HTTP seam, so a swap is **config-only** — no rebuild, and
+**no safety re-review** (the checker, the fence, and the intent parse are
+model-agnostic; a swap changes only the doer's proposals, never its authority):
+
+```bash
+ollama pull <new-model>
+# gate the candidate against the router contract BEFORE flipping the env:
+python3 robot/kitt_model_smoketest.py <new-model>     # JSON contract + directive vs chat + no fabrication
+# then in /etc/kirra/robot.env:
+KIRRA_KITT_MODEL="<new-model>"
+sudo systemctl restart kirra-kitt-watch               # + the converse/voice front-end
+```
+
+`kitt_model_smoketest.py` is a **doer-quality** gate (not a safety gate, not a CI
+test — it needs a live Ollama). A model that fails it is still *safe* to run — an
+unparseable turn fails closed to SPEAK-only — but the drive-by-voice path may not
+fire reliably, so prefer one that passes. Also measure end-to-end latency
+(`KITT_AUDIO_STACK.md` §5): a bigger model is slower and needs more VRAM.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
