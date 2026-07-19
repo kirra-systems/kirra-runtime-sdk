@@ -22,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kitt_boot import greeting_line, shutdown_line  # noqa: E402
 from kitt_ota import match_command  # noqa: E402
 from kitt_persona import (  # noqa: E402
-    classify_model_pin, name_slot, read_model_pin, write_model_pin,
+    classify_model_pin, name_slot, read_model_pin, read_model_pin_record,
+    write_model_pin,
 )
 
 
@@ -138,6 +139,30 @@ def test_model_pin_round_trip_and_isolation(tmp_path=None) -> None:
         assert read_model_pin("gemma3:4b", pin) == "sha256:cc"
         assert read_model_pin("gemma4:8b", pin) == "sha256:bb"    # other untouched
         assert read_model_pin("never-pinned", pin) is None
+
+
+def test_model_pin_records_timestamp_and_note() -> None:
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        pin = os.path.join(d, "pins")
+        write_model_pin("gemma4:8b", "sha256:aa", pin,
+                        vetted_at="2026-07-19T00:00:00+00:00", note="hf re-pull")
+        assert read_model_pin_record("gemma4:8b", pin) == (
+            "sha256:aa", "2026-07-19T00:00:00+00:00", "hf re-pull")
+        assert read_model_pin("gemma4:8b", pin) == "sha256:aa"   # digest accessor still works
+        # a tab in the note must not corrupt the record
+        write_model_pin("m2", "sha256:bb", pin, vetted_at="t", note="a\tb")
+        assert read_model_pin_record("m2", pin) == ("sha256:bb", "t", "a b")
+
+
+def test_model_pin_legacy_two_field_line_reads() -> None:
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        pin = os.path.join(d, "pins")
+        with open(pin, "w") as f:
+            f.write("gemma3:4b\tsha256:cc\n")                    # legacy 2-field line
+        assert read_model_pin("gemma3:4b", pin) == "sha256:cc"   # still reads the digest
+        assert read_model_pin_record("gemma3:4b", pin) == ("sha256:cc", "", "")  # empty ts/note
 
 
 def _run_all() -> int:

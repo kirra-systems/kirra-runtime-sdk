@@ -54,39 +54,57 @@ def model_pin_path() -> str:
     return p or os.path.expanduser("~/.kirra_kitt_model.pin")
 
 
-def read_model_pin(model: str, path: "str | None" = None) -> "str | None":
-    """The vetted digest for `model`, or None if unpinned/unreadable."""
-    path = path or model_pin_path()
-    try:
-        with open(path) as f:
-            for line in f:
-                parts = line.rstrip("\n").split("\t")
-                if len(parts) == 2 and parts[0] == model:
-                    return parts[1] or None
-    except OSError:
-        return None
-    return None
+def _pin_clean(s: "str | None") -> str:
+    """Strip tabs/newlines so a field can't corrupt the TSV record."""
+    return (s or "").replace("\t", " ").replace("\n", " ").strip()
 
 
-def write_model_pin(model: str, digest: str, path: "str | None" = None) -> None:
-    """Record `model`→`digest` as vetted (merges with any other pinned models)."""
-    path = path or model_pin_path()
+def _load_pins(path: str) -> dict:
+    """model → (digest, vetted_at, note). Back-compat: legacy 2-field lines
+    (`model\\tdigest`) read with empty vetted_at/note."""
     rows = {}
     try:
         with open(path) as f:
             for line in f:
                 parts = line.rstrip("\n").split("\t")
-                if len(parts) == 2:
-                    rows[parts[0]] = parts[1]
+                if len(parts) >= 2 and parts[0]:
+                    rows[parts[0]] = (
+                        parts[1],
+                        parts[2] if len(parts) >= 3 else "",
+                        parts[3] if len(parts) >= 4 else "",
+                    )
     except OSError:
         pass
-    rows[model] = digest
+    return rows
+
+
+def read_model_pin_record(model: str, path: "str | None" = None):
+    """(digest, vetted_at, note) for `model`, or None if unpinned — the
+    reproducibility trail: WHICH weights, verified WHEN, and a provenance note."""
+    return _load_pins(path or model_pin_path()).get(model)
+
+
+def read_model_pin(model: str, path: "str | None" = None) -> "str | None":
+    """The vetted digest for `model`, or None if unpinned/unreadable."""
+    rec = read_model_pin_record(model, path)
+    return (rec[0] or None) if rec else None
+
+
+def write_model_pin(model: str, digest: str, path: "str | None" = None,
+                    vetted_at: str = "", note: str = "") -> None:
+    """Record `model`→(digest, vetted_at, note) as vetted (merges with any other
+    pinned models; preserves their fields). `vetted_at` is an ISO timestamp the
+    caller supplies (kept out of here so the write stays clock-free/testable)."""
+    path = path or model_pin_path()
+    rows = _load_pins(path)
+    rows[model] = (digest, _pin_clean(vetted_at), _pin_clean(note))
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     with open(path, "w") as f:
-        for k, v in sorted(rows.items()):
-            f.write(f"{k}\t{v}\n")
+        for k in sorted(rows):
+            d, v, n = rows[k]
+            f.write(f"{k}\t{d}\t{v}\t{n}\n")
 
 
 def classify_model_pin(running: "str | None", pinned: "str | None") -> str:
