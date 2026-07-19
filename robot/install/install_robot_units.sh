@@ -34,7 +34,7 @@ echo "== robot-side unit install — user: ${ROBOT_USER} =="
 echo "== 1. KITT scripts -> ${OPT}/robot =="
 sudo install -d -m 0755 "${OPT}/robot"
 for f in kitt_watch.py kitt_ask.py kitt_converse.py kitt_voice.sh ptt_button.py \
-         run_voice_ptt.sh inspect_corridor.py; do
+         run_voice_ptt.sh inspect_corridor.py kitt_ota.py; do
   [[ -f "${REPO}/robot/${f}" ]] || { echo "  ⚠ missing ${REPO}/robot/${f} — skipped"; continue; }
   sudo install -m 0755 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
   echo "  installed ${OPT}/robot/${f}"
@@ -42,7 +42,8 @@ done
 
 # ---- 2. render + install the units -----------------------------------------
 echo "== 2. units -> /etc/systemd/system =="
-for u in kirra-ros-stack.service kirra-kitt-watch.service; do
+for u in kirra-ros-stack.service kirra-kitt-watch.service \
+         kirra-ota-check.service kirra-ota-check.timer; do
   [[ -f "${UNITS}/${u}" ]] || { echo "❌ missing ${UNITS}/${u}"; exit 1; }
   sed "s/__KIRRA_ROBOT_USER__/${ROBOT_USER}/g" "${UNITS}/${u}" \
     | sudo tee "/etc/systemd/system/${u}" >/dev/null
