@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""kitt_watch.py — Stage 3 KITT: proactive event speech. **SPEAK-ONLY.**
+"""rabbit_watch.py — Stage 3 Rabbit: proactive event speech. **SPEAK-ONLY.**
 
-KITT talks to YOU, unprompted — "I'm holding a safe stop," "all systems nominal,"
+Rabbit talks to YOU, unprompted — "I'm holding a safe stop," "all systems nominal,"
 "I've had to refuse that." A read-only watcher that polls two signals, detects
 state TRANSITIONS, and speaks in persona on a change (never on steady state).
 
@@ -9,7 +9,7 @@ state TRANSITIONS, and speaks in persona on a change (never on steady state).
     GET /metrics  kirra_fleet_posture ─►   Nominal↔Degraded↔LockedOut, cache-stale
     GET /narration/last (the #893 relay) ─► a NEW checker DENY (with its reason)
 
-🔴 CHANNEL A ONLY (docs/hardware/KITT_CONVERSATION_DESIGN.md). This process makes
+🔴 CHANNEL A ONLY (docs/hardware/RABBIT_CONVERSATION_DESIGN.md). This process makes
    read-only GETs and prints/speaks text — NO /intent POST, NO publisher, NO
    serial, NO release token. It observes and narrates; it cannot move the robot.
    Proactive SPEECH, never proactive MOTION.
@@ -20,10 +20,10 @@ limits so a flap can't spam. If a signal is unreachable it stays silent for that
 signal (never false-announces "recovered" from missing data).
 
 Usage:
-  ./robot/kitt_watch.py                 # run alongside the loop; speaks on events
-Env: KIRRA_VERIFIER_URL / KIRRA_MICK_URL / KIRRA_TTS_CMD (inherited from kitt_ask);
-     KIRRA_KITT_WATCH_MS  poll interval (default 1500)
-     KIRRA_KITT_WATCH_MIN_GAP_MS  min ms between spoken lines (default 2500)
+  ./robot/rabbit_watch.py                 # run alongside the loop; speaks on events
+Env: KIRRA_VERIFIER_URL / KIRRA_MICK_URL / KIRRA_TTS_CMD (inherited from rabbit_ask);
+     KIRRA_RABBIT_WATCH_MS  poll interval (default 1500)
+     KIRRA_RABBIT_WATCH_MIN_GAP_MS  min ms between spoken lines (default 2500)
 """
 import os
 import re
@@ -33,14 +33,14 @@ import time
 try:
     import requests
 except ImportError:
-    sys.exit("kitt_watch: python3-requests missing (pip3 install requests)")
+    sys.exit("rabbit_watch: python3-requests missing (pip3 install requests)")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kitt_ask import MICK, VERIFIER, speak  # noqa: E402
-from kitt_persona import name_slot  # noqa: E402
+from rabbit_ask import MICK, VERIFIER, speak  # noqa: E402
+from rabbit_persona import name_slot  # noqa: E402
 
-POLL_S = int(os.environ.get("KIRRA_KITT_WATCH_MS", "1500")) / 1000.0
-MIN_GAP_S = int(os.environ.get("KIRRA_KITT_WATCH_MIN_GAP_MS", "2500")) / 1000.0
+POLL_S = int(os.environ.get("KIRRA_RABBIT_WATCH_MS", "1500")) / 1000.0
+MIN_GAP_S = int(os.environ.get("KIRRA_RABBIT_WATCH_MIN_GAP_MS", "2500")) / 1000.0
 POSTURE_NAME = {0: "nominal", 1: "degraded", 2: "locked out"}
 
 _FLEET_RE = re.compile(r"kirra_fleet_posture\{[^}]*\}\s+(\d+)")
@@ -111,7 +111,7 @@ def verdict_line(v):
 
 
 def main():
-    print("kitt_watch: proactive event speech — announces on change (Ctrl-C quits).",
+    print("rabbit_watch: proactive event speech — announces on change (Ctrl-C quits).",
           file=sys.stderr)
     # baseline WITHOUT speaking
     posture, stale = poll_posture()
@@ -149,4 +149,4 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nkitt_watch: stopped", file=sys.stderr)
+        print("\nrabbit_watch: stopped", file=sys.stderr)

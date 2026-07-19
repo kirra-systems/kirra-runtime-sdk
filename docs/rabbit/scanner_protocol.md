@@ -1,6 +1,6 @@
-# KITT Scanner — Jetson ↔ MCU serial protocol (v1)
+# Rabbit Scanner — Jetson ↔ MCU serial protocol (v1)
 
-> **Single source of truth** for the KITT LED scanner wire contract. BOTH halves
+> **Single source of truth** for the Rabbit LED scanner wire contract. BOTH halves
 > cite this doc:
 > - the **MCU firmware** (XIAO/QT Py driving the WS2812B strip) implements the
 >   *receiver* side, and
@@ -34,7 +34,7 @@
 | Byte order | little-endian for multi-byte fields |
 
 The MCU port appears on the Jetson as `/dev/ttyACM*` (or a udev symlink, e.g.
-`/dev/kitt_scanner` — recommended, add a rule so it's stable).
+`/dev/rabbit_scanner` — recommended, add a rule so it's stable).
 
 ## 2. Frame format
 
@@ -78,7 +78,7 @@ do not change the persistent mode.
 - The Jetson computes a **rolling RMS envelope** of the audio it is *generating*
   (not a mic) over a ~20 ms window, normalizes to the speech's dynamic range, and
   maps to a byte `0–255`.
-- **Stream rate: 50 Hz** (one `'V'` frame every 20 ms) while KITT speaks. This is
+- **Stream rate: 50 Hz** (one `'V'` frame every 20 ms) while Rabbit speaks. This is
   smooth to the eye and ~300 B/s.
 - MCU mapping (firmware-owned, tune to taste): amplitude → the lit bar's
   **width AND brightness** — louder syllables = wider/brighter, gaps = a dim
@@ -104,7 +104,7 @@ The high-value tie-in: the scanner reflects the *actual* safety-governor verdict
 - Repeated refusals re-trigger `'A'` (the flash restarts). The bridge should
   debounce so a sustained refusal doesn't strobe (e.g. min 250 ms between `'A'`).
 
-This makes the cosmetic and the thesis the same event: **KITT refuses an unsafe
+This makes the cosmetic and the thesis the same event: **Rabbit refuses an unsafe
 command → the scanner flashes red at that instant.**
 
 ## 6. Version handshake
@@ -126,7 +126,7 @@ ignored (forward-compat). Reserved keys:
 | 0x01 | 0–255 | master brightness |
 | 0x02 | 0–255 | idle sweep period (×10 ms) |
 | 0x03 | 0–255 | drive sweep period (×10 ms) |
-| 0x04 | 0–255 | base hue (0=red; KITT is red — default 0) |
+| 0x04 | 0–255 | base hue (0=red; Rabbit is red — default 0) |
 
 CONFIG is a nice-to-have; v1 firmware may ignore it entirely.
 
@@ -152,7 +152,7 @@ def _frame(cmd: str, payload: bytes = b"") -> bytes:
     return bytes([SOF]) + body + bytes([crc8(body)])
 
 class Scanner:
-    def __init__(self, port="/dev/kitt_scanner", baud=115200):
+    def __init__(self, port="/dev/rabbit_scanner", baud=115200):
         self.s = serial.Serial(port, baud, timeout=0)
         self.s.write(_frame("H", bytes([1])))          # announce v1
     def idle(self):   self.s.write(_frame("I"))

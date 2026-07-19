@@ -1,4 +1,4 @@
-//! **The governed loop, SPOKEN** — the KITT demo as a CI artifact: *you say
+//! **The governed loop, SPOKEN** — the Rabbit demo as a CI artifact: *you say
 //! something unsafe, and the car tells you — out loud — why it refused.*
 //!
 //! Extends `mick_governed_loop.rs`'s shape with the speech shell wrapped
@@ -25,7 +25,7 @@
 //! runs a byte-reproducible generated WAV through the REAL wav gate + a
 //! scripted STT seam + a prompt-spying model; the live whisper.cpp / Piper /
 //! microphone path is the manual demo (`speech_shell`,
-//! docs/testing/SPEECH_KITT_DEMO.md) — external OS processes CI can't carry.
+//! docs/testing/SPEECH_RABBIT_DEMO.md) — external OS processes CI can't carry.
 //!
 //! Verdict-core honesty: `TrajectoryVerdict` and the frozen kinematics core
 //! are UNTOUCHED by this test and by the speech layer (input transduction +

@@ -28,7 +28,7 @@ fi
 if [ -z "${KIRRA_STT_CMD:-}" ]; then
   echo "FATAL: KIRRA_STT_CMD is required, e.g.:" >&2
   echo '  export KIRRA_STT_CMD="whisper-cli -m models/ggml-base.en.bin -np -nt -f"' >&2
-  echo "(build whisper.cpp; see docs/testing/SPEECH_KITT_DEMO.md)" >&2
+  echo "(build whisper.cpp; see docs/testing/SPEECH_RABBIT_DEMO.md)" >&2
   exit 1
 fi
 # Bounded push-to-talk recorder (the -d bound = no open mic). Overridable.

@@ -42,10 +42,10 @@ for u in kirra.target kirra-verifier.service kirra-planner.service kirra-taj.ser
     esac
   fi
 done
-# kitt-watch is optional (interactive narration) — warn, don't fail.
-systemctl cat kirra-kitt-watch.service >/dev/null 2>&1 \
-  && ok "kirra-kitt-watch installed (optional)" \
-  || warn "kirra-kitt-watch not installed (optional — narration only)"
+# rabbit-watch is optional (interactive narration) — warn, don't fail.
+systemctl cat kirra-rabbit-watch.service >/dev/null 2>&1 \
+  && ok "kirra-rabbit-watch installed (optional)" \
+  || warn "kirra-rabbit-watch not installed (optional — narration only)"
 
 # ---- 2. binaries + consumer scripts staged --------------------------------
 echo "-- /opt/kirra artifacts --"
@@ -106,7 +106,7 @@ fi
 echo "-- user groups --"
 groups_u="$(id -nG "$ROBOT_USER" 2>/dev/null || true)"
 grep -qw dialout <<<"$groups_u" && ok "$ROBOT_USER in dialout (serial)" || { bad "$ROBOT_USER NOT in dialout — consumer can't open /dev/myserial"; fix "sudo usermod -aG dialout $ROBOT_USER (re-login)"; }
-grep -qw audio <<<"$groups_u" && ok "$ROBOT_USER in audio (kitt narration)" || warn "$ROBOT_USER not in audio (only needed for kitt-watch)"
+grep -qw audio <<<"$groups_u" && ok "$ROBOT_USER in audio (rabbit narration)" || warn "$ROBOT_USER not in audio (only needed for rabbit-watch)"
 
 # ---- 6. device symlinks ---------------------------------------------------
 echo "-- devices --"

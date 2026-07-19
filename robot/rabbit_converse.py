@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""kitt_converse.py — Stage 2 KITT: multi-turn conversation, persona, router.
+"""rabbit_converse.py — Stage 2 Rabbit: multi-turn conversation, persona, router.
 
 Unifies ASKING (Stage 1 Q&A) and COMMANDING into ONE dialogue with memory and
-character. Each turn, KITT decides between its two channels
-(docs/hardware/KITT_CONVERSATION_DESIGN.md):
+character. Each turn, Rabbit decides between its two channels
+(docs/hardware/RABBIT_CONVERSATION_DESIGN.md):
 
   * SPEAK  — chat / questions / status → answered in persona from live telemetry
-             (reuses robot/kitt_ask.py's read-only grounding). Never moves.
+             (reuses robot/rabbit_ask.py's read-only grounding). Never moves.
   * ACT    — a driving directive → the operator's movement words are handed to
              mick_service POST /intent, the ONE fail-closed door. occy_doer then
-             drives it and the KIRRA checker BOUNDS it. KITT speaks a confirmation.
+             drives it and the KIRRA checker BOUNDS it. Rabbit speaks a confirmation.
 
-🔴 THE SINGLE-DOOR INVARIANT: KITT NEVER constructs an intent, a Twist, a release
+🔴 THE SINGLE-DOOR INVARIANT: Rabbit NEVER constructs an intent, a Twist, a release
    token, or a serial byte. The ONLY actuation-adjacent call in this process is
    POSTing the operator's directive TEXT to /intent — exactly what a human typing
    does. mick's fail-closed parse (MickIntent::parse_llm_json) is the final
@@ -20,15 +20,15 @@ character. Each turn, KITT decides between its two channels
    APPROVED, bounded motion — never an unsafe one — and an unparseable turn
    drives NOTHING (fail-closed: uncertain → no directive → SPEAK only).
 
-Routing is fail-closed: KITT emits a directive ONLY when it is confident the
+Routing is fail-closed: Rabbit emits a directive ONLY when it is confident the
 operator asked to DRIVE. Questions, chat, and any turn it can't parse → SPEAK,
 directive null, no motion.
 
 Usage:
-  ./robot/kitt_converse.py            # interactive: one utterance per line (Ctrl-D quits)
-  echo "take us to the door" | ./robot/kitt_converse.py --once
-Env: inherits robot/kitt_ask.py's (KIRRA_VERIFIER_URL / _MICK_URL / _TAJ_URL /
-     _OLLAMA_URL / KIRRA_KITT_MODEL / KIRRA_TTS_CMD). Wire STT in by piping the
+  ./robot/rabbit_converse.py            # interactive: one utterance per line (Ctrl-D quits)
+  echo "take us to the door" | ./robot/rabbit_converse.py --once
+Env: inherits robot/rabbit_ask.py's (KIRRA_VERIFIER_URL / _MICK_URL / _TAJ_URL /
+     _OLLAMA_URL / KIRRA_RABBIT_MODEL / KIRRA_TTS_CMD). Wire STT in by piping the
      transcript per line (e.g. the PTT button + whisper) — same as speech_shell.
 """
 import json
@@ -39,23 +39,23 @@ import sys
 try:
     import requests
 except ImportError:
-    sys.exit("kitt_converse: python3-requests missing (pip3 install requests)")
+    sys.exit("rabbit_converse: python3-requests missing (pip3 install requests)")
 
 # Reuse Stage 1's read-only grounding + persona + speak (robot/ is on sys.path[0]).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kitt_ask import (  # noqa: E402
-    KITT_SYSTEM, MICK, MODEL, OLLAMA, gather_perception, gather_posture,
+from rabbit_ask import (  # noqa: E402
+    RABBIT_SYSTEM, MICK, MODEL, OLLAMA, gather_perception, gather_posture,
     gather_stop_reason, speak,
 )
-import kitt_ota  # noqa: E402 — deterministic OTA voice commands (NOT the movement door)
-from kitt_persona import name_slot, operator_name  # noqa: E402
+import rabbit_ota  # noqa: E402 — deterministic OTA voice commands (NOT the movement door)
+from rabbit_persona import name_slot, operator_name  # noqa: E402
 
 MAX_TURNS = 10  # rolling conversation memory (user+assistant pairs kept)
 PERCEPTION_WORDS = ("see", "around", "ahead", "front", "obstacle", "clear",
                     "look", "there", "path", "way", "block")
 
 STAGE2_SYSTEM = (
-    KITT_SYSTEM
+    RABBIT_SYSTEM
     + "\n\nEACH TURN, reply with a JSON object and nothing else:\n"
     '  {"say": "<one or two sentences to speak aloud>",\n'
     '   "directive": <null, OR the operator\'s movement request in plain words>}\n'
@@ -143,7 +143,7 @@ def handle_turn(history, utterance):
     # System commands (OTA "check/apply update") are matched DETERMINISTICALLY and
     # handled BEFORE the LLM/movement path — they run local kirra-ota-ctl, never
     # the fenced mick /intent door, and a movement utterance never reaches here.
-    ota_reply = kitt_ota.handle(utterance)
+    ota_reply = rabbit_ota.handle(utterance)
     if ota_reply is not None:
         speak(ota_reply)
         history.append({"role": "user", "content": utterance})
@@ -187,7 +187,7 @@ def main():
             # Empty transcript (e.g. PTT released with nothing intelligible) → F2.
             speak(f"I didn't quite catch that{name_slot()}.")
         return
-    print("kitt_converse: talk to KITT — one line per turn (Ctrl-D quits).",
+    print("rabbit_converse: talk to Rabbit — one line per turn (Ctrl-D quits).",
           file=sys.stderr)
     for line in sys.stdin:
         utterance = line.strip()

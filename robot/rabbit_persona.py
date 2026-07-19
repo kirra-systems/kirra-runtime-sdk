@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""kitt_persona.py — shared, dependency-free KITT persona helpers.
+"""rabbit_persona.py — shared, dependency-free Rabbit persona helpers.
 
-The one home for (a) how KITT addresses the operator (the `{name}` slot) and
-(b) how it speaks (`speak`). Deliberately stdlib-only so EVERY KITT script can
-import it — including the lean, requests-free ones (kitt_ota.py).
+The one home for (a) how Rabbit addresses the operator (the `{name}` slot) and
+(b) how it speaks (`speak`). Deliberately stdlib-only so EVERY Rabbit script can
+import it — including the lean, requests-free ones (rabbit_ota.py).
 
-🔴 CHANNEL A ONLY (docs/hardware/KITT_CONVERSATION_DESIGN.md, docs/kitt/KITT_VOICE_LINES.md).
+🔴 CHANNEL A ONLY (docs/hardware/RABBIT_CONVERSATION_DESIGN.md, docs/rabbit/RABBIT_VOICE_LINES.md).
    These helpers personalize and render SPEECH. They carry ZERO actuation
    authority: knowing the operator's name never authorizes a command, and
    `speak` only prints / pipes text to a TTS process. The KIRRA checker bounds
@@ -24,15 +24,15 @@ def operator_name() -> str:
     Priority (highest first):
       1. the operator RECOGNIZER feed (face/voice) — slots in here later; it is
          a read-only grounding source with NO actuation authority, and
-      2. KIRRA_KITT_OPERATOR (a configured default name), else
-      3. '' (unknown → KITT stays polite, just nameless).
+      2. KIRRA_RABBIT_OPERATOR (a configured default name), else
+      3. '' (unknown → Rabbit stays polite, just nameless).
     """
     # (recognizer feed reads in here first once it lands — Channel A, read-only.)
-    return os.environ.get("KIRRA_KITT_OPERATOR", "").strip()
+    return os.environ.get("KIRRA_RABBIT_OPERATOR", "").strip()
 
 
 def name_slot() -> str:
-    """Render the `{name}` slot used throughout docs/kitt/KITT_VOICE_LINES.md:
+    """Render the `{name}` slot used throughout docs/rabbit/RABBIT_VOICE_LINES.md:
     ', Justin' when the operator is known, '' when not — so a line reads
     naturally either way ("Good morning{name}." → "Good morning, Justin." | "Good morning.")."""
     n = operator_name()
@@ -44,14 +44,14 @@ def name_slot() -> str:
 # pass silently. The smoketest records the digest it VETTED here; boot compares
 # the RUNNING digest against it and warns on a mismatch. Pure/stdlib so the
 # comparison is unit-testable without a network — the digest FETCH lives in
-# kitt_model_smoketest.py (it needs requests + a live Ollama).
-KITT_MODEL_PIN_ENV = "KIRRA_KITT_MODEL_PIN_FILE"
+# rabbit_model_smoketest.py (it needs requests + a live Ollama).
+RABBIT_MODEL_PIN_ENV = "KIRRA_RABBIT_MODEL_PIN_FILE"
 
 
 def model_pin_path() -> str:
     """Where the vetted `<model>\\t<digest>` pins live (per-user, override via env)."""
-    p = os.environ.get(KITT_MODEL_PIN_ENV, "").strip()
-    return p or os.path.expanduser("~/.kirra_kitt_model.pin")
+    p = os.environ.get(RABBIT_MODEL_PIN_ENV, "").strip()
+    return p or os.path.expanduser("~/.kirra_rabbit_model.pin")
 
 
 def _pin_clean(s: "str | None") -> str:
