@@ -172,6 +172,16 @@ companions `KIRRA_PLATFORM_DEPLOYMENT_STRATEGY.md`, `KIRRA_BRINGUP_RUNBOOK.md`,
 and `KIRRA_QNX_CROSSCOMPILE.md`. (That file's `ADR-0001` prefix is independent of
 the numbered ODD-cap ADRs in the table above — a known naming overlap.)
 
+[`0036-autoware-distro-migration-occy-gap.md`](docs/adr/0036-autoware-distro-migration-occy-gap.md)
+records the Occy-vs-Autoware gap analysis and the decision for the Ubuntu
+22.04/Humble → 24.04/Jazzy transition: **keep Autoware** as the AV-stack doer
+(Occy does not cover its L4 breadth — localization, control, mature fused
+perception), **isolate it as the only component on Humble** in its own container,
+and move the rest of the stack (ros2 adapter, checker, Occy/Taj) to Jazzy now —
+meeting only on 5 curated, hash-verified boundary topics. The safety spine is
+`no_std`/ROS-agnostic, so this is a doer-side migration with no re-certification.
+Isolation scaffold: [`deploy/autoware-isolation/`](deploy/autoware-isolation/).
+
 ### Governor transport / QNX partition lane (EPIC #270)
 
 The governor command path is moving to **Rust end-to-end** on a QNX-resident
