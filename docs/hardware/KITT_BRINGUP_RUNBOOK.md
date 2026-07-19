@@ -154,6 +154,20 @@ unparseable turn fails closed to SPEAK-only — but the drive-by-voice path may 
 fire reliably, so prefer one that passes. Also measure end-to-end latency
 (`KITT_AUDIO_STACK.md` §5): a bigger model is slower and needs more VRAM.
 
+**"No version bump" stealth updates.** A model can change *in place* — same
+Ollama tag, different weights (e.g. tool-calling/output-format fixes). So the
+rule is **re-run the smoketest after any `ollama pull`, not just on a version
+string change** — the tag can lie. On a full pass the smoketest records the
+vetted **digest** (`~/.kirra_kitt_model.pin`); boot then compares the running
+digest and, on a mismatch, KITT says so (voice line A5) — a stealth swap is loud,
+not silent. Check anytime without the LLM:
+```bash
+python3 robot/kitt_model_smoketest.py --pin-check    # running digest vs the vetted pin
+```
+The robot itself is not changed by an upstream update until someone re-pulls
+(Ollama runs the local blob) — the pin catches the case where a re-pull silently
+brought new weights.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

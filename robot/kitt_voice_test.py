@@ -21,7 +21,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kitt_boot import greeting_line, shutdown_line  # noqa: E402
 from kitt_ota import match_command  # noqa: E402
-from kitt_persona import name_slot  # noqa: E402
+from kitt_persona import (  # noqa: E402
+    classify_model_pin, name_slot, read_model_pin, write_model_pin,
+)
 
 
 def _with_operator(value):
@@ -112,6 +114,30 @@ def test_ota_matcher_precedence() -> None:
     assert match_command("check for updates") == "check"
     assert match_command("any updates?") == "check"
     assert match_command("take us to the kitchen") is None
+
+
+# --- model pin (stealth-update guard) ---------------------------------------
+
+def test_classify_model_pin_states() -> None:
+    assert classify_model_pin(None, "sha256:aa") == "unavailable"   # no running digest
+    assert classify_model_pin("sha256:aa", None) == "unpinned"      # never vetted
+    assert classify_model_pin("sha256:aa", "sha256:aa") == "ok"     # matches
+    assert classify_model_pin("sha256:bb", "sha256:aa") == "changed"  # stealth update
+
+
+def test_model_pin_round_trip_and_isolation(tmp_path=None) -> None:
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        pin = os.path.join(d, "pins")
+        assert read_model_pin("gemma3:4b", pin) is None            # unpinned → None
+        write_model_pin("gemma3:4b", "sha256:aa", pin)
+        write_model_pin("gemma4:8b", "sha256:bb", pin)             # a second model
+        assert read_model_pin("gemma3:4b", pin) == "sha256:aa"
+        assert read_model_pin("gemma4:8b", pin) == "sha256:bb"     # both kept
+        write_model_pin("gemma3:4b", "sha256:cc", pin)            # re-vet updates in place
+        assert read_model_pin("gemma3:4b", pin) == "sha256:cc"
+        assert read_model_pin("gemma4:8b", pin) == "sha256:bb"    # other untouched
+        assert read_model_pin("never-pinned", pin) is None
 
 
 def _run_all() -> int:
