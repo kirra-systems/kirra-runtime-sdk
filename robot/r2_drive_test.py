@@ -32,11 +32,15 @@ from r2_drive import (  # noqa: E402
     apply_actuation,
     calibration_from_env,
     closed_loop_enabled,
+    integrate_ackermann_odom,
     mrc_stop,
+    odom_step,
+    odom_zero,
     r2_safe_stop,
     speed_match_params_from_env,
     speed_match_step,
     translate,
+    yaw_to_quaternion_zw,
 )
 
 
@@ -545,6 +549,124 @@ def test_speed_match_params_from_env_rejects_nonnumeric() -> None:
     except R2CalibrationError:
         return
     raise AssertionError("expected R2CalibrationError for non-numeric m_per_tick")
+
+
+# --------------------------------------------------------------------------
+# Ackermann wheel-odometry (pure integrator)
+# --------------------------------------------------------------------------
+_MPT = 0.00025101  # KIRRA_R2_M_PER_TICK (RL 66.675 mm wheel / 834.5 t/rev)
+_WB = 0.229  # KIRRA_R2_WHEELBASE_M
+
+
+def test_odom_first_sample_only_anchors_no_motion() -> None:
+    st = odom_step(odom_zero(), 1000, 1000, 0.0, _MPT, _WB)
+    assert st.pose.x_m == 0.0 and st.pose.y_m == 0.0 and st.pose.yaw_rad == 0.0
+    assert st.last_left_ticks == 1000 and st.last_right_ticks == 1000
+
+
+def test_odom_straight_advances_x_by_mean_distance() -> None:
+    # delta=0 → pure forward. 4000 ticks both wheels → 4000*_MPT metres.
+    st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
+    st = odom_step(st, 4000, 4000, 0.0, _MPT, _WB, max_step_m=100.0)
+    assert abs(st.pose.x_m - 4000 * _MPT) < 1e-9
+    assert abs(st.pose.y_m) < 1e-12
+    assert abs(st.pose.yaw_rad) < 1e-12
+
+
+def test_odom_reaches_one_metre_and_would_trip_goal() -> None:
+    # Accumulate ~1 m in equal steps; the planner's goal-reached fires when the
+    # ego x crosses the goal distance. Prove x converges to ~1.0 m.
+    st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
+    ticks = int(round(1.0 / _MPT))
+    st = odom_step(st, ticks, ticks, 0.0, _MPT, _WB, max_step_m=100.0)
+    assert abs(st.pose.x_m - 1.0) < 1e-3
+
+
+def test_odom_heading_from_steering_not_wheel_difference() -> None:
+    # The R2's rear wheels differ at equal PWM. Feed a LARGE wheel difference but
+    # delta=0: a differential model would spin; the bicycle model must NOT — yaw
+    # stays 0 and x advances by the mean.
+    st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
+    st = odom_step(st, 5000, 3000, 0.0, _MPT, _WB, max_step_m=100.0)  # 34%-ish imbalance
+    assert abs(st.pose.yaw_rad) < 1e-12, "wheel diff must not create yaw at delta=0"
+    assert abs(st.pose.x_m - 4000 * _MPT) < 1e-9  # mean of 5000,3000
+
+
+def test_odom_positive_delta_turns_left() -> None:
+    st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
+    st = odom_step(st, 4000, 4000, 0.30, _MPT, _WB, max_step_m=100.0)  # steering left
+    assert st.pose.yaw_rad > 0.0, "a positive road-wheel angle must yaw left (+)"
+    # dyaw = d*tan(delta)/L with d=4000*_MPT
+    d = 4000 * _MPT
+    assert abs(st.pose.yaw_rad - d * math.tan(0.30) / _WB) < 1e-9
+
+
+def test_odom_backward_decrements_x() -> None:
+    st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
+    st = odom_step(st, -2000, -2000, 0.0, _MPT, _WB)
+    assert st.pose.x_m < 0.0 and abs(st.pose.x_m + 2000 * _MPT) < 1e-9
+
+
+def test_odom_wrap_re_anchors_without_teleport() -> None:
+    st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
+    st = odom_step(st, 4000, 4000, 0.0, _MPT, _WB, max_step_m=100.0)
+    x_before = st.pose.x_m
+    # A non-physical jump (2500 m of implied travel) must hold the pose + re-anchor.
+    st = odom_step(st, 4000 + 10_000_000, 4000, 0.0, _MPT, _WB, max_step_m=100.0)
+    assert st.pose.x_m == x_before, "a counter wrap must not teleport the pose"
+    assert st.last_left_ticks == 4000 + 10_000_000  # re-anchored
+    # A subsequent normal step integrates from the new baseline.
+    st = odom_step(st, 4000 + 10_000_000 + 4000, 8000, 0.0, _MPT, _WB, max_step_m=100.0)
+    assert abs(st.pose.x_m - (x_before + 4000 * _MPT)) < 1e-9
+
+
+def test_odom_16bit_wrap_is_caught_by_distance_bound() -> None:
+    # THE realistic case a tick-magnitude threshold would miss: a signed 16-bit
+    # counter wrap (~65536 ticks) implies ~16.4 m of travel in one step — a raw
+    # 100k-tick threshold would let it through, but the DISTANCE bound (default
+    # 1.0 m) rejects it. Guards finding: a 16-bit wrap must not teleport the pose.
+    st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
+    st = odom_step(st, 100, 100, 0.0, _MPT, _WB)
+    x_before = st.pose.x_m
+    st = odom_step(st, 100 - 65536, 100, 0.0, _MPT, _WB)  # 16-bit wrap on the left wheel
+    assert st.pose.x_m == x_before, "a 16-bit wrap (~65536 ticks) must be rejected, not integrated"
+
+
+def test_odom_large_but_physical_step_is_kept() -> None:
+    # A vigorous hand-spin (~0.2 m in one 50 ms step) is physical (< 1.0 m bound)
+    # and MUST be integrated, not mistaken for a wrap.
+    st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
+    ticks = int(round(0.2 / _MPT))
+    st = odom_step(st, ticks, ticks, 0.0, _MPT, _WB)
+    assert abs(st.pose.x_m - ticks * _MPT) < 1e-9, "a physical step must not be rejected"
+
+
+def test_odom_nonfinite_distance_holds_pose() -> None:
+    st = odom_step(odom_zero(), 0, 0, 0.0, _MPT, _WB)
+    p = st.pose
+    p2 = integrate_ackermann_odom(p, float("nan"), 0.0, 0.0, _WB)
+    assert p2 == p, "non-finite input must not poison the pose"
+
+
+def test_yaw_to_quaternion_zw_matches_planar_convention() -> None:
+    z, w = yaw_to_quaternion_zw(0.0)
+    assert abs(z) < 1e-12 and abs(w - 1.0) < 1e-12
+    z, w = yaw_to_quaternion_zw(math.pi / 2)
+    assert abs(z - math.sin(math.pi / 4)) < 1e-12 and abs(w - math.cos(math.pi / 4)) < 1e-12
+
+
+def test_odom_delta_rad_flows_from_translate() -> None:
+    # The heading source the consumer feeds odom is translate().delta_rad — prove
+    # it is populated on an "ok" actuation and zero on a stop.
+    cal = R2DriveCalibration(
+        wheelbase_m=_WB, v_per_pwm=0.0145, pwm_max=40, steer_units_per_rad=66,
+        delta_max_rad=0.68, steer_sign=-1.0, center_trim=90, drive_deadband_pwm=0,
+    )
+    turning = translate(0.1, 0.2, cal)
+    assert turning.reason == "ok" and abs(turning.delta_rad) > 0.0
+    assert abs(turning.delta_rad - math.atan(_WB * 0.2 / 0.1)) < 1e-9
+    assert translate(0.0, 0.0, cal).delta_rad == 0.0  # stopped
+    assert mrc_stop("x").delta_rad == 0.0
 
 
 def _run_all() -> int:

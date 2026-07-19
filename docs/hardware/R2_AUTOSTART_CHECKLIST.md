@@ -109,6 +109,29 @@ operation in scope.
 - ⬜ An installer step that renders the two new units' `User=` +
   `KIRRA_ROS_WS_SETUP` (today: fill the placeholders by hand).
 
+## Bench tooling (automates the steps above)
+
+Three scripts turn the manual checklist into runnable commands:
+
+- **`robot/install/lint_robot_env.sh`** — validate `/etc/kirra/robot.env` for the
+  two systemd-`EnvironmentFile` traps: inline `# comments` on value lines (systemd
+  keeps them IN the value → the consumer fail-closes) and duplicate keys (last
+  wins — a trap on reorder/delete). `--fix` normalizes to one bare `KEY=VALUE` per
+  key (backs up first). Run after any hand-edit of `robot.env`.
+- **`robot/install/disable_vendor_autostart.sh`** — find whatever autostarts the
+  Yahboom vendor base node (systemd unit / cron `@reboot` / `rc.local` /
+  autostart) — it opens `/dev/myserial` and fights the consumer. Report-only by
+  default; `--disable` acts on confident hits (never touches `kirra-*`). **Must be
+  clean before the cold-boot drill.**
+- **`robot/cold_boot_drill.sh`** — after a physical power cycle: Phase A verifies
+  every KIRRA service is up, posture is readable, a node is Trusted, the board is
+  KIRRA-owned, and no vendor node runs (read-only). `--fail-closed` runs Phase B:
+  stop the verifier → prove the consumer decel-stops (SS-002) + the interceptor
+  denies → restart → prove recovery. 🔴 wheels elevated for Phase B.
+
+Order at the bench: `lint_robot_env.sh` → `disable_vendor_autostart.sh --disable`
+→ power-cycle → `cold_boot_drill.sh` → (wheels up) `cold_boot_drill.sh --fail-closed`.
+
 ## References
 - `docs/hardware/R2_UNTETHERED_BRINGUP.md` §1 — the autostart layer
 - `docs/hardware/R2_ESTOP_SPEC.md` — the hardware e-stop (do first)

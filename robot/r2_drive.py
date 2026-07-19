@@ -168,6 +168,10 @@ class R2Actuation:
     pwm_left:  set_motor s1 (M1 = rear-left), signed PWM %.
     pwm_right: set_motor s4 (M4 = rear-right), signed PWM %.
     steer_cmd: set_akm_steering_angle argument, [-45, +45] command units.
+    delta_rad: the kinematic road-wheel steering angle this actuation implies
+               (bicycle model), BEFORE the servo-unit calibration/rounding. 0.0
+               for a stop/MRC. Used by the odometry integrator as the heading
+               source (never the corrupted per-wheel encoder difference).
     """
 
     is_mrc: bool
@@ -175,6 +179,8 @@ class R2Actuation:
     pwm_left: int
     pwm_right: int
     steer_cmd: int
+    # Default keeps every existing positional/keyword constructor valid.
+    delta_rad: float = 0.0
 
 
 def mrc_stop(reason: str) -> R2Actuation:
@@ -223,7 +229,113 @@ def translate(v: float, omega: float, cal: R2DriveCalibration) -> R2Actuation:
     pwm = _iround(math.copysign(pwm_mag, v))
     pwm = int(_clamp(float(pwm), -cal.pwm_max, cal.pwm_max))
 
-    return R2Actuation(is_mrc=False, reason="ok", pwm_left=pwm, pwm_right=pwm, steer_cmd=steer_cmd)
+    return R2Actuation(
+        is_mrc=False, reason="ok", pwm_left=pwm, pwm_right=pwm, steer_cmd=steer_cmd, delta_rad=delta
+    )
+
+
+# --------------------------------------------------------------------------
+# Ackermann wheel-odometry (pure; the consumer feeds it encoder ticks).
+#
+# WHY a bicycle model, not differential-drive: the R2's two rear wheels are
+# INDEPENDENTLY driven (no fixed axle / no differential) and differ ~34% in
+# speed at equal PWM, so the per-wheel encoder DIFFERENCE does not measure body
+# rotation — it would fabricate a phantom yaw. Heading therefore comes from the
+# STEERING angle (`delta_rad`, the same bicycle geometry `translate` uses);
+# forward travel is the MEAN of the two rear-wheel distances (the body follows
+# the rear-axle centre). Dead-reckoning only — no slip model, no IMU fusion; it
+# exists so the planner sees the ego advance and stops at the goal.
+
+
+@dataclass(frozen=True)
+class OdomPose:
+    """Planar dead-reckoning pose in the odom frame (metres, radians)."""
+
+    x_m: float = 0.0
+    y_m: float = 0.0
+    yaw_rad: float = 0.0
+
+
+@dataclass(frozen=True)
+class OdomState:
+    """Accumulator: the current pose + the last raw encoder tick counts.
+
+    `last_*_ticks is None` marks the pre-first-sample state (no delta yet).
+    """
+
+    pose: OdomPose = OdomPose()
+    last_left_ticks: "int | None" = None
+    last_right_ticks: "int | None" = None
+
+
+def odom_zero() -> OdomState:
+    """A fresh accumulator at the origin, awaiting its first encoder sample."""
+    return OdomState()
+
+
+def _wrap_angle(a: float) -> float:
+    """Normalise a yaw to (-pi, pi]."""
+    return math.atan2(math.sin(a), math.cos(a))
+
+
+def integrate_ackermann_odom(
+    pose: OdomPose, d_left_m: float, d_right_m: float, delta_rad: float, wheelbase_m: float
+) -> OdomPose:
+    """Advance `pose` by one step given the two rear-wheel distances + steering.
+
+    Forward travel is the mean of the wheel distances; heading change is the
+    bicycle model `dyaw = d * tan(delta) / L`. Midpoint (2nd-order) integration
+    so a step taken mid-turn lands between the entry and exit headings.
+    Non-finite inputs are treated as no motion (fail-soft: never poison the pose).
+    """
+    if not (_finite(d_left_m) and _finite(d_right_m) and _finite(delta_rad) and wheelbase_m > 0.0):
+        return pose
+    d = 0.5 * (d_left_m + d_right_m)
+    dyaw = d * math.tan(delta_rad) / wheelbase_m
+    yaw_mid = pose.yaw_rad + 0.5 * dyaw
+    return OdomPose(
+        x_m=pose.x_m + d * math.cos(yaw_mid),
+        y_m=pose.y_m + d * math.sin(yaw_mid),
+        yaw_rad=_wrap_angle(pose.yaw_rad + dyaw),
+    )
+
+
+def odom_step(
+    state: OdomState,
+    left_ticks: int,
+    right_ticks: int,
+    delta_rad: float,
+    m_per_tick: float,
+    wheelbase_m: float,
+    max_step_m: float = 1.0,
+) -> OdomState:
+    """Fold one encoder sample into the accumulator (pure).
+
+    The FIRST sample only anchors the tick baseline (no motion — there is no
+    prior count to difference against). A per-step wheel travel whose magnitude
+    exceeds `max_step_m` is PHYSICALLY IMPOSSIBLE for this robot in one odom
+    period (<0.2 m/s → <~0.01 m/step) and is treated as an encoder-counter WRAP
+    or garbage frame: the baseline is re-anchored and NO motion is integrated (a
+    wrap must never teleport the pose). This bound is on DISTANCE, not tick
+    magnitude, so it is independent of the encoder counter's width — a 16- or
+    32-bit wrap (metres of implied travel) is caught the same way, unlike a raw
+    tick threshold that a 16-bit wrap (~65 k ticks) could slip under. Otherwise
+    ticks → distance → `integrate_ackermann_odom`.
+    """
+    if state.last_left_ticks is None or state.last_right_ticks is None:
+        return OdomState(pose=state.pose, last_left_ticks=left_ticks, last_right_ticks=right_ticks)
+    d_left = (left_ticks - state.last_left_ticks) * m_per_tick
+    d_right = (right_ticks - state.last_right_ticks) * m_per_tick
+    if abs(d_left) > max_step_m or abs(d_right) > max_step_m:
+        # Re-anchor on a non-physical jump; hold the pose.
+        return OdomState(pose=state.pose, last_left_ticks=left_ticks, last_right_ticks=right_ticks)
+    new_pose = integrate_ackermann_odom(state.pose, d_left, d_right, delta_rad, wheelbase_m)
+    return OdomState(pose=new_pose, last_left_ticks=left_ticks, last_right_ticks=right_ticks)
+
+
+def yaw_to_quaternion_zw(yaw_rad: float) -> "tuple[float, float]":
+    """The (z, w) of the planar-yaw quaternion (x=y=0). For nav_msgs/Odometry."""
+    return (math.sin(yaw_rad * 0.5), math.cos(yaw_rad * 0.5))
 
 
 # --------------------------------------------------------------------------

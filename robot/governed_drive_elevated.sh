@@ -63,16 +63,31 @@ else
   echo "  ❌ /scan STILL has no publisher — check ${LOGDIR}/lidar.log (is /dev/ydlidar present?)"
 fi
 
-# ---- 2. /odom (static origin crutch) ---------------------------------------
-banner "2/4  /odom (static origin, 10 Hz — bench crutch, wheels up)"
-pkill -f "topic pub.*[/]odom" 2>/dev/null || true
-setsid ros2 topic pub -r 10 /odom nav_msgs/msg/Odometry '{header: {frame_id: odom}}' \
-  >"${LOGDIR}/odom.log" 2>&1 &
-ODOM_PID=$!
-sleep 1
-[[ "$(pub_count /odom)" != "0" && -n "$(pub_count /odom)" ]] \
-  && echo "  ✔ /odom publishing (pid ${ODOM_PID})" \
-  || echo "  ❌ /odom not publishing — see ${LOGDIR}/odom.log"
+# ---- 2. /odom --------------------------------------------------------------
+banner "2/4  /odom"
+# Remove any stale static crutch left by a PRIOR run (a `ros2 topic pub … /odom`
+# process) BEFORE counting publishers — otherwise an orphaned crutch would be
+# mistaken for the consumer's real wheel-odometry below. The consumer's real
+# /odom is a python process, not `ros2 topic pub`, so it survives this.
+pkill -f "topic pub.*[/]odom" 2>/dev/null && sleep 1 || true
+if [[ "$(pub_count /odom)" != "0" && -n "$(pub_count /odom)" ]]; then
+  # The consumer's real wheel-odometry (KIRRA_R2_ODOM_ENABLED) is publishing —
+  # do NOT add a static crutch (two publishers would fight). This is the path
+  # that lets the drive STOP at the goal.
+  echo "  ✔ /odom already published (real wheel-odometry) — no static crutch"
+else
+  echo "  no /odom publisher — starting static origin crutch (10 Hz)."
+  echo "  🔴 static odom has NO feedback: occy never sees the goal approach, so it"
+  echo "     drives forward FOREVER — wheels-up proof only. For a floor drive that"
+  echo "     STOPS at the goal, run the consumer with KIRRA_R2_ODOM_ENABLED=1."
+  setsid ros2 topic pub -r 10 /odom nav_msgs/msg/Odometry '{header: {frame_id: odom}}' \
+    >"${LOGDIR}/odom.log" 2>&1 &
+  ODOM_PID=$!
+  sleep 1
+  [[ "$(pub_count /odom)" != "0" && -n "$(pub_count /odom)" ]] \
+    && echo "  ✔ static /odom publishing (pid ${ODOM_PID})" \
+    || echo "  ❌ /odom not publishing — see ${LOGDIR}/odom.log"
+fi
 
 # ---- 3. occy DEBUG + goal --------------------------------------------------
 banner "3/4  occy DEBUG + goal via Mick"
