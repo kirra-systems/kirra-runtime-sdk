@@ -54,10 +54,11 @@ Legend: **LIVE** = wired today (file:seam cited) · **GAP** = to be wired · the
 
 | # | Trigger | Status | Line |
 |---|---|---|---|
-| A1 | Powered on, safety systems confirmed up | **GAP** (new boot hook; NOT `kitt_watch`, which stays silent on boot by design) | "Good morning{name}. All systems online, governor nominal — I'm at your disposal." |
-| A2 | Powered on, services still coming up | **GAP** | "I'm awake{name}, but still checking myself over. Give me a moment before we go anywhere." |
-| A3 | Shutting down | **GAP** | "Powering down. I've come to a safe stop — try not to miss me too much." |
-| A4 | Idle / standing by | optional | "Standing by{name}." (or silence) |
+| A1 | Powered on, **fresh nominal** posture confirmed | **LIVE** `kitt_boot.py` `greeting_line` (posture-gated: claims "governor nominal" only on a real fresh code-0 read) | "Good morning{name}. All systems online, governor nominal — I'm at your disposal." |
+| A1b | Powered on, fresh but **degraded** | **LIVE** `kitt_boot.py` | "Good morning{name}. I'm online, but starting in a degraded mode — I'll be cautious until it clears." |
+| A2 | Powered on, governor not ready by deadline (LockedOut / no read / stale) | **LIVE** `kitt_boot.py` | "I'm awake{name}, but still checking myself over. Give me a moment before we go anywhere." |
+| A3 | Shutting down | **LIVE** `kitt_boot.py` `shutdown_line` (systemd `ExecStop`) | "Powering down. I've come to a safe stop — try not to miss me too much." |
+| A4 | Idle / standing by | optional (not wired) | "Standing by{name}." (or silence) |
 
 ### B. Driving (you gave a command)
 
@@ -66,7 +67,7 @@ Legend: **LIVE** = wired today (file:seam cited) · **GAP** = to be wired · the
 | B1 | Directive accepted by the door | **LIVE** `kitt_converse.py` `handle_turn` (fallback line; the LLM usually phrases this) | "On our way{name} — the governor will keep us honest." |
 | B2 | Door couldn't pin a safe destination | **LIVE** `kitt_converse.py` | "I heard a movement request, but I couldn't pin down a safe destination — could you say it another way?" |
 | B3 | Drive control unreachable | **LIVE** `kitt_converse.py` | "I can't reach my driving control right now, so I'm staying put." |
-| B4 | Arrived / goal reached | **GAP** (no arrival event wired) | "We've arrived{name}. Holding position — and I didn't scratch a thing." |
+| B4 | Arrived / goal reached | **FOLLOW-UP** — needs a real *goal-reached* event from the planner/loop; KITT must never announce an arrival it can't confirm (persona rule 2) | "We've arrived{name}. Holding position — and I didn't scratch a thing." |
 
 ### C. Safety — refusals & obstacles
 
@@ -102,7 +103,7 @@ Legend: **LIVE** = wired today (file:seam cited) · **GAP** = to be wired · the
 | # | Trigger | Status | Line |
 |---|---|---|---|
 | F1 | Voice module / LLM offline | **LIVE** `kitt_converse.py` | "My voice module is offline for a moment." |
-| F2 | Didn't understand / empty transcript | **GAP** (STT-empty currently does nothing) | "I didn't quite catch that{name}." |
+| F2 | Didn't understand / empty transcript | **LIVE** `kitt_converse.py` (`--once` empty stdin → the PTT-released-with-nothing case) | "I didn't quite catch that{name}." |
 
 ---
 
@@ -137,13 +138,18 @@ recognizer node ─► publishes {operator: "Justin" | null, confidence}
 
 ## Wiring status summary
 
-- **~16 lines LIVE** across `kitt_converse.py`, `kitt_watch.py`, `kitt_ota.py`.
-- **Easy Channel-A gaps to wire:** A1–A3 (boot greeting/not-ready/shutdown), B4
-  (arrival), F2 (didn't-catch-that), plus threading the `{name}` slot through the
-  live lines.
-- **Engineering gap:** C3 proactive obstacle (needs a perception subscribe —
-  Stage 3b in the conversation design doc).
-- **Follow-up feature:** the recognition feed that fills `{name}` per person.
+- **LIVE:** the boot greeting/not-ready/shutdown (A1–A3, `kitt_boot.py`, posture-
+  gated), the conversation lines (B1–B3, F1–F2, `kitt_converse.py`), the proactive
+  posture + refusal lines (C1–C2, D1–D4, `kitt_watch.py`), and the OTA lines
+  (E1–E6, `kitt_ota.py`). The `{name}` slot is threaded through all of them via
+  `kitt_persona.py` and, for the LLM-phrased turns, via the operator line in the
+  grounding context.
+- **Follow-up (needs a real event source, so it can't be a template):**
+  - **C3** proactive obstacle — needs a perception subscribe (Stage 3b in the
+    conversation design doc).
+  - **B4** arrival — needs a goal-reached event from the planner/loop.
+- **Follow-up feature:** the recognition feed (face/voice) that fills `{name}`
+  per person — see below.
 
-Any change to a line bumps nothing but should update this doc in the same commit —
-this file is the script the robot reads from.
+Any change to a line should update this doc in the same commit — this file is the
+script the robot reads from.

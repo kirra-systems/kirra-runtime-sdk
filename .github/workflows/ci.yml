@@ -1080,6 +1080,11 @@ jobs:
           # profile), geometry/sign/clamps, MRC on non-finite/spin-in-place.
           # See robot/r2_drive.py + docs/hardware/R2_PATH_B_ACKERMANN_DRIVE.md.
           python3 robot/r2_drive_test.py
+          # KITT voice logic (pure, no hardware): the {name} slot, the posture-
+          # GATED boot greeting (only claims "governor nominal" on a fresh code-0
+          # read; stale/degraded/lockout → "still checking myself over"), and the
+          # OTA voice-matcher precedence. See docs/kitt/KITT_VOICE_LINES.md.
+          python3 robot/kitt_voice_test.py
           # Detecting-installer contract (R2 golden build): detect/verify/install
           # are fail-closed (wrong car-type mode, unknown platform, missing
           # devices all refuse with remediation) and SELECT-NOT-INFER holds (the

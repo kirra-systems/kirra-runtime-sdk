@@ -34,7 +34,6 @@ Env (all optional; sensible localhost defaults):
 """
 import math
 import os
-import subprocess
 import sys
 import time
 
@@ -43,12 +42,15 @@ try:
 except ImportError:
     sys.exit("kitt_ask: python3-requests missing (pip3 install requests)")
 
+# robot/ is on sys.path when run standalone; importers add it before importing us.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from kitt_persona import name_slot, operator_name, speak  # noqa: E402,F401 (re-export speak)
+
 VERIFIER = os.environ.get("KIRRA_VERIFIER_URL", "http://localhost:8090").rstrip("/")
 MICK = os.environ.get("KIRRA_MICK_URL", "http://localhost:8102").rstrip("/")
 TAJ = os.environ.get("KIRRA_TAJ_URL", "http://localhost:8101").rstrip("/")
 OLLAMA = os.environ.get("KIRRA_OLLAMA_URL", "http://localhost:11434").rstrip("/")
 MODEL = os.environ.get("KIRRA_KITT_MODEL", "gemma3:4b")
-TTS_CMD = os.environ.get("KIRRA_TTS_CMD", "").strip()
 FORWARD_CONE_RAD = math.radians(15.0)
 
 KITT_SYSTEM = (
@@ -178,9 +180,17 @@ def gather_perception():
                 pass
 
 
+def gather_operator():
+    """The current operator, if known — a read-only grounding fact the persona
+    may use to address them by name. Never an actuation authority."""
+    n = operator_name()
+    return f"operator: {n} (address them by name when natural)" if n else \
+        "operator: unknown (don't guess a name)"
+
+
 def build_context():
     return "TELEMETRY (ground truth — answer only from this):\n- " + "\n- ".join([
-        gather_posture(), gather_stop_reason(), gather_perception(),
+        gather_operator(), gather_posture(), gather_stop_reason(), gather_perception(),
     ])
 
 
@@ -200,17 +210,6 @@ def ask_ollama(question, context):
         return (r.json().get("message", {}).get("content") or "").strip() or None
     except Exception:  # noqa: BLE001
         return None
-
-
-def speak(text):
-    print(text)
-    if not TTS_CMD:
-        return
-    try:
-        parts = TTS_CMD.split()
-        subprocess.run(parts, input=text.encode(), check=False)
-    except Exception as e:  # noqa: BLE001
-        print(f"(tts failed: {e})", file=sys.stderr)
 
 
 def main():

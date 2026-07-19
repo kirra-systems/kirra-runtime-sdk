@@ -27,6 +27,9 @@ import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from kitt_persona import name_slot  # noqa: E402 — stdlib-only helper, safe for this lean module
+
 # The ota-ctl binary reads its OWN config from env (verifier URL, node id, slot
 # paths) — we do NOT duplicate that here, we just invoke it.
 OTA_CTL = os.environ.get("KIRRA_OTA_CTL") or shutil.which("kirra-ota-ctl") or "/opt/kirra/bin/kirra-ota-ctl"
@@ -62,8 +65,8 @@ def check() -> tuple[str, str]:
     if rc != 0:
         return "error", "I couldn't reach the update service just now — I'll stay on my current version."
     if _STAGED_RX.search(out) and not _CURRENT_RX.search(out):
-        return "staged", ("There's a new version. I've downloaded and verified it and it's "
-                          "staged, ready to go. Say 'apply update' when you want me to install it.")
+        return "staged", (f"There's a new version{name_slot()}. I've downloaded and verified it "
+                          "and it's staged, ready to go. Say 'apply update' when you want me to install it.")
     if _CURRENT_RX.search(out):
         return "current", "I checked — you're on the latest version, nothing to update."
     # Unknown-but-success: fall back to the authoritative slot state.

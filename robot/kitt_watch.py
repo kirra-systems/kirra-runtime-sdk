@@ -37,6 +37,7 @@ except ImportError:
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kitt_ask import MICK, VERIFIER, speak  # noqa: E402
+from kitt_persona import name_slot  # noqa: E402
 
 POLL_S = int(os.environ.get("KIRRA_KITT_WATCH_MS", "1500")) / 1000.0
 MIN_GAP_S = int(os.environ.get("KIRRA_KITT_WATCH_MIN_GAP_MS", "2500")) / 1000.0
@@ -86,13 +87,14 @@ def posture_line(old, new, stale_now, stale_before):
         return None
     if new > old:  # escalation
         if new == 2:
+            # LockedOut is the most serious state — kept humor-free, no name.
             return ("I'm locking out and holding a safe stop. "
                     "I'll need a manual reset before we continue.")
-        return ("Heads up — I've dropped into a degraded mode. "
+        return (f"Heads up{name_slot()} — I've dropped into a degraded mode. "
                 "I'll slow and stop as needed to keep us safe.")
     # recovery
     if new == 0:
-        return "All systems nominal. We're clear to move again."
+        return f"All systems nominal{name_slot()}. We're clear to move again."
     return "Recovering — back to a degraded mode."
 
 
@@ -102,8 +104,10 @@ def verdict_line(v):
     if not code:
         return None  # not a deny → not noteworthy
     if expl:
-        return f"I've had to refuse a command. {expl}"
-    return f"I've had to refuse a command ({code})."
+        # Real reason first and intact; the dry garnish trails it (persona rule 1).
+        return (f"I've had to refuse that{name_slot()}. {expl.rstrip('.')}. "
+                "I'd rather be dull than dented.")
+    return f"I've had to refuse a command ({code}). I'm holding until it's safe."
 
 
 def main():
