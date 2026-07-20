@@ -508,7 +508,7 @@ impl AppState {
     /// ONE durable transaction, then insert into the in-memory registry (disk
     /// before memory, invariant #12). Atomic registration — a crash can no longer
     /// leave a policy row without its node. Same held-epoch fence dispatch as
-    /// [`persist_node_row`] (a superseded primary is rejected before either row is
+    /// `persist_node_row` (a superseded primary is rejected before either row is
     /// written). `Ok(())` only after both durable writes commit AND the memory
     /// insert lands.
     #[allow(clippy::result_unit_err)]

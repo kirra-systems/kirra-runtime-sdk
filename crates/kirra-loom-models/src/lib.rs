@@ -347,11 +347,11 @@ fn seqlock_accepted_snapshot_is_never_torn() {
 fn production_seqlock_edges_are_in_lockstep() {
     const PROD: &str = include_str!("../../kirra-contract-channel/src/seqlock.rs");
     for needle in [
-        "LOCKSTEP-SEQLOCK-HVCHAN-001",   // the reciprocal marker naming this test
+        "LOCKSTEP-SEQLOCK-HVCHAN-001", // the reciprocal marker naming this test
         "committed_gen.wrapping_add(1)", // odd marker: write in progress
         "committed_gen.wrapping_add(2)", // even commit
-        "fence(Ordering::Release)",      // edge 3: publisher release fence
-        "fence(Ordering::Acquire)",      // edge 4: reader acquire fence before g2 re-read
+        "fence(Ordering::Release)",    // edge 3: publisher release fence
+        "fence(Ordering::Acquire)",    // edge 4: reader acquire fence before g2 re-read
     ] {
         assert!(
             PROD.contains(needle),
