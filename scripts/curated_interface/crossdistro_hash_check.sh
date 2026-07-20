@@ -12,13 +12,26 @@
 #
 #   1. curated == Humble reference       (reuses verify_hashes.sh)
 #   2. curated == Jazzy  reference       (reuses verify_hashes.sh)
-#   3. Humble reference == Jazzy reference, per curated .msg  (the cross-distro diff)
+#   3. Humble reference == Jazzy reference, over the FULL RECURSIVE CLOSURE of
+#      each curated seed — base packages included (closure_diff.py)
 #
-# A DRIFT in step 3 names the exact interface that must go through
+# M3 (#1042): step 3 previously diffed only the curated top-level autoware_*_msgs
+# `.msg`. A differing NESTED base message (e.g. builtin_interfaces/Time,
+# std_msgs/Header, a geometry_msgs sub-type) leaves every curated leaf
+# byte-identical while the RIHS type hash diverges — undetected. Step 3 now walks
+# the transitive closure from the seeds and byte-compares EVERY message in it
+# across the two references, so a nested drift can no longer slip through.
+#
+# A DRIFT in step 3 names the exact interface (leaf OR base) that must go through
 # kirra_bridge_cpp / domain_bridge instead of direct DDS.
 #
-# Bench tool — needs BOTH a Humble and a Jazzy Autoware msg reference available
-# (sourced installs or mounted `share/` trees). Not a CI gate.
+# Bench tool — the full run needs BOTH a Humble and a Jazzy Autoware msg
+# reference available (sourced installs or mounted `share/` trees), so it is not
+# itself a per-PR CI gate. But the closure comparator's LOGIC is gated:
+# `closure_diff_selftest.sh` runs `closure_diff.py` over committed fixture trees
+# (no ROS) in CI, proving it detects a nested drift the leaf-only check misses.
+# Promoting the FULL comparison to a merge-gating lane needs pinned dual-distro
+# msg shares in a container (the remainder tracked on #1042).
 #
 # Usage:
 #   bash scripts/curated_interface/crossdistro_hash_check.sh \
@@ -50,52 +63,31 @@ for ref in "$REF_HUMBLE" "$REF_JAZZY"; do
   echo
 done
 
-# --- 3: the cross-distro per-interface diff (are the upstream .msg identical?) ---
-echo "== per-interface Humble↔Jazzy diff =="
-mapfile -t CURATED_PKGS < <(
-  find "$WS_SRC" -maxdepth 1 -type d -name 'autoware_*_msgs' -printf '%f\n' | sort
-)
-drift=0
-checked=0
-for pkg in "${CURATED_PKGS[@]}"; do
-  shopt -s nullglob
-  msgs=("$WS_SRC/$pkg/msg"/*.msg)
-  shopt -u nullglob
-  for m in "${msgs[@]}"; do
-    name="$(basename "$m")"
-    h="$REF_HUMBLE/$pkg/msg/$name"
-    j="$REF_JAZZY/$pkg/msg/$name"
-    if [ ! -f "$h" ] || [ ! -f "$j" ]; then
-      echo "SKIP  $pkg/$name (missing on a reference)"
-      missing=1
-      continue
-    fi
-    checked=$((checked + 1))
-    if cmp -s "$h" "$j"; then
-      echo "MATCH $pkg/$name  (Humble == Jazzy → direct DDS ok)"
-    else
-      echo "DRIFT $pkg/$name  (Humble != Jazzy → bridge THIS interface):"
-      diff -u "$h" "$j" | sed 's/^/      /' || true
-      drift=1
-    fi
-  done
-done
+# --- 3: the cross-distro RECURSIVE-CLOSURE diff (are the upstream .msg identical
+#        all the way down — base packages included?) ---
+echo "== Humble↔Jazzy recursive-closure diff (closure_diff.py) =="
+# Seeds must match extract_closures.sh (the types the adapter r2r-binds).
+if python3 "$HERE/closure_diff.py" \
+    --ref-a "$REF_HUMBLE" --ref-b "$REF_JAZZY" \
+    --seed autoware_perception_msgs/PredictedObjects \
+    --seed autoware_planning_msgs/Trajectory; then
+  drift=0
+else
+  drift=1
+fi
 
 echo
 if [ "$missing" -ne 0 ]; then
-  echo "RESULT: INCOMPLETE — a reference (or a per-interface file) was missing."
+  echo "RESULT: INCOMPLETE — a reference share was missing (steps 1/2)."
   echo "        Re-run with BOTH distros' Autoware msg shares available."
   exit 2
 fi
-if [ "$checked" -eq 0 ]; then
-  echo "ERROR: no curated .msg to compare — run extract_closures.sh first." >&2
-  exit 4
-fi
 if [ "$drift" -ne 0 ]; then
-  echo "RESULT: DRIFT — some curated interfaces differ across Humble/Jazzy."
-  echo "        Those interfaces need kirra_bridge_cpp / domain_bridge translation,"
-  echo "        NOT direct cross-distro DDS. Record the drift in the MSGSYNC SRAC."
+  echo "RESULT: DRIFT — some interface in the curated closure (leaf OR nested base"
+  echo "        message) differs across Humble/Jazzy. Those need kirra_bridge_cpp /"
+  echo "        domain_bridge translation, NOT direct cross-distro DDS. Record the"
+  echo "        drift in the MSGSYNC SRAC."
   exit 1
 fi
-echo "RESULT: PASS — all $checked curated interfaces are byte-identical Humble == Jazzy."
-echo "        Direct cross-distro DDS is wire-safe for the whole boundary; no bridge needed."
+echo "RESULT: PASS — the whole curated closure (leaves + nested base messages) is"
+echo "        byte-identical Humble == Jazzy. Direct cross-distro DDS is wire-safe."

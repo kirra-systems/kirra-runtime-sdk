@@ -97,6 +97,23 @@ jobs:
       - name: Version-ordering gate (A4 — never sort backwards)
         run: python3 ci/check_version_ordering.py
 
+  # M3 (#1042) — cross-distro closure-comparator self-test. The Humble↔Jazzy
+  # wire-safety argument rests on the curated `.msg` closures being byte-identical
+  # across distros. The bench tool (crossdistro_hash_check.sh) needs real dual-distro
+  # msg shares, so it is not itself per-PR gateable — but its NEW closure-inclusive
+  # comparator (closure_diff.py, which walks the full recursive closure incl. base
+  # messages, not just the curated leaf) has its LOGIC gated here: the self-test runs
+  # it over committed fixture trees and proves it detects a nested base-message drift
+  # the old leaf-only step-3 missed. Pure python3, no ROS — never flakes.
+  msgsync-closure-selftest:
+    name: cross-distro closure comparator self-test (M3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: closure_diff.py catches nested drift the leaf-only check misses
+        run: bash scripts/curated_interface/closure_diff_selftest.sh
+
   # WS-3.1 — the scenario-KPI gate: thresholds unsafe_miss_rate /
   # admissibility / hazard_recall over the generated deterministic corpus
   # (248 doer scenarios + 71 perception frames) against the reviewed policy
