@@ -416,6 +416,58 @@ fn s1_lateral_accel_within_tolerance_band_accepts() {
     );
 }
 
+#[test]
+fn s1_high_speed_low_steer_within_envelope_accepts() {
+    // Pins the v² term (NOT v+…) in the lateral bound. At 20 m/s with a small
+    // 0.02 rad steer, a_lat = 400·tan(0.02)/2.8 ≈ 2.86 m/s² < 3.5 → admitted.
+    // A mutant that turns `v·v·|tan|` into `v + v·|tan|` (≈ 20.4, over the 11.2
+    // RHS) would wrongly MRC this — so an Accept here kills that mutant, where
+    // the low-speed cases (v small ⇒ v² ≈ v) cannot.
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let traj = accepted_with_envelope(
+        promoted,
+        straight_pts(10, 20.0, 0.1),
+        &cfg,
+        FleetPosture::Nominal,
+    );
+    let cmd = IncomingControl {
+        velocity_mps: 20.0,
+        steering_rad: 0.02,
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::Accept,
+    );
+}
+
+#[test]
+fn s1_non_finite_on_legacy_path_fails_closed() {
+    // The non-finite guard is load-bearing ONLY on the None (legacy) path: with an
+    // envelope, D2 also rejects a non-finite (v²·|tan| → NaN → not within). On the
+    // None path there is no D2, so a `||`→`&&` mutation of the guard would let a
+    // single non-finite field slip C and the static steering check → Accept. These
+    // cases pin the `||` (each has exactly ONE non-finite field).
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let traj = fresh_accepted(promoted, straight_pts(10, 5.0, 0.1)); // envelope = None
+    for (v, s) in [(f64::NAN, 0.0), (5.0, f64::NAN), (f64::INFINITY, 0.0)] {
+        let cmd = IncomingControl {
+            velocity_mps: v,
+            steering_rad: s,
+            stamp_ms: now,
+        };
+        assert_eq!(
+            check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+            ConformanceVerdict::MRCFallback,
+            "non-finite ({v}, {s}) on the legacy path must fail closed via the guard",
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // B1 regression — a `Clamp` verdict must derate the forwarded command.
 //
