@@ -1,0 +1,113 @@
+# deploy/docker/Dockerfile.parko-trt-jetson
+#
+# PARK-021 / ADR-0036 GPU follow-up — the parko TensorRT DOER as a per-target
+# backend image, the Jetson sibling of Dockerfile.parko-ort-cpu (whose header
+# named "TensorRT (L4T/Jetson) ... a per-target follow-on"). See the design +
+# honest open items in deploy/docker/PARKO_TRT_JETSON.md.
+#
+# 🔴 JETSON-GATED: builds from nvcr.io/nvidia/l4t-jetpack (NGC login) and runs
+# ONLY on Jetson with `--runtime nvidia`. It is NOT built in CI and cannot be
+# validated off-Jetson (no GPU here). This is a grounded scaffold, not a shipped
+# image — build + probe it on the Orin.
+#
+# Distro note (ADR-0036): l4t-jetpack = JetPack 6 = Ubuntu 22.04, so the ROS
+# distro here is HUMBLE (native to 22.04; r2r 0.9.5 supports it). The doer meets
+# the JAZZY checker (deploy/orin-jazzy/) over the curated DDS boundary — a doer
+# runs where its CUDA stack lives; the checker bounds it cross-distro.
+
+# l4t-jetpack carries CUDA + cuDNN + TensorRT. Pin r36.x to the Orin's flashed
+# L4T minor. Not Dependabot-tracked (nvcr.io is outside the `docker` ecosystem).
+ARG L4T_BASE=nvcr.io/nvidia/l4t-jetpack:r36.4.0
+# The JetPack-6 (jp6/cu126) onnxruntime-gpu wheel index + version — the exact
+# runtime the Q-1b Orin bench used (parko/crates/parko-tensorrt/Q1B_ORIN.md).
+ARG ORT_GPU_INDEX=https://pypi.jetson-ai-lab.dev/jp6/cu126
+ARG ORT_GPU_VERSION=1.23.0
+
+# =============================== BUILD STAGE ===============================
+FROM ${L4T_BASE} AS build
+ARG ORT_GPU_INDEX
+ARG ORT_GPU_VERSION
+SHELL ["/bin/bash", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 1. ROS 2 Humble (arm64, 22.04) from ros.org + the build toolchain. clang →
+#    r2r bindgen; cmake + colcon + rosidl generators → the curated msgs overlay.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl gnupg ca-certificates lsb-release software-properties-common \
+      build-essential pkg-config clang libclang-dev cmake git \
+    && curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+         -o /usr/share/keyrings/ros-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
+http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" \
+         > /etc/apt/sources.list.d/ros2.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      ros-humble-ros-base ros-humble-rosidl-default-generators \
+      python3-colcon-common-extensions python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Rust toolchain (honors an in-repo rust-toolchain.toml if present).
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# 3. TensorRT-enabled ONNX Runtime: the JetPack-6 onnxruntime-gpu wheel. This is
+#    the .so that carries the CUDA + TensorRT execution providers; ort's
+#    `load-dynamic` resolves it at runtime via ORT_DYLIB_PATH. Pin the version to
+#    the Q-1b bench (1.23.x → ORT_API_VERSION 23, matches ort rc.11).
+RUN python3 -m venv /opt/ort-gpu \
+    && /opt/ort-gpu/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/ort-gpu/bin/pip install --no-cache-dir \
+         --index-url "${ORT_GPU_INDEX}" "onnxruntime-gpu==${ORT_GPU_VERSION}"
+
+# 4. Repo + build the curated msgs overlay on Humble, then the node with the
+#    TensorRT backend (--features ros2,tensorrt-backend; TRT wins over onnx-backend
+#    in backend_select) and the fail-closed TRT probe.
+WORKDIR /build
+COPY . .
+RUN set -euo pipefail; \
+    source /opt/ros/humble/setup.bash; \
+    cd /build/ros2_ws && colcon build --merge-install && cd /build; \
+    source /build/ros2_ws/install/setup.bash; \
+    export ORT_DYLIB_PATH="$(ls /opt/ort-gpu/lib/python3.*/site-packages/onnxruntime/capi/libonnxruntime.so* | head -n1)"; \
+    cd /build/parko; \
+    cargo build --release -p parko-ros2 --bin parko_ros2_node --features ros2,tensorrt-backend; \
+    # The Q-1b fail-closed gate: the int8_qdq_probe test builds a real TRT engine
+    # (parko/crates/parko-tensorrt/Q1B_ORIN.md §2). Stable-name the hashed test bin.
+    cargo build --release -p parko-tensorrt --test int8_qdq_probe; \
+    cp "$(find target/release/deps -maxdepth 1 -type f -name 'int8_qdq_probe-*' ! -name '*.d' | head -n1)" \
+       target/release/parko_trt_probe
+
+# ============================== RUNTIME STAGE ==============================
+# l4t-jetpack again — CUDA/TensorRT runtime libs must be present (the whole point).
+FROM ${L4T_BASE} AS runtime
+SHELL ["/bin/bash", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl gnupg ca-certificates lsb-release python3 \
+    && curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+         -o /usr/share/keyrings/ros-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
+http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" \
+         > /etc/apt/sources.list.d/ros2.list \
+    && apt-get update && apt-get install -y --no-install-recommends ros-humble-ros-base \
+    && rm -rf /var/lib/apt/lists/*
+
+# Artifacts: the GPU ORT venv (the TRT-enabled .so), the node, the fail-closed
+# probe binary, and the curated msgs overlay (r2r typesupport at runtime).
+COPY --from=build /opt/ort-gpu /opt/ort-gpu
+COPY --from=build /build/parko/target/release/parko_ros2_node /opt/parko/bin/parko_ros2_node
+COPY --from=build /build/parko/target/release/parko_trt_probe /opt/parko/bin/parko_trt_probe
+COPY --from=build /build/ros2_ws/install /opt/parko/ros2_ws/install
+# The checked-in FP32 + INT8-QDQ planner models the probe/eval consume.
+COPY --from=build /build/artifacts/doer-eval /opt/parko/artifacts/doer-eval
+COPY --from=build /build/deploy/docker/parko-trt-jetson-entrypoint.sh /usr/local/bin/parko-trt-jetson-entrypoint.sh
+
+# PARKO_TRT_REQUIRE_EP=1 → a missing TensorRT EP is a HARD failure (fail-closed),
+# never a silent CPU fallback. PARKO_MODEL_PATH is operator-supplied (mount it).
+ENV PARKO_TRT_REQUIRE_EP=1 \
+    PARKO_MODEL_PATH=/opt/parko/models/model.onnx \
+    ROS_DOMAIN_ID=28
+
+WORKDIR /opt/parko
+ENTRYPOINT ["/usr/local/bin/parko-trt-jetson-entrypoint.sh"]
