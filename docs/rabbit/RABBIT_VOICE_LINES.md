@@ -60,6 +60,7 @@ Legend: **LIVE** = wired today (file:seam cited) · **GAP** = to be wired · the
 | A3 | Shutting down | **LIVE** `rabbit_boot.py` `shutdown_line` (systemd `ExecStop`) | "Powering down. I've come to a safe stop — try not to miss me too much." |
 | A4 | Idle / standing by | optional (not wired) | "Standing by{name}." (or silence) |
 | A5 | LLM digest changed since it was vetted (stealth update) | **LIVE** `rabbit_boot.py` `_maybe_warn_model_changed` (only on a CONFIRMED change; unpinned/unavailable stay silent) | "A heads-up{name}: my language model has changed since it was last vetted. I'd re-run the model check before trusting me to drive." |
+| A6 | Voice-config doctor found a ❌ on boot (mic/speaker device drifted, missing engine, …) | **LIVE** `rabbit_boot.py` `_maybe_warn_misconfigured` (runs the read-only `kirra_voice_doctor.sh --quiet`; only on a FAIL, silent when clean or the doctor can't run) | "A heads-up{name}: my self-check found a configuration problem. Run the voice doctor before relying on me — my ears or voice may be off." |
 
 ### B. Driving (you gave a command)
 
