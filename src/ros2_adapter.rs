@@ -35,6 +35,19 @@ impl Ros2Adapter {
         })
     }
 
+    /// Decode a `geometry_msgs/Twist` from a RAW little-endian body — six `f64`s
+    /// at fixed offsets 0/8/…/40, with NO CDR encapsulation.
+    ///
+    /// M5 (#1050) — NON-WIRE FIXTURE, not a DDS decoder. A real DDS-serialized
+    /// sample is CDR: it begins with a 4-byte encapsulation header (2-byte scheme
+    /// + 2-byte options) that selects big/little endianness, so the `f64` payload
+    /// starts at offset 4, not 0 — this reader would be 4 bytes off and mis-decode
+    /// every field. It exists ONLY to exercise the interlock/kinematic-clamp logic
+    /// against a hand-built fixed-layout buffer in tests; the production ingress is
+    /// the r2r-typed `~/input/*` path (`crates/kirra-ros2-adapter`), which lets the
+    /// RMW do CDR (de)serialization. Do NOT feed this a real DDS sample. Making it
+    /// wire-correct means parsing the encapsulation header + dispatching on
+    /// endianness — deferred until/unless a raw-CDR ingress is actually needed.
     pub fn decode_twist_frame(
         &self,
         raw_buffer: &[u8],

@@ -92,6 +92,16 @@ const OCCLUSION_SPEED_TOL_MPS: f64 = 0.1;
 /// behind) that the reaction-time swerve term in `lateral_safe_distance` otherwise rejected
 /// (`COMPETITIVE_PLANNER_ANALYSIS §4`'s over-rejection) — while any real lateral closing is
 /// still caught. Small, so only genuine lateral stillness is admitted; fail-closed elsewhere.
+///
+/// S6 (#1050) — RESIDUAL: a slow-drift cut-in whose lateral speed is just under
+/// this eps (`|v_lat| < 0.1 m/s`) is NOT treated as a lateral cut-in for the
+/// current tick, so a very-slowly-developing cut-in is admitted momentarily. This
+/// is a bounded, self-correcting residual, not a hole: the check runs EVERY slow
+/// loop tick, so as the cut-in develops (lateral speed rises past the eps, or the
+/// object comes abreast/longitudinally-unsafe) it is caught on a subsequent tick,
+/// well before contact at these sub-0.1 m/s closing rates. Lowering the eff would
+/// re-introduce the over-rejection of genuinely-stationary same-lane objects the
+/// threshold exists to admit; the value is a reviewed safety/availability balance.
 const RSS_LATERAL_MOTION_EPS_MPS: f64 = 0.1;
 
 /// One predicted future position of an object at a time, in the world frame. A
@@ -962,6 +972,14 @@ fn outruns_assured_clear_distance(
         }
         let remaining = visibility_m - traveled;
         let cap = assured_clear_distance_speed_cap(remaining, brake_decel_mps2);
+        // S7 (#1050): the comparison is on the SIGNED speed, deliberately NOT
+        // `abs()`. The assured-clear-distance bound (RSS Rule 4) is a FORWARD
+        // visibility model — it caps how fast the ego may drive INTO the observed
+        // corridor ahead. A reverse command (`velocity_mps < 0`) is never capped
+        // by this bound (it is `< cap`), which is correct: driving backwards does
+        // not outrun forward visibility. The asymmetry is intentional and bounded
+        // to this forward model; reverse motion is governed by the other envelope
+        // checks, not the occlusion cap.
         if p.velocity_mps > cap + OCCLUSION_SPEED_TOL_MPS {
             return true;
         }
