@@ -1,0 +1,27 @@
+# kirra-doctor.service — one read-only diagnostics pass (docs/diagnostics.md).
+#
+# Runs the DEFAULT module set (opt-in/heavy modules excluded — the autostart
+# module's sudo reads must not block a timer). Human summary → journal; the full
+# schema-v1 JSON report is archived to /var/log/kirra/doctor-last.json (the one
+# artifact this read-only subsystem writes — its own report, never robot state).
+# Driven by kirra-doctor.timer; also runnable on demand:
+#   sudo systemctl start kirra-doctor && journalctl -u kirra-doctor -e
+#
+# STAGED, NOT ENABLED by install_robot_units.sh — enable the timer deliberately
+# (R2_AUTOSTART_CHECKLIST.md discipline):  sudo systemctl enable --now kirra-doctor.timer
+[Unit]
+Description=KIRRA robot diagnostics (read-only, observability only)
+Documentation=file:///opt/kirra/robot/kirra_doctor.py
+
+[Service]
+Type=oneshot
+User=__KIRRA_ROBOT_USER__
+EnvironmentFile=-/etc/kirra/robot.env
+# LogsDirectory creates /var/log/kirra owned by User= (no manual mkdir/chown).
+LogsDirectory=kirra
+ExecStart=/usr/bin/python3 /opt/kirra/robot/kirra_doctor.py --timings --output /var/log/kirra/doctor-last.json
+# Exit 1 (warnings) is a NORMAL outcome for a health probe, not a unit failure;
+# 2 (failures) and 3 (internal) still mark the unit failed → visible in systemctl.
+SuccessExitStatus=1
+TimeoutStartSec=180
+Nice=10

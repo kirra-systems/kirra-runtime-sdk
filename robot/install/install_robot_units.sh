@@ -35,16 +35,25 @@ echo "== 1. Rabbit scripts -> ${OPT}/robot =="
 sudo install -d -m 0755 "${OPT}/robot"
 for f in rabbit_persona.py rabbit_watch.py rabbit_ask.py rabbit_converse.py rabbit_boot.py \
          rabbit_voice.sh ptt_button.py run_voice_ptt.sh inspect_corridor.py rabbit_ota.py \
-         ros_env.sh kirra_voice_doctor.sh; do
+         ros_env.sh kirra_voice_doctor.sh kirra_doctor.py rabbit_diag.py; do
   [[ -f "${REPO}/robot/${f}" ]] || { echo "  ⚠ missing ${REPO}/robot/${f} — skipped"; continue; }
   sudo install -m 0755 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
   echo "  installed ${OPT}/robot/${f}"
 done
+# The diagnostics framework package (docs/diagnostics.md) — a directory, so cp -r.
+if [[ -d "${REPO}/robot/doctor" ]]; then
+  sudo rm -rf "${OPT}/robot/doctor"
+  sudo cp -r "${REPO}/robot/doctor" "${OPT}/robot/doctor"
+  sudo find "${OPT}/robot/doctor" -type d -exec chmod 0755 {} +
+  sudo find "${OPT}/robot/doctor" -type f -exec chmod 0644 {} +
+  echo "  installed ${OPT}/robot/doctor/ (diagnostics modules)"
+fi
 
 # ---- 2. render + install the units -----------------------------------------
 echo "== 2. units -> /etc/systemd/system =="
 for u in kirra-ros-stack.service kirra-rabbit-watch.service kirra-rabbit-greet.service \
-         kirra-ota-check.service kirra-ota-check.timer; do
+         kirra-ota-check.service kirra-ota-check.timer \
+         kirra-doctor.service kirra-doctor.timer; do
   [[ -f "${UNITS}/${u}" ]] || { echo "❌ missing ${UNITS}/${u}"; exit 1; }
   sed "s/__KIRRA_ROBOT_USER__/${ROBOT_USER}/g" "${UNITS}/${u}" \
     | sudo tee "/etc/systemd/system/${u}" >/dev/null

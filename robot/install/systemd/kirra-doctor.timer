@@ -1,0 +1,15 @@
+# kirra-doctor.timer — periodic read-only diagnostics (docs/diagnostics.md).
+# Default cadence: 5 min after boot, then hourly. Change the interval with a
+# drop-in (systemctl edit kirra-doctor.timer → [Timer] OnUnitActiveSec=…).
+# STAGED, NOT ENABLED:  sudo systemctl enable --now kirra-doctor.timer
+[Unit]
+Description=Periodic KIRRA robot diagnostics
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+RandomizedDelaySec=2min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -47,6 +47,7 @@ from rabbit_ask import (  # noqa: E402
     RABBIT_SYSTEM, MICK, MODEL, OLLAMA, gather_perception, gather_posture,
     gather_stop_reason, speak,
 )
+import rabbit_diag  # noqa: E402 — deterministic self-check voice command (read-only)
 import rabbit_ota  # noqa: E402 — deterministic OTA voice commands (NOT the movement door)
 from rabbit_persona import name_slot, operator_name  # noqa: E402
 
@@ -169,6 +170,17 @@ def handle_turn(history, utterance):
         speak(ota_reply)
         history.append({"role": "user", "content": utterance})
         history.append({"role": "assistant", "content": ota_reply})
+        del history[: max(0, len(history) - 2 * MAX_TURNS)]
+        return
+
+    # "Run diagnostics" / "check yourself" — deterministic like OTA, matched
+    # BEFORE the LLM (a self-check must never depend on model inference), and
+    # read-only (kirra_doctor; no /intent, no motion).
+    diag_reply = rabbit_diag.handle(utterance)
+    if diag_reply is not None:
+        speak(diag_reply)
+        history.append({"role": "user", "content": utterance})
+        history.append({"role": "assistant", "content": diag_reply})
         del history[: max(0, len(history) - 2 * MAX_TURNS)]
         return
 
