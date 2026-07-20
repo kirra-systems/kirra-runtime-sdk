@@ -41,7 +41,8 @@
 > `docs/hardware/RABBIT_AUDIO_STACK.md`. Read its §4 before enabling the Rabbit units.
 
 - **Audio hardware:** USB mic + speaker on the Orin. Verify ALSA sees them:
-  `arecord -l` (capture) and `aplay -l` (playback).
+  `arecord -l` (capture) and `aplay -l` (playback). Concrete, replayable per-unit
+  setup (device pins, install paths, env, PTT wiring): `R2_VOICE_AUDIO_SETUP.md`.
 - **Offline speech engines:**
   - whisper.cpp — build `whisper-cli`, fetch a model (`ggml-base.en.bin`).
   - Piper — fetch a voice (`en_US-lessac-medium.onnx`), wrap playback in

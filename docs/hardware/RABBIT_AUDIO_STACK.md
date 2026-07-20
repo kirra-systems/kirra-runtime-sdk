@@ -101,15 +101,27 @@ for the Enter key — the Rust/Python loop is unchanged. Keyboard Enter is the
 zero-hardware fallback (`rabbit_voice.sh` alone).
 
 GPIO wiring (default): a normally-open momentary button between the pin and GND;
-the internal pull-up idles HIGH, a press pulls LOW.
+a press pulls LOW.
+
+> ⚠ **Orin needs an EXTERNAL pull resistor.** Jetson.GPIO on Orin **ignores**
+> `setup()`'s `pull_up_down` (it warns as much at runtime), so the internal
+> pull-up is *not* applied and the input **floats → phantom triggers** (a spurious
+> press that records `[BLANK_AUDIO]`). Add **10 kΩ from the pin to 3V3** for
+> active-low (idle HIGH, button→GND), or 10 kΩ pin→GND + button→3V3 for
+> `KIRRA_PTT_ACTIVE=high`. This is not the older-Jetson behaviour where the
+> internal pull-up sufficed.
 
 ```bash
 KIRRA_PTT_GPIO_PIN=18       # BOARD (physical) pin
 KIRRA_PTT_PIN_MODE=BOARD    # BOARD | BCM
-KIRRA_PTT_ACTIVE=low        # low = button→GND (pull-up) | high = button→3V3
+KIRRA_PTT_ACTIVE=low        # low = button→GND (+ external pull-UP) | high = button→3V3 (+ external pull-DOWN)
 KIRRA_PTT_LED_PIN=          # optional: OUTPUT pin lit while recording
 ```
-Needs `Jetson.GPIO` + the user in the `gpio` group (udev rules), or root.
+Needs `Jetson.GPIO` + the user in the `gpio` group (udev rules), or root. On
+**JetPack 6.2 "Super"** boards the apt/pip 2.1.7 fails with *"Could not determine
+Jetson model"* — install ≥ 2.1.12 from NVIDIA's GitHub (`pip install --upgrade
+--ignore-installed "Jetson.GPIO @ git+https://github.com/NVIDIA/jetson-gpio.git"`).
+Concrete, replayable setup for this R2: `R2_VOICE_AUDIO_SETUP.md`.
 
 > 🔴 The PTT button is a **microphone trigger, not the e-stop.** The e-stop is a
 > separate hardware kill in the motor-power line (`R2_UNTETHERED_BRINGUP.md` §3).
