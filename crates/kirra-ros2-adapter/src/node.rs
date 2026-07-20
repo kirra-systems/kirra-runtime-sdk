@@ -158,12 +158,38 @@ pub const FAST_LOOP_WCET_BUDGET_US: u128 = 200;
 /// Deadline + Liveliness are intentionally NOT set here: a subscriber-REQUESTED
 /// deadline/lease the publisher does not OFFER rejects the QoS match and would
 /// blind the adapter — they are a publisher-coordinated follow-up. The latched
-/// map (`~/input/map`, a one-shot TransientLocal blob) and the control feedback
-/// keep their existing profiles (the map is not a high-rate stream and needs its
-/// own durability handling).
+/// map (`~/input/map`) uses [`map_qos`] (TransientLocal, below) — it is not a
+/// high-rate stream and needs durability, not freshness. The control feedback
+/// keeps the sensor-data profile (a high-rate fresh-only stream).
 #[inline]
 fn ingress_sensor_qos() -> r2r::QosProfile {
     r2r::QosProfile::default().best_effort().keep_last(1)
+}
+
+/// M1 (#1040) — the LATCHED-map QoS for `~/input/map`. The map is published ONCE
+/// as a latched `autoware_map_msgs/LaneletMapBin` blob, so a late-joining /
+/// restarted adapter must receive that historical sample. The prior
+/// `QosProfile::default()` is **Volatile**: a Volatile subscriber that joins
+/// AFTER the one-shot publish matches the publisher silently but never receives
+/// the blob — a silent-no-map hazard (the match succeeds; the sample just never
+/// arrives). TransientLocal + Reliable + KeepLast(1) instead: the DDS durability
+/// cache re-delivers the last latched blob to a late subscriber. A TransientLocal
+/// SUBSCRIBER requires a TransientLocal-or-better PUBLISHER to match — the map
+/// publisher latches by construction (that is why it is a one-shot), so this is
+/// the correct, intended pairing (ADR-0036 / KIRRA-OCCY-MSGSYNC-001), not a
+/// match-blinding request like a subscriber-only deadline would be.
+///
+/// NOTE: today `~/input/map` is a placeholder subscription — the slow loop uses
+/// the injected `CorridorSource`, not this blob. When Phase-2 makes the map
+/// load-bearing, ADD a "map received before first validation" gate that fails
+/// closed (MRC) until the blob lands; the TransientLocal QoS here is the
+/// necessary precondition for that gate (a Volatile late-join would never see it).
+#[inline]
+fn map_qos() -> r2r::QosProfile {
+    r2r::QosProfile::default()
+        .reliable()
+        .transient_local()
+        .keep_last(1)
 }
 
 /// Actuator-OUTPUT QoS for the gated control-command stream (`~/output/control_cmd`):
@@ -399,7 +425,8 @@ pub async fn run_adapter(
     let _map_sub = node.subscribe_untyped(
         "~/input/map",
         "autoware_map_msgs/msg/LaneletMapBin",
-        r2r::QosProfile::default(),
+        map_qos(), // M1 (#1040): TransientLocal — a late-joining adapter must
+                   // receive the latched map blob, not match Volatile and get nothing.
     )?;
     let odom_stream = node.subscribe::<r2r::nav_msgs::msg::Odometry>(
         "~/input/odometry",
