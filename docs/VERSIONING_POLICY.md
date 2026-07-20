@@ -57,6 +57,16 @@ v1.1.2 onward. Tooling that sorts the two tags semantically will order them
 wrong; CHANGELOG.md is the authoritative timeline. The next MAJOR release
 clears the ambiguity permanently (every active version will then be > 1.5).
 
+**Machine-checked (A4 · #1049).** `ci/check_version_ordering.py` (wired into the
+`action-pinning` CI gate) enforces this so the inversion can never recur or go
+silent: the root version must stay `>=` `ci/version_floor.txt` (a **forward
+ratchet** — a backward bump like 1.5.0 → 1.1.2 reds), and while the line is
+still below the 1.5.0 high-water this §2.1 acknowledgment must remain present.
+The day a `>= 2.0.0` MAJOR is cut, the guard confirms the inversion is cleared.
+**Recommended: cut that disambiguating MAJOR at the next deliberate release** —
+it is cheap insurance against version-pinning / SBOM-correlation confusion, and
+it is the natural removal milestone for the §5.1 shims below.
+
 ## 3. MSRV (Minimum Supported Rust Version)
 
 - **Current MSRV: 1.88** — pinned as `rust-version` in the root
@@ -117,6 +127,41 @@ For any element of the public contract (§1):
 5. **Never deprecated-in-place:** semantics of an existing name are not
    silently repurposed; a changed meaning gets a new name and the old one
    goes through this process.
+
+### 5.1 Extracted-crate re-export shims (ADR-0035) — DEPRECATED, remove at next MAJOR
+
+ADR-0035 relocated many types out of the root `kirra-verifier` crate into lean
+leaf crates (`kirra-core`, `kirra-persistence`, `kirra-safety-authority`,
+`kirra-policy-types`, `kirra-fabric-types`, `kirra-ota-campaign`,
+`kirra-fleet-types`, `kirra-industrial`, `kirra-audit-hash`,
+`kirra-release-token`, …). To keep every existing `crate::X` /
+`kirra_verifier::X` path resolving during the migration, the root keeps **thin
+`pub use` re-export shims** (~20 files whose whole body is a re-export, e.g.
+`verifier_store.rs`, `ota_campaign.rs`, `capture.rs`, `federation*.rs`,
+`gateway/{cmd_vel,containment,kinematics_contract,perception_monitor,policy}.rs`,
+`fabric/asset.rs`, `protocol_adapter.rs`, `adapters.rs`, `attestation.rs`,
+`posture_tracker.rs`, `kinematics_sim.rs`, `governor_guard.rs`). Inventory them
+with `grep -rlE '^pub use (kirra_|crate::)' src/` (the *thin* ones; a few large
+files carry a re-export line but also hold real code).
+
+Per the A1 audit finding (#1029) these shims are **pure indirection**, not a
+permanent layer. They are therefore **DEPRECATED as of this policy revision**:
+
+1. **Announce (this document is the announcement):** every thin re-export shim
+   above is deprecated. NEW code MUST import from the canonical leaf crate
+   (e.g. `use kirra_persistence::VerifierStore`), never the root shim path.
+2. **Grace window:** the shims keep working unchanged for the remainder of the
+   current `1.x` line (they are pure `pub use`, so they cost nothing at runtime).
+3. **Remove (MAJOR only):** the disambiguating `>= 2.0.0` MAJOR (§2.1) is the
+   **removal milestone** — that release migrates internal call sites to the
+   canonical crate paths and deletes the shims, listed under `### Removed`. This
+   is deliberately co-scheduled with the version-line disambiguation so the two
+   root-crate cleanups land together.
+
+The larger, separate item this does **not** close is the actual `AppState`
+decomposition (still ADR-0035 **Proposed**); that is tracked as its own body of
+work (#1029) and proceeds in bounded slices (cf. the completed ADR-0035 Stage
+3a–3g). This subsection governs only the shim *layer's* lifecycle.
 
 ## 6. Housekeeping
 
