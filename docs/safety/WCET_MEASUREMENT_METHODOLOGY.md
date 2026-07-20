@@ -259,12 +259,34 @@ argument is grandfathered (it is environment-independent); the *numbers* are not
 |---|---|---|---|
 | **Kinematic gateway / verdict** | `validate_vehicle_command` / `validate_cmd_vel` — the P0..P6 verdict pipeline (`src/wcet_gate.rs`) | QNX Governor partition, FIFO | #274 (re-measure §5); CI guard `GOVERNOR_VERDICT_WCET_CI_THRESHOLD_MICROS` holds the regression line |
 | **HVCHAN snapshot→validate→digest** | The cross-partition trust chain: seqlock snapshot → bounds → CRC → judge → digest → release token (HVCHAN §3) | QNX Governor partition, FIFO; HVCHAN §5 partition config | #278 (the HVCHAN hardware half) + #274 |
-| **Judge (contract checker)** | `kirra_judge_assess` fixed check order (#271 harness today on host) | QNX Governor partition per #274 (host = indicative only) | #271 harness reports host-indicative now; #274 produces the target-under-FIFO numbers |
+| **Judge (contract checker)** | `kirra_judge_assess` fixed check order (#271 harness today on host) — a **PROXY**: integer-only, `no_std`, crypto-free, FP-free, talisman-free, with a proxy velocity bound | QNX Governor partition per #274 (host = indicative only) | #271 harness reports host-indicative now; #274 produces the target-under-FIFO numbers. **NOTE (W1 #1027): this proxy does NOT represent the assembled release loop below** |
+| **Assembled release loop (EP-01)** | `kirra_inline_governor::govern_and_release` — the DEPLOYED enforced cycle: verdict (P0..P6 + the FP `validate_vehicle_command` talisman) **+ release token** (2× SHA-256 + Ed25519 **sign** + Ed25519 **verify_strict**) | QNX Governor + Actuator partitions, FIFO, pages locked (W2 #1028) | **REMAINDER (W1 #1027): NOT yet target-measured-under-FIFO.** The `kirra_judge_assess` proxy (row above) does NOT stand in for it. Host-indicative today via `wcet_gate::regression_inline_loop_full_step` against the **SEPARATE** `GOVERNOR_RELEASE_TOKEN_WCET_*` budget (W3 #1032); porting the assembled loop to the #271/#274 harness is the open obligation |
 | **FFI / fault-injection timing criteria** | The timing half of the #279 fault-injection catalogue — measured as the SAME campaign as the fault verdicts (§3) | QNX Governor partition, FIFO; HVCHAN §4 barrier attribution | #279 (timing criteria == this methodology, not a second standard) |
 
 Each path's number is only a WCET once it is target-measured-under-FIFO per §1–§4,
 margined per §0 (VALIDATION-PENDING until the FTTI closure), and accepted in
 safety-engineer review.
+
+**W1 (#1027) — the on-target proxy caveat (scoping the FTTI evidence honestly).**
+The only on-QNX-target number today is `kirra_judge_assess` (row "Judge"): a
+crypto-free, FP-free, talisman-free checker with a *proxy* velocity bound (min
+31 ns / p99.9 79 ns, `tools/qnx-rtm-harness/results/`). It establishes the harness
+and the verdict-**correctness** FDIT/RTM matrix on target — but it is structurally
+UNLIKE the **deployed** enforced loop (row "Assembled release loop"), whose dominant
+timing terms — 2× Ed25519, 2× SHA-256, and the floating-point
+`validate_vehicle_command` talisman — have **zero target-under-FIFO timing
+evidence**. Two consequences, stated plainly so the safety case does not over-claim:
+
+- The FTTI **reaction** budget (0.5 s) is **not** at risk: the whole crypto term is
+  ~0.06 % of it (see `GOVERNOR_INTEGRITY_EVIDENCE.md` §3 and the W3 #1032 budget
+  split), so nothing here changes the fail-closed-within-FTTI argument.
+- But **no tighter control-cycle bound is earned** for the assembled loop until it is
+  ported to the #271/#274 harness and measured under FIFO with pages locked. Until
+  then the assembled-loop timing is **HOST-INDICATIVE only** (`wcet_gate::
+  regression_inline_loop_full_step`, gated on the separate `GOVERNOR_RELEASE_TOKEN_WCET_*`
+  budget — W3 #1032), never a WCET, and the certified FTTI budget explicitly **scopes
+  out** the release-token crypto pending that measurement. The proxy-judge number MUST
+  NOT be cited as representative of the enforced path.
 
 ---
 
