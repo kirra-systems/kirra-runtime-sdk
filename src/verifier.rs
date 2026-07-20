@@ -439,18 +439,73 @@ impl AppState {
     /// Persist node to SQLite then update in-memory map (fail-closed: disk before memory).
     // `Result<_, ()>` is intentional: the caller fail-closes on ANY error without
     // needing a typed reason (the detail is logged at the store layer).
+    //
+    // C2 (#1031): the disk write and the memory write both happen while the
+    // per-key DashMap entry (shard) lock is HELD, so a concurrent same-node
+    // mutator (a watchdog downgrade racing this re-registration) can never
+    // interleave between them. Previously these were two unsynchronized ops
+    // (`store.with(save_node)` then `nodes.insert`), so an interleaving could
+    // leave disk=Untrusted / memory=Trusted → a restart hydrating from disk would
+    // resurrect revoked trust the running system believed gone. Disk before
+    // memory within the lock (invariant #12). No store closure ever touches
+    // `self.nodes`, so holding the shard lock across `store.with` cannot deadlock.
     #[allow(clippy::result_unit_err)]
     pub fn persist_and_insert_node(&self, node: RegisteredNode) -> Result<(), ()> {
-        self.store
-            .with(|store| store.save_node(&node))
-            .map_err(|_| ())?;
-        self.nodes.insert(node.node_id.clone(), node);
+        use dashmap::mapref::entry::Entry;
+        match self.nodes.entry(node.node_id.clone()) {
+            Entry::Occupied(mut occ) => {
+                self.store
+                    .with(|store| store.save_node(&node))
+                    .map_err(|_| ())?;
+                occ.insert(node);
+            }
+            Entry::Vacant(vac) => {
+                self.store
+                    .with(|store| store.save_node(&node))
+                    .map_err(|_| ())?;
+                vac.insert(node);
+            }
+        }
         Ok(())
     }
 
+    /// Atomically read-modify-write a REGISTERED node's record under the per-key
+    /// entry (shard) lock (C2 #1031). `f` receives the current record and returns
+    /// its replacement; the read, the disk write and the memory write ALL happen
+    /// while the lock is held, so a concurrent same-node mutator (a watchdog
+    /// downgrade vs a re-registration / recovery re-trust) can never interleave
+    /// and lose an update or invert disk/memory. Disk before memory (invariant #12).
+    ///
+    /// Returns `Ok(true)` if the node existed and was updated, `Ok(false)` if no
+    /// such node is registered (the caller fail-closes on this), `Err(())` on a
+    /// store failure — in which case MEMORY IS LEFT UNCHANGED (the durable state
+    /// stays authoritative; we never advance memory past a failed disk write).
+    #[allow(clippy::result_unit_err)] // intentional fail-closed `()` error; see persist_and_insert_node.
+    pub fn update_node_atomic<F>(&self, node_id: &str, f: F) -> Result<bool, ()>
+    where
+        F: FnOnce(&RegisteredNode) -> RegisteredNode,
+    {
+        use dashmap::mapref::entry::Entry;
+        match self.nodes.entry(node_id.to_string()) {
+            Entry::Occupied(mut occ) => {
+                let updated = f(occ.get());
+                self.store
+                    .with(|store| store.save_node(&updated))
+                    .map_err(|_| ())?;
+                occ.insert(updated);
+                Ok(true)
+            }
+            Entry::Vacant(_) => Ok(false),
+        }
+    }
+
     /// Mark a registered node `Untrusted` (e.g. a CANopen NMT node-offline,
-    /// #84) so the next DAG recalc reflects it. Disk-first (invariant #12):
-    /// re-persists via `persist_and_insert_node`.
+    /// #84) so the next DAG recalc reflects it. Disk-first (invariant #12).
+    ///
+    /// C2 (#1031): the get→build→persist→insert is now ONE atomic critical
+    /// section via [`update_node_atomic`](Self::update_node_atomic) — previously
+    /// the read (`nodes.get`) and the write were unsynchronized, so a concurrent
+    /// re-registration could clobber this downgrade (fail-open).
     ///
     /// Returns `Ok(true)` if the node existed and was updated, `Ok(false)` if
     /// no such node is registered (the caller fail-closes on this), `Err(())`
@@ -462,16 +517,11 @@ impl AppState {
         reason: &str,
         now_ms: u64,
     ) -> Result<bool, ()> {
-        let Some(existing) = self.nodes.get(node_id).map(|n| n.clone()) else {
-            return Ok(false);
-        };
-        let updated = RegisteredNode {
+        self.update_node_atomic(node_id, |existing| RegisteredNode {
             status: NodeTrustState::Untrusted(reason.to_string()),
             last_trust_update_ms: now_ms,
-            ..existing
-        };
-        self.persist_and_insert_node(updated)?;
-        Ok(true)
+            ..existing.clone()
+        })
     }
 
     /// Persist dependency list to SQLite then update in-memory graph (fail-closed).

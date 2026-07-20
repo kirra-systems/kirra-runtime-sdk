@@ -405,7 +405,10 @@ pub(crate) async fn evaluate_canopen_adapter(
                             fleet_node_id = %fleet_node_id,
                             "CANopen NMT node-offline → fleet node marked Untrusted; effectful recalc enqueued"
                         );
-                        enqueue_recalc(
+                        // C1 (#1026): this is a trust DOWNGRADE — fail closed if
+                        // the recalc can't be enqueued (never leave the cache
+                        // admitting against a node we just marked Untrusted).
+                        enqueue_downgrade_recalc(
                             &svc,
                             PostureRecalcTrigger::NodeTrustChanged {
                                 node_id: fleet_node_id.clone(),

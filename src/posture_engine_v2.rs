@@ -261,6 +261,57 @@ impl fmt::Display for PostureRecalcTrigger {
 /// Channel sender for posture recalculation triggers.
 pub type PostureEngineSender = mpsc::Sender<PostureRecalcTrigger>;
 
+/// C1 (#1026): fail-closed response to a recalc-trigger send failure for a
+/// trigger whose LOSS would leave the posture cache fail-OPEN — i.e. a trust
+/// *downgrade* (a node was just marked `Untrusted` in memory/disk). If that
+/// recalc is silently dropped, the posture cache keeps its FRESH pre-downgrade
+/// value (not TTL-stale), so `should_route_command` keeps admitting actuator
+/// commands against a posture that no longer reflects the fault.
+///
+/// This mirrors `telemetry_watchdog::handle_recalc_send_failure` exactly — the
+/// watchdog path already fails closed here; the HTTP/industrial handler paths
+/// used to only `warn!` (the fail-open window this seals):
+///
+///   * `Full`   — the engine is backlogged but ALIVE. Force the posture cache to
+///     `LockedOut` IMMEDIATELY (fail-closed now) but do NOT trip the sticky
+///     supervisor flag — the next successful recalc (periodic refresh, or the
+///     engine draining) recovers the correct posture WITHOUT a human reset.
+///   * `Closed` — the posture engine receiver is gone (a dead/panicked worker):
+///     a fatal safety-loop failure → trip the sticky `supervisor_tripped` lockout
+///     (human/HA reset required).
+///
+/// Only call for a downgrade-class trigger; a benign trigger (an UPGRADE such as
+/// `ATTESTATION_TRUSTED`, or `PeriodicRefresh`) whose loss leaves a MORE
+/// restrictive cached posture is fail-closed already and must not force LockedOut.
+pub fn fail_closed_on_downgrade_send_failure(
+    app: &Arc<AppState>,
+    posture_cache: &SharedPostureCache,
+    now_ms: u64,
+    context: &str,
+    err: &mpsc::error::TrySendError<PostureRecalcTrigger>,
+) {
+    match err {
+        mpsc::error::TrySendError::Full(_) => {
+            tracing::error!(
+                context = context,
+                "posture recalc channel FULL on a trust DOWNGRADE — forcing immediate LockedOut \
+                 (transient; auto-recovers on the next successful recalc, no sticky trip)"
+            );
+        }
+        mpsc::error::TrySendError::Closed(_) => {
+            tracing::error!(
+                context = context,
+                "posture recalc channel CLOSED on a trust DOWNGRADE — posture engine is gone; \
+                 tripping sticky supervisor lockout (human/HA reset required)"
+            );
+            app.escalation
+                .supervisor_tripped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    crate::posture_engine::force_lockout(posture_cache, now_ms);
+}
+
 /// Applies an RSS state report to `AppState` violation/recovery fields.
 ///
 /// Violation (safe==false): sets `rss_active_violation` and resets the streak.

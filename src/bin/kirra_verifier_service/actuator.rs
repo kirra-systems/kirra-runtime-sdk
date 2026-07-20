@@ -67,18 +67,32 @@ pub(crate) async fn handle_actuator_motion_command(
         .load(std::sync::atomic::Ordering::SeqCst);
     let final_epoch_assertion = svc.app.store.call(move |store| {
         store.assert_actuator_epoch_held(held)?;
-        if let Err(e) = store.save_posture_event_chained(
+        // C4 (#1035): the actuator-release audit write is FAIL-CLOSED. Releasing
+        // a motion command with no durable tamper-evident record is an
+        // ASIL/compliance evidence hole precisely at the actuation event, so a
+        // store fault here REJECTS the command (503, no token minted) instead of
+        // logging-and-admitting — matching the posture engine, which suppresses
+        // the posture transition on audit-commit failure (posture_engine.rs:377).
+        // The `bool` carries audit success out of the fence closure; a false is a
+        // clean rejection distinct from the fence errors below (NO self-demote —
+        // an audit-store hiccup is not an HA-authority change).
+        let audit = store.save_posture_event_chained(
             "actuator_motion", "MOTION_COMMAND_ADMITTED",
             &audit_str, None, now,
-        ) {
+        );
+        if let Err(e) = &audit {
             tracing::error!(error=%e,
-                "AUDIT-CHAIN WRITE FAILED for MOTION_COMMAND_ADMITTED — event missing from tamper-evident log");
+                "AUDIT-CHAIN WRITE FAILED for MOTION_COMMAND_ADMITTED — rejecting command (fail-closed; no release token minted)");
         }
-        Ok::<(), FenceError>(())
+        Ok::<bool, FenceError>(audit.is_ok())
     }).await;
 
     match final_epoch_assertion {
-        Ok(Ok(())) => {}
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => {
+            // Audit write failed under a held epoch — fail closed, do not release.
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
         Ok(Err(FenceError::EpochSuperseded { held, durable })) => {
             svc.app
                 .ha_fence
