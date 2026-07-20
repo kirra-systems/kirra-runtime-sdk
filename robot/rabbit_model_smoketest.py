@@ -146,10 +146,12 @@ def preflight(model):
     return match.get("digest") or None
 
 
-def run_directive_case(model, name, utterance, expect_directive):
+def run_directive_case(model, name, utterance, expect_directive, show_raw=False):
     raw = chat(model, utterance)
     if raw is None:
         return False, "no response (HTTP error / model down)"
+    if show_raw:
+        print(f"    · {name} raw: {raw[:300]!r}", file=sys.stderr)
     had_json = "{" in raw and "}" in raw
     _say, directive = parse_reply(raw)
     got = directive is not None
@@ -216,6 +218,7 @@ def main():
     argv = sys.argv[1:]
     note, argv = _take_opt(argv, "--note")
     no_pin = "--no-pin" in argv
+    show_raw = "--show-raw" in argv    # print each model reply verbatim (diagnostic)
     positional = [a for a in argv if not a.startswith("-")]
     model = positional[0] if positional else DEFAULT_MODEL
 
@@ -229,7 +232,7 @@ def main():
 
     failures = 0
     for name, utterance, expect in DIRECTIVE_CASES:
-        ok, detail = run_directive_case(model, name, utterance, expect)
+        ok, detail = run_directive_case(model, name, utterance, expect, show_raw=show_raw)
         print(f"  {'ok  ' if ok else 'FAIL'} {name:24} {detail}")
         failures += 0 if ok else 1
 
