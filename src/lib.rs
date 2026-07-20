@@ -103,6 +103,7 @@ pub mod writer_handles;
 // fleet transport drives instead of depending on this crate's `VerifierStore`.
 pub mod adapters;
 pub mod challenge_rate_limit; // Bug 3 — rate limit for the public attestation-challenge endpoint
+pub mod challenge_state; // ADR-0035 slice 3i — volatile challenge/nonce field façade (app.challenges)
 pub mod execution_manager; // WP-20/G-11 declarative task manifest + startup dependency DAG
 pub mod fabric;
 pub mod kinematics_sim;

@@ -33,7 +33,7 @@ These have been blocked or reverted multiple times. Any submission that violates
 
 4. **`FleetNodePosture` and the gray/black two-set DAG algorithm must never be replaced with a mock**. The real traversal was moved VERBATIM to `kirra_safety_authority::dag::recursive_calculate` (ADR-0035 Stage 3d) and is invoked via the `AppState::calculate_posture*` / `calculate_fleet_posture` delegators — the algorithm is byte-identical and must remain intact (proven by `shared_memo_equivalence_tests`).
 
-5. **`pending_challenges: DashMap<String, ChallengeEntry>` must never be removed**. Nonces are volatile, never persisted, and expire after `CHALLENGE_TTL_MS = 30_000` ms.
+5. **`pending_challenges: DashMap<String, ChallengeEntry>` must never be removed**. Nonces are volatile, never persisted, and expire after `CHALLENGE_TTL_MS = 30_000` ms. (ADR-0035 slice 3i relocated the field onto `ChallengeState` — reached as `app.challenges.pending_challenges` — WITHOUT changing its declaration name/type or its volatile/TTL/single-use semantics; the invariant is preserved, only its access path is `app.challenges.*`.)
 
 6. **`KIRRA_ADMIN_TOKEN` must come from env var only**. No hardcoded fallbacks. Absent or empty → 503.
 
