@@ -27,10 +27,10 @@ cd "$REPO"
 # ROS/colcon setup.bash reference unbound vars (COLCON_TRACE, AMENT_TRACE, ...),
 # which trip `set -u`. Source them with nounset OFF, then restore it.
 set +u
-if [ -z "${ROS_DISTRO:-}" ] && [ -f /opt/ros/humble/setup.bash ]; then
-  # shellcheck disable=SC1091
-  source /opt/ros/humble/setup.bash
-fi
+# Distro-agnostic base ROS (Jazzy or Humble, per ADR-0036).
+# shellcheck source=robot/ros_env.sh
+source "$HERE/ros_env.sh"
+kirra_source_ros || true
 if [ -f "$REPO/ros2_ws/install/setup.bash" ]; then
   # shellcheck disable=SC1091
   source "$REPO/ros2_ws/install/setup.bash"

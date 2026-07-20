@@ -113,7 +113,7 @@ for the dev key) in the same file.
 ```bash
 # (a) The consumer starts and OWNS the board — the validated terminal mode:
 set -a; source /etc/kirra/robot.env; set +a
-source /opt/ros/humble/setup.bash
+source /opt/ros/humble/setup.bash    # or /opt/ros/jazzy on 24.04
 python3 /opt/kirra/robot/kirra_motor_consumer.py
 ```
 

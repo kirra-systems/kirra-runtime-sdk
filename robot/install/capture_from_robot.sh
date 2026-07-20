@@ -69,7 +69,9 @@ ls "${OUT}/udev" 2>/dev/null | grep -q . \
   echo "# provenance stamps ($(hostname))"
   uname -a
   cat /etc/nv_tegra_release 2>/dev/null || echo "no /etc/nv_tegra_release (not L4T?)"
-  if [[ -f /opt/ros/humble/setup.bash ]]; then echo "ROS 2 humble present"; fi
+  for _d in jazzy humble kilted rolling; do
+    [[ -f /opt/ros/$_d/setup.bash ]] && echo "ROS 2 $_d present"
+  done
   python3 - <<'PY' 2>/dev/null || echo "Rosmaster_Lib not importable"
 import Rosmaster_Lib, inspect, os
 print("Rosmaster_Lib:", os.path.dirname(inspect.getfile(Rosmaster_Lib)))

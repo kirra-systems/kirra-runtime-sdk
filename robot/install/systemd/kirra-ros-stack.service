@@ -35,7 +35,7 @@ EnvironmentFile=/etc/kirra/robot.env
 # robot.env) points at the built ws's install/setup.bash; the default matches a
 # repo checkout in the robot user's home. exec keeps ros2 as the main PID so
 # SIGTERM tears the launch down cleanly.
-ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && source "${KIRRA_ROS_WS_SETUP:-/home/__KIRRA_ROBOT_USER__/kirra-runtime-sdk/ros2_ws/install/setup.bash}" && exec ros2 launch kirra_safety kirra_with_robot.launch.py use_occy_doer:=true use_perception_cap:=true start_sidecars:=false kirra_url:=http://localhost:8090'
+ExecStart=/bin/bash -c 'source /opt/kirra/robot/ros_env.sh && kirra_source_ros && source "${KIRRA_ROS_WS_SETUP:-/home/__KIRRA_ROBOT_USER__/kirra-runtime-sdk/ros2_ws/install/setup.bash}" && exec ros2 launch kirra_safety kirra_with_robot.launch.py use_occy_doer:=true use_perception_cap:=true start_sidecars:=false kirra_url:=http://localhost:8090'
 # on-failure only: a fail-closed startup abort (e.g. occy_doer's REQUIRED
 # scan_stale_s unset → SystemExit 2) must not hot-loop.
 Restart=on-failure
