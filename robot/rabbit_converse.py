@@ -54,17 +54,28 @@ MAX_TURNS = 10  # rolling conversation memory (user+assistant pairs kept)
 PERCEPTION_WORDS = ("see", "around", "ahead", "front", "obstacle", "clear",
                     "look", "there", "path", "way", "block")
 
+# The router is a structured {say, directive} CLASSIFIER, not a creative writer.
+# Sample near-deterministically so the directive decision is stable turn-to-turn
+# (a high default temperature makes a clear DRIVE command intermittently null its
+# directive — the drive-by-voice path must not be a coin-flip). The smoketest
+# imports THIS so the gate calls the model exactly as production does; a vetted
+# pass then predicts production behaviour instead of a lucky sample.
+ROUTER_LLM_OPTIONS = {"temperature": 0.1}
+
 STAGE2_SYSTEM = (
     RABBIT_SYSTEM
     + "\n\nEACH TURN, reply with a JSON object and nothing else:\n"
     '  {"say": "<one or two sentences to speak aloud>",\n'
     '   "directive": <null, OR the operator\'s movement request in plain words>}\n'
-    "Set `directive` ONLY when the operator clearly wants the robot to DRIVE "
-    "somewhere (e.g. 'creep forward a meter', 'turn left', 'take us to the "
-    "door'). Pass their movement request faithfully — do NOT invent destinations, "
-    "coordinates, or numbers they did not give. For questions, status, chat, or "
-    "anything ambiguous, `directive` is null. You do not decide safety — you hand "
-    "the request to the governed door, and the KIRRA checker bounds what actually "
+    "Set `directive` whenever the operator clearly wants the robot to DRIVE or "
+    "MOVE — INCLUDING to a place they name (e.g. 'creep forward a meter', 'turn "
+    "left', 'take us to the door', 'go to the kitchen'). Copy their movement "
+    "request into `directive` VERBATIM, keeping any destination they named — "
+    "relaying a place the operator gave you is faithful, it is NOT inventing. The "
+    "only thing you must never invent is a destination, coordinate, or number the "
+    "operator did NOT say. For questions, status, chat, or anything with no "
+    "movement intent, `directive` is null. You do not decide safety — you hand the "
+    "request to the governed door, and the KIRRA checker bounds what actually "
     "moves; say so if useful."
 )
 
@@ -95,7 +106,8 @@ def ask_llm(history, context, utterance):
     messages.append({"role": "user", "content": f"{context}\n\nOperator says: {utterance}"})
     try:
         r = requests.post(f"{OLLAMA}/api/chat", timeout=60.0,
-                          json={"model": MODEL, "stream": False, "messages": messages})
+                          json={"model": MODEL, "stream": False, "messages": messages,
+                                "options": ROUTER_LLM_OPTIONS})
         if r.status_code != 200:
             return None, None
         raw = (r.json().get("message", {}).get("content") or "").strip()
