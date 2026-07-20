@@ -1,0 +1,53 @@
+# Orin Jazzy runtime (ADR-0036, Step 3).
+#
+# Runs the robot-side KIRRA stack on ROS 2 Jazzy INSIDE a container on a
+# JetPack-6 / 22.04 / Humble Orin host — so you move to Jazzy today without
+# waiting for a JetPack-7 (24.04) native flash. host networking + a shared
+# ROS_DOMAIN_ID let the containerized Jazzy nodes meet the host's Humble ROS
+# graph (and the isolated Autoware doer) over DDS.
+#
+#   # provide the filled env first (see README):
+#   cp ../../robot/install/env.template robot.env   # then fill KIRRA_* + governor key
+#   docker compose -f deploy/orin-jazzy/docker-compose.yml build
+#   docker compose -f deploy/orin-jazzy/docker-compose.yml up kirra-adapter        # the checker
+#   docker compose -f deploy/orin-jazzy/docker-compose.yml --profile drive up kirra-consumer  # governed wheels
+#
+# 🔴 device + vendor caveats are in README.md (Rosmaster_Lib, udev symlinks, GPU).
+
+x-common: &common
+  build:
+    context: ../..
+    dockerfile: deploy/orin-jazzy/Dockerfile
+  image: kirra-orin-jazzy:local
+  network_mode: host          # DDS discovery + Humble<->Jazzy on the wire
+  environment:
+    - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-28}
+    - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+  env_file:
+    - robot.env               # copy from ../../robot/install/env.template and fill
+  restart: unless-stopped
+
+services:
+  # The checker/adapter — bounds whatever the doer proposes. CPU-only, no devices.
+  kirra-adapter:
+    <<: *common
+    container_name: kirra-adapter-jazzy
+    command: ["adapter"]
+
+  # The ADR-0033 governed motor consumer — owns the motor board, verify-before-drive.
+  # `--profile drive` so it never starts unless asked (it moves wheels). Needs the
+  # motor + lidar device symlinks and the vendor Rosmaster_Lib (see README).
+  kirra-consumer:
+    <<: *common
+    container_name: kirra-consumer-jazzy
+    profiles: ["drive"]
+    command: ["consumer"]
+    devices:
+      - "${KIRRA_MOTOR_DEV:-/dev/myserial}:/dev/myserial"
+      - "${KIRRA_LIDAR_DEV:-/dev/ydlidar}:/dev/ydlidar"
+    volumes:
+      # Vendor motor lib (not redistributable in the image) — mount from the host.
+      - "${ROSMASTER_LIB_DIR:-/usr/local/lib/python3.10/dist-packages/Rosmaster_Lib}:/opt/vendor/Rosmaster_Lib:ro"
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-28}
+      - PYTHONPATH=/opt/vendor
