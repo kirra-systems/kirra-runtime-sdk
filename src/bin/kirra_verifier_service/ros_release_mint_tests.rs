@@ -238,6 +238,35 @@ async fn fenced_503_never_carries_a_token() {
     );
 }
 
+/// C4 (#1035): the actuator-release audit write is FAIL-CLOSED. With the epoch
+/// HELD (the fence admits) but the audit chain unwritable, the handler must
+/// REJECT the command (503) and mint NO token — releasing a motion command with
+/// no durable tamper-evident record is exactly the ASIL/compliance evidence hole
+/// this seals. Mirrors the posture engine's suppress-on-audit-fail policy.
+#[tokio::test]
+async fn audit_write_failure_rejects_the_command_and_mints_no_token() {
+    let svc = nominal_state();
+    claim_epoch(&svc).await;
+    // Drop `audit_log_chain` so `save_posture_event_chained` fails while the
+    // epoch fence (a different table) still admits — isolating the audit path.
+    svc.app
+        .store
+        .call(|store| store.break_audit_chain_table_for_test())
+        .await
+        .expect("store call");
+
+    let (status, body) = post_command(mint_router(svc, Some(signer())), command_json(1.0)).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "an unwritable audit chain must fail the actuator release closed"
+    );
+    assert!(
+        !body.to_string().contains("token_hex") && !body.to_string().contains("payload_hex"),
+        "a fail-closed audit rejection must mint no token: {body}"
+    );
+}
+
 /// No signer configured → the 200 body has no release object (legacy shape).
 #[tokio::test]
 async fn no_signer_means_no_release_object_on_200() {

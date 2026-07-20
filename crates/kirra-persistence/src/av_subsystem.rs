@@ -53,7 +53,16 @@ impl VerifierStore {
             params![node_id],
             |row| row.get::<_, i64>(0),
         ) {
-            Ok(ts) => Ok(ts as u64),
+            // P-AV (#1045): heal-on-read. A stored NEGATIVE `last_telemetry_ms`
+            // (only reachable via corruption / a `> i64::MAX` write wrap — the
+            // write path is clock-sourced) would, as a bare `as u64`, become a
+            // huge "future" timestamp: the telemetry watchdog computes
+            // `now_ms - last_telemetry_ms`, so a far-future value makes a DEAD
+            // sensor look perpetually fresh → the fault threshold never fires
+            // → fail-OPEN. `.max(0)` clamps a negative to epoch-0 = maximally
+            // stale, so a corrupt row can only make the node look MORE overdue
+            // (fail-closed), matching `cert_principals`/`fabric`.
+            Ok(ts) => Ok(ts.max(0) as u64),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
             Err(e) => Err(e),
         }
@@ -79,9 +88,15 @@ impl VerifierStore {
                 subsystem_type: row.get(1)?,
                 hardware_id: row.get(2)?,
                 confidence_floor: row.get(3)?,
-                last_telemetry_ms: row.get::<_, i64>(4)? as u64,
-                recovery_streak_count: row.get::<_, i64>(5)? as u32,
-                recovery_streak_start_ms: row.get::<_, i64>(6)? as u64,
+                // P-AV (#1045): heal-on-read — clamp a corrupt negative i64 to 0
+                // (matches the PG backend's `u64::try_from(..).unwrap_or(0)` and
+                // `cert_principals`/`fabric`). A negative streak count as a bare
+                // `as u32` would also become a huge value → look "recovered" past
+                // AV_RECOVERY_STREAK_THRESHOLD → spurious re-trust (fail-open), so
+                // the count is clamped too.
+                last_telemetry_ms: row.get::<_, i64>(4)?.max(0) as u64,
+                recovery_streak_count: row.get::<_, i64>(5)?.max(0) as u32,
+                recovery_streak_start_ms: row.get::<_, i64>(6)?.max(0) as u64,
             })
         })?;
         rows.collect()
@@ -92,7 +107,15 @@ impl VerifierStore {
             "SELECT recovery_streak_count, recovery_streak_start_ms
              FROM av_subsystem_meta WHERE node_id = ?1",
             params![node_id],
-            |row| Ok((row.get::<_, i64>(0)? as u32, row.get::<_, i64>(1)? as u64)),
+            // P-AV (#1045): heal-on-read — clamp corrupt negatives to 0 (a huge
+            // count would spuriously clear the recovery hysteresis; a huge
+            // start_ms would skew the window math). Fail-closed, backend-parity.
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?.max(0) as u32,
+                    row.get::<_, i64>(1)?.max(0) as u64,
+                ))
+            },
         ) {
             Ok(data) => Ok(data),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok((0, 0)),
@@ -146,7 +169,9 @@ impl VerifierStore {
         self.conn.query_row(
             "SELECT recovery_streak_count FROM av_subsystem_meta WHERE node_id = ?1",
             params![node_id],
-            |row| row.get::<_, i64>(0).map(|v| v as u32),
+            // P-AV (#1045): heal-on-read — a corrupt negative count clamps to 0
+            // rather than wrapping to a huge u32 (which would look "recovered").
+            |row| row.get::<_, i64>(0).map(|v| v.max(0) as u32),
         )
     }
 }
@@ -604,5 +629,43 @@ mod av_subsystem_store_contract_tests {
     #[test]
     fn in_memory_backend_satisfies_the_av_subsystem_store_contract() {
         assert_av_subsystem_store_contract(&InMemoryAvSubsystemStore::default());
+    }
+
+    /// P-AV (#1045): a corrupt / out-of-domain timestamp stored as a NEGATIVE
+    /// i64 must HEAL to 0 on read (maximally stale), never wrap to a huge u64
+    /// "future" value that would make a dead sensor look perpetually fresh to
+    /// the telemetry watchdog (fail-open). SQLite-only: the write path stamps
+    /// `u64 as i64`, so a `> i64::MAX` value lands as a negative row we can then
+    /// read back — the exact corruption shape the heal defends against. (The
+    /// in-memory backend stores `u64`, so it cannot represent this negative and
+    /// the heal is vacuously a no-op there.)
+    #[test]
+    fn sqlite_corrupt_negative_timestamps_heal_to_zero_failclosed() {
+        let store = VerifierStore::new(":memory:").expect("in-memory store");
+        store
+            .register_av_subsystem_meta("n1", "lidar", "hw-1", 0.8, 100)
+            .unwrap();
+
+        // `u64::MAX as i64 == -1`: an out-of-domain telemetry stamp lands negative.
+        store.touch_av_telemetry_timestamp("n1", u64::MAX).unwrap();
+        assert_eq!(
+            store.get_last_telemetry_timestamp("n1").unwrap(),
+            0,
+            "negative last_telemetry_ms heals to 0 (maximally stale), not a huge future value"
+        );
+        assert_eq!(
+            store.load_av_subsystems().unwrap()[0].last_telemetry_ms,
+            0,
+            "the listing read path heals identically"
+        );
+
+        // Drive the streak start_ms negative the same way (set only on the 0→1 edge).
+        store.increment_recovery_streak("n1", u64::MAX).unwrap();
+        let (count, start_ms) = store.load_recovery_streak("n1").unwrap();
+        assert_eq!(count, 1, "the positive count is unaffected");
+        assert_eq!(
+            start_ms, 0,
+            "negative recovery_streak_start_ms heals to 0, keeping the window math sane"
+        );
     }
 }

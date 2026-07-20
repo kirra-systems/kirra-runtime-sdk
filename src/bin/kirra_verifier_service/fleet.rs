@@ -648,32 +648,32 @@ pub(crate) async fn handle_sensor_fault_report(
             })
             .await;
 
-        let updated = match svc.app.nodes.get(&req.source_node_id) {
-            Some(n) => RegisteredNode {
-                node_id: n.node_id.clone(),
+        // C2 (#1031): atomic read-modify-write — this fault downgrade and a
+        // concurrent same-node re-registration / recovery re-trust are now
+        // serialized under the per-key lock, so the downgrade can never be
+        // silently clobbered (fail-open) nor invert disk/memory.
+        match svc
+            .app
+            .update_node_atomic(&req.source_node_id, |n| RegisteredNode {
                 status: NodeTrustState::Untrusted(reason.to_string()),
-                registered_at_ms: n.registered_at_ms,
                 last_trust_update_ms: now,
-                ak_public_pem: n.ak_public_pem.clone(),
-                expected_pcr16_digest_hex: n.expected_pcr16_digest_hex.clone(),
-                site: n.site.clone(),
-                firmware_version: n.firmware_version.clone(),
-            },
-            None => {
+                ..n.clone()
+            }) {
+            Ok(true) => {}
+            Ok(false) => {
                 return (
                     StatusCode::NOT_FOUND,
                     Json(json!({ "error": "node not found" })),
                 )
                     .into_response()
             }
-        };
-
-        if svc.app.persist_and_insert_node(updated).is_err() {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "failed to persist node state" })),
-            )
-                .into_response();
+            Err(()) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "failed to persist node state" })),
+                )
+                    .into_response();
+            }
         }
 
         let event = json!({
@@ -700,7 +700,10 @@ pub(crate) async fn handle_sensor_fault_report(
             "NODE_STATUS_CHANGED",
             Some(req.source_node_id.clone()),
         );
-        enqueue_recalc(
+        // C1 (#1026): a sensor-fault DOWNGRADE — fail closed if the recalc can't
+        // be enqueued so the posture cache can't keep admitting for a refresh
+        // interval against a node just marked Untrusted.
+        enqueue_downgrade_recalc(
             &svc,
             kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
                 node_id: req.source_node_id.clone(),
@@ -771,32 +774,32 @@ pub(crate) async fn handle_sensor_fault_report(
 
     match &decision {
         HysteresisDecision::RecoveryConfirmed { streak } => {
-            let updated = match svc.app.nodes.get(&req.source_node_id) {
-                Some(n) => RegisteredNode {
-                    node_id: n.node_id.clone(),
+            // C2 (#1031): atomic read-modify-write — a recovery re-trust and a
+            // concurrent same-node fault downgrade are serialized under the
+            // per-key lock, so neither update is lost and disk/memory stay
+            // consistent (no trust resurrection on restart).
+            match svc
+                .app
+                .update_node_atomic(&req.source_node_id, |n| RegisteredNode {
                     status: NodeTrustState::Trusted,
-                    registered_at_ms: n.registered_at_ms,
                     last_trust_update_ms: now,
-                    ak_public_pem: n.ak_public_pem.clone(),
-                    expected_pcr16_digest_hex: n.expected_pcr16_digest_hex.clone(),
-                    site: n.site.clone(),
-                    firmware_version: n.firmware_version.clone(),
-                },
-                None => {
+                    ..n.clone()
+                }) {
+                Ok(true) => {}
+                Ok(false) => {
                     return (
                         StatusCode::NOT_FOUND,
                         Json(json!({ "error": "node not found" })),
                     )
                         .into_response()
                 }
-            };
-
-            if svc.app.persist_and_insert_node(updated).is_err() {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "failed to persist node state" })),
-                )
-                    .into_response();
+                Err(()) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "failed to persist node state" })),
+                    )
+                        .into_response();
+                }
             }
 
             // P1: the recovery-streak reset + its audit write run as ONE off-worker

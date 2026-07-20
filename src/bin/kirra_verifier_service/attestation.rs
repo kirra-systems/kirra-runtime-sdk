@@ -321,32 +321,32 @@ pub(crate) async fn verify_attestation(
             .into_response();
     }
 
-    let updated = match svc.app.nodes.get(&req.node_id) {
-        Some(existing) => RegisteredNode {
-            node_id: existing.node_id.clone(),
+    // C2 (#1031): atomic read-modify-write — this attestation re-trust and a
+    // concurrent same-node fault downgrade (watchdog / sensor fault) are
+    // serialized under the per-key lock, so a downgrade racing this promotion is
+    // never silently clobbered and disk/memory can never invert.
+    match svc
+        .app
+        .update_node_atomic(&req.node_id, |existing| RegisteredNode {
             status: NodeTrustState::Trusted,
-            registered_at_ms: existing.registered_at_ms,
             last_trust_update_ms: now,
-            ak_public_pem: existing.ak_public_pem.clone(),
-            expected_pcr16_digest_hex: existing.expected_pcr16_digest_hex.clone(),
-            site: existing.site.clone(),
-            firmware_version: existing.firmware_version.clone(),
-        },
-        None => {
+            ..existing.clone()
+        }) {
+        Ok(true) => {}
+        Ok(false) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "node not registered" })),
             )
                 .into_response()
         }
-    };
-
-    if svc.app.persist_and_insert_node(updated).is_err() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "failed to persist trust state" })),
-        )
-            .into_response();
+        Err(()) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to persist trust state" })),
+            )
+                .into_response();
+        }
     }
 
     let posture = svc.app.calculate_posture(&req.node_id);

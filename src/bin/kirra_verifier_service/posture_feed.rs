@@ -24,6 +24,37 @@ pub(crate) fn enqueue_recalc(
     }
 }
 
+/// Like [`enqueue_recalc`], but FAIL-CLOSED on a send failure — for a trigger
+/// whose LOSS would leave the posture cache fail-OPEN, i.e. a trust *downgrade*
+/// (a node was just marked `Untrusted`). C1 (#1026): the node is already durably
+/// `Untrusted`, but if this recalc is dropped the posture cache keeps its FRESH
+/// pre-downgrade value, so `should_route_command` keeps admitting commands for up
+/// to a refresh interval. On `Full`/`Closed` we mirror the telemetry watchdog and
+/// force the cache to `LockedOut` immediately (transient on `Full`, sticky on
+/// `Closed`) rather than log-and-continue.
+///
+/// Use this at every site that ENQUEUES a downgrade; keep [`enqueue_recalc`] for
+/// benign triggers (an upgrade / `PeriodicRefresh`) whose loss is fail-closed.
+pub(crate) fn enqueue_downgrade_recalc(
+    svc: &ServiceState,
+    trigger: kirra_verifier::posture_engine_v2::PostureRecalcTrigger,
+) {
+    // No `posture_engine_tx` = PassiveStandby: a standby holds no posture cache
+    // and does not gate commands, so there is nothing to fail closed — matching
+    // `enqueue_recalc`'s no-op there.
+    if let Some(tx) = svc.posture_engine_tx.get() {
+        if let Err(e) = tx.try_send(trigger) {
+            kirra_verifier::posture_engine_v2::fail_closed_on_downgrade_send_failure(
+                &svc.app,
+                &svc.posture_cache,
+                now_ms(),
+                "http/industrial trust downgrade",
+                &e,
+            );
+        }
+    }
+}
+
 /// Fail-closed posture read for action/actuator gating sites.
 ///
 /// Delegates to `resolve_posture_with_reason` so the cache-staleness check
