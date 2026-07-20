@@ -153,7 +153,14 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     let empty_live_set = node_ids.is_empty();
     let empty_set_reason = if empty_live_set {
         // SAFETY: SG-HA-3 — durable store reads on runtime paths must be offloaded by callers.
-        let registered = app.store.with(|store| store.count_nodes()).unwrap_or(0);
+        // C9 (#1050): this is a READ-ONLY cross-check, so it goes through the
+        // read-replica seam (`with_read`) rather than contending the single writer
+        // mutex — the empty-set path is cold, but a `count_nodes()` read has no
+        // reason to serialize behind in-flight writes.
+        let registered = app
+            .store
+            .with_read(|store| store.count_nodes())
+            .unwrap_or(0);
         Some(if registered > 0 {
             "EMPTY_LIVE_SET_HYDRATION_GAP"
         } else {

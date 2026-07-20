@@ -162,7 +162,18 @@ pub(crate) async fn issue_challenge(
     // clock. A `SystemTime`-derived nonce is predictable and can collide within
     // a single nanosecond; single-use + TTL + node-binding are enforced by the
     // challenge store and the verify-then-consume order in `verify_attestation`.
-    let nonce = kirra_verifier::verifier::generate_challenge_nonce();
+    // Sec3 (#1050): a transient CSPRNG stall returns 503 (retryable), never
+    // aborts the process on this unauthenticated route.
+    let nonce = match kirra_verifier::verifier::generate_challenge_nonce() {
+        Ok(n) => n,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "entropy source unavailable — retry" })),
+            )
+                .into_response();
+        }
+    };
     svc.app.issue_challenge(&node_id, nonce, now);
     (
         StatusCode::OK,

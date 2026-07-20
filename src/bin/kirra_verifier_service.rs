@@ -1648,14 +1648,28 @@ fn build_app(
         .route("/federation/reports/{asset_id}", get(get_federated_reports));
 
     // #696 (HT2): origins are restrictable to a configured allowlist via
-    // `KIRRA_CORS_ALLOWED_ORIGINS` (comma-separated). Default is `Any`
-    // (back-compat); auth is `Authorization: Bearer` (no cookies / no
-    // `allow_credentials`), so `Any` is not a CSRF vector — the allowlist is
-    // defense-in-depth controlling which web origins may READ responses. A set
-    // env with no parseable origin yields an empty allowlist (deny cross-origin),
-    // logged — fail-closed rather than silently reverting to permissive.
+    // `KIRRA_CORS_ALLOWED_ORIGINS` (comma-separated). Auth is `Authorization:
+    // Bearer` (no cookies / no `allow_credentials`), so a permissive origin is
+    // not a CSRF vector — the allowlist is defense-in-depth controlling which web
+    // origins may READ responses. A set env with no parseable origin yields an
+    // empty allowlist (deny cross-origin), logged — fail-closed rather than
+    // silently reverting to permissive.
+    //
+    // Sec4 (#1050): the UNSET default is now **deny cross-origin** (empty
+    // allowlist), not `Any`. Cross-origin reads must be opted into explicitly —
+    // either by naming the origins in `KIRRA_CORS_ALLOWED_ORIGINS`, or, for the
+    // genuinely-open case, by setting `KIRRA_CORS_ALLOW_ANY_ORIGIN=1`. Same-origin
+    // requests (the console SPA served by the verifier itself) never need CORS, so
+    // this default breaks no first-party surface; it only stops arbitrary web
+    // origins from reading already-public responses by default.
     let cors = {
         let base = CorsLayer::new().allow_methods(Any).allow_headers(Any);
+        let allow_any = std::env::var("KIRRA_CORS_ALLOW_ANY_ORIGIN")
+            .map(|v| {
+                let v = v.trim();
+                v == "1" || v.eq_ignore_ascii_case("true")
+            })
+            .unwrap_or(false);
         match std::env::var("KIRRA_CORS_ALLOWED_ORIGINS") {
             Ok(v) if !v.trim().is_empty() => {
                 // Partition rather than silently dropping: an UNPARSEABLE token is a
@@ -1687,8 +1701,25 @@ fn build_app(
                 }
                 base.allow_origin(origins)
             }
-            // Unset / empty → permissive default (unchanged behaviour).
-            _ => base.allow_origin(Any),
+            // Unset / empty → deny cross-origin by default (Sec4 #1050), UNLESS the
+            // operator explicitly opts into the open case.
+            _ if allow_any => {
+                tracing::warn!(
+                    "KIRRA_CORS_ALLOW_ANY_ORIGIN is set — allowing ANY cross-origin \
+                     web read of (already-public) responses; prefer an explicit \
+                     KIRRA_CORS_ALLOWED_ORIGINS allowlist"
+                );
+                base.allow_origin(Any)
+            }
+            _ => {
+                tracing::info!(
+                    "CORS defaulting to DENY cross-origin (Sec4): set \
+                     KIRRA_CORS_ALLOWED_ORIGINS to a web-origin allowlist, or \
+                     KIRRA_CORS_ALLOW_ANY_ORIGIN=1 to allow any (same-origin \
+                     requests are unaffected)"
+                );
+                base.allow_origin(Vec::<axum::http::HeaderValue>::new())
+            }
         }
     };
 
