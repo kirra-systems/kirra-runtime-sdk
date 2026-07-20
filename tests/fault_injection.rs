@@ -166,44 +166,58 @@ fn test_safety_goal_sg_014_federation_report_replay_prevention() {
 // ============================================================================
 // SG-016 (ASIL C) — DDS actuator topic volatile durability
 //
-// Property: every DDS actuator topic configuration uses
-// `DdsDurability::Volatile`. The `DdsDurability` enum may define
-// `TransientLocal` as a variant, but no topic-creation call site may
-// select it. A `TransientLocal` actuator topic could replay stale
+// Property: the actuator-topic QoS the bridge actually constructs uses
+// `DdsDurability::Volatile`, and the publish seam REFUSES to emit a frame under
+// any non-Volatile profile. A `TransientLocal` actuator topic could replay stale
 // commands to reconnecting subscribers, violating the safety property.
-// Safe state: SS-004 — startup_sentinel aborts on TransientLocal
-// (this test catches the misconfiguration at source level).
+// Safe state: SS-004 — startup_sentinel aborts on TransientLocal.
+//
+// #1047 (CI-Honesty): this test used to `read_to_string("src/dds_bridge.rs")` and
+// grep the SOURCE TEXT for `durability: DdsDurability::Volatile`. That check was
+// defeated by any formatting/refactor (a field split across lines, a builder call,
+// a `const` alias) and asserted nothing about RUNTIME behaviour. It now constructs
+// the real `critical_actuator_profile()` and exercises the runtime QoS-admissibility
+// decision — the actual thing that gates a publish — so a refactor that keeps the
+// text but breaks the behaviour (or vice-versa) can no longer pass vacuously.
 // ============================================================================
 
 #[test]
 fn test_safety_goal_sg_016_dds_actuator_volatile_durability() {
-    let source = std::fs::read_to_string("src/dds_bridge.rs").expect(
-        "read src/dds_bridge.rs from crate root (cwd should be the kirra-runtime-sdk crate root)",
+    use kirra_verifier::dds_bridge::{
+        DdsDurability, DdsPublisherBridge, DdsQosProfile, DdsQosViolation,
+    };
+
+    // 1. The frozen actuator profile the bridge actually builds is Volatile, and
+    //    it is admissible + publishes a frame.
+    let profile = DdsQosProfile::critical_actuator_profile();
+    assert_eq!(
+        profile.durability,
+        DdsDurability::Volatile,
+        "SG-016: the constructed actuator QoS profile MUST be Volatile"
+    );
+    assert!(
+        profile.actuator_admissibility().is_ok(),
+        "SG-016: the frozen actuator profile must pass runtime QoS admissibility"
+    );
+    assert!(
+        DdsPublisherBridge::publish_actuator_command(&[0xAA], &profile).is_ok(),
+        "SG-016: a Volatile actuator topic must publish"
     );
 
-    assert!(
-        source.contains("durability: DdsDurability::Volatile"),
-        "SG-016: src/dds_bridge.rs must configure at least one topic with \
-         DdsDurability::Volatile; found none"
+    // 2. Flipping durability to TransientLocal is REFUSED at the runtime publish
+    //    seam (fail-closed) — not merely absent from the source text.
+    let mut transient = profile;
+    transient.durability = DdsDurability::TransientLocal;
+    assert_eq!(
+        transient.actuator_admissibility(),
+        Err(DdsQosViolation::NonVolatileActuatorTopic),
+        "SG-016: a TransientLocal actuator topic must be inadmissible"
     );
-
-    assert!(
-        !source.contains("durability: DdsDurability::TransientLocal"),
-        "SG-016: src/dds_bridge.rs MUST NOT configure any topic with \
-         DdsDurability::TransientLocal — that policy would allow stale \
-         actuator commands to be replayed to reconnecting subscribers."
-    );
-
-    // The enum itself may still declare TransientLocal as a variant (its
-    // presence is a separate property — startup_sentinel uses it to detect
-    // misconfiguration). Confirm the declaration is still there so a future
-    // refactor that removes the variant does not silently delete this check
-    // by side effect.
-    assert!(
-        source.contains("TransientLocal"),
-        "SG-016: DdsDurability::TransientLocal variant should still exist \
-         (used by startup_sentinel for misconfiguration detection); if it \
-         was intentionally removed, update this test."
+    assert_eq!(
+        DdsPublisherBridge::publish_actuator_command(&[0xAA], &transient),
+        Err(DdsQosViolation::NonVolatileActuatorTopic),
+        "SG-016: the publish seam MUST refuse a TransientLocal actuator topic — it \
+         could replay stale commands to a reconnecting subscriber (INV-10)"
     );
 }
 
