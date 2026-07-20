@@ -31,11 +31,14 @@ The image builds and runs, on a plain `ros:jazzy` arm64 base (no CUDA needed):
 - **the 4 curated `autoware_*_msgs`** + `kirra_safety`,
 - **the robot Channel-A layer** (`rabbit_*`) + the distro resolver `ros_env.sh`.
 
-**Not here (follow-up):** GPU doers — parko TensorRT/ONNX inference and camera
-perception. Those need an `nvcr.io/nvidia/l4t-jetpack`-based Jazzy image with the
-CUDA/cuDNN/TensorRT runtime and `--runtime nvidia`. The safety path needs none of
-that, so it's deliberately split out; the checker bounds a GPU doer the same way
-whether the doer is native, in another container, or on Humble.
+**Not here (separate container):** GPU doers — parko TensorRT/ONNX inference and
+camera perception. Those run on an `nvcr.io/nvidia/l4t-jetpack` base (CUDA/cuDNN/
+TensorRT ⇒ JetPack 6 ⇒ 22.04 ⇒ ROS 2 Humble) with `--runtime nvidia`, meeting
+this Jazzy checker over the same DDS boundary — a doer runs where its hardware
+stack lives. Scaffold + design: `deploy/docker/Dockerfile.parko-trt-jetson` +
+`deploy/docker/PARKO_TRT_JETSON.md`. The safety path needs no CUDA, so it's
+deliberately split out; the checker bounds a GPU doer identically whether the
+doer is native, in another container, or on Humble.
 
 ## Prerequisites on the host
 - Docker with the default runtime (Buildx/BuildKit). For the GPU follow-up:
