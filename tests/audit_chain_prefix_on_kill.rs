@@ -1,17 +1,33 @@
 // tests/audit_chain_prefix_on_kill.rs (renamed from audit_powerloss.rs, EP-23)
-//! Gate C criterion #2 — "audit chain survives a power-loss test."
+//! Gate C criterion #2 — audit-chain **crash-consistency** + un-fsynced-tail loss.
 //!
 //! The SHA-256 hash-chained audit ledger lives in a WAL-mode SQLite DB; each entry
 //! is appended inside an `Immediate` transaction (`audit_tx`, #685) so an append is
-//! atomic. This drill proves the SAFETY property that matters under power loss: after
-//! an ABRUPT kill mid-append, the chain that remains on disk is always a valid,
-//! verifiable PREFIX — never a torn or forked chain. (Under WAL + `synchronous=NORMAL`
-//! the very last uncheckpointed entries can be lost on power loss, but the chain is
-//! never left broken — which is exactly the invariant a hash chain needs.)
+//! atomic. The safety property that matters is: whatever remains on disk after an
+//! abrupt stop is always a valid, verifiable PREFIX — never a torn or forked chain.
 //!
-//! `SIGKILL` is the honest power-loss analogue: the process is terminated with no
-//! chance to flush or run destructors, and SQLite's WAL recovery runs when the file
-//! is reopened — the same recovery a cold boot after a power cut performs.
+//! #1046 (test honesty) — this drill has TWO tiers, because they exercise DIFFERENT
+//! failure modes and the difference is load-bearing:
+//!
+//!   1. `audit_chain_survives_sigkill_mid_append` — **crash-consistency** under
+//!      process death. `SIGKILL` terminates the writer with no chance to flush or
+//!      run destructors, but it leaves the OS PAGE CACHE intact, so the committed
+//!      WAL survives the process even at `synchronous=NORMAL`. This proves WAL
+//!      crash-consistency (no torn/forked chain across a mid-append kill) — a real,
+//!      valuable property — but it does NOT exercise the fsync/hard-power-loss path,
+//!      because nothing un-fsynced is ever actually dropped. (The earlier claim that
+//!      SIGKILL is "the honest power-loss analogue" overstated it: a power cut also
+//!      loses the page cache; SIGKILL does not.)
+//!
+//!   2. `audit_chain_is_valid_prefix_after_unfsynced_wal_tail_is_lost` — the
+//!      **hard-power-loss** path, reproduced PORTABLY (no dm-flakey / custom VFS):
+//!      a durable prefix is checkpointed into the main DB file, more entries are
+//!      appended that live only in the un-fsynced WAL, and then the WAL is DROPPED —
+//!      exactly the bytes a power cut loses when `synchronous=NORMAL` never fsynced
+//!      them. Recovery must still yield a valid PREFIX (the durable entries), with
+//!      the un-fsynced tail cleanly gone — never a torn chain. This is the tier that
+//!      actually backs the "audit tail is checkpoint-bounded, never corrupt" claim
+//!      in `VerifierStore::durable_checkpoint`'s #74 durability-boundary note.
 //!
 //! Unix-only (uses `SIGKILL` via `Child::kill`); CI runs on Linux.
 #![cfg(unix)]
@@ -24,7 +40,20 @@ use kirra_verifier::ota_campaign::Campaign;
 use kirra_verifier::verifier_store::VerifierStore;
 
 const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const WRITER_ENV: &str = "KIRRA_AUDIT_POWERLOSS_DB";
+const WRITER_ENV: &str = "KIRRA_AUDIT_CRASH_DB";
+
+/// One chained audit entry per campaign insert (deterministic, wall-clock-free).
+fn mk_campaign(i: u64) -> Campaign {
+    Campaign::new(
+        format!("c-{i}"),
+        DIGEST,
+        "v1",
+        vec!["c".into()],
+        vec![100],
+        i,
+    )
+    .expect("build campaign")
+}
 
 /// The crash-writer must have committed at least this many chained entries
 /// before we SIGKILL it, so the kill is guaranteed to land WHILE it is actively
@@ -77,12 +106,12 @@ fn cleanup(db: &std::path::Path) {
 }
 
 /// The crash-writer ENTRYPOINT (reexec pattern — no product bin surface). When the
-/// parent spawns this test binary with `KIRRA_AUDIT_POWERLOSS_DB` set, this "test"
+/// parent spawns this test binary with `KIRRA_AUDIT_CRASH_DB` set, this "test"
 /// opens that DB and appends audit-chained entries (one `Immediate`-tx audit append
 /// per `insert_campaign`) in a tight loop FOREVER, until the parent SIGKILLs it. In a
 /// normal test run the env var is unset and this is an instant no-op.
 #[test]
-fn powerloss_writer_child() {
+fn crash_consistency_writer_child() {
     let Ok(db) = std::env::var(WRITER_ENV) else {
         return; // normal run — not the child
     };
@@ -90,16 +119,7 @@ fn powerloss_writer_child() {
     let mut i: u64 = 0;
     loop {
         // Each insert appends exactly one chained audit entry in one atomic tx.
-        let c = Campaign::new(
-            format!("crash-{i}"),
-            DIGEST,
-            "v1",
-            vec!["c".into()],
-            vec![100],
-            i,
-        )
-        .expect("build campaign");
-        let _ = store.insert_campaign(&c); // a mid-commit SIGKILL just drops this one
+        let _ = store.insert_campaign(&mk_campaign(i)); // a mid-commit SIGKILL just drops this one
         i += 1;
     }
 }
@@ -125,7 +145,7 @@ fn audit_chain_survives_sigkill_mid_append() {
         let observer = VerifierStore::new(db.to_str().unwrap()).expect("open observer");
 
         let mut child = Command::new(&self_exe)
-            .args(["--exact", "--nocapture", "powerloss_writer_child"])
+            .args(["--exact", "--nocapture", "crash_consistency_writer_child"])
             .env(WRITER_ENV, &db)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -166,11 +186,13 @@ fn audit_chain_survives_sigkill_mid_append() {
         std::thread::sleep(Duration::from_millis(trial * 7));
         drop(observer); // release the reader before the crash-reopen (cold-boot analogue)
 
-        child.kill().expect("SIGKILL the writer"); // abrupt termination == power loss
+        child.kill().expect("SIGKILL the writer"); // abrupt process death (page cache survives)
         let _ = child.wait();
 
-        // Reopen from the file — this is where SQLite's WAL recovery runs, exactly as
-        // it would on a cold boot after a power cut.
+        // Reopen from the file — SQLite's WAL recovery runs, as it would on a cold
+        // boot. (The un-fsynced-tail LOSS a real power cut also causes is exercised
+        // separately by the WAL-drop test below; SIGKILL keeps the page cache, so
+        // here nothing un-fsynced is actually lost.)
         let store = VerifierStore::new(db.to_str().unwrap()).expect("reopen after kill");
 
         assert!(
@@ -242,4 +264,105 @@ fn committed_audit_chain_reverifies_after_reopen() {
 
     drop(store);
     cleanup(&db);
+}
+
+/// The HARD-POWER-LOSS tier (#1046): un-fsynced WAL frames are DROPPED, and the
+/// chain that recovers must still be a valid, verifiable PREFIX — never torn.
+///
+/// SIGKILL (above) cannot exercise this: it leaves the OS page cache intact, so
+/// the committed-but-un-fsynced WAL survives the process. A real power cut also
+/// loses the page cache. We reproduce that PORTABLY (no dm-flakey / custom VFS):
+///
+///   1. append a durable PREFIX and force `durable_checkpoint()`
+///      (`wal_checkpoint(TRUNCATE)`, `synchronous=FULL`) — those rows are now
+///      fsynced into the MAIN db file, the part a power cut keeps;
+///   2. append MORE entries that, under `synchronous=NORMAL`, commit only into the
+///      WAL and are NEVER fsynced — the part a power cut loses;
+///   3. copy ONLY the main db file (no `-wal`) — the exact on-disk state a power
+///      cut freezes once the un-fsynced WAL pages evaporate;
+///   4. reopen the copy: SQLite recovery sees the durable prefix alone.
+///
+/// The recovered chain must be INTACT and equal to the durable prefix, and the
+/// original (whose tail we did NOT drop) must hold strictly more — proving the
+/// drop was real, so the test can never pass vacuously.
+#[test]
+fn audit_chain_is_valid_prefix_after_unfsynced_wal_tail_is_lost() {
+    const DURABLE: u64 = 20; // checkpointed → fsynced into main.db
+    const TAIL: u64 = 30; // WAL-only, un-fsynced → lost on power cut
+
+    let db = temp_db("waldrop");
+    let db_copy = temp_db("waldrop_copy");
+    cleanup(&db);
+    cleanup(&db_copy);
+
+    let durable_count = {
+        let mut store = VerifierStore::new(db.to_str().unwrap()).expect("open");
+
+        // (1) Durable prefix, fsynced into the MAIN db file by a TRUNCATE checkpoint.
+        for i in 0..DURABLE {
+            store
+                .insert_campaign(&mk_campaign(i))
+                .expect("insert durable");
+        }
+        store
+            .durable_checkpoint()
+            .expect("checkpoint the durable prefix into main.db");
+        let durable_count = store
+            .verify_audit_chain_full(None)
+            .expect("verify durable prefix")
+            .total_entries;
+        assert!(durable_count >= 1, "a durable prefix must exist");
+
+        // (2) Un-fsynced tail — commits into the WAL only (synchronous=NORMAL), so
+        //     main.db is untouched (TAIL is far below the 1000-page auto-checkpoint).
+        for i in DURABLE..(DURABLE + TAIL) {
+            store.insert_campaign(&mk_campaign(i)).expect("insert tail");
+        }
+
+        // (3) Snapshot ONLY the main db file — NOT the `-wal`. This is the durable
+        //     state a hard power cut leaves behind once the un-fsynced WAL is gone.
+        std::fs::copy(&db, &db_copy).expect("snapshot main.db (without its -wal)");
+
+        durable_count
+        // store dropped here → clean close checkpoints the tail into the ORIGINAL
+        // db (so the original becomes the "tail survived" control below).
+    };
+
+    // (4) Reopen the WAL-less copy: recovery yields the durable PREFIX alone.
+    let recovered = VerifierStore::new(db_copy.to_str().unwrap()).expect("reopen power-loss copy");
+    let recovered_full = recovered
+        .verify_audit_chain_full(None)
+        .expect("verify recovered prefix");
+    assert!(
+        recovered_full.chain_intact,
+        "after an un-fsynced WAL tail is lost, the recovered chain must be an INTACT prefix — never torn/forked"
+    );
+    assert_eq!(
+        recovered_full.total_entries, durable_count,
+        "recovery must yield exactly the checkpointed durable prefix ({durable_count}); \
+         the un-fsynced tail must be gone"
+    );
+
+    // Control (non-vacuity): the ORIGINAL, whose tail we did NOT drop, holds
+    // strictly more — proving the WAL really carried the tail we discarded.
+    let with_wal = VerifierStore::new(db.to_str().unwrap()).expect("reopen original");
+    let with_wal_full = with_wal
+        .verify_audit_chain_full(None)
+        .expect("verify original");
+    assert!(
+        with_wal_full.chain_intact,
+        "the original chain (tail retained) must also be intact"
+    );
+    assert!(
+        with_wal_full.total_entries > recovered_full.total_entries,
+        "the dropped WAL must have carried real entries (original {} > recovered {}) — \
+         else the test proves nothing",
+        with_wal_full.total_entries,
+        recovered_full.total_entries
+    );
+
+    drop(recovered);
+    drop(with_wal);
+    cleanup(&db);
+    cleanup(&db_copy);
 }

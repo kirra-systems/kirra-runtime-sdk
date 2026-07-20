@@ -281,9 +281,22 @@ jobs:
         # -Zmiri-many-seeds re-runs the nondeterministic schedule with 16
         # different seeds, exploring distinct interleavings of the concurrent
         # torn-read test — the closest Miri gets to a schedule sweep.
+        #
+        # #1047 (CI-Honesty): the `concurrent` name FILTER matches zero tests if
+        # the torn-read test is ever renamed, and libtest exits 0 on an empty
+        # filter — so this seeded race sweep could pass VACUOUSLY. Fail hard if the
+        # binary reports "running 0 tests" (a real Miri failure still reds via `||`).
         env:
           MIRIFLAGS: "-Zmiri-many-seeds=0..16"
-        run: cargo miri test -p kirra-contract-channel --lib --locked concurrent
+        run: |
+          set -uo pipefail
+          out=$(cargo miri test -p kirra-contract-channel --lib --locked concurrent 2>&1) \
+            || { echo "$out"; exit 1; }
+          echo "$out"
+          if echo "$out" | grep -q 'running 0 tests'; then
+            echo "::error::miri 'concurrent' filter matched 0 tests — vacuous pass (test renamed?)."
+            exit 1
+          fi
 
   inline-governor:
     name: In-line governor loop (EP-01) — fault matrix + cross-process demo
@@ -389,10 +402,15 @@ jobs:
     # gates on the strongest metric present in the export. The day nightly
     # restores mcdc, this lane upgrades itself with no workflow change.
     #
-    # Floors sit ~2 points under the measured baselines (kirra-trajectory
-    # 80.08 %, kirra-core 81.15 %, parko-core 79.82 % branch) — real gates with
-    # anti-flake headroom; RATCHET them up as coverage improves, never down
-    # without reviewer sign-off.
+    # #1047 (CI-Honesty): the floors were RATCHETED UP toward the measured
+    # branch coverage so a real regression can no longer merge green behind a
+    # ~2-point cushion. Freshly measured (nightly `cargo llvm-cov --branch`):
+    # kirra-trajectory 80.31 %, kirra-core 81.15 %, parko-core 77.78 %. Floors
+    # keep only ~0.7-point anti-flake headroom under the two root-workspace
+    # crates (79.5 / 80.5). parko-core's floor STAYS at 77.0: its true coverage
+    # (77.78 %) is well under the STALE 79.82 % this comment used to cite — the
+    # 77.0 floor already sits ~0.8 point under actual, so raising it would gate
+    # on jitter. RATCHET up as coverage improves, never down without sign-off.
     env:
       RUSTUP_TOOLCHAIN: nightly
     steps:
@@ -415,8 +433,8 @@ jobs:
             fi
             python3 ci/check_decision_floor.py "cov-$crate.json" "$floor" "$crate"
           }
-          gate kirra-trajectory 78.0
-          gate kirra-core 79.0
+          gate kirra-trajectory 79.5
+          gate kirra-core 80.5
       - name: Gate parko-core (parko workspace)
         working-directory: parko
         run: |
@@ -677,7 +695,21 @@ jobs:
         # WCET is an OPTIMIZED-build property; the heavy containment guard asserts
         # ONLY when optimized (see wcet_gate.rs — a debug build's jitter-dominated
         # wall clock is not WCET), so this lane must build release to exercise it.
-        run: cargo test -p kirra-verifier --lib wcet_gate::ci_gate_tests --release
+        #
+        # #1047 (CI-Honesty): the `wcet_gate::ci_gate_tests` module FILTER matches
+        # zero tests if the module is ever renamed — and libtest exits 0 on an
+        # empty filter, so the gate would pass VACUOUSLY (green while asserting
+        # nothing). Capture the run, echo it, and fail hard if the binary reports
+        # "running 0 tests"; a genuine test failure still reds via the `||` arm.
+        run: |
+          set -uo pipefail
+          out=$(cargo test -p kirra-verifier --lib wcet_gate::ci_gate_tests --release 2>&1) \
+            || { echo "$out"; exit 1; }
+          echo "$out"
+          if echo "$out" | grep -q 'running 0 tests'; then
+            echo "::error::wcet_gate::ci_gate_tests matched 0 tests — vacuous pass (module renamed?)."
+            exit 1
+          fi
 
   iceoryx2-spike:
     name: iceoryx2 carrier (frozen contract, isolated)
