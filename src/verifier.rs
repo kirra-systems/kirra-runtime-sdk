@@ -291,12 +291,16 @@ pub use kirra_safety_authority::RssRecoveryStreak;
 pub struct AppState {
     pub nodes: DashMap<String, RegisteredNode>,
     pub dependency_graph: DashMap<String, Vec<String>>,
-    /// Volatile in-memory challenge map — nonces are never persisted to SQLite.
-    pub pending_challenges: DashMap<String, ChallengeEntry>,
-    /// Volatile operator clearance-challenge map (#314 Phase 1) — keyed by
-    /// `"{operator_id}|{node_id}"`. Same volatility discipline as
-    /// `pending_challenges` (INVARIANT #5): never persisted, TTL-bounded, single-use.
-    pub pending_clearance_challenges: DashMap<String, ClearanceChallengeEntry>,
+    /// ADR-0035 Stage 3 (slice 3i): the volatile challenge/nonce state — the
+    /// attestation-challenge map (`pending_challenges`, INVARIANT #5), the
+    /// operator-clearance map (`pending_clearance_challenges`), and the Bug 3
+    /// attestation-challenge rate limiter (`challenge_rate_limiter`) — grouped
+    /// VERBATIM onto `crate::challenge_state::ChallengeState` (per-field semantics
+    /// and field names UNCHANGED, documented on the struct). Reached as
+    /// `app.challenges.<field>`; a pure relocation (never persisted, off the
+    /// verdict path), no `&mut self`, no behaviour change. The `pending_challenges`
+    /// field declaration is kept byte-identical so INVARIANT #5's grep resolves.
+    pub challenges: crate::challenge_state::ChallengeState,
     /// Durable store for nodes and dependency graph (write-through, read on boot).
     /// Accessed through the `StoreHandle` seam (`with` / `call`) — never a raw
     /// lock. Phase 2 of the DB-actor migration swaps the handle's internals for a
@@ -362,16 +366,6 @@ pub struct AppState {
     /// the telemetry watchdog). The task loop records each cycle; `GET /metrics`
     /// exports `kirra_task_deadline_*`. Lock-free; observability only.
     pub deadline_registry: Arc<crate::execution_manager::DeadlineRegistry>,
-
-    /// Bug 3 — rate limiter for the UNAUTHENTICATED
-    /// `POST /attestation/challenge/{node_id}` endpoint. A two-tier token bucket
-    /// (per-node + global backstop) that bounds challenge issuance, defeating a
-    /// targeted nonce-churn DoS (a flood on one node keeps overwriting the nonce
-    /// it is about to sign) and the CSPRNG/prune CPU amplification of a flood.
-    /// The limiter is `&mut`-checked under this mutex; the critical section is a
-    /// hashmap lookup + a few float ops (held microscopically). Lives on
-    /// `AppState` next to `pending_challenges`/`issue_challenge`.
-    pub challenge_rate_limiter: Arc<Mutex<crate::challenge_rate_limit::ChallengeRateLimiter>>,
 }
 
 impl AppState {
@@ -384,8 +378,10 @@ impl AppState {
         Self {
             nodes: DashMap::new(),
             dependency_graph: DashMap::new(),
-            pending_challenges: DashMap::new(),
-            pending_clearance_challenges: DashMap::new(),
+            // ADR-0035 Stage 3i: the two nonce maps + the challenge rate limiter
+            // now live on ChallengeState; identical initial state (empty maps +
+            // clock-free-seeded limiter).
+            challenges: crate::challenge_state::ChallengeState::new(),
             store: crate::store_handle::StoreHandle::new(store),
             // ADR-0035 Stage 3f: the mode/epoch fence atomics now live on
             // HaFenceState; identical initial state (Active flag + held=0 +
@@ -412,12 +408,6 @@ impl AppState {
             fleet_metrics: crate::metrics::FleetSafetyMetrics::new(),
             deadline_registry: Arc::new(crate::execution_manager::DeadlineRegistry::from_manifest(
                 crate::execution_manager::TASK_MANIFEST,
-            )),
-            // Bug 3: seed the challenge limiter clock-free (last_ms = 0). The
-            // buckets start full; the first real `allow(_, now)` refills from 0,
-            // clamped to capacity, so a 0 baseline is a no-op vs. seeding `now`.
-            challenge_rate_limiter: Arc::new(Mutex::new(
-                crate::challenge_rate_limit::ChallengeRateLimiter::with_defaults(0),
             )),
         }
     }
@@ -619,7 +609,7 @@ impl AppState {
     }
     /// Consume a challenge nonce. Returns false if nonce is absent, expired, or mismatched.
     pub fn consume_challenge(&self, node_id: &str, nonce: u64, now_ms: u64) -> bool {
-        let entry = match self.pending_challenges.remove(node_id) {
+        let entry = match self.challenges.pending_challenges.remove(node_id) {
             Some((_, e)) => e,
             None => return false,
         };
@@ -635,9 +625,10 @@ impl AppState {
         // entries for nodes that never re-attested do not linger. The map is
         // already bounded (keyed by node_id, per-node overwrite); this only
         // drops timed-out entries — it never introduces unbounded growth.
-        self.pending_challenges
+        self.challenges
+            .pending_challenges
             .retain(|_, e| now_ms <= e.expires_at_ms);
-        self.pending_challenges.insert(
+        self.challenges.pending_challenges.insert(
             node_id.to_string(),
             ChallengeEntry {
                 nonce,
@@ -650,9 +641,10 @@ impl AppState {
     /// node_id)` (#314 Phase 1). Mirrors [`issue_challenge`](Self::issue_challenge):
     /// prunes expired entries, per-key overwrite, TTL-bounded.
     pub fn issue_clearance_challenge(&self, key: &str, nonce_hex: String, now_ms: u64) {
-        self.pending_clearance_challenges
+        self.challenges
+            .pending_clearance_challenges
             .retain(|_, e| now_ms <= e.expires_at_ms);
-        self.pending_clearance_challenges.insert(
+        self.challenges.pending_clearance_challenges.insert(
             key.to_string(),
             ClearanceChallengeEntry {
                 nonce_hex,
@@ -665,7 +657,7 @@ impl AppState {
     /// half (the caller verifies the signature FIRST). Atomic `remove` so a
     /// replay finds nothing. Returns false if absent, expired, or mismatched.
     pub fn consume_clearance_challenge(&self, key: &str, nonce_hex: &str, now_ms: u64) -> bool {
-        let entry = match self.pending_clearance_challenges.remove(key) {
+        let entry = match self.challenges.pending_clearance_challenges.remove(key) {
             Some((_, e)) => e,
             None => return false,
         };
@@ -1078,11 +1070,11 @@ mod nonce_lifecycle_tests {
         let later = 1_000 + CHALLENGE_TTL_MS + 1;
         app.issue_challenge("fresh", 2, later);
         assert!(
-            !app.pending_challenges.contains_key("stale"),
+            !app.challenges.pending_challenges.contains_key("stale"),
             "expired entry pruned on issue"
         );
         assert!(
-            app.pending_challenges.contains_key("fresh"),
+            app.challenges.pending_challenges.contains_key("fresh"),
             "fresh entry retained"
         );
     }

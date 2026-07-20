@@ -692,7 +692,7 @@ async fn unknown_operator_challenge_is_a_decoy_no_oracle() {
         "the decoy response is nonce-shaped"
     );
     assert!(
-        svc.app.pending_clearance_challenges.is_empty(),
+        svc.app.challenges.pending_clearance_challenges.is_empty(),
         "the decoy nonce is NEVER stored"
     );
 
@@ -708,6 +708,7 @@ async fn unknown_operator_challenge_is_a_decoy_no_oracle() {
     assert!(!parse_nonce(&body).is_empty());
     assert!(
         svc.app
+            .challenges
             .pending_clearance_challenges
             .contains_key(&composite_challenge_key("alice", "robot-01")),
         "an active operator's challenge IS stored under the composite key"

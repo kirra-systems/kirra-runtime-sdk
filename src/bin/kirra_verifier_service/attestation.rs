@@ -142,6 +142,7 @@ pub(crate) async fn issue_challenge(
     // state is consistent and continues to rate-limit.
     let admitted = svc
         .app
+        .challenges
         .challenge_rate_limiter
         .lock()
         .unwrap_or_else(|e| e.into_inner())

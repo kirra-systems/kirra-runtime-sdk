@@ -305,7 +305,7 @@ async fn attestation_pcr16_match_succeeds_absent_and_mismatch_are_refused() {
         "expected PCR16, none presented → 403"
     );
     assert!(
-        svc.app.pending_challenges.contains_key(NODE),
+        svc.app.challenges.pending_challenges.contains_key(NODE),
         "a PCR16 refusal must not burn the nonce"
     );
 
@@ -319,7 +319,7 @@ async fn attestation_pcr16_match_succeeds_absent_and_mismatch_are_refused() {
     .await;
     assert_eq!(wrong, StatusCode::FORBIDDEN, "mismatched PCR16 → 403");
     assert!(
-        svc.app.pending_challenges.contains_key(NODE),
+        svc.app.challenges.pending_challenges.contains_key(NODE),
         "still not burned"
     );
 
@@ -419,7 +419,7 @@ async fn tpm_quote_required_but_absent_is_refused() {
         "policy requires a quote, none presented → 403"
     );
     assert!(
-        svc.app.pending_challenges.contains_key(NODE),
+        svc.app.challenges.pending_challenges.contains_key(NODE),
         "a quote refusal must not burn the nonce"
     );
     assert!(
@@ -489,7 +489,7 @@ async fn tpm_quote_invalid_is_refused_and_nonce_preserved() {
         "quote signed by the wrong key → 401"
     );
     assert!(
-        svc.app.pending_challenges.contains_key(NODE),
+        svc.app.challenges.pending_challenges.contains_key(NODE),
         "an invalid quote must not burn the nonce"
     );
 }
@@ -784,7 +784,7 @@ async fn enroll_via_register_handler_then_quote_attests_end_to_end() {
         "an enrolled node must present a quote"
     );
     assert!(
-        svc.app.pending_challenges.contains_key(NODE),
+        svc.app.challenges.pending_challenges.contains_key(NODE),
         "the refusal preserves the nonce"
     );
 
@@ -830,7 +830,7 @@ async fn failed_proof_does_not_burn_the_nonce_then_valid_proof_succeeds() {
     .await;
     assert_eq!(bad, StatusCode::UNAUTHORIZED, "a bad proof is refused");
     assert!(
-        svc.app.pending_challenges.contains_key(NODE),
+        svc.app.challenges.pending_challenges.contains_key(NODE),
         "a FAILED proof must not burn the pending nonce"
     );
 
