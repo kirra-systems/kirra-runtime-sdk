@@ -1093,6 +1093,22 @@ mod durability_tests {
         assert_eq!(pragma_synchronous(dc), 2, "durable conn is FULL (2)");
     }
 
+    /// #1033 (P-Schema) — the LIVE SQLite schema a fresh `VerifierStore` realizes
+    /// matches the ONE cross-backend column spec (`schema_spec::SHARED_TABLES`).
+    /// Drift on this backend — a column added/removed, a nullability/type change —
+    /// that is not mirrored into the spec (and thus the Postgres backend) reds
+    /// HERE. The Postgres half asserts the SAME spec in `kirra-verifier-pg`'s
+    /// `schema_matches_shared_spec` (postgres-conformance lane), so the two
+    /// hand-authored schemas can no longer silently diverge.
+    #[test]
+    fn live_sqlite_schema_matches_shared_spec() {
+        let db = TmpDb::new("schema_spec");
+        let s = VerifierStore::new(db.path()).unwrap();
+        if let Err(report) = crate::schema_spec::assert_sqlite_conforms(&s.conn) {
+            panic!("SQLite schema diverged from the shared cross-backend spec:\n{report}");
+        }
+    }
+
     /// #772 F2 — an incident-class posture row written via
     /// `save_posture_event_chained_with_generation_durable` commits the row + its
     /// audit link + the generation high-water in ONE transaction on the durable

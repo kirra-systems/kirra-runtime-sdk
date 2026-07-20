@@ -106,6 +106,20 @@ src/
 │                               the same engine over a kirra_schema_version table + injected
 │                               executor seam (no tokio-postgres dep; driver binding is
 │                               the integrator's ~10-line adapter).
+│                               schema_spec.rs (#1033/P-Schema): ONE declarative
+│                               cross-backend column spec (SHARED_TABLES: the 13
+│                               tables in BOTH backends × name/LogicalType/nullable/
+│                               PK) + a dialect-agnostic diff_table comparator.
+│                               BOTH backends assert their LIVE schema against it via
+│                               the SAME comparator — SQLite (assert_sqlite_conforms
+│                               over PRAGMA table_info, tested in-crate) and PG
+│                               (information_schema, tested in kirra-verifier-pg's
+│                               live_pg_schema_matches_shared_spec) — so a column/
+│                               nullability/type hand-authored into one backend's DDL
+│                               and not the other now REDS a conformance test instead
+│                               of silently drifting. LogicalType absorbs the benign
+│                               dialect spellings (SQLite INTEGER↔PG bigint/integer,
+│                               REAL↔double precision, INTEGER-bool↔boolean).
 │                               WP-18 3/3: epoch.rs also defines the EpochFence storage
 │                               trait (current_epoch/current_active_holder/try_claim_epoch
 │                               CAS/assert_actuator_epoch_held) — the first VerifierStorage-
