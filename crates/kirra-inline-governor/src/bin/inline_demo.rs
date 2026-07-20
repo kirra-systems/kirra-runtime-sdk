@@ -139,6 +139,36 @@ fn governor_main() -> ExitCode {
         }
     }
 
+    // W2 (#1028) — enforced-loop real-time configuration. Pre-fault BOTH mappings
+    // so the timed loop below cannot take a MAJOR PAGE FAULT on first touch of the
+    // demand-paged SHM region (always safe, needs no privilege — this is the
+    // paging-tail half of the honest "host is INDICATIVE only" caveat). SCHED_FIFO /
+    // CPU affinity / mlockall are opt-in via `KIRRA_INLINE_RT=1` because they need
+    // CAP_SYS_NICE / CAP_IPC_LOCK (degrade-with-warning otherwise), so the default
+    // unprivileged run stays quiet; on the RT-configured target they apply cleanly.
+    region.prefault();
+    reader.prefault();
+    if std::env::var("KIRRA_INLINE_RT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        let cpu: usize = std::env::var("KIRRA_INLINE_RT_CPU")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let status = kirra_hv_carrier::realtime::configure_realtime(
+            &kirra_hv_carrier::realtime::RtConfig::enforced_loop(cpu),
+        );
+        println!(
+            "enforced-loop RT config: mlockall={:?}  sched_fifo={:?}  affinity={:?}  \
+             (fully_applied={})",
+            status.memory_lock,
+            status.scheduler,
+            status.affinity,
+            status.fully_applied()
+        );
+    }
+
     // INDICATIVE latency of the FULL in-line step (read → validate → bound →
     // sign → verify → release-decision), in the PRODUCTION shape: the same
     // long-lived station pair across every cycle, each iteration a fresh
