@@ -155,6 +155,7 @@ mod tests {
             linear_velocity_mps,
             steering_angle_rad,
             stamp_ms: 0,
+            malformed: false,
         }
     }
 

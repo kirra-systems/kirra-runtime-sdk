@@ -294,6 +294,20 @@ impl FleetSubscriber {
         counter: &RejectionCounter,
         now_ms: u64,
     ) -> Result<FederatedTrustReportV2, RejectReason> {
+        // M4 (#1050) — RESIDUAL, documented: the rate-limit gate runs AFTER
+        // `recv_async`, i.e. once a sample has already been pulled off the zenoh
+        // subscriber's FIFO. That is deliberate — it is where the per-sample
+        // `key_expr` (the bucket source) is available, and it cheaply drops a
+        // flood BEFORE the expensive Ed25519 verify + decode (the real DoS
+        // amplifier this shield targets). What it does NOT do is relieve
+        // raw-PACKET FIFO pressure: a burst still occupies the bounded
+        // `FifoChannelHandler` queue up to its capacity before this loop drains
+        // and drops it. That backpressure is bounded by the FIFO depth (the
+        // carrier is untrusted and lossy by design — an overrun drops samples,
+        // never blocks the safety path), so the residual is a throughput dip
+        // under flood, not a safety or memory-growth hazard. Tightening it would
+        // mean a smaller subscriber FIFO or a pre-recv admission hook — a zenoh
+        // config/API choice, tracked as the remainder of M4.
         let sample = self
             .subscriber
             .recv_async()

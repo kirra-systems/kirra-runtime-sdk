@@ -1122,6 +1122,24 @@ pub async fn run_adapter(
             // stamps + `promoted_at_ms` so `any_subscription_stale` / `is_stale`
             // measure a true elapsed age, immune to a wall-clock step.
             let now_ms = now_ms_fresh();
+            // M6 (#1050): an EXPLICITLY-malformed ingress command (a parse failure
+            // flagged the discriminant) is an unconditional MRC, decided here on
+            // the `malformed` flag — NOT on the sentinel magnitudes happening to
+            // trip the envelope in `check_command_conforms` downstream. Checked
+            // before the conformance path so the fail-closed behaviour is
+            // self-contained.
+            if in_cmd.malformed {
+                let out = mrc_command(in_cmd.asset_id.clone(), fast_state.config.max_decel_mps2);
+                if let Err(e) = fast_loop_out_tx.try_send(out) {
+                    tracing::error!(
+                        asset_id = %in_cmd.asset_id,
+                        error = ?e,
+                        "fast-loop output channel send failed (malformed path)",
+                    );
+                }
+                tracing::warn!(asset_id = %in_cmd.asset_id, "malformed_ingress_mrc");
+                continue;
+            }
             let cmd = IncomingControl {
                 velocity_mps: in_cmd.linear_velocity_mps,
                 steering_rad: in_cmd.steering_angle_rad,

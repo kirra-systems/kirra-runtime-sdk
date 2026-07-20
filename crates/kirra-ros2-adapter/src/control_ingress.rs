@@ -19,6 +19,15 @@ pub struct IngressControlCommand {
     /// Wall-clock ms from the ROS message stamp, or the receipt timestamp when
     /// the message carries no usable top-level stamp.
     pub stamp_ms: u64,
+    /// M6 (#1050): an EXPLICIT malformed/MRC discriminant. A parse failure sets
+    /// this `true`; the fast-loop consumer treats `malformed == true` as an
+    /// unconditional reject (→ MRC command) INDEPENDENT of the field magnitudes.
+    /// Previously `fail_closed_control_command` carried a `f64::MAX` poison pill
+    /// that merely *passed* `is_finite` and *relied on* the downstream conformance
+    /// check rejecting huge magnitudes — a fragile coupling. The discriminant makes
+    /// the fail-closed intent self-contained; the sentinel magnitudes are kept as
+    /// defense-in-depth (a value the envelope also rejects), not the sole signal.
+    pub malformed: bool,
 }
 
 /// Parse the minimal Autoware Control fields consumed by the fast-loop
@@ -45,18 +54,26 @@ pub fn parse_control_command_json(
         linear_velocity_mps: velocity,
         steering_angle_rad: steering,
         stamp_ms: stamp_ms_from_control(msg).unwrap_or(received_ms),
+        malformed: false,
     })
 }
 
-/// A finite command that the fast-loop conformance check must reject, causing
-/// publication of the configured MRC command. Used for malformed untyped input
-/// so parse failure fails closed instead of producing no gated output.
+/// A command the fast-loop conformance check must reject, causing publication of
+/// the configured MRC command. Used for malformed untyped input so parse failure
+/// fails closed instead of producing no gated output.
+///
+/// M6 (#1050): `malformed: true` is the AUTHORITATIVE reject signal — the
+/// consumer rejects on it regardless of the numeric fields. The `f64::MAX`
+/// magnitudes are retained as belt-and-suspenders (the envelope also rejects
+/// them), NOT as the primary mechanism, so the fail-closed behaviour no longer
+/// depends on a downstream check happening to reject huge-but-finite values.
 pub fn fail_closed_control_command(asset_id: &str, received_ms: u64) -> IngressControlCommand {
     IngressControlCommand {
         asset_id: asset_id.to_string(),
         linear_velocity_mps: f64::MAX,
         steering_angle_rad: f64::MAX,
         stamp_ms: received_ms,
+        malformed: true,
     }
 }
 
@@ -140,5 +157,24 @@ mod tests {
         assert!(cmd.steering_angle_rad.is_finite());
         assert_eq!(cmd.linear_velocity_mps, f64::MAX);
         assert_eq!(cmd.stamp_ms, 42);
+        // M6 (#1050): the AUTHORITATIVE reject signal — the consumer MRCs on this
+        // regardless of the (sentinel) magnitudes.
+        assert!(
+            cmd.malformed,
+            "a fail-closed command must be flagged malformed"
+        );
+    }
+
+    #[test]
+    fn a_successfully_parsed_command_is_not_flagged_malformed() {
+        let msg = serde_json::json!({
+            "longitudinal": { "velocity": 1.0 },
+            "lateral": { "steering_tire_angle": 0.0 },
+        });
+        let parsed = parse_control_command_json("ego", &msg, 7).expect("parse");
+        assert!(
+            !parsed.malformed,
+            "a well-formed command must not be flagged malformed"
+        );
     }
 }
