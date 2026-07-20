@@ -45,6 +45,19 @@ pub const ENV_TLS_CLIENT_CA_PATH: &str = "KIRRA_TLS_CLIENT_CA_PATH";
 #[derive(Clone, Debug)]
 pub struct ClientCertFingerprint(pub String);
 
+/// A TRUSTED, server-side marker that this request arrived over the in-process
+/// rustls-terminated TLS listener (Sec1 · #1044). Injected into request
+/// extensions by [`serve_tls`] for EVERY connection it handles — this code path
+/// only runs after a completed TLS handshake, so its presence is proof-of-TLS
+/// derived from the ACTUAL connection, not from a client-settable header.
+///
+/// A request extension is a server-side typed value; a client cannot set one
+/// (unlike `X-Forwarded-Proto`). So `require_secure_transport` trusts this marker
+/// as ground truth and only falls back to the forwarded-proto header when it is
+/// ABSENT (the plaintext-listener-behind-an-external-TLS-proxy topology).
+#[derive(Clone, Copy, Debug)]
+pub struct ServerTerminatedTls;
+
 /// The resolved serve mode — the fail-closed decision over the TLS env vars.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TlsResolution {
@@ -250,6 +263,11 @@ pub async fn serve_tls(
                     let client_fp = peer_cert_fingerprint(&tls_stream);
                     let io = TokioIo::new(tls_stream);
                     let service = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
+                        // Sec1 (#1044): mark this request as genuinely TLS-terminated
+                        // in-process (this path only runs post-handshake). The
+                        // transport-security gate trusts this over the spoofable
+                        // forwarded-proto header.
+                        req.extensions_mut().insert(ServerTerminatedTls);
                         if let Some(fp) = client_fp.clone() {
                             req.extensions_mut().insert(ClientCertFingerprint(fp));
                         }

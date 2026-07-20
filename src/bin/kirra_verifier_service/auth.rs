@@ -359,8 +359,18 @@ pub(crate) async fn require_secure_transport(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let cfg = &svc.app.transport.security;
+    // Sec1 (#1044): trust the ACTUAL connection first. `serve_tls` injects the
+    // server-side `ServerTerminatedTls` marker on every in-process-TLS request; a
+    // client cannot set a request extension, so this cannot be spoofed the way
+    // `X-Forwarded-Proto` can. The header is consulted only when this marker is
+    // absent (the external-TLS-proxy topology).
+    let connection_is_tls = request
+        .extensions()
+        .get::<super::tls::ServerTerminatedTls>()
+        .is_some();
     if !request_transport_is_secure(
         cfg.require_secure_transport,
+        connection_is_tls,
         &cfg.forwarded_proto_header,
         request.headers(),
     ) {

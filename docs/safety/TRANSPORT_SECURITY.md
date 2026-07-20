@@ -22,8 +22,11 @@ plaintext leg.
 
 - `TransportSecurityConfig` (`src/verifier.rs`) — `require_secure_transport` +
   `forwarded_proto_header`, from env.
-- `request_transport_is_secure(require, header, headers)` — the **pure**, unit-
-  tested decision.
+- `request_transport_is_secure(require, connection_is_tls, header, headers)` — the
+  **pure**, unit-tested decision. `connection_is_tls` is the authoritative tier-1
+  signal (see §3): a server-side, client-unspoofable request extension
+  (`ServerTerminatedTls`) injected only on the post-handshake in-process-TLS serve
+  path.
 - `require_secure_transport` middleware — layered **OUTERMOST** on the sensitive
   route groups (admin, the WS-1 auditor read group, actuator, identity-gated,
   **and attestation** — the challenge/verify nonce flow, even though it is
@@ -38,28 +41,43 @@ plaintext leg.
 
 ## 3. Decision & fail-closed rules
 
-When enforcement is ON, admit ONLY if the forwarded-proto header is present,
-readable, and its **original-client** value — the FIRST entry of a possibly
-comma-listed `client,proxy,…` chain (standard `X-Forwarded-Proto` semantics) — is
-`https` (case-insensitive). Every other case denies:
+When enforcement is ON the decision is **connection-first, two-tier**:
 
-| Header | Verdict |
+- **Tier 1 — real connection (unspoofable).** If the request arrived over the
+  verifier's own in-process TLS terminator (`ServerTerminatedTls` extension present),
+  **admit** — the transport is TLS by construction, independent of any header. A
+  client cannot set this: request extensions are server-side typed values injected
+  only on the post-handshake serve path.
+- **Tier 2 — forwarded-proto header (proxy assertion).** Only when tier 1 does not
+  apply (no in-process TLS): admit ONLY if the forwarded-proto header is present,
+  readable, and its **original-client** value — the FIRST entry of a possibly
+  comma-listed `client,proxy,…` chain (standard `X-Forwarded-Proto` semantics) — is
+  `https` (case-insensitive). Every other case denies.
+
+| Signal | Verdict |
 |---|---|
-| `https` / `HTTPS` / ` https ` | **admit** |
-| `https, http` (client leg https) | **admit** |
-| absent | **deny** (403) |
-| `http` / `""` / unreadable | **deny** (403) |
-| `http, https` (client leg plaintext) | **deny** (403) |
+| in-process-TLS connection (any/no header) | **admit** (tier 1) |
+| header `https` / `HTTPS` / ` https ` | **admit** (tier 2) |
+| header `https, http` (client leg https) | **admit** (tier 2) |
+| no TLS connection, header absent | **deny** (403) |
+| no TLS connection, header `http` / `""` / unreadable | **deny** (403) |
+| no TLS connection, header `http, https` (client leg plaintext) | **deny** (403) |
 
 ## 4. Assumption of use & in-process TLS
 
-**AOU-TRANSPORT-TLS-001 (load-bearing for the mesh-mTLS gate above):** the trusted
-proxy/mesh MUST set — overwriting any client-supplied value — the forwarded-proto
-header. A directly-reachable (un-proxied) verifier would let a client spoof it, so
-the header-based enforcement is sound ONLY behind a trusted proxy — the same
-assumption that backs `KIRRA_TRUSTED_INGRESS_MODE` / `x-kirra-client-id`. **In-process
-TLS (below) removes this AoU** for deployments that enable it, because the transport
-is then TLS by construction rather than by a proxy's assertion.
+**AOU-TRANSPORT-PROXY-001 (load-bearing for the tier-2 header fallback only):** when
+the gate falls through to the forwarded-proto header — i.e. the verifier is NOT
+terminating TLS in-process — the trusted proxy/mesh MUST set, overwriting any
+client-supplied value, the forwarded-proto header. A directly-reachable (un-proxied)
+verifier would let a client spoof it, so the header-based enforcement is sound ONLY
+behind a trusted proxy — the same assumption that backs `KIRRA_TRUSTED_INGRESS_MODE`
+/ `x-kirra-client-id`. **In-process TLS (below) removes this AoU** for deployments
+that enable it: the tier-1 `ServerTerminatedTls` connection signal is authoritative
+and the header is never consulted, because the transport is then TLS by construction
+rather than by a proxy's assertion. **Startup WARNs (AOU-TRANSPORT-PROXY-001)** when
+`KIRRA_REQUIRE_SECURE_TRANSPORT` is ON but in-process TLS is OFF — the configuration
+that leaves the gate depending on this AoU — so an operator running un-proxied sees
+that the spoofable header is the only barrier.
 
 **In-process TLS termination — LIVE (opt-in, server-side; WS-1 Track 1.2).**
 Terminating TLS on the verifier itself is **opt-in and default-OFF**: with neither

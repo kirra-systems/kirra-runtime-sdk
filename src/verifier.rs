@@ -165,12 +165,20 @@ pub fn validate_client_identity_headers(
 /// TLS via a forwarded-proto header. When `require_secure_transport` is on, a
 /// request that does NOT carry that assertion is rejected (fail-closed).
 ///
-/// **AOU-TRANSPORT-TLS-001:** the trusted proxy/mesh MUST set — overwriting any
-/// client-supplied value — the forwarded-proto header. A directly-reachable
-/// (un-proxied) verifier would let a client spoof it, so this enforcement is only
-/// sound behind a trusted proxy (the same assumption that backs
-/// `KIRRA_TRUSTED_INGRESS_MODE` / `x-kirra-client-id`). In-process TLS termination
-/// on the verifier itself is the alternative (tracked separately).
+/// **Sec1 (#1044) — two tiers, connection first.** When in-process TLS is active
+/// (`KIRRA_TLS_CERT_PATH`/`KEY_PATH`), the gate derives "secure" from the ACTUAL
+/// connection: `serve_tls` injects a server-side `ServerTerminatedTls` request
+/// extension (unspoofable — a client cannot set a request extension), which
+/// `request_transport_is_secure` trusts directly. The `X-Forwarded-Proto` header
+/// is consulted ONLY as the fallback for the plaintext-listener-behind-a-proxy
+/// topology.
+///
+/// **AOU-TRANSPORT-PROXY-001:** in that header-fallback topology the trusted
+/// proxy/mesh MUST set — overwriting any client-supplied value — the
+/// forwarded-proto header; a directly-reachable (un-proxied, no in-process TLS)
+/// verifier would let a client spoof it. The startup sentinel WARNS when the gate
+/// is enabled without in-process TLS, naming this obligation (the same class of
+/// assumption that backs `KIRRA_TRUSTED_INGRESS_MODE` / `x-kirra-client-id`).
 #[derive(Debug, Clone)]
 pub struct TransportSecurityConfig {
     pub require_secure_transport: bool,
@@ -202,19 +210,38 @@ impl TransportSecurityConfig {
 }
 
 /// Pure boundary check — fail-closed. When `require_secure_transport` is OFF,
-/// admit (backward-compatible, byte-identical to before). When ON, admit ONLY if
-/// the forwarded-proto header is present, readable, and its ORIGINAL-client value
-/// (the FIRST entry of a possibly comma-listed `client,proxy,…` chain — the
-/// standard `X-Forwarded-Proto` semantics) is `https` (case-insensitive). An
-/// absent header, an unreadable value, or a non-`https` client protocol is rejected.
+/// admit (backward-compatible, byte-identical to before). When ON:
+///
+///   1. If `connection_is_tls` — the request arrived over the in-process
+///      rustls-terminated listener (a TRUSTED, server-side signal injected by
+///      `serve_tls`, not a client header) — admit. This is the ground truth and
+///      cannot be spoofed (Sec1 · #1044).
+///   2. Otherwise fall back to the `X-Forwarded-Proto` header (the
+///      plaintext-listener-behind-an-external-TLS-proxy topology): admit ONLY if
+///      it is present, readable, and its ORIGINAL-client value (the FIRST entry
+///      of a possibly comma-listed `client,proxy,…` chain) is `https`
+///      (case-insensitive). Absent / unreadable / non-`https` → reject.
+///
+/// The header path is trustworthy ONLY behind a proxy that unconditionally
+/// overwrites `X-Forwarded-Proto` (an operator obligation — AOU-TRANSPORT-PROXY-001,
+/// warned at startup by the sentinel when the gate is on without in-process TLS).
+/// A client on a plaintext leg that forges the header can no longer be admitted
+/// on a TLS-terminating deployment, because tier 1 already answered from the real
+/// connection.
 pub fn request_transport_is_secure(
     require_secure_transport: bool,
+    connection_is_tls: bool,
     forwarded_proto_header: &str,
     headers: &axum::http::HeaderMap,
 ) -> bool {
     if !require_secure_transport {
         return true;
     }
+    // Tier 1: the real connection is in-process TLS (server-derived, unspoofable).
+    if connection_is_tls {
+        return true;
+    }
+    // Tier 2: external-proxy topology — consult the forwarded-proto header.
     let Some(value) = headers.get(forwarded_proto_header) else {
         return false;
     };
@@ -729,10 +756,12 @@ mod transport_security_tests {
         // require off → admit regardless of header (byte-identical to before).
         assert!(request_transport_is_secure(
             false,
+            false,
             "x-forwarded-proto",
             &HeaderMap::new()
         ));
         assert!(request_transport_is_secure(
+            false,
             false,
             "x-forwarded-proto",
             &with_proto("http")
@@ -743,15 +772,16 @@ mod transport_security_tests {
     fn enabled_requires_https_assertion() {
         assert!(request_transport_is_secure(
             true,
+            false,
             "x-forwarded-proto",
             &with_proto("https")
         ));
         assert!(
-            request_transport_is_secure(true, "x-forwarded-proto", &with_proto("HTTPS")),
+            request_transport_is_secure(true, false, "x-forwarded-proto", &with_proto("HTTPS")),
             "case-insensitive"
         );
         assert!(
-            request_transport_is_secure(true, "x-forwarded-proto", &with_proto(" https ")),
+            request_transport_is_secure(true, false, "x-forwarded-proto", &with_proto(" https ")),
             "trimmed"
         );
     }
@@ -759,15 +789,15 @@ mod transport_security_tests {
     #[test]
     fn enabled_rejects_insecure_or_absent_fail_closed() {
         assert!(
-            !request_transport_is_secure(true, "x-forwarded-proto", &HeaderMap::new()),
+            !request_transport_is_secure(true, false, "x-forwarded-proto", &HeaderMap::new()),
             "absent header → deny"
         );
         assert!(
-            !request_transport_is_secure(true, "x-forwarded-proto", &with_proto("http")),
+            !request_transport_is_secure(true, false, "x-forwarded-proto", &with_proto("http")),
             "plaintext → deny"
         );
         assert!(
-            !request_transport_is_secure(true, "x-forwarded-proto", &with_proto("")),
+            !request_transport_is_secure(true, false, "x-forwarded-proto", &with_proto("")),
             "empty → deny"
         );
     }
@@ -777,11 +807,17 @@ mod transport_security_tests {
         // X-Forwarded-Proto lists client,proxy,...: the FIRST (client) leg governs.
         assert!(request_transport_is_secure(
             true,
+            false,
             "x-forwarded-proto",
             &with_proto("https, http")
         ));
         assert!(
-            !request_transport_is_secure(true, "x-forwarded-proto", &with_proto("http, https")),
+            !request_transport_is_secure(
+                true,
+                false,
+                "x-forwarded-proto",
+                &with_proto("http, https")
+            ),
             "a plaintext ORIGINAL client leg must deny even if a later hop is https"
         );
     }
@@ -790,10 +826,39 @@ mod transport_security_tests {
     fn custom_header_name_is_respected() {
         let mut h = HeaderMap::new();
         h.insert("x-mesh-proto", HeaderValue::from_static("https"));
-        assert!(request_transport_is_secure(true, "x-mesh-proto", &h));
+        assert!(request_transport_is_secure(true, false, "x-mesh-proto", &h));
         assert!(
-            !request_transport_is_secure(true, "x-forwarded-proto", &h),
+            !request_transport_is_secure(true, false, "x-forwarded-proto", &h),
             "wrong header name → deny"
+        );
+    }
+
+    #[test]
+    fn connection_derived_tls_is_trusted_over_the_header() {
+        // Sec1 (#1044): a GENUINE in-process-TLS connection (the server-injected
+        // `ServerTerminatedTls` marker → connection_is_tls=true) is secure even
+        // when a spoofed forwarded-proto header lies `http`. Tier 1 answers from
+        // the real connection and the header is never consulted — so a client on a
+        // plaintext leg forging the header cannot be admitted on a TLS-terminating
+        // deployment.
+        assert!(
+            request_transport_is_secure(true, true, "x-forwarded-proto", &with_proto("http")),
+            "a real TLS connection admits regardless of a lying header"
+        );
+        assert!(
+            request_transport_is_secure(true, true, "x-forwarded-proto", &HeaderMap::new()),
+            "a real TLS connection needs no header at all"
+        );
+        // The off-switch and the header-fallback path are unchanged.
+        assert!(request_transport_is_secure(
+            false,
+            false,
+            "x-forwarded-proto",
+            &with_proto("http")
+        ));
+        assert!(
+            request_transport_is_secure(true, false, "x-forwarded-proto", &with_proto("https")),
+            "no in-process TLS → fall back to the (proxy-set) header"
         );
     }
 }

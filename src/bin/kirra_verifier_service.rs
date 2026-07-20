@@ -1145,6 +1145,23 @@ async fn main() {
         }
     };
 
+    // Sec1 (#1044) — enforce AOU-TRANSPORT-PROXY-001. When the transport-security
+    // gate is ON but in-process TLS is OFF, the gate can only derive "secure" from
+    // the forwarded-proto header, which is trustworthy ONLY behind a proxy that
+    // unconditionally overwrites it. Warn LOUDLY so an operator cannot mistake the
+    // gate for a guarantee on a directly-reachable plaintext listener (with
+    // in-process TLS the gate uses the real connection and needs no such trust).
+    if svc_state.app.transport.security.require_secure_transport && tls_config.is_none() {
+        tracing::warn!(
+            aou = "AOU-TRANSPORT-PROXY-001",
+            "KIRRA_REQUIRE_SECURE_TRANSPORT is ON but in-process TLS is OFF: the gate falls \
+             back to the forwarded-proto header, which is SOUND ONLY behind a proxy that \
+             UNCONDITIONALLY overwrites X-Forwarded-Proto. A directly-reachable plaintext \
+             listener would let a client spoof it. Set KIRRA_TLS_CERT_PATH/KIRRA_TLS_KEY_PATH \
+             for unspoofable connection-derived enforcement, or guarantee the proxy obligation."
+        );
+    }
+
     println!("Kirra Verifier Service listening on {listen_addr} (db: {db_path})");
     let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
         Ok(listener) => listener,
