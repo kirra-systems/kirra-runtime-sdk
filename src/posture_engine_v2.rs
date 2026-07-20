@@ -312,6 +312,20 @@ pub fn fail_closed_on_downgrade_send_failure(
     crate::posture_engine::force_lockout(posture_cache, now_ms);
 }
 
+/// Poison-tolerant lock for the escalation STREAK mutexes (C3 · #1034).
+///
+/// Every streak-update site used to be gated `if let Ok(mut s) = ….lock() { … }`,
+/// which is silently skipped FOREVER once the mutex is poisoned (any panic while
+/// a streak lock was held). That is two-directional harm: auto-recovery to
+/// Nominal never advances AND the fault escalation-to-LockedOut streak stops
+/// advancing — a sustained fault would fail to reach the sticky lockout it
+/// should. The streak payload is a plain integer pair (`count` / `start_ms`),
+/// NEVER left torn by a panic, so recovering the guard via `into_inner()` is
+/// always safe — the same policy `StoreHandle` already applies.
+fn streak_lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Applies an RSS state report to `AppState` violation/recovery fields.
 ///
 /// Violation (safe==false): sets `rss_active_violation` and resets the streak.
@@ -327,7 +341,8 @@ pub fn apply_rss_state(app: &Arc<AppState>, rss: &RssState, now_ms: u64) {
         app.escalation
             .rss_active_violation
             .store(true, Ordering::SeqCst);
-        if let Ok(mut streak) = app.escalation.rss_recovery_streak.lock() {
+        {
+            let mut streak = streak_lock(&app.escalation.rss_recovery_streak);
             streak.count = 0;
             streak.start_ms = 0;
         }
@@ -337,7 +352,8 @@ pub fn apply_rss_state(app: &Arc<AppState>, rss: &RssState, now_ms: u64) {
             "RSS violation active — fleet posture will be escalated to Degraded"
         );
     } else if app.escalation.rss_active_violation.load(Ordering::SeqCst) {
-        if let Ok(mut streak) = app.escalation.rss_recovery_streak.lock() {
+        {
+            let mut streak = streak_lock(&app.escalation.rss_recovery_streak);
             // Window expiry: discard streak and start fresh from this tick.
             if streak.start_ms > 0
                 && now_ms.saturating_sub(streak.start_ms) >= AV_RECOVERY_WINDOW_MS
@@ -392,7 +408,8 @@ pub fn apply_frame_integrity_state(app: &Arc<AppState>, trust: FrameTrust, now_m
         FrameTrust::Trusted => {
             // Recovery: only meaningful while a frame degradation is active.
             if app.escalation.frame_degraded_active.load(Ordering::SeqCst) {
-                if let Ok(mut streak) = app.escalation.frame_recovery_streak.lock() {
+                {
+                    let mut streak = streak_lock(&app.escalation.frame_recovery_streak);
                     if streak.start_ms > 0
                         && now_ms.saturating_sub(streak.start_ms) >= AV_RECOVERY_WINDOW_MS
                     {
@@ -417,7 +434,8 @@ pub fn apply_frame_integrity_state(app: &Arc<AppState>, trust: FrameTrust, now_m
                 }
             }
             // A trusted tick breaks any sustained-untrusted run.
-            if let Ok(mut s) = app.escalation.frame_untrusted_streak.lock() {
+            {
+                let mut s = streak_lock(&app.escalation.frame_untrusted_streak);
                 s.count = 0;
                 s.start_ms = 0;
             }
@@ -430,11 +448,13 @@ pub fn apply_frame_integrity_state(app: &Arc<AppState>, trust: FrameTrust, now_m
             app.escalation
                 .frame_degraded_active
                 .store(true, Ordering::SeqCst);
-            if let Ok(mut s) = app.escalation.frame_recovery_streak.lock() {
+            {
+                let mut s = streak_lock(&app.escalation.frame_recovery_streak);
                 s.count = 0;
                 s.start_ms = 0;
             }
-            if let Ok(mut s) = app.escalation.frame_untrusted_streak.lock() {
+            {
+                let mut s = streak_lock(&app.escalation.frame_untrusted_streak);
                 s.count = 0;
                 s.start_ms = 0;
             }
@@ -444,12 +464,14 @@ pub fn apply_frame_integrity_state(app: &Arc<AppState>, trust: FrameTrust, now_m
             app.escalation
                 .frame_degraded_active
                 .store(true, Ordering::SeqCst);
-            if let Ok(mut s) = app.escalation.frame_recovery_streak.lock() {
+            {
+                let mut s = streak_lock(&app.escalation.frame_recovery_streak);
                 s.count = 0;
                 s.start_ms = 0;
             }
             // Inverted streak toward the sticky LockedOut escalation.
-            if let Ok(mut streak) = app.escalation.frame_untrusted_streak.lock() {
+            {
+                let mut streak = streak_lock(&app.escalation.frame_untrusted_streak);
                 if streak.start_ms > 0
                     && now_ms.saturating_sub(streak.start_ms) >= AV_RECOVERY_WINDOW_MS
                 {
@@ -511,7 +533,8 @@ pub fn apply_governor_divergence_state(
         app.escalation
             .divergence_degraded_active
             .store(true, Ordering::SeqCst);
-        if let Ok(mut s) = app.escalation.divergence_recovery_streak.lock() {
+        {
+            let mut s = streak_lock(&app.escalation.divergence_recovery_streak);
             s.count = 0;
             s.start_ms = 0;
         }
@@ -532,7 +555,8 @@ pub fn apply_governor_divergence_state(
             .divergence_degraded_active
             .load(Ordering::SeqCst)
         {
-            if let Ok(mut streak) = app.escalation.divergence_recovery_streak.lock() {
+            {
+                let mut streak = streak_lock(&app.escalation.divergence_recovery_streak);
                 if streak.start_ms > 0
                     && now_ms.saturating_sub(streak.start_ms) >= AV_RECOVERY_WINDOW_MS
                 {
@@ -811,6 +835,47 @@ mod posture_engine_v2_tests {
         use crate::verifier_store::VerifierStore;
         let store = VerifierStore::new(":memory:").unwrap();
         Arc::new(AppState::new(store, VerifierOperationMode::Active))
+    }
+
+    /// C3 (#1034): a POISONED streak mutex must not permanently freeze the
+    /// escalation. Before the fix, every streak update was gated `if let Ok(mut
+    /// s) = ….lock()`, so a single prior panic while a streak lock was held would
+    /// skip all subsequent updates forever — a sustained fault would then never
+    /// escalate Degraded → the sticky LockedOut. With the poison-tolerant
+    /// `streak_lock`, the sustained-Untrusted run still reaches the lockout.
+    #[test]
+    fn poisoned_streak_still_escalates_to_lockout() {
+        let app = frame_app();
+
+        // Poison the untrusted-escalation streak mutex: a helper thread panics
+        // while holding it.
+        let app2 = app.clone();
+        let handle = std::thread::spawn(move || {
+            let _g = app2.escalation.frame_untrusted_streak.lock().unwrap();
+            panic!("intentional panic to poison the streak mutex");
+        });
+        assert!(
+            handle.join().is_err(),
+            "the helper thread must have panicked, poisoning the lock"
+        );
+        assert!(
+            app.escalation.frame_untrusted_streak.lock().is_err(),
+            "precondition: the streak mutex is now poisoned"
+        );
+
+        // Drive AV_RECOVERY_STREAK_THRESHOLD sustained-Untrusted ticks within the
+        // window. With the OLD `if let Ok` gate every one of these would be a
+        // silent no-op and the lockout would NEVER be set.
+        let start = 1_000u64;
+        for i in 0..AV_RECOVERY_STREAK_THRESHOLD {
+            apply_frame_integrity_state(&app, FrameTrust::Untrusted, start + i as u64 * 100);
+        }
+
+        assert!(
+            app.escalation.frame_lockout_active.load(Ordering::SeqCst),
+            "a sustained Untrusted run must reach the sticky LockedOut EVEN through a poisoned \
+             streak lock (C3 #1034); it froze before the fix"
+        );
     }
 
     // ---- S-DG1 governor-divergence tests (mirror the S-FI1 frame matrix) ----
