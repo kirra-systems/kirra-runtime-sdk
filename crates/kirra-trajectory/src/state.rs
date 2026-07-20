@@ -16,6 +16,51 @@
 // TrajectoryPoint, TrajectoryVerdict}` resolves for the checker exactly as before.
 pub use kirra_core::trajectory::{PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict};
 
+use kirra_core::kinematics_contract::VehicleKinematicsContract;
+
+/// S1 fix (#1024) — the checker's **posture-composed lateral envelope**, carried
+/// from the slow loop to the fast-loop conformance gate.
+///
+/// Motivation: the fast loop is the actual per-cycle gate on the untrusted
+/// controller's outgoing steering command, but it previously bounded steering
+/// only against the STATIC `config.max_steering_rad` (the Nominal rack limit) and
+/// never bounded the command's LATERAL ACCELERATION at all. So a within-rack
+/// steer at ODD speed (`a_lat = v²·tan(δ)/L`, far above the rollover envelope)
+/// passed conformance and was republished to the actuators verbatim. This
+/// envelope lets `check_command_conforms` re-apply the kernel's own P5a/P6 bound
+/// (posture-composed → tighter under Degraded) to the OUTGOING command.
+///
+/// Like the B1 velocity ceiling, it rides HERE on the heap-backed slow-loop
+/// record, never on `TrajectoryVerdict` (which stays a pinned one byte). It is a
+/// pure function of `(config, posture)` — the perception cap only tightens speed,
+/// not the lateral limit — so the promote site builds it directly from the same
+/// posture-composed `VehicleKinematicsContract` the slow loop enforced.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LateralEnvelope {
+    /// Posture-composed dynamic lateral-acceleration ceiling (bicycle model), m/s².
+    pub max_lateral_accel_mps2: f64,
+    /// Posture-composed hard steering-angle limit, radians. Tighter than the
+    /// static `config.max_steering_rad` under Degraded (the MRC contract).
+    pub max_steering_rad: f64,
+    /// Wheelbase `L`, metres. Physical — posture-independent.
+    pub wheelbase_m: f64,
+}
+
+impl LateralEnvelope {
+    /// Extract the lateral envelope from the posture-composed kinematics
+    /// contract the slow loop enforced (`config.to_posture_kinematics_contract`).
+    /// The kernel stores the steering hard limit in DEGREES; the fast-loop
+    /// conformance gate works in radians, so convert here once.
+    #[must_use]
+    pub fn from_contract(contract: &VehicleKinematicsContract) -> Self {
+        Self {
+            max_lateral_accel_mps2: contract.max_lateral_accel_mps2,
+            max_steering_rad: contract.max_steering_deg.to_radians(),
+            wheelbase_m: contract.wheelbase_m,
+        }
+    }
+}
+
 /// The per-asset accepted-trajectory record held in `AdaptorState`.
 #[derive(Debug, Clone)]
 pub struct AcceptedTrajectory {
@@ -37,6 +82,13 @@ pub struct AcceptedTrajectory {
     /// `TrajectoryVerdict`, which stays a pinned one byte (the #893
     /// side-channel discipline; see `trajectory_verdict_stays_one_byte`).
     pub effective_velocity_ceiling: Option<Vec<f64>>,
+    /// S1 fix (#1024) — the checker's posture-composed lateral envelope. `Some`
+    /// on a freshly-validated Accept/Clamp record (the slow loop attaches it from
+    /// the same contract it enforced); `check_command_conforms` then bounds the
+    /// OUTGOING command's steering hard-limit AND lateral acceleration against it.
+    /// `None` on a legacy record → the fast loop falls back to the static
+    /// `config.max_steering_rad` only (byte-identical to before this field).
+    pub effective_lateral_envelope: Option<LateralEnvelope>,
     /// Wall-clock ms when this trajectory was promoted into the slot. The
     /// fast loop computes age against `now_ms` for staleness.
     pub promoted_at_ms: u64,
@@ -68,6 +120,7 @@ impl AcceptedTrajectory {
             points,
             verdict: TrajectoryVerdict::Accept,
             effective_velocity_ceiling: None,
+            effective_lateral_envelope: None,
             promoted_at_ms,
             max_age_ms: DEFAULT_MAX_AGE_MS,
         }
@@ -90,6 +143,7 @@ impl AcceptedTrajectory {
             points,
             verdict,
             effective_velocity_ceiling: None,
+            effective_lateral_envelope: None,
             promoted_at_ms,
             max_age_ms: DEFAULT_MAX_AGE_MS,
         }
@@ -106,6 +160,19 @@ impl AcceptedTrajectory {
     #[must_use]
     pub fn with_effective_ceiling(mut self, ceiling: Option<Vec<f64>>) -> Self {
         self.effective_velocity_ceiling = ceiling;
+        self
+    }
+
+    /// Attach the checker's posture-composed lateral envelope (S1 fix, #1024).
+    /// The slow loop calls this on every promoted Accept/Clamp record with the
+    /// envelope derived from the same posture contract it enforced; the fast
+    /// loop's `check_command_conforms` then bounds the outgoing command's
+    /// steering hard-limit + lateral acceleration against it. Chainable off
+    /// [`with_verdict`](Self::with_verdict) / [`with_effective_ceiling`]. A
+    /// `None` argument is a no-op (leaves the static-limit fallback path).
+    #[must_use]
+    pub fn with_lateral_envelope(mut self, envelope: Option<LateralEnvelope>) -> Self {
+        self.effective_lateral_envelope = envelope;
         self
     }
 

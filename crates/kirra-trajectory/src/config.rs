@@ -10,6 +10,7 @@
 
 use kirra_core::containment::VehicleFootprint;
 use kirra_core::kinematics_contract::{VehicleKinematicsContract, URBAN_ODD_SPEED_CAP_MPS};
+use kirra_core::FleetPosture;
 
 /// Integrator-supplied vehicle profile. Holds the platform geometry +
 /// dynamic limits the validator needs. All units SI.
@@ -382,6 +383,31 @@ impl VehicleConfig {
     /// this directly.
     pub fn to_vehicle_footprint(&self) -> VehicleFootprint {
         VehicleFootprint::from(&self.to_kinematics_contract())
+    }
+
+    /// Select the posture-composed kinematics contract:
+    ///
+    /// - `Nominal` → the integrator's full envelope (`to_kinematics_contract`).
+    /// - `Degraded` → the MRC-derated dynamic limits (`to_mrc_kinematics_contract`).
+    /// - `LockedOut` → the MRC contract (most conservative). A LockedOut posture
+    ///   never promotes a trajectory, so this is a safe default the fast path
+    ///   never actually enforces — fail-closed, not a panic.
+    ///
+    /// Single source of truth for the posture→contract mapping, shared by the
+    /// slow-loop per-pose validation (`validate_trajectory_slow_with_envelope`'s
+    /// `base_kinematics`) and the S1 (#1024) fast-loop lateral envelope
+    /// (`LateralEnvelope::from_contract` at the promote site), so the fast loop
+    /// bounds the outgoing command against EXACTLY the contract the slow loop
+    /// enforced — they cannot drift.
+    #[must_use]
+    pub fn to_posture_kinematics_contract(
+        &self,
+        posture: FleetPosture,
+    ) -> VehicleKinematicsContract {
+        match posture {
+            FleetPosture::Nominal => self.to_kinematics_contract(),
+            FleetPosture::Degraded | FleetPosture::LockedOut => self.to_mrc_kinematics_contract(),
+        }
     }
 }
 

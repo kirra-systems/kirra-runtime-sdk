@@ -677,6 +677,9 @@ pub async fn run_adapter(
                         traj.points.clone(),
                         TrajectoryVerdict::MRCFallback,
                         None,
+                        // No lateral envelope on the removal path — the MRC arm
+                        // removes the slot and ignores it (S1, #1024).
+                        None,
                         now_ms_fresh(),
                     );
                     continue;
@@ -833,12 +836,23 @@ pub async fn run_adapter(
             // staleness reads — so a forward wall-clock step can never make a fresh
             // trajectory look stale. (The capture record below keeps a separate
             // wall timestamp for human/audit correlation.)
+            // S1 fix (#1024): derive the posture-composed lateral envelope from
+            // the SAME contract the slow loop enforced (via the shared
+            // `to_posture_kinematics_contract` mapping) and attach it, so the fast
+            // loop can bound the outgoing command's lateral acceleration — not
+            // just its steering against the static rack limit.
+            let lateral_envelope = crate::state::LateralEnvelope::from_contract(
+                &slow_state
+                    .config
+                    .to_posture_kinematics_contract(posture.clone()),
+            );
             slow_state.update_trajectory(
                 traj.asset_id.clone(),
                 traj.trajectory_id,
                 traj.points.clone(),
                 verdict,
                 effective_ceiling,
+                Some(lateral_envelope),
                 now_mono,
             );
             let elapsed_us = start.elapsed().as_micros();
