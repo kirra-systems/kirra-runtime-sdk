@@ -213,27 +213,60 @@ impl DivergenceEscalator {
 }
 
 /// Cross-check two INDEPENDENT perception channels. Fail-closed: returns the FIRST
-/// divergence found (an unmatched object in either direction, or a speed mismatch on a
-/// matched pair). Matching is nearest-position within `cfg.position_tol_m`.
+/// divergence found — an object with no EXCLUSIVE counterpart in the other channel
+/// (in either direction), or a speed mismatch on a matched pair.
 ///
-/// Determinism: objects are matched in input order, nearest-first; ties broken by the
-/// other channel's index. Empty-vs-empty is `Consistent`; an object on only one side
-/// is always a divergence (a sensor that sees a hazard the other misses must not be
-/// silently trusted *or* silently ignored).
+/// S5 (#1039): the match is **one-to-one**. Each channel-A object claims a DISTINCT
+/// channel-B object — its nearest still-UNCLAIMED counterpart within
+/// `cfg.position_tol_m` — and a B already claimed by an earlier A cannot be reused.
+/// Any A that cannot claim a B, and any B left unclaimed after all A are matched, is
+/// a divergence. The prior greedy match had each object independently take its
+/// nearest counterpart with NO exclusivity, so two distinct A objects could both
+/// "match" a single B (and that one B match a single A): a genuine second object seen
+/// by only one channel — a phantom or a miss in a ~2 m cluster (two pedestrians /
+/// vehicles a car-width apart) — passed as `Consistent`, defeating True-Redundancy
+/// for exactly the dangerous case it exists to catch. Exclusivity can only ADD
+/// divergences (fail-closed: an over-flag caps speed to the MRC floor, it never hides
+/// a real object).
+///
+/// Determinism: A is matched in input order; each A takes its nearest unclaimed B
+/// (ties broken by the lower B index). Empty-vs-empty is `Consistent`; an object on
+/// only one side is always a divergence (a sensor that sees a hazard the other misses
+/// must not be silently trusted *or* silently ignored).
 #[must_use]
 pub fn cross_check(
     channel_a: &[PerceivedObject],
     channel_b: &[PerceivedObject],
     cfg: RedundancyConfig,
 ) -> RedundancyVerdict {
-    // Every A must have a B counterpart (and agree on speed).
-    if let Some(reason) = unmatched_or_mismatched(channel_a, channel_b, cfg, Channel::A) {
-        return RedundancyVerdict::Diverged(reason);
+    // One claim slot per B object; an A can only match a still-unclaimed B, so the
+    // assignment is one-to-one and a second real object cannot be masked.
+    let mut b_claimed = vec![false; channel_b.len()];
+    for a in channel_a {
+        match nearest_unclaimed(a, channel_b, &b_claimed, cfg.position_tol_m) {
+            None => {
+                return RedundancyVerdict::Diverged(DivergenceReason::Unmatched {
+                    id: a.id,
+                    channel: Channel::A,
+                });
+            }
+            Some(idx) => {
+                let m = &channel_b[idx];
+                let delta = (a.velocity_mps - m.velocity_mps).abs();
+                if delta > cfg.velocity_tol_mps {
+                    return RedundancyVerdict::Diverged(DivergenceReason::SpeedMismatch {
+                        id_a: a.id,
+                        id_b: m.id,
+                        delta_mps: delta,
+                    });
+                }
+                b_claimed[idx] = true;
+            }
+        }
     }
-    // And every B must have an A counterpart (catches B-only phantoms / A misses).
-    // Speed is already checked above; here we only need the existence direction.
-    for b in channel_b {
-        if nearest_within(b, channel_a, cfg.position_tol_m).is_none() {
+    // Any B not claimed by some A is a B-only object (a B phantom / an A miss).
+    for (i, b) in channel_b.iter().enumerate() {
+        if !b_claimed[i] {
             return RedundancyVerdict::Diverged(DivergenceReason::Unmatched {
                 id: b.id,
                 channel: Channel::B,
@@ -243,59 +276,29 @@ pub fn cross_check(
     RedundancyVerdict::Consistent
 }
 
-/// For each object in `from`, require a position-match in `other` and speed agreement.
-fn unmatched_or_mismatched(
-    from: &[PerceivedObject],
-    other: &[PerceivedObject],
-    cfg: RedundancyConfig,
-    from_channel: Channel,
-) -> Option<DivergenceReason> {
-    for o in from {
-        match nearest_within(o, other, cfg.position_tol_m) {
-            None => {
-                return Some(DivergenceReason::Unmatched {
-                    id: o.id,
-                    channel: from_channel,
-                });
-            }
-            Some(m) => {
-                let delta = (o.velocity_mps - m.velocity_mps).abs();
-                if delta > cfg.velocity_tol_mps {
-                    // Order the ids A-then-B regardless of which side `from` is.
-                    let (id_a, id_b) = match from_channel {
-                        Channel::A => (o.id, m.id),
-                        Channel::B => (m.id, o.id),
-                    };
-                    return Some(DivergenceReason::SpeedMismatch {
-                        id_a,
-                        id_b,
-                        delta_mps: delta,
-                    });
-                }
-            }
-        }
-    }
-    None
-}
-
-/// The nearest object in `candidates` within `tol_m` of `target` (by Euclidean
-/// position), if any.
-fn nearest_within<'a>(
+/// The INDEX of the nearest object in `candidates` that is (a) not yet `claimed` and
+/// (b) within `tol_m` of `target` (by Euclidean position), if any. Ties → the lower
+/// index (`min_by` returns the first equal-minimum). Returns an index rather than a
+/// reference so the caller can mark the claim slot.
+fn nearest_unclaimed(
     target: &PerceivedObject,
-    candidates: &'a [PerceivedObject],
+    candidates: &[PerceivedObject],
+    claimed: &[bool],
     tol_m: f64,
-) -> Option<&'a PerceivedObject> {
+) -> Option<usize> {
     candidates
         .iter()
-        .map(|c| {
+        .enumerate()
+        .filter(|(i, _)| !claimed[*i])
+        .map(|(i, c)| {
             (
-                c,
+                i,
                 (c.pos.x_m - target.pos.x_m).hypot(c.pos.y_m - target.pos.y_m),
             )
         })
         .filter(|(_, d)| *d <= tol_m)
         .min_by(|(_, d1), (_, d2)| d1.total_cmp(d2))
-        .map(|(c, _)| c)
+        .map(|(i, _)| i)
 }
 
 #[cfg(test)]
@@ -381,6 +384,79 @@ mod tests {
             }
             other => panic!("expected a speed mismatch, got {other:?}"),
         }
+    }
+
+    /// S5 (#1039) THE masking case: two distinct A objects clustered within
+    /// `position_tol_m` of a SINGLE B object must diverge — the second A has no
+    /// exclusive counterpart, so channel A genuinely sees an object B does not. The
+    /// prior greedy (non-exclusive) match let both A objects "match" the one B and
+    /// passed this as `Consistent`, hiding the extra object.
+    #[test]
+    fn two_clustered_a_objects_sharing_one_b_diverge() {
+        // a1 and a2 are ~1 m apart, both within 2 m of the single b7.
+        let a = [obj(1, 20.0, 0.0, 0.0), obj(2, 21.0, 0.0, 0.0)];
+        let b = [obj(7, 20.5, 0.0, 0.0)];
+        let v = cross_check(&a, &b, RedundancyConfig::default());
+        assert!(
+            v.is_diverged(),
+            "a second A with no exclusive B must diverge, got {v:?}"
+        );
+        assert_eq!(
+            v,
+            RedundancyVerdict::Diverged(DivergenceReason::Unmatched {
+                id: 2,
+                channel: Channel::A
+            }),
+            "the un-paired second A object is the divergence"
+        );
+        assert_eq!(
+            v.to_perception_cap(),
+            Some(0.0),
+            "divergence → MRC-floor cap"
+        );
+    }
+
+    /// Symmetric: two B objects clustered near a single A → the un-paired B (claimed
+    /// by no A) is the divergence.
+    #[test]
+    fn two_clustered_b_objects_sharing_one_a_diverge() {
+        let a = [obj(1, 20.0, 0.0, 0.0)];
+        let b = [obj(7, 20.3, 0.0, 0.0), obj(9, 20.6, 0.0, 0.0)];
+        assert_eq!(
+            cross_check(&a, &b, RedundancyConfig::default()),
+            RedundancyVerdict::Diverged(DivergenceReason::Unmatched {
+                id: 9,
+                channel: Channel::B
+            })
+        );
+    }
+
+    /// One-to-one must NOT over-flag a legitimate distinct 2↔2 pairing: each A has its
+    /// own nearby, exclusive B, so all claims resolve → `Consistent`.
+    #[test]
+    fn distinct_pairs_match_one_to_one_and_stay_consistent() {
+        let a = [obj(1, 20.0, 0.0, 3.0), obj(2, 40.0, 0.0, 3.0)];
+        let b = [obj(7, 20.2, 0.0, 3.0), obj(9, 40.1, 0.0, 3.0)];
+        assert_eq!(
+            cross_check(&a, &b, RedundancyConfig::default()),
+            RedundancyVerdict::Consistent
+        );
+    }
+
+    /// The speed-mismatch boundary is STRICT (`>`): a position-matched pair whose
+    /// speed delta is EXACTLY `velocity_tol_mps` is still within tolerance →
+    /// `Consistent`. Pins the `>` operator against the `>=` mutant (which would
+    /// wrongly diverge a pair sitting exactly on the tolerance). `5.0 - 3.5 == 1.5`
+    /// is bit-exact and equals the default `velocity_tol_mps`.
+    #[test]
+    fn speed_delta_exactly_at_tolerance_is_consistent() {
+        let a = [obj(1, 20.0, 0.0, 5.0)];
+        let b = [obj(7, 20.2, 0.0, 3.5)]; // |5.0 - 3.5| == 1.5 == velocity_tol_mps
+        assert_eq!(
+            cross_check(&a, &b, RedundancyConfig::default()),
+            RedundancyVerdict::Consistent,
+            "delta EXACTLY at the tolerance is within tolerance (strict >), not a mismatch"
+        );
     }
 
     // ----- the live-monitor resolution (4-state machine) -----

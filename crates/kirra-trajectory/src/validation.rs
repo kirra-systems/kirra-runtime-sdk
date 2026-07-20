@@ -642,14 +642,26 @@ pub fn validate_trajectory_slow_with_envelope(
             // EP-08: the component comes from the SAME frame as the gaps above
             // (lane tangent on a curve; pose tangent on a straight).
             let obj_lon_v = frame.obj_lon_v;
+            // S3 (#1037): the EGO's accel + brake are the POSTURE-COMPOSED contract
+            // (`kinematics.*`), not the Nominal service brake (`config.max_decel_mps2`).
+            // Under Degraded the ego can only achieve the MRC brake, so passing the
+            // Nominal 4.5 overstated ego stopping power and UNDERSTATED the required
+            // gap — a rear-end risk in exactly the posture where a subsystem is
+            // already faulted. This matches the lateral branch (`max_lateral_accel_mps2`)
+            // and the VRU bound (#779 F3, `max_brake_mps2`), and is consistent with
+            // the per-pose gate, which already clamps the ego's commanded accel/brake
+            // to this same contract. The OBJECT's max brake (6th arg) stays the
+            // Nominal `config.max_decel_mps2`: it is the lead/oncoming vehicle's own
+            // worst-case braking, NOT the ego's, so ego posture must not weaken it
+            // (a smaller value there would UNDER-state the required gap — fail-open).
             let lon_required = if obj_lon_v < 0.0 {
-                // Closing magnitudes; symmetric brake_min (both in their lanes).
+                // Closing magnitudes; ego brake_min posture-composed, oncoming brake worst-case.
                 opposite_direction_safe_distance(
                     traj_point.velocity_mps,
                     obj_lon_v.abs(),
                     RSS_REACTION_TIME_S,
-                    config.max_accel_mps2,
-                    config.max_decel_mps2,
+                    kinematics.max_accel_mps2,
+                    kinematics.max_brake_mps2,
                     config.max_decel_mps2,
                 )
             } else {
@@ -657,8 +669,8 @@ pub fn validate_trajectory_slow_with_envelope(
                     traj_point.velocity_mps,
                     obj_lon_v,
                     RSS_REACTION_TIME_S,
-                    config.max_accel_mps2,
-                    config.max_decel_mps2,
+                    kinematics.max_accel_mps2,
+                    kinematics.max_brake_mps2,
                     config.max_decel_mps2,
                 )
             };
@@ -771,7 +783,14 @@ pub fn validate_trajectory_slow_with_envelope(
     if let Some(modes) = predicted_modes {
         // Pass the SAME (posture-/perception-capped) lateral-accel budget the
         // snapshot lateral branch uses, so both passes agree on the side gap.
-        if predictive_rss_breach(trajectory, modes, config, kinematics.max_lateral_accel_mps2) {
+        if predictive_rss_breach(
+            trajectory,
+            modes,
+            config,
+            kinematics.max_lateral_accel_mps2,
+            kinematics.max_brake_mps2,
+            kinematics.max_accel_mps2,
+        ) {
             return (
                 TrajectoryVerdict::MRCFallback,
                 Some(TrajectoryRefusalReason::PredictiveRssBreach),
@@ -787,7 +806,12 @@ pub fn validate_trajectory_slow_with_envelope(
     // what it can see — is refused, treating unobserved space as a potential
     // stopped hazard. Absent input → skipped, so the Nominal path is unchanged.
     if let Some(vis) = visibility_range_m {
-        if outruns_assured_clear_distance(trajectory, vis, config.max_decel_mps2) {
+        // S4 (#1038): the assured-clear-distance cap brakes with the POSTURE-COMPOSED
+        // `kinematics.max_brake_mps2`, not the Nominal service brake — under Degraded
+        // the ego stops more slowly, so the true assured-clear speed is LOWER. Using
+        // the Nominal 4.5 would permit a marginally-too-high speed for the visible
+        // distance (same fail-open direction as S3). Matches the longitudinal/VRU brakes.
+        if outruns_assured_clear_distance(trajectory, vis, kinematics.max_brake_mps2) {
             return (
                 TrajectoryVerdict::MRCFallback,
                 Some(TrajectoryRefusalReason::OcclusionOutrunsVisibility),
@@ -911,9 +935,20 @@ fn assured_clear_distance_speed_cap(remaining_m: f64, brake_decel_mps2: f64) -> 
 /// True if any pose commands a speed above the assured-clear-distance cap for its
 /// station along the trajectory (within a small tolerance). `visibility_m` is the
 /// assured-clear distance from the trajectory start; as the ego advances, the
-/// remaining visible distance shrinks by the arc length travelled — we do not assume
+/// remaining visible distance shrinks by the distance travelled — we do not assume
 /// new space becomes visible mid-plan (fail-closed; the planner re-plans as it sees
-/// further).
+/// further). `brake_decel_mps2` is the POSTURE-COMPOSED ego brake (S4 #1038): under
+/// Degraded the ego stops more slowly, lowering the true assured-clear speed.
+///
+/// S4 (#1038) chord-vs-arc note: `traveled` accumulates the straight-line CHORD
+/// between consecutive poses, which under-estimates the true ARC length on a curve;
+/// that over-estimates `remaining` and would permit a marginally-too-high speed. The
+/// error is accepted as bounded-and-negligible at the deployed sampling density
+/// (≥10 Hz): the chord/arc gap is O(κ²·L³) in the segment length `L`, and at the ODD
+/// speed cap the inter-pose spacing is ~2 m, giving sub-centimetre error on any drivable
+/// curvature — far below `OCCLUSION_SPEED_TOL_MPS`. Accumulating true Frenet arc length
+/// (available only when a corridor is supplied) is the exact fix if a future ODD widens
+/// the curvature/spacing envelope; the chord is the conservative-enough approximation here.
 fn outruns_assured_clear_distance(
     trajectory: &[TrajectoryPoint],
     visibility_m: f64,
@@ -1003,6 +1038,11 @@ fn predictive_rss_breach(
     modes: &[PredictedMode<'_>],
     config: &VehicleConfig,
     max_lateral_accel_mps2: f64,
+    // S3 (#1037): the POSTURE-COMPOSED ego accel + brake, threaded from the caller's
+    // `kinematics` contract so the predictive longitudinal bound matches the snapshot
+    // pass (Nominal → full envelope; Degraded → the weaker MRC brake → larger gap).
+    ego_brake_mps2: f64,
+    ego_accel_mps2: f64,
 ) -> bool {
     // B3: track whether ANY sample window was actually evaluable. A non-monotonic
     // `dt` or an out-of-span time match means "couldn't evaluate this sample" —
@@ -1071,13 +1111,15 @@ fn predictive_rss_breach(
             // closure (negative projected velocity) needs the opposite-direction
             // (sum-of-stopping-distances) bound, otherwise the rear-end bound.
             let obj_lon_v = ovx * cos_h + ovy * sin_h; // predicted closing component
+                                                       // S3 (#1037): posture-composed ego accel + brake (same as the snapshot
+                                                       // pass); the object's max brake stays the Nominal worst-case.
             let lon_required = if obj_lon_v < 0.0 {
                 opposite_direction_safe_distance(
                     ego.velocity_mps,
                     obj_lon_v.abs(),
                     RSS_REACTION_TIME_S,
-                    config.max_accel_mps2,
-                    config.max_decel_mps2,
+                    ego_accel_mps2,
+                    ego_brake_mps2,
                     config.max_decel_mps2,
                 )
             } else {
@@ -1085,8 +1127,8 @@ fn predictive_rss_breach(
                     ego.velocity_mps,
                     obj_lon_v,
                     RSS_REACTION_TIME_S,
-                    config.max_accel_mps2,
-                    config.max_decel_mps2,
+                    ego_accel_mps2,
+                    ego_brake_mps2,
                     config.max_decel_mps2,
                 )
             };
@@ -2363,6 +2405,179 @@ mod boundary_mutation_killers {
             v,
             TrajectoryVerdict::MRCFallback,
             "dy == lat_required sits OUTSIDE the strict lateral gate: {r:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod posture_brake_symmetry {
+    //! S3/S4 (#1037/#1038): the longitudinal RSS and the occlusion assured-clear-
+    //! distance cap brake with the POSTURE-COMPOSED contract, not the Nominal service
+    //! brake. Each test places a hazard / visibility INSIDE the window between the
+    //! Nominal-brake and the (weaker) MRC-brake threshold — computed from the SAME
+    //! primitive the checker calls — so it is admitted under Nominal but MRC'd under
+    //! Degraded. A near-stationary 2-pose trajectory keeps every pose inside the window.
+    use super::*;
+    use crate::corridor::MockCorridorSource;
+    use kirra_core::frame_integrity::FrameTrust;
+
+    fn two_pose(v: f64, x0: f64, dx: f64) -> Vec<TrajectoryPoint> {
+        vec![
+            TrajectoryPoint {
+                pose: Pose {
+                    x_m: x0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+                velocity_mps: v,
+                time_from_start_s: 0.0,
+            },
+            TrajectoryPoint {
+                pose: Pose {
+                    x_m: x0 + dx,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+                velocity_mps: v,
+                time_from_start_s: 0.01,
+            },
+        ]
+    }
+
+    #[test]
+    fn degraded_longitudinal_rss_uses_the_weaker_mrc_brake() {
+        let cfg = VehicleConfig::default_urban();
+        let nom = cfg.to_kinematics_contract();
+        let mrc = cfg.to_mrc_kinematics_contract();
+        let v = 10.0;
+        // The checker's own primitive: ego accel + brake posture-composed; the lead's
+        // max brake stays the Nominal worst-case in BOTH (exactly as the impl passes it).
+        let req_nom = longitudinal_safe_distance(
+            v,
+            0.0,
+            RSS_REACTION_TIME_S,
+            nom.max_accel_mps2,
+            nom.max_brake_mps2,
+            nom.max_brake_mps2,
+        );
+        let req_mrc = longitudinal_safe_distance(
+            v,
+            0.0,
+            RSS_REACTION_TIME_S,
+            mrc.max_accel_mps2,
+            mrc.max_brake_mps2,
+            nom.max_brake_mps2,
+        );
+        assert!(
+            req_mrc > req_nom + 1.0,
+            "the weaker MRC brake must need a materially larger gap (nom={req_nom}, mrc={req_mrc})"
+        );
+        let gap = 0.5 * (req_nom + req_mrc); // midpoint of the [req_nom, req_mrc) window
+
+        let x0 = 5.0;
+        let traj = two_pose(v, x0, 0.1); // 0.1 m travel ≪ the half-window (~1.7 m at v=10)
+        let corridor = MockCorridorSource::straight_5m_half_width(400.0);
+        let obj = PerceivedObject {
+            id: 1,
+            pos: Point {
+                x_m: x0 + gap,
+                y_m: 0.0,
+            },
+            velocity_mps: 0.0,
+            heading_rad: 0.0,
+            vel: Point { x_m: 0.0, y_m: 0.0 },
+        };
+        let objects = [obj];
+
+        let nominal = validate_trajectory_slow(
+            &traj,
+            &corridor,
+            &objects,
+            &cfg,
+            None,
+            FleetPosture::Nominal,
+        );
+        assert_ne!(
+            nominal,
+            TrajectoryVerdict::MRCFallback,
+            "gap {gap:.2} m ≥ Nominal-brake required {req_nom:.2} m → not a breach; got {nominal:?}"
+        );
+        let degraded = validate_trajectory_slow(
+            &traj,
+            &corridor,
+            &objects,
+            &cfg,
+            None,
+            FleetPosture::Degraded,
+        );
+        assert_eq!(
+            degraded,
+            TrajectoryVerdict::MRCFallback,
+            "under Degraded the weaker MRC brake needs {req_mrc:.2} m > gap {gap:.2} m → rear-end breach; got {degraded:?}"
+        );
+    }
+
+    #[test]
+    fn degraded_occlusion_cap_uses_the_weaker_mrc_brake() {
+        let cfg = VehicleConfig::default_urban();
+        let nom_brake = cfg.to_kinematics_contract().max_brake_mps2;
+        let mrc_brake = cfg.to_mrc_kinematics_contract().max_brake_mps2;
+        let v = 10.0;
+        // Invert the checker's `assured_clear_distance_speed_cap`: the assured-clear
+        // distance at which speed `v` is exactly admissible for brake `b` is
+        // rem = v²/(2b) + v·ρ. A weaker brake needs MORE sight distance for the same v.
+        let rem_for = |b: f64| v * v / (2.0 * b) + v * RSS_REACTION_TIME_S;
+        let rem_nom = rem_for(nom_brake);
+        let rem_mrc = rem_for(mrc_brake);
+        // The real cap function agrees the inverted thresholds bracket v.
+        assert!(assured_clear_distance_speed_cap(rem_nom, nom_brake) >= v - 1e-6);
+        assert!(assured_clear_distance_speed_cap(rem_mrc, mrc_brake) >= v - 1e-6);
+        assert!(
+            rem_mrc > rem_nom + 1.0,
+            "the weaker MRC brake must need materially more sight distance (nom={rem_nom}, mrc={rem_mrc})"
+        );
+        let vis = 0.5 * (rem_nom + rem_mrc); // midpoint of the [rem_nom, rem_mrc) window
+
+        let x0 = 5.0;
+        let traj = two_pose(v, x0, 0.05);
+        let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+        let objects: Vec<PerceivedObject> = Vec::new();
+
+        let nominal = validate_trajectory_slow_capped(
+            &traj,
+            &corridor,
+            &objects,
+            &cfg,
+            None,
+            FleetPosture::Nominal,
+            None,
+            Some(vis),
+            None,
+            None,
+            FrameTrust::Trusted,
+        );
+        assert_ne!(
+            nominal,
+            TrajectoryVerdict::MRCFallback,
+            "vis {vis:.2} m ≥ Nominal-brake assured-clear {rem_nom:.2} m → admitted; got {nominal:?}"
+        );
+        let degraded = validate_trajectory_slow_capped(
+            &traj,
+            &corridor,
+            &objects,
+            &cfg,
+            None,
+            FleetPosture::Degraded,
+            None,
+            Some(vis),
+            None,
+            None,
+            FrameTrust::Trusted,
+        );
+        assert_eq!(
+            degraded,
+            TrajectoryVerdict::MRCFallback,
+            "under Degraded the weaker MRC brake needs {rem_mrc:.2} m > vis {vis:.2} m → occlusion breach; got {degraded:?}"
         );
     }
 }
