@@ -54,8 +54,14 @@ docker compose -f deploy/autoware-isolation/docker-compose.yml \
 # or standalone, in any sourced ROS 2 container with the curated msgs built:
 python3 deploy/autoware-isolation/autoware_stub_publisher.py
 ```
-The stub logs `✓ received a governed control_cmd back from the checker` once the
-adapter's bounded output returns — that confirms the seam round-trips end to end.
+This works **out of the box**: the `kirra` container self-bootstraps (rust +
+curated msgs + the adapter) and runs `kirra_governor`, and the stub is pinned to
+that node's topics (`/kirra/kirra_governor/input/*` +
+`…/output/control_cmd`). The stub logs `✓ received a governed control_cmd back
+from the checker` once the adapter's bounded output returns — that confirms the
+seam round-trips end to end, with no real Autoware. (First `up` is slow: the
+`kirra` container compiles r2r + the adapter once. Bake a Jazzy image with the
+adapter prebuilt — set `KIRRA_IMAGE` — to skip the compile on later runs.)
 
 ## Bench commands (copy-paste)
 
@@ -104,6 +110,7 @@ colcon build --packages-up-to autoware_planning_msgs autoware_perception_msgs \
                               autoware_map_msgs autoware_control_msgs
 source install/setup.bash
 KIRRA_BOUNDARY_PREFIX=/kirra/kirra_governor/input \
+KIRRA_CONTROL_TOPIC=/kirra/kirra_governor/output/control_cmd \
   python3 ~/kirra-runtime-sdk/deploy/autoware-isolation/autoware_stub_publisher.py
 ```
 Terminal B — build + run the checker (adapter) node:
@@ -124,16 +131,20 @@ ros2 topic list | grep kirra_governor/input
 ros2 topic hz   /kirra/kirra_governor/input/trajectory      # stub is publishing
 ros2 topic info -v /kirra/kirra_governor/input/objects      # type + (Jazzy) RIHS hash — compare to Humble's
 ```
-Governed round-trip: `ros2 topic list` for the adapter's output topic, then point the
-stub at it (`KIRRA_CONTROL_TOPIC=<that topic>`) — it logs `✓ received a governed
-control_cmd back from the checker` on the first bounded command.
+Governed round-trip: Terminal A already listens on the adapter's output
+(`KIRRA_CONTROL_TOPIC=/kirra/kirra_governor/output/control_cmd`), so the stub logs
+`✓ received a governed control_cmd back from the checker` on the first bounded
+command — confirm the topic is live with
+`ros2 topic hz /kirra/kirra_governor/output/control_cmd`.
 
 ## What this scaffold is / isn't
-- **Is:** the topology, the cross-distro wire-compat gate, and a doer stub so the
-  Jazzy side is testable now.
-- **Isn't:** a real Autoware build (image/command are placeholders), and it does
-  **not** touch the safety spine — the checker is `no_std`/ROS-agnostic and
-  bounds whatever crosses the boundary regardless of distro.
+- **Is:** the topology, the cross-distro wire-compat gate, a doer stub, AND a
+  runnable checker side — `--profile stub up` builds and runs the real adapter and
+  round-trips the boundary on the Jazzy side with no real Autoware.
+- **Isn't:** a real Autoware build — only the `autoware` service image/command are
+  placeholders for the integrator's Humble build. The scaffold does **not** touch
+  the safety spine: the checker is `no_std`/ROS-agnostic and bounds whatever
+  crosses the boundary regardless of distro.
 
 ## Retirement
 When Autoware ships stable Jazzy support, migrate the `autoware` service to
