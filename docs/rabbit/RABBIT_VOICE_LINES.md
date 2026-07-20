@@ -60,7 +60,19 @@ Legend: **LIVE** = wired today (file:seam cited) · **GAP** = to be wired · the
 | A3 | Shutting down | **LIVE** `rabbit_boot.py` `shutdown_line` (systemd `ExecStop`) | "Powering down. I've come to a safe stop — try not to miss me too much." |
 | A4 | Idle / standing by | optional (not wired) | "Standing by{name}." (or silence) |
 | A5 | LLM digest changed since it was vetted (stealth update) | **LIVE** `rabbit_boot.py` `_maybe_warn_model_changed` (only on a CONFIRMED change; unpinned/unavailable stay silent) | "A heads-up{name}: my language model has changed since it was last vetted. I'd re-run the model check before trusting me to drive." |
-| A6 | Voice-config doctor found a ❌ on boot (mic/speaker device drifted, missing engine, …) | **LIVE** `rabbit_boot.py` `_maybe_warn_misconfigured` (runs the read-only `kirra_voice_doctor.sh --quiet`; only on a FAIL, silent when clean or the doctor can't run) | "A heads-up{name}: my self-check found a configuration problem. Run the voice doctor before relying on me — my ears or voice may be off." |
+| A6 | Boot self-check found a FAIL (a drifted device, missing engine, broken prerequisite) | **LIVE** `rabbit_boot.py` `_maybe_warn_misconfigured` (runs the read-only `kirra_doctor` default set — falls back to `kirra_voice_doctor.sh`; SPEAKS only on FAIL + at most ONE issue, WARNs go to the journal — no boot nag) | "A heads-up{name}: my self-check found a configuration problem. The devices module has a problem: motor serial. Run kirra doctor for the full report." |
+
+### G. Diagnostics on demand ("Rabbit, run diagnostics")
+
+Deterministic matcher (`rabbit_diag.py`, the OTA-matcher pattern — NO LLM), handled
+before the LLM/movement path. Read-only `kirra_doctor` run; the summary speaks
+counts + at most three plain issue sentences, never paths or details.
+
+| # | Situation | Wiring | Line |
+|---|---|---|---|
+| G1 | Self-check requested, everything healthy | **LIVE** `rabbit_diag.handle` → `kirra_doctor` → `speech_summary` | "Diagnostics complete. Everything looks healthy across 9 modules." |
+| G2 | Self-check requested, problems found | **LIVE** same path | "Diagnostics complete. 1 problem found and 2 warnings. The devices module has a problem: motor serial. …" |
+| G3 | The diagnostics runner itself errored | **LIVE** `rabbit_diag.run_and_summarize` fallback | "I couldn't complete my self-check — the diagnostics runner hit an internal error. Try kirra doctor from a terminal." |
 
 ### B. Driving (you gave a command)
 

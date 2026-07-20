@@ -1085,6 +1085,12 @@ jobs:
           # read; stale/degraded/lockout → "still checking myself over"), and the
           # OTA voice-matcher precedence. See docs/rabbit/RABBIT_VOICE_LINES.md.
           python3 robot/rabbit_voice_test.py
+          # Diagnostics framework (pure, no hardware): schema v1 shape/ordering,
+          # worst-of aggregation + exit codes, module isolation (raise/timeout →
+          # UNKNOWN for that module only), the deterministic "run diagnostics"
+          # voice matcher (no OTA/drive overlap), speech-summary capping, and
+          # the voice-doctor wrapper against a stub. See docs/diagnostics.md.
+          python3 robot/kirra_doctor_test.py
           # Detecting-installer contract (R2 golden build): detect/verify/install
           # are fail-closed (wrong car-type mode, unknown platform, missing
           # devices all refuse with remediation) and SELECT-NOT-INFER holds (the

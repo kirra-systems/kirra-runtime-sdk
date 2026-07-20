@@ -60,25 +60,44 @@ def shutdown_line():
     return "Powering down. I've come to a safe stop — try not to miss me too much."
 
 
-def misconfig_line():
-    """A6: the voice-config doctor found a ❌ (e.g. a mic/speaker device drifted,
-    a missing engine). Generic advisory — run the doctor for specifics."""
-    return (f"A heads-up{name_slot()}: my self-check found a configuration problem. "
-            "Run the voice doctor before relying on me — my ears or voice may be off.")
+def misconfig_line(top_issue=None):
+    """A6: the boot self-check found a FAIL (a drifted device, a missing engine,
+    a broken prerequisite). Speaks at most ONE issue; the full report is
+    kirra_doctor from a terminal. Back-compatible: no-arg = generic advisory."""
+    base = f"A heads-up{name_slot()}: my self-check found a configuration problem."
+    tail = top_issue if top_issue else \
+        "Run the voice doctor before relying on me — my ears or voice may be off."
+    return f"{base} {tail} Run kirra doctor for the full report." if top_issue else f"{base} {tail}"
 
 
 def _maybe_warn_misconfigured():
-    """Channel-A advisory if the read-only voice-config doctor (kirra_voice_doctor.sh,
-    next to this file) reports a FAIL. Best-effort and lazy; never breaks boot, and
-    stays silent when the doctor passes or can't run (e.g. not staged here)."""
+    """Channel-A advisory from the boot self-check. Prefers the full kirra_doctor
+    framework (default read-only module set): logs the summary to stderr every
+    boot, but SPEAKS only on a FAIL (voice line A6 + the top issue) — WARNs are
+    common (staged-not-enabled services, NTP) and must not become boot nag.
+    Falls back to the standalone kirra_voice_doctor.sh if the framework isn't
+    staged. Best-effort: a self-check advisory must never break boot."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        from kirra_doctor import collect  # lazy; same dir (repo or /opt/kirra/robot)
+        from doctor.core import issues, speech_summary
+        report = collect()
+        print(f"rabbit_boot self-check: {speech_summary(report)}", file=sys.stderr)
+        if report["status"] == "FAIL":
+            top = issues(report)[0]
+            speak(misconfig_line(f"The {top[0]['name']} module has a problem"
+                                 + (f": {top[1]['check']}." if top[1] else ".")))
+        return
+    except Exception:  # noqa: BLE001 — fall back to the shell voice doctor
+        pass
     import subprocess
-    doctor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kirra_voice_doctor.sh")
+    doctor = os.path.join(here, "kirra_voice_doctor.sh")
     if not os.path.exists(doctor):
         return
     try:
         rc = subprocess.run(["bash", doctor, "--quiet"], timeout=15,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
-    except Exception:  # noqa: BLE001 — a self-check advisory must never break boot
+    except Exception:  # noqa: BLE001
         return
     if rc != 0:
         speak(misconfig_line())
