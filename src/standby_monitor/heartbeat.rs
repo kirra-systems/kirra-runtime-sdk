@@ -65,6 +65,19 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
     // FAILURES the primary self-demotes (disk-wedge / fence-uncertainty).
     let mut consecutive_failures: u32 = 0;
 
+    // C8 (#1050): a STRICTLY-monotonic per-tick sequence folded into the
+    // freshness token. The token is only a change-detector for the standby
+    // (`HeartbeatFreshness` compares it as an opaque string; it never parses the
+    // value), and any value that changes EVERY tick suffices. `now_ms()` alone
+    // does not: at a sub-millisecond cadence (a misconfigured interval below the
+    // clock resolution) two ticks would stamp the same millisecond → the same
+    // token → the standby would read "unchanged" and could spuriously promote.
+    // Pairing the timestamp with `heartbeat_seq` (which advances every tick
+    // regardless of clock granularity) removes that collision while keeping the
+    // millisecond for human-readable logs. Not reachable at the shipped ≥2 s
+    // interval; this hardens the misconfigured case.
+    let mut heartbeat_seq: u64 = 0;
+
     // The store work runs under one acquisition; the closure returns an
     // OUTCOME the outer loop acts on (the closure cannot `continue`/`break`
     // the outer loop directly — Rule 4).
@@ -111,6 +124,11 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
         // OWN monotonic clock — see `HeartbeatFreshness`. Any value that
         // strictly changes each tick would do; `now_ms()` is convenient.
         let ts = now_ms();
+        // C8 (#1050): strictly-monotonic per-tick sequence — guarantees the
+        // freshness token changes every tick even if `ts` repeats within a
+        // sub-ms interval. Wraps only after 2^64 ticks (unreachable).
+        heartbeat_seq = heartbeat_seq.wrapping_add(1);
+        let heartbeat_token = format!("{ts}.{heartbeat_seq}");
         // P1: run the heartbeat write + epoch read OFF the tokio worker pool
         // (`call` → spawn_blocking) so the ~2 s fsync write can't pin a shared
         // worker and head-of-line-block request handlers / the fast loop. The
@@ -122,7 +140,7 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
         let id_c = id.clone();
         let lease_c = lease;
         let outcome = match app.store.call(move |store| {
-                if let Err(e) = store.save_engine_state(HEARTBEAT_KEY, &ts.to_string()) {
+                if let Err(e) = store.save_engine_state(HEARTBEAT_KEY, &heartbeat_token) {
                     tracing::warn!(
                         error       = %e,
                         instance_id = %id_c,

@@ -199,6 +199,83 @@ impl VerifierStore {
         Ok(())
     }
 
+    /// Sec9 (#1050): register a node AND its attestation policy in ONE
+    /// transaction. `register_node` previously wrote the TPM-quote policy and the
+    /// node record as two separate durable writes — a correct fail-closed ORDER
+    /// (policy first, so a quote-required node is never live without its
+    /// requirement) but NOT atomic: a crash between them could leave a policy row
+    /// with no node. Folding both INSERT-OR-REPLACEs into one transaction makes
+    /// registration all-or-nothing. Plain variant (no epoch fence) for a
+    /// never-claimed store (`held == 0`; see `AppState::persist_node_row`).
+    pub fn save_node_with_policy(
+        &self,
+        node: &RegisteredNode,
+        require_tpm_quote: bool,
+    ) -> Result<()> {
+        let status_json =
+            serde_json::to_string(&node.status).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let tx = self.conn.unchecked_transaction()?;
+        Self::insert_node_and_policy_tx(&tx, node, &status_json, require_tpm_quote)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Sec9 (#1050): the epoch-fenced sibling of [`save_node_with_policy`] — the
+    /// same atomic node+policy write, preceded in the SAME `Immediate` transaction
+    /// by the `held_epoch` fence (C5 #1036 semantics; a superseded primary is
+    /// rejected before it can write either row). Fail-closed like
+    /// [`save_node_epoch_fenced`].
+    pub fn save_node_with_policy_epoch_fenced(
+        &mut self,
+        node: &RegisteredNode,
+        require_tpm_quote: bool,
+        held_epoch: u64,
+    ) -> std::result::Result<(), DurableWriteError> {
+        let status_json =
+            serde_json::to_string(&node.status).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        Self::assert_epoch_held(&tx, held_epoch)?;
+        Self::insert_node_and_policy_tx(&tx, node, &status_json, require_tpm_quote)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Shared body for the Sec9 combined write: the node INSERT-OR-REPLACE + the
+    /// attestation-policy INSERT-OR-REPLACE, both inside the caller's transaction
+    /// (so they commit together). Node first, policy second — but atomicity, not
+    /// order, is the guarantee here (either both land or neither does).
+    fn insert_node_and_policy_tx(
+        tx: &rusqlite::Transaction<'_>,
+        node: &RegisteredNode,
+        status_json: &str,
+        require_tpm_quote: bool,
+    ) -> Result<()> {
+        tx.execute(
+            "INSERT OR REPLACE INTO nodes
+             (node_id, status_json, registered_at_ms, last_trust_update_ms,
+              ak_public_pem, expected_pcr16_digest_hex, site, firmware_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                node.node_id,
+                status_json,
+                node.registered_at_ms as i64,
+                node.last_trust_update_ms as i64,
+                node.ak_public_pem,
+                node.expected_pcr16_digest_hex,
+                node.site,
+                node.firmware_version,
+            ],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO node_attestation_policy (node_id, require_tpm_quote)
+             VALUES (?1, ?2)",
+            params![node.node_id, require_tpm_quote as i64],
+        )?;
+        Ok(())
+    }
+
     /// C5 (#1036): epoch-fenced dependency-set replace. The atomic
     /// DELETE-then-re-INSERT of [`save_dependencies`], preceded in the SAME
     /// `Immediate` transaction by the `held_epoch` fence — a superseded primary can
@@ -561,5 +638,47 @@ mod epoch_fenced_write_tests {
             store.load_dependencies().unwrap().get("c").is_none(),
             "a fenced-out dependency write must leave NO edges (fail-closed)"
         );
+    }
+
+    // Sec9 (#1050): the node record and its attestation policy are written
+    // atomically — both land, or (when fenced out) neither does.
+    #[test]
+    fn node_and_attestation_policy_are_written_and_fenced_together() {
+        let mut store = VerifierStore::new(":memory:").expect("store");
+
+        // Plain path (never-claimed store): both the node row AND the quote policy
+        // land from one call.
+        store
+            .save_node_with_policy(&node("n1"), true)
+            .expect("combined write");
+        assert!(store.node_exists("n1").unwrap());
+        assert!(
+            store.node_requires_tpm_quote("n1").unwrap(),
+            "the attestation policy committed in the same transaction as the node"
+        );
+
+        // Fenced path: advance the durable epoch so a stale held-epoch is
+        // superseded; the combined write must leave NEITHER row.
+        store.try_claim_epoch(0, "A", 1).unwrap();
+        store.try_claim_epoch(1, "B", 2).unwrap();
+        let err = store
+            .save_node_with_policy_epoch_fenced(&node("n2"), true, 1)
+            .expect_err("superseded combined write rejected");
+        assert!(superseded(&err), "expected EpochSuperseded, got {err:?}");
+        assert!(
+            !store.node_exists("n2").unwrap(),
+            "fenced-out registration must leave no node row"
+        );
+        assert!(
+            !store.node_requires_tpm_quote("n2").unwrap(),
+            "fenced-out registration must leave no policy row (defaults false when absent)"
+        );
+
+        // Holder (held == durable == 2) commits both.
+        store
+            .save_node_with_policy_epoch_fenced(&node("n3"), true, 2)
+            .expect("holder combined write admitted");
+        assert!(store.node_exists("n3").unwrap());
+        assert!(store.node_requires_tpm_quote("n3").unwrap());
     }
 }

@@ -55,6 +55,33 @@ pub struct WireView(pub GovernorContractView);
 // safe to share across a process/partition boundary by value. `WireView` is
 // `#[repr(transparent)]` over it, so the same holds. This is the single, audited
 // `unsafe` the carrier needs (ADR-0006 Clause 3 integration boundary).
+// M7 (#1050): PROVE the "no padding" claim the `ZeroCopySend` safety argument
+// rests on, rather than only asserting it in prose. If the compiler inserted any
+// implicit padding, `size_of::<GovernorContractView>()` would exceed the SUM of
+// the field sizes, and those uninitialized padding bytes would be shared across
+// the process/partition boundary. The frozen layout is widest-first with the
+// `u32`s paired into 8-byte slots, so Σ(field sizes) == size_of == the canonical
+// image length; this const assertion fails to compile the instant that stops
+// holding (a reordered/added field that introduces a hole).
+const _: () = {
+    let sum_of_fields = core::mem::size_of::<u32>()   // layout_version
+        + core::mem::size_of::<u32>()                 // magic
+        + core::mem::size_of::<u64>()                 // generation
+        + core::mem::size_of::<u64>()                 // sequence
+        + core::mem::size_of::<u64>()                 // publication_nanos
+        + core::mem::size_of::<u64>()                 // deadline_nanos
+        + core::mem::size_of::<u32>()                 // crc32
+        + core::mem::size_of::<u32>()                 // command_len
+        + MAX_COMMAND_BYTES; // command: [u8; MAX_COMMAND_BYTES]
+    assert!(
+        core::mem::size_of::<GovernorContractView>() == sum_of_fields,
+        "GovernorContractView has implicit padding — ZeroCopySend would share \
+         uninitialized bytes across the boundary"
+    );
+    // `WireView` is `#[repr(transparent)]` over it, so the same holds.
+    assert!(core::mem::size_of::<WireView>() == sum_of_fields);
+};
+
 unsafe impl ZeroCopySend for WireView {}
 
 /// The transport-contract fault classes the carrier drives through iceoryx2, each

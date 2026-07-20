@@ -329,3 +329,35 @@ fn seqlock_accepted_snapshot_is_never_torn() {
         reader.join().unwrap();
     });
 }
+
+// ---------------------------------------------------------------------------
+// W10 (#1050) — LOCKSTEP-SEQLOCK-HVCHAN-001 drift tripwire.
+//
+// `seqlock_publish` / `seqlock_read` above are a HAND-COPIED mirror of the
+// production `kirra_contract_channel::{publish,read_coherent_snapshot}`. The
+// loom model only proves the MIRROR sound — if the production ordering edges
+// drift without the mirror following, loom would be validating a stale protocol.
+// This test reads the production source at compile time and asserts its four
+// load-bearing ordering edges (the ones the mirror replicates) are still present,
+// so a change there reds this test and forces the mirror to be re-checked. It is
+// a drift reminder, not a full-equivalence proof (that is what the loom model is,
+// against the mirror). Pure `include_str!` + substring checks — no loom runtime.
+// ---------------------------------------------------------------------------
+#[test]
+fn production_seqlock_edges_are_in_lockstep() {
+    const PROD: &str = include_str!("../../kirra-contract-channel/src/seqlock.rs");
+    for needle in [
+        "LOCKSTEP-SEQLOCK-HVCHAN-001",   // the reciprocal marker naming this test
+        "committed_gen.wrapping_add(1)", // odd marker: write in progress
+        "committed_gen.wrapping_add(2)", // even commit
+        "fence(Ordering::Release)",      // edge 3: publisher release fence
+        "fence(Ordering::Acquire)",      // edge 4: reader acquire fence before g2 re-read
+    ] {
+        assert!(
+            PROD.contains(needle),
+            "LOCKSTEP DRIFT: production seqlock.rs no longer contains `{needle}` — \
+             the loom mirror (seqlock_publish/seqlock_read) may now model a stale \
+             protocol. Update the mirror in lock-step (W10 #1050) and re-pin this test."
+        );
+    }
+}

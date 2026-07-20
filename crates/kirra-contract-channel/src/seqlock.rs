@@ -12,6 +12,15 @@
 //! them to the hypervisor-mapped region (where the mapping `unsafe` lives — the
 //! ADR-0006 Clause 3 integration shim, *outside* this crate), while the protocol
 //! itself stays `#![forbid(unsafe_code)]` and host-testable against atomics.
+//!
+//! **LOCKSTEP-SEQLOCK-HVCHAN-001 (W10 #1050):** `crates/kirra-loom-models`
+//! carries a HAND-COPIED mirror of this protocol (`seqlock_publish` /
+//! `seqlock_read`) to model it under loom. The two must stay in lock-step — any
+//! change to the FOUR ordering edges below (odd marker Release, the Release
+//! fence, the even commit Release, the Acquire fence before the g2 re-read) MUST
+//! be reflected in the mirror. The loom crate's `production_seqlock_edges_are_in_lockstep`
+//! test reads THIS file and reds if a mirrored edge disappears, so the drift is
+//! caught in CI rather than silently diverging the one subtle concurrency primitive.
 
 use core::sync::atomic::{fence, Ordering};
 
