@@ -1,0 +1,8 @@
+# provenance stamps (yahboom)
+Linux yahboom 5.15.148-tegra #1 SMP PREEMPT Tue Jan 7 17:14:38 PST 2025 aarch64 aarch64 aarch64 GNU/Linux
+# R36 (release), REVISION: 4.3, GCID: 38968081, BOARD: generic, EABI: aarch64, DATE: Wed Jan  8 01:49:37 UTC 2025
+# KERNEL_VARIANT: oot
+TARGET_USERSPACE_LIB_DIR=nvidia
+TARGET_USERSPACE_LIB_DIR_PATH=usr/lib/aarch64-linux-gnu/nvidia
+ROS 2 humble present
+Rosmaster_Lib: /usr/local/lib/python3.10/dist-packages/Rosmaster_Lib-3.3.9-py3.10.egg/Rosmaster_Lib

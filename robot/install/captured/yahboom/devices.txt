@@ -1,0 +1,6 @@
+# captured device state (yahboom)
+/dev/myserial -> /dev/ttyUSB2
+/dev/ydlidar -> /dev/ttyUSB0
+/dev/rplidar -> /dev/ttyUSB0
+crw-rw-rw- 1 root dialout 188, 0 Jul 20 19:07 /dev/ttyUSB0
+crwxrwxrwx 1 root dialout 188, 2 Jul 20 19:07 /dev/ttyUSB2
