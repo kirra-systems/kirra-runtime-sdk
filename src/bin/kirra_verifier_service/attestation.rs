@@ -70,33 +70,23 @@ pub(crate) async fn register_node(
         firmware_version: req.firmware_version,
     };
 
-    // TPM-quote policy (#572 follow-up) is committed BEFORE the node record, so
-    // a node that requires a hardware quote is never live without its policy
-    // (fail-closed: no window where the requirement silently does not apply). A
-    // store error here fails the whole registration — the node is not inserted.
-    {
-        // SAFETY: SG-HA-3 — durable write off the async worker pool.
-        let node_id_p = req.node_id.clone();
-        let policy_err = !matches!(
-            svc.app
-                .store
-                .call(move |store| { store.set_node_attestation_policy(&node_id_p, require) })
-                .await,
-            Ok(Ok(()))
-        );
-        if policy_err {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "failed to persist attestation policy" })),
-            )
-                .into_response();
-        }
-    }
-
-    if svc.app.persist_and_insert_node(node).is_err() {
+    // Sec9 (#1050): the node record and its TPM-quote policy (#572 follow-up) are
+    // now written in ONE durable transaction, so registration is atomic — a crash
+    // can no longer leave a policy row without its node (or vice versa). The
+    // fail-closed intent is preserved (a quote-required node is never live without
+    // its requirement) and strengthened to all-or-nothing. Runs off the async
+    // worker (SAFETY: SG-HA-3) via `spawn_blocking` on the combined write.
+    let app = std::sync::Arc::clone(&svc.app);
+    let persisted = tokio::task::spawn_blocking(move || {
+        app.persist_and_insert_node_with_policy(node, require)
+            .is_ok()
+    })
+    .await
+    .unwrap_or(false);
+    if !persisted {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "failed to persist node" })),
+            Json(json!({ "error": "failed to persist node registration" })),
         )
             .into_response();
     }

@@ -504,6 +504,48 @@ impl AppState {
         })
     }
 
+    /// Sec9 (#1050): persist a node record AND its TPM-quote attestation policy in
+    /// ONE durable transaction, then insert into the in-memory registry (disk
+    /// before memory, invariant #12). Atomic registration — a crash can no longer
+    /// leave a policy row without its node. Same held-epoch fence dispatch as
+    /// `persist_node_row` (a superseded primary is rejected before either row is
+    /// written). `Ok(())` only after both durable writes commit AND the memory
+    /// insert lands.
+    #[allow(clippy::result_unit_err)]
+    pub fn persist_and_insert_node_with_policy(
+        &self,
+        node: RegisteredNode,
+        require_tpm_quote: bool,
+    ) -> Result<(), ()> {
+        use dashmap::mapref::entry::Entry;
+        let held = self
+            .ha_fence
+            .held_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let write = |store: &mut VerifierStore| {
+            if held == 0 {
+                store
+                    .save_node_with_policy(&node, require_tpm_quote)
+                    .map_err(|_| ())
+            } else {
+                store
+                    .save_node_with_policy_epoch_fenced(&node, require_tpm_quote, held)
+                    .map_err(|_| ())
+            }
+        };
+        match self.nodes.entry(node.node_id.clone()) {
+            Entry::Occupied(mut occ) => {
+                self.store.with(write)?;
+                occ.insert(node);
+            }
+            Entry::Vacant(vac) => {
+                self.store.with(write)?;
+                vac.insert(node);
+            }
+        }
+        Ok(())
+    }
+
     /// Atomically read-modify-write a REGISTERED node's record under the per-key
     /// entry (shard) lock (C2 #1031). `f` receives the current record and returns
     /// its replacement; the read, the disk write and the memory write ALL happen
