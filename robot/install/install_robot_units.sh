@@ -34,7 +34,8 @@ echo "== robot-side unit install — user: ${ROBOT_USER} =="
 echo "== 1. Rabbit scripts -> ${OPT}/robot =="
 sudo install -d -m 0755 "${OPT}/robot"
 for f in rabbit_persona.py rabbit_watch.py rabbit_ask.py rabbit_converse.py rabbit_boot.py \
-         rabbit_voice.sh ptt_button.py run_voice_ptt.sh inspect_corridor.py rabbit_ota.py; do
+         rabbit_voice.sh ptt_button.py run_voice_ptt.sh inspect_corridor.py rabbit_ota.py \
+         ros_env.sh; do
   [[ -f "${REPO}/robot/${f}" ]] || { echo "  ⚠ missing ${REPO}/robot/${f} — skipped"; continue; }
   sudo install -m 0755 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
   echo "  installed ${OPT}/robot/${f}"

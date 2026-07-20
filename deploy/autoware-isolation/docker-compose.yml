@@ -35,19 +35,47 @@ services:
     command: ["bash", "-lc", "echo '[autoware] replace with your Autoware launch'; sleep infinity"]
 
   # --- the CHECKER + adapter, on Jazzy ----------------------------------------
+  # RUNNABLE by default: self-bootstraps from source so `--profile stub up` proves
+  # the seam end-to-end with NO prebuilt image. The node is `kirra_governor` in ns
+  # `kirra`, so it subscribes /kirra/kirra_governor/input/* and publishes the
+  # governed /kirra/kirra_governor/output/control_cmd — the topics the stub is
+  # pinned to below. First run is SLOW (compiles r2r + the adapter once); bake a
+  # Jazzy image with the adapter prebuilt (set KIRRA_IMAGE) and replace the command
+  # with just the run step for fast iteration.
   kirra:
-    image: ${KIRRA_IMAGE:-ros:jazzy}          # ← your KIRRA/Jazzy image (builds ros2_ws + the adapter)
+    image: ${KIRRA_IMAGE:-ros:jazzy}          # ← or your KIRRA/Jazzy image (adapter prebuilt)
     container_name: kirra-checker-jazzy
     depends_on: [autoware]
     network_mode: host
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
       - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      - CARGO_TARGET_DIR=/tmp/target       # /repo is ro — write build artifacts to tmpfs-backed /tmp
     volumes:
-      - ../../ros2_ws:/ws:ro
-    # Build the curated msgs on Jazzy (they compile from .msg unchanged) + run
-    # the kirra-ros2-adapter node. Placeholder command — wire your entrypoint.
-    command: ["bash", "-lc", "echo '[kirra] build /ws + run the kirra-ros2-adapter node on Jazzy'; sleep infinity"]
+      - ../../:/repo:ro                      # whole repo (cargo needs the workspace, not just ros2_ws)
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        source /opt/ros/jazzy/setup.bash
+        # 1. rust toolchain — ros:jazzy ships none; repo rust-toolchain.toml pins 1.94.1.
+        if ! command -v cargo >/dev/null 2>&1; then
+          apt-get update && apt-get install -y --no-install-recommends \
+            curl clang libclang-dev build-essential
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        fi
+        . "$HOME/.cargo/env"
+        # 2. build + source the 4 curated autoware_*_msgs (the types r2r's build binds).
+        rm -rf /tmp/ws && mkdir -p /tmp/ws && cp -r /repo/ros2_ws/src /tmp/ws/src
+        ( cd /tmp/ws && colcon build --packages-up-to \
+            autoware_planning_msgs autoware_perception_msgs autoware_map_msgs autoware_control_msgs )
+        source /tmp/ws/install/setup.bash
+        # 3. build the adapter (ros2 feature) against the sourced types.
+        ( cd /repo && cargo build --locked -p kirra-ros2-adapter --features ros2 --release )
+        # 4. run the checker (mock = explicit 5 m straight-line TEST corridor, WARN-bannered).
+        echo '[kirra] adapter built — starting kirra_governor (ns kirra) on the boundary'
+        exec "$CARGO_TARGET_DIR/release/kirra_ros2_adapter_node" --corridor-source mock
 
   # --- STUB doer: validate the KIRRA side WITHOUT a real Autoware --------------
   # `--profile stub` so it never starts unless asked. Publishes minimal, valid
@@ -60,6 +88,11 @@ services:
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
       - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      # Pin the stub to the adapter's FIXED topics (node kirra_governor / ns kirra),
+      # so the boundary round-trips out of the box: publish on the adapter's inputs,
+      # listen on its governed output.
+      - KIRRA_BOUNDARY_PREFIX=/kirra/kirra_governor/input
+      - KIRRA_CONTROL_TOPIC=/kirra/kirra_governor/output/control_cmd
     volumes:
       - ./autoware_stub_publisher.py:/stub.py:ro
       - ../../ros2_ws:/ws:ro

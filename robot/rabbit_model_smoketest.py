@@ -55,7 +55,9 @@ except ImportError:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # The REAL production contract — same system prompt + lenient fail-closed parser
 # the live router uses. Testing anything else would be testing a fiction.
-from rabbit_converse import OLLAMA, STAGE2_SYSTEM, parse_reply  # noqa: E402
+from rabbit_converse import (  # noqa: E402
+    OLLAMA, ROUTER_LLM_OPTIONS, STAGE2_SYSTEM, parse_reply,
+)
 from rabbit_ask import MODEL as DEFAULT_MODEL  # noqa: E402
 from rabbit_persona import (  # noqa: E402
     classify_model_pin, model_pin_path, read_model_pin, read_model_pin_record,
@@ -91,7 +93,8 @@ def chat(model, utterance):
     ]
     try:
         r = requests.post(f"{OLLAMA}/api/chat", timeout=60.0,
-                          json={"model": model, "stream": False, "messages": messages})
+                          json={"model": model, "stream": False, "messages": messages,
+                                "options": ROUTER_LLM_OPTIONS})  # mirror production sampling
         if r.status_code != 200:
             return None
         return (r.json().get("message", {}).get("content") or "").strip()
@@ -143,10 +146,12 @@ def preflight(model):
     return match.get("digest") or None
 
 
-def run_directive_case(model, name, utterance, expect_directive):
+def run_directive_case(model, name, utterance, expect_directive, show_raw=False):
     raw = chat(model, utterance)
     if raw is None:
         return False, "no response (HTTP error / model down)"
+    if show_raw:
+        print(f"    · {name} raw: {raw[:300]!r}", file=sys.stderr)
     had_json = "{" in raw and "}" in raw
     _say, directive = parse_reply(raw)
     got = directive is not None
@@ -213,6 +218,7 @@ def main():
     argv = sys.argv[1:]
     note, argv = _take_opt(argv, "--note")
     no_pin = "--no-pin" in argv
+    show_raw = "--show-raw" in argv    # print each model reply verbatim (diagnostic)
     positional = [a for a in argv if not a.startswith("-")]
     model = positional[0] if positional else DEFAULT_MODEL
 
@@ -226,7 +232,7 @@ def main():
 
     failures = 0
     for name, utterance, expect in DIRECTIVE_CASES:
-        ok, detail = run_directive_case(model, name, utterance, expect)
+        ok, detail = run_directive_case(model, name, utterance, expect, show_raw=show_raw)
         print(f"  {'ok  ' if ok else 'FAIL'} {name:24} {detail}")
         failures += 0 if ok else 1
 

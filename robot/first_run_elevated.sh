@@ -24,7 +24,7 @@
 #     with all KIRRA_* config exported and KIRRA_GOVERNOR_VK_HEX pinned to the
 #     dev key below (KIRRA_DEV_SEED's pubkey).
 #   - Built: cargo build -p kirra-release-token --bin kirra_ros_release_mint --release
-#   - ROS 2 Humble sourced; ROS_DOMAIN_ID=28.
+#   - ROS 2 (Humble or Jazzy) sourced; ROS_DOMAIN_ID=28.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

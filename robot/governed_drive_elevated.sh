@@ -40,7 +40,11 @@ trap cleanup EXIT INT TERM
 
 # ROS setup scripts reference unset vars — relax nounset around the source.
 set +u
-source /opt/ros/humble/setup.bash
+# Distro-agnostic base ROS (Jazzy or Humble, per ADR-0036).
+_KIRRA_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=robot/ros_env.sh
+source "$_KIRRA_HERE/ros_env.sh"
+kirra_source_ros
 # shellcheck disable=SC1090
 source "${WS_SETUP}"
 set -u

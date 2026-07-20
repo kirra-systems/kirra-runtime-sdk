@@ -33,7 +33,11 @@ REPO="$(cd "${HERE}/../.." && pwd)"
 OPT=/opt/kirra
 ENVDIR=/etc/kirra
 ENVFILE="${ENVDIR}/robot.env"
-ROS_SETUP=/opt/ros/humble/setup.bash
+# Distro-agnostic ROS 2 (Jazzy 24.04 or Humble 22.04, per ADR-0036;
+# override with KIRRA_ROS_SETUP / KIRRA_ROS_DISTRO_PREF).
+# shellcheck source=robot/ros_env.sh
+source "${REPO}/robot/ros_env.sh"
+ROS_SETUP="$(kirra_ros_setup_path || true)"
 
 USE_DEV_KEY=0
 SKIP_BUILD=0
@@ -56,10 +60,10 @@ echo "== 1. preflight =="
 command -v sudo >/dev/null || fail "sudo is required (privileged install steps)"
 command -v python3 >/dev/null || fail "python3 not found"
 
-if [[ -f "${ROS_SETUP}" ]]; then
-  ok "ROS 2 Humble found (${ROS_SETUP})"
+if [[ -n "${ROS_SETUP}" && -f "${ROS_SETUP}" ]]; then
+  ok "ROS 2 $(kirra_ros_distro) found (${ROS_SETUP})"
 else
-  fail "ROS 2 Humble not found at ${ROS_SETUP} — the vendor Yahboom image ships it; on a bare 22.04 install it manually first (manual step, see README.md)"
+  fail "ROS 2 not found under /opt/ros (looked for: ${KIRRA_ROS_DISTRO_PREF:-jazzy humble}) — the vendor Yahboom image ships Humble; on a bare 22.04/24.04 install it manually first (manual step, see README.md). Override the path with KIRRA_ROS_SETUP=/opt/ros/<distro>/setup.bash"
 fi
 
 # Vendor motor-board library (runtime dep of the consumer; ships on the
@@ -111,6 +115,8 @@ done
 for f in first_run_elevated.sh live_loop_elevated.sh steering_bench_elevated.sh; do
   sudo install -m 0755 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
 done
+# The distro-agnostic ROS resolver the consumer unit sources (ADR-0036).
+sudo install -m 0644 "${REPO}/robot/ros_env.sh" "${OPT}/robot/ros_env.sh"
 ok "installed cdylib, mint binary, consumer + scripts"
 
 # ---- 4. environment ---------------------------------------------------------
@@ -178,7 +184,7 @@ echo "== done — verification (see README.md §Verification for the full text) 
 cat <<'EOF'
   1. Consumer starts and OWNS the motor board (terminal, validated mode):
        set -a; source /etc/kirra/robot.env; set +a
-       source /opt/ros/humble/setup.bash
+       source /opt/ros/humble/setup.bash    # or /opt/ros/jazzy on 24.04
        python3 /opt/kirra/robot/kirra_motor_consumer.py
      Expect: "KIRRA consumer OWNS /dev/myserial (sole writer)..." and NO
      car-type FATAL. 🔴 The vendor base node must NOT be running.

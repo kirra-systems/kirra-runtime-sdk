@@ -28,7 +28,10 @@ note() { echo "     $*"; }
 
 # ROS for the topic checks (nounset-relaxed around the vendor setup scripts).
 set +u
-source /opt/ros/humble/setup.bash 2>/dev/null || true
+# Distro-agnostic base ROS (Jazzy or Humble, per ADR-0036).
+_KIRRA_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=robot/ros_env.sh
+source "$_KIRRA_HERE/ros_env.sh" 2>/dev/null && kirra_source_ros 2>/dev/null || true
 source "${KIRRA_ROS_WS_SETUP:-$HOME/kirra-runtime-sdk/ros2_ws/install/setup.bash}" 2>/dev/null || true
 set -u
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-28}"

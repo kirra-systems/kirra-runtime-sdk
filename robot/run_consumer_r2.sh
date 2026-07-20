@@ -22,11 +22,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 cd "$REPO"
 
-# ROS 2 (guarded — skip if already sourced / absent).
-if [ -z "${ROS_DISTRO:-}" ] && [ -f /opt/ros/humble/setup.bash ]; then
-  # shellcheck disable=SC1091
-  source /opt/ros/humble/setup.bash
-fi
+# ROS 2 (guarded — skip if already sourced / absent). Distro-agnostic: Jazzy or
+# Humble, per ADR-0036 (override with KIRRA_ROS_SETUP / KIRRA_ROS_DISTRO_PREF).
+# shellcheck source=robot/ros_env.sh
+source "$HERE/ros_env.sh"
+kirra_source_ros || true
 : "${ROS_DOMAIN_ID:=28}"; export ROS_DOMAIN_ID
 
 # --- governor key pin: derive the dev seed's pubkey unless already pinned ------

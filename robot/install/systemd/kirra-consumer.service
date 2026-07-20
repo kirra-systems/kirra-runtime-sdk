@@ -24,7 +24,7 @@ EnvironmentFile=/etc/kirra/robot.env
 # ROS 2 needs its environment sourced; exec keeps python3 as the main PID so
 # SIGTERM reaches the consumer's signal handler (safe stop before shutdown,
 # robot/kirra_motor_consumer.py:228-235).
-ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && exec python3 /opt/kirra/robot/kirra_motor_consumer.py'
+ExecStart=/bin/bash -c 'source /opt/kirra/robot/ros_env.sh && kirra_source_ros && exec python3 /opt/kirra/robot/kirra_motor_consumer.py'
 # on-failure only: a fail-closed config abort (exit 2 — missing env, car-type
 # mismatch) must NOT hot-loop the board opener.
 Restart=on-failure
