@@ -61,4 +61,14 @@ exclude_re = [
     # arithmetic and both `>` steering limits in `check_command_conforms` ARE
     # killed by the conformance tests.
     "replace <= with < in command_within_lateral_envelope",
+    # S3 (#1037) longitudinal-RSS direction selector `obj_lon_v < 0.0` (snapshot
+    # :657): `<` vs `<=` differ ONLY when the object's projected longitudinal velocity
+    # is EXACTLY 0.0 (a relatively-stationary object). At that measure-zero boundary
+    # the `<=` mutant routes the stopped object to the OPPOSITE-direction (head-on)
+    # bound instead of the rear-end bound, which ADDS the oncoming's response-phase
+    # creep — a STRICTLY MORE conservative required distance, never less safe. Same
+    # measure-zero, safety-equivalent class as the RSS overlap gates above. The S3
+    # change swapped the ego accel/brake ARGS (killed by the `posture_brake_symmetry`
+    # tests), not this pre-existing selector.
+    "replace < with <= in validate_trajectory_slow_with_envelope",
 ]
