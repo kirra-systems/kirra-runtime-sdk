@@ -9,13 +9,14 @@
 //!
 //! Two tiers, both of which must permit an ingest:
 //! - a **per-source** bucket bounds any single source's rate (the source is the
-//!   Zenoh key-expression's node id — untrusted, but fine for *bucketing*: the
-//!   worst an attacker does by spoofing many ids is fall through to the global
-//!   backstop);
+//!   Zenoh key-expression's node id — untrusted, but fine for *bucketing*). The
+//!   per-source map is memory-bounded by `max_tracked_sources`; at the cap a new
+//!   source EVICTS the longest-idle bucket (LRU-by-idle, M2 · #1041), so an
+//!   id-churn flood cannot strip per-source isolation from genuine active peers —
+//!   its single-use spoofed ids are the eviction victims, not the active sources;
 //! - a **global** bucket bounds the TOTAL ingest rate — the backstop against a
-//!   many-source spoofing flood, and the reason the per-source map is memory-bounded
-//!   (a new source seen while the map is full is limited by the global bucket alone,
-//!   never allocated, so the map cannot grow without bound).
+//!   many-source spoofing flood, checked first and short-circuiting (an
+//!   over-global flood is denied before any per-source alloc/eviction).
 //!
 //! Pure and clock-injected (`now_ms` is always supplied — no wall-clock read), so
 //! the limiter is deterministically testable and reused across the sync/async paths.
@@ -79,16 +80,28 @@ impl TokenBucket {
     fn consume_one(&mut self) {
         self.tokens -= 1.0;
     }
+
+    /// Timestamp of this bucket's last refill/activity (ms). Advances every time
+    /// the bucket is queried via a later `now_ms`; a bucket that is never touched
+    /// again keeps its old value — so the SMALLEST `last_activity_ms` across the
+    /// map is the longest-idle (LRU) entry. Used by the per-source-map eviction
+    /// (M2 · #1041).
+    #[must_use]
+    pub fn last_activity_ms(&self) -> u64 {
+        self.last_ms
+    }
 }
 
 /// Two-tier ingest rate limiter: a global backstop bucket plus a bounded map of
 /// per-source buckets. For a TRACKED source, an ingest is allowed iff BOTH the
 /// global and that source's bucket have a token; only then is one consumed from
 /// each (so a denial charges neither). Once `max_tracked_sources` is reached, a
-/// previously-unseen source is NOT allocated a bucket — it is admitted purely on
-/// the global backstop (the memory bound against a spoofing flood). The global
-/// bucket is checked FIRST and short-circuits: when it is empty nothing can be
-/// admitted, so no per-source bucket is even allocated.
+/// previously-unseen source EVICTS the longest-idle tracked bucket (LRU-by-idle,
+/// M2 · #1041) and takes its slot — so the map stays memory-bounded AND every
+/// genuine source keeps its own bucket, while a churn-flood's single-use spoofed
+/// ids are the eviction victims. The global bucket is checked FIRST and short-
+/// circuits: when it is empty nothing can be admitted, so no per-source bucket is
+/// even allocated (nor evicted).
 #[derive(Debug)]
 pub struct IngressRateLimiter {
     global: TokenBucket,
@@ -101,7 +114,7 @@ pub struct IngressRateLimiter {
 impl IngressRateLimiter {
     /// Build a limiter. `global_*` bound the total ingest rate; `per_source_*` bound
     /// any single source; `max_tracked_sources` caps the per-source map (a new
-    /// source seen while the map is full is limited by the global bucket alone).
+    /// source seen while the map is full evicts the longest-idle bucket, M2 · #1041).
     #[must_use]
     pub fn new(
         global_capacity: u32,
@@ -132,13 +145,35 @@ impl IngressRateLimiter {
             return false;
         }
 
-        // Per-source bucket: reuse an existing one; else allocate ONLY if under the
-        // tracking cap. When the map is full and the source is unknown, fall back to
-        // the global bucket alone (memory-bounded — a spoofing flood cannot grow the
-        // map, and the global backstop still bounds total rate).
+        // Per-source bucket: reuse an existing one; else allocate. When the map is
+        // at its tracking cap and the source is unknown, EVICT the longest-idle
+        // (smallest `last_activity_ms`) bucket and admit this source into a fresh
+        // one, rather than falling through to global-only.
+        //
+        // M2 (#1041): the old "full map → global-only" fallthrough let an id-churn
+        // flood (a fresh spoofed source id per message — the Zenoh key-expr id is
+        // untrusted) SATURATE the map with buckets it never revisits, after which
+        // every genuine new source lost per-source isolation until restart. LRU-by-
+        // idle inverts that: an ACTIVE genuine source (recently touched → large
+        // `last_activity_ms`) is preserved, while the churned-once spoofed ids
+        // (never touched again → smallest `last_activity_ms`) are the eviction
+        // victims. The map stays memory-bounded (evict-one-insert-one holds the cap)
+        // and the global backstop still bounds total rate. Eviction only runs for a
+        // globally-admitted ingest (the global check above short-circuits a flood
+        // first), so the O(n) scan is bounded by the global rate, not the flood.
         let source_ok = if let Some(b) = self.per_source.get_mut(source) {
             b.available_at(now_ms) >= 1.0
-        } else if self.per_source.len() < self.max_tracked_sources {
+        } else {
+            if self.per_source.len() >= self.max_tracked_sources {
+                if let Some(victim) = self
+                    .per_source
+                    .iter()
+                    .min_by_key(|(_, b)| b.last_activity_ms())
+                    .map(|(k, _)| k.clone())
+                {
+                    self.per_source.remove(&victim);
+                }
+            }
             let mut b = TokenBucket::new(
                 self.per_source_capacity,
                 self.per_source_refill_per_sec,
@@ -147,9 +182,6 @@ impl IngressRateLimiter {
             let ok = b.available_at(now_ms) >= 1.0;
             self.per_source.insert(source.to_string(), b);
             ok
-        } else {
-            // Untracked source under a full map → global-only.
-            true
         };
 
         if source_ok {
@@ -167,6 +199,14 @@ impl IngressRateLimiter {
     #[must_use]
     pub fn tracked_sources(&self) -> usize {
         self.per_source.len()
+    }
+
+    /// Whether `source` currently has its own per-source bucket (observability /
+    /// tests — e.g. proving M2 eviction kept an active source and dropped the
+    /// longest-idle one).
+    #[must_use]
+    pub fn is_tracked(&self, source: &str) -> bool {
+        self.per_source.contains_key(source)
     }
 }
 
@@ -315,5 +355,68 @@ mod tests {
         assert!(!lim.allow("s", 0));
         assert!(!lim.allow("s", 500), "half a second → not yet refilled");
         assert!(lim.allow("s", 1_000), "one second → one token back");
+    }
+
+    #[test]
+    fn full_map_evicts_longest_idle_and_keeps_active_sources() {
+        // M2 (#1041): at the tracking cap, a new source must EVICT the longest-idle
+        // bucket (not fall through to global-only), preserving per-source isolation
+        // for genuine active sources against an id-churn flood.
+        //
+        // Generous global rate so the global backstop never masks the per-source
+        // behaviour under test; per-source cap 1; MAP CAP = 2.
+        let mut lim = IngressRateLimiter::new(1_000_000, 1_000_000.0, 1, 1.0, 2, 0);
+
+        // Fill both slots.
+        assert!(lim.allow("a", 0));
+        assert!(lim.allow("b", 0));
+        assert_eq!(lim.tracked_sources(), 2);
+
+        // Touch "a" later so "b" becomes the longest-idle (last_activity: a=100,
+        // b=0). The admit RESULT is irrelevant (a's cap-1 bucket is empty 0.1 s
+        // after its first use) — the point is that querying it REFRESHES a's idle
+        // timestamp, which is what protects it from eviction.
+        lim.allow("a", 100);
+
+        // A NEW source "c" arrives at the cap → evict the longest-idle ("b"),
+        // admit "c" into a fresh per-source bucket. The map stays at the cap.
+        assert!(lim.allow("c", 200));
+        assert_eq!(lim.tracked_sources(), 2, "cap held — eviction, not growth");
+        assert!(lim.is_tracked("a"), "the recently-active source survives");
+        assert!(
+            lim.is_tracked("c"),
+            "the new source got its OWN per-source bucket"
+        );
+        assert!(!lim.is_tracked("b"), "the longest-idle source was evicted");
+
+        // Isolation restored for "c": its own capacity-1 bucket rate-limits it,
+        // rather than it riding global-only (which the old fallthrough allowed).
+        assert!(
+            !lim.allow("c", 200),
+            "c's per-source bucket is now empty → denied"
+        );
+    }
+
+    #[test]
+    fn id_churn_flood_cannot_strip_isolation_from_an_active_source() {
+        // The end-to-end M2 property: a genuine active source keeps its per-source
+        // bucket even while an attacker churns a fresh spoofed id every message.
+        let mut lim = IngressRateLimiter::new(1_000_000, 1_000_000.0, 1, 1.0, 4, 0);
+
+        // Genuine source "good" is active every tick.
+        for t in 0..50u64 {
+            // Keep "good" warm (its bucket refills at 1/s; capacity 1).
+            let _ = lim.allow("good", t * 1_000);
+            // Attacker: a brand-new id each tick.
+            assert!(lim.allow(&format!("spoof-{t}"), t * 1_000 + 1));
+        }
+        assert!(
+            lim.is_tracked("good"),
+            "the continuously-active source retained its per-source bucket through the flood"
+        );
+        assert!(
+            lim.tracked_sources() <= 4,
+            "the map stayed memory-bounded at the cap"
+        );
     }
 }
