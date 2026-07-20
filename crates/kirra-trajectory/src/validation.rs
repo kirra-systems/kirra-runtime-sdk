@@ -36,7 +36,8 @@ use crate::config::VehicleConfig;
 use crate::corridor::{CorridorSource, Point};
 use crate::frenet::CenterlineFrenet;
 use crate::state::{
-    AcceptedTrajectory, EgoOdom, PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict,
+    AcceptedTrajectory, EgoOdom, LateralEnvelope, PerceivedObject, Pose, TrajectoryPoint,
+    TrajectoryVerdict,
 };
 
 /// Minimum corridor confidence the slow loop accepts. Tracks the
@@ -1192,6 +1193,33 @@ pub struct IncomingControl {
     pub stamp_ms: u64,
 }
 
+/// Fast-loop bicycle-model lateral-acceleration bound (P6), S1 fix (#1024).
+///
+/// The command's lateral acceleration `a_lat = v²·|tan δ| / L` must stay within
+/// the posture-composed envelope (`max_lateral_accel_mps2 + tolerance`). The test
+/// is written in the **multiplied-out, division-free** form
+///
+/// ```text
+///   v²·|tan δ|  ≤  (max_lateral_accel + tol) · L
+/// ```
+///
+/// so there is NO division and hence NO near-zero wheelbase / velocity guard: at
+/// `v = 0` the LHS is 0 and never exceeds the (positive) RHS, and a degenerate
+/// `wheelbase ≈ 0` drives the RHS to 0 so any real steer at speed **fails closed**
+/// (the earlier divide-and-guard form fail-*opened* on that degenerate case).
+/// Returns `true` when the command is WITHIN the envelope. `tan` feeds a boolean
+/// bound with tolerance, not a signed value into a signature/replay digest, so the
+/// cross-platform ulp concern (#1043 / W4) does not apply.
+#[inline]
+fn command_within_lateral_envelope(cmd: &IncomingControl, env: &LateralEnvelope) -> bool {
+    let lhs = cmd.velocity_mps * cmd.velocity_mps * cmd.steering_rad.tan().abs();
+    let rhs = (env.max_lateral_accel_mps2 + LATERAL_ACCEL_TOLERANCE_MPS2) * env.wheelbase_m;
+    // Boundary note (mutation gate): `<=` vs `<` differ only at exact float
+    // equality `lhs == rhs` — a measure-zero boundary excluded as an equivalent
+    // mutant in `.cargo/mutants.toml`, matching the RSS-gate policy there.
+    lhs <= rhs
+}
+
 // SAFETY: SG7 SG8 | REQ: fast-loop-trajectory-conformance | TEST: test_conforming_command_passes,test_overspeed_command_mrcs,test_stale_trajectory_mrcs,test_no_trajectory_mrcs
 /// Per-cycle conformance check.
 ///
@@ -1304,23 +1332,10 @@ pub fn check_command_conforms(
             }
             // D2. Dynamic lateral-acceleration envelope (bicycle model; P6),
             // solved for the command's OWN velocity — the same bound
-            // `validate_vehicle_command` enforces on the plan. Guard both the
-            // wheelbase and v² away from zero (division / near-stationary, where
-            // the bicycle model is undefined and a tiny steer is harmless).
-            //
-            // `tan` here feeds a BOOLEAN bound with tolerance, NOT a signed value
-            // into a signature/replay digest, so the cross-platform ulp concern
-            // (#1043 / W4) does not apply — a one-ulp `tan` difference only shifts
-            // the accept/MRC boundary by a negligible fraction of the tolerance.
-            if env.wheelbase_m > 1e-6 {
-                let v2 = cmd.velocity_mps.powi(2);
-                if v2 > 1e-6 {
-                    let implied_lat_accel = (v2 * cmd.steering_rad.tan().abs()) / env.wheelbase_m;
-                    if implied_lat_accel > env.max_lateral_accel_mps2 + LATERAL_ACCEL_TOLERANCE_MPS2
-                    {
-                        return ConformanceVerdict::MRCFallback;
-                    }
-                }
+            // `validate_vehicle_command` enforces on the plan. Division-free +
+            // guard-free (see `command_within_lateral_envelope`).
+            if !command_within_lateral_envelope(cmd, env) {
+                return ConformanceVerdict::MRCFallback;
             }
         }
         // No envelope (legacy record): the static rack limit only — byte-identical

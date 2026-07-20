@@ -339,6 +339,83 @@ fn s1_non_finite_command_fails_closed() {
     }
 }
 
+#[test]
+fn s1_steering_exactly_at_posture_limit_accepts() {
+    // Boundary pin for D1 (`>` NOT `>=`): |steering| EXACTLY == the posture
+    // envelope's hard steering limit. The kernel P5a clamps only when strictly
+    // greater, so at-exactly-the-limit is admissible. Read the envelope's own f64
+    // so the equality is bit-exact. Low speed keeps the lateral bound (D2) clear.
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let env =
+        LateralEnvelope::from_contract(&cfg.to_posture_kinematics_contract(FleetPosture::Nominal));
+    let traj = accepted_with_envelope(
+        promoted,
+        straight_pts(10, 1.0, 0.1),
+        &cfg,
+        FleetPosture::Nominal,
+    );
+    let cmd = IncomingControl {
+        velocity_mps: 1.0,
+        steering_rad: env.max_steering_rad, // exactly at the limit
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::Accept,
+        "at-exactly-the-steering-limit is admissible; a `>=` here would wrongly MRC it",
+    );
+}
+
+#[test]
+fn s1_static_fallback_steering_exactly_at_limit_accepts() {
+    // Boundary pin for the None (legacy) path (`>` NOT `>=`): |steering| EXACTLY
+    // == config.max_steering_rad → admitted. Complements `oversteer_command_mrcs`
+    // (which sits just OVER the limit) so the operator is pinned on both sides.
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let traj = fresh_accepted(promoted, straight_pts(10, 1.0, 0.1)); // envelope = None
+    let cmd = IncomingControl {
+        velocity_mps: 1.0,
+        steering_rad: cfg.max_steering_rad, // exactly at the static rack limit
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::Accept,
+    );
+}
+
+#[test]
+fn s1_lateral_accel_within_tolerance_band_accepts() {
+    // Pins the `+` tolerance sign (NOT `-`) and the `*` arithmetic in the lateral
+    // bound. 0.0977 rad at 10 m/s → a_lat ≈ 3.5 m/s²: ABOVE max−tol (3.0) but
+    // BELOW max+tol (4.0), so it is admitted. A `+`→`-` mutant would use a 3.0
+    // ceiling and MRC this command; the arithmetic mutants shift the ceiling
+    // enough to flip the verdict too.
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let traj = accepted_with_envelope(
+        promoted,
+        straight_pts(10, 10.0, 0.1),
+        &cfg,
+        FleetPosture::Nominal,
+    );
+    let cmd = IncomingControl {
+        velocity_mps: 10.0,
+        steering_rad: 0.0977, // a_lat = 100·tan(0.0977)/2.8 ≈ 3.50 m/s²
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::Accept,
+        "a command inside the tolerance band (max−tol, max+tol) must be admitted",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // B1 regression — a `Clamp` verdict must derate the forwarded command.
 //
