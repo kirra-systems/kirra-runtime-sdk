@@ -137,7 +137,7 @@ Today the supported model format on every shipped backend is **ONNX**.
 
 | Backend crate | Type name | Hardware | Status |
 |---|---|---|---|
-| `parko-onnx` | `OrtBackend` | any x86 CPU | ✅ shipping — uses `ort 2.0.0-rc.12` + ONNX Runtime v1.24.2 dlopen'd at runtime |
+| `parko-onnx` | `OrtBackend` | any x86 CPU | ✅ shipping — uses `ort 2.0.0-rc.11` + ONNX Runtime v1.23.2 dlopen'd at runtime (pinned in lockstep; rc.12/1.24.2 deadlocks at init, #144) |
 | `parko-openvino` | `OvBackend` | any x86 Intel CPU | ✅ shipping — uses `openvino = 0.11` with the `runtime-linking` feature; OpenVINO 2024.x |
 | TensorRT (NVIDIA) | — | NVIDIA GPU | **planned** (PARK-020); not built |
 | Qualcomm QNN | — | Qualcomm NPU | **planned** (PARK-027); not built |

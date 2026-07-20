@@ -79,3 +79,10 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # ort 2.0.0-rc.12 (+ ONNX Runtime 1.24.2) DEADLOCKS at OrtBackend::new even
+      # single-threaded (#144) — a genuine init hang, not a version-pair mismatch.
+      # The workspace is pinned to rc.11 / ORT 1.23.2 ON PURPOSE. Hold rc.12 until
+      # an upstream ort / ONNX-Runtime release fixes the hang (then drop this and
+      # bump the CI + Dockerfile native-lib pin in lockstep). See PR #667.
+      - dependency-name: "ort"
+        versions: ["2.0.0-rc.12"]
