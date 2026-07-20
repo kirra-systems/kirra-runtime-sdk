@@ -1333,3 +1333,60 @@ deadline's entire purpose at the actuator.
   the deadline watchdog, and the F2 breach→posture escalator.
 - `SAFE_STATE_SPECIFICATION.md` SS-003 (MRC fallback); the SDK `503 → 0.0`
   consumer safe-stop (#405 / ADR-0011).
+
+---
+
+## AOU-OCCLUSION-RATE-001 — Armed occlusion channel publishes assured-clear distance at rate
+
+### Assumption
+
+When the occlusion / limited-visibility channel is ARMED
+(`KIRRA_OCCLUSION_CHANNEL_ENABLED`, S2 / #1025), its producer SHALL publish the
+ego's **assured-clear distance ahead** (metres — how far into its path the ego has
+actually observed) on `~/input/visibility` at a **bounded rate**, including when
+visibility is wide open (a large range), never silence. A "clear" reading is a
+large number, not the absence of a message. The publish period SHALL stay within
+the subscription staleness budget (`KIRRA_SUBSCRIPTION_STALENESS_MS`, default
+`SUBSCRIPTION_STALENESS_TIMEOUT_MS`). The value SHALL be finite and non-negative.
+
+### Why it is load-bearing
+
+The checker's RSS Rule 4 limited-visibility bound (`outruns_assured_clear_distance`)
+refuses a trajectory the ego could not stop within before entering unobserved
+space — treating what it cannot see as a potential stopped hazard. That bound is
+DISARMED by default (`visibility_range_m = None` → byte-identical no-op); when a
+deployment arms it, the safety property is only as good as the freshness of the
+sight-distance feed. A silent producer (dead sensor / stalled transport) is
+indistinguishable from "the road is clear" — exactly the confusion that would let
+the ego enter a blind junction at full ODD speed. So an armed-but-silent/stale/
+garbage channel is treated as a **fault**: `resolve_occlusion_channel` maps it to
+an MRC-floor perception cap (`Some(0.0)`) that composes into the Track-C derate
+(`apply_perception_cap`) and brings the ego to a controlled stop — it NEVER
+reaches the checker as an admitting `None`. Until a producer publishes, occlusion
+remains a **doer-only** hazard (bounded only by the untrusted planner's own
+`OccludedApproach` cap): the checker's bound is present but disarmed.
+
+### Pairs with
+
+- **AOU-VRU-RATE-001** — the pedestrian-channel sibling (an armed VRU producer
+  must likewise publish an empty "clear" message, not silence). `resolve_occlusion_channel`
+  mirrors `resolve_vru_channel`'s three-way disarmed/live/fail-closed decision.
+- **AOU-TIMESYNC-001** — the arrival stamps the freshness gate ages must be in the
+  monotonic boundary clock domain (a future stamp would mask a stale feed).
+
+### Verification status — **AoU-GAP** (integrator obligation)
+
+The checker + adapter side is DISCHARGED: the pure `resolve_occlusion_channel`
+decision (disarmed no-op / live / fail-closed on silence/garbage) and the
+`AdaptorState::snapshot_visibility` fail-closed freshness are unit-tested; the
+occlusion gate itself (`outruns_assured_clear_distance` / `assured_clear_distance_speed_cap`)
+has existing coverage. The producer that publishes `~/input/visibility` at rate —
+e.g. kirra-taj / kirra-map `sight_distance` per approach lane — is the
+integrator's obligation; the channel ships DISARMED so a deployment without such a
+producer is byte-identical to prior behaviour.
+
+### Cited by
+
+- `crates/kirra-trajectory/src/occlusion_channel.rs` (the resolver);
+  `crates/kirra-trajectory/src/validation.rs` §D (the RSS Rule 4 gate).
+- `SAFE_STATE_SPECIFICATION.md` (MRC fallback); the review finding S2 / #1025.
