@@ -90,6 +90,12 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: All workflow actions must be SHA-pinned
         run: scripts/pin-actions.sh --check
+      # A4 (#1049) — the version line must never sort backwards again (the
+      # 1.5.0-Aegis -> 1.1.2-Kirra renumbering). Forward ratchet vs
+      # ci/version_floor.txt + asserts the §2.1 inversion stays documented until
+      # a >= 2.0.0 MAJOR clears it. Network-free; a backward bump reds here.
+      - name: Version-ordering gate (A4 — never sort backwards)
+        run: python3 ci/check_version_ordering.py
 
   # WS-3.1 — the scenario-KPI gate: thresholds unsafe_miss_rate /
   # admissibility / hazard_recall over the generated deterministic corpus

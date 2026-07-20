@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| Status | **Proposed (design note)** — ratified on merge. |
-| Date | 2026-06-25 |
+| Status | **Accepted / Ratified** (A3 · #1048, 2026-07-20). The "ratified on merge" clause fired when this design note merged; the seam + SG2 containment generalization are LANDED and dual-platform-proven (Ackermann + real `DiffDrivePlatform`). **Scope honesty (unchanged, load-bearing):** only the **Ackermann** path is a claimable-ENFORCED safety goal; a non-Ackermann **enforced deployment** remains an integrator obligation recorded as **AOU-PLATFORM-GEOMETRY-001** (a live diff-drive/omni node consuming the seam with the platform's verified geometry/limits) — the abstraction alone marks NO new-platform goal ENFORCED. Tier B (aerial) + Tier C (manipulator) stay gated/cut per the Decision. |
+| Date | 2026-06-25 (ratified 2026-07-20) |
 | Deciders | Project / safety-case owner |
 | Safety goals | **SG2** (drivable-space containment — generalized to any platform's footprint); **SG8/SG9** (kinematic envelope + non-finite/integrity, per platform). The Ackermann path is the existing enforced talisman, unchanged. |
 | Cross-refs | `docs/safety/STAGE_S-PK1_PLATFORM_KINEMATICS.md` (the staged spec; supersedes its "ADR-0017" placeholder — that number was taken by the predictive-RSS arc); code: `crates/kirra-core/src/platform_kinematics.rs` (`PlatformKinematics`, `PlatformVerdict`, `AckermannPlatform`, `validate_platform_containment`), `parko/crates/parko-kirra/src/platform.rs` (`DiffDrivePlatform`, `DiffDriveVerdict`); the frozen talisman `crates/kirra-core/src/kinematics_contract.rs` (`validate_vehicle_command`) |
