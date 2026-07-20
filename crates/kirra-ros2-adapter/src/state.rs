@@ -110,6 +110,14 @@ pub struct AdaptorState {
     /// the integrator enables the VRU gate, a silent or stale channel FAILS
     /// CLOSED (see [`snapshot_pedestrians`](AdaptorState::snapshot_pedestrians)).
     pub pedestrians_cache: Arc<RwLock<Vec<PerceivedPedestrian>>>,
+    /// S2 (#1025) — the occlusion / assured-clear-distance channel: the latest
+    /// sight distance ahead (metres) from a producer such as kirra-taj /
+    /// kirra-map `sight_distance`. OPT-IN like the pedestrian channel: never
+    /// written when no source is wired; once the integrator enables the occlusion
+    /// gate, a silent/stale channel FAILS CLOSED (see
+    /// [`snapshot_visibility`](AdaptorState::snapshot_visibility)). `f64::NAN` is
+    /// the never-written sentinel (also treated as fail-closed by the resolver).
+    pub visibility_cache: Arc<RwLock<f64>>,
     /// Per-object **turn-rate** estimates `(object_id, yaw_rate_rad_s)` from the tracker — the
     /// SAME CTRV estimate the planner consumes as `MotionState`, supplied to the checker so the
     /// multi-modal predictive RSS (gap #3) can add the CTRV turn-in hypothesis, not just CV.
@@ -136,6 +144,10 @@ pub struct AdaptorState {
     pub last_objects_b_ms: Arc<AtomicU64>,
     /// Monotonic stamp of the last pedestrian-channel write (0 = never seen).
     pub last_pedestrians_ms: Arc<AtomicU64>,
+    /// S2 (#1025) — monotonic stamp of the last occlusion/visibility write
+    /// (0 = never seen). The slow loop checks it against the staleness budget: an
+    /// enabled-but-silent occlusion channel fails closed (MRC), never drives blind.
+    pub last_visibility_ms: Arc<AtomicU64>,
     /// Wall-clock-ms when the LAST per-object yaw-rate estimate arrived (0 = none yet). A STALE
     /// yaw feed degrades the predictive pass to CV-only (the estimate would keep predicting a
     /// turn-in after the object straightened) — an enhancement dropped, NOT a fault.
@@ -202,6 +214,7 @@ impl AdaptorState {
             objects_cache: Arc::new(RwLock::new(Vec::new())),
             objects_cache_b: Arc::new(RwLock::new(Vec::new())),
             pedestrians_cache: Arc::new(RwLock::new(Vec::new())),
+            visibility_cache: Arc::new(RwLock::new(f64::NAN)),
             object_yaw_rates: Arc::new(RwLock::new(Vec::new())),
             config: Arc::new(config),
             latest_odom: Arc::new(RwLock::new(None)),
@@ -209,6 +222,7 @@ impl AdaptorState {
             last_objects_ms: Arc::new(AtomicU64::new(0)),
             last_objects_b_ms: Arc::new(AtomicU64::new(0)),
             last_pedestrians_ms: Arc::new(AtomicU64::new(0)),
+            last_visibility_ms: Arc::new(AtomicU64::new(0)),
             last_object_yaw_ms: Arc::new(AtomicU64::new(0)),
             last_odom_ms: Arc::new(AtomicU64::new(0)),
             posture_tracker: Arc::new(RwLock::new(PostureTracker::nominal_default_no_source())),
@@ -227,6 +241,7 @@ impl AdaptorState {
             objects_cache: Arc::new(RwLock::new(Vec::new())),
             objects_cache_b: Arc::new(RwLock::new(Vec::new())),
             pedestrians_cache: Arc::new(RwLock::new(Vec::new())),
+            visibility_cache: Arc::new(RwLock::new(f64::NAN)),
             object_yaw_rates: Arc::new(RwLock::new(Vec::new())),
             config: Arc::new(config),
             latest_odom: Arc::new(RwLock::new(None)),
@@ -234,6 +249,7 @@ impl AdaptorState {
             last_objects_ms: Arc::new(AtomicU64::new(0)),
             last_objects_b_ms: Arc::new(AtomicU64::new(0)),
             last_pedestrians_ms: Arc::new(AtomicU64::new(0)),
+            last_visibility_ms: Arc::new(AtomicU64::new(0)),
             last_object_yaw_ms: Arc::new(AtomicU64::new(0)),
             last_odom_ms: Arc::new(AtomicU64::new(0)),
             posture_tracker: Arc::new(RwLock::new(PostureTracker::nominal_default_no_source())),
@@ -255,6 +271,7 @@ impl AdaptorState {
             objects_cache: Arc::new(RwLock::new(Vec::new())),
             objects_cache_b: Arc::new(RwLock::new(Vec::new())),
             pedestrians_cache: Arc::new(RwLock::new(Vec::new())),
+            visibility_cache: Arc::new(RwLock::new(f64::NAN)),
             object_yaw_rates: Arc::new(RwLock::new(Vec::new())),
             config: Arc::new(config),
             latest_odom: Arc::new(RwLock::new(None)),
@@ -262,6 +279,7 @@ impl AdaptorState {
             last_objects_ms: Arc::new(AtomicU64::new(0)),
             last_objects_b_ms: Arc::new(AtomicU64::new(0)),
             last_pedestrians_ms: Arc::new(AtomicU64::new(0)),
+            last_visibility_ms: Arc::new(AtomicU64::new(0)),
             last_object_yaw_ms: Arc::new(AtomicU64::new(0)),
             last_odom_ms: Arc::new(AtomicU64::new(0)),
             posture_tracker: Arc::new(RwLock::new(PostureTracker::with_source())),
@@ -510,6 +528,51 @@ impl AdaptorState {
         }
     }
 
+    /// S2 (#1025) — replace the occlusion/visibility snapshot (assured-clear
+    /// distance ahead, metres) and stamp its arrival at `now_ms`. Mirrors
+    /// [`update_pedestrians`](Self::update_pedestrians), including the fail-closed
+    /// RwLock-poisoning handling.
+    pub fn update_visibility(&self, assured_clear_distance_m: f64, now_ms: u64) {
+        self.last_visibility_ms.store(now_ms, Ordering::Relaxed);
+        if let Ok(mut guard) = self.visibility_cache.write() {
+            *guard = assured_clear_distance_m;
+        } else {
+            tracing::error!("visibility_cache RwLock POISONED — occlusion snapshot dropped");
+        }
+    }
+
+    /// S2 (#1025) — read the occlusion channel with fail-closed freshness semantics
+    /// (for a slow loop running with the occlusion gate ENABLED):
+    ///   - fresh (written within `staleness_budget_ms`) → `Some(range_m)` (the
+    ///     resolver still fault-checks the value's finiteness/sign);
+    ///   - NEVER seen, STALE, or POISONED → `None` — the caller MUST fail closed
+    ///     (MRC via [`resolve_occlusion_channel`](kirra_trajectory::occlusion_channel::resolve_occlusion_channel)),
+    ///     never treat it as "wide-open visibility": an enabled-but-silent
+    ///     occlusion source is a lost perception channel, exactly like the VRU one.
+    /// Integrators with the gate DISABLED never call this (the checker's
+    /// `visibility_range_m: None` no-op path is byte-identical prior behavior).
+    pub fn snapshot_visibility(&self, now_ms: u64, staleness_budget_ms: u64) -> Option<f64> {
+        let stamp = self.last_visibility_ms.load(Ordering::Relaxed);
+        if stamp == 0 || now_ms.saturating_sub(stamp) > staleness_budget_ms {
+            tracing::error!(
+                stamp,
+                now_ms,
+                staleness_budget_ms,
+                "occlusion/visibility channel silent/stale with the gate enabled — failing closed"
+            );
+            return None;
+        }
+        match self.visibility_cache.read() {
+            Ok(guard) => Some(*guard),
+            Err(_) => {
+                tracing::error!(
+                    "visibility_cache RwLock POISONED — failing slow loop closed (MRC)"
+                );
+                None
+            }
+        }
+    }
+
     /// Replace the per-object yaw-rate estimates `(object_id, yaw_rate_rad_s)` and stamp arrival
     /// at `now_ms`. Called by the integrator's tracker feed (the same CTRV estimate the planner
     /// gets as `MotionState`); the slow loop reads it to add CTRV modes to the predictive RSS.
@@ -675,6 +738,39 @@ mod tests {
         );
         assert!(
             st.snapshot_pedestrians(1_500, 500).is_some(),
+            "at the budget is fresh"
+        );
+    }
+
+    // ---- S2 (#1025): the occlusion/visibility channel (fail-closed freshness) ----
+
+    #[test]
+    fn visibility_channel_fresh_snapshot_returns_the_range() {
+        let st = AdaptorState::new();
+        st.update_visibility(18.5, 1_000);
+        assert_eq!(st.snapshot_visibility(1_200, 500), Some(18.5));
+    }
+
+    /// Enabled-but-NEVER-SEEN fails closed — an enabled occlusion gate with no
+    /// producer is a lost perception channel, not "wide-open visibility".
+    #[test]
+    fn visibility_channel_never_seen_fails_closed() {
+        let st = AdaptorState::new();
+        assert!(st.snapshot_visibility(10_000, 500).is_none());
+    }
+
+    /// A stale channel (producer died mid-run) fails closed at 1 ms past budget.
+    #[test]
+    fn visibility_channel_stale_fails_closed() {
+        let st = AdaptorState::new();
+        st.update_visibility(25.0, 1_000);
+        assert!(
+            st.snapshot_visibility(1_501, 500).is_none(),
+            "1 ms past the budget"
+        );
+        assert_eq!(
+            st.snapshot_visibility(1_500, 500),
+            Some(25.0),
             "at the budget is fresh"
         );
     }

@@ -611,6 +611,13 @@ feeding the omnidirectional pedestrian bound; the pure `vru_channel::resolve_vru
 the three-way decision DISARMED→checker no-op / armed+fresh→live `PedestrianScene` / armed+silent→
 MRC-floor cap, so an armed-but-silent VRU sensor STOPS the ego rather than driving blind; producer
 must publish at rate per AOU-VRU-RATE-001),
+`KIRRA_OCCLUSION_CHANNEL_ENABLED` (S2 / #1025 — enables the `~/input/visibility` subscription
+(a `std_msgs/Float64` assured-clear distance in metres) that ARMS the checker's RSS Rule 4
+limited-visibility bound, previously fed a hardcoded `None` (dormant every tick); the pure
+`occlusion_channel::resolve_occlusion_channel` makes the same three-way decision DISARMED→checker
+no-op / armed+fresh+valid→live sight distance to the occlusion gate / armed+silent-or-garbage→
+MRC-floor cap, so an armed-but-silent occlusion sensor STOPS the ego rather than driving blind into
+an unobserved junction; producer must publish at rate per AOU-OCCLUSION-RATE-001),
 `KIRRA_SUBSCRIPTION_STALENESS_MS` (subscription/channel freshness budget).
 
 ---

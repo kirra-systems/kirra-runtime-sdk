@@ -44,6 +44,7 @@ use crate::contract_producer::{proposal_payload, ProposalSequencer};
 pub use crate::control_ingress::IngressControlCommand;
 use crate::control_ingress::{fail_closed_control_command, parse_control_command_json};
 use crate::corridor::CorridorSource;
+use crate::occlusion_channel::{resolve_occlusion_channel, OCCLUSION_CHANNEL_ENABLED_ENV};
 use crate::perception_redundancy::{
     more_restrictive_cap, perception_redundancy_enabled, resolve_redundancy_cap,
     DivergenceEscalator, RedundancyConfig,
@@ -98,6 +99,20 @@ fn subscription_staleness_timeout_ms() -> u64 {
 /// `perception_redundancy_enabled`.
 fn vru_channel_enabled() -> bool {
     std::env::var(VRU_CHANNEL_ENABLED_ENV)
+        .map(|v| {
+            let t = v.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
+/// Occlusion / assured-clear-distance channel enable gate (S2, #1025) — reads
+/// `KIRRA_OCCLUSION_CHANNEL_ENABLED`. Adapter INTEGRATION glue (env I/O), kept out
+/// of the pure checker crate so its mutation gate covers only the tested
+/// `resolve_occlusion_channel` decision. Same truthy grammar as
+/// `vru_channel_enabled`; unset/anything else = disarmed (byte-identical no-op).
+fn occlusion_channel_enabled() -> bool {
+    std::env::var(OCCLUSION_CHANNEL_ENABLED_ENV)
         .map(|v| {
             let t = v.trim();
             t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
@@ -364,6 +379,23 @@ pub async fn run_adapter(
     } else {
         None
     };
+    // Occlusion / assured-clear-distance subscription (S2, #1025) — a scalar
+    // sight-distance-ahead topic (metres; a producer such as kirra-taj / kirra-map
+    // `sight_distance`) that ARMS the RSS Rule 4 limited-visibility bound. Same
+    // opt-in discipline as the VRU channel: registered ONLY when the occlusion
+    // gate is enabled, so a deployment without an occlusion source adds no
+    // subscription and the checker's `visibility_range_m: None` no-op path stays
+    // byte-identical. Remap `~/input/visibility` to the producer's topic in the
+    // launch file. When enabled but the channel is silent/stale, the slow loop
+    // FAILS CLOSED (MRC cap), never treats silence as "wide-open visibility".
+    let vis_stream = if occlusion_channel_enabled() {
+        Some(node.subscribe::<r2r::std_msgs::msg::Float64>(
+            "~/input/visibility",
+            ingress_sensor_qos(), // N1
+        )?)
+    } else {
+        None
+    };
     let _map_sub = node.subscribe_untyped(
         "~/input/map",
         "autoware_map_msgs/msg/LaneletMapBin",
@@ -586,6 +618,31 @@ pub async fn run_adapter(
         });
     }
 
+    // Occlusion / visibility drain (S2, #1025) — mirror of the VRU drain. Each
+    // Float64 message REPLACES the assured-clear-distance snapshot and stamps its
+    // freshness (`update_visibility`); the slow loop reads it via
+    // `snapshot_visibility` with fail-closed staleness. Stream close (producer
+    // dies) → the channel goes stale → the slow loop fails closed (MRC).
+    if let Some(vis_stream) = vis_stream {
+        let vis_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut s = vis_stream;
+            while let Some(msg) = s.next().await {
+                let now = now_ms_fresh();
+                tracing::info!(
+                    target: "kirra::ingress",
+                    topic = "visibility",
+                    stamp_ms = now,
+                    "subscription_callback"
+                );
+                vis_state.update_visibility(msg.data, now);
+            }
+            tracing::error!(
+                "visibility subscription stream closed — occlusion channel will fail closed (MRC)"
+            );
+        });
+    }
+
     let odom_state = Arc::clone(&state);
     tokio::spawn(async move {
         let mut s = odom_stream;
@@ -763,6 +820,27 @@ pub async fn run_adapter(
                 barriers: &[],
             });
 
+            // Occlusion / assured-clear-distance channel (S2, #1025) — the sibling
+            // of the VRU resolver, ARMING the RSS Rule 4 limited-visibility bound
+            // that was previously fed a hardcoded `None` (dormant every tick).
+            // DISARMED → the checker's `None` (occlusion gate skipped,
+            // byte-identical); armed + FRESH + valid range → feed the gate the
+            // observed sight distance; armed + SILENT/STALE/garbage → fail closed
+            // to an MRC-floor cap (never drive blind). Same short-circuit as VRU:
+            // only read the snapshot when armed, so a DISARMED default-off
+            // deployment never takes the visibility lock or logs.
+            let occlusion_enabled = occlusion_channel_enabled();
+            let occlusion = resolve_occlusion_channel(
+                occlusion_enabled,
+                if occlusion_enabled {
+                    slow_state.snapshot_visibility(now_mono, subscription_staleness_timeout_ms())
+                } else {
+                    None
+                },
+            );
+            let effective_perception_cap =
+                more_restrictive_cap(effective_perception_cap, occlusion.perception_cap());
+
             // Sustained-divergence → posture escalation (orthogonal to the per-tick MRC cap
             // above): a divergence (or lost redundant channel) that PERSISTS is a
             // perception-integrity fault that escalates the EFFECTIVE fleet posture — Degraded,
@@ -804,10 +882,14 @@ pub async fn run_adapter(
                 odom.as_ref(),
                 posture.clone(),
                 effective_perception_cap,
-                // Occlusion / assured-clear-distance bound (RSS Rule 4): perception
-                // does not yet supply a visibility range → None (no-op), mirroring
-                // the perception-derate cap's pre-wiring state.
-                None,
+                // Occlusion / assured-clear-distance bound (RSS Rule 4): S2 (#1025)
+                // — ARMED from the occlusion channel resolved above. DISARMED →
+                // `None` (gate skipped, byte-identical); armed + fresh → the live
+                // sight distance so the checker refuses a trajectory that outruns
+                // what the ego can see; armed + silent/garbage → `None` here but
+                // the MRC-floor cap already folded into `effective_perception_cap`
+                // stops the ego (never a silent no-op — see `resolve_occlusion_channel`).
+                occlusion.visibility_range(),
                 // Multi-modal predictive RSS (gap #3) — LIVE: the CV (and, when the tracker yaw
                 // feed is fresh, CTRV) modes rolled from the live objects above. The checker
                 // worst-cases over them, refusing a trajectory a predicted cut-in / turn-in

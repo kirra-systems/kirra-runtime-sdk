@@ -31,6 +31,12 @@ pub mod perception_redundancy;
 // from a live channel, fail-closed on silence/staleness. Pure, no ROS.
 pub mod vru_channel;
 
+// Occlusion / assured-clear-distance channel resolver (S2, #1025) — arms the
+// RSS Rule 4 limited-visibility bound from a live sight-distance channel,
+// fail-closed on silence/staleness/garbage. Pure, no ROS. Same three-way
+// disarmed/live/fail-closed shape as `vru_channel`.
+pub mod occlusion_channel;
+
 // Phase 2A Adversarial Review Hardening
 pub mod redundancy_hardening;
 pub mod validation_hardening;
