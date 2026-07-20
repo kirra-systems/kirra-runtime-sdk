@@ -110,6 +110,11 @@ sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
 
 ## Verify (in order)
 ```bash
+# 0. one-shot config doctor (read-only; the fastest "am I misconfigured?" check —
+#    catches a drifted ALSA card, a missing engine/model, an unset env key):
+./robot/kirra_voice_doctor.sh          # ✔/❌/⚠ + a fix hint per gap; exit 0 iff no ❌
+#    (rabbit_boot.py runs it --quiet on boot and SPEAKS a warning on a ❌ — voice line A6.)
+
 # 1. engines standalone:
 echo "rabbit online" | ~/kirra-runtime-sdk/speak.sh                 # hear the speaker
 whisper-cli -m ~/whisper.cpp/models/ggml-base.en.bin -np -nt -f /tmp/t.wav   # prints your words

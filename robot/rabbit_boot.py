@@ -12,9 +12,10 @@ of greeting into a lie.
             then speak the matching line (nominal / degraded / not-ready-yet).
   shutdown→ speak the power-down line.
 
-🔴 CHANNEL A ONLY (docs/rabbit/RABBIT_VOICE_LINES.md, rows A1–A3). Read-only GET +
-   TTS. No /intent, no publisher, no serial, no release token — it cannot move
-   the robot. Proactive SPEECH, never proactive motion.
+🔴 CHANNEL A ONLY (docs/rabbit/RABBIT_VOICE_LINES.md, rows A1–A3 + A5 model-drift +
+   A6 misconfig self-check). Read-only GET + TTS + a read-only config doctor. No
+   /intent, no publisher, no serial, no release token — it cannot move the robot.
+   Proactive SPEECH, never proactive motion.
 
 Usage:
   ./robot/rabbit_boot.py greet       # power-on greeting (posture-gated)
@@ -57,6 +58,30 @@ def greeting_line(posture_code, fresh):
 
 def shutdown_line():
     return "Powering down. I've come to a safe stop — try not to miss me too much."
+
+
+def misconfig_line():
+    """A6: the voice-config doctor found a ❌ (e.g. a mic/speaker device drifted,
+    a missing engine). Generic advisory — run the doctor for specifics."""
+    return (f"A heads-up{name_slot()}: my self-check found a configuration problem. "
+            "Run the voice doctor before relying on me — my ears or voice may be off.")
+
+
+def _maybe_warn_misconfigured():
+    """Channel-A advisory if the read-only voice-config doctor (kirra_voice_doctor.sh,
+    next to this file) reports a FAIL. Best-effort and lazy; never breaks boot, and
+    stays silent when the doctor passes or can't run (e.g. not staged here)."""
+    import subprocess
+    doctor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kirra_voice_doctor.sh")
+    if not os.path.exists(doctor):
+        return
+    try:
+        rc = subprocess.run(["bash", doctor, "--quiet"], timeout=15,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+    except Exception:  # noqa: BLE001 — a self-check advisory must never break boot
+        return
+    if rc != 0:
+        speak(misconfig_line())
 
 
 def _maybe_warn_model_changed():
@@ -112,6 +137,7 @@ def greet(deadline_s=None, poll_s=1.0):
         time.sleep(poll_s)
     speak(greeting_line(last_code, last_fresh))
     _maybe_warn_model_changed()
+    _maybe_warn_misconfigured()
 
 
 def main():

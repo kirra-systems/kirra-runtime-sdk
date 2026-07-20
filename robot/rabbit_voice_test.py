@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rabbit_boot import greeting_line, shutdown_line  # noqa: E402
+from rabbit_boot import greeting_line, misconfig_line, shutdown_line  # noqa: E402
 from rabbit_ota import match_command  # noqa: E402
 from rabbit_persona import (  # noqa: E402
     classify_model_pin, name_slot, read_model_pin, read_model_pin_record,
@@ -104,6 +104,12 @@ def test_greeting_uses_name_when_known() -> None:
 def test_shutdown_line_is_a_safe_stop_message() -> None:
     line = shutdown_line()
     assert "safe stop" in line and len(line) > 0
+
+
+def test_misconfig_line_is_a_nonempty_advisory() -> None:
+    # A6: a Channel-A advisory pointing at the doctor; never claims motion.
+    line = misconfig_line()
+    assert len(line) > 0 and "doctor" in line.lower()
 
 
 # --- OTA matcher precedence (apply/status before check) ----------------------
