@@ -24,6 +24,17 @@
 //! platform permits, degrade-with-warning where not), and FEEDING `DeadlineStats`
 //! into `/metrics` + supervisor escalation are the recorded follow-up — the running
 //! startup sequence is untouched here, so this slice changes no runtime behaviour.
+//!
+//! **W2 (#1028) — note the two distinct paths.** These `SchedulingClass` intents
+//! are for the verifier's CONTROL-PLANE supervised monitors (the async
+//! campaign/cert-expiry/audit-shipper loops) — they run on the tokio runtime and
+//! must NOT be `SCHED_FIFO` (a FIFO async loop starves the executor). The HARD
+//! real-time path is the separate in-line ENFORCED loop (`kirra-inline-governor`
+//! over the SHM carrier), and its real `SCHED_FIFO` + affinity + `mlockall` + SHM
+//! pre-fault primitives now exist in `kirra_hv_carrier::realtime` (opt-in,
+//! degrade-with-warning) and are wired into the `inline_demo` enforced-loop entry.
+//! Wiring THESE control-plane intents to syscalls (only meaningful once those loops
+//! move to dedicated OS threads / an RT partition) stays the recorded follow-up.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -42,6 +42,12 @@ use kirra_contract_channel::{
     ContractReader, ContractWriter, GovernorContractView, CANONICAL_IMAGE_LEN, MAX_COMMAND_BYTES,
 };
 
+// W2 (#1028) — real-time configuration for the enforced SHM loop (SCHED_FIFO /
+// affinity / mlockall) + the SHM pre-fault. Lives here because this is the one
+// crate on the L3 path that is NOT `#![forbid(unsafe_code)]` (ADR-0006 Clause 3),
+// so the RT syscalls sit beside the mmap they configure.
+pub mod realtime;
+
 /// The mapped region viewed as atomics. `#[repr(C)]`, field order + widths
 /// **identical to [`GovernorContractView`]**, so the mapped bytes are the frozen
 /// contract image and a peer that maps the same region interprets it identically.
@@ -264,6 +270,22 @@ impl PosixShmRegion {
     fn view(&self) -> &AtomicView {
         unsafe { &*self.ptr }
     }
+
+    /// W2 (#1028): pre-fault the mapped region so the enforced loop's first access
+    /// cannot take a major page fault (paired with `mlockall(MCL_FUTURE)` the pages
+    /// stay resident). Call once, after mapping, before entering the hot loop. A
+    /// no-op on non-Linux hosts.
+    pub fn prefault(&self) {
+        #[cfg(target_os = "linux")]
+        // SAFETY: `self.ptr` maps exactly `CANONICAL_IMAGE_LEN` bytes and this handle
+        // (hence the mapping) is live for the call.
+        unsafe {
+            crate::realtime::prefault_region(
+                self.ptr as *mut core::ffi::c_void,
+                CANONICAL_IMAGE_LEN,
+            );
+        }
+    }
 }
 
 impl ContractReader for PosixShmRegion {
@@ -320,6 +342,22 @@ impl PosixShmReader {
     fn view(&self) -> &AtomicView {
         unsafe { &*self.ptr }
     }
+
+    /// W2 (#1028): pre-fault the mapped region (the governor's read-only side) so
+    /// the enforced loop's first read cannot take a major page fault. See
+    /// [`PosixShmRegion::prefault`]. No-op on non-Linux.
+    pub fn prefault(&self) {
+        #[cfg(target_os = "linux")]
+        // SAFETY: `self.ptr` maps exactly `CANONICAL_IMAGE_LEN` bytes and this handle
+        // is live for the call. `MADV_WILLNEED` + a READ touch is valid on a
+        // `PROT_READ` mapping.
+        unsafe {
+            crate::realtime::prefault_region(
+                self.ptr as *mut core::ffi::c_void,
+                CANONICAL_IMAGE_LEN,
+            );
+        }
+    }
 }
 
 impl ContractReader for PosixShmReader {
@@ -363,6 +401,27 @@ mod tests {
             steering_angle_deg: -4.0,
             current_steering_angle_deg: -3.5,
         }
+    }
+
+    /// W2 (#1028): pre-faulting the mapped region (both the guest RW handle and the
+    /// governor read-only handle) touches every page WITHOUT a fault/panic, and the
+    /// region is still fully usable afterwards (a command round-trips) — so
+    /// pre-faulting before the enforced loop is behaviour-preserving.
+    #[test]
+    fn prefault_touches_the_region_and_it_still_round_trips() {
+        let name = unique_name("prefault");
+        let region = PosixShmRegion::create(&name).expect("create");
+        let governor = PosixShmReader::open(&name).expect("ro open");
+        region.prefault();
+        governor.prefault();
+
+        // Still works: publish through the RW handle, read a coherent snapshot RO.
+        let payload = demo(7);
+        let gen = region.load_generation();
+        publish(&region, gen, &payload.to_view(gen, 7, 0, u64::MAX / 2));
+        let snap = read_coherent_snapshot(&governor, MAX_SNAPSHOT_RETRIES)
+            .expect("coherent snapshot after prefault");
+        assert_eq!(snap.sequence, 7);
     }
 
     #[test]
