@@ -390,3 +390,82 @@ fn an_absent_ha_row_denies_the_fence_fail_closed() {
         "the read path is fail-closed too"
     );
 }
+
+// ===========================================================================
+// #1033 (P-Schema) — the LIVE Postgres schema conforms to the SAME shared
+// cross-backend column spec the SQLite backend asserts against.
+// ===========================================================================
+//
+// `schema_spec::SHARED_TABLES` is the ONE source of truth; the SQLite backend's
+// `live_sqlite_schema_matches_shared_spec` test (kirra-persistence) diffs its
+// PRAGMA table_info against it, and this test diffs `information_schema` against
+// the SAME spec via the SAME `diff_table` comparator (Dialect::Postgres). Because
+// both backends must equal the spec, they must equal each other — a column /
+// nullability / type change hand-authored into one backend's DDL and not the
+// other now reds one of these two tests instead of drifting silently.
+
+use kirra_verifier::verifier_store::schema_spec::{diff_table, Dialect, LiveColumn, SHARED_TABLES};
+
+/// Read a live PG table's columns (name / data_type / nullability) + its PK set,
+/// as `LiveColumn`s ready for `diff_table`. Scoped to `schema` so parallel
+/// test schemas never cross-read.
+fn pg_live_columns(client: &mut postgres::Client, schema: &str, table: &str) -> Vec<LiveColumn> {
+    let pk_cols: std::collections::HashSet<String> = client
+        .query(
+            "SELECT kcu.column_name \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage kcu \
+               ON tc.constraint_name = kcu.constraint_name \
+              AND tc.table_schema = kcu.table_schema \
+             WHERE tc.constraint_type = 'PRIMARY KEY' \
+               AND tc.table_schema = $1 AND tc.table_name = $2",
+            &[&schema, &table],
+        )
+        .expect("query PK columns")
+        .iter()
+        .map(|r| r.get::<_, String>(0))
+        .collect();
+
+    client
+        .query(
+            "SELECT column_name, data_type, is_nullable \
+             FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = $2",
+            &[&schema, &table],
+        )
+        .expect("query information_schema.columns")
+        .iter()
+        .map(|r| {
+            let name: String = r.get(0);
+            let primary_key = pk_cols.contains(&name);
+            LiveColumn {
+                declared_type: r.get::<_, String>(1),
+                not_null: r.get::<_, String>(2) == "NO",
+                primary_key,
+                name,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn live_pg_schema_matches_shared_spec() {
+    let Some((url, schema, _store)) = isolated_store("schemaspec") else {
+        return;
+    };
+    // `_store` already ran `initialize` (baseline + all PG migrations), so every
+    // shared table is realized. Introspect on a fresh client pinned to the same
+    // schema.
+    let mut client = raw_client_in_schema(&url, &schema);
+
+    let mut errors = Vec::new();
+    for table in SHARED_TABLES {
+        let live = pg_live_columns(&mut client, &schema, table.name);
+        errors.extend(diff_table(table, &live, Dialect::Postgres));
+    }
+    assert!(
+        errors.is_empty(),
+        "Postgres schema diverged from the shared cross-backend spec:\n{}",
+        errors.join("\n")
+    );
+}
