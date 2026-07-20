@@ -17,7 +17,7 @@
 
 # =============================== BUILD STAGE ===============================
 # #686: digest-pinned base image (Dependabot `docker` bumps it).
-FROM ros:jazzy-ros-base@sha256:6513503d0b10e919fbe8134981d4f9d19b5c1f9b045b87a9fe3b0b9e03e7c2a9 AS build
+FROM ros:jazzy-ros-base@sha256:31daab66eef9139933379fb67159449944f4e2dcf2e22c2d12cc715f29873e0f AS build
 SHELL ["/bin/bash", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -77,7 +77,7 @@ RUN set -euo pipefail; \
 # ============================== RUNTIME STAGE ==============================
 # ros:jazzy-ros-base again — r2r needs rcl/rmw/typesupport at runtime.
 # #686: digest-pinned base image (Dependabot `docker` bumps it).
-FROM ros:jazzy-ros-base@sha256:6513503d0b10e919fbe8134981d4f9d19b5c1f9b045b87a9fe3b0b9e03e7c2a9 AS runtime
+FROM ros:jazzy-ros-base@sha256:31daab66eef9139933379fb67159449944f4e2dcf2e22c2d12cc715f29873e0f AS runtime
 SHELL ["/bin/bash", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 
