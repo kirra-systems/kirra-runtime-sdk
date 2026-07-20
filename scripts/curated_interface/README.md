@@ -31,6 +31,23 @@ re-extract + re-verify (below) and a bumped reference in the SRAC
   into the matching curated package and regenerates each `CMakeLists.txt`.
 - `verify_hashes.sh [REF_SHARE]` — the gate: byte-diffs every curated `.msg`
   against the reference; non-zero exit on any mismatch.
+- `crossdistro_hash_check.sh [REF_HUMBLE] [REF_JAZZY]` — the ADR-0036
+  Humble↔Jazzy wire-safety bench check: curated == each reference, then the
+  cross-distro closure diff (step 3). Needs BOTH distros' msg shares.
+- `closure_diff.py --ref-a DIR --ref-b DIR --seed pkg/Msg …` — **M3 (#1042)**:
+  walks the FULL recursive closure of each seed across two reference `share/`
+  trees and byte-compares every message in it, **base packages included**
+  (`builtin_interfaces`, `std_msgs`, `geometry_msgs`, …). This is what step 3 of
+  `crossdistro_hash_check.sh` now runs — a differing *nested* base message
+  (leaf identical, RIHS hash drifted) is no longer invisible. `--leaf-only`
+  reproduces the old leaf-only comparison for contrast.
+- `closure_diff_selftest.sh` — the **CI-gated** proof (pure python3, no ROS):
+  runs `closure_diff.py` over the synthetic `testdata/{humble,jazzy}/` fixtures
+  and asserts the closure check catches a nested drift the leaf-only check
+  misses (and does not false-alarm on an identical tree). Wired into CI as
+  `cross-distro closure comparator self-test (M3)`. The FULL dual-distro
+  comparison against real `/opt/ros/{humble,jazzy}/share` stays a bench tool
+  until pinned dual-distro msg shares are containerized (the #1042 remainder).
 
 ## Build sequence (governor host needs NO apt Autoware packages)
 
