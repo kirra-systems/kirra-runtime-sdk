@@ -155,6 +155,80 @@ impl VerifierStore {
         Ok(())
     }
 
+    /// C5 (#1036): epoch-fenced node upsert. Same write as [`save_node`], but the
+    /// INSERT rides inside an `Immediate` transaction whose FIRST statement
+    /// re-asserts `held_epoch` against the durable `ha_state` row (as
+    /// `save_federated_report_chained` / `assert_actuator_epoch_held` do for their
+    /// tiers). A just-superseded primary keeps `mode_active == true` (and its stale
+    /// cached epoch) for up to one heartbeat; without an in-transaction fence its
+    /// node re-registration could overwrite a row the new Active just changed —
+    /// trust-registry corruption. `Immediate` takes the WAL write lock at `BEGIN`,
+    /// so a concurrent `try_claim_epoch` (on the FULL connection) serializes at the
+    /// same file-level lock and cannot interleave between the fence read and this
+    /// write. Fail-closed: `held == 0`, epoch mismatch, or an unreadable `ha_state`
+    /// rolls the transaction back and writes nothing.
+    pub fn save_node_epoch_fenced(
+        &mut self,
+        node: &RegisteredNode,
+        held_epoch: u64,
+    ) -> std::result::Result<(), DurableWriteError> {
+        let status_json =
+            serde_json::to_string(&node.status).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // #79 HA epoch fence — FIRST statement, before the mutation.
+        Self::assert_epoch_held(&tx, held_epoch)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO nodes
+             (node_id, status_json, registered_at_ms, last_trust_update_ms,
+              ak_public_pem, expected_pcr16_digest_hex, site, firmware_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                node.node_id,
+                status_json,
+                node.registered_at_ms as i64,
+                node.last_trust_update_ms as i64,
+                node.ak_public_pem,
+                node.expected_pcr16_digest_hex,
+                node.site,
+                node.firmware_version,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// C5 (#1036): epoch-fenced dependency-set replace. The atomic
+    /// DELETE-then-re-INSERT of [`save_dependencies`], preceded in the SAME
+    /// `Immediate` transaction by the `held_epoch` fence — a superseded primary can
+    /// no longer rewrite the dependency graph out from under the new Active. Same
+    /// fail-closed semantics as [`save_node_epoch_fenced`].
+    pub fn save_dependencies_epoch_fenced(
+        &mut self,
+        node_id: &str,
+        deps: &[String],
+        held_epoch: u64,
+    ) -> std::result::Result<(), DurableWriteError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        Self::assert_epoch_held(&tx, held_epoch)?;
+        tx.execute(
+            "DELETE FROM dependencies WHERE node_id = ?1",
+            params![node_id],
+        )?;
+        {
+            let mut stmt = tx
+                .prepare("INSERT OR REPLACE INTO dependencies (node_id, dep_id) VALUES (?1, ?2)")?;
+            for dep in deps {
+                stmt.execute(params![node_id, dep])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn load_dependencies(&self) -> Result<HashMap<String, Vec<String>>> {
         let mut stmt = self
             .conn
@@ -403,5 +477,89 @@ mod node_store_contract_tests {
     #[test]
     fn in_memory_backend_satisfies_the_node_store_contract() {
         assert_node_store_contract(&InMemoryNodeStore::default());
+    }
+}
+
+#[cfg(test)]
+mod epoch_fenced_write_tests {
+    // C5 (#1036): the in-transaction epoch fence on the durable node/dependency
+    // writes. A superseded primary (stale `held_epoch < durable`) is rejected
+    // before it can corrupt the shared trust registry; the holder writes.
+    use super::*;
+
+    fn node(id: &str) -> RegisteredNode {
+        RegisteredNode {
+            node_id: id.to_string(),
+            status: NodeTrustState::Trusted,
+            registered_at_ms: 1,
+            last_trust_update_ms: 0,
+            ak_public_pem: None,
+            expected_pcr16_digest_hex: None,
+            site: None,
+            firmware_version: None,
+        }
+    }
+
+    fn superseded(e: &DurableWriteError) -> bool {
+        matches!(
+            e,
+            DurableWriteError::Fenced(FenceError::EpochSuperseded { .. })
+        )
+    }
+
+    #[test]
+    fn superseded_primary_node_write_is_rejected_and_leaves_no_row() {
+        let mut store = VerifierStore::new(":memory:").expect("store");
+        // Two claims: durable epoch advances 0 -> 1 -> 2. The old primary that
+        // claimed epoch 1 is now superseded (durable == 2).
+        store.try_claim_epoch(0, "A", 1).unwrap();
+        store.try_claim_epoch(1, "B", 2).unwrap();
+
+        // Holder (held == durable == 2) writes.
+        store
+            .save_node_epoch_fenced(&node("holder-write"), 2)
+            .expect("holder write admitted");
+        assert!(store.node_exists("holder-write").unwrap());
+
+        // Superseded primary (held == 1 < durable == 2) is rejected, fail-closed:
+        // no row lands.
+        let err = store
+            .save_node_epoch_fenced(&node("stale-write"), 1)
+            .expect_err("superseded write rejected");
+        assert!(superseded(&err), "expected EpochSuperseded, got {err:?}");
+        assert!(
+            !store.node_exists("stale-write").unwrap(),
+            "a fenced-out write must leave NO row (fail-closed)"
+        );
+
+        // A never-claimed process (held == 0) is also rejected by the fenced path.
+        assert!(store.save_node_epoch_fenced(&node("zero"), 0).is_err());
+        assert!(!store.node_exists("zero").unwrap());
+    }
+
+    #[test]
+    fn superseded_primary_dependency_write_is_rejected_and_leaves_no_edges() {
+        let mut store = VerifierStore::new(":memory:").expect("store");
+        store.try_claim_epoch(0, "A", 1).unwrap();
+        store.try_claim_epoch(1, "B", 2).unwrap();
+
+        // Holder writes a dependency set.
+        store
+            .save_dependencies_epoch_fenced("b", &["a".to_string()], 2)
+            .expect("holder dep write admitted");
+        assert_eq!(
+            store.load_dependencies().unwrap().get("b").unwrap().len(),
+            1
+        );
+
+        // Superseded primary cannot rewrite the graph.
+        let err = store
+            .save_dependencies_epoch_fenced("c", &["a".to_string()], 1)
+            .expect_err("superseded dep write rejected");
+        assert!(superseded(&err), "expected EpochSuperseded, got {err:?}");
+        assert!(
+            store.load_dependencies().unwrap().get("c").is_none(),
+            "a fenced-out dependency write must leave NO edges (fail-closed)"
+        );
     }
 }

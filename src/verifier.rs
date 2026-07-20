@@ -481,19 +481,37 @@ impl AppState {
         use dashmap::mapref::entry::Entry;
         match self.nodes.entry(node.node_id.clone()) {
             Entry::Occupied(mut occ) => {
-                self.store
-                    .with(|store| store.save_node(&node))
-                    .map_err(|_| ())?;
+                self.persist_node_row(&node)?;
                 occ.insert(node);
             }
             Entry::Vacant(vac) => {
-                self.store
-                    .with(|store| store.save_node(&node))
-                    .map_err(|_| ())?;
+                self.persist_node_row(&node)?;
                 vac.insert(node);
             }
         }
         Ok(())
+    }
+
+    /// C5 (#1036): route the durable node upsert through the epoch-fenced write
+    /// when this process holds a claimed HA epoch (`held != 0`), else the plain
+    /// write. A never-claimed process (`held == 0`: an in-memory test store, or a
+    /// node that never became Active) has no superseded-primary scenario to guard
+    /// against; a claimed Active always fences, so a just-superseded primary
+    /// (whose stale `held_epoch != durable`) is rejected inside the write
+    /// transaction before it can overwrite a row the new Active just changed.
+    /// Mirrors the request-path `mutation_fence_verdict`'s `held_epoch != 0` guard.
+    fn persist_node_row(&self, node: &RegisteredNode) -> Result<(), ()> {
+        let held = self
+            .ha_fence
+            .held_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
+        self.store.with(|store| {
+            if held == 0 {
+                store.save_node(node).map_err(|_| ())
+            } else {
+                store.save_node_epoch_fenced(node, held).map_err(|_| ())
+            }
+        })
     }
 
     /// Atomically read-modify-write a REGISTERED node's record under the per-key
@@ -554,9 +572,21 @@ impl AppState {
     /// Persist dependency list to SQLite then update in-memory graph (fail-closed).
     #[allow(clippy::result_unit_err)] // intentional fail-closed `()` error; see persist_and_insert_node.
     pub fn persist_and_insert_deps(&self, node_id: &str, deps: Vec<String>) -> Result<(), ()> {
-        self.store
-            .with(|store| store.save_dependencies(node_id, &deps))
-            .map_err(|_| ())?;
+        // C5 (#1036): fence the dependency-graph write on the held HA epoch, same
+        // dispatch as `persist_node_row` (see there for the `held == 0` rationale).
+        let held = self
+            .ha_fence
+            .held_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
+        self.store.with(|store| {
+            if held == 0 {
+                store.save_dependencies(node_id, &deps).map_err(|_| ())
+            } else {
+                store
+                    .save_dependencies_epoch_fenced(node_id, &deps, held)
+                    .map_err(|_| ())
+            }
+        })?;
         self.dependency_graph.insert(node_id.to_string(), deps);
         Ok(())
     }
@@ -923,6 +953,41 @@ mod mark_node_untrusted_tests {
         assert!(!app
             .mark_node_untrusted("ghost", "CANOPEN_NMT_OFFLINE", 1)
             .unwrap());
+    }
+
+    // C5 (#1036): a superseded primary (its stale `held_epoch` trails the durable
+    // `ha_state` epoch) must have its node registration + dependency write fenced
+    // at the delegator — neither the durable row nor the in-memory map is mutated.
+    #[test]
+    fn superseded_primary_registration_is_fenced_at_the_delegator() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let mut store = VerifierStore::new(":memory:").expect("in-memory store");
+        // Durable epoch advances 0 -> 1 -> 2; the process that claimed 1 is stale.
+        store.try_claim_epoch(0, "A", 1).unwrap();
+        store.try_claim_epoch(1, "B", 2).unwrap();
+        let app = AppState::new(store, VerifierOperationMode::Active);
+
+        // Holder (held == durable == 2) registers normally.
+        app.ha_fence.held_epoch.store(2, SeqCst);
+        app.persist_and_insert_node(trusted_node("holder")).unwrap();
+        app.persist_and_insert_deps("holder", vec![]).unwrap();
+        assert!(app.nodes.get("holder").is_some());
+
+        // Superseded primary (held == 1 < durable == 2) is rejected, fail-closed.
+        app.ha_fence.held_epoch.store(1, SeqCst);
+        assert!(
+            app.persist_and_insert_node(trusted_node("stale")).is_err(),
+            "a superseded primary's registration must fail closed"
+        );
+        assert!(
+            app.nodes.get("stale").is_none(),
+            "the in-memory map must not be mutated when the durable write is fenced (disk before memory)"
+        );
+        assert!(
+            app.persist_and_insert_deps("holder", vec!["stale".into()])
+                .is_err(),
+            "a superseded primary's dependency write must fail closed too"
+        );
     }
 }
 
