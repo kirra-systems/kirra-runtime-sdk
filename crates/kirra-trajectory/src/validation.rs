@@ -36,7 +36,8 @@ use crate::config::VehicleConfig;
 use crate::corridor::{CorridorSource, Point};
 use crate::frenet::CenterlineFrenet;
 use crate::state::{
-    AcceptedTrajectory, EgoOdom, PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict,
+    AcceptedTrajectory, EgoOdom, LateralEnvelope, PerceivedObject, Pose, TrajectoryPoint,
+    TrajectoryVerdict,
 };
 
 /// Minimum corridor confidence the slow loop accepts. Tracks the
@@ -421,11 +422,12 @@ pub fn validate_trajectory_slow_with_envelope(
     // LockedOut was short-circuited above; this match is exhaustive on
     // the remaining variants.
     let degraded = posture == FleetPosture::Degraded;
-    let base_kinematics = match posture {
-        FleetPosture::Nominal => config.to_kinematics_contract(),
-        FleetPosture::Degraded => config.to_mrc_kinematics_contract(),
-        FleetPosture::LockedOut => unreachable!("handled by the posture short-circuit above"),
-    };
+    // Posture→contract selection via the shared helper (single source of truth,
+    // #1024): the SAME mapping the S1 fast-loop lateral envelope uses at the
+    // promote site, so the two cannot drift. LockedOut was short-circuited to MRC
+    // above, so it never reaches here; the helper maps it to the MRC contract
+    // (fail-closed, not a panic) as a safe default.
+    let base_kinematics = config.to_posture_kinematics_contract(posture);
     // KIRRA-OCCY-PMON-003: compose the Track-C perception-derate cap (most-
     // conservative-wins `min` into `odd_speed_cap_mps`). Applied uniformly —
     // a no-op when `None` (state 1) or when the cap is above the posture
@@ -1170,6 +1172,14 @@ pub enum ConformanceVerdict {
 /// disagree on the boundary.
 pub const VELOCITY_TOLERANCE_MPS: f64 = 0.5;
 
+/// Fast-loop lateral-acceleration conformance tolerance (m/s²), S1 fix (#1024).
+/// A small slack — the lateral analogue of [`VELOCITY_TOLERANCE_MPS`] — so a
+/// controller tracking legitimately at the lateral envelope does not chatter into
+/// MRC on floating-point boundary noise, while staying far below any rollover
+/// margin. This is the fast-loop *conformance* band; the kernel's own P6 clamp
+/// (`validate_vehicle_command`) uses no tolerance and clamps at exactly the bound.
+pub const LATERAL_ACCEL_TOLERANCE_MPS2: f64 = 0.5;
+
 /// Minimal envelope over the incoming `autoware_control_msgs::Control`
 /// fields. Built at the subscriber boundary (Phase 4 — when the typed
 /// callback lands) so the conformance check stays ROS-free.
@@ -1183,6 +1193,33 @@ pub struct IncomingControl {
     pub stamp_ms: u64,
 }
 
+/// Fast-loop bicycle-model lateral-acceleration bound (P6), S1 fix (#1024).
+///
+/// The command's lateral acceleration `a_lat = v²·|tan δ| / L` must stay within
+/// the posture-composed envelope (`max_lateral_accel_mps2 + tolerance`). The test
+/// is written in the **multiplied-out, division-free** form
+///
+/// ```text
+///   v²·|tan δ|  ≤  (max_lateral_accel + tol) · L
+/// ```
+///
+/// so there is NO division and hence NO near-zero wheelbase / velocity guard: at
+/// `v = 0` the LHS is 0 and never exceeds the (positive) RHS, and a degenerate
+/// `wheelbase ≈ 0` drives the RHS to 0 so any real steer at speed **fails closed**
+/// (the earlier divide-and-guard form fail-*opened* on that degenerate case).
+/// Returns `true` when the command is WITHIN the envelope. `tan` feeds a boolean
+/// bound with tolerance, not a signed value into a signature/replay digest, so the
+/// cross-platform ulp concern (#1043 / W4) does not apply.
+#[inline]
+fn command_within_lateral_envelope(cmd: &IncomingControl, env: &LateralEnvelope) -> bool {
+    let lhs = cmd.velocity_mps * cmd.velocity_mps * cmd.steering_rad.tan().abs();
+    let rhs = (env.max_lateral_accel_mps2 + LATERAL_ACCEL_TOLERANCE_MPS2) * env.wheelbase_m;
+    // Boundary note (mutation gate): `<=` vs `<` differ only at exact float
+    // equality `lhs == rhs` — a measure-zero boundary excluded as an equivalent
+    // mutant in `.cargo/mutants.toml`, matching the RSS-gate policy there.
+    lhs <= rhs
+}
+
 // SAFETY: SG7 SG8 | REQ: fast-loop-trajectory-conformance | TEST: test_conforming_command_passes,test_overspeed_command_mrcs,test_stale_trajectory_mrcs,test_no_trajectory_mrcs
 /// Per-cycle conformance check.
 ///
@@ -1193,7 +1230,11 @@ pub struct IncomingControl {
 ///      horizon — at least one pose with
 ///      `time_from_start_s >= now_ms - promoted_at_ms` exists.
 ///   C. `cmd.velocity_mps <= nearest.velocity_mps + VELOCITY_TOLERANCE_MPS`.
-///   D. `cmd.steering_rad.abs() <= config.max_steering_rad`.
+///   D. Steering + lateral-acceleration bound (S1 fix, #1024): the command's
+///      hard steering angle AND its bicycle-model lateral acceleration at the
+///      command's OWN speed are within the posture-composed envelope the slow
+///      loop enforced (falls back to the static `config.max_steering_rad` when
+///      no envelope is attached — a legacy record).
 ///
 /// Anything else → `MRCFallback`. The `ego` argument is reserved for
 /// Phase 4 extensions (per-axis lateral conformance + acceleration-
@@ -1206,6 +1247,15 @@ pub fn check_command_conforms(
     config: &VehicleConfig,
     now_ms: u64,
 ) -> ConformanceVerdict {
+    // Fail closed on any non-finite command field (NaN/Inf). A NaN comparison is
+    // always false, so without this a non-finite velocity or steering would slip
+    // EVERY bound below (C, D) and be accepted. Defense in depth — the ROS
+    // ingress also rejects NaN/Inf — but the conformance gate is the last line
+    // before the command is republished, so it must fail closed here too.
+    if !cmd.velocity_mps.is_finite() || !cmd.steering_rad.is_finite() {
+        return ConformanceVerdict::MRCFallback;
+    }
+
     // A. Staleness
     if trajectory.is_stale(now_ms) {
         return ConformanceVerdict::MRCFallback;
@@ -1257,9 +1307,44 @@ pub fn check_command_conforms(
         return ConformanceVerdict::MRCFallback;
     }
 
-    // D. Steering bound
-    if cmd.steering_rad.abs() > config.max_steering_rad {
-        return ConformanceVerdict::MRCFallback;
+    // D. Steering + lateral-acceleration bound (S1 fix, #1024).
+    //
+    // FINDING: the prior gate checked ONLY `cmd.steering_rad.abs() <=
+    // config.max_steering_rad` (the static, posture-independent rack limit) and
+    // NEVER bounded the command's lateral acceleration. So the untrusted
+    // controller could command a within-rack steer at ODD speed —
+    // `a_lat = v²·tan(δ)/L` far above the rollover envelope (e.g. 35° at 22.35 m/s
+    // ≈ 125 m/s², ~36× the 3.5 m/s² limit) — and it passed conformance and was
+    // republished to the actuators verbatim. The checker validated the PLAN
+    // (slow loop) but forwarded the COMMAND bounded only by a rack limit.
+    //
+    // FIX: when the slow loop attached its posture-composed lateral envelope,
+    // re-apply the kernel's own P5a (hard steering) + P6 (lateral-accel) bounds to
+    // the OUTGOING command — independently of what the plan proposed, and against
+    // the SAME posture-composed contract the slow loop enforced (tighter under
+    // Degraded). Absent envelope (a legacy record) → the static rack limit only,
+    // byte-identical to before this field existed.
+    match trajectory.effective_lateral_envelope.as_ref() {
+        Some(env) => {
+            // D1. Hard steering-angle limit (posture-composed; P5a).
+            if cmd.steering_rad.abs() > env.max_steering_rad {
+                return ConformanceVerdict::MRCFallback;
+            }
+            // D2. Dynamic lateral-acceleration envelope (bicycle model; P6),
+            // solved for the command's OWN velocity — the same bound
+            // `validate_vehicle_command` enforces on the plan. Division-free +
+            // guard-free (see `command_within_lateral_envelope`).
+            if !command_within_lateral_envelope(cmd, env) {
+                return ConformanceVerdict::MRCFallback;
+            }
+        }
+        // No envelope (legacy record): the static rack limit only — byte-identical
+        // to the pre-#1024 behaviour.
+        None => {
+            if cmd.steering_rad.abs() > config.max_steering_rad {
+                return ConformanceVerdict::MRCFallback;
+            }
+        }
     }
 
     ConformanceVerdict::Accept

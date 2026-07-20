@@ -42,7 +42,9 @@ pub use kirra_core::trajectory::{
 // `kirra_ros2_adapter::state::*` resolve unchanged. The ROS RUNTIME store
 // (`AdaptorState`, subscription stamps, `monotonic_now_ms`, `IncomingTrajectory`,
 // `SUBSCRIPTION_STALENESS_TIMEOUT_MS`) stays below — it is adapter-only.
-pub use kirra_trajectory::state::{AcceptedTrajectory, EgoOdom, DEFAULT_MAX_AGE_MS};
+pub use kirra_trajectory::state::{
+    AcceptedTrajectory, EgoOdom, LateralEnvelope, DEFAULT_MAX_AGE_MS,
+};
 
 /// Default subscription-staleness timeout (ms). Phase 4: the adapter's
 /// own SG9 fail-closed path. If any of the REQUIRED upstream
@@ -549,6 +551,14 @@ impl AdaptorState {
     /// verdict, `None` on `Accept`. Attached to the installed record so the
     /// fast loop conforms a `Clamp`-verdict command to the DERATED ceiling, not
     /// the planner's original speed. Ignored on the removal (MRC/Pending) arm.
+    /// `lateral_envelope` (S1 fix, #1024): the checker's posture-composed lateral
+    /// envelope (steering hard-limit + lateral-accel + wheelbase). Attached so
+    /// the fast loop bounds the outgoing command's lateral acceleration, not just
+    /// its steering against the static rack limit. `None` → static-limit fallback.
+    // The promote path carries the full accepted-trajectory record shape (ids +
+    // points + verdict + both derate side-channels + stamp); grouping into a
+    // struct is churn for a single call site, so the arg count is intentional.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_trajectory(
         &self,
         asset_id: impl Into<String>,
@@ -556,6 +566,7 @@ impl AdaptorState {
         points: Vec<TrajectoryPoint>,
         verdict: TrajectoryVerdict,
         effective_ceiling: Option<Vec<f64>>,
+        lateral_envelope: Option<LateralEnvelope>,
         now_ms: u64,
     ) {
         let asset_id = asset_id.into();
@@ -568,7 +579,8 @@ impl AdaptorState {
                     verdict,
                     now_ms,
                 )
-                .with_effective_ceiling(effective_ceiling);
+                .with_effective_ceiling(effective_ceiling)
+                .with_lateral_envelope(lateral_envelope);
                 self.install(record);
             }
             TrajectoryVerdict::MRCFallback | TrajectoryVerdict::Pending => {

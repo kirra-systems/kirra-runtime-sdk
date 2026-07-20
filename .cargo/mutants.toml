@@ -52,4 +52,13 @@ exclude_re = [
     # behaviourally identical for any real perception input.
     "replace < with <= in validate_trajectory_slow_capped",
     "replace < with <= in predictive_rss_breach",
+    # S1 (#1024) fast-loop lateral-acceleration bound: `lhs <= rhs` vs `lhs < rhs`
+    # differ only when the command's lateral accel EXACTLY equals the envelope
+    # ceiling (v²·|tan δ| == (max+tol)·L to the bit) — a measure-zero boundary,
+    # behaviourally identical for any real command. Same class as the RSS gates
+    # above. The bound was deliberately extracted into its own one-comparison
+    # function so this exclusion is precise (the only `<=` there); the `*`/`+`
+    # arithmetic and both `>` steering limits in `check_command_conforms` ARE
+    # killed by the conformance tests.
+    "replace <= with < in command_within_lateral_envelope",
 ]

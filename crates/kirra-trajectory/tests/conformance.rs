@@ -134,6 +134,341 @@ fn oversteer_command_mrcs() {
 }
 
 // ---------------------------------------------------------------------------
+// S1 fix (#1024): the lateral-acceleration / rollover envelope on the OUTGOING
+// command. Arm D previously bounded steering only against the STATIC rack limit
+// and never bounded lateral acceleration, so a within-rack steer at ODD speed
+// (a_lat = v²·tan(δ)/L far above the envelope) passed conformance and was
+// republished verbatim → rollover. These drive the real checker envelope.
+// ---------------------------------------------------------------------------
+
+use kirra_trajectory::state::LateralEnvelope;
+
+/// A fresh Accept record carrying the posture-composed lateral envelope, exactly
+/// as the slow loop attaches it at the promote site.
+fn accepted_with_envelope(
+    promoted_at_ms: u64,
+    pts: Vec<TrajectoryPoint>,
+    cfg: &VehicleConfig,
+    posture: FleetPosture,
+) -> AcceptedTrajectory {
+    AcceptedTrajectory::with_verdict("av_01", 1, pts, TrajectoryVerdict::Accept, promoted_at_ms)
+        .with_lateral_envelope(Some(LateralEnvelope::from_contract(
+            &cfg.to_posture_kinematics_contract(posture),
+        )))
+}
+
+#[test]
+fn s1_within_rack_but_over_lateral_accel_mrcs() {
+    // THE FINDING. 0.3 rad ≈ 17.2° is well within the 35° rack limit, but at
+    // 10 m/s the bicycle-model lateral accel is a_lat = 100·tan(0.3)/2.8
+    // ≈ 11.05 m/s² — ~3× the 3.5 m/s² envelope (+0.5 tol). With the envelope
+    // attached the fast loop now MRCs it.
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let traj = accepted_with_envelope(
+        promoted,
+        straight_pts(10, 10.0, 0.1),
+        &cfg,
+        FleetPosture::Nominal,
+    );
+    let cmd = IncomingControl {
+        velocity_mps: 10.0,
+        steering_rad: 0.3,
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::MRCFallback,
+        "a within-rack steer whose lateral accel exceeds the envelope must MRC",
+    );
+}
+
+#[test]
+fn s1_legacy_record_without_envelope_admits_the_rollover_command() {
+    // The SAME command against a record with NO lateral envelope (a legacy /
+    // pre-#1024 record) is admitted — |0.3| ≤ max_steering_rad on the static
+    // fallback path. This pins that the None path is byte-identical to the old
+    // behaviour AND documents precisely the gap the envelope closes.
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let traj = fresh_accepted(promoted, straight_pts(10, 10.0, 0.1)); // envelope = None
+    let cmd = IncomingControl {
+        velocity_mps: 10.0,
+        steering_rad: 0.3,
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::Accept,
+        "static-limit fallback (no envelope) stays byte-identical — this is the gap S1 closes",
+    );
+}
+
+#[test]
+fn s1_command_within_lateral_envelope_accepts() {
+    // 0.05 rad at 10 m/s → a_lat = 100·tan(0.05)/2.8 ≈ 1.79 m/s² < 3.5 (+0.5).
+    // "Drive gently, don't stop" — a command inside the envelope still passes.
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let traj = accepted_with_envelope(
+        promoted,
+        straight_pts(10, 10.0, 0.1),
+        &cfg,
+        FleetPosture::Nominal,
+    );
+    let cmd = IncomingControl {
+        velocity_mps: 10.0,
+        steering_rad: 0.05,
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::Accept,
+    );
+}
+
+#[test]
+fn s1_degraded_tightens_lateral_envelope() {
+    // 0.25 rad at 5 m/s → a_lat = 25·tan(0.25)/2.8 ≈ 2.28 m/s². Under Nominal
+    // (3.5 +0.5) this passes; under Degraded (MRC lateral 1.5 +0.5 = 2.0) it
+    // MRCs. Same command, posture-composed envelope decides — Degraded is
+    // tighter, exactly as the slow loop enforces.
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let cmd = IncomingControl {
+        velocity_mps: 5.0,
+        steering_rad: 0.25,
+        stamp_ms: now,
+    };
+
+    let nominal = accepted_with_envelope(
+        promoted,
+        straight_pts(10, 5.0, 0.1),
+        &cfg,
+        FleetPosture::Nominal,
+    );
+    assert_eq!(
+        check_command_conforms(&cmd, &nominal, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::Accept,
+    );
+
+    let degraded = accepted_with_envelope(
+        promoted,
+        straight_pts(10, 5.0, 0.1),
+        &cfg,
+        FleetPosture::Degraded,
+    );
+    assert_eq!(
+        check_command_conforms(&cmd, &degraded, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::MRCFallback,
+        "the MRC contract's tighter lateral limit must reject a steer the Nominal envelope admits",
+    );
+}
+
+#[test]
+fn s1_degraded_tightens_hard_steering_limit() {
+    // 0.4 rad ≈ 22.9° at 2 m/s: lateral accel is tiny (a_lat ≈ 0.60 m/s²), so
+    // only the HARD steering limit differs. Within the 35° Nominal rack (pass)
+    // but beyond the 15° MRC limit (MRC) — the posture-composed D1 bound.
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let cmd = IncomingControl {
+        velocity_mps: 2.0,
+        steering_rad: 0.4,
+        stamp_ms: now,
+    };
+
+    let nominal = accepted_with_envelope(
+        promoted,
+        straight_pts(10, 2.0, 0.1),
+        &cfg,
+        FleetPosture::Nominal,
+    );
+    assert_eq!(
+        check_command_conforms(&cmd, &nominal, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::Accept,
+    );
+
+    let degraded = accepted_with_envelope(
+        promoted,
+        straight_pts(10, 2.0, 0.1),
+        &cfg,
+        FleetPosture::Degraded,
+    );
+    assert_eq!(
+        check_command_conforms(&cmd, &degraded, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::MRCFallback,
+    );
+}
+
+#[test]
+fn s1_non_finite_command_fails_closed() {
+    // A NaN comparison is always false, so a non-finite steer/velocity would
+    // slip every bound below. The gate must fail closed — with OR without an
+    // envelope.
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let traj = accepted_with_envelope(
+        promoted,
+        straight_pts(10, 5.0, 0.1),
+        &cfg,
+        FleetPosture::Nominal,
+    );
+    for (v, s) in [
+        (f64::NAN, 0.0),
+        (5.0, f64::NAN),
+        (f64::INFINITY, 0.0),
+        (5.0, f64::INFINITY),
+    ] {
+        let cmd = IncomingControl {
+            velocity_mps: v,
+            steering_rad: s,
+            stamp_ms: now,
+        };
+        assert_eq!(
+            check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+            ConformanceVerdict::MRCFallback,
+            "non-finite command ({v}, {s}) must fail closed",
+        );
+    }
+}
+
+#[test]
+fn s1_steering_exactly_at_posture_limit_accepts() {
+    // Boundary pin for D1 (`>` NOT `>=`): |steering| EXACTLY == the posture
+    // envelope's hard steering limit. The kernel P5a clamps only when strictly
+    // greater, so at-exactly-the-limit is admissible. Read the envelope's own f64
+    // so the equality is bit-exact. Low speed keeps the lateral bound (D2) clear.
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let env =
+        LateralEnvelope::from_contract(&cfg.to_posture_kinematics_contract(FleetPosture::Nominal));
+    let traj = accepted_with_envelope(
+        promoted,
+        straight_pts(10, 1.0, 0.1),
+        &cfg,
+        FleetPosture::Nominal,
+    );
+    let cmd = IncomingControl {
+        velocity_mps: 1.0,
+        steering_rad: env.max_steering_rad, // exactly at the limit
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::Accept,
+        "at-exactly-the-steering-limit is admissible; a `>=` here would wrongly MRC it",
+    );
+}
+
+#[test]
+fn s1_static_fallback_steering_exactly_at_limit_accepts() {
+    // Boundary pin for the None (legacy) path (`>` NOT `>=`): |steering| EXACTLY
+    // == config.max_steering_rad → admitted. Complements `oversteer_command_mrcs`
+    // (which sits just OVER the limit) so the operator is pinned on both sides.
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let traj = fresh_accepted(promoted, straight_pts(10, 1.0, 0.1)); // envelope = None
+    let cmd = IncomingControl {
+        velocity_mps: 1.0,
+        steering_rad: cfg.max_steering_rad, // exactly at the static rack limit
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::Accept,
+    );
+}
+
+#[test]
+fn s1_lateral_accel_within_tolerance_band_accepts() {
+    // Pins the `+` tolerance sign (NOT `-`) and the `*` arithmetic in the lateral
+    // bound. 0.0977 rad at 10 m/s → a_lat ≈ 3.5 m/s²: ABOVE max−tol (3.0) but
+    // BELOW max+tol (4.0), so it is admitted. A `+`→`-` mutant would use a 3.0
+    // ceiling and MRC this command; the arithmetic mutants shift the ceiling
+    // enough to flip the verdict too.
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let traj = accepted_with_envelope(
+        promoted,
+        straight_pts(10, 10.0, 0.1),
+        &cfg,
+        FleetPosture::Nominal,
+    );
+    let cmd = IncomingControl {
+        velocity_mps: 10.0,
+        steering_rad: 0.0977, // a_lat = 100·tan(0.0977)/2.8 ≈ 3.50 m/s²
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::Accept,
+        "a command inside the tolerance band (max−tol, max+tol) must be admitted",
+    );
+}
+
+#[test]
+fn s1_high_speed_low_steer_within_envelope_accepts() {
+    // Pins the v² term (NOT v+…) in the lateral bound. At 20 m/s with a small
+    // 0.02 rad steer, a_lat = 400·tan(0.02)/2.8 ≈ 2.86 m/s² < 3.5 → admitted.
+    // A mutant that turns `v·v·|tan|` into `v + v·|tan|` (≈ 20.4, over the 11.2
+    // RHS) would wrongly MRC this — so an Accept here kills that mutant, where
+    // the low-speed cases (v small ⇒ v² ≈ v) cannot.
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let traj = accepted_with_envelope(
+        promoted,
+        straight_pts(10, 20.0, 0.1),
+        &cfg,
+        FleetPosture::Nominal,
+    );
+    let cmd = IncomingControl {
+        velocity_mps: 20.0,
+        steering_rad: 0.02,
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::Accept,
+    );
+}
+
+#[test]
+fn s1_non_finite_on_legacy_path_fails_closed() {
+    // The non-finite guard is load-bearing ONLY on the None (legacy) path: with an
+    // envelope, D2 also rejects a non-finite (v²·|tan| → NaN → not within). On the
+    // None path there is no D2, so a `||`→`&&` mutation of the guard would let a
+    // single non-finite field slip C and the static steering check → Accept. These
+    // cases pin the `||` (each has exactly ONE non-finite field).
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let cfg = VehicleConfig::default_urban();
+    let traj = fresh_accepted(promoted, straight_pts(10, 5.0, 0.1)); // envelope = None
+    for (v, s) in [(f64::NAN, 0.0), (5.0, f64::NAN), (f64::INFINITY, 0.0)] {
+        let cmd = IncomingControl {
+            velocity_mps: v,
+            steering_rad: s,
+            stamp_ms: now,
+        };
+        assert_eq!(
+            check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
+            ConformanceVerdict::MRCFallback,
+            "non-finite ({v}, {s}) on the legacy path must fail closed via the guard",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // B1 regression — a `Clamp` verdict must derate the forwarded command.
 //
 // The finding (verified on 8ea3e90): the checker computed `ClampLinear(v)`,
