@@ -29,8 +29,16 @@ stdin). Every log/banner/error goes to STDERR — otherwise a log line would be
 read as a turn and fire a spurious recording (harmless, but noisy).
 
 Wiring (default): a normally-open momentary button between the configured pin and
-GND. The internal pull-up idles the pin HIGH; a press pulls it LOW (falling
-edge = press). No external resistor needed.
+GND; a press pulls it LOW (falling edge = press).
+
+⚠ ORIN PULL-UP CAVEAT: on Orin, Jetson.GPIO IGNORES setup()'s pull_up_down (it
+prints a runtime warning saying so), so the internal pull-up is NOT applied and
+the input FLOATS — which phantom-triggers (a spurious "press" that records
+[BLANK_AUDIO]). You MUST add an EXTERNAL resistor: active-low (default) → 10 kΩ
+from the pin to 3V3 (idles HIGH; button→GND pulls LOW); active-high
+(KIRRA_PTT_ACTIVE=high) → 10 kΩ pin→GND, button→3V3. Without it the pin is
+unreliable. (This is NOT the older Jetson behaviour where the internal pull-up
+sufficed — Orin changed it.)
 
 Env (all optional; the button pin is INPUT-only so a wrong value cannot drive
 anything — but confirm the pin is a free GPIO on your header, not muxed):
@@ -40,8 +48,13 @@ anything — but confirm the pin is a free GPIO on your header, not muxed):
   KIRRA_PTT_DEBOUNCE_MS debounce (default 200)
   KIRRA_PTT_LED_PIN     optional OUTPUT pin lit while pressed (recording feedback)
 
-Requires Jetson.GPIO (`sudo pip3 install Jetson.GPIO`) + the running user in the
-`gpio` group with the Jetson udev rules installed, or run as root.
+Requires Jetson.GPIO + the running user in the `gpio` group with the Jetson udev
+rules installed, or run as root. On JetPack 6.2 "Super" boards the apt/pip 2.1.7
+FAILS at import with "Could not determine Jetson model" — install >= 2.1.12 from
+source: `sudo pip3 install --upgrade --ignore-installed
+"Jetson.GPIO @ git+https://github.com/NVIDIA/jetson-gpio.git"`. If it still can't
+ID the (third-party) carrier, a libgpiod backend (kernel GPIO chardev, no board
+database) is the robust fallback — see docs/hardware/R2_VOICE_AUDIO_SETUP.md.
 """
 import os
 import signal
