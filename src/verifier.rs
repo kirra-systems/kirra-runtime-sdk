@@ -616,7 +616,13 @@ impl AppState {
         if now_ms > entry.expires_at_ms {
             return false;
         }
-        entry.nonce == nonce
+        // Sec2 (#1050): constant-time compare for INVARIANT #2 consistency. There
+        // is no secret to leak here (the nonce is public, single-use, TTL-bound,
+        // and the caller verifies the Ed25519 signature FIRST), but every
+        // security-critical byte comparison uses `constant_time_compare` — never
+        // `==` — so the discipline holds uniformly across the challenge paths
+        // (mirrors `consume_clearance_challenge`, which already does).
+        constant_time_compare(&entry.nonce.to_le_bytes(), &nonce.to_le_bytes())
     }
 
     /// Issue a fresh challenge nonce for the given node. Overwrites any prior pending challenge.
@@ -678,14 +684,15 @@ impl AppState {
 /// are enforced by the challenge store (`issue_challenge` / `consume_challenge`);
 /// this function supplies the *unpredictability* half.
 ///
-/// Fail-closed: if the OS CSPRNG is unavailable we panic rather than fall back
-/// to a weak/predictable source — no secure nonce can be issued without entropy.
-#[must_use]
-pub fn generate_challenge_nonce() -> u64 {
+/// Fail-closed: if the OS CSPRNG is unavailable we return `Err` rather than fall
+/// back to a weak/predictable source — no secure nonce can be issued without
+/// entropy. Sec3 (#1050): the caller (an UNAUTHENTICATED challenge route) maps
+/// the error to a 503 instead of aborting the process — a transient entropy
+/// stall must not take the verifier down. Mirrors `authz::generate_api_token`.
+pub fn generate_challenge_nonce() -> Result<u64, getrandom::Error> {
     let mut bytes = [0u8; 8];
-    getrandom::fill(&mut bytes)
-        .expect("OS CSPRNG (getrandom) unavailable — cannot issue a secure attestation nonce");
-    u64::from_le_bytes(bytes)
+    getrandom::fill(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
 }
 
 #[cfg(test)]
@@ -998,9 +1005,9 @@ mod nonce_lifecycle_tests {
     // #147 HEADLINE: nonces are CSPRNG-sourced, not wall-clock-derived.
     #[test]
     fn nonce_is_csprng_unpredictable_not_time_derived() {
-        let a = generate_challenge_nonce();
-        let b = generate_challenge_nonce();
-        let c = generate_challenge_nonce();
+        let a = generate_challenge_nonce().expect("CSPRNG");
+        let b = generate_challenge_nonce().expect("CSPRNG");
+        let c = generate_challenge_nonce().expect("CSPRNG");
         assert!(
             !(a == b && b == c),
             "successive CSPRNG nonces must not all be identical"

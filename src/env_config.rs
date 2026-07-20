@@ -195,7 +195,12 @@ pub const KIRRA_ENV_KEYS: &[EnvKeySpec] = &[
     EnvKeySpec {
         name: "KIRRA_CORS_ALLOWED_ORIGINS",
         required: false,
-        purpose: "Comma-separated CORS allow-list (empty → deny)",
+        purpose: "Comma-separated CORS allow-list (unset/empty → deny cross-origin, Sec4)",
+    },
+    EnvKeySpec {
+        name: "KIRRA_CORS_ALLOW_ANY_ORIGIN",
+        required: false,
+        purpose: "1/true → allow ANY cross-origin read (Sec4 opt-in; default deny)",
     },
     EnvKeySpec {
         name: "KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT",

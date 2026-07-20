@@ -223,10 +223,18 @@ pub(crate) async fn clearance_challenge(
         _ => false,
     };
     // Hex string (not a u64) so the in-browser signing flow never loses precision.
-    let nonce_hex = format!(
-        "{:016x}",
-        kirra_verifier::verifier::generate_challenge_nonce()
-    );
+    // Sec3 (#1050): a transient CSPRNG stall returns 503, never aborts the process.
+    let nonce_raw = match kirra_verifier::verifier::generate_challenge_nonce() {
+        Ok(n) => n,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "entropy source unavailable — retry" })),
+            )
+                .into_response();
+        }
+    };
+    let nonce_hex = format!("{nonce_raw:016x}");
     // #325: store a REAL challenge only for an active operator; everyone else gets a
     // decoy nonce that is never recorded (no oracle, no map growth). #326: the
     // challenge-map key is length-prefixed (unambiguous operator/node split).
