@@ -75,21 +75,72 @@
 //    bounded (AUDIT_QUEUE_BOUND = 2048) so production cannot grow the
 //    queue beyond a fixed size.
 //
-// CONCLUSION: a finite WCET for the verdict path exists by construction.
-// This module measures it and gates CI against regressions.
+// 7. THE RELEASE-TOKEN CRYPTO IS A SEPARATE, BOUNDED TERM — NOT IN §1–§6.
+//    W3 (#1032): the §1–§6 argument bounds the CRYPTO-FREE verdict path
+//    (`validate_vehicle_command` + the O(1) posture/cap reads). The ASSEMBLED
+//    EP-01 enforced loop (`kirra_inline_governor::govern_and_release`) ALSO
+//    mints/verifies a release token per cycle: 2× SHA-256 (payload digest) +
+//    one Ed25519 SIGN (GovernorStation) + one Ed25519 verify_strict
+//    (ActuatorStation). That crypto term is NOT covered by §1–§6 and must not be
+//    folded into the crypto-free verdict budget. It IS still bounded: each op is
+//    O(1) in the command (fixed-size 32-byte payload, fixed-size keys/signatures),
+//    data-independent in time (no secret-dependent branching in the dalek impls),
+//    and allocation-free on the release path. So a finite WCET for the ASSEMBLED
+//    loop also exists by construction — but as `verdict_WCET + crypto_WCET`, two
+//    SEPARATE budgets (`GOVERNOR_VERDICT_WCET_*` vs `GOVERNOR_RELEASE_TOKEN_WCET_*`
+//    below), each with its own evidence. The crypto-free/verdict separation is a
+//    CI invariant of its own (`ci/check_verdict_core_purity.py`): a signing op must
+//    never slip INTO the verdict path, which is exactly what keeps the two budgets
+//    decomposable.
+//
+// CONCLUSION: a finite WCET for the verdict path exists by construction, and a
+// finite WCET for the assembled release loop exists as verdict + a bounded crypto
+// term. This module measures both and gates CI against regressions.
 
 // ---------------------------------------------------------------------------
 // Budgets
 // ---------------------------------------------------------------------------
 
-/// SG9 fail-closed timeout TARGET (microseconds) for deployment hardware.
+/// SG9 fail-closed timeout TARGET (microseconds) for deployment hardware —
+/// the CRYPTO-FREE verdict path only (W3 #1032).
 ///
 /// This is the verdict-path WCET budget the Governor must stay under on the
 /// target SoC. It must fit inside the control-cycle period minus the
 /// actuation latency (loop closure: WCET + actuation < cycle < 0.5 s
 /// reaction budget per SPEED_ENVELOPE.md). 100 µs is conservative for the
-/// O(1) scalar-math kernel proven above; S8 (#120) re-measures on target.
+/// O(1) scalar-math kernel proven above (§1–§6); S8 (#120) re-measures on target.
+///
+/// SCOPE (W3): this budget covers `validate_vehicle_command` + the O(1)
+/// posture/cap reads — it does NOT include the release-token crypto (2× SHA-256
+/// + Ed25519 sign + verify) the assembled EP-01 loop runs. That term has its own
+/// budget below (`GOVERNOR_RELEASE_TOKEN_WCET_TARGET_MICROS`); the two are
+/// decomposable precisely because the crypto-free/verdict separation is a CI
+/// invariant (`ci/check_verdict_core_purity.py`).
 pub const GOVERNOR_VERDICT_WCET_TARGET_MICROS: u64 = 100;
+
+/// TARGET (microseconds) for the ASSEMBLED release-token path — the crypto term
+/// the verdict budget above deliberately excludes (W3 #1032).
+///
+/// The EP-01 enforced loop (`kirra_inline_governor::govern_and_release`) mints and
+/// verifies a release token every cycle: 2× SHA-256 + one Ed25519 SIGN + one
+/// Ed25519 `verify_strict`. The code's own estimate is ~50–100 µs each for sign
+/// and verify on a release build, so ~200–300 µs for the whole crypto term. 500 µs
+/// is a conservative target with headroom; it is a SEPARATE budget from the
+/// crypto-free verdict path, NOT a revision of it. Both still fit the control cycle
+/// with orders of magnitude of headroom against the 0.5 s reaction FTTI (crypto is
+/// ~0.06% of it). PROVISIONAL / CI-relative — the certified number is the
+/// QNX-target-under-FIFO measurement of the assembled loop (W1 #1027 remainder;
+/// `docs/safety/WCET_MEASUREMENT_METHODOLOGY.md`), which the host proxy judge does
+/// NOT yet represent. S8 (#120) re-measures on target.
+pub const GOVERNOR_RELEASE_TOKEN_WCET_TARGET_MICROS: u64 = 500;
+
+/// CI regression-gate threshold (microseconds) for the assembled release-token
+/// loop. Generous (10× the target) for the same CI-hardware-variance reason as
+/// the verdict threshold, plus the crypto term's own variance (dalek codepath +
+/// the seqlock read/republish). Catches a GROSS regression on the assembled loop
+/// (e.g. an accidental extra sign/verify, or an alloc on the release path) — it is
+/// NOT certified timing. The certified number is the QNX-target measurement.
+pub const GOVERNOR_RELEASE_TOKEN_WCET_CI_THRESHOLD_MICROS: u64 = 5_000;
 
 /// CI regression-gate threshold (microseconds).
 ///
@@ -239,6 +290,30 @@ mod ci_gate_tests {
         );
     }
 
+    /// W3 (#1032): the assembled release-token loop is gated against its OWN,
+    /// larger budget — the crypto term the crypto-free verdict budget excludes —
+    /// NOT the verdict threshold. Same p99.9 / host-indicative framing.
+    fn assert_under_release_token_budget(name: &str, max_ns: u128, p999_ns: u128) {
+        let (max_us, p999_us) = (max_ns / 1000, p999_ns / 1000);
+        println!(
+            "GOVERNOR RELEASE-TOKEN REGRESSION-GATE (host-indicative p99.9, NOT certified WCET) \
+             {name}: max={max_ns}ns ({max_us}us)  p99.9={p999_ns}ns ({p999_us}us)  vs \
+             release-token CI-threshold {}us  (release-token target {}us; the crypto-free verdict \
+             budget is a SEPARATE {}us)",
+            GOVERNOR_RELEASE_TOKEN_WCET_CI_THRESHOLD_MICROS,
+            GOVERNOR_RELEASE_TOKEN_WCET_TARGET_MICROS,
+            GOVERNOR_VERDICT_WCET_TARGET_MICROS,
+        );
+        assert!(
+            p999_us < GOVERNOR_RELEASE_TOKEN_WCET_CI_THRESHOLD_MICROS as u128,
+            "RELEASE-TOKEN LATENCY REGRESSION on {name}: p99.9 {p999_us}us exceeds the \
+             release-token CI threshold {}us — the assembled sign→verify loop regressed \
+             (an extra crypto op, or an alloc on the release path). (Host-indicative, NOT \
+             certified WCET; max={max_us}us reported but not gated.)",
+            GOVERNOR_RELEASE_TOKEN_WCET_CI_THRESHOLD_MICROS,
+        );
+    }
+
     fn nominal_cmd() -> ProposedVehicleCommand {
         // Worst-case Allow path: all P0..P6 guards run to completion
         // without returning early. This is the full pipeline depth.
@@ -269,11 +344,13 @@ mod ci_gate_tests {
     /// validate → decode → kinematic bound → Ed25519 sign → actuator verify →
     /// release decision) over the in-process reference carrier, through the
     /// assembled `kirra-inline-governor` API — the exact composition the SHM
-    /// path runs. The Ed25519 sign+verify dominates (~50-100 µs release-build),
-    /// still well inside the 1 ms CI threshold. The in-loop republish
-    /// (sub-µs CRC + stores) is included and negligible at this scale.
-    /// HOST-INDICATIVE p99.9, NOT certified WCET — the QNX-target measurement
-    /// remains the certified path.
+    /// path runs. The Ed25519 sign+verify dominates (~50-100 µs release-build).
+    /// The in-loop republish (sub-µs CRC + stores) is included and negligible at
+    /// this scale. W3 (#1032): gated against the SEPARATE release-token budget (the
+    /// crypto term the crypto-free verdict budget excludes), NOT the verdict
+    /// threshold. HOST-INDICATIVE p99.9, NOT certified WCET — the QNX-target
+    /// measurement remains the certified path (and the on-target proxy judge does
+    /// NOT yet measure THIS crypto term — W1 #1027 remainder).
     #[test]
     fn regression_inline_loop_full_step() {
         use kirra_contract_channel::reference::InProcessRegion;
@@ -322,7 +399,7 @@ mod ci_gate_tests {
             let _ = std::hint::black_box(released);
         });
         if cfg!(not(debug_assertions)) {
-            assert_under_budget("inline_loop::govern_and_release", max_ns, p999_ns);
+            assert_under_release_token_budget("inline_loop::govern_and_release", max_ns, p999_ns);
         } else {
             println!(
                 "inline_loop::govern_and_release (DEBUG structural pass, not gated): \
