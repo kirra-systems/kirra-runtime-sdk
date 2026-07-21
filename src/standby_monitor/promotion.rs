@@ -594,6 +594,56 @@ pub(crate) async fn perform_promotion(
         ts,
     );
 
+    // Step 4c (review F1 — HA trust-state coherence): RE-HYDRATE the in-memory
+    // fleet (node trust states + the dependency graph) from the SHARED store before
+    // the first Active recalc. A PassiveStandby's `fleet.nodes` was seeded once at
+    // its own boot and never sees the primary's durable trust downgrades (it does not
+    // process them while passive). Promoting and recalculating posture from that
+    // stale cache can treat a durably-`Untrusted` node as `Trusted` → a falsely
+    // `Nominal` posture that admits forbidden commands. Reloading here makes the first
+    // serving posture reflect DURABLE trust. Ordered before the Step 4d generation
+    // re-seed and the Step 5 recalc; the posture cache stays stale/empty (the mutation
+    // gate + the Step 6 freshness gate block serving) until Step 5, so no command is
+    // served against stale trust in the interim. Runs AFTER the epoch claim / promotion
+    // records so a fenced loser (which returned early above) never touches it.
+    // Fail-closed: a load error aborts promotion and self-demotes — a promoted Active
+    // computing posture from stale trust is worse than staying PassiveStandby for a
+    // retry / another instance.
+    // SAFETY: SG-HA-3 — durable read offloaded off the async runtime.
+    // SAFETY: SG-HA-4 — DB/offload failure fails closed (self-demote, return false).
+    let app_for_hydrate = Arc::clone(app);
+    match tokio::task::spawn_blocking(move || app_for_hydrate.hydrate_fleet_from_store()).await {
+        Ok(Ok((node_count, dep_count))) => {
+            tracing::info!(
+                instance_id = %id,
+                epoch = new_epoch,
+                node_count,
+                dep_count,
+                "promotion: rehydrated fleet trust + dependency graph from shared store (review F1) — first Active recalc computes posture from DURABLE trust, not the boot snapshot"
+            );
+        }
+        Ok(Err(e)) => {
+            tracing::error!(
+                error = %e, instance_id = %id, epoch = new_epoch,
+                "promotion ABORTED — cannot rehydrate fleet trust from shared store; staying PassiveStandby (fail-closed) to avoid computing posture from stale in-memory trust"
+            );
+            app.ha_fence
+                .mode_active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e, instance_id = %id, epoch = new_epoch,
+                "promotion ABORTED — fleet rehydrate offload failed; staying PassiveStandby (fail-closed)"
+            );
+            app.ha_fence
+                .mode_active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        }
+    }
+
     // Step 4d (#771 F1): RE-SEED the generation counter from the SHARED store
     // before the first Active recalc. HA pairs share one SQLite file; the dead
     // primary advanced the durable generation high-water for its ENTIRE uptime

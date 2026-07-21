@@ -553,6 +553,65 @@ impl AppState {
         Ok(())
     }
 
+    /// Review F1 (HA promotion trust-coherence): re-hydrate the in-memory fleet —
+    /// node trust states AND the dependency graph — from the durable shared store,
+    /// discarding the process-local snapshot taken at boot.
+    ///
+    /// `fleet.nodes` / `fleet.dependency_graph` are populated ONCE, at boot
+    /// (`load_nodes` + `load_dependencies`), and thereafter mutated only by THIS
+    /// process's own writes. In a shared-file HA topology a `PassiveStandby` never
+    /// processes the primary's registrations / trust downgrades, so its cache drifts:
+    /// a node the primary durably marked `Untrusted` still reads `Trusted` here. A
+    /// standby that promotes and recalculates posture from that stale cache can derive
+    /// a falsely-`Nominal` fleet posture and admit commands the durable trust state
+    /// forbids. This call reloads the authoritative durable state before the first
+    /// Active recalculation, closing that window.
+    ///
+    /// Upserts every durable node (overwriting a stale in-memory `status`) and then
+    /// PRUNES any in-memory node absent from the durable set (deregistered while
+    /// passive); the dependency graph is reconciled the same way. Returns
+    /// `(node_count, dep_count)` on success.
+    ///
+    /// FAIL-CLOSED: any load/decode error returns `Err(String)` — the caller
+    /// (`perform_promotion`) aborts promotion and self-demotes, because a promoted
+    /// Active computing posture from stale trust is worse than staying
+    /// `PassiveStandby` for a retry / another instance. Read-only, so the
+    /// disk-before-memory ordering (invariant #12) is untouched; the caller runs this
+    /// off the async runtime via `spawn_blocking`.
+    pub fn hydrate_fleet_from_store(&self) -> Result<(usize, usize), String> {
+        let (nodes, dependencies) = self.store.with_read(|store| {
+            let nodes = store.load_nodes().map_err(|e| e.to_string())?;
+            let dependencies = store.load_dependencies().map_err(|e| e.to_string())?;
+            Ok::<_, String>((nodes, dependencies))
+        })?;
+
+        // Nodes: upsert the durable record (this overwrites a stale in-memory
+        // `status`), then prune any in-memory node not in the durable set.
+        let durable_node_ids: std::collections::HashSet<String> =
+            nodes.iter().map(|n| n.node_id.clone()).collect();
+        let node_count = nodes.len();
+        for node in nodes {
+            self.fleet.nodes.insert(node.node_id.clone(), node);
+        }
+        self.fleet
+            .nodes
+            .retain(|node_id, _| durable_node_ids.contains(node_id));
+
+        // Dependency graph: the same upsert-then-prune against the durable edge set,
+        // so the posture DAG traverses durable edges, not the boot-time snapshot.
+        let durable_dep_ids: std::collections::HashSet<String> =
+            dependencies.keys().cloned().collect();
+        let dep_count = dependencies.len();
+        for (node_id, deps) in dependencies {
+            self.fleet.dependency_graph.insert(node_id, deps);
+        }
+        self.fleet
+            .dependency_graph
+            .retain(|node_id, _| durable_dep_ids.contains(node_id));
+
+        Ok((node_count, dep_count))
+    }
+
     /// Atomically read-modify-write a REGISTERED node's record under the per-key
     /// entry (shard) lock (C2 #1031). `f` receives the current record and returns
     /// its replacement; the read, the disk write and the memory write ALL happen
@@ -1234,6 +1293,76 @@ mod shared_memo_equivalence_tests {
             site: None,
             firmware_version: None,
         }
+    }
+
+    /// Review F1 (HA promotion trust-coherence): a durable trust downgrade that never
+    /// touched THIS process's in-memory map — the shared-file passive-standby drift —
+    /// is reconciled by `hydrate_fleet_from_store`, and a stale in-memory-only node is
+    /// pruned. This is the core of the promotion fix: the next posture recalculation
+    /// sees the durably-`Untrusted` node instead of the stale `Trusted` cache, so a
+    /// promoted standby cannot derive a falsely-`Nominal` posture from a boot snapshot.
+    #[test]
+    fn hydrate_fleet_from_store_reconciles_stale_trust_and_prunes() {
+        let app = app();
+        // Normal registration: in-memory + durable both Trusted.
+        assert!(app
+            .persist_and_insert_node(node("robot-1", NodeTrustState::Trusted))
+            .is_ok());
+        assert!(app
+            .persist_and_insert_node(node("robot-2", NodeTrustState::Trusted))
+            .is_ok());
+
+        // Simulate the dead primary durably marking robot-1 Untrusted WITHOUT
+        // touching this process's in-memory map — exactly the drift a PassiveStandby
+        // accumulates (it never processes the primary's trust downgrades).
+        assert!(
+            app.store
+                .with(|s| s.save_node(&node(
+                    "robot-1",
+                    NodeTrustState::Untrusted("primary-fault".into()),
+                )))
+                .is_ok(),
+            "durable downgrade write"
+        );
+
+        // A node present ONLY in memory, with no durable row — a stale cache entry
+        // that must be pruned on rehydrate.
+        app.fleet
+            .nodes
+            .insert("ghost".to_string(), node("ghost", NodeTrustState::Trusted));
+
+        // Pre-hydrate: memory is stale — robot-1 still reads Trusted; ghost present.
+        assert!(
+            app.fleet
+                .nodes
+                .get("robot-1")
+                .is_some_and(|n| matches!(n.status, NodeTrustState::Trusted)),
+            "precondition: in-memory trust has drifted stale (still Trusted)"
+        );
+        assert!(app.fleet.nodes.contains_key("ghost"));
+
+        // The fix: reload authoritative durable state before going Active. Two
+        // durable nodes remain (robot-1 now Untrusted, robot-2 still Trusted).
+        assert!(
+            app.hydrate_fleet_from_store()
+                .is_ok_and(|(nodes, _deps)| nodes == 2),
+            "rehydrate succeeds and reports the 2 durable nodes"
+        );
+
+        // Post-hydrate: robot-1 reflects the durable Untrusted; robot-2 survives;
+        // the in-memory-only ghost is pruned.
+        assert!(
+            app.fleet
+                .nodes
+                .get("robot-1")
+                .is_some_and(|n| matches!(n.status, NodeTrustState::Untrusted(_))),
+            "rehydrate replaces the stale Trusted cache with the durable Untrusted"
+        );
+        assert!(app.fleet.nodes.contains_key("robot-2"));
+        assert!(
+            !app.fleet.nodes.contains_key("ghost"),
+            "an in-memory-only node (no durable row) is pruned on rehydrate"
+        );
     }
 
     /// Assert that, for every registered node, resolving with a FRESH per-call
