@@ -80,6 +80,7 @@
       <a href="security.html">security</a>
       <a href="certification.html">certification</a>
       <a href="benchmarks.html">benchmarks</a>
+      <a href="playground.html">playground</a>
       <a href="open-source.html" aria-current="page">open source</a>
       <a href="documentation.html">docs</a>
       <a href="research.html">research</a>
@@ -170,7 +171,8 @@ curl -N localhost:8090/system/posture/stream \
               <h3 style="font-size:1.05rem">Runnable demonstrations</h3>
               <p>The in-line governor demo drives the full read→decide→sign→verify→release loop across a real
               process boundary; the CARLA client runs the governor against a simulator; the proposal bench sweeps
-              a live governor with hostile proposals and prints its verdicts.</p>
+              a live governor with hostile proposals and prints its verdicts. Or skip the terminal entirely:
+              the <a href="playground.html">Verdict Playground</a> runs the frozen checker in your browser.</p>
               <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-inline-governor" target="_blank" rel="noopener">crates/kirra-inline-governor</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/bin/kirra_carla_client.rs" target="_blank" rel="noopener">src/bin/kirra_carla_client.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-proposal-bench" target="_blank" rel="noopener">crates/kirra-proposal-bench</a></p>
             </div>
             <div class="card" data-reveal>
@@ -276,6 +278,7 @@ curl -N localhost:8090/system/posture/stream \
       <nav aria-label="Evidence">
         <h4>Evidence</h4>
         <ul>
+          <li><a href="playground.html">Verdict Playground</a></li>
           <li><a href="benchmarks.html">Benchmarks</a></li>
           <li><a href="open-source.html">Open source</a></li>
           <li><a href="documentation.html">Documentation</a></li>

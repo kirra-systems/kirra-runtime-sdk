@@ -572,6 +572,40 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 0.92rem; min-widt
 .budget__legend .k { display: inline-flex; align-items: center; gap: 6px; }
 .budget__legend .swatch { width: 10px; height: 10px; border-radius: 3px; }
 
+/* ---------- Playground form ---------- */
+.field { display: grid; gap: 6px; }
+.field label { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.08em; color: var(--ink-3); text-transform: uppercase; }
+.field input, .field select {
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;
+  color: var(--ink); font-family: var(--font-mono); font-size: 0.95rem;
+  padding: 10px 12px; width: 100%;
+}
+.field input:focus-visible, .field select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.preset-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.preset {
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px;
+  color: var(--ink-2); font-family: var(--font-mono); font-size: 0.74rem;
+  padding: 6px 14px; cursor: pointer; transition: color 0.2s, border-color 0.2s;
+}
+.preset:hover { color: var(--accent); border-color: var(--accent-line); }
+.verdict-panel {
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: var(--surface); padding: 28px; min-height: 220px;
+  display: grid; align-content: center; gap: 12px;
+}
+.verdict-panel[data-kind="allow"] { border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.verdict-panel[data-kind="clamp"] { border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.verdict-panel[data-kind="deny"]  { border-color: color-mix(in srgb, var(--danger) 55%, transparent); background: var(--danger-soft); }
+.verdict-panel__tag {
+  font-family: var(--font-display); font-weight: 700; letter-spacing: -0.01em;
+  font-size: clamp(1.5rem, 1.2rem + 1.4vw, 2.2rem); line-height: 1.1;
+}
+.verdict-panel[data-kind="allow"] .verdict-panel__tag { color: var(--ok); }
+.verdict-panel[data-kind="clamp"] .verdict-panel__tag { color: var(--warn); }
+.verdict-panel[data-kind="deny"]  .verdict-panel__tag { color: var(--danger); }
+.verdict-panel__code { font-family: var(--font-mono); font-size: 0.8rem; color: var(--ink-2); }
+.verdict-panel__why { color: var(--ink-2); font-size: 0.95rem; max-width: none; }
+
 /* ---------- Accordion (native details) ---------- */
 .acc { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
 .acc + .acc { margin-top: 10px; }

@@ -550,6 +550,7 @@ export const body = `
           <a class="card" href="security.html" data-reveal><h3>Security</h3><p>Per-node attestation, TPM quotes, scoped RBAC, Ed25519 federation, hash-chained audit, signed releases.</p><span class="card__more">Security <span aria-hidden="true">→</span></span></a>
           <a class="card" href="performance.html" data-reveal><h3>Performance</h3><p>WCET budgets and gates, the timing substrate, and honestly-scoped latency measurements.</p><span class="card__more">Performance <span aria-hidden="true">→</span></span></a>
           <a class="card" href="architecture.html" data-reveal><h3>Architecture</h3><p>The layered crate decomposition, transport decisions, partition boundaries, and deployment topology.</p><span class="card__more">Architecture <span aria-hidden="true">→</span></span></a>
+          <a class="card" href="playground.html" data-reveal style="border-color:var(--accent-line)"><h3>Verdict Playground</h3><p>The frozen checker, compiled to WebAssembly, running in your browser. Throw a 999 m/s hallucination at it and watch the envelope answer.</p><span class="card__more">Try it live <span aria-hidden="true">→</span></span></a>
         </div>
       </div>
     </section>

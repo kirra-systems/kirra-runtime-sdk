@@ -86,7 +86,8 @@ curl -N localhost:8090/system/posture/stream \\
               <h3 style="font-size:1.05rem">Runnable demonstrations</h3>
               <p>The in-line governor demo drives the full read→decide→sign→verify→release loop across a real
               process boundary; the CARLA client runs the governor against a simulator; the proposal bench sweeps
-              a live governor with hostile proposals and prints its verdicts.</p>
+              a live governor with hostile proposals and prints its verdicts. Or skip the terminal entirely:
+              the <a href="playground.html">Verdict Playground</a> runs the frozen checker in your browser.</p>
               ${evRow("crates/kirra-inline-governor", "src/bin/kirra_carla_client.rs", "crates/kirra-proposal-bench")}
             </div>
             <div class="card" data-reveal>
