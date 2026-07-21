@@ -155,6 +155,47 @@ export const body = `
       </div>
     </section>
 
+    <!-- ═══════════ USE CASES ═══════════ -->
+    <section id="use-cases" aria-labelledby="h-uses">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>What it protects</p>
+          <h2 id="h-uses" data-reveal>Machines make mistakes.<br>Kirra makes them survivable.</h2>
+          <p class="lede" data-reveal>The same checker, holding very different machines to their physics —
+          each of these is a real failure mode with a real mechanism behind it.</p>
+        </div>
+        <div class="grid grid--2">
+          <a class="card" href="solutions.html#av" data-reveal>
+            <h3>Autonomous vehicles</h3>
+            <p>After a fault, the only admissible commands converge to a stop — a post-collision “crawl” that
+            satisfies the speed limit is still denied. Designed against the 2023 San Francisco dragging incident.</p>
+            <span class="card__more">How AVs are governed <span aria-hidden="true">→</span></span>
+          </a>
+          <a class="card" href="solutions.html#robots" data-reveal>
+            <h3>Robots around people</h3>
+            <p>A pedestrian sensor that goes silent stops the robot — because a machine that can't prove the
+            sidewalk is clear shouldn't keep driving on stale confidence. Proven on physical hardware.</p>
+            <span class="card__more">How robots are governed <span aria-hidden="true">→</span></span>
+          </a>
+          <a class="card" href="solutions.html#industrial" data-reveal>
+            <h3>Industrial control</h3>
+            <p>A valid, authenticated, catastrophic setpoint — 400% output to a PLC — is decoded on the wire,
+            checked against a physical envelope, denied, and permanently recorded.</p>
+            <span class="card__more">How OT is governed <span aria-hidden="true">→</span></span>
+          </a>
+          <a class="card" href="solutions.html#llm" data-reveal>
+            <h3>LLM-driven machines</h3>
+            <p>The model hallucinates a 999 m/s command? Language becomes motion through exactly one typed,
+            fail-closed door — and a CI gate proves the conversational code can't reach the actuators at all.</p>
+            <span class="card__more">How LLMs are fenced <span aria-hidden="true">→</span></span>
+          </a>
+        </div>
+        <a class="card__more" href="solutions.html" style="margin-top:28px" data-reveal>All solutions, including fleet operations <span aria-hidden="true">→</span></a>
+      </div>
+    </section>
+
+    <hr class="rule">
+
     <!-- ═══════════ DOER / CHECKER ═══════════ -->
     <section id="architecture" aria-labelledby="h-arch">
       <div class="container">
