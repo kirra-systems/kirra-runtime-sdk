@@ -18,8 +18,16 @@ the versioned public surface, the MSRV policy, and the deprecation process).
 
 ## [Unreleased]
 
-Everything since v1.1.2 (May 2026 → present). The highlights, by stream —
-detail lives in `docs/adr/`, `docs/safety/`, and the PR history:
+_Nothing yet — this section accumulates changes until the next release is cut._
+
+## [v2.0.0] — 2026-07-21
+
+The disambiguating **MAJOR**: it moves the version line permanently above the
+retired v1.5.0 "Aegis" high-water — clearing the v1.5.0/v1.1.2 sort inversion for
+good (`docs/VERSIONING_POLICY.md` §2.1) — and completes the ADR-0035 re-export-shim
+removal (#1029). Otherwise it carries everything accumulated since v1.1.2
+(May 2026 → present). The highlights, by stream — detail lives in `docs/adr/`,
+`docs/safety/`, and the PR history:
 
 ### Added
 
