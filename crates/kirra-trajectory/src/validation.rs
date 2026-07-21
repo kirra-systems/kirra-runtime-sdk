@@ -49,6 +49,21 @@ const SLOW_LOOP_MIN_CORRIDOR_CONFIDENCE: f32 = 0.5;
 /// Max corridor age (ms). One planning cycle (~100 ms) + jitter.
 const SLOW_LOOP_MAX_CORRIDOR_AGE_MS: u64 = 500;
 
+/// #1096 (F9): hard cap on the number of perceived objects the RSS validator will
+/// process in ONE call. The RSS pass is `O(objects × poses)`; poses are already
+/// bounded (`MAX_TRAJECTORY_HORIZON`), but the object slice is caller-supplied and
+/// was previously unbounded — a dense scene or faulty perception could blow the
+/// slow-loop WCET (an unbounded checker input domain). Bounding the object count
+/// makes the whole RSS cost O(1)-bounded.
+///
+/// Pinned to `kirra_core::perception_monitor::MAX_TRACKED_OBJECTS` (256) — the SAME
+/// cap the perception-monitor derate path already enforces (`PerceptionOutput::
+/// is_healthy`), so a scene that is over-cap for one path is over-cap for both
+/// (one documented fleet-wide object-cardinality limit, one source of truth). An
+/// over-cap object slice is a dense/faulty-perception OVERLOAD → fail-closed MRC,
+/// never partial processing.
+pub const MAX_RSS_OBJECTS: usize = kirra_core::perception_monitor::MAX_TRACKED_OBJECTS;
+
 /// RSS reaction time (s). Per IEEE 2846-2022 §5.1 the canonical value
 /// is 0.5 s for SAE-Level-4 stacks; we use the conservative end.
 const RSS_REACTION_TIME_S: f64 = 0.5;
@@ -356,6 +371,25 @@ pub fn validate_trajectory_slow_with_envelope(
         return (
             TrajectoryVerdict::MRCFallback,
             Some(TrajectoryRefusalReason::TooFewPoints),
+            None,
+        );
+    }
+
+    // ----- Object-cardinality cap (F9 / #1096) -------------------------
+    //
+    // The RSS pass (§C) is `O(objects × poses)`. Poses are bounded by
+    // `MAX_TRAJECTORY_HORIZON`, but `objects` is caller-supplied and was
+    // otherwise unbounded — a dense scene or faulty perception could blow the
+    // slow-loop WCET. Fail CLOSED above the documented `MAX_RSS_OBJECTS` cap: an
+    // overload scene yields a conservative MRC, never partial processing.
+    // Checked up front, before any per-tick buffer is even materialized, so the
+    // overload short-circuits at O(1). The verdict reason
+    // (`PerceptionObjectOverflow`) surfaces the overflow through the existing
+    // verdict-reason emission (the checker's observability channel).
+    if objects.len() > MAX_RSS_OBJECTS {
+        return (
+            TrajectoryVerdict::MRCFallback,
+            Some(TrajectoryRefusalReason::PerceptionObjectOverflow),
             None,
         );
     }
@@ -2026,6 +2060,10 @@ pub enum TrajectoryRefusalReason {
     /// WS-2 VRU bound: a pedestrian's omnidirectional reachable set meets the
     /// ego envelope at a time-matched pose (or a non-finite pedestrian).
     VruReachableSetBreach,
+    /// F9 (#1096): the perceived-object slice exceeded `MAX_RSS_OBJECTS` — a
+    /// dense/faulty-perception overload that would blow the RSS-pass WCET. The
+    /// scene is refused wholesale (MRC), never partially processed.
+    PerceptionObjectOverflow,
 }
 
 impl TrajectoryRefusalReason {
@@ -2048,6 +2086,7 @@ impl TrajectoryRefusalReason {
             Self::PredictiveRssBreach => "TRAJECTORY_RSS_PREDICTIVE",
             Self::OcclusionOutrunsVisibility => "TRAJECTORY_OCCLUSION_OUTRUN",
             Self::VruReachableSetBreach => "TRAJECTORY_VRU_BREACH",
+            Self::PerceptionObjectOverflow => "TRAJECTORY_PERCEPTION_OVERLOAD",
         }
     }
 
@@ -2123,6 +2162,13 @@ impl TrajectoryRefusalReason {
                  carried non-finite fields. Refused omnidirectionally; kerbside lateral \
                  clearance does not exempt a VRU (WS-2, SG1)."
             }
+            Self::PerceptionObjectOverflow => {
+                "The perceived-object count exceeded the checker's cap (MAX_RSS_OBJECTS = 256), \
+                 a dense-scene or faulty-perception overload that would exceed the RSS pass's \
+                 bounded compute budget. The scene is refused wholesale rather than partially \
+                 processed — a bounded checker never trades safety for a scene it cannot fully \
+                 evaluate in time (F9, #1096)."
+            }
         }
     }
 }
@@ -2154,6 +2200,7 @@ mod refusal_reason_tests {
             TrajectoryRefusalReason::PredictiveRssBreach,
             TrajectoryRefusalReason::OcclusionOutrunsVisibility,
             TrajectoryRefusalReason::VruReachableSetBreach,
+            TrajectoryRefusalReason::PerceptionObjectOverflow,
         ];
         let mut codes = std::collections::HashSet::new();
         let mut sentences = std::collections::HashSet::new();
@@ -2263,6 +2310,81 @@ mod refusal_reason_tests {
             TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
         ));
         assert_eq!(r, None);
+    }
+
+    // F9 (#1096): the RSS validator caps the perceived-object cardinality. An
+    // over-`MAX_RSS_OBJECTS` scene fails CLOSED (MRC) with the overflow reason;
+    // exactly the cap is within budget and processed normally.
+    #[test]
+    fn object_cardinality_overflow_mrcs_and_the_cap_boundary_is_processed() {
+        use kirra_core::corridor::Point;
+        let corridor = crate::corridor::MockCorridorSource::straight_5m_half_width(200.0);
+        let config = crate::config::VehicleConfig::default_urban();
+        let traj: Vec<TrajectoryPoint> = (0..5)
+            .map(|i| TrajectoryPoint {
+                pose: crate::state::Pose {
+                    x_m: 5.0 + (i as f64) * 0.5,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+                velocity_mps: 5.0,
+                time_from_start_s: (i as f64) * 0.1,
+            })
+            .collect();
+
+        // Harmless objects placed BEHIND ego (negative x) so the RSS pass's
+        // `dx_ego <= 0.0` guard skips each one — this exercises the cardinality
+        // cap, not an RSS breach.
+        let harmless = |i: usize| PerceivedObject {
+            id: i as u64,
+            pos: Point {
+                x_m: -50.0,
+                y_m: 100.0,
+            },
+            velocity_mps: 0.0,
+            heading_rad: 0.0,
+            vel: Point { x_m: 0.0, y_m: 0.0 },
+        };
+
+        // Exactly MAX_RSS_OBJECTS → within budget, NOT an overflow.
+        let at_cap: Vec<PerceivedObject> = (0..MAX_RSS_OBJECTS).map(harmless).collect();
+        let (_v, r) = validate_trajectory_slow_explained(
+            &traj,
+            &corridor,
+            &at_cap,
+            &config,
+            None,
+            FleetPosture::Nominal,
+            None,
+            None,
+            None,
+            None,
+            FrameTrust::Trusted,
+        );
+        assert_ne!(
+            r,
+            Some(TrajectoryRefusalReason::PerceptionObjectOverflow),
+            "exactly MAX_RSS_OBJECTS is within the cap"
+        );
+
+        // One over the cap → fail-closed MRC with the overflow reason.
+        let over_cap: Vec<PerceivedObject> = (0..=MAX_RSS_OBJECTS).map(harmless).collect();
+        assert_eq!(over_cap.len(), MAX_RSS_OBJECTS + 1);
+        let (v, r) = validate_trajectory_slow_explained(
+            &traj,
+            &corridor,
+            &over_cap,
+            &config,
+            None,
+            FleetPosture::Nominal,
+            None,
+            None,
+            None,
+            None,
+            FrameTrust::Trusted,
+        );
+        assert_eq!(v, TrajectoryVerdict::MRCFallback);
+        assert_eq!(r, Some(TrajectoryRefusalReason::PerceptionObjectOverflow));
     }
 }
 
