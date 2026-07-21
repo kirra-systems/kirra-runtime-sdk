@@ -99,6 +99,19 @@ pub(crate) fn apply_post_promotion(
     spawn_heartbeat_writer(Arc::clone(app), ha);
 }
 
+/// #1099 split-brain guard decision for the `KIRRA_FORCE_PROMOTE` path. Given the
+/// peer heartbeat token observed BEFORE and AFTER a one-interval probe, returns true
+/// iff the force-promote must be REFUSED because the peer is demonstrably LIVE (its
+/// token advanced between the two reads). No token (cold start / dead peer) or an
+/// unchanged token (silent / wedged peer) permits the force — the operator override
+/// is only blocked when it would knowingly race an actively-heartbeating primary.
+pub(crate) fn force_promote_refused_by_live_peer(
+    before: Option<&str>,
+    after: Option<&str>,
+) -> bool {
+    matches!((before, after), (Some(b), Some(a)) if a != b)
+}
+
 pub(crate) async fn promotion_loop(
     app: Arc<AppState>,
     cache: SharedPostureCache,
@@ -133,9 +146,47 @@ pub(crate) async fn promotion_loop(
     }
 
     if timings.force_promote {
+        // #1099: refuse a force-promote over a DEMONSTRABLY-LIVE peer. Read the
+        // heartbeat token twice, one interval apart; an ADVANCING token means the
+        // primary is actively heartbeating, and forcing over it is exactly the
+        // split-brain the #689 margin exists to prevent (the durable epoch CAS is the
+        // backstop, but we must not deliberately race a live holder). No token (cold
+        // start / dead peer) or an unchanged token (silent / wedged peer) → the force
+        // proceeds. The promotion itself stays audit-chained
+        // (STANDBY_PROMOTED_TO_ACTIVE, reason FORCE_PROMOTE) via perform_promotion.
+        // SAFETY: SG-HA-3 — durable reads run off the async runtime (call_read).
+        let before = match app
+            .store
+            .call_read(|store| store.load_engine_state(HEARTBEAT_KEY))
+            .await
+        {
+            Ok(Ok(tok)) => tok,
+            _ => None,
+        };
+        let refuse = if before.is_some() {
+            tokio::time::sleep(Duration::from_millis(timings.heartbeat_interval_ms.max(1))).await;
+            let after = match app
+                .store
+                .call_read(|store| store.load_engine_state(HEARTBEAT_KEY))
+                .await
+            {
+                Ok(Ok(tok)) => tok,
+                _ => None,
+            };
+            force_promote_refused_by_live_peer(before.as_deref(), after.as_deref())
+        } else {
+            false
+        };
+        if refuse {
+            tracing::error!(
+                instance_id = %id,
+                "KIRRA_FORCE_PROMOTE REFUSED (#1099): a peer heartbeat is actively advancing — refusing to force-promote over a LIVE primary (split-brain guard). Stop the peer or clear its heartbeat key, then retry."
+            );
+            return;
+        }
         tracing::warn!(
             instance_id = %id,
-            "KIRRA_FORCE_PROMOTE=1: bypassing heartbeat check, promoting immediately"
+            "KIRRA_FORCE_PROMOTE=1: no live peer heartbeat observed — bypassing heartbeat timeout, promoting immediately"
         );
         if perform_promotion(&app, &cache, &id, "FORCE_PROMOTE").await {
             // reviews H2 + H3: re-wire posture freshness AND start
@@ -752,3 +803,30 @@ pub(crate) async fn perform_promotion(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod force_promote_guard_tests {
+    use super::force_promote_refused_by_live_peer;
+
+    #[test]
+    fn refuses_only_when_a_present_token_advances() {
+        // No token either read (cold start / never-heartbeated peer) → allow.
+        assert!(!force_promote_refused_by_live_peer(None, None));
+        // Token disappeared (peer stopped writing) → allow.
+        assert!(!force_promote_refused_by_live_peer(Some("100.1"), None));
+        // Token appeared but was absent before → not two comparable reads → allow
+        // (the probe only sleeps+re-reads when `before` is Some, so this arm is
+        // defensive; an appearing token is still not proof of a sustained peer).
+        assert!(!force_promote_refused_by_live_peer(None, Some("100.1")));
+        // Token unchanged (silent / wedged primary) → allow the override.
+        assert!(!force_promote_refused_by_live_peer(
+            Some("100.1"),
+            Some("100.1")
+        ));
+        // Token ADVANCED between the two reads → a live primary → REFUSE.
+        assert!(force_promote_refused_by_live_peer(
+            Some("100.1"),
+            Some("100.2")
+        ));
+    }
+}
