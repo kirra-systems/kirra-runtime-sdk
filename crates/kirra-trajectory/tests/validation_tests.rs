@@ -1225,6 +1225,134 @@ fn predictive_rss_does_not_regress_a_lane_keeping_neighbor() {
 }
 
 #[test]
+fn predictive_input_too_coarsely_spaced_fails_closed_f4() {
+    // #1094 (F4): the predictive pass time-matches predicted samples to ego poses
+    // within a tolerance. When modes are supplied, an ego trajectory whose poses are
+    // spaced FARTHER than the tolerance can bridge (> MAX_PREDICTIVE_POSE_SPACING_S)
+    // leaves in-span windows unmatchable — so it is refused UP FRONT (the previously
+    // unused max-pose-spacing precondition, now wired into the live path).
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let benign = linear_mode(1, 6.0, -3.5, 9.0, 0.0, 2.0); // lane-keeping neighbor
+    let modes = [PredictedMode {
+        object_id: 1,
+        samples: &benign,
+    }];
+
+    // Coarse: 3 poses 1.5 s apart (> 1.0 s bound) → refused, purely on spacing.
+    let coarse = straight_trajectory(3, 3.0, 1.5);
+    let v_coarse = validate_trajectory_slow_capped(
+        &coarse,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
+    );
+    assert_eq!(
+        v_coarse,
+        TrajectoryVerdict::MRCFallback,
+        "a too-coarse ego trajectory with predicted modes must fail closed; got {v_coarse:?}"
+    );
+
+    // The SAME benign mode over a fine (0.1 s) trajectory is admitted — proving the
+    // coarse rejection is the spacing precondition, not the lane-keeping neighbor.
+    let fine = straight_trajectory(20, 3.0, 0.1);
+    let v_fine = validate_trajectory_slow_capped(
+        &fine,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
+    );
+    assert!(
+        matches!(v_fine, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "a fine trajectory with a lane-keeping neighbor is admitted; got {v_fine:?}"
+    );
+}
+
+#[test]
+fn predictive_rss_per_window_coverage_closes_an_in_span_nonmonotonic_gap_f4() {
+    // #1094 (F4): the per-mode "evaluated" latch let a LATER in-span window be
+    // silently skipped once an earlier window evaluated. The object sits in the CLEAR
+    // right lane (y=-3.5) in EVERY evaluable window — so the admit/refuse decision
+    // turns ONLY on whether the ONE non-monotonic, in-span window (window 2,
+    // a.t = 1.0 ∈ [0, 1.9]) is fail-closed. The old per-mode latch (set by windows
+    // 0/1) ADMITTED it; per-window coverage refuses it.
+    let trajectory = straight_trajectory(20, 3.0, 0.1); // ego 3 m/s, spans t=0..1.9
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let samples = [
+        // window 0 (0.0→0.5): clear lane — evaluated benign, SETS the latch.
+        PredictedSample {
+            pos: Point {
+                x_m: 9.0,
+                y_m: -3.5,
+            },
+            time_from_start_s: 0.0,
+        },
+        PredictedSample {
+            pos: Point {
+                x_m: 9.0,
+                y_m: -3.5,
+            },
+            time_from_start_s: 0.5,
+        },
+        // window 1 (0.5→1.0): clear lane — evaluated benign.
+        PredictedSample {
+            pos: Point {
+                x_m: 9.0,
+                y_m: -3.5,
+            },
+            time_from_start_s: 1.0,
+        },
+        // window 2 (1.0→0.9): NON-MONOTONIC (dt = -0.1), a.t = 1.0 IN-SPAN → the ONLY
+        // reason the trajectory is refused (same clear lane, so nothing else breaches).
+        PredictedSample {
+            pos: Point {
+                x_m: 9.0,
+                y_m: -3.5,
+            },
+            time_from_start_s: 0.9,
+        },
+    ];
+    let modes = [PredictedMode {
+        object_id: 1,
+        samples: &samples,
+    }];
+    let verdict = validate_trajectory_slow_capped(
+        &trajectory,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
+    );
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "an in-span non-monotonic predicted window must fail closed (per-window coverage, \
+         not the per-mode latch); got {verdict:?}"
+    );
+}
+
+#[test]
 fn predictive_rss_catches_a_predicted_cut_in() {
     // The SAME kind of neighbor, but its predicted mode now CUTS IN: it crosses from
     // the right lane (y=-3.5) INTO the ego's lane just ahead of the ego, then sits
