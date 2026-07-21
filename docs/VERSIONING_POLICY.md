@@ -156,7 +156,19 @@ permanent layer. They are therefore **DEPRECATED as of this policy revision**:
    **removal milestone** — that release migrates internal call sites to the
    canonical crate paths and deletes the shims, listed under `### Removed`. This
    is deliberately co-scheduled with the version-line disambiguation so the two
-   root-crate cleanups land together.
+   root-crate cleanups land together. The **actionable step-by-step** (old→new
+   path table for all remaining shims, per-shim consumer counts + landing order,
+   the mechanical recipe, and the downstream migration guide) is drafted in
+   `docs/adr/0035-shim-removal-v2-plan.md`.
+
+**Enforcement.** The shim set is frozen and shrinking-only between now and v2.0.0
+by `ci/check_reexport_shims.py` (guardrails CI job; inventory in
+`ci/reexport_shims_baseline.json`): a NEW `pub use` shim fails CI, and `max_shims`
+only decreases. Three dead shims have already been removed pre-2.0 under the
+dead-vs-live rule (a zero-consumer shim carries no live contract):
+`gateway/interceptor.rs`, `gateway/cmd_vel.rs`, `posture_tracker.rs` — so the count
+is **14** (not the ~20 named above, which predates the sweep). At v2.0.0 the
+remaining 14 go and `max_shims` reaches 0.
 
 The larger, separate item this does **not** close is the actual `AppState`
 decomposition (still ADR-0035 **Proposed**); that is tracked as its own body of
