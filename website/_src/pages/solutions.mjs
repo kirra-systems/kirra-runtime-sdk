@@ -41,6 +41,68 @@ ${pageHero({
         </nav>`,
 })}
 
+    <section id="incidents" aria-labelledby="h-incidents">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>Already happened</p>
+          <h2 id="h-incidents" data-reveal>None of this is hypothetical.</h2>
+          <p class="lede" data-reveal>Every failure class below has already made the news. We won't claim any
+          system prevents every incident — what we can show, file by file, is the shipped mechanism aimed at
+          each one.</p>
+        </div>
+        <div class="grid grid--2">
+          <div class="card" data-reveal>
+            <p class="eyebrow" style="font-size:0.68rem;margin-bottom:12px">Atlanta · 2025</p>
+            <h3>Robotaxis drove into flooded streets</h3>
+            <p>During heavy storms, robotaxis were filmed driving into standing water. The physics is unforgiving:
+            water is specular to lidar — it returns almost no signal, so geometric perception sees an absence, not
+            a hazard. Kirra's perception layer names this exact problem in its source and answers it by policy:
+            <code>Water</code> is a first-class non-drivable semantic class, <em>all</em> standing water is treated
+            as non-drivable (depth-from-one-sensor is explicitly declared unsolved rather than guessed), and
+            semantic fusion is only allowed to <em>shrink</em> the drivable corridor — a fusion result that loosens
+            it is a hard zero in CI.</p>
+            ${evRow("crates/kirra-taj/src/lib.rs:189", "crates/kirra-kpi-gate")}
+          </div>
+          <div class="card" data-reveal>
+            <p class="eyebrow" style="font-size:0.68rem;margin-bottom:12px">San Francisco · 2023</p>
+            <h3>An AV dragged the pedestrian it stopped for</h3>
+            <p>After a collision, an AV executed its programmed pullover at ~3 m/s — under its speed ceiling, so
+            nothing intervened — dragging the pedestrian beneath it 20 feet. Kirra's Degraded posture is designed
+            against this incident by name: after a fault, only commands that converge to a stop are admissible,
+            the vehicle holds at zero, and the governor never authors re-acceleration. The no-re-initiation rule
+            is machine-checked by proof, not just tested.</p>
+            ${evRow("crates/kirra-core/src/kinematics_contract.rs", "verification/kani/src/proofs_kinematics.rs:166")}
+            <p style="margin-top:12px"><a class="card__more" href="#av">The full AV story <span aria-hidden="true">→</span></a></p>
+          </div>
+          <div class="card" data-reveal>
+            <p class="eyebrow" style="font-size:0.68rem;margin-bottom:12px">Multiple US cities · 2024–2025</p>
+            <h3>Robotaxis drove into fireworks and street chaos</h3>
+            <p>Vehicles have been filmed proceeding into active fireworks, crowds, and scenes their models plainly
+            didn't understand. The failure isn't one bad detection — it's a stack with no concept of "I can't
+            classify this, so I shouldn't proceed." In Kirra, that concept is structural: sensor confidence below
+            its floor faults the node and degrades posture; two perception channels that disagree cap speed to
+            zero; an unevaluable prediction resolves to minimum-risk. Unknown never maps to proceed — that rule
+            holds in every posture, including Nominal.</p>
+            ${evRow("src/recovery_hysteresis.rs", "crates/kirra-trajectory/src/perception_redundancy.rs:224")}
+          </div>
+          <div class="card" data-reveal>
+            <p class="eyebrow" style="font-size:0.68rem;margin-bottom:12px">Oldsmar, Florida · 2021</p>
+            <h3>A water plant's lye setpoint was raised 100-fold</h3>
+            <p>An operator watched the sodium hydroxide setpoint climb from 100 ppm to 11,100 ppm on a remotely
+            accessed HMI — caught by human luck, minutes from dosing a town's water. Later accounts debate
+            intrusion versus operator error, and that debate is the lesson: the control system accepted a 111×
+            toxic setpoint on valid credentials either way. Kirra's industrial adapters decode the actual write on
+            the wire and deny on <em>magnitude</em> — an out-of-envelope setpoint is refused regardless of whose
+            credentials carried it, and the refusal is a permanent, hash-chained record.</p>
+            ${evRow("docs/protocol_adapters.md", "src/bin/kirra_verifier_service/dnp3_mandatory_audit_tests.rs")}
+            <p style="margin-top:12px"><a class="card__more" href="#industrial">The full OT story <span aria-hidden="true">→</span></a></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule">
+
 ${useCase({
   id: "av",
   pill: LIVE,
