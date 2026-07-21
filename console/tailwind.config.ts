@@ -17,8 +17,8 @@ export default {
         warn: 'rgb(var(--warn) / <alpha-value>)',
         crit: 'rgb(var(--crit) / <alpha-value>)',
         ice: 'rgb(var(--ice) / <alpha-value>)',
-        line: 'rgba(150, 166, 198, 0.10)',
-        'line-strong': 'rgba(150, 166, 198, 0.22)',
+        line: 'rgb(var(--line) / 0.10)',
+        'line-strong': 'rgb(var(--line) / 0.22)',
       },
       fontFamily: {
         display: ['var(--font-display)', 'system-ui', 'sans-serif'],

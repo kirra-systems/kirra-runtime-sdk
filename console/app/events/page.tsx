@@ -67,7 +67,7 @@ export default function EventsPage() {
         ) : (
           <ul>
             {filtered.map((e) => (
-              <li key={e.id} className="flex items-start gap-4 border-b border-line px-4 py-3 last:border-0 hover:bg-white/[0.02]">
+              <li key={e.id} className="flex items-start gap-4 border-b border-line px-4 py-3 last:border-0 hover:bg-ink/[0.02]">
                 <StatusDot tone={e.tone} pulse={e.tone === 'crit'} />
                 <span className="w-16 shrink-0 font-mono text-[11px] text-faint">{e.ts}</span>
                 <span className={`w-24 shrink-0 truncate font-mono text-[10px] uppercase tracking-wider ${txt(srcTone(e.source))}`}>{e.source}</span>
@@ -88,7 +88,7 @@ function Chip({ children, active, tone, onClick }: { children: React.ReactNode; 
   return (
     <button
       onClick={onClick}
-      className={`rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-colors ${active ? `${ring(tone)} ${txt(tone)} bg-white/[0.04] ring-1` : 'text-faint hover:text-muted'}`}
+      className={`rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-colors ${active ? `${ring(tone)} ${txt(tone)} bg-ink/[0.04] ring-1` : 'text-faint hover:text-muted'}`}
     >
       {children}
     </button>
@@ -106,4 +106,4 @@ function srcTone(s: string): Tone {
 }
 
 function txt(t: Tone) { return t === 'safe' ? 'text-safe' : t === 'warn' ? 'text-warn' : t === 'crit' ? 'text-crit' : t === 'ice' ? 'text-ice' : 'text-muted' }
-function ring(t: Tone) { return t === 'safe' ? 'ring-safe/30' : t === 'warn' ? 'ring-warn/30' : t === 'crit' ? 'ring-crit/30' : t === 'ice' ? 'ring-ice/30' : 'ring-white/10' }
+function ring(t: Tone) { return t === 'safe' ? 'ring-safe/30' : t === 'warn' ? 'ring-warn/30' : t === 'crit' ? 'ring-crit/30' : t === 'ice' ? 'ring-ice/30' : 'ring-ink/10' }

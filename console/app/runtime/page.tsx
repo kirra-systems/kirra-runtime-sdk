@@ -1,5 +1,5 @@
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
-import { DemoBadge } from '@/components/ui/demo-badge'
+import { SourceBadge } from '@/components/ui/source-badge'
 import { Spark } from '@/components/charts/charts'
 import { LatencyLines } from '@/components/charts/extra'
 import { TopologyMap } from '@/components/ui/topology-map'
@@ -17,7 +17,7 @@ export default function RuntimePage() {
           <p className="font-mono text-[11px] text-faint">compute · transport · isolation</p>
         </div>
         <div className="flex items-center gap-2">
-          <DemoBadge live={false} />
+          <SourceBadge />
           <Pill tone="safe">All partitions enforced</Pill>
         </div>
       </div>
@@ -75,7 +75,7 @@ export default function RuntimePage() {
               </thead>
               <tbody className="font-mono text-[12px]">
                 {ddsTopics.map((d) => (
-                  <tr key={d.topic} className="border-b border-line last:border-0 hover:bg-white/[0.02]">
+                  <tr key={d.topic} className="border-b border-line last:border-0 hover:bg-ink/[0.02]">
                     <td className="px-4 py-2.5 text-ink">{d.topic}</td>
                     <td className="px-4 py-2.5 text-ice">{d.qos}</td>
                     <td className="px-4 py-2.5 text-faint">{d.pubs}/{d.subs}</td>

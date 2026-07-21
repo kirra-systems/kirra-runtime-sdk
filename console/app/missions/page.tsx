@@ -44,7 +44,7 @@ export default function MissionsPage() {
               <div className="relative h-7 flex-1 overflow-hidden rounded-md border border-line bg-bg/40">
                 {/* hour gridlines */}
                 {[0.25, 0.5, 0.75].map((f) => (
-                  <span key={f} className="absolute top-0 h-full w-px bg-white/[0.04]" style={{ left: `${f * 100}%` }} />
+                  <span key={f} className="absolute top-0 h-full w-px bg-ink/[0.04]" style={{ left: `${f * 100}%` }} />
                 ))}
                 {/* now line */}
                 <span className="absolute top-0 z-10 h-full w-px bg-ice/70" style={{ left: `${ganttWindow.nowFrac * 100}%` }} />
@@ -81,7 +81,7 @@ export default function MissionsPage() {
       </Panel>
 
       <Panel title="Mission Timeline" subtitle={`${mission.progress}% complete · started ${mission.started}`}>
-        <div className="mb-4 h-1.5 w-full overflow-hidden rounded-full bg-white/5">
+        <div className="mb-4 h-1.5 w-full overflow-hidden rounded-full bg-ink/5">
           <div className="h-full rounded-full bg-ice" style={{ width: `${mission.progress}%` }} />
         </div>
         <div className="grid grid-cols-3 gap-3 sm:grid-cols-6">

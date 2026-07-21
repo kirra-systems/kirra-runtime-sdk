@@ -70,7 +70,7 @@ export default function AnalyticsPage() {
           <DualLine
             data={transitionSeries as unknown as { t: string; [k: string]: string | number }[]}
             keys={['degraded', 'lockedout']}
-            colors={['#ffb020', '#ff5468']}
+            colors={['var(--c-warn)', 'var(--c-crit)']}
             height={230}
           />
           <p className="mt-2 font-mono text-[10px] text-faint">Backward-looking counts of fleet posture transitions over the {WINDOW_MS / (24 * 60 * 60 * 1000)}-day window — not a forecast.</p>

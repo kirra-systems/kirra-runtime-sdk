@@ -6,6 +6,7 @@ import { useRawModal } from '@/components/ui/raw-modal'
 import { useAuditChain } from '@/lib/api/hooks'
 import { certs, tests, sbom, firmware } from '@/lib/compliance'
 import type { Tone } from '@/lib/types'
+import { utcTime } from '@/lib/format'
 
 export default function CompliancePage() {
   const audit = useAuditChain(15000)
@@ -61,8 +62,8 @@ export default function CompliancePage() {
             </span>
           </div>
           <div className="mt-4 space-y-3">
-            <KV k="Total entries" v={audit.verify.total_entries.toLocaleString()} />
-            <KV k="Signed / unsigned" v={`${audit.verify.signed_entries.toLocaleString()} / ${audit.verify.unsigned_entries.toLocaleString()}`} />
+            <KV k="Total entries" v={audit.verify.total_entries.toLocaleString('en-US')} />
+            <KV k="Signed / unsigned" v={`${audit.verify.signed_entries.toLocaleString('en-US')} / ${audit.verify.unsigned_entries.toLocaleString('en-US')}`} />
             <KV k="Signature valid" v={audit.verify.signature_valid ? 'yes' : 'no'} tone={audit.verify.signature_valid ? 'safe' : 'crit'} />
             <KV k="Head" v={audit.verify.head_status} />
             <KV k="Latest hash" v={audit.verify.latest_hash} />
@@ -75,11 +76,11 @@ export default function CompliancePage() {
               <li
                 key={e.id}
                 onClick={() => raw.open({ title: e.event_type, subtitle: `audit entry #${e.id} · ${e.source}`, data: e })}
-                className="flex cursor-pointer items-center gap-4 border-b border-line px-4 py-3 last:border-0 hover:bg-white/[0.02]"
+                className="flex cursor-pointer items-center gap-4 border-b border-line px-4 py-3 last:border-0 hover:bg-ink/[0.02]"
                 title="tap for raw entry"
               >
                 <StatusDot tone={auditTone(e.event_type)} />
-                <span className="w-20 shrink-0 font-mono text-[10px] text-faint">{new Date(e.timestamp_ms).toLocaleTimeString()}</span>
+                <span className="w-20 shrink-0 font-mono text-[10px] text-faint">{utcTime(e.timestamp_ms)}</span>
                 <span className="w-24 shrink-0 font-mono text-[10px] uppercase tracking-wider text-muted">{e.source}</span>
                 <div className="min-w-0 flex-1">
                   <div className={`truncate font-mono text-[11px] ${txt(auditTone(e.event_type))}`}>{e.event_type}</div>
@@ -101,7 +102,7 @@ export default function CompliancePage() {
                 <li key={t.id}>
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-[13px] text-ink">{t.name}</span>
-                    <span className="font-mono text-[11px] text-muted">{t.passed.toLocaleString()} <span className="text-faint">/ {t.total.toLocaleString()}</span></span>
+                    <span className="font-mono text-[11px] text-muted">{t.passed.toLocaleString('en-US')} <span className="text-faint">/ {t.total.toLocaleString('en-US')}</span></span>
                   </div>
                   <div className="mt-2 flex items-center gap-3">
                     <div className="flex-1"><Meter value={pct} tone={t.tone} /></div>

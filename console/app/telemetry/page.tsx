@@ -60,7 +60,7 @@ export default function TelemetryPage() {
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <Panel className="xl:col-span-2" title="Actuator Commands" subtitle="steering° / throttle% · post-governor">
-          <DualLine data={actuator} keys={['steer', 'throttle']} colors={['#5cc6ff', '#ffb020']} height={200} />
+          <DualLine data={actuator} keys={['steer', 'throttle']} colors={['var(--c-ice)', 'var(--c-warn)']} height={200} />
         </Panel>
         <Panel title="Position" subtitle="local frame · drivable corridor" dense>
           <div className="p-2"><PositionMap path={path} ego={ego} height={208} /></div>

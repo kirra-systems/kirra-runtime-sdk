@@ -6,7 +6,7 @@ import type { Tone } from '@/lib/types'
 export interface TopoNode { id: string; label: string; sub?: string; x: number; y: number; tone: Tone; core?: boolean }
 export interface TopoEdge { from: string; to: string; tone: Tone }
 
-const stroke: Record<string, string> = { safe: '#2fe6a6', warn: '#ffb020', crit: '#ff5468', ice: '#5cc6ff', muted: '#69728a' }
+const stroke: Record<string, string> = { safe: 'var(--c-safe)', warn: 'var(--c-warn)', crit: 'var(--c-crit)', ice: 'var(--c-ice)', muted: 'var(--c-faint)' }
 
 export function TopologyMap({ nodes, edges, height = 340 }: { nodes: TopoNode[]; edges: TopoEdge[]; height?: number }) {
   const byId = (id: string) => nodes.find((n) => n.id === id)!
@@ -23,8 +23,8 @@ export function TopologyMap({ nodes, edges, height = 340 }: { nodes: TopoNode[];
           {n.core && <circle cx={n.x} cy={n.y} r="8.4" fill="none" stroke={stroke[n.tone]} strokeOpacity="0.25" strokeWidth="0.4" />}
           <circle cx={n.x} cy={n.y} r={n.core ? 6 : 4.2} fill="rgba(16,20,30,0.95)" stroke={stroke[n.tone]} strokeWidth={n.core ? 0.8 : 0.5} />
           <circle cx={n.x} cy={n.y} r="1.1" fill={stroke[n.tone]} />
-          <text x={n.x} y={n.y + (n.core ? 9.6 : 7)} fill="#e9edf6" fontSize="2.5" fontFamily="monospace" textAnchor="middle">{n.label}</text>
-          {n.sub && <text x={n.x} y={n.y + (n.core ? 12.4 : 9.6)} fill="#69728a" fontSize="2" fontFamily="monospace" textAnchor="middle">{n.sub}</text>}
+          <text x={n.x} y={n.y + (n.core ? 9.6 : 7)} fill="var(--c-bright)" fontSize="2.5" fontFamily="monospace" textAnchor="middle">{n.label}</text>
+          {n.sub && <text x={n.x} y={n.y + (n.core ? 12.4 : 9.6)} fill="var(--c-faint)" fontSize="2" fontFamily="monospace" textAnchor="middle">{n.sub}</text>}
         </g>
       ))}
     </svg>

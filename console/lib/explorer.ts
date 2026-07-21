@@ -49,14 +49,14 @@ function build(id: string, label: string, unit: string, color: string, tone: Ton
 }
 
 export const signals: ExplorerSignal[] = [
-  build('velocity', 'Velocity', 'm/s', '#5cc6ff', 'ice', 11, (i, r) => 1.2 + Math.sin(i / 5) * 0.6 + (r() - 0.5) * 0.4),
-  build('accel', 'Acceleration', 'm/s²', '#9aa6bd', 'muted', 23, (i, r) => Math.cos(i / 5) * 0.5 + (r() - 0.5) * 0.3),
-  build('localization', 'Localization conf.', '%', '#2fe6a6', 'safe', 31, (i, r) => 94 + (r() - 0.5) * 4, [{ at: 30, to: 61 }]),
-  build('battery', 'Battery', '%', '#2fe6a6', 'safe', 7, (i, r) => 90 - i * 0.9 + (r() - 0.5) * 0.6),
-  build('dds_latency', 'DDS latency p99', 'ms', '#ffb020', 'warn', 19, (i, r) => 12 + Math.sin(i / 7) * 3 + (r() - 0.5) * 2, [{ at: 33, to: 47 }]),
-  build('lidar_points', 'LiDAR returns', 'k pts', '#5cc6ff', 'ice', 5, (i, r) => 28 + (r() - 0.5) * 2, [{ at: 33, to: 12 }]),
-  build('wheel_slip', 'Wheel slip', '%', '#ff5468', 'crit', 13, (i, r) => 2 + (r() - 0.5) * 1.2, [{ at: 31, to: 17 }, { at: 32, to: 14 }]),
-  build('steering', 'Steering', '°', '#9aa6bd', 'muted', 29, (i, r) => Math.sin(i / 4) * 16 + (r() - 0.5) * 3),
+  build('velocity', 'Velocity', 'm/s', 'var(--c-ice)', 'ice', 11, (i, r) => 1.2 + Math.sin(i / 5) * 0.6 + (r() - 0.5) * 0.4),
+  build('accel', 'Acceleration', 'm/s²', 'var(--c-faint)', 'muted', 23, (i, r) => Math.cos(i / 5) * 0.5 + (r() - 0.5) * 0.3),
+  build('localization', 'Localization conf.', '%', 'var(--c-safe)', 'safe', 31, (i, r) => 94 + (r() - 0.5) * 4, [{ at: 30, to: 61 }]),
+  build('battery', 'Battery', '%', 'var(--c-safe)', 'safe', 7, (i, r) => 90 - i * 0.9 + (r() - 0.5) * 0.6),
+  build('dds_latency', 'DDS latency p99', 'ms', 'var(--c-warn)', 'warn', 19, (i, r) => 12 + Math.sin(i / 7) * 3 + (r() - 0.5) * 2, [{ at: 33, to: 47 }]),
+  build('lidar_points', 'LiDAR returns', 'k pts', 'var(--c-ice)', 'ice', 5, (i, r) => 28 + (r() - 0.5) * 2, [{ at: 33, to: 12 }]),
+  build('wheel_slip', 'Wheel slip', '%', 'var(--c-crit)', 'crit', 13, (i, r) => 2 + (r() - 0.5) * 1.2, [{ at: 31, to: 17 }, { at: 32, to: 14 }]),
+  build('steering', 'Steering', '°', 'var(--c-faint)', 'muted', 29, (i, r) => Math.sin(i / 4) * 16 + (r() - 0.5) * 3),
 ]
 
 export function signalById(id: string): ExplorerSignal {

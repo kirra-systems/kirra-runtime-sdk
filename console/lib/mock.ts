@@ -1,10 +1,16 @@
 import type { KPI, Robot, EventItem, SeriesPoint, Posture, Tone } from '@/lib/types'
 
+import { seededRand } from '@/lib/seeded'
+
+// Deterministic demo series: see lib/seeded.ts — Math.random() at module
+// scope breaks React hydration (server and client render different text).
+const rand = seededRand(0x6b697272)
+
 function gen(n: number, base: number, jitter: number, drift = 0): SeriesPoint[] {
   const out: SeriesPoint[] = []
   let v = base
   for (let i = 0; i < n; i++) {
-    v += (Math.random() - 0.5) * jitter + drift
+    v += (rand() - 0.5) * jitter + drift
     v = Math.max(0, v)
     out.push({ t: `${String(i % 24).padStart(2, '0')}:00`, v: Math.round(v) })
   }

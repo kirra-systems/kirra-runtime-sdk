@@ -7,7 +7,7 @@ import type { Tone } from '@/lib/types'
 
 export interface EnvPoint { vx: number; vy: number; tone: Tone; label?: string }
 
-const dotFill: Record<string, string> = { safe: '#2fe6a6', warn: '#ffb020', crit: '#ff5468', ice: '#5cc6ff', muted: '#9aa6bd' }
+const dotFill: Record<string, string> = { safe: 'var(--c-safe)', warn: 'var(--c-warn)', crit: 'var(--c-crit)', ice: 'var(--c-ice)', muted: 'var(--c-faint)' }
 
 export function EnvelopePlot({ points, height = 300 }: { points: EnvPoint[]; height?: number }) {
   // map a -1..1 coord to the 4..96 viewBox range
@@ -45,10 +45,10 @@ export function EnvelopePlot({ points, height = 300 }: { points: EnvPoint[]; hei
       ))}
 
       {/* axis captions */}
-      <text x="94" y="48" fill="#69728a" fontSize="2.6" fontFamily="monospace" textAnchor="end">+v</text>
-      <text x="6.5" y="48" fill="#69728a" fontSize="2.6" fontFamily="monospace">−v</text>
-      <text x="51" y="10" fill="#69728a" fontSize="2.6" fontFamily="monospace">+ω</text>
-      <text x="51" y="93" fill="#69728a" fontSize="2.6" fontFamily="monospace">−ω</text>
+      <text x="94" y="48" fill="var(--c-faint)" fontSize="2.6" fontFamily="monospace" textAnchor="end">+v</text>
+      <text x="6.5" y="48" fill="var(--c-faint)" fontSize="2.6" fontFamily="monospace">−v</text>
+      <text x="51" y="10" fill="var(--c-faint)" fontSize="2.6" fontFamily="monospace">+ω</text>
+      <text x="51" y="93" fill="var(--c-faint)" fontSize="2.6" fontFamily="monospace">−ω</text>
     </svg>
   )
 }

@@ -118,7 +118,7 @@ export default function FleetPage() {
               {twins.map((t) => {
                 const posture = postureOf(t)
                 return (
-                  <tr key={t.id} className="border-b border-line last:border-0 hover:bg-white/[0.02]">
+                  <tr key={t.id} className="border-b border-line last:border-0 hover:bg-ink/[0.02]">
                     <td className="px-4 py-2.5"><Link href={`/fleet/${t.id}`} className="text-ink hover:text-ice">{t.name}</Link></td>
                     <td className="px-4 py-2.5 text-muted">{t.model}</td>
                     <td className={`px-4 py-2.5 ${txt(postureTone(posture))}`}>{posture}</td>

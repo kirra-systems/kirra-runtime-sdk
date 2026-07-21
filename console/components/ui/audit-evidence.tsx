@@ -25,14 +25,14 @@ export function AuditEvidence() {
           <div className={`font-display text-lg font-semibold ${intact ? 'text-safe' : 'text-crit'}`}>
             {intact ? 'Chain verified' : 'Chain integrity FAILED'}
           </div>
-          <div className="font-mono text-[10px] text-faint">head {verify.head_status} · {verify.total_entries.toLocaleString()} entries</div>
+          <div className="font-mono text-[10px] text-faint">head {verify.head_status} · {verify.total_entries.toLocaleString('en-US')} entries</div>
         </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Stat label="Total entries" value={verify.total_entries.toLocaleString()} tone="ice" />
-        <Stat label="Signed" value={verify.signed_entries.toLocaleString()} tone={verify.unsigned_entries === 0 ? 'safe' : 'warn'} />
-        <Stat label="Unsigned" value={verify.unsigned_entries.toLocaleString()} tone={verify.unsigned_entries === 0 ? 'safe' : 'warn'} />
+        <Stat label="Total entries" value={verify.total_entries.toLocaleString('en-US')} tone="ice" />
+        <Stat label="Signed" value={verify.signed_entries.toLocaleString('en-US')} tone={verify.unsigned_entries === 0 ? 'safe' : 'warn'} />
+        <Stat label="Unsigned" value={verify.unsigned_entries.toLocaleString('en-US')} tone={verify.unsigned_entries === 0 ? 'safe' : 'warn'} />
         <Stat label="Signatures" value={verify.signature_valid ? 'valid' : 'invalid'} tone={verify.signature_valid ? 'safe' : 'crit'} />
       </div>
 

@@ -1,7 +1,9 @@
 'use client'
 
+import { useEffect, useState } from 'react'
 import { Panel, Pill } from '@/components/ui/primitives'
 import { useRuntimeHealth } from '@/lib/api/hooks'
+import { DEMO_EPOCH } from '@/lib/format'
 import type { Tone } from '@/lib/types'
 
 // Live verifier runtime snapshot (GET /console/runtime, #395). Self-contained
@@ -11,7 +13,18 @@ import type { Tone } from '@/lib/types'
 export function RuntimeHealthPanel() {
   const { data, source } = useRuntimeHealth(8000)
   const denialPct = data.fabric_denial_rate * 100
-  const recalcAge = Math.max(0, Date.now() - data.last_recalc_ms)
+  // Age must never derive from Date.now() during render: the server-rendered
+  // text would differ from the hydration pass (React #418). A mounted clock
+  // drives the live age; demo data is anchored to its own fixed epoch so the
+  // snapshot renders deterministically.
+  const [now, setNow] = useState<number | null>(null)
+  useEffect(() => {
+    setNow(Date.now())
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  const ref = source === 'demo' ? DEMO_EPOCH : now
+  const recalcAge = ref === null ? null : Math.max(0, ref - data.last_recalc_ms)
 
   return (
     <Panel
@@ -23,7 +36,11 @@ export function RuntimeHealthPanel() {
         <Metric label="Mode" value={data.mode} tone={data.mode === 'Active' ? 'safe' : 'ice'} />
         <Metric label="Uptime" value={fmtDuration(data.uptime_ms)} tone="ice" />
         <Metric label="Posture gen" value={`#${data.posture_generation}`} tone="safe" />
-        <Metric label="Last recalc" value={`${fmtAge(recalcAge)} ago`} tone={recalcAge > data.posture_cache_ttl_ms ? 'warn' : 'safe'} />
+        <Metric
+          label="Last recalc"
+          value={recalcAge === null ? '—' : `${fmtAge(recalcAge)} ago`}
+          tone={recalcAge !== null && recalcAge > data.posture_cache_ttl_ms ? 'warn' : 'safe'}
+        />
         <Metric label="Cache TTL" value={`${(data.posture_cache_ttl_ms / 1000).toFixed(0)}s`} tone="muted" />
         <Metric label="Nodes" value={`${data.total_nodes}`} tone="ice" />
         <Metric label="Fabric assets" value={`${data.fabric_assets}`} tone="ice" />

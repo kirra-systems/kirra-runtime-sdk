@@ -3,8 +3,8 @@ import { cn } from '@/lib/utils'
 import type { Tone } from '@/lib/types'
 
 const toneText: Record<Tone, string> = { safe: 'text-safe', warn: 'text-warn', crit: 'text-crit', ice: 'text-ice', muted: 'text-muted' }
-const toneBg: Record<Tone, string> = { safe: 'bg-safe/10', warn: 'bg-warn/10', crit: 'bg-crit/10', ice: 'bg-ice/10', muted: 'bg-white/5' }
-const toneRing: Record<Tone, string> = { safe: 'ring-safe/30', warn: 'ring-warn/30', crit: 'ring-crit/30', ice: 'ring-ice/30', muted: 'ring-white/10' }
+const toneBg: Record<Tone, string> = { safe: 'bg-safe/10', warn: 'bg-warn/10', crit: 'bg-crit/10', ice: 'bg-ice/10', muted: 'bg-ink/5' }
+const toneRing: Record<Tone, string> = { safe: 'ring-safe/30', warn: 'ring-warn/30', crit: 'ring-crit/30', ice: 'ring-ice/30', muted: 'ring-ink/10' }
 const toneDot: Record<Tone, string> = { safe: 'bg-safe', warn: 'bg-warn', crit: 'bg-crit', ice: 'bg-ice', muted: 'bg-muted' }
 
 export function Panel({ title, subtitle, action, children, className, dense }: { title?: string; subtitle?: string; action?: ReactNode; children: ReactNode; className?: string; dense?: boolean }) {
@@ -59,7 +59,7 @@ export function Stat({ label, value, unit, delta, tone = 'ice', children }: { la
 
 export function Meter({ value, tone = 'safe' }: { value: number; tone?: Tone }) {
   return (
-    <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/5">
+    <div className="h-1.5 w-full overflow-hidden rounded-full bg-ink/5">
       <div className={cn('h-full rounded-full', toneDot[tone])} style={{ width: `${Math.max(2, Math.min(100, value))}%` }} />
     </div>
   )

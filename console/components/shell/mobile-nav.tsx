@@ -56,7 +56,7 @@ export function MobileNav() {
                       <Link
                         href={it.href}
                         onClick={() => setOpen(false)}
-                        className={cn('group flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] transition-colors', active ? 'bg-white/[0.06] text-ink' : 'text-muted hover:bg-white/[0.03] hover:text-ink')}
+                        className={cn('group flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] transition-colors', active ? 'bg-ink/[0.06] text-ink' : 'text-muted hover:bg-ink/[0.03] hover:text-ink')}
                       >
                         <Icon className={cn('h-4 w-4', active ? 'text-safe' : 'text-faint group-hover:text-muted')} strokeWidth={1.75} />
                         <span>{it.label}</span>

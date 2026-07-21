@@ -119,7 +119,7 @@ export default function ExplorerPage() {
                       const r = corr[i][j]
                       return (
                         <td key={b.id} className="px-1 py-1 text-center">
-                          <span className="inline-block w-9 rounded px-1 py-0.5" style={{ background: corrBg(r), color: Math.abs(r) > 0.55 ? '#080a10' : '#9aa6bd' }}>
+                          <span className="inline-block w-9 rounded px-1 py-0.5" style={{ background: corrBg(r), color: Math.abs(r) > 0.55 ? '#05070d' : 'var(--c-faint)' }}>
                             {r.toFixed(2)}
                           </span>
                         </td>
@@ -150,7 +150,7 @@ export default function ExplorerPage() {
               </thead>
               <tbody className="font-mono text-[12px]">
                 {tail.map((i) => (
-                  <tr key={i} className="border-b border-line last:border-0 hover:bg-white/[0.02]">
+                  <tr key={i} className="border-b border-line last:border-0 hover:bg-ink/[0.02]">
                     <td className="px-4 py-2 text-faint">{timeAxis[i]}</td>
                     {chosen.map((s) => (
                       <td key={s.id} className={`px-4 py-2 ${s.anomalies.includes(i) ? `${txt(s.tone)} font-semibold` : 'text-ink'}`}>{s.values[i]}</td>
@@ -185,7 +185,7 @@ function Chip({ children, active, tone, onClick }: { children: React.ReactNode; 
   return (
     <button
       onClick={onClick}
-      className={`rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-colors ${active ? `${ring(tone)} ${txt(tone)} bg-white/[0.04] ring-1` : 'text-faint hover:text-muted'}`}
+      className={`rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-colors ${active ? `${ring(tone)} ${txt(tone)} bg-ink/[0.04] ring-1` : 'text-faint hover:text-muted'}`}
     >
       {children}
     </button>
@@ -200,4 +200,4 @@ function corrBg(r: number) {
 }
 
 function txt(t: Tone) { return t === 'safe' ? 'text-safe' : t === 'warn' ? 'text-warn' : t === 'crit' ? 'text-crit' : t === 'ice' ? 'text-ice' : 'text-muted' }
-function ring(t: Tone) { return t === 'safe' ? 'ring-safe/30' : t === 'warn' ? 'ring-warn/30' : t === 'crit' ? 'ring-crit/30' : t === 'ice' ? 'ring-ice/30' : 'ring-white/10' }
+function ring(t: Tone) { return t === 'safe' ? 'ring-safe/30' : t === 'warn' ? 'ring-warn/30' : t === 'crit' ? 'ring-crit/30' : t === 'ice' ? 'ring-ice/30' : 'ring-ink/10' }

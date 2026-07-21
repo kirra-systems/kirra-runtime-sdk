@@ -24,7 +24,7 @@ export function HeroSafety() {
           <div className="mt-7 grid grid-cols-4 gap-3 border-t border-line pt-5">
             {decisions.map((d) => (
               <div key={d.label}>
-                <div className={`font-display text-xl font-semibold ${txt(d.tone)}`}>{d.value.toLocaleString()}</div>
+                <div className={`font-display text-xl font-semibold ${txt(d.tone)}`}>{d.value.toLocaleString('en-US')}</div>
                 <div className="font-mono text-[10px] uppercase tracking-wider text-faint">{d.label}</div>
               </div>
             ))}
@@ -88,19 +88,19 @@ export function MissionMap() {
           </Fragment>
         ))}
         <rect x="106" y="54" width="40" height="28" fill="rgba(255,176,32,0.07)" stroke="rgba(255,176,32,0.4)" strokeWidth="0.4" strokeDasharray="2 1.5" />
-        <text x="108" y="59" fill="#ffb020" fontSize="3" fontFamily="monospace">HAZARD</text>
+        <text x="108" y="59" fill="var(--c-warn)" fontSize="3" fontFamily="monospace">HAZARD</text>
         <rect x="120" y="62" width="22" height="18" fill="rgba(255,84,104,0.10)" stroke="rgba(255,84,104,0.5)" strokeWidth="0.4" />
-        <text x="122" y="67" fill="#ff5468" fontSize="3" fontFamily="monospace">LOCKOUT</text>
-        <path d="M20 70 L40 55 L70 50 L100 40 L130 30" fill="none" stroke="#5cc6ff" strokeWidth="0.6" strokeOpacity="0.5" strokeDasharray="2 2" />
+        <text x="122" y="67" fill="var(--c-crit)" fontSize="3" fontFamily="monospace">LOCKOUT</text>
+        <path d="M20 70 L40 55 L70 50 L100 40 L130 30" fill="none" stroke="var(--c-ice)" strokeWidth="0.6" strokeOpacity="0.5" strokeDasharray="2 2" />
         {mapRobots.map((r) => {
           const x = 4 + (r.x / 100) * 152
           const y = 4 + (r.y / 100) * 82
-          const c = r.tone === 'safe' ? '#2fe6a6' : r.tone === 'warn' ? '#ffb020' : '#ff5468'
+          const c = r.tone === 'safe' ? 'var(--c-safe)' : r.tone === 'warn' ? 'var(--c-warn)' : 'var(--c-crit)'
           return (
             <Fragment key={r.id}>
               <circle cx={x} cy={y} r="3" fill="none" stroke={c} strokeOpacity="0.35" strokeWidth="0.4" />
               <circle cx={x} cy={y} r="1.5" fill={c} />
-              <text x={x + 3} y={y + 1} fill="#9aa6bd" fontSize="2.6" fontFamily="monospace">{r.id}</text>
+              <text x={x + 3} y={y + 1} fill="var(--c-faint)" fontSize="2.6" fontFamily="monospace">{r.id}</text>
             </Fragment>
           )
         })}

@@ -9,6 +9,7 @@ import { incidents as demoIncidents } from '@/lib/incidents'
 import { twins as demoTwins } from '@/lib/fleet'
 import { recent as demoDecisions, tally as demoTally, type DecisionRow, type DecisionTally, type Verdict } from '@/lib/oversight'
 import type { Tone, SeriesPoint } from '@/lib/types'
+import { DEMO_EPOCH, utcDateTime, utcTime } from '@/lib/format'
 
 // Shared severity classifier for verifier event/audit types.
 export function eventTone(eventType: string): Tone {
@@ -44,7 +45,7 @@ const DEMO_VERIFY: AuditVerify = {
   head_status: 'verified', verified: true,
 }
 function demoAudit(): AuditEntry[] {
-  const now = Date.now()
+  const now = DEMO_EPOCH
   const rows: Array<[string, string, string]> = [
     ['KINEMATIC_ENVELOPE_BREACH', 'governor', 'KIRRA-13 cmd_vel 999 m/s → DENY'],
     ['POSTURE_TRANSITION', 'fleet', 'KIRRA-10 → Degraded (confidence 0.41)'],
@@ -206,7 +207,7 @@ export function useEventFeed(limit = 60): { rows: FeedRow[]; sources: string[]; 
           id: String(e.id),
           tone: eventTone(e.event_type),
           source: e.source,
-          ts: new Date(e.timestamp_ms).toLocaleTimeString(),
+          ts: utcTime(e.timestamp_ms),
           message: e.payload,
           code: e.event_type,
         }))
@@ -249,7 +250,7 @@ export function useIncidentHistory(limit = 80): { rows: IncidentRow[]; source: S
           .filter((e) => { const t = eventTone(e.event_type); return t === 'crit' || t === 'warn' })
           .map((e) => ({
             id: `INC-${e.id}`,
-            ts: new Date(e.timestamp_ms).toLocaleString(),
+            ts: utcDateTime(e.timestamp_ms),
             asset: e.payload.match(/KIRRA-\d+|fleet-dag/)?.[0] ?? '—',
             title: e.event_type,
             duration: '—',
@@ -281,7 +282,7 @@ const DEMO_FABRIC: FabricTelemetry = {
   assets_by_type: { 'AMR-400': 2, 'Atlas-X': 2, 'Spot-V2': 2, 'Forklift-A': 2 },
   assets_by_posture: { Nominal: 6, Degraded: 1, LockedOut: 1 },
   highest_denial_asset: 'KIRRA-13',
-  computed_at_ms: Date.now(),
+  computed_at_ms: DEMO_EPOCH,
 }
 
 export function useFabricTelemetry(pollMs = 10000): { data: FabricTelemetry; source: Source } {
@@ -323,8 +324,8 @@ function demoNodeTrend(nodeId: string): { points: SeriesPoint[]; events: number;
   const end = twin ? postureLevel(twin.posture) : 2
   // Mostly Nominal, converging to the node's current level over the last few steps.
   const levels = [2, 2, 2, 2, 2, 2, 2, 2, Math.min(2, end + 1), end, end, end]
-  const now = Date.now()
-  const points = levels.map((v, i) => ({ t: new Date(now - (levels.length - i) * 1800000).toLocaleTimeString(), v }))
+  const now = DEMO_EPOCH
+  const points = levels.map((v, i) => ({ t: utcTime(now - (levels.length - i) * 1800000), v }))
   const lastReason = end === 0 ? 'lockout · human reset required' : end === 1 ? 'sensor confidence < 0.60 floor' : null
   return { points, events: levels.length, lastReason }
 }
@@ -344,7 +345,7 @@ export function useNodeHistory(nodeId: string, pollMs = 20000): {
       try {
         const { history } = await kirra.nodeHistory(nodeId, ctrl.signal)
         const chrono = [...history].reverse() // API returns newest-first
-        const points: SeriesPoint[] = chrono.map((e) => ({ t: new Date(e.created_at_ms).toLocaleTimeString(), v: entryLevel(e) }))
+        const points: SeriesPoint[] = chrono.map((e) => ({ t: utcTime(e.created_at_ms), v: entryLevel(e) }))
         setState({ points, events: history.length, lastReason: history[0]?.reason ?? null, source: 'live' })
         timer = setTimeout(load, pollMs)
       } catch (e) {
@@ -503,7 +504,7 @@ export function useDecisions(limit = 60): { recent: DecisionRow[]; tally: Decisi
           counts[v] += 1
           rows.push({
             id: String(e.id),
-            ts: new Date(e.timestamp_ms).toLocaleTimeString(),
+            ts: utcTime(e.timestamp_ms),
             asset: e.payload.match(/KIRRA-\d+/)?.[0] ?? '—',
             actionType: parseAction(e.payload, e.source),
             verdict: v,
@@ -546,7 +547,7 @@ const DEMO_RUNTIME: ConsoleRuntime = {
   mode: 'Active',
   uptime_ms: 1000 * 60 * 60 * 73 + 1000 * 60 * 14,
   posture_generation: 4471,
-  last_recalc_ms: Date.now() - 2200,
+  last_recalc_ms: DEMO_EPOCH - 2200,
   posture_cache_ttl_ms: 5000,
   total_nodes: 38,
   fabric_assets: 8,

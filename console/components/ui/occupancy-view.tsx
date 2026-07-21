@@ -6,7 +6,7 @@ import type { Tone } from '@/lib/types'
 
 export interface Actor { x: number; y: number; kind: 'person' | 'vehicle' | 'static'; tone: Tone; label?: string }
 
-const fill: Record<string, string> = { safe: '#2fe6a6', warn: '#ffb020', crit: '#ff5468', ice: '#5cc6ff', muted: '#9aa6bd' }
+const fill: Record<string, string> = { safe: 'var(--c-safe)', warn: 'var(--c-warn)', crit: 'var(--c-crit)', ice: 'var(--c-ice)', muted: 'var(--c-faint)' }
 
 export function OccupancyView({ actors, height = 320 }: { actors: Actor[]; height?: number }) {
   const ex = 50, ey = 84 // ego position
@@ -40,7 +40,7 @@ export function OccupancyView({ actors, height = 320 }: { actors: Actor[]; heigh
 
       {/* hazard keep-out zone */}
       <rect x="62" y="30" width="22" height="20" rx="2" fill="rgba(255,84,104,0.07)" stroke="rgba(255,84,104,0.4)" strokeWidth="0.4" strokeDasharray="1.5 1" />
-      <text x="73" y="41" fill="#ff5468" fontSize="2.6" fontFamily="monospace" textAnchor="middle">HAZARD</text>
+      <text x="73" y="41" fill="var(--c-crit)" fontSize="2.6" fontFamily="monospace" textAnchor="middle">HAZARD</text>
 
       {/* detected actors */}
       {actors.map((a, i) => (
@@ -57,9 +57,9 @@ export function OccupancyView({ actors, height = 320 }: { actors: Actor[]; heigh
 
       {/* ego asset */}
       <g>
-        <polygon points={`${ex},${ey - 4} ${ex - 3},${ey + 3} ${ex + 3},${ey + 3}`} fill="#5cc6ff" />
-        <circle cx={ex} cy={ey} r="5.5" fill="none" stroke="#5cc6ff" strokeOpacity="0.5" strokeWidth="0.4" />
-        <text x={ex} y={ey + 9} fill="#9aa6bd" fontSize="2.4" fontFamily="monospace" textAnchor="middle">ego · KIRRA-09</text>
+        <polygon points={`${ex},${ey - 4} ${ex - 3},${ey + 3} ${ex + 3},${ey + 3}`} fill="var(--c-ice)" />
+        <circle cx={ex} cy={ey} r="5.5" fill="none" stroke="var(--c-ice)" strokeOpacity="0.5" strokeWidth="0.4" />
+        <text x={ex} y={ey + 9} fill="var(--c-faint)" fontSize="2.4" fontFamily="monospace" textAnchor="middle">ego · KIRRA-09</text>
       </g>
     </svg>
   )
