@@ -6,10 +6,13 @@
 A distributed runtime legitimacy engine and safety governor for AI-driven robotic and edge systems. Kirra enforces **fail-closed trust semantics** across a heterogeneous fleet — preventing unsafe or unauthorized commands from reaching actuators regardless of what an AI model, LLM output, or upstream orchestration layer instructs.
 
 > **Note on versioning:** v1.5.0 was a documentation-only release
-> (ASIL-D safety case foundation) tagged out-of-band by CI automation.
-> v1.1.x tracks the runtime SDK implementation history.
-> The next feature release will be v1.2.0 (Occy line: SG2 enforced,
-> Option-B per-trajectory wiring on Autoware, S8 quantitative evidence).
+> (ASIL-D safety case foundation) tagged out-of-band by CI automation, so it
+> sorts *above* the v1.1.x runtime line that supersedes it. The next release is
+> **v2.0.0** — the disambiguating MAJOR (`docs/VERSIONING_POLICY.md` §2.1) that
+> permanently clears that inversion (every active version is then > 1.5) and
+> completes the ADR-0035 re-export-shim removal (#1029), on top of the Occy-line
+> features (SG2 enforced, Option-B per-trajectory wiring on Autoware, S8
+> quantitative evidence).
 
 ---
 
@@ -612,7 +615,19 @@ KIRRA_VERIFIER_MODE=passive_standby KIRRA_INSTANCE_ID=kirra-standby ./kirra_veri
 
 ## Releases
 
-### v1.2.0 (Occy line — in progress)
+### v2.0.0 (in progress) — disambiguating MAJOR
+
+**Version-line + architecture cleanup**
+- **Disambiguating MAJOR cut** — root version 1.1.2 → 2.0.0, permanently clearing the
+  v1.5.0-"Aegis"/v1.1.2 sort inversion (`docs/VERSIONING_POLICY.md` §2.1; A4 / #1049).
+  The `ci/check_version_ordering.py` guard now confirms every active version is > 1.5.
+- **ADR-0035 re-export shims removed (#1029 / A1)** — all 14 live `pub use` back-compat
+  shims (plus 3 dead ones pre-2.0) are gone across four waves; every internal caller
+  imports from the canonical leaf crate (`kirra_persistence`, `kirra_core`,
+  `kirra_safety_authority`, `kirra_industrial`, `kirra_ota_campaign`, `kirra_fabric_types`,
+  `kirra_fleet_types`). The `ci/check_reexport_shims.py` ratchet is now a permanent
+  **zero-tolerance** guard (`max_shims: 0`). See the CHANGELOG `### Removed (BREAKING)`
+  migration table.
 
 **Junction safety + RSS completeness (doer-checker depth)**
 - **Multi-junction routing** — `MickIntent::RouteTo { x_m, y_m }`: resolve ego + destination
