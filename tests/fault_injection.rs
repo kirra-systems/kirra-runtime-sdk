@@ -248,9 +248,7 @@ fn test_safety_goal_sg_016_dds_actuator_volatile_durability() {
 
 #[test]
 fn test_safety_goal_sg_007_cross_asset_lockout_propagation() {
-    use kirra_verifier::fabric::asset::{
-        AssetPosture, AssetType, FabricAsset, KinematicProfileType,
-    };
+    use kirra_fabric_types::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
     use kirra_verifier::fabric::router::FabricRouter;
     use std::collections::HashMap;
 

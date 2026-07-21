@@ -57,10 +57,15 @@ ratchet ticks down visibly. Group by shared reviewer context where natural.
    `gateway::containment`, `governor_guard`, `federation` — repointed to their
    canonical crates and deleted; `max_shims` 14 → 7. (Version stays 1.x; the bump
    itself lands with the final wave.)
-2. **Wave 2 — medium (4 shims → 3):** `attestation`, `capture`, `ota_campaign`,
-   `fabric::asset`. `capture` also requires each consumer crate to enable the
-   `kirra-core` `capture` feature (already on in the SDK manifest; verify for any
-   sibling/test that newly names `kirra_core::capture`).
+2. **Wave 2 — medium (7 → 3): ✅ DONE.** `attestation` → `kirra_safety_authority`,
+   `capture` → `kirra_core`, `ota_campaign` → `kirra_ota_campaign`, `fabric::asset`
+   → `kirra_fabric_types` — repointed and deleted; `max_shims` 7 → 3. The root lib +
+   bins already carried all four leaf crates in `[dependencies]` (nameable from the
+   bins, and — confirmed by the compiler — from the root `tests/` integration crates
+   too), so the only manifest edit was adding `kirra-safety-authority` to
+   `parko-kirra`'s dev-deps for the `verifier-sink`-gated `clearance_e2e` test that
+   named `kirra_verifier::attestation`. `capture`'s `kirra-core/capture` feature was
+   already on in the SDK manifest.
 3. **Wave 3 — large (2 shims):** `gateway::kinematics_contract`,
    `gateway::perception_monitor`. `perception_monitor` has the widest bin surface
    (15 files) — mechanical but touch-heavy.

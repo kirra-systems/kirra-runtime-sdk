@@ -1,7 +1,7 @@
-use crate::fabric::asset::AssetType;
 use crate::posture_cache::now_ms;
 use crate::verifier::FleetPosture;
 use dashmap::DashMap;
+use kirra_fabric_types::asset::AssetType;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -126,7 +126,7 @@ impl Default for FabricTelemetry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fabric::asset::AssetType;
+    use kirra_fabric_types::asset::AssetType;
 
     fn snap(
         id: &str,

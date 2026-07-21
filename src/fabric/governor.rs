@@ -1,9 +1,9 @@
-use crate::fabric::asset::KinematicProfileType;
 use crate::gateway::kinematics_contract::{
     enforce_degraded_decel_to_stop, validate_vehicle_command, DenyCode, EnforceAction,
     ProposedVehicleCommand, VehicleKinematicsContract,
 };
 use crate::verifier::FleetPosture;
+use kirra_fabric_types::asset::KinematicProfileType;
 
 pub struct AssetGovernor {
     pub asset_id: String,

@@ -36,7 +36,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use kirra_verifier::ota_campaign::Campaign;
+use kirra_ota_campaign::Campaign;
 use kirra_verifier::verifier_store::VerifierStore;
 
 const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

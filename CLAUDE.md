@@ -83,7 +83,7 @@ These have been blocked or reverted multiple times. Any submission that violates
 | `VirtualClock` / `SystemClock` | `src/clock.rs` | Clock abstraction for deterministic testing |
 | `ScenarioRunner` | `src/scenario_runner.rs` | Deterministic temporal test harness |
 | `KinematicContract` | `src/kinematics_contract.rs` | Scalar clamping contract for kinematics |
-| `Campaign` / `CampaignState` | `crates/kirra-ota-campaign` (re-exported via `src/ota_campaign.rs` shim) | WS-4 OTA rollout campaign + lifecycle state machine (Draft→Staged→Rolling→{Completed\|Halted}); `advance` fail-closed on posture. ADR-0035 Stage 2.5 C2 slice 1: relocated to a lean crate so `verifier_store` no longer C2-couples to it |
+| `Campaign` / `CampaignState` | `crates/kirra-ota-campaign` (import from `kirra_ota_campaign`; v2.0.0 Wave 2: root shim removed) | WS-4 OTA rollout campaign + lifecycle state machine (Draft→Staged→Rolling→{Completed\|Halted}); `advance` fail-closed on posture. ADR-0035 Stage 2.5 C2 slice 1: relocated to a lean crate so `verifier_store` no longer C2-couples to it |
 
 ### Module Map
 
@@ -185,13 +185,9 @@ src/
 │                               a lock-step test walks the real enum). Deny arm binds
 │                               the id into the chained payload + 400 body; the
 │                               auditor-tier GET /verdicts/{id} handler renders it
-├── ota_campaign.rs           — re-export shim → kirra_ota_campaign (ADR-0035 Stage
-│                               2.5 C2 slice 1): the WS-4/Track-3 OTA governor-artifact
-│                               campaign engine (PURE): Campaign, CampaignState machine,
-│                               HaltReason, fail-closed posture_regression_halt (advance
-│                               HALTS, never rolls, when fleet posture != Nominal).
-│                               Relocated to crates/kirra-ota-campaign so verifier_store
-│                               no longer C2-couples to it
+│  (ota_campaign.rs — removed v2.0.0 Wave 2 → kirra_ota_campaign: the WS-4/Track-3
+│   OTA governor-artifact campaign engine (Campaign, CampaignState machine, HaltReason,
+│   fail-closed posture_regression_halt) — import from the leaf crate directly)
 ├── campaign_monitor.rs       — WS-4/Track-3 background posture-sweep monitor:
 │                               sweep_active_campaigns_once + spawn_campaign_monitor
 │                               (CAMPAIGN_SWEEP_MS); auto-halts active campaigns on a
@@ -205,9 +201,8 @@ src/
 │                               certs (observability only; auth already fail-closes)
 ├── kinematics_contract.rs    — KinematicContract, scalar clamping
 │  (kinematics_sim.rs — removed v2.0.0 Wave 1 → kirra_core::kinematics_sim)
-├── capture.rs                — re-export shim → kirra_core::capture (relocated Stage 7;
-│                               record_from_verdict, spawn_capture_writer; needs the
-│                               kirra-core `capture` feature, enabled in the SDK manifest)
+│  (capture.rs — removed v2.0.0 Wave 2 → kirra_core::capture: record_from_verdict,
+│   spawn_capture_writer; needs the kirra-core `capture` feature, enabled in the SDK manifest)
 ├── action_filter.rs          — ActionFilter<C>, ActionClaim, evaluate_action_claim
 ├── action_policy.rs          — UnstructuredTextParser (LLM JSON → typed AgentAction)
 ├── security.rs               — constant_time_compare

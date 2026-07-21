@@ -36,7 +36,6 @@
 
 pub mod action_filter;
 pub mod action_policy;
-pub mod attestation;
 pub mod audit_chain;
 pub mod audit_shipper;
 pub mod audit_writer;
@@ -55,7 +54,6 @@ pub mod kinematics_contract;
 pub mod kirra_core;
 pub mod metrics;
 pub mod modbus_adapter;
-pub mod ota_campaign;
 pub mod output;
 pub mod posture_cache;
 pub mod posture_engine;
@@ -86,9 +84,6 @@ pub mod post_incident;
 // #111/#112 — command-source provenance (audit/ingress layer; the verdict stays
 // source-blind per SG7). Emits COMMAND_SOURCE_HANDOFF into the signed chain.
 pub mod command_source;
-// Learning-loop capture channel (Phase 1, #190) — sibling of audit_writer;
-// non-blocking, default-OFF side channel recording the verdict/correction.
-pub mod capture;
 pub mod traceability_gate;
 pub mod wcet_gate;
 // ADR-0035 Stage 3g: the off-verdict-path async writer handles (audit/capture

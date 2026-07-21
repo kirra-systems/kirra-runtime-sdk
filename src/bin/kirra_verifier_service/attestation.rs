@@ -212,7 +212,7 @@ pub(crate) async fn verify_attestation(
         }
     };
 
-    if let Err(reason) = kirra_verifier::attestation::verify_attestation_proof_with_pcr16(
+    if let Err(reason) = kirra_safety_authority::attestation::verify_attestation_proof_with_pcr16(
         ak_public_pem.as_deref(),
         &req.node_id,
         req.nonce,
@@ -226,7 +226,7 @@ pub(crate) async fn verify_attestation(
         // attestation is REFUSED — never accepted by default, and the nonce is
         // NOT consumed (this is before `consume_challenge`), so a node can retry
         // with a corrected measured boot.
-        use kirra_verifier::attestation::AttestationError;
+        use kirra_safety_authority::attestation::AttestationError;
         let status = match reason {
             AttestationError::NoRegisteredKey | AttestationError::Pcr16Mismatch => {
                 StatusCode::FORBIDDEN

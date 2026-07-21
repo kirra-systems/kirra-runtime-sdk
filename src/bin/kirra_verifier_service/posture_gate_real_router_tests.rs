@@ -487,7 +487,7 @@ const SEED_ROLLOUT_PERCENT: u8 = 50;
 /// write. Leaves the campaign at `Rolling` / `SEED_ROLLOUT_PERCENT`% so the
 /// assignment read exercises the PARTIAL-rollout membership path.
 fn seed_rolling_campaign(svc: &Arc<ServiceState>, id: &str, cohort: &str) {
-    use kirra_verifier::ota_campaign::{Campaign, CampaignState};
+    use kirra_ota_campaign::{Campaign, CampaignState};
     svc.app
         .store
         .with(|store| {
@@ -515,7 +515,7 @@ fn seed_rolling_campaign(svc: &Arc<ServiceState>, id: &str, cohort: &str) {
 /// `campaign_id`'s rolled bucket at `SEED_ROLLOUT_PERCENT`% — chosen
 /// deterministically so the router test asserts real partial-rollout membership.
 fn node_rolled_at_seed(campaign_id: &str, want_rolled: bool) -> String {
-    use kirra_verifier::ota_campaign::is_node_rolled;
+    use kirra_ota_campaign::is_node_rolled;
     (0..10_000)
         .map(|i| format!("node-{i}"))
         .find(|n| is_node_rolled(campaign_id, n, SEED_ROLLOUT_PERCENT) == want_rolled)

@@ -44,6 +44,10 @@ proptest = "1"
 # Durability + signing test for AuditChainLinkerDivergenceSink: a file-backed
 # SQLite audit chain.
 tempfile = "3"
+# ADR-0035 v2.0.0 shim removal: the clearance_e2e_integration test now imports the
+# attestation crypto from its canonical leaf crate (the `kirra_verifier::attestation`
+# re-export shim is gone), so name it directly. Lean crypto-only crate.
+kirra-safety-authority = { path = "../../../crates/kirra-safety-authority" }
 
 # R5: the clearance/audit example + integration test exercise the
 # `VerifierStore`-backed path, so they only build when `verifier-sink` is enabled.

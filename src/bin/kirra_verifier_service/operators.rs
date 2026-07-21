@@ -36,17 +36,20 @@ pub(crate) async fn register_operator(
             .into_response();
     }
     // Fail-closed: the PEM must parse as a valid Ed25519 SPKI public key.
-    let fingerprint =
-        match kirra_verifier::attestation::operator_key_fingerprint(&req.ed25519_pubkey_pem) {
-            Some(fp) => fp,
-            None => return (
+    let fingerprint = match kirra_safety_authority::attestation::operator_key_fingerprint(
+        &req.ed25519_pubkey_pem,
+    ) {
+        Some(fp) => fp,
+        None => {
+            return (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({
                     "error": "ed25519_pubkey_pem is not a valid Ed25519 SubjectPublicKeyInfo PEM"
                 })),
             )
-                .into_response(),
-        };
+                .into_response()
+        }
+    };
     let now = now_ms();
     // The revoked-check + register + audit run under ONE acquisition (Rule 5).
     // The closure returns the fully-built response; `call` offloads it off the
@@ -363,12 +366,12 @@ pub(crate) async fn console_clearance_grant(
                     .into_response();
             }
         };
-        let payload = kirra_verifier::attestation::operator_grant_signing_payload(
+        let payload = kirra_safety_authority::attestation::operator_grant_signing_payload(
             &operator_id,
             &node_id,
             &nonce,
         );
-        if !kirra_verifier::attestation::verify_ed25519_pem_signature(
+        if !kirra_safety_authority::attestation::verify_ed25519_pem_signature(
             &operator.pubkey_pem,
             &payload,
             &sig_bytes,
@@ -403,7 +406,8 @@ pub(crate) async fn console_clearance_grant(
             )
                 .into_response();
         }
-        let fp = kirra_verifier::attestation::operator_key_fingerprint(&operator.pubkey_pem);
+        let fp =
+            kirra_safety_authority::attestation::operator_key_fingerprint(&operator.pubkey_pem);
         ("operator-signed", fp)
     } else {
         // === BREAK-GLASS PATH — the named, distinctly-audited supervisor fallback.
@@ -593,9 +597,12 @@ pub(crate) async fn console_estop_request(
                 .into_response();
         }
     };
-    let payload =
-        kirra_verifier::attestation::operator_stop_signing_payload(&operator_id, &node_id, &nonce);
-    if !kirra_verifier::attestation::verify_ed25519_pem_signature(
+    let payload = kirra_safety_authority::attestation::operator_stop_signing_payload(
+        &operator_id,
+        &node_id,
+        &nonce,
+    );
+    if !kirra_safety_authority::attestation::verify_ed25519_pem_signature(
         &operator.pubkey_pem,
         &payload,
         &sig_bytes,
@@ -670,7 +677,8 @@ pub(crate) async fn console_estop_request(
             .into_response();
     }
 
-    let fingerprint = kirra_verifier::attestation::operator_key_fingerprint(&operator.pubkey_pem);
+    let fingerprint =
+        kirra_safety_authority::attestation::operator_key_fingerprint(&operator.pubkey_pem);
 
     // 5a. Chain the authenticated REQUEST (who/when) — non-repudiable.
     {

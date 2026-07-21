@@ -3087,6 +3087,7 @@ dependencies = [
  "base64",
  "ed25519-dalek",
  "kirra-core",
+ "kirra-safety-authority",
  "kirra-verifier",
  "parko-core",
  "proptest",

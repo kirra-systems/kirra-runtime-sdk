@@ -18,7 +18,7 @@
 
 use super::*;
 
-use kirra_verifier::ota_campaign::{AdvanceOutcome, Campaign, HaltReason};
+use kirra_ota_campaign::{AdvanceOutcome, Campaign, HaltReason};
 
 #[derive(Deserialize)]
 pub(crate) struct CreateCampaignRequest {
@@ -205,7 +205,7 @@ pub(crate) async fn campaigns_summary_handler(
         .await
     {
         Ok(Ok((campaigns, statuses))) => {
-            let summary = kirra_verifier::ota_campaign::summarize_campaigns(&campaigns, &statuses);
+            let summary = kirra_ota_campaign::summarize_campaigns(&campaigns, &statuses);
             (StatusCode::OK, Json(summary)).into_response()
         }
         _ => (

@@ -1,6 +1,6 @@
 //! OTA campaign posture-sweep monitor (WS-4 / Track 3 — Fleet Plane).
 //!
-//! The [`crate::ota_campaign`] engine halts a rollout on regression only when
+//! The [`kirra_ota_campaign`] engine halts a rollout on regression only when
 //! someone drives it — a `POST …/advance` reads the fleet posture and halts if it
 //! is not `Nominal`. Between advances, a fleet that regresses would keep a
 //! `Rolling` campaign live until the next manual advance. This background monitor
@@ -45,7 +45,7 @@ pub const CAMPAIGN_SWEEP_MS: u64 = 1_000;
 /// campaigns halted this sweep.
 ///
 /// Pure over the store: loads the active set, applies the same
-/// [`crate::ota_campaign::Campaign::check_regression`] rule the advance path uses,
+/// [`kirra_ota_campaign::Campaign::check_regression`] rule the advance path uses,
 /// and persists each halt (with its R156 audit entry) via `update_campaign`.
 pub fn sweep_active_campaigns_once(
     store: &mut VerifierStore,
@@ -156,7 +156,7 @@ pub fn spawn_campaign_monitor_with_clock(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ota_campaign::{Campaign, CampaignState};
+    use kirra_ota_campaign::{Campaign, CampaignState};
 
     const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
