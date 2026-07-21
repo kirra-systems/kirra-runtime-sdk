@@ -22,8 +22,8 @@
 //! and never retried — the operator re-issues through the console. Automatic retry
 //! of a dead grant would be a replay machine.
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::store_handle::StoreHandle;
-use kirra_verifier::verifier_store::VerifierStore;
 use parko_core::{ClearanceLoop, OperatorClearanceGrant, DEFAULT_MAX_GRANT_AGE_MS};
 
 /// The result of one [`ClearanceDelivery::poll_and_deliver`].

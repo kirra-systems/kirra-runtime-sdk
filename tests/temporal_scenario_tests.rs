@@ -48,7 +48,7 @@ use kirra_verifier::verifier::{AppState, FleetPosture, NodeTrustState, VerifierO
 /// All nodes start Trusted. The posture cache starts at Nominal.
 /// Returns (app, cache, clock) ready for ScenarioRunner construction.
 async fn build_av_test_infrastructure() -> (Arc<AppState>, SharedPostureCache, Arc<VirtualClock>) {
-    use kirra_verifier::verifier_store::VerifierStore;
+    use kirra_persistence::VerifierStore;
 
     let store = VerifierStore::new(":memory:").expect("in-memory store");
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));

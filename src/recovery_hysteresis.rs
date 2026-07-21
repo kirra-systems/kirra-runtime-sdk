@@ -25,7 +25,7 @@
 //      The handler calls evaluate_recovery_report(). This keeps the handler
 //      readable and the hysteresis logic independently testable.
 
-use crate::verifier_store::VerifierStore;
+use kirra_persistence::VerifierStore;
 
 // ---------------------------------------------------------------------------
 // DI seam (S3 / #115): RecoveryStreakStore
@@ -631,7 +631,7 @@ mod hysteresis_tests {
     /// the trait dispatch this test catches it.
     #[test]
     fn test_happy_path_through_real_verifier_store_via_trait_seam() {
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         let store = VerifierStore::new(":memory:").expect("memory store");
         store
             .register_av_subsystem_meta("lidar_front", "LIDAR", "hw-0001", 0.7, 0)

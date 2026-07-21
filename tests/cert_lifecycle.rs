@@ -12,9 +12,9 @@
 //! pure-predicate unit tests (`authz::tests`) and the TLS-fingerprint tests
 //! (`tls.rs`) each cover only half of.
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::authz::SCOPE_INTEGRATION_EVALUATE;
 use kirra_verifier::authz::{authorize_request, ApiRole, AuthzOutcome, ResolvedPrincipal};
-use kirra_verifier::verifier_store::VerifierStore;
 
 const ADMIN_ROOT: &str = "root-admin-token";
 const FP: &str = "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44";

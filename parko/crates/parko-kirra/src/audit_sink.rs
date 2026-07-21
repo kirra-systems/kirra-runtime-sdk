@@ -21,8 +21,8 @@ use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use ed25519_dalek::SigningKey;
+use kirra_persistence::VerifierStore;
 use kirra_verifier::store_handle::StoreHandle;
-use kirra_verifier::verifier_store::VerifierStore;
 use parko_core::{
     AuditClient, ClearanceLoop, ClearanceRejection, ClearanceState, DecisionRecord, FaultRecord,
     HealthRecord, ImpactCfg, ImpactEvidence, ImpactLatch, NoopAuditClient, OperatorClearanceGrant,

@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::gateway::policy::OperationalCommand;
 use kirra_verifier::posture_cache::{
     should_route_command, CachedFleetPosture, SharedPostureCache, POSTURE_CACHE_TTL_MS,
 };
 use kirra_verifier::posture_engine_v2::{resolve_post_promotion_posture, LockoutReason};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 
 #[tokio::test]
 async fn concurrent_epoch_claims_have_single_durable_winner() {

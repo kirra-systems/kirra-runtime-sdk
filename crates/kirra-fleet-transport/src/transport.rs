@@ -397,7 +397,7 @@ mod transport_tests {
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     use ed25519_dalek::{Signer, SigningKey};
     use kirra_fleet_types::federation_reconciliation::canonical_federation_payload_v2;
-    use kirra_verifier::verifier_store::VerifierStore;
+    use kirra_persistence::VerifierStore;
 
     use crate::{key_trust_report, sign_clearance_grant};
 

@@ -1,7 +1,7 @@
 // src/verifier.rs
 
 use crate::security::constant_time_compare;
-use crate::verifier_store::VerifierStore;
+use kirra_persistence::VerifierStore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -953,7 +953,7 @@ mod transport_security_tests {
 #[cfg(test)]
 mod mark_node_untrusted_tests {
     use super::*;
-    use crate::verifier_store::VerifierStore;
+    use kirra_persistence::VerifierStore;
 
     fn app() -> AppState {
         let store = VerifierStore::new(":memory:").expect("in-memory store");
@@ -1051,7 +1051,7 @@ mod mark_node_untrusted_tests {
 #[cfg(test)]
 mod nonce_lifecycle_tests {
     use super::*;
-    use crate::verifier_store::VerifierStore;
+    use kirra_persistence::VerifierStore;
 
     fn app() -> AppState {
         AppState::new(
@@ -1212,7 +1212,7 @@ mod nonce_lifecycle_tests {
 #[cfg(test)]
 mod shared_memo_equivalence_tests {
     use super::*;
-    use crate::verifier_store::VerifierStore;
+    use kirra_persistence::VerifierStore;
     use std::collections::HashMap;
     use std::sync::Arc;
 

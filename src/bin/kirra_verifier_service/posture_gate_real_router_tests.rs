@@ -19,9 +19,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt; // for `oneshot`
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 
 /// Builds an Active `ServiceState` with the given seeded posture (or a
 /// cold cache when `None`), mirroring the production field set.

@@ -230,7 +230,7 @@ impl std::error::Error for ShipError {}
 /// Does NOT persist the cursor — the caller advances it only after the sink append
 /// succeeds (see [`ship_and_advance`]).
 pub fn ship_new_records(
-    store: &crate::verifier_store::VerifierStore,
+    store: &kirra_persistence::VerifierStore,
     sink: &mut dyn AuditSink,
     from_cursor: u64,
     batch_limit: u64,
@@ -257,9 +257,7 @@ pub fn ship_new_records(
 
 /// The persisted shipping cursor — the inclusive next sequence to ship (0 if never
 /// shipped / unparseable, i.e. start from the genesis row).
-pub fn load_ship_cursor(
-    store: &crate::verifier_store::VerifierStore,
-) -> Result<u64, rusqlite::Error> {
+pub fn load_ship_cursor(store: &kirra_persistence::VerifierStore) -> Result<u64, rusqlite::Error> {
     Ok(store
         .load_engine_state(AUDIT_SHIP_CURSOR_KEY)?
         .and_then(|s| s.parse::<u64>().ok())
@@ -279,7 +277,7 @@ pub fn load_ship_cursor(
 /// (advance-then-ship) could LOSE records on a crash — unacceptable for a
 /// tamper-evidence log.
 pub fn ship_and_advance(
-    store: &crate::verifier_store::VerifierStore,
+    store: &kirra_persistence::VerifierStore,
     sink: &mut dyn AuditSink,
     batch_limit: u64,
 ) -> Result<ShipOutcome, ShipError> {
@@ -299,7 +297,7 @@ pub fn ship_and_advance(
 /// sink fsync must not block unrelated store WRITES (posture, audit appends, the
 /// actuator epoch fence). Returns `(from_cursor, records)`.
 pub fn read_ship_batch(
-    store: &crate::verifier_store::VerifierStore,
+    store: &kirra_persistence::VerifierStore,
     batch_limit: u64,
 ) -> Result<(u64, Vec<ShippedAuditRecord>), rusqlite::Error> {
     let from = load_ship_cursor(store)?;
@@ -576,7 +574,7 @@ mod tests {
 
     // --- store-backed shipping (real audit chain) -------------------------
 
-    use crate::verifier_store::VerifierStore;
+    use kirra_persistence::VerifierStore;
 
     fn store_with_events(n: usize) -> VerifierStore {
         let mut s = VerifierStore::new(":memory:").expect("in-memory store");

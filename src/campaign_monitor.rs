@@ -30,7 +30,7 @@ use crate::clock::{Clock, SystemClock};
 use crate::posture_cache::{SharedPostureCache, POSTURE_CACHE_TTL_MS};
 use crate::posture_engine_v2::resolve_posture_snapshot_silent;
 use crate::verifier::{AppState, FleetPosture};
-use crate::verifier_store::VerifierStore;
+use kirra_persistence::VerifierStore;
 
 /// Campaign posture-sweep interval. Campaigns are a slow control-plane concern, so
 /// a 1 s cadence bounds the auto-halt latency after a confirmed regression without

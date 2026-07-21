@@ -75,8 +75,17 @@ ratchet ticks down visibly. Group by shared reviewer context where natural.
    only non-mechanical fix was lifting a nested `kirra_verifier::{ gateway::
    kinematics_contract::… }` group in `tests/actuator_middleware_integration.rs` into a
    standalone `use kirra_core::kinematics_contract::…`.
-4. **Wave 4 — `verifier_store` (XL, alone):** the persistence path rename across
-   ~58 files incl. `kirra-verifier-pg` and the integration-test suite. Its own PR.
+4. **Wave 4 — `verifier_store` (XL, alone): ✅ DONE.** `verifier_store` →
+   `kirra_persistence` across ~64 files (root lib/bins/tests + the four sibling/detached
+   consumers). Direct-dep additions: `kirra-persistence` to `kirra-fleet-transport`
+   (dev-dep; its use is test-only), `kirra-verifier-pg` (declared direct like its sibling
+   leaf deps), `parko-kirra` (optional, wired into the `verifier-sink` feature), and
+   `parko-ros2`. One nested `kirra_verifier::{ verifier_store::… }` group lifted out.
+   This wave carries the **`2.0.0` version bump**: `Cargo.toml` 1.1.2 → 2.0.0,
+   `ci/version_floor.txt` → 2.0.0 (A4 forward ratchet; the ordering guard confirms the
+   1.5.0 inversion is permanently cleared), the CHANGELOG `### Removed (BREAKING)` table,
+   VERSIONING_POLICY §5.1 flipped to past tense, and `max_shims` → 0. The **release tag
+   `v2.0.0` is deliberately NOT pushed here** — that is a separate deliberate release cut.
 
 Each wave can be one PR or several; the ratchet enforces monotonic decrease
 regardless of grouping.

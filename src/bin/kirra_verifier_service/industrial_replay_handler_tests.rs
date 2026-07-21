@@ -14,9 +14,9 @@ use axum::Json;
 use kirra_industrial::adapters::canopen::CanOpenMessage;
 use kirra_industrial::adapters::dnp3::Dnp3Message;
 use kirra_industrial::adapters::ethernet_ip::EtherNetIpMessage;
+use kirra_persistence::VerifierStore;
 use kirra_verifier::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 use std::sync::Arc;
 
 fn svc() -> Arc<ServiceState> {

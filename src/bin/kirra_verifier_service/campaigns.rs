@@ -349,7 +349,7 @@ pub(crate) async fn halt_campaign_handler(
 /// Load a campaign for an in-closure mutation, mapping absence to `NotFound` and a
 /// store error to `Store`.
 fn load_for_mutation(
-    store: &kirra_verifier::verifier_store::VerifierStore,
+    store: &kirra_persistence::VerifierStore,
     campaign_id: &str,
 ) -> Result<Campaign, CampaignOpError> {
     match store.load_campaign(campaign_id) {

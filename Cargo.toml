@@ -24,7 +24,7 @@ resolver = "2"
 
 [package]
 name = "kirra-verifier"
-version = "1.1.2"
+version = "2.0.0"
 edition = "2021"
 # MSRV (WS-0.7, docs/VERSIONING_POLICY.md §3): floor set by locked deps that
 # each require 1.88 (time-core 0.1.9, serde_with 3.21, darling 0.23, home 0.5.12,

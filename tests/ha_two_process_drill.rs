@@ -222,10 +222,9 @@ fn log_tail(dir: &Path, name: &str) -> String {
 /// service processes and skew the drill's timing measurements. The replica open
 /// is the store's own non-contending read path.
 fn durable_holder(db: &Path) -> (u64, Option<String>) {
-    let store = kirra_verifier::verifier_store::VerifierStore::open_read_replica(
-        db.to_str().expect("utf8 db path"),
-    )
-    .expect("open read replica from drill");
+    let store =
+        kirra_persistence::VerifierStore::open_read_replica(db.to_str().expect("utf8 db path"))
+            .expect("open read replica from drill");
     store.current_active_holder().expect("read ha_state")
 }
 

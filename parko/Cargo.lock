@@ -1232,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "kirra-verifier"
-version = "1.1.2"
+version = "2.0.0"
 dependencies = [
  "axum",
  "base64",
@@ -1579,6 +1579,7 @@ dependencies = [
  "base64",
  "ed25519-dalek",
  "kirra-core",
+ "kirra-persistence",
  "kirra-safety-authority",
  "kirra-verifier",
  "parko-core",
@@ -1614,6 +1615,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "kirra-core",
+ "kirra-persistence",
  "kirra-taj",
  "kirra-verifier",
  "parko-core",

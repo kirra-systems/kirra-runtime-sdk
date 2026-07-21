@@ -22,10 +22,10 @@ use axum::response::IntoResponse;
 use axum::Json;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
+use kirra_persistence::VerifierStore;
 use kirra_safety_authority::attestation::attestation_signing_payload;
 use kirra_verifier::posture_cache::{now_ms, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, NodeTrustState, RegisteredNode, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 
 const NODE: &str = "edge-node-1";
 

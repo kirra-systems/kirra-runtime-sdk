@@ -21,12 +21,12 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
+use kirra_persistence::{AuditExportPage, VerifierStore};
 use kirra_safety_authority::attestation::{
     operator_grant_signing_payload, operator_key_fingerprint, verify_ed25519_pem_signature,
 };
 use kirra_verifier::store_handle::StoreHandle;
 use kirra_verifier::verifier::{AppState, VerifierOperationMode};
-use kirra_verifier::verifier_store::{AuditExportPage, VerifierStore};
 
 use parko_core::{
     impact_cfg_for_class, is_impact, ClearanceLoop, ClearanceState, ImpactCfg, ImpactEvidence,

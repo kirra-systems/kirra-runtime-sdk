@@ -6,9 +6,9 @@
 // root re-export (`use actuator::*`) lets build_app/tests name them unqualified.
 
 use super::*;
+use kirra_persistence::FenceError;
 use kirra_verifier::gateway::contract_profiles::{contract_for, global_vehicle_class};
 use kirra_verifier::governor_release::RosReleaseSigner;
-use kirra_verifier::verifier_store::FenceError;
 
 pub(crate) async fn handle_actuator_motion_command(
     State(svc): State<Arc<ServiceState>>,

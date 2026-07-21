@@ -20,11 +20,11 @@ use axum::{Extension, Router};
 use tower::ServiceExt; // oneshot
 
 use ed25519_dalek::SigningKey;
+use kirra_persistence::VerifierStore;
 use kirra_verifier::gateway::policy_layer::enforce_actuator_safety_envelope;
 use kirra_verifier::governor_release::{RosReleaseGate, RosReleaseSigner};
 use kirra_verifier::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 
 fn nominal_state() -> Arc<ServiceState> {
     let store = VerifierStore::new(":memory:").expect("in-memory store");

@@ -45,3 +45,8 @@ kirra-fabric-types = { path = "../kirra-fabric-types" }
 # `CampaignState` / `HaltReason` enums for state-token encoding) directly. Already
 # transitive via kirra-verifier; declared direct so the impl can name the types.
 kirra-ota-campaign = { path = "../kirra-ota-campaign" }
+# The storage-seam traits + `VerifierStore` + the migration engine live here (ADR-0035
+# slice 4). The PG backend binds those seams and names the types directly (the
+# `kirra_verifier::verifier_store` re-export shim is removed in v2.0.0). Already
+# transitive via kirra-verifier; declared direct so the impl can name the types.
+kirra-persistence = { path = "../kirra-persistence" }

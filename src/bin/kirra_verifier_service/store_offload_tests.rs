@@ -10,9 +10,9 @@
 // spawn_blocking offload is actually exercised.
 // ---------------------------------------------------------------------------
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::store_handle::StoreError;
 use kirra_verifier::verifier::{AppState, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 use std::sync::Arc;
 
 fn app() -> Arc<AppState> {

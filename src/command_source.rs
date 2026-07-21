@@ -126,8 +126,8 @@ pub fn write_failures(app: &AppState) -> u64 {
 mod tests {
     use super::*;
     use crate::verifier::{AppState, VerifierOperationMode};
-    use crate::verifier_store::VerifierStore;
     use ed25519_dalek::SigningKey;
+    use kirra_persistence::VerifierStore;
 
     fn app_with_key() -> (AppState, ed25519_dalek::VerifyingKey) {
         let key = SigningKey::from_bytes(&[5u8; 32]);

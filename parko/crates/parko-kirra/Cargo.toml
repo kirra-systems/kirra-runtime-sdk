@@ -18,6 +18,10 @@ kirra-core = { path = "../../../crates/kirra-core" }
 # divergence comparator no longer pulls the verifier service tree. The parko-ros2
 # integration node enables `verifier-sink`. (audit_sink / clearance_delivery.)
 kirra-verifier = { path = "../../..", optional = true }
+# ADR-0035 v2.0.0 shim removal: the durable sinks name `VerifierStore` from its
+# canonical crate (the `kirra_verifier::verifier_store` re-export shim is gone).
+# Gated with the same `verifier-sink` feature as kirra-verifier.
+kirra-persistence = { path = "../../../crates/kirra-persistence", optional = true }
 # DivergenceEvent serialisation (always-on: the comparator emits it regardless of
 # whether a durable sink is wired).
 serde = { version = "1", features = ["derive"] }
@@ -37,7 +41,7 @@ default = []
 # (hash-chained, signed ledger). OFF by default so the parko ML core stays lean;
 # enabled by the parko-ros2 integration node and any deployment that persists
 # divergence/clearance. Not on the governor hot path.
-verifier-sink = ["dep:kirra-verifier", "dep:ed25519-dalek", "dep:base64", "dep:tokio"]
+verifier-sink = ["dep:kirra-verifier", "dep:kirra-persistence", "dep:ed25519-dalek", "dep:base64", "dep:tokio"]
 
 [dev-dependencies]
 proptest = "1"

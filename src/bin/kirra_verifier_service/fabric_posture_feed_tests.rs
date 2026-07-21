@@ -13,10 +13,10 @@ use super::{force_local_asset_lockedout, sync_local_asset_posture};
 use std::sync::Arc;
 
 use kirra_fabric_types::asset::{AssetType, FabricAsset, KinematicProfileType};
+use kirra_persistence::VerifierStore;
 use kirra_verifier::fabric::router::FabricRouter;
 use kirra_verifier::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 
 const LOCAL: &str = "local-asset";
 

@@ -152,23 +152,23 @@ permanent layer. They are therefore **DEPRECATED as of this policy revision**:
    (e.g. `use kirra_persistence::VerifierStore`), never the root shim path.
 2. **Grace window:** the shims keep working unchanged for the remainder of the
    current `1.x` line (they are pure `pub use`, so they cost nothing at runtime).
-3. **Remove (MAJOR only):** the disambiguating `>= 2.0.0` MAJOR (§2.1) is the
-   **removal milestone** — that release migrates internal call sites to the
-   canonical crate paths and deletes the shims, listed under `### Removed`. This
-   is deliberately co-scheduled with the version-line disambiguation so the two
-   root-crate cleanups land together. The **actionable step-by-step** (old→new
-   path table for all remaining shims, per-shim consumer counts + landing order,
-   the mechanical recipe, and the downstream migration guide) is drafted in
-   `docs/adr/0035-shim-removal-v2-plan.md`.
+3. **Remove (MAJOR only) — DONE in v2.0.0:** the disambiguating `2.0.0` MAJOR (§2.1)
+   was the **removal milestone** — that release migrated every internal call site to
+   the canonical crate paths and deleted the shims, listed under `### Removed` in the
+   CHANGELOG. It was deliberately co-scheduled with the version-line disambiguation so
+   the two root-crate cleanups landed together. The **actionable step-by-step** (old→new
+   path table for all shims, per-shim consumer counts + landing order, the mechanical
+   recipe, and the downstream migration guide) is `docs/adr/0035-shim-removal-v2-plan.md`.
 
-**Enforcement.** The shim set is frozen and shrinking-only between now and v2.0.0
-by `ci/check_reexport_shims.py` (guardrails CI job; inventory in
-`ci/reexport_shims_baseline.json`): a NEW `pub use` shim fails CI, and `max_shims`
-only decreases. Three dead shims have already been removed pre-2.0 under the
-dead-vs-live rule (a zero-consumer shim carries no live contract):
-`gateway/interceptor.rs`, `gateway/cmd_vel.rs`, `posture_tracker.rs` — so the count
-is **14** (not the ~20 named above, which predates the sweep). At v2.0.0 the
-remaining 14 go and `max_shims` reaches 0.
+**Enforcement.** Between the announcement and v2.0.0 the shim set was frozen and
+shrinking-only by `ci/check_reexport_shims.py` (guardrails CI job; inventory in
+`ci/reexport_shims_baseline.json`): a NEW `pub use` shim failed CI, and `max_shims`
+only decreased. Three dead shims were removed pre-2.0 under the dead-vs-live rule (a
+zero-consumer shim carries no live contract): `gateway/interceptor.rs`,
+`gateway/cmd_vel.rs`, `posture_tracker.rs`; the remaining **14** were then removed in
+v2.0.0 across four waves (see the plan doc + the baseline `_comment`). **`max_shims` is
+now `0`** and the ratchet is a permanent **zero-tolerance** guard — any future
+`pub use <crate>::…` re-export shim module reds CI, so the indirection cannot return.
 
 The larger, separate item this does **not** close is the actual `AppState`
 decomposition (still ADR-0035 **Proposed**); that is tracked as its own body of

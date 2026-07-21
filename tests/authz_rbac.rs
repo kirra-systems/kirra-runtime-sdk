@@ -8,11 +8,11 @@
 //! in-memory `VerifierStore`, so it proves the seam the pure-function unit tests
 //! (`authz::tests`) and the router-gating tests each cover only half of.
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::authz::{
     authorize_request, token_sha256_hex, ApiRole, AuthzOutcome, ResolvedPrincipal,
     SCOPE_ACTUATOR_COMMAND, SCOPE_ADMIN, SCOPE_AUDIT_READ, SCOPE_INTEGRATION_EVALUATE,
 };
-use kirra_verifier::verifier_store::VerifierStore;
 
 const ADMIN_ROOT: &str = "root-admin-token";
 

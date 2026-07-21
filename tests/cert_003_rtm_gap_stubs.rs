@@ -163,11 +163,11 @@ fn test_safety_goal_sg_007_causal_log_records_propagation_event() {
 // backdoor.
 #[test]
 fn test_safety_goal_sg_013_recovery_hysteresis_streak_and_window() {
+    use kirra_persistence::VerifierStore;
     use kirra_verifier::recovery_hysteresis::{
         evaluate_recovery_report, HysteresisDecision, AV_RECOVERY_STREAK_THRESHOLD,
         AV_RECOVERY_WINDOW_MS,
     };
-    use kirra_verifier::verifier_store::VerifierStore;
 
     assert_eq!(
         AV_RECOVERY_STREAK_THRESHOLD, 5,

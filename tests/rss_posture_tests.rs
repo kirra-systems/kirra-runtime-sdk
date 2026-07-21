@@ -9,13 +9,13 @@
 
 use std::sync::Arc;
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::posture_cache::{CachedFleetPosture, SharedPostureCache};
 use kirra_verifier::recovery_hysteresis::AV_RECOVERY_STREAK_THRESHOLD;
 use kirra_verifier::scenario_runner::{PostureAssertion, ScenarioEvent, ScenarioRunner};
 use kirra_verifier::verifier::{
     AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode,
 };
-use kirra_verifier::verifier_store::VerifierStore;
 use parko_core::RssState;
 
 fn build_rss_test_app() -> (Arc<AppState>, SharedPostureCache) {

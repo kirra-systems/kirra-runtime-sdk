@@ -13,6 +13,7 @@
 //! promotes by claiming the next durable epoch, and the old primary is then FENCED
 //! out of writing.
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::lease::{
     holder_must_self_demote, lease_expired, promotion_due_since_renew, should_promote, LeaseParams,
     DEFAULT_LEASE_TTL_MS,
@@ -22,7 +23,6 @@ use kirra_verifier::standby_monitor::{
     should_self_demote_on_heartbeat_failures, HEARTBEAT_INTERVAL_MS, HEARTBEAT_KEY,
     MAX_CONSECUTIVE_HEARTBEAT_FAILURES, PROMOTION_TIMEOUT_MS,
 };
-use kirra_verifier::verifier_store::VerifierStore;
 
 #[test]
 fn ha_failover_promotes_standby_and_fences_the_old_primary() {

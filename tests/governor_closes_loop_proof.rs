@@ -34,13 +34,13 @@ use tower::ServiceExt; // oneshot
 
 use kirra_core::kinematics_contract::{ProposedVehicleCommand, VehicleKinematicsContract};
 use kirra_core::kinematics_sim::VehicleState;
+use kirra_persistence::VerifierStore;
 use kirra_verifier::gateway::policy_layer::{enforce_actuator_safety_envelope, EnforcementOutcome};
 use kirra_verifier::posture_cache::{CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::scenario_runner::{PostureAssertion, ScenarioEvent, ScenarioRunner};
 use kirra_verifier::verifier::{
     AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode,
 };
-use kirra_verifier::verifier_store::VerifierStore;
 
 const DT_S: f64 = 0.05;
 const TOL: f64 = 1e-6;

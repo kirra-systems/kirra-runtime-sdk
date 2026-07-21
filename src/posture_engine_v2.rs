@@ -832,7 +832,7 @@ mod posture_engine_v2_tests {
 
     fn frame_app() -> Arc<AppState> {
         use crate::verifier::VerifierOperationMode;
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         let store = VerifierStore::new(":memory:").unwrap();
         Arc::new(AppState::new(store, VerifierOperationMode::Active))
     }
@@ -1292,7 +1292,7 @@ mod posture_engine_v2_tests {
         use crate::verifier::{
             AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode,
         };
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
@@ -1364,7 +1364,7 @@ mod posture_engine_v2_tests {
         use crate::verifier::{
             AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode,
         };
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         use std::sync::Arc;
         use std::time::Duration;
 

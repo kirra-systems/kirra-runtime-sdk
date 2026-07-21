@@ -680,7 +680,7 @@ mod posture_engine_tests {
     #[test]
     fn test_recalculate_and_broadcast_writes_to_cache() {
         use crate::verifier::{AppState, VerifierOperationMode};
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
@@ -710,7 +710,7 @@ mod posture_engine_tests {
     #[test]
     fn test_empty_live_set_fails_closed_to_locked_out() {
         use crate::verifier::{AppState, VerifierOperationMode};
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
@@ -732,7 +732,7 @@ mod posture_engine_tests {
     #[test]
     fn test_empty_live_set_with_orphaned_store_nodes_is_locked_out() {
         use crate::verifier::{AppState, VerifierOperationMode};
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
@@ -764,7 +764,7 @@ mod posture_engine_tests {
     #[test]
     fn test_empty_live_set_lockout_auto_recovers_on_registration() {
         use crate::verifier::{AppState, VerifierOperationMode};
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
@@ -794,7 +794,7 @@ mod posture_engine_tests {
     #[test]
     fn test_supervisor_tripped_forces_locked_out_over_healthy_dag() {
         use crate::verifier::{AppState, VerifierOperationMode};
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         use std::sync::atomic::Ordering;
         use std::sync::Arc;
 
@@ -852,7 +852,7 @@ mod posture_engine_tests {
     #[test]
     fn test_passive_standby_audits_but_does_not_write_cache() {
         use crate::verifier::{AppState, VerifierOperationMode};
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
@@ -1002,7 +1002,7 @@ mod posture_engine_tests {
 
     fn active_app() -> std::sync::Arc<AppState> {
         use crate::verifier::VerifierOperationMode;
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         let store = VerifierStore::new(":memory:").unwrap();
         let app = std::sync::Arc::new(AppState::new(store, VerifierOperationMode::Active));
         insert_node(&app, "baseline", NodeTrustState::Trusted);
@@ -1041,7 +1041,7 @@ mod posture_engine_tests {
     #[test]
     fn test_standby_transition_is_audited_but_not_counted() {
         use crate::verifier::VerifierOperationMode;
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         let store = VerifierStore::new(":memory:").unwrap();
         let app = std::sync::Arc::new(AppState::new(store, VerifierOperationMode::PassiveStandby));
         insert_node(&app, "baseline", NodeTrustState::Trusted);
@@ -1348,7 +1348,7 @@ mod posture_engine_tests {
     #[test]
     fn test_init_generation_never_moves_counter_backwards() {
         use crate::verifier::{AppState, VerifierOperationMode};
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         use std::sync::Arc;
 
         // B6 regression: simulate a recalc having already advanced the live counter
@@ -1383,7 +1383,7 @@ mod posture_engine_tests {
     #[test]
     fn test_init_generation_raises_counter_above_persisted_high_water() {
         use crate::verifier::{AppState, VerifierOperationMode};
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
@@ -1542,7 +1542,7 @@ mod posture_engine_tests {
     #[test]
     fn test_recalc_over_shared_dependency_dag_completes() {
         use crate::verifier::{AppState, NodeTrustState, RegisteredNode, VerifierOperationMode};
-        use crate::verifier_store::VerifierStore;
+        use kirra_persistence::VerifierStore;
         use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();

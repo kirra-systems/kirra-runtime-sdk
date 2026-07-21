@@ -33,10 +33,10 @@ use axum::routing::{get, post};
 use axum::Router;
 use tower::ServiceExt; // for `oneshot`
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::gateway::policy_layer::enforce_posture_routing;
 use kirra_verifier::posture_cache::{CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 
 // ---------------------------------------------------------------------------
 // Fixtures

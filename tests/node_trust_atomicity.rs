@@ -17,8 +17,8 @@
 use std::sync::Arc;
 use std::thread;
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::verifier::{AppState, NodeTrustState, RegisteredNode, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 
 fn app() -> AppState {
     AppState::new(
