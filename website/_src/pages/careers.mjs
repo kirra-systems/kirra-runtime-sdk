@@ -63,6 +63,7 @@ ${pageHero({
         <div class="hero__ctas" style="justify-content:center" data-reveal>
           <a class="btn btn--primary" href="${SITE.repo}/issues" target="_blank" rel="noopener">Open issues <span class="arrow" aria-hidden="true">→</span></a>
           <a class="btn btn--ghost" href="open-source.html">How contributions are gated</a>
+          <a class="btn btn--ghost" href="company.html">About the company</a>
         </div>
       </div>
     </section>
