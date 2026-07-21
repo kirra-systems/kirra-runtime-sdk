@@ -432,3 +432,10 @@ names/paths, which muddies the safety-case boundary. The policy:
 
 This converts the shims from an open-ended layer into a tracked, shrinking one —
 the "deprecation with a removal milestone" the review asked for.
+
+- **v2.0.0 removal plan:** the actionable step-by-step for retiring the remaining
+  live shims (old→new path table, per-shim consumer counts + ordering, mechanical
+  recipe, external-consumer migration guide, verification gates) is
+  `docs/adr/0035-shim-removal-v2-plan.md`. It executes only at the `>= 2.0.0` MAJOR
+  (co-scheduled with the A4 version-line disambiguation, `VERSIONING_POLICY.md`
+  §2.1 / §5.1).
