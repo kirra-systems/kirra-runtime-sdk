@@ -52,6 +52,7 @@
         <a href="safety.html">Safety</a>
         <a href="certification.html">Certification</a>
         <a href="field-notes.html">Field Notes</a>
+        <a href="contact.html">Contact</a>
       </nav>
       <button class="theme-toggle" id="themeToggle" aria-label="Toggle color theme">
         <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg>
@@ -69,6 +70,7 @@
       <a href="vision.html">vision</a>
       <a href="architecture.html">architecture</a>
       <a href="runtime.html">runtime</a>
+      <a href="diagnostics.html">diagnostics</a>
       <a href="safety.html">safety</a>
       <a href="planning.html">planning</a>
       <a href="perception.html">perception</a>
@@ -131,6 +133,51 @@ curl -N localhost:8090/system/posture/stream \
               the on-robot installer that turns a fresh Jetson into a governed vehicle — and a one-line installer
               for x86_64 / aarch64 / armv7.</p>
               <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/helm/kirra" target="_blank" rel="noopener">helm/kirra</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/deploy/systemd" target="_blank" rel="noopener">deploy/systemd</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/robot/install/README.md" target="_blank" rel="noopener">robot/install/README.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/install.sh" target="_blank" rel="noopener">install.sh</a></p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule">
+
+    <section aria-labelledby="h-orient">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>Developer orientation</p>
+          <h2 id="h-orient" data-reveal>Find your way around in five minutes</h2>
+          <p class="lede" data-reveal>The tree is organized by trust, not by feature — knowing that makes the whole
+          repository legible.</p>
+        </div>
+        <div class="grid grid--2" style="align-items:start">
+          <div class="table-wrap" data-reveal>
+            <table class="tbl" style="min-width:0">
+              <caption class="visually-hidden">Repository map</caption>
+              <thead><tr><th scope="col">Path</th><th scope="col">What lives there</th></tr></thead>
+              <tbody>
+                <tr><td class="mono">crates/</td><td>The checker &amp; platform — trajectory validation, planner, maps, transports, OTA</td></tr>
+                <tr><td class="mono">src/</td><td>The verifier control plane — posture, attestation, audit, HTTP service</td></tr>
+                <tr><td class="mono">parko/</td><td>Separate ML workspace — inference backends, diverse second governor</td></tr>
+                <tr><td class="mono">verification/ · fuzz/</td><td>Kani proofs over shipped source; standing fuzz targets</td></tr>
+                <tr><td class="mono">tools/</td><td>Isolated spikes — iceoryx2 carrier, QNX shim/judge harness</td></tr>
+                <tr><td class="mono">robot/ · firmware/</td><td>The physical R2 testbed scripts and clean-room MCU firmware</td></tr>
+                <tr><td class="mono">docs/</td><td>36 ADRs, 65 safety artifacts, hardware runbooks, specs</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div style="display:grid;gap:14px">
+            <div class="card" data-reveal>
+              <h3 style="font-size:1.05rem">Runnable demonstrations</h3>
+              <p>The in-line governor demo drives the full read→decide→sign→verify→release loop across a real
+              process boundary; the CARLA client runs the governor against a simulator; the proposal bench sweeps
+              a live governor with hostile proposals and prints its verdicts.</p>
+              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-inline-governor" target="_blank" rel="noopener">crates/kirra-inline-governor</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/bin/kirra_carla_client.rs" target="_blank" rel="noopener">src/bin/kirra_carla_client.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-proposal-bench" target="_blank" rel="noopener">crates/kirra-proposal-bench</a></p>
+            </div>
+            <div class="card" data-reveal>
+              <h3 style="font-size:1.05rem">APIs &amp; examples</h3>
+              <p><code>cargo doc --open</code> builds the full API reference (deny-warnings enforced). The governor
+              quickstart example and the C SDK example both build and run in CI, so they're never stale.</p>
+              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/examples/" target="_blank" rel="noopener">examples/</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L323" target="_blank" rel="noopener">.github/workflows/ci.yml:323</a></p>
             </div>
           </div>
         </div>
@@ -210,6 +257,7 @@ curl -N localhost:8090/system/posture/stream \
           <li><a href="solutions.html">Solutions</a></li>
           <li><a href="architecture.html">Architecture</a></li>
           <li><a href="runtime.html">Runtime</a></li>
+          <li><a href="diagnostics.html">Diagnostics</a></li>
           <li><a href="determinism.html">Determinism</a></li>
           <li><a href="performance.html">Performance</a></li>
           <li><a href="security.html">Security</a></li>
@@ -238,6 +286,7 @@ curl -N localhost:8090/system/posture/stream \
         <h4>Company</h4>
         <ul>
           <li><a href="vision.html">Vision</a></li>
+          <li><a href="contact.html">Contact</a></li>
           <li><a href="field-notes.html">Field Notes</a></li>
           <li><a href="careers.html">Careers</a></li>
           <li><a href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener">GitHub ↗</a></li>

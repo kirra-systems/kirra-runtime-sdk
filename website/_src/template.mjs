@@ -47,6 +47,7 @@ const NAV_LINKS = [
   ["safety.html", "Safety"],
   ["certification.html", "Certification"],
   ["field-notes.html", "Field Notes"],
+  ["contact.html", "Contact"],
 ];
 
 const SUBNAV = [
@@ -54,6 +55,7 @@ const SUBNAV = [
   ["vision.html", "vision"],
   ["architecture.html", "architecture"],
   ["runtime.html", "runtime"],
+  ["diagnostics.html", "diagnostics"],
   ["safety.html", "safety"],
   ["planning.html", "planning"],
   ["perception.html", "perception"],
@@ -82,6 +84,7 @@ const FOOTER = `
           <li><a href="solutions.html">Solutions</a></li>
           <li><a href="architecture.html">Architecture</a></li>
           <li><a href="runtime.html">Runtime</a></li>
+          <li><a href="diagnostics.html">Diagnostics</a></li>
           <li><a href="determinism.html">Determinism</a></li>
           <li><a href="performance.html">Performance</a></li>
           <li><a href="security.html">Security</a></li>
@@ -110,6 +113,7 @@ const FOOTER = `
         <h4>Company</h4>
         <ul>
           <li><a href="vision.html">Vision</a></li>
+          <li><a href="contact.html">Contact</a></li>
           <li><a href="field-notes.html">Field Notes</a></li>
           <li><a href="careers.html">Careers</a></li>
           <li><a href="${SITE.repo}" target="_blank" rel="noopener">GitHub ↗</a></li>

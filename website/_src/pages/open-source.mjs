@@ -57,6 +57,51 @@ curl -N localhost:8090/system/posture/stream \\
 
     <hr class="rule">
 
+    <section aria-labelledby="h-orient">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>Developer orientation</p>
+          <h2 id="h-orient" data-reveal>Find your way around in five minutes</h2>
+          <p class="lede" data-reveal>The tree is organized by trust, not by feature — knowing that makes the whole
+          repository legible.</p>
+        </div>
+        <div class="grid grid--2" style="align-items:start">
+          <div class="table-wrap" data-reveal>
+            <table class="tbl" style="min-width:0">
+              <caption class="visually-hidden">Repository map</caption>
+              <thead><tr><th scope="col">Path</th><th scope="col">What lives there</th></tr></thead>
+              <tbody>
+                <tr><td class="mono">crates/</td><td>The checker &amp; platform — trajectory validation, planner, maps, transports, OTA</td></tr>
+                <tr><td class="mono">src/</td><td>The verifier control plane — posture, attestation, audit, HTTP service</td></tr>
+                <tr><td class="mono">parko/</td><td>Separate ML workspace — inference backends, diverse second governor</td></tr>
+                <tr><td class="mono">verification/ · fuzz/</td><td>Kani proofs over shipped source; standing fuzz targets</td></tr>
+                <tr><td class="mono">tools/</td><td>Isolated spikes — iceoryx2 carrier, QNX shim/judge harness</td></tr>
+                <tr><td class="mono">robot/ · firmware/</td><td>The physical R2 testbed scripts and clean-room MCU firmware</td></tr>
+                <tr><td class="mono">docs/</td><td>36 ADRs, 65 safety artifacts, hardware runbooks, specs</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div style="display:grid;gap:14px">
+            <div class="card" data-reveal>
+              <h3 style="font-size:1.05rem">Runnable demonstrations</h3>
+              <p>The in-line governor demo drives the full read→decide→sign→verify→release loop across a real
+              process boundary; the CARLA client runs the governor against a simulator; the proposal bench sweeps
+              a live governor with hostile proposals and prints its verdicts.</p>
+              ${evRow("crates/kirra-inline-governor", "src/bin/kirra_carla_client.rs", "crates/kirra-proposal-bench")}
+            </div>
+            <div class="card" data-reveal>
+              <h3 style="font-size:1.05rem">APIs &amp; examples</h3>
+              <p><code>cargo doc --open</code> builds the full API reference (deny-warnings enforced). The governor
+              quickstart example and the C SDK example both build and run in CI, so they're never stale.</p>
+              ${evRow("examples/", ".github/workflows/ci.yml:323")}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule">
+
     <section aria-labelledby="h-contrib">
       <div class="container">
         <div class="section-head">
