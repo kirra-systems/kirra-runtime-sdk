@@ -52,6 +52,17 @@ images, cosign signing — see `.github/workflows/docker.yml` for the pattern).
 - **Failure containment**: route-segment error boundary (`app/error.tsx`) and
   root boundary (`app/global-error.tsx`) — a screen crash never blanks the
   console, and the recovery copy states that the UI is not the fleet
+- **Live event transport (SSE)**: the fleet hook attaches to the verifier's
+  real posture stream (`GET /system/posture/stream`) once a live snapshot
+  succeeds; each pushed event schedules a coalesced snapshot refetch so the
+  table stays authoritative, and polling relaxes to a 30 s heartbeat while the
+  stream is open. Any stream error falls back to full-rate polling and retries
+  with backoff — never worse than the pre-SSE behavior. The proxy streams SSE
+  unbuffered (push-pump + `no-transform`/`x-accel-buffering: no`) so
+  `EventSource` fires `onopen` immediately. The Overview and Live screens show
+  the live transport (`SSE stream` vs `polling`). Verified end-to-end against a
+  running verifier: a node registration pushed an event over the stream and the
+  new node appeared in the table.
 - **Data-layer resilience** (pre-existing, kept): every hook aborts in-flight
   requests on unmount, distinguishes demo/abort/failure, settles to labeled
   demo data, and keeps re-polling — network interruptions self-heal
@@ -91,12 +102,10 @@ quick-nav keyboard flow must navigate. Locally:
    registry (#314); until then, SSO-in-front is the supported model.
 2. **Auditor-role token instead of admin token** — supported by the verifier
    today; a deployment choice, documented above.
-3. **SSE adoption** — the stream is proxied but unconsumed; polling remains
-   the transport (5–30 s). Roadmap item #1 in REVIEW.md.
-4. **Nonce-based CSP**, error-reporter integration (the boundaries and
+3. **Nonce-based CSP**, error-reporter integration (the boundaries and
    structured logs are the hook points), OpenTelemetry spans on the proxy.
-5. **Test depth** — the smoke gate covers rendering and navigation; component
+4. **Test depth** — the smoke gate covers rendering and navigation; component
    and contract tests (wire types vs verifier serde) are the next layer.
-6. **Preview screens in customer deployments** — the 12 simulated screens are
+5. **Preview screens in customer deployments** — the 12 simulated screens are
    labeled at three levels; a build-time flag to hide them entirely is a
    product decision awaiting real customer telemetry to replace them.

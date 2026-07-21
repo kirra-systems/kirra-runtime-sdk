@@ -76,9 +76,10 @@ Recommended next (no test infrastructure exists yet):
 
 ## 16. Fleet-scale roadmap (ranked)
 
-1. **Consume the real SSE posture stream** (`/system/posture/stream` is already
-   proxy-allow-listed) instead of 5 s polling + client diffing — lower latency,
-   correct event ordering, and the fleet page becomes genuinely live.
+1. ~~Consume the real SSE posture stream~~ **— DONE.** `useLiveFleet` attaches
+   to `/system/posture/stream`; events push a coalesced snapshot refetch, the
+   transport is shown in the UI, and it falls back to polling on any error.
+   Verified end-to-end against a live verifier (see `PRODUCTION.md`).
 2. **Alert center**: persist posture transitions + audit anomalies with
    acknowledge/history (groundwork: `useLiveFleet` already synthesizes
    transition events).
