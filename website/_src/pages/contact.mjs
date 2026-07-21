@@ -33,6 +33,10 @@ ${pageHero({
               <a class="btn btn--ghost" href="${SITE.repo}" target="_blank" rel="noopener">The repository ↗</a>
               <a class="btn btn--ghost" href="mailto:justin.looney@kirrasystems.com?subject=Technical%20evaluation%20%E2%80%94%20Kirra">Ask us directly</a>
             </div>
+            <p class="evidence-note" style="margin-top:16px">Or touch it now — two live demos, no install:
+            <a class="evidence" href="playground.html">the Verdict Playground</a> runs the real frozen checker in your
+            browser; <a class="evidence" href="/console/">the operator console demo</a> runs the full Next.js console
+            on a simulated fleet.</p>
             ${evRow(".github/workflows/release.yml", "ci/build_safety_case.py")}
           </div>
           <div class="card" data-reveal>
