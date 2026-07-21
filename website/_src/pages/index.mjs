@@ -3,7 +3,7 @@ import { SITE, ev, evRow, pill, LIVE, GATED, SPIKE } from "../template.mjs";
 export const meta = {
   slug: "index",
   title: "Kirra Systems",
-  desc: "Kirra is a fail-closed runtime safety governor for AI-driven robots and vehicles. Planners propose; a deterministic, formally checked envelope decides what reaches the actuators. Open source, in Rust.",
+  desc: "Every machine is getting a model, and no model is certifiable. Kirra is the governed layer of autonomy: a fail-closed, machine-checked envelope between AI intent and actuation. Open source, in Rust.",
   subnav: false,
   jsonld: {
     "@context": "https://schema.org",
@@ -135,14 +135,14 @@ export const body = `
     <section class="hero" aria-label="Introduction">
       <canvas class="hero__canvas" id="heroField" aria-hidden="true"></canvas>
       <div class="container">
-        <p class="hero__eyebrow eyebrow">Runtime legitimacy engine · Safety governor</p>
-        <h1>The AI proposes.<br>Kirra <span class="accent">bounds it.</span></h1>
-        <p class="lede">Kirra is a fail-closed runtime safety governor for AI-driven robots and vehicles.
-        Planners — geometric, learned, or LLM-driven — only ever <em>propose</em>. A deterministic,
-        machine-checked envelope decides what reaches the actuators, and denies by default when
-        anything is missing, stale, malformed, or unproven.</p>
+        <p class="hero__eyebrow eyebrow">The governed layer of autonomy</p>
+        <h1>Every machine gets a model.<br>Every model needs an <span class="accent">envelope.</span></h1>
+        <p class="lede">AI capability is outrunning verification — and no amount of training makes a model
+        certifiable. Kirra is the fail-closed runtime layer that closes that gap: planners, learned policies,
+        and LLMs only ever <em>propose</em>, while a deterministic, machine-checked envelope decides what
+        reaches the actuators. The models will keep changing. The envelope is forever.</p>
         <div class="hero__ctas">
-          <a class="btn btn--primary" href="architecture.html">Explore the architecture <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="btn btn--primary" href="vision.html">Where autonomy is heading <span class="arrow" aria-hidden="true">→</span></a>
           <a class="btn btn--ghost" href="${SITE.repo}" target="_blank" rel="noopener">Read the source ↗</a>
         </div>
         <p class="hero__proof">
@@ -155,11 +155,62 @@ export const body = `
       </div>
     </section>
 
+    <!-- ═══════════ THE VISION ═══════════ -->
+    <section id="tomorrow" aria-labelledby="h-tomorrow">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>The world of tomorrow</p>
+          <h2 id="h-tomorrow" data-reveal>Autonomy will be won by whoever<br>can prove safety at runtime.</h2>
+          <p class="lede" data-reveal>Three forces make the governed layer inevitable — and every technical
+          decision on this site exists to build it.</p>
+        </div>
+        <div class="grid grid--3">
+          <div class="card" data-reveal>
+            <h3>AI is outrunning verification</h3>
+            <p>Foundation models are entering planners and language is becoming a robot interface. You can't
+            test a distribution into being safe — but you can bound what any of it is permitted to do.</p>
+            ${evRow("docs/adr/0020-doer-invariant-safety-case.md")}
+          </div>
+          <div class="card" data-reveal>
+            <h3>Regulation demands runtime assurance</h3>
+            <p>UL 4600, SOTIF, ASTM F3269, and the emerging AI-safety standards all converge on the same
+            architecture: an untrusted complex function behind a verifiable monitor. Kirra maintains open,
+            versioned mappings to each.</p>
+            ${evRow("docs/safety/ASTM_F3269_RTA_MAPPING.md", "docs/safety/UL4600_SAFETY_CASE.md")}
+          </div>
+          <div class="card" data-reveal>
+            <h3>Platforms need a decision layer</h3>
+            <p>Certified hypervisors and safety-rated silicon solve isolation and compute — not whether a
+            command is safe. Kirra is built as the decision layer for exactly those platforms, as an SEooC
+            designed for integration.</p>
+            ${evRow("docs/adr/0032-governor-deployment-platform.md")}
+          </div>
+        </div>
+        <div class="grid grid--2" style="align-items:center;gap:48px;margin-top:40px">
+          <div style="display:grid;gap:10px" data-reveal aria-hidden="true">
+            <div class="card" style="padding:16px 22px"><p class="mono dim" style="font-size:0.8rem">AI doer stacks — unverifiable, swappable</p></div>
+            <div class="card" style="padding:16px 22px;border-color:var(--accent-line);background:var(--accent-soft)"><p class="mono" style="font-size:0.8rem;color:var(--accent)">KIRRA — the governed layer (SEooC)</p></div>
+            <div class="card" style="padding:16px 22px"><p class="mono dim" style="font-size:0.8rem">certified OS / hypervisor — QNX 8.0 target</p></div>
+            <div class="card" style="padding:16px 22px"><p class="mono dim" style="font-size:0.8rem">safety-rated silicon — vendor-neutral inference</p></div>
+          </div>
+          <div data-reveal>
+            <h3>The one durable interface</h3>
+            <p class="muted" style="margin-top:10px">Models will keep changing. Sensors will keep changing. The
+            interface that endures is the envelope between intent and actuation — proven, portable, and built to
+            sit inside certified platforms rather than compete with them.</p>
+            <p style="margin-top:16px"><a class="card__more" href="vision.html">The full vision <span aria-hidden="true">→</span></a></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule">
+
     <!-- ═══════════ USE CASES ═══════════ -->
     <section id="use-cases" aria-labelledby="h-uses">
       <div class="container">
         <div class="section-head">
-          <p class="eyebrow" data-reveal>What it protects</p>
+          <p class="eyebrow" data-reveal>The stakes today</p>
           <h2 id="h-uses" data-reveal>Machines make mistakes.<br>Kirra makes them survivable.</h2>
           <p class="lede" data-reveal>The same checker, holding very different machines to their physics —
           each of these is a real failure mode with a real mechanism behind it.</p>
@@ -200,11 +251,12 @@ export const body = `
     <section id="architecture" aria-labelledby="h-arch">
       <div class="container">
         <div class="section-head">
-          <p class="eyebrow" data-reveal>The core idea</p>
-          <h2 id="h-arch" data-reveal>Doers are swappable.<br>The checker is the invariant.</h2>
-          <p class="lede" data-reveal>Every autonomy stack has a component that decides what the vehicle does next.
-          Kirra assumes that component is wrong — hallucinating, compromised, or simply buggy — and
-          makes safety a property of a separate, smaller, provable layer that no doer can bypass.</p>
+          <p class="eyebrow" data-reveal>How we get there</p>
+          <h2 id="h-arch" data-reveal>The AI proposes.<br>Kirra <span style="color:var(--accent)">bounds it.</span></h2>
+          <p class="lede" data-reveal>The mechanism that delivers the vision: every autonomy stack has a component
+          that decides what the vehicle does next, and Kirra assumes that component is wrong — hallucinating,
+          compromised, or simply buggy. Doers are swappable; the checker is the invariant — a separate, smaller,
+          provable layer that no doer can bypass.</p>
         </div>
         <div class="diagram-frame flow-anim" data-reveal>${archSvg}</div>
         <p class="diagram-caption">
@@ -506,8 +558,8 @@ export const body = `
     <section id="hardware" aria-labelledby="h-hw">
       <div class="container">
         <div class="section-head">
-          <p class="eyebrow" data-reveal>Proven on metal</p>
-          <h2 id="h-hw" data-reveal>From simulator to first governed motion</h2>
+          <p class="eyebrow" data-reveal>From thesis to metal</p>
+          <h2 id="h-hw" data-reveal>The vision, driving a real robot</h2>
         </div>
         <div class="grid grid--3">
           <div class="card" data-reveal>
@@ -547,31 +599,6 @@ export const body = `
           <a class="btn btn--ghost" href="certification.html">Read the certification posture <span class="arrow" aria-hidden="true">→</span></a>
         </div>
         <p class="evidence-row" style="justify-content:center" data-reveal>${ev("README.md:117", "README — the claim, verbatim")}${ev("docs/safety/", "docs/safety — 65 artifacts")}</p>
-      </div>
-    </section>
-
-    <hr class="rule">
-
-    <!-- ═══════════ WHERE THIS FITS ═══════════ -->
-    <section id="vision" aria-labelledby="h-vision">
-      <div class="container">
-        <div class="grid grid--2" style="align-items:center;gap:48px">
-          <div class="section-head" style="margin-bottom:0">
-            <p class="eyebrow" data-reveal>The world of tomorrow</p>
-            <h2 id="h-vision" data-reveal>Every machine gets a model.<br>Every model needs an envelope.</h2>
-            <p class="lede" data-reveal>Capability is outrunning verification, and regulation is converging on
-            runtime assurance. The durable layer in that future isn't any particular AI stack — it's the provable
-            envelope between intent and actuation, engineered as a safety element for integration into certified
-            platforms.</p>
-            <p data-reveal style="margin-top:18px"><a class="card__more" href="vision.html">Where Kirra fits <span aria-hidden="true">→</span></a></p>
-          </div>
-          <div style="display:grid;gap:10px" data-reveal aria-hidden="true">
-            <div class="card" style="padding:16px 22px"><p class="mono dim" style="font-size:0.8rem">AI doer stacks — unverifiable, swappable</p></div>
-            <div class="card" style="padding:16px 22px;border-color:var(--accent-line);background:var(--accent-soft)"><p class="mono" style="font-size:0.8rem;color:var(--accent)">KIRRA — the governed layer (SEooC)</p></div>
-            <div class="card" style="padding:16px 22px"><p class="mono dim" style="font-size:0.8rem">certified OS / hypervisor — QNX 8.0 target</p></div>
-            <div class="card" style="padding:16px 22px"><p class="mono dim" style="font-size:0.8rem">safety-rated silicon — vendor-neutral inference</p></div>
-          </div>
-        </div>
       </div>
     </section>
 
