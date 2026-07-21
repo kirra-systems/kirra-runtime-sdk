@@ -52,6 +52,7 @@ const NAV_LINKS = [
 
 const SUBNAV = [
   ["solutions.html", "solutions"],
+  ["industrial.html", "industrial / OT"],
   ["vision.html", "vision"],
   ["architecture.html", "architecture"],
   ["runtime.html", "runtime"],
