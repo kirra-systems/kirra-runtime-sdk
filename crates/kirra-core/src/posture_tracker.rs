@@ -69,6 +69,13 @@ pub struct PostureTracker {
     /// for the tracker's lifetime — an integrator changes mode by
     /// recreating `AdaptorState`.
     source_configured: bool,
+    /// #1095 (F5): the posture returned when NO source is configured
+    /// (`!source_configured`). The fail-safe default is `Degraded`
+    /// (`degraded_default_no_source`) — a verifier-less deployment runs at the
+    /// MRC envelope, not the full one; the legacy `Nominal`-forever behaviour
+    /// (`nominal_default_no_source`) is now an EXPLICIT dev/demo opt-in. Unused on
+    /// the source-configured path (that path derives posture from observations).
+    no_source_posture: FleetPosture,
     /// Last observation from the source. `None` until the first
     /// `observe` call.
     last_observation: Option<FleetPosture>,
@@ -83,13 +90,36 @@ pub struct PostureTracker {
 }
 
 impl PostureTracker {
-    /// Construct a tracker for the no-source configuration. M1 behaviour
-    /// is preserved: `current_posture` always returns `Nominal`,
-    /// `observe` is a no-op.
+    /// Construct a no-source tracker that returns `Nominal` FOREVER — the legacy
+    /// M1 behaviour. `observe` is a no-op.
+    ///
+    /// #1095 (F5): this is NO LONGER the safe default for a verifier-less
+    /// deployment — it runs UNGOVERNED by fleet posture while appearing governed.
+    /// It is retained ONLY for the explicit dev/demo opt-in (and unit tests that
+    /// want the full envelope); production verifier-less nodes must use
+    /// [`Self::degraded_default_no_source`]. The adapter binary selects between the
+    /// two on an explicit env opt-in.
     #[must_use]
     pub fn nominal_default_no_source() -> Self {
         Self {
             source_configured: false,
+            no_source_posture: FleetPosture::Nominal,
+            last_observation: None,
+            last_event_ms: None,
+            sticky_locked_out: false,
+        }
+    }
+
+    /// #1095 (F5): construct a no-source tracker that returns `Degraded` FOREVER —
+    /// the FAIL-SAFE default when no posture source is configured. A verifier-less
+    /// deployment then runs at the MRC envelope (not the full one) and cannot
+    /// silently appear governed while ignoring fleet `LockedOut`/`Degraded`.
+    /// `observe` is a no-op (no source to observe).
+    #[must_use]
+    pub fn degraded_default_no_source() -> Self {
+        Self {
+            source_configured: false,
+            no_source_posture: FleetPosture::Degraded,
             last_observation: None,
             last_event_ms: None,
             sticky_locked_out: false,
@@ -99,11 +129,12 @@ impl PostureTracker {
     /// Construct a tracker for a source-configured deployment. The
     /// pre-first-event seed is `Degraded` (fail-closed): a new
     /// fleet must not be commandable at full envelope before the
-    /// verifier confirms posture.
+    /// verifier confirms posture. (`no_source_posture` is unused on this path.)
     #[must_use]
     pub fn with_source() -> Self {
         Self {
             source_configured: true,
+            no_source_posture: FleetPosture::Nominal,
             last_observation: None,
             last_event_ms: None,
             sticky_locked_out: false,
@@ -138,7 +169,9 @@ impl PostureTracker {
 
     /// Resolve the effective posture at wall-clock `now_ms`.
     ///
-    /// No-source path: always `Nominal` (preserves M1 behaviour).
+    /// No-source path: returns the fixed `no_source_posture` — `Nominal` for the
+    /// legacy/demo tracker (`nominal_default_no_source`) or `Degraded` for the
+    /// fail-safe tracker (`degraded_default_no_source`, the #1095 default).
     ///
     /// Source-configured path, in priority order:
     ///   1. Sticky-LockedOut → return `LockedOut` (most restrictive
@@ -152,7 +185,9 @@ impl PostureTracker {
     #[must_use]
     pub fn current_posture(&self, now_ms: u64) -> FleetPosture {
         if !self.source_configured {
-            return FleetPosture::Nominal;
+            // #1095 (F5): the configured no-source default — `Nominal` for the
+            // legacy/demo tracker, `Degraded` for the fail-safe tracker.
+            return self.no_source_posture;
         }
         if self.sticky_locked_out {
             return FleetPosture::LockedOut;
@@ -196,6 +231,25 @@ mod tracker_tests {
             t.current_posture(3_000),
             FleetPosture::Nominal,
             "observe must not affect a no-source tracker"
+        );
+    }
+
+    #[test]
+    fn tracker_degraded_default_no_source_stays_degraded_and_ignores_observe() {
+        // #1095 (F5): the FAIL-SAFE no-source default returns Degraded forever —
+        // a verifier-less deployment runs at the MRC envelope, never Nominal, and
+        // (like the legacy no-source tracker) observe is a no-op.
+        let mut t = PostureTracker::degraded_default_no_source();
+        assert!(!t.source_configured());
+        assert_eq!(t.current_posture(0), FleetPosture::Degraded);
+        assert_eq!(t.current_posture(1_000_000), FleetPosture::Degraded);
+        // observe cannot lift it to Nominal (no source to trust).
+        t.observe(1_000, FleetPosture::Nominal);
+        t.observe(2_000, FleetPosture::Nominal);
+        assert_eq!(
+            t.current_posture(3_000),
+            FleetPosture::Degraded,
+            "the fail-safe no-source tracker never leaves Degraded"
         );
     }
 

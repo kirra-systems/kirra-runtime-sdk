@@ -205,6 +205,17 @@ pub fn monotonic_now_ms() -> u64 {
     EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
+/// #1095 (F5): parse the `KIRRA_ALLOW_UNGOVERNED_DEMO` opt-in flag value.
+/// `Some("1" | "true" | "TRUE")` → `true` (admit the legacy `Nominal`-forever
+/// no-source tracker for a dev/demo run); anything else — including unset
+/// (`None`), empty, or an unrecognized value — → `false`, the FAIL-SAFE
+/// `Degraded` default. Pure over the flag value so the binary's env read is
+/// unit-tested here rather than in the ros2-gated bin.
+#[must_use]
+pub fn ungoverned_demo_opt_in(flag: Option<&str>) -> bool {
+    matches!(flag, Some("1") | Some("true") | Some("TRUE"))
+}
+
 impl AdaptorState {
     pub fn new() -> Arc<Self> {
         let config = VehicleConfig::default_urban();
@@ -256,6 +267,25 @@ impl AdaptorState {
             latest_frame_integrity: Arc::new(RwLock::new(None)),
             last_frame_integrity_ms: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// #1095 (F5) — constructs the verifier-less (no posture source)
+    /// `AdaptorState`. FAIL-SAFE by default: the `PostureTracker` returns
+    /// `Degraded` forever, so a node with no posture source runs at the MRC
+    /// envelope rather than silently appearing governed at the full envelope
+    /// while ignoring fleet `LockedOut`/`Degraded`.
+    ///
+    /// `allow_ungoverned` (the explicit dev/demo opt-in, resolved from
+    /// `KIRRA_ALLOW_UNGOVERNED_DEMO` by [`ungoverned_demo_opt_in`]) restores the
+    /// legacy `Nominal`-forever tracker. The adapter binary logs LOUDLY in either
+    /// branch. Built on [`AdaptorState::new`] (Nominal tracker), swapping in the
+    /// fail-safe tracker unless the demo is opted into.
+    pub fn new_no_source(allow_ungoverned: bool) -> Arc<Self> {
+        let state = Self::new();
+        if !allow_ungoverned {
+            *state.posture_tracker.write().unwrap() = PostureTracker::degraded_default_no_source();
+        }
+        state
     }
 
     /// **M1b** — constructs an `AdaptorState` with a live posture source
@@ -1182,15 +1212,50 @@ mod tests {
 
     #[test]
     fn url_unset_no_source_default_is_still_nominal() {
-        // Regression: the M1 no-source default is **untouched** by the
-        // M1b amendment. Verifier-less deployments (URL env var unset)
-        // continue to use `AdaptorState::new()` and see `Nominal`.
+        // `AdaptorState::new()` semantics are UNCHANGED — Nominal forever. Since
+        // #1095 this is the unit-test / explicit dev-demo tracker, NOT the
+        // verifier-less production default (see `new_no_source` + the tests below).
         let state = AdaptorState::new();
         assert_eq!(
             state.current_posture(),
             FleetPosture::Nominal,
-            "URL-unset no-source default must remain Nominal (M1 path unchanged)"
+            "AdaptorState::new() must remain Nominal (test/demo path unchanged)"
         );
+    }
+
+    #[test]
+    fn no_source_default_is_fail_safe_degraded_and_opt_in_restores_nominal() {
+        // #1095 (F5): a verifier-less node (URL unset) must fail SAFE. The
+        // default no-source AdaptorState holds Degraded forever — never the full
+        // Nominal envelope while ungoverned.
+        let fail_safe = AdaptorState::new_no_source(/* allow_ungoverned */ false);
+        assert_eq!(
+            fail_safe.current_posture(),
+            FleetPosture::Degraded,
+            "no-source default must be fail-safe Degraded, never ungoverned-Nominal"
+        );
+
+        // The explicit dev/demo opt-in restores the legacy Nominal-forever tracker.
+        let demo = AdaptorState::new_no_source(/* allow_ungoverned */ true);
+        assert_eq!(
+            demo.current_posture(),
+            FleetPosture::Nominal,
+            "the ungoverned-demo opt-in restores Nominal"
+        );
+    }
+
+    #[test]
+    fn ungoverned_demo_opt_in_only_admits_the_explicit_true_values() {
+        // #1095 (F5): only an explicit affirmative admits the ungoverned demo;
+        // unset / empty / anything-else fails safe to `false` (Degraded default).
+        assert!(ungoverned_demo_opt_in(Some("1")));
+        assert!(ungoverned_demo_opt_in(Some("true")));
+        assert!(ungoverned_demo_opt_in(Some("TRUE")));
+        assert!(!ungoverned_demo_opt_in(None));
+        assert!(!ungoverned_demo_opt_in(Some("")));
+        assert!(!ungoverned_demo_opt_in(Some("0")));
+        assert!(!ungoverned_demo_opt_in(Some("false")));
+        assert!(!ungoverned_demo_opt_in(Some("yes")));
     }
 
     // ----- S-FI1 live frame-integrity source -----

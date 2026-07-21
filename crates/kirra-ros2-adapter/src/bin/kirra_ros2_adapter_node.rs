@@ -33,7 +33,7 @@ use kirra_ros2_adapter::{
     corridor::{CorridorSource, MockCorridorSource},
     node::run_adapter,
     posture_source::{spawn_posture_source, PostureSourceConfig},
-    state::AdaptorState,
+    state::{ungoverned_demo_opt_in, AdaptorState},
 };
 
 #[cfg(feature = "lanelet2")]
@@ -244,9 +244,11 @@ async fn main() {
 
     // M1b — three-state posture-source decision:
     //
-    //   NoSource              (URL unset)                    → AdaptorState::new()
+    //   NoSource              (URL unset)                    → AdaptorState::new_no_source()
     //                                                          + no SSE task
-    //                                                          → Nominal (M1 default)
+    //                                                          → Degraded (FAIL-SAFE, #1095);
+    //                                                            Nominal only under the
+    //                                                            KIRRA_ALLOW_UNGOVERNED_DEMO opt-in
     //   ConfiguredNoTransport (URL set, auth missing/unusable)
     //                                                        → with_posture_source()
     //                                                          + no SSE task
@@ -266,11 +268,32 @@ async fn main() {
     let decision = classify_posture_source();
     let state = match &decision {
         PostureSourceDecision::NoSource => {
-            tracing::info!(
-                "M1b: KIRRA_POSTURE_STREAM_URL not set; using M1 default \
-                 (no-source tracker — posture stays Nominal)"
+            // #1095 (F5): no posture source configured. FAIL-SAFE by default —
+            // the no-source tracker holds Degraded (MRC envelope), so a
+            // verifier-less node is NOT ungoverned-at-full-envelope while
+            // appearing governed. The legacy Nominal-forever behaviour is an
+            // EXPLICIT dev/demo opt-in (KIRRA_ALLOW_UNGOVERNED_DEMO).
+            let allow_ungoverned = ungoverned_demo_opt_in(
+                std::env::var("KIRRA_ALLOW_UNGOVERNED_DEMO").ok().as_deref(),
             );
-            AdaptorState::new()
+            if allow_ungoverned {
+                tracing::warn!(
+                    "M1b/#1095: KIRRA_POSTURE_STREAM_URL not set AND \
+                     KIRRA_ALLOW_UNGOVERNED_DEMO opted in — running UNGOVERNED by \
+                     fleet posture (no-source tracker stays Nominal FOREVER). \
+                     DEV/DEMO ONLY: fleet LockedOut/Degraded has NO effect here. \
+                     Do NOT use in production."
+                );
+            } else {
+                tracing::warn!(
+                    "M1b/#1095: KIRRA_POSTURE_STREAM_URL not set — no fleet posture \
+                     source. FAIL-SAFE: the adapter runs at the Degraded (MRC) \
+                     envelope. Set KIRRA_POSTURE_STREAM_URL to govern from the \
+                     verifier, or KIRRA_ALLOW_UNGOVERNED_DEMO=1 for the (unsafe) \
+                     ungoverned demo."
+                );
+            }
+            AdaptorState::new_no_source(allow_ungoverned)
         }
         PostureSourceDecision::ConfiguredNoTransport { reason } => {
             tracing::warn!(reason = %reason,
@@ -338,8 +361,9 @@ async fn main() {
 /// task. See `main` for the dispatch table.
 enum PostureSourceDecision {
     /// `KIRRA_POSTURE_STREAM_URL` is unset or empty. Verifier-less
-    /// deployment / CARLA-only smoke. Use the M1 no-source default —
-    /// `AdaptorState::new()` → tracker returns `Nominal` forever.
+    /// deployment / CARLA-only smoke. Uses `AdaptorState::new_no_source()`
+    /// — FAIL-SAFE `Degraded` forever (#1095), unless the explicit
+    /// `KIRRA_ALLOW_UNGOVERNED_DEMO` opt-in restores the legacy `Nominal`.
     NoSource,
     /// URL is set (operator INTENT to govern is explicit) but the
     /// transport cannot be brought up — typically a missing or empty
