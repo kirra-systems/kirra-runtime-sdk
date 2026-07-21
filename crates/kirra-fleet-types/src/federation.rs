@@ -82,6 +82,28 @@ pub fn verify_federated_report_signature(
         .is_ok()
 }
 
+/// True iff `public_key_b64` decodes (Base64 STANDARD) to a valid 32-byte Ed25519
+/// verifying key — the EXACT format `verify_federated_report_signature` expects
+/// (base64 → `[u8; 32]` → `VerifyingKey::from_bytes`).
+///
+/// A trusted-controller registration should FAIL FAST on a malformed key rather
+/// than storing a string that can never verify and only surfacing the error at the
+/// first report (a confusing, deferred failure). This mirrors the parse-at-boundary
+/// discipline the attestation/operator key-registration paths already apply. Pure /
+/// side-effect-free; the caller maps `false` to a 422.
+pub fn federation_public_key_is_valid(public_key_b64: &str) -> bool {
+    use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
+    use ed25519_dalek::VerifyingKey;
+
+    let Ok(pk_bytes) = b64.decode(public_key_b64) else {
+        return false;
+    };
+    let Ok(pk_array) = <[u8; 32]>::try_from(pk_bytes.as_slice()) else {
+        return false;
+    };
+    VerifyingKey::from_bytes(&pk_array).is_ok()
+}
+
 /// Evaluates structural completeness, chronological freshness, and replay window.
 /// Cryptographic signature verification and nonce uniqueness are enforced by the caller.
 pub fn evaluate_federated_report(
@@ -129,5 +151,30 @@ pub fn evaluate_federated_report(
     ReportEvaluation {
         accepted: true,
         reason: "FEDERATED_OBSERVATION_RECORDED".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod key_validation_tests {
+    use super::federation_public_key_is_valid;
+    use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
+
+    #[test]
+    fn accepts_a_real_ed25519_key_and_rejects_malformed() {
+        // A real verifying key: base64 of its 32 raw bytes (the format the verify
+        // path decodes). from_bytes must accept it.
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let good = b64.encode(sk.verifying_key().to_bytes());
+        assert!(
+            federation_public_key_is_valid(&good),
+            "a real key is accepted"
+        );
+
+        // Not base64.
+        assert!(!federation_public_key_is_valid("!!! not base64 !!!"));
+        // Valid base64 but the wrong length (16 bytes, not 32).
+        assert!(!federation_public_key_is_valid(&b64.encode([0u8; 16])));
+        // Empty string.
+        assert!(!federation_public_key_is_valid(""));
     }
 }
