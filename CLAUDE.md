@@ -251,7 +251,6 @@ src/
 │   │                           crate::gateway::policy::* paths unchanged
 │   ├── policy_layer.rs       — Tower KirraPolicyLayer/KirraPolicyService
 │   ├── cmd_vel.rs            — CmdVel validation, DEFAULT_CMD_VEL_LIMITS
-│   ├── interceptor.rs        — gateway interceptor
 │   ├── kinematics_contract.rs — VehicleKinematicsContract, validate_vehicle_command
 │   ├── kinematics_proptest.rs — property-based tests for validate_vehicle_command
 │   └── perception_monitor.rs — re-export shim → kirra_core::perception_monitor (relocated

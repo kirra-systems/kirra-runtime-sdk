@@ -3,7 +3,6 @@
 pub mod cmd_vel;
 pub mod containment;
 pub mod contract_profiles;
-pub mod interceptor;
 pub mod kinematics_contract;
 pub mod perception_monitor;
 pub mod policy;
