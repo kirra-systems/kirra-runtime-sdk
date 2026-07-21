@@ -1323,3 +1323,31 @@ jobs:
           source /opt/ros/jazzy/setup.bash
           cargo build -p parko-ros2 --bin parko_ros2_node --features ros2,onnx-backend
           cargo build -p parko-ros2 --bin parko_ros2_node --features ros2,tensorrt-backend
+
+  # ── Kirra Console (Next.js operator console) ─────────────────────────────
+  # Typecheck + production build + headless smoke: every route must render
+  # with zero page errors (this is what catches React hydration regressions —
+  # the class of bug fixed in the design-system port), the shell must compose
+  # (#console-main present), and the quick-nav keyboard flow must navigate.
+  # The smoke script self-manages the production server (scripts/smoke.mjs).
+  console:
+    name: Console typecheck + build + smoke (Next.js)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install dependencies (locked)
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Production build
+        run: npm run build
+      - name: Install smoke browser
+        run: npx playwright install --with-deps chromium
+      - name: Smoke — all routes render clean, quick-nav navigates
+        run: npm run smoke
