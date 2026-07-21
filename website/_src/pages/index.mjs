@@ -552,6 +552,31 @@ export const body = `
 
     <hr class="rule">
 
+    <!-- ═══════════ WHERE THIS FITS ═══════════ -->
+    <section id="vision" aria-labelledby="h-vision">
+      <div class="container">
+        <div class="grid grid--2" style="align-items:center;gap:48px">
+          <div class="section-head" style="margin-bottom:0">
+            <p class="eyebrow" data-reveal>The world of tomorrow</p>
+            <h2 id="h-vision" data-reveal>Every machine gets a model.<br>Every model needs an envelope.</h2>
+            <p class="lede" data-reveal>Capability is outrunning verification, and regulation is converging on
+            runtime assurance. The durable layer in that future isn't any particular AI stack — it's the provable
+            envelope between intent and actuation, engineered as a safety element for integration into certified
+            platforms.</p>
+            <p data-reveal style="margin-top:18px"><a class="card__more" href="vision.html">Where Kirra fits <span aria-hidden="true">→</span></a></p>
+          </div>
+          <div style="display:grid;gap:10px" data-reveal aria-hidden="true">
+            <div class="card" style="padding:16px 22px"><p class="mono dim" style="font-size:0.8rem">AI doer stacks — unverifiable, swappable</p></div>
+            <div class="card" style="padding:16px 22px;border-color:var(--accent-line);background:var(--accent-soft)"><p class="mono" style="font-size:0.8rem;color:var(--accent)">KIRRA — the governed layer (SEooC)</p></div>
+            <div class="card" style="padding:16px 22px"><p class="mono dim" style="font-size:0.8rem">certified OS / hypervisor — QNX 8.0 target</p></div>
+            <div class="card" style="padding:16px 22px"><p class="mono dim" style="font-size:0.8rem">safety-rated silicon — vendor-neutral inference</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule">
+
     <!-- ═══════════ FIELD NOTES ═══════════ -->
     <section id="notes" aria-labelledby="h-notes">
       <div class="container">
