@@ -897,6 +897,7 @@ dependencies = [
 name = "kirra-fuzz"
 version = "0.0.0"
 dependencies = [
+ "kirra-industrial",
  "kirra-verifier",
  "kirra-wire-client",
  "libfuzzer-sys",

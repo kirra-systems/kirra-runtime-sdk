@@ -1,6 +1,6 @@
 #![no_main]
 //! Fuzz the DNP3 g41 (Analog Output) setpoint decoder
-//! (`kirra_verifier::adapters::dnp3::decode_analog_setpoint`).
+//! (`kirra_industrial::adapters::dnp3::decode_analog_setpoint`).
 //!
 //! Decodes a raw IEEE-1815 control-write setpoint (variation-tagged, LE) from an
 //! untrusted industrial frame into `Option<f64>`. Fail-closed contract: a short
@@ -18,5 +18,5 @@ fuzz_target!(|data: &[u8]| {
     let Some((&variation, payload)) = data.split_first() else {
         return;
     };
-    let _ = kirra_verifier::adapters::dnp3::decode_analog_setpoint(variation, payload);
+    let _ = kirra_industrial::adapters::dnp3::decode_analog_setpoint(variation, payload);
 });
