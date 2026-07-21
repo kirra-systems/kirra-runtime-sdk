@@ -414,6 +414,12 @@ names/paths, which muddies the safety-case boundary. The policy:
   `pub mod` line in `lib.rs`, drop the entry from the baseline, and lower
   `max_shims` to lock the gain. The ratchet's "removal win" note flags a
   baseline entry whose file has already vanished.
+- **First removal (17 → 16):** `src/gateway/interceptor.rs` — an internal
+  import-surface shim (it re-exported `crate::posture_cache` + `kirra_core` for
+  `policy_layer`) that had drifted to **zero consumers**: pure dead indirection,
+  removed with no caller migration and no MAJOR bump (an internal-only shim carries
+  no external `crate::<mod>` path contract). The remaining 16 are leaf-crate
+  re-exports whose paths ARE published API, so their removal stays gated to v2.0.0.
 
 This converts the shims from an open-ended layer into a tracked, shrinking one —
 the "deprecation with a removal milestone" the review asked for.
