@@ -414,12 +414,21 @@ names/paths, which muddies the safety-case boundary. The policy:
   `pub mod` line in `lib.rs`, drop the entry from the baseline, and lower
   `max_shims` to lock the gain. The ratchet's "removal win" note flags a
   baseline entry whose file has already vanished.
-- **First removal (17 → 16):** `src/gateway/interceptor.rs` — an internal
-  import-surface shim (it re-exported `crate::posture_cache` + `kirra_core` for
-  `policy_layer`) that had drifted to **zero consumers**: pure dead indirection,
-  removed with no caller migration and no MAJOR bump (an internal-only shim carries
-  no external `crate::<mod>` path contract). The remaining 16 are leaf-crate
-  re-exports whose paths ARE published API, so their removal stays gated to v2.0.0.
+- **Dead vs live (the pre-2.0 removal test):** a shim with **zero** consumers
+  anywhere in the workspace — no `crate::<mod>` internal use, no
+  `kirra_verifier::<mod>` cross-crate/bin use — is dead indirection with no
+  reachable dependent, and removing it pre-2.0 is safe (nothing in-tree breaks, and
+  a transitional re-export nobody imports is not a committed contract). A shim with
+  ≥1 consumer stays v2.0.0-gated: its `kirra_verifier::<mod>` path is live published
+  API and removal breaks a real import.
+- **Removals so far:**
+  - *(17 → 16)* `src/gateway/interceptor.rs` — an internal import-surface shim
+    (re-exported `crate::posture_cache` + `kirra_core` for `policy_layer`), zero
+    consumers.
+  - *(16 → 14)* `src/gateway/cmd_vel.rs` + `src/posture_tracker.rs` — dead **leaf**
+    re-export shims, zero consumers (every in-tree user reaches
+    `kirra_policy_types::cmd_vel` / `kirra_core::posture_tracker` directly). The
+    remaining 14 all have live consumers, so their removal stays gated to v2.0.0.
 
 This converts the shims from an open-ended layer into a tracked, shrinking one —
 the "deprecation with a removal milestone" the review asked for.

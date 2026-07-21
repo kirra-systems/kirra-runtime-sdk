@@ -61,7 +61,6 @@ pub mod output;
 pub mod posture_cache;
 pub mod posture_engine;
 pub mod posture_engine_v2;
-pub mod posture_tracker;
 pub mod recovery_hysteresis;
 pub mod robotics_alignment;
 pub mod ros2_adapter;
