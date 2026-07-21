@@ -21,10 +21,10 @@ pub(crate) async fn enforce_industrial_replay(
     timestamp_ms: u64,
 ) -> Option<&'static str> {
     let now = now_ms();
-    let fresh = kirra_verifier::protocol_adapter::classify_industrial_freshness(
+    let fresh = kirra_industrial::protocol_adapter::classify_industrial_freshness(
         timestamp_ms,
         now,
-        kirra_verifier::protocol_adapter::INDUSTRIAL_FRESHNESS_WINDOW_MS,
+        kirra_industrial::protocol_adapter::INDUSTRIAL_FRESHNESS_WINDOW_MS,
     );
     // The seq check-and-advance and the rejection audit write share ONE store
     // acquisition (Rule 5: keep the read-then-write atomic). P1: run that whole
@@ -254,7 +254,10 @@ pub(crate) async fn evaluate_ethernet_ip_adapter(
     let posture_str = format!("{:?}", posture);
     let eval = EtherNetIpAdapter::evaluate(&msg);
     let (mut allowed, mut denial_reason) =
-        kirra_verifier::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
+        kirra_industrial::protocol_adapter::command_allowed_for_posture_pub(
+            &eval.command,
+            &posture,
+        );
     // MAGNITUDE BOUND (parity with the unified `dispatch_adapter` path and the DNP3
     // handler): a posture-admitted CIP Set_Attribute_Single must also lie within the
     // configured per-attribute envelope — else REFUSE (fail-closed; also on an
@@ -264,7 +267,7 @@ pub(crate) async fn evaluate_ethernet_ip_adapter(
     // the unified `/industrial/evaluate` path rejects.
     if allowed {
         if let Err(reason) =
-            <EtherNetIpAdapter as kirra_verifier::adapters::IndustrialAdapter>::bound_magnitude(
+            <EtherNetIpAdapter as kirra_industrial::adapters::IndustrialAdapter>::bound_magnitude(
                 &msg,
             )
         {
@@ -351,7 +354,10 @@ pub(crate) async fn evaluate_canopen_adapter(
     let posture_str = format!("{:?}", posture);
     let eval = CanOpenAdapter::evaluate(&msg);
     let (mut allowed, mut denial_reason) =
-        kirra_verifier::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
+        kirra_industrial::protocol_adapter::command_allowed_for_posture_pub(
+            &eval.command,
+            &posture,
+        );
     // MAGNITUDE BOUND (parity with the unified `dispatch_adapter` path and the DNP3
     // handler): a posture-admitted SDO expedited-download must also lie within the
     // configured per-target envelope — else REFUSE (fail-closed; also on an
@@ -362,7 +368,7 @@ pub(crate) async fn evaluate_canopen_adapter(
     // downloads the unified `/industrial/evaluate` path rejects.
     if allowed {
         if let Err(reason) =
-            <CanOpenAdapter as kirra_verifier::adapters::IndustrialAdapter>::bound_magnitude(&msg)
+            <CanOpenAdapter as kirra_industrial::adapters::IndustrialAdapter>::bound_magnitude(&msg)
         {
             allowed = false;
             denial_reason = Some(reason.to_string());
@@ -375,7 +381,7 @@ pub(crate) async fn evaluate_canopen_adapter(
     // unregistered ids are FAIL-CLOSED — surfaced as an unattributed offline
     // (distinct audit event + warning + response flag), never a silent no-op.
     let offline_outcome = if eval.triggers_recalculation {
-        use kirra_verifier::adapters::canopen::{classify_nmt_offline, global_resolve};
+        use kirra_industrial::adapters::canopen::{classify_nmt_offline, global_resolve};
         let resolved = global_resolve(eval.node_id);
         let registered = resolved
             .as_deref()
@@ -390,7 +396,7 @@ pub(crate) async fn evaluate_canopen_adapter(
     // actually marked offline (if any) is recorded for the audit + response.
     let mut attributed_fleet_node: Option<String> = None;
     if let Some(outcome) = &offline_outcome {
-        use kirra_verifier::adapters::canopen::{NmtOfflineOutcome, UnattributedReason};
+        use kirra_industrial::adapters::canopen::{NmtOfflineOutcome, UnattributedReason};
         use kirra_verifier::posture_engine_v2::PostureRecalcTrigger;
         match outcome {
             NmtOfflineOutcome::Attributed { fleet_node_id } => {
@@ -544,7 +550,10 @@ pub(crate) async fn evaluate_dnp3_adapter(
     let posture_str = format!("{:?}", posture);
     let eval = Dnp3Adapter::evaluate(&msg);
     let (allowed, denial_reason) =
-        kirra_verifier::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
+        kirra_industrial::protocol_adapter::command_allowed_for_posture_pub(
+            &eval.command,
+            &posture,
+        );
     let audit_ref = now_ms().to_string();
 
     // SG-012 / H-011 — a DNP3 broadcast control command must carry a
@@ -572,7 +581,7 @@ pub(crate) async fn evaluate_dnp3_adapter(
     if allowed {
         if let Err(reason) = Dnp3Adapter::bound_analog_control(
             &msg,
-            kirra_verifier::adapters::dnp3::global_analog_envelope().as_ref(),
+            kirra_industrial::adapters::dnp3::global_analog_envelope().as_ref(),
         ) {
             allowed = false;
             denial_reason = Some(reason.to_string());

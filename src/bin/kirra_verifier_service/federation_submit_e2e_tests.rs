@@ -19,7 +19,7 @@ use axum::response::IntoResponse;
 use axum::{body::to_bytes, Json};
 use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
-use kirra_verifier::federation_reconciliation::{
+use kirra_fleet_types::federation_reconciliation::{
     canonical_federation_payload_v2, FederatedTrustReportV2,
 };
 use kirra_verifier::posture_cache::{now_ms, ServiceState, SharedPostureCache};

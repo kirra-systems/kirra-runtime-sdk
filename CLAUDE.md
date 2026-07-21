@@ -70,8 +70,8 @@ These have been blocked or reverted multiple times. Any submission that violates
 | `VerifierStore` | `crates/kirra-persistence` (extracted ADR-0035 slice 4; `lib.rs` + per-table submodules), re-exported via the `src/verifier_store.rs` shim | rusqlite WAL-mode SQLite; wrapped in `Arc<Mutex<VerifierStore>>` in AppState. The persistence crate depends only on the lean domain/audit leaf crates; `crate::verifier_store::*` / `kirra_verifier::verifier_store::*` paths resolve through the shim. Test-only `*_for_test` helpers are behind its `test-support` feature (root enables it as a dev-dep) |
 | `PostureStreamEvent` | `src/verifier.rs` | Broadcast channel payload for SSE stream |
 | `TransportIdentityConfig` | `src/verifier.rs` | `trusted_ingress_mode` + `client_id_header` from env |
-| `FederatedTrustReport` | `src/federation.rs` | Ed25519-signed cross-controller trust report |
-| `FederatedTrustReportV2` | `src/federation_reconciliation.rs` | Generation-ordered v2 report with reconciliation |
+| `FederatedTrustReport` | `kirra_fleet_types::federation` | Ed25519-signed cross-controller trust report (v2.0.0 Wave 1: root shim removed) |
+| `FederatedTrustReportV2` | `kirra_fleet_types::federation_reconciliation` | Generation-ordered v2 report with reconciliation (v2.0.0 Wave 1: root shim removed) |
 | `AuditChainLinker` | `src/audit_chain.rs` | SHA-256 hash-chained tamper-evident ledger |
 | `SharedPostureCache` | `src/posture_cache.rs` | `Arc<tokio::sync::RwLock<Option<CachedFleetPosture>>>` |
 | `CachedFleetPosture` | `src/posture_cache.rs` | Atomic snapshot: `posture`, `generated_at_ms`, `ttl_ms`, `generation` |
@@ -169,9 +169,8 @@ src/
 │                               brain invariant. EP-03: LIVE behind KIRRA_HA_LEASE_ENABLED
 │                               (standby_monitor renews + lease-triggers promotion;
 │                               epoch CAS stays the takeover authority; default off)
-├── federation.rs             — FederatedTrustReport, Ed25519 verify, evaluate_federated_report
-├── federation_reconciliation.rs — FederatedTrustReportV2, reconcile_reports,
-│                               ReconciliationOutcome, authoritative_posture
+│  (federation.rs / federation_reconciliation.rs — removed v2.0.0 Wave 1 →
+│   kirra_fleet_types::{federation, federation_reconciliation})
 ├── audit_chain.rs            — SHA-256 hash-chained audit log
 ├── audit_shipper.rs          — WS-4/Track-3 WORM off-box audit shipping:
 │                               ShippedAuditRecord, verify_shipped_chain (INDEPENDENT
@@ -205,8 +204,7 @@ src/
 │                               CertPrincipalExpiryWarning audit for lapsed/lapsing
 │                               certs (observability only; auth already fail-closes)
 ├── kinematics_contract.rs    — KinematicContract, scalar clamping
-├── kinematics_sim.rs         — re-export shim → kirra_core::kinematics_sim (relocated
-│                               Stage 7; VehicleState, apply_enforcement, run_simulation)
+│  (kinematics_sim.rs — removed v2.0.0 Wave 1 → kirra_core::kinematics_sim)
 ├── capture.rs                — re-export shim → kirra_core::capture (relocated Stage 7;
 │                               record_from_verdict, spawn_capture_writer; needs the
 │                               kirra-core `capture` feature, enabled in the SDK manifest)
@@ -215,7 +213,9 @@ src/
 ├── security.rs               — constant_time_compare
 ├── authz.rs                  — WS-1 (#G7) RBAC: ApiRole, scopes, authorize_request
 │                               (pure fail-closed decision; store/env lifted out)
-├── protocol_adapter.rs       — Modbus/OPC-UA industrial event mapping
+│  (protocol_adapter.rs / adapters.rs / governor_guard.rs / gateway/containment.rs —
+│   removed v2.0.0 Wave 1 → kirra_industrial::{protocol_adapter,adapters},
+│   kirra_core::{governor_guard,containment})
 ├── kirra_core.rs             — KirraKernelGovernor (scalar clamping, rate limiting)
 ├── ros2_adapter.rs           — NaN/Inf rejection before ROS2 publish
 ├── dds_bridge.rs             — CDR encapsulation, Volatile durability

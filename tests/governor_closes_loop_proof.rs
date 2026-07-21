@@ -32,11 +32,11 @@ use axum::{Extension, Json, Router};
 use serde_json::Value;
 use tower::ServiceExt; // oneshot
 
+use kirra_core::kinematics_sim::VehicleState;
 use kirra_verifier::gateway::kinematics_contract::{
     ProposedVehicleCommand, VehicleKinematicsContract,
 };
 use kirra_verifier::gateway::policy_layer::{enforce_actuator_safety_envelope, EnforcementOutcome};
-use kirra_verifier::kinematics_sim::VehicleState;
 use kirra_verifier::posture_cache::{CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::scenario_runner::{PostureAssertion, ScenarioEvent, ScenarioRunner};
 use kirra_verifier::verifier::{

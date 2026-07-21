@@ -157,7 +157,7 @@ pub(crate) async fn handle_fabric_command(
             // FAIL-CLOSED: deny when no enforced command can be produced —
             // `DenyBreach`, OR (defensively) a clamp whose enforced value is
             // non-finite. We NEVER return the unclamped command.
-            let enforced = kirra_verifier::kinematics_sim::apply_enforce_action(&cmd, &action)
+            let enforced = kirra_core::kinematics_sim::apply_enforce_action(&cmd, &action)
                 .filter(|c| c.linear_velocity_mps.is_finite() && c.steering_angle_deg.is_finite());
 
             match enforced {
