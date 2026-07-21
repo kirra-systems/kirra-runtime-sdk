@@ -8,7 +8,7 @@ import type { Tone } from '@/lib/types'
 import { utcTime } from '@/lib/format'
 
 export default function LivePage() {
-  const { fleet, events, source, error, updatedAt } = useLiveFleet(5000)
+  const { fleet, events, source, error, updatedAt, transport } = useLiveFleet(5000)
   const audit = useAuditChain(15000)
   const counts = fleet.reduce(
     (a, n) => { a[n.propagated_status] = (a[n.propagated_status] ?? 0) + 1; return a },
@@ -21,7 +21,7 @@ export default function LivePage() {
         <div>
           <h1 className="font-display text-xl font-semibold text-ink">Live Fleet</h1>
           <p className="font-mono text-[11px] text-faint">
-            verifier · GET /fleet/posture · {source === 'live' ? `updated ${updatedAt ? utcTime(updatedAt) : '—'}` : 'mock fallback'}
+            verifier · {transport === 'stream' ? 'SSE /system/posture/stream + snapshot' : 'GET /fleet/posture'} · {source === 'live' ? `updated ${updatedAt ? utcTime(updatedAt) : '—'}` : 'mock fallback'}
           </p>
         </div>
         <div className="flex items-center gap-2">

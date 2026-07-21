@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { kirra, DemoMode } from './client'
+import { PROXY_BASE } from './config'
 import type { AuditEntry, AuditVerify, AssetPosture, ConsoleAnalytics, ConsoleRuntime, ConsoleSites, ConsoleVersions, FabricTelemetry, FederatedReport, FleetNodePosture, FleetPostureState, NodeHistoryEntry, PostureStreamEvent } from './types'
 import { robots } from '@/lib/mock'
 import { log as demoEvents, sources as demoSources } from '@/lib/events'
@@ -97,20 +98,29 @@ export function useLiveFleet(pollMs = 5000): {
   source: Source
   error: string | null
   updatedAt: number | null
+  transport: 'stream' | 'poll' | 'demo'
 } {
   const [fleet, setFleet] = useState<FleetNodePosture[]>(() => demoFleet())
   const [events, setEvents] = useState<PostureStreamEvent[]>([])
   const [source, setSource] = useState<Source>('demo')
   const [error, setError] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState<number | null>(null)
+  const [transport, setTransport] = useState<'stream' | 'poll' | 'demo'>('demo')
   const prev = useRef<Map<string, FleetPostureState>>(new Map())
   const demoTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     const ctrl = new AbortController()
     let timer: ReturnType<typeof setTimeout>
+    let esTimer: ReturnType<typeof setTimeout>
+    let refetchTimer: ReturnType<typeof setTimeout> | null = null
+    let es: EventSource | null = null
+    let esBackoff = 5000
+    let streaming = false
+    let disposed = false
 
     const startDemo = () => {
+      setTransport('demo')
       if (demoTimer.current) return
       const f = demoFleet(); setFleet(f); setSource('demo')
       let k = 0
@@ -120,7 +130,39 @@ export function useLiveFleet(pollMs = 5000): {
       }, 2600)
     }
 
-    const load = async () => {
+    // SSE upgrade: once a live snapshot succeeds, attach to the verifier's
+    // real posture stream (GET /system/posture/stream through the proxy).
+    // Events arrive push-fashion; each one schedules a coalesced snapshot
+    // refetch so the fleet table stays authoritative. While the stream is
+    // open, polling stretches to a 30s safety heartbeat. Any stream error
+    // falls back to full-rate polling and retries the stream with backoff —
+    // the console is never worse off than the pre-SSE behavior.
+    const openStream = () => {
+      if (disposed || es || typeof EventSource === 'undefined') return
+      const sse = new EventSource(`${PROXY_BASE}/system/posture/stream`)
+      es = sse
+      sse.onopen = () => { streaming = true; esBackoff = 5000; setTransport('stream') }
+      sse.onmessage = (m) => {
+        try {
+          const ev = JSON.parse(m.data) as PostureStreamEvent
+          if (typeof ev?.event_type === 'string') {
+            setEvents((cur) => [ev, ...cur].slice(0, 40))
+            if (!refetchTimer) refetchTimer = setTimeout(() => { refetchTimer = null; void load(true) }, 250)
+          }
+        } catch { /* ignore malformed frames — the snapshot loop stays authoritative */ }
+      }
+      sse.onerror = () => {
+        sse.close()
+        es = null
+        if (streaming) { streaming = false; setTransport('poll') }
+        if (!disposed) {
+          esTimer = setTimeout(openStream, esBackoff)
+          esBackoff = Math.min(esBackoff * 2, 60000)
+        }
+      }
+    }
+
+    const load = async (oneShot = false) => {
       try {
         const { fleet: next } = await kirra.fleetPosture(ctrl.signal)
         if (demoTimer.current) { clearInterval(demoTimer.current); demoTimer.current = null }
@@ -132,23 +174,29 @@ export function useLiveFleet(pollMs = 5000): {
           prev.current.set(n.node_id, n.propagated_status)
         }
         setFleet(next); setSource('live'); setError(null); setUpdatedAt(Date.now())
-        if (fresh.length) setEvents((cur) => [...fresh, ...cur].slice(0, 40))
-        timer = setTimeout(load, pollMs)
+        if (!streaming) setTransport('poll')
+        if (fresh.length && !streaming) setEvents((cur) => [...fresh, ...cur].slice(0, 40))
+        openStream()
+        if (!oneShot) timer = setTimeout(() => void load(), streaming ? Math.max(pollMs, 30000) : pollMs)
       } catch (e) {
         if (isAbort(e)) return
         if (isDemo(e)) { startDemo(); return }       // no backend — settle into demo
         setError(String((e as Error)?.message ?? e)) // backend down — show demo, keep retrying
-        startDemo(); timer = setTimeout(load, pollMs)
+        startDemo()
+        if (!oneShot) timer = setTimeout(() => void load(), pollMs)
       }
     }
-    load()
+    void load()
     return () => {
-      ctrl.abort(); clearTimeout(timer)
+      disposed = true
+      ctrl.abort(); clearTimeout(timer); clearTimeout(esTimer)
+      if (refetchTimer) clearTimeout(refetchTimer)
+      es?.close(); es = null
       if (demoTimer.current) { clearInterval(demoTimer.current); demoTimer.current = null }
     }
   }, [pollMs])
 
-  return { fleet, events, source, error, updatedAt }
+  return { fleet, events, source, error, updatedAt, transport }
 }
 
 // Audit-chain integrity + recent entries (verify is admin-gated, entries are

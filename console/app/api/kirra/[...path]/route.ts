@@ -122,14 +122,59 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ path
       cache: 'no-store',
       signal,
     })
-    // Pass the body straight through (works for JSON and text/event-stream).
+
+    // SSE: returning the upstream body directly lets the Node runtime buffer
+    // text/event-stream, so the browser's EventSource never fires onopen
+    // (stays CONNECTING). Manually pumping the upstream reader into a fresh
+    // ReadableStream forces the response headers out immediately and streams
+    // each chunk as it arrives. `no-transform` + `x-accel-buffering: no`
+    // stop any compression/buffering intermediary.
+    if (isStream && upstream.body) {
+      const reader = upstream.body.getReader()
+      const enc = new TextEncoder()
+      const passthrough = new ReadableStream<Uint8Array>({
+        start(controller) {
+          // Eagerly emit a comment so the runtime flushes response headers
+          // immediately (EventSource fires onopen), then self-pump the
+          // upstream. Push-driven, not pull-driven — the runtime cannot defer.
+          controller.enqueue(enc.encode(': open\n\n'))
+          ;(async () => {
+            try {
+              for (;;) {
+                const { done, value } = await reader.read()
+                if (done) break
+                controller.enqueue(value)
+              }
+            } catch {
+              /* upstream closed */
+            } finally {
+              controller.close()
+            }
+          })()
+        },
+        cancel() {
+          reader.cancel().catch(() => {})
+        },
+      })
+      const out = new Headers({
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache, no-transform',
+        'connection': 'keep-alive',
+        'x-accel-buffering': 'no',
+      })
+      return respond(new NextResponse(passthrough, { status: upstream.status, headers: out }), {
+        upstream: upstream.status,
+        stream: true,
+      })
+    }
+
+    // Non-stream reads: pass the body straight through.
     const out = new Headers()
     const ct = upstream.headers.get('content-type')
     if (ct) out.set('content-type', ct)
     out.set('cache-control', 'no-store')
     return respond(new NextResponse(upstream.body, { status: upstream.status, headers: out }), {
       upstream: upstream.status,
-      stream: isStream || undefined,
     })
   } catch (e) {
     const detail = String((e as Error)?.message ?? e)

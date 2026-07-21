@@ -10,7 +10,7 @@ import { Pill } from '@/components/ui/primitives'
     otherwise the demo dataset with the badge saying exactly that. Nothing in
     this strip is a hardcoded reassurance. */
 export function OverviewStatus() {
-  const { fleet, source, updatedAt } = useLiveFleet()
+  const { fleet, source, updatedAt, transport } = useLiveFleet()
   const { verify, source: auditSource } = useAuditChain()
 
   const posture = useMemo(() => {
@@ -27,6 +27,11 @@ export function OverviewStatus() {
   return (
     <div className="flex flex-wrap items-center gap-2">
       <DemoBadge live={source === 'live'} />
+      {source === 'live' && (
+        <Pill tone={transport === 'stream' ? 'ice' : 'muted'}>
+          {transport === 'stream' ? 'SSE stream' : 'polling'}
+        </Pill>
+      )}
       <Pill tone={posture.tone}>{posture.label}</Pill>
       <Pill tone="muted">
         {trusted}/{fleet.length} nominal
