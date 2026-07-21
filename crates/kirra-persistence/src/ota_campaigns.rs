@@ -98,6 +98,69 @@ impl VerifierStore {
         tx.commit()
     }
 
+    /// #1093 (F3): [`update_campaign`], fenced on the caller's held HA epoch. A
+    /// campaign lifecycle mutation (arm / advance / halt / auto-halt) is a fleet-
+    /// authority durable write, but the plain [`update_campaign`] carried no HA
+    /// epoch assertion — a just-superseded primary could persist campaign state the
+    /// new Active has moved past (the same failover-window gap C5 #1036 closed for
+    /// the actuator/registration writes).
+    ///
+    /// `held_epoch == 0` (a never-claimed store: an in-memory test store or a node
+    /// that never became Active) has no superseded-primary scenario to guard and
+    /// takes the plain path — byte-identical to [`update_campaign`]. A claimed
+    /// Active (`held != 0`) rides the UPDATE + audit append inside the SAME
+    /// `Immediate` transaction whose FIRST statement re-asserts `held_epoch` against
+    /// the durable `ha_state` row (`assert_epoch_held`); the write lock is taken at
+    /// `BEGIN`, so a concurrent `try_claim_epoch` serializes and cannot interleave
+    /// between the fence read and the write. Fail-closed: `held` mismatch / an
+    /// unreadable `ha_state` rolls the transaction back and writes nothing
+    /// (`DurableWriteError::Fenced`), exactly like [`super::VerifierStore::save_node_epoch_fenced`].
+    pub fn update_campaign_epoch_fenced(
+        &mut self,
+        campaign: &Campaign,
+        event_type: &str,
+        held_epoch: u64,
+    ) -> std::result::Result<(), DurableWriteError> {
+        // Never-claimed store: no fence to assert, plain write (test / never-Active).
+        if held_epoch == 0 {
+            return self
+                .update_campaign(campaign, event_type)
+                .map_err(DurableWriteError::Db);
+        }
+        let payload = campaign_audit_payload(campaign, event_type);
+        let tx = Self::audit_tx(&mut self.conn)?; // #685: Immediate — non-forking audit append + fence carrier
+                                                  // #79/#1093 HA epoch fence — FIRST statement, before the mutation.
+        Self::assert_epoch_held(&tx, held_epoch)?;
+        let n = tx.execute(
+            "UPDATE ota_campaigns
+                SET stage_index     = ?2,
+                    rollout_percent = ?3,
+                    state           = ?4,
+                    halt_reason     = ?5,
+                    updated_at_ms   = ?6
+              WHERE campaign_id = ?1",
+            params![
+                campaign.campaign_id,
+                campaign.stage_index as i64,
+                campaign.rollout_percent as i64,
+                campaign.state.as_str(),
+                campaign.halt_reason.map(|r| r.as_str()),
+                campaign.updated_at_ms as i64,
+            ],
+        )?;
+        if n == 0 {
+            // No such campaign — do NOT write an audit entry for a phantom mutation.
+            // (Rolls back the fenced tx; parity with `update_campaign`.)
+            return Err(DurableWriteError::Db(rusqlite::Error::QueryReturnedNoRows));
+        }
+        ChainedAuditAppender {
+            signing_key: self.signing_key.as_ref(),
+        }
+        .append_within(&tx, event_type, &payload, campaign.updated_at_ms as i64)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Load one campaign by id. `None` if absent; a stored row that no longer
     /// parses (unknown state token / malformed JSON) is a fail-closed error, not a
     /// silent `None`.
@@ -708,6 +771,62 @@ mod tests {
         let loaded = s.load_campaign("camp-1").unwrap().expect("present");
         assert_eq!(loaded, c);
         assert!(s.load_campaign("absent").unwrap().is_none());
+    }
+
+    #[test]
+    fn epoch_fenced_campaign_update_rejects_a_superseded_primary() {
+        // #1093 (F3): a campaign lifecycle write from a just-superseded primary
+        // (stale held_epoch < durable) is rejected in-transaction and mutates
+        // nothing; the holder (held == durable) commits; held == 0 (never-claimed
+        // store) takes the plain path, byte-identical to `update_campaign`.
+        let mut s = store();
+        let mut c = draft();
+        s.insert_campaign(&c).unwrap();
+
+        // held == 0: plain path.
+        c.arm(1_100).unwrap();
+        s.update_campaign_epoch_fenced(&c, "OtaCampaignArmed", 0)
+            .expect("held==0 takes the plain write");
+        assert_eq!(
+            s.load_campaign("camp-1").unwrap().unwrap().state,
+            CampaignState::Staged
+        );
+
+        // Durable epoch advances 0 -> 1 -> 2; the primary that claimed 1 is superseded.
+        s.try_claim_epoch(0, "A", 1).unwrap();
+        s.try_claim_epoch(1, "B", 2).unwrap();
+
+        // Holder (held == durable == 2) commits an advance.
+        let outcome = c.advance(FleetPosture::Nominal, 1_200).unwrap();
+        let ev = match outcome {
+            AdvanceOutcome::Advanced { .. } => "OtaCampaignAdvanced",
+            AdvanceOutcome::Completed => "OtaCampaignCompleted",
+            AdvanceOutcome::Halted { .. } => "OtaCampaignHalted",
+        };
+        s.update_campaign_epoch_fenced(&c, ev, 2)
+            .expect("holder write admitted");
+        let after_holder = s.load_campaign("camp-1").unwrap().unwrap();
+        assert_eq!(after_holder, c, "the holder's advance persisted");
+
+        // Superseded primary (held == 1 < durable == 2): rejected, fail-closed —
+        // the campaign row is UNCHANGED (no phantom halt, no audit entry).
+        let mut stale = after_holder.clone();
+        stale.halt(HaltReason::OperatorHalt, 1_300).unwrap();
+        let err = s
+            .update_campaign_epoch_fenced(&stale, "OtaCampaignHalted", 1)
+            .expect_err("superseded write rejected");
+        assert!(
+            matches!(
+                err,
+                crate::DurableWriteError::Fenced(crate::FenceError::EpochSuperseded { .. })
+            ),
+            "expected EpochSuperseded, got {err:?}"
+        );
+        assert_eq!(
+            s.load_campaign("camp-1").unwrap().unwrap(),
+            after_holder,
+            "a fenced-out lifecycle write must leave the campaign UNCHANGED"
+        );
     }
 
     #[test]
