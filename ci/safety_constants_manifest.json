@@ -7,7 +7,7 @@
       "file": "crates/kirra-trajectory/src/validation.rs",
       "value": "0.5",
       "status": "pending",
-      "provenance": "IEEE 2846-2022 §5.1 canonical response time for SAE-L4 stacks (conservative end); awaiting #408 safety-case sign-off",
+      "provenance": "IEEE 2846-2022 §5.1 canonical response time for SAE-L4 stacks. [DRAFT #299 — pending safety-eng ratify] Monotonicity: a LARGER reaction time only widens the required gap (more conservative), so 0.5 s is safe iff it is an UPPER bound on the deployed stack's true sense->actuate latency. Sign-off = ratify the §5.1 citation AND record that the integrated stack's measured reaction budget is <= 0.5 s (else raise the constant). Awaiting #408 safety-case.",
       "owner": "safety-engineering"
     },
     {
@@ -15,7 +15,7 @@
       "file": "crates/kirra-trajectory/src/validation.rs",
       "value": "0.7",
       "status": "pending",
-      "provenance": "WP-07 (#408 Option A) placeholder; fraction form keeps deratings tightening-or-equal (parko-core test_lat_split_conservative_vs_legacy); deployed value must be safety-case-derived",
+      "provenance": "WP-07 (#408 Option A) placeholder. [DRAFT #299 — pending safety-eng ratify] CONSERVATISM PROVEN not asserted: parko-core::test_lat_split_conservative_vs_legacy shows the fraction form keeps every derating tightening-or-equal vs the legacy split -> 0.7 never relaxes. BUT the value itself is DATA-PENDING: the deployed fraction must be derived from the vehicle's true lateral-brake capability. Sign-off = ratify 0.7 as the conservative deployment value WITH vehicle evidence, or replace it (this half needs real data, unlike the pure-structural caps).",
       "owner": "safety-engineering"
     },
     {
@@ -23,7 +23,7 @@
       "file": "crates/kirra-trajectory/src/validation.rs",
       "value": "0.2",
       "status": "pending",
-      "provenance": "IEEE 2846-2022 §5.2 lateral-fluctuation margin mu; additive so strictly conservative; placeholder pending #408 sign-off",
+      "provenance": "IEEE 2846-2022 §5.2 lateral-fluctuation margin mu. [DRAFT #299 — pending safety-eng ratify] ADDITIVE to the required lateral gap -> strictly conservative (increasing mu only widens the refuse region, never relaxes; parko test test_lat_split_mu_is_additive). Sign-off = ratify the §5.2 citation + the additive-conservatism property. Pending #408.",
       "owner": "safety-engineering"
     },
     {
@@ -39,7 +39,7 @@
       "file": "crates/kirra-trajectory/src/validation.rs",
       "value": "0.1",
       "status": "pending",
-      "provenance": "Float-noise slack on the RSS-Rule-4 assured-clear-distance speed bound; sub-decimetre by construction, needs recorded sign-off that the slack is envelope-negligible",
+      "provenance": "Float-noise slack on the RSS-Rule-4 assured-clear-distance speed bound. [DRAFT #299 — pending safety-eng ratify] VERIFIED IN-CODE: the ONLY use is the single comparison `if p.velocity_mps > cap + OCCLUSION_SPEED_TOL_MPS { return true }` (validation.rs:1042), so the constant's entire effect is a FIXED, ADDITIVE 0.1 m/s (0.36 km/h) relaxation of the occlusion cap — it does NOT scale with speed, visibility, or decel, and cannot compound. Its magnitude is bounded and constant by construction (same slack class as the fast-loop float tolerances). RESIDUAL for sign-off: record that a fixed 0.1 m/s overshoot of the assured-clear-distance speed cap is envelope-negligible for the deployment (the added stopping distance at 0.1 m/s over the reaction budget is sub-decimetre), i.e. the slack only absorbs float noise / a sub-decimetre cap overshoot and never a real over-speed.",
       "owner": "safety-engineering"
     },
     {
@@ -55,7 +55,7 @@
       "file": "crates/kirra-trajectory/src/perception_redundancy.rs",
       "value": "1_000",
       "status": "pending",
-      "provenance": "True-Redundancy divergence-to-Degraded debounce; balances phantom-flicker tolerance vs detection latency; needs FTTI-budget sign-off",
+      "provenance": "True-Redundancy sustained-divergence-to-Degraded debounce. [DRAFT #299 — pending safety-eng ratify] VERIFIED IN-CODE: this window governs a STICKIER, ORTHOGONAL escalation only — `DivergenceEscalator::recommended_posture` is ESCALATION-ONLY (`base.escalate(recommended)`, can only make posture stricter, never relax it; perception_redundancy.rs:198), AND the per-tick `resolve_redundancy_cap` ALREADY brings the ego to a controlled stop on ANY divergence via the MRC-floor cap (perception_redundancy.rs:160-165). So the immediate SAFETY response is independent of this timer; the window only decides how long a PERSISTENT divergence waits before also degrading fleet posture. A LONGER window is less conservative on the posture-escalation axis (never on the per-tick stop). RESIDUAL for sign-off: ratify 1000 ms against the perception-integrity FTTI budget — i.e. confirm the per-tick MRC cap alone bounds the hazard for up to 1 s of continuous divergence, so deferring the Degraded escalation that long is acceptable, and it is short enough to filter phantom flicker.",
       "owner": "safety-engineering"
     },
     {
@@ -63,7 +63,7 @@
       "file": "crates/kirra-trajectory/src/perception_redundancy.rs",
       "value": "5_000",
       "status": "pending",
-      "provenance": "Sustained-divergence-to-MRC escalation window; needs FTTI-budget sign-off",
+      "provenance": "Sustained-divergence-to-LockedOut (human-reset) escalation window. [DRAFT #299 — pending safety-eng ratify] VERIFIED IN-CODE: same escalation-only, backstopped structure as DIVERGENCE_DEGRADE_MS — `recommended_posture` returns LockedOut only once continuous divergence has persisted >= 5000 ms (perception_redundancy.rs:203), strictly AFTER the Degraded escalation (1000 ms) and always ON TOP of the per-tick MRC-floor stop that fires immediately. LockedOut here mirrors the verifier's human-reset LockedOut semantics: a redundant world model untrustworthy for 5 s warrants a controlled stop + human reset, not just a speed cap. Ordering invariant (DEGRADE_MS < LOCKOUT_MS) is structural. RESIDUAL for sign-off: ratify 5000 ms as the point at which a persistently-inconsistent redundant perception channel should demand human intervention rather than continued automated derating — an operational/availability-vs-integrity judgement bounded by the same FTTI argument (the per-tick cap holds the hazard throughout).",
       "owner": "safety-engineering"
     },
     {
@@ -71,7 +71,7 @@
       "file": "crates/kirra-trajectory/src/prediction.rs",
       "value": "0.02",
       "status": "pending",
-      "provenance": "Yaw-rate floor below which CTRV degrades to CV (numerical conditioning of the turn-radius division); needs tracker-noise-floor confirmation",
+      "provenance": "Yaw-rate floor below which no distinct CTRV mode is emitted (CTRV degenerates to CV: turn radius R = v/yaw -> infinity, so a near-zero yaw's curved rollout is indistinguishable from the straight CV rollout over the horizon). [DRAFT #299 — pending safety-eng ratify] VERIFIED IN-CODE: below the floor the producer simply does NOT push the CTRV mode (prediction.rs:220), and the checker already evaluates the CV mode for the SAME object unconditionally (prediction.rs:211) and worst-cases over all modes — so a below-floor yaw drops a mode that would only DUPLICATE the CV hypothesis, leaving the worst-case (hence the verdict) unchanged. The dropped mode is thus behaviourally redundant, not a lost hazard. RESIDUAL for sign-off: confirm 0.02 rad/s is (a) at/below the deployed tracker's yaw-rate noise floor AND (b) small enough that a real turn at that yaw diverges from CV by less than the checker's spatial tolerance over the max prediction horizon — else a genuine slow curve would be under-modelled as straight.",
       "owner": "safety-engineering"
     },
     {
@@ -79,7 +79,7 @@
       "file": "crates/kirra-trajectory/src/prediction.rs",
       "value": "10.0",
       "status": "pending",
-      "provenance": "Physical-plausibility cap on a predicted mode's implied lateral acceleration (~1g); needs recorded sign-off vs the object-class dynamics envelope",
+      "provenance": "Physical-plausibility ceiling (~1 g, tyre-grip limit) on a predicted CTRV mode's implied lateral acceleration `speed*|yaw|` (= v^2/R). [DRAFT #299 — pending safety-eng ratify] VERIFIED IN-CODE: the CTRV mode is emitted only when `implied_lateral_accel <= CTRV_MAX_LATERAL_ACCEL_MPS2` (prediction.rs:221); a yaw above the ceiling implies un-physical cornering (tracker noise) whose sharp-curve CTRV would MANUFACTURE a spurious breach -> spurious MRC (an availability loss, never an unsafe admission). A genuine sharp turn is a LOW-speed event (small `speed*yaw`) and is NEVER rejected. Safe direction is a HIGHER ceiling (admits more modes = more conservative); the risk of 10.0 being too LOW is dropping a real high-g mode. RESIDUAL for sign-off: ratify 10.0 m/s^2 as an UPPER bound on the object class's true achievable lateral acceleration under the ODD (road-surface mu * g), so no physically-realisable turning mode is ever rejected — i.e. the gate only ever filters tracker noise.",
       "owner": "safety-engineering"
     },
     {
@@ -87,7 +87,7 @@
       "file": "crates/kirra-trajectory/src/prediction.rs",
       "value": "512",
       "status": "pending",
-      "provenance": "Boundedness cap on mode rollout length (WCET/memory argument, not a tuning value); sign-off = confirm it exceeds every horizon/step-size pairing in the ODD",
+      "provenance": "Boundedness cap on mode rollout length (WCET/memory argument, not a tuning value). [DRAFT #299 — pending safety-eng ratify] VERIFIED IN-CODE: step_count() clamps the realized SampleVec to MAX_PREDICTION_STEPS+1 for ALL inputs incl. dt_s<=0 / NaN / near-zero (guarded explicitly, not as-cast saturation), so the rollout is provably bounded; a mode that would exceed it is TRUNCATED to a shorter horizon, which the predictive per-window coverage (#1094) + per-mode fail-closed guard (#824) treat conservatively (a mode with no in-span evaluable window -> MRC). RESIDUAL for sign-off: confirm 512 >= ceil(max_horizon_s / min_dt_s) over the ODD (horizon, step) pairings so the cap is never actually reached in-domain.",
       "owner": "safety-engineering"
     },
     {
@@ -103,7 +103,7 @@
       "file": "crates/kirra-trajectory/src/vru.rs",
       "value": "64",
       "status": "pending",
-      "provenance": "Boundedness cap on the per-cycle VRU set (WCET argument); sign-off = confirm it exceeds the ODD's worst-case crossing crowd",
+      "provenance": "Boundedness cap on the per-cycle VRU set (WCET argument). [DRAFT #299 — pending safety-eng ratify] VERIFIED IN-CODE: an over-MAX_PEDESTRIANS set is FAIL-CLOSED (vru.rs module doc: 'bounds the pedestrian count ... fail-closed above it') -> MRC, not a silent drop, mirroring the RSS object cap (#1096); so SAFETY does not depend on 64 being 'enough' — overflow degrades safely. RESIDUAL for sign-off: confirm 64 >= the ODD worst-case simultaneous-VRU count so the fail-closed cap is an availability bound, not routinely hit.",
       "owner": "safety-engineering"
     },
     {
@@ -119,7 +119,7 @@
       "file": "crates/kirra-trajectory/src/vru.rs",
       "value": "STOP_EPSILON_MPS",
       "status": "pending",
-      "provenance": "Inherited by construction from the frozen gateway contract's STOP_EPSILON_MPS; sign-off = record the inheritance argument",
+      "provenance": "Inherited by construction from the frozen gateway contract's STOP_EPSILON_MPS. [DRAFT #299 — pending safety-eng ratify] VERIFIED IN-CODE: defined literally = STOP_EPSILON_MPS (vru.rs:90) — NO independent value; the VRU stop_epsilon is clamped to this ceiling (vru.rs:188, test :955) so a VRU can never be granted a larger stop-still band than the frozen ego kinematics use. Sign-off = record the inheritance: this entry introduces no new number and is validated iff STOP_EPSILON_MPS (the ed00f4da talisman constant) is validated.",
       "owner": "safety-engineering"
     },
     {
@@ -127,7 +127,7 @@
       "file": "parko/crates/parko-core/src/rss.rs",
       "value": "1.0e6",
       "status": "pending",
-      "provenance": "Fail-closed sentinel returned on invalid RSS inputs (NaN-division guard); sign-off = confirm it exceeds every finite safe-distance the ODD can produce",
+      "provenance": "Fail-closed sentinel returned on invalid RSS inputs (NaN/non-finite guard). [DRAFT #299 — pending safety-eng ratify] VERIFIED IN-CODE: returned ONLY on the finiteness/positivity guard (rss.rs:151; tests test_lat_nan_input_is_failsafe / test_lat_zero_accel_is_failsafe); a required safe distance of 1e6 m is unsatisfiable by any real gap -> the command is refused (defence-in-depth for SG9). 1e6 m dwarfs every finite required distance the formulas emit under ODD speeds/decels. RESIDUAL for sign-off: ratify that no in-ODD (v, a, t) tuple yields a finite required distance >= 1e6 m, i.e. the sentinel always strictly exceeds -> always refuses.",
       "owner": "safety-engineering"
     },
     {
