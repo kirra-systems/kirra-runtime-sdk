@@ -387,6 +387,16 @@ pub struct VerifierStore {
     /// falls back to `conn`). Never compiled into production.
     #[cfg(any(test, feature = "test-support"))]
     durable_posture_writes: std::sync::atomic::AtomicU64,
+    /// #792 F5 — TEST-ONLY counter of busy retries performed by the
+    /// incident-class durable posture writes (each backoff-and-replay is one).
+    /// Never compiled into production.
+    #[cfg(any(test, feature = "test-support"))]
+    durable_busy_retries: std::sync::atomic::AtomicU64,
+    /// #792 F5 — TEST-ONLY fault seam: pending injected busy-class faults;
+    /// each durable-write ATTEMPT consumes one (see `inject_durable_busy_faults`).
+    /// Never compiled into production.
+    #[cfg(any(test, feature = "test-support"))]
+    injected_busy_faults: std::sync::atomic::AtomicU64,
     /// #772 F3 — TEST-ONLY fault seam: when set, the durable posture-event writes
     /// return `Err` at entry WITHOUT touching the DB, so a test can exercise the
     /// recalc's "durable write failed → count it, fall back to the NORMAL write,
@@ -622,8 +632,9 @@ pub use ota_campaigns::{
 };
 mod posture;
 pub use posture::{
-    assert_posture_engine_state_store_contract, InMemPostureStateError,
-    InMemoryPostureEngineStateStore, PostureEngineStateStore,
+    assert_posture_engine_state_store_contract, is_busy_error, InMemPostureStateError,
+    InMemoryPostureEngineStateStore, PostureEngineStateStore, DURABLE_BUSY_BACKOFF,
+    DURABLE_BUSY_RETRIES,
 };
 mod principals;
 // ADR-0035 Stage 2 (trait-seam inversion) — the API-principal storage trait + its
@@ -1087,6 +1098,10 @@ impl VerifierStore {
             #[cfg(any(test, feature = "test-support"))]
             durable_posture_writes: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
+            durable_busy_retries: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            injected_busy_faults: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-support"))]
             fail_durable_posture_writes: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -1128,6 +1143,10 @@ impl VerifierStore {
             db_path: path.to_string(),
             #[cfg(any(test, feature = "test-support"))]
             durable_posture_writes: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            durable_busy_retries: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            injected_busy_faults: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             fail_durable_posture_writes: std::sync::atomic::AtomicBool::new(false),
         })

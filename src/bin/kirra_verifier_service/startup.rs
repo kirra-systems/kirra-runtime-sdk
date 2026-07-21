@@ -30,6 +30,14 @@ pub(crate) struct StartupContext {
     /// The SQLite store reports `journal_mode = wal` (CRITICAL INVARIANT #12
     /// ordering depends on the WAL-mode durable seam).
     pub sqlite_wal: bool,
+    /// #791 F3 — `init_generation_from_store` completed successfully in this
+    /// process (`posture_engine::generation_initialized()`), so the posture
+    /// generation counter was seeded from the persisted high-water BEFORE any
+    /// recalculation can claim a generation. Required in BOTH modes: the
+    /// Active initial recalc and the standby PROMOTION recalc each depend on
+    /// it, and a regression here silently time-reverses generations across
+    /// restarts (the exact WS-0.2 wiring omission this fact pins).
+    pub generation_initialized: bool,
     /// True on the Active path. PassiveStandby is read-only and intentionally
     /// runs neither the watchdog nor the posture engine, so those two
     /// invariants are evaluated ONLY when this is true.
@@ -46,6 +54,7 @@ pub(crate) enum StartupInvariant {
     HardwareRootUntrusted,
     AdminTokenMissing,
     SqliteNotWal,
+    GenerationNotInitialized,
     WatchdogNotSpawned,
     PostureEngineDown,
 }
@@ -56,6 +65,10 @@ impl std::fmt::Display for StartupInvariant {
             Self::HardwareRootUntrusted => "hardware root of trust unavailable/unresponsive (TPM)",
             Self::AdminTokenMissing => "KIRRA_ADMIN_TOKEN absent or empty",
             Self::SqliteNotWal => "SQLite store is not in WAL journal mode",
+            Self::GenerationNotInitialized => {
+                "posture-generation counter not seeded from the persisted high-water \
+                 (init_generation_from_store did not run — generations would time-reverse)"
+            }
             Self::WatchdogNotSpawned => "telemetry watchdog not spawned (Active path)",
             Self::PostureEngineDown => "posture-engine worker not running (Active path)",
         };
@@ -81,6 +94,11 @@ pub(crate) fn check_startup_invariants(ctx: &StartupContext) -> Result<(), Start
     }
     if !ctx.sqlite_wal {
         return Err(StartupInvariant::SqliteNotWal);
+    }
+    // #791 F3: both modes — the standby's promotion recalc needs the seeded
+    // counter exactly as the Active initial recalc does.
+    if !ctx.generation_initialized {
+        return Err(StartupInvariant::GenerationNotInitialized);
     }
     if ctx.mode_active {
         if !ctx.watchdog_spawned {
@@ -116,10 +134,38 @@ mod sg_008_cert_tests {
             hardware_root_trusted: true,
             admin_token_present: true,
             sqlite_wal: true,
+            generation_initialized: true,
             mode_active: true,
             watchdog_spawned: true,
             posture_engine_running: true,
         }
+    }
+
+    /// #791 F3 — a binary wired without the generation seeding must fail
+    /// closed before the listener binds, in EITHER mode (the standby's
+    /// promotion recalc depends on the seed exactly as the Active path does).
+    #[test]
+    fn test_startup_aborts_when_generation_not_initialized() {
+        let ctx = StartupContext {
+            generation_initialized: false,
+            ..all_ok_active()
+        };
+        assert_eq!(
+            check_startup_invariants(&ctx),
+            Err(StartupInvariant::GenerationNotInitialized),
+            "SG-008/#791 F3: the generation-seeding wiring is a startup invariant"
+        );
+        let standby = StartupContext {
+            mode_active: false,
+            watchdog_spawned: false,
+            posture_engine_running: false,
+            ..ctx
+        };
+        assert_eq!(
+            check_startup_invariants(&standby),
+            Err(StartupInvariant::GenerationNotInitialized),
+            "SG-008/#791 F3: required on the standby path too"
+        );
     }
 
     #[test]
@@ -207,6 +253,7 @@ mod sg_008_cert_tests {
             hardware_root_trusted: true,
             admin_token_present: true,
             sqlite_wal: true,
+            generation_initialized: true,
             mode_active: false,
             watchdog_spawned: false,
             posture_engine_running: false,
@@ -224,6 +271,7 @@ mod sg_008_cert_tests {
             hardware_root_trusted: true,
             admin_token_present: false,
             sqlite_wal: true,
+            generation_initialized: true,
             mode_active: false,
             watchdog_spawned: false,
             posture_engine_running: false,
@@ -254,6 +302,7 @@ mod sg_008_cert_tests {
             hardware_root_trusted: true,
             admin_token_present: false,
             sqlite_wal: false,
+            generation_initialized: false,
             mode_active: true,
             watchdog_spawned: false,
             posture_engine_running: false,

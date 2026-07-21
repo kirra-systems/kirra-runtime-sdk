@@ -1102,6 +1102,7 @@ async fn main() {
             .await
             .ok()
             .unwrap_or(false),
+        generation_initialized: kirra_verifier::posture_engine::generation_initialized(),
         mode_active: svc_state.app.is_active(),
         watchdog_spawned,
         posture_engine_running: svc_state.posture_engine_tx.get().is_some(),

@@ -3,6 +3,42 @@
 
 use super::*;
 
+/// #792 F5 — bounded retry budget for the INCIDENT-CLASS durable posture
+/// write under `SQLITE_BUSY`/`SQLITE_LOCKED` contention (an HA peer write or
+/// a `RESTART`/`TRUNCATE` checkpoint holding the writer lock past the 250 ms
+/// `busy_timeout`). The write retries up to this many times, sleeping
+/// [`DURABLE_BUSY_BACKOFF`] between attempts, BEFORE declaring the durability
+/// degradation (the caller's `incident_durability_failures` counter + the
+/// NORMAL-connection fallback, #772 F3). Retries fire ONLY on busy-class
+/// errors ([`is_busy_error`]) — an I/O or corruption error is never worth a
+/// blind replay.
+///
+/// OPERABILITY numbers, not safety numbers (the issue's "3×250 ms" sketch):
+/// worst case adds `3 × (250 ms busy_timeout + 250 ms backoff)` = 1.5 s to
+/// one incident-class write — well inside `PROMOTION_TIMEOUT_MS` (10 s), and
+/// on a path that is rare by construction (posture TRANSITIONS only, never
+/// the 20 Hz refresh traffic). The transition itself is NEVER suppressed by
+/// this loop: exhaustion falls through to the existing count-and-fallback.
+pub const DURABLE_BUSY_RETRIES: u32 = 3;
+/// Backoff between busy retries — one full `busy_timeout` quantum, so a
+/// checkpoint that just missed the window gets a real chance to finish.
+pub const DURABLE_BUSY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Is this rusqlite error the transient writer-contention class
+/// (`SQLITE_BUSY` / `SQLITE_LOCKED`) that a bounded retry may clear (#792 F5)?
+/// Everything else (I/O, corruption, constraint) is terminal for the attempt.
+#[must_use]
+pub fn is_busy_error(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if matches!(
+                inner.code,
+                rusqlite::ffi::ErrorCode::DatabaseBusy | rusqlite::ffi::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
 impl VerifierStore {
     /// Plain (non-chained) posture-event insert. **TEST-ONLY** — gated
     /// `#[cfg(test)]` after the audit-chain-bypass fix so production code
@@ -295,21 +331,60 @@ impl VerifierStore {
             }
         }
         // Disjoint field borrows: `durable_conn`/`conn` for the tx, `signing_key`
-        // for the append.
+        // for the append; the retry counters are separate atomic fields.
         let conn = self.durable_conn.as_mut().unwrap_or(&mut self.conn);
-        Self::write_posture_event_chained_tx(
-            conn,
-            &ChainedAuditAppender {
-                signing_key: self.signing_key.as_ref(),
-            },
-            node_id,
-            event_type,
-            posture_json,
-            reason,
-            created_at_ms,
-            None,
-        )?;
-        Ok(())
+        let mut attempt = 0u32;
+        loop {
+            // #792 F5 test seam: consume one injected busy-class fault per
+            // ATTEMPT (inside the loop, so the retry path itself is testable
+            // deterministically — no timing-sensitive lock juggling).
+            #[cfg(any(test, feature = "test-support"))]
+            let result = if Self::take_injected_busy(&self.injected_busy_faults) {
+                Err(Self::injected_busy_fault())
+            } else {
+                Self::write_posture_event_chained_tx(
+                    conn,
+                    &ChainedAuditAppender {
+                        signing_key: self.signing_key.as_ref(),
+                    },
+                    node_id,
+                    event_type,
+                    posture_json,
+                    reason,
+                    created_at_ms,
+                    None,
+                )
+            };
+            #[cfg(not(any(test, feature = "test-support")))]
+            let result = Self::write_posture_event_chained_tx(
+                conn,
+                &ChainedAuditAppender {
+                    signing_key: self.signing_key.as_ref(),
+                },
+                node_id,
+                event_type,
+                posture_json,
+                reason,
+                created_at_ms,
+                None,
+            );
+            match result {
+                // #792 F5: bounded busy retry BEFORE the caller declares the
+                // durability degradation. Busy-class only; everything else is
+                // terminal for this attempt.
+                Err(ref e) if is_busy_error(e) && attempt < DURABLE_BUSY_RETRIES => {
+                    attempt += 1;
+                    #[cfg(any(test, feature = "test-support"))]
+                    self.durable_busy_retries
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(DURABLE_BUSY_BACKOFF);
+                }
+                other => {
+                    other?;
+                    return Ok(());
+                }
+            }
+        }
     }
 
     /// INCIDENT-CLASS durable variant of
@@ -345,18 +420,92 @@ impl VerifierStore {
             }
         }
         let conn = self.durable_conn.as_mut().unwrap_or(&mut self.conn);
-        Self::write_posture_event_chained_tx(
-            conn,
-            &ChainedAuditAppender {
-                signing_key: self.signing_key.as_ref(),
-            },
-            node_id,
-            event_type,
-            posture_json,
-            reason,
-            created_at_ms,
-            Some(generation),
+        let mut attempt = 0u32;
+        loop {
+            #[cfg(any(test, feature = "test-support"))]
+            let result = if Self::take_injected_busy(&self.injected_busy_faults) {
+                Err(Self::injected_busy_fault())
+            } else {
+                Self::write_posture_event_chained_tx(
+                    conn,
+                    &ChainedAuditAppender {
+                        signing_key: self.signing_key.as_ref(),
+                    },
+                    node_id,
+                    event_type,
+                    posture_json,
+                    reason,
+                    created_at_ms,
+                    Some(generation),
+                )
+            };
+            #[cfg(not(any(test, feature = "test-support")))]
+            let result = Self::write_posture_event_chained_tx(
+                conn,
+                &ChainedAuditAppender {
+                    signing_key: self.signing_key.as_ref(),
+                },
+                node_id,
+                event_type,
+                posture_json,
+                reason,
+                created_at_ms,
+                Some(generation),
+            );
+            match result {
+                // #792 F5: bounded busy retry — see save_posture_event_chained_durable.
+                Err(ref e) if is_busy_error(e) && attempt < DURABLE_BUSY_RETRIES => {
+                    attempt += 1;
+                    #[cfg(any(test, feature = "test-support"))]
+                    self.durable_busy_retries
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(DURABLE_BUSY_BACKOFF);
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// TEST-ONLY (#792 F5): consume one injected busy-class fault, if any are
+    /// armed. Free function over the field (not `&self`) so the call is legal
+    /// while `durable_conn` is mutably borrowed (disjoint-field discipline).
+    #[cfg(any(test, feature = "test-support"))]
+    fn take_injected_busy(faults: &std::sync::atomic::AtomicU64) -> bool {
+        faults
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |n| n.checked_sub(1),
+            )
+            .is_ok()
+    }
+
+    /// TEST-ONLY (#792 F5): the busy-class error the injection seam yields —
+    /// classified by [`is_busy_error`] exactly as a real `SQLITE_BUSY` is.
+    #[cfg(any(test, feature = "test-support"))]
+    fn injected_busy_fault() -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("injected busy fault (#792 F5 test)".into()),
         )
+    }
+
+    /// TEST-ONLY (#792 F5): arm `n` injected busy-class faults — each durable
+    /// write ATTEMPT (initial or retry) consumes one, so `n ≤ DURABLE_BUSY_RETRIES`
+    /// exercises retry-then-succeed and `n > DURABLE_BUSY_RETRIES` exercises
+    /// exhaustion-then-degradation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inject_durable_busy_faults(&self, n: u64) {
+        self.injected_busy_faults
+            .store(n, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// TEST-ONLY (#792 F5): how many busy retries the durable posture writes
+    /// have performed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn durable_busy_retry_count(&self) -> u64 {
+        self.durable_busy_retries
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// TEST-ONLY (#772 F6): how many incident-class durable posture-event writes
