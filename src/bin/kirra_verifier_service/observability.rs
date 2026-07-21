@@ -76,6 +76,7 @@ pub(crate) async fn request_observability(
     let mut res = next.run(req).instrument(span).await;
     let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     svc.app
+        .observability
         .fleet_metrics
         .http_request_latency
         .record_micros(micros);
@@ -154,6 +155,7 @@ mod observability_tests {
         assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
         assert_eq!(
             svc.app
+                .observability
                 .fleet_metrics
                 .http_request_latency
                 .observation_count(),

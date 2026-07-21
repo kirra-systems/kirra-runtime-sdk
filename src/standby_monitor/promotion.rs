@@ -695,7 +695,7 @@ pub(crate) async fn perform_promotion(
     // Promotion succeeded (durable epoch claimed, audit anchored, mode flipped).
     // WS-0.5 — count the completed failover for /metrics (aborted promotions
     // above returned false and are not counted). Observability only.
-    app.fleet_metrics.record_ha_promotion();
+    app.observability.fleet_metrics.record_ha_promotion();
     true
 }
 

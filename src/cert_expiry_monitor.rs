@@ -117,7 +117,8 @@ pub fn spawn_cert_expiry_monitor_with_clock(app: Arc<AppState>, clock: Arc<dyn C
                         Err(_) => tracing::error!("cert-expiry monitor sweep task failed"),
                     }
                     let elapsed_ms = clock.now_ms().saturating_sub(sweep_start_ms);
-                    app.deadline_registry
+                    app.observability
+                        .deadline_registry
                         .record("cert_expiry_monitor", elapsed_ms);
                 }
             }

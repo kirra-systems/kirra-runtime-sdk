@@ -108,6 +108,7 @@ pub mod execution_manager; // WP-20/G-11 declarative task manifest + startup dep
 pub mod fabric;
 pub mod kinematics_sim;
 pub mod lease; // WP-19/G-21 lease-based failover timing model (pure)
+pub mod observability_state; // ADR-0035 slice 3j — fleet-observability registries façade (app.observability)
 pub mod protocol_adapter;
 pub mod standby_monitor;
 /// Background-task supervisor (review finding C2): re-spawns dead safety loops and

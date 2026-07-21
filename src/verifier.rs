@@ -354,18 +354,17 @@ pub struct AppState {
     /// NONE ever gates the verdict path. All are `Arc<AtomicU64>` interior-mutable,
     /// so the move is pure relocation — no `&mut self`, no behaviour change.
     pub off_path_writes: kirra_safety_authority::OffPathWriteCounters,
-    /// WS-0.5 — fleet-safety Prometheus counters (posture transitions, gate
-    /// denials, HA promotions), exported by `GET /metrics` on the verifier
-    /// binary. Lock-free; incremented on the observed paths, never gating
-    /// them. Lives here (not on `ServiceState`) so the posture engine, the
-    /// routing gate, and the HA promotion path can all reach it.
-    pub fleet_metrics: crate::metrics::FleetSafetyMetrics,
-
-    /// WP-20 (G-11) per-task deadline-miss counters for the supervised loops that
-    /// declare a `deadline_ms` budget in `execution_manager::TASK_MANIFEST` (today:
-    /// the telemetry watchdog). The task loop records each cycle; `GET /metrics`
-    /// exports `kirra_task_deadline_*`. Lock-free; observability only.
-    pub deadline_registry: Arc<crate::execution_manager::DeadlineRegistry>,
+    /// ADR-0035 Stage 3 (slice 3j): the two lock-free fleet-observability
+    /// registries — the WS-0.5 `fleet_metrics` (posture/denial/HA-promotion
+    /// counters + WP-05 latency histograms) and the WP-20 (G-11) per-task
+    /// `deadline_registry` — grouped VERBATIM onto
+    /// `crate::observability_state::ObservabilityState`. Reached as
+    /// `app.observability.fleet_metrics` / `app.observability.deadline_registry`;
+    /// per-field semantics UNCHANGED (documented on the struct). Both are read only
+    /// by `GET /metrics` and NONE ever gates the verdict path. Interior-mutable
+    /// (`AtomicU64` / `Arc<DeadlineRegistry>`), so the move is pure relocation — no
+    /// `&mut self`, no behaviour change.
+    pub observability: crate::observability_state::ObservabilityState,
 }
 
 impl AppState {
@@ -405,10 +404,10 @@ impl AppState {
             // ADR-0035 Stage 3e: the five off-path counters now live on
             // OffPathWriteCounters; identical initial state (all 0).
             off_path_writes: kirra_safety_authority::OffPathWriteCounters::new(),
-            fleet_metrics: crate::metrics::FleetSafetyMetrics::new(),
-            deadline_registry: Arc::new(crate::execution_manager::DeadlineRegistry::from_manifest(
-                crate::execution_manager::TASK_MANIFEST,
-            )),
+            // ADR-0035 Stage 3j: the fleet-observability registries (fleet_metrics
+            // + deadline_registry) now live on ObservabilityState; identical
+            // initial state (fresh counters + a from-manifest deadline registry).
+            observability: crate::observability_state::ObservabilityState::new(),
         }
     }
 

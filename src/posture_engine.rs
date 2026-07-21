@@ -449,7 +449,9 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
         // subscribers — both would tick a transition nobody observed. The audit
         // CHAIN still records every committed transition (the forensic ledger); the
         // METRIC now tracks enforced/broadcast transitions.
-        app.fleet_metrics.record_transition(&new_posture);
+        app.observability
+            .fleet_metrics
+            .record_transition(&new_posture);
 
         let _ = app.posture_tx.send(crate::verifier::PostureStreamEvent {
             event_type: event_type.to_string(),
@@ -1056,7 +1058,7 @@ mod posture_engine_tests {
             FleetPosture::LockedOut,
         ] {
             assert_eq!(
-                app.fleet_metrics.transition_count(&p),
+                app.observability.fleet_metrics.transition_count(&p),
                 0,
                 "a PassiveStandby transition must not tick the enforced-transition metric ({p:?})"
             );
@@ -1416,7 +1418,9 @@ mod posture_engine_tests {
         // First recalc: None → Nominal is a transition.
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(
-            app.fleet_metrics.transition_count(&FleetPosture::Nominal),
+            app.observability
+                .fleet_metrics
+                .transition_count(&FleetPosture::Nominal),
             1,
             "the None→Nominal transition must be counted"
         );
@@ -1424,7 +1428,9 @@ mod posture_engine_tests {
         // No-change refresh: nothing moves.
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(
-            app.fleet_metrics.transition_count(&FleetPosture::Nominal),
+            app.observability
+                .fleet_metrics
+                .transition_count(&FleetPosture::Nominal),
             1,
             "a no-change refresh is not a transition and must not count"
         );
@@ -1439,12 +1445,16 @@ mod posture_engine_tests {
             "precondition: the fault degrades the fleet"
         );
         assert_eq!(
-            app.fleet_metrics.transition_count(&new_posture),
+            app.observability
+                .fleet_metrics
+                .transition_count(&new_posture),
             1,
             "the degradation transition must be counted under its target posture"
         );
         assert_eq!(
-            app.fleet_metrics.transition_count(&FleetPosture::Nominal),
+            app.observability
+                .fleet_metrics
+                .transition_count(&FleetPosture::Nominal),
             1,
             "the earlier Nominal count is untouched"
         );
