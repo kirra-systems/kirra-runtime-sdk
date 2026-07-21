@@ -108,16 +108,16 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // Step 1: Traverse the full DAG for every registered node.
     //
     // B1 (deadlock hazard): snapshot the node ids FIRST, releasing the
-    // `app.nodes` shard guards, THEN traverse. The previous form held a
+    // `app.fleet.nodes` shard guards, THEN traverse. The previous form held a
     // `nodes.iter()` shard read-guard across each `calculate_posture()` call,
-    // which re-locks `app.nodes` / `app.dependency_graph` inside
+    // which re-locks `app.fleet.nodes` / `app.fleet.dependency_graph` inside
     // `recursive_calculate`. A re-entrant `get()` on the SAME shard while a writer
     // is queued on it can self-deadlock (DashMap's per-shard RwLock is
     // writer-preferring) and hang the safety engine. Collecting the keys to an
     // owned Vec drops every iterator guard before any traversal begins.
     // SAFETY: SG-RED-2 — snapshot iteration prevents nested DashMap locks.
     // SAFETY: SG-RED-3 — posture DAG recalculation must be deadlock-free.
-    let node_ids: Vec<String> = app.nodes.iter().map(|e| e.key().clone()).collect();
+    let node_ids: Vec<String> = app.fleet.nodes.iter().map(|e| e.key().clone()).collect();
     // P3: ONE shared `black` memo across the whole-fleet traversal. Each node's
     // fully-evaluated posture is root-independent, so a node depended on by K
     // others is traversed once and black-hit by the rest — O(N·(N+E)) → ~O(N+E).
@@ -747,7 +747,7 @@ mod posture_engine_tests {
             .with(|s| s.save_node(&registered_trusted_node("orphan")))
             .unwrap();
         assert!(
-            app.nodes.is_empty(),
+            app.fleet.nodes.is_empty(),
             "in-memory live set must be empty for this case"
         );
 
@@ -1011,7 +1011,7 @@ mod posture_engine_tests {
 
     fn insert_node(app: &AppState, id: &str, status: NodeTrustState) {
         use crate::verifier::RegisteredNode;
-        app.nodes.insert(
+        app.fleet.nodes.insert(
             id.to_string(),
             RegisteredNode {
                 node_id: id.to_string(),

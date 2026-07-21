@@ -341,7 +341,7 @@ impl VerifierStore {
     /// Cheap `COUNT(*)` (no row materialization, unlike `load_nodes`). Used by
     /// the posture engine's M-9 empty-live-set guard to distinguish a genuinely
     /// empty fleet (`0` here too) from a hydration/consistency gap (the in-memory
-    /// `app.nodes` is empty while the durable registry still holds nodes) — both
+    /// `app.fleet.nodes` is empty while the durable registry still holds nodes) — both
     /// fail closed, but the reason code differs for operators.
     pub fn count_nodes(&self) -> Result<i64> {
         self.conn

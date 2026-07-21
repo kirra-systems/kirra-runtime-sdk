@@ -379,7 +379,7 @@ pub(crate) async fn evaluate_canopen_adapter(
         let resolved = global_resolve(eval.node_id);
         let registered = resolved
             .as_deref()
-            .map(|n| svc.app.nodes.contains_key(n))
+            .map(|n| svc.app.fleet.nodes.contains_key(n))
             .unwrap_or(false);
         Some(classify_nmt_offline(eval.node_id, resolved, registered))
     } else {

@@ -234,7 +234,7 @@ fn test_locked_out_hard_stop_dominates_rss_gate() {
     )));
 
     // Register an untrusted node — DAG drives fleet posture to LockedOut.
-    app.nodes.insert(
+    app.fleet.nodes.insert(
         "adversarial_node".to_string(),
         RegisteredNode {
             node_id: "adversarial_node".to_string(),

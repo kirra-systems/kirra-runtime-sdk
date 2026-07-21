@@ -681,10 +681,10 @@ async fn main() {
             }
         };
         for node in nodes {
-            app_state.nodes.insert(node.node_id.clone(), node);
+            app_state.fleet.nodes.insert(node.node_id.clone(), node);
         }
         for (node_id, deps) in dependencies {
-            app_state.dependency_graph.insert(node_id, deps);
+            app_state.fleet.dependency_graph.insert(node_id, deps);
         }
     }
 

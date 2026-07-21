@@ -47,7 +47,7 @@ These have been blocked or reverted multiple times. Any submission that violates
 
 11. **All handlers use `State<Arc<ServiceState>>`**, not `State<Arc<AppState>>`. `ServiceState` has `app: Arc<AppState>` and `posture_cache: SharedPostureCache`. Accessing app state in handlers: `svc.app.*`.
 
-12. **SQLite writes go to disk before memory** (fail-closed ordering). `persist_and_insert_node` calls `save_node` then `nodes.insert` — never reverse this.
+12. **SQLite writes go to disk before memory** (fail-closed ordering). `persist_and_insert_node` calls `save_node` then `fleet.nodes.insert` — never reverse this. (ADR-0035 slice 3k: the map is `app.fleet.nodes`; the disk-before-memory ordering is unchanged.)
 
 13. **`no std::env::set_var` in multithreaded context**.
 
@@ -59,7 +59,7 @@ These have been blocked or reverted multiple times. Any submission that violates
 
 | Type | File | Notes |
 |------|------|-------|
-| `AppState` | `src/verifier.rs:169` | DashMap nodes/dependency_graph/challenges, Arc<Mutex<VerifierStore>>, mode_active AtomicBool, posture_tx |
+| `AppState` | `src/verifier.rs:169` | `fleet` (FleetGraph: DashMap nodes/dependency_graph — ADR-0035 slice 3k), `challenges` (ChallengeState), Arc<Mutex<VerifierStore>>, mode_active AtomicBool, posture_tx |
 | `RegisteredNode` | `src/verifier.rs:34` | `node_id`, `status: NodeTrustState`, `registered_at_ms`, `last_trust_update_ms`, `ak_public_pem`, `expected_pcr16_digest_hex` |
 | `ServiceState` | `src/posture_cache.rs` | Wraps `Arc<AppState>` + `SharedPostureCache`; is the axum router state |
 | `FleetPosture` | `src/verifier.rs` | `Nominal` / `Degraded` / `LockedOut` |
@@ -746,7 +746,7 @@ HD-maps) — KIRRA is the checker that bounds it. Scaffold: `deploy/autoware-iso
 - Calling `should_route_command` with 2 args — signature is `(cache, now_ms, command)`
 - Importing `FleetPosture` from `crate::gateway::posture_cache` — correct path is `crate::verifier::FleetPosture`
 - Using `node.trust_state` — the field is `node.status` on `RegisteredNode`
-- Using `app.deps` — the field is `app.dependency_graph` on `AppState`
+- Using `app.deps` — the field is `app.fleet.dependency_graph` on `AppState` (ADR-0035 slice 3k grouped `nodes` + `dependency_graph` onto `app.fleet`; likewise `app.fleet.nodes`)
 - Calling `app.store.method()` directly — store is `Arc<Mutex<VerifierStore>>`; use `app.store.lock().unwrap().method()`
 - Calling `cache.read().await` on `SharedPostureCache` in sync code — use `cache.blocking_read()` or restructure as async
 - Replacing `admin_routes` router structure without accounting for all existing protected routes

@@ -56,7 +56,10 @@ fn update_node_atomic_is_a_noop_on_an_absent_node() {
     let app = app();
     let r = app.update_node_atomic("ghost", |n| n.clone());
     assert_eq!(r, Ok(false));
-    assert!(app.nodes.get("ghost").is_none(), "no memory row created");
+    assert!(
+        app.fleet.nodes.get("ghost").is_none(),
+        "no memory row created"
+    );
     assert!(disk_status(&app, "ghost").is_none(), "no disk row created");
 }
 
@@ -69,7 +72,13 @@ fn a_downgrade_writes_disk_and_memory_together() {
 
     assert_eq!(app.mark_node_untrusted("n1", "FAULT", 42), Ok(true));
 
-    let mem = app.nodes.get("n1").expect("memory row").status.clone();
+    let mem = app
+        .fleet
+        .nodes
+        .get("n1")
+        .expect("memory row")
+        .status
+        .clone();
     assert!(
         matches!(mem, NodeTrustState::Untrusted(_)),
         "memory reflects the downgrade"
@@ -110,7 +119,13 @@ fn concurrent_downgrade_and_retrust_keep_disk_and_memory_consistent() {
         h.join().expect("thread");
     }
 
-    let mem = app.nodes.get("n1").expect("memory row").status.clone();
+    let mem = app
+        .fleet
+        .nodes
+        .get("n1")
+        .expect("memory row")
+        .status
+        .clone();
     let disk = disk_status(&app, "n1").expect("disk row");
     assert_eq!(
         std::mem::discriminant(&mem),
