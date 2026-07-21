@@ -446,7 +446,7 @@ impl AppState {
     /// ADR-0035 Stage 3g: thin delegator to `WriterHandles::install_capture_writer`.
     pub fn install_capture_writer(
         &self,
-        tx: tokio::sync::mpsc::Sender<crate::capture::CaptureRecord>,
+        tx: tokio::sync::mpsc::Sender<kirra_core::capture::CaptureRecord>,
     ) {
         self.writers.install_capture_writer(tx);
     }

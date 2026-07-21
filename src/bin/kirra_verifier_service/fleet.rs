@@ -126,10 +126,8 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
         })
         .await
     {
-        let summary = kirra_verifier::ota_campaign::summarize_campaigns(&campaigns, &statuses);
-        body.push_str(&kirra_verifier::ota_campaign::campaign_metrics_prometheus(
-            &summary,
-        ));
+        let summary = kirra_ota_campaign::summarize_campaigns(&campaigns, &statuses);
+        body.push_str(&kirra_ota_campaign::campaign_metrics_prometheus(&summary));
     }
 
     // WP-15 (MGA G-19): append the mTLS cert-principal lifecycle census
@@ -263,7 +261,7 @@ pub(crate) async fn get_node_campaign_assignment(
     {
         Ok(Ok(active)) => {
             let assignment =
-                kirra_verifier::ota_campaign::resolve_node_assignment(&node_id, &cohorts, &active);
+                kirra_ota_campaign::resolve_node_assignment(&node_id, &cohorts, &active);
             (StatusCode::OK, Json(assignment)).into_response()
         }
         _ => (
@@ -375,12 +373,12 @@ pub(crate) async fn report_node_artifact(
             )
                 .into_response();
         };
-        let payload = kirra_verifier::attestation::adoption_report_signing_payload(
+        let payload = kirra_safety_authority::attestation::adoption_report_signing_payload(
             &node_id,
             &applied_digest,
             ts,
         );
-        if !kirra_verifier::attestation::verify_ed25519_pem_signature(&ak, &payload, &sig) {
+        if !kirra_safety_authority::attestation::verify_ed25519_pem_signature(&ak, &payload, &sig) {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "adoption report signature invalid" })),
@@ -392,7 +390,7 @@ pub(crate) async fn report_node_artifact(
         (false, now_ms())
     };
 
-    let status = kirra_verifier::ota_campaign::NodeArtifactStatus {
+    let status = kirra_ota_campaign::NodeArtifactStatus {
         node_id,
         applied_digest,
         campaign_id: req
@@ -480,8 +478,10 @@ pub(crate) async fn list_operators(State(svc): State<Arc<ServiceState>>) -> impl
                     let active = r.is_active();
                     OperatorView {
                         operator_key_fingerprint:
-                            kirra_verifier::attestation::operator_key_fingerprint(&r.pubkey_pem)
-                                .unwrap_or_else(|| "unparseable".to_string()),
+                            kirra_safety_authority::attestation::operator_key_fingerprint(
+                                &r.pubkey_pem,
+                            )
+                            .unwrap_or_else(|| "unparseable".to_string()),
                         operator_id: r.operator_id,
                         registered_at_ms: r.registered_at_ms,
                         revoked_at_ms: r.revoked_at_ms,

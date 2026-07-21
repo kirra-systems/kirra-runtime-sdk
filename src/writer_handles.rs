@@ -31,7 +31,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc::Sender;
 
 use crate::audit_writer::AuditWriteJob;
-use crate::capture::CaptureRecord;
+use kirra_core::capture::CaptureRecord;
 
 /// The off-verdict-path async writer handles (ADR-0035 slice 3g). None of the
 /// three ever gates the verdict path.

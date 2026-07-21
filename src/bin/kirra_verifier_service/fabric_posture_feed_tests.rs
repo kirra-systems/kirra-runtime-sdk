@@ -12,7 +12,7 @@ use super::{force_local_asset_lockedout, sync_local_asset_posture};
 
 use std::sync::Arc;
 
-use kirra_verifier::fabric::asset::{AssetType, FabricAsset, KinematicProfileType};
+use kirra_fabric_types::asset::{AssetType, FabricAsset, KinematicProfileType};
 use kirra_verifier::fabric::router::FabricRouter;
 use kirra_verifier::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};

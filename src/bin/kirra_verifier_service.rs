@@ -60,7 +60,7 @@ use kirra_verifier::verifier_store::{DurableWriteError, VerifierStore};
 /// standby promotion via `wire_active_posture_freshness`) read the audit-ship
 /// path from here — the same values the digest was computed over.
 static EFFECTIVE_CONFIG: std::sync::OnceLock<EffectiveConfig> = std::sync::OnceLock::new();
-use kirra_verifier::fabric::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
+use kirra_fabric_types::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
 use kirra_verifier::fabric::causal_log::FabricCausalLog;
 use kirra_verifier::fabric::router::FabricRouter;
 use kirra_verifier::fabric::telemetry::FabricTelemetry;
@@ -646,8 +646,8 @@ async fn main() {
     // installed when KIRRA_CAPTURE_ENABLED is set; unset → no writer, and the
     // gateway emit is a pure no-op (capture_writer_tx stays None). Non-safety
     // side channel; mirrors the audit writer wiring above.
-    if kirra_verifier::capture::capture_enabled() {
-        let capture_tx = kirra_verifier::capture::spawn_capture_writer();
+    if kirra_core::capture::capture_enabled() {
+        let capture_tx = kirra_core::capture::spawn_capture_writer();
         app_state.install_capture_writer(capture_tx);
         tracing::info!(
             "learning-loop capture ENABLED (KIRRA_CAPTURE_ENABLED) — verdict records → JSONL sink"

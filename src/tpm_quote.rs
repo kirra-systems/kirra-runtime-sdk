@@ -37,7 +37,7 @@
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
-use crate::attestation::parse_ed25519_public_pem;
+use kirra_safety_authority::attestation::parse_ed25519_public_pem;
 
 /// `TPM_GENERATED_VALUE` (TPM 2.0 Part 2 §6.2) — every TPM-generated attestation
 /// structure begins with this. A software-forged structure cannot set it without

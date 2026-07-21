@@ -652,7 +652,7 @@ pub fn plan_rollback(rec: &BootRecord) -> BootRecord {
 
 /// The exact byte payload a node signs (with its attestation key) to make an OTA
 /// adoption report unforgeable — **byte-identical** to the verifier's
-/// `kirra_verifier::attestation::adoption_report_signing_payload`. Domain-separated,
+/// `kirra_safety_authority::attestation::adoption_report_signing_payload`. Domain-separated,
 /// length-prefixed on the two string fields (u64 LE length then bytes), with
 /// `reported_at_ms` appended as a fixed u64 LE. A drift from the server is caught by
 /// the byte-pinned `adoption_report_payload_is_byte_stable` test.

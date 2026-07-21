@@ -684,7 +684,7 @@ async fn test_capstone_missing_enforcement_outcome_extension_fails_closed_500() 
 /// test can both drive the gateway and observe the emitted records.
 fn build_state_with_capture() -> (
     Arc<ServiceState>,
-    tokio::sync::mpsc::Receiver<kirra_verifier::capture::CaptureRecord>,
+    tokio::sync::mpsc::Receiver<kirra_core::capture::CaptureRecord>,
 ) {
     use kirra_verifier::verifier::{AppState, VerifierOperationMode};
     use kirra_verifier::verifier_store::VerifierStore;
@@ -737,7 +737,7 @@ async fn test_capture_on_vs_off_responses_identical() {
 /// outcome + the substituted safe value — passes included (selection-bias).
 #[tokio::test]
 async fn test_capture_emits_a_record_per_arm() {
-    use kirra_verifier::capture::CaptureOutcome;
+    use kirra_core::capture::CaptureOutcome;
 
     // Allow.
     let (svc, mut rx) = build_state_with_capture();
@@ -776,8 +776,8 @@ async fn test_capture_emits_a_record_per_arm() {
 /// (the drop is off the verdict path).
 #[tokio::test]
 async fn a3_drop_counters_count_audit_and_capture_overflow() {
+    use kirra_core::capture::CaptureRecord;
     use kirra_verifier::audit_writer::AuditWriteJob;
-    use kirra_verifier::capture::CaptureRecord;
 
     let svc = build_state_with_posture(FleetPosture::Nominal);
 

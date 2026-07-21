@@ -16,7 +16,7 @@ use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::Json;
 
-use kirra_verifier::fabric::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
+use kirra_fabric_types::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
 use kirra_verifier::fabric::router::FabricRouter;
 use kirra_verifier::gateway::kinematics_contract::ProposedVehicleCommand;
 use kirra_verifier::posture_cache::{now_ms, ServiceState, SharedPostureCache};

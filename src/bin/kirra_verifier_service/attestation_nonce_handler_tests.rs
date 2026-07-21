@@ -22,7 +22,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
-use kirra_verifier::attestation::attestation_signing_payload;
+use kirra_safety_authority::attestation::attestation_signing_payload;
 use kirra_verifier::posture_cache::{now_ms, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, NodeTrustState, RegisteredNode, VerifierOperationMode};
 use kirra_verifier::verifier_store::VerifierStore;
@@ -147,8 +147,10 @@ async fn signed_adoption_report_is_attested_and_forgery_rejected() {
     let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let ts: u64 = 5_000;
     let good_sig = B64.encode(
-        sk.sign(&kirra_verifier::attestation::adoption_report_signing_payload(NODE, digest, ts))
-            .to_bytes(),
+        sk.sign(
+            &kirra_safety_authority::attestation::adoption_report_signing_payload(NODE, digest, ts),
+        )
+        .to_bytes(),
     );
 
     let report = |body: serde_json::Value| {
@@ -221,7 +223,9 @@ async fn signed_adoption_report_is_attested_and_forgery_rejected() {
     let future_ts = now_ms() + 3_600_000; // 1h ahead — beyond the skew allowance
     let future_sig = B64.encode(
         sk.sign(
-            &kirra_verifier::attestation::adoption_report_signing_payload(NODE, digest, future_ts),
+            &kirra_safety_authority::attestation::adoption_report_signing_payload(
+                NODE, digest, future_ts,
+            ),
         )
         .to_bytes(),
     );
@@ -261,7 +265,7 @@ fn sign_proof_with_pcr16(
     nonce: u64,
     presented: Option<&str>,
 ) -> String {
-    let payload = kirra_verifier::attestation::attestation_signing_payload_with_pcr16(
+    let payload = kirra_safety_authority::attestation::attestation_signing_payload_with_pcr16(
         node_id, nonce, presented,
     );
     hex::encode(sk.sign(&payload).to_bytes())

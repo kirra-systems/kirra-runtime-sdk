@@ -1,10 +1,10 @@
-use crate::fabric::asset::{AssetPosture, AssetType, FabricAsset, FabricState};
 use crate::fabric::causal_log::FabricCausalLog;
 use crate::fabric::governor::AssetGovernor;
 use crate::gateway::kinematics_contract::{EnforceAction, ProposedVehicleCommand};
 use crate::posture_cache::now_ms;
 use crate::verifier::FleetPosture;
 use dashmap::DashMap;
+use kirra_fabric_types::asset::{AssetPosture, AssetType, FabricAsset, FabricState};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug)]
@@ -501,7 +501,7 @@ impl Default for FabricRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fabric::asset::{AssetType, FabricAsset, KinematicProfileType};
+    use kirra_fabric_types::asset::{AssetType, FabricAsset, KinematicProfileType};
     use std::collections::HashMap;
     use std::sync::Arc;
 

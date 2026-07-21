@@ -17,13 +17,13 @@
 
 use std::path::Path;
 
+use kirra_ota_campaign::{
+    is_node_rolled, resolve_node_assignment, summarize_campaigns, Campaign, NodeArtifactStatus,
+    NodeAssignment,
+};
 use kirra_ota_installer::{
     artifact_sha256_hex, decide_pull, AssignmentView, HealthOutcome, InMemoryBootController,
     Installer, PullAction, Slot,
-};
-use kirra_verifier::ota_campaign::{
-    is_node_rolled, resolve_node_assignment, summarize_campaigns, Campaign, NodeArtifactStatus,
-    NodeAssignment,
 };
 use kirra_verifier::verifier::FleetPosture;
 use kirra_verifier::verifier_store::VerifierStore;

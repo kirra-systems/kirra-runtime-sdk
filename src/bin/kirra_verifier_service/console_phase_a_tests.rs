@@ -272,7 +272,7 @@ async fn console_versions_rolls_up_with_pct() {
 async fn console_campaigns_shows_rollout_and_adoption() {
     // WS-4: the public console rollout view mirrors the admin summary — a Rolling
     // campaign with its stage progress + the adoption count from node reports.
-    use kirra_verifier::ota_campaign::{Campaign, NodeArtifactStatus};
+    use kirra_ota_campaign::{Campaign, NodeArtifactStatus};
     let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let svc = build_state();
 
@@ -510,16 +510,22 @@ fn operator_keypair(seed: u8) -> (SigningKey, String) {
 
 fn sign_grant_b64(sk: &SigningKey, operator_id: &str, node_id: &str, nonce: &str) -> String {
     use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
-    let payload =
-        kirra_verifier::attestation::operator_grant_signing_payload(operator_id, node_id, nonce);
+    let payload = kirra_safety_authority::attestation::operator_grant_signing_payload(
+        operator_id,
+        node_id,
+        nonce,
+    );
     b64e.encode(sk.sign(&payload).to_bytes())
 }
 
 /// #412 — sign the EMERGENCY-STOP payload (domain-distinct from a grant).
 fn sign_stop_b64(sk: &SigningKey, operator_id: &str, node_id: &str, nonce: &str) -> String {
     use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
-    let payload =
-        kirra_verifier::attestation::operator_stop_signing_payload(operator_id, node_id, nonce);
+    let payload = kirra_safety_authority::attestation::operator_stop_signing_payload(
+        operator_id,
+        node_id,
+        nonce,
+    );
     b64e.encode(sk.sign(&payload).to_bytes())
 }
 
@@ -809,7 +815,7 @@ async fn operator_signed_grant_records_fingerprint_and_phase_b_consumes() {
         "operator-signed grant recorded; body={gb}"
     );
     assert!(gb.contains("operator-signed"), "auth_method in response");
-    let fp = kirra_verifier::attestation::operator_key_fingerprint(&pem).unwrap();
+    let fp = kirra_safety_authority::attestation::operator_key_fingerprint(&pem).unwrap();
     assert!(gb.contains(&fp), "response carries the key fingerprint");
 
     let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
@@ -1053,7 +1059,7 @@ async fn estop_request_commands_mrc_and_chains_both_events() {
         ab.contains("GovernorMRCCommanded"),
         "the governor's MRC action is chained"
     );
-    let fp = kirra_verifier::attestation::operator_key_fingerprint(&pem).unwrap();
+    let fp = kirra_safety_authority::attestation::operator_key_fingerprint(&pem).unwrap();
     assert!(
         ab.contains(&fp),
         "the request event carries the operator key fingerprint (non-repudiation)"

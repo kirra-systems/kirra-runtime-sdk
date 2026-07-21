@@ -35,9 +35,7 @@
 // The test below asserts BOTH the decision and the recorded causal event.
 #[test]
 fn test_safety_goal_sg_007_causal_log_records_propagation_event() {
-    use kirra_verifier::fabric::asset::{
-        AssetPosture, AssetType, FabricAsset, KinematicProfileType,
-    };
+    use kirra_fabric_types::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
     use kirra_verifier::fabric::causal_log::FabricCausalLog;
     use kirra_verifier::fabric::router::FabricRouter;
     use kirra_verifier::verifier::FleetPosture;
