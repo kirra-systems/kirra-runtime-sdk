@@ -119,6 +119,19 @@ pub struct TrajPt {
 pub struct PlanResponse {
     pub kind: String,
     pub verdict: String,
+    /// F13 (#1097): this `/plan` result is ADVISORY — a demo/inspection verdict from
+    /// the slow-loop checker, NEVER actuation authority. Real authority is the
+    /// in-line governor / the ADR-0033 release-token chokepoint. Always `true`; an
+    /// explicit marker so a consumer cannot mistake this response for an
+    /// actuation-authorized command.
+    pub advisory: bool,
+    /// F13 (#1097): whether the checker ADMITTED the proposal (`Accept`/`Clamp`).
+    /// `false` on a refusal (`MRCFallback`/`Pending`), in which case `trajectory`
+    /// is EMPTY — a refused proposal's geometry is never returned as if drivable.
+    pub admitted: bool,
+    /// The proposed trajectory — populated ONLY when `admitted` (F13 #1097).
+    /// A refusal returns an empty array so a naive 2xx consumer cannot read a
+    /// refused proposal's poses as an authoritative path.
     pub trajectory: Vec<TrajPt>,
     /// #893 narration: the stable refusal code (`TRAJECTORY_*`) when the
     /// checker refused, else null.
@@ -422,6 +435,14 @@ pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
         FrameTrust::Trusted,
     );
 
+    // F13 (#1097): the checker's admit decision. Accept / Clamp are drivable
+    // (admitted); MRCFallback / Pending are refusals. Only an admitted proposal
+    // carries its trajectory on the wire (below).
+    let admitted = matches!(
+        verdict,
+        TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+    );
+
     Ok(PlanResponse {
         kind: match plan.kind {
             ProposalKind::Motion => "Motion",
@@ -437,17 +458,26 @@ pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
             TrajectoryVerdict::Pending => "Pending",
         }
         .to_string(),
-        trajectory: plan
-            .trajectory
-            .iter()
-            .map(|p| TrajPt {
-                x: p.pose.x_m,
-                y: p.pose.y_m,
-                heading: p.pose.heading_rad,
-                v: p.velocity_mps,
-                t: p.time_from_start_s,
-            })
-            .collect(),
+        // F13 (#1097): an advisory result, never actuation authority.
+        advisory: true,
+        admitted,
+        // F13 (#1097): the proposed trajectory rides ONLY on an admitted verdict.
+        // A refusal returns an EMPTY trajectory so a consumer that ignores the
+        // verdict field cannot read a refused proposal's poses as a drivable path.
+        trajectory: if admitted {
+            plan.trajectory
+                .iter()
+                .map(|p| TrajPt {
+                    x: p.pose.x_m,
+                    y: p.pose.y_m,
+                    heading: p.pose.heading_rad,
+                    v: p.velocity_mps,
+                    t: p.time_from_start_s,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
         reason_code: reason.map(|r| r.code().to_string()),
         reason: reason.map(|r| r.explain().to_string()),
     })
@@ -479,9 +509,20 @@ mod tests {
     fn goal_only_request_still_grounds_as_goto_and_reports_a_verdict() {
         let resp = handle_plan(&base_request()).expect("seam admits");
         assert!(
-            resp.verdict == "Accept" || resp.verdict == "Clamp" || resp.verdict == "MRCFallback"
+            resp.advisory,
+            "the /plan result is always advisory (F13 #1097)"
         );
-        assert!(!resp.trajectory.is_empty(), "a proposal is always returned");
+        // A clear goal down an open corridor is admitted, so the trajectory rides.
+        assert!(
+            resp.verdict == "Accept" || resp.verdict == "Clamp",
+            "clear goal is admitted, got {}",
+            resp.verdict
+        );
+        assert!(resp.admitted, "an Accept/Clamp verdict is admitted");
+        assert!(
+            !resp.trajectory.is_empty(),
+            "an admitted proposal carries its trajectory"
+        );
     }
 
     #[test]
@@ -592,6 +633,15 @@ mod tests {
         req.right = vec![[-5.0, -0.05], [100.0, -0.05]];
         let resp = handle_plan(&req).expect("seam admits; the checker refuses");
         assert_eq!(resp.verdict, "MRCFallback");
+        // F13 (#1097): a refusal is advisory, NOT admitted, and carries NO
+        // trajectory — a consumer cannot mistake the refused proposal's geometry
+        // for an actuation-authorized path.
+        assert!(resp.advisory, "the result is advisory");
+        assert!(!resp.admitted, "a refused proposal is not admitted");
+        assert!(
+            resp.trajectory.is_empty(),
+            "a refused proposal must carry no trajectory (F13 #1097)"
+        );
         let code = resp.reason_code.expect("a refusal must carry its code");
         let sentence = resp.reason.expect("a refusal must carry its sentence");
         assert!(code.starts_with("TRAJECTORY_"), "stable vocabulary: {code}");
