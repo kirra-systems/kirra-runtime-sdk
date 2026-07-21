@@ -20,7 +20,7 @@ export function VersionAdoptionBar() {
         <span className="font-mono text-[10px] uppercase tracking-wider text-faint">Fleet version adoption</span>
         {source === 'live' ? <Pill tone="safe">live</Pill> : <Pill tone="warn">demo</Pill>}
       </div>
-      <div className="flex h-3 overflow-hidden rounded-full bg-white/5">
+      <div className="flex h-3 overflow-hidden rounded-full bg-ink/5">
         {rows.map((v) => (
           <div key={v.version} className={dotBg(v.tone)} style={{ width: `${v.pct}%` }} title={`${v.version} ${v.pct}% · ${v.count} nodes`} />
         ))}

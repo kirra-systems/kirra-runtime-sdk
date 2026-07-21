@@ -106,7 +106,7 @@ export default function IncidentsPage() {
               <span className="font-display text-2xl font-semibold text-ink">{frame.speed.toFixed(1)}</span>
               <span className="font-mono text-xs text-muted">m/s</span>
             </div>
-            <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/5">
+            <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-ink/5">
               <div className={`h-full rounded-full ${barBg(frame.tone)}`} style={{ width: `${(frame.speed / MAX_SPEED) * 100}%` }} />
             </div>
           </StateCard>
@@ -158,7 +158,7 @@ export default function IncidentsPage() {
               <li
                 key={idx}
                 onClick={() => { setPlaying(false); setI(idx); raw.open({ title: `Frame ${f.t > 0 ? '+' : ''}${f.t}s`, subtitle: `${f.clock} · ${f.verdict}`, data: f }) }}
-                className={`flex cursor-pointer items-center gap-4 border-b border-line px-4 py-2.5 last:border-0 hover:bg-white/[0.02] ${idx === i ? 'bg-white/[0.04]' : idx > i ? 'opacity-40' : ''}`}
+                className={`flex cursor-pointer items-center gap-4 border-b border-line px-4 py-2.5 last:border-0 hover:bg-ink/[0.02] ${idx === i ? 'bg-ink/[0.04]' : idx > i ? 'opacity-40' : ''}`}
                 title="tap for raw frame"
               >
                 <span className="w-10 shrink-0 font-mono text-[11px] text-faint">{f.t > 0 ? '+' : ''}{f.t}s</span>
@@ -209,7 +209,7 @@ export default function IncidentsPage() {
                 <tr
                   key={inc.id}
                   onClick={() => raw.open({ title: inc.title, subtitle: `${inc.id} · ${inc.asset}`, data: inc })}
-                  className={`cursor-pointer border-b border-line last:border-0 hover:bg-white/[0.02] ${inc.id === featured.id ? 'bg-white/[0.03]' : ''}`}
+                  className={`cursor-pointer border-b border-line last:border-0 hover:bg-ink/[0.02] ${inc.id === featured.id ? 'bg-ink/[0.03]' : ''}`}
                   title="tap for raw incident"
                 >
                   <td className={`px-4 py-2.5 ${txt(inc.tone)}`}>{inc.id}</td>
@@ -234,7 +234,7 @@ function DeckBtn({ children, onClick, label, primary }: { children: React.ReactN
     <button
       onClick={onClick}
       aria-label={label}
-      className={`flex h-8 w-8 items-center justify-center rounded-lg border transition-colors ${primary ? 'border-ice/40 bg-ice/10 text-ice hover:bg-ice/20' : 'border-line text-faint hover:bg-white/[0.04] hover:text-ink'}`}
+      className={`flex h-8 w-8 items-center justify-center rounded-lg border transition-colors ${primary ? 'border-ice/40 bg-ice/10 text-ice hover:bg-ice/20' : 'border-line text-faint hover:bg-ink/[0.04] hover:text-ink'}`}
     >
       {children}
     </button>

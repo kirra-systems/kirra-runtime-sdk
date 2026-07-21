@@ -1,10 +1,12 @@
+import { seededRand } from '@/lib/seeded'
+const rand = seededRand(102)
 import type { SeriesPoint, Tone } from './types'
 
 function g(n: number, b: number, j: number): SeriesPoint[] {
   const o: SeriesPoint[] = []
   let v = b
   for (let i = 0; i < n; i++) {
-    v += (Math.random() - 0.5) * j
+    v += (rand() - 0.5) * j
     v = Math.max(0, v)
     o.push({ t: `${String(i % 24).padStart(2, '0')}:00`, v: Math.round(v) })
   }
@@ -26,7 +28,7 @@ export const resources: Resource[] = [
 
 export const latency: LatPoint[] = Array.from({ length: 24 }).map((_, i) => {
   const base = 7 + Math.round(Math.sin(i / 3) * 2)
-  return { t: `${String(i % 24).padStart(2, '0')}:00`, p50: base + Math.round(Math.random() * 2), p99: base + 8 + Math.round(Math.random() * 8) }
+  return { t: `${String(i % 24).padStart(2, '0')}:00`, p50: base + Math.round(rand() * 2), p99: base + 8 + Math.round(rand() * 8) }
 })
 
 export const network: NetStat[] = [

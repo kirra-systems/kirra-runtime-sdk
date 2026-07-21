@@ -3,7 +3,7 @@
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid, RadialBar, RadialBarChart, PolarAngleAxis } from 'recharts'
 import type { SeriesPoint } from '@/lib/types'
 
-const COLORS = { safe: '#2fe6a6', warn: '#ffb020', crit: '#ff5468', ice: '#5cc6ff' } as const
+const COLORS = { safe: 'var(--c-safe)', warn: 'var(--c-warn)', crit: 'var(--c-crit)', ice: 'var(--c-ice)' } as const
 type ChartColor = keyof typeof COLORS
 
 export function TrendArea({ data, color = 'ice', height = 200 }: { data: SeriesPoint[]; color?: ChartColor; height?: number }) {
@@ -18,11 +18,11 @@ export function TrendArea({ data, color = 'ice', height = 200 }: { data: SeriesP
           </linearGradient>
         </defs>
         <CartesianGrid stroke="rgba(150,166,198,0.08)" vertical={false} />
-        <XAxis dataKey="t" tick={{ fill: '#69728a', fontSize: 10, fontFamily: 'monospace' }} axisLine={false} tickLine={false} minTickGap={28} />
-        <YAxis tick={{ fill: '#69728a', fontSize: 10, fontFamily: 'monospace' }} axisLine={false} tickLine={false} width={42} />
+        <XAxis dataKey="t" tick={{ fill: 'var(--c-faint)', fontSize: 10, fontFamily: 'monospace' }} axisLine={false} tickLine={false} minTickGap={28} />
+        <YAxis tick={{ fill: 'var(--c-faint)', fontSize: 10, fontFamily: 'monospace' }} axisLine={false} tickLine={false} width={42} />
         <Tooltip
-          contentStyle={{ background: '#10141e', border: '1px solid rgba(150,166,198,0.22)', borderRadius: 10, fontFamily: 'monospace', fontSize: 12 }}
-          labelStyle={{ color: '#9aa6bd' }}
+          contentStyle={{ background: 'var(--c-panel)', border: '1px solid rgba(150,166,198,0.22)', borderRadius: 10, fontFamily: 'monospace', fontSize: 12 }}
+          labelStyle={{ color: 'var(--c-faint)' }}
           itemStyle={{ color: c }}
         />
         <Area type="monotone" dataKey="v" stroke={c} strokeWidth={1.6} fill={`url(#grad-${color})`} dot={false} />

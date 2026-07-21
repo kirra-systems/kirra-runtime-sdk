@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { CloudRain, Network, Flame } from 'lucide-react'
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
-import { DemoBadge } from '@/components/ui/demo-badge'
+import { SourceBadge } from '@/components/ui/source-badge'
 import { GlobalMap } from '@/components/ui/global-map'
 import { sites, weatherZones, geofences, crossSiteAlerts, regionRisk, totals } from '@/lib/global'
 import { useSites } from '@/lib/api/hooks'
@@ -27,7 +27,7 @@ export default function GlobalPage() {
           <p className="font-mono text-[11px] text-faint">strategic view · {totals.sites} sites · {totals.assets} assets · {totals.active} active</p>
         </div>
         <div className="flex items-center gap-2">
-          <DemoBadge live={false} />
+          <SourceBadge />
           <Pill tone="warn">2 regions elevated</Pill>
           <Pill tone="safe">federation in sync</Pill>
         </div>
@@ -95,7 +95,7 @@ export default function GlobalPage() {
               </thead>
               <tbody className="font-mono text-[12px]">
                 {regionRisk.map((r) => (
-                  <tr key={r.region} className="border-b border-line last:border-0 hover:bg-white/[0.02]">
+                  <tr key={r.region} className="border-b border-line last:border-0 hover:bg-ink/[0.02]">
                     <td className="px-4 py-2.5 text-ink">{r.region}</td>
                     <td className="px-4 py-2.5"><Dot tone={r.weather} /></td>
                     <td className="px-4 py-2.5"><Dot tone={r.network} /></td>
@@ -158,7 +158,7 @@ function Toggle({ children, on, tone, onClick }: { children: React.ReactNode; on
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-colors ${on ? `${ring(tone)} ${txt(tone)} bg-white/[0.04] ring-1` : 'text-faint hover:text-muted'}`}
+      className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-colors ${on ? `${ring(tone)} ${txt(tone)} bg-ink/[0.04] ring-1` : 'text-faint hover:text-muted'}`}
     >
       {children}
     </button>
@@ -171,4 +171,4 @@ function Dot({ tone }: { tone: Tone }) {
 
 function txt(t: Tone) { return t === 'safe' ? 'text-safe' : t === 'warn' ? 'text-warn' : t === 'crit' ? 'text-crit' : t === 'ice' ? 'text-ice' : 'text-muted' }
 function dotBg(t: Tone) { return t === 'safe' ? 'bg-safe' : t === 'warn' ? 'bg-warn' : t === 'crit' ? 'bg-crit' : t === 'ice' ? 'bg-ice' : 'bg-muted' }
-function ring(t: Tone) { return t === 'safe' ? 'ring-safe/30' : t === 'warn' ? 'ring-warn/30' : t === 'crit' ? 'ring-crit/30' : t === 'ice' ? 'ring-ice/30' : 'ring-white/10' }
+function ring(t: Tone) { return t === 'safe' ? 'ring-safe/30' : t === 'warn' ? 'ring-warn/30' : t === 'crit' ? 'ring-crit/30' : t === 'ice' ? 'ring-ice/30' : 'ring-ink/10' }

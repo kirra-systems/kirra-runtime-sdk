@@ -4,7 +4,7 @@ import type { GlobalSite, WeatherZone, GeoZone } from '@/lib/global'
 // suggestion, not cartography. Layers (toggleable): risk (weather blobs +
 // geofence zones), network links, and an activity/intervention heatmap.
 
-const C: Record<string, string> = { safe: '#2fe6a6', warn: '#ffb020', crit: '#ff5468', ice: '#5cc6ff', muted: '#69728a' }
+const C: Record<string, string> = { safe: 'var(--c-safe)', warn: 'var(--c-warn)', crit: 'var(--c-crit)', ice: 'var(--c-ice)', muted: 'var(--c-faint)' }
 const TONES = ['safe', 'warn', 'crit', 'ice'] as const
 
 const LAND = [
@@ -82,8 +82,8 @@ export function GlobalMap({
         <g key={s.id}>
           <circle cx={s.x} cy={s.y} r={markerR(s.assets) + 1.4} fill="none" stroke={C[s.tone]} strokeOpacity="0.35" strokeWidth="0.4" />
           <circle cx={s.x} cy={s.y} r={markerR(s.assets)} fill={C[s.tone]} />
-          <text x={s.x} y={s.y - markerR(s.assets) - 1.8} fill="#e9edf6" fontSize="2.4" fontFamily="monospace" textAnchor="middle">{s.name}</text>
-          <text x={s.x} y={s.y + markerR(s.assets) + 3.4} fill="#69728a" fontSize="2" fontFamily="monospace" textAnchor="middle">{s.active}/{s.assets}</text>
+          <text x={s.x} y={s.y - markerR(s.assets) - 1.8} fill="var(--c-bright)" fontSize="2.4" fontFamily="monospace" textAnchor="middle">{s.name}</text>
+          <text x={s.x} y={s.y + markerR(s.assets) + 3.4} fill="var(--c-faint)" fontSize="2" fontFamily="monospace" textAnchor="middle">{s.active}/{s.assets}</text>
         </g>
       ))}
     </svg>

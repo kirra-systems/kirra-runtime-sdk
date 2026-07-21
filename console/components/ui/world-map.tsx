@@ -6,7 +6,7 @@ import type { Tone } from '@/lib/types'
 
 export interface Site { id: string; name: string; region: string; x: number; y: number; assets: number; tone: Tone; hub?: boolean }
 
-const stroke: Record<string, string> = { safe: '#2fe6a6', warn: '#ffb020', crit: '#ff5468', ice: '#5cc6ff', muted: '#69728a' }
+const stroke: Record<string, string> = { safe: 'var(--c-safe)', warn: 'var(--c-warn)', crit: 'var(--c-crit)', ice: 'var(--c-ice)', muted: 'var(--c-faint)' }
 
 export function WorldMap({ sites, height = 300 }: { sites: Site[]; height?: number }) {
   const hub = sites.find((s) => s.hub) ?? sites[0]
@@ -42,8 +42,8 @@ export function WorldMap({ sites, height = 300 }: { sites: Site[]; height?: numb
         <g key={s.id}>
           <circle cx={s.x} cy={s.y} r={s.hub ? 2.4 : 1.8} fill="none" stroke={stroke[s.tone]} strokeOpacity="0.35" strokeWidth="0.4" />
           <circle cx={s.x} cy={s.y} r={s.hub ? 1.2 : 0.9} fill={stroke[s.tone]} />
-          <text x={s.x} y={s.y - 3} fill="#e9edf6" fontSize="2.4" fontFamily="monospace" textAnchor="middle">{s.name}</text>
-          <text x={s.x} y={s.y + 4.4} fill="#69728a" fontSize="2" fontFamily="monospace" textAnchor="middle">{s.assets} assets</text>
+          <text x={s.x} y={s.y - 3} fill="var(--c-bright)" fontSize="2.4" fontFamily="monospace" textAnchor="middle">{s.name}</text>
+          <text x={s.x} y={s.y + 4.4} fill="var(--c-faint)" fontSize="2" fontFamily="monospace" textAnchor="middle">{s.assets} assets</text>
         </g>
       ))}
     </svg>

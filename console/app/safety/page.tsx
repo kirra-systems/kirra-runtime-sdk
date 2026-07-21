@@ -48,7 +48,7 @@ export default function SafetyPage() {
 
         <Panel title="Verdict Throughput" subtitle="last 24h">
           <div className="mb-3 flex items-baseline gap-2">
-            <span className="font-display text-3xl font-semibold text-ink">{(verdictMix.allow + verdictMix.clamp + verdictMix.deny).toLocaleString()}</span>
+            <span className="font-display text-3xl font-semibold text-ink">{(verdictMix.allow + verdictMix.clamp + verdictMix.deny).toLocaleString('en-US')}</span>
             <span className="font-mono text-xs text-muted">decisions</span>
           </div>
           <VerdictBar allow={verdictMix.allow} clamp={verdictMix.clamp} deny={verdictMix.deny} />
@@ -132,7 +132,7 @@ export default function SafetyPage() {
             </thead>
             <tbody className="font-mono text-[12px]">
               {violations.map((v) => (
-                <tr key={v.id} className="border-b border-line last:border-0 hover:bg-white/[0.02]">
+                <tr key={v.id} className="border-b border-line last:border-0 hover:bg-ink/[0.02]">
                   <td className="px-4 py-2.5 text-faint">{v.ts}</td>
                   <td className={`px-4 py-2.5 ${v.tone === 'crit' ? 'text-crit' : 'text-warn'}`}>{v.rule}</td>
                   <td className="px-4 py-2.5 text-ink">{v.asset}</td>
@@ -161,7 +161,7 @@ function VerdictBar({ allow, clamp, deny }: { allow: number; clamp: number; deny
   const p = (n: number) => `${(n / total) * 100}%`
   return (
     <div>
-      <div className="flex h-2 overflow-hidden rounded-full bg-white/5">
+      <div className="flex h-2 overflow-hidden rounded-full bg-ink/5">
         <div className="bg-safe" style={{ width: p(allow) }} />
         <div className="bg-warn" style={{ width: p(clamp) }} />
         <div className="bg-crit" style={{ width: p(deny) }} />
@@ -182,7 +182,7 @@ function Leg({ tone, label, value }: { tone: Tone; label: string; value: number 
         <span className={`h-2 w-2 rounded-full ${dotBg(tone)}`} />
         <span className="text-faint">{label}</span>
       </div>
-      <div className="mt-0.5 text-ink">{value.toLocaleString()}</div>
+      <div className="mt-0.5 text-ink">{value.toLocaleString('en-US')}</div>
     </div>
   )
 }

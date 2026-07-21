@@ -10,9 +10,9 @@ export function PositionMap({ path, ego, height = 210 }: { path: PosPoint[]; ego
         </pattern>
       </defs>
       <rect width="100" height="100" fill="url(#pm-grid)" />
-      <path d={d} fill="none" stroke="#5cc6ff" strokeWidth="0.7" strokeOpacity="0.55" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx={ego.x} cy={100 - ego.y} r="3.6" fill="none" stroke="#2fe6a6" strokeOpacity="0.4" strokeWidth="0.5" />
-      <circle cx={ego.x} cy={100 - ego.y} r="1.6" fill="#2fe6a6" />
+      <path d={d} fill="none" stroke="var(--c-ice)" strokeWidth="0.7" strokeOpacity="0.55" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={ego.x} cy={100 - ego.y} r="3.6" fill="none" stroke="var(--c-safe)" strokeOpacity="0.4" strokeWidth="0.5" />
+      <circle cx={ego.x} cy={100 - ego.y} r="1.6" fill="var(--c-safe)" />
     </svg>
   )
 }

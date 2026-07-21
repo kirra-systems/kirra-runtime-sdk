@@ -5,6 +5,7 @@ import { DemoBadge } from '@/components/ui/demo-badge'
 import { useLiveFleet, useAuditChain } from '@/lib/api/hooks'
 import { postureTone, trustLabel, trustReason, trustTone, type FleetPostureState } from '@/lib/api/types'
 import type { Tone } from '@/lib/types'
+import { utcTime } from '@/lib/format'
 
 export default function LivePage() {
   const { fleet, events, source, error, updatedAt } = useLiveFleet(5000)
@@ -20,7 +21,7 @@ export default function LivePage() {
         <div>
           <h1 className="font-display text-xl font-semibold text-ink">Live Fleet</h1>
           <p className="font-mono text-[11px] text-faint">
-            verifier · GET /fleet/posture · {source === 'live' ? `updated ${updatedAt ? new Date(updatedAt).toLocaleTimeString() : '—'}` : 'mock fallback'}
+            verifier · GET /fleet/posture · {source === 'live' ? `updated ${updatedAt ? utcTime(updatedAt) : '—'}` : 'mock fallback'}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -66,7 +67,7 @@ export default function LivePage() {
               </thead>
               <tbody className="font-mono text-[12px]">
                 {fleet.map((n) => (
-                  <tr key={n.node_id} className="border-b border-line last:border-0 hover:bg-white/[0.02]">
+                  <tr key={n.node_id} className="border-b border-line last:border-0 hover:bg-ink/[0.02]">
                     <td className="px-4 py-2.5 text-ink">{n.node_id}</td>
                     <td className={`px-4 py-2.5 ${txt(trustTone(n.local_status))}`} title={trustReason(n.local_status) ?? ''}>
                       {trustLabel(n.local_status)}
@@ -94,7 +95,7 @@ export default function LivePage() {
                     <StatusDot tone={tone} pulse={tone === 'crit'} />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 font-mono text-[10px] text-faint">
-                        <span>{new Date(e.emitted_at_ms).toLocaleTimeString()}</span>
+                        <span>{utcTime(e.emitted_at_ms)}</span>
                         <span className={txt(tone)}>{e.event_type}</span>
                       </div>
                       <p className="mt-0.5 truncate font-mono text-[12px] text-ink">
@@ -119,8 +120,8 @@ export default function LivePage() {
             </span>
           </div>
           <div className="mt-4 space-y-3">
-            <KV k="Total entries" v={audit.verify.total_entries.toLocaleString()} />
-            <KV k="Signed / unsigned" v={`${audit.verify.signed_entries.toLocaleString()} / ${audit.verify.unsigned_entries.toLocaleString()}`} />
+            <KV k="Total entries" v={audit.verify.total_entries.toLocaleString('en-US')} />
+            <KV k="Signed / unsigned" v={`${audit.verify.signed_entries.toLocaleString('en-US')} / ${audit.verify.unsigned_entries.toLocaleString('en-US')}`} />
             <KV k="Signature valid" v={audit.verify.signature_valid ? 'yes' : 'no'} tone={audit.verify.signature_valid ? 'safe' : 'crit'} />
             <KV k="Head" v={audit.verify.head_status} />
             <KV k="Latest hash" v={audit.verify.latest_hash} />
@@ -132,7 +133,7 @@ export default function LivePage() {
             {audit.entries.map((e) => (
               <li key={e.id} className="flex items-start gap-3 border-b border-line px-4 py-2.5 last:border-0">
                 <StatusDot tone={auditTone(e.event_type)} />
-                <span className="w-20 shrink-0 font-mono text-[10px] text-faint">{new Date(e.timestamp_ms).toLocaleTimeString()}</span>
+                <span className="w-20 shrink-0 font-mono text-[10px] text-faint">{utcTime(e.timestamp_ms)}</span>
                 <span className="w-24 shrink-0 font-mono text-[10px] uppercase tracking-wider text-muted">{e.source}</span>
                 <div className="min-w-0 flex-1">
                   <div className={`truncate font-mono text-[11px] ${txt(auditTone(e.event_type))}`}>{e.event_type}</div>

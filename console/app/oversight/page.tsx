@@ -34,7 +34,7 @@ export default function OversightPage() {
               <StatusDot tone={t.tone} />
             </div>
             <div className="mt-2 flex items-baseline gap-2">
-              <span className="font-display text-[28px] font-semibold leading-none text-ink">{t.value.toLocaleString()}</span>
+              <span className="font-display text-[28px] font-semibold leading-none text-ink">{t.value.toLocaleString('en-US')}</span>
               <span className={`font-mono text-xs ${txt(t.tone)}`}>{t.share}%</span>
             </div>
             <div className="mt-3"><Meter value={t.share} tone={t.tone} /></div>
@@ -98,7 +98,7 @@ export default function OversightPage() {
                 <tr
                   key={d.id}
                   onClick={() => raw.open({ title: d.reason, subtitle: `${d.verdict} · ${d.asset} · ${d.actionType}`, data: d })}
-                  className="cursor-pointer border-b border-line last:border-0 hover:bg-white/[0.02]"
+                  className="cursor-pointer border-b border-line last:border-0 hover:bg-ink/[0.02]"
                   title="tap for raw decision"
                 >
                   <td className="px-4 py-2.5 text-faint">{d.ts}</td>

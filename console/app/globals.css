@@ -2,18 +2,67 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================================
+   Kirra Console tokens — the operational extension of the
+   kirrasystems.com design system (website/css/kirra.css).
+   Dark is the operator default; light is a first-class theme
+   toggled via html.light. Components must reference tokens
+   (Tailwind classes or the --c-* hex vars for SVG/charts) —
+   never hardcoded hex.
+   ============================================================ */
+
 :root {
-  --bg: 8 10 16;
-  --surface: 11 14 22;
-  --panel: 16 20 30;
-  --elevated: 22 27 39;
-  --ink: 233 237 246;
-  --muted: 154 166 189;
-  --faint: 105 114 138;
-  --safe: 47 230 166;
-  --warn: 255 176 32;
-  --crit: 255 84 104;
-  --ice: 92 198 255;
+  /* surfaces & ink — RGB triples for Tailwind alpha composition */
+  --bg: 5 7 13;          /* #05070d — site --bg */
+  --surface: 10 15 26;   /* #0a0f1a — site --surface */
+  --panel: 15 22 38;     /* #0f1626 — site --surface-2 */
+  --elevated: 20 29 49;  /* #141d31 — site --surface-3 */
+  --ink: 232 238 247;    /* #e8eef7 */
+  --muted: 167 180 198;  /* #a7b4c6 */
+  --faint: 138 151 171;  /* #8a97ab — AA on bg (6.8:1) */
+  --line: 151 168 195;   /* borders at alpha in tailwind config */
+  /* status + accent — RGB triples */
+  --safe: 62 207 142;    /* #3ecf8e — site --ok */
+  --warn: 232 163 61;    /* #e8a33d */
+  --crit: 240 101 93;    /* #f0655d */
+  --ice: 63 217 201;     /* #3fd9c9 — the Kirra signal cyan */
+
+  /* hex mirrors for SVG/Recharts attribute usage (var() resolves in
+     presentation attributes; keep in lockstep with the triples above) */
+  --c-safe: #3ecf8e;
+  --c-warn: #e8a33d;
+  --c-crit: #f0655d;
+  --c-ice: #3fd9c9;
+  --c-faint: #8a97ab;
+  --c-panel: #0f1626;
+  --c-bright: #e8eef7;
+
+  color-scheme: dark;
+}
+
+html.light {
+  --bg: 246 248 251;     /* #f6f8fb */
+  --surface: 255 255 255;
+  --panel: 242 245 249;  /* #f2f5f9 */
+  --elevated: 232 237 244;
+  --ink: 12 21 36;       /* #0c1524 */
+  --muted: 70 86 108;    /* #46566c */
+  --faint: 91 107 128;   /* #5b6b80 */
+  --line: 24 42 68;
+  --safe: 10 110 64;     /* #0a6e40 */
+  --warn: 138 90 0;      /* #8a5a00 */
+  --crit: 192 57 43;     /* #c0392b */
+  --ice: 10 116 102;     /* #0a7466 — site light accent */
+
+  --c-safe: #0a6e40;
+  --c-warn: #8a5a00;
+  --c-crit: #c0392b;
+  --c-ice: #0a7466;
+  --c-faint: #5b6b80;
+  --c-panel: #f2f5f9;
+  --c-bright: #0c1524;
+
+  color-scheme: light;
 }
 
 @layer base {
@@ -27,7 +76,7 @@
 
 @layer utilities {
   .scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
-  .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(150,166,198,0.18); border-radius: 8px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: rgb(var(--line) / 0.18); border-radius: 8px; }
   .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
 }
 
@@ -48,26 +97,27 @@
   background-attachment: local, local, scroll, scroll;
 }
 
-/* Subtle mission-control environmental layer (grid + glow), restrained. */
+/* Subtle mission-control environmental layer (grid + glow), restrained.
+   Token-driven so it adapts to both themes. */
 .app-bg {
   position: fixed;
   inset: 0;
   z-index: 0;
   pointer-events: none;
   background:
-    radial-gradient(1100px 560px at 8% -8%, rgba(47, 230, 166, 0.05), transparent 60%),
-    radial-gradient(1000px 680px at 102% 108%, rgba(92, 198, 255, 0.045), transparent 60%);
+    radial-gradient(1100px 560px at 8% -8%, rgb(var(--ice) / 0.05), transparent 60%),
+    radial-gradient(1000px 680px at 102% 108%, rgb(var(--ice) / 0.04), transparent 60%);
 }
 .app-bg::before {
   content: '';
   position: absolute;
   inset: 0;
   background-image:
-    linear-gradient(rgba(150, 166, 198, 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(150, 166, 198, 0.035) 1px, transparent 1px);
+    linear-gradient(rgb(var(--line) / 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(var(--line) / 0.035) 1px, transparent 1px);
   background-size: 46px 46px;
   -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 24%, #000 28%, transparent 86%);
   mask-image: radial-gradient(ellipse 80% 70% at 50% 24%, #000 28%, transparent 86%);
 }
 
-::selection { background: rgb(var(--safe)); color: #04130d; }
+::selection { background: rgb(var(--ice)); color: rgb(var(--bg)); }

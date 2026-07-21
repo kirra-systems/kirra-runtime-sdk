@@ -1,10 +1,12 @@
+import { seededRand } from '@/lib/seeded'
+const rand = seededRand(103)
 import type { SeriesPoint, Tone } from './types'
 
 function g(n: number, b: number, j: number, drift = 0): SeriesPoint[] {
   const o: SeriesPoint[] = []
   let v = b
   for (let i = 0; i < n; i++) {
-    v += (Math.random() - 0.5) * j + drift
+    v += (rand() - 0.5) * j + drift
     v = Math.max(0, v)
     o.push({ t: `${String(i % 24).padStart(2, '0')}:00`, v: Math.round(v * 10) / 10 })
   }
@@ -45,7 +47,7 @@ export const actuatorLog: ActuatorCmd[] = [
 
 export const path: PosPoint[] = Array.from({ length: 40 }).map((_, i) => {
   const t = i / 39
-  return { x: 8 + t * 84, y: 50 + Math.sin(t * Math.PI * 3) * 28 + (Math.random() - 0.5) * 2 }
+  return { x: 8 + t * 84, y: 50 + Math.sin(t * Math.PI * 3) * 28 + (rand() - 0.5) * 2 }
 })
 export const ego: PosPoint = path[25]
 

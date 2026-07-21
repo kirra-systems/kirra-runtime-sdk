@@ -4,7 +4,7 @@ import type { SpatialFrame, ReplayActor } from '@/lib/incidents'
 // an incident. The ego advances per scrubber frame; the traveled path brightens,
 // the planned path stays faint, and the front radar cone recolors with sensor
 // health. Pure SVG, driven by the page's frame index.
-const C: Record<string, string> = { safe: '#2fe6a6', warn: '#ffb020', crit: '#ff5468', ice: '#5cc6ff', muted: '#9aa6bd' }
+const C: Record<string, string> = { safe: 'var(--c-safe)', warn: 'var(--c-warn)', crit: 'var(--c-crit)', ice: 'var(--c-ice)', muted: 'var(--c-faint)' }
 
 export function ReplayMap({
   frames, actors, hazard, index, height = 320,
@@ -62,7 +62,7 @@ export function ReplayMap({
         <rect x={ego.x - 2.6} y={ego.y - 3.4} width="5.2" height="6.8" rx="1" fill="rgba(22,27,39,0.96)" stroke={breached ? C.crit : C.ice} strokeWidth="0.6" />
         <polygon points={`${ego.x},${ego.y - 5} ${ego.x - 1.6},${ego.y - 3.2} ${ego.x + 1.6},${ego.y - 3.2}`} fill={breached ? C.crit : C.ice} />
       </g>
-      <text x={ego.x} y={ego.y + 7} fill="#9aa6bd" fontSize="2.4" fontFamily="monospace" textAnchor="middle">KIRRA-13</text>
+      <text x={ego.x} y={ego.y + 7} fill="var(--c-faint)" fontSize="2.4" fontFamily="monospace" textAnchor="middle">KIRRA-13</text>
     </svg>
   )
 }

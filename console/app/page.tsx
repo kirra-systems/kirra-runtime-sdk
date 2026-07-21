@@ -1,7 +1,7 @@
-import { Stat, Pill, StatusDot, Meter, Panel } from '@/components/ui/primitives'
-import { DemoBadge } from '@/components/ui/demo-badge'
+import { Stat, StatusDot, Meter, Pill, Panel } from '@/components/ui/primitives'
 import { Spark } from '@/components/charts/charts'
 import { HeroSafety, FleetTopology, MissionMap, ExecSummary, AuditLedger, EventFeed } from '@/components/command'
+import { OverviewStatus } from '@/components/ui/overview-status'
 import { kpis, robots, postureTone } from '@/lib/mock'
 
 export default function OverviewPage() {
@@ -10,14 +10,9 @@ export default function OverviewPage() {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="font-display text-xl font-semibold text-ink">Fleet Command</h1>
-          <p className="font-mono text-[11px] text-faint">PRODUCTION · us-fleet-1 · updated 2s ago</p>
+          <p className="font-mono text-[11px] text-faint">posture · audit · freshness — from the console&apos;s real data source</p>
         </div>
-        <div className="flex items-center gap-2">
-          <DemoBadge live={false} />
-          <Pill tone="safe">Fleet Nominal</Pill>
-          <Pill tone="ice">E-Stop Armed</Pill>
-          <button className="rounded-lg border border-line bg-panel px-3 py-1.5 font-mono text-[11px] text-muted hover:text-ink">Last 24h</button>
-        </div>
+        <OverviewStatus />
       </div>
 
       <HeroSafety />
@@ -56,7 +51,7 @@ export default function OverviewPage() {
               </thead>
               <tbody className="font-mono text-[12px]">
                 {robots.map((r) => (
-                  <tr key={r.id} className="border-b border-line last:border-0 hover:bg-white/[0.02]">
+                  <tr key={r.id} className="border-b border-line last:border-0 hover:bg-ink/[0.02]">
                     <td className="px-4 py-2.5"><div className="text-ink">{r.name}</div><div className="text-[10px] text-faint">{r.model}</div></td>
                     <td className="px-4 py-2.5"><Pill tone={postureTone(r.posture)}>{r.posture}</Pill></td>
                     <td className="px-4 py-2.5 text-muted">{r.mission}</td>

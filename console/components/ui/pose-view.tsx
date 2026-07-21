@@ -4,7 +4,7 @@ import type { Tone } from '@/lib/types'
 // Robot pose visualization — a top-down chassis on a perspective ground grid,
 // rotated by yaw, with a heading arrow and compass ring. Pitch/roll are surfaced
 // as readouts by the caller. Pure SVG (no three.js); reads as a 3D pose.
-const COL: Record<string, string> = { safe: '#2fe6a6', warn: '#ffb020', crit: '#ff5468', ice: '#5cc6ff', muted: '#9aa6bd' }
+const COL: Record<string, string> = { safe: 'var(--c-safe)', warn: 'var(--c-warn)', crit: 'var(--c-crit)', ice: 'var(--c-ice)', muted: 'var(--c-faint)' }
 
 export function PoseView({ pose, tone, height = 240 }: { pose: TwinPose; tone: Tone; height?: number }) {
   const c = COL[tone] ?? COL.ice
@@ -26,7 +26,7 @@ export function PoseView({ pose, tone, height = 240 }: { pose: TwinPose; tone: T
       {/* floor shadow + compass ring */}
       <ellipse cx={cx} cy={cy + 12} rx="16" ry="4.5" fill={c} opacity="0.08" />
       <circle cx={cx} cy={cy} r="23" fill="none" stroke="rgba(150,166,198,0.16)" strokeWidth="0.3" strokeDasharray="0.5 3" />
-      <text x={cx} y={cy - 25} fill="#69728a" fontSize="3" fontFamily="monospace" textAnchor="middle">N</text>
+      <text x={cx} y={cy - 25} fill="var(--c-faint)" fontSize="3" fontFamily="monospace" textAnchor="middle">N</text>
 
       {/* chassis rotated by yaw */}
       <g transform={`rotate(${pose.yaw} ${cx} ${cy})`}>

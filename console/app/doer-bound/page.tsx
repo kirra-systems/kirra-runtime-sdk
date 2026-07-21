@@ -51,8 +51,8 @@ export default function DoerBoundPage() {
         subtitle={`stopped car at x=${blocked.obstacleX} m · ego at x=${egoX} · goal at x=${goalX}`}
         action={
           <div className="flex items-center gap-3 font-mono text-[10px] uppercase tracking-wider text-faint">
-            <span className="flex items-center gap-1"><i className="inline-block h-2 w-2 rounded-full" style={{ background: '#2fe6a6' }} />occy · admitted</span>
-            <span className="flex items-center gap-1"><i className="inline-block h-2 w-2 rounded-full" style={{ background: '#ff5468' }} />reckless · rejected</span>
+            <span className="flex items-center gap-1"><i className="inline-block h-2 w-2 rounded-full" style={{ background: 'var(--c-safe)' }} />occy · admitted</span>
+            <span className="flex items-center gap-1"><i className="inline-block h-2 w-2 rounded-full" style={{ background: 'var(--c-crit)' }} />reckless · rejected</span>
           </div>
         }
       >

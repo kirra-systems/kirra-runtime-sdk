@@ -36,7 +36,7 @@ export default function SettingsPage() {
                 {a.critical && <AlertOctagon className="h-4 w-4 text-crit" />}
               </div>
               <p className="mt-2 text-[11px] leading-snug text-muted">{a.desc}</p>
-              <span className="mt-3 inline-block rounded-sm bg-white/5 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-faint">request → governor</span>
+              <span className="mt-3 inline-block rounded-sm bg-ink/5 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-faint">request → governor</span>
             </div>
           ))}
         </div>
@@ -74,11 +74,11 @@ export default function SettingsPage() {
               </thead>
               <tbody className="font-mono text-[12px]">
                 {config.map((c) => (
-                  <tr key={c.key} className="border-b border-line last:border-0 hover:bg-white/[0.02]">
+                  <tr key={c.key} className="border-b border-line last:border-0 hover:bg-ink/[0.02]">
                     <td className="px-4 py-2.5 text-ink">{c.key}</td>
                     <td className={`px-4 py-2.5 ${txt(c.tone)}`}>{c.value}</td>
                     <td className="px-4 py-2.5">
-                      <span className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] uppercase text-muted">{c.scope}</span>
+                      <span className="rounded bg-ink/5 px-1.5 py-0.5 text-[10px] uppercase text-muted">{c.scope}</span>
                     </td>
                   </tr>
                 ))}
@@ -116,7 +116,7 @@ export default function SettingsPage() {
             </thead>
             <tbody className="text-[12px]">
               {roster.map((m) => (
-                <tr key={m.name} className="border-b border-line last:border-0 hover:bg-white/[0.02]">
+                <tr key={m.name} className="border-b border-line last:border-0 hover:bg-ink/[0.02]">
                   <td className="px-4 py-2.5 text-ink">{m.name}</td>
                   <td className="px-4 py-2.5 text-muted">{m.role}</td>
                   <td className="px-4 py-2.5 font-mono text-[11px] text-faint">{m.access}</td>
@@ -138,7 +138,7 @@ export default function SettingsPage() {
 
 function Toggle({ on }: { on: boolean }) {
   return (
-    <span className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${on ? 'bg-safe/40' : 'bg-white/10'}`}>
+    <span className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${on ? 'bg-safe/40' : 'bg-ink/10'}`}>
       <span className={`inline-block h-3 w-3 transform rounded-full transition-transform ${on ? 'translate-x-3.5 bg-safe' : 'translate-x-0.5 bg-muted'}`} />
     </span>
   )

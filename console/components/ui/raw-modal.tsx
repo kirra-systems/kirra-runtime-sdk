@@ -38,12 +38,12 @@ export function RawModal({ title, subtitle, data, onClose }: {
           <div className="flex shrink-0 items-center gap-1.5">
             <button
               onClick={copy}
-              className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-faint hover:bg-white/[0.04] hover:text-ink"
+              className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-faint hover:bg-ink/[0.04] hover:text-ink"
             >
               {copied ? <Check className="h-3 w-3 text-safe" /> : <Copy className="h-3 w-3" />}
               {copied ? 'copied' : 'copy'}
             </button>
-            <button onClick={onClose} aria-label="close" className="flex h-7 w-7 items-center justify-center rounded-lg border border-line text-faint hover:bg-white/[0.04] hover:text-ink">
+            <button onClick={onClose} aria-label="close" className="flex h-7 w-7 items-center justify-center rounded-lg border border-line text-faint hover:bg-ink/[0.04] hover:text-ink">
               <X className="h-3.5 w-3.5" />
             </button>
           </div>
