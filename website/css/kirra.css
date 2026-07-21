@@ -82,7 +82,7 @@
   --accent-strong: #086055;
   --accent-soft: rgba(10, 116, 102, 0.10);
   --accent-line: rgba(10, 116, 102, 0.35);
-  --ok: #0e7a46;
+  --ok: #0a6e40;
   --warn: #8a5a00;
   --danger: #c0392b;
   --danger-soft: rgba(192, 57, 43, 0.10);
@@ -403,9 +403,9 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 0.92rem; min-widt
   padding: 2px 10px; border-radius: 999px; white-space: nowrap;
 }
 .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.pill--live { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
-.pill--gated { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
-.pill--rnd { color: var(--chart-2); background: color-mix(in srgb, var(--chart-2) 12%, transparent); }
+.pill--live { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.pill--gated { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.pill--rnd { color: var(--chart-2); background: color-mix(in srgb, var(--chart-2) 10%, transparent); }
 .pill--deny { color: var(--danger); background: var(--danger-soft); }
 
 /* ---------- Code blocks ---------- */
@@ -659,7 +659,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 0.92rem; min-widt
 .footer__grid { display: grid; grid-template-columns: 1.4fr repeat(4, 1fr); gap: 32px; }
 @media (max-width: 980px) { .footer__grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 560px) { .footer__grid { grid-template-columns: 1fr; } }
-.footer h4 {
+.footer h3 {
   font-family: var(--font-mono); font-size: 0.72rem; font-weight: 500;
   letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-3);
   margin-bottom: 14px;

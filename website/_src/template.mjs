@@ -80,7 +80,7 @@ const FOOTER = `
         <p>The fail-closed runtime safety governor for AI-driven machines. The doer proposes; the checker bounds it.</p>
       </div>
       <nav aria-label="Platform">
-        <h4>Platform</h4>
+        <h3>Platform</h3>
         <ul>
           <li><a href="solutions.html">Solutions</a></li>
           <li><a href="architecture.html">Architecture</a></li>
@@ -92,7 +92,7 @@ const FOOTER = `
         </ul>
       </nav>
       <nav aria-label="Safety">
-        <h4>Safety</h4>
+        <h3>Safety</h3>
         <ul>
           <li><a href="safety.html">Safety model</a></li>
           <li><a href="planning.html">Planning</a></li>
@@ -102,7 +102,7 @@ const FOOTER = `
         </ul>
       </nav>
       <nav aria-label="Evidence">
-        <h4>Evidence</h4>
+        <h3>Evidence</h3>
         <ul>
           <li><a href="playground.html">Verdict Playground</a></li>
           <li><a href="benchmarks.html">Benchmarks</a></li>
@@ -112,7 +112,7 @@ const FOOTER = `
         </ul>
       </nav>
       <nav aria-label="Company">
-        <h4>Company</h4>
+        <h3>Company</h3>
         <ul>
           <li><a href="vision.html">Vision</a></li>
           <li><a href="contact.html">Contact</a></li>
@@ -127,6 +127,7 @@ const FOOTER = `
       <span>© <span data-year>2026</span> Kirra Systems</span>
       <span class="mono">kirra-verifier ${SITE.version} · Rust 2021 · MSRV 1.88</span>
       <span>Every claim on this site links to its source in the repository.</span>
+      <a class="mono" data-lighthouse hidden href="${SITE.repo}/blob/main/scripts/lighthouse-bake.mjs" target="_blank" rel="noopener" style="text-decoration:none"></a>
     </div>
   </div>
 </footer>`;
@@ -220,7 +221,7 @@ export function page(meta, body) {
         <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg>
         <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
       </button>
-      <a href="${SITE.repo}" class="nav__cta" target="_blank" rel="noopener"><span class="label">GitHub</span><span aria-hidden="true">↗</span></a>
+      <a href="${SITE.repo}" class="nav__cta" target="_blank" rel="noopener" aria-label="Kirra on GitHub (opens in new tab)"><span class="label">GitHub</span><span aria-hidden="true">↗</span></a>
       <button class="nav__burger" id="navBurger" aria-label="Open menu" aria-expanded="false" aria-controls="navLinks">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
       </button>

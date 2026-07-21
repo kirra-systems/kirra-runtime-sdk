@@ -199,7 +199,24 @@
     });
   });
 
-  /* ---------- Field Notes feed (posts.json → RSS proxies fallback) ---------- */
+  /* ---------- Lighthouse footer badge (measured at deploy; hidden if never measured) */
+  const lhSlot = $("[data-lighthouse]");
+  if (lhSlot) {
+    fetch("lighthouse.json", { cache: "no-cache" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s) => {
+        if (!s || typeof s.performance !== "number") return;
+        lhSlot.textContent =
+          `Lighthouse ${s.measuredAt} (min of ${s.pages?.length ?? "?"} pages): ` +
+          `Perf ${s.performance} · A11y ${s.accessibility} · BP ${s.bestPractices} · SEO ${s.seo}`;
+        lhSlot.hidden = false;
+      })
+      .catch(() => {});
+  }
+
+  /* ---------- Field Notes feed (posts.json → RSS proxies fallback) ----------
+     Lazy: third-party fetches start only when the section approaches the
+     viewport, so page load stays first-party-only. */
   const notesGrid = $("[data-notes]");
   if (notesGrid) {
     const FEED = "https://justinlooney.substack.com/feed";
@@ -249,7 +266,7 @@
         });
       } catch { return null; }
     };
-    (async () => {
+    const loadNotes = async () => {
       const posts = (await fromPostsJson()) || (await fromRss2Json()) || (await fromAllOrigins());
       if (!posts) return; // subscribe CTA stays as fallback
       notesGrid.innerHTML = posts.map((p) => `
@@ -262,7 +279,13 @@
         </a>`).join("");
       const fallback = $("[data-notes-fallback]");
       if (fallback) fallback.hidden = true;
-    })();
+    };
+    if ("IntersectionObserver" in window) {
+      const io = new IntersectionObserver((entries) => {
+        if (entries.some((e) => e.isIntersecting)) { io.disconnect(); loadNotes(); }
+      }, { rootMargin: "600px 0px" });
+      io.observe(notesGrid);
+    } else loadNotes();
   }
 
   /* ---------- Current-year stamp ---------- */
