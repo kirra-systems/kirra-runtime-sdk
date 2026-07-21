@@ -41,14 +41,15 @@ export const MARK = `<svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
 </svg>`;
 
 const NAV_LINKS = [
+  ["solutions.html", "Solutions"],
   ["architecture.html", "Architecture"],
   ["safety.html", "Safety"],
-  ["performance.html", "Performance"],
   ["certification.html", "Certification"],
   ["field-notes.html", "Field Notes"],
 ];
 
 const SUBNAV = [
+  ["solutions.html", "solutions"],
   ["architecture.html", "architecture"],
   ["runtime.html", "runtime"],
   ["safety.html", "safety"],
@@ -76,6 +77,7 @@ const FOOTER = `
       <nav aria-label="Platform">
         <h4>Platform</h4>
         <ul>
+          <li><a href="solutions.html">Solutions</a></li>
           <li><a href="architecture.html">Architecture</a></li>
           <li><a href="runtime.html">Runtime</a></li>
           <li><a href="determinism.html">Determinism</a></li>
