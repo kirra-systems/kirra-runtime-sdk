@@ -590,11 +590,11 @@ mod ci_gate_tests {
         // edge against every footprint corner of every pose, max work). A
         // regression that introduces an alloc, Mutex, or unbounded loop on the
         // SG2 check would surface here.
-        use crate::gateway::containment::{
+        use crate::gateway::kinematics_contract::VehicleKinematicsContract;
+        use kirra_core::containment::{
             validate_trajectory_containment, Corridor, Point, Pose, VehicleFootprint,
             MAX_CORRIDOR_VERTICES, MAX_TRAJECTORY_HORIZON,
         };
-        use crate::gateway::kinematics_contract::VehicleKinematicsContract;
         use kirra_core::frame_integrity::FrameTrust;
 
         let n = MAX_CORRIDOR_VERTICES;

@@ -23,6 +23,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 kirra-verifier = { path = ".." }
 kirra-wire-client = { path = "../crates/kirra-wire-client" }
+kirra-industrial = { path = "../crates/kirra-industrial" }
 
 # Prevent this crate's [[bin]] targets from being treated as libtest binaries.
 [[bin]]

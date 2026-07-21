@@ -52,10 +52,11 @@ separate compilation units), **xc** = sibling crates + integration tests
 Land in ascending blast-radius so each step is independently reviewable and the
 ratchet ticks down visibly. Group by shared reviewer context where natural.
 
-1. **Wave 1 — trivial, bin-or-single-file (7 shims → 7):** `adapters`,
+1. **Wave 1 — trivial, bin-or-single-file (14 → 7): ✅ DONE.** `adapters`,
    `protocol_adapter`, `federation_reconciliation`, `kinematics_sim`,
-   `gateway::containment`, `governor_guard`, `federation`. Each: repoint a handful
-   of sites, delete the module, `max_shims -= 1`.
+   `gateway::containment`, `governor_guard`, `federation` — repointed to their
+   canonical crates and deleted; `max_shims` 14 → 7. (Version stays 1.x; the bump
+   itself lands with the final wave.)
 2. **Wave 2 — medium (4 shims → 3):** `attestation`, `capture`, `ota_campaign`,
    `fabric::asset`. `capture` also requires each consumer crate to enable the
    `kirra-core` `capture` feature (already on in the SDK manifest; verify for any

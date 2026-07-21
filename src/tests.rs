@@ -846,12 +846,12 @@ fn test_load_all_posture_events_empty_on_fresh_store() {
 
 #[test]
 fn test_valid_ed25519_signature_verification_passes() {
-    use crate::federation::{
-        canonical_federation_payload, verify_federated_report_signature, FederatedTrustReport,
-    };
     use crate::verifier::FleetPosture;
     use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
     use ed25519_dalek::{Signer, SigningKey};
+    use kirra_fleet_types::federation::{
+        canonical_federation_payload, verify_federated_report_signature, FederatedTrustReport,
+    };
     use rand::rngs::OsRng;
 
     let signing_key = SigningKey::generate(&mut OsRng);
@@ -878,12 +878,12 @@ fn test_valid_ed25519_signature_verification_passes() {
 
 #[test]
 fn test_tampered_payload_ed25519_verification_fails() {
-    use crate::federation::{
-        canonical_federation_payload, verify_federated_report_signature, FederatedTrustReport,
-    };
     use crate::verifier::FleetPosture;
     use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
     use ed25519_dalek::{Signer, SigningKey};
+    use kirra_fleet_types::federation::{
+        canonical_federation_payload, verify_federated_report_signature, FederatedTrustReport,
+    };
     use rand::rngs::OsRng;
 
     let signing_key = SigningKey::generate(&mut OsRng);
@@ -913,12 +913,12 @@ fn test_tampered_payload_ed25519_verification_fails() {
 
 #[test]
 fn test_wrong_key_ed25519_verification_fails() {
-    use crate::federation::{
-        canonical_federation_payload, verify_federated_report_signature, FederatedTrustReport,
-    };
     use crate::verifier::FleetPosture;
     use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
     use ed25519_dalek::{Signer, SigningKey};
+    use kirra_fleet_types::federation::{
+        canonical_federation_payload, verify_federated_report_signature, FederatedTrustReport,
+    };
     use rand::rngs::OsRng;
 
     let signing_key = SigningKey::generate(&mut OsRng);

@@ -1,6 +1,5 @@
 // src/gateway/mod.rs
 
-pub mod containment;
 pub mod contract_profiles;
 pub mod kinematics_contract;
 pub mod perception_monitor;

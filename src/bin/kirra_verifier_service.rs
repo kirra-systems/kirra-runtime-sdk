@@ -21,27 +21,27 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 use tower_http::cors::{Any, CorsLayer};
 
+use kirra_fleet_types::federation::{RegisterFederationControllerRequest, ReportEvaluation};
+use kirra_fleet_types::federation_reconciliation::{
+    authoritative_posture, dissenting_restriction, evaluate_federated_report_v2,
+    verify_federated_report_signature_v2, FederatedTrustReportV2,
+};
+use kirra_industrial::adapters::canopen::{CanOpenAdapter, CanOpenMessage};
+use kirra_industrial::adapters::dnp3::{Dnp3Adapter, Dnp3Message};
+use kirra_industrial::adapters::ethernet_ip::{EtherNetIpAdapter, EtherNetIpMessage};
+use kirra_industrial::protocol_adapter::{
+    evaluate_unified_industrial_request, IndustrialProtocol, UnifiedIndustrialRequest,
+};
 use kirra_verifier::action_filter::{evaluate_action_claim, ActionClaim};
-use kirra_verifier::adapters::canopen::{CanOpenAdapter, CanOpenMessage};
-use kirra_verifier::adapters::dnp3::{Dnp3Adapter, Dnp3Message};
-use kirra_verifier::adapters::ethernet_ip::{EtherNetIpAdapter, EtherNetIpMessage};
 use kirra_verifier::authz::{
     authorize_request, generate_api_token, token_fingerprint, token_sha256_hex, ApiRole,
     AuthzOutcome, ResolvedPrincipal, SCOPE_ACTUATOR_COMMAND, SCOPE_ADMIN, SCOPE_AUDIT_READ,
     SCOPE_INTEGRATION_EVALUATE,
 };
 use kirra_verifier::env_config::EffectiveConfig;
-use kirra_verifier::federation::{RegisterFederationControllerRequest, ReportEvaluation};
-use kirra_verifier::federation_reconciliation::{
-    authoritative_posture, dissenting_restriction, evaluate_federated_report_v2,
-    verify_federated_report_signature_v2, FederatedTrustReportV2,
-};
 use kirra_verifier::posture_cache::{now_ms, ServiceState, POSTURE_CACHE_TTL_MS};
 use kirra_verifier::posture_engine_v2::{
     resolve_posture_snapshot_silent, resolve_posture_with_reason, LockoutReason,
-};
-use kirra_verifier::protocol_adapter::{
-    evaluate_unified_industrial_request, IndustrialProtocol, UnifiedIndustrialRequest,
 };
 use kirra_verifier::security::{admin_token_ok, constant_time_compare};
 use kirra_verifier::standby_monitor::{
@@ -428,23 +428,23 @@ async fn main() {
     // node-offline event marks the correct asset (effectful recalc). Sourced
     // from KIRRA_CANOPEN_NODE_MAP; unset → empty map (every offline is then
     // unattributed, handled fail-closed in evaluate_canopen_adapter).
-    kirra_verifier::adapters::canopen::init_node_map_from_env();
+    kirra_industrial::adapters::canopen::init_node_map_from_env();
 
     // DNP3 Analog Output magnitude envelope from KIRRA_DNP3_ANALOG_OUTPUT_ENVELOPE
     // ("min:max"); unset/invalid → analog control writes are denied (fail-closed).
-    kirra_verifier::adapters::dnp3::init_analog_envelope_from_env();
+    kirra_industrial::adapters::dnp3::init_analog_envelope_from_env();
 
     // CANopen SDO download per-target magnitude bounds from KIRRA_CANOPEN_SDO_BOUNDS
     // ("node:index:subindex=type:min:max", …) + KIRRA_CANOPEN_STRICT_BOUNDS. Unset →
     // SDO writes are posture-only; a configured target is faithfully decoded by its
     // declared type and bounded (fail-closed on breach/undecodable).
-    kirra_verifier::adapters::canopen::init_sdo_bounds_from_env();
+    kirra_industrial::adapters::canopen::init_sdo_bounds_from_env();
 
     // CIP per-attribute magnitude bounds from KIRRA_CIP_ATTR_BOUNDS
     // ("class:instance:attr=type:min:max", …) + KIRRA_CIP_STRICT_BOUNDS. Unset →
     // CIP writes are posture-only; a configured Set_Attribute_Single target is
     // faithfully decoded by its declared type and bounded (fail-closed on breach).
-    kirra_verifier::adapters::ethernet_ip::init_cip_bounds_from_env();
+    kirra_industrial::adapters::ethernet_ip::init_cip_bounds_from_env();
 
     // EP-12 (Config Slice B): build the boot-time EffectiveConfig snapshot ONCE,
     // VALIDATING every migrated variable (vehicle class, HA timing knobs, HA

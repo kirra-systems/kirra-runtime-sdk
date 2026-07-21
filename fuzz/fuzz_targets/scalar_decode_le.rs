@@ -1,13 +1,13 @@
 #![no_main]
 //! Fuzz the generic little-endian scalar field decoder
-//! (`kirra_verifier::adapters::ScalarType::decode_le`).
+//! (`kirra_industrial::adapters::ScalarType::decode_le`).
 //!
 //! This backs the CANopen SDO / EtherNet-IP / DNP3 magnitude-bound checks — it
 //! slices the leading `width()` bytes of an untrusted protocol payload and
 //! reinterprets them as the configured type. Fail-closed contract: a buffer
 //! shorter than the type width must yield `None` — never an out-of-bounds slice,
 //! never a panic. The first byte selects the type; the rest is the payload.
-use kirra_verifier::adapters::ScalarType;
+use kirra_industrial::adapters::ScalarType;
 use libfuzzer_sys::fuzz_target;
 
 const TYPES: [ScalarType; 8] = [

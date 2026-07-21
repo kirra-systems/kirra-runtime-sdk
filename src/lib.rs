@@ -51,7 +51,6 @@ pub mod dds_cyclonedds;
 pub mod env_config;
 pub mod ffi;
 pub mod gateway;
-pub mod governor_guard;
 pub mod kinematics_contract;
 pub mod kirra_core;
 pub mod metrics;
@@ -90,8 +89,6 @@ pub mod command_source;
 // Learning-loop capture channel (Phase 1, #190) — sibling of audit_writer;
 // non-blocking, default-OFF side channel recording the verdict/correction.
 pub mod capture;
-pub mod federation;
-pub mod federation_reconciliation;
 pub mod traceability_gate;
 pub mod wcet_gate;
 // ADR-0035 Stage 3g: the off-verdict-path async writer handles (audit/capture
@@ -100,16 +97,13 @@ pub mod wcet_gate;
 pub mod writer_handles;
 // R2: `impl FleetTrustStore for VerifierStore` — the narrow durable seam the QM
 // fleet transport drives instead of depending on this crate's `VerifierStore`.
-pub mod adapters;
 pub mod challenge_rate_limit; // Bug 3 — rate limit for the public attestation-challenge endpoint
 pub mod challenge_state; // ADR-0035 slice 3i — volatile challenge/nonce field façade (app.challenges)
 pub mod execution_manager; // WP-20/G-11 declarative task manifest + startup dependency DAG
 pub mod fabric;
 pub mod fleet_graph; // ADR-0035 slice 3k — in-memory fleet trust graph façade (app.fleet)
-pub mod kinematics_sim;
 pub mod lease; // WP-19/G-21 lease-based failover timing model (pure)
 pub mod observability_state; // ADR-0035 slice 3j — fleet-observability registries façade (app.observability)
-pub mod protocol_adapter;
 pub mod standby_monitor;
 /// Background-task supervisor (review finding C2): re-spawns dead safety loops and
 /// escalates the fleet to fail-closed LockedOut if a critical loop is wedged.

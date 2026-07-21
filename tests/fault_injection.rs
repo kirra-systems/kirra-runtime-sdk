@@ -16,7 +16,7 @@
 //
 // Tracking: CERT-004, ADL-010 / ADL-011 in work/decisions.md.
 
-use kirra_verifier::federation::{
+use kirra_fleet_types::federation::{
     evaluate_federated_report, FederatedTrustReport, FEDERATION_REPLAY_WINDOW_MS,
 };
 use kirra_verifier::gateway::policy::OperationalCommand;
