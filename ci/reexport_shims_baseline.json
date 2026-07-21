@@ -1,7 +1,7 @@
 {
-  "_comment": "ADR-0035 re-export shim inventory + deprecation policy (#1029 A1 — the shim-deprecation front). Each entry is a src/ module that is now a PURE `pub use <canonical>` re-export left in place ONLY for path back-compat after the de-monolith relocated its contents into a lean leaf crate (so every existing `crate::<mod>::*` / `kirra_verifier::<mod>::*` path resolves unchanged). Per the #1029 review these are DEPRECATED indirection, NOT a permanent layer: scheduled for removal at the next MAJOR (`remove_in`), when internal callers repoint to the canonical crate path and the shim module is deleted. This ratchet (ci/check_reexport_shims.py) FREEZES the set: a NEW untracked shim fails CI (new indirection must be a conscious, recorded decision — or, better, avoided), and `max_shims` only moves DOWN. Removing a shim = migrate its callers to the canonical path, delete the module + its `pub mod` line, drop the entry here, and lower max_shims to lock the gain. FIRST REMOVAL (17->16): src/gateway/interceptor.rs — an INTERNAL import-surface shim (re-exported crate::posture_cache + kirra_core for policy_layer) with ZERO consumers (dead indirection), removed with no caller migration and no MAJOR bump needed (internal-only shims carry no external path contract). The remaining 16 are leaf-crate re-exports whose `crate::<mod>` paths ARE published API, so their removal stays gated to v2.0.0.",
+  "_comment": "ADR-0035 re-export shim inventory + deprecation policy (#1029 A1 — the shim-deprecation front). Each entry is a src/ module that is now a PURE `pub use <canonical>` re-export left in place ONLY for path back-compat after the de-monolith relocated its contents into a lean leaf crate (so every existing `crate::<mod>::*` / `kirra_verifier::<mod>::*` path resolves unchanged). Per the #1029 review these are DEPRECATED indirection, NOT a permanent layer: scheduled for removal at the next MAJOR (`remove_in`), when internal callers repoint to the canonical crate path and the shim module is deleted. This ratchet (ci/check_reexport_shims.py) FREEZES the set: a NEW untracked shim fails CI (new indirection must be a conscious, recorded decision — or, better, avoided), and `max_shims` only moves DOWN. Removing a shim = migrate its callers to the canonical path, delete the module + its `pub mod` line, drop the entry here, and lower max_shims to lock the gain. REMOVAL POLICY — dead vs live: a shim with ZERO consumers anywhere in the workspace (no `crate::<mod>` internal use, no `kirra_verifier::<mod>` cross-crate/bin use) is dead indirection with no reachable dependent; removing it pre-2.0 is safe (nothing in-tree breaks, and a pre-2.0 transitional re-export nobody imports is not a committed contract). A shim with >=1 consumer stays gated to v2.0.0 (its `kirra_verifier::<mod>` path IS live published API; removal breaks a real import). REMOVALS SO FAR: (17->16) src/gateway/interceptor.rs — an internal import-surface shim (re-exported crate::posture_cache + kirra_core), zero consumers. (16->14) src/gateway/cmd_vel.rs + src/posture_tracker.rs — dead LEAF re-export shims, zero consumers (every in-tree user reaches kirra_policy_types::cmd_vel / kirra_core::posture_tracker directly). The remaining 14 all have live consumers, so their removal stays v2.0.0-gated.",
   "remove_in": "2.0.0",
-  "max_shims": 16,
+  "max_shims": 14,
   "shims": {
     "src/adapters.rs": "kirra_industrial::adapters",
     "src/attestation.rs": "kirra_safety_authority::attestation",
@@ -9,14 +9,12 @@
     "src/fabric/asset.rs": "kirra_fabric_types::asset",
     "src/federation.rs": "kirra_fleet_types::federation",
     "src/federation_reconciliation.rs": "kirra_fleet_types::federation_reconciliation",
-    "src/gateway/cmd_vel.rs": "kirra_policy_types::cmd_vel",
     "src/gateway/containment.rs": "kirra_core::containment",
     "src/gateway/kinematics_contract.rs": "kirra_core::kinematics_contract",
     "src/gateway/perception_monitor.rs": "kirra_core::perception_monitor",
     "src/governor_guard.rs": "kirra_core::governor_guard",
     "src/kinematics_sim.rs": "kirra_core::kinematics_sim",
     "src/ota_campaign.rs": "kirra_ota_campaign",
-    "src/posture_tracker.rs": "kirra_core::posture_tracker",
     "src/protocol_adapter.rs": "kirra_industrial::protocol_adapter",
     "src/verifier_store.rs": "kirra_persistence"
   }
