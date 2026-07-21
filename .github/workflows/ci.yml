@@ -374,6 +374,11 @@ jobs:
         # wall-clock failover; running them concurrently would contend the runner
         # and skew the timing assertions.
         run: cargo test --test ha_two_process_drill --locked -- --ignored --nocapture --test-threads 1
+      - name: Generation restart drill (#791 F3 — no time-reversal across a real restart)
+        # Same serial-process discipline: spawns the real binary twice against
+        # one SQLite file and asserts the posture generation is seeded from the
+        # persisted high-water (strictly newer after a SIGKILL restart).
+        run: cargo test --test generation_restart_drill --locked -- --ignored --nocapture --test-threads 1
 
   docs-and-sdk:
     name: SDK docs + examples (G20)

@@ -16,6 +16,22 @@ pub use crate::posture_cache::POSTURE_CACHE_TTL_MS;
 /// Initialized to 1; first emitted generation is 1.
 pub static POSTURE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+/// #791 F3 — set once by a SUCCESSFUL [`init_generation_from_store`] in this
+/// process. Read by the SG-008 startup sentinel (`generation_initialized()`)
+/// so the BINARY's boot wiring — "seed the counter from the persisted
+/// high-water BEFORE any recalculation claims a generation" — is a checked
+/// startup invariant, not a convention a refactor can silently drop.
+static GENERATION_INITIALIZED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// #791 F3 — has [`init_generation_from_store`] completed successfully in
+/// this process? The SG-008 sentinel aborts startup (before the listener
+/// binds) when this is still false at check time.
+#[must_use]
+pub fn generation_initialized() -> bool {
+    GENERATION_INITIALIZED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Initialize the generation counter from the last persisted value.
 /// Call once at service startup after VerifierStore is opened, BEFORE the
 /// first recalculation claims a generation — the service binary does this
@@ -56,6 +72,13 @@ pub fn init_generation_from_store(app: &Arc<AppState>) -> Result<u64, String> {
         })?;
         POSTURE_GENERATION.fetch_max(next, Ordering::SeqCst);
     }
+    // #791 F3: record that init RAN (successfully) in this process, so the
+    // SG-008 startup sentinel can assert the binary wiring — a lib test can
+    // prove this function works, but only a boot fact can prove `main` still
+    // CALLS it before the first recalc (the exact wiring omission WS-0.2
+    // fixed). Set only on the success path: a failed init aborts startup at
+    // the call site, and must not leave a "initialized" fact behind.
+    GENERATION_INITIALIZED.store(true, Ordering::SeqCst);
     Ok(last)
 }
 
@@ -303,10 +326,15 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
         // row is hard-power-loss durable at write time, atomically, with no
         // separate marker and no cross-connection piggyback inference. The 20 Hz
         // POSTURE_CACHE_REFRESHED traffic stays on the NORMAL connection (INV-12
-        // throughput). #772 F3: if the durable write FAILS we do NOT suppress the
-        // (possibly escalating) transition over a degraded durability guarantee —
-        // we fall back to the NORMAL write so the row still lands (durable to the
-        // next checkpoint) and count the degradation for /metrics.
+        // throughput). #792 F5: transient SQLITE_BUSY/LOCKED contention (an HA
+        // peer write or a checkpoint holding the writer lock past the 250 ms
+        // busy_timeout) is retried INSIDE the store with a bounded backoff
+        // (DURABLE_BUSY_RETRIES × DURABLE_BUSY_BACKOFF) before the failure
+        // surfaces here. #772 F3: if the durable write still FAILS we do NOT
+        // suppress the (possibly escalating) transition over a degraded
+        // durability guarantee — we fall back to the NORMAL write so the row
+        // still lands (durable to the next checkpoint) and count the
+        // degradation for /metrics.
         let write_result = if is_transition {
             match store.save_posture_event_chained_with_generation_durable(
                 "posture_engine",

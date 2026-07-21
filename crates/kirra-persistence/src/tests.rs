@@ -3028,3 +3028,129 @@ mod industrial_seq_tests {
         let _ = std::fs::remove_file(format!("{path}-shm"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// #792 F5 — bounded SQLITE_BUSY retry on the incident-class durable write.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod durable_busy_retry_tests {
+    use crate::*;
+
+    fn in_memory() -> VerifierStore {
+        VerifierStore::new(":memory:").unwrap()
+    }
+
+    /// A transient busy burst SHORTER than the retry budget clears: the durable
+    /// write succeeds, the retries are counted, and no degradation is declared
+    /// (deterministic via the injected busy seam — one fault per ATTEMPT).
+    #[test]
+    fn durable_write_retries_through_transient_busy_and_succeeds() {
+        let mut store = in_memory();
+        store.inject_durable_busy_faults(2); // < DURABLE_BUSY_RETRIES
+        store
+            .save_posture_event_chained_with_generation_durable(
+                "posture_engine",
+                "SYSTEM_POSTURE_TRANSITION",
+                "{\"posture\":\"Degraded\"}",
+                Some("busy-retry drill"),
+                1_000,
+                7,
+            )
+            .expect("transient busy must clear within the retry budget");
+        assert_eq!(
+            store.durable_busy_retry_count(),
+            2,
+            "each replay is counted"
+        );
+        // The row actually landed and the chain still verifies.
+        assert!(store
+            .verify_audit_chain_integrity()
+            .expect("chain readable"));
+    }
+
+    /// Sustained contention past the budget is TERMINAL for the durable
+    /// attempt: the busy error surfaces (for the caller to count as a
+    /// durability degradation and fall back, #772 F3) after exactly
+    /// DURABLE_BUSY_RETRIES replays — bounded, never an unbounded spin.
+    #[test]
+    fn durable_write_exhausts_the_bounded_retry_budget_on_sustained_busy() {
+        let mut store = in_memory();
+        store.inject_durable_busy_faults(u64::from(DURABLE_BUSY_RETRIES) + 1);
+        let err = store
+            .save_posture_event_chained_durable(
+                "posture_engine",
+                "SYSTEM_POSTURE_TRANSITION",
+                "{\"posture\":\"LockedOut\"}",
+                Some("busy-exhaustion drill"),
+                2_000,
+            )
+            .expect_err("sustained busy must exhaust the budget, not spin");
+        assert!(is_busy_error(&err), "the terminal error is the busy class");
+        assert_eq!(
+            store.durable_busy_retry_count(),
+            u64::from(DURABLE_BUSY_RETRIES)
+        );
+    }
+
+    /// A NON-busy failure (the #772 F3 injected I/O fault) is terminal
+    /// immediately — a blind replay of an I/O or corruption error is never
+    /// attempted, so the existing fallback semantics are byte-identical.
+    #[test]
+    fn non_busy_durable_failure_is_never_retried() {
+        let mut store = in_memory();
+        store.set_fail_durable_posture_writes(true);
+        let err = store
+            .save_posture_event_chained_durable(
+                "posture_engine",
+                "SYSTEM_POSTURE_TRANSITION",
+                "{}",
+                None,
+                3_000,
+            )
+            .expect_err("injected I/O fault fails the write");
+        assert!(!is_busy_error(&err));
+        assert_eq!(
+            store.durable_busy_retry_count(),
+            0,
+            "no replay of a non-busy error"
+        );
+    }
+
+    /// REAL-SQLite classification pin: an actual writer-lock conflict produced
+    /// by a second connection maps to the same busy class the retry loop (and
+    /// the injection seam) key on. The second connection holds
+    /// `BEGIN IMMEDIATE` for the WHOLE bounded budget, so the assertion is
+    /// deterministic — exhaustion, not a race.
+    #[test]
+    fn real_writer_lock_contention_is_classified_busy_and_stays_bounded() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("busy_drill.sqlite");
+        let mut store = VerifierStore::new(path.to_str().unwrap()).expect("store");
+
+        let blocker = rusqlite::Connection::open(&path).expect("second conn");
+        blocker
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold writer lock");
+
+        let err = store
+            .save_posture_event_chained_durable(
+                "posture_engine",
+                "SYSTEM_POSTURE_TRANSITION",
+                "{}",
+                None,
+                4_000,
+            )
+            .expect_err("a held writer lock must surface as an error, not hang");
+        assert!(
+            is_busy_error(&err),
+            "real SQLITE_BUSY classifies for retry: {err:?}"
+        );
+        assert_eq!(
+            store.durable_busy_retry_count(),
+            u64::from(DURABLE_BUSY_RETRIES),
+            "the whole bounded budget was exercised, then it stopped"
+        );
+        drop(blocker);
+    }
+}
