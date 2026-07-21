@@ -2,6 +2,12 @@
 members = ["crates/parko-core", "crates/parko-onnx", "crates/parko-kirra", "crates/parko-ros2", "crates/parko-openvino", "crates/parko-tensorrt"]
 resolver = "2"
 
+# One MSRV source of truth for the parko workspace (#797 F3 / policy §3):
+# every member inherits via `rust-version.workspace = true`. Bump in lock-step
+# with the ROOT workspace's [workspace.package] and the ci.yml `msrv` lane.
+[workspace.package]
+rust-version = "1.88"
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -20,6 +20,10 @@ version = "0.1.0"
 publish = false
 edition = "2021"
 
+# MSRV floor inherited from the workspace root ([workspace.package]) — one
+# source of truth per workspace, so `cargo <cmd> -p <member>` on an old
+# toolchain fails the rust-version check up front, never mid-compile (#797 F3).
+rust-version.workspace = true
 [dependencies]
 kirra-release-token = { path = "../kirra-release-token" }
 ed25519-dalek = "2"

@@ -2,9 +2,10 @@
 name = "parko-core"
 version = "0.1.0"
 edition = "2021"
-# Workspace MSRV floor (WS-0.7, docs/VERSIONING_POLICY.md §3) — parko-core is
-# the base crate every parko member depends on, so this bounds the workspace.
-rust-version = "1.88"
+# Workspace MSRV floor (WS-0.7, docs/VERSIONING_POLICY.md §3) — inherited from
+# parko/Cargo.toml [workspace.package]; every parko member carries the same
+# inheritance, so the floor bounds the workspace at every entry point (#797 F3).
+rust-version.workspace = true
 description = "Core types and traits for vendor-neutral ML inference runtime"
 repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
 license-file = "../../../COPYRIGHT"

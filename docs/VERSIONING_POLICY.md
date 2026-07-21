@@ -69,9 +69,12 @@ it is the natural removal milestone for the §5.1 shims below.
 
 ## 3. MSRV (Minimum Supported Rust Version)
 
-- **Current MSRV: 1.88** — pinned as `rust-version` in the root
-  `Cargo.toml` and in `parko/crates/parko-core/Cargo.toml` (the base crate
-  of the parko workspace), and verified empirically against both committed
+- **Current MSRV: 1.88** — pinned ONCE per workspace as
+  `[workspace.package] rust-version` (root `Cargo.toml` and
+  `parko/Cargo.toml`); **every member inherits it** via
+  `rust-version.workspace = true` (#797 F3), so `cargo <cmd> -p <member>` on
+  an old toolchain fails the rust-version check up front rather than dying
+  mid-compile in a dependency. Verified empirically against both committed
   lockfiles (`cargo +1.88.0 check --workspace --locked`); the floor is set
   by locked dependencies (`time-core 0.1.9` requires 1.88), not by our own
   code (`u64::is_multiple_of` needs 1.87).
@@ -79,7 +82,8 @@ it is the natural removal milestone for the §5.1 shims below.
   `rust-version`), instead of failing cryptically mid-compile.
 - **Raising the MSRV is a deliberate act:** a MINOR version bump, a
   CHANGELOG entry stating the new floor and what forced it, and an update
-  to the two `rust-version` fields plus this document. Routine `cargo
+  to the two `[workspace.package] rust-version` fields (root + parko), the
+  `msrv` CI-lane toolchain pin, plus this document. Routine `cargo
   update` must not silently raise the effective floor past the pinned MSRV
   — if it would, either pin the dependency back or raise the MSRV by this
   process.

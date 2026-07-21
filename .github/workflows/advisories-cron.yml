@@ -1,0 +1,63 @@
+# #797 F4 (#775) — the SCHEDULED advisory scan. The per-PR supply-chain gate
+# (ci.yml) is event-driven: a RUSTSEC advisory published while no PR is in
+# flight would sit unseen until the next unrelated PR went red on it. This
+# cron closes that window: both workspaces are scanned daily against the SAME
+# policy (/deny.toml, --all-features — the identical resolve the PR gate
+# runs), and a finding FILES/UPDATES a tracking issue so the signal lands on
+# a human without blocking anyone's PR.
+#
+# Kept in its OWN workflow (the kpi-campaign-nightly precedent) so the
+# `schedule` trigger does not fan the whole ci.yml job graph out nightly.
+#
+# Triage path (same as the gating lane): bump the dependency, or add a
+# scoped, dated entry to deny.toml `[advisories].ignore` with a written
+# justification — never continue-on-error.
+name: Advisories (scheduled scan)
+
+on:
+  schedule:
+    # 06:41 UTC daily (off the hour to dodge the top-of-hour scheduler surge).
+    - cron: "41 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write # files/updates/closes the tracking issue below
+
+concurrency:
+  group: advisories-cron
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: RUSTSEC advisories — both workspaces (issue-filing, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      # continue-on-error here is CORRECT (unlike the PR gate): the scan's
+      # whole job is to observe-and-file; the red signal is the ISSUE, and
+      # the filing step below must run precisely when these steps fail.
+      - name: Advisories — root workspace
+        id: root
+        continue-on-error: true
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check advisories
+          arguments: --locked
+      - name: Advisories — parko workspace
+        id: parko
+        continue-on-error: true
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check advisories
+          arguments: --locked
+          manifest-path: ./parko/Cargo.toml
+      - name: File / update / close the tracking issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          OUTCOME_ROOT: ${{ steps.root.outcome }}
+          OUTCOME_PARKO: ${{ steps.parko.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 ci/file_advisory_issue.py

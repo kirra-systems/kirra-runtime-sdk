@@ -23,10 +23,16 @@
 # advisory pass unseen instead.
 
 [graph]
-# Resolve the graph for the shipped feature set (default features), all
-# targets we release for. --all-features would drag CI/hardware-gated
-# resolution (ros2/r2r, TensorRT) into the policy graph.
-all-features = false
+# Resolve the FULL feature graph (#797 F3 / #775): the `ros2` (r2r + ROS
+# message chain) and `tpm` (tss-esapi + bindgen chain) trees are built and
+# shipped by CI, so they must be license/ban/source/advisory-checked like
+# everything else — feature-gated is not exempt. Resolution is metadata-only
+# (from the committed lockfiles); no ROS/TPM system libraries are needed.
+# What STAYS outside this policy graph: the workspace-DETACHED harness trees
+# (fuzz/, verification/kani, kirra-loom-models, kirra-verifier-pg,
+# tools/iceoryx2-spike) with their own lockfiles, and native SDKs linked on
+# hardware at build time (TensorRT) that are not crates.io dependencies.
+all-features = true
 targets = [
     "x86_64-unknown-linux-gnu",
     "x86_64-unknown-linux-musl",
@@ -51,6 +57,11 @@ allow = [
     "BSL-1.0",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
+    # Apache-2.0 with the LLVM binary-embedding exception — strictly MORE
+    # permissive than plain Apache-2.0 (the exception only removes the §4
+    # notice burden when embedding in binaries). Enters the full-feature
+    # graph via target-lexicon (tss-esapi-sys/bindgen build chain, #797 F3).
+    "Apache-2.0 WITH LLVM-exception",
 ]
 confidence-threshold = 0.8
 
@@ -89,4 +100,11 @@ ignore = [
     # only (no known vulnerability). Remove when the dependents migrate to
     # rustls-pki-types PemObject (track reqwest/rustls bumps).
     { id = "RUSTSEC-2025-0134", reason = "unmaintained; no drop-in upgrade; parses operator-supplied PEM only" },
+    # paste is unmaintained (advisory is unmaintained-class only, no known
+    # vulnerability). It is a COMPILE-TIME proc-macro (token pasting) with
+    # zero runtime footprint, pinned by the r2r 0.9.5 ROS bindings chain —
+    # surfaced only now that the policy graph covers the ros2 feature tree
+    # (#797 F3). Not bumpable from this repo. Remove when r2r moves off
+    # paste (track r2r releases > 0.9.5).
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained; compile-time-only proc-macro; pinned by r2r 0.9.5; remove on r2r upgrade" },
 ]

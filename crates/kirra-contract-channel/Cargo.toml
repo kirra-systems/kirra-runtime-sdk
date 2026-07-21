@@ -15,6 +15,10 @@
 name = "kirra-contract-channel"
 version = "0.1.0"
 edition = "2021"
+# MSRV floor inherited from the workspace root ([workspace.package]) — one
+# source of truth per workspace, so `cargo <cmd> -p <member>` on an old
+# toolchain fails the rust-version check up front, never mid-compile (#797 F3).
+rust-version.workspace = true
 description = "Frozen #[repr(C)] cross-partition governor contract view + odd/even generation seqlock (ADR-0006 Clause 2 / HVCHAN-001)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/kirra-systems/kirra-runtime-sdk"

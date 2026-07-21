@@ -31,28 +31,43 @@ env:
 
 jobs:
   # WS-0.6 — supply-chain gate. Deterministic checks only (licenses / bans /
-  # sources go red only when the dependency tree or the policy changes);
-  # advisories runs non-gating below because it goes red on events EXTERNAL
-  # to the repo (a freshly published CVE) — that is signal for a human, not
-  # a reason to block an unrelated PR. Policy: /deny.toml (single config,
-  # passed explicitly to BOTH workspaces so they cannot drift).
+  # sources go red only when the dependency tree or the policy changes).
+  # Policy: /deny.toml — one policy file for both workspaces; the pin step
+  # below ASSERTS parko/deny.toml is still a symlink to it (#797 F9 — a
+  # replaced regular file would silently fork the policy).
+  #
+  # #797 F3 (#775): the policy graph resolves the FULL feature set — see
+  # deny.toml [graph] all-features = true (the one policy file; set there,
+  # not per-invocation, so a local `cargo deny check` resolves identically).
+  # That folds the feature-gated production trees into every check below:
+  # root `ros2` (r2r + ROS message chain), `tpm` (tss-esapi + bindgen chain),
+  # `capture`, and parko's backend features. The inventory of what stays
+  # OUTSIDE the policy graph is documented on that [graph] section.
   supply-chain:
     name: supply-chain gate (cargo-deny)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - name: Deny gate — root workspace (licenses / bans / sources)
+      - name: Single-policy pin — parko/deny.toml must BE the root policy (symlink)
+        # #797 F9: the one-policy claim is load-bearing for every parko check
+        # below; assert the mechanism instead of trusting a comment.
+        run: |
+          test -L parko/deny.toml || { echo "parko/deny.toml is not a symlink — policy forked"; exit 1; }
+          test "$(readlink parko/deny.toml)" = "../deny.toml" \
+            || { echo "parko/deny.toml points at $(readlink parko/deny.toml), not ../deny.toml"; exit 1; }
+      - name: Deny gate — root workspace, full feature graph (licenses / bans / sources)
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check licenses bans sources
           arguments: --locked
-      - name: Deny gate — parko workspace (licenses / bans / sources)
+      - name: Deny gate — parko workspace, full feature graph (licenses / bans / sources)
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check licenses bans sources
           arguments: --locked
-          # parko/deny.toml is a symlink to the root deny.toml — one policy.
+          # One policy: parko/deny.toml -> ../deny.toml, asserted by the pin
+          # step above.
           manifest-path: ./parko/Cargo.toml
       # WP-04 (MGA G-6): advisories are now GATING. A new RUSTSEC advisory on a
       # locked dependency reds the PR until it is either bumped (the normal
@@ -235,6 +250,10 @@ jobs:
           test -n "$pin" && test "$actual" = "$pin" \
             || { echo "talisman blob $actual != pinned $pin"; exit 1; }
 
+  # MSRV floor (policy §3). The number lives in THREE places bumped in
+  # lock-step: the two [workspace.package] rust-version fields (root +
+  # parko/Cargo.toml — every member inherits, #797 F3) and this lane's
+  # toolchain pin.
   msrv:
     name: MSRV check (rustc 1.88)
     runs-on: ubuntu-latest
