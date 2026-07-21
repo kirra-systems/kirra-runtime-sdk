@@ -138,6 +138,8 @@ export function useLiveFleet(pollMs = 5000): {
     // falls back to full-rate polling and retries the stream with backoff —
     // the console is never worse off than the pre-SSE behavior.
     const openStream = () => {
+      // Static-demo builds have no proxy/stream; stay on the demo path.
+      if (process.env.NEXT_PUBLIC_KIRRA_STATIC_DEMO === '1') return
       if (disposed || es || typeof EventSource === 'undefined') return
       const sse = new EventSource(`${PROXY_BASE}/system/posture/stream`)
       es = sse

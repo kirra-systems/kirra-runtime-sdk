@@ -7,7 +7,15 @@ export class DemoMode extends Error {
   constructor() { super('demo'); this.name = 'DemoMode' }
 }
 
+// Static-demo builds (the hosted GitHub Pages demo, `output: export`) have no
+// server proxy at all, so every read short-circuits straight to the DemoMode
+// sentinel — the hooks then render bundled demo data and label it truthfully.
+// Set at build time only; a normal server build leaves this unset and reads
+// live through the proxy exactly as before.
+const STATIC_DEMO = process.env.NEXT_PUBLIC_KIRRA_STATIC_DEMO === '1'
+
 async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
+  if (STATIC_DEMO) throw new DemoMode()
   const res = await fetch(`${PROXY_BASE}${path}`, {
     method: 'GET',
     headers: { accept: 'application/json' },
