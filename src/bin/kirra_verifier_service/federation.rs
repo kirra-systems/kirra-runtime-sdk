@@ -18,6 +18,19 @@ pub(crate) async fn register_federation_controller(
         )
             .into_response();
     }
+    // Fail-fast (#1105): the key must parse as the base64 Ed25519 (32-byte) verifying
+    // key that report verification expects — reject a malformed key here rather than
+    // storing it and only failing at the first signed report. Same parse-at-boundary
+    // discipline as attestation/operator key registration.
+    if !kirra_fleet_types::federation::federation_public_key_is_valid(&req.public_key_b64) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "public_key_b64 must be a base64-encoded 32-byte Ed25519 public key"
+            })),
+        )
+            .into_response();
+    }
     // P1: durable write off the worker pool (`call` → spawn_blocking). Own the
     // captured request fields (still needed for the response). `call` wraps the
     // closure's own `Result` in an outer `Result<_, StoreError>`, so a DB error
