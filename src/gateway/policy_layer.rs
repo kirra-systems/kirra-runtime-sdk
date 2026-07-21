@@ -284,6 +284,7 @@ pub async fn enforce_actuator_safety_envelope(
             let micros = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
             self.svc
                 .app
+                .observability
                 .fleet_metrics
                 .actuator_envelope_latency
                 .record_micros(micros);
@@ -812,6 +813,7 @@ pub async fn enforce_posture_routing(
                 .inspect_err(|_| {
                     // WS-0.5: count the authority-fence denial for /metrics.
                     svc.app
+                        .observability
                         .fleet_metrics
                         .record_gate_denial(crate::metrics::GateDenialReason::HaFenced);
                 })?;
@@ -845,6 +847,7 @@ pub async fn enforce_posture_routing(
                 MutationFence::Admit => {}
                 MutationFence::DenyNotActive => {
                     svc.app
+                        .observability
                         .fleet_metrics
                         .record_gate_denial(crate::metrics::GateDenialReason::HaFenced);
                     tracing::error!(
@@ -861,6 +864,7 @@ pub async fn enforce_posture_routing(
                         .store(false, std::sync::atomic::Ordering::SeqCst);
                     // WS-0.5: count the fence denial for /metrics.
                     svc.app
+                        .observability
                         .fleet_metrics
                         .record_gate_denial(crate::metrics::GateDenialReason::HaFenced);
                     tracing::error!(
@@ -895,7 +899,10 @@ pub async fn enforce_posture_routing(
     // denial cause during an incident).
     if let Err(reason) = crate::posture_cache::route_command_verdict(&snapshot, gate_now_ms, cmd) {
         // WS-0.5: count the dropped command for /metrics, labeled by reason.
-        svc.app.fleet_metrics.record_gate_denial(reason);
+        svc.app
+            .observability
+            .fleet_metrics
+            .record_gate_denial(reason);
         tracing::warn!(
             method = %method,
             path = %path,

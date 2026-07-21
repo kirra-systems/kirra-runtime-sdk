@@ -1116,7 +1116,7 @@ mod sg_009_promotion_act_tests {
         run_promotion(&app, &cache, "standby-metrics", "HEARTBEAT_TIMEOUT");
         assert!(app.is_active(), "healthy promotion completes");
         assert_eq!(
-            app.fleet_metrics.ha_promotion_count(),
+            app.observability.fleet_metrics.ha_promotion_count(),
             1,
             "a completed failover must be counted"
         );
@@ -1130,7 +1130,7 @@ mod sg_009_promotion_act_tests {
         run_promotion(&app2, &cache2, "standby-abort", "HEARTBEAT_TIMEOUT");
         assert!(!app2.is_active(), "precondition: the promotion aborted");
         assert_eq!(
-            app2.fleet_metrics.ha_promotion_count(),
+            app2.observability.fleet_metrics.ha_promotion_count(),
             0,
             "an aborted promotion is not a failover and must not be counted"
         );

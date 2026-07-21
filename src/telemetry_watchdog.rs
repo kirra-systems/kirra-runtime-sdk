@@ -265,6 +265,7 @@ pub fn spawn_telemetry_watchdog_with_clock(
                     // re-raises above and the loop dies (the CRITICAL supervisor escalates).
                     let elapsed_ms = deadline_clock.now_ms().saturating_sub(sweep_start_ms);
                     let missed = deadline_app
+                        .observability
                         .deadline_registry
                         .record("telemetry_watchdog", elapsed_ms);
                     // EP-11: a SUSTAINED pattern of slow sweeps (threshold misses

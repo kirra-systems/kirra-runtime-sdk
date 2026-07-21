@@ -144,7 +144,9 @@ pub fn spawn_campaign_monitor_with_clock(
                         Err(_) => tracing::error!("campaign monitor sweep task failed"),
                     }
                     let elapsed_ms = clock.now_ms().saturating_sub(sweep_start_ms);
-                    app.deadline_registry.record("campaign_monitor", elapsed_ms);
+                    app.observability
+                        .deadline_registry
+                        .record("campaign_monitor", elapsed_ms);
                 }
             }
         },

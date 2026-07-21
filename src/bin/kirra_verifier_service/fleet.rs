@@ -106,6 +106,7 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
     };
     let mut body = svc
         .app
+        .observability
         .fleet_metrics
         .format_prometheus(&kirra_verifier::standby_monitor::instance_id(), &snap);
 
@@ -157,7 +158,10 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
     // (`kirra_task_deadline_{cycles,misses}_total{task=…}`) so a loop that
     // repeatedly overruns its per-cycle budget is alertable. In-memory atomics
     // (no store read); posture-exempt like the rest of `/metrics`.
-    svc.app.deadline_registry.append_prometheus(&mut body);
+    svc.app
+        .observability
+        .deadline_registry
+        .append_prometheus(&mut body);
 
     (
         [(
