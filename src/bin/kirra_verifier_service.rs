@@ -1723,15 +1723,34 @@ fn build_app(
         }
     };
 
-    // Operator console — Phase A (#103 SG6). Reads are QM; the one mutation
-    // (clearance-grant recording) is gated by the supervisor key IN the handler,
-    // so this group carries no auth layer. The whole `/console` plane is
+    // SEC1 (#1098): `/console/audit` streams RAW hash-chained audit rows — the
+    // forensic ledger — so unlike the QM fleet/observability views it is gated
+    // behind SCOPE_AUDIT_READ (an `auditor`-role principal or the admin token),
+    // the SAME authority as the API-plane `/system/audit/*` tier. It stays on the
+    // console plane (the console backpressure pool + the `/console/` posture
+    // exemption, so an authorized operator can still read it during LockedOut) —
+    // only the auth + transport-security layers are wrapped around this one route.
+    let console_audit_route = Router::new()
+        .route("/console/audit", get(console_audit))
+        .layer(middleware::from_fn_with_state(
+            svc_state.clone(),
+            require_audit_scope,
+        ))
+        .layer(middleware::from_fn_with_state(
+            svc_state.clone(),
+            require_secure_transport,
+        ));
+
+    // Operator console — Phase A (#103 SG6). The remaining reads are QM; the one
+    // mutation (clearance-grant recording) is gated by the supervisor key IN the
+    // handler, so this group carries no auth layer. The whole `/console` plane is
     // posture-exempt (gateway::policy_layer::is_posture_exempt) so it stays
     // reachable during LockedOut — the posture it exists to recover from.
+    // `/console/audit` is gated separately (see `console_audit_route` above) and
+    // merged back in below.
     let console_routes = Router::new()
         .route("/console", get(console_html))
         .route("/console/fleet", get(console_fleet))
-        .route("/console/audit", get(console_audit))
         .route("/console/escalations", get(console_escalations))
         // #394 live console — public read-only observability views (no auth
         // layer, posture-exempt via `/console/` prefix). Mirror `console_audit`
@@ -1750,7 +1769,9 @@ fn build_app(
         // (the clearance verb inverted). Operator-signed over the same challenge
         // nonce; accepting it makes the GOVERNOR command the MRC (sticky LockedOut)
         // under its own authority — the console never touches the actuator.
-        .route("/console/estop-requests", post(console_estop_request));
+        .route("/console/estop-requests", post(console_estop_request))
+        // SEC1 (#1098): the audit-scope-gated `/console/audit` route (defined above).
+        .merge(console_audit_route);
 
     // WP-03 (MGA G-10) — control-plane backpressure. TWO isolated pools so a
     // flood of API traffic cannot starve the operator console (the LockedOut

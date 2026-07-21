@@ -74,6 +74,22 @@ async fn get(svc: Arc<ServiceState>, path: &str) -> (StatusCode, String) {
     (status, String::from_utf8_lossy(&bytes).to_string())
 }
 
+/// SEC1 (#1098): `/console/audit` is now SCOPE_AUDIT_READ-gated (403/503 without
+/// an auditor credential), so tests that use the audit view ONLY to confirm an
+/// event was chained read the page DIRECTLY from the store here — the same rows
+/// the `console_audit` handler serializes — decoupling the "was it chained"
+/// assertion from the now-gated HTTP surface. The route's gating itself is
+/// asserted by `console_audit_route_requires_audit_scope`.
+fn audit_json(svc: &Arc<ServiceState>) -> String {
+    let vk = svc.audit_verifying_key;
+    let page = svc
+        .app
+        .store
+        .with_read(|s| s.load_audit_chain_page(50, 0, vk.as_ref()))
+        .expect("audit page read");
+    serde_json::to_string(&page).expect("serialize audit page")
+}
+
 #[tokio::test]
 async fn console_html_is_served() {
     let (status, body) = get(build_state(), "/console").await;
@@ -105,12 +121,24 @@ async fn console_fleet_returns_seeded_node() {
 }
 
 #[tokio::test]
-async fn console_audit_returns_a_page() {
-    let (status, body) = get(build_state(), "/console/audit?limit=10").await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("\"entries\""), "audit page passthrough");
+async fn console_audit_route_requires_audit_scope() {
+    // SEC1 (#1098): `/console/audit` streams the RAW hash-chained audit ledger and
+    // is now gated behind SCOPE_AUDIT_READ. With no admin token configured in the
+    // test env (INV-13 forbids set_var here) an unauthenticated GET fail-closes —
+    // NOT a 200 page. The authenticated-pass path is exercised in the external
+    // integration suite (where the admin env can be set before the router builds);
+    // the page CONTENT is asserted here via the direct-store `audit_json` helper.
+    let (status, _body) = get(build_state(), "/console/audit?limit=10").await;
     assert!(
-        body.contains("\"chain_intact\""),
+        status == StatusCode::SERVICE_UNAVAILABLE || status == StatusCode::UNAUTHORIZED,
+        "unauthenticated /console/audit must fail closed (got {status})"
+    );
+
+    // The underlying page still serializes correctly for an authorized reader.
+    let page = audit_json(&build_state());
+    assert!(page.contains("\"entries\""), "audit page passthrough");
+    assert!(
+        page.contains("\"chain_intact\""),
         "the chain-verified flag is exposed"
     );
 }
@@ -818,7 +846,7 @@ async fn operator_signed_grant_records_fingerprint_and_phase_b_consumes() {
     let fp = kirra_safety_authority::attestation::operator_key_fingerprint(&pem).unwrap();
     assert!(gb.contains(&fp), "response carries the key fingerprint");
 
-    let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
+    let ab = audit_json(&svc);
     assert!(ab.contains("OperatorClearanceGrantIssued"));
     assert!(
         ab.contains("operator-signed"),
@@ -865,7 +893,7 @@ async fn nonce_replay_is_rejected_and_audited() {
         StatusCode::UNAUTHORIZED,
         "replayed nonce rejected; body={b2}"
     );
-    let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
+    let ab = audit_json(&svc);
     assert!(
         ab.contains("nonce_replay_or_expired"),
         "the replay is audited"
@@ -897,7 +925,7 @@ async fn bad_signature_is_rejected_and_audited() {
         StatusCode::UNAUTHORIZED,
         "wrong-key signature rejected; body={b}"
     );
-    let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
+    let ab = audit_json(&svc);
     assert!(ab.contains("bad_signature"));
 }
 
@@ -915,7 +943,7 @@ async fn unknown_operator_is_rejected_403_audited() {
         StatusCode::FORBIDDEN,
         "unknown operator rejected; body={b}"
     );
-    let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
+    let ab = audit_json(&svc);
     assert!(ab.contains("unknown_operator"));
 }
 
@@ -939,7 +967,7 @@ async fn revoked_operator_is_rejected_403_audited() {
         StatusCode::FORBIDDEN,
         "revoked operator rejected; body={b}"
     );
-    let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
+    let ab = audit_json(&svc);
     assert!(ab.contains("revoked_operator"));
 }
 
@@ -1050,7 +1078,7 @@ async fn estop_request_commands_mrc_and_chains_both_events() {
             .load(std::sync::atomic::Ordering::SeqCst),
         "an accepted e-stop must set the sticky supervisor_tripped flag (force_lockout)"
     );
-    let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
+    let ab = audit_json(&svc);
     assert!(
         ab.contains("OperatorStopRequested"),
         "the authenticated request is chained"
@@ -1099,7 +1127,7 @@ async fn clearance_signature_is_not_accepted_as_an_estop() {
             .load(std::sync::atomic::Ordering::SeqCst),
         "a rejected e-stop must NOT command the MRC"
     );
-    let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
+    let ab = audit_json(&svc);
     assert!(ab.contains("OperatorStopRequestRejected") && ab.contains("bad_signature"));
 }
 
@@ -1122,7 +1150,7 @@ async fn estop_unknown_operator_rejected_403() {
         .escalation
         .supervisor_tripped
         .load(std::sync::atomic::Ordering::SeqCst));
-    let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
+    let ab = audit_json(&svc);
     assert!(ab.contains("OperatorStopRequestRejected") && ab.contains("unknown_operator"));
 }
 
