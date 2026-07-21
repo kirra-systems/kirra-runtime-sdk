@@ -421,13 +421,13 @@ mod g7_transport_security_router_tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt; // for `oneshot`
 
+    use kirra_persistence::VerifierStore;
     use kirra_verifier::posture_cache::{
         now_ms, CachedFleetPosture, ServiceState, SharedPostureCache,
     };
     use kirra_verifier::verifier::{
         AppState, FleetPosture, TransportSecurityConfig, VerifierOperationMode,
     };
-    use kirra_verifier::verifier_store::VerifierStore;
 
     // Inject the transport-security config via the PUBLIC field (no env mutation —
     // INVARIANT #13), then assemble the REAL router. The posture cache is seeded

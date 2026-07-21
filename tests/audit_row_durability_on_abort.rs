@@ -21,10 +21,10 @@
 
 use std::process::Command;
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::posture_cache::SharedPostureCache;
 use kirra_verifier::posture_engine::recalculate_and_broadcast;
 use kirra_verifier::verifier::{AppState, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 
 const CHILD_ENV: &str = "KIRRA_AUDIT_POWER_LOSS_CHILD_DB";
 

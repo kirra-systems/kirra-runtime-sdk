@@ -18,10 +18,10 @@ use axum::Json;
 
 use kirra_core::kinematics_contract::ProposedVehicleCommand;
 use kirra_fabric_types::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
+use kirra_persistence::VerifierStore;
 use kirra_verifier::fabric::router::FabricRouter;
 use kirra_verifier::posture_cache::{now_ms, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 
 const ASSET: &str = "av-01";
 

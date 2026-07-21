@@ -1,13 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::posture_cache::{CachedFleetPosture, SharedPostureCache};
 use kirra_verifier::posture_engine::recalculate_and_broadcast;
 use kirra_verifier::posture_engine_v2::{start_posture_engine_worker, PostureRecalcTrigger};
 use kirra_verifier::verifier::{
     AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode,
 };
-use kirra_verifier::verifier_store::VerifierStore;
 
 fn app() -> Arc<AppState> {
     Arc::new(AppState::new(

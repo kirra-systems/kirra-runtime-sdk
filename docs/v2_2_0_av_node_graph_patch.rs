@@ -353,7 +353,7 @@ mod av_transition_integration_tests {
     use crate::gateway::policy_layer::enforce_actuator_safety_envelope;
     use crate::posture_cache::{CachedFleetPosture, SharedPostureCache};
     use crate::verifier::{FleetPosture, NodeTrustState};
-    use crate::verifier_store::VerifierStore;
+    use kirra_persistence::VerifierStore;
     use super::{ServiceState, handle_sensor_fault_report, SensorFaultReport};
 
     /// Builds a ServiceState with:

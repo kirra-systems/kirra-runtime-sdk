@@ -19,12 +19,12 @@ use serde_json::Value;
 use tower::ServiceExt; // for `oneshot`
 
 use kirra_core::kinematics_contract::{ProposedVehicleCommand, VehicleKinematicsContract};
+use kirra_persistence::VerifierStore;
 use kirra_verifier::gateway::policy_layer::{
     enforce_actuator_safety_envelope, enforce_posture_routing, EnforcementOutcome,
 };
 use kirra_verifier::posture_cache::{CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -684,8 +684,8 @@ fn build_state_with_capture() -> (
     Arc<ServiceState>,
     tokio::sync::mpsc::Receiver<kirra_core::capture::CaptureRecord>,
 ) {
+    use kirra_persistence::VerifierStore;
     use kirra_verifier::verifier::{AppState, VerifierOperationMode};
-    use kirra_verifier::verifier_store::VerifierStore;
     let store = VerifierStore::new(":memory:").expect("in-memory store");
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
     let (tx, rx) = tokio::sync::mpsc::channel(16);

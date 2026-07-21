@@ -22,9 +22,9 @@ use ed25519_dalek::{Signer, SigningKey};
 use kirra_fleet_types::federation_reconciliation::{
     canonical_federation_payload_v2, FederatedTrustReportV2,
 };
+use kirra_persistence::VerifierStore;
 use kirra_verifier::posture_cache::{now_ms, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 use std::sync::Arc;
 
 fn service() -> Arc<ServiceState> {

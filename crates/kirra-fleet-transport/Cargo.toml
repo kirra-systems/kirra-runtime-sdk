@@ -66,6 +66,9 @@ rand = "0.8"
 # It is a DEV-dependency only — the production transport build stays off the
 # verifier service tree (R2).
 kirra-verifier = { path = "../.." }
+# ADR-0035 v2.0.0 shim removal: the round-trip tests name `VerifierStore` from its
+# canonical crate (the `kirra_verifier::verifier_store` re-export shim is gone).
+kirra-persistence = { path = "../kirra-persistence" }
 # zenoh is async; the in-process two-session round-trip tests need a runtime.
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tempfile = "3"

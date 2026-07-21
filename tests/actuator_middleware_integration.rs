@@ -10,10 +10,10 @@ use std::sync::Arc;
 use kirra_core::kinematics_contract::{
     validate_vehicle_command, EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
 };
+use kirra_persistence::VerifierStore;
 use kirra_verifier::{
     posture_cache::{CachedFleetPosture, ServiceState, SharedPostureCache},
     verifier::{AppState, FleetPosture, VerifierOperationMode},
-    verifier_store::VerifierStore,
 };
 
 // ---------------------------------------------------------------------------

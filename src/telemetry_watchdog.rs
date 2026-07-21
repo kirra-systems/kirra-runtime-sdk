@@ -814,7 +814,7 @@ mod watchdog_di_tests {
     use crate::clock::VirtualClock;
     use crate::posture_engine_v2::PostureRecalcTrigger;
     use crate::verifier::{AppState, RegisteredNode, VerifierOperationMode};
-    use crate::verifier_store::VerifierStore;
+    use kirra_persistence::VerifierStore;
     use tokio::sync::mpsc;
 
     fn insert_trusted_node(app: &Arc<AppState>, node_id: &str, registered_at_ms: u64) {
@@ -1505,7 +1505,7 @@ mod sg_003_cert_tests {
     use crate::clock::VirtualClock;
     use crate::posture_engine_v2::PostureRecalcTrigger;
     use crate::verifier::{AppState, RegisteredNode, VerifierOperationMode};
-    use crate::verifier_store::VerifierStore;
+    use kirra_persistence::VerifierStore;
     use tokio::sync::mpsc;
 
     fn app_with_trusted_node(node_id: &str, last_seen_ms: u64) -> Arc<AppState> {
@@ -1647,7 +1647,7 @@ mod sustained_overrun_tests {
     use super::*;
     use crate::execution_manager::{SustainedMissTracker, DEADLINE_SUSTAINED_MISS_THRESHOLD};
     use crate::verifier::{AppState, VerifierOperationMode};
-    use crate::verifier_store::VerifierStore;
+    use kirra_persistence::VerifierStore;
     use tokio::sync::mpsc;
 
     fn app() -> Arc<AppState> {

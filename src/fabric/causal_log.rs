@@ -1,6 +1,6 @@
 use crate::posture_cache::now_ms;
 use crate::store_handle::StoreHandle;
-use crate::verifier_store::VerifierStore;
+use kirra_persistence::VerifierStore;
 use sha2::{Digest, Sha256};
 
 // ADR-0035 Stage 2.5 C2 slice 2: the pure `CausalLogEntry` record + the
@@ -72,7 +72,7 @@ impl FabricCausalLog {
         // log it and still return the entry_id.
         self.store.with(|store| {
             if let Err(e) = store.append_causal_event(
-                &crate::verifier_store::CausalEventInput {
+                &kirra_persistence::CausalEventInput {
                     entry_id: &entry_id,
                     asset_id,
                     event_type,

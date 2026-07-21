@@ -174,6 +174,37 @@ detail lives in `docs/adr/`, `docs/safety/`, and the PR history:
   other variant's bare-number style. Cosmetic/narrative only (nothing parses it);
   new gateway `kirra_replay.json` records read without the unit suffix.
 
+### Removed (BREAKING)
+
+- **The ADR-0035 re-export shims are gone (#1029 A1).** The de-monolith relocated
+  many types out of the root `kirra-verifier` crate into lean leaf crates and left
+  thin `pub use` re-export modules for path back-compat. Those shims were DEPRECATED
+  for the whole `1.x` line (`docs/VERSIONING_POLICY.md` §5.1) and are removed in this
+  MAJOR — co-scheduled with the version-line disambiguation (§2.1). The re-exported
+  types are **byte-identical** (they were always the same types via the shim); repoint
+  imports to the leaf crate and add it to your `[dependencies]`:
+
+  ```
+  kirra_verifier::verifier_store::*                 → kirra_persistence::*
+  kirra_verifier::gateway::kinematics_contract::*   → kirra_core::kinematics_contract::*
+  kirra_verifier::gateway::perception_monitor::*    → kirra_core::perception_monitor::*
+  kirra_verifier::gateway::containment::*           → kirra_core::containment::*
+  kirra_verifier::capture::*                         → kirra_core::capture::*   (enable feature "capture")
+  kirra_verifier::kinematics_sim::*                  → kirra_core::kinematics_sim::*
+  kirra_verifier::governor_guard::*                  → kirra_core::governor_guard::*
+  kirra_verifier::attestation::*                     → kirra_safety_authority::attestation::*
+  kirra_verifier::adapters::*                        → kirra_industrial::adapters::*
+  kirra_verifier::protocol_adapter::*                → kirra_industrial::protocol_adapter::*
+  kirra_verifier::ota_campaign::*                    → kirra_ota_campaign::*
+  kirra_verifier::fabric::asset::*                   → kirra_fabric_types::asset::*
+  kirra_verifier::federation::*                      → kirra_fleet_types::federation::*
+  kirra_verifier::federation_reconciliation::*       → kirra_fleet_types::federation_reconciliation::*
+  ```
+
+  The `ci/check_reexport_shims.py` ratchet is now a permanent **zero-tolerance** guard
+  (`max_shims: 0`) — the indirection cannot return. Workspace crates are `publish = false`
+  proprietary, so this is an internal-source path change, not a published-crates.io break.
+
 ### Security / supply chain
 
 - Ed25519-signed hash-chained audit ledger with causal chain, key

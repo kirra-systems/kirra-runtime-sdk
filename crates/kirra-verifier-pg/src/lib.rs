@@ -59,15 +59,15 @@ use std::sync::Mutex;
 
 use kirra_fabric_types::asset::{AssetType, FabricAsset, KinematicProfileType};
 use kirra_ota_campaign::{Campaign, CampaignState, HaltReason, NodeArtifactStatus};
-use kirra_verifier::verifier::{NodeTrustState, RegisteredNode};
-use kirra_verifier::verifier_store::migrations_postgres::{
+use kirra_persistence::migrations_postgres::{
     PgExecutor, PgMigration, PgMigrationError, PostgresBackend,
 };
-use kirra_verifier::verifier_store::{
+use kirra_persistence::{
     ApiPrincipalRecord, AvSubsystemRecord, AvSubsystemStore, CertPrincipalRecord,
     CertPrincipalStore, EpochFence, FabricAssetStore, FederationStore, FenceError, NodeStore,
     OperatorRecord, OperatorStore, OtaCampaignStore, PostureEngineStateStore, PrincipalStore,
 };
+use kirra_verifier::verifier::{NodeTrustState, RegisteredNode};
 
 /// The Postgres schema version THIS binary supports (mirrors the SQLite
 /// `SCHEMA_VERSION` discipline: a newer stamp in the database is refused

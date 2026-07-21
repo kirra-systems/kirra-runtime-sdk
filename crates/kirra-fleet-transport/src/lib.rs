@@ -638,7 +638,7 @@ mod core_tests {
     // R2: the reference `FleetTrustStore` impl used to drive the generic ingest
     // functions in tests (a DEV-dependency; not in the production build graph).
     use ed25519_dalek::SigningKey;
-    use kirra_verifier::verifier_store::VerifierStore;
+    use kirra_persistence::VerifierStore;
 
     fn keypair() -> (SigningKey, String) {
         let mut seed = [0u8; 32];

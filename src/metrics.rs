@@ -502,7 +502,7 @@ impl FleetSafetyMetrics {
 #[must_use]
 pub fn cert_expiry_prometheus(
     node_id: &str,
-    summary: &crate::verifier_store::CertExpirySummary,
+    summary: &kirra_persistence::CertExpirySummary,
 ) -> String {
     use std::fmt::Write as _;
     let node_id = escape_label_value(node_id);
@@ -856,7 +856,7 @@ mod fleet_metrics_tests {
     /// lifecycle state plus a total, with escaped node_id.
     #[test]
     fn cert_expiry_exposition_has_every_state_and_total() {
-        use crate::verifier_store::CertExpirySummary;
+        use kirra_persistence::CertExpirySummary;
         let summary = CertExpirySummary {
             total: 5,
             active: 3,
@@ -892,7 +892,7 @@ mod fleet_metrics_tests {
 
     #[test]
     fn cert_expiry_exposition_escapes_node_id() {
-        use crate::verifier_store::CertExpirySummary;
+        use kirra_persistence::CertExpirySummary;
         let text = super::cert_expiry_prometheus("bad\"id\nx", &CertExpirySummary::default());
         assert!(
             text.contains("node_id=\"bad\\\"id\\nx\""),

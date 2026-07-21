@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::posture_cache::{CachedFleetPosture, SharedPostureCache};
 use kirra_verifier::posture_engine::recalculate_and_broadcast;
 use kirra_verifier::posture_engine_v2::apply_rss_state;
@@ -23,7 +24,6 @@ use kirra_verifier::scenario_runner::{PostureAssertion, ScenarioEvent, ScenarioR
 use kirra_verifier::verifier::{
     AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode,
 };
-use kirra_verifier::verifier_store::VerifierStore;
 
 use parko_core::commands::ControlCommand;
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};

@@ -31,7 +31,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::verifier_store::VerifierStore;
+use kirra_persistence::VerifierStore;
 
 /// Number of independent read-only replica connections opened per file-backed
 /// store. Bounds read-among-read concurrency (each is a separate WAL reader);

@@ -97,9 +97,9 @@ mod observability_tests {
     use axum::http::Request as HttpRequest;
     use axum::routing::get;
     use axum::Router;
+    use kirra_persistence::VerifierStore;
     use kirra_verifier::posture_cache::{CachedFleetPosture, SharedPostureCache};
     use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
-    use kirra_verifier::verifier_store::VerifierStore;
     use tower::ServiceExt; // for `oneshot`
 
     fn test_state() -> Arc<ServiceState> {

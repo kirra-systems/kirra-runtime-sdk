@@ -16,15 +16,15 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use kirra_verifier::verifier::{NodeTrustState, RegisteredNode};
-use kirra_verifier::verifier_store::migrations_postgres::PgMigrationError;
-use kirra_verifier::verifier_store::{
+use kirra_persistence::migrations_postgres::PgMigrationError;
+use kirra_persistence::{
     assert_av_subsystem_store_contract, assert_cert_principal_store_contract,
     assert_fabric_asset_store_contract, assert_federation_store_contract, assert_fence_contract,
     assert_node_store_contract, assert_operator_store_contract, assert_ota_campaign_store_contract,
     assert_posture_engine_state_store_contract, assert_principal_store_contract, EpochFence,
     FenceError, NodeStore,
 };
+use kirra_verifier::verifier::{NodeTrustState, RegisteredNode};
 use kirra_verifier_pg::{PgVerifierStore, PG_SCHEMA_VERSION};
 
 /// Per-test schema counter (combined with the process id so parallel test
@@ -404,7 +404,7 @@ fn an_absent_ha_row_denies_the_fence_fail_closed() {
 // nullability / type change hand-authored into one backend's DDL and not the
 // other now reds one of these two tests instead of drifting silently.
 
-use kirra_verifier::verifier_store::schema_spec::{diff_table, Dialect, LiveColumn, SHARED_TABLES};
+use kirra_persistence::schema_spec::{diff_table, Dialect, LiveColumn, SHARED_TABLES};
 
 /// Read a live PG table's columns (name / data_type / nullability) + its PK set,
 /// as `LiveColumn`s ready for `diff_table`. Scoped to `schema` so parallel

@@ -72,6 +72,9 @@ kirra-taj = { path = "../../../crates/kirra-taj" }
 # Kept for the SQLite `VerifierStore` the clearance gate persists through (heavy,
 # verifier-tier; see clearance_gate) — not on the governor hot path.
 kirra-verifier = { path = "../../.." }
+# ADR-0035 v2.0.0 shim removal: the clearance gate names `VerifierStore` from its
+# canonical crate (the `kirra_verifier::verifier_store` re-export shim is gone).
+kirra-persistence = { path = "../../../crates/kirra-persistence" }
 
 # Async runtime. Default features so `tokio::spawn` and `mpsc` channels
 # are available in both lanes (the scheduler already uses them).

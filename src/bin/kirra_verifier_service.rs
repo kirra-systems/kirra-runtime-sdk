@@ -32,6 +32,7 @@ use kirra_industrial::adapters::ethernet_ip::{EtherNetIpAdapter, EtherNetIpMessa
 use kirra_industrial::protocol_adapter::{
     evaluate_unified_industrial_request, IndustrialProtocol, UnifiedIndustrialRequest,
 };
+use kirra_persistence::{DurableWriteError, VerifierStore};
 use kirra_verifier::action_filter::{evaluate_action_claim, ActionClaim};
 use kirra_verifier::authz::{
     authorize_request, generate_api_token, token_fingerprint, token_sha256_hex, ApiRole,
@@ -53,7 +54,6 @@ use kirra_verifier::verifier::{
     FlapStatus, FleetPosture, HealthResponse, NodeTrustState, PostureStreamEvent, RegisteredNode,
     VerifierOperationMode,
 };
-use kirra_verifier::verifier_store::{DurableWriteError, VerifierStore};
 
 /// EP-12 (Config Slice B): the boot-validated configuration snapshot, set ONCE
 /// in `main` after validation. The spawn-registry closures (which run again on
@@ -518,7 +518,7 @@ async fn main() {
                 std::process::exit(1);
             }
         };
-        use kirra_verifier::verifier_store::KeyAdmission;
+        use kirra_persistence::KeyAdmission;
         // Each rejection is a fail-closed startup REFUSAL — keep the full operator
         // remediation guidance (HOW to recover) in the message, not just the cause.
         match admission {

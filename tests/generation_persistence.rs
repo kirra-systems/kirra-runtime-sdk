@@ -19,10 +19,10 @@
 
 use std::sync::Arc;
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::posture_cache::SharedPostureCache;
 use kirra_verifier::posture_engine::{init_generation_from_store, recalculate_and_broadcast};
 use kirra_verifier::verifier::{AppState, NodeTrustState, RegisteredNode, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 
 fn app_on(path: &std::path::Path) -> Arc<AppState> {
     let store = VerifierStore::new(path.to_str().expect("utf8 temp path")).expect("file store");

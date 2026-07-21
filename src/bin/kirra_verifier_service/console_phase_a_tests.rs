@@ -17,11 +17,11 @@ use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::response::IntoResponse;
 use tower::ServiceExt; // oneshot
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::posture_cache::{
     now_ms, ServiceState, SharedPostureCache, POSTURE_CACHE_TTL_MS,
 };
 use kirra_verifier::verifier::{AppState, NodeTrustState, RegisteredNode, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 
 fn build_state() -> Arc<ServiceState> {
     let store = VerifierStore::new(":memory:").expect("in-memory store");

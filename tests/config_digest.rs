@@ -8,8 +8,8 @@
 //! chain, that the chain integrity holds with the config event in it, and that a
 //! config change yields a different committed digest.
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::env_config::{EffectiveConfig, RawConfig};
-use kirra_verifier::verifier_store::VerifierStore;
 
 fn config_event_payload(cfg: &EffectiveConfig) -> String {
     // Plain string (no serde_json dep in the integration-test crate); shape mirrors

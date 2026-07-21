@@ -21,7 +21,7 @@ use tokio::time::{interval, Duration};
 
 use crate::clock::{Clock, SystemClock};
 use crate::verifier::AppState;
-use crate::verifier_store::{CertExpirySummary, VerifierStore};
+use kirra_persistence::{CertExpirySummary, VerifierStore};
 
 /// How often the expiry census runs. Cert expiry is a slow (days/weeks) concern,
 /// so an hourly sweep is ample to surface a lapse well within an operator's

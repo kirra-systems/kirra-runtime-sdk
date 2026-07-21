@@ -2,10 +2,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::store_handle::StoreError;
 use kirra_verifier::store_handle::StoreHandle;
 use kirra_verifier::verifier::{AppState, VerifierOperationMode};
-use kirra_verifier::verifier_store::VerifierStore;
 
 fn app() -> Arc<AppState> {
     Arc::new(AppState::new(

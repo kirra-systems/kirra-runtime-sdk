@@ -24,8 +24,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
 use ed25519_dalek::SigningKey;
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::verifier::{NodeTrustState, RegisteredNode};
-use kirra_verifier::verifier_store::VerifierStore;
 
 // The REAL SG6 impact-event vocabulary, mirrored as literals. We cannot IMPORT
 // the parko-kirra `audit_sink` constants here because `parko-kirra` is only a

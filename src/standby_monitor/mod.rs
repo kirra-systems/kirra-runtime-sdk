@@ -535,7 +535,7 @@ mod standby_monitor_tests {
 
 #[cfg(test)]
 mod ha_epoch_fence_tests {
-    use crate::verifier_store::VerifierStore;
+    use kirra_persistence::VerifierStore;
     use std::path::PathBuf;
 
     fn tmp_db_path(tag: &str) -> PathBuf {
@@ -772,7 +772,7 @@ mod ha_epoch_fence_tests {
 mod sg_009_promotion_act_tests {
     use super::*;
     use crate::verifier::{AppState, VerifierOperationMode};
-    use crate::verifier_store::VerifierStore;
+    use kirra_persistence::VerifierStore;
     use std::sync::atomic::Ordering;
 
     /// Stale token (unchanged for longer than the timeout, monotonic) → promote.

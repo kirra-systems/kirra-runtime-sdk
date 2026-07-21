@@ -22,8 +22,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
 use ed25519_dalek::SigningKey;
 
+use kirra_persistence::VerifierStore;
 use kirra_verifier::store_handle::StoreHandle;
-use kirra_verifier::verifier_store::VerifierStore;
 use parko_core::{ClearanceLoop, ImpactCfg, ImpactEvidence};
 use parko_kirra::clearance_delivery::{ClearanceDelivery, DeliveryOutcome};
 

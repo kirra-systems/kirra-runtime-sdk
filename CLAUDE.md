@@ -67,7 +67,7 @@ These have been blocked or reverted multiple times. Any submission that violates
 | `NodeTrustState` | `src/verifier.rs` | `Trusted` / `Untrusted(String)` / `Unknown` |
 | `OperationalCommand` | `src/posture_cache.rs` | `ReadTelemetry` / `WriteState` / `SystemMutation` / `Unknown` |
 | `VerifierOperationMode` | `src/verifier.rs` | `Active` / `PassiveStandby`; runtime state held in `mode_active: Arc<AtomicBool>` |
-| `VerifierStore` | `crates/kirra-persistence` (extracted ADR-0035 slice 4; `lib.rs` + per-table submodules), re-exported via the `src/verifier_store.rs` shim | rusqlite WAL-mode SQLite; wrapped in `Arc<Mutex<VerifierStore>>` in AppState. The persistence crate depends only on the lean domain/audit leaf crates; `crate::verifier_store::*` / `kirra_verifier::verifier_store::*` paths resolve through the shim. Test-only `*_for_test` helpers are behind its `test-support` feature (root enables it as a dev-dep) |
+| `VerifierStore` | `crates/kirra-persistence` (extracted ADR-0035 slice 4; `lib.rs` + per-table submodules; import from `kirra_persistence`; v2.0.0 Wave 4: root `verifier_store` shim removed) | rusqlite WAL-mode SQLite; wrapped in `Arc<Mutex<VerifierStore>>` in AppState. The persistence crate depends only on the lean domain/audit leaf crates. Test-only `*_for_test` helpers are behind its `test-support` feature (root enables it as a dev-dep) |
 | `PostureStreamEvent` | `src/verifier.rs` | Broadcast channel payload for SSE stream |
 | `TransportIdentityConfig` | `src/verifier.rs` | `trusted_ingress_mode` + `client_id_header` from env |
 | `FederatedTrustReport` | `kirra_fleet_types::federation` | Ed25519-signed cross-controller trust report (v2.0.0 Wave 1: root shim removed) |
@@ -87,18 +87,24 @@ These have been blocked or reverted multiple times. Any submission that violates
 
 ### Module Map
 
-**Re-export shims are DEPRECATED, not permanent (#1029).** The `— re-export shim
-→ <crate>` modules below are pure `pub use` back-compat surfaces left by the
-de-monolith; ADR-0035 §"Shim deprecation" schedules them for removal at the next
-MAJOR (v2.0.0). The `ci/check_reexport_shims.py` ratchet (guardrails CI job,
-inventory in `ci/reexport_shims_baseline.json`) FREEZES the set: a NEW `pub use`
-shim fails CI, and the count only moves DOWN. Do not add a new shim without
-recording it in the baseline (or, preferably, wire the canonical path directly).
+**Re-export shims are GONE as of v2.0.0 (#1029).** The de-monolith left thin
+`pub use` back-compat surfaces in `src/`; ADR-0035 §"Shim deprecation" scheduled them
+for removal at the next MAJOR, and **v2.0.0 removed all of them across four waves** —
+every internal caller now imports from the canonical leaf crate (e.g.
+`use kirra_persistence::VerifierStore`, `use kirra_core::kinematics_contract::…`). The
+`ci/check_reexport_shims.py` ratchet (guardrails CI job, inventory in
+`ci/reexport_shims_baseline.json`, `max_shims: 0`) is now a permanent
+**zero-tolerance** guard: ANY new `pub use <crate>::…` re-export shim module reds CI, so
+the indirection cannot return. Wire the canonical path directly. (Any `— re-export shim →`
+annotations remaining in the map below are historical notes on where code moved.)
 
 ```
 src/
 ├── verifier.rs               — AppState, FleetPosture, DAG traversal, TransportIdentityConfig
-├── verifier_store/           — SQLite persistence (all tables; WAL mode); module dir:
+│  (verifier_store — relocated to crates/kirra-persistence; import `kirra_persistence`.
+│   v2.0.0 Wave 4 removed the root `src/verifier_store.rs` re-export shim. The persistence
+│   layer's structure, documented here for reference, is:)
+│   kirra-persistence           — SQLite persistence (all tables; WAL mode); module dir:
 │                               mod.rs + per-table submodules (nodes, attestation, audit,
 │                               federation, epoch, principals, ota_campaigns, …).
 │                               migrations.rs (WP-18/G-20): versioned schema framework

@@ -8,8 +8,8 @@
 //! drill proves `new()` actually wires the fail-closed gate + the stamp, on a real
 //! on-disk WAL database with committed rows.
 
-use kirra_verifier::verifier_store::migrations::SCHEMA_VERSION;
-use kirra_verifier::verifier_store::VerifierStore;
+use kirra_persistence::migrations::SCHEMA_VERSION;
+use kirra_persistence::VerifierStore;
 
 const FP: &str = "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44";
 

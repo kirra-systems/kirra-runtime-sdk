@@ -261,7 +261,7 @@ fn test_posture_diamond_dag_not_misidentified_as_cycle() {
     // the second time D was encountered. The gray/black two-set algorithm memoizes D
     // on first completion and returns the cached result on the second visit.
     let state = AppState::new(
-        crate::verifier_store::VerifierStore::new(":memory:").unwrap(),
+        kirra_persistence::VerifierStore::new(":memory:").unwrap(),
         crate::verifier::VerifierOperationMode::Active,
     );
     for id in ["A", "B", "C", "D"] {
@@ -304,7 +304,7 @@ fn test_posture_deep_acyclic_chain_is_not_depth_locked_out() {
     const N: usize = 15;
     for shortcut_first in [false, true] {
         let state = AppState::new(
-            crate::verifier_store::VerifierStore::new(":memory:").unwrap(),
+            kirra_persistence::VerifierStore::new(":memory:").unwrap(),
             crate::verifier::VerifierOperationMode::Active,
         );
         let ids: Vec<String> = (0..N).map(|i| format!("A{i}")).collect();
@@ -342,7 +342,7 @@ fn test_posture_deep_acyclic_chain_is_not_depth_locked_out() {
 fn test_posture_cycle_returns_locked_out_with_diagnostic_tag() {
     // A→B→A: genuine cycle — must lock out and tag with INVALID_GRAPH_CONFIG.
     let state = AppState::new(
-        crate::verifier_store::VerifierStore::new(":memory:").unwrap(),
+        kirra_persistence::VerifierStore::new(":memory:").unwrap(),
         crate::verifier::VerifierOperationMode::Active,
     );
     for id in ["A", "B"] {
@@ -377,7 +377,7 @@ fn test_posture_locked_out_dep_propagates_locked_out_not_degraded() {
     // Parent is Trusted but its dependency is Untrusted (LockedOut).
     // The propagated status must be LockedOut, not softened to Degraded.
     let state = AppState::new(
-        crate::verifier_store::VerifierStore::new(":memory:").unwrap(),
+        kirra_persistence::VerifierStore::new(":memory:").unwrap(),
         crate::verifier::VerifierOperationMode::Active,
     );
     make_node(&state, "parent", NodeTrustState::Trusted);
@@ -642,7 +642,7 @@ fn test_routing_one_ms_past_ttl_is_blocked() {
 
 // --- v0.9.7 posture event store tests ----------------------------------------
 
-use crate::verifier_store::VerifierStore;
+use kirra_persistence::VerifierStore;
 
 fn in_memory_store() -> VerifierStore {
     VerifierStore::new(":memory:").expect("in-memory SQLite must initialise")

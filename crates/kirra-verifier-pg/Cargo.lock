@@ -998,6 +998,7 @@ version = "0.1.0"
 dependencies = [
  "kirra-fabric-types",
  "kirra-ota-campaign",
+ "kirra-persistence",
  "kirra-verifier",
  "postgres",
  "serde_json",
