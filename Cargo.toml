@@ -22,6 +22,15 @@
 members = [".", "crates/kirra-core", "crates/kirra-policy-types", "crates/kirra-industrial", "crates/kirra-contract-channel", "crates/kirra-hv-carrier", "crates/kirra-inline-governor", "crates/kirra-l3-e2e", "crates/kirra-release-token", "crates/kirra-timing", "crates/kirra-wcet-bench", "crates/kirra-trajectory", "crates/kirra-fleet-types", "crates/kirra-ros2-adapter", "crates/kirra-capture-schema", "crates/kirra-collector", "crates/kirra-governor-service", "crates/kirra-wire-client", "crates/kirra-proposal-bench", "crates/kirra-planner", "crates/kirra-mick", "crates/kirra-map", "crates/kirra-taj", "crates/kirra-fleet-transport", "crates/kirra-doer-eval", "crates/kirra-kpi-gate", "crates/kirra-ota-installer", "crates/kirra-ota-campaign", "crates/kirra-fabric-types", "crates/kirra-audit-hash", "crates/kirra-persistence", "crates/kirra-safety-authority", "crates/kirra-replay", "crates/kirra-actuation-consumer", "crates/kirra-sidecars", "crates/kirra-consumer-ffi"]
 resolver = "2"
 
+# One MSRV source of truth for this workspace (#797 F3 / VERSIONING_POLICY.md
+# §3): every member (including the root package) inherits via
+# `rust-version.workspace = true`, so `cargo <cmd> -p <member>` on an old
+# toolchain fails the rust-version check up front instead of dying
+# mid-compile. Bump in lock-step with parko/Cargo.toml [workspace.package]
+# and the ci.yml `msrv` lane toolchain pin.
+[workspace.package]
+rust-version = "1.88"
+
 [package]
 name = "kirra-verifier"
 version = "2.0.0"
@@ -31,8 +40,9 @@ edition = "2021"
 # libloading 0.9, ort) — not by our own code. ENFORCED on every PR by the `msrv`
 # CI lane (`cargo +1.88.0 check --workspace --locked`), not just asserted here.
 # Raising this is a MINOR bump + CHANGELOG entry, per policy — in lock-step with
-# the CI lane and the parko-core `rust-version`.
-rust-version = "1.88"
+# the CI lane and parko's [workspace.package]. The value lives in THIS
+# manifest's [workspace.package]; every member inherits it (#797 F3).
+rust-version.workspace = true
 description = "Vendor-neutral runtime safety kernel for autonomous vehicles, robots, and drones"
 repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
 homepage = "https://kirrasystems.com"

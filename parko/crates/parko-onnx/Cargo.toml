@@ -2,6 +2,10 @@
 name = "parko-onnx"
 version = "0.1.0"
 edition = "2021"
+# MSRV floor inherited from the workspace root ([workspace.package]) — one
+# source of truth per workspace, so `cargo <cmd> -p <member>` on an old
+# toolchain fails the rust-version check up front, never mid-compile (#797 F3).
+rust-version.workspace = true
 description = "ONNX Runtime backend for parko-core via ort"
 repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
 license-file = "../../../COPYRIGHT"

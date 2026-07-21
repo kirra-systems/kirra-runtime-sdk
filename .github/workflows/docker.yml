@@ -17,6 +17,18 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
+      # #797 F6 — the REGISTRY half of the A4 version-ordering guard
+      # (ci/check_version_ordering.py covers the in-repo line): refuse to
+      # publish while any ghcr tag semver-exceeds the version being built, so
+      # a semver image-update policy can never "upgrade" a fleet onto an old
+      # image. The pre-existing Aegis-era 1.5.0/1.5 tags are allowlisted with
+      # justifications in ci/ghcr_legacy_tags.json pending OWNER deletion or
+      # re-tag; any NEW offender reds this job before anything is pushed.
+      - name: ghcr tag-ordering guard (no tag may semver-exceed this build)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 ci/check_ghcr_tag_ordering.py
+
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
@@ -77,6 +89,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      # #797 F6 — same registry-ordering guard over the dashboard package.
+      - name: ghcr tag-ordering guard (no tag may semver-exceed this build)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_PACKAGE: kirra-dashboard
+        run: python3 ci/check_ghcr_tag_ordering.py
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
