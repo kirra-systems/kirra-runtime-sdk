@@ -173,7 +173,7 @@ ${useCase({
      evRow("src/audit_shipper.rs", "src/bin/kirra_verifier_service/dnp3_mandatory_audit_tests.rs")],
   ],
   chips: "",
-  footnote: "Decoders for hostile inputs are fuzzed continuously — the DNP3 setpoint decoder is one of the four standing fuzz targets.",
+  footnote: `Decoders for hostile inputs are fuzzed continuously — the DNP3 setpoint decoder is one of the four standing fuzz targets. <a class="evidence" href="industrial.html">The full OT &amp; utilities page →</a>`,
 })}
 
 ${useCase({

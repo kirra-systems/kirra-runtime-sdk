@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Industrial &amp; OT — Kirra Systems</title>
+  <meta name="description" content="Kirra for operational technology: a fail-closed governor that decodes the actual control write on the wire — DNP3, CANopen, EtherNet/IP — checks it against a physical envelope, and denies out-of-range setpoints regardless of credentials, with a tamper-evident record.">
+  <link rel="canonical" href="https://kirrasystems.com/industrial.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Kirra Systems">
+  <meta property="og:title" content="Industrial &amp; OT — Kirra Systems">
+  <meta property="og:description" content="Kirra for operational technology: a fail-closed governor that decodes the actual control write on the wire — DNP3, CANopen, EtherNet/IP — checks it against a physical envelope, and denies out-of-range setpoints regardless of credentials, with a tamper-evident record.">
+  <meta property="og:url" content="https://kirrasystems.com/industrial.html">
+  <meta property="og:image" content="https://kirrasystems.com/assets/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Industrial &amp; OT — Kirra Systems">
+  <meta name="twitter:description" content="Kirra for operational technology: a fail-closed governor that decodes the actual control write on the wire — DNP3, CANopen, EtherNet/IP — checks it against a physical envelope, and denies out-of-range setpoints regardless of credentials, with a tamper-evident record.">
+  <meta name="twitter:image" content="https://kirrasystems.com/assets/og.png">
+  <meta name="theme-color" content="#05070d">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="assets/kirra-logo.png" type="image/png">
+  <link rel="apple-touch-icon" href="assets/kirra-logo.png">
+  <link rel="preload" href="fonts/space-grotesk-var-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/inter-var-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="css/kirra.css">
+  <script>/* theme init before first paint — prevents flash */
+(function(){try{var t=localStorage.getItem("kirra-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme="dark";}})();</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"Industrial &amp; OT — Kirra Systems","description":"Kirra for operational technology: a fail-closed governor that decodes the actual control write on the wire — DNP3, CANopen, EtherNet/IP — checks it against a physical envelope, and denies out-of-range setpoints regardless of credentials, with a tamper-evident record.","url":"https://kirrasystems.com/industrial.html","isPartOf":{"@type":"WebSite","name":"Kirra Systems","url":"https://kirrasystems.com"}}</script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="nav" id="nav">
+    <div class="nav__inner">
+      <a href="index.html" class="nav__brand" aria-label="Kirra Systems home"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <g stroke="currentColor" stroke-width="1.4" opacity="0.85">
+    <path d="M7 4v24M7 17 25 4M11.5 13.7 25 28"/>
+    <path d="M7 4l7 6.5M7 28l4.5-14.3M14 10.5 7 17" opacity="0.35"/>
+  </g>
+  <g fill="var(--accent, #3fd9c9)">
+    <circle cx="7" cy="4" r="2"/><circle cx="7" cy="17" r="2.4"/><circle cx="7" cy="28" r="2"/>
+    <circle cx="25" cy="4" r="2"/><circle cx="25" cy="28" r="2"/>
+    <circle cx="14" cy="10.5" r="1.5"/><circle cx="11.5" cy="13.7" r="1.5"/>
+  </g>
+</svg><span>KIRRA</span></a>
+      <nav class="nav__links" id="navLinks" aria-label="Primary">
+        <a href="solutions.html">Solutions</a>
+        <a href="vision.html">Vision</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="safety.html">Safety</a>
+        <a href="certification.html">Certification</a>
+        <a href="field-notes.html">Field Notes</a>
+        <a href="contact.html">Contact</a>
+      </nav>
+      <button class="theme-toggle" id="themeToggle" aria-label="Toggle color theme">
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg>
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>
+      <a href="https://github.com/kirra-systems/kirra-runtime-sdk" class="nav__cta" target="_blank" rel="noopener" aria-label="Kirra on GitHub (opens in new tab)"><span class="label">GitHub</span><span aria-hidden="true">↗</span></a>
+      <button class="nav__burger" id="navBurger" aria-label="Open menu" aria-expanded="false" aria-controls="navLinks">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
+    </div>
+  </header>
+  <nav class="subnav" aria-label="Platform sections">
+    <div class="subnav__inner">
+      <a href="solutions.html">solutions</a>
+      <a href="industrial.html" aria-current="page">industrial / OT</a>
+      <a href="vision.html">vision</a>
+      <a href="architecture.html">architecture</a>
+      <a href="runtime.html">runtime</a>
+      <a href="diagnostics.html">diagnostics</a>
+      <a href="safety.html">safety</a>
+      <a href="planning.html">planning</a>
+      <a href="perception.html">perception</a>
+      <a href="prediction.html">prediction</a>
+      <a href="determinism.html">determinism</a>
+      <a href="performance.html">performance</a>
+      <a href="security.html">security</a>
+      <a href="certification.html">certification</a>
+      <a href="benchmarks.html">benchmarks</a>
+      <a href="playground.html">playground</a>
+      <a href="open-source.html">open source</a>
+      <a href="documentation.html">docs</a>
+      <a href="research.html">research</a>
+    </div>
+  </nav>
+
+  <main id="main">
+
+
+    <section class="page-hero">
+      <div class="container">
+        <p class="eyebrow" data-reveal>Industrial &amp; OT</p>
+        <h1 data-reveal>Valid credentials.<br>Catastrophic command.<br><span style="color:var(--accent)">Denied on physics.</span></h1>
+        <p class="lede" data-reveal>The dangerous failure in operational technology isn't always an intruder — it's a valid, authenticated write with a physically impossible value: a 100-fold lye setpoint, a 400% output, a reversed valve. Kirra decodes the actual control write on the wire and denies on magnitude, regardless of whose credentials carried it — and records the refusal in a ledger a regulator can verify.</p>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-story">
+      <div class="container">
+        <div class="grid grid--2" style="gap:48px;align-items:start">
+          <div>
+            <div class="compare-note" data-reveal>
+              <strong>Oldsmar, Florida — February 2021.</strong> An operator watched the sodium-hydroxide setpoint
+              at a municipal water plant climb from 100&nbsp;ppm to 11,100&nbsp;ppm on a remotely-accessed HMI —
+              a 111× jump toward dosing a town's drinking water, caught by human luck minutes from harm. Whether
+              the cause was an intrusion or an operator error is still debated, and that debate <em>is</em> the
+              lesson: the control system accepted a physically catastrophic setpoint on valid credentials either
+              way. A magnitude envelope on the wire refuses it in both cases.
+            </div>
+            <p class="evidence-note" style="margin-top:14px">Kirra's founder holds licensed operating experience on public
+            water-treatment control systems — the exact class of infrastructure this addresses. <a class="evidence" href="company.html">About the company</a></p>
+          </div>
+          <div class="diagram-frame flow-anim" data-reveal>
+<svg viewBox="0 0 960 250" role="img" aria-labelledby="otT otD">
+  <title id="otT">Setpoint bounding on the wire</title>
+  <desc id="otD">A control write travels from an operator or engineering workstation toward a PLC or RTU. Kirra decodes the setpoint by its configured type, checks the magnitude against a physical envelope, and either forwards an in-range value or denies an out-of-range one and records it in the hash-chained ledger — regardless of whether the credentials were valid.</desc>
+  <g>
+    <rect class="dg-box" x="14" y="90" width="180" height="70" rx="10"/>
+    <text class="dg-label" x="32" y="120">HMI / workstation</text>
+    <text class="dg-sub" x="32" y="140">valid credentials</text>
+  </g>
+  <path class="dg-edge dg-edge--flow" d="M194 125 L 250 125"/>
+  <text class="dg-mono" x="198" y="114">Operate / Set</text>
+  <g>
+    <rect class="dg-box dg-box--accent" x="252" y="70" width="220" height="110" rx="12"/>
+    <text class="dg-label" x="272" y="100">KIRRA — on the wire</text>
+    <text class="dg-mono" x="272" y="124">decode by configured type</text>
+    <text class="dg-mono" x="272" y="144">check magnitude vs envelope</text>
+    <text class="dg-sub" x="272" y="166">undecodable ⇒ refuse, never guess</text>
+  </g>
+  <path class="dg-edge dg-edge--flow" d="M472 105 L 560 105"/>
+  <text class="dg-mono" x="486" y="95">in range</text>
+  <g>
+    <rect class="dg-box" x="562" y="72" width="180" height="64" rx="10"/>
+    <text class="dg-label" x="580" y="100">PLC / RTU</text>
+    <text class="dg-sub" x="580" y="120">command applied</text>
+  </g>
+  <path class="dg-edge dg-edge--deny" d="M472 150 L 560 170"/>
+  <text class="dg-mono" x="486" y="150">out of range</text>
+  <g>
+    <rect class="dg-box dg-box--deny" x="562" y="150" width="220" height="60" rx="10"/>
+    <text class="dg-label" x="580" y="178">DENY + hash-chained record</text>
+    <text class="dg-sub" x="580" y="198">identity does not excuse physics</text>
+  </g>
+</svg></div>
+        </div>
+        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/protocol_adapters.md" target="_blank" rel="noopener">docs/protocol_adapters.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/protocol_adapter.rs" target="_blank" rel="noopener">src/protocol_adapter.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-industrial" target="_blank" rel="noopener">crates/kirra-industrial</a></p>
+      </div>
+    </section>
+
+    <hr class="rule">
+
+    <section aria-labelledby="h-protocols">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>Native protocol awareness</p>
+          <h2 id="h-protocols" data-reveal>It reads the wire, not a wrapper</h2>
+          <p class="lede" data-reveal>Kirra decodes each control write by its <em>configured type</em> — because the
+          frame on the wire carries width at best, never type — then bounds the decoded value. A write that can't
+          be faithfully decoded is refused, never fabricated. Envelopes are configuration; a high-assurance
+          strict mode denies any write to a target with no configured bound.</p>
+        </div>
+        <div class="table-wrap" data-reveal>
+          <table class="tbl">
+            <caption class="visually-hidden">Industrial protocol adapters</caption>
+            <thead><tr><th scope="col">Protocol</th><th scope="col">What Kirra bounds</th><th scope="col">Configuration</th><th scope="col">Status</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>DNP3</td>
+                <td>Analog Output (g41) control writes — Operate / Direct_Operate setpoints</td>
+                <td class="mono">KIRRA_DNP3_ANALOG_OUTPUT_ENVELOPE</td>
+                <td><span class="pill pill--live">LIVE</span></td>
+              </tr>
+              <tr>
+                <td>CANopen</td>
+                <td>SDO expedited-download setpoints, decoded by the OD entry's type (i8…f32)</td>
+                <td class="mono">KIRRA_CANOPEN_SDO_BOUNDS · _STRICT_BOUNDS</td>
+                <td><span class="pill pill--live">LIVE</span></td>
+              </tr>
+              <tr>
+                <td>EtherNet/IP (CIP)</td>
+                <td>Set_Attribute_Single writes, decoded by the attribute's data type</td>
+                <td class="mono">KIRRA_CIP_ATTR_BOUNDS · _STRICT_BOUNDS</td>
+                <td><span class="pill pill--live">LIVE</span></td>
+              </tr>
+              <tr>
+                <td>Modbus / OPC-UA</td>
+                <td>Event mapping into the fleet posture engine</td>
+                <td class="mono">protocol_adapter.rs</td>
+                <td><span class="pill pill--live">LIVE</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/CLAUDE.md" target="_blank" rel="noopener">CLAUDE.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-industrial" target="_blank" rel="noopener">crates/kirra-industrial</a></p>
+        <p class="evidence-note">Env-var names are the repository's own; each maps a target (node/index/attribute) to a
+        typed <code>min:max</code> range. Unconfigured targets are posture-only; strict mode makes them deny-by-default.</p>
+      </div>
+    </section>
+
+    <hr class="rule">
+
+    <section aria-labelledby="h-props">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow" data-reveal>Why OT teams trust it</p>
+          <h2 id="h-props" data-reveal>Fail-closed, auditable, adversary-tested</h2>
+        </div>
+        <div class="grid grid--3">
+          <div class="card" data-reveal>
+            <h3>Deny on physics, not identity</h3>
+            <p>The envelope check is on the decoded magnitude. A compromised-but-authenticated workstation, an
+            insider, or a fat-fingered setpoint are all refused by the same rule — the one thing they have in
+            common is a physically out-of-range value.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-industrial" target="_blank" rel="noopener">crates/kirra-industrial</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <h3>A record regulators can verify</h3>
+            <p>Every denied setpoint lands in a SHA-256 hash-chained ledger with the decoded value that was
+            refused — tamper-evident, shippable off-box to WORM storage, and independently re-verifiable. The DNP3
+            deny path is mandatory-audited by test.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/audit_shipper.rs" target="_blank" rel="noopener">src/audit_shipper.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/bin/kirra_verifier_service/dnp3_mandatory_audit_tests.rs" target="_blank" rel="noopener">src/bin/kirra_verifier_service/dnp3_mandatory_audit_tests.rs</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <h3>Hostile inputs are fuzzed</h3>
+            <p>The decoders face malformed frames continuously — the DNP3 analog-setpoint decoder is one of four
+            standing fuzz targets, run on every push and deep-fuzzed weekly. An undecodable payload is refused,
+            never interpreted.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/fuzz/fuzz_targets/dnp3_analog_setpoint.rs" target="_blank" rel="noopener">fuzz/fuzz_targets/dnp3_analog_setpoint.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/fuzz-deep-weekly.yml" target="_blank" rel="noopener">.github/workflows/fuzz-deep-weekly.yml</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <h3>Posture across the plant</h3>
+            <p>Assets form a dependency fabric: a faulted upstream asset degrades what depends on it, and
+            industrial events feed the same fleet-posture engine that gates every command class across the site.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/multi_asset_fabric.md" target="_blank" rel="noopener">docs/multi_asset_fabric.md</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <h3>Sits in front of what you run</h3>
+            <p>Kirra is a governor, not a replacement PLC or SCADA. It bounds the control write between the
+            issuing layer and the actuator — your existing automation stays; it simply gains a physics-aware
+            veto it can't talk its way past.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/adr/0020-doer-invariant-safety-case.md" target="_blank" rel="noopener">docs/adr/0020-doer-invariant-safety-case.md</a></p>
+          </div>
+          <div class="card" data-reveal>
+            <h3>Standards-aligned, honestly</h3>
+            <p>The safety case maps to IEC 61508 SIL 3 and the run-time-assurance patterns OT regulators
+            recognize — drafted in the open, versioned with the code. Independent assessment has not yet been
+            performed, and we say so.</p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/safety/IEC_61508_SIL3_MAPPING.md" target="_blank" rel="noopener">docs/safety/IEC_61508_SIL3_MAPPING.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/certification.html" target="_blank" rel="noopener">certification.html</a></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+
+    <section class="cta-band">
+      <div class="container">
+        <p class="eyebrow" style="justify-content:center">READ THE SOURCE</p>
+        <h2>Bound the setpoint. Keep the plant.</h2>
+        <p class="lede">Bring us your protocol, your targets, and your physical limits — we'll show you where Kirra's envelope sits in your control path today, and where it's roadmap.</p>
+        <div class="hero__ctas">
+          <a class="btn btn--primary" href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener">View the repository <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="btn btn--ghost" href="documentation.html">Browse the documentation</a>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+<footer class="footer">
+  <div class="container">
+    <div class="footer__grid">
+      <div class="footer__brand">
+        <a class="nav__brand" href="index.html"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <g stroke="currentColor" stroke-width="1.4" opacity="0.85">
+    <path d="M7 4v24M7 17 25 4M11.5 13.7 25 28"/>
+    <path d="M7 4l7 6.5M7 28l4.5-14.3M14 10.5 7 17" opacity="0.35"/>
+  </g>
+  <g fill="var(--accent, #3fd9c9)">
+    <circle cx="7" cy="4" r="2"/><circle cx="7" cy="17" r="2.4"/><circle cx="7" cy="28" r="2"/>
+    <circle cx="25" cy="4" r="2"/><circle cx="25" cy="28" r="2"/>
+    <circle cx="14" cy="10.5" r="1.5"/><circle cx="11.5" cy="13.7" r="1.5"/>
+  </g>
+</svg><span>KIRRA</span></a>
+        <p>The fail-closed runtime safety governor for AI-driven machines. The doer proposes; the checker bounds it.</p>
+      </div>
+      <nav aria-label="Platform">
+        <h3>Platform</h3>
+        <ul>
+          <li><a href="solutions.html">Solutions</a></li>
+          <li><a href="architecture.html">Architecture</a></li>
+          <li><a href="runtime.html">Runtime</a></li>
+          <li><a href="diagnostics.html">Diagnostics</a></li>
+          <li><a href="determinism.html">Determinism</a></li>
+          <li><a href="performance.html">Performance</a></li>
+          <li><a href="security.html">Security</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Safety">
+        <h3>Safety</h3>
+        <ul>
+          <li><a href="safety.html">Safety model</a></li>
+          <li><a href="planning.html">Planning</a></li>
+          <li><a href="perception.html">Perception</a></li>
+          <li><a href="prediction.html">Prediction</a></li>
+          <li><a href="certification.html">Certification</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Evidence">
+        <h3>Evidence</h3>
+        <ul>
+          <li><a href="playground.html">Verdict Playground</a></li>
+          <li><a href="benchmarks.html">Benchmarks</a></li>
+          <li><a href="open-source.html">Open source</a></li>
+          <li><a href="documentation.html">Documentation</a></li>
+          <li><a href="research.html">Research</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Company">
+        <h3>Company</h3>
+        <ul>
+          <li><a href="company.html">About</a></li>
+          <li><a href="vision.html">Vision</a></li>
+          <li><a href="contact.html">Contact</a></li>
+          <li><a href="field-notes.html">Field Notes</a></li>
+          <li><a href="careers.html">Careers</a></li>
+          <li><a href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener">GitHub ↗</a></li>
+          <li><a href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/SECURITY.md" target="_blank" rel="noopener">Security policy ↗</a></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="footer__meta">
+      <span>© <span data-year>2026</span> Kirra Systems</span>
+      <span class="mono">kirra-verifier v1.1.2 · Rust 2021 · MSRV 1.88</span>
+      <span>Every claim on this site links to its source in the repository.</span>
+      <a class="mono" data-lighthouse hidden href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/scripts/lighthouse-bake.mjs" target="_blank" rel="noopener" style="text-decoration:none"></a>
+    </div>
+  </div>
+</footer>
+  <script src="js/kirra.js" defer></script>
+</body>
+</html>

@@ -67,6 +67,7 @@
   <nav class="subnav" aria-label="Platform sections">
     <div class="subnav__inner">
       <a href="solutions.html" aria-current="page">solutions</a>
+      <a href="industrial.html">industrial / OT</a>
       <a href="vision.html">vision</a>
       <a href="architecture.html">architecture</a>
       <a href="runtime.html">runtime</a>
@@ -229,7 +230,7 @@
     a DNP3 analog setpoint, a CANopen SDO download, an EtherNet/IP attribute write — check the decoded
     value against a configured physical envelope, and <em>deny what's out of range</em>. A payload that
     can't be faithfully decoded is refused too: the governor never guesses what a malformed frame meant.</div>
-            <p class="evidence-note" style="margin-top:14px">Decoders for hostile inputs are fuzzed continuously — the DNP3 setpoint decoder is one of the four standing fuzz targets.</p>
+            <p class="evidence-note" style="margin-top:14px">Decoders for hostile inputs are fuzzed continuously — the DNP3 setpoint decoder is one of the four standing fuzz targets. <a class="evidence" href="industrial.html">The full OT &amp; utilities page →</a></p>
           </div>
           <div style="display:grid;gap:14px">
             <div class="card" data-reveal><h3 style="font-size:1.05rem">Native protocol awareness</h3><p>Modbus and OPC-UA event mapping, DNP3 Analog Output (g41) magnitude envelopes, per-target typed CANopen SDO bounds, CIP Set_Attribute_Single bounds — each with a strict mode that denies writes to any target without a configured bound.</p><p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/protocol_adapters.md" target="_blank" rel="noopener">docs/protocol_adapters.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-industrial" target="_blank" rel="noopener">crates/kirra-industrial</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/protocol_adapter.rs" target="_blank" rel="noopener">src/protocol_adapter.rs</a></p></div><div class="card" data-reveal><h3 style="font-size:1.05rem">Posture across the plant</h3><p>Assets form a dependency fabric: a faulted upstream asset degrades what depends on it, and industrial events feed the same fleet-posture engine that gates every command class.</p><p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/multi_asset_fabric.md" target="_blank" rel="noopener">docs/multi_asset_fabric.md</a></p></div><div class="card" data-reveal><h3 style="font-size:1.05rem">An audit trail regulators can verify</h3><p>Every denied setpoint lands in the hash-chained ledger with the decoded value that was refused — shippable off-box to WORM storage and independently re-verifiable. The DNP3 deny path is mandatory-audited by test.</p><p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/audit_shipper.rs" target="_blank" rel="noopener">src/audit_shipper.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/bin/kirra_verifier_service/dnp3_mandatory_audit_tests.rs" target="_blank" rel="noopener">src/bin/kirra_verifier_service/dnp3_mandatory_audit_tests.rs</a></p></div>
