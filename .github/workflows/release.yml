@@ -90,6 +90,19 @@ jobs:
           fi
           echo "OK: CHANGELOG.md has a '## [$VERSION]' section"
 
+      - name: Release safety-constant sign-off gate (EP-09; review F2)
+        # A tagged release must not ship UNAPPROVED safety constants. The EP-09
+        # provenance gate, run here under KIRRA_RELEASE_GATE=1, fails if ANY governed
+        # constant in ci/safety_constants_manifest.json is still `pending` sign-off —
+        # making the stated release policy real at the tag. ci.yml runs this same
+        # check only as a NON-blocking red-path self-test; the enforcement point is
+        # here. Placed in the toolchain-free preflight (no build, no cargo) so a
+        # release blocked on sign-off never reaches the cross-compiles or the cosign
+        # signing identity — same fail-fast rationale as the tag/changelog gates.
+        # Until all constants are `validated`, a tag is intentionally blocked here;
+        # sign one off (with recorded provenance + owner) to release.
+        run: KIRRA_RELEASE_GATE=1 python3 ci/check_safety_constants.py
+
   build-dashboard:
     name: Build dashboard
     needs: preflight
