@@ -65,6 +65,7 @@ const SUBNAV = [
   ["security.html", "security"],
   ["certification.html", "certification"],
   ["benchmarks.html", "benchmarks"],
+  ["playground.html", "playground"],
   ["open-source.html", "open source"],
   ["documentation.html", "docs"],
   ["research.html", "research"],
@@ -103,6 +104,7 @@ const FOOTER = `
       <nav aria-label="Evidence">
         <h4>Evidence</h4>
         <ul>
+          <li><a href="playground.html">Verdict Playground</a></li>
           <li><a href="benchmarks.html">Benchmarks</a></li>
           <li><a href="open-source.html">Open source</a></li>
           <li><a href="documentation.html">Documentation</a></li>

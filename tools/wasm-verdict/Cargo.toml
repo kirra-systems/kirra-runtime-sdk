@@ -1,0 +1,41 @@
+# The website's verdict playground — the FROZEN kinematics-contract talisman
+# (crates/kirra-core/src/kinematics_contract.rs, git blob ed00f4da…) compiled
+# to WebAssembly so visitors run the REAL checker in their browser.
+#
+# FIDELITY: the source under test is `#[path]`-included VERBATIM from its
+# shipped location — the same pattern `verification/kani` uses. The talisman
+# file is never modified; only the thin FFI shim in src/lib.rs is ours.
+#
+# BUILD (output is committed to website/assets/verdict.wasm):
+#   rustup target add wasm32-unknown-unknown
+#   cargo build --release --target wasm32-unknown-unknown
+#   cp target/wasm32-unknown-unknown/release/kirra_wasm_verdict.wasm \
+#      ../../website/assets/verdict.wasm
+#
+# TEST (native, no wasm toolchain needed — mirrors the browser call path):
+#   cargo test
+#
+# The empty `[workspace]` table detaches this crate from the parent workspace
+# (like fuzz/, kirra-loom-models, verification/kani): it never enters the root
+# Cargo.lock, the MSRV lane, or a normal `cargo build --workspace`.
+[package]
+name = "kirra-wasm-verdict"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The included talisman derives serde on its wire types.
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
