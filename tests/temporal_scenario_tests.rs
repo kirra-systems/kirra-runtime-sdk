@@ -72,12 +72,12 @@ async fn build_av_test_infrastructure() -> (Arc<AppState>, SharedPostureCache, A
 
     // Set up dependency graph edges (mirrors POST /fleet/dependencies)
     // perception_fusion depends on lidar_front and camera_front
-    app.dependency_graph.insert(
+    app.fleet.dependency_graph.insert(
         "perception_fusion".to_string(),
         vec!["lidar_front".to_string(), "camera_front".to_string()],
     );
     // trajectory_planner depends on perception_fusion
-    app.dependency_graph.insert(
+    app.fleet.dependency_graph.insert(
         "trajectory_planner".to_string(),
         vec!["perception_fusion".to_string()],
     );
@@ -90,7 +90,7 @@ async fn build_av_test_infrastructure() -> (Arc<AppState>, SharedPostureCache, A
         "perception_fusion",
         "trajectory_planner",
     ] {
-        app.nodes.insert(
+        app.fleet.nodes.insert(
             node_id.to_string(),
             kirra_verifier::verifier::RegisteredNode {
                 node_id: node_id.to_string(),

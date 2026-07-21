@@ -40,20 +40,22 @@ async fn posture_recalc_remains_bounded_under_dashmap_contention() {
     let app = app();
     let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
 
-    app.nodes.insert("root".into(), node("root"));
-    app.nodes.insert("dep_a".into(), node("dep_a"));
-    app.dependency_graph
+    app.fleet.nodes.insert("root".into(), node("root"));
+    app.fleet.nodes.insert("dep_a".into(), node("dep_a"));
+    app.fleet
+        .dependency_graph
         .insert("root".into(), vec!["dep_a".into()]);
 
     let writer_app = Arc::clone(&app);
     let writer = tokio::spawn(async move {
         for i in 0..250u32 {
             let temp = format!("temp-{i}");
-            writer_app.nodes.insert(temp.clone(), node(&temp));
+            writer_app.fleet.nodes.insert(temp.clone(), node(&temp));
             writer_app
+                .fleet
                 .dependency_graph
                 .insert("root".into(), vec!["dep_a".into(), temp.clone()]);
-            writer_app.nodes.remove(temp.as_str());
+            writer_app.fleet.nodes.remove(temp.as_str());
             tokio::task::yield_now().await;
         }
     });
@@ -128,7 +130,9 @@ async fn posture_dag_recalc_completes_under_dashmap_contention() {
         let id = format!("n{i}");
         app.persist_and_insert_node(node(&id)).expect("insert node");
         if i > 0 {
-            app.dependency_graph.insert(id, vec![format!("n{}", i - 1)]);
+            app.fleet
+                .dependency_graph
+                .insert(id, vec![format!("n{}", i - 1)]);
         }
     }
 
@@ -137,10 +141,11 @@ async fn posture_dag_recalc_completes_under_dashmap_contention() {
         for i in 0..200usize {
             let id = format!("w{}", i % 24);
             app_w
+                .fleet
                 .dependency_graph
                 .insert(id.clone(), vec![format!("n{}", i % 24)]);
             if i % 3 == 0 {
-                app_w.dependency_graph.remove(&id);
+                app_w.fleet.dependency_graph.remove(&id);
             }
             tokio::task::yield_now().await;
         }

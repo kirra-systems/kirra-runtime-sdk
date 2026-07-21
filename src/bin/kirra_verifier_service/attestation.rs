@@ -109,7 +109,7 @@ pub(crate) async fn issue_challenge(
         )
             .into_response();
     }
-    if !svc.app.nodes.contains_key(&node_id) {
+    if !svc.app.fleet.nodes.contains_key(&node_id) {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "node not registered" })),
@@ -198,7 +198,7 @@ pub(crate) async fn verify_attestation(
     // into the AK signature (`verify_attestation_proof_with_pcr16`); a node with no
     // expectation is unaffected. A hardware TPM *quote* (the deeper measured-boot
     // root) is enforced just below for a node whose policy requires it.
-    let (ak_public_pem, expected_pcr16) = match svc.app.nodes.get(&req.node_id) {
+    let (ak_public_pem, expected_pcr16) = match svc.app.fleet.nodes.get(&req.node_id) {
         Some(node) => (
             node.ak_public_pem.clone(),
             node.expected_pcr16_digest_hex.clone(),
@@ -384,7 +384,7 @@ pub(crate) async fn get_node_status(
     State(svc): State<Arc<ServiceState>>,
     Path(node_id): Path<String>,
 ) -> impl IntoResponse {
-    match svc.app.nodes.get(&node_id) {
+    match svc.app.fleet.nodes.get(&node_id) {
         Some(node) => {
             let status = match &node.status {
                 NodeTrustState::Trusted => "Trusted",

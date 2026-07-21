@@ -356,6 +356,7 @@ pub(crate) async fn report_node_artifact(
         }
         let ak = svc
             .app
+            .fleet
             .nodes
             .get(&node_id)
             .and_then(|n| n.ak_public_pem.clone());
@@ -609,7 +610,7 @@ pub(crate) async fn handle_sensor_fault_report(
         )
             .into_response();
     }
-    if !svc.app.nodes.contains_key(&req.source_node_id) {
+    if !svc.app.fleet.nodes.contains_key(&req.source_node_id) {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "node not registered" })),
@@ -728,6 +729,7 @@ pub(crate) async fn handle_sensor_fault_report(
 
     let currently_untrusted = svc
         .app
+        .fleet
         .nodes
         .get(&req.source_node_id)
         .map(|n| matches!(n.status, NodeTrustState::Untrusted(_)))
@@ -875,7 +877,7 @@ pub(crate) async fn handle_register_av_asset(
         )
             .into_response();
     }
-    if !svc.app.nodes.contains_key(&req.node_id) {
+    if !svc.app.fleet.nodes.contains_key(&req.node_id) {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "node not registered" })),

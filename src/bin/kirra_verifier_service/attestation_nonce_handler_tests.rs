@@ -245,7 +245,7 @@ async fn signed_adoption_report_is_attested_and_forgery_rejected() {
 /// measured-boot PCR16 digest.
 fn svc_with_pcr16_node(ak_pem: String, expected_pcr16: &str) -> Arc<ServiceState> {
     let svc = svc_with_registered_node(ak_pem);
-    let existing = svc.app.nodes.get(NODE).map(|n| n.clone()).unwrap();
+    let existing = svc.app.fleet.nodes.get(NODE).map(|n| n.clone()).unwrap();
     svc.app
         .persist_and_insert_node(RegisteredNode {
             expected_pcr16_digest_hex: Some(expected_pcr16.to_string()),
@@ -334,7 +334,7 @@ async fn attestation_pcr16_match_succeeds_absent_and_mismatch_are_refused() {
     assert_eq!(ok, StatusCode::OK, "matching bound PCR16 attests");
     assert!(
         matches!(
-            svc.app.nodes.get(NODE).unwrap().status,
+            svc.app.fleet.nodes.get(NODE).unwrap().status,
             NodeTrustState::Trusted
         ),
         "node becomes Trusted after a valid PCR16-bound proof"
@@ -424,7 +424,7 @@ async fn tpm_quote_required_but_absent_is_refused() {
     );
     assert!(
         matches!(
-            svc.app.nodes.get(NODE).unwrap().status,
+            svc.app.fleet.nodes.get(NODE).unwrap().status,
             NodeTrustState::Unknown
         ),
         "node is not trusted without the required quote"
@@ -454,7 +454,7 @@ async fn tpm_quote_valid_attests_node_trusted() {
     assert_eq!(status, StatusCode::OK, "valid quote attests");
     assert!(
         matches!(
-            svc.app.nodes.get(NODE).unwrap().status,
+            svc.app.fleet.nodes.get(NODE).unwrap().status,
             NodeTrustState::Trusted
         ),
         "node becomes Trusted after a valid hardware quote"
@@ -522,7 +522,7 @@ async fn tpm_quote_policy_absent_is_back_compat() {
     );
     assert!(
         matches!(
-            svc.app.nodes.get(NODE).unwrap().status,
+            svc.app.fleet.nodes.get(NODE).unwrap().status,
             NodeTrustState::Trusted
         ),
         "node attests via the back-compat self-report path"
@@ -738,7 +738,7 @@ async fn register_quote_required_without_material_is_400() {
     );
 
     // Neither node was minted.
-    assert!(!svc.app.nodes.contains_key("n1") && !svc.app.nodes.contains_key("n2"));
+    assert!(!svc.app.fleet.nodes.contains_key("n1") && !svc.app.fleet.nodes.contains_key("n2"));
 }
 
 /// WP-16 end-to-end: ENROLL a node through the real `register_node` handler with
@@ -804,7 +804,7 @@ async fn enroll_via_register_handler_then_quote_attests_end_to_end() {
     );
     assert!(
         matches!(
-            svc.app.nodes.get(NODE).unwrap().status,
+            svc.app.fleet.nodes.get(NODE).unwrap().status,
             NodeTrustState::Trusted
         ),
         "the enrolled measured-boot node becomes Trusted after a valid quote"
@@ -843,7 +843,7 @@ async fn failed_proof_does_not_burn_the_nonce_then_valid_proof_succeeds() {
     );
     assert!(
         matches!(
-            svc.app.nodes.get(NODE).unwrap().status,
+            svc.app.fleet.nodes.get(NODE).unwrap().status,
             NodeTrustState::Trusted
         ),
         "node becomes Trusted after a valid proof"

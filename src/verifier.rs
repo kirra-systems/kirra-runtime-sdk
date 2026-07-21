@@ -2,7 +2,6 @@
 
 use crate::security::constant_time_compare;
 use crate::verifier_store::VerifierStore;
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -289,8 +288,16 @@ impl TransportConfig {
 pub use kirra_safety_authority::RssRecoveryStreak;
 
 pub struct AppState {
-    pub nodes: DashMap<String, RegisteredNode>,
-    pub dependency_graph: DashMap<String, Vec<String>>,
+    /// ADR-0035 Stage 3 (slice 3k): the in-memory fleet trust graph — the
+    /// registered-node registry (`nodes`) and the dependency adjacency list
+    /// (`dependency_graph`) the gray/black DAG traversal reads TOGETHER — grouped
+    /// VERBATIM onto `crate::fleet_graph::FleetGraph` (per-field semantics and field
+    /// names UNCHANGED, documented on the struct). Reached as `app.fleet.nodes` /
+    /// `app.fleet.dependency_graph`; both are `DashMap` (lock-free interior
+    /// mutability), so the move is pure relocation — no `&mut self`, no ordering
+    /// change. The persist-then-insert ordering (INVARIANT #12) and the C2 (#1031)
+    /// shard-locked RMW operate on `self.fleet.nodes` exactly as before.
+    pub fleet: crate::fleet_graph::FleetGraph,
     /// ADR-0035 Stage 3 (slice 3i): the volatile challenge/nonce state — the
     /// attestation-challenge map (`pending_challenges`, INVARIANT #5), the
     /// operator-clearance map (`pending_clearance_challenges`), and the Bug 3
@@ -375,8 +382,9 @@ impl AppState {
         // value before any request lands. Unreadable → 0 (gate falls through).
         let initial_db_epoch = store.current_epoch().unwrap_or(0);
         Self {
-            nodes: DashMap::new(),
-            dependency_graph: DashMap::new(),
+            // ADR-0035 Stage 3k: the node registry + dependency adjacency list now
+            // live on FleetGraph; identical initial state (two empty DashMaps).
+            fleet: crate::fleet_graph::FleetGraph::new(),
             // ADR-0035 Stage 3i: the two nonce maps + the challenge rate limiter
             // now live on ChallengeState; identical initial state (empty maps +
             // clock-free-seeded limiter).
@@ -464,11 +472,11 @@ impl AppState {
     // leave disk=Untrusted / memory=Trusted → a restart hydrating from disk would
     // resurrect revoked trust the running system believed gone. Disk before
     // memory within the lock (invariant #12). No store closure ever touches
-    // `self.nodes`, so holding the shard lock across `store.with` cannot deadlock.
+    // `self.fleet.nodes`, so holding the shard lock across `store.with` cannot deadlock.
     #[allow(clippy::result_unit_err)]
     pub fn persist_and_insert_node(&self, node: RegisteredNode) -> Result<(), ()> {
         use dashmap::mapref::entry::Entry;
-        match self.nodes.entry(node.node_id.clone()) {
+        match self.fleet.nodes.entry(node.node_id.clone()) {
             Entry::Occupied(mut occ) => {
                 self.persist_node_row(&node)?;
                 occ.insert(node);
@@ -532,7 +540,7 @@ impl AppState {
                     .map_err(|_| ())
             }
         };
-        match self.nodes.entry(node.node_id.clone()) {
+        match self.fleet.nodes.entry(node.node_id.clone()) {
             Entry::Occupied(mut occ) => {
                 self.store.with(write)?;
                 occ.insert(node);
@@ -562,7 +570,7 @@ impl AppState {
         F: FnOnce(&RegisteredNode) -> RegisteredNode,
     {
         use dashmap::mapref::entry::Entry;
-        match self.nodes.entry(node_id.to_string()) {
+        match self.fleet.nodes.entry(node_id.to_string()) {
             Entry::Occupied(mut occ) => {
                 let updated = f(occ.get());
                 self.store
@@ -618,7 +626,9 @@ impl AppState {
                     .map_err(|_| ())
             }
         })?;
-        self.dependency_graph.insert(node_id.to_string(), deps);
+        self.fleet
+            .dependency_graph
+            .insert(node_id.to_string(), deps);
         Ok(())
     }
 
@@ -626,7 +636,11 @@ impl AppState {
     /// traversal in `kirra_safety_authority::dag` (ADR-0035 slice 3d) — the
     /// algorithm is byte-identical and never mocked (INVARIANT #4).
     pub fn calculate_posture(&self, node_id: &str) -> FleetNodePosture {
-        kirra_safety_authority::dag::calculate_posture(&self.nodes, &self.dependency_graph, node_id)
+        kirra_safety_authority::dag::calculate_posture(
+            &self.fleet.nodes,
+            &self.fleet.dependency_graph,
+            node_id,
+        )
     }
 
     /// Whole-fleet-shared-memo posture (see `dag::calculate_posture_memoized`).
@@ -636,8 +650,8 @@ impl AppState {
         black: &mut HashMap<Arc<str>, Arc<FleetNodePosture>>,
     ) -> FleetNodePosture {
         kirra_safety_authority::dag::calculate_posture_memoized(
-            &self.nodes,
-            &self.dependency_graph,
+            &self.fleet.nodes,
+            &self.fleet.dependency_graph,
             node_id,
             black,
         )
@@ -646,7 +660,10 @@ impl AppState {
     /// Whole-fleet per-node posture in ONE pass with a shared memo
     /// (see `dag::calculate_fleet_posture`). Snapshot-then-traverse, deadlock-free.
     pub fn calculate_fleet_posture(&self) -> Vec<FleetNodePosture> {
-        kirra_safety_authority::dag::calculate_fleet_posture(&self.nodes, &self.dependency_graph)
+        kirra_safety_authority::dag::calculate_fleet_posture(
+            &self.fleet.nodes,
+            &self.fleet.dependency_graph,
+        )
     }
     /// Consume a challenge nonce. Returns false if nonce is absent, expired, or mismatched.
     pub fn consume_challenge(&self, node_id: &str, nonce: u64, now_ms: u64) -> bool {
@@ -975,7 +992,7 @@ mod mark_node_untrusted_tests {
         assert!(updated, "an existing node is updated");
 
         assert!(matches!(
-            app.nodes.get("robot-01").unwrap().status,
+            app.fleet.nodes.get("robot-01").unwrap().status,
             NodeTrustState::Untrusted(_)
         ));
         assert_eq!(
@@ -1011,7 +1028,7 @@ mod mark_node_untrusted_tests {
         app.ha_fence.held_epoch.store(2, SeqCst);
         app.persist_and_insert_node(trusted_node("holder")).unwrap();
         app.persist_and_insert_deps("holder", vec![]).unwrap();
-        assert!(app.nodes.get("holder").is_some());
+        assert!(app.fleet.nodes.get("holder").is_some());
 
         // Superseded primary (held == 1 < durable == 2) is rejected, fail-closed.
         app.ha_fence.held_epoch.store(1, SeqCst);
@@ -1020,7 +1037,7 @@ mod mark_node_untrusted_tests {
             "a superseded primary's registration must fail closed"
         );
         assert!(
-            app.nodes.get("stale").is_none(),
+            app.fleet.nodes.get("stale").is_none(),
             "the in-memory map must not be mutated when the durable write is fenced (disk before memory)"
         );
         assert!(
@@ -1223,7 +1240,7 @@ mod shared_memo_equivalence_tests {
     /// memo equals resolving the whole fleet through ONE shared memo (in id-sorted
     /// order). This pins the P3/P5 change as result-preserving.
     fn assert_shared_equals_per_call(app: &AppState) {
-        let mut ids: Vec<String> = app.nodes.iter().map(|e| e.key().clone()).collect();
+        let mut ids: Vec<String> = app.fleet.nodes.iter().map(|e| e.key().clone()).collect();
         ids.sort();
         let mut shared: HashMap<Arc<str>, Arc<FleetNodePosture>> = HashMap::new();
         for id in &ids {
@@ -1364,10 +1381,12 @@ mod shared_memo_equivalence_tests {
         // straight into the in-memory graph (the edges intentionally reference
         // unregistered ids, which a persisted FK path would not allow).
         const N: usize = 20;
-        app.dependency_graph
+        app.fleet
+            .dependency_graph
             .insert("a".to_string(), vec!["u1".to_string()]);
         for i in 1..N {
-            app.dependency_graph
+            app.fleet
+                .dependency_graph
                 .insert(format!("u{i}"), vec![format!("u{}", i + 1)]);
         }
 

@@ -301,7 +301,7 @@ impl ScenarioRunner {
                                 .store
                                 .with(|store| store.touch_av_telemetry_timestamp(node_id, ts));
 
-                            if let Some(mut node) = self.app.nodes.get_mut(node_id) {
+                            if let Some(mut node) = self.app.fleet.nodes.get_mut(node_id) {
                                 node.status = NodeTrustState::Untrusted(reason.to_string());
                             }
                             needs_recalc = true;
@@ -309,6 +309,7 @@ impl ScenarioRunner {
                             // Health report — check if node is currently untrusted
                             let currently_untrusted = self
                                 .app
+                                .fleet
                                 .nodes
                                 .get(node_id)
                                 .map(|n| matches!(n.status, NodeTrustState::Untrusted(_)))
@@ -329,7 +330,9 @@ impl ScenarioRunner {
                                             virtual_ms = ts,
                                             "Scenario: recovery confirmed"
                                         );
-                                        if let Some(mut node) = self.app.nodes.get_mut(node_id) {
+                                        if let Some(mut node) =
+                                            self.app.fleet.nodes.get_mut(node_id)
+                                        {
                                             node.status = NodeTrustState::Trusted;
                                         }
                                         let _ = self
@@ -382,7 +385,7 @@ impl ScenarioRunner {
                             .app
                             .store
                             .with(|store| store.reset_recovery_streak(node_id, ts));
-                        if let Some(mut node) = self.app.nodes.get_mut(node_id) {
+                        if let Some(mut node) = self.app.fleet.nodes.get_mut(node_id) {
                             node.status = NodeTrustState::Untrusted(reason.clone());
                         }
                         needs_recalc = true;
@@ -477,7 +480,7 @@ async fn evaluate_assertion(
             }
         }
 
-        PostureAssertion::NodeTrustIs(node_id, expected) => match app.nodes.get(node_id) {
+        PostureAssertion::NodeTrustIs(node_id, expected) => match app.fleet.nodes.get(node_id) {
             Some(node) => {
                 let ok = node.status == *expected;
                 let desc = format!(
@@ -492,7 +495,7 @@ async fn evaluate_assertion(
             ),
         },
 
-        PostureAssertion::NodeIsUntrusted(node_id) => match app.nodes.get(node_id) {
+        PostureAssertion::NodeIsUntrusted(node_id) => match app.fleet.nodes.get(node_id) {
             Some(node) => {
                 let ok = matches!(node.status, NodeTrustState::Untrusted(_));
                 let desc = format!("NodeIsUntrusted({node_id}): got {:?}", node.status);
@@ -501,7 +504,7 @@ async fn evaluate_assertion(
             None => (false, format!("NodeIsUntrusted({node_id}): node not found")),
         },
 
-        PostureAssertion::NodeIsTrusted(node_id) => match app.nodes.get(node_id) {
+        PostureAssertion::NodeIsTrusted(node_id) => match app.fleet.nodes.get(node_id) {
             Some(node) => {
                 let ok = matches!(node.status, NodeTrustState::Trusted);
                 let desc = format!("NodeIsTrusted({node_id}): got {:?}", node.status);

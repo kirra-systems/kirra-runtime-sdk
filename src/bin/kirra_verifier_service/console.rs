@@ -206,7 +206,7 @@ pub(crate) async fn console_runtime(State(svc): State<Arc<ServiceState>>) -> imp
             .load(std::sync::atomic::Ordering::SeqCst),
         "last_recalc_ms": last_recalc_ms,
         "posture_cache_ttl_ms": POSTURE_CACHE_TTL_MS,
-        "total_nodes": svc.app.nodes.len(),
+        "total_nodes": svc.app.fleet.nodes.len(),
         "fabric_assets": svc.fabric_router.fabric_state().total_assets,
         "fabric_denial_rate": svc.fabric_telemetry.summary().fabric_denial_rate,
         "audit_entries": audit_entries,
@@ -358,7 +358,7 @@ pub(crate) async fn console_sites(State(svc): State<Arc<ServiceState>>) -> impl 
     let mut sites: BTreeMap<String, (u64, u64, u64, u64)> = BTreeMap::new();
     let mut unassigned: u64 = 0;
 
-    for entry in svc.app.nodes.iter() {
+    for entry in svc.app.fleet.nodes.iter() {
         let node = entry.value();
         let bucket = match &node.status {
             NodeTrustState::Trusted => 0,
@@ -404,7 +404,7 @@ pub(crate) async fn console_versions(State(svc): State<Arc<ServiceState>>) -> im
     let mut unknown: u64 = 0;
     let mut total: u64 = 0;
 
-    for entry in svc.app.nodes.iter() {
+    for entry in svc.app.fleet.nodes.iter() {
         total += 1;
         match &entry.value().firmware_version {
             Some(v) => *versions.entry(v.clone()).or_insert(0) += 1,

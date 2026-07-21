@@ -106,7 +106,7 @@ pub(crate) struct WatchdogNodeEntry {
 ///   3. At `AV_TELEMETRY_WARN_MS` silence: logs a structured warning
 ///   4. At `AV_TELEMETRY_TIMEOUT_MS` silence:
 ///      a. Persists node `Untrusted("TELEMETRY_TIMEOUT")` to SQLite
-///      b. Updates AppState.nodes via the same disk-first helper
+///      b. Updates AppState.fleet.nodes via the same disk-first helper
 ///      c. Logs a structured error
 ///      d. Sends `PostureRecalcTrigger::WatchdogTimeout` to the posture engine channel
 ///      (NOT calling recalculate_and_broadcast directly — routes through the
@@ -383,7 +383,8 @@ fn watchdog_sweep_once_inner(
                             .with_read(|store| store.get_last_telemetry_timestamp(node_id))
                             .unwrap_or(0);
                         let monitoring_started_ms = if last_seen == 0 {
-                            app.nodes
+                            app.fleet
+                                .nodes
                                 .get(node_id)
                                 .map(|n| n.registered_at_ms)
                                 .unwrap_or(now)
@@ -469,6 +470,7 @@ fn watchdog_sweep_once_inner(
             // Already-timed-out check avoids repeated triggers for the
             // same ongoing silence.
             let already_timed_out = app
+                .fleet
                 .nodes
                 .get(&entry.node_id)
                 .map(|n| n.status == NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()))
@@ -513,7 +515,7 @@ fn watchdog_sweep_once_inner(
                     Ok(false) => {
                         tracing::error!(
                             node_id = %entry.node_id,
-                            "Watchdog: timed-out node missing from AppState.nodes — \
+                            "Watchdog: timed-out node missing from AppState.fleet.nodes — \
                              enqueueing graph recalc (fail-closed)"
                         );
                         if let Err(e) =
@@ -816,7 +818,7 @@ mod watchdog_di_tests {
     use tokio::sync::mpsc;
 
     fn insert_trusted_node(app: &Arc<AppState>, node_id: &str, registered_at_ms: u64) {
-        app.nodes.insert(
+        app.fleet.nodes.insert(
             node_id.to_string(),
             RegisteredNode {
                 node_id: node_id.to_string(),
@@ -881,7 +883,7 @@ mod watchdog_di_tests {
         );
 
         // (a) node was mutated to Untrusted("TELEMETRY_TIMEOUT").
-        let status = app.nodes.get("lidar_front").unwrap().status.clone();
+        let status = app.fleet.nodes.get("lidar_front").unwrap().status.clone();
         assert_eq!(
             status,
             NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
@@ -973,7 +975,7 @@ mod watchdog_di_tests {
 
         // And the dead-man's switch must still fire.
         assert_eq!(
-            app.nodes.get("lidar_front").unwrap().status,
+            app.fleet.nodes.get("lidar_front").unwrap().status,
             NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
             "watchdog must still mark a silent node Untrusted despite a poisoned store lock"
         );
@@ -1009,7 +1011,7 @@ mod watchdog_di_tests {
 
         assert!(
             matches!(
-                app.nodes.get("imu_main").map(|n| n.status.clone()),
+                app.fleet.nodes.get("imu_main").map(|n| n.status.clone()),
                 Some(NodeTrustState::Trusted)
             ),
             "node must remain Trusted while in warn band (silence < TIMEOUT)"
@@ -1101,7 +1103,7 @@ mod watchdog_di_tests {
         );
 
         assert_eq!(
-            app.nodes.get("camera_front").unwrap().status,
+            app.fleet.nodes.get("camera_front").unwrap().status,
             NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
             "a registered node that never reports must not be skipped forever"
         );
@@ -1167,7 +1169,7 @@ mod watchdog_di_tests {
         // Node is untrusted, streak is cleared, and the telemetry timestamp is
         // PRESERVED (the timeout did not invent a fresh last-seen).
         assert_eq!(
-            app.nodes.get("lidar_front").unwrap().status,
+            app.fleet.nodes.get("lidar_front").unwrap().status,
             NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
         );
         let (count, start) = app
@@ -1419,7 +1421,7 @@ mod watchdog_di_tests {
             "the offloaded sweep must enqueue a WatchdogTimeout trigger; got {trigger:?}"
         );
         assert_eq!(
-            app.nodes.get("lidar_front").unwrap().status,
+            app.fleet.nodes.get("lidar_front").unwrap().status,
             NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
             "the offloaded sweep must mark the silent node Untrusted"
         );
@@ -1509,7 +1511,7 @@ mod sg_003_cert_tests {
     fn app_with_trusted_node(node_id: &str, last_seen_ms: u64) -> Arc<AppState> {
         let store = VerifierStore::new(":memory:").expect("memory store");
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
-        app.nodes.insert(
+        app.fleet.nodes.insert(
             node_id.to_string(),
             RegisteredNode {
                 node_id: node_id.to_string(),
@@ -1555,7 +1557,7 @@ mod sg_003_cert_tests {
         watchdog_sweep_once(&app, &tx, clock.as_ref(), &mut nh, &mut last_refresh);
 
         assert_eq!(
-            app.nodes.get("lidar_front").unwrap().status.clone(),
+            app.fleet.nodes.get("lidar_front").unwrap().status.clone(),
             NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
             "SG-003: a node silent ≥ AV_TELEMETRY_TIMEOUT_MS must be marked Untrusted(TELEMETRY_TIMEOUT)"
         );
@@ -1579,7 +1581,7 @@ mod sg_003_cert_tests {
         watchdog_sweep_once(&app, &tx, below.as_ref(), &mut nh, &mut last_refresh);
         assert!(
             matches!(
-                app.nodes.get("imu_main").map(|n| n.status.clone()),
+                app.fleet.nodes.get("imu_main").map(|n| n.status.clone()),
                 Some(NodeTrustState::Trusted)
             ),
             "SG-003: must NOT detect a timeout before AV_TELEMETRY_TIMEOUT_MS of silence"
@@ -1600,7 +1602,7 @@ mod sg_003_cert_tests {
             "SG-003: worst-case detection latency must be ≤ TIMEOUT + one SWEEP"
         );
         assert_eq!(
-            app.nodes.get("imu_main").unwrap().status.clone(),
+            app.fleet.nodes.get("imu_main").unwrap().status.clone(),
             NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
             "SG-003: node must be detected within TIMEOUT + one sweep"
         );

@@ -37,7 +37,7 @@ fn app_on(path: &std::path::Path) -> Arc<AppState> {
         site: None,
         firmware_version: None,
     };
-    app.nodes.insert(node.node_id.clone(), node);
+    app.fleet.nodes.insert(node.node_id.clone(), node);
     app
 }
 

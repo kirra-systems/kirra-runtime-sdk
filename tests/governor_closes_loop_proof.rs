@@ -340,11 +340,11 @@ fn register_av_infra(app: &Arc<AppState>) {
             let _ = store.register_av_subsystem_meta(id, ty, hw, 0.70, 0);
         }
     });
-    app.dependency_graph.insert(
+    app.fleet.dependency_graph.insert(
         "perception_fusion".to_string(),
         vec!["lidar_front".to_string(), "camera_front".to_string()],
     );
-    app.dependency_graph.insert(
+    app.fleet.dependency_graph.insert(
         "trajectory_planner".to_string(),
         vec!["perception_fusion".to_string()],
     );
@@ -354,7 +354,7 @@ fn register_av_infra(app: &Arc<AppState>) {
         "perception_fusion",
         "trajectory_planner",
     ] {
-        app.nodes.insert(
+        app.fleet.nodes.insert(
             id.to_string(),
             RegisteredNode {
                 node_id: id.to_string(),

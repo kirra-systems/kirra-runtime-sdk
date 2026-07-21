@@ -239,7 +239,7 @@ fn test_startup_sentinel_trusted_with_live_swtpm() {
 // --- Verifier engine tests ---------------------------------------------------
 
 fn make_node(state: &AppState, id: &str, status: NodeTrustState) {
-    state.nodes.insert(
+    state.fleet.nodes.insert(
         id.to_string(),
         RegisteredNode {
             node_id: id.to_string(),
@@ -268,12 +268,15 @@ fn test_posture_diamond_dag_not_misidentified_as_cycle() {
         make_node(&state, id, NodeTrustState::Trusted);
     }
     state
+        .fleet
         .dependency_graph
         .insert("A".to_string(), vec!["B".to_string(), "C".to_string()]);
     state
+        .fleet
         .dependency_graph
         .insert("B".to_string(), vec!["D".to_string()]);
     state
+        .fleet
         .dependency_graph
         .insert("C".to_string(), vec!["D".to_string()]);
 
@@ -311,6 +314,7 @@ fn test_posture_deep_acyclic_chain_is_not_depth_locked_out() {
         // Chain edges A_i → A_{i+1}.
         for i in 0..N - 1 {
             state
+                .fleet
                 .dependency_graph
                 .insert(ids[i].clone(), vec![ids[i + 1].clone()]);
         }
@@ -322,7 +326,7 @@ fn test_posture_deep_acyclic_chain_is_not_depth_locked_out() {
         } else {
             vec![ids[1].clone(), ids[N - 1].clone()]
         };
-        state.dependency_graph.insert(ids[0].clone(), a0_deps);
+        state.fleet.dependency_graph.insert(ids[0].clone(), a0_deps);
 
         let posture = state.calculate_posture("A0");
         assert_eq!(posture.propagated_status, FleetPosture::Nominal,
@@ -345,9 +349,11 @@ fn test_posture_cycle_returns_locked_out_with_diagnostic_tag() {
         make_node(&state, id, NodeTrustState::Trusted);
     }
     state
+        .fleet
         .dependency_graph
         .insert("A".to_string(), vec!["B".to_string()]);
     state
+        .fleet
         .dependency_graph
         .insert("B".to_string(), vec!["A".to_string()]);
 
@@ -381,6 +387,7 @@ fn test_posture_locked_out_dep_propagates_locked_out_not_degraded() {
         NodeTrustState::Untrusted("compromised".to_string()),
     );
     state
+        .fleet
         .dependency_graph
         .insert("parent".to_string(), vec!["dep".to_string()]);
 

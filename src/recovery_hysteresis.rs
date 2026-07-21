@@ -290,7 +290,7 @@ pub async fn handle_sensor_fault_report(
     State(svc): State<Arc<ServiceState>>,
     Json(report): Json<SensorFaultReport>,
 ) -> Result<StatusCode, StatusCode> {
-    if !svc.app.nodes.contains_key(&report.source_node_id) {
+    if !svc.app.fleet.nodes.contains_key(&report.source_node_id) {
         return Err(StatusCode::NOT_FOUND);
     }
 
@@ -314,7 +314,7 @@ pub async fn handle_sensor_fault_report(
         let _ = svc.app.store.reset_recovery_streak(&report.source_node_id, ts);
 
         // Memory mutation after disk write.
-        if let Some(mut node) = svc.app.nodes.get_mut(&report.source_node_id) {
+        if let Some(mut node) = svc.app.fleet.nodes.get_mut(&report.source_node_id) {
             node.trust_state = NodeTrustState::Untrusted(reason.to_string());
         }
 
@@ -327,7 +327,7 @@ pub async fn handle_sensor_fault_report(
         ).await;
 
     } else {
-        let currently_untrusted = svc.app.nodes
+        let currently_untrusted = svc.app.fleet.nodes
             .get(&report.source_node_id)
             .map(|n| matches!(n.trust_state, NodeTrustState::Untrusted(_)))
             .unwrap_or(false);
@@ -340,7 +340,7 @@ pub async fn handle_sensor_fault_report(
                         streak   = streak,
                         "Hysteresis satisfied — re-trusting node"
                     );
-                    if let Some(mut node) = svc.app.nodes.get_mut(&report.source_node_id) {
+                    if let Some(mut node) = svc.app.fleet.nodes.get_mut(&report.source_node_id) {
                         node.trust_state = NodeTrustState::Trusted;
                     }
                     let _ = svc.app.store.reset_recovery_streak(&report.source_node_id, ts);

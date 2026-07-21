@@ -106,6 +106,7 @@ pub mod challenge_rate_limit; // Bug 3 — rate limit for the public attestation
 pub mod challenge_state; // ADR-0035 slice 3i — volatile challenge/nonce field façade (app.challenges)
 pub mod execution_manager; // WP-20/G-11 declarative task manifest + startup dependency DAG
 pub mod fabric;
+pub mod fleet_graph; // ADR-0035 slice 3k — in-memory fleet trust graph façade (app.fleet)
 pub mod kinematics_sim;
 pub mod lease; // WP-19/G-21 lease-based failover timing model (pure)
 pub mod observability_state; // ADR-0035 slice 3j — fleet-observability registries façade (app.observability)
