@@ -632,9 +632,31 @@ impl AppState {
         match self.fleet.nodes.entry(node_id.to_string()) {
             Entry::Occupied(mut occ) => {
                 let updated = f(occ.get());
-                self.store
-                    .with(|store| store.save_node(&updated))
-                    .map_err(|_| ())?;
+                // #1093 (F3): fence the per-node trust RMW on the held HA epoch, the
+                // SAME dispatch as `persist_node_row` (see there for the `held == 0`
+                // rationale). This is the write path for `mark_node_untrusted` and the
+                // attestation re-trust upgrade, driven by BACKGROUND tasks that bypass
+                // the HTTP mutation middleware entirely (telemetry watchdog, CANopen
+                // NMT-offline, attestation re-trust, federated trust). Without an
+                // in-transaction fence a just-superseded primary — still holding
+                // `mode_active == true` and a stale cached epoch for up to one
+                // heartbeat — could overwrite a trust row the new Active just changed
+                // (a trust downgrade/upgrade), a fail-open gap the C5 (#1036)
+                // registration/actuator fence did not cover. Fail-closed: a fenced
+                // loser's write is rejected inside the transaction (`Err(())`), and
+                // MEMORY IS LEFT UNCHANGED (we never advance memory past a rejected
+                // disk write) — the durable state stays authoritative.
+                let held = self
+                    .ha_fence
+                    .held_epoch
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                self.store.with(|store| {
+                    if held == 0 {
+                        store.save_node(&updated).map_err(|_| ())
+                    } else {
+                        store.save_node_epoch_fenced(&updated, held).map_err(|_| ())
+                    }
+                })?;
                 occ.insert(updated);
                 Ok(true)
             }
@@ -1104,6 +1126,55 @@ mod mark_node_untrusted_tests {
                 .is_err(),
             "a superseded primary's dependency write must fail closed too"
         );
+    }
+
+    // #1093 (F3): the per-node trust RMW (`update_node_atomic`, the write path for
+    // `mark_node_untrusted` and attestation re-trust) is ALSO epoch-fenced now — a
+    // superseded primary's trust downgrade/upgrade must not overwrite a registry row
+    // the new Active moved past. Driven by background tasks that bypass the HTTP
+    // mutation middleware, this was the fail-open gap C5 (#1036) left uncovered.
+    #[test]
+    fn superseded_primary_trust_rmw_is_fenced_at_the_delegator() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let mut store = VerifierStore::new(":memory:").expect("in-memory store");
+        // Durable epoch advances 0 -> 1 -> 2; the process that claimed 1 is stale.
+        assert!(store.try_claim_epoch(0, "A", 1).is_ok());
+        assert!(store.try_claim_epoch(1, "B", 2).is_ok());
+        let app = AppState::new(store, VerifierOperationMode::Active);
+
+        // Register a Trusted node as the holder (held == durable == 2).
+        app.ha_fence.held_epoch.store(2, SeqCst);
+        assert!(app.persist_and_insert_node(trusted_node("n1")).is_ok());
+
+        // Superseded primary (held == 1 < durable == 2): the trust downgrade fails
+        // closed and leaves the in-memory status UNCHANGED (disk before memory —
+        // memory never advances past a rejected disk write).
+        app.ha_fence.held_epoch.store(1, SeqCst);
+        assert!(
+            app.mark_node_untrusted("n1", "CANOPEN_NMT_OFFLINE", 5)
+                .is_err(),
+            "a superseded primary's trust RMW must fail closed"
+        );
+        assert!(
+            app.fleet
+                .nodes
+                .get("n1")
+                .is_some_and(|n| matches!(n.status, NodeTrustState::Trusted)),
+            "the in-memory trust status must be UNCHANGED when the fenced disk write is rejected"
+        );
+
+        // The holder (held == durable == 2) can still perform the downgrade.
+        app.ha_fence.held_epoch.store(2, SeqCst);
+        assert!(
+            app.mark_node_untrusted("n1", "CANOPEN_NMT_OFFLINE", 6)
+                .is_ok_and(|updated| updated),
+            "the holder's trust downgrade is admitted"
+        );
+        assert!(app
+            .fleet
+            .nodes
+            .get("n1")
+            .is_some_and(|n| matches!(n.status, NodeTrustState::Untrusted(_))));
     }
 }
 

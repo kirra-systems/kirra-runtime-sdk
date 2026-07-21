@@ -247,6 +247,14 @@ pub(crate) async fn arm_campaign_handler(
     Path(campaign_id): Path<String>,
 ) -> impl IntoResponse {
     let now = now_ms();
+    // #1093 (F3): fence the lifecycle write on the held HA epoch (see
+    // `update_campaign_epoch_fenced`); a superseded primary's campaign write is
+    // rejected in-transaction. `held == 0` (never-claimed store) → plain write.
+    let held = svc
+        .app
+        .ha_fence
+        .held_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
     let op = svc
         .app
         .store
@@ -255,7 +263,7 @@ pub(crate) async fn arm_campaign_handler(
             c.arm(now)
                 .map_err(|e| CampaignOpError::InvalidTransition(e.to_string()))?;
             store
-                .update_campaign(&c, "OtaCampaignArmed")
+                .update_campaign_epoch_fenced(&c, "OtaCampaignArmed", held)
                 .map_err(|e| CampaignOpError::Store(e.to_string()))?;
             Ok(c)
         })
@@ -275,6 +283,13 @@ pub(crate) async fn advance_campaign_handler(
     // Fail-closed posture read (LockedOut on any staleness/poison). Copy into the
     // blocking closure.
     let (posture, _reason) = gate_posture(&svc);
+    // #1093 (F3): fence the lifecycle write on the held HA epoch (see
+    // `update_campaign_epoch_fenced`). `held == 0` (never-claimed store) → plain write.
+    let held = svc
+        .app
+        .ha_fence
+        .held_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
 
     let op = svc
         .app
@@ -290,7 +305,7 @@ pub(crate) async fn advance_campaign_handler(
                 AdvanceOutcome::Halted { .. } => "OtaCampaignHalted",
             };
             store
-                .update_campaign(&c, event_type)
+                .update_campaign_epoch_fenced(&c, event_type, held)
                 .map_err(|e| CampaignOpError::Store(e.to_string()))?;
             Ok((c, outcome))
         })
@@ -330,6 +345,13 @@ pub(crate) async fn halt_campaign_handler(
     Path(campaign_id): Path<String>,
 ) -> impl IntoResponse {
     let now = now_ms();
+    // #1093 (F3): fence the lifecycle write on the held HA epoch (see
+    // `update_campaign_epoch_fenced`). `held == 0` (never-claimed store) → plain write.
+    let held = svc
+        .app
+        .ha_fence
+        .held_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
     let op = svc
         .app
         .store
@@ -338,7 +360,7 @@ pub(crate) async fn halt_campaign_handler(
             c.halt(HaltReason::OperatorHalt, now)
                 .map_err(|e| CampaignOpError::InvalidTransition(e.to_string()))?;
             store
-                .update_campaign(&c, "OtaCampaignHalted")
+                .update_campaign_epoch_fenced(&c, "OtaCampaignHalted", held)
                 .map_err(|e| CampaignOpError::Store(e.to_string()))?;
             Ok(c)
         })
