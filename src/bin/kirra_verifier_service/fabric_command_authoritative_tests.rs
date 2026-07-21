@@ -16,9 +16,9 @@ use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::Json;
 
+use kirra_core::kinematics_contract::ProposedVehicleCommand;
 use kirra_fabric_types::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
 use kirra_verifier::fabric::router::FabricRouter;
-use kirra_verifier::gateway::kinematics_contract::ProposedVehicleCommand;
 use kirra_verifier::posture_cache::{now_ms, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
 use kirra_verifier::verifier_store::VerifierStore;
@@ -65,7 +65,7 @@ fn svc_with_asset(posture: FleetPosture) -> Arc<ServiceState> {
             kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
         ),
         posture_engine_tx: std::sync::OnceLock::new(),
-        perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
+        perception_cap: kirra_core::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
         last_actuator_verdict: kirra_verifier::posture_cache::empty_last_verdict_cell(),
     })

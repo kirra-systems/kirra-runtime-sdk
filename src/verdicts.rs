@@ -109,7 +109,7 @@ pub fn explain_deny_token(token: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::kinematics_contract::DenyCode;
+    use kirra_core::kinematics_contract::DenyCode;
 
     /// Walks the REAL `DenyCode` enum: every variant's wire token must map to
     /// a specific (non-fallback) explanation. Adding a variant to the talisman

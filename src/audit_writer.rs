@@ -189,7 +189,7 @@ fn write_one(app: &AppState, job: AuditWriteJob) {
 #[cfg(test)]
 mod byte_identity_tests {
     use super::*;
-    use crate::gateway::kinematics_contract::DenyCode;
+    use kirra_core::kinematics_contract::DenyCode;
     use serde_json::json;
 
     fn render_legacy(

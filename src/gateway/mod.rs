@@ -1,8 +1,6 @@
 // src/gateway/mod.rs
 
 pub mod contract_profiles;
-pub mod kinematics_contract;
-pub mod perception_monitor;
 pub mod policy;
 pub mod policy_layer;
 

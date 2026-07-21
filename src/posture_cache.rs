@@ -195,7 +195,7 @@ pub struct ServiceState {
     /// rate; the actuator verdict surfaces read it O(1) and compose it into the
     /// Nominal-arm contract via `apply_perception_cap`. Present even when the
     /// monitor is disabled (the enabled flag gates use, not allocation).
-    pub perception_cap: crate::gateway::perception_monitor::SharedPerceptionCap,
+    pub perception_cap: kirra_core::perception_monitor::SharedPerceptionCap,
 
     /// Part 3 (#891 narration) — the latched LAST actuator-envelope verdict:
     /// read-only telemetry for the auditor-tier `GET /system/verdicts/last`

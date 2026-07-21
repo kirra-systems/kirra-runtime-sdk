@@ -16,14 +16,14 @@ use crate::audit_writer::{
     fleet_posture_str, AuditWriteJob, KinematicViolationPayload, ProposedCommandPayload,
 };
 use crate::gateway::contract_profiles::{contract_for, global_vehicle_class, mrc_fallback_for};
-use crate::gateway::kinematics_contract::{
-    enforce_degraded_decel_to_stop, validate_vehicle_command, EnforceAction, ProposedVehicleCommand,
-};
-use crate::gateway::perception_monitor::{apply_perception_cap, resolve_perception_cap};
 use crate::gateway::policy::{classify_http_command, OperationalCommand};
 use crate::posture_cache::{now_ms as posture_now_ms, CachedFleetPosture, ServiceState};
 use crate::verifier::FleetPosture;
 use crate::verifier_store::FenceError;
+use kirra_core::kinematics_contract::{
+    enforce_degraded_decel_to_stop, validate_vehicle_command, EnforceAction, ProposedVehicleCommand,
+};
+use kirra_core::perception_monitor::{apply_perception_cap, resolve_perception_cap};
 // ADR-0035 Stage 3f: the HA mutation-fence predicate + verdict enum (moved here
 // from this file into the safety-authority crate, beside the atomics they read).
 use kirra_safety_authority::{mutation_fence_verdict, MutationFence};
@@ -1016,11 +1016,11 @@ mod actuator_middleware_tests {
     use crate::fabric::causal_log::FabricCausalLog;
     use crate::fabric::router::FabricRouter;
     use crate::fabric::telemetry::FabricTelemetry;
-    use crate::gateway::kinematics_contract::{ProposedVehicleCommand, VehicleKinematicsContract};
-    use crate::gateway::perception_monitor::SharedPerceptionCap;
     use crate::posture_cache::{SharedPostureCache, POSTURE_CACHE_TTL_MS};
     use crate::verifier::{AppState, FleetPosture, VerifierOperationMode};
     use crate::verifier_store::VerifierStore;
+    use kirra_core::kinematics_contract::{ProposedVehicleCommand, VehicleKinematicsContract};
+    use kirra_core::perception_monitor::SharedPerceptionCap;
     use std::sync::atomic::Ordering;
 
     fn temp_db_path(tag: &str) -> std::path::PathBuf {
@@ -1399,9 +1399,7 @@ mod actuator_middleware_tests {
         };
         assert_eq!(
             validate_vehicle_command(&cmd, &contract),
-            EnforceAction::DenyBreach(
-                crate::gateway::kinematics_contract::DenyCode::InvalidTimeDelta
-            )
+            EnforceAction::DenyBreach(kirra_core::kinematics_contract::DenyCode::InvalidTimeDelta)
         );
     }
 

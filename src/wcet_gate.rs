@@ -251,13 +251,13 @@ fn measure_stats<F: FnMut()>(iterations: u32, mut f: F) -> (u128, u128) {
 #[cfg(test)]
 mod ci_gate_tests {
     use super::*;
-    use crate::gateway::kinematics_contract::{
-        enforce_degraded_decel_to_stop, validate_vehicle_command, ProposedVehicleCommand,
-        VehicleKinematicsContract,
-    };
     use crate::gateway::policy::OperationalCommand;
     use crate::posture_cache::{should_route_command, CachedFleetPosture};
     use crate::verifier::FleetPosture;
+    use kirra_core::kinematics_contract::{
+        enforce_degraded_decel_to_stop, validate_vehicle_command, ProposedVehicleCommand,
+        VehicleKinematicsContract,
+    };
 
     const ITERS: u32 = 100_000;
 
@@ -590,12 +590,12 @@ mod ci_gate_tests {
         // edge against every footprint corner of every pose, max work). A
         // regression that introduces an alloc, Mutex, or unbounded loop on the
         // SG2 check would surface here.
-        use crate::gateway::kinematics_contract::VehicleKinematicsContract;
         use kirra_core::containment::{
             validate_trajectory_containment, Corridor, Point, Pose, VehicleFootprint,
             MAX_CORRIDOR_VERTICES, MAX_TRAJECTORY_HORIZON,
         };
         use kirra_core::frame_integrity::FrameTrust;
+        use kirra_core::kinematics_contract::VehicleKinematicsContract;
 
         let n = MAX_CORRIDOR_VERTICES;
         let half_w = 6.0;
@@ -690,7 +690,7 @@ mod ci_gate_tests {
 
     #[test]
     fn wcet_perception_kinematic_guard_worst_case() {
-        use crate::gateway::perception_monitor::{
+        use kirra_core::perception_monitor::{
             kinematic_plausibility_derate, KinematicPlausibilityContract, PerceptionOutput,
             TrackedObject, Vec2, MAX_TRACKED_OBJECTS,
         };
@@ -741,8 +741,8 @@ mod ci_gate_tests {
 
     #[test]
     fn wcet_perception_cap_read_is_o1() {
-        use crate::gateway::kinematics_contract::VehicleKinematicsContract;
-        use crate::gateway::perception_monitor::{
+        use kirra_core::kinematics_contract::VehicleKinematicsContract;
+        use kirra_core::perception_monitor::{
             apply_perception_cap, empty_perception_cap, resolve_perception_cap,
             CachedPerceptionCap, DerateCode,
         };

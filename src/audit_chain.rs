@@ -267,9 +267,9 @@ mod audit_signing_tests {
         // signature is produced when a key is configured.
         let conn = setup_db();
         let key = test_signing_key();
-        let decision = crate::gateway::perception_monitor::DerateDecision {
+        let decision = kirra_core::perception_monitor::DerateDecision {
             cap_mps: 0.0,
-            reason: crate::gateway::perception_monitor::DerateCode::DetectionRangeUntrusted,
+            reason: kirra_core::perception_monitor::DerateCode::DetectionRangeUntrusted,
         };
         let event = decision.to_audit_event(4242);
         {

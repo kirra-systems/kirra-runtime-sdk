@@ -130,7 +130,7 @@ pub(crate) async fn handle_fabric_command(
     // KIRRA-OCCY-PMON-002: resolve the perception-derate cap O(1) here (the
     // handler holds `svc`/`ServiceState`) and thread it through to the fabric
     // governor's Nominal arm. `None` while the monitor is disabled (default).
-    let perception_cap = kirra_verifier::gateway::perception_monitor::resolve_perception_cap(
+    let perception_cap = kirra_core::perception_monitor::resolve_perception_cap(
         svc.perception_monitor_enabled,
         &svc.perception_cap,
         now_ms(),
@@ -140,7 +140,7 @@ pub(crate) async fn handle_fabric_command(
         .route_command(&asset_id, &cmd, perception_cap)
     {
         Ok(action) => {
-            use kirra_verifier::gateway::kinematics_contract::EnforceAction;
+            use kirra_core::kinematics_contract::EnforceAction;
             let action_str = format!("{:?}", action);
             let now = now_ms();
             let fabric_generation = svc.fabric_router.fabric_state().fabric_generation;

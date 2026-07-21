@@ -60,11 +60,11 @@ use kirra_verifier::verifier_store::{DurableWriteError, VerifierStore};
 /// standby promotion via `wire_active_posture_freshness`) read the audit-ship
 /// path from here — the same values the digest was computed over.
 static EFFECTIVE_CONFIG: std::sync::OnceLock<EffectiveConfig> = std::sync::OnceLock::new();
+use kirra_core::kinematics_contract::ProposedVehicleCommand;
 use kirra_fabric_types::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
 use kirra_verifier::fabric::causal_log::FabricCausalLog;
 use kirra_verifier::fabric::router::FabricRouter;
 use kirra_verifier::fabric::telemetry::FabricTelemetry;
-use kirra_verifier::gateway::kinematics_contract::ProposedVehicleCommand;
 use kirra_verifier::gateway::policy_layer::{
     enforce_actuator_safety_envelope, enforce_posture_routing, EnforcementOutcome,
 };
@@ -743,7 +743,7 @@ async fn main() {
         // KIRRA-OCCY-PMON-002: perception-derate composition. DEFAULT OFF —
         // pure no-op (state 1) until #126 wires a real perception ingest and a
         // deployment enables the monitor + starts the publisher worker.
-        perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
+        perception_cap: kirra_core::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
         last_actuator_verdict: kirra_verifier::posture_cache::empty_last_verdict_cell(),
     });

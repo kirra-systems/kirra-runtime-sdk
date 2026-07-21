@@ -1,8 +1,8 @@
-use crate::gateway::kinematics_contract::{
+use crate::verifier::FleetPosture;
+use kirra_core::kinematics_contract::{
     enforce_degraded_decel_to_stop, validate_vehicle_command, DenyCode, EnforceAction,
     ProposedVehicleCommand, VehicleKinematicsContract,
 };
-use crate::verifier::FleetPosture;
 use kirra_fabric_types::asset::KinematicProfileType;
 
 pub struct AssetGovernor {
@@ -157,7 +157,7 @@ impl AssetGovernor {
                 enforce_degraded_decel_to_stop(cmd, &contract)
             }
             FleetPosture::Nominal => {
-                let contract = crate::gateway::perception_monitor::apply_perception_cap(
+                let contract = kirra_core::perception_monitor::apply_perception_cap(
                     &self.profile.nominal_contract(),
                     effective_perception_cap,
                 );

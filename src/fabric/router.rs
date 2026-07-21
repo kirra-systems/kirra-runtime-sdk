@@ -1,9 +1,9 @@
 use crate::fabric::causal_log::FabricCausalLog;
 use crate::fabric::governor::AssetGovernor;
-use crate::gateway::kinematics_contract::{EnforceAction, ProposedVehicleCommand};
 use crate::posture_cache::now_ms;
 use crate::verifier::FleetPosture;
 use dashmap::DashMap;
+use kirra_core::kinematics_contract::{EnforceAction, ProposedVehicleCommand};
 use kirra_fabric_types::asset::{AssetPosture, AssetType, FabricAsset, FabricState};
 use std::sync::atomic::{AtomicU64, Ordering};
 
