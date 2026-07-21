@@ -391,3 +391,29 @@ No behaviour change: byte-identical verdicts, the SAME audit chain bytes, the sa
 fail-closed semantics and one-transaction atomicity. The power-loss, loom, and
 deterministic-replay suites gate this; any tempting semantic change is a separate
 ADR/PR.
+
+## Shim deprecation (#1029 — the shim-deprecation front)
+
+The `pub use` re-export shims (Constraint 2) are a DELIBERATE transition aid, but
+they are **deprecated indirection, not a permanent layer**. The #1029 review
+flagged them as "pure indirection cost" — every relocated type keeps two
+names/paths, which muddies the safety-case boundary. The policy:
+
+- **Freeze the set.** `ci/reexport_shims_baseline.json` is the tracked inventory
+  (each shim → its canonical crate). `ci/check_reexport_shims.py` (guardrails CI
+  job) discovers every pure `pub use` re-export module under `src/` and FAILS if a
+  NEW untracked shim appears or the count exceeds the ceiling. New indirection
+  cannot accrete silently — a new shim is a conscious, recorded decision (or,
+  preferably, avoided). The ceiling only moves DOWN.
+- **Removal milestone: the next MAJOR (v2.0.0).** Deleting a shim is a
+  path-breaking change for `crate::<mod>::*` / `kirra_verifier::<mod>::*`
+  consumers, so it is gated to a MAJOR bump per `docs/VERSIONING_POLICY.md`. Until
+  then the shims stay (back-compat) but cannot grow.
+- **How to remove one** (at the MAJOR, or opportunistically for an internal-only
+  shim): migrate its callers to the canonical crate path, delete the module + its
+  `pub mod` line in `lib.rs`, drop the entry from the baseline, and lower
+  `max_shims` to lock the gain. The ratchet's "removal win" note flags a
+  baseline entry whose file has already vanished.
+
+This converts the shims from an open-ended layer into a tracked, shrinking one —
+the "deprecation with a removal milestone" the review asked for.

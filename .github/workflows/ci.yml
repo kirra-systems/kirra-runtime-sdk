@@ -1095,6 +1095,16 @@ jobs:
         # the DD review asked for after finding six unwired "DONE" cores.
         # See ci/check_orphan_cores.py + ci/orphan_cores_baseline.json.
         run: python3 ci/check_orphan_cores.py
+      - name: Re-export shim ratchet (ADR-0035 shim deprecation, #1029)
+        # The de-monolith left thin `pub use <lean-crate>` re-export shims in src/
+        # for path back-compat. #1029 requires treating them as a DEPRECATION with
+        # a removal milestone (v2.0.0), not a permanent layer. This ratchet freezes
+        # the set: a NEW untracked shim fails (no silent indirection accretion), and
+        # the count only moves DOWN. Self-test first (non-vacuity of the detector).
+        # See ci/check_reexport_shims.py + ci/reexport_shims_baseline.json.
+        run: |
+          python3 ci/check_reexport_shims.py --self-test
+          python3 ci/check_reexport_shims.py
       - name: Mick actuation fence (no path from the intent layer to the motors)
         # The doer-checker thesis, structurally: kirra-mick and the sidecar
         # binaries must have NO dependency route to the release-token mint,

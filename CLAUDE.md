@@ -87,6 +87,14 @@ These have been blocked or reverted multiple times. Any submission that violates
 
 ### Module Map
 
+**Re-export shims are DEPRECATED, not permanent (#1029).** The `— re-export shim
+→ <crate>` modules below are pure `pub use` back-compat surfaces left by the
+de-monolith; ADR-0035 §"Shim deprecation" schedules them for removal at the next
+MAJOR (v2.0.0). The `ci/check_reexport_shims.py` ratchet (guardrails CI job,
+inventory in `ci/reexport_shims_baseline.json`) FREEZES the set: a NEW `pub use`
+shim fails CI, and the count only moves DOWN. Do not add a new shim without
+recording it in the baseline (or, preferably, wire the canonical path directly).
+
 ```
 src/
 ├── verifier.rs               — AppState, FleetPosture, DAG traversal, TransportIdentityConfig
