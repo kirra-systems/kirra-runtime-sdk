@@ -66,9 +66,15 @@ ratchet ticks down visibly. Group by shared reviewer context where natural.
    `parko-kirra`'s dev-deps for the `verifier-sink`-gated `clearance_e2e` test that
    named `kirra_verifier::attestation`. `capture`'s `kirra-core/capture` feature was
    already on in the SDK manifest.
-3. **Wave 3 — large (2 shims):** `gateway::kinematics_contract`,
-   `gateway::perception_monitor`. `perception_monitor` has the widest bin surface
-   (15 files) — mechanical but touch-heavy.
+3. **Wave 3 — large (3 → 1): ✅ DONE.** `gateway::kinematics_contract` →
+   `kirra_core::kinematics_contract`, `gateway::perception_monitor` →
+   `kirra_core::perception_monitor` — repointed and deleted; `max_shims` 3 → 1. The
+   FROZEN kinematics-contract talisman blob stays in `kirra_core` (its Kani pin
+   `#[path]`-includes the leaf source, not the shim), so only the import path renamed —
+   no talisman touch. `kirra-replay` already carried `kirra-core` as a direct dep; the
+   only non-mechanical fix was lifting a nested `kirra_verifier::{ gateway::
+   kinematics_contract::… }` group in `tests/actuator_middleware_integration.rs` into a
+   standalone `use kirra_core::kinematics_contract::…`.
 4. **Wave 4 — `verifier_store` (XL, alone):** the persistence path rename across
    ~58 files incl. `kirra-verifier-pg` and the integration-test suite. Its own PR.
 

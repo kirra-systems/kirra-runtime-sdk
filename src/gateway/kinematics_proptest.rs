@@ -30,7 +30,7 @@
 // 10.DETERMINISTIC: same input always produces same output
 
 use crate::gateway::contract_profiles::{contract_for, mrc_fallback_for, VehicleClass};
-use crate::gateway::kinematics_contract::{
+use kirra_core::kinematics_contract::{
     validate_vehicle_command, EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
 };
 use proptest::prelude::*;

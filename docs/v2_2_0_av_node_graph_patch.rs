@@ -349,7 +349,7 @@ mod av_transition_integration_tests {
     use serde_json::json;
     use tokio::sync::broadcast;
 
-    use crate::gateway::kinematics_contract::ProposedVehicleCommand;
+    use kirra_core::kinematics_contract::ProposedVehicleCommand;
     use crate::gateway::policy_layer::enforce_actuator_safety_envelope;
     use crate::posture_cache::{CachedFleetPosture, SharedPostureCache};
     use crate::verifier::{FleetPosture, NodeTrustState};

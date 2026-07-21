@@ -48,7 +48,7 @@
 use std::str::FromStr;
 use std::sync::OnceLock;
 
-use crate::gateway::kinematics_contract::{VehicleKinematicsContract, URBAN_ODD_SPEED_CAP_MPS};
+use kirra_core::kinematics_contract::{VehicleKinematicsContract, URBAN_ODD_SPEED_CAP_MPS};
 
 /// Env var selecting the deployment's vehicle class (#312). Parsed FAIL-CLOSED via
 /// [`VehicleClass::from_str`]: `courier` | `delivery-av` | `robotaxi`. There is NO

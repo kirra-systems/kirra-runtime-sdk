@@ -36,11 +36,11 @@ use std::str::FromStr;
 
 use kirra_capture_schema::{CaptureOutcome, CaptureRecord, CaptureSource};
 use kirra_core::capture::record_from_verdict;
-use kirra_verifier::gateway::contract_profiles::{contract_for, mrc_fallback_for, VehicleClass};
-use kirra_verifier::gateway::kinematics_contract::{
+use kirra_core::kinematics_contract::{
     enforce_degraded_decel_to_stop, validate_vehicle_command, ProposedVehicleCommand,
     VehicleKinematicsContract,
 };
+use kirra_verifier::gateway::contract_profiles::{contract_for, mrc_fallback_for, VehicleClass};
 use kirra_verifier::verifier::FleetPosture;
 
 /// W4 (#1043): the cross-platform (x86 replay/CI vs aarch64 Orin/QNX) libm

@@ -79,7 +79,7 @@ These have been blocked or reverted multiple times. Any submission that violates
 | `PostureRecalcTrigger` | `src/posture_engine_v2.rs` | Typed trigger for posture engine worker channel |
 | `PostureEngineSender` | `src/posture_engine_v2.rs` | `mpsc::Sender<PostureRecalcTrigger>` — add to ServiceState |
 | `KirraPolicyLayer` | `src/gateway/policy_layer.rs` | Tower middleware; gates commands by posture |
-| `VehicleKinematicsContract` | `src/gateway/kinematics_contract.rs` | Hard envelope limits for vehicle commands |
+| `VehicleKinematicsContract` | `kirra_core::kinematics_contract` (v2.0.0 Wave 3: root `gateway::kinematics_contract` shim removed) | Hard envelope limits for vehicle commands |
 | `VirtualClock` / `SystemClock` | `src/clock.rs` | Clock abstraction for deterministic testing |
 | `ScenarioRunner` | `src/scenario_runner.rs` | Deterministic temporal test harness |
 | `KinematicContract` | `src/kinematics_contract.rs` | Scalar clamping contract for kinematics |
@@ -245,10 +245,12 @@ src/
 │   │                           kirra-policy-types leaf crate; existing
 │   │                           crate::gateway::policy::* paths unchanged
 │   ├── policy_layer.rs       — Tower KirraPolicyLayer/KirraPolicyService
-│   ├── kinematics_contract.rs — VehicleKinematicsContract, validate_vehicle_command
 │   ├── kinematics_proptest.rs — property-based tests for validate_vehicle_command
-│   └── perception_monitor.rs — re-export shim → kirra_core::perception_monitor (relocated
-│                               Stage 7; KinematicPlausibilityContract, apply_perception_cap)
+│   │  (kinematics_contract.rs — removed v2.0.0 Wave 3 → kirra_core::kinematics_contract:
+│   │   VehicleKinematicsContract, validate_vehicle_command; the FROZEN talisman blob lives
+│   │   in kirra_core, only the import path renamed. import from the leaf crate directly)
+│   │  (perception_monitor.rs — removed v2.0.0 Wave 3 → kirra_core::perception_monitor:
+│   │   KinematicPlausibilityContract, apply_perception_cap — import from the leaf crate)
 └── bin/
     ├── kirra_verifier_service.rs  — axum HTTP service, all route handlers
     └── kirra_carla_client.rs      — CARLA simulator integration client
