@@ -291,3 +291,41 @@ HTML (no client-side rendering of content) so every claim is crawlable.
 | Careers page has no job listings | No roles exist in the repository; inventing them would violate the no-fabrication rule. Culture claims cite commit-visible practices instead. |
 | Field Notes keeps the 3-tier feed fallback | Preserved from the prior implementation because its resilience design (Substack 403s from datacenter IPs) is documented in the old `notes.js` and the deploy workflow. |
 | Preloader ported from the old site | The "VERIFYING FLEET POSTURE" boot sequence was the prior site's most on-brand moment. Rebuilt dependency-free: homepage only, once per session, ~1.3 s, skipped under `prefers-reduced-motion`, armed only when JS runs (can never block a no-JS visit), 3 s hard failsafe. |
+
+---
+
+## 14. Review-pass addendum (second full audit, post-launch)
+
+A second audit of the shipped site against the expanded brief (customers, government,
+investors, acquirers) found four genuine gaps, all closed:
+
+| Gap | Why it weakened the company | Fix |
+|---|---|---|
+| No contact/commercial path anywhere | An acquirer, partner, or customer literally could not reach the company — the single largest credibility gap; signals "project," not "company" | `contact.html`: commercial/partnership, technical-evaluation/due-diligence, security-disclosure, and community doors, each with honest expectations (only the documented 48 h security SLA is promised); Contact in nav + footer |
+| No diagnostics/observability page | Operators and evaluators judge maturity by day-2 tooling; the repo has a strong story (posture-exempt metrics, SSE stream, explainable verdicts, three consoles, drift detection) that was invisible | `diagnostics.html` with the lockout-survivable scrape rationale, Prometheus series table, console honesty rule, and drift/lifecycle monitors |
+| Thin developer orientation | Evaluating engineers had quickstart + gates but no map of the tree, demos, or API entry points | Open Source page gains "Find your way around in five minutes": trust-organized repo map, runnable demos (inline loop, CARLA, proposal bench), CI-built examples |
+| CTAs terminated at GitHub | No path from interest to conversation (demos, partnership, commercial) | Contact CTAs added to Vision and nav; evaluation door points at release evidence bundles |
+
+## 15. Remaining opportunities, ranked (engineering value × business impact)
+
+1. **Demo footage of the R2 refusing a bad command** — nothing on the site shows the
+   governor *acting*; 30 seconds of real hardware denying a hallucinated command would
+   outperform every diagram. (High impact; needs camera + a bring-up session.)
+2. **Live/interactive verdict playground** — a WASM build of the pure checker core
+   (`validate_vehicle_command` is `no_std`, zero-dep — it would compile) letting
+   visitors submit a command and watch the deny codes. Uniquely credible: the real code
+   in the page. (High impact; moderate effort; keep clearly labeled as the real core.)
+3. **Per-vertical landing pages** (OT/utilities first — the Oldsmar story carries it),
+   fed by `docs/MARKET_AUTONOMOUS_SERVICES.md`. (Medium-high; low effort with the
+   existing page generator.)
+4. **Published Lighthouse/a11y scores in the footer** — the site targets them; showing
+   measured numbers (like every other claim on the site) closes the loop. Requires
+   running Lighthouse in CI and baking the badge. (Medium; low effort.)
+5. **Case-study page for the July 2026 R2 bring-up** — the runbooks and hardware
+   findings are already public; a narrative page with photos would humanize the
+   engineering. (Medium; needs photos that don't exist in-repo.)
+6. **Team/About depth** — evaluators eventually ask "who builds this." Not fabricatable
+   from the repository; needs founder-supplied bio/photo before it can ship. (Medium
+   impact; blocked on non-repo content.)
+7. **Search across docs** — a static Lunr-style index over `docs/` titles for the
+   Documentation page. (Low-medium; moderate effort.)

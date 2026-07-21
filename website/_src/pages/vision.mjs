@@ -158,6 +158,7 @@ ${pageHero({
         <div class="hero__ctas" style="justify-content:center" data-reveal>
           <a class="btn btn--primary" href="solutions.html">See it applied <span class="arrow" aria-hidden="true">→</span></a>
           <a class="btn btn--ghost" href="architecture.html">See how it's built</a>
+          <a class="btn btn--ghost" href="contact.html">Start a conversation</a>
         </div>
       </div>
     </section>
