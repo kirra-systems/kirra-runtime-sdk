@@ -27,7 +27,7 @@
   <link rel="stylesheet" href="css/kirra.css">
   <script>/* theme init before first paint — prevents flash */
 (function(){try{var t=localStorage.getItem("kirra-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme="dark";}})();</script>
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","name":"Kirra Systems","url":"https://kirrasystems.com","logo":"https://kirrasystems.com/assets/kirra-logo.png","sameAs":["https://github.com/kirra-systems/kirra-runtime-sdk"]},{"@type":"WebSite","name":"Kirra Systems","url":"https://kirrasystems.com"},{"@type":"SoftwareSourceCode","name":"kirra-runtime-sdk","codeRepository":"https://github.com/kirra-systems/kirra-runtime-sdk","programmingLanguage":"Rust","description":"Distributed runtime legitimacy engine and safety governor for AI-driven robotic and edge systems."}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","name":"Kirra Systems","url":"https://kirrasystems.com","logo":"https://kirrasystems.com/assets/kirra-logo.png","sameAs":["https://github.com/kirra-systems/kirra-runtime-sdk"],"address":{"@type":"PostalAddress","addressLocality":"Titusville","addressRegion":"FL","addressCountry":"US"},"founder":{"@type":"Person","name":"Justin Looney","jobTitle":"Founder"}},{"@type":"WebSite","name":"Kirra Systems","url":"https://kirrasystems.com"},{"@type":"SoftwareSourceCode","name":"kirra-runtime-sdk","codeRepository":"https://github.com/kirra-systems/kirra-runtime-sdk","programmingLanguage":"Rust","description":"Distributed runtime legitimacy engine and safety governor for AI-driven robotic and edge systems."}]}</script>
 </head>
 <body>
   <div class="preloader" id="preloader" hidden aria-hidden="true">
@@ -748,6 +748,7 @@
       <nav aria-label="Company">
         <h3>Company</h3>
         <ul>
+          <li><a href="company.html">About</a></li>
           <li><a href="vision.html">Vision</a></li>
           <li><a href="contact.html">Contact</a></li>
           <li><a href="field-notes.html">Field Notes</a></li>

@@ -14,6 +14,13 @@ export const meta = {
         url: "https://kirrasystems.com",
         logo: "https://kirrasystems.com/assets/kirra-logo.png",
         sameAs: ["https://github.com/kirra-systems/kirra-runtime-sdk"],
+        address: {
+          "@type": "PostalAddress",
+          addressLocality: "Titusville",
+          addressRegion: "FL",
+          addressCountry: "US",
+        },
+        founder: { "@type": "Person", name: "Justin Looney", jobTitle: "Founder" },
       },
       {
         "@type": "WebSite",
