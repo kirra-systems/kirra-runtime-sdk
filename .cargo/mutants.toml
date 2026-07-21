@@ -71,4 +71,15 @@ exclude_re = [
     # change swapped the ego accel/brake ARGS (killed by the `posture_brake_symmetry`
     # tests), not this pre-existing selector.
     "replace < with <= in validate_trajectory_slow_with_envelope",
+    # #1094 (F4) `ego_time_span` min/max scan: `if t < lo { lo = t }` vs
+    # `if t <= lo { lo = t }` (and the `>`/`>=` max twin) are TRULY EQUIVALENT — not
+    # just measure-zero. When `t == lo` the strict form skips (lo already == t) and
+    # the non-strict form re-assigns (lo = t = the same value); the resulting min/max
+    # is bit-identical for EVERY input, so no test can distinguish them. cargo-mutants
+    # cannot prove equivalence, so they are excluded here (same accept-with-reason
+    # policy as the boundary gates above). The scan's real behaviour — that it finds
+    # the true min AND max, and that `in_ego_span` uses them — IS killed by the F4
+    # per-window coverage test (a wrong span flips the in-span verdict).
+    "replace < with <= in ego_time_span",
+    "replace > with >= in ego_time_span",
 ]

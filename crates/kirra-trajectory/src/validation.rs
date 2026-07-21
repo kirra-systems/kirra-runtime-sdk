@@ -39,6 +39,9 @@ use crate::state::{
     AcceptedTrajectory, EgoOdom, LateralEnvelope, PerceivedObject, Pose, TrajectoryPoint,
     TrajectoryVerdict,
 };
+use crate::validation_hardening::{
+    validate_trajectory_time_monotonicity, validate_trajectory_time_spacing,
+};
 
 /// Minimum corridor confidence the slow loop accepts. Tracks the
 /// `kirra_core::containment::Corridor::min_confidence`
@@ -825,6 +828,28 @@ pub fn validate_trajectory_slow_with_envelope(
     // longitudinal-overlap gating, so a mode that stays in its own lane is skipped
     // (this generalizes §4, it does not regress it). Absent input → no-op.
     if let Some(modes) = predicted_modes {
+        // #1094 (F4): max-pose-spacing precondition on the LIVE predictive path
+        // (previously an unused helper). The predictive pass time-matches predicted
+        // object samples to ego poses within `PREDICTIVE_TIME_MATCH_TOLERANCE_S`; if
+        // the ego poses are spaced farther apart than the tolerance can bridge, an
+        // in-span window can fall into a temporal GAP and escape evaluation. Reject
+        // a non-monotonic OR too-coarsely-spaced ego trajectory up front so the
+        // per-window coverage in `predictive_rss_breach` is well-defined (no in-span
+        // gap can hide a cut-in). Fail-closed (a nonconforming planner input →
+        // MRCFallback). SCOPED to modes-present, so the no-modes Nominal WCET path
+        // is byte-identical. Mapped to `PredictiveRssBreach` (whose contract already
+        // covers "a mode was unevaluable").
+        if !modes.is_empty()
+            && (validate_trajectory_time_monotonicity(trajectory).is_some()
+                || validate_trajectory_time_spacing(trajectory, MAX_PREDICTIVE_POSE_SPACING_S)
+                    .is_some())
+        {
+            return (
+                TrajectoryVerdict::MRCFallback,
+                Some(TrajectoryRefusalReason::PredictiveRssBreach),
+                None,
+            );
+        }
         // Pass the SAME (posture-/perception-capped) lateral-accel budget the
         // snapshot lateral branch uses, so both passes agree on the side gap.
         if predictive_rss_breach(
@@ -1029,11 +1054,44 @@ fn outruns_assured_clear_distance(
 /// in for a far-future object — a meaningless comparison. One predicted step.
 const PREDICTIVE_TIME_MATCH_TOLERANCE_S: f64 = 0.5;
 
+/// #1094 (F4): the max ego-pose time spacing the predictive pass accepts. The
+/// predictive pass time-matches to within `PREDICTIVE_TIME_MATCH_TOLERANCE_S`, so
+/// poses spaced up to `2×tolerance` apart keep EVERY in-span instant within
+/// tolerance of some pose (the midpoint of a `2×tolerance` gap is exactly
+/// `tolerance` away → matched by `nearest_in_time`'s `<=`). A trajectory coarser
+/// than this (when predicted modes are supplied) is refused up front so no in-span
+/// window can fall into an unmatched temporal gap. Not applied when no modes are
+/// supplied — the no-predictive-RSS path is unchanged.
+const MAX_PREDICTIVE_POSE_SPACING_S: f64 = 2.0 * PREDICTIVE_TIME_MATCH_TOLERANCE_S;
+
 /// The trajectory pose closest in TIME to `t` (the ego's where-am-I-when index),
 /// but ONLY if that pose is within `tolerance_s` of `t`. Returns `None` when the
 /// nearest pose is further away — i.e. the ego trajectory does not span time `t`
 /// — so the caller skips the sample instead of matching a far-future object to a
 /// near ego pose (the snapshot RSS still bounds the real object).
+/// #1094 (F4): the ego trajectory's finite time span as `(min, max)` over all
+/// poses (robust to unordered input; ignores any non-finite stamp). Returns
+/// `(+INF, -INF)` for an all-non-finite trajectory, which makes every window read
+/// as out-of-span (the per-mode / set-level guards then handle it). Used to decide
+/// whether a skipped predicted window falls WITHIN the ego's temporal coverage
+/// (→ fail closed) or beyond it (→ legitimately unevaluable, skip).
+fn ego_time_span(trajectory: &[TrajectoryPoint]) -> (f64, f64) {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for p in trajectory {
+        let t = p.time_from_start_s;
+        if t.is_finite() {
+            if t < lo {
+                lo = t;
+            }
+            if t > hi {
+                hi = t;
+            }
+        }
+    }
+    (lo, hi)
+}
+
 fn nearest_in_time(
     trajectory: &[TrajectoryPoint],
     t: f64,
@@ -1108,6 +1166,20 @@ fn predictive_rss_breach(
     // fall outside the ego trajectory's span, so `nearest_in_time` returns `None`
     // for every window) — a silent per-object fail-open. `any_windows` preserves
     // the original set-level guard for the "no windows anywhere" case.
+    // #1094 (F4): PER-WINDOW coverage. The per-mode `mode_evaluated` latch below
+    // (set on the FIRST evaluable window) let a LATER in-span window be silently
+    // skipped — a cut-in in that window escaped. A window whose start time falls
+    // WITHIN the ego trajectory's temporal span `[min, max]` must be evaluated; if
+    // it is skipped (non-monotonic prediction dt, or no ego pose within tolerance)
+    // it is an in-span window we could not check → fail closed. A window BEYOND the
+    // span is legitimately unevaluable (the object is predicted past the ego's plan;
+    // the snapshot RSS still bounds the real object) → skip. The band is the plain
+    // span with NO tolerance buffer: the caller's max-pose-spacing precondition
+    // keeps every in-span instant within `nearest_in_time`'s tolerance of some pose,
+    // and a window just OUTSIDE the span is already matchable-or-out (so a buffer
+    // would only add arithmetic with no behavioural effect).
+    let (ego_t_min, ego_t_max) = ego_time_span(trajectory);
+    let in_ego_span = |t: f64| t >= ego_t_min && t <= ego_t_max;
     let mut any_windows = false;
     for mode in modes {
         let mut mode_evaluated = false;
@@ -1129,7 +1201,14 @@ fn predictive_rss_breach(
             }
             let dt = b.time_from_start_s - a.time_from_start_s;
             if dt <= 0.0 {
-                continue; // non-monotonic samples — unevaluable (see post-loop guard)
+                // #1094 (F4): a non-monotonic predicted window WITHIN the ego span
+                // is an in-span window we cannot evaluate (no velocity from the
+                // reversed/zero dt) → fail closed; a cut-in could hide here. Beyond
+                // the span it is legitimately unevaluable → skip.
+                if in_ego_span(a.time_from_start_s) {
+                    return true;
+                }
+                continue; // out-of-span non-monotonic samples — legitimately unevaluable
             }
             let ovx = (b.pos.x_m - a.pos.x_m) / dt;
             let ovy = (b.pos.y_m - a.pos.y_m) / dt;
@@ -1139,7 +1218,15 @@ fn predictive_rss_breach(
                 a.time_from_start_s,
                 PREDICTIVE_TIME_MATCH_TOLERANCE_S,
             ) else {
-                continue; // no ego pose within tolerance at this time — unevaluable
+                // #1094 (F4): no ego pose within tolerance. WITHIN the ego span this
+                // is a temporal GAP (poses too sparse) — an in-span window that
+                // escapes evaluation → fail closed. The caller's max-pose-spacing
+                // precondition normally prevents this; defense-in-depth. Beyond the
+                // span the object is predicted past the ego's plan → legit skip.
+                if in_ego_span(a.time_from_start_s) {
+                    return true;
+                }
+                continue; // out-of-span — legitimately unevaluable
             };
             // Past both unevaluable gates: this window WAS evaluated (whatever the
             // geometric verdict below).
