@@ -379,6 +379,13 @@ jobs:
         # one SQLite file and asserts the posture generation is seeded from the
         # persisted high-water (strictly newer after a SIGKILL restart).
         run: cargo test --test generation_restart_drill --locked -- --ignored --nocapture --test-threads 1
+      - name: SIGTERM clean-shutdown drill (#1127 — bounded exit, ordered teardown)
+        # Spawns the real binary (two-listener config), SIGTERMs it, and
+        # asserts a CLEAN exit within the bound plus the ordered teardown
+        # evidence (checkpoint flushed, audit writer channel-closed) — the
+        # pre-#1127 binary never exits at all (audit-writer Arc keep-alive +
+        # unbounded implicit runtime Drop).
+        run: cargo test --test sigterm_shutdown_drill --locked -- --ignored --nocapture --test-threads 1
 
   docs-and-sdk:
     name: SDK docs + examples (G20)
