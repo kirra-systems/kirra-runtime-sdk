@@ -15,6 +15,7 @@
 //! environments the fail-closed test targets:
 //!   * the GPU-less sandbox / default workspace job (no ORT dylib)       → skip
 //!   * the parko-tensorrt CI job's CPU-only ORT (`with_config` Errs)     → skip
+//!
 //! It only ASSERTS where a TensorRT-enabled ORT is present (the Jetson). The
 //! existing CI fail-closed job runs `--test fail_closed` specifically, so adding
 //! this file does not change CI behaviour; run it on hardware with:

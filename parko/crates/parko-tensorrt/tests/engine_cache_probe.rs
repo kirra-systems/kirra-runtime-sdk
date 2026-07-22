@@ -36,8 +36,9 @@ use parko_tensorrt::{TrtBackend, TrtConfig};
 const MODEL: &str = "tests/data/mnist-12.onnx";
 const INPUT_NAME: &str = "Input3";
 const OUTPUT_NAME: &str = "Plus214_Output_0";
-/// MNIST fixture input is [1,1,28,28] (asserted in positive_probe.rs).
-const TOTAL: usize = 1 * 1 * 28 * 28;
+/// MNIST fixture input is [1,1,28,28] (asserted in positive_probe.rs); the
+/// batch and channel dims are 1, so the element count is the spatial 28*28.
+const TOTAL: usize = 28 * 28;
 
 fn require_ep() -> bool {
     std::env::var("PARKO_TRT_REQUIRE_EP")
@@ -95,7 +96,7 @@ fn engine_cache_fingerprint(dir: &Path) -> Option<(String, u64, u64)> {
     let mut best: Option<(std::path::PathBuf, u64)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         if let Ok(md) = entry.metadata() {
-            if md.is_file() && best.as_ref().map_or(true, |(_, b)| md.len() > *b) {
+            if md.is_file() && best.as_ref().is_none_or(|(_, b)| md.len() > *b) {
                 best = Some((entry.path(), md.len()));
             }
         }

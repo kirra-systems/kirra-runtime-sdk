@@ -837,6 +837,39 @@ jobs:
           cargo test -p parko-core --features test-helpers
           cargo test -p parko-kirra --features verifier-sink
 
+  parko-clippy:
+    name: Parko Clippy (lint gate — no ROS, no ORT)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: clippy
+      - name: Clippy — parko workspace
+        # `parko/` is a SEPARATE workspace: the root `static-analysis` Clippy lane
+        # runs `cargo clippy --workspace` from the repo root, and `cargo clippy`
+        # NEVER crosses a workspace boundary — so it does not descend into parko.
+        # parko clippy debt was therefore caught by NO lane and silently
+        # accumulated on main (the root lane runs only on PRs, and never over
+        # parko at all). This lane closes that hole with the SAME invocation +
+        # flags the root lane uses, over `--manifest-path parko/Cargo.toml`.
+        #
+        # Runtime-FREE (like `parko-safety`, but MORE so): clippy is a
+        # compile-time check — it never dlopens the ONNX / OpenVINO / TensorRT
+        # native runtimes that the parko-onnx/openvino/tensorrt tests load at
+        # EXECUTION, so it can lint the whole graph (including those crates' test
+        # targets) with no runtime installed, and needs no `--exclude` list.
+        # Pinned toolchain (1.94.1) is inherited from rust-toolchain.toml exactly
+        # as the root lane, so the lint set matches byte-for-byte.
+        run: |
+          cargo clippy --manifest-path parko/Cargo.toml --workspace --all-targets -- \
+            -D warnings \
+            -W clippy::all \
+            -A clippy::module_name_repetitions \
+            -A clippy::must_use_candidate \
+            2>&1 | tee clippy-parko-report.txt
+
   parko-ros2-backends:
     name: Parko ros2 backend-selection lanes (build, no runtime)
     runs-on: ubuntu-latest
