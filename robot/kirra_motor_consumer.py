@@ -36,6 +36,12 @@ Config — ALL required, NO defaults (fail-closed; a missing var aborts):
 Optional:
     KIRRA_RELEASE_TOPIC        (default /kirra/release)
     KIRRA_CONSUMER_LIB         explicit path to libkirra_consumer_ffi.so
+    KIRRA_ALLOW_SHARED_SERIAL  "1" acknowledges a bring-up run on a port that
+                               FAILS the ADR-0033 Tier-3 exclusivity sentinel
+                               (wrong owner / loose mode / another holder).
+                               Default: violations REFUSE startup (fail-closed;
+                               see robot/serial_exclusivity.py + the tightened
+                               udev rule 99-kirra-serial-exclusivity.rules)
     KIRRA_DRIVE_MODE           actuation last-hop: "x3_set_car_motion" (default)
                                or "r2_ackermann" (Path B). Off by default →
                                existing behaviour byte-identical.
@@ -225,8 +231,36 @@ def main() -> int:
         vz_max=vz_max,
     )
 
-    # 🔴 OWN the motor board. This is the sole opener/writer of /dev/myserial.
+    # 🔴 OWN the motor board — and PROVE it (ADR-0033 Tier-3, #887). Sole
+    # ownership of /dev/myserial was a docstring convention; the stock vendor
+    # udev rule ships the port MODE 0777, so any process could actuate below
+    # the checker. The sentinel makes the claim fail-closed at boot:
+    # owner==this uid, mode 0600, no other holder — violations REFUSE startup
+    # unless KIRRA_ALLOW_SHARED_SERIAL=1 acknowledges a bring-up run.
+    import serial_exclusivity
+    verdict, sentinel_msg = serial_exclusivity.startup_verdict(
+        serial_exclusivity.preflight(motor_port),
+        serial_exclusivity.ack_given(os.environ.get(serial_exclusivity.ACK_ENV)),
+    )
+    if verdict == "refuse":
+        print(f"FATAL: {sentinel_msg}", file=sys.stderr)
+        return 2
+    print(("WARNING: " if verdict == "acknowledged" else "") + sentinel_msg,
+          file=sys.stderr)
+
     bot = Rosmaster(com=motor_port)
+    # Layer 2 — kernel-enforced exclusivity for the session: TIOCEXCL makes
+    # every further non-root open of the port fail EBUSY while we hold it.
+    # Best-effort by design: a vendor-lib layout change (fd not found) or a
+    # non-tty degrades to a WARN — the boot sentinel + udev rule still hold.
+    _ser_fd = serial_exclusivity.serial_fd_of(bot)
+    if _ser_fd is not None and serial_exclusivity.claim_exclusive(_ser_fd):
+        print(f"serial exclusivity: TIOCEXCL claimed on {motor_port} "
+              "(further opens refused by the kernel)", file=sys.stderr)
+    else:
+        print("WARNING: could not set TIOCEXCL on the motor port (vendor lib "
+              "layout changed?) — boot sentinel + udev mode still enforce "
+              "exclusivity", file=sys.stderr)
     bot.create_receive_threading()
 
     # Closed-loop speed matching AND wheel-odometry read the encoders

@@ -28,18 +28,46 @@ def _in_group(name):
 
 def run(ctx):
     details = []
-    # Pinned serial devices: configured-but-missing is a FAIL (drive/lidar dead).
+    # MOTOR serial: existence AND the ADR-0033 Tier-3 exclusivity contract
+    # (#887 / AOU-ACTUATION-SERIAL-001). Unlike the lidar (a sensor, dialout
+    # access is fine), the motor port is the ACTUATION boundary: loose perms
+    # mean any process can drive the wheels below the checker — the stock
+    # vendor rule ships it 0777. FAIL, with the tightening fix, never a
+    # "join dialout" hint.
     motor = ctx["robot_env"].get("KIRRA_MOTOR_PORT", "/dev/myserial")
-    for label, path, sev in (("motor serial", motor, "FAIL"),
-                             ("lidar serial", "/dev/ydlidar", "WARN")):
-        if os.path.exists(path):
-            rw = os.access(path, os.R_OK | os.W_OK)
-            details.append(detail(label, "PASS" if rw else "WARN",
-                                  f"{path}{'' if rw else ' (no rw access — dialout group?)'}",
-                                  fix=None if rw else "sudo usermod -aG dialout $USER"))
+    if os.path.exists(motor):
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))))
+        try:
+            import serial_exclusivity
+            violations = serial_exclusivity.preflight(motor)
+        except Exception as e:  # noqa: BLE001 — census must never crash the doctor
+            violations = [f"exclusivity check errored: {e}"]
+        if violations:
+            details.append(detail(
+                "motor serial exclusivity", "FAIL",
+                f"{motor}: " + "; ".join(violations)[:200],
+                fix="install robot/install/99-kirra-serial-exclusivity.rules "
+                    "(owner=<consumer user>, MODE=0600) + udevadm trigger; "
+                    "stop other openers (disable_vendor_autostart.sh)"))
         else:
-            details.append(detail(label, sev, f"{path} missing",
-                                  fix="check the USB lead + vendor udev rules (capture_from_robot.sh)"))
+            details.append(detail("motor serial exclusivity", "PASS",
+                                  f"{motor} (owner+mode 0600, no other holder)"))
+    else:
+        details.append(detail("motor serial", "FAIL", f"{motor} missing",
+                              fix="check the USB lead + vendor udev rules (capture_from_robot.sh)"))
+
+    # Lidar: existence + plain rw (sensor — group access is acceptable).
+    path = "/dev/ydlidar"
+    if os.path.exists(path):
+        rw = os.access(path, os.R_OK | os.W_OK)
+        details.append(detail("lidar serial", "PASS" if rw else "WARN",
+                              f"{path}{'' if rw else ' (no rw access — dialout group?)'}",
+                              fix=None if rw else "sudo usermod -aG dialout $USER"))
+    else:
+        details.append(detail("lidar serial", "WARN", f"{path} missing",
+                              fix="check the USB lead + vendor udev rules (capture_from_robot.sh)"))
 
     cams = glob.glob("/dev/video*")
     details.append(detail("camera", "PASS" if cams else "WARN",

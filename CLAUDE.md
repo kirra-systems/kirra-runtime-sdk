@@ -694,7 +694,11 @@ every conversational path is fenced.
 
 **Governed drive chokepoint (ADR-0033):** `kirra_motor_consumer.py` (verifying
 consumer — reads the Ed25519 release token, verifies via `kirra_ffi.py` ctypes →
-`libkirra_consumer_ffi.so`, NO crypto in Python, then drives) + `r2_drive.py`
+`libkirra_consumer_ffi.so`, NO crypto in Python, then drives; #887 Tier-3: its
+boot sentinel `serial_exclusivity.py` REFUSES startup unless it exclusively owns
+the motor port — owner+0600, no other holder, then TIOCEXCL for the session;
+`KIRRA_ALLOW_SHARED_SERIAL=1` = loudly-labeled bring-up only. The tightened udev
+rule `99-kirra-serial-exclusivity.rules` replaces the vendor's 0777) + `r2_drive.py`
 (the pure R2 Path-B Ackermann last-hop — `translate`/`odom_step`, host-tested in
 `r2_drive_test.py`; `KIRRA_DRIVE_MODE=r2_ackermann` = set_motor + AKM steering,
 bypassing the broken X3 firmware mixer). Consumer `/odom` gated by
