@@ -118,6 +118,20 @@ pub(crate) async fn get_verdict_handler(
         .into_response()
 }
 
+/// Part 3 (#891 narration) — the read-only last-verdict sidecar: the latched
+/// most-recent actuator-envelope verdict with its deny code + operator
+/// sentence. Auditor tier (`SCOPE_AUDIT_READ`), mounted beside
+/// `/verdicts/{id}`; pure telemetry — no command surface, no state change.
+/// `last` is null until the first actuator command after boot.
+pub(crate) async fn last_verdict(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
+    let last = svc
+        .last_actuator_verdict
+        .read()
+        .ok()
+        .and_then(|g| (*g).clone());
+    Json(serde_json::json!({ "last": last }))
+}
+
 // ---------------------------------------------------------------------------
 // Tests — the EP-17 DoD end-to-end: a denied actuator command is retrievable
 // as a signed, human-readable artifact.
@@ -293,18 +307,4 @@ mod verdict_handler_tests {
             .expect("response");
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
-}
-
-/// Part 3 (#891 narration) — the read-only last-verdict sidecar: the latched
-/// most-recent actuator-envelope verdict with its deny code + operator
-/// sentence. Auditor tier (`SCOPE_AUDIT_READ`), mounted beside
-/// `/verdicts/{id}`; pure telemetry — no command surface, no state change.
-/// `last` is null until the first actuator command after boot.
-pub(crate) async fn last_verdict(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
-    let last = svc
-        .last_actuator_verdict
-        .read()
-        .ok()
-        .and_then(|g| (*g).clone());
-    Json(serde_json::json!({ "last": last }))
 }

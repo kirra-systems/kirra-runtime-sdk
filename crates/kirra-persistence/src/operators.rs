@@ -29,8 +29,8 @@ impl VerifierStore {
         )
     }
 
-    /// Record a clearance grant with its **authorization provenance** (#314 Phase
-    /// 1) — `auth_method` (`operator-signed` / `supervisor-break-glass` /
+    /// Record a clearance grant with its **authorization provenance**
+    /// (#314 Phase 1) — `auth_method` (`operator-signed` / `supervisor-break-glass` /
     /// `unspecified`) and the signing operator's key `fingerprint`. Both are
     /// written to the (additive) grant columns AND embedded in the
     /// `OperatorClearanceGrantIssued` chain event — the non-repudiation payoff: the

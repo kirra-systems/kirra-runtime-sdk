@@ -57,6 +57,7 @@ the verification passes for the target deployment.
 | AOU-HW-QNX-TARGET-001 | The QNX-resident safety partition and its **certified-WCET** evidence run on an NVIDIA **DRIVE** platform (DRIVE AGX Orin / DRIVE AGX Thor) running DRIVE OS + QNX OS for Safety — **NOT** a Jetson module (Orin NX / AGX Orin / Jetson Thor), which runs L4T/Linux and which NVIDIA does **not** support QNX on | Integrator (hardware / platform) | **AoU-GAP** — pre-production HW gate; vendor-fixed (informational) | the QNX-target WCET / FTTI claim (`TBD-QNX-TARGET`, #274); the EPIC #270 QNX safety-partition lane; ADR `KIRRA_QNX_CROSSCOMPILE` aarch64 path |
 | AOU-PLATFORM-GEOMETRY-001 | A non-Ackermann platform deployed behind the `PlatformKinematics` abstraction supplies a footprint and kinematic limits (via its impl) that MATCH the physical platform; for a platform using the center-convention `VehicleFootprint` (`wheelbase_m = 0`, symmetric overhangs), the supplied pose is the **geometric center** | Integrator (platform) | **AoU** (by design) — abstraction + SG2 seam IMPLEMENTED and dual-platform-PROVEN (S-PK1a/b/c, ADR-0027); a live non-Ackermann **deployment** is **DEPLOYMENT-PENDING** (integrator wires a node consuming `validate_platform_containment` + supplies verified geometry/limits). The Ackermann path is unchanged/ENFORCED | SG2 drivable-space containment for any platform via `validate_platform_containment` (`crates/kirra-core/src/platform_kinematics.rs`); the per-platform envelope (`evaluate`) + RSS stay platform-specific |
 | AOU-TRANSPORT-TLS-001 | The verifier HTTP API (admin token + mutation routes) is reached only over a TLS-terminated / encrypted transport; plaintext exposure beyond a trusted cluster-internal path is prohibited | Integrator (deployment / platform) | **AoU** (by design) — chart fail-closed guard + TLS Ingress live (H-1); cert/issuer integrator-supplied | the confidentiality of `KIRRA_ADMIN_TOKEN` (Tier-2 Bearer auth) and the integrity of all mutation routes — `constant_time_compare` defends the comparison, not the wire |
+| AOU-METRICS-SEGMENTATION-001 | `GET /metrics` is unauthenticated and posture-exempt: it discloses fleet posture, HA topology (`mode_active`), instance identity, failover/abort counts, and per-reason denial counts to any peer that can reach the API port. Until the dedicated ops listener lands (#793 F2 remainder), the integrator MUST restrict scrape reachability to a trusted operations/monitoring network segment (or front it with an authenticating reverse proxy) — it must not be exposed on the public command plane | Integrator (deployment / network) | **AoU-GAP** — interim record; #793 F6/F7/F8 hardened the *content*, the separate-listener (`KIRRA_METRICS_ADDR`, loopback default) is the tracked remainder | the confidentiality of fleet-operational state (posture / HA role / denial telemetry); the industry norm of diagnostics on a dedicated ops port, not the command-plane application port |
 | AOU-HV-CLOCK-001 | The hypervisor provides the **boundary clock domain** (HVCHAN §5, R-HV-3): one shared, monotonic time source readable identically from the guest and governor partitions, with a **bounded max cross-partition skew** (bound: **VALIDATION-PENDING**, set with the FTTI budget on hypervisor hardware) | Integrator (hypervisor / platform) | **AoU-GAP** — Phase-II hypervisor gate; the concrete QNX primitive + skew figure are #274/#278 target work | every governor deadline/staleness verdict (`validate` `now > deadline`, HVCHAN §3); the §4 `clock skew beyond bound` fail-closed backstop. Distinct from AOU-TIMESYNC-001 (that binds the integrator's *timestamps*; this binds the *clock source*) |
 | AOU-HV-ROMAP-001 | The hypervisor maps the contract region **read-only into the governor partition** (HVCHAN R-HV-1): the governor cannot write it, and no guest action can induce a governor-side write; verified at hypervisor-configuration level | Integrator (hypervisor / platform) | **AoU-GAP** — Phase-II hypervisor gate; the software mirrors (`PosixShmReader` `PROT_READ` + no-`ContractWriter`-impl) are defense-in-depth, **not** the discharge | the one-way trust direction of the whole Clause-2 channel; `HV_FAULT_CAMPAIGN.md` row HV-R1 |
 | AOU-HV-SCHED-001 | The hypervisor grants the governor partition a **CPU scheduling guarantee independent of guest behavior** (HVCHAN R-HV-4): a guest CPU flood or starve-then-burst cannot delay the governor's bounded snapshot→validate→decide path beyond its FTTI allocation | Integrator (hypervisor / platform) | **AoU-GAP** — Phase-II hypervisor gate; tested by the `HV_FAULT_CAMPAIGN.md` HV-S* rows (a flood absorbed only by judge speed is a FINDING, per the #279 attribution rule) | the `publisher silent` liveness row (§4) and the verdict-latency half of FTTI — without it, guest misbehavior converts into governor latency, the interference FFI forbids |
@@ -1140,6 +1141,55 @@ control plane, not a single route.
 - `docs/ros2_interlock.md` (interceptor token-over-TLS note).
 - Route auth matrix: `CLAUDE.md` / `docs/v1_route_authorization_matrix.md`
   (Tier-1 / Tier-2 routes that carry the token).
+
+---
+
+## AOU-METRICS-SEGMENTATION-001 — `/metrics` scrape is reachable only from a trusted ops segment
+
+### Assumption
+> *`GET /metrics` is served unauthenticated and posture-exempt on the verifier's
+> API port (`KIRRA_VERIFIER_ADDR`, default `0.0.0.0:8090`) so the Prometheus
+> scrape survives LockedOut. Until a dedicated operations listener lands (#793
+> F2 remainder), the integrator restricts scrape reachability to a trusted
+> operations/monitoring network segment — a NetworkPolicy, a bound to a
+> management interface, or an authenticating reverse proxy in front of the
+> path — and never exposes it on a public/command-plane network.*
+
+### Why it is load-bearing
+The exposition discloses fleet-operational state: the effective posture
+(state-set), HA topology (`kirra_mode_active`, `kirra_ha_promotions_total`,
+`kirra_ha_promotion_aborts_total`), the instance identity (`node_id` label),
+and per-reason denial/actuator-deny counts. None of it is a secret like the
+admin token, but in aggregate it is a reconnaissance surface: an attacker
+learns which instance is Active, whether failover is flapping, and which
+safety denials are firing — and it remains readable under LockedOut, when the
+equivalent functional reads are 503'd. Industry norm is to serve diagnostics on
+a dedicated ops port, not the command-plane application port.
+
+### Status / scope
+- **Content hardened — LIVE (#793 F6/F7/F8).** The exposition now separates a
+  real split-brain fence (`ha_fenced`) from a flapping-DB fence
+  (`ha_store_unavailable`), makes the inner Degraded actuator-gate denials
+  visible (`kirra_actuator_denials_total{code=…}`), and renders posture as a
+  state-set — but none of that changes *who can reach* the endpoint.
+- **Separate ops listener — TRACKED REMAINDER (#793 F2).** The planned fix is an
+  opt-in `KIRRA_METRICS_ADDR` (loopback default) that serves `/metrics` off a
+  second listener, off the command plane. Until then this AoU is the interim
+  record of the segmentation obligation.
+- Pairs with **AOU-TRANSPORT-TLS-001** (that binds the *mutation* plane's
+  transport; this binds the *observability* plane's reachability).
+
+### Consequence if violated
+A `/metrics` endpoint exposed on an untrusted network leaks fleet posture, HA
+role, and safety-denial telemetry to any peer — operational reconnaissance that
+persists under LockedOut. Not a direct control break (no route is actuated), but
+a confidentiality break of fleet-operational state.
+
+### Evidence
+- `src/bin/kirra_verifier_service/fleet.rs` (`metrics_endpoint`, posture-exempt),
+  `src/gateway/policy_layer.rs` (`is_posture_exempt`), `src/metrics.rs`
+  (exposition; #793 F6/F7/F8).
+- Route auth matrix: `CLAUDE.md` (Public read-only / posture-exempt GETs).
 
 ---
 

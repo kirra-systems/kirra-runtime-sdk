@@ -178,6 +178,9 @@ pub(crate) async fn promotion_loop(
             false
         };
         if refuse {
+            // #793 F6: count the aborted force-promotion so an abort storm (a
+            // misconfigured/contended failover) is observable on /metrics.
+            app.observability.fleet_metrics.record_ha_promotion_abort();
             tracing::error!(
                 instance_id = %id,
                 "KIRRA_FORCE_PROMOTE REFUSED (#1099): a peer heartbeat is actively advancing — refusing to force-promote over a LIVE primary (split-brain guard). Stop the peer or clear its heartbeat key, then retry."

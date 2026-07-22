@@ -137,20 +137,27 @@ fn mode_active(port: u16) -> Option<bool> {
     }
 }
 
-/// Parse `kirra_posture_cache_stale{...} <0|1>` from a /metrics scrape.
+/// Is the posture fail-closed synthetic? #793 F8 made
+/// `kirra_posture_cache_stale{reason=…}` a reason-labeled state gauge (one line
+/// per stale cause, the active one `1`), so "stale" now == ANY cause reads `1`
+/// (equivalently `sum() > 0`).
 fn posture_cache_stale(port: u16) -> Option<bool> {
     let (code, body) = http_get(&format!("http://127.0.0.1:{port}/metrics"))?;
     if code != 200 {
         return None;
     }
-    let line = body
+    let mut seen = false;
+    let mut any_active = false;
+    for l in body
         .lines()
-        .find(|l| l.starts_with("kirra_posture_cache_stale") && !l.starts_with('#'))?;
-    match line.rsplit(' ').next()? {
-        "1" => Some(true),
-        "0" => Some(false),
-        _ => None,
+        .filter(|l| l.starts_with("kirra_posture_cache_stale") && !l.starts_with('#'))
+    {
+        seen = true;
+        if l.ends_with(" 1") {
+            any_active = true;
+        }
     }
+    seen.then_some(any_active)
 }
 
 fn ready(port: u16) -> bool {

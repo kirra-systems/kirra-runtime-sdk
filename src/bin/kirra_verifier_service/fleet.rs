@@ -61,6 +61,9 @@ pub(crate) async fn ready(State(svc): State<Arc<ServiceState>>) -> impl IntoResp
 pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     use std::sync::atomic::Ordering;
 
+    // #793 F6: count the scrape (a scraper that stops flat-lines this counter).
+    svc.app.observability.fleet_metrics.record_metrics_scrape();
+
     // Effective fail-closed posture via the single TTL authority — the gauge
     // reports what the ROUTING GATE would enforce (cold/stale/poisoned →
     // LockedOut), not a possibly-stale cached optimism. #774 F1+F5: the SILENT
@@ -70,9 +73,28 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
     let (effective_posture, stale_reason, posture_generation) =
         resolve_posture_snapshot_silent(&svc.posture_cache, POSTURE_CACHE_TTL_MS);
 
+    // #793 F8: carry the fail-closed CAUSE (not just a bool) so the labeled
+    // `kirra_posture_cache_stale{reason=…}` gauge can distinguish stale from
+    // empty (cold-standby) from poisoned. `None` == a live DAG verdict.
+    let posture_stale_reason = match stale_reason {
+        None => kirra_verifier::metrics::PostureStaleReason::Live,
+        Some(kirra_verifier::posture_engine_v2::LockoutReason::PostureCacheStale) => {
+            kirra_verifier::metrics::PostureStaleReason::Stale
+        }
+        Some(kirra_verifier::posture_engine_v2::LockoutReason::PostureCacheEmpty) => {
+            kirra_verifier::metrics::PostureStaleReason::Empty
+        }
+        Some(kirra_verifier::posture_engine_v2::LockoutReason::PostureCachePoisoned) => {
+            kirra_verifier::metrics::PostureStaleReason::Poisoned
+        }
+        // The silent resolver only ever returns the three cache states above or
+        // None; any other lockout reason is still fail-closed → label "stale".
+        Some(_) => kirra_verifier::metrics::PostureStaleReason::Stale,
+    };
+
     let snap = kirra_verifier::metrics::FleetMetricsSnapshot {
         effective_posture,
-        posture_cache_stale: stale_reason.is_some(),
+        stale_reason: posture_stale_reason,
         posture_generation,
         mode_active: svc.app.is_active(),
         // Relaxed: monotonic observability counters — a best-effort snapshot
@@ -164,7 +186,8 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
     (
         [(
             axum::http::header::CONTENT_TYPE,
-            "text/plain; version=0.0.4",
+            // #793 F8: charset=utf-8 per the Prometheus text exposition content type.
+            "text/plain; version=0.0.4; charset=utf-8",
         )],
         body,
     )

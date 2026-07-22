@@ -665,11 +665,13 @@ mod verdict_tests {
             KIRRA_POSTURE_LOCKED_OUT
         );
         // Ordered most-permissive → most-restrictive, and all distinct.
-        assert!(
-            KIRRA_POSTURE_NOMINAL < KIRRA_POSTURE_CONSTRAINED
-                && KIRRA_POSTURE_CONSTRAINED < KIRRA_POSTURE_SHADOW
-                && KIRRA_POSTURE_SHADOW < KIRRA_POSTURE_LOCKED_OUT
-        );
+        const {
+            assert!(
+                KIRRA_POSTURE_NOMINAL < KIRRA_POSTURE_CONSTRAINED
+                    && KIRRA_POSTURE_CONSTRAINED < KIRRA_POSTURE_SHADOW
+                    && KIRRA_POSTURE_SHADOW < KIRRA_POSTURE_LOCKED_OUT
+            );
+        }
     }
 
     /// The FFI posture query never returns garbage: always a valid, in-range

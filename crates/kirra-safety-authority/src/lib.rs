@@ -26,8 +26,8 @@
 //!   stay as delegators).
 //!
 //! `kirra-verifier` re-exports the pure-decision items and the attestation module
-//! from their original module paths (a `pub use` shim) and embeds `EscalationState`
-//! + `OffPathWriteCounters` as `AppState` fields, so consumers reach a flag as
+//! from their original module paths (a `pub use` shim) and embeds `EscalationState` +
+//! `OffPathWriteCounters` as `AppState` fields, so consumers reach a flag as
 //! `app.escalation.<field>` / a counter as `app.off_path_writes.<field>`.
 
 use std::sync::Arc;
