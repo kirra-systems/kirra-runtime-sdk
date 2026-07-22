@@ -37,6 +37,7 @@
 //! reviewed, versioned policy. The binary exits non-zero on any breach and
 //! prints the scorecard either way.
 
+pub mod closedloop;
 pub mod confidence;
 pub mod differential;
 pub mod montecarlo;

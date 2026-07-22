@@ -15,6 +15,7 @@
 //! Both are deterministic: a red run is a real regression. The process exits
 //! non-zero if EITHER gate fails.
 
+use kirra_kpi_gate::closedloop::run_closedloop_gate;
 use kirra_kpi_gate::montecarlo::{MonteCarloPolicy, Profile};
 use kirra_kpi_gate::sotif_coverage::{
     check_sotif_coverage, live_corpus_scenario_names, parse_aou_ids, parse_trigger_ids,
@@ -38,6 +39,11 @@ fn main() {
     // #796 F4/F5 — the named known-failure manifest, SET EQUALITY per planner.
     let manifest_ok = run_manifest_gate_cli();
     println!();
+    // #796 F8 — the closed-loop episode gate (virtual-clock tick loop through
+    // the real planner + real checker; episode-level KPIs + the reckless-
+    // proposer discriminance control pair).
+    let closedloop_ok = run_closedloop_gate_cli();
+    println!();
     // WP-23: the seeded Monte-Carlo campaign. Opt-in via KIRRA_KPI_MC_PROFILE
     // (per_pr | nightly) so the deterministic gate above stays the default; CI
     // sets per_pr on PRs and nightly on the scheduled full-corpus run. Absent →
@@ -49,9 +55,10 @@ fn main() {
     // #796 F11 — the evidence artifact: opt-in via KIRRA_KPI_REPORT_DIR (CI
     // sets it and uploads). Written on pass AND fail — a red gate's evidence
     // is the more valuable kind.
-    write_evidence_artifacts(&thresholds_path, kpi_ok && manifest_ok && mc_ok && sotif_ok);
+    let all_ok = kpi_ok && manifest_ok && closedloop_ok && mc_ok && sotif_ok;
+    write_evidence_artifacts(&thresholds_path, all_ok);
 
-    if kpi_ok && manifest_ok && mc_ok && sotif_ok {
+    if all_ok {
         std::process::exit(0);
     }
     std::process::exit(1);
@@ -117,6 +124,44 @@ fn run_manifest_gate_cli() -> bool {
     ok
 }
 
+/// #796 F8 — run the closed-loop episode gate and print the per-episode
+/// scorecard. Returns `true` on pass.
+fn run_closedloop_gate_cli() -> bool {
+    let report = run_closedloop_gate();
+    println!("=== Closed-loop episode gate (#796 F8) ===");
+    println!(
+        "episodes: {} (0.1 s virtual ticks, 15 s horizon; negctl_* = reckless-proposer discriminance pair)",
+        report.episodes.len()
+    );
+    for e in &report.episodes {
+        let gap = e.min_gap_m.map_or("-".to_string(), |g| format!("{g:.2}m"));
+        println!(
+            "  [{}] {:<44} min_gap={:<8} progress={:>6.1}m final_v={:.2} refusals={}{}",
+            if e.pass { "PASS" } else { "FAIL" },
+            e.name,
+            gap,
+            e.progress_m,
+            e.final_speed_mps,
+            e.refusals,
+            e.reason
+                .as_deref()
+                .map(|r| format!("  ({r})"))
+                .unwrap_or_default(),
+        );
+    }
+    if report.passed() {
+        println!("Closed-loop gate: PASS");
+        true
+    } else {
+        eprintln!(
+            "Closed-loop gate: FAIL — an episode-level safety KPI (gap floor / stop-short / \
+             progress) regressed, or a discriminance control went vacuous. The loop is \
+             deterministic: a red episode is a real behavioral change."
+        );
+        false
+    }
+}
+
 /// #796 F11 — GateReport JSON + per-scenario verdict CSV + corpus/toolchain
 /// stamp, written under `KIRRA_KPI_REPORT_DIR` when set. Failures to write
 /// are LOUD but non-fatal: the gate verdict is authoritative, the artifact is
@@ -153,6 +198,7 @@ fn write_evidence_artifacts(thresholds_path: &str, passed: bool) {
         "kpi_gate_crate_version": env!("CARGO_PKG_VERSION"),
         "report": report,
         "manifest_diffs": diffs,
+        "closedloop": run_closedloop_gate(),
     });
     let json_path = format!("{dir}/gate_report.json");
     match serde_json::to_string_pretty(&stamp) {
