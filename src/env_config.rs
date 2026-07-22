@@ -198,6 +198,18 @@ pub const KIRRA_ENV_KEYS: &[EnvKeySpec] = &[
         purpose: "Comma-separated CORS allow-list (unset/empty → deny cross-origin, Sec4)",
     },
     EnvKeySpec {
+        name: "KIRRA_METRICS_ADDR",
+        required: false,
+        purpose: "Dedicated /metrics ops listener (#1123): unset → /metrics stays on the \
+                  command-plane port (AOU-METRICS-SEGMENTATION-001 stands); a socket addr → \
+                  serve /metrics there and 404 it on the command plane; invalid → startup abort",
+    },
+    EnvKeySpec {
+        name: "KIRRA_METRICS_MAX_CONCURRENCY",
+        required: false,
+        purpose: "The ops /metrics listener's own shed pool (default 16; 429 at capacity)",
+    },
+    EnvKeySpec {
         name: "KIRRA_CORS_ALLOW_ANY_ORIGIN",
         required: false,
         purpose: "1/true → allow ANY cross-origin read (Sec4 opt-in; default deny)",
