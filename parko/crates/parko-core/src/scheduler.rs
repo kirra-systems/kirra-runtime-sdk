@@ -45,8 +45,37 @@ fn override_reason(action: &EnforcementAction) -> Option<&'static str> {
 /// `cmd_vel` MUST additionally dead-man a silent command stream to STOP within
 /// this budget (else it would hold a pre-hang MOVING twist live across the hang).
 /// See `AOU-ACTUATION-DEADMAN-001` in `docs/safety/ASSUMPTIONS_OF_USE.md`.
-/// Budget-deriving this default from the FTTI decomposition (vs the current
-/// "generous" rationale) is a tracked safety-case item.
+///
+/// # FTTI budget derivation (#794 F1) — DRAFT, pending safety-owner ratify
+///
+/// This deadline is one term in the Fault-Tolerant Time Interval (FTTI) for the
+/// "backend wedge → moving ego" hazard: the total wall-clock from the backend
+/// ceasing to return until the vehicle reaches the MRC (full stop) must not
+/// exceed the hazard's time-to-harm `T_harm`. The chain is
+///
+/// ```text
+///   T_ftti = t_detect + t_propagate + t_actuate + t_decel   ≤   T_harm
+/// ```
+///
+/// where, for the parko path:
+/// - `t_detect` = THIS deadline — the bound on how long `tick` waits for a wedged
+///   backend before it publishes STOP. (≤ 1000 ms today.)
+/// - `t_propagate` = drain-loop + transport latency from the STOP command to the
+///   base controller (bounded by the tick period + DDS/QoS).
+/// - `t_actuate` = base-controller dead-man reaction (AOU-ACTUATION-DEADMAN-001) —
+///   it must STOP on a silent `cmd_vel` within this same budget.
+/// - `t_decel` = kinematic stopping time from the pre-hang speed under the class
+///   MRC decel profile (`contract_for` / `mrc_fallback_for`).
+///
+/// To DERIVE (not merely bound) this default, the safety owner supplies the
+/// per-class empirical inputs — `T_harm` for the design ODD, the measured
+/// `t_propagate`/`t_actuate`, and the MRC decel — and solves for the admissible
+/// `t_detect`; the deadline is then set to `min(that, current generous default)`.
+/// Those inputs are NOT asserted here: this comment records the decomposition
+/// FORM so the number has a home in the safety case, and the empirical values +
+/// the ratified `t_detect` remain a signed-off safety-engineering deliverable.
+/// Until then the value is unchanged — the "generous 20×-tick" bound above
+/// stands as a conservative placeholder, never a validated FTTI allocation.
 pub const DEFAULT_INFERENCE_DEADLINE_MS: u64 = 1_000;
 
 /// WS-0.4 F6 — sanity CEILING on the per-tick inference deadline, ms. The

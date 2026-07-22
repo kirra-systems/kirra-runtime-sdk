@@ -102,7 +102,7 @@ fn already_stopped(outcome: &TickOutcome) -> bool {
 /// scene: `Absent` (or missing/stale when armed) caps at 0.0 (any motion
 /// stops), `KnownClear` never binds, `Limited` binds via
 /// `occlusion_limited_speed` (fail-closed to 0.0 on invalid inputs).
-// SAFETY: SG1 | REQ: parko-ros2-occlusion-gate | TEST: occlusion_known_clear_passes,occlusion_limited_caps_overspeed,occlusion_limited_admits_slow_ego,occlusion_missing_scene_fails_closed,occlusion_stale_scene_fails_closed,already_stopped_outcome_passes_all_gates
+// SAFETY: SG1 | REQ: parko-ros2-occlusion-gate | TEST: occlusion_known_clear_passes,occlusion_limited_caps_overspeed,occlusion_limited_clamp_preserves_direction,occlusion_absent_scene_full_stops,occlusion_nonfinite_overspeed_full_stops,occlusion_limited_admits_slow_ego,occlusion_missing_scene_fails_closed,occlusion_stale_scene_fails_closed,already_stopped_outcome_passes_all_gates
 pub fn apply_occlusion_gate(
     outcome: TickOutcome,
     occlusion: Option<&StampedScene<OcclusionScene>>,
@@ -115,10 +115,31 @@ pub fn apply_occlusion_gate(
     }
     let scene = resolve_scene(occlusion, max_age_ms, now_ms, OcclusionScene::Absent);
     let cap = compute_occlusion_cap(&scene, params);
-    // `<=` is NaN-safe: a non-finite speed fails the comparison → stop. (The
-    // twist is already finiteness-enforced upstream; this is defence-in-depth.)
-    if outcome.twist.linear_x_mps.abs() <= cap {
-        outcome
+    let v = outcome.twist.linear_x_mps;
+    // Within the assured-clear-distance cap (`<=` is NaN-safe: a non-finite
+    // speed fails the comparison → the fail-closed branch below).
+    if v.abs() <= cap {
+        return outcome;
+    }
+    // #794 F8/F9: over the cap → CLAMP the ego to the assured-clear-distance
+    // speed (creep at ±cap, preserving direction) instead of a bang-bang full
+    // STOP that a cap-unaware planner fights every tick (park-at-every-blind-
+    // junction / oscillation). The clamped speed IS safe by construction — `cap`
+    // is the RSS-Rule-4 max safe speed for the sightline. Full-stop only when no
+    // motion is admissible: `cap == 0` (Absent / no visibility) or a non-finite
+    // command. The breach tag is preserved either way. (F8: the occlusion gate
+    // binds only the LINEAR channel — the in-place-rotation-while-limited
+    // decision is a separate track — so the clamp leaves `angular_z` untouched;
+    // the full-stop path zeros both via `OutgoingTwist::stopped`.)
+    if cap > 0.0 && v.is_finite() {
+        TickOutcome {
+            twist: OutgoingTwist {
+                linear_x_mps: v.clamp(-cap, cap),
+                ..outcome.twist
+            },
+            error: Some(TickError::OcclusionBreach),
+            degraded: outcome.degraded,
+        }
     } else {
         TickOutcome {
             twist: OutgoingTwist::stopped(outcome.twist.stamp_ms),
@@ -289,18 +310,74 @@ mod tests {
 
     #[test]
     fn occlusion_limited_caps_overspeed() {
-        // A short sightline yields a small cap; a 5 m/s ego must stop.
-        let s = stamped(
-            OcclusionScene::Limited {
-                d_sight_m: 2.0,
-                v_emerge_max_mps: 1.5,
-            },
-            100,
+        // #794 F8/F9: a bounded sightline yields a positive cap; an overspeed ego
+        // is CLAMPED to that cap (creep), not bang-bang stopped. The breach tag is
+        // still raised so provenance/telemetry see the correction.
+        let scene = OcclusionScene::Limited {
+            d_sight_m: 30.0,
+            v_emerge_max_mps: 1.0,
+        };
+        let cap = compute_occlusion_cap(&scene, &params());
+        assert!(
+            cap > 0.0,
+            "this sightline must admit creep for the clamp branch to be exercised; got {cap}"
         );
+        let s = stamped(scene, 100);
+        let out = apply_occlusion_gate(outcome(20.0), Some(&s), &params(), 500, 100);
+        assert_eq!(
+            out.twist.linear_x_mps, cap,
+            "overspeed past a positive occlusion cap clamps to the cap (creep), not to 0"
+        );
+        assert_eq!(out.error, Some(TickError::OcclusionBreach));
+    }
+
+    #[test]
+    fn occlusion_limited_clamp_preserves_direction() {
+        // #794 F8/F9: a reversing ego over the cap clamps to -cap, not +cap — the
+        // clamp bounds MAGNITUDE and keeps sign, it never flips travel direction.
+        let scene = OcclusionScene::Limited {
+            d_sight_m: 30.0,
+            v_emerge_max_mps: 1.0,
+        };
+        let cap = compute_occlusion_cap(&scene, &params());
+        assert!(cap > 0.0, "sightline must admit creep; got {cap}");
+        let s = stamped(scene, 100);
+        let out = apply_occlusion_gate(outcome(-20.0), Some(&s), &params(), 500, 100);
+        assert_eq!(
+            out.twist.linear_x_mps, -cap,
+            "reverse overspeed clamps to -cap (magnitude bound, sign preserved)"
+        );
+        assert_eq!(out.error, Some(TickError::OcclusionBreach));
+    }
+
+    #[test]
+    fn occlusion_absent_scene_full_stops() {
+        // #794 F8/F9: cap == 0 (Absent / no admissible motion) is the only branch
+        // that still bang-bang STOPS — there is no non-zero speed to clamp to.
+        let s = stamped(OcclusionScene::Absent, 100);
         let out = apply_occlusion_gate(outcome(5.0), Some(&s), &params(), 500, 100);
         assert_eq!(
             out.twist.linear_x_mps, 0.0,
-            "overspeed past the occlusion cap must stop"
+            "a zero cap admits no motion → full stop"
+        );
+        assert_eq!(out.error, Some(TickError::OcclusionBreach));
+    }
+
+    #[test]
+    fn occlusion_nonfinite_overspeed_full_stops() {
+        // A non-finite command can never be clamped to a finite cap safely → the
+        // fail-closed full-stop branch, even under a positive cap.
+        let s = stamped(
+            OcclusionScene::Limited {
+                d_sight_m: 30.0,
+                v_emerge_max_mps: 1.0,
+            },
+            100,
+        );
+        let out = apply_occlusion_gate(outcome(f64::INFINITY), Some(&s), &params(), 500, 100);
+        assert_eq!(
+            out.twist.linear_x_mps, 0.0,
+            "a non-finite command fails closed to a full stop, not a clamp"
         );
         assert_eq!(out.error, Some(TickError::OcclusionBreach));
     }
