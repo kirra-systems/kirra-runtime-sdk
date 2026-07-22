@@ -388,6 +388,34 @@ pub(crate) fn actions_diverge(
     (p_lin - s_lin).abs() > tol || (p_ang - s_ang).abs() > tol
 }
 
+impl GovernorComparator<DiverseKirraGovernor> {
+    /// #795 F11 — declare `ExternallyGated` on **both** arms at once.
+    ///
+    /// The scene-RSS declaration MUST match on the primary and the shadow: a
+    /// one-sided `with_external_rss_gate` is a PERMANENT false divergence (one arm
+    /// quiescent, the other still `NeverFed`). The per-arm builders warn about
+    /// this in prose, but the symmetry was convention-only. This applies the
+    /// declaration to both arms in one call, so it cannot drift. Production
+    /// wiring (primary `KirraGovernor` + shadow `DiverseKirraGovernor`) should use
+    /// this instead of gating each arm by hand.
+    #[must_use]
+    pub fn with_external_rss_gate(mut self) -> Self {
+        self.primary = self.primary.with_external_rss_gate();
+        self.shadow = self.shadow.with_external_rss_gate();
+        self
+    }
+
+    /// #795 F11 — declare `OperatorWaived` on **both** arms at once (the waiver
+    /// twin of [`with_external_rss_gate`](Self::with_external_rss_gate); same
+    /// no-drift guarantee).
+    #[must_use]
+    pub fn with_operator_waived(mut self) -> Self {
+        self.primary = self.primary.with_operator_waived();
+        self.shadow = self.shadow.with_operator_waived();
+        self
+    }
+}
+
 impl<S: SafetyGovernor> GovernorComparator<S> {
     /// Create a comparator with a primary `KirraGovernor` and a shadow
     /// governor `S`, and the default in-memory divergence sink.
@@ -678,6 +706,23 @@ mod tests {
         primary.update_rss_state(safe_rss());
         shadow.update_rss_state(unsafe_rss());
         (primary, shadow)
+    }
+
+    /// #795 F11 — the comparator-level `with_external_rss_gate` declares the SAME
+    /// RSS-feed state on BOTH arms in one call, so the symmetry (which the per-arm
+    /// builders warn MUST hold, or it is a permanent false divergence) cannot
+    /// drift. `with_operator_waived` is the waiver twin.
+    #[test]
+    fn comparator_gate_helpers_declare_both_arms() {
+        let gated = GovernorComparator::new(KirraGovernor::new(), DiverseKirraGovernor::new())
+            .with_external_rss_gate();
+        assert_eq!(gated.primary.rss_feed_label(), "externally_gated");
+        assert_eq!(gated.shadow.rss_feed_label(), "externally_gated");
+
+        let waived = GovernorComparator::new(KirraGovernor::new(), DiverseKirraGovernor::new())
+            .with_operator_waived();
+        assert_eq!(waived.primary.rss_feed_label(), "operator_waived");
+        assert_eq!(waived.shadow.rss_feed_label(), "operator_waived");
     }
 
     // -----------------------------------------------------------------

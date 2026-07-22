@@ -6,6 +6,9 @@
 
 use std::time::Duration;
 
+use parko_core::commit_zone::CommitZoneCfg;
+use parko_core::water::WaterVetoConfig;
+
 use crate::platform_profile::CourierPlatformProfile;
 
 /// Configuration for the Parko ROS 2 node. Constructed by the binary
@@ -172,6 +175,32 @@ pub struct ParkoNodeConfig {
     /// (`CommitZoneScene::Unknown` → veto): arm only
     /// with a map-anchored zone producer. **Default `false`.**
     pub commit_zone_gate_enabled: bool,
+
+    /// #795 F6 — the SG4 water-veto bounds threaded into `apply_water_gate`
+    /// (`max_exit_distance_m` / `max_puddle_extent_m`). Previously the drain loop
+    /// hardcoded `WaterVetoConfig::default()`; carrying it on the config makes the
+    /// (VALIDATION-PENDING) puddle bounds a deployment knob, one source shared by
+    /// the gate and any diagnostics. **Default:** `WaterVetoConfig::default()`
+    /// (byte-identical to the prior hardcode).
+    pub water_veto_config: WaterVetoConfig,
+
+    /// #795 F6 — the SG5 commit-zone geometry threaded into `apply_commit_zone_gate`
+    /// (look-ahead / vehicle length / exit margin / clearance-time margin).
+    /// Previously the drain loop hardcoded `CommitZoneCfg::default()`; carrying it
+    /// here makes the (VALIDATION-PENDING) geometry a deployment knob. **Default:**
+    /// `CommitZoneCfg::default()` (byte-identical to the prior hardcode).
+    pub commit_zone_config: CommitZoneCfg,
+
+    /// #795 F6 — EXPLICIT operator acknowledgment that a scene-veto gate
+    /// (occlusion / water / commit-zone) may be ARMED even though this build ships
+    /// **no producer** for its slot. An armed gate with no producer fails closed to
+    /// a STOP every tick — a *permanent immobilization*. **Default `false` —
+    /// fail-closed:** [`scene_gate_startup_check`](Self::scene_gate_startup_check)
+    /// REFUSES startup (rather than silently immobilizing) when a producer-less gate
+    /// is armed and this is unset. Set `true` only for a deliberate
+    /// bring-up/immobilizer test; the operator — not a silent default — owns that
+    /// choice. (When a real producer lands, that gate drops out of the guard.)
+    pub allow_scene_gate_without_producer: bool,
 }
 
 /// Placeholder for an MRC fallback override. Today's MRC is always
@@ -222,6 +251,13 @@ impl Default for ParkoNodeConfig {
             occlusion_gate_enabled: false,
             water_gate_enabled: false,
             commit_zone_gate_enabled: false,
+            // #795 F6: veto configs plumbed (previously hardcoded in the drain
+            // loop); default to their parko-core Default() → byte-identical.
+            water_veto_config: WaterVetoConfig::default(),
+            commit_zone_config: CommitZoneCfg::default(),
+            // #795 F6: a producer-less armed gate is a permanent immobilizer;
+            // arming one requires the operator's explicit acknowledgment.
+            allow_scene_gate_without_producer: false,
         }
     }
 }
@@ -289,7 +325,91 @@ impl ParkoNodeConfig {
     pub fn object_gate_armed(&self) -> bool {
         self.object_rss_enabled && self.lidar_topic.is_some() && self.platform_profile.is_some()
     }
+
+    /// #795 F6 — the scene-veto gates that are ARMED **and will actually
+    /// immobilize**, in this build that ships no producers for their slots.
+    ///
+    /// Each such gate, with its slot never fed, fails closed to a STOP every tick
+    /// — a permanent immobilization. Occlusion additionally needs a
+    /// `platform_profile` (its RSS params) to arm at all: `occlusion_gate_enabled`
+    /// with no profile is a *dark* flag (the gate is skipped, no immobilization),
+    /// so it is NOT counted here — only a gate that will genuinely hold the ego at
+    /// zero. Water and commit-zone need no profile, so the flag alone arms them.
+    ///
+    /// Returned by name (fixed order occlusion → water → commit-zone) so the
+    /// startup guard can name exactly which gates are producer-less.
+    #[must_use]
+    pub fn producerless_armed_scene_gates(&self) -> Vec<&'static str> {
+        let mut armed = Vec::new();
+        if self.occlusion_gate_enabled && self.platform_profile.is_some() {
+            armed.push("occlusion");
+        }
+        if self.water_gate_enabled {
+            armed.push("water");
+        }
+        if self.commit_zone_gate_enabled {
+            armed.push("commit_zone");
+        }
+        armed
+    }
+
+    /// #795 F6 — fail-closed startup guard against SILENT permanent immobilization.
+    ///
+    /// A scene-veto gate armed with no producer feeding its slot fails closed to a
+    /// STOP forever. Rather than let the node come up and hold the ego at zero with
+    /// no diagnostic, REFUSE startup when any producer-less gate
+    /// ([`producerless_armed_scene_gates`](Self::producerless_armed_scene_gates)) is
+    /// armed — UNLESS the operator has explicitly acknowledged the immobilization
+    /// via `allow_scene_gate_without_producer` (a deliberate bring-up/immobilizer
+    /// test). Default config → no armed gates → `Ok`, so ordinary deployments are
+    /// unaffected. When a real producer for a gate lands, that gate drops out of
+    /// `producerless_armed_scene_gates` and no longer trips this guard.
+    ///
+    /// # Errors
+    /// Returns [`SceneGateStartupRefusal`] naming the armed-without-producer gates
+    /// when the acknowledgment is unset.
+    pub fn scene_gate_startup_check(&self) -> Result<(), SceneGateStartupRefusal> {
+        let armed = self.producerless_armed_scene_gates();
+        if armed.is_empty() || self.allow_scene_gate_without_producer {
+            Ok(())
+        } else {
+            SceneGateStartupRefusal::from_gates(&armed)
+        }
+    }
 }
+
+/// #795 F6 — a fail-closed startup refusal: one or more scene-veto gates are
+/// ARMED but have no producer, so the node would come up permanently immobilized.
+/// Names the offending gates so the operator can either configure a producer,
+/// disarm the gate, or (deliberately) acknowledge the immobilization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneGateStartupRefusal {
+    /// The armed-without-producer gate names (occlusion / water / commit_zone).
+    pub armed_gates: Vec<String>,
+}
+
+impl SceneGateStartupRefusal {
+    fn from_gates(gates: &[&str]) -> Result<(), Self> {
+        Err(Self {
+            armed_gates: gates.iter().map(|g| (*g).to_string()).collect(),
+        })
+    }
+}
+
+impl std::fmt::Display for SceneGateStartupRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "scene-veto gate(s) [{}] are ARMED but this build ships no producer for \
+             their slots — the node would come up PERMANENTLY IMMOBILIZED (fail-closed \
+             STOP every tick). Configure a producer, disarm the gate(s), or set \
+             PARKO_ALLOW_SCENE_GATE_WITHOUT_PRODUCER=1 to acknowledge the immobilization.",
+            self.armed_gates.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for SceneGateStartupRefusal {}
 
 /// #795 F10 — classification of a boolean env-flag value. `1`/`true` → enabled;
 /// `0`/`false`/empty → disabled; anything ELSE (`yes`, `on`, a typo) →
@@ -360,6 +480,96 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// #795 F6 — the default (all gates disarmed) has nothing producer-less and
+    /// the startup guard passes: ordinary deployments are unaffected.
+    #[test]
+    fn scene_gate_guard_passes_by_default() {
+        let cfg = ParkoNodeConfig::default();
+        assert!(cfg.producerless_armed_scene_gates().is_empty());
+        assert!(cfg.scene_gate_startup_check().is_ok());
+        // The veto configs default to parko-core Default() (byte-identical to the
+        // prior drain-loop hardcode). WaterVetoConfig/CommitZoneCfg don't derive
+        // PartialEq, so compare their fields.
+        let w = WaterVetoConfig::default();
+        assert!((cfg.water_veto_config.max_exit_distance_m - w.max_exit_distance_m).abs() < 1e-9);
+        assert!((cfg.water_veto_config.max_puddle_extent_m - w.max_puddle_extent_m).abs() < 1e-9);
+        let cz = CommitZoneCfg::default();
+        assert!((cfg.commit_zone_config.look_ahead_m - cz.look_ahead_m).abs() < 1e-9);
+        assert!((cfg.commit_zone_config.vehicle_length_m - cz.vehicle_length_m).abs() < 1e-9);
+        assert!((cfg.commit_zone_config.exit_margin_m - cz.exit_margin_m).abs() < 1e-9);
+        assert!(
+            (cfg.commit_zone_config.clearance_time_margin_s - cz.clearance_time_margin_s).abs()
+                < 1e-9
+        );
+        assert!(!cfg.allow_scene_gate_without_producer);
+    }
+
+    /// #795 F6 — arming water or commit-zone (no profile needed) makes them
+    /// producer-less-armed and REFUSES startup; the refusal names the gate.
+    #[test]
+    fn arming_water_or_commit_zone_refuses_startup() {
+        for (field, name) in [("water", "water"), ("commit_zone", "commit_zone")] {
+            let cfg = ParkoNodeConfig {
+                water_gate_enabled: field == "water",
+                commit_zone_gate_enabled: field == "commit_zone",
+                ..ParkoNodeConfig::default()
+            };
+            assert_eq!(cfg.producerless_armed_scene_gates(), vec![name]);
+            let err = cfg
+                .scene_gate_startup_check()
+                .expect_err("an armed producer-less gate must refuse startup");
+            assert_eq!(err.armed_gates, vec![name.to_string()]);
+            assert!(err.to_string().contains(name));
+        }
+    }
+
+    /// #795 F6 — the occlusion gate only immobilizes when it actually ARMS, which
+    /// needs a platform_profile (its RSS params). The flag WITHOUT a profile is a
+    /// dark flag (gate skipped) → not counted, guard passes; WITH a profile it is
+    /// producer-less-armed → refused.
+    #[test]
+    fn occlusion_counts_only_when_it_actually_arms() {
+        let dark = ParkoNodeConfig {
+            occlusion_gate_enabled: true,
+            platform_profile: None,
+            ..ParkoNodeConfig::default()
+        };
+        assert!(
+            dark.producerless_armed_scene_gates().is_empty(),
+            "occlusion flag with no profile does not arm → not an immobilizer"
+        );
+        assert!(dark.scene_gate_startup_check().is_ok());
+
+        let armed = ParkoNodeConfig {
+            occlusion_gate_enabled: true,
+            platform_profile: Some(CourierPlatformProfile::courier_reference()),
+            ..ParkoNodeConfig::default()
+        };
+        assert_eq!(armed.producerless_armed_scene_gates(), vec!["occlusion"]);
+        assert!(armed.scene_gate_startup_check().is_err());
+    }
+
+    /// #795 F6 — the explicit operator acknowledgment turns the refusal into an
+    /// (allowed, deliberate) immobilizer: the guard passes even with gates armed.
+    #[test]
+    fn acknowledgment_allows_producerless_immobilizer() {
+        let cfg = ParkoNodeConfig {
+            water_gate_enabled: true,
+            commit_zone_gate_enabled: true,
+            allow_scene_gate_without_producer: true,
+            ..ParkoNodeConfig::default()
+        };
+        // Still reported as producer-less (observability), but startup is allowed.
+        assert_eq!(
+            cfg.producerless_armed_scene_gates(),
+            vec!["water", "commit_zone"]
+        );
+        assert!(
+            cfg.scene_gate_startup_check().is_ok(),
+            "an acknowledged immobilizer may start"
+        );
     }
 
     #[test]

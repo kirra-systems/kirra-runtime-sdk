@@ -42,9 +42,9 @@ use crate::taj_objects::{
     apply_object_rss_gate, courier_rss_params, object_snapshot_to_vanished_scene, ObjectSnapshot,
 };
 use crate::tick_pipeline::{current_time_ms, TickError};
-use parko_core::commit_zone::{CommitZoneCfg, CommitZoneScene};
+use parko_core::commit_zone::CommitZoneScene;
 use parko_core::rss::OcclusionScene;
-use parko_core::water::{WaterScene, WaterVetoConfig};
+use parko_core::water::WaterScene;
 use parko_kirra::clearance_delivery::DeliveryOutcome;
 
 /// Run the Parko ROS 2 node. Owns the r2r context for the lifetime of
@@ -515,8 +515,8 @@ where
             let occlusion_slot = drain_occlusion.lock().ok().and_then(|g| g.clone());
             let water_slot = drain_water.lock().ok().and_then(|g| g.clone());
             let commit_zone_slot = drain_commit_zone.lock().ok().and_then(|g| g.clone());
-            let water_cfg = WaterVetoConfig::default();
-            let commit_zone_cfg = CommitZoneCfg::default();
+            // #795 F6: the veto configs come from ParkoNodeConfig (plumbed) rather
+            // than a per-tick hardcoded `Default()`.
             let outcome = apply_scene_gates(
                 outcome,
                 &SceneGateChain {
@@ -524,10 +524,10 @@ where
                     occlusion: occlusion_slot.as_ref(),
                     water_armed: drain_water_armed,
                     water: water_slot.as_ref(),
-                    water_cfg: &water_cfg,
+                    water_cfg: &drain_config.water_veto_config,
                     commit_zone_armed: drain_commit_zone_armed,
                     commit_zone: commit_zone_slot.as_ref(),
-                    commit_zone_cfg: &commit_zone_cfg,
+                    commit_zone_cfg: &drain_config.commit_zone_config,
                     max_age_ms: drain_config.corridor_max_age_ms,
                     now_ms: current_time_ms(),
                 },
