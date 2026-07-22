@@ -575,6 +575,7 @@ mod scenario_runner_tests {
             generated_at_ms: 1_000,
             ttl_ms: POSTURE_CACHE_TTL_MS,
             generation: 1,
+            epoch: 0,
         };
 
         // At t=1000 — not stale

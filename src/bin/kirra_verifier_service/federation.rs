@@ -75,6 +75,19 @@ pub(crate) async fn submit_federated_report(
         return Json(evaluation).into_response();
     }
 
+    // #791 I1 structural gate: `source_epoch` without `source_generation` is
+    // malformed — there is no (epoch, generation) tuple to order by, and the
+    // canonical payload deliberately canonicalizes that shape WITHOUT the epoch
+    // (so its signature cannot be laundered into an epoch claim). Reject before
+    // any store work, like the other structural checks.
+    if !kirra_fleet_types::federation_reconciliation::epoch_field_well_formed(&report) {
+        return Json(ReportEvaluation {
+            accepted: false,
+            reason: "MALFORMED_EPOCH_WITHOUT_GENERATION".to_string(),
+        })
+        .into_response();
+    }
+
     // #79: held fencing token, read before locking the store. The durable commit
     // re-checks it INSIDE the transaction, closing the gate→commit TOCTOU.
     let held_epoch = svc
@@ -146,6 +159,7 @@ pub(crate) async fn submit_federated_report(
             match store.save_federated_report_chained(
                 &report.as_v1(),
                 report.source_generation,
+                report.source_epoch,
                 received_at_ms,
                 held_epoch,
             ) {
@@ -184,6 +198,27 @@ pub(crate) async fn submit_federated_report(
                         received_at_ms,
                     );
                     FedCommitOutcome::Rejected("FEDERATED_GENERATION_REGRESS")
+                }
+                Err(DurableWriteError::EpochRegress { found, high_water }) => {
+                    // #791 I1: the report's effective epoch is BELOW this peer's
+                    // epoch high-water — a fenced old primary still publishing
+                    // under its superseded epoch (found ≥ 1), or the omission-
+                    // downgrade hard reject (found == 0: the peer has proven an
+                    // epoch, this report omits it). Fail-closed, clean audit —
+                    // the report was NOT persisted and no nonce was burned.
+                    let event = json!({ "source_controller_id": report.source_controller_id,
+                                    "asset_id": report.asset_id,
+                                    "offered_epoch": found,
+                                    "high_water_epoch": high_water,
+                                    "reason": "FEDERATION_EPOCH_REGRESS" });
+                    let _ = store.save_posture_event_chained(
+                        "federation_gateway",
+                        "FEDERATION_REJECTED",
+                        &event.to_string(),
+                        Some("epoch regress / omission-downgrade"),
+                        received_at_ms,
+                    );
+                    FedCommitOutcome::Rejected("FEDERATED_EPOCH_REGRESS")
                 }
                 Err(DurableWriteError::Fenced(reason)) => {
                     FedCommitOutcome::Fenced(format!("{reason:?}"))

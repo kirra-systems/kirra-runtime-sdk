@@ -88,6 +88,7 @@ fn signed_report(
         nonce_hex: nonce.to_string(),
         signature_b64: String::new(),
         source_generation: generation,
+        source_epoch: None,
     };
     let sig = sk.sign(canonical_federation_payload_v2(&report).as_bytes());
     report.signature_b64 = b64.encode(sig.to_bytes());
@@ -201,5 +202,113 @@ async fn tampered_signature_is_rejected() {
             .with(|store| store.has_seen_federation_nonce("nonce-bad"))
             .unwrap(),
         "a rejected report must not burn its nonce"
+    );
+}
+
+/// #791 I1 — a genuinely signed epoch-carrying report (the third canonical
+/// arm) is accepted end-to-end, and the peer's next report under a LOWER
+/// epoch — even at a far higher generation — is rejected as
+/// FEDERATED_EPOCH_REGRESS with nothing persisted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn epoch_carrying_report_accepted_then_lower_epoch_rejected() {
+    let svc = service();
+    let sk = SigningKey::from_bytes(&[7u8; 32]);
+    register(&svc, "ctrl-a", &sk);
+
+    // The promoted standby's stream: epoch 2, generation 1.
+    let mut promoted = signed_report(&sk, "ctrl-a", "lidar_front", "nonce-e2", Some(1));
+    promoted.source_epoch = Some(2);
+    promoted.signature_b64 = b64.encode(
+        sk.sign(canonical_federation_payload_v2(&promoted).as_bytes())
+            .to_bytes(),
+    );
+    let (_, body) = submit(svc.clone(), promoted).await;
+    assert_eq!(body["accepted"], serde_json::json!(true), "{body}");
+
+    // The killed primary's straggler: epoch 1, generation 500.
+    let mut stale = signed_report(&sk, "ctrl-a", "lidar_front", "nonce-e1", Some(500));
+    stale.source_epoch = Some(1);
+    stale.signature_b64 = b64.encode(
+        sk.sign(canonical_federation_payload_v2(&stale).as_bytes())
+            .to_bytes(),
+    );
+    let (_, body) = submit(svc.clone(), stale).await;
+    assert_eq!(body["accepted"], serde_json::json!(false));
+    assert_eq!(
+        body["reason"],
+        serde_json::json!("FEDERATED_EPOCH_REGRESS"),
+        "{body}"
+    );
+    assert!(
+        !svc.app
+            .store
+            .with(|store| store.has_seen_federation_nonce("nonce-e1"))
+            .unwrap(),
+        "an epoch-regressed report must not burn its nonce"
+    );
+}
+
+/// #791 I1 — the omission-downgrade HARD REJECT at the handler: after an
+/// epoch-carrying report, a validly-signed generation-only report from the
+/// same peer is refused as FEDERATED_EPOCH_REGRESS (owner decision on #791 —
+/// no grace report; recovery is the peer resuming epoch-carrying reports).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn omission_downgrade_is_rejected_at_the_handler() {
+    let svc = service();
+    let sk = SigningKey::from_bytes(&[7u8; 32]);
+    register(&svc, "ctrl-a", &sk);
+
+    let mut epoch_report = signed_report(&sk, "ctrl-a", "lidar_front", "nonce-ep", Some(3));
+    epoch_report.source_epoch = Some(1);
+    epoch_report.signature_b64 = b64.encode(
+        sk.sign(canonical_federation_payload_v2(&epoch_report).as_bytes())
+            .to_bytes(),
+    );
+    let (_, body) = submit(svc.clone(), epoch_report).await;
+    assert_eq!(body["accepted"], serde_json::json!(true), "{body}");
+
+    // Validly signed, higher generation — but the epoch is OMITTED.
+    let stripped = signed_report(&sk, "ctrl-a", "lidar_front", "nonce-om", Some(9));
+    let (_, body) = submit(svc.clone(), stripped).await;
+    assert_eq!(body["accepted"], serde_json::json!(false));
+    assert_eq!(
+        body["reason"],
+        serde_json::json!("FEDERATED_EPOCH_REGRESS"),
+        "epoch omission after epoch-carrying history must hard-reject: {body}"
+    );
+}
+
+/// #791 I1 — the STRUCTURAL gate: `source_epoch` without `source_generation`
+/// is malformed and rejected before any store work (no tuple to order by; the
+/// canonical payload deliberately drops the epoch for this shape, so the
+/// signature also cannot vouch for it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn epoch_without_generation_is_structurally_rejected() {
+    let svc = service();
+    let sk = SigningKey::from_bytes(&[7u8; 32]);
+    register(&svc, "ctrl-a", &sk);
+
+    // Signed over the (epoch-less) canonical bytes for this ill-formed shape —
+    // the signature is VALID; the STRUCTURE is what must reject it.
+    let mut bad = signed_report(&sk, "ctrl-a", "lidar_front", "nonce-ill", None);
+    bad.source_epoch = Some(4);
+    bad.signature_b64 = b64.encode(
+        sk.sign(canonical_federation_payload_v2(&bad).as_bytes())
+            .to_bytes(),
+    );
+
+    let (_, body) = submit(svc.clone(), bad).await;
+    assert_eq!(body["accepted"], serde_json::json!(false));
+    assert_eq!(
+        body["reason"],
+        serde_json::json!("MALFORMED_EPOCH_WITHOUT_GENERATION"),
+        "{body}"
+    );
+    assert!(
+        !svc.app
+            .store
+            .with(|store| store.has_seen_federation_nonce("nonce-ill"))
+            .unwrap(),
+        "a structurally rejected report must not burn its nonce"
     );
 }

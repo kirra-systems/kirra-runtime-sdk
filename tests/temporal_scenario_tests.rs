@@ -312,6 +312,7 @@ async fn test_stale_cache_fails_closed_after_virtual_clock_advance() {
         generated_at_ms: 0,
         ttl_ms: POSTURE_CACHE_TTL_MS,
         generation: 1,
+        epoch: 0,
     };
     *cache.write().unwrap() = Some(entry_at_t0);
 

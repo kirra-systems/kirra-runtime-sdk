@@ -276,6 +276,16 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
         .unwrap_or(true);
 
     let generation = next_generation();
+    // #791 I1 — the HA epoch this recalc is stamped under, read at stamp time
+    // from the fence (the durable `ha_state` row remains the single authority;
+    // this is the in-memory `held_epoch` the write fence itself trusts). The
+    // ordering key everywhere downstream is the lexicographic tuple
+    // `(epoch, generation)`: a freshly-promoted instance (higher epoch) is
+    // newer BY CONSTRUCTION, retiring generation counter catch-up.
+    let epoch = app
+        .ha_fence
+        .held_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
 
     // Step 4: Persist to audit chain (disk-first, invariant #12).
     //
@@ -343,6 +353,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
                 Some("Fleet posture recomputed from DAG traversal"),
                 ts,
                 generation,
+                epoch,
             ) {
                 Ok(advanced) => Ok(advanced),
                 Err(e) => {
@@ -364,6 +375,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
                         Some("Fleet posture recomputed from DAG traversal"),
                         ts,
                         generation,
+                        epoch,
                     )
                 }
             }
@@ -375,6 +387,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
                 Some("Fleet posture recomputed from DAG traversal"),
                 ts,
                 generation,
+                epoch,
             )
         };
 
@@ -441,7 +454,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // Step 6: Generation-monotonic cache replace.
     // Two recalcs can race (promotion path + Step-C worker), and a SLOWER
     // one carrying a LOWER generation must not clobber a newer posture.
-    let new_cached = CachedFleetPosture::new_with_generation(new_posture, generation, ts);
+    let new_cached = CachedFleetPosture::new_with_stamp(new_posture, epoch, generation, ts);
     // #688: read the sticky-lockout flags HERE (after the generation grab at
     // `next_generation()` above, just before the write) so a recalc that predates a
     // supervisor/frame trip cannot clobber the forced LockedOut — see
@@ -449,19 +462,11 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // loom model `sticky_lockout_never_downgraded_under_recalc_race`
     // (`crates/kirra-loom-models`) fails (finds a downgrade interleaving) if this
     // read is moved BEFORE the generation grab. Do not reorder.
-    let sticky_lockout = app
-        .escalation
-        .supervisor_tripped
-        .load(std::sync::atomic::Ordering::SeqCst)
-        || app
-            .escalation
-            .frame_lockout_active
-            .load(std::sync::atomic::Ordering::SeqCst)
-        || app
-            .escalation
-            .divergence_lockout_active
-            .load(std::sync::atomic::Ordering::SeqCst);
-    let cache_written = replace_cache_if_newer(cache, new_cached, sticky_lockout);
+    let sticky_lockout = sticky_flags_set(&app.escalation);
+    // #791 I1: the escalation handle is ALSO passed so the CAS re-checks the
+    // flags UNDER the cache write lock — see `replace_cache_if_newer`.
+    let cache_written =
+        replace_cache_if_newer(cache, new_cached, sticky_lockout, Some(&app.escalation));
 
     // Step 7: Broadcast ONLY if we actually wrote a newer entry AND it's a
     // transition. A broadcast without a corresponding cache update would
@@ -486,6 +491,8 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
             node_id: None,
             emitted_at_ms: ts,
             posture: None,
+            epoch: Some(epoch),
+            generation: Some(generation),
         });
 
         tracing::info!(
@@ -502,35 +509,88 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
 /// Writes a `LockedOut` entry with a freshly-bumped generation so it wins the
 /// monotonic compare-and-swap, WITHOUT going through `recalculate_and_broadcast`
 /// (which may be the very task that died). Callers MUST also set
-/// `AppState::supervisor_tripped` so any *surviving* recalc keeps producing
-/// LockedOut — this function only makes the lockout instantaneous; the sticky flag
-/// makes it durable. Fail-closed by construction: a poisoned cache lock is the
-/// gate's own LockedOut signal, so a failed write here still denies.
-pub fn force_lockout(cache: &SharedPostureCache, ts_ms: u64) {
-    let candidate =
-        CachedFleetPosture::new_with_generation(FleetPosture::LockedOut, next_generation(), ts_ms);
+/// `AppState::supervisor_tripped` BEFORE calling — this function only makes the
+/// lockout instantaneous; the sticky flag makes it durable. Fail-closed by
+/// construction: a poisoned cache lock is the gate's own LockedOut signal, so a
+/// failed write here still denies.
+///
+/// #791 I1 — `held_epoch` is the fence's live epoch atomic
+/// (`app.ha_fence.held_epoch`), loaded HERE (i.e., after the caller set the
+/// sticky flag), not pre-loaded by the caller. Ordering is load-bearing under
+/// the `(epoch, generation)` tuple CAS: a racing recalc that read the sticky
+/// flag as unset read its OWN epoch before that flag was set, so this later
+/// load is ≥ the recalc's epoch (the fence epoch is monotonic in-process), and
+/// with the generation grabbed after the flag too, the forced candidate's
+/// tuple strictly outranks the racing recalc's — the same closure argument
+/// the loom model proves for the generation half of #688, lifted to tuples.
+pub fn force_lockout(
+    cache: &SharedPostureCache,
+    held_epoch: &std::sync::atomic::AtomicU64,
+    ts_ms: u64,
+) {
+    let epoch = held_epoch.load(std::sync::atomic::Ordering::SeqCst);
+    let candidate = CachedFleetPosture::new_with_stamp(
+        FleetPosture::LockedOut,
+        epoch,
+        next_generation(),
+        ts_ms,
+    );
     // sticky_lockout = true: this IS the supervisor escalation. The guard only
     // blocks NON-LockedOut candidates, so a LockedOut candidate is unaffected;
-    // passing true documents intent and is correct under the gen CAS.
-    let wrote = replace_cache_if_newer(cache, candidate, true);
+    // passing true documents intent and is correct under the tuple CAS (it also
+    // arms the epoch-inherit fallback in `replace_cache_if_newer`). No
+    // escalation handle needed — `true` is already the strongest value.
+    let wrote = replace_cache_if_newer(cache, candidate, true, None);
     tracing::error!(
         wrote_cache = wrote,
         "C2 escalation: posture cache forced to LockedOut (critical safety loop wedged)"
     );
 }
 
-/// Replaces the cached posture ONLY if `candidate.generation` is strictly
-/// greater than the currently cached generation. Returns `true` if a write
-/// landed. Prevents a slow / out-of-order recalc (lower generation) from
-/// clobbering a newer posture already in the cache. Pure w.r.t. callers —
-/// holds the cache write lock for the duration of the compare-and-swap.
+/// The three sticky escalation flags, OR-folded (#688 + frame + divergence).
+/// Read at two points: the caller's pre-read (the loom-proven late read in
+/// `recalculate_and_broadcast`) and the authoritative under-lock re-read in
+/// `replace_cache_if_newer` (#791 I1).
+fn sticky_flags_set(escalation: &kirra_safety_authority::EscalationState) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    escalation.supervisor_tripped.load(SeqCst)
+        || escalation.frame_lockout_active.load(SeqCst)
+        || escalation.divergence_lockout_active.load(SeqCst)
+}
+
+/// Replaces the cached posture ONLY if the candidate's `(epoch, generation)`
+/// tuple is lexicographically greater than the currently cached one (#791 I1;
+/// within one process the generation alone is already strictly monotonic, so
+/// the epoch rung only ever decides when a promotion bumped `held_epoch`
+/// mid-lifetime). Returns `true` if a write landed. Prevents a slow /
+/// out-of-order recalc (lower tuple) from clobbering a newer posture already
+/// in the cache. Pure w.r.t. callers — holds the cache write lock for the
+/// duration of the compare-and-swap.
 fn replace_cache_if_newer(
     cache: &SharedPostureCache,
     candidate: CachedFleetPosture,
     sticky_lockout: bool,
+    escalation: Option<&kirra_safety_authority::EscalationState>,
 ) -> bool {
+    let mut candidate = candidate;
     match cache.write() {
         Ok(mut guard) => {
+            // #791 I1 — AUTHORITATIVE sticky re-read UNDER the write lock. The
+            // caller's pre-read (`sticky_lockout`) keeps the loom-proven #688
+            // ordering as a fast path, but under the (epoch, generation) tuple
+            // CAS it is no longer sufficient alone: a recalc whose pre-read
+            // raced the trip could carry a HIGHER EPOCH (promotion concurrent
+            // with the trip) and outrank the forced lockout on the epoch rung
+            // — a window the generation CAS used to close via counter order.
+            // Re-reading here closes it by lock ordering, not memory-ordering
+            // subtlety: if `force_lockout`'s LockedOut already committed, its
+            // caller's flag store happens-before this critical section (lock
+            // release → acquire), so the re-read observes it and the guard
+            // below refuses the downgrade. Proven by the loom model
+            // `sticky_lockout_never_downgraded_under_promotion_race`, which
+            // FAILS without this re-read.
+            let sticky_lockout =
+                sticky_lockout || escalation.map(sticky_flags_set).unwrap_or(false);
             // #688: a supervisor / frame-integrity sticky LockedOut has ABSOLUTE
             // priority. Without this guard, a recalc that computed a non-LockedOut
             // posture BEFORE the trip — but grabbed a HIGHER generation (the trip
@@ -553,15 +613,34 @@ fn replace_cache_if_newer(
                 );
                 return false;
             }
-            let cur_gen = guard.as_ref().map(|c| c.generation).unwrap_or(0);
-            if candidate.generation > cur_gen {
+            // #791 I1: a sticky LockedOut candidate (the `force_lockout` path,
+            // which has no fence handle and stamps epoch 0) INHERITS the cached
+            // epoch under this write lock. Without this, the epoch rung could
+            // reject the forced lockout against a higher-epoch entry — the exact
+            // downgrade-window class #688 closed for generations. Inheriting
+            // degenerates its compare to the proven generation CAS (force's
+            // generation is always grabbed after the racing recalc's). Recovery
+            // is unaffected: post-reset recalcs at the same epoch replace it on
+            // generation as before.
+            if sticky_lockout && candidate.posture == FleetPosture::LockedOut {
+                if let Some(cur) = guard.as_ref() {
+                    candidate.epoch = candidate.epoch.max(cur.epoch);
+                }
+            }
+            let cur_stamp = guard
+                .as_ref()
+                .map(|c| (c.epoch, c.generation))
+                .unwrap_or((0, 0));
+            if (candidate.epoch, candidate.generation) > cur_stamp {
                 *guard = Some(candidate);
                 true
             } else {
                 tracing::debug!(
+                    candidate_epoch = candidate.epoch,
                     candidate_gen = candidate.generation,
-                    current_gen = cur_gen,
-                    "Skipping cache replace — a newer or equal generation is already cached"
+                    current_epoch = cur_stamp.0,
+                    current_gen = cur_stamp.1,
+                    "Skipping cache replace — a newer or equal (epoch, generation) is already cached"
                 );
                 false
             }
@@ -866,7 +945,7 @@ mod posture_engine_tests {
             CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 1, 1_000),
         )));
 
-        force_lockout(&cache, 2_000);
+        force_lockout(&cache, &std::sync::atomic::AtomicU64::new(0), 2_000);
 
         let guard = cache.read().unwrap();
         let entry = guard.as_ref().unwrap();
@@ -917,13 +996,13 @@ mod posture_engine_tests {
 
         // Seed with generation 10.
         let g10 = CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 10, 1_000);
-        assert!(replace_cache_if_newer(&cache, g10, false));
+        assert!(replace_cache_if_newer(&cache, g10, false, None));
         assert_eq!(snapshot(&cache), (10, FleetPosture::Nominal));
 
         // Lower generation 9 must be rejected, cache unchanged.
         let g9 = CachedFleetPosture::new_with_generation(FleetPosture::Degraded, 9, 2_000);
         assert!(
-            !replace_cache_if_newer(&cache, g9, false),
+            !replace_cache_if_newer(&cache, g9, false, None),
             "lower generation must NOT replace the cache"
         );
         assert_eq!(
@@ -935,14 +1014,14 @@ mod posture_engine_tests {
         // Equal generation 10 must also be rejected (strictly greater).
         let g10_eq = CachedFleetPosture::new_with_generation(FleetPosture::LockedOut, 10, 3_000);
         assert!(
-            !replace_cache_if_newer(&cache, g10_eq, false),
+            !replace_cache_if_newer(&cache, g10_eq, false, None),
             "equal generation must NOT replace (strict > required)"
         );
         assert_eq!(snapshot(&cache), (10, FleetPosture::Nominal));
 
         // Strictly greater generation 11 wins.
         let g11 = CachedFleetPosture::new_with_generation(FleetPosture::Degraded, 11, 4_000);
-        assert!(replace_cache_if_newer(&cache, g11, false));
+        assert!(replace_cache_if_newer(&cache, g11, false, None));
         assert_eq!(snapshot(&cache), (11, FleetPosture::Degraded));
     }
 
@@ -955,7 +1034,7 @@ mod posture_engine_tests {
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
         let g1 = CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 1, 0);
         assert!(
-            replace_cache_if_newer(&cache, g1, false),
+            replace_cache_if_newer(&cache, g1, false, None),
             "generation > 0 must populate an empty cache"
         );
         let snap_gen = cache.read().unwrap().as_ref().unwrap().generation;
@@ -976,7 +1055,7 @@ mod posture_engine_tests {
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
         // force_lockout writes LockedOut at gen 10.
         let locked = CachedFleetPosture::new_with_generation(FleetPosture::LockedOut, 10, 1_000);
-        assert!(replace_cache_if_newer(&cache, locked, true));
+        assert!(replace_cache_if_newer(&cache, locked, true, None));
 
         // A racing recalc: HIGHER generation (11) but non-LockedOut. Without #688 it
         // wins the generation CAS and downgrades the lockout. With the guard it is
@@ -984,7 +1063,7 @@ mod posture_engine_tests {
         let stale_nominal =
             CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 11, 2_000);
         assert!(
-            !replace_cache_if_newer(&cache, stale_nominal, true),
+            !replace_cache_if_newer(&cache, stale_nominal, true, None),
             "a higher-gen non-LockedOut recalc must NOT downgrade a sticky LockedOut"
         );
         {
@@ -999,7 +1078,7 @@ mod posture_engine_tests {
         let locked_newer =
             CachedFleetPosture::new_with_generation(FleetPosture::LockedOut, 12, 3_000);
         assert!(
-            replace_cache_if_newer(&cache, locked_newer, true),
+            replace_cache_if_newer(&cache, locked_newer, true, None),
             "a newer LockedOut is still accepted"
         );
 
@@ -1007,12 +1086,97 @@ mod posture_engine_tests {
         // higher-gen recovery recalc is admitted again.
         let recovery = CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 13, 4_000);
         assert!(
-            replace_cache_if_newer(&cache, recovery, false),
+            replace_cache_if_newer(&cache, recovery, false, None),
             "after the sticky flag clears, a normal recalc resumes writing"
         );
         assert_eq!(
             cache.read().unwrap().as_ref().unwrap().posture,
             FleetPosture::Nominal
+        );
+    }
+
+    /// #791 I1: the CAS is the LEXICOGRAPHIC (epoch, generation) tuple — a
+    /// higher-epoch entry wins even at a far lower generation (the failover
+    /// signature), and a lower-epoch entry never clobbers a higher-epoch one
+    /// regardless of generation.
+    #[test]
+    fn test_replace_cache_tuple_epoch_rung_791() {
+        use crate::posture_cache::CachedFleetPosture;
+        use std::sync::Arc;
+
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+        // The long-lived primary's stream: epoch 1, generation 100.
+        let e1g100 = CachedFleetPosture::new_with_stamp(FleetPosture::Nominal, 1, 100, 1_000);
+        assert!(replace_cache_if_newer(&cache, e1g100, false, None));
+
+        // Post-promotion recalc: epoch 2, generation 5 — newer BY CONSTRUCTION.
+        let e2g5 = CachedFleetPosture::new_with_stamp(FleetPosture::Degraded, 2, 5, 2_000);
+        assert!(
+            replace_cache_if_newer(&cache, e2g5, false, None),
+            "a higher epoch must win regardless of generation"
+        );
+
+        // A straggler from the old epoch — even at a huge generation — is refused.
+        let stale = CachedFleetPosture::new_with_stamp(FleetPosture::Nominal, 1, 999, 3_000);
+        assert!(
+            !replace_cache_if_newer(&cache, stale, false, None),
+            "a lower-epoch entry must never clobber a higher-epoch one"
+        );
+        let snap = *cache.read().unwrap();
+        let e = snap.unwrap();
+        assert_eq!(
+            (e.epoch, e.generation, e.posture),
+            (2, 5, FleetPosture::Degraded)
+        );
+    }
+
+    /// #791 I1 + #688: a forced sticky LockedOut whose stamp epoch is stale
+    /// (force_lockout raced a promotion) INHERITS the cached epoch under the
+    /// CAS lock, so the epoch rung can never reject the forced lockout; and
+    /// the under-lock sticky re-read refuses a higher-epoch healthy candidate
+    /// whose caller pre-read raced the trip.
+    #[test]
+    fn test_sticky_lockout_epoch_inherit_and_under_lock_reread_791() {
+        use crate::posture_cache::CachedFleetPosture;
+        use std::sync::Arc;
+
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+        // Cache holds a post-promotion entry: epoch 2, gen 5.
+        let cur = CachedFleetPosture::new_with_stamp(FleetPosture::Nominal, 2, 5, 1_000);
+        assert!(replace_cache_if_newer(&cache, cur, false, None));
+
+        // Forced lockout stamped under the OLD epoch (0/1) but a later
+        // generation: without the inherit rule the tuple CAS would refuse it.
+        let forced = CachedFleetPosture::new_with_stamp(FleetPosture::LockedOut, 0, 6, 2_000);
+        assert!(
+            replace_cache_if_newer(&cache, forced, true, None),
+            "a sticky LockedOut must inherit the cached epoch and win on generation"
+        );
+        {
+            let snap = *cache.read().unwrap();
+            let e = snap.unwrap();
+            assert_eq!(
+                (e.epoch, e.posture),
+                (2, FleetPosture::LockedOut),
+                "the forced entry carries the inherited epoch"
+            );
+        }
+
+        // Under-lock re-read: a healthy candidate whose CALLER pre-read the
+        // sticky flag as false (stale) is still refused when the escalation
+        // flags are set at CAS time.
+        let escalation = kirra_safety_authority::EscalationState::default();
+        escalation
+            .supervisor_tripped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let healthy = CachedFleetPosture::new_with_stamp(FleetPosture::Nominal, 3, 7, 3_000);
+        assert!(
+            !replace_cache_if_newer(&cache, healthy, false, Some(&escalation)),
+            "the under-lock sticky re-read must refuse the downgrade despite the stale pre-read"
+        );
+        assert_eq!(
+            cache.read().unwrap().as_ref().unwrap().posture,
+            FleetPosture::LockedOut
         );
     }
 

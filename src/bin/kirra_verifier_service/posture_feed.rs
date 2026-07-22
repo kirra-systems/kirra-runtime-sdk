@@ -541,5 +541,9 @@ pub(crate) fn emit_posture_event(state: &AppState, event_type: &str, node_id: Op
         node_id,
         emitted_at_ms: now_ms(),
         posture,
+        // Per-node trust events carry no engine stamp — the fields are
+        // additive and elided from the JSON (legacy consumers byte-identical).
+        epoch: None,
+        generation: None,
     });
 }

@@ -79,6 +79,31 @@ pub struct FederatedTrustReportV2 {
     pub signature_b64: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_generation: Option<u64>,
+    /// #791 I1 — the HA epoch this report was published under (the source
+    /// controller's `held_epoch` from its durable `try_claim_epoch` CAS).
+    /// Inside the SIGNED canonical payload when present. Ordering is the
+    /// lexicographic tuple `(source_epoch, source_generation)` — a
+    /// freshly-promoted controller (higher epoch, reset-adjacent generation)
+    /// is newer BY CONSTRUCTION, retiring counter catch-up. Same trust model
+    /// as `source_generation`: a signed self-claim by a registry-trusted
+    /// controller. STRUCTURAL RULE: `source_epoch` without `source_generation`
+    /// is malformed ([`epoch_field_well_formed`]) — receivers reject it.
+    /// EMITTER-SIDE ROLLOUT GATE: because this enters the signed payload, an
+    /// old receiver fails signature verification on an epoch-carrying report
+    /// (fail-closed, but an availability cliff on mixed fleets) — emitters
+    /// must not populate it until every receiver in the fleet understands
+    /// the third canonical-payload arm (ADR: epoch-fenced ordering).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_epoch: Option<u64>,
+}
+
+/// #791 I1 structural rule: `source_epoch` is only meaningful riding on a
+/// generation-carrying (v2+) report. Epoch-without-generation is malformed —
+/// there is no tuple to order by — and receivers must reject it rather than
+/// guess. (Both-absent and generation-only remain the valid v1/v2 forms.)
+#[must_use]
+pub fn epoch_field_well_formed(report: &FederatedTrustReportV2) -> bool {
+    !(report.source_epoch.is_some() && report.source_generation.is_none())
 }
 
 impl FederatedTrustReportV2 {
@@ -96,6 +121,24 @@ impl FederatedTrustReportV2 {
 }
 
 pub fn canonical_federation_payload_v2(report: &FederatedTrustReportV2) -> String {
+    // #791 I1 — the third arm of the payload ladder: generation + epoch. Kept
+    // strictly additive (the two legacy arms are byte-identical), and epoch is
+    // included ONLY alongside a generation (the structural rule above; an
+    // ill-formed epoch-only report canonicalizes WITHOUT the epoch, so its
+    // signature cannot be laundered into an epoch claim).
+    if let (Some(gen), Some(epoch)) = (report.source_generation, report.source_epoch) {
+        return serde_json::json!({
+            "source_controller_id": report.source_controller_id,
+            "asset_id": report.asset_id,
+            "posture": report.posture,
+            "issued_at_ms": report.issued_at_ms,
+            "expires_at_ms": report.expires_at_ms,
+            "nonce_hex": report.nonce_hex,
+            "source_generation": gen,
+            "source_epoch": epoch,
+        })
+        .to_string();
+    }
     match report.source_generation {
         Some(gen) => serde_json::json!({
             "source_controller_id": report.source_controller_id,
@@ -181,6 +224,27 @@ pub fn reconcile_reports(
 
     if first.posture == second.posture {
         return ReconciliationOutcome::Equivalent;
+    }
+
+    // #791 I1 — the epoch rung sits ABOVE the generation rung, mirroring the
+    // existing Some > None protocol-version preference: when both sides carry
+    // an epoch the lexicographic tuple (epoch, generation) decides; when only
+    // one does, the epoch-carrying report is the newer protocol and wins. An
+    // ill-formed epoch (no generation) never reaches here — the gateway
+    // rejects it structurally (`epoch_field_well_formed`).
+    match (first.source_epoch, second.source_epoch) {
+        (Some(e1), Some(e2)) => {
+            if e1 > e2 {
+                return ReconciliationOutcome::PreferFirst;
+            }
+            if e2 > e1 {
+                return ReconciliationOutcome::PreferSecond;
+            }
+            // Equal epochs → fall through to the generation rung.
+        }
+        (Some(_), None) => return ReconciliationOutcome::PreferFirst,
+        (None, Some(_)) => return ReconciliationOutcome::PreferSecond,
+        (None, None) => {}
     }
 
     match (first.source_generation, second.source_generation) {
@@ -309,7 +373,14 @@ mod federation_reconciliation_tests {
             nonce_hex: format!("{controller}_{issued_at_ms}"),
             signature_b64: "test_sig".to_string(),
             source_generation: generation,
+            source_epoch: None,
         }
+    }
+
+    /// #791 I1 helper — a report carrying the full `(epoch, generation)` tuple.
+    fn with_epoch(mut r: FederatedTrustReportV2, epoch: u64) -> FederatedTrustReportV2 {
+        r.source_epoch = Some(epoch);
+        r
     }
 
     fn nominal(controller: &str, t: u64, gen: Option<u64>) -> FederatedTrustReportV2 {
@@ -599,6 +670,7 @@ mod federation_reconciliation_tests {
             nonce_hex: "abc123".to_string(),
             signature_b64: "sig".to_string(),
             source_generation: Some(412),
+            source_epoch: None,
         };
         let result = evaluate_federated_report_v2(&r, now + 100);
         assert!(
@@ -620,6 +692,7 @@ mod federation_reconciliation_tests {
             nonce_hex: "abc123".to_string(),
             signature_b64: "sig".to_string(),
             source_generation: None,
+            source_epoch: None,
         };
         let result = evaluate_federated_report_v2(&r, now + 100);
         assert!(
@@ -639,6 +712,180 @@ mod federation_reconciliation_tests {
         );
         assert!(
             posture_severity(&FleetPosture::LockedOut) > posture_severity(&FleetPosture::Nominal)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #791 I1 — the epoch rung: lexicographic (epoch, generation) ordering.
+    // -----------------------------------------------------------------------
+
+    /// THE FAILOVER SIGNATURE: a higher epoch wins even against a far higher
+    /// generation — a freshly-promoted controller is newer by construction.
+    #[test]
+    fn test_higher_epoch_beats_higher_generation() {
+        let r1 = with_epoch(degraded("ctrl-a", 1000, Some(1)), 2); // promoted standby
+        let r2 = with_epoch(nominal("ctrl-b", 1000, Some(500)), 1); // killed primary
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::PreferFirst
+        );
+        assert_eq!(
+            reconcile_reports(&r2, &r1),
+            ReconciliationOutcome::PreferSecond
+        );
+    }
+
+    /// Equal epochs fall through to the generation rung — same-epoch ordering
+    /// is the legacy ordering verbatim.
+    #[test]
+    fn test_equal_epochs_fall_through_to_generation() {
+        let r1 = with_epoch(degraded("ctrl-a", 1000, Some(412)), 3);
+        let r2 = with_epoch(nominal("ctrl-b", 1000, Some(398)), 3);
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::PreferFirst
+        );
+    }
+
+    /// One-sided epoch: the epoch-carrying report is the newer protocol and is
+    /// preferred — the exact `Some > None` precedent `source_generation` set.
+    #[test]
+    fn test_epoch_carrying_report_preferred_over_epoch_less() {
+        let r1 = with_epoch(degraded("ctrl-a", 1000, Some(2)), 1);
+        let r2 = nominal("ctrl-b", 1000, Some(999));
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::PreferFirst
+        );
+        assert_eq!(
+            reconcile_reports(&r2, &r1),
+            ReconciliationOutcome::PreferSecond
+        );
+    }
+
+    /// Both epoch-less → the legacy ladder verbatim (pinned by the pre-#791
+    /// tests above; this asserts the rung is a pure fall-through).
+    #[test]
+    fn test_epoch_less_pair_uses_legacy_ladder() {
+        let r1 = degraded("ctrl-a", 1000, Some(412));
+        let r2 = nominal("ctrl-b", 1000, Some(398));
+        assert_eq!(
+            reconcile_reports(&r1, &r2),
+            ReconciliationOutcome::PreferFirst
+        );
+    }
+
+    /// EXHAUSTIVE tuple-consistency grid: for every pair of both-epoch-carrying
+    /// reports over a small (epoch, generation) grid with differing postures,
+    /// `reconcile_reports`' preference agrees with the lexicographic tuple
+    /// order whenever the tuples differ — the reconcile ladder and the storage
+    /// gate can never disagree about which report is newer.
+    #[test]
+    fn test_epoch_rung_is_consistent_with_lexicographic_tuple_order() {
+        for e1 in 1..=3u64 {
+            for g1 in 1..=3u64 {
+                for e2 in 1..=3u64 {
+                    for g2 in 1..=3u64 {
+                        let r1 = with_epoch(degraded("ctrl-a", 1000, Some(g1)), e1);
+                        let r2 = with_epoch(nominal("ctrl-b", 1000, Some(g2)), e2);
+                        let out = reconcile_reports(&r1, &r2);
+                        match (e1, g1).cmp(&(e2, g2)) {
+                            std::cmp::Ordering::Greater => assert_eq!(
+                                out,
+                                ReconciliationOutcome::PreferFirst,
+                                "({e1},{g1}) vs ({e2},{g2})"
+                            ),
+                            std::cmp::Ordering::Less => assert_eq!(
+                                out,
+                                ReconciliationOutcome::PreferSecond,
+                                "({e1},{g1}) vs ({e2},{g2})"
+                            ),
+                            std::cmp::Ordering::Equal => { /* timestamp/severity rungs */ }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_epoch_field_well_formed_rule() {
+        let ok_both = with_epoch(nominal("c", 1, Some(4)), 2);
+        let ok_gen_only = nominal("c", 1, Some(4));
+        let ok_neither = nominal("c", 1, None);
+        let bad_epoch_only = with_epoch(nominal("c", 1, None), 2);
+        assert!(epoch_field_well_formed(&ok_both));
+        assert!(epoch_field_well_formed(&ok_gen_only));
+        assert!(epoch_field_well_formed(&ok_neither));
+        assert!(!epoch_field_well_formed(&bad_epoch_only));
+    }
+
+    /// BYTE-STABILITY pin for the third canonical-payload arm (generation +
+    /// epoch) — the exact bytes cross-controller Ed25519 signatures cover.
+    #[test]
+    fn test_canonical_payload_v2_byte_stability_with_epoch() {
+        let r = with_epoch(degraded("ctrl-a", 1000, Some(412)), 2);
+        assert_eq!(
+            canonical_federation_payload_v2(&r),
+            r#"{"asset_id":"lidar_front","expires_at_ms":31000,"issued_at_ms":1000,"nonce_hex":"ctrl-a_1000","posture":"Degraded","source_controller_id":"ctrl-a","source_epoch":2,"source_generation":412}"#
+        );
+    }
+
+    /// The ill-formed epoch-only shape canonicalizes WITHOUT the epoch — its
+    /// signature can never be laundered into an epoch claim (it is byte-equal
+    /// to the v1 payload, and the gateway independently rejects the shape).
+    #[test]
+    fn test_ill_formed_epoch_only_canonicalizes_without_epoch() {
+        let bad = with_epoch(nominal("ctrl-a", 1000, None), 9);
+        let payload = canonical_federation_payload_v2(&bad);
+        assert!(!payload.contains("source_epoch"));
+        assert_eq!(
+            payload,
+            crate::federation::canonical_federation_payload(&bad.as_v1())
+        );
+    }
+
+    /// The epoch is INSIDE the signed payload: a genuinely signed epoch-carrying
+    /// report verifies, and stripping or rewriting the epoch breaks the
+    /// signature (fail-closed on an old receiver, tamper-evident everywhere).
+    #[test]
+    fn test_epoch_is_signature_covered() {
+        use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
+        use ed25519_dalek::{Signer as _, SigningKey};
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pk_b64 = b64.encode(sk.verifying_key().to_bytes());
+
+        let mut r = with_epoch(degraded("ctrl-a", 1000, Some(412)), 2);
+        let sig = sk.sign(canonical_federation_payload_v2(&r).as_bytes());
+        r.signature_b64 = b64.encode(sig.to_bytes());
+        assert!(verify_federated_report_signature_v2(&r, &pk_b64));
+
+        let mut stripped = r.clone();
+        stripped.source_epoch = None;
+        assert!(
+            !verify_federated_report_signature_v2(&stripped, &pk_b64),
+            "stripping the signed epoch must break the signature"
+        );
+        let mut rewritten = r.clone();
+        rewritten.source_epoch = Some(3);
+        assert!(
+            !verify_federated_report_signature_v2(&rewritten, &pk_b64),
+            "rewriting the signed epoch must break the signature"
+        );
+    }
+
+    /// End-to-end over `authoritative_posture`: the promoted standby's first
+    /// (epoch 2, generation 1) report outranks the killed primary's
+    /// (epoch 1, generation 500) stream.
+    #[test]
+    fn test_authoritative_posture_prefers_higher_epoch() {
+        let reports = vec![
+            with_epoch(nominal("ctrl-a", 2000, Some(500)), 1),
+            with_epoch(degraded("ctrl-a", 1000, Some(1)), 2),
+        ];
+        assert_eq!(
+            authoritative_posture(&reports),
+            Some(FleetPosture::Degraded)
         );
     }
 

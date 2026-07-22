@@ -1244,6 +1244,7 @@ mod sg_009_promotion_act_tests {
             generated_at_ms: stale_ts,
             ttl_ms: POSTURE_CACHE_TTL_MS,
             generation: 1,
+            epoch: 0,
         };
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(stale)));
 
