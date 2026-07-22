@@ -191,6 +191,23 @@ pub struct ParkoNodeConfig {
     /// `CommitZoneCfg::default()` (byte-identical to the prior hardcode).
     pub commit_zone_config: CommitZoneCfg,
 
+    /// #1124 (SG5 go-live) — ego-pose topic (`nav_msgs/Odometry`, map frame)
+    /// anchoring the map-anchored commit-zone producer. When set together with
+    /// `commit_zone_spec`, the producer computes a fresh `CommitZoneScene` each
+    /// tick from the latest pose (missing/stale/non-finite pose → `Unknown` →
+    /// veto), and the commit-zone gate is no longer producer-less. **Default
+    /// `None`.** Env: `PARKO_POSE_TOPIC`.
+    pub pose_topic: Option<String>,
+
+    /// #1124 (SG5 go-live) — the LOADED, VALIDATED commit-zone map spec (site-
+    /// authored zone polygons; see `commit_zone_producer::parse_commit_zone_spec`).
+    /// The binary loads it fail-closed from `PARKO_COMMIT_ZONE_MAP_PATH` (an
+    /// unreadable or invalid spec ABORTS startup — never a partial zone map).
+    /// Together with `pose_topic` this arms the producer
+    /// ([`commit_zone_producer_armed`](Self::commit_zone_producer_armed)).
+    /// **Default `None`.**
+    pub commit_zone_spec: Option<crate::commit_zone_producer::CommitZoneSpec>,
+
     /// #795 F6 — EXPLICIT operator acknowledgment that a scene-veto gate
     /// (occlusion / water / commit-zone) may be ARMED even though this build ships
     /// **no producer** for its slot. An armed gate with no producer fails closed to
@@ -255,6 +272,10 @@ impl Default for ParkoNodeConfig {
             // loop); default to their parko-core Default() → byte-identical.
             water_veto_config: WaterVetoConfig::default(),
             commit_zone_config: CommitZoneCfg::default(),
+            // #1124: no pose channel / zone map by default — the commit-zone
+            // producer arms only when BOTH are configured.
+            pose_topic: None,
+            commit_zone_spec: None,
             // #795 F6: a producer-less armed gate is a permanent immobilizer;
             // arming one requires the operator's explicit acknowledgment.
             allow_scene_gate_without_producer: false,
@@ -338,6 +359,11 @@ impl ParkoNodeConfig {
     ///
     /// Returned by name (fixed order occlusion → water → commit-zone) so the
     /// startup guard can name exactly which gates are producer-less.
+    ///
+    /// #1124: commit-zone now has a REAL producer (the map-anchored
+    /// `commit_zone_producer`), so an armed commit-zone gate counts as
+    /// producer-less only when that producer is NOT configured
+    /// ([`commit_zone_producer_armed`](Self::commit_zone_producer_armed)).
     #[must_use]
     pub fn producerless_armed_scene_gates(&self) -> Vec<&'static str> {
         let mut armed = Vec::new();
@@ -347,10 +373,24 @@ impl ParkoNodeConfig {
         if self.water_gate_enabled {
             armed.push("water");
         }
-        if self.commit_zone_gate_enabled {
+        if self.commit_zone_gate_enabled && !self.commit_zone_producer_armed() {
             armed.push("commit_zone");
         }
         armed
+    }
+
+    /// #1124 — the SINGLE commit-zone-producer arming predicate (the same
+    /// one-predicate discipline as [`object_gate_armed`](Self::object_gate_armed)):
+    /// the map-anchored producer runs only when BOTH its inputs are configured —
+    /// the validated zone spec (`commit_zone_spec`, loaded fail-closed by the
+    /// binary) and the ego-pose channel (`pose_topic`, the anchor). Missing
+    /// either → the producer cannot anchor the map prior, so it stays dark and
+    /// an armed commit-zone gate is still counted producer-less (startup
+    /// refusal, #795 F6). node.rs's per-tick fill and this guard both call this
+    /// one method so the two halves cannot drift.
+    #[must_use]
+    pub fn commit_zone_producer_armed(&self) -> bool {
+        self.commit_zone_spec.is_some() && self.pose_topic.is_some()
     }
 
     /// #795 F6 — fail-closed startup guard against SILENT permanent immobilization.
@@ -569,6 +609,101 @@ mod tests {
         assert!(
             cfg.scene_gate_startup_check().is_ok(),
             "an acknowledged immobilizer may start"
+        );
+    }
+
+    /// #1124 — a minimal valid loaded zone spec for the producer-arming tests.
+    fn loaded_spec() -> crate::commit_zone_producer::CommitZoneSpec {
+        crate::commit_zone_producer::parse_commit_zone_spec(
+            r#"{ "version": 1, "zones": [
+                { "id": "z", "kind": "rail_crossing",
+                  "polygon": [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]] } ] }"#,
+        )
+        .expect("fixture spec parses")
+    }
+
+    /// #1124 — the producer arms only with BOTH inputs (spec AND pose topic);
+    /// either alone stays dark (and an armed gate stays producer-less).
+    #[test]
+    fn commit_zone_producer_arming_truth_table() {
+        for (spec, topic, expect) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, true),
+        ] {
+            let cfg = ParkoNodeConfig {
+                commit_zone_spec: spec.then(loaded_spec),
+                pose_topic: topic.then(|| "/odom".to_string()),
+                ..ParkoNodeConfig::default()
+            };
+            assert_eq!(
+                cfg.commit_zone_producer_armed(),
+                expect,
+                "spec={spec} topic={topic}"
+            );
+        }
+    }
+
+    /// #1124 — the go-live: an armed commit-zone gate WITH the producer
+    /// configured is no longer producer-less, so startup passes with NO
+    /// acknowledgment flag. A partially-configured producer (spec without pose
+    /// topic, or vice versa) still refuses.
+    #[test]
+    fn commit_zone_gate_with_producer_passes_startup() {
+        let cfg = ParkoNodeConfig {
+            commit_zone_gate_enabled: true,
+            commit_zone_spec: Some(loaded_spec()),
+            pose_topic: Some("/odom".to_string()),
+            ..ParkoNodeConfig::default()
+        };
+        assert!(cfg.producerless_armed_scene_gates().is_empty());
+        assert!(
+            cfg.scene_gate_startup_check().is_ok(),
+            "an armed gate with a configured producer must start without the \
+             immobilizer acknowledgment"
+        );
+
+        for (spec, topic) in [(true, false), (false, true)] {
+            let partial = ParkoNodeConfig {
+                commit_zone_gate_enabled: true,
+                commit_zone_spec: spec.then(loaded_spec),
+                pose_topic: topic.then(|| "/odom".to_string()),
+                ..ParkoNodeConfig::default()
+            };
+            assert_eq!(
+                partial.producerless_armed_scene_gates(),
+                vec!["commit_zone"],
+                "a half-configured producer (spec={spec} topic={topic}) must still \
+                 count as producer-less"
+            );
+            assert!(partial.scene_gate_startup_check().is_err());
+        }
+    }
+
+    /// #1124 — configuring the producer WITHOUT arming the gate is inert for the
+    /// startup guard (nothing armed → nothing producer-less), and the water gate
+    /// is unaffected by the commit-zone producer.
+    #[test]
+    fn commit_zone_producer_without_gate_is_inert() {
+        let cfg = ParkoNodeConfig {
+            commit_zone_spec: Some(loaded_spec()),
+            pose_topic: Some("/odom".to_string()),
+            ..ParkoNodeConfig::default()
+        };
+        assert!(cfg.producerless_armed_scene_gates().is_empty());
+        assert!(cfg.scene_gate_startup_check().is_ok());
+
+        let water = ParkoNodeConfig {
+            water_gate_enabled: true,
+            commit_zone_spec: Some(loaded_spec()),
+            pose_topic: Some("/odom".to_string()),
+            ..ParkoNodeConfig::default()
+        };
+        assert_eq!(
+            water.producerless_armed_scene_gates(),
+            vec!["water"],
+            "the commit-zone producer must not vouch for the water gate"
         );
     }
 

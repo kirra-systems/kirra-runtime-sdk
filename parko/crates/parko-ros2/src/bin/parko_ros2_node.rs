@@ -350,6 +350,10 @@ async fn install_shutdown_handler() {
 ///   - `PARKO_IMPACT_SPIKE_THRESHOLD_MPS2` — decel threshold (deployment-tunable,
 ///     VALIDATION-PENDING; parko-core default 30 m/s²). A non-numeric value is
 ///     ignored with a warning (the safe default stands).
+///   - `PARKO_POSE_TOPIC` — `nav_msgs/Odometry` ego-pose topic (map frame), the
+///     commit-zone producer's anchor (#1124).
+///   - `PARKO_COMMIT_ZONE_MAP_PATH` — site-authored commit-zone spec JSON,
+///     loaded FAIL-CLOSED (unreadable/invalid → startup abort) (#1124).
 fn build_config() -> ParkoNodeConfig {
     let imu_topic = std::env::var("PARKO_IMU_TOPIC")
         .ok()
@@ -436,6 +440,47 @@ fn build_config() -> ParkoNodeConfig {
     // producer (a deliberate permanent immobilizer). Unset → the startup guard
     // REFUSES a producer-less armed gate instead of silently immobilizing.
     config.allow_scene_gate_without_producer = env_flag("PARKO_ALLOW_SCENE_GATE_WITHOUT_PRODUCER");
+    // #1124 — the map-anchored commit-zone producer's two inputs:
+    //   - PARKO_POSE_TOPIC: nav_msgs/Odometry ego pose (map frame), the anchor.
+    //   - PARKO_COMMIT_ZONE_MAP_PATH: the site-authored zone-spec JSON, loaded
+    //     FAIL-CLOSED here — an unreadable or invalid spec ABORTS startup (a
+    //     defective zone map must never anchor a safety veto; same fail-closed-
+    //     exit shape as the backend-select and scene-gate guards).
+    // Both set → `commit_zone_producer_armed()` and the commit-zone gate is no
+    // longer producer-less for the #795 F6 startup guard.
+    config.pose_topic = std::env::var("PARKO_POSE_TOPIC")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if let Some(path) = std::env::var("PARKO_COMMIT_ZONE_MAP_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            tracing::error!(path = %path, error = %e,
+                "parko-ros2: FATAL — PARKO_COMMIT_ZONE_MAP_PATH is set but unreadable");
+            eprintln!(
+                "parko_ros2_node: commit-zone map {path:?} unreadable ({e}) — refusing to \
+                 start (fail-closed)"
+            );
+            std::process::exit(2);
+        });
+        match parko_ros2::commit_zone_producer::parse_commit_zone_spec(&raw) {
+            Ok(spec) => {
+                tracing::info!(path = %path, zones = spec.zones.len(),
+                    "parko-ros2: commit-zone map loaded and validated (#1124)");
+                config.commit_zone_spec = Some(spec);
+            }
+            Err(e) => {
+                tracing::error!(path = %path, error = %e,
+                    "parko-ros2: FATAL — commit-zone map failed validation");
+                eprintln!(
+                    "parko_ros2_node: commit-zone map {path:?} invalid ({e}) — refusing to \
+                     start (fail-closed, never a partial zone map)"
+                );
+                std::process::exit(2);
+            }
+        }
+    }
     config
 }
 

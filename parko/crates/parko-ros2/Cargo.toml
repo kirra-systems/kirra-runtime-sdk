@@ -37,7 +37,7 @@ default = []
 # Everything this lane touches is BASE-jazzy (sensor_msgs / std_msgs /
 # nav_msgs / geometry_msgs, plus untyped subscriptions whose payload is a
 # `serde_json::Value`), so no curated message workspace is needed.
-ros2 = ["dep:r2r", "dep:tracing-subscriber", "dep:futures", "dep:serde_json"]
+ros2 = ["dep:r2r", "dep:tracing-subscriber", "dep:futures"]
 
 # Opt-in: the DEFERRED typed r2r radar adapter (`radar_scan_msg_to_detections`),
 # which references `r2r::radar_msgs::msg::RadarScan`. `radar_msgs` is NOT a
@@ -97,10 +97,12 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optio
 # streams in the drain tasks. Same pattern as the adapter.
 futures = { version = "0.3", optional = true }
 
-# r2r's untyped subscriptions/publishers exchange `serde_json::Value`; the node
-# builds the geometry_msgs/Twist envelope with `json!`. ros2-only (the default
-# unit-test lane has no r2r and never touches it), hence optional + the feature.
-serde_json = { version = "1", optional = true }
+# r2r's untyped subscriptions/publishers exchange `serde_json::Value` (the node
+# builds the geometry_msgs/Twist envelope with `json!`), and — since #1124 — the
+# DEFAULT lane parses the fail-closed commit-zone map spec
+# (`commit_zone_producer::parse_commit_zone_spec`), so this is a plain
+# dependency now (it was ros2-optional before the producer landed).
+serde_json = "1"
 
 # Optional ONNX backend. The integrator opts in when ORT is installed.
 parko-onnx = { path = "../parko-onnx", optional = true }

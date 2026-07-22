@@ -27,6 +27,7 @@
 pub mod backend_select;
 pub mod clearance_gate;
 pub mod command_mapping;
+pub mod commit_zone_producer;
 pub mod comparator_adapter;
 pub mod config;
 pub mod containment_gate;
@@ -57,6 +58,10 @@ pub use crate::clearance_gate::{
     run_pipeline_tick_with_clearance, ClearedTickOutcome, NodeClearance,
 };
 pub use crate::command_mapping::{enforce_outgoing_twist, OutgoingTwist};
+pub use crate::commit_zone_producer::{
+    parse_commit_zone_spec, produce_commit_zone_scene, CommitZoneEvidence, CommitZoneSpec, EgoPose,
+    SpecError,
+};
 pub use crate::comparator_adapter::ComparatorAsGovernor;
 pub use crate::config::ParkoNodeConfig;
 pub use crate::containment_gate::{
