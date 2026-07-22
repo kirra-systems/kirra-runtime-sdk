@@ -122,15 +122,39 @@ pub struct AuditWriteJob {
 /// The task loops on `rx.blocking_recv()` (sound under
 /// `tokio::task::spawn_blocking`) and exits cleanly when the last Sender is
 /// dropped (channel closes → `None` from `blocking_recv`). On shutdown,
-/// any remaining queued jobs are drained before exit.
+/// any remaining queued jobs are drained before exit — while the state is
+/// still alive to write them (see the Weak note below).
+///
+/// #1127 — the task holds `Weak<AppState>`, NOT `Arc`. The returned Sender is
+/// installed INTO `AppState` (`install_audit_writer`), so an `Arc` here formed
+/// a self-referential keep-alive: the blocking task kept the state alive, the
+/// state kept the channel's Sender alive, `blocking_recv` therefore never saw
+/// the channel close, the task never exited — and tokio's runtime teardown,
+/// which joins in-flight blocking tasks, hung the process FOREVER on SIGTERM
+/// (checkpoint flushed, exit never came; systemd had to SIGKILL). With `Weak`,
+/// the last real `Arc` dropping closes the channel and the loop ends; a job
+/// still queued at that instant is unwritable BY CONSTRUCTION (writing needs
+/// the store the dropped state owned) and is dropped with a log line, not a
+/// wedge. Live behavior is byte-identical — the upgrade only fails once the
+/// state is already gone.
 pub fn spawn_audit_writer(app: Arc<AppState>) -> mpsc::Sender<AuditWriteJob> {
     let (tx, mut rx) = mpsc::channel::<AuditWriteJob>(AUDIT_QUEUE_BOUND);
+    let weak = Arc::downgrade(&app);
+    drop(app);
     tokio::task::spawn_blocking(move || {
         tracing::info!(queue_bound = AUDIT_QUEUE_BOUND, "audit writer task started");
         // blocking_recv drains the queue serially; per Pass B discovery,
         // single-writer-only is what preserves chain-hash read-then-write
         // atomicity across concurrent verdict tasks.
         while let Some(job) = rx.blocking_recv() {
+            let Some(app) = weak.upgrade() else {
+                tracing::info!(
+                    event_type = job.event_type,
+                    "audit writer: state dropped mid-shutdown — remaining queued jobs \
+                     are unwritable (their store is gone); exiting"
+                );
+                break;
+            };
             write_one(&app, job);
         }
         tracing::info!("audit writer task exiting (channel closed)");

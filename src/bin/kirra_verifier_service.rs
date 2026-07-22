@@ -393,8 +393,38 @@ struct CausalLogQuery {
 
 // --- Entry point ------------------------------------------------------------
 
-#[tokio::main]
-async fn main() {
+/// #1127 — own the runtime EXPLICITLY so teardown is BOUNDED (the #794 F7 /
+/// #1119 parko precedent). `#[tokio::main]`'s implicit runtime `Drop` joins
+/// in-flight blocking tasks with NO deadline: any wedged blocking call (a
+/// stuck SQLite fsync, a hung FFI/serial read — and, until its `Weak` fix,
+/// the audit writer's self-referential keep-alive) turned SIGTERM into a
+/// forever-hang that only systemd's `TimeoutStopSec` SIGKILL escalation could
+/// end, forfeiting the clean-exit path. `shutdown_timeout` abandons anything
+/// still wedged after the grace window and the process exits cleanly.
+fn main() {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("FATAL: could not build the tokio runtime: {err}");
+            std::process::exit(1);
+        }
+    };
+    rt.block_on(async_main());
+    // Everything ordered (the WAL checkpoint, connection drain) has already
+    // completed inside async_main; this bounds only the teardown of leftover
+    // blocking work, which is abandonable by definition.
+    rt.shutdown_timeout(std::time::Duration::from_secs(SHUTDOWN_GRACE_SECS));
+}
+
+/// Bounded teardown grace for wedged blocking tasks at exit (#1127). Small on
+/// purpose: the durable checkpoint has ALREADY flushed by the time this
+/// window starts, so nothing safety-bearing waits on it.
+const SHUTDOWN_GRACE_SECS: u64 = 5;
+
+async fn async_main() {
     // Install a tracing subscriber FIRST, before any fallible startup step, so
     // the fail-closed startup diagnostics below (and all runtime logs) are
     // actually emitted. Without an installed subscriber, tracing events are
