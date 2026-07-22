@@ -47,11 +47,11 @@ use kirra_core::frame_integrity::FrameTrust;
 use kirra_core::trajectory::{PerceivedObject, TrajectoryVerdict};
 use kirra_doer_eval::{AdmissibilityTally, EvalScenario};
 use kirra_planner::{GeometricPlanner, GeometricPlannerConfig, LearnedPlanner, Planner, Teacher};
-use kirra_trajectory::validation::validate_trajectory_slow_capped;
 use kirra_taj::{
     LaserScan, MockSemanticDetector, SemanticClass, SemanticDetection, SemanticDetector,
     SemanticEvalFrame, SemanticEvalSummary, TajConfig, TajCorridor, TajPhaseA,
 };
+use kirra_trajectory::validation::validate_trajectory_slow_capped;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -235,7 +235,10 @@ fn bend_corridor(bend: f64) -> (MockCorridorSource, Point, Point) {
     let leg = 40.0;
     // Offset-line ∩ straight-boundary corner points (closed form, see #796 F3).
     let left = vec![
-        Point { x_m: 0.0, y_m: half },
+        Point {
+            x_m: 0.0,
+            y_m: half,
+        },
         Point {
             x_m: bend + half - 2.0 * half * c,
             y_m: half,
@@ -353,8 +356,15 @@ fn degraded_family() -> Vec<EvalScenario> {
     let mut v = Vec::new();
     for &speed in &[1.0_f64, 2.0, 4.0, 6.0] {
         v.push(
-            EvalScenario::new(format!("degraded_clear_v{speed}"), road(), vec![], 5.0, speed, 60.0)
-                .with_posture(kirra_core::FleetPosture::Degraded),
+            EvalScenario::new(
+                format!("degraded_clear_v{speed}"),
+                road(),
+                vec![],
+                5.0,
+                speed,
+                60.0,
+            )
+            .with_posture(kirra_core::FleetPosture::Degraded),
         );
     }
     for &x in &[16.0_f64, 32.0] {
