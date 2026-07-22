@@ -43,6 +43,7 @@ mod tests {
                 generated_at_ms: now,
                 ttl_ms: POSTURE_CACHE_TTL_MS,
                 generation: 1,
+                epoch: 0,
             });
             assert!(
                 !should_route_command(&cache, now, cmd),

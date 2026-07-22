@@ -928,6 +928,7 @@ mod gate_denial_metrics_tests {
             generated_at_ms: now,
             ttl_ms: POSTURE_CACHE_TTL_MS,
             generation: 1,
+            epoch: 0,
         })
     }
 
@@ -1050,6 +1051,7 @@ mod actuator_middleware_tests {
                 generated_at_ms: posture_now_ms(),
                 ttl_ms: POSTURE_CACHE_TTL_MS,
                 generation: 1,
+                epoch: 0,
             })));
         let perception_cap: SharedPerceptionCap = Arc::new(std::sync::RwLock::new(None));
         Arc::new(ServiceState {

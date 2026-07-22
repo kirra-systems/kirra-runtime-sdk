@@ -419,6 +419,7 @@ mod transport_tests {
             nonce_hex: "deadbeef".into(),
             signature_b64: String::new(),
             source_generation: Some(3),
+            source_epoch: None,
         };
         let sig = sk.sign(canonical_federation_payload_v2(&r).as_bytes());
         r.signature_b64 = B64.encode(sig.to_bytes());

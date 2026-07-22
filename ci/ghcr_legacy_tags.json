@@ -1,10 +1,1 @@
-[
-  {
-    "tag": "1.5.0",
-    "reason": "Aegis-era image published before the v1.5.0->v1.1.2 rebrand renumbering (#1049 A4); semver-sorts above current Kirra code. Pending OWNER deletion or re-tag to aegis-1.5.0 (#797 F6) — remove this entry when done."
-  },
-  {
-    "tag": "1.5",
-    "reason": "Floating Aegis-era tag, same hazard as 1.5.0. Pending OWNER deletion or re-tag (#797 F6) — remove this entry when done."
-  }
-]
+[]

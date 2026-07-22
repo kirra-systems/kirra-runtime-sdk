@@ -309,7 +309,7 @@ pub fn fail_closed_on_downgrade_send_failure(
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
-    crate::posture_engine::force_lockout(posture_cache, now_ms);
+    crate::posture_engine::force_lockout(posture_cache, &app.ha_fence.held_epoch, now_ms);
 }
 
 /// Poison-tolerant lock for the escalation STREAK mutexes (C3 · #1034).
@@ -608,7 +608,7 @@ pub fn start_posture_engine_worker(
             app.escalation
                 .supervisor_tripped
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-            crate::posture_engine::force_lockout(&cache, now_ms_engine());
+            crate::posture_engine::force_lockout(&cache, &app.ha_fence.held_epoch, now_ms_engine());
         })
     };
 
@@ -791,6 +791,7 @@ mod posture_engine_v2_tests {
                     generated_at_ms,
                     ttl_ms: POSTURE_CACHE_TTL_MS,
                     generation,
+                    epoch: 0,
                 })));
             c
         };
@@ -1082,6 +1083,7 @@ mod posture_engine_v2_tests {
             generated_at_ms: now_ms_engine(),
             ttl_ms: 10_000,
             generation: 1,
+            epoch: 0,
         };
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(cached)));
         let (posture, reason) = resolve_posture_with_reason(&cache, 10_000);
@@ -1103,6 +1105,7 @@ mod posture_engine_v2_tests {
             generated_at_ms: stale_ts,
             ttl_ms: 10_000,
             generation: 5,
+            epoch: 0,
         };
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(cached)));
         let (posture, reason) = resolve_posture_with_reason(&cache, 10_000);
@@ -1125,6 +1128,7 @@ mod posture_engine_v2_tests {
             generated_at_ms: future_ts,
             ttl_ms: 10_000,
             generation: 7,
+            epoch: 0,
         };
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(cached)));
 
@@ -1153,6 +1157,7 @@ mod posture_engine_v2_tests {
             generated_at_ms: stale_ts,
             ttl_ms: POSTURE_CACHE_TTL_MS,
             generation: 42,
+            epoch: 0,
         };
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(cached)));
         let (posture, reason) = resolve_posture_with_reason(&cache, POSTURE_CACHE_TTL_MS);

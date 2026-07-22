@@ -269,6 +269,7 @@ fn incident_durable_write_syncs_the_wal_and_the_normal_write_does_not() {
             Some("fsync evidence drill — NORMAL class"),
             1_000,
             1,
+            1,
         )
         .expect("normal write");
     let wal_after_normal = WAL_SYNCS.load(Ordering::SeqCst);
@@ -288,6 +289,7 @@ fn incident_durable_write_syncs_the_wal_and_the_normal_write_does_not() {
             Some("fsync evidence drill — INCIDENT class"),
             2_000,
             2,
+            1,
         )
         .expect("durable write");
     let wal_after_durable = WAL_SYNCS.load(Ordering::SeqCst);

@@ -712,7 +712,11 @@ pub(crate) async fn console_estop_request(
         .escalation
         .supervisor_tripped
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    kirra_verifier::posture_engine::force_lockout(&svc.posture_cache, now);
+    kirra_verifier::posture_engine::force_lockout(
+        &svc.posture_cache,
+        &svc.app.ha_fence.held_epoch,
+        now,
+    );
 
     // 5c. Chain what the governor DID (reconstructable after the fact).
     {

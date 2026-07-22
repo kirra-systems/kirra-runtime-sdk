@@ -90,6 +90,16 @@ pub struct CachedFleetPosture {
     /// Useful for ordering guarantees, stale-cache debugging, and federation
     /// reconciliation.
     pub generation: u64,
+
+    /// #791 I1 — the HA epoch this entry was stamped under (the instance's
+    /// `held_epoch` from its durable `try_claim_epoch` CAS at recalc time;
+    /// `0` = no claim / legacy / test seed). Ordering is the lexicographic
+    /// tuple `(epoch, generation)` in `replace_cache_if_newer`, and this is
+    /// the epoch an outbound (federation/SSE) stamp reads so its tuple is
+    /// coherent with the generation it was computed under. `serde(default)`
+    /// keeps pre-epoch serialized entries deserializing as epoch 0.
+    #[serde(default)]
+    pub epoch: u64,
 }
 
 impl CachedFleetPosture {
@@ -103,6 +113,24 @@ impl CachedFleetPosture {
             generated_at_ms: now_ms,
             ttl_ms: POSTURE_CACHE_TTL_MS,
             generation,
+            epoch: 0,
+        }
+    }
+
+    /// #791 I1 — the full-stamp constructor: like
+    /// [`Self::new_with_generation`] but also carrying the HA `epoch` the
+    /// entry was computed under (`app.ha_fence.held_epoch` at recalc time).
+    /// Production engine writes use this; `new_with_generation` keeps the
+    /// epoch-0 legacy stamp (tests, and `force_lockout`, whose candidate
+    /// inherits the cached epoch under the CAS lock — see
+    /// `replace_cache_if_newer`).
+    pub fn new_with_stamp(posture: FleetPosture, epoch: u64, generation: u64, now_ms: u64) -> Self {
+        Self {
+            posture,
+            generated_at_ms: now_ms,
+            ttl_ms: POSTURE_CACHE_TTL_MS,
+            generation,
+            epoch,
         }
     }
 
@@ -124,6 +152,7 @@ impl CachedFleetPosture {
             generated_at_ms: now,
             ttl_ms: POSTURE_CACHE_TTL_MS,
             generation: 0,
+            epoch: 0,
         }
     }
 
@@ -370,6 +399,7 @@ mod posture_cache_tests {
             generated_at_ms: old_ts,
             ttl_ms: POSTURE_CACHE_TTL_MS,
             generation: 1,
+            epoch: 0,
         };
         assert!(
             entry.is_stale(now_ms()),
@@ -386,6 +416,7 @@ mod posture_cache_tests {
             generated_at_ms: boundary_ts,
             ttl_ms: POSTURE_CACHE_TTL_MS,
             generation: 1,
+            epoch: 0,
         };
         assert!(entry.is_stale(now_ms()));
     }
@@ -401,6 +432,7 @@ mod posture_cache_tests {
             generated_at_ms: 10_000,
             ttl_ms: POSTURE_CACHE_TTL_MS,
             generation: 1,
+            epoch: 0,
         };
         assert!(
             entry.is_stale(5_000),
@@ -422,6 +454,7 @@ mod posture_cache_tests {
             generated_at_ms: 1_000,
             ttl_ms: 5_000,
             generation: 1,
+            epoch: 0,
         };
         for now in [1_000u64, 5_999, 6_000, 6_001, 100_000] {
             assert_eq!(
@@ -446,6 +479,7 @@ mod posture_cache_tests {
             generated_at_ms: 10_000,
             ttl_ms: POSTURE_CACHE_TTL_MS,
             generation: 1,
+            epoch: 0,
         };
         assert!(
             entry.is_stale_with_ttl(5_000, POSTURE_CACHE_TTL_MS),
@@ -499,6 +533,7 @@ mod posture_cache_tests {
             generated_at_ms: ts,
             ttl_ms: POSTURE_CACHE_TTL_MS,
             generation: 1,
+            epoch: 0,
         })
     }
 

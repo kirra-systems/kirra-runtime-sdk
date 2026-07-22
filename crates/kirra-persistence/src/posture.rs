@@ -192,7 +192,9 @@ impl VerifierStore {
         posture_json: &str,
         reason: Option<&str>,
         created_at_ms: u64,
-        generation: Option<u64>,
+        // #791 I1: the engine stamp `(generation, epoch)` — `None` for
+        // un-stamped events (the plain `save_posture_event_chained` path).
+        stamp: Option<(u64, u64)>,
     ) -> Result<bool> {
         let tx = Self::audit_tx(conn)?; // #685: Immediate — non-forking audit append
         tx.execute(
@@ -208,8 +210,8 @@ impl VerifierStore {
             ],
         )?;
         appender.append_within(&tx, event_type, posture_json, created_at_ms as i64)?;
-        let advanced = match generation {
-            Some(g) => {
+        let advanced = match stamp {
+            Some((g, epoch)) => {
                 // Monotonic max-write — identical guard to `save_last_generation`,
                 // but in THIS transaction so the stamp and its high-water commit
                 // together (#771 F2).
@@ -219,6 +221,21 @@ impl VerifierStore {
                      ON CONFLICT(key) DO UPDATE SET value = ?1
                      WHERE CAST(?1 AS INTEGER) > CAST(value AS INTEGER)",
                     params![g.to_string()],
+                )?;
+                // #791 I1 — record the HA epoch the high-water was last advanced
+                // under, in the SAME transaction, with the same monotonic-max
+                // guard. DIAGNOSTIC/forward-compat only: the epoch's durable
+                // authority remains the `ha_state` row (single authority — this
+                // copy never seeds the fence), and the generation guard above
+                // deliberately stays generation-monotonic (a per-epoch floor
+                // reset stays dormant while boot-seeding makes the counter
+                // restart-monotonic; see ADR-0037 §5).
+                tx.execute(
+                    "INSERT INTO posture_engine_state (key, value)
+                     VALUES ('last_epoch', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = ?1
+                     WHERE CAST(?1 AS INTEGER) > CAST(value AS INTEGER)",
+                    params![epoch.to_string()],
                 )?;
                 changed > 0
             }
@@ -277,6 +294,7 @@ impl VerifierStore {
     /// (`>= i64::MAX`) is rejected BEFORE the transaction — SQLite's
     /// `CAST(value AS INTEGER)` saturates at `i64::MAX`, so storing such a value
     /// would silently corrupt the monotonic guard itself. The whole write errors.
+    #[allow(clippy::too_many_arguments)] // the (generation, epoch) stamp pushed this to 8
     pub fn save_posture_event_chained_with_generation(
         &mut self,
         node_id: &str,
@@ -285,8 +303,11 @@ impl VerifierStore {
         reason: Option<&str>,
         created_at_ms: u64,
         generation: u64,
+        epoch: u64,
     ) -> Result<bool> {
-        if generation >= i64::MAX as u64 {
+        // #771 F4 fail-closed domain guard — applied to BOTH stamp components
+        // (the epoch rides the same CAST-guarded INTEGER upsert).
+        if generation >= i64::MAX as u64 || epoch >= i64::MAX as u64 {
             return Err(rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX));
         }
         Self::write_posture_event_chained_tx(
@@ -299,7 +320,7 @@ impl VerifierStore {
             posture_json,
             reason,
             created_at_ms,
-            Some(generation),
+            Some((generation, epoch)),
         )
     }
 
@@ -396,6 +417,7 @@ impl VerifierStore {
     /// fsync semantics rather than a documented per-write guarantee). Use for a
     /// posture TRANSITION. Same `>= i64::MAX` fail-closed guard as the normal
     /// variant.
+    #[allow(clippy::too_many_arguments)] // the (generation, epoch) stamp pushed this to 8
     pub fn save_posture_event_chained_with_generation_durable(
         &mut self,
         node_id: &str,
@@ -404,8 +426,9 @@ impl VerifierStore {
         reason: Option<&str>,
         created_at_ms: u64,
         generation: u64,
+        epoch: u64,
     ) -> Result<bool> {
-        if generation >= i64::MAX as u64 {
+        if generation >= i64::MAX as u64 || epoch >= i64::MAX as u64 {
             return Err(rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX));
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -436,7 +459,7 @@ impl VerifierStore {
                     posture_json,
                     reason,
                     created_at_ms,
-                    Some(generation),
+                    Some((generation, epoch)),
                 )
             };
             #[cfg(not(any(test, feature = "test-support")))]
@@ -450,7 +473,7 @@ impl VerifierStore {
                 posture_json,
                 reason,
                 created_at_ms,
-                Some(generation),
+                Some((generation, epoch)),
             );
             match result {
                 // #792 F5: bounded busy retry — see save_posture_event_chained_durable.

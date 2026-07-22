@@ -661,6 +661,7 @@ mod core_tests {
             nonce_hex: "deadbeef".into(),
             signature_b64: String::new(),
             source_generation: gen,
+            source_epoch: None,
         };
         let sig = sk.sign(canonical_federation_payload_v2(&report).as_bytes());
         report.signature_b64 = B64.encode(sig.to_bytes());
@@ -715,6 +716,7 @@ mod core_tests {
             nonce_hex: "00".into(),
             signature_b64: String::new(), // UNSIGNED
             source_generation: None,
+            source_epoch: None,
         };
         let bytes = encode_report(&report).unwrap();
         let err = accept_report(&bytes, &pk, &counter).unwrap_err();

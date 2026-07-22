@@ -155,13 +155,14 @@ pub(crate) async fn handle_audit_rotate_key(
             (StatusCode::SERVICE_UNAVAILABLE,
              Json(json!({ "error": "fenced: epoch superseded; instance demoted to passive standby" }))).into_response()
         }
-        // NonceReplay / GenerationRegress cannot arise here (key rotation touches
-        // neither the nonce nor the federation-generation tables); fold them into the
-        // generic server-error arm for exhaustiveness.
+        // NonceReplay / GenerationRegress / EpochRegress cannot arise here (key
+        // rotation touches neither the nonce nor the federation high-water tables);
+        // fold them into the generic server-error arm for exhaustiveness.
         Err(
             DurableWriteError::Db(_)
             | DurableWriteError::NonceReplay
-            | DurableWriteError::GenerationRegress { .. },
+            | DurableWriteError::GenerationRegress { .. }
+            | DurableWriteError::EpochRegress { .. },
         ) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": "failed to record key rotation" })),
