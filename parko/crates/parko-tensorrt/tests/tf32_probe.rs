@@ -16,6 +16,7 @@
 //!   3. compares: reports the measured per-logit drift, and ASSERTS the governed
 //!      DECISION (argmax) is unchanged — a TF32-induced decision flip is a safety
 //!      failure.
+//!
 //! Each process uses its OWN engine-cache dir so a default-TF32 engine is never
 //! reused under the override.
 //!

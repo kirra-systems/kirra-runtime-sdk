@@ -313,10 +313,7 @@ mod tests {
             objects_to_agent_scene(&[], 1.0),
             AgentScene::KnownEmpty
         ));
-        assert!(matches!(
-            parko_kirra::compute_scene_rss(&objects_to_agent_scene(&[], 1.0), &params()).safe,
-            true
-        ));
+        assert!(parko_kirra::compute_scene_rss(&objects_to_agent_scene(&[], 1.0), &params()).safe);
     }
 
     #[test]
