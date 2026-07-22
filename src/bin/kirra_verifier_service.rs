@@ -122,6 +122,12 @@ mod tls;
 #[path = "kirra_verifier_service/backpressure.rs"]
 mod backpressure;
 use backpressure::{env_limit_or, with_backpressure};
+// #1123 (#793 F2 remainder) — the dedicated `/metrics` OPS listener
+// (`KIRRA_METRICS_ADDR`): move-not-copy off the command plane; retires
+// AOU-METRICS-SEGMENTATION-001 when enabled. Parse/router/serve + tests in
+// the module; main() wires parse → build_app flag → bind_and_spawn.
+#[path = "kirra_verifier_service/metrics_listener.rs"]
+mod metrics_listener;
 // WP-05 (MGA G-10) — request observability: correlation id + tracing span +
 // end-to-end latency histogram. Mounted outermost in `build_app`; makes no
 // admission decisions.
@@ -1076,11 +1082,28 @@ async fn main() {
     // ADR-0033 ROS release-token signer (opt-in; fail-closed — actuator.rs).
     let ros_release_signer = provision_ros_release_signer();
 
+    // #1123: the dedicated /metrics ops listener — parsed BEFORE router
+    // assembly (a typo aborts startup; it must never silently leave /metrics
+    // on the command plane when the operator asked to move it).
+    let metrics_addr = match metrics_listener::parse_metrics_addr(
+        std::env::var("KIRRA_METRICS_ADDR").ok().as_deref(),
+    ) {
+        Ok(addr) => addr,
+        Err(msg) => {
+            tracing::error!("startup failed: {msg}");
+            std::process::exit(1);
+        }
+    };
+
     // Assemble the production router. Extracted into `build_app` (issue #72)
     // so the EXACT assembled router — identical routes, middleware layer
     // order, and state wiring — is what the binary-internal posture-gate
     // test exercises, rather than a representative stand-in.
-    let app = build_app(Arc::clone(&svc_state), ros_release_signer);
+    let app = build_app(
+        Arc::clone(&svc_state),
+        ros_release_signer,
+        metrics_addr.is_some(),
+    );
 
     // SG-008 (ASIL D): fail closed BEFORE binding the listener. Build the boot
     // facts and evaluate the startup-invariant predicate; on any violation, log
@@ -1175,6 +1198,18 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // #1123: bind the ops listener BEFORE READY — a requested-but-unbindable
+    // metrics plane is a startup failure, not a silent degrade to the exposed
+    // command-plane port (which build_app already 404s in this configuration).
+    if let Some(addr) = metrics_addr {
+        if metrics_listener::bind_and_spawn(addr, Arc::clone(&svc_state))
+            .await
+            .is_err()
+        {
+            std::process::exit(1);
+        }
+    }
 
     // #46: the listener is bound and startup invariants passed (SG-008) — tell
     // systemd we are READY (Type=notify) and start the watchdog keepalive
@@ -1423,6 +1458,10 @@ struct OperatorStopRequest {
 fn build_app(
     svc_state: Arc<ServiceState>,
     ros_release_signer: Option<Arc<kirra_verifier::governor_release::RosReleaseSigner>>,
+    // #1123: true when the dedicated ops listener serves /metrics — the
+    // command-plane router then 404s it (MOVE, not copy; the whole point is
+    // that the recon surface on this port ends).
+    metrics_on_ops_listener: bool,
 ) -> Router {
     let identity_gated_routes = Router::new()
         .route("/system/posture/stream", get(system_posture_stream))
@@ -1629,8 +1668,18 @@ fn build_app(
         .route("/ready", get(ready))
         // WS-0.5 — Prometheus fleet-safety series. Public read-only;
         // posture-exempt (pre-allowlisted in `is_posture_exempt`) so the
-        // scrape survives LockedOut.
-        .route("/metrics", get(metrics_endpoint));
+        // scrape survives LockedOut. #1123: when the dedicated ops listener
+        // is enabled the exposition MOVES there and this port answers 404 +
+        // pointer (a misconfigured scraper fails loud, the recon surface on
+        // the command plane actually ends).
+        .route(
+            "/metrics",
+            if metrics_on_ops_listener {
+                get(metrics_listener::metrics_moved_to_ops_listener)
+            } else {
+                get(metrics_endpoint)
+            },
+        );
 
     let read_routes = Router::new()
         .route("/attestation/status/{node_id}", get(get_node_status))
