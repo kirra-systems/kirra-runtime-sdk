@@ -99,6 +99,22 @@ impl MockCorridorSource {
         self.age_ms = age_ms;
         self
     }
+
+    /// Arbitrary-geometry mock (curved / non-axis-aligned test corridors, e.g.
+    /// the WS-3.1 KPI corpus' curved family). Same healthy confidence/age
+    /// defaults as [`Self::straight_5m_half_width`]; same production guard —
+    /// this is a test stand-in, never drivable space.
+    ///
+    /// Both polylines must advance in the same direction and carry ≥ 2
+    /// vertices (the kernel minimum); the caller owns that shape.
+    pub fn from_boundaries(left: Vec<Point>, right: Vec<Point>) -> Self {
+        Self {
+            left,
+            right,
+            confidence: 0.95,
+            age_ms: 10,
+        }
+    }
 }
 
 impl CorridorSource for MockCorridorSource {

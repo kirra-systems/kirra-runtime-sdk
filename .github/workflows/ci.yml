@@ -828,6 +828,14 @@ jobs:
         # regression to e.g. the H1 angular cap would land on main with
         # CI green.
         #
+        # #796 F9: this lane also carries the parko-side KPI row —
+        # parko-kirra/tests/divergence_kpi_gate.rs gates the
+        # GovernorComparator divergence rate over a scripted corpus
+        # (zero on the shipped diverse pair + a mis-capped-shadow
+        # discriminance control). Keep this job AND the root
+        # "scenario-KPI gate (WS-3.1)" job in the branch-protection
+        # required-checks set so both KPI gates stay merge-blocking.
+        #
         # This lane stays runtime-free by EXCLUDING every crate that dlopens a
         # native inference runtime at backend `::new` (libopenvino_c.so /
         # libonnxruntime.so) and panics without it — those tests belong to the
