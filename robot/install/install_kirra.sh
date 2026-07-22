@@ -89,6 +89,23 @@ for dev in /dev/myserial /dev/ydlidar; do
   fi
 done
 
+# ADR-0033 Tier-3 (#887): tighten the motor port to the consumer user, 0600.
+# The vendor rule ships it 0777 (world-writable actuation below the checker);
+# this 99- rule overrides owner/mode while keeping the /dev/myserial symlink.
+# The consumer's boot sentinel refuses to start until this holds (or
+# KIRRA_ALLOW_SHARED_SERIAL=1 acknowledges a bring-up run).
+KIRRA_USER="${SUDO_USER:-${USER}}"
+RULE_SRC="${HERE}/99-kirra-serial-exclusivity.rules"
+RULE_DST="/etc/udev/rules.d/99-kirra-serial-exclusivity.rules"
+if [[ -f "${RULE_SRC}" ]]; then
+  sed "s/__KIRRA_ROBOT_USER__/${KIRRA_USER}/g" "${RULE_SRC}" | sudo tee "${RULE_DST}" >/dev/null
+  sudo udevadm control --reload 2>/dev/null || true
+  sudo udevadm trigger 2>/dev/null || true
+  ok "serial-exclusivity udev rule installed (${RULE_DST}, OWNER=${KIRRA_USER}, MODE=0600) — replug the board if perms don't update"
+else
+  warn "99-kirra-serial-exclusivity.rules not found beside the installer — the motor port stays on the vendor 0777 rule and the consumer sentinel will refuse to start"
+fi
+
 # ---- 2. build ---------------------------------------------------------------
 echo "== 2. build (verify-core cdylib + dev mint binary) =="
 SO="${REPO}/target/release/libkirra_consumer_ffi.so"

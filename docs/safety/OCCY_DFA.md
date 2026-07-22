@@ -32,17 +32,31 @@ integrity is concentrated in the simpler, deterministic, verifiable Governor.
   ISO 26262-9 voids the decomposition and *each* element would have to meet the
   full ASIL D.
 
-  > **Scope note (2026-07-09, pending ADR-0033).** PO-2's "cannot defeat" is
-  > currently **enforced on the SHM/inline enforcement path only** (EP-01
-  > `ActuatorStation` verify-before-release; FDIT matrix + WP-21b carrier
-  > evidence). On the **`ros2_ws` deployment topology it is asserted but
-  > unenforced**: the bus carries no DDS security, so any process can publish
-  > the motor topic directly, and the Rosmaster serial device has no in-repo
-  > owner. Until ADR-0033's motor-boundary chokepoint lands, PO-2 must be read
-  > as scoped to the SHM/inline path; on the ROS topology the honest claim is
-  > that the checker governs every command that *routes through* the
-  > interceptor, not every command that can reach the motors. Tracked as a
-  > safety finding (see ADR-0033 "Consequences — tracking").
+  > **Scope note (updated 2026-07-22; original 2026-07-09 recorded the gap,
+  > #887).** PO-2's "cannot defeat" is enforced on BOTH deployment topologies:
+  > - **SHM/inline path** — EP-01 `ActuatorStation` verify-before-release;
+  >   FDIT matrix + WP-21b carrier evidence (unchanged).
+  > - **`ros2_ws`/R2 topology** — the ADR-0033 motor-boundary chokepoint: the
+  >   verifying consumer is the sole releaser (Ed25519 verify-before-release
+  >   at the last hop, so a rogue bus publisher's bytes carry no valid token
+  >   and are refused regardless of topic remaps), with **Tier-1** CI-blocking
+  >   cross-process evidence (`crates/kirra-actuation-consumer/tests/
+  >   tier1_chokepoint.rs`: exactly one serial write, and it is the signed
+  >   enforced bytes — unsigned / replay / token-over-different-bytes /
+  >   deny-never-mints all refused) and **Tier-3** serial authority BELOW the
+  >   bus (`robot/serial_exclusivity.py`: the consumer refuses to start unless
+  >   it owns the port at mode 0600 with no other holder; TIOCEXCL for the
+  >   session; the tightened `99-kirra-serial-exclusivity.rules` replaces the
+  >   vendor's world-writable 0777; `AOU-ACTUATION-SERIAL-001` discharge).
+  >
+  > **Residuals (tracked, not silent):** the Tier-2 per-release rogue-flood
+  > launch drill and the sros2 transport perimeter (defense-in-depth — the bus
+  > itself remains open; harmless to actuation given the chokepoint, but a
+  > rogue can still flood/delay, converted to a safe stop by the liveness
+  > window per ADR-0033 "Does not enforce"). Consumer-process compromise and
+  > DoS remain owned by ADR-0013 (hardwired E-stop) / ADR-0032 (QNX
+  > partition). A bring-up run acknowledged via `KIRRA_ALLOW_SHARED_SERIAL=1`
+  > carries NO serial-authority claim for that run (loudly self-labeled).
 
 **Decision — planner rigor. SETTLED: DISCIPLINED-QM.**
 

@@ -1214,6 +1214,11 @@ jobs:
           # rabbit_wake control matcher incl. non-overlap with the OTA/diag/
           # drive matchers. See docs/hardware/RABBIT_AUDIO_STACK.md §3b.
           python3 robot/wake_word_test.py
+          # ADR-0033 Tier-3 sentinel logic (#887, pure, no device): owner/mode
+          # violations vs the AOU-ACTUATION-SERIAL-001 contract (the vendor
+          # 0777 rule is the canonical hazard case), holder reporting, and the
+          # fail-closed startup verdict incl. the loudly-labeled bring-up ack.
+          python3 robot/serial_exclusivity_test.py
           # Diagnostics framework (pure, no hardware): schema v1 shape/ordering,
           # worst-of aggregation + exit codes, module isolation (raise/timeout →
           # UNKNOWN for that module only), the deterministic "run diagnostics"
