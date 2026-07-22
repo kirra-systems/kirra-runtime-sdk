@@ -199,6 +199,7 @@ pub struct EvalScenario {
     goal: Goal,
     config: VehicleConfig,
     posture: FleetPosture,
+    sight_distance_m: Option<f64>,
 }
 
 impl EvalScenario {
@@ -237,6 +238,7 @@ impl EvalScenario {
             },
             config: VehicleConfig::default_urban(),
             posture: FleetPosture::Nominal,
+            sight_distance_m: None,
         }
     }
 
@@ -245,6 +247,33 @@ impl EvalScenario {
     pub fn with_posture(mut self, posture: FleetPosture) -> Self {
         self.posture = posture;
         self
+    }
+
+    /// Place the goal off the +x axis (default `y = 0`) — curved-corridor
+    /// scenarios (#796 F3) put the goal at the arc end so the planner's travel
+    /// window spans the whole curve instead of projecting onto its entry.
+    #[must_use]
+    pub fn with_goal_point(mut self, x_m: f64, y_m: f64) -> Self {
+        self.goal.target.x_m = x_m;
+        self.goal.target.y_m = y_m;
+        self
+    }
+
+    /// Arm the RSS Rule 4 occlusion bound for this scenario: the assured-clear
+    /// distance ahead (`None` — the default — leaves the bound dormant, the
+    /// back-compat checker path). Consumed by callers that route the verdict
+    /// through `validate_trajectory_slow_capped` (the KPI gate's occlusion
+    /// family); [`verdict_of`] itself stays the plain no-occlusion wrapper.
+    #[must_use]
+    pub fn with_sight_distance(mut self, sight_m: f64) -> Self {
+        self.sight_distance_m = Some(sight_m);
+        self
+    }
+
+    /// The armed assured-clear distance, if any (see [`Self::with_sight_distance`]).
+    #[must_use]
+    pub fn sight_distance_m(&self) -> Option<f64> {
+        self.sight_distance_m
     }
 
     // Read-only world accessors (WS-3.1): the KPI gate scores planners other

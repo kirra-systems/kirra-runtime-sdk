@@ -43,9 +43,11 @@ pub mod montecarlo;
 pub mod sotif_coverage;
 
 use kirra_core::corridor::{MockCorridorSource, Point};
-use kirra_core::trajectory::PerceivedObject;
-use kirra_doer_eval::{verdict_of, AdmissibilityTally, EvalScenario};
+use kirra_core::frame_integrity::FrameTrust;
+use kirra_core::trajectory::{PerceivedObject, TrajectoryVerdict};
+use kirra_doer_eval::{AdmissibilityTally, EvalScenario};
 use kirra_planner::{GeometricPlanner, GeometricPlannerConfig, LearnedPlanner, Planner, Teacher};
+use kirra_trajectory::validation::validate_trajectory_slow_capped;
 use kirra_taj::{
     LaserScan, MockSemanticDetector, SemanticClass, SemanticDetection, SemanticDetector,
     SemanticEvalFrame, SemanticEvalSummary, TajConfig, TajCorridor, TajPhaseA,
@@ -89,13 +91,16 @@ pub(crate) fn hazard(kind: HazardKind, id: u64, x_m: f64) -> PerceivedObject {
     }
 }
 
-/// The WS-3.1 doer corpus: a deterministic closed-form sweep over
-/// hazard kind × hazard distance × ego speed × goal distance, plus a
-/// clear-road row per (speed, goal). No RNG — the corpus is identical on
-/// every run and every machine.
+/// The WS-3.1 doer corpus: the BASE family — a deterministic closed-form sweep
+/// over hazard kind × hazard distance × ego speed × goal distance, plus a
+/// clear-road row per (speed, goal) — UNION the #796 F3 families below
+/// (cut-in, lateral-offset, curved-corridor, multi-object, Degraded,
+/// occlusion). No RNG — the corpus is identical on every run and every
+/// machine.
 ///
-/// Size: 3 kinds × 10 distances × 4 speeds × 2 goals + 4×2 clear-road
-/// = **248 scenarios** (pinned by test).
+/// Base size: 3 kinds × 10 distances × 4 speeds × 2 goals + 4×2 clear-road
+/// = **248 scenarios**; family sizes are pinned individually by test
+/// (total **398**).
 #[must_use]
 pub fn generated_doer_corpus() -> Vec<EvalScenario> {
     let road = || MockCorridorSource::straight_5m_half_width(100.0);
@@ -133,12 +138,362 @@ pub fn generated_doer_corpus() -> Vec<EvalScenario> {
             }
         }
     }
+    corpus.extend(cutin_family());
+    corpus.extend(lateral_offset_family());
+    corpus.extend(curved_family());
+    corpus.extend(multi_object_family());
+    corpus.extend(degraded_family());
+    corpus.extend(occlusion_family());
     corpus
 }
 
+// ---------------------------------------------------------------------------
+// #796 F3 — corpus families beyond the base longitudinal sweep
+//
+// The base family above is ONE logical scenario: a straight road, a
+// centerline hazard with purely longitudinal velocity, Nominal posture. The
+// families below add the axes the review named missing — each a closed-form
+// deterministic sweep (no RNG, no transcendentals beyond IEEE-exact `sqrt`,
+// so the corpus cannot drift across toolchains), each carrying a name PREFIX
+// that assigns per-family gate rows (aggregate-only gating masks a family
+// regression — Simpson's paradox once families mix).
+// ---------------------------------------------------------------------------
+
+/// Cut-in: an object laterally OFFSET from the ego path, CLOSING laterally
+/// (pure lateral velocity toward the centerline — the RSS §4 conjunction's
+/// `lateral_cut_in` term, which the base family never fires). Heading is a
+/// constant ±π/2 (no `atan2`, determinism).
+fn cutin_family() -> Vec<EvalScenario> {
+    let mut v = Vec::new();
+    for &x in &[10.0_f64, 15.0, 20.0, 25.0, 30.0] {
+        for &side in &[3.0_f64, -3.0] {
+            for &speed in &[2.0_f64, 4.0, 6.0] {
+                for &closing in &[0.5_f64, 1.5] {
+                    let toward_center = -side.signum() * closing;
+                    let obj = PerceivedObject {
+                        id: 1,
+                        pos: Point { x_m: x, y_m: side },
+                        velocity_mps: closing,
+                        heading_rad: toward_center.signum() * std::f64::consts::FRAC_PI_2,
+                        vel: Point {
+                            x_m: 0.0,
+                            y_m: toward_center,
+                        },
+                    };
+                    let tag = if side > 0.0 { "l" } else { "r" };
+                    v.push(EvalScenario::new(
+                        format!("cutin_x{x}_{tag}_v{speed}_c{closing}"),
+                        MockCorridorSource::straight_5m_half_width(100.0),
+                        vec![obj],
+                        5.0,
+                        speed,
+                        60.0,
+                    ));
+                }
+            }
+        }
+    }
+    v
+}
+
+/// Lateral-offset hazards: STATIONARY objects abreast of the path but off the
+/// centerline. Guards the RSS §4 conjunction from regressing to
+/// lateral-on-proximity-alone (which over-rejects a safe parked queue — the
+/// admissible direction is the load-bearing one here).
+fn lateral_offset_family() -> Vec<EvalScenario> {
+    let mut v = Vec::new();
+    for &x in &[8.0_f64, 16.0, 24.0, 32.0] {
+        for &y in &[2.5_f64, -2.5, 4.0, -4.0] {
+            for &speed in &[2.0_f64, 4.0] {
+                let obj = PerceivedObject {
+                    id: 1,
+                    pos: Point { x_m: x, y_m: y },
+                    velocity_mps: 0.0,
+                    heading_rad: 0.0,
+                    vel: Point { x_m: 0.0, y_m: 0.0 },
+                };
+                v.push(EvalScenario::new(
+                    format!("latoff_x{x}_y{y}_v{speed}"),
+                    MockCorridorSource::straight_5m_half_width(100.0),
+                    vec![obj],
+                    5.0,
+                    speed,
+                    60.0,
+                ));
+            }
+        }
+    }
+    v
+}
+
+/// A 45°-bend corridor built from exact line intersections (`sqrt` only —
+/// IEEE-exact, deterministic): straight to `x = bend`, then a diagonal leg of
+/// arc length 40 m. Returns (corridor, centerline end, mid-diagonal point).
+fn bend_corridor(bend: f64) -> (MockCorridorSource, Point, Point) {
+    let c = 0.5_f64.sqrt(); // cos 45° = sin 45°
+    let half = 5.0;
+    let leg = 40.0;
+    // Offset-line ∩ straight-boundary corner points (closed form, see #796 F3).
+    let left = vec![
+        Point { x_m: 0.0, y_m: half },
+        Point {
+            x_m: bend + half - 2.0 * half * c,
+            y_m: half,
+        },
+        Point {
+            x_m: bend + (leg - half) * c,
+            y_m: (leg + half) * c,
+        },
+    ];
+    let right = vec![
+        Point {
+            x_m: 0.0,
+            y_m: -half,
+        },
+        Point {
+            x_m: bend - half + 2.0 * half * c,
+            y_m: -half,
+        },
+        Point {
+            x_m: bend + (leg + half) * c,
+            y_m: (leg - half) * c,
+        },
+    ];
+    let end = Point {
+        x_m: bend + leg * c,
+        y_m: leg * c,
+    };
+    let mid = Point {
+        x_m: bend + (leg / 2.0) * c,
+        y_m: (leg / 2.0) * c,
+    };
+    (MockCorridorSource::from_boundaries(left, right), end, mid)
+}
+
+/// Curved corridor: the planner must FOLLOW the bend (the geometric planner's
+/// centerline guide; the straight-vocabulary learned planner is measured
+/// honestly against it), with the goal at the arc end and an optional stopped
+/// hazard mid-bend.
+fn curved_family() -> Vec<EvalScenario> {
+    let mut v = Vec::new();
+    for &bend in &[20.0_f64, 30.0] {
+        for &speed in &[1.0_f64, 2.0, 4.0] {
+            for &with_hazard in &[false, true] {
+                let (road, end, mid) = bend_corridor(bend);
+                let objects = if with_hazard {
+                    vec![PerceivedObject {
+                        id: 1,
+                        pos: mid,
+                        velocity_mps: 0.0,
+                        heading_rad: 0.0,
+                        vel: Point { x_m: 0.0, y_m: 0.0 },
+                    }]
+                } else {
+                    vec![]
+                };
+                let tag = if with_hazard { "stopped" } else { "clear" };
+                v.push(
+                    EvalScenario::new(
+                        format!("curve_b{bend}_{tag}_v{speed}"),
+                        road,
+                        objects,
+                        5.0,
+                        speed,
+                        end.x_m,
+                    )
+                    .with_goal_point(end.x_m, end.y_m),
+                );
+            }
+        }
+    }
+    v
+}
+
+/// Multi-object: a stopped QUEUE of three, and a stopped lead with an
+/// oncoming behind it — one object's clearance must never mask another's
+/// bound (the worst object binds).
+fn multi_object_family() -> Vec<EvalScenario> {
+    let mut v = Vec::new();
+    for &x0 in &[12.0_f64, 20.0, 28.0, 36.0] {
+        for &speed in &[2.0_f64, 4.0, 6.0] {
+            v.push(EvalScenario::new(
+                format!("multi_queue3_x{x0}_v{speed}"),
+                MockCorridorSource::straight_5m_half_width(100.0),
+                vec![
+                    hazard(HazardKind::Stopped, 1, x0),
+                    hazard(HazardKind::Stopped, 2, x0 + 6.0),
+                    hazard(HazardKind::Stopped, 3, x0 + 12.0),
+                ],
+                5.0,
+                speed,
+                60.0,
+            ));
+        }
+        for &speed in &[2.0_f64, 4.0] {
+            v.push(EvalScenario::new(
+                format!("multi_mixed_x{x0}_v{speed}"),
+                MockCorridorSource::straight_5m_half_width(100.0),
+                vec![
+                    hazard(HazardKind::Stopped, 1, x0),
+                    hazard(HazardKind::Oncoming, 2, x0 + 20.0),
+                ],
+                5.0,
+                speed,
+                60.0,
+            ));
+        }
+    }
+    v
+}
+
+/// Degraded posture: the checker's decel-to-stop envelope (#70) over clear
+/// road and a stopped lead — the corpus' first non-Nominal rows.
+fn degraded_family() -> Vec<EvalScenario> {
+    let road = || MockCorridorSource::straight_5m_half_width(100.0);
+    let mut v = Vec::new();
+    for &speed in &[1.0_f64, 2.0, 4.0, 6.0] {
+        v.push(
+            EvalScenario::new(format!("degraded_clear_v{speed}"), road(), vec![], 5.0, speed, 60.0)
+                .with_posture(kirra_core::FleetPosture::Degraded),
+        );
+    }
+    for &x in &[16.0_f64, 32.0] {
+        for &speed in &[2.0_f64, 4.0, 6.0] {
+            v.push(
+                EvalScenario::new(
+                    format!("degraded_stopped_x{x}_v{speed}"),
+                    road(),
+                    vec![hazard(HazardKind::Stopped, 1, x)],
+                    5.0,
+                    speed,
+                    60.0,
+                )
+                .with_posture(kirra_core::FleetPosture::Degraded),
+            );
+        }
+    }
+    v
+}
+
+/// Occlusion (RSS Rule 4): clear road with an ARMED assured-clear distance —
+/// the checker refuses a trajectory that outruns what the ego has observed.
+/// The planners are occlusion-blind, so the family measures the checker's
+/// sight-vs-speed discrimination across the sweep.
+fn occlusion_family() -> Vec<EvalScenario> {
+    let mut v = Vec::new();
+    for &sight in &[5.0_f64, 10.0, 20.0, 40.0] {
+        for &speed in &[1.0_f64, 2.0, 4.0, 6.0] {
+            v.push(
+                EvalScenario::new(
+                    format!("occl_s{sight}_v{speed}"),
+                    MockCorridorSource::straight_5m_half_width(100.0),
+                    vec![],
+                    5.0,
+                    speed,
+                    60.0,
+                )
+                .with_sight_distance(sight),
+            );
+        }
+    }
+    v
+}
+
+/// One corpus family: its stable key, the scenario-name prefix that assigns
+/// membership, and the static gate-row names its two planner rates report
+/// under. `""` prefix = the base family (everything no other prefix claims).
+pub struct CorpusFamily {
+    pub key: &'static str,
+    pub prefix: &'static str,
+    pub geometric_row: &'static str,
+    pub learned_row: &'static str,
+}
+
+/// The reviewed family universe (#796 F3). Order is display order; membership
+/// is first-prefix-match with base as the fallback.
+pub const CORPUS_FAMILIES: &[CorpusFamily] = &[
+    CorpusFamily {
+        key: "base",
+        prefix: "",
+        geometric_row: "geometric_admissibility_fam_base",
+        learned_row: "learned_admissibility_fam_base",
+    },
+    CorpusFamily {
+        key: "cutin",
+        prefix: "cutin_",
+        geometric_row: "geometric_admissibility_fam_cutin",
+        learned_row: "learned_admissibility_fam_cutin",
+    },
+    CorpusFamily {
+        key: "lateral_offset",
+        prefix: "latoff_",
+        geometric_row: "geometric_admissibility_fam_lateral_offset",
+        learned_row: "learned_admissibility_fam_lateral_offset",
+    },
+    CorpusFamily {
+        key: "curved",
+        prefix: "curve_",
+        geometric_row: "geometric_admissibility_fam_curved",
+        learned_row: "learned_admissibility_fam_curved",
+    },
+    CorpusFamily {
+        key: "multi_object",
+        prefix: "multi_",
+        geometric_row: "geometric_admissibility_fam_multi_object",
+        learned_row: "learned_admissibility_fam_multi_object",
+    },
+    CorpusFamily {
+        key: "degraded",
+        prefix: "degraded_",
+        geometric_row: "geometric_admissibility_fam_degraded",
+        learned_row: "learned_admissibility_fam_degraded",
+    },
+    CorpusFamily {
+        key: "occlusion",
+        prefix: "occl_",
+        geometric_row: "geometric_admissibility_fam_occlusion",
+        learned_row: "learned_admissibility_fam_occlusion",
+    },
+];
+
+/// The family a scenario name belongs to: first non-empty prefix that
+/// matches, else `"base"`.
+#[must_use]
+pub fn family_of(scenario_name: &str) -> &'static str {
+    CORPUS_FAMILIES
+        .iter()
+        .filter(|f| !f.prefix.is_empty())
+        .find(|f| scenario_name.starts_with(f.prefix))
+        .map_or("base", |f| f.key)
+}
+
+/// One scenario's checker verdict for a proposal: the REAL slow-loop checker,
+/// with the scenario's armed occlusion sight distance (if any) routed to the
+/// RSS Rule 4 bound. A `None` sight distance is byte-identical to
+/// `kirra_doer_eval::verdict_of` (the capped call collapses to the plain
+/// wrapper's argument set).
+pub(crate) fn scenario_verdict(
+    sc: &EvalScenario,
+    out: &kirra_planner::PlanOutput,
+) -> TrajectoryVerdict {
+    validate_trajectory_slow_capped(
+        &out.trajectory,
+        sc.corridor(),
+        sc.objects(),
+        sc.config(),
+        None,
+        sc.posture(),
+        None,
+        sc.sight_distance_m(),
+        None,
+        None,
+        FrameTrust::Trusted,
+    )
+}
+
 /// Admissibility of a planner over the corpus: every proposal is run through
-/// the REAL checker (`validate_trajectory_slow` via `verdict_of`); the rate
-/// is `kirra_doer_eval::AdmissibilityTally::admissibility_rate` (fail-closed:
+/// the REAL checker ([`scenario_verdict`]); the rate is
+/// `kirra_doer_eval::AdmissibilityTally::admissibility_rate` (fail-closed:
 /// an empty corpus scores 0.0, not 1.0).
 pub(crate) fn admissibility_over(
     corpus: &[EvalScenario],
@@ -147,13 +502,7 @@ pub(crate) fn admissibility_over(
     let mut tally = AdmissibilityTally::default();
     for sc in corpus {
         let out = plan(sc);
-        tally.record(verdict_of(
-            &out,
-            sc.corridor(),
-            sc.objects(),
-            sc.config(),
-            sc.posture(),
-        ));
+        tally.record(scenario_verdict(sc, &out));
     }
     (tally.admissibility_rate(), tally)
 }
@@ -390,6 +739,10 @@ pub struct KpiThresholds {
     pub geometric_admissibility_min: f64,
     /// Min admissibility for the seeded SafetyAware learned planner.
     pub learned_admissibility_min: f64,
+    /// #796 F3 — per-family admissibility floors (one entry per
+    /// [`CORPUS_FAMILIES`] key, every field required): the aggregate rows
+    /// above cannot mask a family regression once families mix.
+    pub families: FamilyThresholds,
     /// Max fraction of perception frames where the detector's drivable
     /// extent runs PAST ground truth (the catastrophic direction).
     pub unsafe_miss_rate_max: f64,
@@ -405,6 +758,51 @@ pub struct KpiThresholds {
 
 fn default_detector() -> String {
     "mock".to_string()
+}
+
+/// One family's admissibility floors (both planners). Required fields —
+/// a family without a reviewed bound must fail to PARSE, never silently pass.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FamilyBounds {
+    pub geometric_min: f64,
+    pub learned_min: f64,
+}
+
+/// #796 F3 — the per-family floor table. One NAMED field per
+/// [`CORPUS_FAMILIES`] key (`deny_unknown_fields` + all-required keeps the
+/// policy file and the family universe lock-stepped: adding a family without
+/// a bound, or a bound for a removed family, reds at load).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FamilyThresholds {
+    pub base: FamilyBounds,
+    pub cutin: FamilyBounds,
+    pub lateral_offset: FamilyBounds,
+    pub curved: FamilyBounds,
+    pub multi_object: FamilyBounds,
+    pub degraded: FamilyBounds,
+    pub occlusion: FamilyBounds,
+}
+
+impl FamilyThresholds {
+    /// The bounds for a [`CORPUS_FAMILIES`] key. Panics on an unknown key —
+    /// the family table and this struct are lock-stepped by construction (and
+    /// by the `family_universe_is_lock_stepped` test), so an unknown key is a
+    /// programming error, not a runtime condition.
+    #[must_use]
+    pub fn bounds_for(&self, key: &str) -> &FamilyBounds {
+        match key {
+            "base" => &self.base,
+            "cutin" => &self.cutin,
+            "lateral_offset" => &self.lateral_offset,
+            "curved" => &self.curved,
+            "multi_object" => &self.multi_object,
+            "degraded" => &self.degraded,
+            "occlusion" => &self.occlusion,
+            other => panic!("unknown corpus family key: {other}"),
+        }
+    }
 }
 
 /// One evaluated KPI row: measured value vs its bound.
@@ -458,20 +856,32 @@ impl GateReport {
 /// the existing harnesses, and threshold them.
 #[must_use]
 pub fn run_gate(t: &KpiThresholds) -> GateReport {
-    let corpus = generated_doer_corpus();
+    // One per-(planner × scenario) verdict pass feeds BOTH the aggregate rate
+    // rows and the #796 F3 per-family rows (identical construction to the
+    // F4/F5 manifest gate — the rates and the named sets can never disagree).
+    let verdicts = per_scenario_verdicts();
+    let doer_scenarios = verdicts.len() / 2;
 
-    // Geometric doer (the shipped default proposer). `Planner::plan` takes
-    // &mut self; a fresh planner per scenario keeps scenarios independent.
-    let (geo_rate, _) = admissibility_over(&corpus, |sc| {
-        GeometricPlanner::new(GeometricPlannerConfig::default()).plan(&sc.plan_input())
-    });
+    // Fail-closed rate: an empty selection scores 0.0, never 1.0.
+    let rate_where = |planner: &str, family: Option<&str>| -> f64 {
+        let mut total = 0usize;
+        let mut admitted = 0usize;
+        for r in verdicts.iter().filter(|r| r.planner == planner) {
+            if family.is_some_and(|f| family_of(&r.scenario) != f) {
+                continue;
+            }
+            total += 1;
+            admitted += usize::from(r.admissible);
+        }
+        if total == 0 {
+            0.0
+        } else {
+            admitted as f64 / total as f64
+        }
+    };
 
-    // Seeded SafetyAware learned doer (the ScoredPlanner path — same seam the
-    // quantization scorecard uses).
-    let learned = LearnedPlanner::trained(7, Teacher::SafetyAware);
-    let (learned_rate, _) = admissibility_over(&corpus, |sc| {
-        learned.plan_with_chosen_index(&sc.plan_input()).1
-    });
+    let geo_rate = rate_where("geometric", None);
+    let learned_rate = rate_where("learned_safetyaware_seed7", None);
 
     let cases = generated_perception_corpus();
     let perception = score_perception(&cases);
@@ -487,6 +897,25 @@ pub fn run_gate(t: &KpiThresholds) -> GateReport {
             learned_rate,
             t.learned_admissibility_min,
         ),
+    ];
+
+    // #796 F3 — per-family admissibility rows: a regression inside one family
+    // cannot hide behind the aggregate (Simpson's paradox once families mix).
+    for fam in CORPUS_FAMILIES {
+        let bounds = t.families.bounds_for(fam.key);
+        rows.push(KpiRow::at_least(
+            fam.geometric_row,
+            rate_where("geometric", Some(fam.key)),
+            bounds.geometric_min,
+        ));
+        rows.push(KpiRow::at_least(
+            fam.learned_row,
+            rate_where("learned_safetyaware_seed7", Some(fam.key)),
+            bounds.learned_min,
+        ));
+    }
+
+    rows.extend([
         // #777 F1: these two rows are SEAM-PINNED — the mock detector is fed its
         // own ground truth, so they score the identity function and cannot fail.
         // Kept as a harness smoke test (labelled so CI output can't be mistaken
@@ -502,7 +931,7 @@ pub fn run_gate(t: &KpiThresholds) -> GateReport {
             perception.hazard_recall(),
             t.hazard_recall_min,
         ),
-    ];
+    ]);
 
     // #777 F1 — negative-control fault families: each MUST breach the safety
     // metric, proving the oracle discriminates the fault (mutation testing of the
@@ -628,7 +1057,7 @@ pub fn run_gate(t: &KpiThresholds) -> GateReport {
     }
 
     GateReport {
-        doer_scenarios: corpus.len(),
+        doer_scenarios,
         perception_frames: cases.len(),
         rows,
     }
@@ -832,13 +1261,7 @@ pub fn per_scenario_verdicts() -> Vec<PlannerVerdictRow> {
     let mut rows = Vec::with_capacity(corpus.len() * 2);
     for sc in &corpus {
         let out = GeometricPlanner::new(GeometricPlannerConfig::default()).plan(&sc.plan_input());
-        let (verdict, admissible) = verdict_label(verdict_of(
-            &out,
-            sc.corridor(),
-            sc.objects(),
-            sc.config(),
-            sc.posture(),
-        ));
+        let (verdict, admissible) = verdict_label(scenario_verdict(sc, &out));
         rows.push(PlannerVerdictRow {
             planner: "geometric",
             scenario: sc.name.clone(),
@@ -846,13 +1269,7 @@ pub fn per_scenario_verdicts() -> Vec<PlannerVerdictRow> {
             admissible,
         });
         let out = learned.plan_with_chosen_index(&sc.plan_input()).1;
-        let (verdict, admissible) = verdict_label(verdict_of(
-            &out,
-            sc.corridor(),
-            sc.objects(),
-            sc.config(),
-            sc.posture(),
-        ));
+        let (verdict, admissible) = verdict_label(scenario_verdict(sc, &out));
         rows.push(PlannerVerdictRow {
             planner: "learned_safetyaware_seed7",
             scenario: sc.name.clone(),
@@ -987,13 +1404,13 @@ mod tests {
         }
     }
 
-    /// The manifest counts must reconcile with the rate rows (240/248 and
-    /// 224/248 today): the names ARE the integer bounds (#796 F5).
+    /// The manifest counts must reconcile with the rate rows (347/398 and
+    /// 329/398 today): the names ARE the integer bounds (#796 F5).
     #[test]
     fn manifest_counts_reconcile_with_the_rate_floors() {
         let m = committed_manifest();
-        assert_eq!(m.geometric.len(), 8, "248 - 240 admitted");
-        assert_eq!(m.learned_safetyaware_seed7.len(), 24, "248 - 224 admitted");
+        assert_eq!(m.geometric.len(), 51, "398 - 347 admitted");
+        assert_eq!(m.learned_safetyaware_seed7.len(), 69, "398 - 329 admitted");
     }
 
     /// The gate DISCRIMINATES: perturbing the committed sets in either
@@ -1081,6 +1498,10 @@ mod tests {
             real.differential_phantom_tighten_max,
             mock.differential_phantom_tighten_max
         );
+        // #796 F3: the per-family floors are doer-side (detector-independent)
+        // — pinned identical across profiles like every other non-plan-sourced
+        // bound.
+        assert_eq!(real.families, mock.families);
     }
 
     /// #796 F11 — the corpus fingerprint is stable across runs (determinism)
@@ -1094,11 +1515,76 @@ mod tests {
     }
 
     /// Corpus sizes are pinned: a silent shrink would weaken the gate while
-    /// it kept reporting green.
+    /// it kept reporting green. #796 F3: PER-FAMILY counts are pinned too —
+    /// an aggregate pin alone would let one family shrink while another grew.
     #[test]
     fn corpus_sizes_are_pinned_at_low_hundreds() {
-        assert_eq!(generated_doer_corpus().len(), 248);
+        let corpus = generated_doer_corpus();
+        assert_eq!(corpus.len(), 398);
         assert_eq!(generated_perception_corpus().len(), 71);
+
+        let count = |fam: &str| corpus.iter().filter(|s| family_of(&s.name) == fam).count();
+        assert_eq!(count("base"), 248);
+        assert_eq!(count("cutin"), 60);
+        assert_eq!(count("lateral_offset"), 32);
+        assert_eq!(count("curved"), 12);
+        assert_eq!(count("multi_object"), 20);
+        assert_eq!(count("degraded"), 10);
+        assert_eq!(count("occlusion"), 16);
+    }
+
+    /// #796 F3 — the family universe is lock-stepped end to end: every
+    /// [`CORPUS_FAMILIES`] key resolves committed bounds (a missing JSON
+    /// entry cannot parse; a missing `bounds_for` arm panics here, not in
+    /// CI's report path), every family is non-empty in the live corpus, and
+    /// scenario names never collide across prefixes.
+    #[test]
+    fn family_universe_is_lock_stepped() {
+        let t = committed_thresholds();
+        let corpus = generated_doer_corpus();
+        for fam in CORPUS_FAMILIES {
+            let b = t.families.bounds_for(fam.key);
+            assert!(
+                b.geometric_min.is_finite() && b.learned_min.is_finite(),
+                "family {} must carry finite committed bounds",
+                fam.key
+            );
+            assert!(
+                corpus.iter().any(|s| family_of(&s.name) == fam.key),
+                "family {} must be populated in the live corpus",
+                fam.key
+            );
+        }
+        // Base-family names must not accidentally carry a family prefix (a
+        // rename that silently re-homes scenarios would corrupt every
+        // per-family floor).
+        let mut seen = std::collections::BTreeSet::new();
+        for s in &corpus {
+            assert!(seen.insert(s.name.clone()), "duplicate name {}", s.name);
+        }
+    }
+
+    /// #796 F3 — a FAMILY regression reds the gate even when the aggregate
+    /// still clears its floor: the per-family row is attributed by name.
+    #[test]
+    fn family_breach_reds_the_gate_independently_of_the_aggregate() {
+        let mut t = committed_thresholds();
+        t.families.curved.geometric_min = 1.01; // unreachable: rate ≤ 1.0
+        let report = run_gate(&t);
+        assert!(!report.passed());
+        assert!(
+            report
+                .rows
+                .iter()
+                .any(|r| r.name == "geometric_admissibility_fam_curved" && !r.pass),
+            "the breach must attribute to the curved family row: {report:#?}"
+        );
+        // The aggregate row itself still passes — the family row is what
+        // caught it (the anti-Simpson property).
+        assert!(report
+            .rows
+            .iter()
+            .any(|r| r.name == "geometric_admissibility" && r.pass));
     }
 
     /// The generators are deterministic: two invocations produce identical

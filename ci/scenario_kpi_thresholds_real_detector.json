@@ -1,10 +1,40 @@
 {
-  "_comment": "#796 F2 — the PRE-COMMITTED real-detector threshold profile, labeled and reviewed BEFORE any real detector exists, so the first loosening of the perception bars is a deliberate profile SWITCH (mock -> real, visible in the CI lane definition) rather than an edit to the mock profile that is indistinguishable from a regression. Activate by passing this file to the gate binary (first argument) in a `detector: real` lane once the RGB->TensorRT detector rides the MockSemanticDetector seam; until then the mock lane keeps running scenario_kpi_thresholds.json unchanged. PROVENANCE: hazard_recall_min 0.9 is the execution plan's AoU target named in #796 F2 — the ONE bound with a plan-sourced number. unsafe_miss_rate_max and the differential rows are DELIBERATELY kept at the mock profile's 0.0: no plan-sourced relaxation exists for the catastrophic direction, and this repo does not invent safety numbers — if the real detector cannot meet 0.0 unsafe-miss on the corpus, the relaxation must arrive as a reviewed change to THIS file citing its derivation (safety-owner sign-off), which is exactly the audit trail F2 exists to force. The doer admissibility rows are detector-independent (same corpus, same planners) and match the mock profile.",
+  "_comment": "#796 F2 \u2014 the PRE-COMMITTED real-detector threshold profile, labeled and reviewed BEFORE any real detector exists, so the first loosening of the perception bars is a deliberate profile SWITCH (mock -> real, visible in the CI lane definition) rather than an edit to the mock profile that is indistinguishable from a regression. Activate by passing this file to the gate binary (first argument) in a `detector: real` lane once the RGB->TensorRT detector rides the MockSemanticDetector seam; until then the mock lane keeps running scenario_kpi_thresholds.json unchanged. PROVENANCE: hazard_recall_min 0.9 is the execution plan's AoU target named in #796 F2 \u2014 the ONE bound with a plan-sourced number. unsafe_miss_rate_max and the differential rows are DELIBERATELY kept at the mock profile's 0.0: no plan-sourced relaxation exists for the catastrophic direction, and this repo does not invent safety numbers \u2014 if the real detector cannot meet 0.0 unsafe-miss on the corpus, the relaxation must arrive as a reviewed change to THIS file citing its derivation (safety-owner sign-off), which is exactly the audit trail F2 exists to force. The doer admissibility rows are detector-independent (same corpus, same planners) and match the mock profile.",
   "detector": "real",
-  "geometric_admissibility_min": 0.9677,
-  "learned_admissibility_min": 0.9032,
+  "geometric_admissibility_min": 0.8718,
+  "learned_admissibility_min": 0.8266,
   "unsafe_miss_rate_max": 0.0,
   "hazard_recall_min": 0.9,
   "differential_missed_tighten_max": 0.0,
-  "differential_phantom_tighten_max": 0.0
+  "differential_phantom_tighten_max": 0.0,
+  "families": {
+    "base": {
+      "geometric_min": 0.9677,
+      "learned_min": 0.9032
+    },
+    "cutin": {
+      "geometric_min": 0.5333,
+      "learned_min": 0.7333
+    },
+    "lateral_offset": {
+      "geometric_min": 1.0,
+      "learned_min": 1.0
+    },
+    "curved": {
+      "geometric_min": 1.0,
+      "learned_min": 0.0
+    },
+    "multi_object": {
+      "geometric_min": 0.95,
+      "learned_min": 0.8
+    },
+    "degraded": {
+      "geometric_min": 1.0,
+      "learned_min": 0.6
+    },
+    "occlusion": {
+      "geometric_min": 0.125,
+      "learned_min": 0.4375
+    }
+  }
 }
