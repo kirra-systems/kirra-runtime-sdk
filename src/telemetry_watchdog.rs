@@ -653,7 +653,7 @@ fn force_watchdog_lockout(
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     if let Some(cache) = posture_cache {
-        crate::posture_engine::force_lockout(cache, now_ms);
+        crate::posture_engine::force_lockout(cache, &app.ha_fence.held_epoch, now_ms);
     } else {
         tracing::warn!(
             node_id = %node_id,

@@ -259,6 +259,7 @@ mod attestation_registry_tests {
                 None,
                 1_000,
                 42,
+                1,
             )
             .unwrap();
         assert!(advanced, "first write must advance the high-water");
@@ -279,6 +280,7 @@ mod attestation_registry_tests {
                 None,
                 2_000,
                 10,
+                1,
             )
             .unwrap();
         assert!(
@@ -306,6 +308,7 @@ mod attestation_registry_tests {
             None,
             3_000,
             99,
+            1,
         );
         assert!(
             r.is_err(),
@@ -1127,6 +1130,7 @@ mod durability_tests {
                 None,
                 1_234,
                 7,
+                1,
             )
             .unwrap();
         assert!(advanced, "the durable write must advance the high-water");
@@ -1155,7 +1159,7 @@ mod durability_tests {
         );
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
         // #79: held == durable epoch (1) → the fence admits the legitimate write.
-        s.save_federated_report_chained(&report("aa"), None, 2_000, 1)
+        s.save_federated_report_chained(&report("aa"), None, None, 2_000, 1)
             .unwrap();
         assert!(s.has_seen_federation_nonce("aa").unwrap());
     }
@@ -1168,10 +1172,10 @@ mod durability_tests {
     fn duplicate_nonce_chain_returns_nonce_replay_and_rolls_back() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("dup"), None, 2_000, 1)
+        s.save_federated_report_chained(&report("dup"), None, None, 2_000, 1)
             .unwrap();
 
-        let second = s.save_federated_report_chained(&report("dup"), None, 2_001, 1);
+        let second = s.save_federated_report_chained(&report("dup"), None, None, 2_001, 1);
         assert!(
             matches!(second, Err(DurableWriteError::NonceReplay)),
             "a duplicate nonce must surface as NonceReplay, got {second:?}"
@@ -1196,11 +1200,11 @@ mod durability_tests {
     fn generation_highwater_accepts_ascending() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("g1"), Some(10), 2_000, 1)
+        s.save_federated_report_chained(&report("g1"), Some(10), None, 2_000, 1)
             .unwrap();
-        s.save_federated_report_chained(&report("g2"), Some(11), 2_001, 1)
+        s.save_federated_report_chained(&report("g2"), Some(11), None, 2_001, 1)
             .unwrap();
-        s.save_federated_report_chained(&report("g3"), Some(50), 2_002, 1)
+        s.save_federated_report_chained(&report("g3"), Some(50), None, 2_002, 1)
             .unwrap();
         let hw: i64 = s
             .conn
@@ -1224,11 +1228,11 @@ mod durability_tests {
     fn generation_highwater_rejects_regress_and_rolls_back() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("hi"), Some(20), 2_000, 1)
+        s.save_federated_report_chained(&report("hi"), Some(20), None, 2_000, 1)
             .unwrap();
 
         for (nonce, gen) in [("lo", 19u64), ("eq", 20u64)] {
-            let res = s.save_federated_report_chained(&report(nonce), Some(gen), 2_010, 1);
+            let res = s.save_federated_report_chained(&report(nonce), Some(gen), None, 2_010, 1);
             assert!(
                 matches!(res, Err(DurableWriteError::GenerationRegress { found, high_water })
                     if found == gen && high_water == 20),
@@ -1260,9 +1264,9 @@ mod durability_tests {
     fn generation_highwater_skips_v1_reports() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("v1a"), None, 2_000, 1)
+        s.save_federated_report_chained(&report("v1a"), None, None, 2_000, 1)
             .unwrap();
-        s.save_federated_report_chained(&report("v1b"), None, 2_001, 1)
+        s.save_federated_report_chained(&report("v1b"), None, None, 2_001, 1)
             .unwrap();
         let rows: i64 = s
             .conn
@@ -1285,13 +1289,13 @@ mod durability_tests {
     fn generation_gap_emits_in_chain_audit_marker() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("base"), Some(5), 2_000, 1)
+        s.save_federated_report_chained(&report("base"), Some(5), None, 2_000, 1)
             .unwrap();
         // Contiguous step: no gap marker.
-        s.save_federated_report_chained(&report("step"), Some(6), 2_001, 1)
+        s.save_federated_report_chained(&report("step"), Some(6), None, 2_001, 1)
             .unwrap();
         // Jump 6 -> 9: missing 7,8 -> one gap marker.
-        s.save_federated_report_chained(&report("jump"), Some(9), 2_002, 1)
+        s.save_federated_report_chained(&report("jump"), Some(9), None, 2_002, 1)
             .unwrap();
 
         let markers: i64 = s.conn.query_row(
@@ -1328,13 +1332,14 @@ mod durability_tests {
     fn aged_nonces_are_pruned_on_accept() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("old"), None, 2_000, 1)
+        s.save_federated_report_chained(&report("old"), None, None, 2_000, 1)
             .unwrap();
         assert!(s.has_seen_federation_nonce("old").unwrap());
 
         // A later accept whose received_at is past the retention horizon over "old".
         s.save_federated_report_chained(
             &report("new"),
+            None,
             None,
             2_000 + FEDERATION_NONCE_RETENTION_MS as u64 + 1,
             1,
@@ -1386,7 +1391,7 @@ mod durability_tests {
         {
             let mut s = VerifierStore::new(db.path()).unwrap();
             let held = s.try_claim_epoch(0, "test-node", 0).unwrap().unwrap();
-            s.save_federated_report_chained(&report("deadbeef"), None, 2_000, held)
+            s.save_federated_report_chained(&report("deadbeef"), None, None, 2_000, held)
                 .unwrap();
             assert!(
                 s.has_seen_federation_nonce("deadbeef").unwrap(),
@@ -1434,6 +1439,356 @@ mod durability_tests {
         assert!(
             r2.chain_intact && r2.signed_entries >= 3,
             "rows durable + intact after reopen"
+        );
+    }
+}
+
+/// #791 I1 — the epoch-fenced `(epoch, generation)` LEXICOGRAPHIC high-water
+/// gate on federation ingest, plus the schema v3 columns it rides on.
+#[cfg(test)]
+mod epoch_tuple_791_tests {
+    use crate::*;
+
+    fn report(nonce: &str) -> kirra_fleet_types::federation::FederatedTrustReport {
+        kirra_fleet_types::federation::FederatedTrustReport {
+            source_controller_id: "ctrl-A".to_string(),
+            asset_id: "asset-1".to_string(),
+            posture: kirra_core::FleetPosture::Nominal,
+            issued_at_ms: 1_000,
+            expires_at_ms: 9_000,
+            nonce_hex: nonce.to_string(),
+            signature_b64: "sig".to_string(),
+        }
+    }
+
+    fn store() -> VerifierStore {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        assert_eq!(s.try_claim_epoch(0, "self", 0).unwrap(), Some(1));
+        s
+    }
+
+    fn highwater(s: &VerifierStore) -> (i64, i64) {
+        s.conn
+            .query_row(
+                "SELECT last_epoch, last_generation FROM federation_generation_highwater
+                 WHERE source_controller_id = 'ctrl-A' AND asset_id = 'asset-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    fn marker_count(s: &VerifierStore, event_type: &str) -> i64 {
+        s.conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log_chain WHERE event_type = ?1",
+                [event_type],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// Schema v3: a fresh store lands at SCHEMA_VERSION 3 with both epoch
+    /// columns installed (the migration step is their single birthplace).
+    #[test]
+    fn fresh_store_installs_v3_epoch_columns() {
+        let s = store();
+        assert_eq!(
+            s.schema_version().unwrap(),
+            crate::migrations::SCHEMA_VERSION
+        );
+        for (table, col) in [
+            ("federation_generation_highwater", "last_epoch"),
+            ("federated_trust_reports", "source_epoch"),
+        ] {
+            let n: i64 = s
+                .conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{table}.{col} must exist after the v3 migration");
+        }
+    }
+
+    /// THE FAILOVER SIGNATURE: an epoch bump with a GENERATION RESET is
+    /// accepted (a freshly-promoted controller is newer by construction),
+    /// advances the tuple high-water, emits NO generation-gap marker, and
+    /// records the in-chain FEDERATION_EPOCH_ADVANCE marker instead.
+    #[test]
+    fn epoch_bump_with_generation_reset_is_accepted_not_a_gap() {
+        let mut s = store();
+        // The long-lived primary: epoch 1, generation 50.
+        s.save_federated_report_chained(&report("e1g50"), Some(50), Some(1), 2_000, 1)
+            .unwrap();
+        assert_eq!(highwater(&s), (1, 50));
+
+        // The promoted standby: epoch 2, generation 1 — lower generation, HIGHER
+        // epoch. Accepted, no counter catch-up required.
+        s.save_federated_report_chained(&report("e2g1"), Some(1), Some(2), 2_001, 1)
+            .unwrap();
+        assert_eq!(
+            highwater(&s),
+            (2, 1),
+            "tuple high-water advanced on the epoch rung"
+        );
+        assert_eq!(
+            marker_count(&s, "FEDERATION_GENERATION_GAP"),
+            0,
+            "an epoch advance is the failover signature, never a generation gap"
+        );
+        assert_eq!(
+            marker_count(&s, "FEDERATION_EPOCH_ADVANCE"),
+            1,
+            "the failover signature is recorded in-chain for auditors"
+        );
+    }
+
+    /// EPOCH REGRESS: after the peer proved epoch 2, a report under epoch 1 —
+    /// even at a far higher generation (the killed primary's stale stream) —
+    /// is rejected fail-closed and the whole commit rolls back.
+    #[test]
+    fn epoch_regress_rejected_and_rolls_back() {
+        let mut s = store();
+        s.save_federated_report_chained(&report("e2"), Some(1), Some(2), 2_000, 1)
+            .unwrap();
+
+        let res = s.save_federated_report_chained(&report("stale"), Some(51), Some(1), 2_010, 1);
+        assert!(
+            matches!(
+                res,
+                Err(DurableWriteError::EpochRegress {
+                    found: 1,
+                    high_water: 2
+                })
+            ),
+            "epoch 1 < high-water 2 must surface as EpochRegress, got {res:?}"
+        );
+        assert!(
+            !s.has_seen_federation_nonce("stale").unwrap(),
+            "a rejected report must NOT have burned its nonce (atomic rollback)"
+        );
+        assert_eq!(highwater(&s), (2, 1), "high-water untouched by the regress");
+    }
+
+    /// OMISSION-DOWNGRADE (owner decision #791, HARD reject): once the peer's
+    /// high-water carries epoch ≥ 1, a report WITHOUT `source_epoch` — whether
+    /// generation-only v2 or full v1 — is rejected (`found: 0`). Recovery is
+    /// the peer resuming epoch-carrying reports: nothing latches.
+    #[test]
+    fn omission_downgrade_is_hard_rejected_and_recovery_needs_no_reset() {
+        let mut s = store();
+        s.save_federated_report_chained(&report("e2g5"), Some(5), Some(2), 2_000, 1)
+            .unwrap();
+
+        // Generation-only v2 (higher generation!) — stripped epoch → reject.
+        let gen_only = s.save_federated_report_chained(&report("strip"), Some(9), None, 2_010, 1);
+        assert!(
+            matches!(
+                gen_only,
+                Err(DurableWriteError::EpochRegress {
+                    found: 0,
+                    high_water: 2
+                })
+            ),
+            "epoch omission after epoch-carrying history must hard-reject, got {gen_only:?}"
+        );
+        // Full v1 (no ordering fields at all) — same downgrade-by-omission.
+        let v1 = s.save_federated_report_chained(&report("v1"), None, None, 2_011, 1);
+        assert!(
+            matches!(
+                v1,
+                Err(DurableWriteError::EpochRegress {
+                    found: 0,
+                    high_water: 2
+                })
+            ),
+            "a v1 report after epoch-carrying history must hard-reject, got {v1:?}"
+        );
+        for nonce in ["strip", "v1"] {
+            assert!(!s.has_seen_federation_nonce(nonce).unwrap());
+        }
+
+        // Recovery: the peer's next valid tuple above the high-water lands
+        // normally — no operator reset, nothing latched.
+        s.save_federated_report_chained(&report("resume"), Some(6), Some(2), 2_020, 1)
+            .unwrap();
+        assert_eq!(highwater(&s), (2, 6));
+    }
+
+    /// NEVER-EPOCH PEER UNAFFECTED: a peer whose high-water epoch is 0 keeps
+    /// the legacy behaviour verbatim — generation-only gating, v1 reports
+    /// ungated, no epoch rejections.
+    #[test]
+    fn never_epoch_peer_keeps_legacy_semantics() {
+        let mut s = store();
+        s.save_federated_report_chained(&report("g10"), Some(10), None, 2_000, 1)
+            .unwrap();
+        assert_eq!(highwater(&s), (0, 10), "epoch-less stream records epoch 0");
+        // v1 report still accepted (not gated, does not advance the row).
+        s.save_federated_report_chained(&report("v1ok"), None, None, 2_001, 1)
+            .unwrap();
+        // Generation regress still caught on the generation rung.
+        let res = s.save_federated_report_chained(&report("re"), Some(10), None, 2_002, 1);
+        assert!(matches!(
+            res,
+            Err(DurableWriteError::GenerationRegress {
+                found: 10,
+                high_water: 10
+            })
+        ));
+    }
+
+    /// SAME-EPOCH semantics are the legacy generation semantics: a same-epoch
+    /// generation gap still emits the FEDERATION_GENERATION_GAP marker, and a
+    /// same-epoch regress is still a GenerationRegress.
+    #[test]
+    fn same_epoch_generation_gap_and_regress_unchanged() {
+        let mut s = store();
+        s.save_federated_report_chained(&report("a"), Some(5), Some(3), 2_000, 1)
+            .unwrap();
+        s.save_federated_report_chained(&report("b"), Some(9), Some(3), 2_001, 1)
+            .unwrap();
+        assert_eq!(marker_count(&s, "FEDERATION_GENERATION_GAP"), 1);
+        let res = s.save_federated_report_chained(&report("c"), Some(9), Some(3), 2_002, 1);
+        assert!(matches!(
+            res,
+            Err(DurableWriteError::GenerationRegress {
+                found: 9,
+                high_water: 9
+            })
+        ));
+    }
+
+    /// STRUCTURAL NORMALIZATION: an epoch riding in with NO generation (the
+    /// ill-formed shape the gateway rejects) is dropped at the persistence
+    /// seam — it can never launder a tuple-gate bypass. Against a never-epoch
+    /// peer it degrades to a plain v1 accept; against an epoch-carrying peer
+    /// it hard-rejects as an omission.
+    #[test]
+    fn epoch_without_generation_is_normalized_away() {
+        let mut s = store();
+        // Never-epoch peer: behaves exactly like a v1 report.
+        s.save_federated_report_chained(&report("weird"), None, Some(7), 2_000, 1)
+            .unwrap();
+        let rows: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM federation_generation_highwater",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "no ordering fields → no high-water row");
+        let stored_epoch: Option<i64> = s
+            .conn
+            .query_row(
+                "SELECT source_epoch FROM federated_trust_reports WHERE asset_id = 'asset-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored_epoch, None,
+            "the laundered epoch is not persisted either"
+        );
+
+        // Epoch-carrying peer: the same shape is an omission → hard reject.
+        s.save_federated_report_chained(&report("e1"), Some(1), Some(1), 2_001, 1)
+            .unwrap();
+        let res = s.save_federated_report_chained(&report("weird2"), None, Some(9), 2_002, 1);
+        assert!(matches!(
+            res,
+            Err(DurableWriteError::EpochRegress {
+                found: 0,
+                high_water: 1
+            })
+        ));
+    }
+
+    /// ROUND-TRIP: the persisted `source_epoch` surfaces in BOTH loaders, and
+    /// read-time reconciliation prefers the higher-epoch report (the end-to-end
+    /// punchline: the promoted standby's first report outranks the killed
+    /// primary's higher-generation one).
+    #[test]
+    fn source_epoch_round_trips_and_drives_reconciliation() {
+        use kirra_fleet_types::federation_reconciliation::authoritative_posture;
+        let mut s = store();
+        // Killed primary's stream: epoch 1, high generation, Nominal.
+        let mut r1 = report("p1");
+        r1.posture = kirra_core::FleetPosture::Nominal;
+        s.save_federated_report_chained(&r1, Some(50), Some(1), 2_000, 1)
+            .unwrap();
+        // Promoted standby: epoch 2, generation 1, Degraded.
+        let mut r2 = report("p2");
+        r2.posture = kirra_core::FleetPosture::Degraded;
+        s.save_federated_report_chained(&r2, Some(1), Some(2), 2_001, 1)
+            .unwrap();
+
+        let v2s = s.load_federated_report_v2s_for_asset("asset-1").unwrap();
+        assert!(v2s
+            .iter()
+            .any(|r| r.source_epoch == Some(1) && r.source_generation == Some(50)));
+        assert!(v2s
+            .iter()
+            .any(|r| r.source_epoch == Some(2) && r.source_generation == Some(1)));
+        assert_eq!(
+            authoritative_posture(&v2s),
+            Some(kirra_core::FleetPosture::Degraded),
+            "the higher-EPOCH report must win despite the far lower generation"
+        );
+
+        let json_rows = s.load_federated_reports_for_asset("asset-1").unwrap();
+        assert!(json_rows
+            .iter()
+            .any(|v| v["source_epoch"] == serde_json::json!(2)));
+    }
+
+    /// LOCAL STAMP RECORD: the generation-carrying posture write records the
+    /// HA epoch it was stamped under in the SAME transaction (`last_epoch` KV,
+    /// monotonic-max). Diagnostic only — the epoch's durable authority remains
+    /// `ha_state` — and the generation high-water guard stays
+    /// generation-monotonic (ADR-0037 §5: the per-epoch floor reset is dormant
+    /// while boot-seeding keeps the counter restart-monotonic).
+    #[test]
+    fn posture_stamp_records_last_epoch_kv_in_tx_monotonic() {
+        let mut s = store();
+        s.save_posture_event_chained_with_generation(
+            "posture_engine",
+            "SYSTEM_POSTURE_TRANSITION",
+            "{}",
+            None,
+            1_000,
+            10,
+            7,
+        )
+        .unwrap();
+        assert_eq!(
+            s.load_engine_state("last_epoch").unwrap().as_deref(),
+            Some("7")
+        );
+        assert_eq!(s.load_last_generation().unwrap(), 10);
+
+        // Monotonic: a later write under a LOWER epoch (impossible live — the
+        // fence epoch never regresses in-process — but the guard is cheap and
+        // matches the generation cell's discipline) does not lower the record.
+        s.save_posture_event_chained_with_generation(
+            "posture_engine",
+            "POSTURE_CACHE_REFRESHED",
+            "{}",
+            None,
+            1_001,
+            11,
+            5,
+        )
+        .unwrap();
+        assert_eq!(
+            s.load_engine_state("last_epoch").unwrap().as_deref(),
+            Some("7")
         );
     }
 }
@@ -2150,7 +2505,7 @@ mod epoch_fence_79_tests {
         assert_eq!(s.current_epoch().unwrap(), 2);
 
         let err = s
-            .save_federated_report_chained(&report("cafe"), None, 9_000, held)
+            .save_federated_report_chained(&report("cafe"), None, None, 9_000, held)
             .unwrap_err();
         match err {
             DurableWriteError::Fenced(FenceError::EpochSuperseded {
@@ -2186,7 +2541,7 @@ mod epoch_fence_79_tests {
     fn legitimate_federation_write_commits_when_held_matches_durable() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         let held = claimed(&mut s);
-        s.save_federated_report_chained(&report("beef"), None, 9_000, held)
+        s.save_federated_report_chained(&report("beef"), None, None, 9_000, held)
             .unwrap();
         assert!(
             s.has_seen_federation_nonce("beef").unwrap(),
@@ -2205,7 +2560,7 @@ mod epoch_fence_79_tests {
             .unwrap();
 
         let err = s
-            .save_federated_report_chained(&report("f00d"), None, 9_000, held)
+            .save_federated_report_chained(&report("f00d"), None, None, 9_000, held)
             .unwrap_err();
         assert!(
             matches!(err, DurableWriteError::Fenced(FenceError::EpochUnreadable)),
@@ -2222,7 +2577,7 @@ mod epoch_fence_79_tests {
         assert_eq!(s.current_epoch().unwrap(), 0, "genesis durable epoch is 0");
 
         let err = s
-            .save_federated_report_chained(&report("0000"), None, 9_000, 0)
+            .save_federated_report_chained(&report("0000"), None, None, 9_000, 0)
             .unwrap_err();
         assert!(
             matches!(
@@ -2863,6 +3218,7 @@ mod federation_v2_wiring_tests {
         s.save_federated_report_chained(
             &rep("a1", "lidar_front", FleetPosture::Nominal, 2_000),
             Some(100),
+            None,
             2_100,
             held,
         )
@@ -2870,6 +3226,7 @@ mod federation_v2_wiring_tests {
         s.save_federated_report_chained(
             &rep("b2", "lidar_front", FleetPosture::Degraded, 1_000),
             Some(412),
+            None,
             1_100,
             held,
         )
@@ -2905,6 +3262,7 @@ mod federation_v2_wiring_tests {
         // A v1 report (no generation) persists with NULL source_generation.
         s.save_federated_report_chained(
             &rep("c3", "camera_front", FleetPosture::LockedOut, 1_000),
+            None,
             None,
             1_100,
             held,
@@ -3056,6 +3414,7 @@ mod durable_busy_retry_tests {
                 Some("busy-retry drill"),
                 1_000,
                 7,
+                1,
             )
             .expect("transient busy must clear within the retry budget");
         assert_eq!(

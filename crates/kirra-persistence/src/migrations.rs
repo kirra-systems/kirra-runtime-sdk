@@ -31,10 +31,12 @@ use rusqlite::Connection;
 /// The schema version this binary targets. Version `1` is the original baseline
 /// schema (every `CREATE TABLE`/`ADD COLUMN` in `VerifierStore::new` +
 /// `init_audit_chain_schema`); version `2` (EP-13) adds
-/// `ota_campaigns.uptane_metadata_json`. BUMP this and push a [`Migration`] onto
-/// [`MIGRATIONS`] for any future schema change — additive → MINOR, destructive →
-/// MAJOR per `docs/VERSIONING_POLICY.md`.
-pub const SCHEMA_VERSION: i64 = 2;
+/// `ota_campaigns.uptane_metadata_json`; version `3` (#791 I1) adds the HA-epoch
+/// ordering columns (`federation_generation_highwater.last_epoch` +
+/// `federated_trust_reports.source_epoch`). BUMP this and push a [`Migration`]
+/// onto [`MIGRATIONS`] for any future schema change — additive → MINOR,
+/// destructive → MAJOR per `docs/VERSIONING_POLICY.md`.
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// One registered schema migration to a specific target `version` (≥ 2 — version 1
 /// is the unconditional idempotent baseline DDL, not a registered step). `apply`
@@ -67,6 +69,29 @@ pub const MIGRATIONS: &[Migration] = &[
         {
             Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
             other => other,
+        },
+    },
+    // v3 (#791 I1): epoch-fenced federation ordering. The high-water gate becomes
+    // the lexicographic tuple (last_epoch, last_generation) — `DEFAULT 0` marks
+    // every pre-epoch row as "this peer has never proven an epoch", which is the
+    // exact legacy semantics (generation-only ordering) until the peer's first
+    // epoch-carrying report advances it. `source_epoch` on the persisted reports
+    // is nullable (legacy rows carry none), mirroring `source_generation`.
+    Migration {
+        version: 3,
+        apply: |conn| {
+            for ddl in [
+                "ALTER TABLE federation_generation_highwater
+                     ADD COLUMN last_epoch INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE federated_trust_reports ADD COLUMN source_epoch INTEGER",
+            ] {
+                match conn.execute_batch(ddl) {
+                    Err(e) if e.to_string().contains("duplicate column name") => {}
+                    Err(e) => return Err(e),
+                    Ok(()) => {}
+                }
+            }
+            Ok(())
         },
     },
 ];
@@ -359,7 +384,8 @@ mod tests {
         );
         // Precondition of `run_migrations`: the baseline DDL has run (in
         // `VerifierStore::new` it always precedes this call). The v2 step
-        // ALTERs `ota_campaigns`, so create the baseline-shaped table here.
+        // ALTERs `ota_campaigns` and the v3 step ALTERs the two federation
+        // tables, so create the baseline-shaped tables here.
         c.execute_batch(
             "CREATE TABLE ota_campaigns (
                 campaign_id TEXT PRIMARY KEY, artifact_digest TEXT NOT NULL,
@@ -368,7 +394,19 @@ mod tests {
                 rollout_percent INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL,
                 halt_reason TEXT, created_at_ms INTEGER NOT NULL,
                 updated_at_ms INTEGER NOT NULL, artifact_signature_b64 TEXT
-            )",
+            );
+            CREATE TABLE federation_generation_highwater (
+                source_controller_id TEXT NOT NULL, asset_id TEXT NOT NULL,
+                last_generation INTEGER NOT NULL, last_seen_ms INTEGER NOT NULL,
+                PRIMARY KEY (source_controller_id, asset_id)
+            );
+            CREATE TABLE federated_trust_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_controller_id TEXT NOT NULL, asset_id TEXT NOT NULL,
+                posture_json TEXT NOT NULL, issued_at_ms INTEGER NOT NULL,
+                expires_at_ms INTEGER NOT NULL, received_at_ms INTEGER NOT NULL,
+                source_generation INTEGER
+            );",
         )
         .unwrap();
         let before = run_migrations(&c).unwrap();

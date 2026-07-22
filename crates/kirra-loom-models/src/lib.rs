@@ -12,8 +12,9 @@
 //!   * `POSTURE_GENERATION` — `next_generation()` (`fetch_add`) issues unique,
 //!     monotone ids, and `init_generation_from_store()` (`fetch_max`) never lowers
 //!     the counter (the "B6: fetch_max not store" monotonicity concern).
-//!   * `replace_cache_if_newer` — the GENERATION compare-and-swap under the cache
-//!     write lock never lets a lower (or equal) generation clobber a higher one.
+//!   * `replace_cache_if_newer` — the `(epoch, generation)` lexicographic
+//!     compare-and-swap under the cache write lock (#791 I1) never lets a lower
+//!     (or equal) tuple clobber a higher one.
 //!   * The FULL #688 defense — a supervisor `force_lockout` is never transiently
 //!     downgraded by a racing recalc, under every interleaving. Both jointly
 //!     necessary halves are modeled with production's exact ordering: the LATE
@@ -22,6 +23,14 @@
 //!     `frame_lockout_active` sticky flag just before the write) AND the sticky
 //!     downgrade guard in `replace_cache_if_newer`. See
 //!     `sticky_lockout_never_downgraded_under_recalc_race`.
+//!   * The #791 I1 lift of #688 to the epoch tuple — a PROMOTION bumping the
+//!     fence epoch concurrently with a supervisor trip must not let a
+//!     higher-epoch healthy recalc outrank the forced lockout on the epoch
+//!     rung. Two jointly-sufficient defenses, both modeled with production's
+//!     ordering: `force_lockout` loads `held_epoch` only AFTER the caller set
+//!     the sticky flag (so its epoch is ≥ any recalc's whose sticky read was
+//!     stale-false), and the CAS's sticky epoch-inherit fallback. See
+//!     `sticky_lockout_never_downgraded_under_promotion_race`.
 //!   * The HVCHAN-001 odd/even seqlock (`crates/kirra-contract-channel/src/seqlock.rs`)
 //!     — an accepted cross-partition snapshot is never torn, weak-memory outcomes
 //!     included; models the driver's two fences (WP-01 / MGA G-13). See
@@ -34,14 +43,15 @@ use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 use loom::sync::{Arc, RwLock};
 use loom::thread;
 
-/// Faithful model of `replace_cache_if_newer`'s generation CAS under the write
-/// lock (`src/posture_engine.rs`), reduced to the generation field. A candidate is
-/// committed only if it is strictly newer than what is cached.
-fn replace_cache_if_newer(cache: &RwLock<Option<u64>>, candidate_gen: u64) -> bool {
+/// Faithful model of `replace_cache_if_newer`'s `(epoch, generation)` tuple CAS
+/// under the write lock (`src/posture_engine.rs`, #791 I1), reduced to the stamp
+/// fields. A candidate is committed only if its tuple is lexicographically
+/// strictly newer than what is cached.
+fn replace_cache_if_newer(cache: &RwLock<Option<(u64, u64)>>, candidate: (u64, u64)) -> bool {
     let mut guard = cache.write().unwrap();
-    let cur_gen = guard.unwrap_or(0);
-    if candidate_gen > cur_gen {
-        *guard = Some(candidate_gen);
+    let cur = guard.unwrap_or((0, 0));
+    if candidate > cur {
+        *guard = Some(candidate);
         true
     } else {
         false
@@ -102,29 +112,59 @@ fn generations_are_unique_and_init_is_monotone() {
 fn cache_holds_highest_generation_under_concurrent_replace() {
     loom::model(|| {
         let gen = Arc::new(AtomicU64::new(1));
-        let cache: Arc<RwLock<Option<u64>>> = Arc::new(RwLock::new(None));
+        let cache: Arc<RwLock<Option<(u64, u64)>>> = Arc::new(RwLock::new(None));
 
+        // Both writers stamp under the same held epoch (1) — the tuple CAS must
+        // degenerate exactly to the proven generation CAS.
         let (g1, c1) = (gen.clone(), cache.clone());
         let t1 = thread::spawn(move || {
             let v = g1.fetch_add(1, SeqCst);
-            replace_cache_if_newer(&c1, v);
+            replace_cache_if_newer(&c1, (1, v));
             v
         });
         let (g2, c2) = (gen.clone(), cache.clone());
         let t2 = thread::spawn(move || {
             let v = g2.fetch_add(1, SeqCst);
-            replace_cache_if_newer(&c2, v);
+            replace_cache_if_newer(&c2, (1, v));
             v
         });
 
         let v1 = t1.join().unwrap();
         let v2 = t2.join().unwrap();
 
-        let cached = cache.read().unwrap().expect("a generation was committed");
+        let (_, cached) = cache.read().unwrap().expect("a generation was committed");
         assert_eq!(
             cached,
             v1.max(v2),
             "cache must hold the highest committed generation, never a lower one"
+        );
+    });
+}
+
+/// INV (#791 I1): under concurrent same-generation-stream writers stamped with
+/// DIFFERENT epochs (a promotion bumped the fence between their stamps), the
+/// cache ends at the lexicographically-highest tuple — the higher-epoch entry
+/// wins even when the lower-epoch writer committed last.
+#[test]
+fn cache_holds_highest_tuple_under_cross_epoch_replace() {
+    loom::model(|| {
+        let cache: Arc<RwLock<Option<(u64, u64)>>> = Arc::new(RwLock::new(None));
+
+        // Pre-promotion writer: epoch 1, HIGH generation (a long-lived primary).
+        let c1 = cache.clone();
+        let t1 = thread::spawn(move || replace_cache_if_newer(&c1, (1, 100)));
+        // Post-promotion writer: epoch 2, LOW generation — newer BY CONSTRUCTION.
+        let c2 = cache.clone();
+        let t2 = thread::spawn(move || replace_cache_if_newer(&c2, (2, 5)));
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        let cached = cache.read().unwrap().expect("a stamp was committed");
+        assert_eq!(
+            cached,
+            (2, 5),
+            "the higher-epoch stamp must win regardless of generation and commit order"
         );
     });
 }
@@ -138,20 +178,38 @@ enum Posture {
 }
 
 /// Faithful model of `replace_cache_if_newer` INCLUDING the #688 sticky guard
-/// (`src/posture_engine.rs`): a sticky lockout refuses ANY non-LockedOut candidate;
-/// otherwise the generation compare-and-swap applies.
+/// AND the #791 I1 tuple CAS + sticky epoch-inherit (`src/posture_engine.rs`):
+/// a sticky lockout refuses ANY non-LockedOut candidate; a sticky LockedOut
+/// candidate inherits the cached epoch under the lock; otherwise the
+/// `(epoch, generation)` lexicographic compare-and-swap applies.
+/// Candidate/cached shape: `(epoch, generation, posture)`.
 fn replace_cache_if_newer_posture(
-    cache: &RwLock<Option<(u64, Posture)>>,
-    candidate: (u64, Posture),
+    cache: &RwLock<Option<(u64, u64, Posture)>>,
+    candidate: (u64, u64, Posture),
     sticky_lockout: bool,
+    // #791 I1: the AUTHORITATIVE under-lock sticky re-read (production passes
+    // the escalation flags; `None` models the force path, which passes `true`).
+    sticky_flag: Option<&AtomicBool>,
 ) -> bool {
+    let mut candidate = candidate;
     let mut guard = cache.write().unwrap();
+    // Under-lock re-read: if a forced LockedOut already committed, its caller's
+    // flag store happens-before this critical section (lock release→acquire),
+    // so the re-read observes it regardless of the caller's stale pre-read.
+    let sticky_lockout = sticky_lockout || sticky_flag.map(|f| f.load(SeqCst)).unwrap_or(false);
     // The sticky guard — a supervisor/frame sticky LockedOut is never downgraded.
-    if sticky_lockout && candidate.1 != Posture::LockedOut {
+    if sticky_lockout && candidate.2 != Posture::LockedOut {
         return false;
     }
-    let cur_gen = guard.map(|(g, _)| g).unwrap_or(0);
-    if candidate.0 > cur_gen {
+    // The sticky epoch-inherit fallback (#791 I1) — a forced lockout can never
+    // lose the CAS to the epoch rung of what is already cached.
+    if sticky_lockout && candidate.2 == Posture::LockedOut {
+        if let Some((cur_epoch, _, _)) = *guard {
+            candidate.0 = candidate.0.max(cur_epoch);
+        }
+    }
+    let cur = guard.map(|(e, g, _)| (e, g)).unwrap_or((0, 0));
+    if (candidate.0, candidate.1) > cur {
         *guard = Some(candidate);
         true
     } else {
@@ -179,29 +237,34 @@ fn replace_cache_if_newer_posture(
 #[test]
 fn sticky_lockout_never_downgraded_under_recalc_race() {
     loom::model(|| {
-        // A prior Nominal posture at generation 1; the counter hands out 2 and 3.
+        // A prior Nominal posture at (epoch 1, generation 1); the counter hands
+        // out 2 and 3. The fence epoch is steady at 1 (no promotion in this
+        // model — the promotion race is the next test).
         let gen = Arc::new(AtomicU64::new(2));
+        let epoch = Arc::new(AtomicU64::new(1));
         let sticky = Arc::new(AtomicBool::new(false));
-        let cache: Arc<RwLock<Option<(u64, Posture)>>> =
-            Arc::new(RwLock::new(Some((1, Posture::Nominal))));
+        let cache: Arc<RwLock<Option<(u64, u64, Posture)>>> =
+            Arc::new(RwLock::new(Some((1, 1, Posture::Nominal))));
 
         // Recalc (e.g. the Step-C worker) recomputes a healthy posture. FAITHFUL
-        // ORDERING (recalculate_and_broadcast): grab the generation BEFORE the
-        // sticky read.
-        let (gr, sr, cr) = (gen.clone(), sticky.clone(), cache.clone());
+        // ORDERING (recalculate_and_broadcast): grab the generation, then the
+        // epoch, BEFORE the sticky read.
+        let (gr, er, sr, cr) = (gen.clone(), epoch.clone(), sticky.clone(), cache.clone());
         let recalc = thread::spawn(move || {
             let g = gr.fetch_add(1, SeqCst); // next_generation()
+            let e = er.load(SeqCst); // held_epoch stamp read
             let s = sr.load(SeqCst); // the LATE sticky_lockout read
-            replace_cache_if_newer_posture(&cr, (g, Posture::Nominal), s);
+            replace_cache_if_newer_posture(&cr, (e, g, Posture::Nominal), s, Some(&sr));
         });
 
         // Force: the C2 supervisor escalation. The caller sets supervisor_tripped
-        // BEFORE force_lockout grabs its generation.
-        let (gf, sf, cf) = (gen.clone(), sticky.clone(), cache.clone());
+        // BEFORE force_lockout loads the epoch and grabs its generation.
+        let (gf, ef, sf, cf) = (gen.clone(), epoch.clone(), sticky.clone(), cache.clone());
         let force = thread::spawn(move || {
             sf.store(true, SeqCst); // caller sets supervisor_tripped
+            let e = ef.load(SeqCst); // force_lockout's held_epoch load (AFTER the flag)
             let g = gf.fetch_add(1, SeqCst); // force_lockout's next_generation()
-            replace_cache_if_newer_posture(&cf, (g, Posture::LockedOut), true);
+            replace_cache_if_newer_posture(&cf, (e, g, Posture::LockedOut), true, None);
         });
 
         recalc.join().unwrap();
@@ -209,11 +272,87 @@ fn sticky_lockout_never_downgraded_under_recalc_race() {
 
         // Once the supervisor has tripped, the cache MUST be LockedOut — the
         // healthy recalc can never leave a non-LockedOut posture behind it.
-        let (_, posture) = cache.read().unwrap().expect("cache populated");
+        let (_, _, posture) = cache.read().unwrap().expect("cache populated");
         assert_eq!(
             posture,
             Posture::LockedOut,
             "a racing recalc must never downgrade a forced supervisor LockedOut"
+        );
+    });
+}
+
+/// INV (#791 I1 — #688 lifted to the epoch tuple): a PROMOTION bumping the
+/// fence epoch CONCURRENTLY with a supervisor trip must never let a
+/// higher-epoch healthy recalc outrank the forced LockedOut on the epoch rung.
+/// The closure argument, modeled with production's exact ordering:
+///
+///   * If the recalc read the sticky flag as SET → the guard refuses it.
+///   * If it read the flag as UNSET, then its own epoch load happened before
+///     the trip, while `force_lockout` loads `held_epoch` AFTER the trip — so
+///     (the fence epoch being monotonic) force's epoch ≥ the recalc's, and
+///     force's generation (grabbed after the flag) is strictly higher: force's
+///     TUPLE strictly outranks the recalc's.
+///   * The CAS-side sticky epoch-inherit closes the residual case where the
+///     recalc committed first (force then inherits the higher cached epoch).
+///
+/// If `force_lockout` instead pre-loaded the epoch before the flag store, or
+/// the inherit fallback were dropped together with it, loom finds the
+/// downgrade interleaving (higher-epoch Nominal cached after the trip).
+#[test]
+fn sticky_lockout_never_downgraded_under_promotion_race() {
+    // Preemption-bounded like the seqlock model (loom's standard state-space
+    // control): three threads over an epoch atomic, a flag, a counter and the
+    // lock explode combinatorially unbounded (~8 min); bound 3 explores every
+    // schedule within 3 preemptions per thread in seconds. VERIFIED NON-VACUOUS
+    // within this bound: removing the under-lock sticky re-read (pass `None`
+    // in the recalc arm below) OR pre-loading force's epoch before the flag
+    // store makes loom report the Nominal-cached downgrade counterexample.
+    let mut model = loom::model::Builder::new();
+    model.preemption_bound = Some(3);
+    model.check(|| {
+        // Steady state: epoch 1, prior Nominal at (1, 1). Counter hands out 2, 3.
+        let gen = Arc::new(AtomicU64::new(2));
+        let epoch = Arc::new(AtomicU64::new(1));
+        let sticky = Arc::new(AtomicBool::new(false));
+        let cache: Arc<RwLock<Option<(u64, u64, Posture)>>> =
+            Arc::new(RwLock::new(Some((1, 1, Posture::Nominal))));
+
+        // Promotion: the fence epoch advances (perform_promotion after a
+        // successful try_claim_epoch CAS). Free-running vs both other threads.
+        let ep = epoch.clone();
+        let promotion = thread::spawn(move || {
+            ep.store(2, SeqCst);
+        });
+
+        // Recalc: healthy posture, production ordering (gen → epoch → sticky).
+        let (gr, er, sr, cr) = (gen.clone(), epoch.clone(), sticky.clone(), cache.clone());
+        let recalc = thread::spawn(move || {
+            let g = gr.fetch_add(1, SeqCst);
+            let e = er.load(SeqCst);
+            let s = sr.load(SeqCst);
+            let w = replace_cache_if_newer_posture(&cr, (e, g, Posture::Nominal), s, Some(&sr));
+            (g, e, s, w)
+        });
+
+        // Force: flag first, THEN the epoch load, then the generation grab.
+        let (gf, ef, sf, cf) = (gen.clone(), epoch.clone(), sticky.clone(), cache.clone());
+        let force = thread::spawn(move || {
+            sf.store(true, SeqCst);
+            let e = ef.load(SeqCst);
+            let g = gf.fetch_add(1, SeqCst);
+            let w = replace_cache_if_newer_posture(&cf, (e, g, Posture::LockedOut), true, None);
+            (e, g, w)
+        });
+
+        promotion.join().unwrap();
+        let rv = recalc.join().unwrap();
+        let fv = force.join().unwrap();
+
+        let (ce, cg, posture) = cache.read().unwrap().expect("cache populated");
+        assert_eq!(
+            posture,
+            Posture::LockedOut,
+            "a promotion-epoch bump must never let a healthy recalc outrank the forced lockout: cached=({ce},{cg}) recalc={rv:?} force={fv:?}"
         );
     });
 }

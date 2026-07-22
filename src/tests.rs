@@ -413,6 +413,7 @@ fn make_cache(status: FleetPosture, age_ms: u64) -> (Option<CachedFleetPosture>,
         generated_at_ms: updated_at,
         ttl_ms: POSTURE_CACHE_TTL_MS,
         generation: 1,
+        epoch: 0,
     };
     (Some(cache), now)
 }
@@ -960,6 +961,8 @@ async fn test_slow_subscriber_drops_on_buffer_saturation_without_blocking() {
             node_id: Some(format!("node-{i}")),
             emitted_at_ms: i * 100,
             posture: None,
+            epoch: None,
+            generation: None,
         });
     }
 

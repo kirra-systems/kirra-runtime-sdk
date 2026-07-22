@@ -68,6 +68,7 @@ fn stale_cache_is_fail_closed_locked_out() {
         generated_at_ms: 1,
         ttl_ms: POSTURE_CACHE_TTL_MS,
         generation: 1,
+        epoch: 0,
     };
     let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(stale)));
     let (posture, reason) = resolve_post_promotion_posture(&cache);
@@ -82,6 +83,7 @@ fn routing_gate_blocks_when_cache_is_stale() {
         generated_at_ms: 1,
         ttl_ms: POSTURE_CACHE_TTL_MS,
         generation: 1,
+        epoch: 0,
     };
     let snapshot = Some(stale);
     let now = 1 + POSTURE_CACHE_TTL_MS + 1;

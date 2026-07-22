@@ -295,6 +295,19 @@ pub enum DurableWriteError {
         found: u64,
         high_water: u64,
     },
+    /// #791 I1: the report's effective HA epoch is BELOW the per-(controller,
+    /// asset) epoch high-water — either an explicit `source_epoch` regress (a
+    /// fenced old primary still publishing under its superseded epoch) or the
+    /// OMISSION-DOWNGRADE: a report with NO `source_epoch` from a peer whose
+    /// high-water already carries epoch ≥ 1 (`found` = 0). The omission case is
+    /// a HARD reject by owner decision (#791) — accepting it would let a
+    /// stripped-field replay ride below the tuple gate, the same
+    /// downgrade-by-omission EP-13 refuses for Uptane metadata. Transaction
+    /// aborted: report NOT persisted, nonce NOT burned, high-water NOT advanced.
+    EpochRegress {
+        found: u64,
+        high_water: u64,
+    },
     Db(rusqlite::Error),
 }
 
@@ -326,6 +339,11 @@ impl std::fmt::Display for DurableWriteError {
             DurableWriteError::GenerationRegress { found, high_water } => write!(
                 f,
                 "durable write rejected: federation generation {found} <= high-water {high_water} (regress/replay)"
+            ),
+            DurableWriteError::EpochRegress { found, high_water } => write!(
+                f,
+                "durable write rejected: federation epoch {found} < high-water epoch {high_water} \
+                 (superseded-epoch regress or omission-downgrade)"
             ),
             DurableWriteError::Db(e) => write!(f, "durable write failed: {e}"),
         }

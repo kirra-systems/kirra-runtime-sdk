@@ -8,9 +8,22 @@ impl VerifierStore {
         &mut self,
         report: &FederatedTrustReport,
         source_generation: Option<u64>,
+        source_epoch: Option<u64>,
         received_at_ms: u64,
         held_epoch: u64,
     ) -> std::result::Result<(), DurableWriteError> {
+        // #791 I1 structural normalization: `source_epoch` without a generation is
+        // malformed (`epoch_field_well_formed`) and the gateway rejects it before
+        // this call; defensively, an epoch riding in with no generation is DROPPED
+        // here (mirroring `canonical_federation_payload_v2`, which canonicalizes
+        // the ill-formed shape WITHOUT the epoch) — it then takes the epoch-less
+        // path below, which is the fail-closed one once the peer's high-water
+        // carries an epoch. It can never launder a tuple-gate bypass.
+        let source_epoch = if source_generation.is_some() {
+            source_epoch
+        } else {
+            None
+        };
         // #74: route the whole federation commit — report + NONCE BURN + audit —
         // through the FULL (force-synced) connection. A burned nonce must survive
         // power-loss or anti-replay is defeated (the 5 s freshness window only
@@ -27,55 +40,89 @@ impl VerifierStore {
         // fenced after the request-path gate check cannot land a stale report.
         Self::assert_epoch_held(&tx, held_epoch)?;
 
-        // Item 20 — per-(controller, asset) GENERATION HIGH-WATER gate. Runs inside
-        // the Immediate write lock (no interleave). Only v2 reports (a supplied
-        // `source_generation`) are gated; a v1 report (None) keeps its legacy
-        // timestamp-ordered behaviour. Two outcomes that matter here:
-        //   * regress/replay: `gen <= high_water` → abort the whole commit
-        //     (fail-closed; the stale report never persists and no nonce is burned);
-        //   * forward GAP: `gen > high_water + 1` → accept, but record the skipped
-        //     generations as an in-chain audit marker (below, after the report row).
-        // `gap_from` carries the prior high-water when a gap is detected so the
-        // marker can be appended in the SAME transaction as the accepted report.
+        // Item 20 + #791 I1 — per-(controller, asset) HIGH-WATER gate, now the
+        // LEXICOGRAPHIC tuple `(epoch, generation)`. Runs inside the Immediate
+        // write lock (no interleave). An epoch-less report has effective epoch 0
+        // (the pre-epoch legacy rung). Outcomes:
+        //   * EPOCH regress: `eff_epoch < hw_epoch` → abort (a fenced old primary
+        //     still publishing under its superseded epoch);
+        //   * OMISSION-DOWNGRADE (hard reject, owner decision #791): the peer's
+        //     high-water carries epoch ≥ 1 but this report omits `source_epoch`
+        //     (whether v1 or generation-only v2) → abort. Accepting it would let
+        //     a stripped-field replay ride BELOW the tuple gate — the same
+        //     downgrade-by-omission EP-13 refuses for Uptane metadata;
+        //   * same epoch, generation regress/replay: `gen <= hw_gen` → abort;
+        //   * same epoch, forward GAP: `gen > hw_gen + 1` → accept + in-chain
+        //     FEDERATION_GENERATION_GAP marker (below, after the report row);
+        //   * EPOCH ADVANCE: `eff_epoch > hw_epoch` → accept regardless of the
+        //     generation (a freshly-promoted controller legitimately RESETS its
+        //     generation; higher epoch orders newer BY CONSTRUCTION — no counter
+        //     catch-up, no gap marker) + in-chain FEDERATION_EPOCH_ADVANCE marker.
+        // All rejects drop `tx` → atomic rollback: report NOT persisted, nonce NOT
+        // burned, high-water NOT advanced. Fail-closed.
         let mut gap_from: Option<u64> = None;
-        if let Some(gen) = source_generation {
-            let high_water: Option<u64> = tx
-                .query_row(
-                    "SELECT last_generation FROM federation_generation_highwater
-                     WHERE source_controller_id = ?1 AND asset_id = ?2",
-                    params![report.source_controller_id, report.asset_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map(|g| Some(g as u64))
-                .or_else(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    other => Err(other),
-                })?;
+        let mut epoch_advance_from: Option<u64> = None;
+        let eff_epoch = source_epoch.unwrap_or(0);
+        let high_water: Option<(u64, u64)> = tx
+            .query_row(
+                "SELECT last_epoch, last_generation FROM federation_generation_highwater
+                 WHERE source_controller_id = ?1 AND asset_id = ?2",
+                params![report.source_controller_id, report.asset_id],
+                |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
 
-            if let Some(hw) = high_water {
-                if gen <= hw {
-                    // tx drops here → atomic rollback. Fail-closed.
-                    return Err(DurableWriteError::GenerationRegress {
-                        found: gen,
-                        high_water: hw,
+        if let Some((hw_epoch, hw_gen)) = high_water {
+            if hw_epoch >= 1 && source_epoch.is_none() {
+                // `found: 0` — the effective epoch an omitting report claims.
+                return Err(DurableWriteError::EpochRegress {
+                    found: 0,
+                    high_water: hw_epoch,
+                });
+            }
+            if let Some(gen) = source_generation {
+                if eff_epoch < hw_epoch {
+                    return Err(DurableWriteError::EpochRegress {
+                        found: eff_epoch,
+                        high_water: hw_epoch,
                     });
                 }
-                if gen > hw + 1 {
-                    gap_from = Some(hw);
+                if eff_epoch == hw_epoch {
+                    if gen <= hw_gen {
+                        return Err(DurableWriteError::GenerationRegress {
+                            found: gen,
+                            high_water: hw_gen,
+                        });
+                    }
+                    if gen > hw_gen + 1 {
+                        gap_from = Some(hw_gen);
+                    }
+                } else {
+                    epoch_advance_from = Some(hw_epoch);
                 }
             }
+            // A v1 report (no generation) against an epoch-0 high-water keeps its
+            // legacy behaviour: no gate, no advance.
+        }
 
-            // Advance the high-water within the same tx (UPSERT; the gate above
-            // guarantees strict advance for an existing row).
+        // Advance the tuple high-water within the same tx (UPSERT; the gates
+        // above guarantee lexicographic strict advance for an existing row).
+        // Only ordering-carrying (v2) reports advance it, as before.
+        if let Some(gen) = source_generation {
             tx.execute(
                 "INSERT INTO federation_generation_highwater
-                     (source_controller_id, asset_id, last_generation, last_seen_ms)
-                 VALUES (?1, ?2, ?3, ?4)
+                     (source_controller_id, asset_id, last_epoch, last_generation, last_seen_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(source_controller_id, asset_id)
-                 DO UPDATE SET last_generation = ?3, last_seen_ms = ?4",
+                 DO UPDATE SET last_epoch = ?3, last_generation = ?4, last_seen_ms = ?5",
                 params![
                     report.source_controller_id,
                     report.asset_id,
+                    eff_epoch as i64,
                     gen as i64,
                     received_at_ms as i64,
                 ],
@@ -87,12 +134,13 @@ impl VerifierStore {
 
         tx.execute(
             "INSERT INTO federated_trust_reports
-             (source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms, received_at_ms, source_generation)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms, received_at_ms, source_generation, source_epoch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 report.source_controller_id, report.asset_id, posture_json,
                 report.issued_at_ms as i64, report.expires_at_ms as i64, received_at_ms as i64,
                 source_generation.map(|g| g as i64),
+                source_epoch.map(|e| e as i64),
             ],
         )?;
 
@@ -161,6 +209,31 @@ impl VerifierStore {
                 &tx,
                 "FEDERATION_GENERATION_GAP",
                 &gap.to_string(),
+                received_at_ms as i64,
+            )?;
+        }
+
+        // #791 I1 — in-chain EPOCH-ADVANCE marker. A higher epoch means the source
+        // controller failed over (a standby promoted via the durable epoch CAS)
+        // and its generation counter may legitimately RESET — a later auditor
+        // reading the chain must see the explicit failover signature explaining
+        // the generation discontinuity, not an unexplained drop. Same tx as the
+        // accepted report → the marker is committed iff the report is.
+        if let (Some(prev_epoch), Some(gen)) = (epoch_advance_from, source_generation) {
+            let adv = serde_json::json!({
+                "source_controller_id": report.source_controller_id,
+                "asset_id": report.asset_id,
+                "previous_epoch": prev_epoch,
+                "observed_epoch": eff_epoch,
+                "observed_generation": gen,
+            });
+            ChainedAuditAppender {
+                signing_key: signing_key.as_ref(),
+            }
+            .append_within(
+                &tx,
+                "FEDERATION_EPOCH_ADVANCE",
+                &adv.to_string(),
                 received_at_ms as i64,
             )?;
         }
@@ -284,7 +357,7 @@ impl VerifierStore {
         asset_id: &str,
     ) -> Result<Vec<serde_json::Value>> {
         let mut stmt = self.conn.prepare(
-            "SELECT source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms, source_generation
+            "SELECT source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms, source_generation, source_epoch
              FROM federated_trust_reports
              WHERE asset_id = ?1
              ORDER BY received_at_ms DESC",
@@ -296,6 +369,7 @@ impl VerifierStore {
             let issued: i64 = row.get(3)?;
             let expires: i64 = row.get(4)?;
             let generation: Option<i64> = row.get(5)?;
+            let epoch: Option<i64> = row.get(6)?;
             Ok(serde_json::json!({
                 "source_controller_id": source,
                 "asset_id": aid,
@@ -303,6 +377,7 @@ impl VerifierStore {
                 "issued_at_ms": issued as u64,
                 "expires_at_ms": expires as u64,
                 "source_generation": generation.map(|g| g as u64),
+                "source_epoch": epoch.map(|e| e as u64),
             }))
         })?;
         rows.collect()
@@ -321,7 +396,7 @@ impl VerifierStore {
         asset_id: &str,
     ) -> Result<Vec<kirra_fleet_types::federation_reconciliation::FederatedTrustReportV2>> {
         let mut stmt = self.conn.prepare(
-            "SELECT source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms, source_generation
+            "SELECT source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms, source_generation, source_epoch
              FROM federated_trust_reports
              WHERE asset_id = ?1
              ORDER BY received_at_ms DESC",
@@ -333,6 +408,7 @@ impl VerifierStore {
             let issued: i64 = row.get(3)?;
             let expires: i64 = row.get(4)?;
             let generation: Option<i64> = row.get(5)?;
+            let epoch: Option<i64> = row.get(6)?;
             Ok((
                 source,
                 aid,
@@ -340,12 +416,13 @@ impl VerifierStore {
                 issued as u64,
                 expires as u64,
                 generation.map(|g| g as u64),
+                epoch.map(|e| e as u64),
             ))
         })?;
 
         let mut out = Vec::new();
         for row in rows {
-            let (source, aid, posture_json, issued, expires, generation) = row?;
+            let (source, aid, posture_json, issued, expires, generation, epoch) = row?;
             // Fail-closed: a corrupt posture is skipped, never coerced to Nominal.
             let Ok(posture) = serde_json::from_str::<kirra_core::FleetPosture>(&posture_json)
             else {
@@ -361,6 +438,7 @@ impl VerifierStore {
                     nonce_hex: String::new(),
                     signature_b64: String::new(),
                     source_generation: generation,
+                    source_epoch: epoch,
                 },
             );
         }

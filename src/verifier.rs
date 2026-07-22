@@ -114,6 +114,15 @@ pub struct PostureStreamEvent {
     pub node_id: Option<String>,
     pub emitted_at_ms: u64,
     pub posture: Option<FleetNodePosture>,
+    /// #791 I1 — the explicit ordering stamp, additive: the `(epoch,
+    /// generation)` tuple the emitting recalc was stamped with, so an SSE
+    /// consumer can order events explicitly instead of inferring from arrival.
+    /// `None` on emitters that carry no stamp (per-node trust events); absent
+    /// fields keep legacy consumers byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
 }
 
 /// Controls whether the `require_client_identity` middleware enforces the
