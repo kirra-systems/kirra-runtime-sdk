@@ -283,19 +283,21 @@ where
     // operator explicitly accepted motion without object perception; it is
     // applied to BOTH comparator arms (a one-sided declaration would be a
     // permanent false divergence).
-    let gate_arm = |g: KirraGovernor| {
-        if external_rss_gate {
-            g.with_external_rss_gate()
-        } else {
-            g
-        }
+    // #795 F5: distinguish the TWO quiescent-RSS reasons. `object_gate_armed`
+    // → scene RSS is ENFORCED at the publication seam (`with_external_rss_gate`);
+    // the waiver-only path (`external_rss_gate` true but the object gate NOT
+    // armed ⟹ `allow_motion_without_object_perception`) → scene RSS is WAIVED,
+    // driving blind (`with_operator_waived`). Both are quiescent; only the audit
+    // label differs, so an auditor can tell "enforced elsewhere" from "waived".
+    let gate_arm = |g: KirraGovernor| match (external_rss_gate, object_gate_armed) {
+        (false, _) => g,
+        (true, true) => g.with_external_rss_gate(),
+        (true, false) => g.with_operator_waived(),
     };
-    let gate_arm_diverse = |g: DiverseKirraGovernor| {
-        if external_rss_gate {
-            g.with_external_rss_gate()
-        } else {
-            g
-        }
+    let gate_arm_diverse = |g: DiverseKirraGovernor| match (external_rss_gate, object_gate_armed) {
+        (false, _) => g,
+        (true, true) => g.with_external_rss_gate(),
+        (true, false) => g.with_operator_waived(),
     };
     let comparator = match platform_profile {
         Some(profile) => GovernorComparator::with_sink(
@@ -429,14 +431,29 @@ fn build_config() -> ParkoNodeConfig {
     config
 }
 
-/// `1` / `true` (case-insensitive, trimmed) → `true`; everything else → `false`.
+/// Read a boolean gate-arming env var. Unset → `false` (fail-safe default). A
+/// recognized `1`/`true`/`0`/`false` → that value. A SET-but-unrecognized value
+/// (`=yes`, `=on`, a typo) → a LOUD error + `false` (#795 F10): a mis-spelled
+/// enable must never silently leave a safety gate disarmed with no diagnostic.
+/// The pure classifier lives in `parko_ros2::config` (non-`ros2`-gated) so it is
+/// unit-tested in the default CI build; this reader adds the env read + WARN.
 fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true"
-        })
-        .unwrap_or(false)
+    match std::env::var(name) {
+        Err(_) => false,
+        Ok(raw) => match parko_ros2::config::classify_env_flag(&raw) {
+            parko_ros2::config::EnvFlagValue::Set(b) => b,
+            parko_ros2::config::EnvFlagValue::Unrecognized => {
+                tracing::error!(
+                    var = name,
+                    value = %raw,
+                    "parko-ros2: {name} is set to an UNRECOGNIZED value {raw:?} — expected \
+                     1/true or 0/false. Treating as DISABLED (fail-safe); a mis-spelled enable \
+                     (e.g. =yes / =on) will NOT arm the gate. Fix the value to arm it."
+                );
+                false
+            }
+        },
+    }
 }
 
 #[tokio::main]
@@ -469,9 +486,11 @@ async fn main() {
     // WS-0.1 (#G2): decide the governors' RSS mode. Fail-closed default: with
     // no armed object gate and no explicit waiver, the governors stay UNFED
     // and the node HOLDs at zero.
-    let object_gate_armed = config.object_rss_enabled
-        && config.lidar_topic.is_some()
-        && config.platform_profile.is_some();
+    // #795 F3: the ONE arming predicate (`ParkoNodeConfig::object_gate_armed`),
+    // shared with node.rs's seam-gate decision so the two interlock halves
+    // cannot drift into a fail-open (governors declaring external gating while
+    // the seam gate stays dark).
+    let object_gate_armed = config.object_gate_armed();
     let external_rss_gate = object_gate_armed || config.allow_motion_without_object_perception;
     if object_gate_armed {
         tracing::info!(

@@ -214,6 +214,23 @@ impl DiverseKirraGovernor {
         self
     }
 
+    /// #795 F5 — mirror of [`crate::KirraGovernor::with_operator_waived`]: scene
+    /// RSS is WAIVED (driving blind), quiescent like `with_external_rss_gate`
+    /// but recorded distinctly for audit. A comparator pairing MUST set the SAME
+    /// declaration on both arms (or neither) — a one-sided one is a permanent
+    /// false divergence.
+    #[must_use]
+    pub fn with_operator_waived(mut self) -> Self {
+        self.rss_feed = RssFeed::OperatorWaived;
+        self
+    }
+
+    /// #795 F5 — the current RSS-feed observability label for audit/divergence.
+    #[must_use]
+    pub fn rss_feed_label(&self) -> &'static str {
+        self.rss_feed.label()
+    }
+
     /// DIFFERENCE #1 — single regime classifier. Folds the primary's
     /// LockedOut-then-RSS-gate-then-posture-match control flow into one
     /// dispatch. LockedOut dominates (matches the primary returning Deny
@@ -227,7 +244,8 @@ impl DiverseKirraGovernor {
         let rss_safe = match &self.rss_feed {
             RssFeed::NeverFed => false,
             RssFeed::Fed(state) => state.safe,
-            RssFeed::ExternallyGated => true,
+            // #795 F5: both quiescent — the split is observability-only.
+            RssFeed::ExternallyGated | RssFeed::OperatorWaived => true,
         };
         if posture == SafetyPosture::LockedOut {
             Regime::HardStop

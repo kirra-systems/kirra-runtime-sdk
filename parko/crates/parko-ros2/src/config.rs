@@ -270,11 +270,97 @@ impl ParkoNodeConfig {
     pub fn needs_object_snapshot(&self) -> bool {
         self.object_rss_enabled || self.vanished_detection_enabled
     }
+
+    /// #795 F3 — the SINGLE object-RSS-gate arming predicate.
+    ///
+    /// The scene-RSS object gate is ARMED only when the operator opted in
+    /// (`object_rss_enabled`) AND both inputs it needs are configured: a lidar
+    /// stream (`lidar_topic`, the object source) and a `platform_profile` (the
+    /// footprint + RSS params). Missing either → the object slot would never be
+    /// fed and the gate would MRC forever, so it stays DISARMED (fail-safe).
+    ///
+    /// This was previously re-derived independently in the bin's `main()` (which
+    /// decides `with_external_rss_gate`) AND in `node.rs` (which decides whether
+    /// the seam gate actually runs) — two textually-matched halves of ONE
+    /// interlock with no shared function and no test. If they ever drifted, the
+    /// governors could declare the scene tier externally-gated while the seam
+    /// gate stayed dark (a latent fail-OPEN). Both now call this one method.
+    #[must_use]
+    pub fn object_gate_armed(&self) -> bool {
+        self.object_rss_enabled && self.lidar_topic.is_some() && self.platform_profile.is_some()
+    }
+}
+
+/// #795 F10 — classification of a boolean env-flag value. `1`/`true` → enabled;
+/// `0`/`false`/empty → disabled; anything ELSE (`yes`, `on`, a typo) →
+/// `Unrecognized`, so the reader can WARN instead of SILENTLY treating a
+/// mis-spelled enable as "off" (which would leave a safety gate disarmed with
+/// no signal). Lives HERE (non-`ros2`-gated) rather than in the `ros2`-only
+/// node binary, so it is unit-tested in the default CI build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvFlagValue {
+    Set(bool),
+    Unrecognized,
+}
+
+/// Classify a raw env value (case-insensitive, trimmed). See [`EnvFlagValue`].
+#[must_use]
+pub fn classify_env_flag(raw: &str) -> EnvFlagValue {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => EnvFlagValue::Set(true),
+        "0" | "false" | "" => EnvFlagValue::Set(false),
+        _ => EnvFlagValue::Unrecognized,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_flag_recognizes_true_false_tokens() {
+        for t in ["1", "true", "TRUE", " True ", "tRuE"] {
+            assert_eq!(classify_env_flag(t), EnvFlagValue::Set(true), "{t:?}");
+        }
+        for f in ["0", "false", "FALSE", " ", ""] {
+            assert_eq!(classify_env_flag(f), EnvFlagValue::Set(false), "{f:?}");
+        }
+    }
+
+    /// #795 F10 — a mis-spelled enable is UNRECOGNIZED (not silently false), so
+    /// the reader can warn instead of quietly leaving a safety gate disarmed.
+    #[test]
+    fn env_flag_misspelled_enables_are_unrecognized() {
+        for u in ["yes", "on", "y", "enable", "enabled", "2", "tru"] {
+            assert_eq!(classify_env_flag(u), EnvFlagValue::Unrecognized, "{u:?}");
+        }
+    }
+
+    /// #795 F3 — the object-gate arming predicate is the AND of all three
+    /// inputs, over the FULL {object_rss} × {lidar} × {profile} truth table.
+    /// The bin and node.rs now share THIS, so the interlock cannot drift.
+    #[test]
+    fn object_gate_armed_is_the_and_of_all_three_inputs() {
+        for object_rss in [false, true] {
+            for has_lidar in [false, true] {
+                for has_profile in [false, true] {
+                    let cfg = ParkoNodeConfig {
+                        object_rss_enabled: object_rss,
+                        lidar_topic: has_lidar.then(|| "/lidar".to_string()),
+                        platform_profile: has_profile
+                            .then(CourierPlatformProfile::courier_reference),
+                        ..Default::default()
+                    };
+                    let expected = object_rss && has_lidar && has_profile;
+                    assert_eq!(
+                        cfg.object_gate_armed(),
+                        expected,
+                        "object_rss={object_rss} lidar={has_lidar} profile={has_profile}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn default_tick_period_is_20hz() {
