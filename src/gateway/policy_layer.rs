@@ -97,6 +97,13 @@ pub async fn assert_actuator_epoch_or_demote(
                 .ha_fence
                 .mode_active
                 .store(false, std::sync::atomic::Ordering::SeqCst);
+            // #793 F7: a REAL supersession — label `ha_fenced` (the split-brain
+            // signal). The label decision lives HERE, where the fence-error type
+            // is known, so a flapping DB (below) cannot masquerade as split-brain.
+            svc.app
+                .observability
+                .fleet_metrics
+                .record_gate_denial(crate::metrics::GateDenialReason::HaFenced);
             tracing::error!(
                 method = method,
                 path = path,
@@ -112,6 +119,14 @@ pub async fn assert_actuator_epoch_or_demote(
                 .ha_fence
                 .mode_active
                 .store(false, std::sync::atomic::Ordering::SeqCst);
+            // #793 F7: the epoch was UNREADABLE (store unavailable), NOT a
+            // supersession — label `ha_store_unavailable` so an alert on
+            // `ha_fenced > 0` does not fire on a flapping DB. Still fail-closed
+            // (self-demote + reject); only the observability label differs.
+            svc.app
+                .observability
+                .fleet_metrics
+                .record_gate_denial(crate::metrics::GateDenialReason::HaStoreUnavailable);
             tracing::error!(
                 method = method,
                 path = path,
@@ -498,6 +513,13 @@ pub async fn enforce_actuator_safety_envelope(
         }
 
         EnforceAction::DenyBreach(code) => {
+            // #793 F6: the inner Degraded/kinematic gate's denials were
+            // metrics-invisible — the ONE write admitted under Degraded produced
+            // unobservable rejections. Count by DenyCode (bounded cardinality).
+            svc.app
+                .observability
+                .fleet_metrics
+                .record_actuator_denial(code);
             tracing::error!(
                 reason               = %code,
                 linear_velocity_mps  = %proposed_cmd.linear_velocity_mps,
@@ -808,15 +830,11 @@ pub async fn enforce_posture_routing(
         // and any audit work, so an epoch change during the actuator write is
         // caught at the final authority boundary too.
         OperationalCommand::ActuatorMotion => {
-            assert_actuator_epoch_or_demote(&svc, "POST", "/actuator/motion/command")
-                .await
-                .inspect_err(|_| {
-                    // WS-0.5: count the authority-fence denial for /metrics.
-                    svc.app
-                        .observability
-                        .fleet_metrics
-                        .record_gate_denial(crate::metrics::GateDenialReason::HaFenced);
-                })?;
+            // #793 F7: the denial is counted INSIDE assert_actuator_epoch_or_demote
+            // with the correct label (`ha_fenced` for a real supersession vs
+            // `ha_store_unavailable` for an unreadable epoch) — the caller no
+            // longer records here, so a flapping DB can't inflate `ha_fenced`.
+            assert_actuator_epoch_or_demote(&svc, "POST", "/actuator/motion/command").await?;
         }
         // Other mutations. UNLIKE the actuator + top-tier writes
         // (`save_federated_report_chained`, `record_key_rotation`), the ordinary

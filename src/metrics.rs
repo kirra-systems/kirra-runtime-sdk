@@ -25,10 +25,57 @@ pub enum GateDenialReason {
     /// Fleet posture is `Degraded` and the command is a write that is not
     /// the decel-gated `ActuatorMotion` deferral (ADR-0011 Option A).
     DegradedWriteDenied,
-    /// The HA authority fence rejected a mutation: this instance's held
-    /// epoch is stale (another instance promoted) or actuator authority
-    /// could not be verified — self-demote + deny.
+    /// The HA authority fence rejected a mutation because this instance's
+    /// held epoch is STALE (another instance legitimately promoted) or it is
+    /// not Active — a genuine split-brain-prevention fence. An alert on
+    /// `ha_fenced > 0` is a real "two writers contended" signal.
     HaFenced,
+    /// #793 F7 — the HA actuator fence could not be EVALUATED because the
+    /// durable epoch was unreadable (SQLite busy / store failure), NOT because
+    /// this instance was superseded. Split from `HaFenced` so a flapping DB
+    /// does not fire the split-brain alert: this is a store-availability
+    /// signal, still fail-closed (the command is rejected + self-demote), but
+    /// operationally distinct from a real epoch supersession.
+    HaStoreUnavailable,
+}
+
+/// #793 F8 — why the posture-routing gate's effective posture is the
+/// fail-closed synthetic `LockedOut` (or that it is a live verdict). Mirrors
+/// the `Option<LockoutReason>` the silent snapshot resolver returns, collapsed
+/// to a BOUNDED Prometheus label so `/metrics` can distinguish a stale cache
+/// from an empty (cold-standby) one from a poisoned lock — the prior single
+/// `posture_cache_stale` bit read `1` for all three, hiding the cause during
+/// an incident. `Live` = a real DAG verdict (not fail-closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostureStaleReason {
+    /// The effective posture is a live DAG verdict (cache fresh) — not stale.
+    Live,
+    /// Cache entry aged past its TTL — stale evidence, fail closed.
+    Stale,
+    /// Cache held `None` (cold start / healthy PassiveStandby) — fail closed.
+    Empty,
+    /// Cache lock was poisoned (a panic held it) — no evidence, fail closed.
+    Poisoned,
+}
+
+impl PostureStaleReason {
+    /// True when the posture is fail-closed synthetic (any non-`Live` reason).
+    #[must_use]
+    pub fn is_stale(self) -> bool {
+        !matches!(self, Self::Live)
+    }
+
+    /// The stable Prometheus `reason` label for the fail-closed states. `Live`
+    /// has no fail-closed label (all three stale series read `0`).
+    #[must_use]
+    pub fn as_label(self) -> Option<&'static str> {
+        match self {
+            Self::Live => None,
+            Self::Stale => Some("stale"),
+            Self::Empty => Some("empty"),
+            Self::Poisoned => Some("poisoned"),
+        }
+    }
 }
 
 /// Escape a string for use inside a quoted Prometheus label value
@@ -56,6 +103,7 @@ impl GateDenialReason {
             Self::LockedOut => "locked_out",
             Self::DegradedWriteDenied => "degraded_write_denied",
             Self::HaFenced => "ha_fenced",
+            Self::HaStoreUnavailable => "ha_store_unavailable",
         }
     }
 }
@@ -69,9 +117,10 @@ pub struct FleetMetricsSnapshot {
     /// The EFFECTIVE routing posture (fail-closed: a cold / stale /
     /// poisoned cache reads as `LockedOut`, exactly as the gate treats it).
     pub effective_posture: FleetPosture,
-    /// True when the effective posture is fail-closed synthetic (cold /
-    /// stale / poisoned cache) rather than a live DAG verdict.
-    pub posture_cache_stale: bool,
+    /// #793 F8 — WHY the effective posture is fail-closed synthetic (stale /
+    /// empty / poisoned) or `Live` for a real DAG verdict. Rendered as the
+    /// reason-labeled `kirra_posture_cache_stale{reason=…}` state gauge.
+    pub stale_reason: PostureStaleReason,
     /// The posture generation from the cache (0 when the cache is cold).
     pub posture_generation: u64,
     /// True when this instance is Active (accepting mutations), false for
@@ -229,8 +278,24 @@ pub struct FleetSafetyMetrics {
     denials_locked_out: AtomicU64,
     denials_degraded_write: AtomicU64,
     denials_ha_fenced: AtomicU64,
+    /// #793 F7 — actuator-fence denials where the epoch was UNREADABLE (store
+    /// unavailable), split out of `denials_ha_fenced` so a flapping DB does not
+    /// masquerade as split-brain.
+    denials_ha_store_unavailable: AtomicU64,
+    /// #793 F6 — the inner Degraded/kinematic actuator gate's `DenyBreach`
+    /// denials, by `DenyCode`. Indexed by [`DenyCode::index`]; a bounded
+    /// (fixed-cardinality) family, one atomic per code. These are the ONE write
+    /// admitted under Degraded's denials, previously metrics-invisible.
+    actuator_denials: [AtomicU64; kirra_core::kinematics_contract::DenyCode::ALL.len()],
     /// Completed standby→Active promotions (HA failover).
     ha_promotions: AtomicU64,
+    /// #793 F6 — force-promotions REFUSED by the split-brain guard (a live peer
+    /// heartbeat was advancing). An abort storm here is currently invisible; an
+    /// alert on this rising signals a misconfigured/contended failover.
+    ha_promotion_aborts: AtomicU64,
+    /// #793 F6 — total `/metrics` scrapes served (a liveness/observability
+    /// signal: a scraper that stops is detectable as this flat-lining).
+    metrics_scrapes: AtomicU64,
     /// WP-05 (MGA G-10) — end-to-end HTTP request latency on the verifier
     /// plane (recorded by the binary's request-observability middleware,
     /// OUTSIDE the pure verdict kernel; includes posture-gate denials and
@@ -275,13 +340,32 @@ impl FleetSafetyMetrics {
             GateDenialReason::LockedOut => &self.denials_locked_out,
             GateDenialReason::DegradedWriteDenied => &self.denials_degraded_write,
             GateDenialReason::HaFenced => &self.denials_ha_fenced,
+            GateDenialReason::HaStoreUnavailable => &self.denials_ha_store_unavailable,
         };
         c.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// #793 F6 — count an inner-gate `DenyBreach` actuator denial by code. The
+    /// index is bounded by `DenyCode::ALL.len()` so the label cardinality is
+    /// fixed. Called from `enforce_actuator_safety_envelope`'s DenyBreach arm.
+    pub fn record_actuator_denial(&self, code: kirra_core::kinematics_contract::DenyCode) {
+        self.actuator_denials[code.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// #793 F6 — count a `/metrics` scrape (called once per served scrape).
+    pub fn record_metrics_scrape(&self) {
+        self.metrics_scrapes.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Count a completed standby→Active promotion (HA failover).
     pub fn record_ha_promotion(&self) {
         self.ha_promotions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// #793 F6 — count a force-promotion REFUSED by the split-brain guard (a
+    /// live peer heartbeat was advancing).
+    pub fn record_ha_promotion_abort(&self) {
+        self.ha_promotion_aborts.fetch_add(1, Ordering::Relaxed);
     }
 
     #[cfg(test)]
@@ -297,6 +381,24 @@ impl FleetSafetyMetrics {
     #[cfg(test)]
     pub(crate) fn ha_promotion_count(&self) -> u64 {
         self.ha_promotions.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn actuator_denial_count(
+        &self,
+        code: kirra_core::kinematics_contract::DenyCode,
+    ) -> u64 {
+        self.actuator_denials[code.index()].load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ha_promotion_abort_count(&self) -> u64 {
+        self.ha_promotion_aborts.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn metrics_scrape_count(&self) -> u64 {
+        self.metrics_scrapes.load(Ordering::Relaxed)
     }
 
     /// Render the Prometheus text exposition (format 0.0.4) for the fleet-
@@ -328,28 +430,57 @@ impl FleetSafetyMetrics {
             };
 
         // --- gauges (scrape-time state) ---
+        // #793 F8 — posture as a Prometheus STATE-SET (state=…, exactly one
+        // series is 1), not a 0/1/2 value gauge (on which avg()/interpolation
+        // was meaningless). Fail-closed: a cold/stale/poisoned cache is
+        // locked_out here, exactly as the routing gate treats it.
         family(
             &mut out,
             "fleet_posture",
             "gauge",
-            "Effective fleet routing posture (0=Nominal 1=Degraded 2=LockedOut; \
-             fail-closed: a cold/stale/poisoned posture cache reads as LockedOut)",
-            &[(
-                "",
-                match snap.effective_posture {
-                    FleetPosture::Nominal => 0,
-                    FleetPosture::Degraded => 1,
-                    FleetPosture::LockedOut => 2,
-                },
-            )],
+            "Effective fleet routing posture as a state-set \
+             (state=nominal|degraded|locked_out; exactly one series is 1; \
+             fail-closed: a cold/stale/poisoned posture cache reads as locked_out)",
+            &[
+                (
+                    "state=\"nominal\"",
+                    u64::from(matches!(snap.effective_posture, FleetPosture::Nominal)),
+                ),
+                (
+                    "state=\"degraded\"",
+                    u64::from(matches!(snap.effective_posture, FleetPosture::Degraded)),
+                ),
+                (
+                    "state=\"locked_out\"",
+                    u64::from(matches!(snap.effective_posture, FleetPosture::LockedOut)),
+                ),
+            ],
         );
+        // #793 F8 — the fail-closed CAUSE, labeled (reason=stale|empty|poisoned;
+        // the active cause is 1, all 0 when live). Prior single bit read 1 for
+        // all three, so an alert could not tell a stale cache from an empty
+        // (cold-standby) one from a poisoned lock. `sum()` > 0 == fail-closed.
         family(
             &mut out,
             "posture_cache_stale",
             "gauge",
-            "1 when the effective posture is the fail-closed synthetic LockedOut \
-             (cold/stale/poisoned posture cache) rather than a live DAG verdict",
-            &[("", u64::from(snap.posture_cache_stale))],
+            "Effective posture is fail-closed synthetic (not a live DAG verdict), \
+             labeled by cause (reason=stale|empty|poisoned; the active cause is 1, \
+             all 0 when live; sum()>0 means fail-closed)",
+            &[
+                (
+                    "reason=\"stale\"",
+                    u64::from(matches!(snap.stale_reason, PostureStaleReason::Stale)),
+                ),
+                (
+                    "reason=\"empty\"",
+                    u64::from(matches!(snap.stale_reason, PostureStaleReason::Empty)),
+                ),
+                (
+                    "reason=\"poisoned\"",
+                    u64::from(matches!(snap.stale_reason, PostureStaleReason::Poisoned)),
+                ),
+            ],
         );
         family(
             &mut out,
@@ -419,6 +550,10 @@ impl FleetSafetyMetrics {
                     "reason=\"ha_fenced\"",
                     self.denials_ha_fenced.load(Ordering::Relaxed),
                 ),
+                (
+                    "reason=\"ha_store_unavailable\"",
+                    self.denials_ha_store_unavailable.load(Ordering::Relaxed),
+                ),
             ],
         );
         family(
@@ -428,6 +563,51 @@ impl FleetSafetyMetrics {
             "Completed standby-to-Active promotions (HA failover) performed by this instance",
             &[("", self.ha_promotions.load(Ordering::Relaxed))],
         );
+        // #793 F6 — force-promotion aborts (split-brain guard refused over a
+        // live peer). An abort storm was previously invisible.
+        family(
+            &mut out,
+            "ha_promotion_aborts_total",
+            "counter",
+            "Force-promotions refused by the split-brain guard because a peer \
+             heartbeat was actively advancing (#1099) — an abort storm here \
+             signals a misconfigured/contended failover",
+            &[("", self.ha_promotion_aborts.load(Ordering::Relaxed))],
+        );
+        // #793 F6 — total scrapes served (a scraper that stops flat-lines this).
+        family(
+            &mut out,
+            "metrics_scrapes_total",
+            "counter",
+            "Total /metrics scrapes served by this instance",
+            &[("", self.metrics_scrapes.load(Ordering::Relaxed))],
+        );
+        // #793 F6 — the inner Degraded/kinematic actuator gate's DenyBreach
+        // denials by DenyCode. A bounded, fixed-cardinality family: one series
+        // per code (0 until it first fires), so the ONE write admitted under
+        // Degraded no longer produces unobservable denials.
+        {
+            use kirra_core::kinematics_contract::DenyCode;
+            let mut samples: Vec<(String, u64)> = Vec::with_capacity(DenyCode::ALL.len());
+            for code in DenyCode::ALL {
+                samples.push((
+                    format!("code=\"{}\"", code.reason()),
+                    self.actuator_denials[code.index()].load(Ordering::Relaxed),
+                ));
+            }
+            let _ = writeln!(
+                out,
+                "# HELP kirra_actuator_denials_total Inadmissible actuator commands rejected by \
+                 the kinematic safety gate (enforce_actuator_safety_envelope DenyBreach) by DenyCode"
+            );
+            let _ = writeln!(out, "# TYPE kirra_actuator_denials_total counter");
+            for (labels, val) in &samples {
+                let _ = writeln!(
+                    out,
+                    "kirra_actuator_denials_total{{node_id=\"{node_id}\",{labels}}} {val}"
+                );
+            }
+        }
 
         // --- drop / write-failure counters already accumulated on AppState ---
         family(
@@ -697,7 +877,7 @@ mod latency_histogram_tests {
         m.actuator_envelope_latency.record_micros(200);
         let snap = FleetMetricsSnapshot {
             effective_posture: FleetPosture::Nominal,
-            posture_cache_stale: false,
+            stale_reason: PostureStaleReason::Live,
             posture_generation: 1,
             mode_active: true,
             audit_write_drops: 0,
@@ -730,7 +910,11 @@ mod fleet_metrics_tests {
     fn snap(posture: FleetPosture, stale: bool) -> FleetMetricsSnapshot {
         FleetMetricsSnapshot {
             effective_posture: posture,
-            posture_cache_stale: stale,
+            stale_reason: if stale {
+                PostureStaleReason::Stale
+            } else {
+                PostureStaleReason::Live
+            },
             posture_generation: 7,
             mode_active: true,
             audit_write_drops: 11,
@@ -755,6 +939,9 @@ mod fleet_metrics_tests {
             "posture_transitions_total",
             "gate_denials_total",
             "ha_promotions_total",
+            "ha_promotion_aborts_total",
+            "metrics_scrapes_total",
+            "actuator_denials_total",
             "audit_write_drops_total",
             "capture_drops_total",
             "post_incident_write_failures_total",
@@ -776,23 +963,152 @@ mod fleet_metrics_tests {
         }
     }
 
-    /// The posture gauge encodes 0/1/2 and the stale flag is independent.
+    /// #793 F8 — posture is a state-set: exactly one `state=…` series is 1 for
+    /// the effective posture, the others 0.
     #[test]
-    fn posture_gauge_encodes_the_fail_closed_mapping() {
+    fn posture_state_set_marks_exactly_one_state() {
         let m = FleetSafetyMetrics::new();
-        for (posture, code) in [
-            (FleetPosture::Nominal, 0),
-            (FleetPosture::Degraded, 1),
-            (FleetPosture::LockedOut, 2),
+        for (posture, on, off1, off2) in [
+            (FleetPosture::Nominal, "nominal", "degraded", "locked_out"),
+            (FleetPosture::Degraded, "degraded", "nominal", "locked_out"),
+            (FleetPosture::LockedOut, "locked_out", "nominal", "degraded"),
         ] {
             let text = m.format_prometheus("n", &snap(posture, false));
             assert!(
-                text.contains(&format!("kirra_fleet_posture{{node_id=\"n\"}} {code}\n")),
-                "posture {posture:?} must encode as {code}:\n{text}"
+                text.contains(&format!(
+                    "kirra_fleet_posture{{node_id=\"n\",state=\"{on}\"}} 1\n"
+                )),
+                "posture {posture:?}: state={on} must be 1:\n{text}"
+            );
+            for off in [off1, off2] {
+                assert!(
+                    text.contains(&format!(
+                        "kirra_fleet_posture{{node_id=\"n\",state=\"{off}\"}} 0\n"
+                    )),
+                    "posture {posture:?}: state={off} must be 0:\n{text}"
+                );
+            }
+            // No legacy value-encoded gauge survives (avg()/interpolation trap).
+            assert!(
+                !text.contains("kirra_fleet_posture{node_id=\"n\"} "),
+                "the value-encoded posture gauge must be gone:\n{text}"
             );
         }
-        let stale = m.format_prometheus("n", &snap(FleetPosture::LockedOut, true));
-        assert!(stale.contains("kirra_posture_cache_stale{node_id=\"n\"} 1\n"));
+    }
+
+    /// #793 F8 — the stale gauge is labeled by CAUSE; the active reason is 1,
+    /// all reasons 0 when the posture is live.
+    #[test]
+    fn posture_cache_stale_is_labeled_by_cause() {
+        let m = FleetSafetyMetrics::new();
+        for (reason, label) in [
+            (PostureStaleReason::Stale, "stale"),
+            (PostureStaleReason::Empty, "empty"),
+            (PostureStaleReason::Poisoned, "poisoned"),
+        ] {
+            let mut s = snap(FleetPosture::LockedOut, true);
+            s.stale_reason = reason;
+            let text = m.format_prometheus("n", &s);
+            assert!(
+                text.contains(&format!(
+                    "kirra_posture_cache_stale{{node_id=\"n\",reason=\"{label}\"}} 1\n"
+                )),
+                "reason {label} must be 1:\n{text}"
+            );
+        }
+        // Live → every stale cause reads 0 (sum() == 0 → not fail-closed).
+        let live = m.format_prometheus("n", &snap(FleetPosture::Nominal, false));
+        for label in ["stale", "empty", "poisoned"] {
+            assert!(
+                live.contains(&format!(
+                    "kirra_posture_cache_stale{{node_id=\"n\",reason=\"{label}\"}} 0\n"
+                )),
+                "live: reason {label} must be 0:\n{live}"
+            );
+        }
+    }
+
+    /// #793 F7 — a store-unavailable actuator fence is a DISTINCT label from a
+    /// real split-brain `ha_fenced`, so a flapping DB does not fire that alert.
+    #[test]
+    fn ha_store_unavailable_is_a_distinct_denial_label() {
+        assert_eq!(
+            GateDenialReason::HaStoreUnavailable.as_label(),
+            "ha_store_unavailable"
+        );
+        assert_ne!(
+            GateDenialReason::HaFenced.as_label(),
+            GateDenialReason::HaStoreUnavailable.as_label()
+        );
+        let m = FleetSafetyMetrics::new();
+        m.record_gate_denial(GateDenialReason::HaStoreUnavailable);
+        m.record_gate_denial(GateDenialReason::HaFenced);
+        let text = m.format_prometheus("n", &snap(FleetPosture::Nominal, false));
+        assert!(
+            text.contains(
+                "kirra_gate_denials_total{node_id=\"n\",reason=\"ha_store_unavailable\"} 1\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("kirra_gate_denials_total{node_id=\"n\",reason=\"ha_fenced\"} 1\n"),
+            "{text}"
+        );
+    }
+
+    /// #793 F6 — the inner actuator gate's DenyBreach denials are metric-visible
+    /// per DenyCode; every code exposes a series (0 until it fires), and a
+    /// recorded denial lands on exactly its code.
+    #[test]
+    fn actuator_denials_are_visible_per_deny_code() {
+        use kirra_core::kinematics_contract::DenyCode;
+        let m = FleetSafetyMetrics::new();
+        m.record_actuator_denial(DenyCode::DegradedSpeedIncreaseDenied);
+        m.record_actuator_denial(DenyCode::DegradedSpeedIncreaseDenied);
+        m.record_actuator_denial(DenyCode::DegradedReinitiationDenied);
+        assert_eq!(
+            m.actuator_denial_count(DenyCode::DegradedSpeedIncreaseDenied),
+            2
+        );
+        assert_eq!(
+            m.actuator_denial_count(DenyCode::DegradedReinitiationDenied),
+            1
+        );
+        assert_eq!(m.actuator_denial_count(DenyCode::NanInfLinearVelocity), 0);
+
+        let text = m.format_prometheus("n", &snap(FleetPosture::Nominal, false));
+        // Every code exposes a series (bounded cardinality, 0 until fired).
+        for code in DenyCode::ALL {
+            assert!(
+                text.contains(&format!(
+                    "kirra_actuator_denials_total{{node_id=\"n\",code=\"{}\"}} ",
+                    code.reason()
+                )),
+                "missing series for {}:\n{text}",
+                code.reason()
+            );
+        }
+        assert!(text.contains("kirra_actuator_denials_total{node_id=\"n\",code=\"DEGRADED_SPEED_INCREASE_DENIED\"} 2\n"), "{text}");
+    }
+
+    /// #793 F6 — scrape and promotion-abort counters are exposed and countable.
+    #[test]
+    fn scrapes_and_promotion_aborts_are_counted() {
+        let m = FleetSafetyMetrics::new();
+        m.record_metrics_scrape();
+        m.record_metrics_scrape();
+        m.record_ha_promotion_abort();
+        assert_eq!(m.metrics_scrape_count(), 2);
+        assert_eq!(m.ha_promotion_abort_count(), 1);
+        let text = m.format_prometheus("n", &snap(FleetPosture::Nominal, false));
+        assert!(
+            text.contains("kirra_metrics_scrapes_total{node_id=\"n\"} 2\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("kirra_ha_promotion_aborts_total{node_id=\"n\"} 1\n"),
+            "{text}"
+        );
     }
 
     /// Recorded events land on exactly the right labeled sample.
@@ -840,8 +1156,12 @@ mod fleet_metrics_tests {
             "bad\"id\\with\nnewline",
             &snap(FleetPosture::Nominal, false),
         );
+        // #793 F8: fleet_posture is a state-set — the escaped node_id must
+        // appear on a labeled series (here the degraded state, 0 for Nominal).
         assert!(
-            text.contains("kirra_fleet_posture{node_id=\"bad\\\"id\\\\with\\nnewline\"} 0\n"),
+            text.contains(
+                "kirra_fleet_posture{node_id=\"bad\\\"id\\\\with\\nnewline\",state=\"degraded\"} 0\n"
+            ),
             "node_id must be escaped for the quoted label value; got:\n{text}"
         );
         // No raw newline may survive inside a sample line (it would split
@@ -926,5 +1246,9 @@ mod fleet_metrics_tests {
             "degraded_write_denied"
         );
         assert_eq!(GateDenialReason::HaFenced.as_label(), "ha_fenced");
+        assert_eq!(
+            GateDenialReason::HaStoreUnavailable.as_label(),
+            "ha_store_unavailable"
+        );
     }
 }

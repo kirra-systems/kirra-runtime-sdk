@@ -324,6 +324,49 @@ impl DenyCode {
             Self::TrajectoryHorizonExceeded   => "TRAJECTORY_HORIZON_EXCEEDED",
         }
     }
+
+    /// Every `DenyCode`, in declaration (and bincode-wire-tag) order. A single
+    /// source of truth for bounded, allocation-free iteration — the `/metrics`
+    /// `kirra_actuator_denials_total{code=…}` family (#793 F6) emits one line
+    /// per entry so a code that has never fired still exposes a `0` series, and
+    /// `index()` maps a code to its slot in a fixed-size counter array. Adding a
+    /// variant is a compile error here (the array length) until it is listed —
+    /// the same "bounded label set, no free-form strings" discipline the
+    /// `GateDenialReason` family follows.
+    pub const ALL: [DenyCode; 12] = [
+        Self::NanInfLinearVelocity,
+        Self::NanInfCurrentVelocity,
+        Self::NanInfSteeringAngle,
+        Self::NanInfCurrentSteering,
+        Self::NanInfDeltaTime,
+        Self::InvalidTimeDelta,
+        Self::AssetLockedOut,
+        Self::DrivableSpaceDeparture,
+        Self::DegradedReinitiationDenied,
+        Self::DegradedSpeedIncreaseDenied,
+        Self::FrameIntegrityUntrusted,
+        Self::TrajectoryHorizonExceeded,
+    ];
+
+    /// This code's stable slot in [`ALL`](Self::ALL) (equivalently its bincode
+    /// wire tag) — the index into a `[_; DenyCode::ALL.len()]` counter array.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::NanInfLinearVelocity => 0,
+            Self::NanInfCurrentVelocity => 1,
+            Self::NanInfSteeringAngle => 2,
+            Self::NanInfCurrentSteering => 3,
+            Self::NanInfDeltaTime => 4,
+            Self::InvalidTimeDelta => 5,
+            Self::AssetLockedOut => 6,
+            Self::DrivableSpaceDeparture => 7,
+            Self::DegradedReinitiationDenied => 8,
+            Self::DegradedSpeedIncreaseDenied => 9,
+            Self::FrameIntegrityUntrusted => 10,
+            Self::TrajectoryHorizonExceeded => 11,
+        }
+    }
 }
 
 impl std::fmt::Display for DenyCode {

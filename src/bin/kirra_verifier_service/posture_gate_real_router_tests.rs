@@ -848,12 +848,13 @@ async fn metrics_scrape_returns_fleet_safety_series_under_lockedout() {
         );
     }
 
-    // The live LockedOut posture reads 2 on the gauge (fresh cache → not
-    // the stale-synthetic flavor).
+    // #793 F8: posture is a state-set — the LockedOut state series reads 1
+    // (fresh cache → the live locked_out state, not a stale-synthetic flavor).
     assert!(
-        text.lines()
-            .any(|l| l.starts_with("kirra_fleet_posture{") && l.ends_with(" 2")),
-        "the posture gauge must read 2 (LockedOut); got:\n{text}"
+        text.lines().any(|l| l.starts_with("kirra_fleet_posture{")
+            && l.contains("state=\"locked_out\"")
+            && l.ends_with(" 1")),
+        "the posture state-set must mark state=locked_out as 1; got:\n{text}"
     );
     // The denied read above is visible on the labeled denial counter.
     assert!(
