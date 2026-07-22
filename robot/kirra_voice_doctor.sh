@@ -103,6 +103,55 @@ else
   warn "Jetson.GPIO not importable (PTT button off; Enter-key still works)"; fix "pip install >=2.1.12 from GitHub on Super boards — §5"
 fi
 
+# 8. wake word (W1, opt-in) — only checked when enabled; off is a clean ok.
+case "$(printf '%s' "${KIRRA_WAKE_ENABLED:-}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    ok "wake word ENABLED (KIRRA_WAKE_ENABLED)"
+    # 8a. the wake STT engine (a SECOND, tiny model — not the turn STT).
+    if [ -n "${KIRRA_WAKE_STT_CMD:-}" ]; then
+      wb="$(first_tok "$KIRRA_WAKE_STT_CMD")"
+      command -v "$wb" >/dev/null 2>&1 && ok "wake STT binary: $wb" || { bad "wake STT binary not found: $wb"; fix "build whisper.cpp; use the TINY model for the listener"; }
+      wm="$(opt_val -m "$KIRRA_WAKE_STT_CMD")"
+      [ -z "$wm" ] || { [ -f "$wm" ] && ok "wake STT model: $wm" || { bad "wake STT model missing: $wm"; fix "download-ggml-model.sh tiny.en"; }; }
+    else
+      bad "KIRRA_WAKE_ENABLED is on but KIRRA_WAKE_STT_CMD unset"; fix 'set it, e.g. "whisper-cli -m models/ggml-tiny.en.bin -np -nt -f"'
+    fi
+    # 8b. phrases parse to something.
+    if python3 -c "
+import sys; sys.path.insert(0, '$(dirname "$0")')
+from wake_word import parse_phrases, DEFAULT_PHRASES
+import os
+sys.exit(0 if parse_phrases(os.environ.get('KIRRA_WAKE_PHRASES', DEFAULT_PHRASES)) else 1)" 2>/dev/null; then
+      ok "wake phrases parse (${KIRRA_WAKE_PHRASES:-hello rabbit,hey rabbit,yo rabbit})"
+    else
+      bad "KIRRA_WAKE_PHRASES parses to nothing"; fix "comma-separated phrases, e.g. \"hello rabbit,hey rabbit\""
+    fi
+    # 8c. hold-off must cover the turn recorder's -d bound (mic contention:
+    # the listener releases the device for holdoff; a short holdoff steals it
+    # back mid-turn and the turn recorder fails SILENTLY).
+    rd="$(opt_val -d "${KIRRA_RECORD_CMD:-arecord -d 4}")"
+    ho="${KIRRA_WAKE_HOLDOFF_S:-10}"
+    if [ -n "$rd" ] && awk "BEGIN{exit !($ho >= $rd + 3)}" 2>/dev/null; then
+      ok "wake holdoff ${ho}s covers the ${rd}s turn recording (+STT/TTS)"
+    else
+      warn "KIRRA_WAKE_HOLDOFF_S=${ho} may not cover the ${rd:-?}s turn recording + STT + TTS"; fix "set KIRRA_WAKE_HOLDOFF_S >= record -d + ~6"
+    fi
+    # 8d. ack cue: false fires must be AUDIBLE, not silent.
+    if [ -n "${KIRRA_WAKE_ACK_CMD:-}" ] || [ -n "${KIRRA_TTS_CMD:-}" ]; then
+      ok "wake ack cue available (KIRRA_WAKE_ACK_CMD or TTS \"Yes?\")"
+    else
+      warn "no KIRRA_WAKE_ACK_CMD and no KIRRA_TTS_CMD — wakes (incl. FALSE fires) will be silent"
+    fi
+    # 8e. state-file directory writable (nap/mute controls).
+    wsf="${KIRRA_WAKE_STATE_FILE:-/tmp/kirra_rabbit_wake.state}"
+    wsd="$(dirname "$wsf")"
+    [ -d "$wsd" ] && [ -w "$wsd" ] && ok "wake state dir writable: $wsd" || { warn "wake state dir not writable: $wsd (nap/mute controls will no-op)"; fix "set KIRRA_WAKE_STATE_FILE to a writable path"; }
+    ;;
+  *)
+    ok "wake word off (KIRRA_WAKE_ENABLED unset — PTT/Enter are the triggers)"
+    ;;
+esac
+
 # summary + exit code
 if [ "$QUIET" = 1 ]; then
   [ "$FAIL" -eq 0 ] && echo "OK" || echo "FAIL: $FIRST_FAIL"

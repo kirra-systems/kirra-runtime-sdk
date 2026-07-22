@@ -74,6 +74,22 @@ counts + at most three plain issue sentences, never paths or details.
 | G2 | Self-check requested, problems found | **LIVE** same path | "Diagnostics complete. 1 problem found and 2 warnings. The devices module has a problem: motor serial. …" |
 | G3 | The diagnostics runner itself errored | **LIVE** `rabbit_diag.run_and_summarize` fallback | "I couldn't complete my self-check — the diagnostics runner hit an internal error. Try kirra doctor from a terminal." |
 
+### W. Wake word (W1 — "hello rabbit" / "hey rabbit" / "yo rabbit")
+
+The wake ack is deliberately SHORT (it gates the turn's 4 s record window —
+a long line would eat the operator's speaking slot), and it fires on EVERY
+wake so a false fire is heard, never silent. The nap/mute confirmations must
+state the resume asymmetry: a muted listener cannot hear "start listening" —
+the button (or the nap timer) is the way back.
+
+| # | Situation | Wiring | Line |
+|---|---|---|---|
+| W1 | Wake phrase heard, turn window opening | **LIVE** `wake_word.py` `_ack` (`KIRRA_WAKE_ACK_CMD`, else TTS) | "Yes?" |
+| W2 | "Rabbit, go to sleep" (nap `KIRRA_WAKE_NAP_MIN` minutes) | **LIVE** `rabbit_wake.handle` | "Going quiet{name} — I'll stop listening for about 30 minutes. The button still works if you need me." |
+| W3 | "Stop listening" (mute until explicitly resumed) | **LIVE** `rabbit_wake.handle` | "Ears off{name}. I won't listen for my name until you press the button and ask me to start listening again." |
+| W4 | "Start listening" (via PTT/Enter — the muted listener can't hear it) | **LIVE** `rabbit_wake.handle` | "I'm listening again{name}." |
+| W5 | Wake control state file unwritable | **LIVE** `rabbit_wake.handle` fallback | "I couldn't reach my wake control — the listening state is unchanged. Check the wake state file from a terminal." |
+
 ### B. Driving (you gave a command)
 
 | # | Trigger | Status | Line |

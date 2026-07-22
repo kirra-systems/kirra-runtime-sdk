@@ -128,6 +128,53 @@ Concrete, replayable setup for this R2: `R2_VOICE_AUDIO_SETUP.md`.
 > Losing the button = you can't talk to it; losing the e-stop = you can't stop it.
 > Different circuits, different criticality — never wire one as the other.
 
+## 3b. Wake word (W1, opt-in) — "hello rabbit" as a third trigger source
+
+PTT **stays the recommended default**; the wake word is an opt-in *trigger
+producer* honoring the same one-newline contract, so it drops in with zero
+change to the pipeline:
+
+```bash
+python3 robot/wake_word.py | ./robot/rabbit_voice.sh                              # wake word only
+{ python3 robot/ptt_button.py & python3 robot/wake_word.py; } | ./robot/rabbit_voice.sh   # both
+```
+
+As a service: `kirra-rabbit-voice.service` (staged by `install_robot_units.sh`,
+enable deliberately). Master gate `KIRRA_WAKE_ENABLED` in `robot.env`; the
+listener exits cleanly when unset. Full env set: `robot/install/rabbit.env.example`.
+
+**Detection** (no LLM anywhere): `arecord` raw stream → in-memory ring buffer →
+**RMS energy pre-gate** (a silent room runs zero inference) → whisper.cpp
+**tiny** (`KIRRA_WAKE_STT_CMD` — a second, smaller model than the turn STT) on a
+~2 s tmpfs window → a **pure token matcher** (ordered-adjacent, one-edit
+tolerance on long tokens only: "hallo rabbits" wakes; a stray "yo" or "hey the
+rabbit robot" never does; host-tested in `robot/wake_word_test.py`). On a hit:
+ack cue ("Yes?" through TTS by default — a **false fire is heard, not silent**),
+the mic is **released** for `KIRRA_WAKE_HOLDOFF_S` so the turn recorder can
+claim the device, then a cooldown.
+
+**How this answers §3's three objections** (which still stand for *naive*
+always-listening):
+- *Bounds when the LLM runs* — the LLM still runs at most once per wake, exactly
+  as once per press; detection is energy-gated tiny-whisper + a regex-class
+  matcher, and idle ≈ zero inference.
+- *Mishears* — a false wake is exactly the phantom-PTT-press class (one bounded
+  clip → garbage transcript → no intent → no motion), made audible by the ack
+  cue. The wake word adds **zero actuation authority**.
+- *Hot mic* — transcribe-and-discard: fixed in-memory window, tmpfs wav deleted
+  every cycle, no audio persisted, no transcripts logged (only wake hits).
+  Operator controls: **"rabbit, go to sleep"** (nap, `KIRRA_WAKE_NAP_MIN`) /
+  **"stop listening"** (mute) — deterministic matchers in `rabbit_wake.py`,
+  never LLM-decided; while suspended the capture process is closed entirely.
+  Optional `KIRRA_WAKE_LED_PIN` lights while the mic is open. Note the
+  asymmetry: a muted listener can't hear "start listening" — resume via the
+  button/Enter or the nap timer.
+
+Before enabling on battery, measure the duty-cycled tiny.en cost (§5 pattern,
+`tegrastats` A/B with the listener on/off). If it's too hot, the recorded
+fallback is swapping the producer for a dedicated wake engine (openWakeWord) —
+the trigger contract means that changes one script and nothing else.
+
 ---
 
 ## 4. 🔴 Audio from a systemd service (read this before enabling the units)
