@@ -635,7 +635,7 @@ mod epoch_fenced_write_tests {
             .expect_err("superseded dep write rejected");
         assert!(superseded(&err), "expected EpochSuperseded, got {err:?}");
         assert!(
-            store.load_dependencies().unwrap().get("c").is_none(),
+            !store.load_dependencies().unwrap().contains_key("c"),
             "a fenced-out dependency write must leave NO edges (fail-closed)"
         );
     }

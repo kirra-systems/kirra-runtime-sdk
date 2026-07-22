@@ -1697,7 +1697,6 @@ impl LateralBump {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::*;
     use kirra_trajectory::config::VehicleConfig;
     use kirra_trajectory::corridor::MockCorridorSource;
     use kirra_trajectory::validate_trajectory_slow;

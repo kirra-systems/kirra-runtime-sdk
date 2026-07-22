@@ -348,7 +348,7 @@ mod promotion;
 pub use heartbeat::spawn_heartbeat_writer;
 pub(crate) use heartbeat::{promotion_decision, HeartbeatFreshness};
 #[cfg(test)]
-pub(crate) use promotion::{apply_post_promotion, perform_promotion, promotion_loop};
+pub(crate) use promotion::{apply_post_promotion, perform_promotion};
 pub use promotion::{spawn_promotion_monitor, OnPromote};
 
 #[cfg(test)]

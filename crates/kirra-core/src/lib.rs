@@ -32,8 +32,11 @@ pub mod kinematics_contract;
 /// #793 F6 — non-frozen extensions to `DenyCode` (`ALL` / `index`) used by the
 /// `/metrics` actuator-denial family. Kept OUT of the byte-frozen
 /// `kinematics_contract` talisman (blob `ed00f4da…`) so the pin holds; see the
-/// module doc.
-pub mod deny_code_ext;
+/// module doc. PRIVATE `mod` (not `pub`): it only carries an inherent
+/// `impl DenyCode` — the methods are public via the (public) type, callable
+/// cross-crate as `DenyCode::ALL` / `.index()` without exposing a module path,
+/// so it is not an orphan `pub mod`.
+mod deny_code_ext;
 
 /// L3.3 — the governor CONSUMER of the frozen Clause-2 cross-partition contract
 /// (`consume_and_bound` / `GovernorVerdict`): read a coherent snapshot →

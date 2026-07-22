@@ -1034,10 +1034,12 @@ mod tests {
         //     slot's max-age the fast path already fails closed on the slot — the
         //     tighter of the two bounds wins. (Guarded below so this stays true if
         //     the constants are ever re-tuned.) ---
-        assert!(
-            DEFAULT_MAX_AGE_MS < SUBSCRIPTION_STALENESS_TIMEOUT_MS,
-            "this drill assumes the slot budget is the tighter of the two bounds"
-        );
+        const {
+            assert!(
+                DEFAULT_MAX_AGE_MS < SUBSCRIPTION_STALENESS_TIMEOUT_MS,
+                "this drill assumes the slot budget is the tighter of the two bounds"
+            );
+        }
         let slot_aged = t0 + DEFAULT_MAX_AGE_MS + 1;
         assert_eq!(
             state.current_verdict("av_01", slot_aged),
