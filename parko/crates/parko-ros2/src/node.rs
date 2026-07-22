@@ -32,6 +32,7 @@ use crate::clearance_gate::{
     run_pipeline_tick_with_clearance, ContactCell, ImpactInputs, NodeClearance,
 };
 use crate::command_mapping::OutgoingTwist;
+use crate::commit_zone_producer::{produce_commit_zone_scene, CommitZoneEvidence, EgoPose};
 use crate::config::ParkoNodeConfig;
 use crate::containment_gate::{apply_containment_gate, CONTAINMENT_HORIZON_S, CONTAINMENT_STEP_S};
 use crate::imu_shim::imu_msg_to_sample;
@@ -293,6 +294,39 @@ where
         Arc::new(StdMutex::new(None));
     let latest_commit_zone: Arc<StdMutex<Option<StampedScene<CommitZoneScene>>>> =
         Arc::new(StdMutex::new(None));
+
+    // #1124 — ego-pose channel (`nav_msgs/Odometry`, map frame) anchoring the
+    // map-anchored commit-zone producer. ARRIVAL-stamped (the same convention
+    // as the IMU arrival watchdog and the Taj track stamp — one clock, no
+    // producer-clock skew on the freshness gate; producer-side latency rides
+    // AOU-LOCALIZATION-001's timing half). Subscribed whenever a pose topic is
+    // configured, so future map-anchored producers share the channel.
+    let latest_pose: Arc<StdMutex<Option<StampedScene<EgoPose>>>> = Arc::new(StdMutex::new(None));
+    if let Some(topic) = &config.pose_topic {
+        let pose_stream =
+            node.subscribe::<r2r::nav_msgs::msg::Odometry>(topic, r2r::QosProfile::default())?;
+        let cell = Arc::clone(&latest_pose);
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            let mut s = pose_stream;
+            while let Some(msg) = s.next().await {
+                let p = &msg.pose.pose.position;
+                let sample = StampedScene {
+                    scene: EgoPose { x_m: p.x, y_m: p.y },
+                    stamp_ms: current_time_ms(),
+                };
+                if let Ok(mut g) = cell.lock() {
+                    *g = Some(sample);
+                }
+            }
+            tracing::warn!(
+                "parko-ros2: pose stream closed — the commit-zone producer's anchor goes stale \
+                 and an armed commit-zone gate fails closed (stop)"
+            );
+        });
+        tracing::info!(topic = %topic,
+            "parko-ros2: ego-pose channel subscribed (map-anchored producer anchor, #1124)");
+    }
     // Occlusion needs the RSS params → armed only with a platform_profile
     // (same precedent as the object gate). Enabled without a profile → warn.
     let drain_occlusion_params = config
@@ -319,10 +353,24 @@ where
         );
     }
     if config.commit_zone_gate_enabled {
-        tracing::warn!(
-            "parko-ros2: WS-0.1 SG5 commit-zone gate ARMED — a missing/stale zone scene fails \
+        if config.commit_zone_producer_armed() {
+            tracing::info!(
+                zones = config
+                    .commit_zone_spec
+                    .as_ref()
+                    .map(|s| s.zones.len())
+                    .unwrap_or(0),
+                "parko-ros2: WS-0.1 SG5 commit-zone gate ARMED with the map-anchored producer \
+                 (#1124) — a missing/stale/non-finite pose anchors the map prior to Unknown → \
+                 fail-closed STOP; entry through a zone stays vetoed until clearance/exit \
+                 evidence ingestion lands (#107/#108)"
+            );
+        } else {
+            tracing::warn!(
+                "parko-ros2: WS-0.1 SG5 commit-zone gate ARMED — a missing/stale zone scene fails \
                  closed to a STOP; ensure a producer feeds the commit-zone slot"
-        );
+            );
+        }
     }
 
     // --- Drain task: consume the sensor stream, tick, publish ---------
@@ -358,6 +406,10 @@ where
     let drain_commit_zone = Arc::clone(&latest_commit_zone);
     let drain_water_armed = config.water_gate_enabled;
     let drain_commit_zone_armed = config.commit_zone_gate_enabled;
+    // #1124: the ONE producer-arming predicate (shared with the startup guard's
+    // producer-less accounting, so the two halves cannot drift).
+    let drain_commit_zone_producer = config.commit_zone_producer_armed();
+    let drain_pose = Arc::clone(&latest_pose);
 
     let drain_task = tokio::spawn(async move {
         use futures::StreamExt;
@@ -505,6 +557,36 @@ where
                 ),
                 None => outcome,
             };
+
+            // #1124 — the map-anchored commit-zone PRODUCER: derive this tick's
+            // zone scene from the static spec anchored on the latest pose, and
+            // write it into the slot the gate below reads (one path through the
+            // chain, same as an external producer would take). A missing/stale/
+            // non-finite pose yields `Unknown` (the gate vetoes — Reject from
+            // MAP ALONE). Evidence is the no-evidence instance until #107/#108
+            // ingestion lands: the derived confirmations stay false and a zone
+            // within the look-ahead vetoes (stop short) — SG5's intended
+            // fail-closed go-live behaviour.
+            if drain_commit_zone_producer {
+                if let Some(spec) = drain_config.commit_zone_spec.as_ref() {
+                    let pose_slot = drain_pose.lock().ok().and_then(|g| g.clone());
+                    let now = current_time_ms();
+                    let scene = produce_commit_zone_scene(
+                        spec,
+                        pose_slot.as_ref(),
+                        drain_config.corridor_max_age_ms,
+                        now,
+                        &drain_config.commit_zone_config,
+                        &CommitZoneEvidence::absent(outcome.twist.linear_x_mps.abs()),
+                    );
+                    if let Ok(mut g) = drain_commit_zone.lock() {
+                        *g = Some(StampedScene {
+                            scene,
+                            stamp_ms: now,
+                        });
+                    }
+                }
+            }
 
             // WS-0.1 scene-veto gates (occlusion / water / commit-zone),
             // composed after the object gate on the same publication seam via
