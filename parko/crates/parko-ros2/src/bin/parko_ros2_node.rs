@@ -227,6 +227,10 @@ fn build_loop<B>(
     inference_deadline_ms: u64,
     platform_profile: Option<&CourierPlatformProfile>,
     external_rss_gate: bool,
+    // #795 F5: whether the object gate is ARMED (scene RSS enforced at the seam)
+    // vs merely WAIVED (`external_rss_gate` true via the operator waiver only).
+    // Both are quiescent; this selects the audit label the gate-arm applies.
+    object_gate_armed: bool,
 ) -> Arc<Mutex<InferenceLoop<B>>>
 where
     B: InferenceBackend + 'static,
@@ -519,6 +523,7 @@ async fn main() {
         config.inference_deadline_ms,
         config.platform_profile.as_ref(),
         external_rss_gate,
+        object_gate_armed,
     );
 
     // M2 posture: static, defaults to Nominal. M1b's `PostureTracker`
