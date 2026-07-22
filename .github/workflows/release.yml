@@ -421,6 +421,7 @@ jobs:
     permissions:
       contents: write  # create the GitHub release
       id-token: write  # keyless cosign signing (GitHub OIDC identity)
+      attestations: write  # #798 roadmap — SLSA build-provenance attestations
     env:
       # #775 F5 — the signing job routes the tag through env (data, not
       # interpolated script), the highest-value place to close the injection
@@ -492,6 +493,24 @@ jobs:
           done
           ls -l ./*.cosign.bundle
 
+      # #798 roadmap — SLSA build-PROVENANCE for the release artifacts.
+      # `cosign sign-blob` above proves WHO signed (identity), not HOW the
+      # artifact was built; this attaches a signed SLSA provenance statement
+      # (workflow, ref, builder, materials) per artifact to the repo's
+      # attestation store, closing the tarball half of the provenance story
+      # (the container images already carry BuildKit `provenance: mode=max`,
+      # merged with #798 F6). Verify per artifact with:
+      #   gh attestation verify <artifact> --repo kirra-systems/kirra-runtime-sdk
+      # L3 (structural isolation of signing via slsa-github-generator) remains
+      # the recorded roadmap step — see SUPPLY_CHAIN_OWNER_ACTIONS.md §4.
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.cdx.json
+            dist/SHA256SUMS
+
       - name: Extract changelog for this version
         id: changelog
         run: |
@@ -543,6 +562,16 @@ jobs:
               'https://github.com/kirra-systems/kirra-runtime-sdk/.github/workflows/release.yml@refs/tags/@VERSION@' \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             <artifact>
+          ```
+
+          ### Verify build provenance (SLSA attestation)
+
+          Every artifact also carries a signed SLSA build-provenance
+          attestation (which workflow built it, from which commit, on which
+          builder) in this repository's attestation store:
+
+          ```sh
+          gh attestation verify <artifact> --repo kirra-systems/kirra-runtime-sdk
           ```
 
           The `kirra-@VERSION@-<bin>-<target-triple>.cdx.json` files are
