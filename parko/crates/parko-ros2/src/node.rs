@@ -35,9 +35,7 @@ use crate::command_mapping::OutgoingTwist;
 use crate::config::ParkoNodeConfig;
 use crate::containment_gate::{apply_containment_gate, CONTAINMENT_HORIZON_S, CONTAINMENT_STEP_S};
 use crate::imu_shim::imu_msg_to_sample;
-use crate::scene_vetoes::{
-    apply_commit_zone_gate, apply_occlusion_gate, apply_water_gate, StampedScene,
-};
+use crate::scene_vetoes::{apply_scene_gates, SceneGateChain, StampedScene};
 use crate::sensor_mapping::{ImuSample, SensorInputMapping};
 use crate::taj_corridor::{laserscan_msg_to_taj, CorridorSnapshot, EGO_REAR_COVER_M};
 use crate::taj_objects::{
@@ -340,10 +338,14 @@ where
     // footprint are configured — otherwise the slot would never be fed and the
     // gate would MRC forever. `None` → byte-identical (gate skipped).
     let drain_objects = Arc::clone(&latest_objects);
+    // #795 F3: the seam gate arms on the SHARED `object_gate_armed()` predicate
+    // (== the bin's `with_external_rss_gate` decision), so this half of the
+    // interlock cannot drift from the bin's half. `platform_profile.as_ref()`
+    // supplies the params; the filter is the one arming authority.
     let drain_object_params = config
         .platform_profile
         .as_ref()
-        .filter(|_| config.object_rss_enabled && config.lidar_topic.is_some())
+        .filter(|_| config.object_gate_armed())
         .map(courier_rss_params);
     // #309: SG6 vanished-object scene sourcing — armed under the SAME condition as
     // the bin's `with_vanished_detection` (enabled + object perception present),
@@ -505,46 +507,31 @@ where
             };
 
             // WS-0.1 scene-veto gates (occlusion / water / commit-zone),
-            // composed after the object gate on the same publication seam.
-            // Armed-when-configured; inside an armed gate a missing/stale
-            // scene fails closed (stop). The brief std-mutex locks release
-            // before any `.await`.
-            let outcome = match &drain_occlusion_params {
-                Some(params) => apply_occlusion_gate(
-                    outcome,
-                    drain_occlusion.lock().ok().and_then(|g| g.clone()).as_ref(),
-                    params,
-                    drain_config.corridor_max_age_ms,
-                    current_time_ms(),
-                ),
-                None => outcome,
-            };
-            let outcome = if drain_water_armed {
-                apply_water_gate(
-                    outcome,
-                    drain_water.lock().ok().and_then(|g| g.clone()).as_ref(),
-                    &WaterVetoConfig::default(),
-                    drain_config.corridor_max_age_ms,
-                    current_time_ms(),
-                )
-            } else {
-                outcome
-            };
-            let outcome = if drain_commit_zone_armed {
-                apply_commit_zone_gate(
-                    outcome,
-                    drain_commit_zone
-                        .lock()
-                        .ok()
-                        .and_then(|g| g.clone())
-                        .as_ref(),
-                    &CommitZoneCfg::default(),
-                    drain_config.corridor_max_age_ms,
-                    current_time_ms(),
-                )
-            } else {
-                outcome
-            };
+            // composed after the object gate on the same publication seam via
+            // the extracted, CI-tested `apply_scene_gates` (#795 F7). Armed-when-
+            // configured; inside an armed gate a missing/stale scene fails closed
+            // (stop). The brief std-mutex locks release before any `.await` (the
+            // clones are taken here, and the chain borrows them).
+            let occlusion_slot = drain_occlusion.lock().ok().and_then(|g| g.clone());
+            let water_slot = drain_water.lock().ok().and_then(|g| g.clone());
+            let commit_zone_slot = drain_commit_zone.lock().ok().and_then(|g| g.clone());
+            let water_cfg = WaterVetoConfig::default();
+            let commit_zone_cfg = CommitZoneCfg::default();
+            let outcome = apply_scene_gates(
+                outcome,
+                &SceneGateChain {
+                    occlusion_params: drain_occlusion_params.as_ref(),
+                    occlusion: occlusion_slot.as_ref(),
+                    water_armed: drain_water_armed,
+                    water: water_slot.as_ref(),
+                    water_cfg: &water_cfg,
+                    commit_zone_armed: drain_commit_zone_armed,
+                    commit_zone: commit_zone_slot.as_ref(),
+                    commit_zone_cfg: &commit_zone_cfg,
+                    max_age_ms: drain_config.corridor_max_age_ms,
+                    now_ms: current_time_ms(),
+                },
+            );
 
             // Surface the per-tick clearance delivery (a console-recorded grant
             // arriving on this node's own tick). A `NoGrant` no-op is silent.

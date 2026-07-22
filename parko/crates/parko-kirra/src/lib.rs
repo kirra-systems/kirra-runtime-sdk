@@ -402,19 +402,43 @@ pub enum RssFeed {
     NeverFed,
     /// The most recent verdict pushed via `update_rss_state`.
     Fed(RssState),
-    /// The integrator explicitly declared that scene-RSS enforcement happens
-    /// outside this governor (publication-seam gate) or was explicitly
-    /// waived. The pushed-state RSS tier does not gate.
+    /// #795 F5 — the integrator declared that scene-RSS enforcement happens
+    /// OUTSIDE this governor, at the publication seam (parko-ros2's
+    /// `apply_object_rss_gate` bounds the exact twist about to publish). The
+    /// scene RSS IS enforced, just not by this governor's pushed-state tier.
     ExternallyGated,
+    /// #795 F5 — the operator EXPLICITLY WAIVED scene RSS (no producer + an
+    /// acknowledged `PARKO_ALLOW_MOTION_WITHOUT_OBJECT_PERCEPTION`): the vehicle
+    /// drives BLIND to scene RSS. Behaviourally identical to `ExternallyGated`
+    /// (the pushed-state tier is quiescent, every other tier still enforces) —
+    /// but SAFETY-DISTINCT: "enforced elsewhere" vs "not enforced at all". Split
+    /// out so an auditor / the divergence sink can tell them apart (the prior
+    /// single `ExternallyGated` conflated the two, hiding a driving-blind fleet).
+    OperatorWaived,
 }
 
 impl RssFeed {
     /// The RSS-safe verdict this feed contributes to the three-tier gate.
+    /// `OperatorWaived` is quiescent EXACTLY like `ExternallyGated` — the split
+    /// is for observability, never for the gate verdict.
     fn rss_safe(&self) -> bool {
         match self {
             RssFeed::NeverFed => false,
             RssFeed::Fed(state) => state.safe,
-            RssFeed::ExternallyGated => true,
+            RssFeed::ExternallyGated | RssFeed::OperatorWaived => true,
+        }
+    }
+
+    /// #795 F5 — a stable observability label for the feed state, for the
+    /// divergence sink / audit records so "waived (driving blind)" is never
+    /// indistinguishable from "enforced elsewhere".
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            RssFeed::NeverFed => "never_fed",
+            RssFeed::Fed(_) => "fed",
+            RssFeed::ExternallyGated => "externally_gated",
+            RssFeed::OperatorWaived => "operator_waived",
         }
     }
 }
@@ -559,6 +583,26 @@ impl KirraGovernor {
     pub fn with_external_rss_gate(mut self) -> Self {
         self.rss_feed = RssFeed::ExternallyGated;
         self
+    }
+
+    /// #795 F5 — EXPLICITLY declare that scene RSS is WAIVED (the operator
+    /// accepted motion with no scene-RSS producer; the vehicle drives BLIND to
+    /// scene RSS). Behaviourally identical to [`with_external_rss_gate`](Self::with_external_rss_gate)
+    /// — the pushed-state RSS tier is quiescent and every other tier still
+    /// enforces — but recorded as [`RssFeed::OperatorWaived`] so an auditor can
+    /// tell "waived" from "enforced elsewhere". Use THIS for the acknowledged-
+    /// waiver path and `with_external_rss_gate` for the seam-enforced path.
+    #[must_use]
+    pub fn with_operator_waived(mut self) -> Self {
+        self.rss_feed = RssFeed::OperatorWaived;
+        self
+    }
+
+    /// #795 F5 — the current RSS-feed observability label (`never_fed` / `fed` /
+    /// `externally_gated` / `operator_waived`) for logging + audit records.
+    #[must_use]
+    pub fn rss_feed_label(&self) -> &'static str {
+        self.rss_feed.label()
     }
 
     /// Construct a governor that uses the nominal profile regardless of
@@ -1492,6 +1536,31 @@ mod tests {
             matches!(action, EnforcementAction::Allow),
             "externally-gated governor passes an in-envelope command, got {action:?}"
         );
+    }
+
+    /// #795 F5 — the operator-WAIVED opt-out is behaviourally identical to the
+    /// externally-gated one (both quiescent, envelope pass-through) but carries
+    /// a DISTINCT audit label, so "driving blind" is never indistinguishable
+    /// from "enforced elsewhere".
+    #[test]
+    fn operator_waived_is_quiescent_like_external_but_labeled_distinctly() {
+        let waived = KirraGovernor::new().with_operator_waived();
+        let gated = KirraGovernor::new().with_external_rss_gate();
+        let prev = cmd(3.0);
+        // Same gate behaviour: an in-envelope command passes under both.
+        assert!(matches!(
+            waived.evaluate(&cmd(3.0), Some(&prev), 0.05, SafetyPosture::Nominal),
+            EnforcementAction::Allow
+        ));
+        assert!(matches!(
+            gated.evaluate(&cmd(3.0), Some(&prev), 0.05, SafetyPosture::Nominal),
+            EnforcementAction::Allow
+        ));
+        // But the observability label distinguishes them (the F5 payoff).
+        assert_eq!(waived.rss_feed_label(), "operator_waived");
+        assert_eq!(gated.rss_feed_label(), "externally_gated");
+        assert_ne!(waived.rss_feed_label(), gated.rss_feed_label());
+        assert_eq!(KirraGovernor::new().rss_feed_label(), "never_fed");
     }
 
     /// Feeding a safe verdict exits NeverFed; feeding an unsafe one after a

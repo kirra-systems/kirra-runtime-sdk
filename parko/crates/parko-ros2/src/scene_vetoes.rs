@@ -180,6 +180,69 @@ pub fn apply_commit_zone_gate(
     }
 }
 
+/// #795 F7 — the resolved inputs to the per-tick scene-veto chain. `Some(params)`
+/// / `*_armed = true` ARMS a gate; the borrowed scene is that gate's latest
+/// slot (already locked out of its mutex by the caller). Grouped into a struct
+/// so [`apply_scene_gates`] has a small signature and the drain loop just fills
+/// this in.
+pub struct SceneGateChain<'a> {
+    /// `Some` = occlusion gate armed; the RSS bound for the occlusion cap.
+    pub occlusion_params: Option<&'a RssParams>,
+    pub occlusion: Option<&'a StampedScene<OcclusionScene>>,
+    pub water_armed: bool,
+    pub water: Option<&'a StampedScene<WaterScene>>,
+    pub water_cfg: &'a WaterVetoConfig,
+    pub commit_zone_armed: bool,
+    pub commit_zone: Option<&'a StampedScene<CommitZoneScene>>,
+    pub commit_zone_cfg: &'a CommitZoneCfg,
+    pub max_age_ms: u64,
+    pub now_ms: u64,
+}
+
+/// #795 F7 — the per-tick scene-veto CHAIN, composed in the fixed order
+/// occlusion → water → commit-zone. Each gate runs ONLY when armed; a DISARMED
+/// gate is skipped (never stops), an ARMED gate with a missing/stale scene
+/// fails CLOSED (stop) INSIDE the gate (the enabled-but-silent rule). Extracted
+/// out of the `ros2`-gated drain loop (which was build-only in CI) so the
+/// arming + ordering logic is unit-testable — the loop now just locks the slots
+/// and calls this.
+// SAFETY: SG1 SG4 SG5 | REQ: parko-ros2-scene-gate-chain | TEST: scene_gate_chain_arming_truth_table,scene_gate_chain_disarmed_gates_never_stop
+#[must_use]
+pub fn apply_scene_gates(outcome: TickOutcome, chain: &SceneGateChain<'_>) -> TickOutcome {
+    let outcome = match chain.occlusion_params {
+        Some(params) => apply_occlusion_gate(
+            outcome,
+            chain.occlusion,
+            params,
+            chain.max_age_ms,
+            chain.now_ms,
+        ),
+        None => outcome,
+    };
+    let outcome = if chain.water_armed {
+        apply_water_gate(
+            outcome,
+            chain.water,
+            chain.water_cfg,
+            chain.max_age_ms,
+            chain.now_ms,
+        )
+    } else {
+        outcome
+    };
+    if chain.commit_zone_armed {
+        apply_commit_zone_gate(
+            outcome,
+            chain.commit_zone,
+            chain.commit_zone_cfg,
+            chain.max_age_ms,
+            chain.now_ms,
+        )
+    } else {
+        outcome
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +467,74 @@ mod tests {
             "upstream provenance preserved"
         );
         assert_eq!(out.twist, OutgoingTwist::stopped(7));
+    }
+
+    // ---- #795 F7: the composed chain's arming truth table ------------------
+
+    /// Over the FULL {occlusion} × {water} × {commit-zone} arming table, a
+    /// MOVING command with NO scenes fed stops IFF at least one gate is armed
+    /// (an armed gate with a silent slot fails closed inside the gate); with no
+    /// gate armed the command passes through unchanged. This pins the extracted
+    /// composition's arming + ordering logic in a non-ros2 unit test.
+    #[test]
+    fn scene_gate_chain_arming_truth_table() {
+        let p = params();
+        let wcfg = WaterVetoConfig::default();
+        let czcfg = CommitZoneCfg::default();
+        for occ in [false, true] {
+            for wat in [false, true] {
+                for cz in [false, true] {
+                    let chain = SceneGateChain {
+                        occlusion_params: occ.then_some(&p),
+                        occlusion: None,
+                        water_armed: wat,
+                        water: None,
+                        water_cfg: &wcfg,
+                        commit_zone_armed: cz,
+                        commit_zone: None,
+                        commit_zone_cfg: &czcfg,
+                        max_age_ms: 100,
+                        now_ms: 0,
+                    };
+                    let out = apply_scene_gates(outcome(2.0), &chain);
+                    let any_armed = occ || wat || cz;
+                    assert_eq!(
+                        out.twist.linear_x_mps == 0.0,
+                        any_armed,
+                        "occ={occ} water={wat} commit_zone={cz}: armed+silent must fail closed"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A DISARMED gate is skipped entirely: even a scene that WOULD stop
+    /// (`OcclusionScene::Absent` / `WaterScene::Unknown` /
+    /// `CommitZoneScene::Unknown`) present in a disarmed slot never stops the
+    /// command — arming is the sole authority for whether a gate runs.
+    #[test]
+    fn scene_gate_chain_disarmed_gates_never_stop() {
+        let wcfg = WaterVetoConfig::default();
+        let czcfg = CommitZoneCfg::default();
+        let occ = stamped(OcclusionScene::Absent, 0);
+        let wat = stamped(WaterScene::Unknown, 0);
+        let cz = stamped(CommitZoneScene::Unknown, 0);
+        let chain = SceneGateChain {
+            occlusion_params: None, // disarmed despite a would-stop scene
+            occlusion: Some(&occ),
+            water_armed: false,
+            water: Some(&wat),
+            water_cfg: &wcfg,
+            commit_zone_armed: false,
+            commit_zone: Some(&cz),
+            commit_zone_cfg: &czcfg,
+            max_age_ms: 100,
+            now_ms: 0,
+        };
+        let out = apply_scene_gates(outcome(2.0), &chain);
+        assert!(
+            (out.twist.linear_x_mps - 2.0).abs() < 1e-9 && out.error.is_none(),
+            "disarmed gates must not run — command passes unchanged, got {out:?}"
+        );
     }
 }
