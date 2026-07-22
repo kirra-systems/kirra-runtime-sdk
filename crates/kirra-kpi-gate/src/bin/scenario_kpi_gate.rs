@@ -20,9 +20,13 @@ use kirra_kpi_gate::sotif_coverage::{
     check_sotif_coverage, live_corpus_scenario_names, parse_aou_ids, parse_trigger_ids,
     SotifCoverageManifest,
 };
-use kirra_kpi_gate::{run_gate, run_montecarlo_gate, KpiThresholds};
+use kirra_kpi_gate::{
+    corpus_fingerprint_sha256, per_scenario_verdicts, run_gate, run_manifest_gate,
+    run_montecarlo_gate, FailureManifest, KpiThresholds,
+};
 
 const MC_POLICY_PATH: &str = "ci/scenario_kpi_montecarlo.json";
+const MANIFEST_PATH: &str = "ci/scenario_kpi_known_failures.json";
 
 fn main() {
     let thresholds_path = std::env::args()
@@ -30,6 +34,9 @@ fn main() {
         .unwrap_or_else(|| "ci/scenario_kpi_thresholds.json".to_string());
 
     let kpi_ok = run_kpi_gate(&thresholds_path);
+    println!();
+    // #796 F4/F5 — the named known-failure manifest, SET EQUALITY per planner.
+    let manifest_ok = run_manifest_gate_cli();
     println!();
     // WP-23: the seeded Monte-Carlo campaign. Opt-in via KIRRA_KPI_MC_PROFILE
     // (per_pr | nightly) so the deterministic gate above stays the default; CI
@@ -39,10 +46,139 @@ fn main() {
     println!();
     let sotif_ok = run_sotif_gate();
 
-    if kpi_ok && mc_ok && sotif_ok {
+    // #796 F11 — the evidence artifact: opt-in via KIRRA_KPI_REPORT_DIR (CI
+    // sets it and uploads). Written on pass AND fail — a red gate's evidence
+    // is the more valuable kind.
+    write_evidence_artifacts(&thresholds_path, kpi_ok && manifest_ok && mc_ok && sotif_ok);
+
+    if kpi_ok && manifest_ok && mc_ok && sotif_ok {
         std::process::exit(0);
     }
     std::process::exit(1);
+}
+
+/// #796 F4/F5 — load the committed known-failure manifest and demand set
+/// equality with the measured failing scenarios, BY NAME, per planner.
+/// Returns `true` on pass. Exits(2) on an unreadable/unparseable manifest.
+fn run_manifest_gate_cli() -> bool {
+    let raw = match std::fs::read_to_string(MANIFEST_PATH) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "scenario_kpi_gate: cannot read known-failure manifest at {MANIFEST_PATH}: {e}"
+            );
+            std::process::exit(2);
+        }
+    };
+    let manifest: FailureManifest = match serde_json::from_str(&raw) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("scenario_kpi_gate: manifest at {MANIFEST_PATH} does not parse: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let diffs = run_manifest_gate(&manifest);
+    println!("=== Known-failure manifest gate (#796 F4/F5, set equality) ===");
+    let mut ok = true;
+    for d in &diffs {
+        println!(
+            "  [{}] {:<28} committed={} new_failures={} fixed={} unknown={}",
+            if d.pass() { "PASS" } else { "FAIL" },
+            d.planner,
+            match d.planner {
+                "geometric" => manifest.geometric.len(),
+                _ => manifest.learned_safetyaware_seed7.len(),
+            },
+            d.new_failures.len(),
+            d.fixed.len(),
+            d.unknown_names.len(),
+        );
+        for n in &d.new_failures {
+            println!("      NEW FAILURE (regression): {n}");
+        }
+        for n in &d.fixed {
+            println!("      FIXED (tighten the manifest to lock it in): {n}");
+        }
+        for n in &d.unknown_names {
+            println!("      UNKNOWN NAME (stale manifest / renamed scenario): {n}");
+        }
+        ok &= d.pass();
+    }
+    if ok {
+        println!("Manifest gate: PASS");
+    } else {
+        eprintln!(
+            "Manifest gate: FAIL — the failing-scenario set drifted from {MANIFEST_PATH}. A NEW \
+             failure is a regression (fix it); a FIXED scenario is an improvement (remove its \
+             line from the manifest, with the PR noting the fix). Never widen silently."
+        );
+    }
+    ok
+}
+
+/// #796 F11 — GateReport JSON + per-scenario verdict CSV + corpus/toolchain
+/// stamp, written under `KIRRA_KPI_REPORT_DIR` when set. Failures to write
+/// are LOUD but non-fatal: the gate verdict is authoritative, the artifact is
+/// evidence packaging.
+fn write_evidence_artifacts(thresholds_path: &str, passed: bool) {
+    let Ok(dir) = std::env::var("KIRRA_KPI_REPORT_DIR") else {
+        return;
+    };
+    if dir.trim().is_empty() {
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("scenario_kpi_gate: cannot create report dir {dir}: {e}");
+        return;
+    }
+
+    // The full report re-runs the deterministic gates (cheap, seconds) so the
+    // artifact is self-contained even though main() already printed them.
+    let thresholds: Option<KpiThresholds> = std::fs::read_to_string(thresholds_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    let manifest: Option<FailureManifest> = std::fs::read_to_string(MANIFEST_PATH)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    let report = thresholds.as_ref().map(run_gate);
+    let diffs = manifest.as_ref().map(run_manifest_gate);
+
+    let stamp = serde_json::json!({
+        "gate": "scenario-kpi (WS-3.1)",
+        "passed": passed,
+        "thresholds_path": thresholds_path,
+        "detector_profile": thresholds.as_ref().map(|t| t.detector.clone()),
+        "corpus_sha256": corpus_fingerprint_sha256(),
+        "kpi_gate_crate_version": env!("CARGO_PKG_VERSION"),
+        "report": report,
+        "manifest_diffs": diffs,
+    });
+    let json_path = format!("{dir}/gate_report.json");
+    match serde_json::to_string_pretty(&stamp) {
+        Ok(s) => {
+            if let Err(e) = std::fs::write(&json_path, s) {
+                eprintln!("scenario_kpi_gate: cannot write {json_path}: {e}");
+            } else {
+                println!("evidence artifact: {json_path}");
+            }
+        }
+        Err(e) => eprintln!("scenario_kpi_gate: report serialize failed: {e}"),
+    }
+
+    let csv_path = format!("{dir}/per_scenario_verdicts.csv");
+    let mut csv = String::from("planner,scenario,verdict,admissible\n");
+    for row in per_scenario_verdicts() {
+        csv.push_str(&format!(
+            "{},{},{},{}\n",
+            row.planner, row.scenario, row.verdict, row.admissible
+        ));
+    }
+    if let Err(e) = std::fs::write(&csv_path, csv) {
+        eprintln!("scenario_kpi_gate: cannot write {csv_path}: {e}");
+    } else {
+        println!("evidence artifact: {csv_path}");
+    }
 }
 
 /// The WP-23 Monte-Carlo campaign gate. Returns `true` on pass OR when not

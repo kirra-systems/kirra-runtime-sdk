@@ -378,6 +378,13 @@ pub struct KpiThresholds {
     /// Free-text rationale — travels with the numbers.
     #[serde(rename = "_comment")]
     pub comment: String,
+    /// #796 F2 — which detector this profile bounds: `"mock"` (the scripted
+    /// seam, perfection-pinned) or `"real"` (the pre-committed AoU-target
+    /// profile in `ci/scenario_kpi_thresholds_real_detector.json`). Defaults
+    /// to `"mock"` so the original profile is unchanged on disk; stamped into
+    /// the F11 evidence artifact so a report names the profile it gated.
+    #[serde(default = "default_detector")]
+    pub detector: String,
     /// Min fraction of GEOMETRIC-planner proposals the checker admits
     /// without an MRC (`Accept | Clamp`) over the doer corpus.
     pub geometric_admissibility_min: f64,
@@ -394,6 +401,10 @@ pub struct KpiThresholds {
     /// EP-20 differential: max fraction of all frames with an UNJUSTIFIED
     /// Phase-B tighten (availability cost, over-conservative direction).
     pub differential_phantom_tighten_max: f64,
+}
+
+fn default_detector() -> String {
+    "mock".to_string()
 }
 
 /// One evaluated KPI row: measured value vs its bound.
@@ -760,12 +771,327 @@ pub fn run_montecarlo_gate(policy: &MonteCarloPolicy, profile: Profile) -> McGat
 }
 
 // ---------------------------------------------------------------------------
+// #796 F4/F5 — the NAMED known-failure manifest (set-equality ratchet)
+//
+// `run_gate`'s rate rows discard the tallies' identities: a PR that fixes 3
+// scenarios and breaks 3 different ones is byte-identical to no-change, and
+// the honor-system float ratchet is exposed to libm/toolchain FP flips (F7).
+// The manifest mechanizes both: the failing-scenario SET is committed BY NAME
+// per planner (`ci/scenario_kpi_known_failures.json`) and the gate demands
+// SET EQUALITY —
+//   * a measured failure NOT in the manifest = a REGRESSION (unsafe
+//     direction, always red);
+//   * a manifest entry that no longer fails = an IMPROVEMENT (also red, until
+//     the manifest is tightened to lock it in — a one-line reviewed change,
+//     never silent).
+// Any FP flip is therefore attributable to a scenario NAME, and the bounds
+// are integer/set-valued, not truncated float rates.
+// ---------------------------------------------------------------------------
+
+/// The committed known-failure manifest: per planner, the exact scenario
+/// names the checker currently refuses (MRC/Pending). Keys are stable planner
+/// labels; scenario names come from `generated_doer_corpus` (deterministic).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailureManifest {
+    /// Free-text rationale — travels with the names.
+    #[serde(rename = "_comment")]
+    pub comment: String,
+    /// Geometric planner (`GeometricPlannerConfig::default()`).
+    pub geometric: Vec<String>,
+    /// Seeded SafetyAware learned planner (`trained(7, Teacher::SafetyAware)`).
+    pub learned_safetyaware_seed7: Vec<String>,
+}
+
+/// One per-scenario, per-planner checker verdict — the F11 CSV artifact row
+/// and the manifest gate's raw material.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlannerVerdictRow {
+    pub planner: &'static str,
+    pub scenario: String,
+    pub verdict: &'static str,
+    /// `Accept | Clamp` (the `admissibility_rate` predicate).
+    pub admissible: bool,
+}
+
+fn verdict_label(v: kirra_core::trajectory::TrajectoryVerdict) -> (&'static str, bool) {
+    use kirra_core::trajectory::TrajectoryVerdict as V;
+    match v {
+        V::Accept => ("Accept", true),
+        V::Clamp => ("Clamp", true),
+        V::MRCFallback => ("MRCFallback", false),
+        V::Pending => ("Pending", false),
+    }
+}
+
+/// Every (planner × scenario) verdict over the deterministic corpus — the
+/// same construction as `run_gate`'s rate rows, with identities kept.
+#[must_use]
+pub fn per_scenario_verdicts() -> Vec<PlannerVerdictRow> {
+    let corpus = generated_doer_corpus();
+    let learned = LearnedPlanner::trained(7, Teacher::SafetyAware);
+    let mut rows = Vec::with_capacity(corpus.len() * 2);
+    for sc in &corpus {
+        let out = GeometricPlanner::new(GeometricPlannerConfig::default()).plan(&sc.plan_input());
+        let (verdict, admissible) = verdict_label(verdict_of(
+            &out,
+            sc.corridor(),
+            sc.objects(),
+            sc.config(),
+            sc.posture(),
+        ));
+        rows.push(PlannerVerdictRow {
+            planner: "geometric",
+            scenario: sc.name.clone(),
+            verdict,
+            admissible,
+        });
+        let out = learned.plan_with_chosen_index(&sc.plan_input()).1;
+        let (verdict, admissible) = verdict_label(verdict_of(
+            &out,
+            sc.corridor(),
+            sc.objects(),
+            sc.config(),
+            sc.posture(),
+        ));
+        rows.push(PlannerVerdictRow {
+            planner: "learned_safetyaware_seed7",
+            scenario: sc.name.clone(),
+            verdict,
+            admissible,
+        });
+    }
+    rows
+}
+
+/// One planner's set-equality outcome against the manifest.
+#[derive(Debug, Clone, Serialize)]
+pub struct ManifestDiff {
+    pub planner: &'static str,
+    /// Failing now, NOT in the manifest — a regression (unsafe direction).
+    pub new_failures: Vec<String>,
+    /// In the manifest, no longer failing — an improvement to lock in.
+    pub fixed: Vec<String>,
+    /// Manifest names that don't exist in the corpus at all (a rename/typo —
+    /// a stale manifest must red, not silently gate nothing).
+    pub unknown_names: Vec<String>,
+}
+
+impl ManifestDiff {
+    #[must_use]
+    pub fn pass(&self) -> bool {
+        self.new_failures.is_empty() && self.fixed.is_empty() && self.unknown_names.is_empty()
+    }
+}
+
+/// The F4/F5 gate: measured failing sets vs the committed manifest, per
+/// planner, SET EQUALITY required.
+#[must_use]
+pub fn run_manifest_gate(manifest: &FailureManifest) -> Vec<ManifestDiff> {
+    use std::collections::BTreeSet;
+    let rows = per_scenario_verdicts();
+    let corpus_names: BTreeSet<&str> = rows.iter().map(|r| r.scenario.as_str()).collect();
+    let diff_for = |planner: &'static str, committed: &[String]| -> ManifestDiff {
+        let measured: BTreeSet<&str> = rows
+            .iter()
+            .filter(|r| r.planner == planner && !r.admissible)
+            .map(|r| r.scenario.as_str())
+            .collect();
+        let committed_set: BTreeSet<&str> = committed.iter().map(String::as_str).collect();
+        ManifestDiff {
+            planner,
+            new_failures: measured
+                .difference(&committed_set)
+                .map(|s| (*s).to_string())
+                .collect(),
+            fixed: committed_set
+                .difference(&measured)
+                .filter(|s| corpus_names.contains(**s))
+                .map(|s| (*s).to_string())
+                .collect(),
+            unknown_names: committed_set
+                .iter()
+                .filter(|s| !corpus_names.contains(**s))
+                .map(|s| (*s).to_string())
+                .collect(),
+        }
+    };
+    vec![
+        diff_for("geometric", &manifest.geometric),
+        diff_for(
+            "learned_safetyaware_seed7",
+            &manifest.learned_safetyaware_seed7,
+        ),
+    ]
+}
+
+/// #796 F11 — the corpus fingerprint stamped into the evidence artifact: a
+/// SHA-256 over every doer scenario name + every perception case name, in
+/// corpus order. Any generator change (added axis, renamed cell, resized
+/// sweep) changes the stamp, so a report is attributable to an exact corpus.
+#[must_use]
+pub fn corpus_fingerprint_sha256() -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for sc in generated_doer_corpus() {
+        h.update(sc.name.as_bytes());
+        h.update([0u8]);
+    }
+    for case in generated_perception_corpus() {
+        h.update(case.name.as_bytes());
+        h.update([0u8]);
+    }
+    hex_lower(&h.finalize())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The committed manifest path (repo root), used by the equality pin below.
+    const MANIFEST_PATH: &str = "../../ci/scenario_kpi_known_failures.json";
+
+    fn committed_manifest() -> FailureManifest {
+        let raw = std::fs::read_to_string(MANIFEST_PATH).expect("read known-failures manifest");
+        serde_json::from_str(&raw).expect("parse known-failures manifest")
+    }
+
+    /// #796 F4/F5 — the committed manifest matches the measured failing sets
+    /// EXACTLY (set equality). A new failure OR an unrecorded fix reds this.
+    #[test]
+    fn known_failure_manifest_is_set_equal_to_measured() {
+        let diffs = run_manifest_gate(&committed_manifest());
+        for d in &diffs {
+            assert!(
+                d.pass(),
+                "manifest drift for {}: new_failures={:?} fixed={:?} unknown={:?} — a new \
+                 failure is a regression; a fix must be locked in by tightening \
+                 ci/scenario_kpi_known_failures.json (regenerate via the ignored \
+                 dump_failing_scenario_names test)",
+                d.planner,
+                d.new_failures,
+                d.fixed,
+                d.unknown_names
+            );
+        }
+    }
+
+    /// The manifest counts must reconcile with the rate rows (240/248 and
+    /// 224/248 today): the names ARE the integer bounds (#796 F5).
+    #[test]
+    fn manifest_counts_reconcile_with_the_rate_floors() {
+        let m = committed_manifest();
+        assert_eq!(m.geometric.len(), 8, "248 - 240 admitted");
+        assert_eq!(m.learned_safetyaware_seed7.len(), 24, "248 - 224 admitted");
+    }
+
+    /// The gate DISCRIMINATES: perturbing the committed sets in either
+    /// direction (drop a name → "fixed"; add a bogus-but-real name → covered
+    /// by new_failures on the other side; add a nonexistent name → unknown)
+    /// is caught by name.
+    #[test]
+    fn manifest_gate_flags_drift_in_both_directions() {
+        let mut m = committed_manifest();
+        let dropped = m.geometric.pop().expect("manifest has entries");
+        m.learned_safetyaware_seed7
+            .push("no_such_scenario".to_string());
+        let diffs = run_manifest_gate(&m);
+        let geo = &diffs[0];
+        assert_eq!(
+            geo.new_failures,
+            vec![dropped],
+            "a dropped entry surfaces as a NEW failure by name"
+        );
+        let learned = &diffs[1];
+        assert_eq!(
+            learned.unknown_names,
+            vec!["no_such_scenario".to_string()],
+            "a stale/typo name is flagged, never silently ignored"
+        );
+    }
+
+    /// Regeneration utility (documented in the manifest _comment): dumps the
+    /// measured failing names as JSON arrays. `--ignored --nocapture`.
+    #[test]
+    #[ignore = "manifest regeneration utility, not a gate"]
+    fn dump_failing_scenario_names() {
+        for planner in ["geometric", "learned_safetyaware_seed7"] {
+            let names: Vec<String> = per_scenario_verdicts()
+                .into_iter()
+                .filter(|r| r.planner == planner && !r.admissible)
+                .map(|r| r.scenario)
+                .collect();
+            println!(
+                "{planner}: {}",
+                serde_json::to_string_pretty(&names).unwrap()
+            );
+        }
+    }
+
+    /// #796 F2 — the pre-committed real-detector profile parses, is labeled,
+    /// and differs from the mock profile ONLY in `hazard_recall_min` (the one
+    /// bound with a plan-sourced number: the AoU 0.9 target). Every other
+    /// bound — including the catastrophic-direction `unsafe_miss_rate_max` —
+    /// is pinned identical: a relaxation there must arrive as a reviewed
+    /// change to the profile file, never ride in silently.
+    #[test]
+    fn real_detector_profile_relaxes_only_the_plan_sourced_bound() {
+        let mock: KpiThresholds = serde_json::from_str(
+            &std::fs::read_to_string("../../ci/scenario_kpi_thresholds.json").unwrap(),
+        )
+        .unwrap();
+        let real: KpiThresholds = serde_json::from_str(
+            &std::fs::read_to_string("../../ci/scenario_kpi_thresholds_real_detector.json")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            mock.detector, "mock",
+            "the original profile defaults to mock"
+        );
+        assert_eq!(real.detector, "real", "the new profile is labeled");
+        assert_eq!(real.hazard_recall_min, 0.9, "the plan-sourced AoU target");
+        assert!(real.hazard_recall_min < mock.hazard_recall_min);
+        // Everything else identical — especially the catastrophic direction.
+        assert_eq!(real.unsafe_miss_rate_max, mock.unsafe_miss_rate_max);
+        assert_eq!(
+            real.geometric_admissibility_min,
+            mock.geometric_admissibility_min
+        );
+        assert_eq!(
+            real.learned_admissibility_min,
+            mock.learned_admissibility_min
+        );
+        assert_eq!(
+            real.differential_missed_tighten_max,
+            mock.differential_missed_tighten_max
+        );
+        assert_eq!(
+            real.differential_phantom_tighten_max,
+            mock.differential_phantom_tighten_max
+        );
+    }
+
+    /// #796 F11 — the corpus fingerprint is stable across runs (determinism)
+    /// and 64 hex chars.
+    #[test]
+    fn corpus_fingerprint_is_deterministic() {
+        let a = corpus_fingerprint_sha256();
+        assert_eq!(a, corpus_fingerprint_sha256());
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 
     /// Corpus sizes are pinned: a silent shrink would weaken the gate while
     /// it kept reporting green.

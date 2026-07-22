@@ -1,0 +1,39 @@
+{
+  "_comment": "#796 F4/F5 — the NAMED known-failure manifest for the WS-3.1 scenario-KPI gate (crates/kirra-kpi-gate::run_manifest_gate). The gate requires SET EQUALITY between these lists and the measured checker-refused scenarios (MRC/Pending) per planner: a measured failure NOT listed here is a REGRESSION (red, unsafe direction — a scenario the checker used to admit is now refused, or a fixed one silently broke back); a listed name that no longer fails is an IMPROVEMENT and is ALSO red until this file is tightened to lock it in (a one-line reviewed change — the mechanized ratchet). Names, not rates: a fix-3-break-3 PR is no longer invisible, and any libm/toolchain FP flip (#777 F7) is attributable to a scenario NAME. Counts reconcile with the rate floors in scenario_kpi_thresholds.json (geometric 8 = 248-240; learned 24 = 248-224; pinned by test). The failing cells are the coherent close-hazard/high-speed corner (x12-x20 at v4-v6), where the checker's RSS refusal is the intended fail-closed outcome pending planner improvements. Regenerate after an intentional change: cargo test -p kirra-kpi-gate dump_failing_scenario_names -- --ignored --nocapture.",
+  "geometric": [
+    "Oncoming_x12_v4_g40",
+    "Oncoming_x12_v4_g60",
+    "Stopped_x12_v6_g40",
+    "Oncoming_x12_v6_g40",
+    "Oncoming_x16_v6_g40",
+    "Stopped_x12_v6_g60",
+    "Oncoming_x12_v6_g60",
+    "Oncoming_x16_v6_g60"
+  ],
+  "learned_safetyaware_seed7": [
+    "Stopped_x12_v4_g40",
+    "LeadMoving_x12_v4_g40",
+    "Oncoming_x12_v4_g40",
+    "Stopped_x12_v4_g60",
+    "LeadMoving_x12_v4_g60",
+    "Oncoming_x12_v4_g60",
+    "Stopped_x12_v6_g40",
+    "Stopped_x16_v6_g40",
+    "Stopped_x20_v6_g40",
+    "LeadMoving_x12_v6_g40",
+    "LeadMoving_x16_v6_g40",
+    "LeadMoving_x20_v6_g40",
+    "Oncoming_x12_v6_g40",
+    "Oncoming_x16_v6_g40",
+    "Oncoming_x20_v6_g40",
+    "Stopped_x12_v6_g60",
+    "Stopped_x16_v6_g60",
+    "Stopped_x20_v6_g60",
+    "LeadMoving_x12_v6_g60",
+    "LeadMoving_x16_v6_g60",
+    "LeadMoving_x20_v6_g60",
+    "Oncoming_x12_v6_g60",
+    "Oncoming_x16_v6_g60",
+    "Oncoming_x20_v6_g60"
+  ]
+}
