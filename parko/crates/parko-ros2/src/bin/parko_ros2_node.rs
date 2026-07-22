@@ -460,8 +460,30 @@ fn env_flag(name: &str) -> bool {
     }
 }
 
-#[tokio::main]
-async fn main() {
+/// #794 F7: bounded post-shutdown grace for lingering `spawn_blocking` workers.
+/// The inference backend runs on a blocking worker; a wedged model call cannot be
+/// aborted, and the default tokio runtime `Drop` blocks FOREVER waiting for such a
+/// thread — hanging SIGTERM until systemd escalates to SIGKILL and the clean-exit
+/// path (tracing flush, task abort acknowledgement) is lost. After `async_main`
+/// returns (the SIGINT/SIGTERM handler has fired and the node task is aborted) we
+/// give any stuck worker this window, then abandon it and exit.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn main() {
+    // Explicit runtime (not `#[tokio::main]`) so we own the shutdown: the macro's
+    // implicit `Drop` would wait unboundedly on a wedged blocking inference thread.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("parko_ros2_node: failed to build the tokio runtime");
+
+    runtime.block_on(async_main());
+
+    // Bounded shutdown — never hang SIGTERM on a stuck inference worker.
+    runtime.shutdown_timeout(SHUTDOWN_GRACE);
+}
+
+async fn async_main() {
     init_tracing();
 
     let config = Arc::new(build_config());
