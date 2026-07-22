@@ -146,9 +146,27 @@ jobs:
         # WP-23: the deterministic sweep PLUS the seeded Monte-Carlo campaign at
         # the per-PR sampled-subset size (95% CI bounds). The full 10⁴–10⁵ corpus
         # runs nightly in kpi-campaign-nightly.yml.
+        # #796 F4/F5: also gates SET EQUALITY against the named known-failure
+        # manifest (ci/scenario_kpi_known_failures.json) — a fix-3-break-3 PR
+        # is no longer invisible, and any FP flip is attributable by name.
+        # #796 F2: the pre-committed real-detector profile
+        # (ci/scenario_kpi_thresholds_real_detector.json) activates by passing
+        # it as the binary's first argument in a `detector: real` lane once a
+        # real detector rides the MockSemanticDetector seam — until then this
+        # mock lane is unchanged.
         env:
           KIRRA_KPI_MC_PROFILE: per_pr
+          # #796 F11 — evidence artifacts (GateReport JSON + per-scenario
+          # verdict CSV + corpus-hash stamp), uploaded below pass or fail.
+          KIRRA_KPI_REPORT_DIR: kpi-evidence
         run: cargo run --locked -p kirra-kpi-gate --bin scenario_kpi_gate
+      - name: Upload KPI evidence artifacts (#796 F11)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: scenario-kpi-evidence
+          path: kpi-evidence/
+          if-no-files-found: warn
 
   # WS-5.1 — the QNX governor-judge cross-build: the EPIC-#270 no_std
   # core-only judge staticlib for both QNX 8.0 tuples (x86_64 + the aarch64
