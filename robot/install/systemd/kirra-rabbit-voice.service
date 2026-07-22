@@ -1,0 +1,54 @@
+# kirra-rabbit-voice.service — the Rabbit VOICE LISTENER as a service (W1).
+#
+# Runs the wake-word trigger piped into the conversation front-end:
+#   wake_word.py | rabbit_voice.sh → rabbit_converse.py
+# This is the unit that makes "hello rabbit / hey rabbit / yo rabbit" work
+# hands-free — without it (or a terminal running the same pipeline) NOTHING
+# on the robot listens, button or not.
+#
+# 🔴 SAFETY: the wake word is a MICROPHONE trigger with zero actuation
+# authority — a (false) wake records ONE bounded clip whose transcript enters
+# the loop only through the fenced mick /intent door; a mishear dead-ends in
+# the intent parser (no intent, no motion). It is NOT the e-stop.
+#
+# OPT-IN: wake_word.py exits 0 immediately unless KIRRA_WAKE_ENABLED=1 in
+# /etc/kirra/robot.env (Restart=on-failure means the unit then just goes
+# inactive — enabling the unit without enabling the env flag is a no-op).
+# KIRRA_WAKE_STT_CMD (whisper tiny) is REQUIRED when enabled.
+#
+# PRIVACY: transcribe-and-discard (tmpfs, no audio persisted, no transcripts
+# logged); "rabbit, go to sleep" / "stop listening" suspend it by voice;
+# optional KIRRA_WAKE_LED_PIN lights while the mic is open.
+#
+# ⚠ AUDIO-FROM-A-SYSTEM-SERVICE caveat (same as kirra-rabbit-watch): use
+# ALSA-DIRECT record/STT/TTS commands and put the rendered User in the
+# `audio` group; a Pulse/PipeWire-based command may have no session sink.
+#
+# ⚠ NOT YET HARDWARE-VALIDATED as a service. Enable deliberately:
+# `sudo systemctl enable --now kirra-rabbit-voice`. See R2_AUTOSTART_CHECKLIST.md.
+#
+# User= is rendered by the installer to the invoking user (needs `audio`,
+# and `gpio` if KIRRA_WAKE_LED_PIN is set).
+
+[Unit]
+Description=KIRRA Rabbit voice listener (wake word -> bounded turn -> fenced intent door)
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+# Talks to mick/verifier/Ollama but is fail-soft per turn — no hard dependency.
+After=network-online.target kirra.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__KIRRA_ROBOT_USER__
+EnvironmentFile=/etc/kirra/robot.env
+WorkingDirectory=/opt/kirra/robot
+# pipefail so a dead listener fails the pipeline (and vice versa); exec'd bash
+# stays the main PID and SIGTERM tears both halves down.
+ExecStart=/bin/bash -o pipefail -c 'python3 /opt/kirra/robot/wake_word.py | /opt/kirra/robot/rabbit_voice.sh'
+# on-failure (NOT always): a disabled listener (KIRRA_WAKE_ENABLED unset)
+# exits 0 and the unit rests inactive instead of restart-looping.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

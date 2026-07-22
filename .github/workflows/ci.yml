@@ -1207,6 +1207,13 @@ jobs:
           # read; stale/degraded/lockout → "still checking myself over"), and the
           # OTA voice-matcher precedence. See docs/rabbit/RABBIT_VOICE_LINES.md.
           python3 robot/rabbit_voice_test.py
+          # Wake-word logic (W1, pure, no audio/GPIO): phrase parsing, the
+          # ordered-adjacent matcher with long-token-only edit tolerance
+          # ("hallo rabbits" wakes, a stray "yo"/lookalike never does), the
+          # RMS gate math, the fail-OPEN nap/mute state gate, and the
+          # rabbit_wake control matcher incl. non-overlap with the OTA/diag/
+          # drive matchers. See docs/hardware/RABBIT_AUDIO_STACK.md §3b.
+          python3 robot/wake_word_test.py
           # Diagnostics framework (pure, no hardware): schema v1 shape/ordering,
           # worst-of aggregation + exit codes, module isolation (raise/timeout →
           # UNKNOWN for that module only), the deterministic "run diagnostics"

@@ -35,7 +35,8 @@ echo "== 1. Rabbit scripts -> ${OPT}/robot =="
 sudo install -d -m 0755 "${OPT}/robot"
 for f in rabbit_persona.py rabbit_watch.py rabbit_ask.py rabbit_converse.py rabbit_boot.py \
          rabbit_voice.sh ptt_button.py run_voice_ptt.sh inspect_corridor.py rabbit_ota.py \
-         ros_env.sh kirra_voice_doctor.sh kirra_doctor.py rabbit_diag.py; do
+         ros_env.sh kirra_voice_doctor.sh kirra_doctor.py rabbit_diag.py \
+         wake_word.py rabbit_wake.py; do
   [[ -f "${REPO}/robot/${f}" ]] || { echo "  ⚠ missing ${REPO}/robot/${f} — skipped"; continue; }
   sudo install -m 0755 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
   echo "  installed ${OPT}/robot/${f}"
@@ -52,6 +53,7 @@ fi
 # ---- 2. render + install the units -----------------------------------------
 echo "== 2. units -> /etc/systemd/system =="
 for u in kirra-ros-stack.service kirra-rabbit-watch.service kirra-rabbit-greet.service \
+         kirra-rabbit-voice.service \
          kirra-ota-check.service kirra-ota-check.timer \
          kirra-doctor.service kirra-doctor.timer; do
   [[ -f "${UNITS}/${u}" ]] || { echo "❌ missing ${UNITS}/${u}"; exit 1; }
@@ -69,3 +71,5 @@ echo
 echo "  validate then enable, one at a time:"
 echo "    sudo systemctl start kirra-ros-stack   && journalctl -u kirra-ros-stack -f"
 echo "    sudo systemctl start kirra-rabbit-watch  && journalctl -u kirra-rabbit-watch -f"
+echo "    sudo systemctl start kirra-rabbit-voice  && journalctl -u kirra-rabbit-voice -f"
+echo "      (wake word is OPT-IN: also set KIRRA_WAKE_ENABLED=1 + KIRRA_WAKE_STT_CMD in robot.env)"

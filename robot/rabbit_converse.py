@@ -49,6 +49,7 @@ from rabbit_ask import (  # noqa: E402
 )
 import rabbit_diag  # noqa: E402 — deterministic self-check voice command (read-only)
 import rabbit_ota  # noqa: E402 — deterministic OTA voice commands (NOT the movement door)
+import rabbit_wake  # noqa: E402 — deterministic wake-listener controls (state file only)
 from rabbit_persona import name_slot, operator_name  # noqa: E402
 
 MAX_TURNS = 10  # rolling conversation memory (user+assistant pairs kept)
@@ -181,6 +182,18 @@ def handle_turn(history, utterance):
         speak(diag_reply)
         history.append({"role": "user", "content": utterance})
         history.append({"role": "assistant", "content": diag_reply})
+        del history[: max(0, len(history) - 2 * MAX_TURNS)]
+        return
+
+    # "Go to sleep" / "stop listening" / "start listening" — deterministic
+    # wake-listener controls (W1). Whether the ambient mic is open must never
+    # depend on model inference; rabbit_wake only writes the local state file
+    # wake_word.py polls (no /intent, no motion).
+    wake_reply = rabbit_wake.handle(utterance)
+    if wake_reply is not None:
+        speak(wake_reply)
+        history.append({"role": "user", "content": utterance})
+        history.append({"role": "assistant", "content": wake_reply})
         del history[: max(0, len(history) - 2 * MAX_TURNS)]
         return
 
