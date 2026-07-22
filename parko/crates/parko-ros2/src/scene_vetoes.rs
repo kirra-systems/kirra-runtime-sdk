@@ -102,6 +102,29 @@ fn already_stopped(outcome: &TickOutcome) -> bool {
 /// scene: `Absent` (or missing/stale when armed) caps at 0.0 (any motion
 /// stops), `KnownClear` never binds, `Limited` binds via
 /// `occlusion_limited_speed` (fail-closed to 0.0 on invalid inputs).
+///
+/// # Angular channel (#795 F8 — intended semantics)
+///
+/// The occlusion cap is an assured-clear-**distance** bound: it limits FORWARD
+/// PROGRESS, so it binds only the LINEAR channel (`linear_x_mps`) and leaves
+/// `angular_z_rads` untouched. This is DELIBERATE, not an oversight:
+/// - A pure in-place rotation (`linear ≈ 0`, `angular ≠ 0`) under an `Absent` /
+///   `Limited` scene PASSES this gate unchanged. Turning in place does not
+///   advance the ego into the unobserved region — it is the *creep-and-peek*
+///   primitive that lets the ego rotate to improve its own sightline before
+///   committing to forward motion. Zeroing it would deadlock that maneuver.
+/// - Any rotation with a nonzero turn RADIUS carries a nonzero `linear_x` and is
+///   therefore still bound by the clamp above (the arc's along-track speed is
+///   capped to the sightline).
+///
+/// CAVEAT (pending safety-owner decision, NOT silently assumed): a *swept*
+/// in-place rotation of a long/rectangular footprint can sweep the vehicle's
+/// extremities into an occluded conflict zone even at zero `linear_x`. Whether
+/// to additionally BOUND that swept-rotation case here — versus the stricter
+/// water / commit-zone gates, which zero BOTH channels — is a footprint-geometry
+/// safety decision left to the owner. Until decided, the linear-only binding
+/// documented above stands (this note exists so the choice is explicit, not
+/// implicit). See `docs/safety/PARKO_SCENE_VETO_SEMANTICS.md`.
 // SAFETY: SG1 | REQ: parko-ros2-occlusion-gate | TEST: occlusion_known_clear_passes,occlusion_limited_caps_overspeed,occlusion_limited_clamp_preserves_direction,occlusion_absent_scene_full_stops,occlusion_nonfinite_overspeed_full_stops,occlusion_limited_admits_slow_ego,occlusion_missing_scene_fails_closed,occlusion_stale_scene_fails_closed,already_stopped_outcome_passes_all_gates
 pub fn apply_occlusion_gate(
     outcome: TickOutcome,

@@ -432,6 +432,10 @@ fn build_config() -> ParkoNodeConfig {
     config.occlusion_gate_enabled = env_flag("PARKO_OCCLUSION_GATE_ENABLED");
     config.water_gate_enabled = env_flag("PARKO_WATER_GATE_ENABLED");
     config.commit_zone_gate_enabled = env_flag("PARKO_COMMIT_ZONE_GATE_ENABLED");
+    // #795 F6: explicit acknowledgment that a scene-veto gate may be armed with no
+    // producer (a deliberate permanent immobilizer). Unset → the startup guard
+    // REFUSES a producer-less armed gate instead of silently immobilizing.
+    config.allow_scene_gate_without_producer = env_flag("PARKO_ALLOW_SCENE_GATE_WITHOUT_PRODUCER");
     config
 }
 
@@ -488,6 +492,18 @@ async fn async_main() {
 
     let config = Arc::new(build_config());
     tracing::info!(?config, "parko_ros2_node starting");
+
+    // #795 F6: fail-closed startup guard. A scene-veto gate (occlusion/water/
+    // commit-zone) armed with no producer feeding its slot fails closed to a STOP
+    // every tick — a PERMANENT immobilization. Refuse to start (rather than come
+    // up silently immobilized) unless the operator explicitly acknowledged it via
+    // PARKO_ALLOW_SCENE_GATE_WITHOUT_PRODUCER. Same fail-closed-exit shape as the
+    // backend-select guard below.
+    if let Err(refusal) = config.scene_gate_startup_check() {
+        tracing::error!("parko_ros2_node: {refusal}");
+        eprintln!("parko_ros2_node: {refusal} — refusing to start (fail-closed)");
+        std::process::exit(2);
+    }
 
     // Pick the backend compiled into THIS build (compile-time feature gate, so a
     // misconfigured production build can't fall through to the mock). The mock lane
