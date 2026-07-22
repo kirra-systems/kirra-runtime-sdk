@@ -310,6 +310,11 @@ def main() -> int:
         "KIRRA_DEMO_VZ_MAX": "0.4",
         "KIRRA_MOTOR_PORT": "/dev/stub-serial",
         "KIRRA_EXPECTED_CAR_TYPE": "1",
+        # ADR-0033 Tier-3 (#887): the stub port would (correctly) fail the
+        # serial-exclusivity sentinel — acknowledge it exactly as a bring-up
+        # run would. The sentinel's own logic is host-tested in
+        # serial_exclusivity_test.py; THIS harness tests teardown paths.
+        "KIRRA_ALLOW_SHARED_SERIAL": "1",
     })
     ctx.spin_downs_context = True  # our handler already shut it down...
     ctx.spin_raises = ExternalShutdownException()  # ...and spin surfaces it
