@@ -1,0 +1,133 @@
+# ADR-0038 — Postgres for Shared Control-Plane State, Local SQLite for the Audit Ledger (the Hybrid)
+
+**Status:** Accepted (stage 1 merged; stages 2–3 tracked on #1030)
+**Date:** 2026-07-23
+**Owner:** Kirra Systems, LLC
+**Scope:** How #1030 ("shared-file SQLite control plane is an availability SPOF; promote Postgres") is realized. Decides WHICH storage tiers move to Postgres when `KIRRA_DB_URL` selects it, which deliberately stay local, and the staged path from today's single-backend service to the selectable one. Ratified by the owner on the #1030 scoping question (2026-07-23), superseding the earlier assumption that the whole store could switch backends behind one flag.
+
+---
+
+## Context
+
+The A2 review finding (#1030) names the shared-file SQLite store as the control
+plane's availability SPOF in the HA topology: primary and standby share one
+database file, so the file (and its host) is a single point of failure even
+though the verifier process itself fails over.
+
+EP-10/G-9 built the exit ramp: ten storage-seam traits (`EpochFence`,
+`NodeStore`, `PostureEngineStateStore`, `FederationStore`, `OperatorStore`,
+`PrincipalStore`, `CertPrincipalStore`, `FabricAssetStore`, `OtaCampaignStore`,
+`AvSubsystemStore`) with shared conformance suites, and
+`crates/kirra-verifier-pg` binding all ten to a live Postgres server in the
+`postgres-conformance` CI lane.
+
+A full call-surface audit for this ADR established what the conformance story
+does NOT cover — the service methods with **no Postgres implementation, by
+explicit design** (`kirra-verifier-pg/src/lib.rs` records the audit-chaining
+exclusion):
+
+- the **hash-chained audit tier** — every `save_*_chained*` write (posture
+  events, denials, federation reports, clearance grants), chain
+  verification/pagination, the signing-key ledger, verdict-id lookup, the
+  WORM ship cursor. These ride nearly every request;
+- the **posture-event history** (`load_node_history`, flap counting, backup
+  export);
+- the **fabric causal log** (its own hash chain);
+- the **attestation identity registry**;
+- assorted epoch-fenced write variants, the HA lease rows, and
+  SQLite-lifecycle methods (`is_wal_mode` — the SG-008 startup invariant —
+  and `durable_checkpoint`).
+
+Reimplementing the chained-audit tier on Postgres is a from-scratch,
+safety-critical build (tamper-evidence semantics, fsync equivalence, key
+ledger) — not a wiring exercise.
+
+## Decision
+
+**Hybrid.** When `KIRRA_DB_URL=postgres://…` is configured (stage 2), the
+verifier routes the **shared control-plane state** — the ten trait-seam tiers:
+node registry + trust, epoch fence, engine state/generation, federation
+registry + anti-replay, operators, API/cert principals, fabric assets, OTA
+campaigns + adoption, AV subsystem meta — to Postgres. The
+**tamper-evident audit ledger** (audit chain, posture-event history, causal
+log, key ledger) **stays on per-instance local SQLite**, always.
+
+Rationale:
+
+1. **The SPOF is the SHARED state.** What makes the shared file a single
+   point of failure is exactly the state both instances must agree on — the
+   epoch fence above all. Moving that tier to a Postgres deployment (which
+   brings its own replication/HA story) removes the shared-file coupling.
+2. **The audit ledger is inherently per-writer.** Each chain entry links to
+   the previous entry written by THAT instance; the chain is an
+   append-only, per-writer artifact whose durability story is local fsync
+   (`synchronous=FULL`, the #1046 power-loss drill) and whose off-box story
+   already exists — the WS-4 WORM audit shipper re-verifies the stream
+   independently of the source DB. Centralizing it in Postgres would weaken
+   the tamper-evidence argument (a compromised central DB rewrites every
+   instance's history at once) while buying no availability (a verifier that
+   cannot write its local ledger must fail closed anyway).
+3. **The WCET/latency story survives.** The chained audit write rides the
+   deny/verdict path; keeping it a local fsync avoids adding a network RTT
+   to the safety-critical path. Shared-state writes (registration, campaign
+   lifecycle) are control-plane-slow already.
+4. **SG-008 stays intact.** The WAL-mode startup invariant and
+   `durable_checkpoint` remain meaningful because local SQLite remains —
+   they now guard the audit ledger specifically.
+
+Consequences accepted with the hybrid: a fleet's shared state can be current
+in Postgres while an instance's local ledger lags (crash between the two
+writes). This is the SAME class of gap the WORM shipper's at-least-once
+cursor already handles, and the write ORDER (local chained write first, then
+shared-state effect — matching INVARIANT #12's disk-before-memory discipline)
+keeps the ledger the pessimistic record.
+
+## Rejected alternatives
+
+- **Full Postgres including the audit chain.** Largest scope; weakens the
+  per-writer tamper-evidence story; adds a network RTT to the deny path;
+  duplicates durability machinery the local ledger + WORM shipper already
+  prove. Revisitable later as an *additional* central mirror (never the
+  authoritative chain).
+- **Single-flag whole-store swap (the original #1030 framing).** Impossible
+  as scoped: the audit tier has no PG implementation and should not get one
+  (above), and `StoreHandle` passes concrete `&mut VerifierStore` closures at
+  ~150 call sites — a whole-store trait object is a big-bang refactor with
+  no safety payoff.
+
+## Staging
+
+- **Stage 1 (this ADR's PR): de-cycle.** `kirra-verifier-pg` depended on the
+  ROOT crate for two type imports whose canonical home is `kirra-core`
+  (`NodeTrustState`, `RegisteredNode`) — an inverted edge that made root →
+  pg consumption impossible (dependency cycle). Fixed: the crate now depends
+  on the leaf. No behavior change; the `postgres-conformance` lane is the
+  regression evidence.
+- **Stage 2: the backend seam + flag.** `StoreHandle` grows a
+  `shared`-tier accessor dispatching to either the local `VerifierStore` or
+  a `PgVerifierStore` (enum, not trait object — two variants, exhaustive
+  match, no vtable on the hot path); `KIRRA_DB_URL` (registered in
+  `KIRRA_ENV_KEYS`, boot-validated per EP-12) selects it. Unset →
+  byte-identical SQLite path. Set-but-unreachable → **fail-closed startup
+  abort**; connection loss at runtime → the affected operation errors (5xx /
+  posture-recalc skip), never a silent SQLite fallback (a split brain
+  between backends is worse than an outage). The rusqlite leaks in handlers
+  (`is_unique_violation` matching, `rusqlite::Error` closure annotations,
+  the audit-shipper cursor error type) are abstracted behind
+  `kirra-persistence` as part of this stage. Root gains an optional
+  `postgres` cargo feature; the workspace-detachment policy for the driver
+  tree is revisited THERE (the feature stays off in the MSRV lane and the
+  default build).
+- **Stage 3: proof.** The two-node HA drill re-run with PG shared state
+  (epoch CAS race, promotion, fencing) in the `postgres-conformance` lane;
+  topology docs updated. The shared-file topology remains the DEFAULT and
+  the documented small-deployment path; Postgres is the recommended
+  multi-host HA topology once stage 3 lands.
+
+## Invariants preserved
+
+INVARIANT #12 (disk-before-memory) extends across backends: the local
+chained audit write precedes the shared-state effect it records. The epoch
+fence contract (`assert_actuator_epoch_held`, at-most-one-writer) is already
+conformance-proven on both backends and does not change shape. `KIRRA_DB_PATH`
+semantics are untouched — it names the LOCAL ledger DB in both modes.

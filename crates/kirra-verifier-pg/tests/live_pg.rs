@@ -24,7 +24,7 @@ use kirra_persistence::{
     assert_posture_engine_state_store_contract, assert_principal_store_contract, EpochFence,
     FenceError, NodeStore,
 };
-use kirra_verifier::verifier::{NodeTrustState, RegisteredNode};
+use kirra_core::{NodeTrustState, RegisteredNode};
 use kirra_verifier_pg::{PgVerifierStore, PG_SCHEMA_VERSION};
 
 /// Per-test schema counter (combined with the process id so parallel test
