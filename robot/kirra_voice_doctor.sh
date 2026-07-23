@@ -14,7 +14,11 @@
 # Exit 0 iff there is no ❌ (a ⚠ still exits 0 — warnings are non-fatal).
 # The killer check: the `-D plughw:N,0` mic/speaker cards actually appear in
 # arecord -l / aplay -l — ALSA card numbers drift across reboots, and a drifted
-# device fails SILENTLY mid-turn otherwise.
+# device fails SILENTLY mid-turn otherwise. Both addressing forms are checked:
+# a bare numeric index (`plughw:N,0` — drifts across reboots on generic USB
+# audio dongles with no persistent udev naming) AND the more robust
+# `plughw:CARD=<name>,DEV=n` (survives USB re-enumeration order changing) — a
+# correctly-pinned CARD=name must never read as "drifted".
 set -uo pipefail
 
 QUIET=0
@@ -32,8 +36,24 @@ RENV="${KIRRA_ROBOT_ENV:-/etc/kirra/robot.env}"
 first_tok() { set -- $1; printf '%s' "${1:-}"; }
 # value following <flag> in a command string, or "" (e.g. opt_val -m "$KIRRA_STT_CMD")
 opt_val() { local f="$1"; shift; set -- $1; while [ "$#" -gt 0 ]; do [ "$1" = "$f" ] && { printf '%s' "${2:-}"; return; }; shift; done; }
-# ALSA card number from a plughw:N,0 / hw:N,0 spec
-card_of() { local d="${1#plughw:}"; d="${d#hw:}"; printf '%s' "${d%%,*}"; }
+# ALSA card reference from a device spec: plughw:N,0 / hw:N,0 (numeric) or
+# plughw:CARD=<name>,DEV=n (by-name — the robust form). Prints "num:<N>",
+# "name:<NAME>", or "num:" (empty value) if no -D spec was given at all.
+card_ref() {
+  local d="${1#plughw:}"; d="${d#hw:}"; d="${d%%,*}"
+  case "$d" in
+    CARD=*) printf 'name:%s' "${d#CARD=}" ;;
+    *)      printf 'num:%s' "$d" ;;
+  esac
+}
+# Is a card_ref() result present in `arecord -l` / `aplay -l` (arg1: the tool)?
+card_present() {
+  local tool="$1" kind="${2%%:*}" val="${2#*:}"
+  case "$kind" in
+    num)  "$tool" -l 2>/dev/null | grep -qE "^card ${val}:" ;;
+    name) "$tool" -l 2>/dev/null | grep -qE "^card [0-9]+: ${val} " ;;
+  esac
+}
 
 [ "$QUIET" = 1 ] || echo "== R2 voice/audio doctor =="
 
@@ -65,12 +85,13 @@ else
 fi
 
 # 4. MIC device present in arecord -l  (the drift check)
-mc="$(card_of "$(opt_val -D "${KIRRA_RECORD_CMD:-}")")"
-if [ -n "$mc" ]; then
-  if command -v arecord >/dev/null 2>&1 && arecord -l 2>/dev/null | grep -qE "^card ${mc}:"; then
-    ok "mic device present: plughw:${mc},0"
+mic_spec="$(opt_val -D "${KIRRA_RECORD_CMD:-}")"
+mc="$(card_ref "$mic_spec")"
+if [ -n "${mc#*:}" ]; then
+  if command -v arecord >/dev/null 2>&1 && card_present arecord "$mc"; then
+    ok "mic device present: -D $mic_spec"
   else
-    bad "mic device plughw:${mc},0 NOT in arecord -l (card drifted?)"; fix "arecord -l → update KIRRA_RECORD_CMD -D plughw:<N>,0 — §0"
+    bad "mic device NOT in arecord -l (card drifted?): -D $mic_spec"; fix "arecord -l → update KIRRA_RECORD_CMD -D plughw:<N>,0 (or the more robust plughw:CARD=<name>,DEV=0) — §0"
   fi
 else
   warn "KIRRA_RECORD_CMD has no -D plughw:N,0 (mic device not pinned)"
@@ -79,12 +100,13 @@ fi
 # 5. SPEAKER device present in aplay -l (parse the plughw from the TTS wrapper file)
 tts_src="${KIRRA_TTS_CMD:-}"; tf="$(first_tok "$tts_src")"
 [ -f "$tf" ] && tts_src="$(cat "$tf" 2>/dev/null || true)"
-sc="$(card_of "$(opt_val -D "$tts_src")")"
-if [ -n "$sc" ]; then
-  if command -v aplay >/dev/null 2>&1 && aplay -l 2>/dev/null | grep -qE "^card ${sc}:"; then
-    ok "speaker device present: plughw:${sc},0"
+spk_spec="$(opt_val -D "$tts_src")"
+sc="$(card_ref "$spk_spec")"
+if [ -n "${sc#*:}" ]; then
+  if command -v aplay >/dev/null 2>&1 && card_present aplay "$sc"; then
+    ok "speaker device present: -D $spk_spec"
   else
-    bad "speaker device plughw:${sc},0 NOT in aplay -l (card drifted?)"; fix "aplay -l → update speak.sh aplay -D plughw:<N>,0 — §0"
+    bad "speaker device NOT in aplay -l (card drifted?): -D $spk_spec"; fix "aplay -l → update speak.sh aplay -D plughw:<N>,0 (or the more robust plughw:CARD=<name>,DEV=0) — §0"
   fi
 else
   warn "no speaker plughw:N,0 found in the TTS path (not pinned)"
