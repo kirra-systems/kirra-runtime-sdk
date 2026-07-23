@@ -1259,6 +1259,12 @@ jobs:
           # and speak_interruptible completing vs being killed mid-playback. See
           # docs/hardware/RABBIT_AUDIO_STACK.md §3c.
           python3 robot/barge_in_test.py
+          # Skill registry (pure, no LLM/HTTP): the fail-closed dispatcher
+          # (motion → a directive for the SAME /intent fence, unimplemented/
+          # unknown → REFUSE, never faked), fail-closed {say,skills[]} parsing,
+          # and THE single-door invariant — execute_skill_decisions routes motion
+          # ONLY through the injected fence sink. See robot/skill_registry.py.
+          python3 robot/skill_registry_test.py
           # ADR-0033 Tier-3 sentinel logic (#887, pure, no device): owner/mode
           # violations vs the AOU-ACTUATION-SERIAL-001 contract (the vendor
           # 0777 rule is the canonical hazard case), holder reporting, and the

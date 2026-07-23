@@ -36,7 +36,7 @@ sudo install -d -m 0755 "${OPT}/robot"
 for f in rabbit_persona.py rabbit_watch.py rabbit_ask.py rabbit_converse.py rabbit_boot.py \
          rabbit_voice.sh ptt_button.py run_voice_ptt.sh inspect_corridor.py rabbit_ota.py \
          ros_env.sh kirra_voice_doctor.sh kirra_doctor.py rabbit_diag.py \
-         wake_word.py rabbit_wake.py vad_record.py barge_in.py; do
+         wake_word.py rabbit_wake.py vad_record.py barge_in.py skill_registry.py; do
   [[ -f "${REPO}/robot/${f}" ]] || { echo "  ⚠ missing ${REPO}/robot/${f} — skipped"; continue; }
   sudo install -m 0755 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
   echo "  installed ${OPT}/robot/${f}"

@@ -194,6 +194,41 @@ supplied telemetry; the persona phrases, the numbers are ground truth.
 
 ---
 
+## Skills mode (opt-in) — named skills through the *same* door
+
+`KIRRA_SKILLS_ENABLED=1` swaps the free-form `{say, directive}` router for a
+**named-skill** contract: the LLM emits `{say, skills:[{name, parameters}]}` from
+a REGISTERED vocabulary (`robot/skill_registry.py`). Default off → the free-form
+router is byte-identical.
+
+The registry is a **catalog, not a new door.** Its dispatcher (pure,
+host-tested) turns each skill into exactly one of three decisions:
+
+- **`FENCE`** — a *motion* skill (`navigate` / `cruise` / `turn` / `pull_over` /
+  `stop`) compiles to a plain-words directive that goes through the **same**
+  `offer_to_door` → mick `POST /intent` → `MickIntent` grounding → checker path a
+  free-form directive already takes. Motion reaches the wheels ONLY via this
+  decision, and it is just text handed to the existing door.
+- **`SPEAK`** — a read-only skill (`speak`) narrates; no actuation.
+- **`REFUSE`** — a cataloged-but-unimplemented skill (`dock`, `follow_person`,
+  `search_area`, …) or an unknown name is refused, **never faked**. Fabricating a
+  capability is the failure mode this guards against.
+
+`execute_skill_decisions(decisions, offer_to_door, speak)` routes motion ONLY
+through the injected fence sink — the single-door invariant, asserted directly in
+`skill_registry_test.py`. So `ci/check_mick_actuation_fence.py` and the
+one-door rule are untouched: a skill name buys the LLM a vocabulary, not
+authority.
+
+**Not yet default:** graduating the flag requires extending
+`rabbit_model_smoketest.py` to gate the skills contract (the model-swap
+discipline), and the mission Executive (the multi-step sequencer) is a later
+slice. Metadata each skill advertises (permissions, interruptibility,
+preconditions, failure modes) is carried now so that Executive can reason about
+it without a redesign.
+
+---
+
 ## Honest caveats
 
 - **Latency.** A local LLM on the Orin (gemma3:4b) is a few seconds per turn.
