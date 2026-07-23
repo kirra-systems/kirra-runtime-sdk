@@ -101,6 +101,34 @@ async fn console_html_is_served() {
 }
 
 #[tokio::test]
+async fn console_serves_the_estop_request_action() {
+    // ADR-0013 item 4: the console's authenticated "Request Emergency Stop"
+    // action. Guard its wiring — it must POST to the governor-request endpoint,
+    // sign under the STOP-distinct domain (so a clearance signature can't be
+    // replayed as a stop), and be framed as a REQUEST, never a command.
+    let (status, body) = get(build_state(), "/console").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("/console/estop-requests"),
+        "the e-stop action must target the governor-request endpoint"
+    );
+    assert!(
+        body.contains("KIRRA-OPERATOR-ESTOP-v1"),
+        "the in-page signing must use the STOP-distinct domain (not the grant domain)"
+    );
+    assert!(
+        body.contains("REQUEST · routed to governor"),
+        "the UI must frame the stop as a REQUEST, never a direct command"
+    );
+    // ADR-0013 #2: the stop must be non-repudiable — operator-signed ONLY, no
+    // supervisor break-glass (a shared key cannot prove which operator asked).
+    assert!(
+        body.contains("operator-signed only"),
+        "the e-stop panel must state it is operator-signed only (no break-glass)"
+    );
+}
+
+#[tokio::test]
 async fn console_fleet_returns_seeded_node() {
     let svc = build_state();
     seed_node(&svc, "robot-01");

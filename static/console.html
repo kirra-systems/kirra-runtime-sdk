@@ -63,11 +63,19 @@
          font-size:11px; color:var(--dim); white-space:pre-wrap; word-break:break-word; }
   button { margin-top:12px; background:var(--accent); color:#fff; border:0; border-radius:5px;
            padding:8px 14px; font:inherit; cursor:pointer; }
+  button.danger { background:var(--bad); }
   button:disabled { opacity:.5; cursor:default; }
   .result { margin-top:10px; padding:9px; border-radius:5px; font-size:13px; display:none; }
   .result.recorded { display:block; background:rgba(74,134,232,.12); border:1px solid var(--accent); }
+  .result.commanded { display:block; background:rgba(224,83,59,.15); border:1px solid var(--bad); }
+  .result.commanded .pend { color:var(--bad); }
   .result.rejected { display:block; background:rgba(224,83,59,.12); border:1px solid var(--bad); color:var(--bad); }
   .result .pend { color:var(--warn); font-weight:600; }
+  .estop-warn { color:var(--dim); font-size:12px; margin:2px 0 10px; padding:8px;
+                background:rgba(224,83,59,.08); border:1px solid rgba(224,83,59,.4); border-radius:5px; }
+  label.confirm { display:flex; align-items:flex-start; gap:8px; margin-top:10px; color:var(--dim);
+                  font-size:12px; cursor:pointer; }
+  label.confirm input { width:auto; margin-top:2px; }
   .empty { color:var(--dim); font-style:italic; }
   footer { padding:12px 18px; color:var(--dim); font-size:11px; border-top:1px solid var(--line);
            background:var(--panel); line-height:1.6; }
@@ -167,6 +175,51 @@
   </section>
 
   <section>
+    <h2>Request emergency stop <span class="badge">REQUEST · routed to governor</span></h2>
+
+    <!-- ADR-0013: an authenticated REQUEST, never a console->actuator command.
+         The console is QM-domain and holds NO actuator authority (ADR-0006). The
+         operator SIGNS a stop request; the fail-closed governor JUDGES it and
+         commands the MRC under ITS OWN authority. The console asks; the governor
+         acts. This is the clearance loop INVERTED — same signed channel + same
+         verify-then-consume, a domain-distinct payload (KIRRA-OPERATOR-ESTOP-v1)
+         so a clearance signature can never be replayed as a stop. Supplementary
+         to the hardwired PHYSICAL E-stop, never the primary safety mechanism. -->
+    <div id="estopsigned">
+      <p class="estop-warn">Sends a <b>signed request</b> to the governor. On acceptance the governor
+        commands the MRC (controlled decel-to-stop &amp; <b>HOLD</b>) and the fleet goes
+        <b>LockedOut</b> — recovery is a deliberate <b>supervisor reset</b>, not automatic. This does
+        not touch the actuator directly and does <b>not</b> replace the hardwired physical E-stop.</p>
+
+      <!-- Operator-proven identity (#314), signed in-browser with WebCrypto
+           Ed25519. The private key is held in memory ONLY — never localStorage,
+           never sent. -->
+      <form id="estopform" autocomplete="off">
+        <label for="es_node_id">Node id (must be registered)</label>
+        <input id="es_node_id" required>
+        <label for="es_operator_id">Operator id (must be a registered operator)</label>
+        <input id="es_operator_id" required>
+        <label for="es_opkey">Operator private key — PKCS#8 PEM (in memory for this session only — NEVER stored, NEVER sent; the page signs locally)</label>
+        <textarea id="es_opkey" rows="4" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----" required></textarea>
+        <label class="confirm"><input type="checkbox" id="es_confirm" required>
+          I understand this REQUESTS a governor-commanded MRC (sticky <b>LockedOut</b>) and recovery requires a supervisor reset.</label>
+        <button type="submit" id="estopbtn" class="danger">Sign &amp; request emergency stop</button>
+      </form>
+      <div class="result" id="estopresult"></div>
+    </div>
+
+    <!-- Operator-signed ONLY. There is NO break-glass for a stop: ADR-0013 #2
+         requires the stop be NON-REPUDIABLE (provably the operator's), which a
+         shared supervisor key cannot give. If WebCrypto Ed25519 is unavailable,
+         point to the CLI flow — never a silent fallback. -->
+    <div id="estopclifallback" style="display:none">
+      <p class="err">This browser cannot sign Ed25519 in-page (WebCrypto Ed25519 unavailable, or not a secure context).</p>
+      <p style="color:var(--dim);font-size:12px">Use the documented <b>CLI signing flow</b> in
+        <code>docs/CONSOLE_RUNBOOK.md</code>. A stop request is <b>operator-signed only</b> — there is no break-glass.</p>
+    </div>
+  </section>
+
+  <section>
     <h2>Audit chain feed</h2>
     <div class="feed" id="audit"><span class="empty">loading…</span></div>
   </section>
@@ -174,14 +227,18 @@
 
 <footer>
   <strong>QM domain.</strong> This console is a <em>read-only view</em> of the
-  verifier's real store, plus <em>one</em> authenticated affordance: recording a
-  supervisor clearance grant. The UI never claims a release the system hasn't made:
-  a grant is recorded and cryptographically signed, then <em>delivered</em> to the
-  node's <code>ClearanceLoop</code> (Phase B) — which re-validates it and is the
-  thing that actually clears. The card shows <code>RECORDED</code> until a real
-  delivery outcome (<code>CLEARED</code> / <code>REJECTED</code>) exists. The
-  governor judges; this UI does not. Posture-exempt so it stays reachable during
-  LockedOut.
+  verifier's real store, plus <em>two</em> authenticated affordances, both routed
+  through the governor: recording a supervisor <em>clearance grant</em> (RELEASE),
+  and requesting an <em>emergency stop</em> (STOP). The UI never claims a release
+  the system hasn't made: a grant is recorded and cryptographically signed, then
+  <em>delivered</em> to the node's <code>ClearanceLoop</code> (Phase B) — which
+  re-validates it and is the thing that actually clears. The card shows
+  <code>RECORDED</code> until a real delivery outcome (<code>CLEARED</code> /
+  <code>REJECTED</code>) exists. A stop is an authenticated <em>request</em>
+  (ADR-0013): the governor judges it and commands the MRC under its own authority —
+  this console never touches the actuator, and this software path never replaces
+  the hardwired physical E-stop. The governor judges; this UI does not.
+  Posture-exempt so it stays reachable during LockedOut.
 </footer>
 
 <script>
@@ -411,11 +468,13 @@ function b64FromBytes(buf){
   for(let i=0;i<u.length;i++) s += String.fromCharCode(u[i]);
   return btoa(s);
 }
-// MUST byte-match Rust attestation::operator_grant_signing_payload:
-//   "KIRRA-OPERATOR-GRANT-v1" || for f in [operator_id,node_id,nonce]: u64_le(len(f)) || f
-function operatorGrantPayload(operatorId, nodeId, nonce){
+// Domain-framed operator payload: DOMAIN || for f in [operator_id,node_id,nonce]:
+//   u64_le(len(f)) || f. The DOMAIN tag makes the two operator verbs
+//   (RELEASE vs STOP) non-interchangeable — a clearance signature can never be
+//   replayed as a stop, nor vice versa.
+function domainFramedPayload(domainStr, operatorId, nodeId, nonce){
   const te = new TextEncoder();
-  const domain = te.encode("KIRRA-OPERATOR-GRANT-v1");
+  const domain = te.encode(domainStr);
   const fields = [operatorId, nodeId, nonce].map(s => te.encode(s));
   let total = domain.length; for(const f of fields) total += 8 + f.length;
   const buf = new Uint8Array(total); let o = 0;
@@ -425,6 +484,15 @@ function operatorGrantPayload(operatorId, nodeId, nonce){
     buf.set(f, o); o += f.length;
   }
   return buf;
+}
+// MUST byte-match Rust attestation::operator_grant_signing_payload.
+function operatorGrantPayload(operatorId, nodeId, nonce){
+  return domainFramedPayload("KIRRA-OPERATOR-GRANT-v1", operatorId, nodeId, nonce);
+}
+// MUST byte-match Rust attestation::operator_stop_signing_payload
+// (OPERATOR_STOP_DOMAIN, ADR-0013) — domain-distinct from the grant above.
+function operatorStopPayload(operatorId, nodeId, nonce){
+  return domainFramedPayload("KIRRA-OPERATOR-ESTOP-v1", operatorId, nodeId, nonce);
 }
 async function ed25519Supported(){
   try {
@@ -446,6 +514,18 @@ function showRecorded(res, body){
 function showRejected(res, status, reason){
   res.className = "result rejected";
   res.innerHTML = 'REJECTED ('+esc(status)+'): '+esc(reason || "request refused");
+}
+// ADR-0013: the governor ACCEPTED the stop request and commanded the MRC under
+// its own authority. The console did not touch the actuator — it renders the
+// governor's action, not a claim of its own.
+function showStopCommanded(res, body){
+  res.className = "result commanded";
+  res.innerHTML = '<span class="pend">STOP REQUESTED — GOVERNOR COMMANDED MRC</span><br>'+
+    'node <b>'+esc(body.node_id)+'</b> · operator <b>'+esc(body.operator_id)+'</b><br>'+
+    'governor action: <b>'+esc(body.governor_action||"MRC_COMMANDED")+'</b> · posture <b>'+esc(body.posture||"LockedOut")+'</b>'+
+    (body.operator_key_fingerprint ? (' · key <span class="fp">'+esc(body.operator_key_fingerprint)+'</span>') : '')+'<br>'+
+    '<span style="color:var(--dim)">'+esc(body.note||"")+'</span>';
+  poll(); // reflect the new LockedOut posture + the chained OperatorStopRequested/GovernorMRCCommanded events
 }
 
 // PRIMARY: operator-signed grant. Fetch challenge → sign locally → submit.
@@ -502,12 +582,51 @@ document.getElementById("bgform").addEventListener("submit", async (ev) => {
   finally { supEl.value = ""; btn.disabled = false; } // never retain the key
 });
 
-// Feature-detect WebCrypto Ed25519. If unavailable, hide the in-page signing form
+// ADR-0013: operator-signed emergency-stop REQUEST. Same signed channel as a
+// clearance grant (reuses /console/clearance-challenge for the nonce), but the
+// STOP payload is domain-distinct (KIRRA-OPERATOR-ESTOP-v1) and it POSTs to
+// /console/estop-requests. Operator-signed ONLY — no break-glass (the stop must
+// be non-repudiable). The console REQUESTS; the governor commands the MRC.
+document.getElementById("estopform").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const btn = document.getElementById("estopbtn");
+  const res = document.getElementById("estopresult");
+  const opkeyEl = document.getElementById("es_opkey");
+  const node_id = document.getElementById("es_node_id").value.trim();
+  const operator_id = document.getElementById("es_operator_id").value.trim();
+  const confirmed = document.getElementById("es_confirm").checked;
+  const pem = opkeyEl.value; // memory only; never stored, never sent
+  btn.disabled = true; res.className = "result"; res.style.display = "none";
+  try {
+    if(!confirmed){ showRejected(res, "confirm", "tick the acknowledgement — a stop request commands the MRC (sticky LockedOut)"); return; }
+    let key;
+    try { key = await crypto.subtle.importKey("pkcs8", pemToDer(pem), {name:"Ed25519"}, false, ["sign"]); }
+    catch(_){ showRejected(res, "key", "private key is not a valid PKCS#8 Ed25519 PEM"); return; }
+    const cr = await fetch("/console/clearance-challenge?operator_id="+encodeURIComponent(operator_id)+
+                           "&node_id="+encodeURIComponent(node_id), { headers:{accept:"application/json"} });
+    const cbody = await cr.json().catch(() => ({}));
+    if(!cr.ok){ showRejected(res, cr.status, cbody.error || "could not get a challenge (is the operator registered?)"); return; }
+    const sigBuf = await crypto.subtle.sign({name:"Ed25519"}, key,
+                       operatorStopPayload(operator_id, node_id, cbody.nonce));
+    const r = await fetch("/console/estop-requests", {
+      method:"POST", headers:{"content-type":"application/json"},
+      body: JSON.stringify({ node_id, operator_id, nonce: cbody.nonce, signature_b64: b64FromBytes(sigBuf) }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if(r.ok && body.status === "stop_commanded") showStopCommanded(res, body);
+    else showRejected(res, r.status, body.reason);
+  } catch(e){ showRejected(res, "err", e.message); }
+  finally { opkeyEl.value = ""; document.getElementById("es_confirm").checked = false; btn.disabled = false; }
+});
+
+// Feature-detect WebCrypto Ed25519. If unavailable, hide the in-page signing forms
 // and surface the documented CLI flow — NEVER a silent break-glass fallback.
 ed25519Supported().then(ok => {
   if(!ok){
     document.getElementById("opsigned").style.display = "none";
     document.getElementById("clifallback").style.display = "block";
+    document.getElementById("estopsigned").style.display = "none";
+    document.getElementById("estopclifallback").style.display = "block";
   }
 });
 

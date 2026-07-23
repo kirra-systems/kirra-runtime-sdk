@@ -151,6 +151,33 @@ req = urllib.request.Request(f"{BASE}/console/clearance-grants", method="POST",
 print(urllib.request.urlopen(req).read().decode())
 ```
 
+### 4. Request an emergency stop — operator-signed (ADR-0013)
+
+The console's second authenticated affordance is the **"Request emergency stop"** card
+— the clearance loop **inverted**. It is a signed **REQUEST** to the governor, never a
+console→actuator command: the operator signs, the fail-closed governor judges it and
+commands the MRC (controlled decel-to-stop · HOLD → sticky `LockedOut`) under **its own**
+authority. Recovery is a deliberate supervisor reset, not automatic. It is **supplementary
+to the hardwired physical E-stop, never the primary safety mechanism**.
+
+In the browser: enter node id + operator id, paste the operator PEM (memory only), tick
+the acknowledgement, and submit — the page signs the **STOP-distinct** payload
+(`KIRRA-OPERATOR-ESTOP-v1`) and posts to `/console/estop-requests`. It is **operator-signed
+ONLY — there is no break-glass** (ADR-0013 #2: the stop must be non-repudiable, provably a
+specific operator's; a shared key cannot give that). When WebCrypto Ed25519 is unavailable,
+sign from the CLI — identical to the grant snippet above with two changes: the domain tag
+and the endpoint:
+
+```python
+# ... same challenge fetch + `lp` length-prefix helper as the grant snippet above ...
+payload = b"KIRRA-OPERATOR-ESTOP-v1" + lp(op) + lp(node) + lp(nonce)  # == operator_stop_signing_payload
+sig = base64.b64encode(priv.sign(payload)).decode()
+req = urllib.request.Request(f"{BASE}/console/estop-requests", method="POST",
+    data=json.dumps({"node_id":node,"operator_id":op,"nonce":nonce,"signature_b64":sig}).encode(),
+    headers={"content-type":"application/json"})
+print(urllib.request.urlopen(req).read().decode())   # -> {"status":"stop_commanded","governor_action":"MRC_COMMANDED",...}
+```
+
 ### Break-glass policy (the named, audited supervisor fallback)
 
 The shared supervisor key (`KIRRA_SUPERVISOR_RESET_KEY`, #255) **remains** as an
