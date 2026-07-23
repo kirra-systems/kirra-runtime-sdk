@@ -60,14 +60,16 @@ release run; create it manually if it does not exist yet):
   when cosign is installed; `KIRRA_REQUIRE_SIGNED=1` makes it mandatory
   (fail-closed).
 
-## 4. Roadmap remainder (tracked, not yet merged)
+## 4. Roadmap remainder (tracked)
 
-- **SLSA L2→L3 provenance for the tarballs**: adopt
-  `actions/attest-build-provenance` (or `slsa-github-generator`) in the
-  release workflow — L3 additionally isolates signing from `npm install` /
-  `build.rs` structurally. Deferred from the #798 PR only because the repo's
-  SHA-pinning rule (#775 F2) requires pinning the new action by commit SHA,
-  and resolving that SHA needs repo access outside this session's scope —
-  a one-line follow-up with the SHA in hand. (Container images already get
-  SLSA provenance via BuildKit `provenance: mode=max`, merged with #798.)
+- **SLSA build provenance for the tarballs — MERGED.** The `release` job now
+  runs `actions/attest-build-provenance` (SHA-pinned, v4.1.1) over every
+  tarball, SBOM, and `SHA256SUMS`, and the release notes carry the
+  `gh attestation verify <artifact> --repo kirra-systems/kirra-runtime-sdk`
+  instruction. (Container images already get SLSA provenance via BuildKit
+  `provenance: mode=max`, merged with #798 F6.)
+- **SLSA L3 (structural isolation)**: the remaining hardening step is
+  `slsa-github-generator`, which additionally isolates the signing identity
+  from `npm install` / `build.rs` structurally (a separate, reusable signing
+  workflow). Adopt when the release cadence justifies the workflow split.
 - QNX judge tarball SBOM: tracked in #790.
