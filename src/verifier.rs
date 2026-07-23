@@ -527,13 +527,16 @@ impl AppState {
             .ha_fence
             .held_epoch
             .load(std::sync::atomic::Ordering::SeqCst);
-        self.store.with(|store| {
-            if held == 0 {
-                store.save_node(node).map_err(|_| ())
-            } else {
-                store.save_node_epoch_fenced(node, held).map_err(|_| ())
-            }
-        })
+        // #1030 stage 2: routed through the SHARED-tier facade (Local =
+        // byte-identical writer path; Pg when KIRRA_DB_URL selected it).
+        if held == 0 {
+            self.store.shared().save_node(node).map_err(|_| ())
+        } else {
+            self.store
+                .shared()
+                .save_node_epoch_fenced(node, held)
+                .map_err(|_| ())
+        }
     }
 
     /// Sec9 (#1050): persist a node record AND its TPM-quote attestation policy in
@@ -554,24 +557,25 @@ impl AppState {
             .ha_fence
             .held_epoch
             .load(std::sync::atomic::Ordering::SeqCst);
-        let write = |store: &mut VerifierStore| {
+        // #1030 stage 2: routed through the SHARED-tier facade.
+        let write = |shared: &crate::shared_store::SharedOps| {
             if held == 0 {
-                store
+                shared
                     .save_node_with_policy(&node, require_tpm_quote)
                     .map_err(|_| ())
             } else {
-                store
+                shared
                     .save_node_with_policy_epoch_fenced(&node, require_tpm_quote, held)
                     .map_err(|_| ())
             }
         };
         match self.fleet.nodes.entry(node.node_id.clone()) {
             Entry::Occupied(mut occ) => {
-                self.store.with(write)?;
+                write(self.store.shared())?;
                 occ.insert(node);
             }
             Entry::Vacant(vac) => {
-                self.store.with(write)?;
+                write(self.store.shared())?;
                 vac.insert(node);
             }
         }
@@ -604,11 +608,19 @@ impl AppState {
     /// disk-before-memory ordering (invariant #12) is untouched; the caller runs this
     /// off the async runtime via `spawn_blocking`.
     pub fn hydrate_fleet_from_store(&self) -> Result<(usize, usize), String> {
-        let (nodes, dependencies) = self.store.with_read(|store| {
-            let nodes = store.load_nodes().map_err(|e| e.to_string())?;
-            let dependencies = store.load_dependencies().map_err(|e| e.to_string())?;
-            Ok::<_, String>((nodes, dependencies))
-        })?;
+        // #1030 stage 2: hydration reads the SHARED tier (the durable trust
+        // source may be Postgres). Under Local this reads the writer instead
+        // of a replica — acceptable: hydration runs only at boot/promotion.
+        let nodes = self
+            .store
+            .shared()
+            .load_nodes()
+            .map_err(|e| e.to_string())?;
+        let dependencies = self
+            .store
+            .shared()
+            .load_dependencies()
+            .map_err(|e| e.to_string())?;
 
         // Nodes: upsert the durable record (this overwrites a stale in-memory
         // `status`), then prune any in-memory node not in the durable set.
@@ -675,13 +687,14 @@ impl AppState {
                     .ha_fence
                     .held_epoch
                     .load(std::sync::atomic::Ordering::SeqCst);
-                self.store.with(|store| {
-                    if held == 0 {
-                        store.save_node(&updated).map_err(|_| ())
-                    } else {
-                        store.save_node_epoch_fenced(&updated, held).map_err(|_| ())
-                    }
-                })?;
+                if held == 0 {
+                    self.store.shared().save_node(&updated).map_err(|_| ())?;
+                } else {
+                    self.store
+                        .shared()
+                        .save_node_epoch_fenced(&updated, held)
+                        .map_err(|_| ())?;
+                }
                 occ.insert(updated);
                 Ok(true)
             }
@@ -723,15 +736,17 @@ impl AppState {
             .ha_fence
             .held_epoch
             .load(std::sync::atomic::Ordering::SeqCst);
-        self.store.with(|store| {
-            if held == 0 {
-                store.save_dependencies(node_id, &deps).map_err(|_| ())
-            } else {
-                store
-                    .save_dependencies_epoch_fenced(node_id, &deps, held)
-                    .map_err(|_| ())
-            }
-        })?;
+        if held == 0 {
+            self.store
+                .shared()
+                .save_dependencies(node_id, &deps)
+                .map_err(|_| ())?;
+        } else {
+            self.store
+                .shared()
+                .save_dependencies_epoch_fenced(node_id, &deps, held)
+                .map_err(|_| ())?;
+        }
         self.fleet
             .dependency_graph
             .insert(node_id.to_string(), deps);

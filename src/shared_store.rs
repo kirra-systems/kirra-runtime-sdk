@@ -323,6 +323,39 @@ impl SharedOps {
         }
     }
 
+    pub fn save_node_with_policy(
+        &self,
+        node: &kirra_core::RegisteredNode,
+        require_tpm_quote: bool,
+    ) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.save_node_with_policy(node, require_tpm_quote))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => pg_lock(pg)
+                .save_node_with_policy(node, require_tpm_quote)
+                .map_err(Into::into),
+        }
+    }
+
+    pub fn save_dependencies_epoch_fenced(
+        &self,
+        node_id: &str,
+        deps: &[String],
+        held_epoch: u64,
+    ) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.save_dependencies_epoch_fenced(node_id, deps, held_epoch))
+                .map_err(map_local_fenced),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => pg_lock(pg)
+                .save_dependencies_epoch_fenced(node_id, deps, held_epoch)
+                .map_err(Into::into),
+        }
+    }
+
     pub fn save_dependencies(&self, node_id: &str, deps: &[String]) -> SharedResult<()> {
         match &*self.backend {
             SharedBackend::Local => self

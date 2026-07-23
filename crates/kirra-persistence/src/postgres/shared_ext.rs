@@ -481,6 +481,56 @@ impl PgVerifierStore {
         Ok(s)
     }
 
+    /// [`Self::save_dependencies`], fenced on the caller's held epoch (C5
+    /// #1036 parity): the delete+re-insert rides the same transaction whose
+    /// FIRST statement re-asserts the epoch under the `ha_state` row lock.
+    pub fn save_dependencies_epoch_fenced(
+        &self,
+        node_id: &str,
+        deps: &[String],
+        held_epoch: u64,
+    ) -> Result<(), PgDurableWriteError> {
+        let mut guard = self.lock();
+        let mut tx = guard.transaction()?;
+        assert_epoch_held_tx(&mut tx, held_epoch)?;
+        tx.execute("DELETE FROM dependencies WHERE node_id = $1", &[&node_id])?;
+        for dep in deps {
+            tx.execute(
+                "INSERT INTO dependencies (node_id, dep_id) VALUES ($1, $2) \
+                 ON CONFLICT DO NOTHING",
+                &[&node_id, &dep],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The UNFENCED node+policy combined upsert (never-claimed stores): one
+    /// transaction, both rows or neither — `save_node_with_policy` parity.
+    pub fn save_node_with_policy(
+        &self,
+        node: &RegisteredNode,
+        require_tpm_quote: bool,
+    ) -> Result<(), PgStoreError> {
+        let status_json = serde_json::to_string(&node.status).map_err(PgStoreError::Encode)?;
+        let mut guard = self.lock();
+        let mut tx = guard.transaction()?;
+        upsert_node_tx(&mut tx, node, &status_json).map_err(|e| match e {
+            PgDurableWriteError::Db(d) => d,
+            other => PgStoreError::Encode(serde_json::Error::io(std::io::Error::other(
+                other.to_string(),
+            ))),
+        })?;
+        tx.execute(
+            "INSERT INTO node_attestation_policy (node_id, require_tpm_quote) \
+             VALUES ($1, $2) \
+             ON CONFLICT (node_id) DO UPDATE SET require_tpm_quote = EXCLUDED.require_tpm_quote",
+            &[&node.node_id, &require_tpm_quote],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     // -- &self fence/CAS mirrors (#1030 stage 2) --------------------------------
     //
     // The `EpochFence` trait methods take `&mut self`; the PG store's interior
