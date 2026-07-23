@@ -175,6 +175,30 @@ specifically the tool-calling/truncation fixes are *welcome* — they harden the
 `{say, directive}` JSON contract; the smoketest confirms it. The FA4/vision gains
 don't reach the Orin — Ampere, text-only router.)
 
+### Update the Rabbit *code* (scripts) to the latest HEAD
+
+Distinct from a model swap: this pulls the merged repo changes (persona, boot
+line, voice cognition) onto the robot. There is **no remote self-update** — the
+OTA timer updates only the governor *artifact*, never these Python scripts — so
+you pull the checkout and re-stage. One command does it end-to-end:
+
+```bash
+cd ~/kirra-runtime-sdk
+robot/rabbit_update.sh        # ff-pull main → re-stage → restart ACTIVE units → speak a confirmation
+```
+
+It refuses on a dirty tree (never clobbers local edits), restarts **only the
+Rabbit units already running** (it won't newly-enable a disabled one — validate
+wheels-up first per `R2_AUTOSTART_CHECKLIST.md`), and speaks a confirmation so you
+can hear it's talking. Flags: `--ref <branch>`, `--restart-stack` (also bounce
+`kirra-ros-stack`), `--no-restart`, `--no-talk`. If it prints the line but no
+audio comes out, `KIRRA_TTS_CMD` is unset — configure piper per
+`rabbit.env.example` + `RABBIT_AUDIO_STACK.md`, or run `robot/kirra_voice_doctor.sh`.
+
+Equivalent manual steps if you prefer: `git pull --ff-only origin main` →
+`robot/install/install_robot_units.sh` → `sudo systemctl restart
+kirra-rabbit-watch kirra-rabbit-greet kirra-rabbit-voice`.
+
 ### Update commands (copy-paste)
 
 **A — re-pull the same tag** (stealth in-place update, e.g. the Gemma-4 case):
