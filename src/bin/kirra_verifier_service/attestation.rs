@@ -247,12 +247,12 @@ pub(crate) async fn verify_attestation(
     // Fail-closed: a policy-lookup error, a required-but-absent quote, an absent
     // expectation to check against, or an invalid quote all REJECT. Runs BEFORE
     // `consume_challenge`, so a quote failure does NOT burn the nonce (retry).
-    // SAFETY: SG-HA-3 — read off the async worker pool via read replica.
+    // SG-HA-3 — read off the async worker pool; #1030: via the shared facade.
     let node_id_q = req.node_id.clone();
     let require_quote = match svc
         .app
         .store
-        .call_read(move |store| store.node_requires_tpm_quote(&node_id_q))
+        .call_shared(move |shared| shared.node_requires_tpm_quote(&node_id_q))
         .await
     {
         Ok(Ok(v)) => v,

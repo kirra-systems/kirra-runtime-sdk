@@ -139,14 +139,14 @@ mod tests {
 
     fn shared() -> SharedOps {
         let store = VerifierStore::new(":memory:").expect("in-memory store");
-        SharedOps::new(
-            Arc::new(Mutex::new(store)),
-            Arc::new(SharedBackend::Local),
-        )
+        SharedOps::new(Arc::new(Mutex::new(store)), Arc::new(SharedBackend::Local))
     }
 
     fn audit_count(s: &SharedOps, event_type: &str) -> i64 {
-        s.writer.lock().unwrap().count_audit_events_for_test(event_type)
+        s.writer
+            .lock()
+            .unwrap()
+            .count_audit_events_for_test(event_type)
     }
 
     #[test]

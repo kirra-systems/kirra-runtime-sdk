@@ -87,7 +87,7 @@ pub async fn assert_actuator_epoch_or_demote(
     let outcome = svc
         .app
         .store
-        .call(move |store| store.assert_actuator_epoch_held(held))
+        .call_shared(move |shared| shared.assert_actuator_epoch_held(held))
         .await;
 
     match outcome {

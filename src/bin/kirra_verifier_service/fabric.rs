@@ -46,8 +46,8 @@ pub(crate) async fn handle_register_fabric_asset(
     let _ = svc
         .app
         .store
-        .call(move |store| {
-            let _ = store.save_fabric_asset(&asset_c);
+        .call_shared(move |shared| {
+            let _ = shared.save_fabric_asset(&asset_c);
         })
         .await;
     (

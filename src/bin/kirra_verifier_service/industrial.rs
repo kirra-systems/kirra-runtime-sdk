@@ -39,11 +39,11 @@ pub(crate) async fn enforce_industrial_replay(
     match svc
         .app
         .store
-        .call(move |store| {
+        .call_shared(move |shared| {
             let reason = match fresh {
                 Some(r) => Some(r),
                 None => {
-                    match store.industrial_seq_check_and_advance(&source_owned, sequence, now) {
+                    match shared.industrial_seq_check_and_advance(&source_owned, sequence, now) {
                         Ok(true) => None,
                         Ok(false) => Some("INDUSTRIAL_MESSAGE_REPLAY"),
                         Err(_) => Some("INDUSTRIAL_REPLAY_STORE_UNAVAILABLE"),
@@ -55,7 +55,7 @@ pub(crate) async fn enforce_industrial_replay(
                     "protocol": protocol_owned, "source_id": source_owned,
                     "sequence": sequence, "timestamp_ms": timestamp_ms, "reason": r,
                 });
-                let _ = store.save_posture_event_chained(
+                let _ = shared.ledger_posture_event_chained(
                     "industrial_replay_guard",
                     "INDUSTRIAL_MESSAGE_REJECTED",
                     &payload.to_string(),

@@ -65,8 +65,8 @@ pub(crate) async fn handle_actuator_motion_command(
         .ha_fence
         .held_epoch
         .load(std::sync::atomic::Ordering::SeqCst);
-    let final_epoch_assertion = svc.app.store.call(move |store| {
-        store.assert_actuator_epoch_held(held)?;
+    let final_epoch_assertion = svc.app.store.call_shared(move |shared| {
+        shared.assert_actuator_epoch_held(held)?;
         // C4 (#1035): the actuator-release audit write is FAIL-CLOSED. Releasing
         // a motion command with no durable tamper-evident record is an
         // ASIL/compliance evidence hole precisely at the actuation event, so a
@@ -76,7 +76,7 @@ pub(crate) async fn handle_actuator_motion_command(
         // The `bool` carries audit success out of the fence closure; a false is a
         // clean rejection distinct from the fence errors below (NO self-demote —
         // an audit-store hiccup is not an HA-authority change).
-        let audit = store.save_posture_event_chained(
+        let audit = shared.ledger_posture_event_chained(
             "actuator_motion", "MOTION_COMMAND_ADMITTED",
             &audit_str, None, now,
         );

@@ -18,14 +18,14 @@ pub(crate) async fn console_html() -> impl IntoResponse {
 /// (`load_nodes`). QM read. `note` is the Untrusted reason carried on the node's
 /// trust state (the latest trust note); `null` for Trusted/Unknown.
 pub(crate) async fn console_fleet(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
-    // SAFETY: SG-HA-3 — heavy read off the worker pool via read replica.
-    // load_nodes + the per-node clearance lookups run under ONE acquisition
-    // (Rule 5). The closure returns a Result; the error response is built outside.
+    // SG-HA-3 — heavy read off the worker pool; #1030: via the shared facade.
+    // load_nodes + the per-node clearance lookups run in ONE dispatch. The
+    // closure returns a Result; the error response is built outside.
     let fleet = svc
         .app
         .store
-        .call_read(|store| {
-            let nodes = store.load_nodes().map_err(|_| "load_nodes failed")?;
+        .call_shared(|shared| {
+            let nodes = shared.load_nodes().map_err(|_| "load_nodes failed")?;
             let fleet: Vec<_> = nodes
                 .iter()
                 .map(|n| {
@@ -37,7 +37,7 @@ pub(crate) async fn console_fleet(State(svc): State<Arc<ServiceState>>) -> impl 
                     // Phase B: the latest clearance grant's delivery state (or null). The
                     // UI derives the lifecycle label (pending / delivered:Cleared /
                     // delivery-rejected:reason) from these raw columns — no invented state.
-                    let clearance = store.latest_clearance_grant(&n.node_id).ok().flatten();
+                    let clearance = shared.latest_clearance_grant(&n.node_id).ok().flatten();
                     json!({
                         "node_id": n.node_id,
                         "posture": posture,
@@ -165,25 +165,34 @@ pub(crate) async fn console_runtime(State(svc): State<Arc<ServiceState>>) -> imp
         }
     };
 
-    // Two store reads under one lock acquisition: audit depth + HA heartbeat.
-    // The closure returns a Result; per-read error responses are built outside.
-    // SAFETY: SG-HA-3 — two-read probe off the worker pool via read replica.
-    let probe = svc
+    // Two probe reads: audit depth (LOCAL ledger — read replica) + HA heartbeat
+    // (SHARED tier — #1030 facade, so a Pg-backed fleet reports the real shared
+    // heartbeat). The closures return Results; error responses are built outside.
+    let audit_probe = svc
         .app
         .store
-        .call_read(move |store| {
-            let audit_entries = store.audit_chain_len().map_err(|_| "audit query failed")?;
+        .call_read(move |store| store.audit_chain_len().map_err(|_| "audit query failed"))
+        .await;
+    let hb_probe = svc
+        .app
+        .store
+        .call_shared(move |shared| {
             // Heartbeat absent → null (no primary has written yet).
-            let hb = store
-                .load_engine_state(HEARTBEAT_KEY)
-                .map_err(|_| "engine state query failed")?
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(|stored| now.saturating_sub(stored));
-            Ok::<_, &'static str>((audit_entries, hb))
+            Ok::<_, &'static str>(
+                shared
+                    .load_engine_state(HEARTBEAT_KEY)
+                    .map_err(|_| "engine state query failed")?
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|stored| now.saturating_sub(stored)),
+            )
         })
         .await;
+    let probe: Result<(u64, Option<u64>), ()> = match (audit_probe, hb_probe) {
+        (Ok(Ok(a)), Ok(Ok(h))) => Ok((a, h)),
+        _ => Err(()),
+    };
     let (audit_entries, ha_heartbeat_age_ms) = match probe {
-        Ok(Ok(pair)) => pair,
+        Ok(pair) => pair,
         _ => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -438,10 +447,10 @@ pub(crate) async fn console_campaigns(State(svc): State<Arc<ServiceState>>) -> i
     match svc
         .app
         .store
-        .call_read(|store| {
-            let campaigns = store.load_campaigns()?;
-            let statuses = store.load_node_artifact_statuses()?;
-            Ok::<_, rusqlite::Error>((campaigns, statuses))
+        .call_shared(|shared| {
+            let campaigns = shared.load_campaigns()?;
+            let statuses = shared.load_node_artifact_statuses()?;
+            Ok::<_, SharedError>((campaigns, statuses))
         })
         .await
     {

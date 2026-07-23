@@ -220,9 +220,7 @@ pub(crate) async fn submit_federated_report(
                     );
                     FedCommitOutcome::Rejected("FEDERATED_EPOCH_REGRESS")
                 }
-                Err(SharedError::Fenced(reason)) => {
-                    FedCommitOutcome::Fenced(format!("{reason:?}"))
-                }
+                Err(SharedError::Fenced(reason)) => FedCommitOutcome::Fenced(format!("{reason:?}")),
                 Err(_) => FedCommitOutcome::InternalError("failed to persist federated report"),
             }
         })

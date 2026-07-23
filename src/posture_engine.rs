@@ -181,11 +181,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
         // read-replica seam (`with_read`) rather than contending the single writer
         // mutex — the empty-set path is cold, but a `count_nodes()` read has no
         // reason to serialize behind in-flight writes.
-        let registered = app
-            .store
-            .shared()
-            .count_nodes()
-            .unwrap_or(0);
+        let registered = app.store.shared().count_nodes().unwrap_or(0);
         Some(if registered > 0 {
             "EMPTY_LIVE_SET_HYDRATION_GAP"
         } else {

@@ -757,9 +757,9 @@ async fn async_main() {
     {
         let load_initial = app_state
             .store
-            .call_read(|store| {
-                let nodes = store.load_nodes().map_err(|e| e.to_string())?;
-                let dependencies = store.load_dependencies().map_err(|e| e.to_string())?;
+            .call_shared(|shared| {
+                let nodes = shared.load_nodes().map_err(|e| e.to_string())?;
+                let dependencies = shared.load_dependencies().map_err(|e| e.to_string())?;
                 Ok::<_, String>((nodes, dependencies))
             })
             .await;
@@ -852,11 +852,11 @@ async fn async_main() {
         // Load the assets under one acquisition; register them OUTSIDE the
         // closure (registration borrows svc_state and calls back into the store
         // via seed_local_asset_lockedout — keep it off the held guard).
-        // SAFETY: SG-HA-3 — read off the worker pool via read replica.
+        // SG-HA-3 — read off the worker pool; #1030: via the shared facade.
         let assets = svc_state
             .app
             .store
-            .call_read(|store| store.load_fabric_assets())
+            .call_shared(|shared| shared.load_fabric_assets())
             .await
             .ok()
             .and_then(|r| r.ok());
@@ -903,13 +903,14 @@ async fn async_main() {
     let effective_mode = match mode {
         VerifierOperationMode::PassiveStandby => VerifierOperationMode::PassiveStandby,
         VerifierOperationMode::Active => {
-            // SAFETY: SG-HA-3 — read probe off the worker pool via read replica.
+            // SG-HA-3 — probe off the worker pool; #1030: via the shared facade
+            // (a Pg-backed fleet arbitrates against the REAL shared epoch/heartbeat).
             let arbitration = svc_state
                 .app
                 .store
-                .call_read(|store| {
-                    let (epoch, holder) = store.current_active_holder().ok()?;
-                    let hb_str = store.load_engine_state(HEARTBEAT_KEY).ok()?;
+                .call_shared(|shared| {
+                    let (epoch, holder) = shared.current_active_holder().ok()?;
+                    let hb_str = shared.load_engine_state(HEARTBEAT_KEY).ok()?;
                     let now = now_ms();
                     let hb_fresh = hb_str
                         .as_deref()
@@ -938,7 +939,7 @@ async fn async_main() {
                     let claim = svc_state
                         .app
                         .store
-                        .call(move |s| {
+                        .call_shared(move |s| {
                             Ok::<_, ()>(s.try_claim_epoch(epoch, &my_id_c, now_ms()).ok().flatten())
                         })
                         .await

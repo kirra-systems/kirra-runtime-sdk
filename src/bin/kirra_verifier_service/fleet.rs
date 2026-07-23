@@ -140,10 +140,10 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
     if let Ok(Ok((campaigns, statuses))) = svc
         .app
         .store
-        .call_read(|store| {
-            Ok::<_, rusqlite::Error>((
-                store.load_campaigns()?,
-                store.load_node_artifact_statuses()?,
+        .call_shared(|shared| {
+            Ok::<_, kirra_verifier::shared_store::SharedError>((
+                shared.load_campaigns()?,
+                shared.load_node_artifact_statuses()?,
             ))
         })
         .await
@@ -160,8 +160,8 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
     if let Ok(Ok(cert_summary)) = svc
         .app
         .store
-        .call_read(move |store| {
-            store.cert_expiry_summary(
+        .call_shared(move |shared| {
+            shared.cert_expiry_summary(
                 cert_now,
                 kirra_verifier::cert_expiry_monitor::CERT_EXPIRY_WARN_WINDOW_MS,
             )
@@ -195,25 +195,34 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
 
 pub(crate) async fn export_backup(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     let exported_at_ms = now_ms();
-    // Three full-table loads (nodes + dependencies + all posture events) — the
-    // heaviest read. `call_read` runs it off the worker pool AND against a
-    // read-only replica connection, so a large dump neither pins a tokio worker
-    // nor contends the writer mutex (a concurrent write proceeds unblocked).
-    let result = svc
+    // Three full-table loads, split by tier (#1030): nodes + dependencies come
+    // from the SHARED backend (the authoritative registry in Pg mode), the
+    // posture-event history from the LOCAL ledger's read replica. Both run off
+    // the worker pool; a large dump never pins a tokio worker.
+    let shared_part = svc
         .app
         .store
-        .call_read(move |store| {
-            let nodes = store.load_nodes().ok()?;
-            let dependencies = store.load_dependencies().ok()?;
-            let posture_events = store.load_all_posture_events().ok()?;
-            Some(BackupExport {
-                exported_at_ms,
-                nodes,
-                dependencies,
-                posture_events,
-            })
+        .call_shared(|shared| {
+            let nodes = shared.load_nodes().ok()?;
+            let dependencies = shared.load_dependencies().ok()?;
+            Some((nodes, dependencies))
         })
         .await;
+    let events_part = svc
+        .app
+        .store
+        .call_read(|store| store.load_all_posture_events())
+        .await;
+    let result = match (shared_part, events_part) {
+        (Ok(Some((nodes, dependencies))), Ok(Ok(posture_events))) => Ok(Some(BackupExport {
+            exported_at_ms,
+            nodes,
+            dependencies,
+            posture_events,
+        })),
+        (Err(_), _) | (_, Err(_)) => Err(()),
+        _ => Ok(None),
+    };
     match result {
         Ok(Some(export)) => Json(export).into_response(),
         Ok(None) => (
@@ -275,11 +284,11 @@ pub(crate) async fn get_node_campaign_assignment(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    // Read the active campaign set off the worker pool (read replica).
+    // Read the active campaign set off the worker pool (#1030: shared facade).
     match svc
         .app
         .store
-        .call_read(|store| store.load_active_campaigns())
+        .call_shared(|shared| shared.load_active_campaigns())
         .await
     {
         Ok(Ok(active)) => {
