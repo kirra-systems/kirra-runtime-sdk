@@ -19,7 +19,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rabbit_boot import greeting_line, misconfig_line, shutdown_line  # noqa: E402
+from rabbit_boot import (  # noqa: E402
+    RABIT_EXPANSION, greeting_line, misconfig_line, shutdown_line,
+)
 from rabbit_ota import match_command  # noqa: E402
 from rabbit_persona import (  # noqa: E402
     classify_model_pin, name_slot, read_model_pin, read_model_pin_record,
@@ -71,6 +73,20 @@ def test_greeting_nominal_fresh_claims_governor_nominal() -> None:
     with _with_operator(None):
         line = greeting_line(0, True)
     assert "governor nominal" in line and "online" in line
+
+
+def test_greeting_nominal_introduces_rabit_acronym() -> None:
+    """On the nominal-ready path Rabbit introduces itself with the R.A.B.I.T.
+    expansion — the name IS the doer/checker architecture. It must NOT leak onto
+    the not-ready / degraded lines (Rabbit never overclaims while not nominal)."""
+    assert RABIT_EXPANSION == "Robotic Agent, Bounded by Independent Trust"
+    with _with_operator(None):
+        nominal = greeting_line(0, True)
+        degraded = greeting_line(1, True)
+        not_ready = greeting_line(2, True)
+    assert RABIT_EXPANSION in nominal and "Rabbit here" in nominal
+    assert RABIT_EXPANSION not in degraded, "no self-introduction while degraded"
+    assert RABIT_EXPANSION not in not_ready, "no self-introduction while not ready"
 
 
 def test_greeting_degraded_fresh_says_degraded_not_nominal() -> None:

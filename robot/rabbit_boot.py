@@ -36,6 +36,13 @@ from rabbit_persona import name_slot, speak  # noqa: E402
 VERIFIER = os.environ.get("KIRRA_VERIFIER_URL", "http://localhost:8090").rstrip("/")
 GREET_DEADLINE_S = int(os.environ.get("KIRRA_RABBIT_GREET_DEADLINE_MS", "20000")) / 1000.0
 
+# R.A.B.I.T. — the name is an acronym, and it *means* the architecture: a doer
+# (the robot/LLM) that only ever PROPOSES, bounded by an independent safety
+# checker it cannot bypass. Rabbit introduces itself with the expansion on a
+# nominal boot (the one path where it is genuinely ready). Single source of truth
+# for both the greeting and docs/rabbit/RABBIT_VOICE_LINES.md.
+RABIT_EXPANSION = "Robotic Agent, Bounded by Independent Trust"
+
 _FLEET_RE = re.compile(r"kirra_fleet_posture\{[^}]*\}\s+(\d+)")
 _STALE_RE = re.compile(r"kirra_posture_cache_stale\{[^}]*\}\s+1\b")
 
@@ -46,8 +53,8 @@ def greeting_line(posture_code, fresh):
     fresh: the read is fresh (posture present AND cache not stale)."""
     slot = name_slot()
     if fresh and posture_code == 0:
-        return (f"Good morning{slot}. All systems online, governor nominal — "
-                "I'm at your disposal.")
+        return (f"Good morning{slot}. Rabbit here — a {RABIT_EXPANSION}. "
+                "All systems online, governor nominal; I'm at your disposal.")
     if fresh and posture_code == 1:
         return (f"Good morning{slot}. I'm online, but starting in a degraded mode — "
                 "I'll be cautious until it clears.")
