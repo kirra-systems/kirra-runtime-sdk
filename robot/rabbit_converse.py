@@ -52,6 +52,7 @@ import rabbit_ota  # noqa: E402 — deterministic OTA voice commands (NOT the mo
 import rabbit_wake  # noqa: E402 — deterministic wake-listener controls (state file only)
 import barge_in  # noqa: E402 — interruptible reply speech (opt-in; Channel A, cosmetic)
 import skill_registry  # noqa: E402 — opt-in named-skill router (motion → the SAME /intent fence)
+import world_model  # noqa: E402 — opt-in situation report (read-only TTL'd projection)
 from rabbit_persona import name_slot, operator_name  # noqa: E402
 
 MAX_TURNS = 10  # rolling conversation memory (user+assistant pairs kept)
@@ -233,6 +234,18 @@ def handle_turn(history, utterance):
         speak(wake_reply)
         history.append({"role": "user", "content": utterance})
         history.append({"role": "assistant", "content": wake_reply})
+        del history[: max(0, len(history) - 2 * MAX_TURNS)]
+        return
+
+    # "Situation report" / "sitrep" — deterministic, read-only (opt-in,
+    # KIRRA_WORLD_MODEL_ENABLED). Renders the TTL'd World Model projection: a
+    # stale/unavailable field is SAID to be unknown, never a stale value. No LLM,
+    # no /intent, no motion. Off → None → falls through to the LLM.
+    wm_reply = world_model.handle(utterance)
+    if wm_reply is not None:
+        _speak_reply(wm_reply)
+        history.append({"role": "user", "content": utterance})
+        history.append({"role": "assistant", "content": wm_reply})
         del history[: max(0, len(history) - 2 * MAX_TURNS)]
         return
 

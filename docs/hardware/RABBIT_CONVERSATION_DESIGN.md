@@ -229,6 +229,29 @@ it without a redesign.
 
 ---
 
+## World Model (opt-in) — a read projection, not a shared brain
+
+`KIRRA_WORLD_MODEL_ENABLED=1` adds a deterministic **"situation report" / "sitrep"**
+voice command (`robot/world_model.py`) that renders a single TTL'd view of the
+live grounding — posture, perception, last stop reason, operator.
+
+It is deliberately a **read projection, not an authority** (architecture ruling
+§5.1). Rather than one shared mutable "brain" every subsystem depends on — a
+single point of staleness that turns "is this fresh enough to act on?" into a
+global question — each field carries its own `source` / `stamp_ms` / `ttl_ms`, and
+a field read past its TTL comes back **`UNKNOWN`**. A stale or unavailable value
+is **said to be unknown, never dressed as current**; a source that reports
+"unavailable" leaves its field unset (`UNKNOWN`), never fabricated. The KIRRA
+checker still reads its **own** inputs directly — the projection never gates
+safety; it is Channel-A narration only.
+
+The freshness core (fresh/stale/skew, snapshot, render, assemble) is host-tested;
+the live gather is the thin seam. Fields without a producer yet (battery,
+localization, nav state, known people) are simply absent → `UNKNOWN` — documented
+projection slots, not fabricated readings.
+
+---
+
 ## Honest caveats
 
 - **Latency.** A local LLM on the Orin (gemma3:4b) is a few seconds per turn.

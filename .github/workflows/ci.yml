@@ -1265,6 +1265,12 @@ jobs:
           # and THE single-door invariant — execute_skill_decisions routes motion
           # ONLY through the injected fence sink. See robot/skill_registry.py.
           python3 robot/skill_registry_test.py
+          # World Model read projection (pure, no HTTP): TTL freshness incl. the
+          # boundary + clock-skew, absent/stale → UNKNOWN (never a stale value),
+          # the situation-report matcher's non-overlap, render SAYING unknown for
+          # a stale field, and assemble leaving an 'unavailable' source UNKNOWN
+          # (fail-closed). The live gather is the seam. See robot/world_model.py.
+          python3 robot/world_model_test.py
           # ADR-0033 Tier-3 sentinel logic (#887, pure, no device): owner/mode
           # violations vs the AOU-ACTUATION-SERIAL-001 contract (the vendor
           # 0777 rule is the canonical hazard case), holder reporting, and the
