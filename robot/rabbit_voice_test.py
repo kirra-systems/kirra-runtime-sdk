@@ -25,6 +25,7 @@ from rabbit_persona import (  # noqa: E402
     classify_model_pin, name_slot, read_model_pin, read_model_pin_record,
     write_model_pin,
 )
+from rabbit_ask import RABBIT_SYSTEM  # noqa: E402 — persona prompt (requests is lazy inside rabbit_ask)
 
 
 def _with_operator(value):
@@ -113,6 +114,24 @@ def test_misconfig_line_is_a_nonempty_advisory() -> None:
 
 
 # --- OTA matcher precedence (apply/status before check) ----------------------
+
+def test_rabbit_persona_voice_in_kitt_name_out() -> None:
+    """The Rabbit persona is KITT-FLAVOURED (formal, dry, no filler) but must NOT
+    name KITT / Knight Rider, nor hardcode an operator name — the name comes from
+    the {name} slot at runtime — and it must retain the load-bearing safety
+    framing (ADVISE/narrate, ground truth)."""
+    s = RABBIT_SYSTEM
+    low = s.lower()
+    assert "rabbit" in low, "persona is named Rabbit"
+    for forbidden in ("kitt", "k.i.t.t", "knight industries", "knight rider", "michael"):
+        assert forbidden not in low, f"persona must not name {forbidden!r}"
+    # the KITT-flavoured voice traits are present
+    assert "slang" in low and "emoji" in low, "the no-slang/no-emoji rule is present"
+    assert ("wit" in low or "understate" in low), "the dry/understated voice is present"
+    assert "operator by name" in low, "addresses the operator via the {name} slot, not a hardcode"
+    # regression guard: the safety framing must survive persona edits
+    assert "ADVISE" in s and "ground truth" in low, "advise-not-control + ground-truth retained"
+
 
 def test_ota_matcher_precedence() -> None:
     assert match_command("apply the update") == "apply"
