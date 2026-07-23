@@ -365,16 +365,21 @@ impl PgVerifierStore {
         operator_id: &str,
         granted_at_ms: u64,
         created_at_ms: u64,
+        auth_method: &str,
+        operator_key_fingerprint: Option<&str>,
     ) -> Result<i64, PgStoreError> {
         let row = self.lock().query_one(
             "INSERT INTO clearance_grants \
-                 (node_id, operator_id, granted_at_ms, created_at_ms) \
-             VALUES ($1, $2, $3, $4) RETURNING id",
+                 (node_id, operator_id, granted_at_ms, created_at_ms, auth_method, \
+                  operator_key_fingerprint) \
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
             &[
                 &node_id,
                 &operator_id,
                 &(granted_at_ms as i64),
                 &(created_at_ms as i64),
+                &auth_method,
+                &operator_key_fingerprint,
             ],
         )?;
         Ok(row.get(0))

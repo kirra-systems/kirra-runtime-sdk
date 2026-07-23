@@ -266,10 +266,10 @@ fn clearance_grant_lifecycle_is_exactly_once() {
         .is_none());
 
     let id1 = store
-        .insert_clearance_grant_row("nodeX", "op-1", 100, 100)
+        .insert_clearance_grant_row("nodeX", "op-1", 100, 100, "supervisor-key", None)
         .unwrap();
     let id2 = store
-        .insert_clearance_grant_row("nodeX", "op-2", 200, 200)
+        .insert_clearance_grant_row("nodeX", "op-2", 200, 200, "operator-ed25519", Some("ab12"))
         .unwrap();
     assert!(id2 > id1);
 

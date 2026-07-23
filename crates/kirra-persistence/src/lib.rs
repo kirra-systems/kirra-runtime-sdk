@@ -665,6 +665,7 @@ pub use principals::{
 // in-memory reference backend (SQLite realizes it via `ha_state` + BEGIN IMMEDIATE,
 // a future Postgres backend via SELECT … FOR UPDATE).
 pub use epoch::{assert_fence_contract, EpochFence, HaLease, InMemFenceError, InMemoryEpochFence};
+pub use ota_campaigns::campaign_audit_payload;
 mod fabric;
 // ADR-0035 Stage 2.5 seam step (family 2) — the fabric-asset registry storage trait
 // + its in-memory reference backend (asset CRUD only; the audit-chained causal

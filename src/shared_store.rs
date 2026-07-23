@@ -52,7 +52,7 @@ pub enum SharedBackend {
     Local,
     /// Shared tiers served by live Postgres (`KIRRA_DB_URL`).
     #[cfg(feature = "postgres")]
-    Pg(Arc<PgVerifierStore>),
+    Pg(Arc<Mutex<PgVerifierStore>>),
 }
 
 impl SharedBackend {
@@ -78,6 +78,19 @@ pub enum SharedError {
     /// An epoch-fenced write was refused (superseded / unreadable). Nothing
     /// was written. Fail-closed.
     Fenced(FenceError),
+    /// Federation: the report nonce was already burned (H1 replay). The
+    /// handler maps this to the clean FEDERATED_NONCE_REPLAY rejection.
+    NonceReplay,
+    /// Federation: same-epoch generation regress/replay (Item 20).
+    GenerationRegress {
+        found: u64,
+        high_water: u64,
+    },
+    /// Federation: effective-epoch regress or omission-downgrade (#791 I1).
+    EpochRegress {
+        found: u64,
+        high_water: u64,
+    },
 }
 
 impl SharedError {
@@ -91,7 +104,7 @@ impl SharedError {
             SharedError::Sqlite(_) => false,
             #[cfg(feature = "postgres")]
             SharedError::Pg(e) => e.is_unique_violation(),
-            SharedError::Fenced(_) => false,
+            _ => false,
         }
     }
 
@@ -111,6 +124,15 @@ impl std::fmt::Display for SharedError {
             #[cfg(feature = "postgres")]
             SharedError::Pg(e) => write!(f, "shared store (postgres): {e}"),
             SharedError::Fenced(e) => write!(f, "shared store fence: {e:?}"),
+            SharedError::NonceReplay => f.write_str("federation nonce replay"),
+            SharedError::GenerationRegress { found, high_water } => write!(
+                f,
+                "federation generation regress: found {found}, high-water {high_water}"
+            ),
+            SharedError::EpochRegress { found, high_water } => write!(
+                f,
+                "federation epoch regress: found {found}, high-water {high_water}"
+            ),
         }
     }
 }
@@ -133,10 +155,7 @@ impl From<PgStoreError> for SharedError {
 #[cfg(feature = "postgres")]
 impl From<PgDurableWriteError> for SharedError {
     fn from(e: PgDurableWriteError) -> Self {
-        match e {
-            PgDurableWriteError::Fenced(f) => SharedError::Fenced(f),
-            PgDurableWriteError::Db(d) => SharedError::Pg(d),
-        }
+        map_federation_pg(e)
     }
 }
 
@@ -156,6 +175,15 @@ fn map_local_fenced(e: kirra_persistence::DurableWriteError) -> SharedError {
 }
 
 pub type SharedResult<T> = Result<T, SharedError>;
+
+/// Lock the PG store (poison-tolerant, matching the writer's discipline). The
+/// PG client is additionally serialized internally; this outer mutex exists so
+/// the facade can reach the store's `&mut self` trait methods through an
+/// `Arc` without per-method `&self` mirrors.
+#[cfg(feature = "postgres")]
+fn pg_lock(m: &Mutex<PgVerifierStore>) -> std::sync::MutexGuard<'_, PgVerifierStore> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 /// The shared-tier operations facade. Cheaply cloneable (`Arc`s inside);
 /// `'static`, so it moves into `spawn_blocking` closures freely.
@@ -199,7 +227,7 @@ impl SharedOps {
             #[cfg(feature = "postgres")]
             SharedBackend::Pg(pg) => {
                 use kirra_persistence::NodeStore;
-                pg.save_node(node).map_err(Into::into)
+                pg_lock(pg).save_node(node).map_err(Into::into)
             }
         }
     }
@@ -214,7 +242,7 @@ impl SharedOps {
                 .local(|s| s.save_node_epoch_fenced(node, held_epoch))
                 .map_err(map_local_fenced),
             #[cfg(feature = "postgres")]
-            SharedBackend::Pg(pg) => pg
+            SharedBackend::Pg(pg) => pg_lock(pg)
                 .save_node_epoch_fenced(node, held_epoch)
                 .map_err(Into::into),
         }
@@ -233,7 +261,7 @@ impl SharedOps {
                 })
                 .map_err(map_local_fenced),
             #[cfg(feature = "postgres")]
-            SharedBackend::Pg(pg) => pg
+            SharedBackend::Pg(pg) => pg_lock(pg)
                 .save_node_with_policy_epoch_fenced(node, require_tpm_quote, held_epoch)
                 .map_err(Into::into),
         }
@@ -245,7 +273,7 @@ impl SharedOps {
             #[cfg(feature = "postgres")]
             SharedBackend::Pg(pg) => {
                 use kirra_persistence::NodeStore;
-                pg.load_node(node_id).map_err(Into::into)
+                pg_lock(pg).load_node(node_id).map_err(Into::into)
             }
         }
     }
@@ -256,7 +284,7 @@ impl SharedOps {
             #[cfg(feature = "postgres")]
             SharedBackend::Pg(pg) => {
                 use kirra_persistence::NodeStore;
-                pg.load_nodes().map_err(Into::into)
+                pg_lock(pg).load_nodes().map_err(Into::into)
             }
         }
     }
@@ -267,7 +295,7 @@ impl SharedOps {
             #[cfg(feature = "postgres")]
             SharedBackend::Pg(pg) => {
                 use kirra_persistence::NodeStore;
-                pg.node_exists(node_id).map_err(Into::into)
+                pg_lock(pg).node_exists(node_id).map_err(Into::into)
             }
         }
     }
@@ -278,7 +306,7 @@ impl SharedOps {
             #[cfg(feature = "postgres")]
             SharedBackend::Pg(pg) => {
                 use kirra_persistence::NodeStore;
-                pg.count_nodes().map_err(Into::into)
+                pg_lock(pg).count_nodes().map_err(Into::into)
             }
         }
     }
@@ -289,7 +317,9 @@ impl SharedOps {
                 .local(|s| s.node_requires_tpm_quote(node_id))
                 .map_err(Into::into),
             #[cfg(feature = "postgres")]
-            SharedBackend::Pg(pg) => pg.node_requires_tpm_quote(node_id).map_err(Into::into),
+            SharedBackend::Pg(pg) => pg_lock(pg)
+                .node_requires_tpm_quote(node_id)
+                .map_err(Into::into),
         }
     }
 
@@ -299,7 +329,9 @@ impl SharedOps {
                 .local(|s| s.save_dependencies(node_id, deps))
                 .map_err(Into::into),
             #[cfg(feature = "postgres")]
-            SharedBackend::Pg(pg) => pg.save_dependencies(node_id, deps).map_err(Into::into),
+            SharedBackend::Pg(pg) => pg_lock(pg)
+                .save_dependencies(node_id, deps)
+                .map_err(Into::into),
         }
     }
 
@@ -307,7 +339,7 @@ impl SharedOps {
         match &*self.backend {
             SharedBackend::Local => self.local(|s| s.load_dependencies()).map_err(Into::into),
             #[cfg(feature = "postgres")]
-            SharedBackend::Pg(pg) => pg.load_dependencies().map_err(Into::into),
+            SharedBackend::Pg(pg) => pg_lock(pg).load_dependencies().map_err(Into::into),
         }
     }
 }
@@ -323,7 +355,7 @@ impl SharedOps {
             #[cfg(feature = "postgres")]
             SharedBackend::Pg(pg) => {
                 use kirra_persistence::EpochFence;
-                pg.current_epoch().map_err(Into::into)
+                pg_lock(pg).current_epoch().map_err(Into::into)
             }
         }
     }
@@ -336,7 +368,7 @@ impl SharedOps {
             #[cfg(feature = "postgres")]
             SharedBackend::Pg(pg) => {
                 use kirra_persistence::EpochFence;
-                pg.current_active_holder().map_err(Into::into)
+                pg_lock(pg).current_active_holder().map_err(Into::into)
             }
         }
     }
@@ -357,7 +389,8 @@ impl SharedOps {
                 // serializes internally, and the inherent CAS is on `&self`
                 // via the connection lock — call through the store's own
                 // interior mutability.
-                pg.try_claim_epoch_shared(observed, instance_id, now_ms)
+                pg_lock(pg)
+                    .try_claim_epoch_shared(observed, instance_id, now_ms)
                     .map_err(Into::into)
             }
         }
@@ -367,7 +400,7 @@ impl SharedOps {
         match &*self.backend {
             SharedBackend::Local => self.local(|s| s.assert_actuator_epoch_held(held_epoch)),
             #[cfg(feature = "postgres")]
-            SharedBackend::Pg(pg) => pg.assert_actuator_epoch_held_shared(held_epoch),
+            SharedBackend::Pg(pg) => pg_lock(pg).assert_actuator_epoch_held_shared(held_epoch),
         }
     }
 
@@ -382,7 +415,7 @@ impl SharedOps {
                 .local(|s| s.renew_lease(instance_id, held_epoch, now_ms))
                 .map_err(Into::into),
             #[cfg(feature = "postgres")]
-            SharedBackend::Pg(pg) => pg
+            SharedBackend::Pg(pg) => pg_lock(pg)
                 .renew_lease(instance_id, held_epoch, now_ms)
                 .map_err(Into::into),
         }
@@ -392,7 +425,7 @@ impl SharedOps {
         match &*self.backend {
             SharedBackend::Local => self.local(|s| s.read_ha_lease()).map_err(Into::into),
             #[cfg(feature = "postgres")]
-            SharedBackend::Pg(pg) => pg.read_ha_lease().map_err(Into::into),
+            SharedBackend::Pg(pg) => pg_lock(pg).read_ha_lease().map_err(Into::into),
         }
     }
 }
@@ -408,7 +441,7 @@ impl SharedOps {
             #[cfg(feature = "postgres")]
             SharedBackend::Pg(pg) => {
                 use kirra_persistence::PostureEngineStateStore;
-                pg.load_engine_state(key).map_err(Into::into)
+                pg_lock(pg).load_engine_state(key).map_err(Into::into)
             }
         }
     }
@@ -421,7 +454,9 @@ impl SharedOps {
             #[cfg(feature = "postgres")]
             SharedBackend::Pg(pg) => {
                 use kirra_persistence::PostureEngineStateStore;
-                pg.save_engine_state(key, value).map_err(Into::into)
+                pg_lock(pg)
+                    .save_engine_state(key, value)
+                    .map_err(Into::into)
             }
         }
     }
@@ -432,7 +467,7 @@ impl SharedOps {
             #[cfg(feature = "postgres")]
             SharedBackend::Pg(pg) => {
                 use kirra_persistence::PostureEngineStateStore;
-                pg.load_last_generation().map_err(Into::into)
+                pg_lock(pg).load_last_generation().map_err(Into::into)
             }
         }
     }
@@ -445,9 +480,964 @@ impl SharedOps {
             #[cfg(feature = "postgres")]
             SharedBackend::Pg(pg) => {
                 use kirra_persistence::PostureEngineStateStore;
-                pg.save_last_generation(generation).map_err(Into::into)
+                pg_lock(pg)
+                    .save_last_generation(generation)
+                    .map_err(Into::into)
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tier: federation registry + anti-replay + reports
+// ---------------------------------------------------------------------------
+
+impl SharedOps {
+    pub fn save_trusted_federation_controller(
+        &self,
+        controller_id: &str,
+        public_key_b64: &str,
+        registered_at_ms: u64,
+    ) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| {
+                    s.save_trusted_federation_controller(
+                        controller_id,
+                        public_key_b64,
+                        registered_at_ms,
+                    )
+                })
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::FederationStore;
+                pg_lock(pg)
+                    .save_trusted_federation_controller(
+                        controller_id,
+                        public_key_b64,
+                        registered_at_ms,
+                    )
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_trusted_federation_controller_key(
+        &self,
+        controller_id: &str,
+    ) -> SharedResult<Option<String>> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.load_trusted_federation_controller_key(controller_id))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::FederationStore;
+                pg_lock(pg)
+                    .load_trusted_federation_controller_key(controller_id)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn has_seen_federation_nonce(&self, nonce_hex: &str) -> SharedResult<bool> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.has_seen_federation_nonce(nonce_hex))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::FederationStore;
+                pg_lock(pg)
+                    .has_seen_federation_nonce(nonce_hex)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn industrial_seq_check_and_advance(
+        &self,
+        source_id: &str,
+        sequence: u64,
+        now_ms: u64,
+    ) -> SharedResult<bool> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.industrial_seq_check_and_advance(source_id, sequence, now_ms))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::FederationStore;
+                pg_lock(pg)
+                    .industrial_seq_check_and_advance(source_id, sequence, now_ms)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    /// The FUSED federated-report accept. Local: the SQLite single-transaction
+    /// save runs UNCHANGED (row + nonce burn + chained audit, atomic). Pg: the
+    /// gated PG transaction commits the shared halves (gates + high-water +
+    /// report + nonce burn), then the SAME audit events are appended to the
+    /// LOCAL ledger. Shared-write-first is REQUIRED here (the gates may
+    /// refuse — a refused report must never be ledgered as accepted); the
+    /// crash window (PG committed, ledger append missed) is recorded in
+    /// ADR-0038 and surfaces as a WARN, never a silent divergence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_federated_report_chained(
+        &self,
+        report: &kirra_fleet_types::federation::FederatedTrustReport,
+        source_generation: Option<u64>,
+        source_epoch: Option<u64>,
+        received_at_ms: u64,
+        held_epoch: u64,
+    ) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| {
+                    s.save_federated_report_chained(
+                        report,
+                        source_generation,
+                        source_epoch,
+                        received_at_ms,
+                        held_epoch,
+                    )
+                })
+                .map_err(map_federation_dwe),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                let posture_json = serde_json::to_string(&report.posture)
+                    .map_err(|_| SharedError::Sqlite(rusqlite::Error::InvalidQuery))?;
+                let outcome = pg_lock(pg)
+                    .save_federated_report_row_gated(
+                        &report.source_controller_id,
+                        &report.asset_id,
+                        &posture_json,
+                        report.issued_at_ms,
+                        report.expires_at_ms,
+                        &report.nonce_hex,
+                        source_generation,
+                        source_epoch,
+                        received_at_ms,
+                        held_epoch,
+                    )
+                    .map_err(map_federation_pg)?;
+                // LOCAL ledger — the same events the SQLite fused save appends.
+                let accepted = serde_json::json!({
+                    "source_controller_id": report.source_controller_id,
+                    "asset_id": report.asset_id,
+                    "posture": posture_json,
+                    "issued_at_ms": report.issued_at_ms,
+                    "expires_at_ms": report.expires_at_ms,
+                    "nonce_hex": report.nonce_hex,
+                    "received_at_ms": received_at_ms,
+                });
+                self.ledger_append(
+                    "FEDERATED_TRUST_REPORT_ACCEPTED",
+                    &accepted.to_string(),
+                    received_at_ms,
+                );
+                if let (Some(hw), Some(gen)) = (outcome.gap_from, source_generation) {
+                    let gap = serde_json::json!({
+                        "source_controller_id": report.source_controller_id,
+                        "asset_id": report.asset_id,
+                        "last_accepted_generation": hw,
+                        "observed_generation": gen,
+                        "missing_from_generation": hw + 1,
+                        "missing_through_generation": gen - 1,
+                        "skipped_generations": gen - hw - 1,
+                    });
+                    self.ledger_append(
+                        "FEDERATION_GENERATION_GAP",
+                        &gap.to_string(),
+                        received_at_ms,
+                    );
+                }
+                if let (Some(prev), Some(gen)) = (outcome.epoch_advance_from, source_generation) {
+                    let adv = serde_json::json!({
+                        "source_controller_id": report.source_controller_id,
+                        "asset_id": report.asset_id,
+                        "previous_epoch": prev,
+                        "observed_epoch": outcome.eff_epoch,
+                        "observed_generation": gen,
+                    });
+                    self.ledger_append(
+                        "FEDERATION_EPOCH_ADVANCE",
+                        &adv.to_string(),
+                        received_at_ms,
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub fn load_federated_reports_for_asset(
+        &self,
+        asset_id: &str,
+    ) -> SharedResult<Vec<serde_json::Value>> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.load_federated_reports_for_asset(asset_id))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => pg_lock(pg)
+                .load_federated_reports_for_asset(asset_id)
+                .map_err(Into::into),
+        }
+    }
+
+    pub fn load_federated_report_v2s_for_asset(
+        &self,
+        asset_id: &str,
+    ) -> SharedResult<Vec<kirra_fleet_types::federation_reconciliation::FederatedTrustReportV2>>
+    {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.load_federated_report_v2s_for_asset(asset_id))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => pg_lock(pg)
+                .load_federated_report_v2s_for_asset(asset_id)
+                .map_err(Into::into),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tier: operators + clearance grants
+// ---------------------------------------------------------------------------
+
+impl SharedOps {
+    pub fn register_operator(
+        &self,
+        operator_id: &str,
+        pubkey_pem: &str,
+        now_ms: u64,
+    ) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.register_operator(operator_id, pubkey_pem, now_ms))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::OperatorStore;
+                pg_lock(pg)
+                    .register_operator(operator_id, pubkey_pem, now_ms)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn revoke_operator(&self, operator_id: &str, now_ms: u64) -> SharedResult<bool> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.revoke_operator(operator_id, now_ms))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::OperatorStore;
+                pg_lock(pg)
+                    .revoke_operator(operator_id, now_ms)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_operator(
+        &self,
+        operator_id: &str,
+    ) -> SharedResult<Option<kirra_persistence::OperatorRecord>> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.load_operator(operator_id))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::OperatorStore;
+                pg_lock(pg).load_operator(operator_id).map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_operators(&self) -> SharedResult<Vec<kirra_persistence::OperatorRecord>> {
+        match &*self.backend {
+            SharedBackend::Local => self.local(|s| s.load_operators()).map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::OperatorStore;
+                pg_lock(pg).load_operators().map_err(Into::into)
+            }
+        }
+    }
+
+    /// FUSED grant-create. Local: the SQLite chained insert runs unchanged.
+    /// Pg: the PG grant row lands first (it can fail; a failed insert must
+    /// not be ledgered), then the SAME OperatorClearanceGrantIssued payload
+    /// is appended to the LOCAL ledger.
+    pub fn save_clearance_grant_chained_with_auth(
+        &self,
+        node_id: &str,
+        operator_id: &str,
+        granted_at_ms: u64,
+        auth_method: &str,
+        operator_key_fingerprint: Option<&str>,
+    ) -> SharedResult<i64> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| {
+                    s.save_clearance_grant_chained_with_auth(
+                        node_id,
+                        operator_id,
+                        granted_at_ms,
+                        auth_method,
+                        operator_key_fingerprint,
+                    )
+                })
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                let id = pg_lock(pg).insert_clearance_grant_row(
+                    node_id,
+                    operator_id,
+                    granted_at_ms,
+                    granted_at_ms,
+                    auth_method,
+                    operator_key_fingerprint,
+                )?;
+                let payload = serde_json::json!({
+                    "node_id": node_id,
+                    "operator_id": operator_id,
+                    "granted_at_ms": granted_at_ms,
+                    "delivery": "PENDING-NODE-TRANSPORT",
+                    "auth_method": auth_method,
+                    "operator_key_fingerprint": operator_key_fingerprint,
+                });
+                self.ledger_append(
+                    "OperatorClearanceGrantIssued",
+                    &payload.to_string(),
+                    granted_at_ms,
+                );
+                Ok(id)
+            }
+        }
+    }
+
+    pub fn take_pending_clearance_grant(
+        &self,
+        node_id: &str,
+        now_ms: u64,
+    ) -> SharedResult<Option<kirra_persistence::PendingClearanceGrant>> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.take_pending_clearance_grant(node_id, now_ms))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => pg_lock(pg)
+                .take_pending_clearance_grant(node_id, now_ms)
+                .map_err(Into::into),
+        }
+    }
+
+    /// FUSED outcome record. Local: unchanged (row + chained event, one tx).
+    /// Pg: row first (phantom check — a missing grant must not be ledgered),
+    /// then the SAME ClearanceDelivered/ClearanceDeliveryRejected event on
+    /// the LOCAL ledger.
+    pub fn record_grant_outcome(
+        &self,
+        grant_rowid: i64,
+        outcome: &str,
+        detail: Option<&str>,
+        now_ms: u64,
+    ) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.record_grant_outcome(grant_rowid, outcome, detail, now_ms))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                let found = pg_lock(pg).record_grant_outcome_row(grant_rowid, outcome, detail)?;
+                if !found {
+                    return Err(SharedError::Sqlite(rusqlite::Error::QueryReturnedNoRows));
+                }
+                let event_type = if outcome == "Cleared" {
+                    "ClearanceDelivered"
+                } else {
+                    "ClearanceDeliveryRejected"
+                };
+                let payload = serde_json::json!({
+                    "grant_rowid": grant_rowid,
+                    "outcome": outcome,
+                    "detail": detail,
+                });
+                self.ledger_append(event_type, &payload.to_string(), now_ms);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn latest_clearance_grant(
+        &self,
+        node_id: &str,
+    ) -> SharedResult<Option<kirra_persistence::ClearanceGrantState>> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.latest_clearance_grant(node_id))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => pg_lock(pg)
+                .latest_clearance_grant(node_id)
+                .map_err(Into::into),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tier: API principals + cert principals
+// ---------------------------------------------------------------------------
+
+impl SharedOps {
+    pub fn register_api_principal(
+        &self,
+        principal_id: &str,
+        token_sha256: &str,
+        role: &str,
+        now_ms: u64,
+    ) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.register_api_principal(principal_id, token_sha256, role, now_ms))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::PrincipalStore;
+                pg_lock(pg)
+                    .register_api_principal(principal_id, token_sha256, role, now_ms)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn revoke_api_principal(&self, principal_id: &str, now_ms: u64) -> SharedResult<bool> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.revoke_api_principal(principal_id, now_ms))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::PrincipalStore;
+                pg_lock(pg)
+                    .revoke_api_principal(principal_id, now_ms)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_api_principal_by_token_hash(
+        &self,
+        token_sha256: &str,
+    ) -> SharedResult<Option<kirra_persistence::ApiPrincipalRecord>> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.load_api_principal_by_token_hash(token_sha256))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::PrincipalStore;
+                pg_lock(pg)
+                    .load_api_principal_by_token_hash(token_sha256)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_api_principals(&self) -> SharedResult<Vec<kirra_persistence::ApiPrincipalRecord>> {
+        match &*self.backend {
+            SharedBackend::Local => self.local(|s| s.load_api_principals()).map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::PrincipalStore;
+                pg_lock(pg).load_api_principals().map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn register_cert_principal(
+        &self,
+        principal_id: &str,
+        cert_sha256: &str,
+        role: &str,
+        not_after_ms: Option<u64>,
+        now_ms: u64,
+    ) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| {
+                    s.register_cert_principal(principal_id, cert_sha256, role, not_after_ms, now_ms)
+                })
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::CertPrincipalStore;
+                pg_lock(pg)
+                    .register_cert_principal(principal_id, cert_sha256, role, not_after_ms, now_ms)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn revoke_cert_principal(&self, principal_id: &str, now_ms: u64) -> SharedResult<bool> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.revoke_cert_principal(principal_id, now_ms))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::CertPrincipalStore;
+                pg_lock(pg)
+                    .revoke_cert_principal(principal_id, now_ms)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_cert_principal_by_fingerprint(
+        &self,
+        cert_sha256: &str,
+    ) -> SharedResult<Option<kirra_persistence::CertPrincipalRecord>> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.load_cert_principal_by_fingerprint(cert_sha256))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::CertPrincipalStore;
+                pg_lock(pg)
+                    .load_cert_principal_by_fingerprint(cert_sha256)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_cert_principals(
+        &self,
+    ) -> SharedResult<Vec<kirra_persistence::CertPrincipalRecord>> {
+        match &*self.backend {
+            SharedBackend::Local => self.local(|s| s.load_cert_principals()).map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::CertPrincipalStore;
+                pg_lock(pg).load_cert_principals().map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn cert_expiry_summary(
+        &self,
+        now_ms: u64,
+        warn_window_ms: u64,
+    ) -> SharedResult<kirra_persistence::CertExpirySummary> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.cert_expiry_summary(now_ms, warn_window_ms))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => pg_lock(pg)
+                .cert_expiry_summary(now_ms, warn_window_ms)
+                .map_err(Into::into),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tier: fabric assets + OTA campaigns + AV subsystem meta
+// ---------------------------------------------------------------------------
+
+impl SharedOps {
+    pub fn save_fabric_asset(
+        &self,
+        asset: &kirra_fabric_types::asset::FabricAsset,
+    ) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.save_fabric_asset(asset))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::FabricAssetStore;
+                pg_lock(pg).save_fabric_asset(asset).map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_fabric_assets(&self) -> SharedResult<Vec<kirra_fabric_types::asset::FabricAsset>> {
+        match &*self.backend {
+            SharedBackend::Local => self.local(|s| s.load_fabric_assets()).map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::FabricAssetStore;
+                pg_lock(pg).load_fabric_assets().map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn insert_campaign(&self, campaign: &kirra_ota_campaign::Campaign) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.insert_campaign(campaign))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::OtaCampaignStore;
+                pg_lock(pg).insert_campaign(campaign).map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_campaign(
+        &self,
+        campaign_id: &str,
+    ) -> SharedResult<Option<kirra_ota_campaign::Campaign>> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.load_campaign(campaign_id))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::OtaCampaignStore;
+                pg_lock(pg).load_campaign(campaign_id).map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_campaigns(&self) -> SharedResult<Vec<kirra_ota_campaign::Campaign>> {
+        match &*self.backend {
+            SharedBackend::Local => self.local(|s| s.load_campaigns()).map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::OtaCampaignStore;
+                pg_lock(pg).load_campaigns().map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_active_campaigns(&self) -> SharedResult<Vec<kirra_ota_campaign::Campaign>> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.load_active_campaigns())
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::OtaCampaignStore;
+                pg_lock(pg).load_active_campaigns().map_err(Into::into)
+            }
+        }
+    }
+
+    /// FUSED campaign lifecycle update. Local: the SQLite single-transaction
+    /// row-update + chained audit runs UNCHANGED (incl. the phantom-mutation
+    /// refusal). Pg: the row update commits first (a phantom must never be
+    /// ledgered — the same rule the SQLite transaction enforces), then the
+    /// SAME R156-shaped payload is appended to the LOCAL ledger.
+    pub fn update_campaign(
+        &self,
+        campaign: &kirra_ota_campaign::Campaign,
+        event_type: &str,
+    ) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.update_campaign(campaign, event_type))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                if !pg_lock(pg).update_campaign_row(campaign)? {
+                    return Err(SharedError::Sqlite(rusqlite::Error::QueryReturnedNoRows));
+                }
+                let payload = kirra_persistence::campaign_audit_payload(campaign, event_type);
+                self.ledger_append(event_type, &payload, campaign.updated_at_ms);
+                Ok(())
+            }
+        }
+    }
+
+    /// [`Self::update_campaign`], fenced on the caller's held epoch (#1093).
+    pub fn update_campaign_epoch_fenced(
+        &self,
+        campaign: &kirra_ota_campaign::Campaign,
+        event_type: &str,
+        held_epoch: u64,
+    ) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.update_campaign_epoch_fenced(campaign, event_type, held_epoch))
+                .map_err(map_local_fenced),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                if !pg_lock(pg).update_campaign_row_epoch_fenced(campaign, held_epoch)? {
+                    return Err(SharedError::Sqlite(rusqlite::Error::QueryReturnedNoRows));
+                }
+                let payload = kirra_persistence::campaign_audit_payload(campaign, event_type);
+                self.ledger_append(event_type, &payload, campaign.updated_at_ms);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn upsert_node_artifact_status(
+        &self,
+        st: &kirra_ota_campaign::NodeArtifactStatus,
+    ) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.upsert_node_artifact_status(st))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::OtaCampaignStore;
+                pg_lock(pg)
+                    .upsert_node_artifact_status(st)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_node_artifact_statuses(
+        &self,
+    ) -> SharedResult<Vec<kirra_ota_campaign::NodeArtifactStatus>> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.load_node_artifact_statuses())
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::OtaCampaignStore;
+                pg_lock(pg)
+                    .load_node_artifact_statuses()
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn register_av_subsystem_meta(
+        &self,
+        node_id: &str,
+        subsystem_type: &str,
+        hardware_id: &str,
+        confidence_floor: f64,
+        initial_telemetry_ms: u64,
+    ) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| {
+                    s.register_av_subsystem_meta(
+                        node_id,
+                        subsystem_type,
+                        hardware_id,
+                        confidence_floor,
+                        initial_telemetry_ms,
+                    )
+                })
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::AvSubsystemStore;
+                pg_lock(pg)
+                    .register_av_subsystem_meta(
+                        node_id,
+                        subsystem_type,
+                        hardware_id,
+                        confidence_floor,
+                        initial_telemetry_ms,
+                    )
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_av_confidence_floor(&self, node_id: &str) -> SharedResult<Option<f64>> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.load_av_confidence_floor(node_id))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::AvSubsystemStore;
+                pg_lock(pg)
+                    .load_av_confidence_floor(node_id)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn touch_av_telemetry_timestamp(&self, node_id: &str, now_ms: u64) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.touch_av_telemetry_timestamp(node_id, now_ms))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::AvSubsystemStore;
+                pg_lock(pg)
+                    .touch_av_telemetry_timestamp(node_id, now_ms)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn get_last_telemetry_timestamp(&self, node_id: &str) -> SharedResult<u64> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.get_last_telemetry_timestamp(node_id))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::AvSubsystemStore;
+                pg_lock(pg)
+                    .get_last_telemetry_timestamp(node_id)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_all_registered_av_node_ids(&self) -> SharedResult<Vec<String>> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.load_all_registered_av_node_ids())
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::AvSubsystemStore;
+                pg_lock(pg)
+                    .load_all_registered_av_node_ids()
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_av_subsystems(&self) -> SharedResult<Vec<kirra_persistence::AvSubsystemRecord>> {
+        match &*self.backend {
+            SharedBackend::Local => self.local(|s| s.load_av_subsystems()).map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::AvSubsystemStore;
+                pg_lock(pg).load_av_subsystems().map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn load_recovery_streak(&self, node_id: &str) -> SharedResult<(u32, u64)> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.load_recovery_streak(node_id))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::AvSubsystemStore;
+                pg_lock(pg)
+                    .load_recovery_streak(node_id)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn reset_recovery_streak(&self, node_id: &str, now_ms: u64) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.reset_recovery_streak(node_id, now_ms))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::AvSubsystemStore;
+                pg_lock(pg)
+                    .reset_recovery_streak(node_id, now_ms)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn reset_recovery_streak_preserving_telemetry(&self, node_id: &str) -> SharedResult<()> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.reset_recovery_streak_preserving_telemetry(node_id))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::AvSubsystemStore;
+                pg_lock(pg)
+                    .reset_recovery_streak_preserving_telemetry(node_id)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    pub fn increment_recovery_streak(&self, node_id: &str, now_ms: u64) -> SharedResult<u32> {
+        match &*self.backend {
+            SharedBackend::Local => self
+                .local(|s| s.increment_recovery_streak(node_id, now_ms))
+                .map_err(Into::into),
+            #[cfg(feature = "postgres")]
+            SharedBackend::Pg(pg) => {
+                use kirra_persistence::AvSubsystemStore;
+                pg_lock(pg)
+                    .increment_recovery_streak(node_id, now_ms)
+                    .map_err(Into::into)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Support: the local-ledger append + &mut adapters + federation error maps
+// ---------------------------------------------------------------------------
+
+impl SharedOps {
+    /// Append a hash-chained event to the LOCAL ledger (the Pg-arm half of the
+    /// decomposed fused operations). A ledger-append failure after a committed
+    /// shared write is LOUD (tracing::error) but does not roll back the shared
+    /// state — the divergence window is recorded in ADR-0038 and is
+    /// reconcilable by cross-checking the shared rows against the chain.
+    fn ledger_append(&self, event_type: &str, payload_json: &str, at_ms: u64) {
+        let r = self.local(|s| s.append_clearance_audit_event(event_type, payload_json, at_ms));
+        if let Err(e) = r {
+            tracing::error!(
+                event_type,
+                error = %e,
+                "LOCAL LEDGER APPEND FAILED after a committed shared-state write — \
+                 the chain is missing an event the shared backend carries; reconcile \
+                 via the shared rows (ADR-0038 crash-window)"
+            );
+        }
+    }
+}
+
+/// The federation-specific error maps: surface the distinct rejection arms the
+/// handler turns into clean HTTP rejections (replay / regress), instead of
+/// flattening them into a 500.
+fn map_federation_dwe(e: kirra_persistence::DurableWriteError) -> SharedError {
+    use kirra_persistence::DurableWriteError as D;
+    match e {
+        D::Fenced(f) => SharedError::Fenced(f),
+        D::NonceReplay => SharedError::NonceReplay,
+        D::GenerationRegress { found, high_water } => {
+            SharedError::GenerationRegress { found, high_water }
+        }
+        D::EpochRegress { found, high_water } => SharedError::EpochRegress { found, high_water },
+        D::Db(d) => SharedError::Sqlite(d),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn map_federation_pg(e: PgDurableWriteError) -> SharedError {
+    use kirra_persistence::postgres::PgDurableWriteError as P;
+    match e {
+        P::Fenced(f) => SharedError::Fenced(f),
+        P::NonceReplay => SharedError::NonceReplay,
+        P::GenerationRegress { found, high_water } => {
+            SharedError::GenerationRegress { found, high_water }
+        }
+        P::EpochRegress { found, high_water } => SharedError::EpochRegress { found, high_water },
+        P::Db(d) => SharedError::Pg(d),
     }
 }
 
