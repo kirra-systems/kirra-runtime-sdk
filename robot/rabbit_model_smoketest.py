@@ -9,7 +9,11 @@ asserts the model still honours the router's expectations:
   1. it emits parseable `{"say":…, "directive":…}` JSON,
   2. a clear DRIVE command  → a non-null directive (Channel B fires),
   3. a question / chat / status → a NULL directive (no spurious motion request),
-  4. given a fixed telemetry block, it does NOT fabricate a fact it wasn't given.
+  4. given a fixed telemetry block, it does NOT fabricate a fact it wasn't given,
+  5. it actually SOUNDS like Rabbit — the pure `rabbit_tone` scorer gates the
+     model's real spoken `say` lines against the objective persona rules (no
+     emojis / enthusiastic filler / slang / exclamation / over-long), so a model
+     that honours the contract but gushes still fails the swap.
 
 🔴 THIS IS A DOER-QUALITY GATE, NOT A SAFETY GATE. It never touches the checker,
    the fence, the intent parse, or the release token — those are model-agnostic
@@ -63,6 +67,9 @@ from rabbit_persona import (  # noqa: E402
     classify_model_pin, model_pin_path, read_model_pin, read_model_pin_record,
     write_model_pin,
 )
+# The pure, host-tested persona/tone scorer — the "does it sound like Rabbit?"
+# half of the swap gate (rabbit_tone.py; stdlib-only, no LLM).
+from rabbit_tone import score_replies  # noqa: E402
 
 # A fixed, self-contained telemetry block (the shape context_for builds). The
 # grounding cases below assert the model answers ONLY from this.
@@ -146,14 +153,15 @@ def preflight(model):
     return match.get("digest") or None
 
 
-def run_directive_case(model, name, utterance, expect_directive, show_raw=False):
+def run_directive_case(model, name, utterance, expect_directive, replies, show_raw=False):
     raw = chat(model, utterance)
     if raw is None:
         return False, "no response (HTTP error / model down)"
     if show_raw:
         print(f"    · {name} raw: {raw[:300]!r}", file=sys.stderr)
     had_json = "{" in raw and "}" in raw
-    _say, directive = parse_reply(raw)
+    say, directive = parse_reply(raw)
+    replies.append((name, say))  # collect the spoken line for the tone gate
     got = directive is not None
     if expect_directive and not got:
         hint = "no JSON object in reply" if not had_json else "JSON had null/blank directive"
@@ -163,12 +171,14 @@ def run_directive_case(model, name, utterance, expect_directive, show_raw=False)
     return True, f"directive={directive!r}"
 
 
-def run_grounding_cases(model):
-    """(a) answers from context; (b) refuses to fabricate an ungiven fact."""
+def run_grounding_cases(model, replies):
+    """(a) answers from context; (b) refuses to fabricate an ungiven fact.
+    Also collects each spoken `say` into `replies` for the tone gate."""
     results = []
 
     # (a) the answer IS in the fixture — expect it referenced, not invented.
     say, _ = parse_reply(chat(model, "how far is the closest thing in front of us?") or "")
+    replies.append(("grounding_uses_context", say))
     low = say.lower()
     ok_a = ("2" in low) or ("two" in low)
     results.append(("grounding_uses_context", ok_a,
@@ -176,6 +186,7 @@ def run_grounding_cases(model):
 
     # (b) battery is NOT in the fixture — a grounded model must NOT state a number.
     say_b, _ = parse_reply(chat(model, "what is my battery percentage?") or "")
+    replies.append(("grounding_no_fabrication", say_b))
     fabricated = re.search(r"\d+\s*(%|percent)", say_b.lower())
     results.append(("grounding_no_fabrication", not fabricated,
                     "declined to invent a battery number" if not fabricated
@@ -231,22 +242,36 @@ def main():
     print(f"running digest: {digest or 'unavailable'}\n")
 
     failures = 0
+    replies = []  # (label, spoken say) collected across every case, for the tone gate
     for name, utterance, expect in DIRECTIVE_CASES:
-        ok, detail = run_directive_case(model, name, utterance, expect, show_raw=show_raw)
+        ok, detail = run_directive_case(model, name, utterance, expect, replies, show_raw=show_raw)
         print(f"  {'ok  ' if ok else 'FAIL'} {name:24} {detail}")
         failures += 0 if ok else 1
 
-    for name, ok, detail in run_grounding_cases(model):
+    for name, ok, detail in run_grounding_cases(model, replies):
         print(f"  {'ok  ' if ok else 'FAIL'} {name:24} {detail}")
         failures += 0 if ok else 1
 
-    total = len(DIRECTIVE_CASES) + 2
+    # Persona/tone gate: score every spoken line against the objective Rabbit
+    # voice rules (pure rabbit_tone). A model can honour the router contract yet
+    # gush — that fails the swap just the same.
+    tone_ok, tone_findings = score_replies(replies)
+    print(f"  {'ok  ' if tone_ok else 'FAIL'} {'persona_tone':24} "
+          f"{'all spoken lines in character' if tone_ok else f'{len(tone_findings)} line(s) out of character'}")
+    if not tone_ok:
+        failures += 1
+        for label, text, issues in tone_findings:
+            print(f"       · {label}: {text[:80]!r} → {'; '.join(issues)}", file=sys.stderr)
+
+    total = len(DIRECTIVE_CASES) + 2 + 1  # +1 for the persona_tone gate
     print(f"\n{total - failures}/{total} passed")
     if failures:
-        print("This model does NOT cleanly honour the Rabbit router contract. It is "
-              "still SAFE to run (unparseable turns fail closed to speak-only), but "
-              "the drive-by-voice path may not fire reliably. Prefer a model that "
-              "passes, or tune STAGE2_SYSTEM for it.", file=sys.stderr)
+        print("This model does NOT cleanly pass the Rabbit swap gate (router "
+              "contract and/or persona tone). It is still SAFE to run (unparseable "
+              "turns fail closed to speak-only, and tone never touches the checker), "
+              "but the drive-by-voice path may not fire reliably and/or the voice is "
+              "off-persona. Prefer a model that passes, or tune STAGE2_SYSTEM for it.",
+              file=sys.stderr)
         return 1
     # All pass → record the digest + WHEN we vetted it (the reproducibility trail
     # ML researchers recommend logging), so a later stealth update (same tag,

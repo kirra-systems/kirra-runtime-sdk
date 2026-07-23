@@ -252,6 +252,39 @@ projection slots, not fabricated readings.
 
 ---
 
+## Missions (opt-in) — a multi-step Executive that the checker still bounds
+
+`KIRRA_MISSIONS_ENABLED=1` adds a multi-step **Executive** (`robot/mission.py`):
+the LLM emits `{say, mission:[{name, parameters}, …]}` — an ordered plan over the
+**registered** skills — and the Executive runs it with sequencing, retry,
+cancellation, and progress narration. It takes precedence over skills mode;
+default off → the single-turn router is byte-identical.
+
+The Executive is a **doer; the checker still owns every step:**
+
+- **Motion only through the fence.** Each motion step is executed by handing its
+  directive to the *same* `offer_to_door` → `/intent` → checker path a single
+  directive already takes. `run_mission` routes motion *only* through the
+  injected fence sink — asserted in `mission_test.py`.
+- **Refuse before motion.** `validate_mission` dispatches every step up front; a
+  mission with *any* unimplemented/unknown skill (e.g. `inspect`, `dock`) is
+  **refused before a single step runs** — no partial mission with a bad step.
+- **Halt, never skip.** A step the checker **refuses** halts the mission (motion
+  never continues to the next step); a transient door error retries a bounded
+  number of times, then halts. Fail-closed throughout.
+- **Cancellable.** A barge-in (Slice 2 — a PTT press / `barge_in.py --signal`)
+  cancels between or within steps; the ego stops (the checker's own MRC) and the
+  Executive never authors re-acceleration.
+
+So the mission layer buys the operator *sequencing*, not *authority*: the same
+`ci/check_mick_actuation_fence.py` one-door rule holds, one step at a time. The
+Executive core (plan / validate / step transitions / run) is pure and
+host-tested; the LLM planning call is the thin seam. Missions are limited to the
+registered skills — as unimplemented skills (`dock`, `search_area`, …) gain real,
+fenced backings, missions get richer with no change to this safety story.
+
+---
+
 ## Honest caveats
 
 - **Latency.** A local LLM on the Orin (gemma3:4b) is a few seconds per turn.

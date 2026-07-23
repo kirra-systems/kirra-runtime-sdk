@@ -19,12 +19,16 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rabbit_boot import greeting_line, misconfig_line, shutdown_line  # noqa: E402
+from rabbit_boot import (  # noqa: E402
+    RABIT_EXPANSION, greeting_line, misconfig_line, shutdown_line,
+)
 from rabbit_ota import match_command  # noqa: E402
 from rabbit_persona import (  # noqa: E402
     classify_model_pin, name_slot, read_model_pin, read_model_pin_record,
     write_model_pin,
 )
+from rabbit_ask import RABBIT_SYSTEM  # noqa: E402 — persona prompt (requests is lazy inside rabbit_ask)
+from rabbit_tone import OFF_BRAND_SLANG  # noqa: E402 — the hard-fail juvenile terms
 
 
 def _with_operator(value):
@@ -72,6 +76,20 @@ def test_greeting_nominal_fresh_claims_governor_nominal() -> None:
     assert "governor nominal" in line and "online" in line
 
 
+def test_greeting_nominal_introduces_rabit_acronym() -> None:
+    """On the nominal-ready path Rabbit introduces itself with the R.A.B.I.T.
+    expansion — the name IS the doer/checker architecture. It must NOT leak onto
+    the not-ready / degraded lines (Rabbit never overclaims while not nominal)."""
+    assert RABIT_EXPANSION == "Robotic Agent, Bounded by Independent Trust"
+    with _with_operator(None):
+        nominal = greeting_line(0, True)
+        degraded = greeting_line(1, True)
+        not_ready = greeting_line(2, True)
+    assert RABIT_EXPANSION in nominal and "Rabbit here" in nominal
+    assert RABIT_EXPANSION not in degraded, "no self-introduction while degraded"
+    assert RABIT_EXPANSION not in not_ready, "no self-introduction while not ready"
+
+
 def test_greeting_degraded_fresh_says_degraded_not_nominal() -> None:
     with _with_operator(None):
         line = greeting_line(1, True)
@@ -113,6 +131,38 @@ def test_misconfig_line_is_a_nonempty_advisory() -> None:
 
 
 # --- OTA matcher precedence (apply/status before check) ----------------------
+
+def test_rabbit_persona_voice_in_kitt_name_out() -> None:
+    """The Rabbit persona is KITT-FLAVOURED (formal, dry, no filler) but must NOT
+    name KITT / Knight Rider, nor hardcode an operator name — the name comes from
+    the {name} slot at runtime — and it must retain the load-bearing safety
+    framing (ADVISE/narrate, ground truth)."""
+    s = RABBIT_SYSTEM
+    low = s.lower()
+    assert "rabbit" in low, "persona is named Rabbit"
+    for forbidden in ("kitt", "k.i.t.t", "knight industries", "knight rider", "michael"):
+        assert forbidden not in low, f"persona must not name {forbidden!r}"
+    # the KITT-flavoured voice traits are present
+    assert "emoji" in low, "the no-emoji rule is present"
+    assert ("wit" in low or "understate" in low), "the dry/understated voice is present"
+    assert "operator by name" in low, "addresses the operator via the {name} slot, not a hardcode"
+    # the deliberate touch of deadpan comedic slang (with its guardrails) is present…
+    assert "slang" in low, "the modern-slang-for-comedy clause is present"
+    assert "cooked" in low or "no cap" in low, "a comedic-palette example is present"
+    assert "never inside a safety-critical sentence" in low or "safety-critical sentence" in low, \
+        "the quip-never-replaces-the-safety-reason guardrail is present"
+    # …and the dry hip-hop proverb clause, with its safety-authority guardrail: the
+    # on-brand caution proverb is offered, the risk-glorifying ones are forbidden.
+    assert "check yourself before you wreck yourself" in low, "the caution proverb is offered"
+    assert "you only get one shot" in low and "close to the edge" in low, \
+        "the risk-glorifying proverbs are explicitly forbidden"
+    # …and every term the tone gate hard-fails is named off-limits in the persona
+    # itself (imported from rabbit_tone so the two lists can never silently drift).
+    for off_brand in OFF_BRAND_SLANG:
+        assert off_brand in low, f"persona must name {off_brand!r} as off-limits"
+    # regression guard: the safety framing must survive persona edits
+    assert "ADVISE" in s and "ground truth" in low, "advise-not-control + ground-truth retained"
+
 
 def test_ota_matcher_precedence() -> None:
     assert match_command("apply the update") == "apply"
