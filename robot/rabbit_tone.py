@@ -47,13 +47,17 @@ SLANG = (
     "cool", "lol", "omg", "dude", "yikes",
 )
 
-# Off-brand juvenile slang the persona explicitly excludes from its comedic
-# palette (whole-word matched). The persona MAY drop a dry, deadpan modern term
-# for humour (cooked / no cap / left no crumbs / …), but these read as juvenile
-# or are actively wrong for a safety system — "delulu" (a governor calling itself
-# delusional) and the quasi-profane "gyatt" especially — so they hard-fail here.
+# Off-brand slang the persona explicitly excludes from its comedic palette
+# (whole-word matched). The persona MAY drop a dry, deadpan modern term or hip-hop
+# proverb for humour (cooked / no cap / "check yourself before you wreck yourself"
+# / …), but these read as juvenile or are actively wrong for a safety system:
+# "delulu" (a governor calling itself delusional), the quasi-profane "gyatt", and
+# "yolo" — the antithesis of a safety authority (the reckless proverbs the persona
+# also forbids, "you only get one shot" / "close to the edge", are multi-word and
+# handled by the prompt, not this whole-word gate; "yolo" is a clean token worth
+# hard-failing so a swapped model can never put it in the governor's mouth).
 OFF_BRAND_SLANG = (
-    "skibidi", "gyatt", "rizz", "delulu", "bussin",
+    "skibidi", "gyatt", "rizz", "delulu", "bussin", "yolo",
 )
 
 # Conservative emoji / pictograph matcher (common ranges + dingbats + arrows).

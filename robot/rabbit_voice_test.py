@@ -151,6 +151,11 @@ def test_rabbit_persona_voice_in_kitt_name_out() -> None:
     assert "cooked" in low or "no cap" in low, "a comedic-palette example is present"
     assert "never inside a safety-critical sentence" in low or "safety-critical sentence" in low, \
         "the quip-never-replaces-the-safety-reason guardrail is present"
+    # …and the dry hip-hop proverb clause, with its safety-authority guardrail: the
+    # on-brand caution proverb is offered, the risk-glorifying ones are forbidden.
+    assert "check yourself before you wreck yourself" in low, "the caution proverb is offered"
+    assert "you only get one shot" in low and "close to the edge" in low, \
+        "the risk-glorifying proverbs are explicitly forbidden"
     # …and every term the tone gate hard-fails is named off-limits in the persona
     # itself (imported from rabbit_tone so the two lists can never silently drift).
     for off_brand in OFF_BRAND_SLANG:
