@@ -33,6 +33,8 @@ use std::sync::{Arc, Mutex};
 
 use kirra_persistence::VerifierStore;
 
+use crate::shared_store::{SharedBackend, SharedOps};
+
 /// Number of independent read-only replica connections opened per file-backed
 /// store. Bounds read-among-read concurrency (each is a separate WAL reader);
 /// reads never serialize behind the writer regardless. Small: read routes are
@@ -128,16 +130,29 @@ pub struct StoreHandle {
     /// The read-only side: a pool of independent replica connections (or a
     /// fallback to the writer for in-memory stores).
     readers: Arc<ReadReplica>,
+    /// #1030 stage 2 (ADR-0038): the SHARED-tier dispatch facade. Local by
+    /// default (byte-identical — the same writer connection); Postgres when
+    /// KIRRA_DB_URL selected it at boot.
+    shared: SharedOps,
 }
 
 impl StoreHandle {
     /// Build a handle that owns `store` (the writer) and opens a read-replica
     /// pool against the same database file (or `Fallback` for `":memory:"`).
     pub fn new(store: VerifierStore) -> Self {
+        Self::new_with_backend(store, Arc::new(SharedBackend::Local))
+    }
+
+    /// Build a handle with an explicit SHARED-tier backend (#1030 stage 2).
+    /// `SharedBackend::Local` is byte-identical to [`StoreHandle::new`].
+    pub fn new_with_backend(store: VerifierStore, backend: Arc<SharedBackend>) -> Self {
         let readers = Arc::new(ReadReplica::open(store.path()));
+        let writer = Arc::new(Mutex::new(store));
+        let shared = SharedOps::new(Arc::clone(&writer), backend);
         Self {
-            writer: Arc::new(Mutex::new(store)),
+            writer,
             readers,
+            shared,
         }
     }
 
@@ -152,7 +167,33 @@ impl StoreHandle {
             .path()
             .to_string();
         let readers = Arc::new(ReadReplica::open(&path));
-        Self { writer, readers }
+        let shared = SharedOps::new(Arc::clone(&writer), Arc::new(SharedBackend::Local));
+        Self {
+            writer,
+            readers,
+            shared,
+        }
+    }
+
+    /// The SHARED-tier facade (#1030 stage 2): shared control-plane reads and
+    /// writes go through this, dispatching to the configured backend. The
+    /// LOCAL ledger tier stays on [`StoreHandle::with`]/[`StoreHandle::call`].
+    pub fn shared(&self) -> &SharedOps {
+        &self.shared
+    }
+
+    /// Async shared-tier access OFF the worker pool (the [`StoreHandle::call`]
+    /// analogue): the closure receives the cloned facade on a blocking thread.
+    pub async fn call_shared<F, R>(&self, f: F) -> Result<R, StoreError>
+    where
+        F: FnOnce(&SharedOps) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let shared = self.shared.clone();
+        match tokio::task::spawn_blocking(move || f(&shared)).await {
+            Ok(r) => Ok(r),
+            Err(_) => Err(StoreError::TaskFailed),
+        }
     }
 
     /// Run `f` against the WRITER from a SYNCHRONOUS context and return its value.

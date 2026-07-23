@@ -606,7 +606,70 @@ async fn async_main() {
         }
     }
 
-    let app_state = Arc::new(AppState::new(store, mode));
+    // #1030 stage 2 (ADR-0038) — resolve the SHARED-tier backend from
+    // KIRRA_DB_URL. Unset/empty → Local (byte-identical). Set without the
+    // `postgres` build feature → fail-closed startup abort (a configured
+    // backend the binary cannot serve must never silently fall back). Set
+    // with the feature → connect + run/verify migrations NOW; unreachable or
+    // future-schema → fail-closed abort. There is NO runtime fallback from
+    // Pg to Local — a split brain between backends is worse than an outage.
+    let shared_backend = match std::env::var("KIRRA_DB_URL") {
+        Err(_) => Arc::new(kirra_verifier::shared_store::SharedBackend::Local),
+        Ok(url) if url.trim().is_empty() => {
+            Arc::new(kirra_verifier::shared_store::SharedBackend::Local)
+        }
+        Ok(url) => {
+            #[cfg(not(feature = "postgres"))]
+            {
+                let _ = url;
+                tracing::error!(
+                    "startup failed: KIRRA_DB_URL is set but this binary was built WITHOUT \
+                     the `postgres` feature — rebuild with `--features postgres` or unset \
+                     the variable (fail-closed; no silent SQLite fallback)"
+                );
+                std::process::exit(1);
+            }
+            #[cfg(feature = "postgres")]
+            {
+                use kirra_persistence::postgres::{driver as postgres, PgVerifierStore};
+                let client = match postgres::Client::connect(&url, postgres::NoTls) {
+                    Ok(c) => c,
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            "startup failed: KIRRA_DB_URL is set but Postgres is \
+                             unreachable (fail-closed; no silent SQLite fallback)"
+                        );
+                        std::process::exit(1);
+                    }
+                };
+                match PgVerifierStore::from_client(client) {
+                    Ok(pg) => {
+                        tracing::info!(
+                            "shared-tier backend: postgres (ADR-0038 hybrid; local SQLite \
+                             remains the audit ledger at {db_path})"
+                        );
+                        Arc::new(kirra_verifier::shared_store::SharedBackend::Pg(Arc::new(
+                            std::sync::Mutex::new(pg),
+                        )))
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            "startup failed: Postgres schema init/verify refused \
+                             (future schema or migration failure — fail-closed)"
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    };
+    let app_state = Arc::new(AppState::new_with_shared_backend(
+        store,
+        mode,
+        shared_backend,
+    ));
 
     // S3 Pass B2 (#115): spawn the audit-writer task and install its Sender
     // into AppState. The deny arm of the actuator-safety-envelope middleware

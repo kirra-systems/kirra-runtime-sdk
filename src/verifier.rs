@@ -385,6 +385,22 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(store: VerifierStore, mode: VerifierOperationMode) -> Self {
+        Self::new_with_shared_backend(
+            store,
+            mode,
+            std::sync::Arc::new(crate::shared_store::SharedBackend::Local),
+        )
+    }
+
+    /// #1030 stage 2 (ADR-0038): as [`AppState::new`], with an explicit
+    /// SHARED-tier backend. `SharedBackend::Local` is byte-identical to
+    /// [`AppState::new`]; `main()` passes the Postgres backend when
+    /// `KIRRA_DB_URL` selected it at boot.
+    pub fn new_with_shared_backend(
+        store: VerifierStore,
+        mode: VerifierOperationMode,
+        shared_backend: std::sync::Arc<crate::shared_store::SharedBackend>,
+    ) -> Self {
         let (posture_tx, _) = broadcast::channel(POSTURE_BROADCAST_CAPACITY);
         // Pass B1 cache seed (S3 / #115): read the current durable epoch
         // before moving the store into the handle so the gate has a fresh
@@ -398,7 +414,7 @@ impl AppState {
             // now live on ChallengeState; identical initial state (empty maps +
             // clock-free-seeded limiter).
             challenges: crate::challenge_state::ChallengeState::new(),
-            store: crate::store_handle::StoreHandle::new(store),
+            store: crate::store_handle::StoreHandle::new_with_backend(store, shared_backend),
             // ADR-0035 Stage 3f: the mode/epoch fence atomics now live on
             // HaFenceState; identical initial state (Active flag + held=0 +
             // cached_db_epoch seeded from the store's current durable epoch).
