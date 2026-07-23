@@ -47,19 +47,28 @@ say() { printf '\n== %s ==\n' "$*"; }
 
 # ---- 1. update the checkout -------------------------------------------------
 say "1. update ${REPO} → origin/${REF}"
-if [[ -n "$(git -C "${REPO}" status --porcelain)" ]]; then
-  echo "REFUSING: the checkout has uncommitted changes — commit/stash them first" >&2
-  git -C "${REPO}" status --short >&2
+# Only MODIFICATIONS TO TRACKED FILES block the update — those risk being
+# clobbered by the merge. Untracked files (build artifacts, caches, lockfiles a
+# real robot accumulates) are ignored here; git's own ff-merge below still fails
+# safely if a specific untracked file would be overwritten, and we surface that.
+if [[ -n "$(git -C "${REPO}" status --porcelain --untracked-files=no)" ]]; then
+  echo "REFUSING: the checkout has uncommitted changes to TRACKED files — commit/stash them first" >&2
+  git -C "${REPO}" status --short --untracked-files=no >&2
   exit 1
 fi
 git -C "${REPO}" fetch origin "${REF}"
 git -C "${REPO}" checkout "${REF}"
-# Fast-forward only: a non-ff (someone committed locally) stops here, loudly,
-# rather than creating a surprise merge on the robot.
-if ! git -C "${REPO}" merge --ff-only "origin/${REF}"; then
-  echo "REFUSING: cannot fast-forward — the local branch has diverged from origin/${REF}" >&2
+# Fast-forward only: a non-ff (someone committed locally) OR an untracked file
+# that would be overwritten stops here, loudly, with git's REAL message — rather
+# than a canned guess or a surprise merge on the robot.
+if ! merge_out="$(git -C "${REPO}" merge --ff-only "origin/${REF}" 2>&1)"; then
+  echo "REFUSING: could not fast-forward to origin/${REF}:" >&2
+  echo "${merge_out}" >&2
+  echo "(if it names untracked files that would be overwritten, move/remove them and re-run;" >&2
+  echo " if the branch has diverged, reconcile it first)" >&2
   exit 1
 fi
+echo "${merge_out}"
 NEW_HEAD="$(git -C "${REPO}" log --oneline -1)"
 echo "now at: ${NEW_HEAD}"
 
