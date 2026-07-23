@@ -29,6 +29,21 @@ fn override_reason(action: &EnforcementAction) -> Option<&'static str> {
     }
 }
 
+/// Default control-loop tick period, ms — the scheduler's tick rate (20 Hz).
+/// The inference deadline below is DERIVED from this (a fixed multiple), and
+/// the builder seeds `tick_period_s` from it too, so the tick rate lives in one
+/// place and the deadline can never silently drift away from it (#794 F1). A
+/// deployment that retimes the loop via `with_tick_period` should reconsider the
+/// deadline via `with_inference_deadline_ms` accordingly.
+pub const DEFAULT_TICK_PERIOD_MS: u64 = 50;
+
+/// #794 F1 — the default inference deadline expressed as a MULTIPLE of the tick
+/// period, so the "generous 20× the tick period" relationship recorded in the
+/// FTTI-derivation note below is enforced by the code, not merely asserted in
+/// prose. Changing the tick rate moves the deadline with it (and
+/// `deadline_default_is_the_documented_tick_multiple` pins the product).
+pub const DEFAULT_DEADLINE_TICK_MULTIPLE: u64 = 20;
+
 /// WS-0.4 — default per-tick inference deadline, ms. The HARD bound on how
 /// long `tick` waits for the backend before failing closed to a stopped
 /// command; distinct from `DegradationThresholds::max_inference_latency_ms`
@@ -36,7 +51,8 @@ fn override_reason(action: &EnforcementAction) -> Option<&'static str> {
 /// A backend that never returns (wedged driver, deadlocked EP) previously
 /// stalled `tick` — and therefore the node's whole drain loop — forever;
 /// the deadline turns that hang into an MRC within a bounded time.
-/// Deliberately generous (20× the tick period @ 20 Hz) so it only fires on
+/// Deliberately generous (`DEFAULT_DEADLINE_TICK_MULTIPLE` × the tick period
+/// @ 20 Hz = 1000 ms) so it only fires on
 /// a genuine hang, never on ordinary latency jitter; deployments tighten it
 /// via `with_inference_deadline_ms` / `PARKO_INFERENCE_DEADLINE_MS`.
 ///
@@ -76,7 +92,12 @@ fn override_reason(action: &EnforcementAction) -> Option<&'static str> {
 /// the ratified `t_detect` remain a signed-off safety-engineering deliverable.
 /// Until then the value is unchanged — the "generous 20×-tick" bound above
 /// stands as a conservative placeholder, never a validated FTTI allocation.
-pub const DEFAULT_INFERENCE_DEADLINE_MS: u64 = 1_000;
+/// It is now DERIVED (`DEFAULT_TICK_PERIOD_MS × DEFAULT_DEADLINE_TICK_MULTIPLE`
+/// = 50 × 20 = 1000 ms) rather than a bare literal, so the placeholder can only
+/// be changed by moving the tick rate or the ratified multiple — not by an
+/// unrelated edit that quietly decouples it from the loop it is protecting.
+pub const DEFAULT_INFERENCE_DEADLINE_MS: u64 =
+    DEFAULT_TICK_PERIOD_MS * DEFAULT_DEADLINE_TICK_MULTIPLE;
 
 /// WS-0.4 F6 — sanity CEILING on the per-tick inference deadline, ms. The
 /// deadline is the loop's only defence against an indefinite backend hang, so a
@@ -85,6 +106,24 @@ pub const DEFAULT_INFERENCE_DEADLINE_MS: u64 = 1_000;
 /// clamps to `[1, DEADLINE_CEILING_MS]` (60 s — comfortably above any legitimate
 /// backend warm-up, far below "never").
 pub const DEADLINE_CEILING_MS: u64 = 60_000;
+
+// #794 F1 — compile-time invariants coupling the derived deadline to the loop it
+// protects. These are `const assert`s (they fail the BUILD, not a test run), so a
+// future edit that decouples the deadline from the tick period — or drifts it off
+// the documented 1000 ms placeholder, or above the sanity ceiling — cannot compile.
+const _: () = assert!(
+    DEFAULT_INFERENCE_DEADLINE_MS == DEFAULT_TICK_PERIOD_MS * DEFAULT_DEADLINE_TICK_MULTIPLE,
+    "the default deadline must stay a fixed multiple of the tick period",
+);
+const _: () = assert!(
+    DEFAULT_INFERENCE_DEADLINE_MS == 1_000,
+    "the derived default must still equal the documented 20×-tick placeholder; \
+     changing it is a ratified safety-case edit, not an accident",
+);
+const _: () = assert!(
+    DEFAULT_INFERENCE_DEADLINE_MS <= DEADLINE_CEILING_MS,
+    "the default deadline must sit under the sanity ceiling",
+);
 
 // --- WS-0.4 F2: deadline-breach → posture escalation, with hysteresis --------
 //
@@ -223,7 +262,9 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
             cached_capabilities,
             cached_descriptor,
             governor: None,
-            tick_period_s: 0.05,
+            // Seeded from the same constant the deadline derives from (#794 F1),
+            // so the tick rate has one source of truth.
+            tick_period_s: DEFAULT_TICK_PERIOD_MS as f64 / 1000.0,
             audit: None,
             inference_deadline_ms: DEFAULT_INFERENCE_DEADLINE_MS,
             hung_inference: None,
@@ -322,7 +363,7 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
     }
 
     /// Set the tick period (used for time-delta calculations passed to
-    /// the safety governor). Defaults to 0.05 (20Hz).
+    /// the safety governor). Defaults to `DEFAULT_TICK_PERIOD_MS` (50 ms, 20 Hz).
     pub fn with_tick_period(mut self, tick_period_s: f64) -> Self {
         self.tick_period_s = tick_period_s;
         self
@@ -1377,6 +1418,27 @@ mod tests {
         assert_eq!(
             engine.inference_deadline_ms, DEADLINE_CEILING_MS,
             "an absurd deadline must clamp to the ceiling, never act as a disable"
+        );
+    }
+
+    /// #794 F1 — a freshly-built loop ticks at `DEFAULT_TICK_PERIOD_MS` and carries
+    /// the derived default deadline: the constant is the single source of truth for
+    /// the rate, and the deadline follows it. (The const relationships themselves —
+    /// deadline == multiple × tick period, == 1000 ms, ≤ ceiling — are enforced at
+    /// COMPILE time by the `const assert`s beside the constant definitions.)
+    #[test]
+    fn deadline_default_is_the_documented_tick_multiple() {
+        let backend = Arc::new(ConfigurableBackend { linear: 1.0 });
+        let model = backend.load_model("").unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        let engine = InferenceLoop::new(backend, model, tx);
+        assert_eq!(
+            engine.inference_deadline_ms, DEFAULT_INFERENCE_DEADLINE_MS,
+            "a fresh loop carries the derived default deadline"
+        );
+        assert!(
+            (engine.tick_period_s - DEFAULT_TICK_PERIOD_MS as f64 / 1000.0).abs() < 1e-12,
+            "a fresh loop ticks at DEFAULT_TICK_PERIOD_MS — one source of truth for the rate"
         );
     }
 
