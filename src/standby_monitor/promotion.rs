@@ -157,7 +157,7 @@ pub(crate) async fn promotion_loop(
         // SAFETY: SG-HA-3 — durable reads run off the async runtime (call_read).
         let before = match app
             .store
-            .call_read(|store| store.load_engine_state(HEARTBEAT_KEY))
+            .call_shared(|shared| shared.load_engine_state(HEARTBEAT_KEY))
             .await
         {
             Ok(Ok(tok)) => tok,
@@ -167,7 +167,7 @@ pub(crate) async fn promotion_loop(
             tokio::time::sleep(Duration::from_millis(timings.heartbeat_interval_ms.max(1))).await;
             let after = match app
                 .store
-                .call_read(|store| store.load_engine_state(HEARTBEAT_KEY))
+                .call_shared(|shared| shared.load_engine_state(HEARTBEAT_KEY))
                 .await
             {
                 Ok(Ok(tok)) => tok,
@@ -257,10 +257,10 @@ pub(crate) async fn promotion_loop(
 
             let read = app
                 .store
-                .call_read(|store| {
-                    let token = store.load_engine_state(HEARTBEAT_KEY)?;
-                    let ha = store.read_ha_lease()?;
-                    Ok::<_, rusqlite::Error>((token, ha))
+                .call_shared(|shared| {
+                    let token = shared.load_engine_state(HEARTBEAT_KEY)?;
+                    let ha = shared.read_ha_lease()?;
+                    Ok::<_, crate::shared_store::SharedError>((token, ha))
                 })
                 .await;
             let (token, ha) = match read {
@@ -330,7 +330,7 @@ pub(crate) async fn promotion_loop(
         // SAFETY: SG-HA-3 — durable writes/reads must never block the async runtime.
         let token = match app
             .store
-            .call_read(|store| store.load_engine_state(HEARTBEAT_KEY))
+            .call_shared(|shared| shared.load_engine_state(HEARTBEAT_KEY))
             .await
         {
             Ok(Ok(Some(token))) => token,
@@ -414,7 +414,7 @@ pub(crate) async fn perform_promotion(
     // false and no audit/cache state is written. The previous in-memory
     // `compare_exchange` did NOT provide this guarantee: it was per-process.
     // SAFETY: SG-HA-3 — durable writes/reads must never block the async runtime.
-    let observed = match app.store.call_read(|store| store.current_epoch()).await {
+    let observed = match app.store.call_shared(|shared| shared.current_epoch()).await {
         Ok(Ok(e)) => e,
         // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
         Ok(Err(e)) => {
@@ -433,7 +433,7 @@ pub(crate) async fn perform_promotion(
     let id_owned = id.to_string();
     let new_epoch = match app
         .store
-        .call(move |store| store.try_claim_epoch(observed, &id_owned, ts))
+        .call_shared(move |shared| shared.try_claim_epoch(observed, &id_owned, ts))
         .await
     {
         Ok(Ok(Some(e))) => e,
@@ -548,7 +548,7 @@ pub(crate) async fn perform_promotion(
     let id_owned = id.to_string();
     match app
         .store
-        .call(move |store| store.save_engine_state(PROMOTION_RECORD_KEY, &id_owned))
+        .call_shared(move |shared| shared.save_engine_state(PROMOTION_RECORD_KEY, &id_owned))
         .await
     {
         Ok(Ok(())) => {}
