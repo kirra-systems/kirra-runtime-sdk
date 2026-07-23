@@ -28,10 +28,11 @@
 // un-spec'd live column fails too, so a column added to one backend cannot slip
 // through unnoticed.
 //
-// SCOPE: only the 13 tables present in BOTH backends. SQLite-only tables (the
-// audit-chain ledger, dependency graph, posture-event log, clearance grants,
-// fabric causal log, …) are NOT part of the storage-portability contract and are
-// intentionally absent. `UNIQUE` / `CHECK` / `DEFAULT` are out of scope (they do
+// SCOPE: only the 16 tables present in BOTH backends (#1030 stage 2 added the
+// dependency graph, attestation policy, and clearance grants when the hybrid
+// shared-state tier gained its PG realization). SQLite-only tables (the
+// audit-chain ledger, posture-event log, fabric causal log, …) are NOT part of
+// the storage-portability contract and are intentionally absent. `UNIQUE` / `CHECK` / `DEFAULT` are out of scope (they do
 // not change a column's presence, type, or nullability); the benign
 // type-CATEGORY differences the two dialects legitimately use — SQLite `INTEGER`
 // vs PG `bigint`/`integer`, SQLite `REAL` vs PG `double precision`, SQLite
@@ -252,6 +253,33 @@ const AV_SUBSYSTEM_META: &[SharedColumn] = &[
     nn("recovery_streak_start_ms", Integer),
 ];
 
+// #1030 stage 2 (ADR-0038) — the shared-tier inherent-method tables joined the
+// cross-backend contract when the PG v11 migration added them: the hybrid
+// routes ALL shared control-plane state to one backend atomically, so the
+// dependency graph, the attestation policy, and the clearance-grant state
+// machine are now present in BOTH backends and pinned here like every other
+// shared table. (The audit-chain ledger, posture-event log, and causal log
+// remain deliberately LOCAL-only — see the ADR.)
+
+const DEPENDENCIES: &[SharedColumn] = &[pk("node_id", Text), pk("dep_id", Text)];
+
+const NODE_ATTESTATION_POLICY: &[SharedColumn] =
+    &[pk("node_id", Text), nn("require_tpm_quote", Bool)];
+
+const CLEARANCE_GRANTS: &[SharedColumn] = &[
+    pk("id", Integer),
+    nn("node_id", Text),
+    nn("operator_id", Text),
+    nn("granted_at_ms", Integer),
+    nn("delivery", Text),
+    nn("created_at_ms", Integer),
+    null("consumed_at_ms", Integer),
+    null("outcome", Text),
+    null("outcome_detail", Text),
+    null("auth_method", Text),
+    null("operator_key_fingerprint", Text),
+];
+
 /// The single source of truth: every table present in BOTH backends, with the
 /// columns both must realize identically (modulo the dialect type-category
 /// tolerances baked into `LogicalType`).
@@ -303,6 +331,18 @@ pub const SHARED_TABLES: &[SharedTable] = &[
     SharedTable {
         name: "node_artifact_status",
         columns: NODE_ARTIFACT_STATUS,
+    },
+    SharedTable {
+        name: "dependencies",
+        columns: DEPENDENCIES,
+    },
+    SharedTable {
+        name: "node_attestation_policy",
+        columns: NODE_ATTESTATION_POLICY,
+    },
+    SharedTable {
+        name: "clearance_grants",
+        columns: CLEARANCE_GRANTS,
     },
     SharedTable {
         name: "av_subsystem_meta",

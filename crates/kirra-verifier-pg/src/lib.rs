@@ -72,7 +72,7 @@ use kirra_persistence::{
 /// The Postgres schema version THIS binary supports (mirrors the SQLite
 /// `SCHEMA_VERSION` discipline: a newer stamp in the database is refused
 /// fail-closed by the shared engine).
-pub const PG_SCHEMA_VERSION: i64 = 10;
+pub const PG_SCHEMA_VERSION: i64 = 11;
 
 /// Baseline (v1) DDL — idempotent, applied on every open BEFORE the versioned
 /// steps run (v1 is the engine's baseline; steps are v ≥ 2). The two tables
@@ -247,6 +247,19 @@ const PG_MIGRATIONS: &[PgMigration] = &[
                   recovery_streak_count    BIGINT NOT NULL DEFAULT 0, \
                   recovery_streak_start_ms BIGINT NOT NULL DEFAULT 0 \
               )",
+    },
+    // v11 — #1030 stage 2 (ADR-0038): the shared-tier inherent-method tables.
+    // The hybrid design routes ALL shared control-plane state to one backend
+    // atomically, so the dependency graph, the per-node attestation policy,
+    // and the clearance-grant state machine (previously SQLite-only) join the
+    // cross-backend contract. Shapes mirror the SQLite DDL; the id column is
+    // BIGSERIAL (the AUTOINCREMENT analogue), require_tpm_quote is a native
+    // BOOLEAN (LogicalType::Bool absorbs the dialect difference). All three
+    // enter `schema_spec::SHARED_TABLES`, so a one-sided drift reds the
+    // conformance tests on whichever backend diverges.
+    PgMigration {
+        version: 11,
+        sql: "CREATE TABLE IF NOT EXISTS dependencies (                   node_id TEXT NOT NULL,                   dep_id  TEXT NOT NULL,                   PRIMARY KEY (node_id, dep_id)               );               CREATE TABLE IF NOT EXISTS node_attestation_policy (                   node_id           TEXT PRIMARY KEY,                   require_tpm_quote BOOLEAN NOT NULL DEFAULT FALSE               );               CREATE TABLE IF NOT EXISTS clearance_grants (                   id             BIGSERIAL PRIMARY KEY,                   node_id        TEXT   NOT NULL,                   operator_id    TEXT   NOT NULL,                   granted_at_ms  BIGINT NOT NULL,                   delivery       TEXT   NOT NULL DEFAULT 'PENDING-NODE-TRANSPORT',                   created_at_ms  BIGINT NOT NULL,                   consumed_at_ms BIGINT,                   outcome        TEXT,                   outcome_detail TEXT,                   auth_method    TEXT,                   operator_key_fingerprint TEXT               )",
     },
 ];
 
@@ -464,6 +477,8 @@ impl PgVerifierStore {
 }
 
 mod av_subsystem;
+mod shared_ext;
+pub use shared_ext::PgDurableWriteError;
 mod cert_principals;
 mod epoch;
 mod fabric;
