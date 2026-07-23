@@ -78,6 +78,18 @@ def env_int(key, default):
         sys.exit(2)
 
 
+def _maybe_barge_in():
+    """Raise a barge-in signal on press so an in-progress reply is cut (opt-in via
+    KIRRA_BARGE_IN_ENABLED). Best-effort and side-channel: it writes a signal file,
+    never stdout, and never raises — the mic trigger must never depend on it."""
+    try:
+        import barge_in  # same dir; sys.path[0]
+        if barge_in.enabled():
+            barge_in.raise_barge_in(barge_in.signal_path())
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main():
     try:
         import Jetson.GPIO as GPIO
@@ -138,6 +150,10 @@ def main():
                     # THE TRIGGER — the only thing that ever touches stdout.
                     sys.stdout.write("\n")
                     sys.stdout.flush()
+                    # BARGE-IN (opt-in): a press means "I want to talk" — cut any
+                    # in-progress spoken reply. Writes a signal FILE, never stdout,
+                    # so the trigger contract above is untouched. Best-effort.
+                    _maybe_barge_in()
                     log("press -> record one clip")
             elif not down and is_pressed:
                 is_pressed = False

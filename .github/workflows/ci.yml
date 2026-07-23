@@ -1253,6 +1253,12 @@ jobs:
           # HARD max-ms ceiling always wins (the bounded-mic guarantee). The
           # capture loop is the hardware seam. See RABBIT_AUDIO_STACK.md §1.
           python3 robot/vad_record_test.py
+          # Barge-in (pure + subprocess seam, no audio): the priority arbiter
+          # (P1 cuts P3, P3 never cuts P1), the fail-closed enable gate, the
+          # monotonic epoch signal (absent/corrupt → 0, baseline never false-cuts),
+          # and speak_interruptible completing vs being killed mid-playback. See
+          # docs/hardware/RABBIT_AUDIO_STACK.md §3c.
+          python3 robot/barge_in_test.py
           # ADR-0033 Tier-3 sentinel logic (#887, pure, no device): owner/mode
           # violations vs the AOU-ACTUATION-SERIAL-001 contract (the vendor
           # 0777 rule is the canonical hazard case), holder reporting, and the

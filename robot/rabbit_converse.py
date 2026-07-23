@@ -50,6 +50,7 @@ from rabbit_ask import (  # noqa: E402
 import rabbit_diag  # noqa: E402 — deterministic self-check voice command (read-only)
 import rabbit_ota  # noqa: E402 — deterministic OTA voice commands (NOT the movement door)
 import rabbit_wake  # noqa: E402 — deterministic wake-listener controls (state file only)
+import barge_in  # noqa: E402 — interruptible reply speech (opt-in; Channel A, cosmetic)
 from rabbit_persona import name_slot, operator_name  # noqa: E402
 
 MAX_TURNS = 10  # rolling conversation memory (user+assistant pairs kept)
@@ -162,6 +163,23 @@ def offer_to_door(directive_text):
         return "error"
 
 
+def _speak_reply(text):
+    """Speak a CONVERSATIONAL reply (P3 info-speech). Interruptible (barge-in)
+    when KIRRA_BARGE_IN_ENABLED=1 — a PTT press / raised signal cuts it so Rabbit
+    stops and listens; otherwise the plain blocking speak(). Channel A, cosmetic:
+    cutting a reply early never affects the fenced /intent door. Only the long
+    conversational line uses this; the short deterministic lines (OTA/diag/wake)
+    stay on plain speak()."""
+    if not barge_in.enabled():
+        speak(text)
+        return
+    tts_argv = (os.environ.get("KIRRA_TTS_CMD") or "").split()
+    path = barge_in.signal_path()
+    baseline = barge_in.read_epoch(path)
+    barge_in.speak_interruptible(text, tts_argv,
+                                 barge_in.make_file_cancel_check(path, baseline))
+
+
 def handle_turn(history, utterance):
     # System commands (OTA "check/apply update") are matched DETERMINISTICALLY and
     # handled BEFORE the LLM/movement path — they run local kirra-ota-ctl, never
@@ -215,7 +233,7 @@ def handle_turn(history, utterance):
     else:
         spoken = say
 
-    speak(spoken)
+    _speak_reply(spoken)
     # rolling memory (store the spoken reply, not the raw grounding)
     history.append({"role": "user", "content": utterance})
     history.append({"role": "assistant", "content": spoken})
