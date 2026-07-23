@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** — verifier-side implementation landed (#412); the console action (UI) remains the one deferred step. |
+| Status | **Accepted** — verifier-side implementation (#412) AND the console "Request Emergency Stop" action (UI) landed; end-to-end validation remains hardware-gated. |
 | Date | 2026-06-21 (design); implemented 2026-06-30 |
 | Deciders | Project / safety-case owner |
 | Issues | #412 (this), #314 (operator identity), #410 / #405 (MRC / decel-to-stop), ADR-0006 (the QM↔safety boundary), #411 (console safety-theater fix) |
@@ -84,12 +84,21 @@ This **design note first** (this ADR). Then implementation (laptop; end-to-end
    domain-distinct `OPERATOR_STOP_DOMAIN` so a clearance signature can't be replayed as a stop),
 3. ✅ the chain events (`OperatorStopRequested` → `GovernorMRCCommanded`), with the MRC commanded
    under the governor's own authority (sticky `supervisor_tripped` + `force_lockout`),
-4. ⬜ the console "Request Emergency Stop" action (UI — deferred; the console correctly has no
-   E-stop button today, #411).
+4. ✅ the console "Request Emergency Stop" action (UI). Landed in the embedded operator console
+   (`static/console.html`, served at `GET /console`) as the inverse of the clearance-grant panel:
+   the operator signs the challenge in-browser with WebCrypto Ed25519 under the STOP-distinct
+   payload (`KIRRA-OPERATOR-ESTOP-v1`) and POSTs to `/console/estop-requests`. Framed as a
+   **REQUEST** ("Request emergency stop · routed to governor"), gated behind operator
+   authentication exactly like clearance, with an explicit acknowledgement that acceptance commands
+   a sticky-LockedOut MRC recoverable only by a supervisor reset. Operator-signed ONLY — no
+   break-glass (constraint #2 requires non-repudiation). If WebCrypto Ed25519 is unavailable it
+   surfaces the CLI flow, never a silent fallback. Guarded by
+   `console_serves_the_estop_request_action` (`console_phase_a_tests.rs`).
 
 Items 1–3 (the verifier-side core) are implemented + unit-tested (operator-signed happy path
 commands the MRC + chains both events; domain separation rejects a clearance signature; unknown
-operator / replay / passive-standby all fail closed). End-to-end validation remains
+operator / replay / passive-standby all fail closed). Item 4 (the console UI action) is wired and
+regression-guarded. End-to-end validation (a running governor + actuator path) remains
 hardware-gated.
 
 Cross-ref: #314, the clearance-loop PRs, ADR-0006 (the boundary), #411 (console
