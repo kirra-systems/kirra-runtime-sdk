@@ -1430,6 +1430,7 @@ impl SharedOps {
     /// shared write is LOUD (tracing::error) but does not roll back the shared
     /// state — the divergence window is recorded in ADR-0038 and is
     /// reconcilable by cross-checking the shared rows against the chain.
+    #[cfg(feature = "postgres")]
     fn ledger_append(&self, event_type: &str, payload_json: &str, at_ms: u64) {
         let r = self.local(|s| s.append_clearance_audit_event(event_type, payload_json, at_ms));
         if let Err(e) = r {

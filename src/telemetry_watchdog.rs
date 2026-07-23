@@ -368,7 +368,7 @@ fn watchdog_sweep_once_inner(
         // path (off the writer mutex, no contention with a slow write).
         let load_result = app
             .store
-            .with_read(|store| store.load_all_registered_av_node_ids());
+            .shared().load_all_registered_av_node_ids();
 
         match load_result {
             Ok(node_ids) => {
@@ -380,7 +380,7 @@ fn watchdog_sweep_once_inner(
                         // Load initial last_seen from persistent store (read-replica).
                         let last_seen = app
                             .store
-                            .with_read(|store| store.get_last_telemetry_timestamp(node_id))
+                            .shared().get_last_telemetry_timestamp(node_id)
                             .unwrap_or(0);
                         let monitoring_started_ms = if last_seen == 0 {
                             app.fleet
@@ -446,7 +446,7 @@ fn watchdog_sweep_once_inner(
         // serializes behind a writer holding the store mutex.
         if let Ok(ts) = app
             .store
-            .with_read(|store| store.get_last_telemetry_timestamp(&entry.node_id))
+            .shared().get_last_telemetry_timestamp(&entry.node_id)
         {
             if ts > entry.last_seen_ms {
                 // Fresh telemetry received since last sweep — reset warn flag.
@@ -493,7 +493,7 @@ fn watchdog_sweep_once_inner(
                 // fabricate a fresh `last_telemetry_ms` (no report actually arrived).
                 let _ = app
                     .store
-                    .with(|store| store.reset_recovery_streak_preserving_telemetry(&entry.node_id));
+                    .shared().reset_recovery_streak_preserving_telemetry(&entry.node_id);
 
                 match app.mark_node_untrusted(&entry.node_id, "TELEMETRY_TIMEOUT", now) {
                     Ok(true) => {

@@ -50,7 +50,8 @@ pub fn generation_initialized() -> bool {
 pub fn init_generation_from_store(app: &Arc<AppState>) -> Result<u64, String> {
     let last = app
         .store
-        .with(|store| store.load_last_generation())
+        .shared()
+        .load_last_generation()
         .map_err(|e| e.to_string())?;
     if last > 0 {
         // B6: `fetch_max`, not `store`. If any recalc already advanced the counter
@@ -182,7 +183,8 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
         // reason to serialize behind in-flight writes.
         let registered = app
             .store
-            .with_read(|store| store.count_nodes())
+            .shared()
+            .count_nodes()
             .unwrap_or(0);
         Some(if registered > 0 {
             "EMPTY_LIVE_SET_HYDRATION_GAP"
