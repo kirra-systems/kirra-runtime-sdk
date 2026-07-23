@@ -627,6 +627,16 @@ jobs:
         env:
           KIRRA_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
         run: cargo test --features postgres --locked --lib pg_drill
+      - name: Two-node HA failover drill vs live PostgreSQL 16 (#1030 stage 3)
+        # The shared-file HA drill (tests/ha_failover.rs) RE-RUN over PG shared
+        # state: two PgVerifierStore connections share one database; the standby
+        # promotes by claiming the next durable epoch (transactional CAS), and the
+        # revived old primary is FENCED (write refused + stale re-claim refused),
+        # plus the lease-driven variant — all on the SAME kirra_verifier::lease
+        # timing model the SQLite drill uses, so both topologies meet one contract.
+        env:
+          KIRRA_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: cargo test --features postgres --locked --test ha_failover_pg
 
   # M5 — loom concurrency-model tests. Exhaustively permutes thread interleavings
   # for the posture-generation protocol (`crates/kirra-loom-models`), proving the
