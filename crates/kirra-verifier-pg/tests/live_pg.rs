@@ -16,6 +16,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use kirra_core::{NodeTrustState, RegisteredNode};
 use kirra_persistence::migrations_postgres::PgMigrationError;
 use kirra_persistence::{
     assert_av_subsystem_store_contract, assert_cert_principal_store_contract,
@@ -24,7 +25,6 @@ use kirra_persistence::{
     assert_posture_engine_state_store_contract, assert_principal_store_contract, EpochFence,
     FenceError, NodeStore,
 };
-use kirra_core::{NodeTrustState, RegisteredNode};
 use kirra_verifier_pg::{PgVerifierStore, PG_SCHEMA_VERSION};
 
 /// Per-test schema counter (combined with the process id so parallel test
