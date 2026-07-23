@@ -31,6 +31,15 @@ Two hard rules the wit never overrides:
    truth (posture, distances, deny codes come from live reads). An unavailable
    source becomes an honest "I can't tell right now," never a guess.
 
+**Model swaps are tone-gated.** The doer LLM stays swappable with no safety
+re-review (the checker is model-agnostic), but a swap must clear
+`rabbit_model_smoketest.py`, which now scores the candidate's real spoken lines
+against the *objective* half of this persona — no emojis, no enthusiastic filler,
+no slang, no exclamation, one or two sentences — via the pure, host-tested
+`robot/rabbit_tone.py` (`rabbit_tone_test.py` runs in CI). A model that honours
+the router contract but gushes fails the swap. Wit and formality stay a matter of
+taste and are not scored; the hard rules a candidate must not break are.
+
 ## The `{name}` slot — how Rabbit uses your name
 
 Every line may contain a `{name}` slot. It renders to:
