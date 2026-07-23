@@ -28,6 +28,7 @@ from rabbit_persona import (  # noqa: E402
     write_model_pin,
 )
 from rabbit_ask import RABBIT_SYSTEM  # noqa: E402 — persona prompt (requests is lazy inside rabbit_ask)
+from rabbit_tone import OFF_BRAND_SLANG  # noqa: E402 — the hard-fail juvenile terms
 
 
 def _with_operator(value):
@@ -142,9 +143,18 @@ def test_rabbit_persona_voice_in_kitt_name_out() -> None:
     for forbidden in ("kitt", "k.i.t.t", "knight industries", "knight rider", "michael"):
         assert forbidden not in low, f"persona must not name {forbidden!r}"
     # the KITT-flavoured voice traits are present
-    assert "slang" in low and "emoji" in low, "the no-slang/no-emoji rule is present"
+    assert "emoji" in low, "the no-emoji rule is present"
     assert ("wit" in low or "understate" in low), "the dry/understated voice is present"
     assert "operator by name" in low, "addresses the operator via the {name} slot, not a hardcode"
+    # the deliberate touch of deadpan comedic slang (with its guardrails) is present…
+    assert "slang" in low, "the modern-slang-for-comedy clause is present"
+    assert "cooked" in low or "no cap" in low, "a comedic-palette example is present"
+    assert "never inside a safety-critical sentence" in low or "safety-critical sentence" in low, \
+        "the quip-never-replaces-the-safety-reason guardrail is present"
+    # …and every term the tone gate hard-fails is named off-limits in the persona
+    # itself (imported from rabbit_tone so the two lists can never silently drift).
+    for off_brand in OFF_BRAND_SLANG:
+        assert off_brand in low, f"persona must name {off_brand!r} as off-limits"
     # regression guard: the safety framing must survive persona edits
     assert "ADVISE" in s and "ground truth" in low, "advise-not-control + ground-truth retained"
 
