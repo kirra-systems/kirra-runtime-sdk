@@ -1251,6 +1251,12 @@ jobs:
           # read; stale/degraded/lockout → "still checking myself over"), and the
           # OTA voice-matcher precedence. See docs/rabbit/RABBIT_VOICE_LINES.md.
           python3 robot/rabbit_voice_test.py
+          # Persona/tone scorer (pure, no LLM): the objective Rabbit voice rules
+          # the model-swap gate enforces — no emoji/enthusiastic filler/slang/
+          # exclamation/over-long, whole-word slang match (coolant≠cool), empty
+          # spoken line scores clean. rabbit_model_smoketest scores a candidate
+          # model's real replies with this. See robot/rabbit_tone.py.
+          python3 robot/rabbit_tone_test.py
           # Wake-word logic (W1, pure, no audio/GPIO): phrase parsing, the
           # ordered-adjacent matcher with long-token-only edit tolerance
           # ("hallo rabbits" wakes, a stray "yo"/lookalike never does), the
