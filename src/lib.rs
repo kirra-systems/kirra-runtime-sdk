@@ -63,6 +63,7 @@ pub mod robotics_alignment;
 pub mod ros2_adapter;
 pub mod scenario_runner;
 pub mod security;
+pub mod shared_store;
 pub mod spi_ledger;
 pub mod startup_sentinel;
 pub mod store_handle;

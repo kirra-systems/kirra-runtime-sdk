@@ -409,6 +409,19 @@ pub struct PgVerifierStore {
     client: Mutex<postgres::Client>,
 }
 
+impl PgStoreError {
+    /// Backend-portable UNIQUE-constraint predicate (#1030 stage 2): the
+    /// Postgres analogue of matching SQLite's `ConstraintViolation` code —
+    /// consumed by the root `SharedError::is_unique_violation`, so handlers
+    /// never introspect driver errors directly.
+    pub fn is_unique_violation(&self) -> bool {
+        match self {
+            PgStoreError::Pg(e) => e.code() == Some(&postgres::error::SqlState::UNIQUE_VIOLATION),
+            _ => false,
+        }
+    }
+}
+
 impl PgVerifierStore {
     /// Connect to `url` (e.g. `postgres://user:pass@host:5432/db`), install /
     /// migrate the schema fail-closed, and seed the `ha_state` genesis row.
