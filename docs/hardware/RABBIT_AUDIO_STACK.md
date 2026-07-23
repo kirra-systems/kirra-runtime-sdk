@@ -65,8 +65,33 @@ the text comes back. Build with CUDA on the Orin if you can — it moves STT fro
 KIRRA_RECORD_CMD="arecord -d 4 -f S16_LE -r 16000 -c 1"   # 4 s, 16 kHz mono, the whisper-native rate
 ```
 The `-d 4` bound is the single biggest latency lever. To make Rabbit feel snappier,
-either shorten it (`-d 2` for terse commands) or, as a follow-up, put a VAD in
-front so it stops on silence instead of waiting the full window.
+either shorten it (`-d 2` for terse commands) or use **VAD endpointing** (below).
+
+### 1a. VAD endpointing (`vad_record.py`) — opt-in, stop on silence
+
+`robot/vad_record.py` is a **drop-in replacement** for the `arecord` line: it
+records ONE utterance that ends on trailing silence instead of always waiting the
+full window, so a terse "check yourself" returns in ~1 s while a longer sentence
+still gets its time — up to a hard ceiling. It writes the appended WAV path (the
+same `$KIRRA_RECORD_CMD "$wav"` contract), so nothing else in the pipeline
+changes:
+
+```bash
+KIRRA_RECORD_CMD="python3 /opt/kirra/robot/vad_record.py"    # opt in
+#   (left as the arecord line above → byte-identical prior behaviour)
+```
+
+It stays a **bounded** mic, not an open one: `KIRRA_VAD_MAX_MS` (default 8 s) is a
+hard ceiling the endpointer always stops at, exactly like arecord's `-d` bound,
+and a silence-only capture ends at `KIRRA_VAD_START_TIMEOUT_MS` with an empty clip
+→ the fenced parser latches nothing → no motion. It emits only a WAV the existing
+STT transcribes — **no new authority**. The default backend is `energy` (RMS vs
+`KIRRA_VAD_RMS_FLOOR`, zero new deps — the same idea as `wake_word.py`'s pre-gate);
+`KIRRA_VAD_BACKEND` is a fail-closed seam for a future Silero/webrtc detector (an
+unimplemented value is refused, never silently ignored). The endpoint state
+machine (min actual speech + trailing-silence + hard cap) is host-tested in
+`robot/vad_record_test.py`; the capture loop is the hardware seam. Full env set:
+`robot/install/rabbit.env.example`.
 
 ## 2. TTS — piper
 

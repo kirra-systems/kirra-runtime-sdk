@@ -1247,6 +1247,12 @@ jobs:
           # rabbit_wake control matcher incl. non-overlap with the OTA/diag/
           # drive matchers. See docs/hardware/RABBIT_AUDIO_STACK.md §3b.
           python3 robot/wake_word_test.py
+          # VAD endpointing (pure, no audio): the RMS energy math and the
+          # silence-endpoint state machine — endpoint only after enough ACTUAL
+          # speech + trailing silence, a lone click never ends the clip, and the
+          # HARD max-ms ceiling always wins (the bounded-mic guarantee). The
+          # capture loop is the hardware seam. See RABBIT_AUDIO_STACK.md §1.
+          python3 robot/vad_record_test.py
           # ADR-0033 Tier-3 sentinel logic (#887, pure, no device): owner/mode
           # violations vs the AOU-ACTUATION-SERIAL-001 contract (the vendor
           # 0777 rule is the canonical hazard case), holder reporting, and the
