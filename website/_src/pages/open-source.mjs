@@ -52,6 +52,32 @@ curl -N localhost:8090/system/posture/stream \\
             </div>
           </div>
         </div>
+
+        <div class="stats stats--4" data-reveal style="margin-top:24px">
+          <div class="stat">
+            <p class="stat__value">100<span class="unit">µs</span></p>
+            <p class="stat__label">verdict target — SG9 fail-closed timeout budget</p>
+            <p class="stat__evidence">${ev("src/wcet_gate.rs:92", "wcet_gate.rs")}</p>
+          </div>
+          <div class="stat">
+            <p class="stat__value">~116<span class="unit">µs p99.9</span></p>
+            <p class="stat__label">assembled in-line loop, Ed25519-dominated — host-indicative</p>
+            <p class="stat__evidence">${ev("crates/kirra-inline-governor/README.md", "inline-governor")}</p>
+          </div>
+          <div class="stat">
+            <p class="stat__value">~60<span class="unit">ns</span></p>
+            <p class="stat__label">shared-memory seqlock read — no serialization on the enforced path</p>
+            <p class="stat__evidence">${ev("crates/kirra-hv-carrier/README.md", "hv-carrier")}</p>
+          </div>
+          <div class="stat">
+            <p class="stat__value">O(1)</p>
+            <p class="stat__label">structural boundedness — no alloc, no unbounded loops in the verdict</p>
+            <p class="stat__evidence">${ev("src/wcet_gate.rs", "wcet_gate.rs")}</p>
+          </div>
+        </div>
+        <p class="evidence-note" data-reveal>Host-measured, not certified: these are regression tripwires gated on p99.9 in CI, not
+        a WCET claim. Certified worst-case timing is defined as QNX-target-under-FIFO and hasn't been produced yet —
+        the repository says so, and so do we. <a class="evidence" href="performance.html">The full timing story →</a></p>
       </div>
     </section>
 
