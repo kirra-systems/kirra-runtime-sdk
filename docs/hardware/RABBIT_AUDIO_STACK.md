@@ -200,6 +200,34 @@ Before enabling on battery, measure the duty-cycled tiny.en cost (§5 pattern,
 fallback is swapping the producer for a dedicated wake engine (openWakeWord) —
 the trigger contract means that changes one script and nothing else.
 
+### 3c. Barge-in (`barge_in.py`) — opt-in, cut a reply and listen
+
+When Rabbit is mid-reply and you want to talk NOW, barge-in stops the speech
+instead of making you wait for the sentence to finish. Opt in with
+`KIRRA_BARGE_IN_ENABLED=1`; default off → conversational replies use the plain
+blocking `speak()` (byte-identical).
+
+How it works: a **PTT press** (`ptt_button.py`) raises a monotonic **signal
+file** (`KIRRA_BARGE_IN_FILE`), and the in-progress conversational reply — played
+in a killable subprocess by `barge_in.speak_interruptible` — polls that signal
+and terminates playback the moment it advances past the baseline captured when
+the reply started (so a leftover signal never false-cuts the *next* reply). The
+press's own trigger then records your follow-up as usual. Any event source can
+raise one too: `python3 robot/barge_in.py --signal` (wire it to an e-stop / a
+"hush" button / a critical posture transition).
+
+🔴 It is **Channel A / cosmetic**: a barge-in only STOPS speech — it never starts
+motion, emits an intent, or touches the fenced `/intent` door, so cutting a reply
+early is always safe. The priority model is P0 e-stop > P1 {wake, human-interrupt}
+> P2 mission > P3 info-speech; a reply is P3, so any raised barge-in cuts it
+(`should_interrupt`, host-tested).
+
+The **PTT** path works today because the button is independent of the mic. The
+*acoustic* "say the wake word over Rabbit" path does not yet, because the wake
+listener releases the mic for the turn's hold-off while Rabbit speaks — closing
+that needs full-duplex audio (echo cancellation) or a shorter hold-off, a tracked
+follow-up.
+
 ---
 
 ## 4. 🔴 Audio from a systemd service (read this before enabling the units)
