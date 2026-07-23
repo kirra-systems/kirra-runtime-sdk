@@ -60,6 +60,39 @@ def test_slang_whole_word_only_no_false_positive():
     check(ok, f"substrings of slang words must not false-fire: {issues}")
 
 
+def test_deadpan_comedic_slang_passes():
+    # The persona ALLOWS a dry, deadpan modern term for humour — the curated
+    # comedic palette is NOT flagged (delivered without exclamation).
+    for good in (
+        "That trajectory was, frankly, cooked.",
+        "The numbers check out. No cap.",
+        "A textbook stop — left no crumbs.",
+        "The corridor is clear; lowkey my favourite stretch of the route.",
+        "It executed the manoeuvre and, I must say, understood the assignment.",
+    ):
+        ok, issues = score_tone(good)
+        check(ok, f"deadpan comedic slang should pass, got {issues}: {good!r}")
+
+
+def test_off_brand_slang_fails():
+    # The juvenile / off-brand terms hard-fail even in the comedic regime.
+    for bad, term in (
+        ("That parking job was straight bussin.", "bussin"),
+        ("I am, admittedly, a little delulu about that shortcut.", "delulu"),
+        ("skibidi toilet", "skibidi"),
+        ("He has serious rizz.", "rizz"),
+    ):
+        ok, issues = score_tone(bad)
+        check(not ok and any("off-brand" in i and term in i for i in issues),
+              f"off-brand {term!r} must fail: {issues}")
+
+
+def test_off_brand_whole_word_only_no_false_positive():
+    # 'rizz' must not trip on substrings; ordinary text stays clean.
+    ok, issues = score_tone("The drizzle has eased and the route is clear.")
+    check(ok, f"'drizzle' must not trip the rizz matcher: {issues}")
+
+
 def test_emoji_fails():
     ok, issues = score_tone("On our way to the dock \U0001F697")
     check(not ok and any("emoji" in i for i in issues), f"emoji must fail: {issues}")

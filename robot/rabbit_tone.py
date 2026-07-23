@@ -14,9 +14,20 @@ deliberately the *checkable* half of `RABBIT_SYSTEM`'s VOICE rules:
   - NO emojis;
   - NO enthusiastic filler / customer-service tropes ("Awesome!", "Happy to
     help!", "Sure thing!");
-  - NO casual slang ("gonna", "yeah", "lol");
+  - NO casual mumble-slang ("gonna", "yeah", "lol");
+  - NO off-brand juvenile slang ("skibidi", "gyatt", "rizz", "delulu", "bussin")
+    — these hard-fail even in the comedic regime below;
   - understatement over exclamation (no "!");
   - brevity (one or two spoken sentences).
+
+The persona (deliberately) allows a *touch* of dry, deadpan modern slang for
+comedic contrast — "That trajectory was, frankly, cooked" — so the curated
+comedic palette (cooked / no cap / left no crumbs / understood the assignment /
+the blueprint / lowkey / highkey) is NOT flagged here; several are ordinary
+English words too, so a frequency counter would false-fire. "Just a touch" is a
+persona-prompt instruction + a bench judgment, not a brittle regex. What this
+gate enforces is the register the persona must NEVER slip into (chirpy filler,
+lazy mumble, the juvenile terms) plus the deadpan delivery (no exclamation).
 
 Wit and formality are subjective and NOT scored — this gates the hard rules a
 candidate must not break, not the taste it should have.
@@ -30,10 +41,19 @@ FILLER = (
     "of course!", "anytime!",
 )
 
-# Casual slang out of character for the formal voice (whole-word matched).
+# Casual mumble-slang out of character for the formal voice (whole-word matched).
 SLANG = (
     "gonna", "wanna", "gotta", "yeah", "yep", "nope", "kinda", "sorta",
     "cool", "lol", "omg", "dude", "yikes",
+)
+
+# Off-brand juvenile slang the persona explicitly excludes from its comedic
+# palette (whole-word matched). The persona MAY drop a dry, deadpan modern term
+# for humour (cooked / no cap / left no crumbs / …), but these read as juvenile
+# or are actively wrong for a safety system — "delulu" (a governor calling itself
+# delusional) and the quasi-profane "gyatt" especially — so they hard-fail here.
+OFF_BRAND_SLANG = (
+    "skibidi", "gyatt", "rizz", "delulu", "bussin",
 )
 
 # Conservative emoji / pictograph matcher (common ranges + dingbats + arrows).
@@ -65,6 +85,9 @@ def score_tone(text):
     for s in SLANG:
         if re.search(r"\b" + re.escape(s) + r"\b", low):
             issues.append(f"slang: {s!r}")
+    for s in OFF_BRAND_SLANG:
+        if re.search(r"\b" + re.escape(s) + r"\b", low):
+            issues.append(f"off-brand slang: {s!r} (not in the persona's comedic palette)")
     if "!" in t:
         issues.append("exclamation mark (understatement over exclamation)")
     sentences = [s for s in re.split(r"[.!?]+", t) if s.strip()]
