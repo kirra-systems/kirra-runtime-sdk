@@ -65,8 +65,33 @@ the text comes back. Build with CUDA on the Orin if you can — it moves STT fro
 KIRRA_RECORD_CMD="arecord -d 4 -f S16_LE -r 16000 -c 1"   # 4 s, 16 kHz mono, the whisper-native rate
 ```
 The `-d 4` bound is the single biggest latency lever. To make Rabbit feel snappier,
-either shorten it (`-d 2` for terse commands) or, as a follow-up, put a VAD in
-front so it stops on silence instead of waiting the full window.
+either shorten it (`-d 2` for terse commands) or use **VAD endpointing** (below).
+
+### 1a. VAD endpointing (`vad_record.py`) — opt-in, stop on silence
+
+`robot/vad_record.py` is a **drop-in replacement** for the `arecord` line: it
+records ONE utterance that ends on trailing silence instead of always waiting the
+full window, so a terse "check yourself" returns in ~1 s while a longer sentence
+still gets its time — up to a hard ceiling. It writes the appended WAV path (the
+same `$KIRRA_RECORD_CMD "$wav"` contract), so nothing else in the pipeline
+changes:
+
+```bash
+KIRRA_RECORD_CMD="python3 /opt/kirra/robot/vad_record.py"    # opt in
+#   (left as the arecord line above → byte-identical prior behaviour)
+```
+
+It stays a **bounded** mic, not an open one: `KIRRA_VAD_MAX_MS` (default 8 s) is a
+hard ceiling the endpointer always stops at, exactly like arecord's `-d` bound,
+and a silence-only capture ends at `KIRRA_VAD_START_TIMEOUT_MS` with an empty clip
+→ the fenced parser latches nothing → no motion. It emits only a WAV the existing
+STT transcribes — **no new authority**. The default backend is `energy` (RMS vs
+`KIRRA_VAD_RMS_FLOOR`, zero new deps — the same idea as `wake_word.py`'s pre-gate);
+`KIRRA_VAD_BACKEND` is a fail-closed seam for a future Silero/webrtc detector (an
+unimplemented value is refused, never silently ignored). The endpoint state
+machine (min actual speech + trailing-silence + hard cap) is host-tested in
+`robot/vad_record_test.py`; the capture loop is the hardware seam. Full env set:
+`robot/install/rabbit.env.example`.
 
 ## 2. TTS — piper
 
@@ -174,6 +199,34 @@ Before enabling on battery, measure the duty-cycled tiny.en cost (§5 pattern,
 `tegrastats` A/B with the listener on/off). If it's too hot, the recorded
 fallback is swapping the producer for a dedicated wake engine (openWakeWord) —
 the trigger contract means that changes one script and nothing else.
+
+### 3c. Barge-in (`barge_in.py`) — opt-in, cut a reply and listen
+
+When Rabbit is mid-reply and you want to talk NOW, barge-in stops the speech
+instead of making you wait for the sentence to finish. Opt in with
+`KIRRA_BARGE_IN_ENABLED=1`; default off → conversational replies use the plain
+blocking `speak()` (byte-identical).
+
+How it works: a **PTT press** (`ptt_button.py`) raises a monotonic **signal
+file** (`KIRRA_BARGE_IN_FILE`), and the in-progress conversational reply — played
+in a killable subprocess by `barge_in.speak_interruptible` — polls that signal
+and terminates playback the moment it advances past the baseline captured when
+the reply started (so a leftover signal never false-cuts the *next* reply). The
+press's own trigger then records your follow-up as usual. Any event source can
+raise one too: `python3 robot/barge_in.py --signal` (wire it to an e-stop / a
+"hush" button / a critical posture transition).
+
+🔴 It is **Channel A / cosmetic**: a barge-in only STOPS speech — it never starts
+motion, emits an intent, or touches the fenced `/intent` door, so cutting a reply
+early is always safe. The priority model is P0 e-stop > P1 {wake, human-interrupt}
+> P2 mission > P3 info-speech; a reply is P3, so any raised barge-in cuts it
+(`should_interrupt`, host-tested).
+
+The **PTT** path works today because the button is independent of the mic. The
+*acoustic* "say the wake word over Rabbit" path does not yet, because the wake
+listener releases the mic for the turn's hold-off while Rabbit speaks — closing
+that needs full-duplex audio (echo cancellation) or a shorter hold-off, a tracked
+follow-up.
 
 ---
 

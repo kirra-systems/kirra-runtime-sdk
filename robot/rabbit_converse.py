@@ -50,6 +50,9 @@ from rabbit_ask import (  # noqa: E402
 import rabbit_diag  # noqa: E402 — deterministic self-check voice command (read-only)
 import rabbit_ota  # noqa: E402 — deterministic OTA voice commands (NOT the movement door)
 import rabbit_wake  # noqa: E402 — deterministic wake-listener controls (state file only)
+import barge_in  # noqa: E402 — interruptible reply speech (opt-in; Channel A, cosmetic)
+import skill_registry  # noqa: E402 — opt-in named-skill router (motion → the SAME /intent fence)
+import world_model  # noqa: E402 — opt-in situation report (read-only TTL'd projection)
 from rabbit_persona import name_slot, operator_name  # noqa: E402
 
 MAX_TURNS = 10  # rolling conversation memory (user+assistant pairs kept)
@@ -127,6 +130,26 @@ def ask_llm(history, context, utterance):
     return parse_reply(raw)
 
 
+def ask_llm_skills(history, context, utterance):
+    """Skills-mode persona call (opt-in, KIRRA_SKILLS_ENABLED). Returns the raw
+    JSON string; `skill_registry.plan_skills` parses it fail-closed. Same model +
+    near-deterministic options as the default router — only the CONTRACT differs
+    (named skills instead of a free-form directive)."""
+    system = RABBIT_SYSTEM + "\n\n" + skill_registry.skills_prompt_fragment()
+    messages = [{"role": "system", "content": system}]
+    messages += history
+    messages.append({"role": "user", "content": f"{context}\n\nOperator says: {utterance}"})
+    try:
+        r = requests.post(f"{OLLAMA}/api/chat", timeout=60.0,
+                          json={"model": MODEL, "stream": False, "messages": messages,
+                                "options": ROUTER_LLM_OPTIONS})
+        if r.status_code != 200:
+            return ""
+        return (r.json().get("message", {}).get("content") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def parse_reply(raw):
     """Lenient JSON extraction. FAIL-CLOSED: anything we can't parse as a clear
     directive → (text, None) — no directive, no motion."""
@@ -160,6 +183,23 @@ def offer_to_door(directive_text):
         return "reject"
     except Exception:  # noqa: BLE001
         return "error"
+
+
+def _speak_reply(text):
+    """Speak a CONVERSATIONAL reply (P3 info-speech). Interruptible (barge-in)
+    when KIRRA_BARGE_IN_ENABLED=1 — a PTT press / raised signal cuts it so Rabbit
+    stops and listens; otherwise the plain blocking speak(). Channel A, cosmetic:
+    cutting a reply early never affects the fenced /intent door. Only the long
+    conversational line uses this; the short deterministic lines (OTA/diag/wake)
+    stay on plain speak()."""
+    if not barge_in.enabled():
+        speak(text)
+        return
+    tts_argv = (os.environ.get("KIRRA_TTS_CMD") or "").split()
+    path = barge_in.signal_path()
+    baseline = barge_in.read_epoch(path)
+    barge_in.speak_interruptible(text, tts_argv,
+                                 barge_in.make_file_cancel_check(path, baseline))
 
 
 def handle_turn(history, utterance):
@@ -197,7 +237,39 @@ def handle_turn(history, utterance):
         del history[: max(0, len(history) - 2 * MAX_TURNS)]
         return
 
+    # "Situation report" / "sitrep" — deterministic, read-only (opt-in,
+    # KIRRA_WORLD_MODEL_ENABLED). Renders the TTL'd World Model projection: a
+    # stale/unavailable field is SAID to be unknown, never a stale value. No LLM,
+    # no /intent, no motion. Off → None → falls through to the LLM.
+    wm_reply = world_model.handle(utterance)
+    if wm_reply is not None:
+        _speak_reply(wm_reply)
+        history.append({"role": "user", "content": utterance})
+        history.append({"role": "assistant", "content": wm_reply})
+        del history[: max(0, len(history) - 2 * MAX_TURNS)]
+        return
+
     context = context_for(utterance)
+
+    # SKILLS MODE (opt-in, KIRRA_SKILLS_ENABLED): the LLM emits {say, skills[]}
+    # from the REGISTERED vocabulary instead of a free-form directive. A motion
+    # skill still routes through the SAME fenced door (offer_to_door → /intent →
+    # checker) via execute_skill_decisions — the registry is a catalog, not a new
+    # door — and an unimplemented/unknown skill is REFUSED, never faked. Default
+    # off → the free-form {say, directive} router below is byte-identical.
+    if skill_registry.enabled():
+        say, decisions = skill_registry.plan_skills(
+            ask_llm_skills(history, context, utterance))
+        if say:
+            _speak_reply(say)
+        elif not decisions:
+            _speak_reply(f"I didn't quite catch that{name_slot()}.")
+        skill_registry.execute_skill_decisions(decisions, offer_to_door, _speak_reply)
+        history.append({"role": "user", "content": utterance})
+        history.append({"role": "assistant", "content": say or "(skill request)"})
+        del history[: max(0, len(history) - 2 * MAX_TURNS)]
+        return
+
     say, directive = ask_llm(history, context, utterance)
     if say is None:
         say = "My voice module is offline for a moment."
@@ -215,7 +287,7 @@ def handle_turn(history, utterance):
     else:
         spoken = say
 
-    speak(spoken)
+    _speak_reply(spoken)
     # rolling memory (store the spoken reply, not the raw grounding)
     history.append({"role": "user", "content": utterance})
     history.append({"role": "assistant", "content": spoken})

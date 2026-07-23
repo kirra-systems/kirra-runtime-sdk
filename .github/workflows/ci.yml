@@ -1258,6 +1258,30 @@ jobs:
           # rabbit_wake control matcher incl. non-overlap with the OTA/diag/
           # drive matchers. See docs/hardware/RABBIT_AUDIO_STACK.md §3b.
           python3 robot/wake_word_test.py
+          # VAD endpointing (pure, no audio): the RMS energy math and the
+          # silence-endpoint state machine — endpoint only after enough ACTUAL
+          # speech + trailing silence, a lone click never ends the clip, and the
+          # HARD max-ms ceiling always wins (the bounded-mic guarantee). The
+          # capture loop is the hardware seam. See RABBIT_AUDIO_STACK.md §1.
+          python3 robot/vad_record_test.py
+          # Barge-in (pure + subprocess seam, no audio): the priority arbiter
+          # (P1 cuts P3, P3 never cuts P1), the fail-closed enable gate, the
+          # monotonic epoch signal (absent/corrupt → 0, baseline never false-cuts),
+          # and speak_interruptible completing vs being killed mid-playback. See
+          # docs/hardware/RABBIT_AUDIO_STACK.md §3c.
+          python3 robot/barge_in_test.py
+          # Skill registry (pure, no LLM/HTTP): the fail-closed dispatcher
+          # (motion → a directive for the SAME /intent fence, unimplemented/
+          # unknown → REFUSE, never faked), fail-closed {say,skills[]} parsing,
+          # and THE single-door invariant — execute_skill_decisions routes motion
+          # ONLY through the injected fence sink. See robot/skill_registry.py.
+          python3 robot/skill_registry_test.py
+          # World Model read projection (pure, no HTTP): TTL freshness incl. the
+          # boundary + clock-skew, absent/stale → UNKNOWN (never a stale value),
+          # the situation-report matcher's non-overlap, render SAYING unknown for
+          # a stale field, and assemble leaving an 'unavailable' source UNKNOWN
+          # (fail-closed). The live gather is the seam. See robot/world_model.py.
+          python3 robot/world_model_test.py
           # ADR-0033 Tier-3 sentinel logic (#887, pure, no device): owner/mode
           # violations vs the AOU-ACTUATION-SERIAL-001 contract (the vendor
           # 0777 rule is the canonical hazard case), holder reporting, and the
