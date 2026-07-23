@@ -404,8 +404,13 @@ impl AppState {
         let (posture_tx, _) = broadcast::channel(POSTURE_BROADCAST_CAPACITY);
         // Pass B1 cache seed (S3 / #115): read the current durable epoch
         // before moving the store into the handle so the gate has a fresh
-        // value before any request lands. Unreadable → 0 (gate falls through).
-        let initial_db_epoch = store.current_epoch().unwrap_or(0);
+        // value before any request lands. #1030: the read goes to the SHARED
+        // backend — in Pg mode the fence lives on the server, and seeding
+        // from the (fresh, epoch-0) local ledger would make the mutation
+        // gate's `held != cached_db_epoch` check spuriously self-demote a
+        // just-claimed Active until the first heartbeat re-stamp. Unreadable
+        // → 0 (gate denies mutations — fail-closed).
+        let initial_db_epoch = crate::shared_store::backend_initial_epoch(&shared_backend, &store);
         Self {
             // ADR-0035 Stage 3k: the node registry + dependency adjacency list now
             // live on FleetGraph; identical initial state (two empty DashMaps).

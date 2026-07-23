@@ -187,6 +187,23 @@ fn map_local_fenced(e: kirra_persistence::DurableWriteError) -> SharedError {
 
 pub type SharedResult<T> = Result<T, SharedError>;
 
+/// Boot-time read of the durable epoch from the SHARED backend, used while
+/// `AppState` is still being constructed (before the store moves into the
+/// handle and the facade exists). Local reads the passed store; Pg reads the
+/// live server — the fence's authority in hybrid mode. Unreadable → 0: the
+/// mutation gate then DENIES until the heartbeat stamps a real value
+/// (fail-closed, never fail-open).
+pub fn backend_initial_epoch(backend: &SharedBackend, local: &VerifierStore) -> u64 {
+    match backend {
+        SharedBackend::Local => local.current_epoch().unwrap_or(0),
+        #[cfg(feature = "postgres")]
+        SharedBackend::Pg(pg) => {
+            use kirra_persistence::EpochFence;
+            pg_lock(pg).current_epoch().unwrap_or(0)
+        }
+    }
+}
+
 /// Lock the PG store (poison-tolerant, matching the writer's discipline). The
 /// PG client is additionally serialized internally; this outer mutex exists so
 /// the facade can reach the store's `&mut self` trait methods through an
