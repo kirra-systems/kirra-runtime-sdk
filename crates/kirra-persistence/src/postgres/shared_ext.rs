@@ -45,6 +45,22 @@ use crate::{CertExpirySummary, ClearanceGrantState, FenceError, HaLease, Pending
 pub enum PgDurableWriteError {
     Fenced(FenceError),
     Db(PgStoreError),
+    /// H1 parity: the federation nonce was already burned (the plain INSERT's
+    /// UNIQUE violation aborted the transaction — never `ON CONFLICT DO
+    /// NOTHING`, which would double-accept).
+    NonceReplay,
+    /// Item 20 parity: same-epoch generation regress/replay. Transaction
+    /// aborted; nothing persisted, nonce not burned, high-water unchanged.
+    GenerationRegress {
+        found: u64,
+        high_water: u64,
+    },
+    /// #791 I1 parity: effective-epoch regress (or omission-downgrade,
+    /// `found: 0`). Transaction aborted, as above.
+    EpochRegress {
+        found: u64,
+        high_water: u64,
+    },
 }
 
 impl From<PgStoreError> for PgDurableWriteError {
@@ -64,6 +80,15 @@ impl std::fmt::Display for PgDurableWriteError {
         match self {
             PgDurableWriteError::Fenced(e) => write!(f, "epoch fence rejected: {e:?}"),
             PgDurableWriteError::Db(e) => write!(f, "store error: {e}"),
+            PgDurableWriteError::NonceReplay => f.write_str("federation nonce replay"),
+            PgDurableWriteError::GenerationRegress { found, high_water } => write!(
+                f,
+                "federation generation regress: found {found}, high-water {high_water}"
+            ),
+            PgDurableWriteError::EpochRegress { found, high_water } => write!(
+                f,
+                "federation epoch regress: found {found}, high-water {high_water}"
+            ),
         }
     }
 }
@@ -495,4 +520,230 @@ impl PgVerifierStore {
         }
         tx.commit().map_err(|_| FenceError::EpochUnreadable)
     }
+
+    // -- Federated-report tier (#1030 stage 2) ---------------------------------
+    //
+    // The PG half of `save_federated_report_chained`: the SAME lexicographic
+    // `(epoch, generation)` tuple gates, high-water advance, report INSERT,
+    // and authoritative nonce burn — one PG transaction, with the high-water
+    // row taken `FOR UPDATE` (PG's analogue of SQLite's Immediate write lock:
+    // two concurrent reports from one controller serialize at the row lock,
+    // so the gate check and the advance cannot interleave). The chained audit
+    // events the SQLite fused save appends (ACCEPTED / GENERATION_GAP /
+    // EPOCH_ADVANCE) stay with the caller's LOCAL ledger — the returned
+    // outcome carries what the caller must ledger.
+
+    /// Save a federated report under the full gate set. On `Ok`, the report
+    /// row is committed, the nonce burned, and the high-water advanced; the
+    /// outcome names the local audit markers the caller must append
+    /// (`gap_from` / `epoch_advance_from`, same semantics as the SQLite fused
+    /// save). All rejects roll back atomically.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_federated_report_row_gated(
+        &self,
+        source_controller_id: &str,
+        asset_id: &str,
+        posture_json: &str,
+        issued_at_ms: u64,
+        expires_at_ms: u64,
+        nonce_hex: &str,
+        source_generation: Option<u64>,
+        source_epoch: Option<u64>,
+        received_at_ms: u64,
+        held_epoch: u64,
+    ) -> Result<PgFederationOutcome, PgDurableWriteError> {
+        // #791 I1 defensive normalization (mirrors the SQLite save).
+        let source_epoch = if source_generation.is_some() {
+            source_epoch
+        } else {
+            None
+        };
+        let mut guard = self.lock();
+        let mut tx = guard.transaction()?;
+        // #79 fence — FIRST statement. held == 0 means "never claimed" here
+        // exactly as the SQLite save's assert_epoch_held treats it: reports
+        // can only be accepted by an Active holder.
+        assert_epoch_held_tx(&mut tx, held_epoch)?;
+
+        let mut gap_from: Option<u64> = None;
+        let mut epoch_advance_from: Option<u64> = None;
+        let eff_epoch = source_epoch.unwrap_or(0);
+
+        let hw_row = tx.query_opt(
+            "SELECT last_epoch, last_generation FROM federation_generation_highwater \
+             WHERE source_controller_id = $1 AND asset_id = $2 FOR UPDATE",
+            &[&source_controller_id, &asset_id],
+        )?;
+        if let Some(r) = hw_row {
+            let hw_epoch = r.get::<_, i64>(0).max(0) as u64;
+            let hw_gen = r.get::<_, i64>(1).max(0) as u64;
+            if hw_epoch >= 1 && source_epoch.is_none() {
+                return Err(PgDurableWriteError::EpochRegress {
+                    found: 0,
+                    high_water: hw_epoch,
+                });
+            }
+            if let Some(gen) = source_generation {
+                if eff_epoch < hw_epoch {
+                    return Err(PgDurableWriteError::EpochRegress {
+                        found: eff_epoch,
+                        high_water: hw_epoch,
+                    });
+                }
+                if eff_epoch == hw_epoch {
+                    if gen <= hw_gen {
+                        return Err(PgDurableWriteError::GenerationRegress {
+                            found: gen,
+                            high_water: hw_gen,
+                        });
+                    }
+                    if gen > hw_gen + 1 {
+                        gap_from = Some(hw_gen);
+                    }
+                } else {
+                    epoch_advance_from = Some(hw_epoch);
+                }
+            }
+        }
+
+        if let Some(gen) = source_generation {
+            tx.execute(
+                "INSERT INTO federation_generation_highwater \
+                     (source_controller_id, asset_id, last_epoch, last_generation, last_seen_ms) \
+                 VALUES ($1, $2, $3, $4, $5) \
+                 ON CONFLICT (source_controller_id, asset_id) \
+                 DO UPDATE SET last_epoch = $3, last_generation = $4, last_seen_ms = $5",
+                &[
+                    &source_controller_id,
+                    &asset_id,
+                    &(eff_epoch as i64),
+                    &(gen as i64),
+                    &(received_at_ms as i64),
+                ],
+            )?;
+        }
+
+        tx.execute(
+            "INSERT INTO federated_trust_reports \
+                 (source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms, \
+                  received_at_ms, source_generation, source_epoch) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            &[
+                &source_controller_id,
+                &asset_id,
+                &posture_json,
+                &(issued_at_ms as i64),
+                &(expires_at_ms as i64),
+                &(received_at_ms as i64),
+                &source_generation.map(|g| g as i64),
+                &source_epoch.map(|e| e as i64),
+            ],
+        )?;
+
+        // H1 — the authoritative single-use claim: a PLAIN insert whose UNIQUE
+        // violation aborts the whole transaction (report row included).
+        match tx.execute(
+            "INSERT INTO federation_report_nonces (nonce_hex, source_controller_id, seen_at_ms) \
+             VALUES ($1, $2, $3)",
+            &[&nonce_hex, &source_controller_id, &(received_at_ms as i64)],
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                return if e.code() == Some(&postgres::error::SqlState::UNIQUE_VIOLATION) {
+                    Err(PgDurableWriteError::NonceReplay)
+                } else {
+                    Err(PgDurableWriteError::Db(PgStoreError::from(e)))
+                };
+            }
+        }
+
+        tx.commit()?;
+        Ok(PgFederationOutcome {
+            eff_epoch,
+            gap_from,
+            epoch_advance_from,
+        })
+    }
+
+    /// The stored reports for an asset, newest-first (the posture-exempt GET's
+    /// shape — mirrors the SQLite loader's JSON rows).
+    pub fn load_federated_reports_for_asset(
+        &self,
+        asset_id: &str,
+    ) -> Result<Vec<serde_json::Value>, PgStoreError> {
+        let rows = self.lock().query(
+            "SELECT source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms, \
+                    source_generation, source_epoch \
+             FROM federated_trust_reports WHERE asset_id = $1 ORDER BY received_at_ms DESC",
+            &[&asset_id],
+        )?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "source_controller_id": row.get::<_, String>(0),
+                    "asset_id": row.get::<_, String>(1),
+                    "posture": row.get::<_, String>(2),
+                    "issued_at_ms": row.get::<_, i64>(3).max(0) as u64,
+                    "expires_at_ms": row.get::<_, i64>(4).max(0) as u64,
+                    "source_generation": row.get::<_, Option<i64>>(5).map(|g| g.max(0) as u64),
+                    "source_epoch": row.get::<_, Option<i64>>(6).map(|e| e.max(0) as u64),
+                })
+            })
+            .collect())
+    }
+
+    /// Typed v2 loader for reconciliation — same fail-closed skip of a corrupt
+    /// posture row as the SQLite loader (never coerced to Nominal).
+    pub fn load_federated_report_v2s_for_asset(
+        &self,
+        asset_id: &str,
+    ) -> Result<
+        Vec<kirra_fleet_types::federation_reconciliation::FederatedTrustReportV2>,
+        PgStoreError,
+    > {
+        let rows = self.lock().query(
+            "SELECT source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms, \
+                    source_generation, source_epoch \
+             FROM federated_trust_reports WHERE asset_id = $1 ORDER BY received_at_ms DESC",
+            &[&asset_id],
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            let posture_json: String = row.get(2);
+            let Ok(posture) = serde_json::from_str::<kirra_core::FleetPosture>(&posture_json)
+            else {
+                continue;
+            };
+            out.push(
+                kirra_fleet_types::federation_reconciliation::FederatedTrustReportV2 {
+                    source_controller_id: row.get(0),
+                    asset_id: row.get(1),
+                    posture,
+                    issued_at_ms: row.get::<_, i64>(3).max(0) as u64,
+                    expires_at_ms: row.get::<_, i64>(4).max(0) as u64,
+                    nonce_hex: String::new(),
+                    signature_b64: String::new(),
+                    source_generation: row.get::<_, Option<i64>>(5).map(|g| g.max(0) as u64),
+                    source_epoch: row.get::<_, Option<i64>>(6).map(|e| e.max(0) as u64),
+                },
+            );
+        }
+        Ok(out)
+    }
+}
+
+/// The accepted-federated-report outcome: what the caller must ledger locally
+/// (the SQLite fused save appends these markers in-transaction; the PG path
+/// returns them for the local chained append).
+#[derive(Debug, Clone, Copy)]
+pub struct PgFederationOutcome {
+    /// The effective epoch the gate evaluated (0 = epoch-less legacy report).
+    pub eff_epoch: u64,
+    /// `Some(hw)` = forward generation GAP accepted — ledger the
+    /// FEDERATION_GENERATION_GAP marker over `hw+1 ..= gen-1`.
+    pub gap_from: Option<u64>,
+    /// `Some(prev)` = epoch ADVANCE accepted — ledger the
+    /// FEDERATION_EPOCH_ADVANCE marker.
+    pub epoch_advance_from: Option<u64>,
 }

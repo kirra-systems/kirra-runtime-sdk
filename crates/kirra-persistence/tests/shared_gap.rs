@@ -369,3 +369,130 @@ fn cert_expiry_summary_classifies_like_sqlite() {
     assert_eq!(s.no_expiry, 1);
     assert_eq!(s.expiring_soon, 1);
 }
+
+// -- Federated-report tier (gated save) ---------------------------------------
+
+#[test]
+fn federated_report_gates_mirror_the_sqlite_tuple_algebra() {
+    use kirra_persistence::postgres::PgDurableWriteError as E;
+    let Some(mut store) = isolated_store("fedgate") else {
+        return;
+    };
+    let held = store.try_claim_epoch(0, "inst-A", 1).unwrap().unwrap();
+    let save = |st: &kirra_persistence::postgres::PgVerifierStore,
+                nonce: &str,
+                gen: Option<u64>,
+                epoch: Option<u64>,
+                at: u64| {
+        st.save_federated_report_row_gated(
+            "ctrl-1",
+            "asset-1",
+            "\"Nominal\"",
+            at,
+            at + 5_000,
+            nonce,
+            gen,
+            epoch,
+            at,
+            held,
+        )
+    };
+
+    // First v2 report accepted; no markers.
+    let o = save(&store, "n-1", Some(5), Some(1), 100).unwrap();
+    assert_eq!(o.eff_epoch, 1);
+    assert!(o.gap_from.is_none() && o.epoch_advance_from.is_none());
+
+    // Nonce replay: transaction aborts, report row NOT duplicated.
+    assert!(matches!(
+        save(&store, "n-1", Some(6), Some(1), 101),
+        Err(E::NonceReplay)
+    ));
+    assert_eq!(
+        store
+            .load_federated_reports_for_asset("asset-1")
+            .unwrap()
+            .len(),
+        1,
+        "replay rolled back atomically"
+    );
+
+    // Same-epoch generation regress/replay.
+    assert!(matches!(
+        save(&store, "n-2", Some(5), Some(1), 102),
+        Err(E::GenerationRegress {
+            found: 5,
+            high_water: 5
+        })
+    ));
+    assert!(matches!(
+        save(&store, "n-3", Some(4), Some(1), 103),
+        Err(E::GenerationRegress {
+            found: 4,
+            high_water: 5
+        })
+    ));
+
+    // Forward GAP accepted with the marker outcome.
+    let o = save(&store, "n-4", Some(9), Some(1), 104).unwrap();
+    assert_eq!(o.gap_from, Some(5));
+
+    // Omission-downgrade: high-water carries epoch >= 1, report omits it.
+    assert!(matches!(
+        save(&store, "n-5", Some(10), None, 105),
+        Err(E::EpochRegress {
+            found: 0,
+            high_water: 1
+        })
+    ));
+
+    // Epoch regress from a fenced old primary.
+    assert!(matches!(
+        save(&store, "n-6", Some(50), Some(0), 106),
+        Err(E::EpochRegress {
+            found: 0,
+            high_water: 1
+        })
+    ));
+
+    // Epoch ADVANCE accepted regardless of generation reset, with the marker.
+    let o = save(&store, "n-7", Some(1), Some(2), 107).unwrap();
+    assert_eq!(o.epoch_advance_from, Some(1));
+    assert_eq!(o.eff_epoch, 2);
+
+    // The v2 loader reads back typed rows newest-first, corrupt-skipping.
+    let v2 = store
+        .load_federated_report_v2s_for_asset("asset-1")
+        .unwrap();
+    assert_eq!(v2.len(), 3);
+    assert_eq!(v2[0].source_generation, Some(1));
+    assert_eq!(v2[0].source_epoch, Some(2));
+}
+
+#[test]
+fn federated_report_save_is_fenced() {
+    use kirra_persistence::postgres::PgDurableWriteError as E;
+    let Some(mut store) = isolated_store("fedfence") else {
+        return;
+    };
+    let held = store.try_claim_epoch(0, "inst-A", 1).unwrap().unwrap();
+    let _ = store.try_claim_epoch(held, "inst-B", 2).unwrap().unwrap();
+    // The superseded holder's save is refused; nothing lands.
+    let r = store.save_federated_report_row_gated(
+        "ctrl-1",
+        "asset-9",
+        "\"Nominal\"",
+        10,
+        5_010,
+        "nf-1",
+        Some(1),
+        Some(1),
+        10,
+        held,
+    );
+    assert!(matches!(r, Err(E::Fenced(_))));
+    assert!(store
+        .load_federated_reports_for_asset("asset-9")
+        .unwrap()
+        .is_empty());
+}

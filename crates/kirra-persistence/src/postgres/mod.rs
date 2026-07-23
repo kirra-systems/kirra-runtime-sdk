@@ -70,7 +70,7 @@ use kirra_ota_campaign::{Campaign, CampaignState, HaltReason, NodeArtifactStatus
 /// The Postgres schema version THIS binary supports (mirrors the SQLite
 /// `SCHEMA_VERSION` discipline: a newer stamp in the database is refused
 /// fail-closed by the shared engine).
-pub const PG_SCHEMA_VERSION: i64 = 11;
+pub const PG_SCHEMA_VERSION: i64 = 12;
 
 /// Baseline (v1) DDL — idempotent, applied on every open BEFORE the versioned
 /// steps run (v1 is the engine's baseline; steps are v ≥ 2). The two tables
@@ -258,6 +258,34 @@ const PG_MIGRATIONS: &[PgMigration] = &[
     PgMigration {
         version: 11,
         sql: "CREATE TABLE IF NOT EXISTS dependencies (                   node_id TEXT NOT NULL,                   dep_id  TEXT NOT NULL,                   PRIMARY KEY (node_id, dep_id)               );               CREATE TABLE IF NOT EXISTS node_attestation_policy (                   node_id           TEXT PRIMARY KEY,                   require_tpm_quote BOOLEAN NOT NULL DEFAULT FALSE               );               CREATE TABLE IF NOT EXISTS clearance_grants (                   id             BIGSERIAL PRIMARY KEY,                   node_id        TEXT   NOT NULL,                   operator_id    TEXT   NOT NULL,                   granted_at_ms  BIGINT NOT NULL,                   delivery       TEXT   NOT NULL DEFAULT 'PENDING-NODE-TRANSPORT',                   created_at_ms  BIGINT NOT NULL,                   consumed_at_ms BIGINT,                   outcome        TEXT,                   outcome_detail TEXT,                   auth_method    TEXT,                   operator_key_fingerprint TEXT               )",
+    },
+    // v12 — #1030 stage 2 (ADR-0038): the federated-report tier. The report
+    // rows + the per-(controller, asset) LEXICOGRAPHIC (epoch, generation)
+    // high-water are SHARED anti-replay/ordering state, so PG mode carries
+    // them; the chained audit events the SQLite fused save appends stay with
+    // the caller's LOCAL ledger. Shapes mirror the live SQLite schema
+    // (including the #791 I1 source_epoch columns).
+    PgMigration {
+        version: 12,
+        sql: "CREATE TABLE IF NOT EXISTS federation_generation_highwater ( \
+                  source_controller_id TEXT   NOT NULL, \
+                  asset_id             TEXT   NOT NULL, \
+                  last_generation      BIGINT NOT NULL, \
+                  last_seen_ms         BIGINT NOT NULL, \
+                  last_epoch           BIGINT NOT NULL DEFAULT 0, \
+                  PRIMARY KEY (source_controller_id, asset_id) \
+              ); \
+              CREATE TABLE IF NOT EXISTS federated_trust_reports ( \
+                  id                   BIGSERIAL PRIMARY KEY, \
+                  source_controller_id TEXT   NOT NULL, \
+                  asset_id             TEXT   NOT NULL, \
+                  posture_json         TEXT   NOT NULL, \
+                  issued_at_ms         BIGINT NOT NULL, \
+                  expires_at_ms        BIGINT NOT NULL, \
+                  received_at_ms       BIGINT NOT NULL, \
+                  source_generation    BIGINT, \
+                  source_epoch         BIGINT \
+              )",
     },
 ];
 
