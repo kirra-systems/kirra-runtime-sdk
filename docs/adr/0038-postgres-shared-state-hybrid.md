@@ -1,6 +1,6 @@
 # ADR-0038 — Postgres for Shared Control-Plane State, Local SQLite for the Audit Ledger (the Hybrid)
 
-**Status:** Accepted (stage 1 merged; stages 2–3 tracked on #1030)
+**Status:** Accepted (stages 1–3 landed on #1030)
 **Date:** 2026-07-23
 **Owner:** Kirra Systems, LLC
 **Scope:** How #1030 ("shared-file SQLite control plane is an availability SPOF; promote Postgres") is realized. Decides WHICH storage tiers move to Postgres when `KIRRA_DB_URL` selects it, which deliberately stay local, and the staged path from today's single-backend service to the selectable one. Ratified by the owner on the #1030 scoping question (2026-07-23), superseding the earlier assumption that the whole store could switch backends behind one flag.
@@ -118,7 +118,7 @@ for shared tiers; the in-memory fleet map still updates only after it).
   pg consumption impossible (dependency cycle). Fixed: the crate now depends
   on the leaf. No behavior change; the `postgres-conformance` lane is the
   regression evidence.
-- **Stage 2 (in progress): the backend seam + flag.** First movements, merged:
+- **Stage 2 (landed): the backend seam + flag.** First movements, merged:
   the shared-tier inherent-method GAP-FILL (`postgres/shared_ext.rs`: the
   dependency graph, epoch-fenced node upserts, attestation policy, WP-19 HA
   lease, unchained campaign/clearance-grant row primitives, WP-15 cert
@@ -131,7 +131,7 @@ for shared tiers; the in-memory fleet map still updates only after it).
   workspace roots"), so the backend lives IN the persistence crate — the
   driver tree still compiles only under the feature, preserving the
   detachment's actual goals (default build, MSRV lane byte-identical).
-  Remaining in stage 2: `StoreHandle` grows a
+  Then, completing stage 2: `StoreHandle` grew a
   `shared`-tier accessor dispatching to either the local `VerifierStore` or
   a `PgVerifierStore` (enum, not trait object — two variants, exhaustive
   match, no vtable on the hot path); `KIRRA_DB_URL` (registered in
@@ -146,11 +146,21 @@ for shared tiers; the in-memory fleet map still updates only after it).
   `postgres` cargo feature; the workspace-detachment policy for the driver
   tree is revisited THERE (the feature stays off in the MSRV lane and the
   default build).
-- **Stage 3: proof.** The two-node HA drill re-run with PG shared state
-  (epoch CAS race, promotion, fencing) in the `postgres-conformance` lane;
-  topology docs updated. The shared-file topology remains the DEFAULT and
-  the documented small-deployment path; Postgres is the recommended
-  multi-host HA topology once stage 3 lands.
+- **Stage 3 (landed): proof.** The two-node HA drill re-run with PG shared
+  state, in the `postgres-conformance` lane: `tests/ha_failover_pg.rs` drives
+  the SQLite drill's exact narrative (`tests/ha_failover.rs`) over TWO
+  `PgVerifierStore` connections sharing one database — the standby promotes by
+  claiming the next durable epoch (transactional `SELECT … FOR UPDATE` CAS),
+  and the revived old primary is FENCED (write refused + stale-epoch re-claim
+  refused), plus the lease-driven variant, all on the SAME
+  `kirra_verifier::lease` timing model the shared-file drill uses (so both
+  topologies meet ONE exactly-one-writer contract). The persistence-crate
+  primitives (a genuine two-connection concurrent CAS race
+  `two_connections_racing_the_cas_produce_exactly_one_winner`, the
+  `SELECT … FOR UPDATE` fence, the wedge fail-closed) back it. Topology docs
+  updated (`docs/deployment/HA_TOPOLOGY.md`). The shared-file topology remains
+  the DEFAULT and the documented small-deployment path; Postgres is the
+  recommended multi-host HA topology.
 
 ## Invariants preserved
 
