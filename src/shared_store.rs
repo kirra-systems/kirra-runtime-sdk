@@ -1425,6 +1425,21 @@ impl SharedOps {
 // ---------------------------------------------------------------------------
 
 impl SharedOps {
+    /// Append a hash-chained event to the LOCAL ledger and PROPAGATE failure —
+    /// for sweeps whose audit entry IS the product (the cert-expiry census,
+    /// Copilot #857), where dropping the append would let callers treat a
+    /// missing entry as evidence. The ledger is per-instance local SQLite on
+    /// BOTH backends (ADR-0038).
+    pub fn ledger_append_checked(
+        &self,
+        event_type: &str,
+        payload_json: &str,
+        at_ms: u64,
+    ) -> SharedResult<()> {
+        self.local(|s| s.append_clearance_audit_event(event_type, payload_json, at_ms))?;
+        Ok(())
+    }
+
     /// Append a hash-chained event to the LOCAL ledger (the Pg-arm half of the
     /// decomposed fused operations). A ledger-append failure after a committed
     /// shared write is LOUD (tracing::error) but does not roll back the shared
