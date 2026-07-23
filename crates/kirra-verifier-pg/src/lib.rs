@@ -57,6 +57,7 @@
 
 use std::sync::Mutex;
 
+use kirra_core::{NodeTrustState, RegisteredNode};
 use kirra_fabric_types::asset::{AssetType, FabricAsset, KinematicProfileType};
 use kirra_ota_campaign::{Campaign, CampaignState, HaltReason, NodeArtifactStatus};
 use kirra_persistence::migrations_postgres::{
@@ -67,7 +68,6 @@ use kirra_persistence::{
     CertPrincipalStore, EpochFence, FabricAssetStore, FederationStore, FenceError, NodeStore,
     OperatorRecord, OperatorStore, OtaCampaignStore, PostureEngineStateStore, PrincipalStore,
 };
-use kirra_verifier::verifier::{NodeTrustState, RegisteredNode};
 
 /// The Postgres schema version THIS binary supports (mirrors the SQLite
 /// `SCHEMA_VERSION` discipline: a newer stamp in the database is refused

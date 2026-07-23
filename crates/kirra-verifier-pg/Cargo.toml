@@ -29,7 +29,14 @@ publish = false # proprietary (see COPYRIGHT) — not for crates.io
 [workspace]
 
 [dependencies]
-kirra-verifier = { path = "../.." }
+# #1030 stage 1 — DE-CYCLED: this crate previously depended on the ROOT crate
+# (`kirra-verifier = { path = "../.." }`) solely for the `NodeTrustState` /
+# `RegisteredNode` imports, whose canonical home is the lean `kirra-core` leaf.
+# That inverted edge made it impossible for the root service to ever consume
+# this backend (root → pg → root cycle). Depending on the leaf directly keeps
+# the dependency arrows pointing one way (leaves ← pg), which the hybrid
+# shared-state-on-PG design (ADR-0038) requires.
+kirra-core = { path = "../kirra-core" }
 # The sync client the program names ("the promised ~10-line PgExecutor adapter
 # over `postgres` (sync)"). Bundled TLS is NOT needed — the CI service container
 # is plaintext-local; an integrator terminating TLS binds their own connector.
