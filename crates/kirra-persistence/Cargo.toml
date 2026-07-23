@@ -37,6 +37,10 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 # `#[cfg(test)]`). The root crate's dev-dependency enables this; production builds
 # leave it off. Off by default — these helpers never compile into a normal build.
 test-support = []
+# #1030 stage 2 (ADR-0038): the live-Postgres shared-state backend
+# (src/postgres/). Pulls the sync `postgres` driver ONLY under this feature —
+# default builds and the MSRV lane never compile the driver tree.
+postgres = ["dep:postgres"]
 
 [dependencies]
 # Domain-type + pure-audit leaf crates (the C2 relocations + the audit-hash split).
@@ -45,6 +49,10 @@ kirra-audit-hash = { path = "../kirra-audit-hash" }
 kirra-fleet-types = { path = "../kirra-fleet-types" }
 kirra-ota-campaign = { path = "../kirra-ota-campaign" }
 kirra-fabric-types = { path = "../kirra-fabric-types" }
+# The sync Postgres client (optional — see the `postgres` feature). Bundled TLS
+# is NOT pulled (plaintext-local CI service container; an integrator
+# terminating TLS binds their own connector).
+postgres = { version = "0.19", optional = true }
 # Storage + crypto externals (same specs as the root crate).
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -57,3 +65,14 @@ tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+
+# The live-Postgres suites build ONLY with the `postgres` feature (they also
+# self-skip loudly without KIRRA_PG_URL). required-features keeps the driver
+# tree out of every default `cargo test --workspace` compile.
+[[test]]
+name = "live_pg"
+required-features = ["postgres"]
+
+[[test]]
+name = "shared_gap"
+required-features = ["postgres"]

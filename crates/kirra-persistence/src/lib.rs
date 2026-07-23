@@ -674,7 +674,16 @@ mod fleet_trust_store; // ADR-0035 slice 4: `impl FleetTrustStore for VerifierSt
 pub mod key_registry; // ADR-0035 slice-4 follow-up: the #329/ADR-0008 unified KeyRegistry over VerifierStore (relocated from root; fleet_trust_store delegates to it)
 pub mod migrations; // WP-18/G-20 versioned schema migration framework (user_version)
 pub mod migrations_postgres; // WP-18 slice 3 — Postgres SchemaBackend over an injected executor seam
-pub mod schema_spec; // #1033 (P-Schema) — ONE cross-backend shared-table column spec both backends assert their live schema against (drift-catching)
+pub mod schema_spec;
+// #1030 stage 2 (ADR-0038) — the live-Postgres SHARED-STATE backend
+// (PgVerifierStore + the shared-tier gap-fill), folded in from the former
+// workspace-detached kirra-verifier-pg crate so the root service can consume
+// it without a dependency cycle. Compiles ONLY under the `postgres` feature:
+// the default build, the MSRV lane, and every existing CI lane stay
+// byte-identical; the `postgres-conformance` lane enables the feature and
+// runs the live suites.
+#[cfg(feature = "postgres")]
+pub mod postgres; // #1033 (P-Schema) — ONE cross-backend shared-table column spec both backends assert their live schema against (drift-catching)
 
 impl VerifierStore {
     pub fn new(path: &str) -> Result<Self> {

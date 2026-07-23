@@ -103,7 +103,20 @@ keeps the ledger the pessimistic record.
   pg consumption impossible (dependency cycle). Fixed: the crate now depends
   on the leaf. No behavior change; the `postgres-conformance` lane is the
   regression evidence.
-- **Stage 2: the backend seam + flag.** `StoreHandle` grows a
+- **Stage 2 (in progress): the backend seam + flag.** First movements, merged:
+  the shared-tier inherent-method GAP-FILL (`postgres/shared_ext.rs`: the
+  dependency graph, epoch-fenced node upserts, attestation policy, WP-19 HA
+  lease, unchained campaign/clearance-grant row primitives, WP-15 cert
+  census — with the v11 PG migration and `schema_spec::SHARED_TABLES` grown
+  13→16), and the FOLD-IN of the PG backend into
+  `kirra_persistence::postgres` behind a `postgres` feature. The fold-in
+  supersedes stage 1's assumption that the de-cycled crate could stay
+  workspace-detached: a path dependency whose own workspace root
+  back-references parent-workspace members is rejected by cargo ("multiple
+  workspace roots"), so the backend lives IN the persistence crate — the
+  driver tree still compiles only under the feature, preserving the
+  detachment's actual goals (default build, MSRV lane byte-identical).
+  Remaining in stage 2: `StoreHandle` grows a
   `shared`-tier accessor dispatching to either the local `VerifierStore` or
   a `PgVerifierStore` (enum, not trait object — two variants, exhaustive
   match, no vtable on the hot path); `KIRRA_DB_URL` (registered in

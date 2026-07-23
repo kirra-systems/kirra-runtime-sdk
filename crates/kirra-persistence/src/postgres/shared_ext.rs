@@ -35,9 +35,7 @@
 use std::collections::HashMap;
 
 use super::*;
-use kirra_persistence::{
-    CertExpirySummary, ClearanceGrantState, FenceError, HaLease, PendingClearanceGrant,
-};
+use crate::{CertExpirySummary, ClearanceGrantState, FenceError, HaLease, PendingClearanceGrant};
 
 /// A fenced PG shared-state write failed. The Postgres analogue of the SQLite
 /// backend's `DurableWriteError`: `Fenced` = the epoch assertion rejected
@@ -431,7 +429,7 @@ impl PgVerifierStore {
         now_ms: u64,
         warn_window_ms: u64,
     ) -> Result<CertExpirySummary, PgStoreError> {
-        use kirra_persistence::CertPrincipalStore;
+        use crate::CertPrincipalStore;
         let mut s = CertExpirySummary::default();
         for rec in self.load_cert_principals()? {
             s.total += 1;

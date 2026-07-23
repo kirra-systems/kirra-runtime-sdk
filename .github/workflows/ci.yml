@@ -613,9 +613,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Conformance suites vs live PostgreSQL 16
         # --locked: build the committed lockfile exactly; fail if it would drift.
+        # #1030 stage 2: the PG backend lives at kirra_persistence::postgres
+        # behind the `postgres` feature (the former workspace-detached
+        # kirra-verifier-pg crate, folded in after the stage-1 de-cycle so the
+        # root service can consume it). The live suites are required-features
+        # test targets, so ONLY this lane compiles the driver tree.
         env:
           KIRRA_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: cd crates/kirra-verifier-pg && cargo test --locked
+        run: cargo test -p kirra-persistence --features postgres --locked --test live_pg --test shared_gap
 
   # M5 — loom concurrency-model tests. Exhaustively permutes thread interleavings
   # for the posture-generation protocol (`crates/kirra-loom-models`), proving the

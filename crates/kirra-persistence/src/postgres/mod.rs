@@ -57,17 +57,15 @@
 
 use std::sync::Mutex;
 
-use kirra_core::{NodeTrustState, RegisteredNode};
-use kirra_fabric_types::asset::{AssetType, FabricAsset, KinematicProfileType};
-use kirra_ota_campaign::{Campaign, CampaignState, HaltReason, NodeArtifactStatus};
-use kirra_persistence::migrations_postgres::{
-    PgExecutor, PgMigration, PgMigrationError, PostgresBackend,
-};
-use kirra_persistence::{
+use crate::migrations_postgres::{PgExecutor, PgMigration, PgMigrationError, PostgresBackend};
+use crate::{
     ApiPrincipalRecord, AvSubsystemRecord, AvSubsystemStore, CertPrincipalRecord,
     CertPrincipalStore, EpochFence, FabricAssetStore, FederationStore, FenceError, NodeStore,
     OperatorRecord, OperatorStore, OtaCampaignStore, PostureEngineStateStore, PrincipalStore,
 };
+use kirra_core::{NodeTrustState, RegisteredNode};
+use kirra_fabric_types::asset::{AssetType, FabricAsset, KinematicProfileType};
+use kirra_ota_campaign::{Campaign, CampaignState, HaltReason, NodeArtifactStatus};
 
 /// The Postgres schema version THIS binary supports (mirrors the SQLite
 /// `SCHEMA_VERSION` discipline: a newer stamp in the database is refused
@@ -475,6 +473,8 @@ impl PgVerifierStore {
         }
     }
 }
+
+pub use postgres as driver;
 
 mod av_subsystem;
 mod shared_ext;

@@ -1,4 +1,4 @@
-// crates/kirra-verifier-pg/tests/shared_gap.rs
+// crates/kirra-persistence/tests/shared_gap.rs
 //
 // #1030 stage 2 (ADR-0038) — live-Postgres tests for the shared-tier
 // inherent-method gap-fill (`src/shared_ext.rs`): the dependency graph, the
@@ -10,10 +10,12 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use kirra_persistence::postgres::driver as postgres;
+
 use kirra_core::{NodeTrustState, RegisteredNode};
 use kirra_ota_campaign::{Campaign, CampaignState};
+use kirra_persistence::postgres::{PgDurableWriteError, PgVerifierStore};
 use kirra_persistence::{CertPrincipalStore, EpochFence, FenceError, NodeStore};
-use kirra_verifier_pg::{PgDurableWriteError, PgVerifierStore};
 
 static SCHEMA_SEQ: AtomicU32 = AtomicU32::new(0);
 
