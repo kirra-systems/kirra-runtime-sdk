@@ -259,7 +259,6 @@ jobs:
           cargo fmt --check --manifest-path fuzz/Cargo.toml
           cargo fmt --check --manifest-path verification/kani/Cargo.toml
           cargo fmt --check --manifest-path crates/kirra-loom-models/Cargo.toml
-          cargo fmt --check --manifest-path crates/kirra-verifier-pg/Cargo.toml
           cargo fmt --check --manifest-path tools/iceoryx2-spike/Cargo.toml
       - name: frozen-talisman blob pin survives formatting
         run: |

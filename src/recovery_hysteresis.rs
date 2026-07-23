@@ -61,7 +61,8 @@ impl RecoveryStreakStore for VerifierStore {
 
 /// #1030: the shared facade satisfies the same seam, so the hysteresis engine
 /// runs unchanged over either backend. Errors collapse via
-/// [`SharedError::into_rusqlite`] (loss-free on the Local arm; the Pg arm
+/// [`crate::shared_store::SharedError::into_rusqlite`] (loss-free on the
+/// Local arm; the Pg arm
 /// wraps, preserving `Display`) — the engine only logs them and fails closed.
 impl RecoveryStreakStore for crate::shared_store::SharedOps {
     fn load_recovery_streak(&self, node_id: &str) -> rusqlite::Result<(u32, u64)> {
