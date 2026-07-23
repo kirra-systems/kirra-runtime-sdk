@@ -79,7 +79,18 @@ pub const KIRRA_ENV_KEYS: &[EnvKeySpec] = &[
     EnvKeySpec {
         name: "KIRRA_DB_PATH",
         required: false,
-        purpose: "SQLite file path (default kirra_verifier.sqlite)",
+        purpose: "SQLite file path (default kirra_verifier.sqlite). Under \
+                  KIRRA_DB_URL (hybrid mode) this remains the LOCAL audit-ledger DB",
+    },
+    EnvKeySpec {
+        name: "KIRRA_DB_URL",
+        required: false,
+        purpose: "#1030/ADR-0038 hybrid: postgres:// URL routing the SHARED \
+                  control-plane state to Postgres (needs the `postgres` build \
+                  feature). Unset = all-SQLite (byte-identical). Set but \
+                  unreachable/unsupported = fail-closed startup abort; runtime \
+                  connection loss = operation errors, never a silent SQLite \
+                  fallback",
     },
     EnvKeySpec {
         name: "KIRRA_VERIFIER_ADDR",

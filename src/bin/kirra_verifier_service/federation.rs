@@ -41,8 +41,8 @@ pub(crate) async fn register_federation_controller(
     match svc
         .app
         .store
-        .call(move |store| {
-            store.save_trusted_federation_controller(&controller_id, &public_key_b64, now)
+        .call_shared(move |shared| {
+            shared.save_trusted_federation_controller(&controller_id, &public_key_b64, now)
         })
         .await
     {
@@ -106,14 +106,14 @@ pub(crate) async fn submit_federated_report(
     let outcome = svc
         .app
         .store
-        .call(move |store| {
+        .call_shared(move |shared| {
             let pk_b64 =
-                match store.load_trusted_federation_controller_key(&report.source_controller_id) {
+                match shared.load_trusted_federation_controller_key(&report.source_controller_id) {
                     Ok(Some(key)) => key,
                     Ok(None) => {
                         let event = json!({ "source_controller_id": report.source_controller_id,
                                     "reason": "UNREGISTERED_FEDERATION_CONTROLLER" });
-                        let _ = store.save_posture_event_chained(
+                        let _ = shared.ledger_posture_event_chained(
                             "federation_gateway",
                             "FEDERATION_REJECTED",
                             &event.to_string(),
@@ -128,7 +128,7 @@ pub(crate) async fn submit_federated_report(
             if !verify_federated_report_signature_v2(&report, &pk_b64) {
                 let event = json!({ "source_controller_id": report.source_controller_id,
                                 "reason": "INVALID_FEDERATION_SIGNATURE" });
-                let _ = store.save_posture_event_chained(
+                let _ = shared.ledger_posture_event_chained(
                     "federation_gateway",
                     "FEDERATION_REJECTED",
                     &event.to_string(),
@@ -138,12 +138,12 @@ pub(crate) async fn submit_federated_report(
                 return FedCommitOutcome::Rejected("INVALID_FEDERATION_SIGNATURE");
             }
 
-            match store.has_seen_federation_nonce(&report.nonce_hex) {
+            match shared.has_seen_federation_nonce(&report.nonce_hex) {
                 Ok(true) => {
                     let event = json!({ "source_controller_id": report.source_controller_id,
                                     "nonce_hex": report.nonce_hex,
                                     "reason": "FEDERATION_NONCE_REPLAY" });
-                    let _ = store.save_posture_event_chained(
+                    let _ = shared.ledger_posture_event_chained(
                         "federation_gateway",
                         "FEDERATION_REJECTED",
                         &event.to_string(),
@@ -156,7 +156,7 @@ pub(crate) async fn submit_federated_report(
                 Err(_) => return FedCommitOutcome::InternalError("nonce lookup failed"),
             }
 
-            match store.save_federated_report_chained(
+            match shared.save_federated_report_chained(
                 &report.as_v1(),
                 report.source_generation,
                 report.source_epoch,
@@ -164,7 +164,7 @@ pub(crate) async fn submit_federated_report(
                 held_epoch,
             ) {
                 Ok(()) => FedCommitOutcome::Accepted,
-                Err(DurableWriteError::NonceReplay) => {
+                Err(SharedError::NonceReplay) => {
                     // H1: a replay raced past the `has_seen_federation_nonce` gate above and
                     // lost the durable single-use claim (PRIMARY KEY violation aborted the
                     // transaction — report NOT persisted, nonce NOT double-burned). Map it to
@@ -172,7 +172,7 @@ pub(crate) async fn submit_federated_report(
                     let event = json!({ "source_controller_id": report.source_controller_id,
                                     "nonce_hex": report.nonce_hex,
                                     "reason": "FEDERATION_NONCE_REPLAY" });
-                    let _ = store.save_posture_event_chained(
+                    let _ = shared.ledger_posture_event_chained(
                         "federation_gateway",
                         "FEDERATION_REJECTED",
                         &event.to_string(),
@@ -181,7 +181,7 @@ pub(crate) async fn submit_federated_report(
                     );
                     FedCommitOutcome::Rejected("FEDERATED_NONCE_REPLAY")
                 }
-                Err(DurableWriteError::GenerationRegress { found, high_water }) => {
+                Err(SharedError::GenerationRegress { found, high_water }) => {
                     // Item 20: a validly-signed but stale (older-generation) report that
                     // slipped inside the freshness window. Reject fail-closed with a clean
                     // audit trail — the report was NOT persisted and no nonce was burned.
@@ -190,7 +190,7 @@ pub(crate) async fn submit_federated_report(
                                     "offered_generation": found,
                                     "high_water_generation": high_water,
                                     "reason": "FEDERATION_GENERATION_REGRESS" });
-                    let _ = store.save_posture_event_chained(
+                    let _ = shared.ledger_posture_event_chained(
                         "federation_gateway",
                         "FEDERATION_REJECTED",
                         &event.to_string(),
@@ -199,7 +199,7 @@ pub(crate) async fn submit_federated_report(
                     );
                     FedCommitOutcome::Rejected("FEDERATED_GENERATION_REGRESS")
                 }
-                Err(DurableWriteError::EpochRegress { found, high_water }) => {
+                Err(SharedError::EpochRegress { found, high_water }) => {
                     // #791 I1: the report's effective epoch is BELOW this peer's
                     // epoch high-water — a fenced old primary still publishing
                     // under its superseded epoch (found ≥ 1), or the omission-
@@ -211,7 +211,7 @@ pub(crate) async fn submit_federated_report(
                                     "offered_epoch": found,
                                     "high_water_epoch": high_water,
                                     "reason": "FEDERATION_EPOCH_REGRESS" });
-                    let _ = store.save_posture_event_chained(
+                    let _ = shared.ledger_posture_event_chained(
                         "federation_gateway",
                         "FEDERATION_REJECTED",
                         &event.to_string(),
@@ -220,12 +220,8 @@ pub(crate) async fn submit_federated_report(
                     );
                     FedCommitOutcome::Rejected("FEDERATED_EPOCH_REGRESS")
                 }
-                Err(DurableWriteError::Fenced(reason)) => {
-                    FedCommitOutcome::Fenced(format!("{reason:?}"))
-                }
-                Err(DurableWriteError::Db(_)) => {
-                    FedCommitOutcome::InternalError("failed to persist federated report")
-                }
+                Err(SharedError::Fenced(reason)) => FedCommitOutcome::Fenced(format!("{reason:?}")),
+                Err(_) => FedCommitOutcome::InternalError("failed to persist federated report"),
             }
         })
         .await;
@@ -276,11 +272,13 @@ pub(crate) async fn get_federated_reports(
     State(svc): State<Arc<ServiceState>>,
     Path(asset_id): Path<String>,
 ) -> impl IntoResponse {
-    // Both reads share ONE acquisition (Rule 5). The closure returns a Result so
-    // the per-read error responses are produced OUTSIDE the closure (Rule 4).
+    // Both reads share ONE dispatch through the shared facade (#1030). The
+    // closure returns a Result so the per-read error responses are produced
+    // OUTSIDE the closure (Rule 4).
     let now = now_ms();
-    let loaded = svc.app.store.with_read(|store| {
-        let reports = store
+    let shared = svc.app.store.shared();
+    let loaded = (|| {
+        let reports = shared
             .load_federated_reports_for_asset(&asset_id)
             .map_err(|_| "failed to load reports")?;
         // #329 v2 — generation-ordered conflict resolution. Reconcile the stored
@@ -288,7 +286,7 @@ pub(crate) async fn get_federated_reports(
         // ties fall back to issued_at_ms, then fail closed to the more restrictive
         // posture). `null` when no reports exist for the asset. This is a read-time
         // view only — it does NOT feed the local posture engine that gates actuators.
-        let v2s = store
+        let v2s = shared
             .load_federated_report_v2s_for_asset(&asset_id)
             .map_err(|_| "failed to reconcile reports")?;
         let authoritative = authoritative_posture(&v2s);
@@ -299,7 +297,7 @@ pub(crate) async fn get_federated_reports(
         // never relaxes the authoritative value, never feeds the actuator gate.
         let dissent = authoritative.and_then(|auth| dissenting_restriction(&v2s, auth, now));
         Ok::<_, &'static str>((reports, authoritative, dissent))
-    });
+    })();
     let (reports, authoritative, dissent) = match loaded {
         Ok(triple) => triple,
         Err(msg) => {

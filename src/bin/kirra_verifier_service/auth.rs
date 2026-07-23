@@ -119,7 +119,7 @@ async fn authorize_scope(
             match svc
                 .app
                 .store
-                .call_read(move |s| s.load_api_principal_by_token_hash(&hash))
+                .call_shared(move |s| s.load_api_principal_by_token_hash(&hash))
                 .await
             {
                 Ok(Ok(Some(rec))) => Some(ResolvedPrincipal {
@@ -155,7 +155,7 @@ async fn authorize_scope(
                     match svc
                         .app
                         .store
-                        .call_read(move |s| s.load_cert_principal_by_fingerprint(&fp))
+                        .call_shared(move |s| s.load_cert_principal_by_fingerprint(&fp))
                         .await
                     {
                         Ok(Ok(Some(rec))) => {

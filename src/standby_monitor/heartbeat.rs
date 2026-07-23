@@ -139,8 +139,8 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
         let app_c = Arc::clone(&app);
         let id_c = id.clone();
         let lease_c = lease;
-        let outcome = match app.store.call(move |store| {
-                if let Err(e) = store.save_engine_state(HEARTBEAT_KEY, &heartbeat_token) {
+        let outcome = match app.store.call_shared(move |shared| {
+                if let Err(e) = shared.save_engine_state(HEARTBEAT_KEY, &heartbeat_token) {
                     tracing::warn!(
                         error       = %e,
                         instance_id = %id_c,
@@ -149,7 +149,7 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
                     return HeartbeatOutcome::Failed;
                 }
 
-                let _ = store.save_engine_state(PRIMARY_INSTANCE_KEY, &id_c);
+                let _ = shared.save_engine_state(PRIMARY_INSTANCE_KEY, &id_c);
 
                 // Proactive epoch-fence check: if the durable epoch has
                 // advanced past our held value, another instance has
@@ -160,7 +160,7 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
                 // mutation gate would still let writes through until
                 // the next request-time epoch check).
                 let held = app_c.ha_fence.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
-                let db_epoch = match store.current_epoch() {
+                let db_epoch = match shared.current_epoch() {
                     Ok(e) => e,
                     // Review item "1": an unreadable epoch is a FAILED tick, not a
                     // silent pass. The old code logged and fell through to
@@ -189,7 +189,7 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
                     return HeartbeatOutcome::SelfDemoted;
                 }
 
-                if let Ok(Some(promoted_by)) = store.load_engine_state(PROMOTION_RECORD_KEY) {
+                if let Ok(Some(promoted_by)) = shared.load_engine_state(PROMOTION_RECORD_KEY) {
                     match takeover_record_verdict(&promoted_by, &id_c, held) {
                         TakeoverRecordVerdict::OwnRecord => {
                             // Our own promotion record — we ARE the promoted
@@ -231,7 +231,7 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
                 // and the holder-side expiry check above is the hard backstop.
                 if let Some(params) = &lease_c {
                     let _ = params; // cadence already folded into the tick interval
-                    match store.renew_lease(&id_c, held, ts) {
+                    match shared.renew_lease(&id_c, held, ts) {
                         Ok(true) => {}
                         Ok(false) => {
                             tracing::warn!(

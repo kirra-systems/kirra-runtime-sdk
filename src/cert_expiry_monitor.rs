@@ -20,8 +20,9 @@ use std::sync::Arc;
 use tokio::time::{interval, Duration};
 
 use crate::clock::{Clock, SystemClock};
+use crate::shared_store::{SharedError, SharedOps};
 use crate::verifier::AppState;
-use kirra_persistence::{CertExpirySummary, VerifierStore};
+use kirra_persistence::CertExpirySummary;
 
 /// How often the expiry census runs. Cert expiry is a slow (days/weeks) concern,
 /// so an hourly sweep is ample to surface a lapse well within an operator's
@@ -33,19 +34,20 @@ pub const CERT_EXPIRY_SWEEP_MS: u64 = 3_600_000; // 1 hour
 /// lead time for an offline cert-reissue + re-pin.
 pub const CERT_EXPIRY_WARN_WINDOW_MS: u64 = 14 * 24 * 3_600_000; // 14 days
 
-/// Run one expiry census and emit warnings. Pure over the store: computes the
-/// [`CertExpirySummary`] and, when anything is lapsed or lapsing, WARN-logs and
-/// appends ONE hash-chained `CertPrincipalExpiryWarning` audit event carrying the
+/// Run one expiry census and emit warnings. Pure over the shared facade (#1030):
+/// computes the [`CertExpirySummary`] from the SHARED cert registry and, when
+/// anything is lapsed or lapsing, WARN-logs and appends ONE hash-chained
+/// `CertPrincipalExpiryWarning` audit event to the LOCAL ledger carrying the
 /// census (never any fingerprint/secret). Returns the summary for the caller/tests.
 ///
 /// Silent when the registry is entirely healthy (no expired, none expiring) — the
 /// audit chain records lapses, not routine all-clear sweeps.
 pub fn sweep_cert_expiry_once(
-    store: &mut VerifierStore,
+    shared: &SharedOps,
     now_ms: u64,
     warn_window_ms: u64,
-) -> rusqlite::Result<CertExpirySummary> {
-    let summary = store.cert_expiry_summary(now_ms, warn_window_ms)?;
+) -> Result<CertExpirySummary, SharedError> {
+    let summary = shared.cert_expiry_summary(now_ms, warn_window_ms)?;
     if summary.expired > 0 || summary.expiring_soon > 0 {
         tracing::warn!(
             expired = summary.expired,
@@ -60,8 +62,8 @@ pub fn sweep_cert_expiry_once(
         // IS this sweep's product, so PROPAGATE a failure (Copilot #857) rather than
         // dropping it — the caller's `Ok(Err(e))` arm logs "sweep DB error", so a
         // broken audit trail is surfaced, not silently skipped while callers/tests
-        // treat the entry as evidence.
-        store.append_clearance_audit_event(
+        // treat the entry as evidence. Always the LOCAL ledger (ADR-0038).
+        shared.ledger_append_checked(
             "CertPrincipalExpiryWarning",
             &serde_json::json!({
                 "expired": summary.expired,
@@ -107,7 +109,9 @@ pub fn spawn_cert_expiry_monitor_with_clock(app: Arc<AppState>, clock: Arc<dyn C
                     let sweep_start_ms = now;
                     match app
                         .store
-                        .call(move |s| sweep_cert_expiry_once(s, now, CERT_EXPIRY_WARN_WINDOW_MS))
+                        .call_shared(move |shared| {
+                            sweep_cert_expiry_once(shared, now, CERT_EXPIRY_WARN_WINDOW_MS)
+                        })
                         .await
                     {
                         Ok(Ok(_)) => {}
@@ -129,52 +133,54 @@ pub fn spawn_cert_expiry_monitor_with_clock(app: Arc<AppState>, clock: Arc<dyn C
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared_store::SharedBackend;
+    use kirra_persistence::VerifierStore;
+    use std::sync::Mutex;
 
-    fn store() -> VerifierStore {
-        VerifierStore::new(":memory:").expect("in-memory store")
+    fn shared() -> SharedOps {
+        let store = VerifierStore::new(":memory:").expect("in-memory store");
+        SharedOps::new(Arc::new(Mutex::new(store)), Arc::new(SharedBackend::Local))
+    }
+
+    fn audit_count(s: &SharedOps, event_type: &str) -> i64 {
+        s.writer
+            .lock()
+            .unwrap()
+            .count_audit_events_for_test(event_type)
     }
 
     #[test]
     fn healthy_registry_sweeps_silently_no_audit() {
-        let mut s = store();
+        let s = shared();
         // One active cert whose expiry is comfortably beyond the 14-day warn window
         // from `now = 10_000` (so it is neither expired nor expiring-soon).
         s.register_cert_principal("svc", "fp", "integrator", Some(5_000_000_000), 1_000)
             .unwrap();
-        let sum = sweep_cert_expiry_once(&mut s, 10_000, CERT_EXPIRY_WARN_WINDOW_MS).unwrap();
+        let sum = sweep_cert_expiry_once(&s, 10_000, CERT_EXPIRY_WARN_WINDOW_MS).unwrap();
         assert_eq!(sum.active, 1);
         assert_eq!(sum.expired, 0);
         assert_eq!(sum.expiring_soon, 0);
         // No lapse → no audit event.
-        assert_eq!(
-            s.count_audit_events_for_test("CertPrincipalExpiryWarning"),
-            0
-        );
+        assert_eq!(audit_count(&s, "CertPrincipalExpiryWarning"), 0);
     }
 
     #[test]
     fn lapsed_or_lapsing_registry_audits_the_warning() {
-        let mut s = store();
+        let s = shared();
         // Expired (past notAfter).
         s.register_cert_principal("stale", "fp-stale", "integrator", Some(5_000), 1_000)
             .unwrap();
         // Expiring within the window.
         s.register_cert_principal("soon", "fp-soon", "integrator", Some(10_500), 1_000)
             .unwrap();
-        let sum = sweep_cert_expiry_once(&mut s, 10_000, 1_000).unwrap();
+        let sum = sweep_cert_expiry_once(&s, 10_000, 1_000).unwrap();
         assert_eq!(sum.expired, 1);
         assert_eq!(sum.expiring_soon, 1);
         // The lapse is recorded once in the hash-chained audit log.
-        assert_eq!(
-            s.count_audit_events_for_test("CertPrincipalExpiryWarning"),
-            1
-        );
+        assert_eq!(audit_count(&s, "CertPrincipalExpiryWarning"), 1);
         // A second sweep with the same state records again (each census is a fresh
         // observation — the audit chain is append-only, dedup is the consumer's job).
-        let _ = sweep_cert_expiry_once(&mut s, 10_000, 1_000).unwrap();
-        assert_eq!(
-            s.count_audit_events_for_test("CertPrincipalExpiryWarning"),
-            2
-        );
+        let _ = sweep_cert_expiry_once(&s, 10_000, 1_000).unwrap();
+        assert_eq!(audit_count(&s, "CertPrincipalExpiryWarning"), 2);
     }
 }

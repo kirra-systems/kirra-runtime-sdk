@@ -78,9 +78,24 @@ Rationale:
 Consequences accepted with the hybrid: a fleet's shared state can be current
 in Postgres while an instance's local ledger lags (crash between the two
 writes). This is the SAME class of gap the WORM shipper's at-least-once
-cursor already handles, and the write ORDER (local chained write first, then
-shared-state effect — matching INVARIANT #12's disk-before-memory discipline)
-keeps the ledger the pessimistic record.
+cursor already handles.
+
+**Fused-op decomposition order (stage-2 amendment).** The SQLite backend's
+fused write+audit methods (federated-report accept, campaign lifecycle,
+clearance grants) are single transactions — accept and ledger are atomic. On
+the Pg backend they decompose, and the order is **shared write FIRST, local
+ledger append second** for every REFUSABLE operation: the shared transaction
+carries the gates (nonce burn, generation/epoch high-water, epoch fence,
+phantom checks), and a mutation those gates REFUSE must never appear in the
+ledger as accepted — ledger-first would record events that then fail to
+commit, which is worse than a lagging ledger (the chain is supposed to be the
+pessimistic record of what HAPPENED, not of what was attempted and refused).
+The crash window (shared committed, ledger append missed) is LOUD
+(`tracing::error` in `SharedOps::ledger_append`) and reconcilable by
+cross-checking the shared rows against the chain. INVARIANT #12's
+disk-before-memory discipline is about durable-before-volatile within one
+node's write path and is unchanged (the shared backend IS the durable record
+for shared tiers; the in-memory fleet map still updates only after it).
 
 ## Rejected alternatives
 
@@ -103,7 +118,20 @@ keeps the ledger the pessimistic record.
   pg consumption impossible (dependency cycle). Fixed: the crate now depends
   on the leaf. No behavior change; the `postgres-conformance` lane is the
   regression evidence.
-- **Stage 2: the backend seam + flag.** `StoreHandle` grows a
+- **Stage 2 (in progress): the backend seam + flag.** First movements, merged:
+  the shared-tier inherent-method GAP-FILL (`postgres/shared_ext.rs`: the
+  dependency graph, epoch-fenced node upserts, attestation policy, WP-19 HA
+  lease, unchained campaign/clearance-grant row primitives, WP-15 cert
+  census — with the v11 PG migration and `schema_spec::SHARED_TABLES` grown
+  13→16), and the FOLD-IN of the PG backend into
+  `kirra_persistence::postgres` behind a `postgres` feature. The fold-in
+  supersedes stage 1's assumption that the de-cycled crate could stay
+  workspace-detached: a path dependency whose own workspace root
+  back-references parent-workspace members is rejected by cargo ("multiple
+  workspace roots"), so the backend lives IN the persistence crate — the
+  driver tree still compiles only under the feature, preserving the
+  detachment's actual goals (default build, MSRV lane byte-identical).
+  Remaining in stage 2: `StoreHandle` grows a
   `shared`-tier accessor dispatching to either the local `VerifierStore` or
   a `PgVerifierStore` (enum, not trait object — two variants, exhaustive
   match, no vtable on the hot path); `KIRRA_DB_URL` (registered in
@@ -126,8 +154,10 @@ keeps the ledger the pessimistic record.
 
 ## Invariants preserved
 
-INVARIANT #12 (disk-before-memory) extends across backends: the local
-chained audit write precedes the shared-state effect it records. The epoch
-fence contract (`assert_actuator_epoch_held`, at-most-one-writer) is already
+INVARIANT #12 (disk-before-memory) extends across backends: the durable
+shared-tier write precedes the in-memory effect it records (see the fused-op
+decomposition order above for how the two durable halves of a decomposed
+operation are sequenced). The epoch fence contract
+(`assert_actuator_epoch_held`, at-most-one-writer) is already
 conformance-proven on both backends and does not change shape. `KIRRA_DB_PATH`
 semantics are untouched — it names the LOCAL ledger DB in both modes.

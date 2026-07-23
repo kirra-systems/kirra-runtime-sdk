@@ -259,7 +259,6 @@ jobs:
           cargo fmt --check --manifest-path fuzz/Cargo.toml
           cargo fmt --check --manifest-path verification/kani/Cargo.toml
           cargo fmt --check --manifest-path crates/kirra-loom-models/Cargo.toml
-          cargo fmt --check --manifest-path crates/kirra-verifier-pg/Cargo.toml
           cargo fmt --check --manifest-path tools/iceoryx2-spike/Cargo.toml
       - name: frozen-talisman blob pin survives formatting
         run: |
@@ -613,9 +612,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Conformance suites vs live PostgreSQL 16
         # --locked: build the committed lockfile exactly; fail if it would drift.
+        # #1030 stage 2: the PG backend lives at kirra_persistence::postgres
+        # behind the `postgres` feature (the former workspace-detached
+        # kirra-verifier-pg crate, folded in after the stage-1 de-cycle so the
+        # root service can consume it). The live suites are required-features
+        # test targets, so ONLY this lane compiles the driver tree.
         env:
           KIRRA_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: cd crates/kirra-verifier-pg && cargo test --locked
+        run: cargo test -p kirra-persistence --features postgres --locked --test live_pg --test shared_gap
+      - name: SharedOps facade drill vs live PostgreSQL 16 (#1030 stage 2)
+        # The root-crate hybrid drill: shared tiers land in PG (never the local
+        # writer), decomposed fused ops ledger locally, federation gates surface
+        # as the unified SharedError arms, the epoch fence holds on PG.
+        env:
+          KIRRA_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: cargo test --features postgres --locked --lib pg_drill
 
   # M5 — loom concurrency-model tests. Exhaustively permutes thread interleavings
   # for the posture-generation protocol (`crates/kirra-loom-models`), proving the

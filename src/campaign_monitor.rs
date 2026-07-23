@@ -29,8 +29,8 @@ use tokio::time::{interval, Duration};
 use crate::clock::{Clock, SystemClock};
 use crate::posture_cache::{SharedPostureCache, POSTURE_CACHE_TTL_MS};
 use crate::posture_engine_v2::resolve_posture_snapshot_silent;
+use crate::shared_store::{SharedError, SharedOps};
 use crate::verifier::{AppState, FleetPosture};
-use kirra_persistence::{DurableWriteError, VerifierStore};
 
 /// Campaign posture-sweep interval. Campaigns are a slow control-plane concern, so
 /// a 1 s cadence bounds the auto-halt latency after a confirmed regression without
@@ -44,10 +44,11 @@ pub const CAMPAIGN_SWEEP_MS: u64 = 1_000;
 /// no-op (unknown ≠ regressed — see the module docs). Returns the number of
 /// campaigns halted this sweep.
 ///
-/// Pure over the store: loads the active set, applies the same
+/// Pure over the shared facade (#1030): loads the active set, applies the same
 /// [`kirra_ota_campaign::Campaign::check_regression`] rule the advance path uses,
 /// and persists each halt (with its R156 audit entry) via the epoch-fenced
-/// `update_campaign_epoch_fenced` (#1093).
+/// `update_campaign_epoch_fenced` (#1093) — on the Pg backend the shared row
+/// commits first and the audit entry lands on the LOCAL ledger (ADR-0038).
 ///
 /// `held_epoch` is the caller's held HA epoch (`0` for a never-claimed store — the
 /// in-memory test path takes the plain, byte-identical write). On a live Active it
@@ -56,22 +57,22 @@ pub const CAMPAIGN_SWEEP_MS: u64 = 1_000;
 /// and non-fatal** — the halt is skipped this sweep (the new Active applies it) and
 /// the sweep keeps going; only a genuine DB error still propagates as before.
 pub fn sweep_active_campaigns_once(
-    store: &mut VerifierStore,
+    shared: &SharedOps,
     confirmed: Option<FleetPosture>,
     now_ms: u64,
     held_epoch: u64,
-) -> rusqlite::Result<usize> {
+) -> Result<usize, SharedError> {
     // Posture unavailable → do not halt. The actuator gate handles staleness; a
     // campaign is only ever terminally halted on a CONFIRMED regression.
     let Some(posture) = confirmed else {
         return Ok(0);
     };
 
-    let active = store.load_active_campaigns()?;
+    let active = shared.load_active_campaigns()?;
     let mut halted = 0usize;
     for mut c in active {
         if let Some(reason) = c.check_regression(posture, now_ms) {
-            match store.update_campaign_epoch_fenced(&c, "OtaCampaignHalted", held_epoch) {
+            match shared.update_campaign_epoch_fenced(&c, "OtaCampaignHalted", held_epoch) {
                 Ok(()) => {
                     halted += 1;
                     tracing::warn!(
@@ -81,8 +82,11 @@ pub fn sweep_active_campaigns_once(
                         "OTA campaign auto-halted by the posture-sweep monitor (confirmed fleet regression)"
                     );
                 }
-                // A genuine DB failure propagates, exactly as before this became fenced.
-                Err(DurableWriteError::Db(e)) => return Err(e),
+                // A genuine backend failure propagates, exactly as before this
+                // became fenced.
+                Err(e @ SharedError::Sqlite(_)) => return Err(e),
+                #[cfg(feature = "postgres")]
+                Err(e @ SharedError::Pg(_)) => return Err(e),
                 // HA-fenced (this instance is a superseded primary) — or a
                 // structurally-impossible variant for a campaign UPDATE (no nonce /
                 // no generation gate). Fail-closed: skip this halt (the new Active
@@ -158,10 +162,13 @@ pub fn spawn_campaign_monitor_with_clock(
                     // EP-11: time this sweep against the manifest's deadline budget
                     // (observability; NonCritical — never escalates).
                     let sweep_start_ms = now;
-                    // Store I/O off the async thread (StoreHandle::call → spawn_blocking).
+                    // Store I/O off the async thread (spawn_blocking); dispatched
+                    // through the shared facade (#1030 — Local or Pg backend).
                     match app
                         .store
-                        .call(move |s| sweep_active_campaigns_once(s, confirmed, now, held))
+                        .call_shared(move |shared| {
+                            sweep_active_campaigns_once(shared, confirmed, now, held)
+                        })
                         .await
                     {
                         Ok(Ok(n)) if n > 0 => {
@@ -189,16 +196,20 @@ pub fn spawn_campaign_monitor_with_clock(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared_store::SharedBackend;
     use kirra_ota_campaign::{Campaign, CampaignState};
+    use kirra_persistence::VerifierStore;
+    use std::sync::Mutex;
 
     const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    fn store() -> VerifierStore {
-        VerifierStore::new(":memory:").expect("in-memory store")
+    fn shared() -> SharedOps {
+        let store = VerifierStore::new(":memory:").expect("in-memory store");
+        SharedOps::new(Arc::new(Mutex::new(store)), Arc::new(SharedBackend::Local))
     }
 
     /// Insert an armed, one-step-advanced (Rolling) campaign.
-    fn rolling(s: &mut VerifierStore, id: &str) {
+    fn rolling(s: &SharedOps, id: &str) {
         let mut c =
             Campaign::new(id, DIGEST, "v1", vec!["a".into()], vec![50, 100], 1_000).unwrap();
         c.arm(1_100).unwrap();
@@ -206,11 +217,18 @@ mod tests {
         s.insert_campaign(&c).unwrap();
     }
 
+    fn audit_count(s: &SharedOps, event_type: &str) -> i64 {
+        s.writer
+            .lock()
+            .unwrap()
+            .count_audit_events_for_test(event_type)
+    }
+
     #[test]
     fn nominal_sweep_halts_nothing() {
-        let mut s = store();
-        rolling(&mut s, "camp-1");
-        let n = sweep_active_campaigns_once(&mut s, Some(FleetPosture::Nominal), 2_000, 0).unwrap();
+        let s = shared();
+        rolling(&s, "camp-1");
+        let n = sweep_active_campaigns_once(&s, Some(FleetPosture::Nominal), 2_000, 0).unwrap();
         assert_eq!(n, 0);
         assert_eq!(
             s.load_campaign("camp-1").unwrap().unwrap().state,
@@ -220,11 +238,10 @@ mod tests {
 
     #[test]
     fn confirmed_regression_halts_all_active() {
-        let mut s = store();
-        rolling(&mut s, "camp-1");
-        rolling(&mut s, "camp-2");
-        let n =
-            sweep_active_campaigns_once(&mut s, Some(FleetPosture::LockedOut), 2_000, 0).unwrap();
+        let s = shared();
+        rolling(&s, "camp-1");
+        rolling(&s, "camp-2");
+        let n = sweep_active_campaigns_once(&s, Some(FleetPosture::LockedOut), 2_000, 0).unwrap();
         assert_eq!(n, 2, "both active campaigns halt on a confirmed regression");
         assert_eq!(
             s.load_campaign("camp-1").unwrap().unwrap().state,
@@ -235,15 +252,14 @@ mod tests {
             CampaignState::Halted
         );
         // The halt is R156-audited like any other lifecycle mutation.
-        assert_eq!(s.count_audit_events_for_test("OtaCampaignHalted"), 2);
+        assert_eq!(audit_count(&s, "OtaCampaignHalted"), 2);
     }
 
     #[test]
     fn degraded_is_a_regression_too() {
-        let mut s = store();
-        rolling(&mut s, "camp-1");
-        let n =
-            sweep_active_campaigns_once(&mut s, Some(FleetPosture::Degraded), 2_000, 0).unwrap();
+        let s = shared();
+        rolling(&s, "camp-1");
+        let n = sweep_active_campaigns_once(&s, Some(FleetPosture::Degraded), 2_000, 0).unwrap();
         assert_eq!(n, 1);
     }
 
@@ -251,20 +267,20 @@ mod tests {
     fn unavailable_posture_is_a_noop_not_a_halt() {
         // `None` = posture unavailable (stale/empty/poisoned). The sweep must NOT
         // halt — unknown is not a confirmed regression.
-        let mut s = store();
-        rolling(&mut s, "camp-1");
-        let n = sweep_active_campaigns_once(&mut s, None, 2_000, 0).unwrap();
+        let s = shared();
+        rolling(&s, "camp-1");
+        let n = sweep_active_campaigns_once(&s, None, 2_000, 0).unwrap();
         assert_eq!(n, 0, "unavailable posture must not halt a campaign");
         assert_eq!(
             s.load_campaign("camp-1").unwrap().unwrap().state,
             CampaignState::Rolling
         );
-        assert_eq!(s.count_audit_events_for_test("OtaCampaignHalted"), 0);
+        assert_eq!(audit_count(&s, "OtaCampaignHalted"), 0);
     }
 
     #[test]
     fn terminal_and_draft_campaigns_are_untouched() {
-        let mut s = store();
+        let s = shared();
         // Draft (un-armed).
         s.insert_campaign(
             &Campaign::new(
@@ -293,8 +309,7 @@ mod tests {
         assert_eq!(done.state, CampaignState::Completed);
         s.insert_campaign(&done).unwrap();
 
-        let n =
-            sweep_active_campaigns_once(&mut s, Some(FleetPosture::LockedOut), 2_000, 0).unwrap();
+        let n = sweep_active_campaigns_once(&s, Some(FleetPosture::LockedOut), 2_000, 0).unwrap();
         assert_eq!(
             n, 0,
             "a confirmed regression must not touch Draft/terminal campaigns"

@@ -84,15 +84,16 @@ pub(crate) async fn register_api_principal_handler(
     let persisted = svc
         .app
         .store
-        .call(move |store| {
-            if store
+        .call_shared(move |shared| {
+            if shared
                 .register_api_principal(&id, &token_hash, &role_str, now)
                 .is_err()
             {
                 return false;
             }
-            // Attributed, non-repudiable registration event (never records the token).
-            let _ = store.append_clearance_audit_event(
+            // Attributed, non-repudiable registration event (never records the
+            // token). LOCAL ledger on both backends (ADR-0038).
+            let _ = shared.ledger_append_checked(
                 "ApiPrincipalRegistered",
                 &json!({
                     "principal_id": id,
@@ -135,7 +136,7 @@ pub(crate) async fn list_api_principals_handler(
     match svc
         .app
         .store
-        .call_read(|store| store.load_api_principals())
+        .call_shared(|shared| shared.load_api_principals())
         .await
     {
         Ok(Ok(list)) => {
@@ -174,9 +175,9 @@ pub(crate) async fn revoke_api_principal_handler(
     match svc
         .app
         .store
-        .call(move |store| match store.revoke_api_principal(&id, now) {
+        .call_shared(move |shared| match shared.revoke_api_principal(&id, now) {
             Ok(true) => {
-                let _ = store.append_clearance_audit_event(
+                let _ = shared.ledger_append_checked(
                     "ApiPrincipalRevoked",
                     &json!({ "principal_id": id, "revoked_by_admin_fingerprint": admin_fp })
                         .to_string(),
@@ -300,16 +301,16 @@ pub(crate) async fn register_cert_principal_handler(
     let role_str = role.as_str().to_string();
     let fp_store = fingerprint.clone();
     let fp_audit = fingerprint.clone();
-    // Propagate the rusqlite error so a UNIQUE(cert_sha256) conflict — the same
+    // Propagate the store error so a UNIQUE(cert_sha256) conflict — the same
     // fingerprint already pinned to a DIFFERENT principal (`ON CONFLICT(principal_id)`
     // only rotates the SAME id) — maps to 409, not a generic 500. cert_sha256 is
     // operator-supplied, so this collision is a plausible, actionable mistake.
     let persisted = svc
         .app
         .store
-        .call(move |store| {
-            store.register_cert_principal(&id, &fp_store, &role_str, not_after_ms, now)?;
-            let _ = store.append_clearance_audit_event(
+        .call_shared(move |shared| {
+            shared.register_cert_principal(&id, &fp_store, &role_str, not_after_ms, now)?;
+            let _ = shared.ledger_append_checked(
                 "CertPrincipalRegistered",
                 &json!({
                     "principal_id": id,
@@ -321,7 +322,7 @@ pub(crate) async fn register_cert_principal_handler(
                 .to_string(),
                 now,
             );
-            Ok::<(), rusqlite::Error>(())
+            Ok::<(), SharedError>(())
         })
         .await;
 
@@ -336,7 +337,7 @@ pub(crate) async fn register_cert_principal_handler(
             })),
         )
             .into_response(),
-        Ok(Err(e)) if is_unique_violation(&e) => (
+        Ok(Err(e)) if e.is_unique_violation() => (
             StatusCode::CONFLICT,
             Json(json!({
                 "error": "cert_sha256 is already pinned to another principal"
@@ -356,16 +357,6 @@ pub(crate) async fn register_cert_principal_handler(
     }
 }
 
-/// A SQLite UNIQUE / constraint violation — used to distinguish a duplicate-pin
-/// conflict (409) from a genuine internal persistence failure (500).
-fn is_unique_violation(e: &rusqlite::Error) -> bool {
-    matches!(
-        e,
-        rusqlite::Error::SqliteFailure(f, _)
-            if f.code == rusqlite::ffi::ErrorCode::ConstraintViolation
-    )
-}
-
 /// GET /system/cert-principals — list pinned cert principals. ADMIN-scoped. Never
 /// returns the fingerprint — only id / role / status.
 pub(crate) async fn list_cert_principals_handler(
@@ -377,7 +368,7 @@ pub(crate) async fn list_cert_principals_handler(
     match svc
         .app
         .store
-        .call_read(|store| store.load_cert_principals())
+        .call_shared(|shared| shared.load_cert_principals())
         .await
     {
         Ok(Ok(list)) => {
@@ -421,9 +412,9 @@ pub(crate) async fn revoke_cert_principal_handler(
     match svc
         .app
         .store
-        .call(move |store| match store.revoke_cert_principal(&id, now) {
+        .call_shared(move |shared| match shared.revoke_cert_principal(&id, now) {
             Ok(true) => {
-                let _ = store.append_clearance_audit_event(
+                let _ = shared.ledger_append_checked(
                     "CertPrincipalRevoked",
                     &json!({ "principal_id": id, "revoked_by_admin_fingerprint": admin_fp })
                         .to_string(),

@@ -61,16 +61,16 @@ pub(crate) async fn register_operator(
     let resp = match svc
         .app
         .store
-        .call(move |store| {
+        .call_shared(move |shared| {
             // #327: detect a prior REVOKED row BEFORE registering — register_operator
             // silently clears revoked_at, so reactivation would otherwise be
             // invisible in the ledger. Record it as a distinct, attributed event.
-            let was_revoked = store
+            let was_revoked = shared
                 .load_operator(&op_id)
                 .ok()
                 .flatten()
                 .is_some_and(|o| o.revoked_at_ms.is_some());
-            if store.register_operator(&op_id, &pubkey, now).is_err() {
+            if shared.register_operator(&op_id, &pubkey, now).is_err() {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": "persist failed" })),
@@ -80,7 +80,7 @@ pub(crate) async fn register_operator(
             if was_revoked {
                 // A previously-revoked operator is now active again — the
                 // reactivating admin is attributed by token fingerprint (#327).
-                let _ = store.append_clearance_audit_event(
+                let _ = shared.ledger_append_checked(
                     "OperatorReactivated",
                     &json!({
                         "operator_id": op_id,
@@ -100,7 +100,7 @@ pub(crate) async fn register_operator(
                 )
                     .into_response()
             } else {
-                let _ = store.append_clearance_audit_event(
+                let _ = shared.ledger_append_checked(
                     "OperatorRegistered",
                     &json!({ "operator_id": op_id, "operator_key_fingerprint": fp }).to_string(),
                     now,
@@ -142,9 +142,9 @@ pub(crate) async fn revoke_operator(
     match svc
         .app
         .store
-        .call(move |store| match store.revoke_operator(&op_id, now) {
+        .call_shared(move |shared| match shared.revoke_operator(&op_id, now) {
             Ok(true) => {
-                let _ = store.append_clearance_audit_event(
+                let _ = shared.ledger_append_checked(
                     "OperatorRevoked",
                     &json!({ "operator_id": op_id }).to_string(),
                     now,
@@ -210,9 +210,9 @@ pub(crate) async fn clearance_challenge(
     let active = match svc
         .app
         .store
-        .call_read(move |store| {
+        .call_shared(move |shared| {
             Ok::<bool, ()>(
-                store
+                shared
                     .load_operator(&op_id)
                     .ok()
                     .flatten()
@@ -320,7 +320,7 @@ pub(crate) async fn console_clearance_grant(
         let maybe_op = svc
             .app
             .store
-            .call_read(move |s| Ok::<_, ()>(s.load_operator(&op_id_c).ok().flatten()))
+            .call_shared(move |s| Ok::<_, ()>(s.load_operator(&op_id_c).ok().flatten()))
             .await
             .ok()
             .and_then(|r| r.ok())
@@ -452,7 +452,7 @@ pub(crate) async fn console_clearance_grant(
     let registered = svc
         .app
         .store
-        .call_read(move |store| Ok::<bool, ()>(store.node_exists(&node_id_c).unwrap_or(false)))
+        .call_shared(move |shared| Ok::<bool, ()>(shared.node_exists(&node_id_c).unwrap_or(false)))
         .await
         .ok()
         .and_then(|r| r.ok())
@@ -474,7 +474,7 @@ pub(crate) async fn console_clearance_grant(
     let op_id_c = operator_id.clone();
     let auth_method_s = auth_method.to_string();
     let fp_c = fingerprint.clone();
-    match svc.app.store.call(move |store| match store.save_clearance_grant_chained_with_auth(
+    match svc.app.store.call_shared(move |shared| match shared.save_clearance_grant_chained_with_auth(
         &node_id_c, &op_id_c, now, &auth_method_s, fp_c.as_deref(),
     ) {
         Ok(_id) => (StatusCode::OK, Json(json!({
@@ -550,7 +550,7 @@ pub(crate) async fn console_estop_request(
     let maybe_op = svc
         .app
         .store
-        .call_read(move |s| Ok::<_, ()>(s.load_operator(&op_id_c).ok().flatten()))
+        .call_shared(move |s| Ok::<_, ()>(s.load_operator(&op_id_c).ok().flatten()))
         .await
         .ok()
         .and_then(|r| r.ok())
@@ -650,7 +650,7 @@ pub(crate) async fn console_estop_request(
     let lookup = svc
         .app
         .store
-        .call_read(move |store| store.node_exists(&node_id_c).map_err(|_| ()))
+        .call_shared(move |shared| shared.node_exists(&node_id_c).map_err(|_| ()))
         .await;
     let registered = match lookup {
         Ok(Ok(exists)) => exists,

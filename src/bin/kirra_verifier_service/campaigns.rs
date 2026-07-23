@@ -9,8 +9,9 @@
 // The control-plane state machine + the fail-closed halt-on-regression rule live
 // in `kirra_verifier::ota_campaign`; persistence + the R156 audit append live in
 // `verifier_store::ota_campaigns`. Each mutating handler does the whole
-// read-modify-write INSIDE one `store.call` closure, so the writer mutex is held
-// across load→transition→persist and two concurrent advances cannot race.
+// read-modify-write INSIDE one `call_shared` closure (#1030 — Local or Pg
+// backend), so load→transition→persist runs on one blocking-pool task and two
+// concurrent advances cannot race (Local: writer mutex; Pg: epoch-fenced CAS).
 //
 // The advance path reads the fleet posture via `gate_posture` (fail-closed: a
 // stale/empty/poisoned cache resolves to `LockedOut`), so a rollout can only
@@ -125,9 +126,9 @@ pub(crate) async fn create_campaign_handler(
     let persisted = svc
         .app
         .store
-        .call(move |store| match store.insert_campaign(&campaign) {
+        .call_shared(move |shared| match shared.insert_campaign(&campaign) {
             Ok(()) => Ok(campaign),
-            Err(e) if is_unique_violation(&e) => Err(CampaignOpError::InvalidTransition(
+            Err(e) if e.is_unique_violation() => Err(CampaignOpError::InvalidTransition(
                 "campaign_id already exists".into(),
             )),
             Err(e) => Err(CampaignOpError::Store(e.to_string())),
@@ -168,7 +169,7 @@ pub(crate) async fn list_campaigns_handler(
     match svc
         .app
         .store
-        .call_read(|store| store.load_campaigns())
+        .call_shared(|shared| shared.load_campaigns())
         .await
     {
         Ok(Ok(list)) => {
@@ -195,12 +196,12 @@ pub(crate) async fn campaigns_summary_handler(
     match svc
         .app
         .store
-        .call_read(|store| {
-            // One replica read for both the campaigns and the node adoption reports;
+        .call_shared(|shared| {
+            // One dispatch for both the campaigns and the node adoption reports;
             // the pure `summarize_campaigns` joins them (adoption numerator per digest).
-            let campaigns = store.load_campaigns()?;
-            let statuses = store.load_node_artifact_statuses()?;
-            Ok::<_, rusqlite::Error>((campaigns, statuses))
+            let campaigns = shared.load_campaigns()?;
+            let statuses = shared.load_node_artifact_statuses()?;
+            Ok::<_, SharedError>((campaigns, statuses))
         })
         .await
     {
@@ -224,7 +225,7 @@ pub(crate) async fn get_campaign_handler(
     match svc
         .app
         .store
-        .call_read(move |store| store.load_campaign(&campaign_id))
+        .call_shared(move |shared| shared.load_campaign(&campaign_id))
         .await
     {
         Ok(Ok(Some(c))) => (StatusCode::OK, Json(campaign_json(&c))).into_response(),
@@ -258,11 +259,11 @@ pub(crate) async fn arm_campaign_handler(
     let op = svc
         .app
         .store
-        .call(move |store| {
-            let mut c = load_for_mutation(store, &campaign_id)?;
+        .call_shared(move |shared| {
+            let mut c = load_for_mutation(shared, &campaign_id)?;
             c.arm(now)
                 .map_err(|e| CampaignOpError::InvalidTransition(e.to_string()))?;
-            store
+            shared
                 .update_campaign_epoch_fenced(&c, "OtaCampaignArmed", held)
                 .map_err(|e| CampaignOpError::Store(e.to_string()))?;
             Ok(c)
@@ -294,8 +295,8 @@ pub(crate) async fn advance_campaign_handler(
     let op = svc
         .app
         .store
-        .call(move |store| {
-            let mut c = load_for_mutation(store, &campaign_id)?;
+        .call_shared(move |shared| {
+            let mut c = load_for_mutation(shared, &campaign_id)?;
             let outcome = c
                 .advance(posture, now)
                 .map_err(|e| CampaignOpError::InvalidTransition(e.to_string()))?;
@@ -304,7 +305,7 @@ pub(crate) async fn advance_campaign_handler(
                 AdvanceOutcome::Completed => "OtaCampaignCompleted",
                 AdvanceOutcome::Halted { .. } => "OtaCampaignHalted",
             };
-            store
+            shared
                 .update_campaign_epoch_fenced(&c, event_type, held)
                 .map_err(|e| CampaignOpError::Store(e.to_string()))?;
             Ok((c, outcome))
@@ -355,11 +356,11 @@ pub(crate) async fn halt_campaign_handler(
     let op = svc
         .app
         .store
-        .call(move |store| {
-            let mut c = load_for_mutation(store, &campaign_id)?;
+        .call_shared(move |shared| {
+            let mut c = load_for_mutation(shared, &campaign_id)?;
             c.halt(HaltReason::OperatorHalt, now)
                 .map_err(|e| CampaignOpError::InvalidTransition(e.to_string()))?;
-            store
+            shared
                 .update_campaign_epoch_fenced(&c, "OtaCampaignHalted", held)
                 .map_err(|e| CampaignOpError::Store(e.to_string()))?;
             Ok(c)
@@ -371,10 +372,10 @@ pub(crate) async fn halt_campaign_handler(
 /// Load a campaign for an in-closure mutation, mapping absence to `NotFound` and a
 /// store error to `Store`.
 fn load_for_mutation(
-    store: &kirra_persistence::VerifierStore,
+    shared: &kirra_verifier::shared_store::SharedOps,
     campaign_id: &str,
 ) -> Result<Campaign, CampaignOpError> {
-    match store.load_campaign(campaign_id) {
+    match shared.load_campaign(campaign_id) {
         Ok(Some(c)) => Ok(c),
         Ok(None) => Err(CampaignOpError::NotFound),
         Err(e) => Err(CampaignOpError::Store(e.to_string())),
@@ -429,15 +430,4 @@ fn campaign_json(c: &Campaign) -> serde_json::Value {
         "created_at_ms": c.created_at_ms,
         "updated_at_ms": c.updated_at_ms,
     })
-}
-
-/// Constraint-violation classifier (duplicate `campaign_id` PRIMARY KEY) → 409.
-/// Mirrors the `principals` module helper (kept module-local — the sibling's is
-/// private).
-fn is_unique_violation(e: &rusqlite::Error) -> bool {
-    matches!(
-        e,
-        rusqlite::Error::SqliteFailure(f, _)
-            if f.code == rusqlite::ffi::ErrorCode::ConstraintViolation
-    )
 }

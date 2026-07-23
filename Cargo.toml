@@ -93,6 +93,14 @@ tpm = ["dep:tss-esapi"]
 # Pulls NO Rust dependency; the QoS mapping + read-back validation it relies on
 # are pure functions in `dds_bridge.rs`, exercised by the default test suite.
 cyclonedds = []
+# #1030 / ADR-0038 (hybrid stage 2) — the live-Postgres SHARED-STATE backend
+# (kirra_persistence::postgres). Off by default: the default build, the MSRV
+# lane, and every existing CI lane stay byte-identical (the `postgres` driver
+# tree compiles only under this feature). On: `KIRRA_DB_URL=postgres://…`
+# routes the shared control-plane tiers to Postgres at boot (fail-closed on
+# unreachable); the hash-chained audit ledger stays on local SQLite ALWAYS
+# (the ADR's tamper-evidence rationale).
+postgres = ["kirra-persistence/postgres"]
 
 [dependencies]
 # Lean safety/contract foundation (de-monolith Stage 1): FleetPosture / NodeTrustState

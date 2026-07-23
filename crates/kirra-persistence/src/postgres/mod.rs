@@ -57,22 +57,20 @@
 
 use std::sync::Mutex;
 
-use kirra_core::{NodeTrustState, RegisteredNode};
-use kirra_fabric_types::asset::{AssetType, FabricAsset, KinematicProfileType};
-use kirra_ota_campaign::{Campaign, CampaignState, HaltReason, NodeArtifactStatus};
-use kirra_persistence::migrations_postgres::{
-    PgExecutor, PgMigration, PgMigrationError, PostgresBackend,
-};
-use kirra_persistence::{
+use crate::migrations_postgres::{PgExecutor, PgMigration, PgMigrationError, PostgresBackend};
+use crate::{
     ApiPrincipalRecord, AvSubsystemRecord, AvSubsystemStore, CertPrincipalRecord,
     CertPrincipalStore, EpochFence, FabricAssetStore, FederationStore, FenceError, NodeStore,
     OperatorRecord, OperatorStore, OtaCampaignStore, PostureEngineStateStore, PrincipalStore,
 };
+use kirra_core::{NodeTrustState, RegisteredNode};
+use kirra_fabric_types::asset::{AssetType, FabricAsset, KinematicProfileType};
+use kirra_ota_campaign::{Campaign, CampaignState, HaltReason, NodeArtifactStatus};
 
 /// The Postgres schema version THIS binary supports (mirrors the SQLite
 /// `SCHEMA_VERSION` discipline: a newer stamp in the database is refused
 /// fail-closed by the shared engine).
-pub const PG_SCHEMA_VERSION: i64 = 10;
+pub const PG_SCHEMA_VERSION: i64 = 12;
 
 /// Baseline (v1) DDL — idempotent, applied on every open BEFORE the versioned
 /// steps run (v1 is the engine's baseline; steps are v ≥ 2). The two tables
@@ -248,6 +246,47 @@ const PG_MIGRATIONS: &[PgMigration] = &[
                   recovery_streak_start_ms BIGINT NOT NULL DEFAULT 0 \
               )",
     },
+    // v11 — #1030 stage 2 (ADR-0038): the shared-tier inherent-method tables.
+    // The hybrid design routes ALL shared control-plane state to one backend
+    // atomically, so the dependency graph, the per-node attestation policy,
+    // and the clearance-grant state machine (previously SQLite-only) join the
+    // cross-backend contract. Shapes mirror the SQLite DDL; the id column is
+    // BIGSERIAL (the AUTOINCREMENT analogue), require_tpm_quote is a native
+    // BOOLEAN (LogicalType::Bool absorbs the dialect difference). All three
+    // enter `schema_spec::SHARED_TABLES`, so a one-sided drift reds the
+    // conformance tests on whichever backend diverges.
+    PgMigration {
+        version: 11,
+        sql: "CREATE TABLE IF NOT EXISTS dependencies (                   node_id TEXT NOT NULL,                   dep_id  TEXT NOT NULL,                   PRIMARY KEY (node_id, dep_id)               );               CREATE TABLE IF NOT EXISTS node_attestation_policy (                   node_id           TEXT PRIMARY KEY,                   require_tpm_quote BOOLEAN NOT NULL DEFAULT FALSE               );               CREATE TABLE IF NOT EXISTS clearance_grants (                   id             BIGSERIAL PRIMARY KEY,                   node_id        TEXT   NOT NULL,                   operator_id    TEXT   NOT NULL,                   granted_at_ms  BIGINT NOT NULL,                   delivery       TEXT   NOT NULL DEFAULT 'PENDING-NODE-TRANSPORT',                   created_at_ms  BIGINT NOT NULL,                   consumed_at_ms BIGINT,                   outcome        TEXT,                   outcome_detail TEXT,                   auth_method    TEXT,                   operator_key_fingerprint TEXT               )",
+    },
+    // v12 — #1030 stage 2 (ADR-0038): the federated-report tier. The report
+    // rows + the per-(controller, asset) LEXICOGRAPHIC (epoch, generation)
+    // high-water are SHARED anti-replay/ordering state, so PG mode carries
+    // them; the chained audit events the SQLite fused save appends stay with
+    // the caller's LOCAL ledger. Shapes mirror the live SQLite schema
+    // (including the #791 I1 source_epoch columns).
+    PgMigration {
+        version: 12,
+        sql: "CREATE TABLE IF NOT EXISTS federation_generation_highwater ( \
+                  source_controller_id TEXT   NOT NULL, \
+                  asset_id             TEXT   NOT NULL, \
+                  last_generation      BIGINT NOT NULL, \
+                  last_seen_ms         BIGINT NOT NULL, \
+                  last_epoch           BIGINT NOT NULL DEFAULT 0, \
+                  PRIMARY KEY (source_controller_id, asset_id) \
+              ); \
+              CREATE TABLE IF NOT EXISTS federated_trust_reports ( \
+                  id                   BIGSERIAL PRIMARY KEY, \
+                  source_controller_id TEXT   NOT NULL, \
+                  asset_id             TEXT   NOT NULL, \
+                  posture_json         TEXT   NOT NULL, \
+                  issued_at_ms         BIGINT NOT NULL, \
+                  expires_at_ms        BIGINT NOT NULL, \
+                  received_at_ms       BIGINT NOT NULL, \
+                  source_generation    BIGINT, \
+                  source_epoch         BIGINT \
+              )",
+    },
 ];
 
 /// The "~10-line adapter" binding the root crate's [`PgExecutor`] seam to the
@@ -398,6 +437,19 @@ pub struct PgVerifierStore {
     client: Mutex<postgres::Client>,
 }
 
+impl PgStoreError {
+    /// Backend-portable UNIQUE-constraint predicate (#1030 stage 2): the
+    /// Postgres analogue of matching SQLite's `ConstraintViolation` code —
+    /// consumed by the root `SharedError::is_unique_violation`, so handlers
+    /// never introspect driver errors directly.
+    pub fn is_unique_violation(&self) -> bool {
+        match self {
+            PgStoreError::Pg(e) => e.code() == Some(&postgres::error::SqlState::UNIQUE_VIOLATION),
+            _ => false,
+        }
+    }
+}
+
 impl PgVerifierStore {
     /// Connect to `url` (e.g. `postgres://user:pass@host:5432/db`), install /
     /// migrate the schema fail-closed, and seed the `ha_state` genesis row.
@@ -463,7 +515,11 @@ impl PgVerifierStore {
     }
 }
 
+pub use postgres as driver;
+
 mod av_subsystem;
+mod shared_ext;
+pub use shared_ext::PgDurableWriteError;
 mod cert_principals;
 mod epoch;
 mod fabric;

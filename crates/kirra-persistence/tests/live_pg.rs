@@ -1,4 +1,4 @@
-// crates/kirra-verifier-pg/tests/live_pg.rs
+// crates/kirra-persistence/tests/live_pg.rs
 //
 // EP-10 — the live-Postgres conformance run. Each test connects to the server
 // named by `KIRRA_PG_URL` (the CI lane's `services: postgres` container),
@@ -16,8 +16,11 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use kirra_persistence::postgres::driver as postgres;
+
 use kirra_core::{NodeTrustState, RegisteredNode};
 use kirra_persistence::migrations_postgres::PgMigrationError;
+use kirra_persistence::postgres::{PgVerifierStore, PG_SCHEMA_VERSION};
 use kirra_persistence::{
     assert_av_subsystem_store_contract, assert_cert_principal_store_contract,
     assert_fabric_asset_store_contract, assert_federation_store_contract, assert_fence_contract,
@@ -25,7 +28,6 @@ use kirra_persistence::{
     assert_posture_engine_state_store_contract, assert_principal_store_contract, EpochFence,
     FenceError, NodeStore,
 };
-use kirra_verifier_pg::{PgVerifierStore, PG_SCHEMA_VERSION};
 
 /// Per-test schema counter (combined with the process id so parallel test
 /// threads and successive runs never collide on a schema name).

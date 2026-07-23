@@ -326,7 +326,10 @@ impl VerifierStore {
 /// The R156-shaped audit payload for a campaign lifecycle event: the update
 /// identity (artifact digest + version), the target cohorts, and the rollout
 /// state reached. Never carries any secret. `action` is the event type.
-fn campaign_audit_payload(campaign: &Campaign, action: &str) -> String {
+/// The R156-shaped campaign audit payload. `pub` since #1030 stage 2: the
+/// root facade's Pg arm appends the SAME payload to the LOCAL ledger that the
+/// SQLite fused save appends in-transaction (one payload shape, two backends).
+pub fn campaign_audit_payload(campaign: &Campaign, action: &str) -> String {
     serde_json::json!({
         "action": action,
         "campaign_id": campaign.campaign_id,

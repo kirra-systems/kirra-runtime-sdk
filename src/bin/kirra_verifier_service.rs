@@ -45,6 +45,7 @@ use kirra_verifier::posture_engine_v2::{
     resolve_posture_snapshot_silent, resolve_posture_with_reason, LockoutReason,
 };
 use kirra_verifier::security::{admin_token_ok, constant_time_compare};
+use kirra_verifier::shared_store::SharedError;
 use kirra_verifier::standby_monitor::{
     instance_id as ha_instance_id, spawn_heartbeat_writer, spawn_promotion_monitor, HEARTBEAT_KEY,
     PROMOTION_TIMEOUT_MS,
@@ -68,7 +69,7 @@ use kirra_verifier::fabric::telemetry::FabricTelemetry;
 use kirra_verifier::gateway::policy_layer::{
     enforce_actuator_safety_envelope, enforce_posture_routing, EnforcementOutcome,
 };
-use kirra_verifier::recovery_hysteresis::{evaluate_recovery_report, HysteresisDecision};
+use kirra_verifier::recovery_hysteresis::{evaluate_recovery_report_shared, HysteresisDecision};
 
 // Route handlers, split by domain into sibling submodules. Each holds
 // `pub(crate)` handler fns that share the binary's helpers, DTOs and `use`
@@ -606,7 +607,70 @@ async fn async_main() {
         }
     }
 
-    let app_state = Arc::new(AppState::new(store, mode));
+    // #1030 stage 2 (ADR-0038) — resolve the SHARED-tier backend from
+    // KIRRA_DB_URL. Unset/empty → Local (byte-identical). Set without the
+    // `postgres` build feature → fail-closed startup abort (a configured
+    // backend the binary cannot serve must never silently fall back). Set
+    // with the feature → connect + run/verify migrations NOW; unreachable or
+    // future-schema → fail-closed abort. There is NO runtime fallback from
+    // Pg to Local — a split brain between backends is worse than an outage.
+    let shared_backend = match std::env::var("KIRRA_DB_URL") {
+        Err(_) => Arc::new(kirra_verifier::shared_store::SharedBackend::Local),
+        Ok(url) if url.trim().is_empty() => {
+            Arc::new(kirra_verifier::shared_store::SharedBackend::Local)
+        }
+        Ok(url) => {
+            #[cfg(not(feature = "postgres"))]
+            {
+                let _ = url;
+                tracing::error!(
+                    "startup failed: KIRRA_DB_URL is set but this binary was built WITHOUT \
+                     the `postgres` feature — rebuild with `--features postgres` or unset \
+                     the variable (fail-closed; no silent SQLite fallback)"
+                );
+                std::process::exit(1);
+            }
+            #[cfg(feature = "postgres")]
+            {
+                use kirra_persistence::postgres::{driver as postgres, PgVerifierStore};
+                let client = match postgres::Client::connect(&url, postgres::NoTls) {
+                    Ok(c) => c,
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            "startup failed: KIRRA_DB_URL is set but Postgres is \
+                             unreachable (fail-closed; no silent SQLite fallback)"
+                        );
+                        std::process::exit(1);
+                    }
+                };
+                match PgVerifierStore::from_client(client) {
+                    Ok(pg) => {
+                        tracing::info!(
+                            "shared-tier backend: postgres (ADR-0038 hybrid; local SQLite \
+                             remains the audit ledger at {db_path})"
+                        );
+                        Arc::new(kirra_verifier::shared_store::SharedBackend::Pg(Arc::new(
+                            std::sync::Mutex::new(pg),
+                        )))
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            "startup failed: Postgres schema init/verify refused \
+                             (future schema or migration failure — fail-closed)"
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    };
+    let app_state = Arc::new(AppState::new_with_shared_backend(
+        store,
+        mode,
+        shared_backend,
+    ));
 
     // S3 Pass B2 (#115): spawn the audit-writer task and install its Sender
     // into AppState. The deny arm of the actuator-safety-envelope middleware
@@ -693,9 +757,9 @@ async fn async_main() {
     {
         let load_initial = app_state
             .store
-            .call_read(|store| {
-                let nodes = store.load_nodes().map_err(|e| e.to_string())?;
-                let dependencies = store.load_dependencies().map_err(|e| e.to_string())?;
+            .call_shared(|shared| {
+                let nodes = shared.load_nodes().map_err(|e| e.to_string())?;
+                let dependencies = shared.load_dependencies().map_err(|e| e.to_string())?;
                 Ok::<_, String>((nodes, dependencies))
             })
             .await;
@@ -788,11 +852,11 @@ async fn async_main() {
         // Load the assets under one acquisition; register them OUTSIDE the
         // closure (registration borrows svc_state and calls back into the store
         // via seed_local_asset_lockedout — keep it off the held guard).
-        // SAFETY: SG-HA-3 — read off the worker pool via read replica.
+        // SG-HA-3 — read off the worker pool; #1030: via the shared facade.
         let assets = svc_state
             .app
             .store
-            .call_read(|store| store.load_fabric_assets())
+            .call_shared(|shared| shared.load_fabric_assets())
             .await
             .ok()
             .and_then(|r| r.ok());
@@ -839,13 +903,14 @@ async fn async_main() {
     let effective_mode = match mode {
         VerifierOperationMode::PassiveStandby => VerifierOperationMode::PassiveStandby,
         VerifierOperationMode::Active => {
-            // SAFETY: SG-HA-3 — read probe off the worker pool via read replica.
+            // SG-HA-3 — probe off the worker pool; #1030: via the shared facade
+            // (a Pg-backed fleet arbitrates against the REAL shared epoch/heartbeat).
             let arbitration = svc_state
                 .app
                 .store
-                .call_read(|store| {
-                    let (epoch, holder) = store.current_active_holder().ok()?;
-                    let hb_str = store.load_engine_state(HEARTBEAT_KEY).ok()?;
+                .call_shared(|shared| {
+                    let (epoch, holder) = shared.current_active_holder().ok()?;
+                    let hb_str = shared.load_engine_state(HEARTBEAT_KEY).ok()?;
                     let now = now_ms();
                     let hb_fresh = hb_str
                         .as_deref()
@@ -874,7 +939,7 @@ async fn async_main() {
                     let claim = svc_state
                         .app
                         .store
-                        .call(move |s| {
+                        .call_shared(move |s| {
                             Ok::<_, ()>(s.try_claim_epoch(epoch, &my_id_c, now_ms()).ok().flatten())
                         })
                         .await
