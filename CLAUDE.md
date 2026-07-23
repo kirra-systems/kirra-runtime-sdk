@@ -598,7 +598,8 @@ with only an error log. Per-instance identity is carried on the snapshot but
 |----------|----------|---------|---------|
 | `KIRRA_ADMIN_TOKEN` | Yes (mutation routes) | — | Bearer token; absent/empty → 503 |
 | `KIRRA_VERIFIER_MODE` | No | `active` | `passive_standby` → read-only; runtime-mutable via `mode_active` AtomicBool |
-| `KIRRA_DB_PATH` | No | `kirra_verifier.sqlite` | SQLite file path |
+| `KIRRA_DB_PATH` | No | `kirra_verifier.sqlite` | SQLite file path. Under `KIRRA_DB_URL` (hybrid mode) it remains the LOCAL audit-ledger DB — the tamper-evident chain never moves off-box |
+| `KIRRA_DB_URL` | No | — | **#1030 / ADR-0038 hybrid backend.** `postgres://…` routes the SHARED control-plane tiers (nodes+deps, epoch fence + HA lease, engine state/generation, federation registry + anti-replay, operators + clearance grants, API/cert principals, fabric assets, OTA campaigns + adoption, AV meta, attestation policy) to Postgres via the `SharedOps` facade (`src/shared_store.rs`; `StoreHandle::call_shared`); the hash-chained audit ledger / posture-event history / causal log / key ledger STAY on per-instance local SQLite always. Needs the root `postgres` cargo feature (a non-feature build with the var set aborts). Unset → all-SQLite, byte-identical. Set-but-unreachable → **fail-closed startup abort**; runtime connection loss → the affected operation errors — NEVER a silent SQLite fallback (split brain between backends is worse than an outage). Fused write+audit ops decompose: shared row commits FIRST (a refused mutation is never ledgered), then the identical audit payload appends to the local ledger |
 | `KIRRA_VERIFIER_ADDR` | No | `0.0.0.0:8090` | Listen address |
 | `KIRRA_TRUSTED_INGRESS_MODE` | No | `false` | Enable client-id header enforcement |
 | `KIRRA_CLIENT_ID_HEADER` | No | `x-kirra-client-id` | Header name for identity-gated routes |

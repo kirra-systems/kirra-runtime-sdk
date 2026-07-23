@@ -78,9 +78,24 @@ Rationale:
 Consequences accepted with the hybrid: a fleet's shared state can be current
 in Postgres while an instance's local ledger lags (crash between the two
 writes). This is the SAME class of gap the WORM shipper's at-least-once
-cursor already handles, and the write ORDER (local chained write first, then
-shared-state effect — matching INVARIANT #12's disk-before-memory discipline)
-keeps the ledger the pessimistic record.
+cursor already handles.
+
+**Fused-op decomposition order (stage-2 amendment).** The SQLite backend's
+fused write+audit methods (federated-report accept, campaign lifecycle,
+clearance grants) are single transactions — accept and ledger are atomic. On
+the Pg backend they decompose, and the order is **shared write FIRST, local
+ledger append second** for every REFUSABLE operation: the shared transaction
+carries the gates (nonce burn, generation/epoch high-water, epoch fence,
+phantom checks), and a mutation those gates REFUSE must never appear in the
+ledger as accepted — ledger-first would record events that then fail to
+commit, which is worse than a lagging ledger (the chain is supposed to be the
+pessimistic record of what HAPPENED, not of what was attempted and refused).
+The crash window (shared committed, ledger append missed) is LOUD
+(`tracing::error` in `SharedOps::ledger_append`) and reconcilable by
+cross-checking the shared rows against the chain. INVARIANT #12's
+disk-before-memory discipline is about durable-before-volatile within one
+node's write path and is unchanged (the shared backend IS the durable record
+for shared tiers; the in-memory fleet map still updates only after it).
 
 ## Rejected alternatives
 
@@ -139,8 +154,10 @@ keeps the ledger the pessimistic record.
 
 ## Invariants preserved
 
-INVARIANT #12 (disk-before-memory) extends across backends: the local
-chained audit write precedes the shared-state effect it records. The epoch
-fence contract (`assert_actuator_epoch_held`, at-most-one-writer) is already
+INVARIANT #12 (disk-before-memory) extends across backends: the durable
+shared-tier write precedes the in-memory effect it records (see the fused-op
+decomposition order above for how the two durable halves of a decomposed
+operation are sequenced). The epoch fence contract
+(`assert_actuator_epoch_held`, at-most-one-writer) is already
 conformance-proven on both backends and does not change shape. `KIRRA_DB_PATH`
 semantics are untouched — it names the LOCAL ledger DB in both modes.

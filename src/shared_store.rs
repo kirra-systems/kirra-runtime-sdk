@@ -1567,3 +1567,185 @@ mod tests {
         assert!(o.assert_actuator_epoch_held(e + 1).is_err());
     }
 }
+
+/// #1030 stage 2 — the Pg-backend FACADE drill: the same dispatch surface the
+/// service uses, against a live Postgres server, proving (a) shared-tier ops
+/// actually land in PG and NOT in the local writer, (b) the decomposed fused
+/// ops append their audit events to the LOCAL ledger, and (c) the federation
+/// gates surface as the unified `SharedError` arms the handlers match on.
+/// Same skip-loudly discipline as the kirra-persistence live suites: without
+/// `KIRRA_PG_URL` every test passes vacuously (loudly on stderr); the
+/// `postgres-conformance` CI lane provides the server.
+#[cfg(all(test, feature = "postgres"))]
+mod pg_drill_tests {
+    use super::*;
+    use kirra_persistence::postgres::driver as postgres;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static SCHEMA_SEQ: AtomicU32 = AtomicU32::new(0);
+
+    fn pg_url() -> Option<String> {
+        match std::env::var("KIRRA_PG_URL") {
+            Ok(u) if !u.trim().is_empty() => Some(u),
+            _ => {
+                eprintln!("SKIPPED: KIRRA_PG_URL unset — the Pg facade drill needs a live server");
+                None
+            }
+        }
+    }
+
+    /// A SharedOps whose shared tiers hit a fresh isolated PG schema and whose
+    /// local ledger is an in-memory SQLite — the exact hybrid shape.
+    fn pg_ops(test: &str) -> Option<SharedOps> {
+        let url = pg_url()?;
+        let schema = format!(
+            "kirra_facade_{}_{}_{}",
+            std::process::id(),
+            SCHEMA_SEQ.fetch_add(1, Ordering::Relaxed),
+            test
+        );
+        let mut c = postgres::Client::connect(&url, postgres::NoTls).expect("connect");
+        c.batch_execute(&format!(
+            "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}; SET search_path TO {schema}"
+        ))
+        .expect("create + pin test schema");
+        let pg = PgVerifierStore::from_client(c).expect("initialize schema on live PG");
+        let writer = VerifierStore::new(":memory:").expect("in-memory local ledger");
+        Some(SharedOps::new(
+            Arc::new(Mutex::new(writer)),
+            Arc::new(SharedBackend::Pg(Arc::new(Mutex::new(pg)))),
+        ))
+    }
+
+    fn node(id: &str) -> kirra_core::RegisteredNode {
+        kirra_core::RegisteredNode {
+            node_id: id.to_string(),
+            status: kirra_core::NodeTrustState::Trusted,
+            registered_at_ms: 1,
+            last_trust_update_ms: 1,
+            ak_public_pem: None,
+            expected_pcr16_digest_hex: None,
+            site: None,
+            firmware_version: None,
+        }
+    }
+
+    fn local_writer_audit_count(o: &SharedOps, event_type: &str) -> i64 {
+        o.writer
+            .lock()
+            .unwrap()
+            .count_audit_events_for_test(event_type)
+    }
+
+    #[test]
+    fn shared_tier_ops_land_in_pg_not_in_the_local_writer() {
+        let Some(o) = pg_ops("nodes") else { return };
+        assert_eq!(o.backend_label(), "postgres");
+        o.save_node(&node("n1")).unwrap();
+        o.save_dependencies("n1", &["dep-a".to_string()]).unwrap();
+        // The facade sees the PG rows…
+        assert!(o.node_exists("n1").unwrap());
+        assert_eq!(o.count_nodes().unwrap(), 1);
+        assert_eq!(o.load_dependencies().unwrap().len(), 1);
+        // …and the LOCAL writer has none of them (dispatch went to PG, not SQLite).
+        let w = o.writer.lock().unwrap();
+        assert_eq!(
+            w.count_nodes().unwrap(),
+            0,
+            "node row leaked into the local writer"
+        );
+        assert!(w.load_dependencies().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fused_campaign_update_writes_pg_row_and_local_ledger() {
+        let Some(o) = pg_ops("campaign") else { return };
+        const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mut c = kirra_ota_campaign::Campaign::new(
+            "camp-1",
+            DIGEST,
+            "v1",
+            vec!["a".into()],
+            vec![50, 100],
+            1_000,
+        )
+        .unwrap();
+        o.insert_campaign(&c).unwrap();
+        c.arm(1_100).unwrap();
+        o.update_campaign(&c, "OtaCampaignArmed").unwrap();
+        // Shared row advanced in PG…
+        let loaded = o.load_campaign("camp-1").unwrap().unwrap();
+        assert_eq!(loaded.state, kirra_ota_campaign::CampaignState::Staged);
+        // …the R156 audit event landed on the LOCAL ledger…
+        assert_eq!(local_writer_audit_count(&o, "OtaCampaignArmed"), 1);
+        // …and the campaign row did NOT leak into the local SQLite.
+        assert!(o
+            .writer
+            .lock()
+            .unwrap()
+            .load_campaign("camp-1")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn federation_fused_accept_gates_and_ledgers() {
+        let Some(o) = pg_ops("federation") else {
+            return;
+        };
+        // The federation accept is a TOP-TIER write: it requires a claimed
+        // epoch (held == 0 is fenced even at genesis, same as SQLite).
+        let held = o.try_claim_epoch(0, "inst-A", 5).unwrap().expect("claim");
+        let report = kirra_fleet_types::federation::FederatedTrustReport {
+            source_controller_id: "ctrl-A".to_string(),
+            asset_id: "asset-1".to_string(),
+            posture: kirra_core::FleetPosture::Nominal,
+            issued_at_ms: 1_000,
+            expires_at_ms: 100_000,
+            nonce_hex: "aabbccdd".to_string(),
+            signature_b64: "unused-at-store-tier".to_string(),
+        };
+        o.save_federated_report_chained(&report, Some(7), None, 1_500, held)
+            .unwrap();
+        // Accepted once → the local ledger carries the accept event.
+        assert_eq!(
+            local_writer_audit_count(&o, "FEDERATED_TRUST_REPORT_ACCEPTED"),
+            1
+        );
+        assert_eq!(
+            o.load_federated_reports_for_asset("asset-1").unwrap().len(),
+            1
+        );
+        // Replay (same nonce) → the unified NonceReplay arm, nothing new ledgered.
+        let replay = o.save_federated_report_chained(&report, Some(8), None, 1_600, held);
+        assert!(matches!(replay, Err(SharedError::NonceReplay)));
+        assert_eq!(
+            local_writer_audit_count(&o, "FEDERATED_TRUST_REPORT_ACCEPTED"),
+            1
+        );
+        // Generation regress (older gen, fresh nonce) → the regress arm.
+        let mut stale = report.clone();
+        stale.nonce_hex = "eeff0011".to_string();
+        let regress = o.save_federated_report_chained(&stale, Some(3), None, 1_700, held);
+        assert!(matches!(
+            regress,
+            Err(SharedError::GenerationRegress {
+                found: 3,
+                high_water: 7
+            })
+        ));
+    }
+
+    #[test]
+    fn epoch_fence_holds_on_the_pg_backend() {
+        let Some(o) = pg_ops("fence") else { return };
+        let e = o.try_claim_epoch(0, "inst-A", 5).unwrap().expect("claim");
+        assert_eq!(o.current_epoch().unwrap(), e);
+        assert!(o.assert_actuator_epoch_held(e).is_ok());
+        // A superseded holder's assertion fails (fail-closed).
+        assert!(o.assert_actuator_epoch_held(e + 1).is_err());
+        // Lease renew + read round-trips on PG.
+        assert!(o.renew_lease("inst-A", e, 9).unwrap());
+        assert_eq!(o.read_ha_lease().unwrap().holder.as_deref(), Some("inst-A"));
+    }
+}
