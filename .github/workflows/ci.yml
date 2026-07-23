@@ -1282,6 +1282,13 @@ jobs:
           # a stale field, and assemble leaving an 'unavailable' source UNKNOWN
           # (fail-closed). The live gather is the seam. See robot/world_model.py.
           python3 robot/world_model_test.py
+          # Mission Executive (pure, no LLM/HTTP): fail-closed plan parsing,
+          # validate REFUSING a mission with any unsupported skill before any
+          # motion, and THE single-door invariant in run_mission — motion routes
+          # ONLY through the injected fence sink, a checker refusal HALTS (never
+          # skip-and-continue), transient errors retry then halt, and a barge-in
+          # cancels mid-mission. See robot/mission.py.
+          python3 robot/mission_test.py
           # ADR-0033 Tier-3 sentinel logic (#887, pure, no device): owner/mode
           # violations vs the AOU-ACTUATION-SERIAL-001 contract (the vendor
           # 0777 rule is the canonical hazard case), holder reporting, and the

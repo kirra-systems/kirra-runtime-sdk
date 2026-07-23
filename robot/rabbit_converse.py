@@ -53,6 +53,7 @@ import rabbit_wake  # noqa: E402 — deterministic wake-listener controls (state
 import barge_in  # noqa: E402 — interruptible reply speech (opt-in; Channel A, cosmetic)
 import skill_registry  # noqa: E402 — opt-in named-skill router (motion → the SAME /intent fence)
 import world_model  # noqa: E402 — opt-in situation report (read-only TTL'd projection)
+import mission  # noqa: E402 — opt-in multi-step Executive (each step → the SAME /intent fence)
 from rabbit_persona import name_slot, operator_name  # noqa: E402
 
 MAX_TURNS = 10  # rolling conversation memory (user+assistant pairs kept)
@@ -136,6 +137,26 @@ def ask_llm_skills(history, context, utterance):
     near-deterministic options as the default router — only the CONTRACT differs
     (named skills instead of a free-form directive)."""
     system = RABBIT_SYSTEM + "\n\n" + skill_registry.skills_prompt_fragment()
+    messages = [{"role": "system", "content": system}]
+    messages += history
+    messages.append({"role": "user", "content": f"{context}\n\nOperator says: {utterance}"})
+    try:
+        r = requests.post(f"{OLLAMA}/api/chat", timeout=60.0,
+                          json={"model": MODEL, "stream": False, "messages": messages,
+                                "options": ROUTER_LLM_OPTIONS})
+        if r.status_code != 200:
+            return ""
+        return (r.json().get("message", {}).get("content") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def ask_llm_mission(history, context, utterance):
+    """Mission-mode persona call (opt-in, KIRRA_MISSIONS_ENABLED). Returns the raw
+    JSON string; `mission.plan_mission` parses it fail-closed. Same model +
+    options as the other routers — only the CONTRACT differs (an ordered
+    multi-step mission over the registered skills)."""
+    system = RABBIT_SYSTEM + "\n\n" + mission.missions_prompt_fragment()
     messages = [{"role": "system", "content": system}]
     messages += history
     messages.append({"role": "user", "content": f"{context}\n\nOperator says: {utterance}"})
@@ -250,6 +271,37 @@ def handle_turn(history, utterance):
         return
 
     context = context_for(utterance)
+
+    # MISSION MODE (opt-in, KIRRA_MISSIONS_ENABLED; takes precedence over skills):
+    # the LLM emits {say, mission:[...]} — a multi-step plan the Executive runs
+    # with sequencing / retry / cancel. Each MOTION step still routes through the
+    # SAME fenced door (offer_to_door → /intent → checker); a mission with any
+    # unsupported skill is REFUSED before any motion; a checker-refused step HALTS
+    # (never skip-and-continue); a barge-in cancels. Default off → byte-identical.
+    if mission.enabled():
+        say, steps = mission.plan_mission(ask_llm_mission(history, context, utterance))
+        if say:
+            _speak_reply(say)
+        ok, decisions, reason = mission.validate_mission(steps)
+        if not ok:
+            if steps:  # a real (but unsupported) mission — say why; empty = just chat
+                _speak_reply(f"I can't run that mission — {reason}.")
+            elif not say:
+                _speak_reply(f"I didn't quite catch that{name_slot()}.")
+        else:
+            def _mission_progress(i, n, d):
+                line = mission.narrate_progress(i, n, d)
+                if line:
+                    _speak_reply(line)
+            result = mission.run_mission(
+                decisions, offer_to_door, _speak_reply,
+                cancel_check=mission.cancel_check_from_barge_in(),
+                progress_fn=_mission_progress)
+            _speak_reply(mission.narrate_result(result))
+        history.append({"role": "user", "content": utterance})
+        history.append({"role": "assistant", "content": say or "(mission)"})
+        del history[: max(0, len(history) - 2 * MAX_TURNS)]
+        return
 
     # SKILLS MODE (opt-in, KIRRA_SKILLS_ENABLED): the LLM emits {say, skills[]}
     # from the REGISTERED vocabulary instead of a free-form directive. A motion
