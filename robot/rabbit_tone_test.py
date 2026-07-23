@@ -93,6 +93,25 @@ def test_off_brand_whole_word_only_no_false_positive():
     check(ok, f"'drizzle' must not trip the rizz matcher: {issues}")
 
 
+def test_deadpan_proverb_passes():
+    # The persona may land a dry hip-hop proverb — the safe, on-brand ones pass.
+    for good in (
+        "Check yourself before you wreck yourself.",
+        "A tidy piece of driving. Game recognize game.",
+        "The corridor is blocked; it's like that, and that's the way it is.",
+        "I never sleep — someone has to keep an eye on the corridor.",
+    ):
+        ok, issues = score_tone(good)
+        check(ok, f"deadpan proverb should pass, got {issues}: {good!r}")
+
+
+def test_yolo_hard_fails():
+    # 'YOLO' is the antithesis of a safety authority — it must never pass, even
+    # deadpan. (The multi-word reckless proverbs are handled by the prompt.)
+    ok, issues = score_tone("We could just send it. YOLO.")
+    check(not ok and any("yolo" in i for i in issues), f"YOLO must hard-fail: {issues}")
+
+
 def test_emoji_fails():
     ok, issues = score_tone("On our way to the dock \U0001F697")
     check(not ok and any("emoji" in i for i in issues), f"emoji must fail: {issues}")
