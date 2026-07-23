@@ -38,6 +38,41 @@ export const meta = {
   },
 };
 
+/* ---------- placement band: [proposers] → [Kirra] → [actuators] ---------- */
+const placementSvg = `
+<svg viewBox="0 0 960 190" role="img" aria-labelledby="plcT plcD">
+  <title id="plcT">Where Kirra sits in the stack</title>
+  <desc id="plcD">Untrusted proposers — an LLM or agent, a planner, and perception — emit a proposed action. Kirra, the fail-closed checker, sits between them and the actuator bus and emits a clamped, approved, or denied command carrying an Ed25519 release token. The actuator transports — ROS 2 and DDS, CAN and serial, and shared memory — verify the token before anything moves.</desc>
+  <g>
+    <rect class="dg-box" x="8" y="34" width="212" height="122" rx="12"/>
+    <text class="dg-sub" x="28" y="58">UNTRUSTED · SWAPPABLE</text>
+    <text class="dg-label" x="28" y="82">LLM / agent</text>
+    <text class="dg-label" x="28" y="106">Planner</text>
+    <text class="dg-label" x="28" y="130">Perception</text>
+  </g>
+  <path class="dg-edge dg-edge--flow" d="M220 95 L 356 95"/>
+  <text class="dg-mono" x="238" y="84">proposed action</text>
+  <circle class="dg-dot dg-pulse" cx="288" cy="95" r="4"/>
+  <g>
+    <rect class="dg-box dg-box--accent" x="358" y="26" width="244" height="138" rx="14"/>
+    <text class="dg-label" x="382" y="58" style="font-size:15px">KIRRA — the checker</text>
+    <text class="dg-mono" x="382" y="82">posture · envelope · RSS</text>
+    <text class="dg-mono" x="382" y="102">fail-closed · deny by default</text>
+    <text class="dg-mono" x="382" y="122">Ed25519 release token</text>
+    <text class="dg-sub" x="382" y="146">verdict target 100 µs (host-indicative)</text>
+  </g>
+  <path class="dg-edge dg-edge--flow" d="M602 95 L 738 95"/>
+  <text class="dg-mono" x="614" y="84">governed command</text>
+  <circle class="dg-dot dg-pulse" cx="670" cy="95" r="4"/>
+  <g>
+    <rect class="dg-box" x="740" y="34" width="212" height="122" rx="12"/>
+    <text class="dg-sub" x="760" y="58">VERIFY-BEFORE-RELEASE</text>
+    <text class="dg-label" x="760" y="82">ROS 2 / DDS</text>
+    <text class="dg-label" x="760" y="106">CAN / serial</text>
+    <text class="dg-label" x="760" y="130">Shared memory</text>
+  </g>
+</svg>`;
+
 /* ---------- architecture flow SVG (doer / checker / actuator) ---------- */
 const archSvg = `
 <svg viewBox="0 0 960 400" role="img" aria-labelledby="archTitle archDesc">
@@ -161,6 +196,21 @@ export const body = `
         </p>
       </div>
     </section>
+
+    <!-- ═══════════ WHERE IT SITS (3-second read) ═══════════ -->
+    <section id="placement" aria-labelledby="h-placement" style="padding-block:clamp(40px,6vh,72px)">
+      <div class="container">
+        <p class="eyebrow" data-reveal style="margin-bottom:18px">Where it sits</p>
+        <div class="diagram-frame flow-anim" data-reveal>${placementSvg}</div>
+        <p class="diagram-caption">
+          <span>An un-bypassable checker between untrusted intent and the actuator bus. If trust can't be proven, nothing moves.</span>
+          <span class="mono" style="color:var(--accent)">≈65&nbsp;µs p50 · ≈116&nbsp;µs p99.9 measured (host)</span>
+        </p>
+        ${evRow("crates/kirra-trajectory/src/validation.rs", "src/wcet_gate.rs:92", "crates/kirra-release-token/src/lib.rs")}
+      </div>
+    </section>
+
+    <hr class="rule">
 
     <!-- ═══════════ THE VISION ═══════════ -->
     <section id="tomorrow" aria-labelledby="h-tomorrow">
