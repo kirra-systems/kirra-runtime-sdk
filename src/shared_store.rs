@@ -115,6 +115,17 @@ impl SharedError {
             SharedError::Sqlite(rusqlite::Error::QueryReturnedNoRows)
         )
     }
+
+    /// Collapse into a `rusqlite::Error` for the narrow legacy seams whose
+    /// trait signatures predate the facade (`RecoveryStreakStore`). Loss-free
+    /// on the Local arm; every other arm wraps `self`, so `Display` (and the
+    /// error source chain) is preserved for the consumer's log line.
+    pub fn into_rusqlite(self) -> rusqlite::Error {
+        match self {
+            SharedError::Sqlite(e) => e,
+            other => rusqlite::Error::ToSqlConversionFailure(Box::new(other)),
+        }
+    }
 }
 
 impl std::fmt::Display for SharedError {
@@ -1437,6 +1448,24 @@ impl SharedOps {
         at_ms: u64,
     ) -> SharedResult<()> {
         self.local(|s| s.append_clearance_audit_event(event_type, payload_json, at_ms))?;
+        Ok(())
+    }
+
+    /// LEDGER-tier passthrough: append a chained posture event to the LOCAL
+    /// ledger (the handlers' rejection audits ride this next to their
+    /// shared-tier gates). Never dispatches to Pg — the tamper-evident chain
+    /// is per-instance local on BOTH backends (ADR-0038).
+    pub fn ledger_posture_event_chained(
+        &self,
+        node_id: &str,
+        event_type: &str,
+        posture_json: &str,
+        reason: Option<&str>,
+        at_ms: u64,
+    ) -> SharedResult<()> {
+        self.local(|s| {
+            s.save_posture_event_chained(node_id, event_type, posture_json, reason, at_ms)
+        })?;
         Ok(())
     }
 

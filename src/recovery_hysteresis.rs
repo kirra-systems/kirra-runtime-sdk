@@ -59,6 +59,47 @@ impl RecoveryStreakStore for VerifierStore {
     }
 }
 
+/// #1030: the shared facade satisfies the same seam, so the hysteresis engine
+/// runs unchanged over either backend. Errors collapse via
+/// [`SharedError::into_rusqlite`] (loss-free on the Local arm; the Pg arm
+/// wraps, preserving `Display`) — the engine only logs them and fails closed.
+impl RecoveryStreakStore for crate::shared_store::SharedOps {
+    fn load_recovery_streak(&self, node_id: &str) -> rusqlite::Result<(u32, u64)> {
+        crate::shared_store::SharedOps::load_recovery_streak(self, node_id)
+            .map_err(|e| e.into_rusqlite())
+    }
+    fn reset_recovery_streak(&self, node_id: &str, now_ms: u64) -> rusqlite::Result<()> {
+        crate::shared_store::SharedOps::reset_recovery_streak(self, node_id, now_ms)
+            .map_err(|e| e.into_rusqlite())
+    }
+    fn increment_recovery_streak(&self, node_id: &str, now_ms: u64) -> rusqlite::Result<u32> {
+        crate::shared_store::SharedOps::increment_recovery_streak(self, node_id, now_ms)
+            .map_err(|e| e.into_rusqlite())
+    }
+}
+
+/// Facade-dispatched entry point (#1030). On the Local backend the whole
+/// read-then-write evaluation runs under ONE writer-lock acquisition —
+/// byte-identical atomicity to the pre-#1030 `store.call` grouping. On the
+/// Pg backend each streak op is an atomic single-statement upsert/CAS on the
+/// server, so the per-call dispatch is race-safe there by construction.
+pub fn evaluate_recovery_report_shared(
+    shared: &crate::shared_store::SharedOps,
+    node_id: &str,
+    now_ms: u64,
+) -> HysteresisDecision {
+    match &*shared.backend {
+        crate::shared_store::SharedBackend::Local => {
+            let guard = shared.writer.lock().unwrap_or_else(|p| p.into_inner());
+            evaluate_recovery_report(&*guard, node_id, now_ms)
+        }
+        #[cfg(feature = "postgres")]
+        crate::shared_store::SharedBackend::Pg(_) => {
+            evaluate_recovery_report(shared, node_id, now_ms)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------

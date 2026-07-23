@@ -431,7 +431,7 @@ pub(crate) async fn report_node_artifact(
     match svc
         .app
         .store
-        .call(move |store| store.upsert_node_artifact_status(&status))
+        .call_shared(move |shared| shared.upsert_node_artifact_status(&status))
         .await
     {
         Ok(Ok(())) => (StatusCode::OK, Json(json!({ "recorded": true }))).into_response(),
@@ -453,11 +453,11 @@ fn is_sha256_hex_lower(s: &str) -> bool {
 /// Read-only listing of registered AV subsystem diagnostics (confidence floor,
 /// recovery streak, last telemetry). Admin-gated; no secrets returned. (#385)
 pub(crate) async fn list_av_subsystems(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
-    // SAFETY: SG-HA-3 — read off the worker pool via read replica.
+    // SG-HA-3 — read off the worker pool; #1030: via the shared facade.
     match svc
         .app
         .store
-        .call_read(|store| store.load_av_subsystems())
+        .call_shared(|shared| shared.load_av_subsystems())
         .await
     {
         Ok(Ok(rows)) => {
@@ -487,11 +487,11 @@ pub(crate) async fn list_av_subsystems(State(svc): State<Arc<ServiceState>>) -> 
 /// Read-only listing of registered operators. Admin-gated. Exposes only the
 /// public-key FINGERPRINT (never the PEM), matching the write-side convention. (#385)
 pub(crate) async fn list_operators(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
-    // SAFETY: SG-HA-3 — read off the worker pool via read replica.
+    // SG-HA-3 — read off the worker pool; #1030: via the shared facade.
     match svc
         .app
         .store
-        .call_read(|store| store.load_operators())
+        .call_shared(|shared| shared.load_operators())
         .await
     {
         Ok(Ok(rows)) => {
@@ -643,13 +643,13 @@ pub(crate) async fn handle_sensor_fault_report(
 
     let now = now_ms();
 
-    // SAFETY: SG-HA-3 — read off the worker pool via read replica.
+    // SG-HA-3 — read off the worker pool; #1030: via the shared facade.
     let node_id_cf = req.source_node_id.clone();
     let confidence_floor = svc
         .app
         .store
-        .call_read(move |store| {
-            store
+        .call_shared(move |shared| {
+            shared
                 .load_av_confidence_floor(&node_id_cf)
                 .unwrap_or(None)
                 .unwrap_or(0.70)
@@ -671,8 +671,8 @@ pub(crate) async fn handle_sensor_fault_report(
         let _ = svc
             .app
             .store
-            .call(move |store| {
-                let _ = store.reset_recovery_streak(&node_id_rs, now);
+            .call_shared(move |shared| {
+                let _ = shared.reset_recovery_streak(&node_id_rs, now);
             })
             .await;
 
@@ -764,8 +764,8 @@ pub(crate) async fn handle_sensor_fault_report(
         let _ = svc
             .app
             .store
-            .call(move |store| {
-                let _ = store.touch_av_telemetry_timestamp(&node_id_tt, now);
+            .call_shared(move |shared| {
+                let _ = shared.touch_av_telemetry_timestamp(&node_id_tt, now);
             })
             .await;
         return (
@@ -780,20 +780,15 @@ pub(crate) async fn handle_sensor_fault_report(
     }
 
     // SAFETY: SG-HA-3 — recovery-streak read+write off the worker pool.
-    // `evaluate_recovery_report` internally reads and writes streak state;
-    // it must run on the writer connection (via `call`) to keep the
-    // read-then-write atomic under one lock acquisition.
+    // `evaluate_recovery_report_shared` (#1030) keeps the Local arm's
+    // read-then-write atomic under ONE writer-lock acquisition (byte-identical
+    // to the old `call` grouping); the Pg arm's streak ops are atomic
+    // single-statement server-side upserts.
     let node_id_rr = req.source_node_id.clone();
     let decision = match svc
         .app
         .store
-        .call(move |store| {
-            // `&*store` dereferences to `&VerifierStore` so the generic
-            // `S: RecoveryStreakStore` bound on `evaluate_recovery_report`
-            // resolves correctly (S3 / #115 — trait seam, behavior unchanged:
-            // the trait impl delegates verbatim).
-            evaluate_recovery_report(&*store, &node_id_rr, now)
-        })
+        .call_shared(move |shared| evaluate_recovery_report_shared(shared, &node_id_rr, now))
         .await
     {
         Ok(d) => d,
@@ -831,17 +826,17 @@ pub(crate) async fn handle_sensor_fault_report(
                 }
             }
 
-            // P1: the recovery-streak reset + its audit write run as ONE off-worker
-            // closure (same single-acquisition grouping as before, just off the pool).
+            // P1: the recovery-streak reset (shared tier) + its audit write
+            // (LOCAL ledger) run as ONE off-worker closure (#1030 decomposition).
             let node_id_c = req.source_node_id.clone();
             let streak_v = *streak;
-            let _ = svc.app.store.call(move |store| {
-                let _ = store.reset_recovery_streak(&node_id_c, now);
+            let _ = svc.app.store.call_shared(move |shared| {
+                let _ = shared.reset_recovery_streak(&node_id_c, now);
                 let event = json!({
                     "source_node_id": node_id_c.as_str(),
                     "streak":         streak_v,
                 });
-                if let Err(e) = store.save_posture_event_chained(
+                if let Err(e) = shared.ledger_posture_event_chained(
                     &node_id_c, "SENSOR_RECOVERY_CONFIRMED",
                     &event.to_string(), None, now,
                 ) {
@@ -870,8 +865,8 @@ pub(crate) async fn handle_sensor_fault_report(
             let _ = svc
                 .app
                 .store
-                .call(move |store| {
-                    let _ = store.touch_av_telemetry_timestamp(&node_id_tt, now);
+                .call_shared(move |shared| {
+                    let _ = shared.touch_av_telemetry_timestamp(&node_id_tt, now);
                 })
                 .await;
         }
@@ -916,8 +911,8 @@ pub(crate) async fn handle_register_av_asset(
     let node_id_c = req.node_id.clone();
     let subsystem_type_c = req.subsystem_type.clone();
     let hardware_id_c = req.hardware_id.clone();
-    let _ = svc.app.store.call(move |store| {
-        if let Err(e) = store.register_av_subsystem_meta(
+    let _ = svc.app.store.call_shared(move |shared| {
+        if let Err(e) = shared.register_av_subsystem_meta(
             &node_id_c, &subsystem_type_c, &hardware_id_c, floor, now,
         ) {
             tracing::warn!(
@@ -931,7 +926,7 @@ pub(crate) async fn handle_register_av_asset(
             "hardware_id":      hardware_id_c.as_str(),
             "confidence_floor": floor,
         });
-        if let Err(e) = store.save_posture_event_chained(
+        if let Err(e) = shared.ledger_posture_event_chained(
             &node_id_c, "AV_ASSET_REGISTERED", &meta.to_string(), None, now,
         ) {
             tracing::error!(error=%e, node_id=%node_id_c,

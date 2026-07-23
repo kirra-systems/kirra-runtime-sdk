@@ -45,6 +45,7 @@ use kirra_verifier::posture_engine_v2::{
     resolve_posture_snapshot_silent, resolve_posture_with_reason, LockoutReason,
 };
 use kirra_verifier::security::{admin_token_ok, constant_time_compare};
+use kirra_verifier::shared_store::SharedError;
 use kirra_verifier::standby_monitor::{
     instance_id as ha_instance_id, spawn_heartbeat_writer, spawn_promotion_monitor, HEARTBEAT_KEY,
     PROMOTION_TIMEOUT_MS,
@@ -68,7 +69,7 @@ use kirra_verifier::fabric::telemetry::FabricTelemetry;
 use kirra_verifier::gateway::policy_layer::{
     enforce_actuator_safety_envelope, enforce_posture_routing, EnforcementOutcome,
 };
-use kirra_verifier::recovery_hysteresis::{evaluate_recovery_report, HysteresisDecision};
+use kirra_verifier::recovery_hysteresis::{evaluate_recovery_report_shared, HysteresisDecision};
 
 // Route handlers, split by domain into sibling submodules. Each holds
 // `pub(crate)` handler fns that share the binary's helpers, DTOs and `use`
