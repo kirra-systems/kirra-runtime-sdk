@@ -4,17 +4,31 @@
 # The stock Yahboom rule (captured/yahboom/udev/serial.rules) ships the CH340
 # motor board MODE:=0777 — WORLD-WRITABLE: any process on the host can drive
 # the motors with no ROS at all, bypassing the checker (the #887 gap below the
-# bus). This rule matches the SAME device and, running later in lexical order
-# (99- vs the vendor's), overrides ownership/mode while keeping the
-# /dev/myserial symlink the whole stack expects.
+# bus). This rule matches the SAME device and, running earlier in lexical
+# order (99- vs the vendor's bare "serial.rules" — '9' < 's'), tightens
+# ownership/mode while keeping the /dev/myserial symlink the whole stack
+# expects.
+#
+# 🔴 OWNER/MODE use `:=` (FINAL assignment), NOT `=` — load-bearing. The
+# vendor's own rule uses `MODE:=0777`; udev's `:=` locks a key against ANY
+# later rule's attempt to change it, REGARDLESS of that later rule's own
+# operator. Since our rule runs FIRST (alphabetically before "serial.rules"),
+# a plain `=` here would look like it worked but be silently overwritten +
+# re-locked by the vendor's later `MODE:=0777` — the port stays 0777
+# world-writable with NO error, defeating this entire mitigation. Using `:=`
+# ourselves closes that: we lock the value before the vendor rule ever runs.
+# (Confirm the winning rule any time with the dry-run `udevadm test
+# $(udevadm info -q path -n /dev/myserial)` — it names which rule applied.)
 #
 # __KIRRA_ROBOT_USER__ is rendered by install_kirra.sh to the consumer's user.
 # After install: sudo udevadm control --reload && sudo udevadm trigger
-# (or replug the board). Verify: stat -c '%U %a' /dev/myserial → <user> 600.
+# (or replug the board — a device already open when triggered may need
+# `systemctl stop kirra-consumer` first to release the fd). Verify:
+# stat -c '%U %a' /dev/myserial → <user> 600.
 #
 # NOTE: this matches the CH340 (1a86:7523) like the vendor rule does. If a
 # second CH340 device is ever attached, it inherits the same tightening —
 # prefer that (fail-closed) over a serial-number match that silently misses a
 # replaced expansion board. The consumer's boot sentinel
 # (robot/serial_exclusivity.py) independently verifies the result either way.
-KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", OWNER="__KIRRA_ROBOT_USER__", MODE="0600", SYMLINK+="myserial"
+KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", OWNER:="__KIRRA_ROBOT_USER__", MODE:="0600", SYMLINK+="myserial"
