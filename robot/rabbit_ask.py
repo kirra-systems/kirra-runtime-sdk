@@ -52,6 +52,13 @@ TAJ = os.environ.get("KIRRA_TAJ_URL", "http://localhost:8101").rstrip("/")
 OLLAMA = os.environ.get("KIRRA_OLLAMA_URL", "http://localhost:11434").rstrip("/")
 MODEL = os.environ.get("KIRRA_RABBIT_MODEL", "gemma3:4b")
 FORWARD_CONE_RAD = math.radians(15.0)
+# Speed (Slice S): keep the model RESIDENT between turns so a follow-up doesn't
+# pay the cold-reload stall (the single biggest per-turn latency on the Orin).
+# Sent as Ollama's top-level `keep_alive`: "30m" holds it ~half an hour after a
+# request, "-1" pins it indefinitely, "0" unloads at once. UX-layer latency only
+# — keep_alive changes residency, never the model's OUTPUT, so it cannot affect
+# the router's directive decision or the checker.
+KEEP_ALIVE = (os.environ.get("KIRRA_RABBIT_KEEP_ALIVE") or "30m").strip()
 
 RABBIT_SYSTEM = (
     "You are Rabbit, the voice of a small self-driving robot. Your manner is "
@@ -227,7 +234,7 @@ def ask_ollama(question, context):
     back to a plain factual read)."""
     try:
         r = requests.post(f"{OLLAMA}/api/chat", timeout=60.0, json={
-            "model": MODEL, "stream": False,
+            "model": MODEL, "stream": False, "keep_alive": KEEP_ALIVE,
             "messages": [
                 {"role": "system", "content": RABBIT_SYSTEM},
                 {"role": "user", "content": f"{context}\n\nOperator asks: {question}"},

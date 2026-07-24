@@ -44,8 +44,8 @@ except ImportError:
 # Reuse Stage 1's read-only grounding + persona + speak (robot/ is on sys.path[0]).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rabbit_ask import (  # noqa: E402
-    RABBIT_SYSTEM, MICK, MODEL, OLLAMA, gather_perception, gather_posture,
-    gather_stop_reason, speak,
+    KEEP_ALIVE, RABBIT_SYSTEM, MICK, MODEL, OLLAMA, gather_perception,
+    gather_posture, gather_stop_reason, speak,
 )
 import rabbit_diag  # noqa: E402 — deterministic self-check voice command (read-only)
 import rabbit_ota  # noqa: E402 — deterministic OTA voice commands (NOT the movement door)
@@ -68,6 +68,15 @@ PERCEPTION_WORDS = ("see", "around", "ahead", "front", "obstacle", "clear",
 # imports THIS so the gate calls the model exactly as production does; a vetted
 # pass then predicts production behaviour instead of a lucky sample.
 ROUTER_LLM_OPTIONS = {"temperature": 0.1}
+# Speed (Slice S, OPT-IN): cap the reply length. DEFAULT UNSET — the router emits
+# a {say, directive} JSON object and a too-tight cap could TRUNCATE it, which
+# parse_reply fail-closes to directive=None (a silently DROPPED drive command).
+# So this is opt-in and must be generous (>= a full reply's JSON); the model-swap
+# smoketest imports ROUTER_LLM_OPTIONS, so a value that starts truncating the
+# directive is caught by its drive→directive assertions before you ship it.
+_num_predict = (os.environ.get("KIRRA_RABBIT_NUM_PREDICT") or "").strip()
+if _num_predict.lstrip("-").isdigit():
+    ROUTER_LLM_OPTIONS["num_predict"] = int(_num_predict)
 
 STAGE2_SYSTEM = (
     RABBIT_SYSTEM
@@ -123,7 +132,7 @@ def ask_llm(history, context, utterance):
     try:
         r = requests.post(f"{OLLAMA}/api/chat", timeout=60.0,
                           json={"model": MODEL, "stream": False, "messages": messages,
-                                "options": ROUTER_LLM_OPTIONS})
+                                "keep_alive": KEEP_ALIVE, "options": ROUTER_LLM_OPTIONS})
         if r.status_code != 200:
             return None, None
         raw = (r.json().get("message", {}).get("content") or "").strip()
@@ -144,7 +153,7 @@ def ask_llm_skills(history, context, utterance):
     try:
         r = requests.post(f"{OLLAMA}/api/chat", timeout=60.0,
                           json={"model": MODEL, "stream": False, "messages": messages,
-                                "options": ROUTER_LLM_OPTIONS})
+                                "keep_alive": KEEP_ALIVE, "options": ROUTER_LLM_OPTIONS})
         if r.status_code != 200:
             return ""
         return (r.json().get("message", {}).get("content") or "").strip()
@@ -164,7 +173,7 @@ def ask_llm_mission(history, context, utterance):
     try:
         r = requests.post(f"{OLLAMA}/api/chat", timeout=60.0,
                           json={"model": MODEL, "stream": False, "messages": messages,
-                                "options": ROUTER_LLM_OPTIONS})
+                                "keep_alive": KEEP_ALIVE, "options": ROUTER_LLM_OPTIONS})
         if r.status_code != 200:
             return ""
         return (r.json().get("message", {}).get("content") or "").strip()
