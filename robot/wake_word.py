@@ -65,6 +65,9 @@ import tempfile
 import time
 import wave
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import turn_state  # noqa: E402 — cross-process "turn in progress" signal (Slice R)
+
 # ---------------------------------------------------------------------------
 # Pure logic (host-tested in robot/wake_word_test.py — no audio, no GPIO)
 # ---------------------------------------------------------------------------
@@ -177,6 +180,24 @@ BYTES_PER_SAMPLE = 2
 HOP_S = 0.25          # RMS gate granularity
 WINDOW_S = 2.0        # transcription window handed to whisper
 STATE_POLL_S = 1.0    # nap/mute file poll cadence
+REARM_POLL_S = 0.2    # turn-state poll cadence while waiting to re-arm the mic
+
+
+def _wait_for_rearm(state_file, baseline_seq, grace_s, max_s):
+    """After a trigger fires, hold the mic CLOSED until the turn it caused is
+    settled, then return so the outer loop reopens the mic. Event-driven (polls
+    turn_state) and bounded by grace_s / max_s, so an old/absent/crashed writer
+    degrades to a timed reopen instead of wedging. Replaces the old blind
+    `time.sleep(holdoff_s)` that dropped a fast turn's follow-up wake (Slice R)."""
+    t0 = time.monotonic()
+    while True:
+        active, seq = turn_state.read_state(state_file)
+        elapsed = time.monotonic() - t0
+        decision = turn_state.rearm_decision(
+            elapsed, active, seq > baseline_seq, grace_s=grace_s, max_s=max_s)
+        if decision == "reopen":
+            return
+        time.sleep(REARM_POLL_S)
 
 
 def _log(msg: str) -> None:
@@ -294,6 +315,14 @@ def main() -> int:
     cooldown_s = float(os.environ.get("KIRRA_WAKE_COOLDOWN_S", "2"))
     holdoff_s = float(os.environ.get("KIRRA_WAKE_HOLDOFF_S", "10"))
     state_file = os.environ.get("KIRRA_WAKE_STATE_FILE", "/tmp/kirra_rabbit_wake.state")
+    # Slice R: re-arm the mic on the TURN-DONE signal, not a blind timer.
+    #   default ("signal"): wait for rabbit_converse to finish the turn, bounded
+    #   by grace_s (wait-for-start / garbage-clip reopen) and max_s (hung-writer
+    #   ceiling). "timer" forces the legacy fixed-holdoff sleep.
+    rearm_mode = (os.environ.get("KIRRA_WAKE_REARM") or "signal").strip().lower()
+    turn_state_file = turn_state.state_path()
+    rearm_grace_s = float(os.environ.get("KIRRA_WAKE_TURN_GRACE_S", "7"))
+    rearm_max_s = float(os.environ.get("KIRRA_WAKE_TURN_MAX_S", "45"))
     ack_cmd = os.environ.get("KIRRA_WAKE_ACK_CMD")
     tts_cmd = os.environ.get("KIRRA_TTS_CMD")
     tmp_dir = "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir()
@@ -360,11 +389,21 @@ def main() -> int:
             if hit:
                 # Release-before-trigger: the mic is already closed (above), so
                 # rabbit_voice.sh's bounded recorder can claim the device.
+                # Baseline the turn counter BEFORE firing so the turn this trigger
+                # causes is detected as "advanced past baseline" when it completes.
+                baseline_seq = turn_state.read_state(turn_state_file)[1]
                 _log(f'wake: "{hit}"')
                 sys.stdout.write("\n")   # THE TRIGGER — sole stdout writer
                 sys.stdout.flush()
                 _ack(ack_cmd, tts_cmd)
-                time.sleep(holdoff_s)    # the turn's record+STT+TTS window
+                if rearm_mode == "timer":
+                    time.sleep(holdoff_s)   # legacy: blind fixed hold-off
+                else:
+                    # Slice R: keep the mic closed only until the turn actually
+                    # finishes (or a bounded fallback) — no dead window that drops
+                    # a fast turn's immediate follow-up wake.
+                    _wait_for_rearm(turn_state_file, baseline_seq,
+                                    rearm_grace_s, rearm_max_s)
                 time.sleep(cooldown_s)   # refractory: no immediate re-wake
     except KeyboardInterrupt:
         return 0

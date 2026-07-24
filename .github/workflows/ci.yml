@@ -1274,6 +1274,14 @@ jobs:
           # rabbit_wake control matcher incl. non-overlap with the OTA/diag/
           # drive matchers. See docs/hardware/RABBIT_AUDIO_STACK.md §3b.
           python3 robot/wake_word_test.py
+          # Turn-state re-arm gate (Slice R, pure, no audio): the cross-process
+          # "turn in progress" signal (fail-safe parse, active/done round-trip,
+          # seq monotonicity) and the bounded rearm_decision that fixes the wake
+          # listener re-arming on a blind timer — a completed turn reopens the mic
+          # AT ONCE (no dropped follow-up), a long turn is never cut before its
+          # ceiling, a garbage clip reopens after grace, incl. the 5-consecutive-
+          # cycle acceptance proof. See robot/turn_state.py.
+          python3 robot/turn_state_test.py
           # VAD endpointing (pure, no audio): the RMS energy math and the
           # silence-endpoint state machine — endpoint only after enough ACTUAL
           # speech + trailing silence, a lone click never ends the clip, and the
