@@ -145,12 +145,18 @@ tuned. In order of impact:
    `KIRRA_RABBIT_KEEP_ALIVE` (default `30m`; use `-1` on a dedicated robot) is
    sent on every request to pin it. Residency only — it never changes the
    model's output.
-2. **Max out the Jetson.** Run once at boot (not an env var — put it in a
-   systemd unit or `rc.local`):
+2. **Max out the Jetson.** Max power mode + locked clocks — the biggest inference
+   speedup after keep-alive. Once, to try it:
    ```bash
    sudo nvpmodel -m 0 && sudo jetson_clocks
    ```
-   Max power mode + locked clocks — the biggest inference speedup after keep-alive.
+   `jetson_clocks` resets every boot, so to make it **persist** install the
+   oneshot unit (Jetson only, deliberate opt-in):
+   ```bash
+   sudo install -m 0644 robot/install/kirra-jetson-perf.service \
+        /etc/systemd/system/kirra-jetson-perf.service
+   sudo systemctl daemon-reload && sudo systemctl enable --now kirra-jetson-perf.service
+   ```
 3. **tiny.en for the wake listener** (`KIRRA_WAKE_STT_CMD`) so the always-on
    detector sips CPU; keep `base.en` on `KIRRA_STT_CMD` for turn transcription.
 4. **VAD endpointing** for the turn recorder (`KIRRA_RECORD_CMD=…vad_record.py`)
