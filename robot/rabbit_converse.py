@@ -51,6 +51,7 @@ import rabbit_diag  # noqa: E402 — deterministic self-check voice command (rea
 import rabbit_ota  # noqa: E402 — deterministic OTA voice commands (NOT the movement door)
 import rabbit_wake  # noqa: E402 — deterministic wake-listener controls (state file only)
 import barge_in  # noqa: E402 — interruptible reply speech (opt-in; Channel A, cosmetic)
+import turn_state  # noqa: E402 — cross-process "turn in progress" signal (Slice R re-arm)
 import skill_registry  # noqa: E402 — opt-in named-skill router (motion → the SAME /intent fence)
 import world_model  # noqa: E402 — opt-in situation report (read-only TTL'd projection)
 import mission  # noqa: E402 — opt-in multi-step Executive (each step → the SAME /intent fence)
@@ -346,13 +347,25 @@ def handle_turn(history, utterance):
     del history[: max(0, len(history) - 2 * MAX_TURNS)]
 
 
+def _run_turn(history, utterance):
+    """One turn, bracketed by the cross-process turn-state signal so the wake
+    listener re-arms its mic the instant the reply finishes (Slice R) instead of
+    on a blind timer. mark_active spans exactly the LLM+TTS stretch the listener
+    can't see; mark_done runs in a finally so a mid-turn error still re-arms."""
+    turn_state.mark_active()
+    try:
+        handle_turn(history, utterance)
+    finally:
+        turn_state.mark_done()
+
+
 def main():
     once = "--once" in sys.argv[1:]
     history = []
     if once:
         utterance = sys.stdin.read().strip()
         if utterance:
-            handle_turn(history, utterance)
+            _run_turn(history, utterance)
         else:
             # Empty transcript (e.g. PTT released with nothing intelligible) → F2.
             speak(f"I didn't quite catch that{name_slot()}.")
@@ -362,7 +375,7 @@ def main():
     for line in sys.stdin:
         utterance = line.strip()
         if utterance:
-            handle_turn(history, utterance)
+            _run_turn(history, utterance)
 
 
 if __name__ == "__main__":

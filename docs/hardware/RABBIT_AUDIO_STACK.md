@@ -175,8 +175,23 @@ listener exits cleanly when unset. Full env set: `robot/install/rabbit.env.examp
 tolerance on long tokens only: "hallo rabbits" wakes; a stray "yo" or "hey the
 rabbit robot" never does; host-tested in `robot/wake_word_test.py`). On a hit:
 ack cue ("Yes?" through TTS by default — a **false fire is heard, not silent**),
-the mic is **released** for `KIRRA_WAKE_HOLDOFF_S` so the turn recorder can
-claim the device, then a cooldown.
+the mic is **released** so the turn recorder can claim the device, then a
+cooldown.
+
+**Re-arm is event-driven, not a blind timer (Slice R).** The mic is held closed
+only until the turn it triggered actually *finishes*, then reopens at once — so
+the operator's immediate follow-up "hey rabbit" is heard. The old fixed
+`KIRRA_WAKE_HOLDOFF_S` sleep couldn't fit a variable-length turn: a fast turn left
+the mic shut through a dead window that dropped the follow-up (the "it only
+answered one question" symptom), while a long turn reopened mid-reply. Now
+`rabbit_converse` publishes a tmpfs turn-state file (`turn_state.py`, the same
+atomic-epoch pattern as `barge_in.py`) that the listener waits on, bounded by
+`KIRRA_WAKE_TURN_GRACE_S` (wait-for-start / garbage-clip reopen) and
+`KIRRA_WAKE_TURN_MAX_S` (hung-writer ceiling) and fail-safe (an old/crashed
+writer degrades to the timers). The pure `rearm_decision` gate — including a
+five-consecutive-cycle re-arm proof — is host-tested in
+`robot/turn_state_test.py`. `KIRRA_WAKE_REARM=timer` restores the legacy blind
+`KIRRA_WAKE_HOLDOFF_S` hold-off.
 
 **How this answers §3's three objections** (which still stand for *naive*
 always-listening):
@@ -223,10 +238,12 @@ early is always safe. The priority model is P0 e-stop > P1 {wake, human-interrup
 (`should_interrupt`, host-tested).
 
 The **PTT** path works today because the button is independent of the mic. The
-*acoustic* "say the wake word over Rabbit" path does not yet, because the wake
-listener releases the mic for the turn's hold-off while Rabbit speaks — closing
-that needs full-duplex audio (echo cancellation) or a shorter hold-off, a tracked
-follow-up.
+*acoustic* "say the wake word **over** Rabbit while it is still speaking" path
+does not yet: the wake mic stays closed until the reply finishes, so a barge-in
+mid-sentence needs full-duplex audio (echo cancellation) — a tracked follow-up.
+Note this is now **only** the interrupt-while-speaking case: the wake word
+**immediately after** a reply is heard right away (event-driven re-arm, Slice R
+above), so back-to-back questions no longer need the button.
 
 ---
 
