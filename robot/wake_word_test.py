@@ -23,8 +23,8 @@ import rabbit_diag  # noqa: E402
 import rabbit_wake  # noqa: E402
 from rabbit_ota import match_command  # noqa: E402
 from wake_word import (  # noqa: E402
-    DEFAULT_PHRASES, parse_phrases, rms, transcript_tokens, wake_allowed,
-    wake_hit,
+    DEFAULT_PHRASES, followup_decision, parse_phrases, rms, transcript_tokens,
+    wake_allowed, wake_hit,
 )
 
 PHRASES = parse_phrases(DEFAULT_PHRASES)
@@ -122,6 +122,49 @@ def test_wake_allowed_states() -> None:
     nap = '{"mode": "nap", "until_ms": 1000500}'
     assert not wake_allowed(nap, now), "napping until the deadline"
     assert wake_allowed(nap, 1_000_500), "nap expires exactly at until_ms"
+
+
+# --- follow-up mode gate (Slice F) -------------------------------------------
+
+def test_followup_listen_until_onset_or_window() -> None:
+    W = 6.0
+    assert followup_decision(0.0, False, W) == "listen"   # just opened, silent
+    assert followup_decision(3.0, False, W) == "listen"   # mid-window, silent
+    assert followup_decision(2.0, True, W) == "trigger"   # operator started talking
+    assert followup_decision(W, False, W) == "expire"     # window elapsed silent
+    assert followup_decision(99.0, False, W) == "expire"
+
+
+def test_followup_onset_wins_even_past_window() -> None:
+    # Speech that just began at/after the boundary is honoured, not dropped on a
+    # tie — onset is checked before the window expiry.
+    assert followup_decision(6.0, True, 6.0) == "trigger"
+    assert followup_decision(100.0, True, 6.0) == "trigger"
+
+
+def test_followup_chained_conversation_simulation() -> None:
+    """Three back-to-back follow-ups then a silent window closes the loop — the
+    Slice F acceptance shape: 'respond and keep talking' without re-waking."""
+    W = 6.0
+    fired = 0
+    # each cycle: silent hops then an onset; the 4th cycle stays silent to close.
+    cycles = [
+        [(0.0, False), (1.0, False), (1.5, True)],   # follow-up 1
+        [(0.0, False), (2.0, True)],                 # follow-up 2
+        [(0.0, False), (0.5, True)],                 # follow-up 3
+        [(0.0, False), (3.0, False), (W, False)],    # silent → expire
+    ]
+    for samples in cycles:
+        outcome = None
+        for elapsed, onset in samples:
+            outcome = followup_decision(elapsed, onset, W)
+            if outcome != "listen":
+                break
+        if outcome == "trigger":
+            fired += 1
+        else:
+            assert outcome == "expire"
+    assert fired == 3, f"expected 3 chained follow-ups, got {fired}"
 
 
 # --- rabbit_wake controls ------------------------------------------------------

@@ -193,6 +193,19 @@ five-consecutive-cycle re-arm proof — is host-tested in
 `robot/turn_state_test.py`. `KIRRA_WAKE_REARM=timer` restores the legacy blind
 `KIRRA_WAKE_HOLDOFF_S` hold-off.
 
+**Follow-up mode (Slice F, opt-in).** With `KIRRA_WAKE_FOLLOWUP_ENABLED=1`, for
+`KIRRA_WAKE_FOLLOWUP_S` seconds after each reply the listener holds the mic open
+and treats the operator simply *starting to speak* (sustained energy, no wake
+phrase, no STT) as a follow-up — so a back-and-forth exchange needs the wake word
+only once, exactly like Google's Continued Conversation / Alexa's Follow-Up Mode.
+A silent window (or a nap/mute) closes it and the wake word is required again. The
+"Yes?" ack fires only on the initial wake, not on each follow-up. It carries **no
+new authority**: a follow-up fires the *same* fenced trigger the wake word does,
+so a misheard follow-up still dead-ends at `MickIntent::parse_llm_json`. The pure
+`followup_decision` gate — including a chained-conversation simulation — is
+host-tested in `robot/wake_word_test.py`. Off by default → byte-identical (every
+turn needs a wake word).
+
 **How this answers §3's three objections** (which still stand for *naive*
 always-listening):
 - *Bounds when the LLM runs* — the LLM still runs at most once per wake, exactly
