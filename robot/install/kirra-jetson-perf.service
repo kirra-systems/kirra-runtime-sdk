@@ -1,0 +1,38 @@
+# kirra-jetson-perf.service — put the Jetson in MAX performance mode at every
+# boot, so Rabbit's LLM inference (and the perception loop) run at full clocks
+# without a manual `nvpmodel -m 0 && jetson_clocks` after each power cycle.
+#
+# This is the one Slice-S speed lever that does NOT persist on its own: nvpmodel
+# mode is remembered across reboot on most Jetsons, but jetson_clocks (which
+# LOCKS the clocks to max and disables DVFS scaling) is reset every boot. This
+# oneshot re-applies both, in order.
+#
+# 🔴 Ops-only / Channel A. It changes the power/clock governor — nothing to do
+#    with the safety checker or actuation. Higher power draw + heat is the cost;
+#    keep the fan/heatsink adequate (docs/hardware/RABBIT_AUDIO_STACK.md "Speed").
+#
+# INSTALL (Jetson only — deliberate opt-in, NOT auto-enabled by
+# install_robot_units.sh so a non-Jetson host never runs it):
+#   sudo install -m 0644 robot/install/kirra-jetson-perf.service \
+#        /etc/systemd/system/kirra-jetson-perf.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now kirra-jetson-perf.service
+#   systemctl status kirra-jetson-perf.service      # verify: active (exited)
+#
+# nvpmodel -m 0 = the MAX power mode on Orin NX/Nano (MAXN). Adjust the mode
+# number if your board's max profile differs (`sudo nvpmodel -q` lists them).
+[Unit]
+Description=Kirra: max Jetson performance (nvpmodel MAXN + jetson_clocks) for fast Rabbit inference
+# jetson_clocks wants the clocks up and the mode applied first; run late in boot.
+After=multi-user.target nvpmodel.service
+Wants=nvpmodel.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Fail-soft: apply whichever tools exist (both ship on a stock Jetson). The `|| true`
+# keeps a missing tool from marking the unit failed — this is a best-effort ops nicety.
+ExecStart=/bin/sh -c 'command -v nvpmodel >/dev/null 2>&1 && nvpmodel -m 0 || true; command -v jetson_clocks >/dev/null 2>&1 && jetson_clocks || true'
+
+[Install]
+WantedBy=multi-user.target

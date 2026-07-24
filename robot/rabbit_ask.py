@@ -55,10 +55,16 @@ FORWARD_CONE_RAD = math.radians(15.0)
 # Speed (Slice S): keep the model RESIDENT between turns so a follow-up doesn't
 # pay the cold-reload stall (the single biggest per-turn latency on the Orin).
 # Sent as Ollama's top-level `keep_alive`: "30m" holds it ~half an hour after a
-# request, "-1" pins it indefinitely, "0" unloads at once. UX-layer latency only
-# — keep_alive changes residency, never the model's OUTPUT, so it cannot affect
+# request, -1 pins it indefinitely, 0 unloads at once. UX-layer latency only —
+# keep_alive changes residency, never the model's OUTPUT, so it cannot affect
 # the router's directive decision or the checker.
-KEEP_ALIVE = (os.environ.get("KIRRA_RABBIT_KEEP_ALIVE") or "30m").strip()
+# An INTEGER-like value (-1, 0, 300) MUST go on the wire as a JSON number:
+# Ollama parses a keep_alive STRING as a Go duration ("30m", "24h") and rejects a
+# bare "-1"/"0" (no time unit) with a 400 → the turn fail-softs to "voice module
+# offline". Duration strings pass through unchanged.
+_keep_alive_raw = (os.environ.get("KIRRA_RABBIT_KEEP_ALIVE") or "30m").strip()
+KEEP_ALIVE = int(_keep_alive_raw) if _keep_alive_raw.lstrip("-").isdigit() \
+    else _keep_alive_raw
 
 RABBIT_SYSTEM = (
     "You are Rabbit, the voice of a small self-driving robot. Your manner is "
@@ -94,13 +100,24 @@ RABBIT_SYSTEM = (
     "edge', 'sleep is the cousin of death') — you are the safety authority, and "
     "that framing is the opposite of you.\n"
     "STRICT RULES:\n"
-    "1. Answer ONLY from the TELEMETRY provided below. State nothing the "
-    "telemetry does not support. If the needed telemetry is missing or says "
-    "'unavailable', say plainly that you can't determine it right now.\n"
+    "1. GROUND EVERYTHING IN THE TELEMETRY BELOW. Your ONLY senses are the "
+    "fields in that block — fleet posture, the last checker verdict, the "
+    "perception/obstacle summary, and the operator. You have NO other sensors: "
+    "no sound-level or 'music' or decibel reading, no temperature, no battery "
+    "percent, no speed or heading beyond what the telemetry states. If a value "
+    "is not in the telemetry — or it says 'unavailable' — say plainly that you "
+    "can't measure or determine that right now. Never guess it, average it, or "
+    "fill it in.\n"
     "2. You ADVISE and NARRATE; you do NOT control safety and you never claim to "
     "have driven or to be about to drive. If asked to go somewhere, say the "
     "operator should give that as a driving command (you don't act on it here).\n"
-    "3. Never invent distances, objects, or status. The numbers are ground truth."
+    "3. NEVER invent a number, distance, object, unit, or status. A specific "
+    "reading you were not given ('68 decibels', 'three meters ahead', 'battery "
+    "at 80 percent') is a FABRICATION — and a confident wrong figure is worse "
+    "than honestly saying you don't know. The telemetry numbers are the only "
+    "ground truth; for anything else the honest answer is 'I can't tell from "
+    "here'. This rule outranks sounding clever: a dry 'I can't measure that' is "
+    "correct; an invented figure never is."
 )
 
 
