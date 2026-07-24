@@ -171,6 +171,30 @@ def wake_allowed(state_text: str | None, now_ms: int) -> bool:
         return True
 
 
+def followup_decision(elapsed_s: float, onset: bool, window_s: float) -> str:
+    """Follow-up mode (Slice F): after a reply, should the listener fire a
+    follow-up trigger WITHOUT a wake word, keep waiting for the operator to
+    start speaking, or close the window?
+
+    Like Google's Continued Conversation / Alexa Follow-Up Mode: for a short
+    window after each answer the operator can just talk. Pure so the whole
+    follow-up gate is host-testable with no audio.
+
+      onset      — the operator has STARTED speaking (sustained energy above the
+                   floor) → fire a follow-up trigger, treated exactly as a wake
+                   (the same fenced text-to-the-door path; zero new authority).
+      window_s   — how long to hold the window open; a silent window closes and
+                   the listener falls back to requiring the wake word.
+
+    Returns 'trigger' | 'listen' | 'expire'. Onset wins even past the window —
+    speech that just began is honoured, not dropped on a boundary tie."""
+    if onset:
+        return "trigger"
+    if elapsed_s >= window_s:
+        return "expire"
+    return "listen"
+
+
 # ---------------------------------------------------------------------------
 # The listener (hardware side — not imported by tests)
 # ---------------------------------------------------------------------------
@@ -202,6 +226,24 @@ def _wait_for_rearm(state_file, baseline_seq, grace_s, max_s):
 
 def _log(msg: str) -> None:
     print(f"wake_word: {msg}", file=sys.stderr, flush=True)
+
+
+def _fire_trigger_and_wait(turn_state_file, rearm_mode, holdoff_s,
+                           grace_s, max_s, cooldown_s, after_fire=None):
+    """Emit ONE trigger newline (the wake/follow-up signal) and hold the mic
+    closed until the turn it causes settles (Slice R), then a cooldown. Shared by
+    the wake path and the follow-up path so both re-arm identically. The mic is
+    already CLOSED by the caller before this runs (release-before-trigger)."""
+    baseline_seq = turn_state.read_state(turn_state_file)[1]
+    sys.stdout.write("\n")   # THE TRIGGER — sole stdout writer
+    sys.stdout.flush()
+    if after_fire is not None:
+        after_fire()
+    if rearm_mode == "timer":
+        time.sleep(holdoff_s)   # legacy: blind fixed hold-off
+    else:
+        _wait_for_rearm(turn_state_file, baseline_seq, grace_s, max_s)
+    time.sleep(cooldown_s)   # refractory: no immediate re-trigger
 
 
 def _truthy(v: str | None) -> bool:
@@ -290,6 +332,52 @@ def _read_state(path: str) -> str | None:
         return None
 
 
+def _listen_for_speech_onset(record_cmd, rms_floor, window_s, onset_hops,
+                             hop_bytes, led, state_file) -> bool:
+    """Follow-up mode (Slice F): open the mic and wait up to window_s for the
+    operator to START speaking (onset_hops consecutive energy hops above the
+    floor). Returns True on onset — with the mic already CLOSED so the turn
+    recorder can claim the device (release-before-trigger, same as the wake
+    path) — or False on a silent timeout / nap-mute / recorder fault (→ fall
+    back to requiring the wake word). No STT and no phrase match: after Rabbit's
+    OWN answer, the operator simply talking is the trigger, exactly like a
+    Nest/Alexa follow-up. Carries no new authority — it fires the same fenced
+    trigger the wake word does."""
+    try:
+        cap = subprocess.Popen(record_cmd, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL)
+    except Exception as e:  # noqa: BLE001 — no mic → no follow-up, just fall back
+        _log(f"follow-up: recorder failed to start ({type(e).__name__}) — wake-word only")
+        return False
+    led.set(True)
+    loud = 0
+    onset = False
+    t0 = time.monotonic()
+    try:
+        while True:
+            elapsed = time.monotonic() - t0
+            # A nap/mute engaged during the window closes it immediately.
+            if not wake_allowed(_read_state(state_file), int(time.time() * 1000)):
+                break
+            decision = followup_decision(elapsed, onset, window_s)
+            if decision != "listen":
+                break
+            chunk = cap.stdout.read(hop_bytes)
+            if not chunk:
+                break  # recorder died → treat as no onset
+            loud = loud + 1 if rms(chunk) >= rms_floor else 0
+            if loud >= onset_hops:
+                onset = True   # next iteration's decision → 'trigger' → break
+    finally:
+        led.set(False)
+        cap.terminate()
+        try:
+            cap.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            cap.kill()
+    return onset
+
+
 def main() -> int:
     if not _truthy(os.environ.get("KIRRA_WAKE_ENABLED")):
         _log("KIRRA_WAKE_ENABLED not set — wake word off (exit 0; PTT/Enter still work)")
@@ -323,6 +411,12 @@ def main() -> int:
     turn_state_file = turn_state.state_path()
     rearm_grace_s = float(os.environ.get("KIRRA_WAKE_TURN_GRACE_S", "7"))
     rearm_max_s = float(os.environ.get("KIRRA_WAKE_TURN_MAX_S", "45"))
+    # Slice F: follow-up mode (opt-in, like Nest/Alexa). After a reply, hold a
+    # short window where the operator can just talk — no wake word — before the
+    # listener falls back to requiring one.
+    followup_enabled = _truthy(os.environ.get("KIRRA_WAKE_FOLLOWUP_ENABLED"))
+    followup_window_s = float(os.environ.get("KIRRA_WAKE_FOLLOWUP_S", "6"))
+    followup_onset_hops = max(1, int(os.environ.get("KIRRA_WAKE_FOLLOWUP_ONSET_HOPS", "2")))
     ack_cmd = os.environ.get("KIRRA_WAKE_ACK_CMD")
     tts_cmd = os.environ.get("KIRRA_TTS_CMD")
     tmp_dir = "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir()
@@ -388,23 +482,28 @@ def main() -> int:
 
             if hit:
                 # Release-before-trigger: the mic is already closed (above), so
-                # rabbit_voice.sh's bounded recorder can claim the device.
-                # Baseline the turn counter BEFORE firing so the turn this trigger
-                # causes is detected as "advanced past baseline" when it completes.
-                baseline_seq = turn_state.read_state(turn_state_file)[1]
+                # rabbit_voice.sh's bounded recorder can claim the device. The
+                # ack ("Yes?") fires once, on the WAKE — not on each follow-up.
                 _log(f'wake: "{hit}"')
-                sys.stdout.write("\n")   # THE TRIGGER — sole stdout writer
-                sys.stdout.flush()
-                _ack(ack_cmd, tts_cmd)
-                if rearm_mode == "timer":
-                    time.sleep(holdoff_s)   # legacy: blind fixed hold-off
-                else:
-                    # Slice R: keep the mic closed only until the turn actually
-                    # finishes (or a bounded fallback) — no dead window that drops
-                    # a fast turn's immediate follow-up wake.
-                    _wait_for_rearm(turn_state_file, baseline_seq,
-                                    rearm_grace_s, rearm_max_s)
-                time.sleep(cooldown_s)   # refractory: no immediate re-wake
+                _fire_trigger_and_wait(
+                    turn_state_file, rearm_mode, holdoff_s, rearm_grace_s,
+                    rearm_max_s, cooldown_s,
+                    after_fire=lambda: _ack(ack_cmd, tts_cmd))
+
+                # Slice F: follow-up window(s). After the reply, listen briefly
+                # for the operator to just start talking (no wake word). Each
+                # onset fires another turn and reopens the window; a silent
+                # window (or nap/mute) closes it → back to wake-word listening.
+                while followup_enabled and wake_allowed(
+                        _read_state(state_file), int(time.time() * 1000)):
+                    if not _listen_for_speech_onset(
+                            record_cmd, rms_floor, followup_window_s,
+                            followup_onset_hops, hop_bytes, led, state_file):
+                        break
+                    _log("follow-up: speech onset — firing without a wake word")
+                    _fire_trigger_and_wait(
+                        turn_state_file, rearm_mode, holdoff_s, rearm_grace_s,
+                        rearm_max_s, cooldown_s)
     except KeyboardInterrupt:
         return 0
     except BrokenPipeError:
