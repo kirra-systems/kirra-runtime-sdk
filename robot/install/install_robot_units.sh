@@ -53,7 +53,8 @@ fi
 
 # ---- 2. render + install the units -----------------------------------------
 echo "== 2. units -> /etc/systemd/system =="
-for u in kirra-ros-stack.service kirra-rabbit-watch.service kirra-rabbit-greet.service \
+for u in kirra-ros-stack.service kirra-lidar.service \
+         kirra-rabbit-watch.service kirra-rabbit-greet.service \
          kirra-rabbit-voice.service \
          kirra-ota-check.service kirra-ota-check.timer \
          kirra-doctor.service kirra-doctor.timer; do

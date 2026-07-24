@@ -1,0 +1,46 @@
+# kirra-lidar.service — the YDLIDAR TG30 driver as a boot service, so `/scan` is
+# always publishing (real perception for "what do you see" + the governed loop)
+# without keeping a terminal open.
+#
+# Publishes /scan @ ~10 Hz from `ydlidar_ros2_driver` on `/dev/ydlidar`
+# (baud 512000, TG30 — the VALIDATED hardware; the image's `my_lidar=4ROS`
+# marker is WRONG for this unit, see docs/hardware/ROSMASTER_X3_BRINGUP.md §6 +
+# installer/platform_map.toml).
+#
+# 🔴 Perception INPUT only / Channel A. It publishes a sensor topic; it has NO
+#    path to actuation — the checker still bounds every command. Kept separate
+#    from kirra-ros-stack (occy_doer + interceptor) by design.
+#
+# ROS_DOMAIN_ID must match the rest of the ROS graph (the motor consumer + taj +
+# rabbit). It is read from /etc/kirra/robot.env, defaulting to 28 (this unit's
+# domain) — a mismatched domain means /scan is invisible to rabbit.
+#
+# INSTALL (deliberate opt-in — confirm the manual launch works first:
+#   `ros2 launch ydlidar_ros2_driver ydlidar_launch.py` + `ros2 topic hz /scan`):
+#   sudo systemctl enable --now kirra-lidar.service
+#   ros2 topic hz /scan          # verify ~10 Hz
+# Staged to /etc/systemd/system by install_robot_units.sh, which renders User=
+# to the invoking user (same idiom as kirra-ros-stack / kirra-consumer).
+
+[Unit]
+Description=Kirra YDLIDAR driver (publishes /scan for perception)
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=simple
+User=__KIRRA_ROBOT_USER__
+EnvironmentFile=-/etc/kirra/robot.env
+# Source ROS 2 (+ the ws overlay so ydlidar_ros2_driver is found wherever it
+# lives — best-effort: if only the base install has it, the ws source is a
+# no-op), force the shared domain, then exec the driver as the main PID so
+# SIGTERM tears the launch down cleanly.
+ExecStart=/bin/bash -c 'source /opt/kirra/robot/ros_env.sh && kirra_source_ros && { source "${KIRRA_ROS_WS_SETUP:-/home/__KIRRA_ROBOT_USER__/kirra-runtime-sdk/ros2_ws/install/setup.bash}" 2>/dev/null || true; }; export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-28}"; exec ros2 launch ydlidar_ros2_driver ydlidar_launch.py'
+# A transient serial hiccup should recover; a persistent one backs off (not a
+# hot loop).
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
