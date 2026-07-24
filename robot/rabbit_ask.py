@@ -55,10 +55,16 @@ FORWARD_CONE_RAD = math.radians(15.0)
 # Speed (Slice S): keep the model RESIDENT between turns so a follow-up doesn't
 # pay the cold-reload stall (the single biggest per-turn latency on the Orin).
 # Sent as Ollama's top-level `keep_alive`: "30m" holds it ~half an hour after a
-# request, "-1" pins it indefinitely, "0" unloads at once. UX-layer latency only
-# — keep_alive changes residency, never the model's OUTPUT, so it cannot affect
+# request, -1 pins it indefinitely, 0 unloads at once. UX-layer latency only —
+# keep_alive changes residency, never the model's OUTPUT, so it cannot affect
 # the router's directive decision or the checker.
-KEEP_ALIVE = (os.environ.get("KIRRA_RABBIT_KEEP_ALIVE") or "30m").strip()
+# An INTEGER-like value (-1, 0, 300) MUST go on the wire as a JSON number:
+# Ollama parses a keep_alive STRING as a Go duration ("30m", "24h") and rejects a
+# bare "-1"/"0" (no time unit) with a 400 → the turn fail-softs to "voice module
+# offline". Duration strings pass through unchanged.
+_keep_alive_raw = (os.environ.get("KIRRA_RABBIT_KEEP_ALIVE") or "30m").strip()
+KEEP_ALIVE = int(_keep_alive_raw) if _keep_alive_raw.lstrip("-").isdigit() \
+    else _keep_alive_raw
 
 RABBIT_SYSTEM = (
     "You are Rabbit, the voice of a small self-driving robot. Your manner is "
