@@ -134,6 +134,39 @@ Rabbit confirms. Approach an obstacle → it warns, unprompted. That's Rabbit.
 
 ---
 
+## Speed — making Rabbit reply fast
+
+If Rabbit feels slow to answer it is almost always one of these; all are
+UX-layer (none touch the checker or the fence), and the env defaults now ship
+tuned. In order of impact:
+
+1. **Keep the model resident.** The biggest per-turn cost is Ollama unloading
+   the model after ~5 min idle and cold-reloading it on the next turn.
+   `KIRRA_RABBIT_KEEP_ALIVE` (default `30m`; use `-1` on a dedicated robot) is
+   sent on every request to pin it. Residency only — it never changes the
+   model's output.
+2. **Max out the Jetson.** Run once at boot (not an env var — put it in a
+   systemd unit or `rc.local`):
+   ```bash
+   sudo nvpmodel -m 0 && sudo jetson_clocks
+   ```
+   Max power mode + locked clocks — the biggest inference speedup after keep-alive.
+3. **tiny.en for the wake listener** (`KIRRA_WAKE_STT_CMD`) so the always-on
+   detector sips CPU; keep `base.en` on `KIRRA_STT_CMD` for turn transcription.
+4. **VAD endpointing** for the turn recorder (`KIRRA_RECORD_CMD=…vad_record.py`)
+   so a terse command returns in ~1 s instead of the fixed `-d 4` window.
+5. **Event-driven re-arm + follow-up mode** (Slices R/F) so back-to-back
+   questions need neither a dead-window wait nor a fresh wake word.
+
+Optionally cap the reply length with `KIRRA_RABBIT_NUM_PREDICT` — but see the
+warning in `rabbit.env.example`: too low TRUNCATES the router's `{say, directive}`
+JSON and fail-closes to a dropped drive command, so re-run
+`rabbit_model_smoketest.py` at your chosen value first. The router/persona system
+prompt is deliberately **not** trimmed for speed: its length is load-bearing
+correctness (the "never null a drive request" guardrail + the routing examples).
+
+---
+
 ## Swapping the LLM (a newer/better model)
 
 The model is behind an HTTP seam, so a swap is **config-only** — no rebuild, and

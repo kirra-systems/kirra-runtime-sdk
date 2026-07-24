@@ -60,7 +60,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # The REAL production contract — same system prompt + lenient fail-closed parser
 # the live router uses. Testing anything else would be testing a fiction.
 from rabbit_converse import (  # noqa: E402
-    OLLAMA, ROUTER_LLM_OPTIONS, STAGE2_SYSTEM, parse_reply,
+    KEEP_ALIVE, OLLAMA, ROUTER_LLM_OPTIONS, STAGE2_SYSTEM, parse_reply,
 )
 from rabbit_ask import MODEL as DEFAULT_MODEL  # noqa: E402
 from rabbit_persona import (  # noqa: E402
@@ -101,6 +101,7 @@ def chat(model, utterance):
     try:
         r = requests.post(f"{OLLAMA}/api/chat", timeout=60.0,
                           json={"model": model, "stream": False, "messages": messages,
+                                "keep_alive": KEEP_ALIVE,       # mirror production residency
                                 "options": ROUTER_LLM_OPTIONS})  # mirror production sampling
         if r.status_code != 200:
             return None
