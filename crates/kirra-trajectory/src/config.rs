@@ -254,6 +254,44 @@ impl VehicleConfig {
         }
     }
 
+    /// **R2 class** — the Yahboom Rosmaster R2 bench robot (Ackermann, ~1/10 RC
+    /// scale), the SMALLEST sibling. MEASURED footprint / wheelbase / full-lock
+    /// steering (bench tape + `robot/r2_drive_calibration_results.txt`); the dynamic
+    /// limits (speed / accel / brake / steering-rate) are VALIDATION-PENDING per
+    /// `docs/CONTRACT_PROFILES.md` param `r2.*`. Mirrors the fast-loop
+    /// `contract_profiles::VehicleClass::R2` and parko's `impact_cfg_for_class(R2)`
+    /// BY NAME (the cited-copy discipline across the dependency-separated workspaces).
+    /// A tight RSS band so the slow-loop checker judges a 0.2 m bench robot, not a
+    /// sidewalk courier — retires the interim `courier` borrow for the R2 (#312 / #85).
+    pub fn r2() -> Self {
+        Self {
+            // MEASURED ~9 in front-to-rear (KIRRA_R2_WHEELBASE_M). (r2.wheelbase)
+            wheelbase_m: 0.229,
+            // VALIDATION-PENDING: wheel track NOT bench-measured; estimate < body width.
+            track_width_m: 0.16,
+            // MEASURED body length 13 in = 0.330 m → half 0.165. (r2.footprint)
+            half_length_m: 0.165,
+            // MEASURED body width 8 in = 0.203 m → half ~0.102. (r2.footprint)
+            half_width_m: 0.102,
+            // VALIDATION-PENDING: conservative small-robot mechanical max; the ODD cap
+            // (1.0) is the effective ceiling. (r2.max_speed)
+            max_speed_mps: 1.5,
+            max_accel_mps2: 0.5, // VALIDATION-PENDING: gentle low-speed. (r2.accel)
+            max_decel_mps2: 1.5, // VALIDATION-PENDING: firm brake ≥ accel. (r2.brake)
+            // MEASURED full-lock road-wheel angle ~39° = 0.68 rad
+            // (KIRRA_R2_DELTA_MAX_RAD). (r2.steering)
+            max_steering_rad: 39.0_f64.to_radians(),
+            // The bench-robot ODD ceiling (R2_ODD_SPEED_CAP_MPS sibling). (r2.odd_cap)
+            odd_speed_cap_mps: Some(1.0),
+            // VALIDATION-PENDING: tight indoor band, half-scale of the courier 0.6.
+            rss_lateral_alignment_tolerance_m: 0.3,
+            // Overlap == the band (the sibling idiom).
+            rss_longitudinal_overlap_m: 0.3,
+            // R2 is Ackermann (the r2_ackermann last-hop) — NO diff-drive angular channel.
+            angular: None,
+        }
+    }
+
     /// **The single slow-loop class selector** — the counterpart of the fast-loop
     /// `VehicleClass::from_str` + `contract_for` (`src/gateway/contract_profiles.rs`), keyed by
     /// the same class STRING (the two live in dependency-separated workspaces, so they select by
@@ -264,6 +302,7 @@ impl VehicleConfig {
         match class.trim().to_ascii_lowercase().as_str() {
             "courier" | "robot" | "sidewalk" => Self::courier(),
             "delivery-av" | "delivery_av" | "deliveryav" => Self::delivery_av(),
+            "r2" => Self::r2(),
             _ => Self::default_urban(), // robotaxi / unknown → frozen reference (fail-safe)
         }
     }
@@ -443,6 +482,12 @@ mod tests {
             VehicleConfig::for_class("robotaxi").rss_lateral_alignment_tolerance_m,
             4.0
         );
+        // R2 — the smallest sibling; name-keyed, case-insensitive.
+        assert_eq!(
+            VehicleConfig::for_class("r2").rss_lateral_alignment_tolerance_m,
+            0.3
+        );
+        assert_eq!(VehicleConfig::for_class("R2").max_speed_mps, 1.5);
         // Unknown / absent → robotaxi (frozen reference), the fail-safe default.
         assert_eq!(
             VehicleConfig::for_class("nonsense").half_length_m,
@@ -455,10 +500,11 @@ mod tests {
     }
 
     #[test]
-    fn slow_loop_class_family_is_ordered_courier_lt_delivery_lt_robotaxi() {
+    fn slow_loop_class_family_is_ordered_r2_lt_courier_lt_delivery_lt_robotaxi() {
         // The family is monotone in the dimensions that scale with vehicle size/speed —
-        // the cited-copy mirror of the fast-loop contract family.
-        let (c, d, r) = (
+        // the cited-copy mirror of the fast-loop contract family. R2 is the smallest.
+        let (r2, c, d, r) = (
+            VehicleConfig::r2(),
             VehicleConfig::courier(),
             VehicleConfig::delivery_av(),
             VehicleConfig::default_urban(),
@@ -468,10 +514,12 @@ mod tests {
             |v: &VehicleConfig| v.max_speed_mps,
             |v: &VehicleConfig| v.half_length_m,
         ] {
-            assert!(
-                f(&c) < f(&d) && f(&d) < f(&r),
-                "courier < delivery-av < robotaxi expected"
-            );
+            // Separate asserts, NOT an `&&` chain: an always-true chain leaves each
+            // short-circuit false-branch unexecuted, which the EP-07 branch-coverage
+            // gate counts as an uncovered decision. Pairwise asserts have no such branch.
+            assert!(f(&r2) < f(&c), "r2 < courier expected");
+            assert!(f(&c) < f(&d), "courier < delivery-av expected");
+            assert!(f(&d) < f(&r), "delivery-av < robotaxi expected");
         }
     }
 
