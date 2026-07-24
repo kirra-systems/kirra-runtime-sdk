@@ -1324,6 +1324,11 @@ jobs:
           # voice matcher (no OTA/drive overlap), speech-summary capping, and
           # the voice-doctor wrapper against a stub. See docs/diagnostics.md.
           python3 robot/kirra_doctor_test.py
+          # GPU/CUDA doctor module (pure, no GPU): Tegra detection, the CUDA/
+          # TensorRT/nvidia-smi classifiers, and the load-bearing Ollama-offload
+          # check (resident-on-CPU → WARN, on-GPU → PASS, idle → UNKNOWN) — plus a
+          # bounded, never-FAIL live run on a GPU-less host. See robot/doctor/modules/gpu.py.
+          python3 robot/gpu_doctor_test.py
           # Detecting-installer contract (R2 golden build): detect/verify/install
           # are fail-closed (wrong car-type mode, unknown platform, missing
           # devices all refuse with remediation) and SELECT-NOT-INFER holds (the
