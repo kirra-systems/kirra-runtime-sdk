@@ -250,6 +250,7 @@ swap them freely without touching the safety loop.
 5. **Fleet (later)** — Zenoh transport when you go multi-robot.
 
 ## References
+- `docs/hardware/R2_FIELD_DIAGNOSTICS.md` — the concrete SSH-connectivity recipe (Tailscale / the `ROSMASTER` AP / reach `jetson@192.168.1.11` off the cable), plus the lidar-self-occlusion and r2-switch bench recipes
 - `docs/hardware/R2_LIVE_LOOP_BRINGUP.md` — the tethered governed loop (Stages 1–2)
 - `docs/testing/SPEECH_RABBIT_DEMO.md` — the voice UX (whisper.cpp / Piper, env, CI)
 - `robot/install/install_kirra.sh` — installer + the staged `kirra-consumer.service`
