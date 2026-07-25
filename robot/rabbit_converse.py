@@ -78,6 +78,17 @@ ROUTER_LLM_OPTIONS = {"temperature": 0.1}
 _num_predict = (os.environ.get("KIRRA_RABBIT_NUM_PREDICT") or "").strip()
 if _num_predict.lstrip("-").isdigit():
     ROUTER_LLM_OPTIONS["num_predict"] = int(_num_predict)
+# Speed (Slice S, OPT-IN): cap the INPUT context window (num_ctx). Smaller ctx =
+# smaller KV cache = less memory bandwidth and faster prefill/TTFT on the
+# bandwidth-bound Orin. DEFAULT UNSET → Ollama's own default (check the effective
+# size with `ollama ps`; only cap if it is defaulting large). SAME truncation
+# caveat as num_predict but on the INPUT side: too small drops the system prompt /
+# history / telemetry and can silently degrade routing, so keep it comfortably
+# above one turn (system prompt + a few history pairs + the telemetry block) and
+# let the smoketest (which imports these options) catch a bad value.
+_num_ctx = (os.environ.get("KIRRA_RABBIT_NUM_CTX") or "").strip()
+if _num_ctx.isdigit() and int(_num_ctx) > 0:
+    ROUTER_LLM_OPTIONS["num_ctx"] = int(_num_ctx)
 
 STAGE2_SYSTEM = (
     RABBIT_SYSTEM

@@ -57,6 +57,32 @@ def test_stream_gate_defaults_off_and_guardrails_preserved() -> None:
     assert directive == "creep forward" and say == "Creeping forward.", (say, directive)
 
 
+def test_num_ctx_env_wires_into_router_options() -> None:
+    if not _HAVE_REQUESTS:
+        print("  skip (requests unavailable — CI lane)")
+        return
+    import importlib
+    prev = os.environ.get("KIRRA_RABBIT_NUM_CTX")
+    try:
+        os.environ["KIRRA_RABBIT_NUM_CTX"] = "2048"
+        import rabbit_converse
+        importlib.reload(rabbit_converse)
+        assert rabbit_converse.ROUTER_LLM_OPTIONS.get("num_ctx") == 2048, \
+            "KIRRA_RABBIT_NUM_CTX must populate the router's num_ctx option"
+        # A non-positive / garbage value is ignored (falls back to Ollama's default).
+        os.environ["KIRRA_RABBIT_NUM_CTX"] = "0"
+        importlib.reload(rabbit_converse)
+        assert "num_ctx" not in rabbit_converse.ROUTER_LLM_OPTIONS, \
+            "a non-positive num_ctx must be ignored, not sent"
+    finally:
+        if prev is None:
+            os.environ.pop("KIRRA_RABBIT_NUM_CTX", None)
+        else:
+            os.environ["KIRRA_RABBIT_NUM_CTX"] = prev
+        import rabbit_converse
+        importlib.reload(rabbit_converse)
+
+
 def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print("rabbit_stream integration tests:")
