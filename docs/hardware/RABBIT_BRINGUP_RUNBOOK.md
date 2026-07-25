@@ -163,6 +163,19 @@ tuned. In order of impact:
    so a terse command returns in ~1 s instead of the fixed `-d 4` window.
 5. **Event-driven re-arm + follow-up mode** (Slices R/F) so back-to-back
    questions need neither a dead-window wait nor a fresh wake word.
+6. **First-clause streaming to TTS** (Slice T, `KIRRA_RABBIT_STREAM_TTS=1`,
+   default off). Rabbit starts *speaking* the first sentence of a chat reply
+   while the model is still generating the rest, instead of waiting for the whole
+   answer — the largest drop in *perceived* latency for a conversational turn. It
+   is safe by construction: the router emits a DIRECTIVE-FIRST variant of the same
+   contract, so the routing decision is known before any speech — a **drive** turn
+   still voices nothing until the door has decided (its "on our way" vs "couldn't
+   pin down a safe destination" line is never pre-empted), and any non-directive-
+   first or malformed reply falls back to the normal non-streaming path. Barge-in
+   still stops the whole reply. `parse_reply` remains the fail-closed authority on
+   the directive. Validate on your model with `rabbit_model_smoketest.py` before
+   relying on it (a model that ignores the field order simply falls back, losing
+   only the speed-up). Off → byte-identical to today.
 
 Optionally cap the reply length with `KIRRA_RABBIT_NUM_PREDICT` — but see the
 warning in `rabbit.env.example`: too low TRUNCATES the router's `{say, directive}`
