@@ -129,6 +129,26 @@ ros2 topic hz /scan            # steady ~10 Hz (TG30)
 ros2 topic echo /scan --once   # finite, room-plausible ranges (not all 0/inf)
 ```
 
+**Lidar orientation — verify 0° points FORWARD and left/right isn't mirrored.**
+This is safety-relevant: the checker + Taj read `/scan` **raw** and treat angle 0
+as the ego +X axis (forward), +90° as left — there is **no tf/offset layer**, so a
+rotated or mirrored sensor corrupts the robot's whole notion of "ahead" and
+"which side." `ros2 topic echo` truncates the array (and prints from −180° =
+behind), so it can't show the front rays — use the bring-up tool instead:
+
+```bash
+# Put a narrow object (box/pole) ~1 m directly in FRONT of the robot's centreline.
+python3 robot/lidar_orient_check.py     # only needs rclpy + sensor_msgs
+#   valid returns=<N>                    (0 → the lidar isn't producing data, not orientation)
+#   NEAREST return overall: ~1 m at ~0°  ->  FRONT   ← 0° faces forward ✅
+```
+
+- Nearest reads **LEFT** (≈+90°) → sensor rotated; rotate the unit 90° **clockwise**
+  (top view). **RIGHT** (≈−90°) → 90° CCW. **BEHIND** (≈180°) → 180°.
+- Then move the object to the robot's **LEFT** and re-run: **LEFT** should go short,
+  **RIGHT** stay long. If **RIGHT** goes short, left/right are mirrored → flip
+  `inverted` in `robot/install/captured/yahboom/ydlidar/ydlidar.yaml` and relaunch.
+
 ```bash
 # (c) First governed motion — 🔴 WHEELS ELEVATED:
 /opt/kirra/robot/first_run_elevated.sh

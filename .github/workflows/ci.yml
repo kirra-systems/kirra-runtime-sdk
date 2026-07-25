@@ -1317,6 +1317,13 @@ jobs:
           # routing guardrails, and parse_reply (the fail-closed directive authority)
           # is order-agnostic. See robot/rabbit_converse.py.
           python3 robot/rabbit_stream_integration_test.py
+          # Lidar orientation check (pure geometry, no ROS/hardware): the scan
+          # angle→direction labelling (0°=FRONT, +90°=LEFT), in-band return
+          # filtering, per-direction nearest, and the forward-aligned verdict — the
+          # bring-up tool that confirms 0° points forward and left/right isn't
+          # mirrored (the checker reads /scan raw, so this is safety-relevant). See
+          # robot/lidar_orient_check.py.
+          python3 robot/lidar_orient_check_test.py
           # Mission Executive (pure, no LLM/HTTP): fail-closed plan parsing,
           # validate REFUSING a mission with any unsupported skill before any
           # motion, and THE single-door invariant in run_mission — motion routes

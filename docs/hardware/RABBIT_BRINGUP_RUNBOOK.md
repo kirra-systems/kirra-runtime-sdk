@@ -176,13 +176,34 @@ tuned. In order of impact:
    the directive. Validate on your model with `rabbit_model_smoketest.py` before
    relying on it (a model that ignores the field order simply falls back, losing
    only the speed-up). Off → byte-identical to today.
+7. **Ollama server tuning** (the memory-bandwidth levers). The Orin NX is
+   bandwidth-bound, so the remaining wins come from moving fewer bytes per token —
+   flash attention + an 8-bit KV cache + a single inference slot. These are
+   **ollama-server env flags, not per-request options**, so they ship as a staged
+   systemd drop-in `robot/install/kirra-ollama-tuning.conf` (`OLLAMA_FLASH_ATTENTION=1`,
+   `OLLAMA_KV_CACHE_TYPE=q8_0`, `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_MAX_LOADED_MODELS=1`,
+   `OLLAMA_KEEP_ALIVE`). Install it deliberately:
+   ```bash
+   sudo install -Dm0644 robot/install/kirra-ollama-tuning.conf \
+        /etc/systemd/system/ollama.service.d/kirra-tuning.conf
+   sudo systemctl daemon-reload && sudo systemctl restart ollama
+   ```
+   Gains are real but modest; measure a canned turn before/after. `q8_0` is
+   near-lossless — do not use `q4_*` for the router (a lossy KV cache can flip a
+   routing decision).
 
 Optionally cap the reply length with `KIRRA_RABBIT_NUM_PREDICT` — but see the
 warning in `rabbit.env.example`: too low TRUNCATES the router's `{say, directive}`
 JSON and fail-closes to a dropped drive command, so re-run
-`rabbit_model_smoketest.py` at your chosen value first. The router/persona system
-prompt is deliberately **not** trimmed for speed: its length is load-bearing
-correctness (the "never null a drive request" guardrail + the routing examples).
+`rabbit_model_smoketest.py` at your chosen value first. Likewise
+`KIRRA_RABBIT_NUM_CTX` caps the INPUT context window (smaller KV cache → faster
+prefill), but first check the effective size with `ollama ps` — only cap if it
+defaults large — and mind the same truncation caveat on the input side (it can
+drop the system prompt / history / telemetry). The router/persona system prompt
+is deliberately **not** trimmed for speed: its length is load-bearing correctness
+(the "never null a drive request" guardrail + the routing examples), and because
+it is a stable prefix Ollama already reuses its KV cache across turns, so it is
+not re-paid every turn.
 
 ---
 
