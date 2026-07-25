@@ -44,6 +44,10 @@ pub use semantic_eval::{
     DEFAULT_CLIP_TOL_M,
 };
 
+/// Object-goal resolution: a NAMED thing the operator asked for → a goal point.
+/// Deliberately separate from the drivability fusion above — see the module docs.
+pub mod object_goal;
+
 /// Minimal range-scan input — a `sensor_msgs/LaserScan` subset.
 ///
 /// Angles are measured from the ego **+X** axis (forward); **+Y** is left.
