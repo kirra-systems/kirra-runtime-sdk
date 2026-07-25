@@ -36,6 +36,7 @@ setup(
             'perception_governor = kirra_safety.perception_governor:main',
             'doer_commander = kirra_safety.doer_commander:main',
             'occy_doer = kirra_safety.occy_doer:main',
+            'camera_detect = kirra_safety.camera_detect:main',
         ],
     },
 )

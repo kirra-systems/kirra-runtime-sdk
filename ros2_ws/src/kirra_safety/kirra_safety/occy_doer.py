@@ -26,6 +26,7 @@ the same `objects` list (richer than Taj's geometric clusters) — this node's s
 unchanged. Mick (the LLM) fits by publishing the goal/intent instead of RViz.
 """
 
+import json
 import math
 import time
 
@@ -35,10 +36,15 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Twist, PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
 
 from kirra_safety.doer_core import (
     yaw_from_quaternion, goal_to_base, goal_reached, decide, extend_corridor_back,
     staleness_budget_valid,
+)
+from kirra_safety.camera_detect_core import (
+    DEFAULT_CAMERA_MAX_AGE_MS, camera_perception_fields, object_goal_reached,
+    plan_object_goal_fields,
 )
 
 try:
@@ -116,6 +122,19 @@ class OccyDoer(Node):
         # Extend the corridor behind the robot so its footprint (which sits behind the lidar
         # at the origin) is contained — Taj only reports forward free space.
         self.declare_parameter('corridor_back_m', 0.5)
+        # --- camera channels (OPT-IN; default off = byte-identical prior behaviour) ---
+        # `camera_armed` arms the Taj Phase-B fusion, which is TIGHTEN-ONLY: camera
+        # detections may only SHORTEN the lidar corridor, never extend it. Armed but
+        # blind (detector down / unregistered depth) relays NO stamp, so Taj faults the
+        # channel and floors the speed cap — "the detector did not look" is never "clear".
+        self.declare_parameter('camera_armed', False)
+        self.declare_parameter('camera_detections_topic', '/camera_detect/detections')
+        self.declare_parameter('camera_max_age_ms', DEFAULT_CAMERA_MAX_AGE_MS)
+        # The object-goal channel ("drive to the red cup"). A phrase published here is
+        # reduced to the one colour term the classical detector can ground and sent as
+        # `object_goal`; the planner resolves it against `targets` and fails closed.
+        # Empty string clears it. This is a DESTINATION, never a drivability claim.
+        self.declare_parameter('object_goal_topic', '/object_goal')
 
         self._taj = self.get_parameter('taj_url').value.rstrip('/')
         self._planner = self.get_parameter('planner_url').value.rstrip('/')
@@ -153,14 +172,25 @@ class OccyDoer(Node):
             'lateral_clearance_target_m': self.get_parameter('lateral_clearance_target_m').value,
         }
 
+        self._camera_armed = bool(self.get_parameter('camera_armed').value)
+        self._camera_max_age_ms = int(self.get_parameter('camera_max_age_ms').value)
+
         self._pose = None         # (x, y, yaw, speed)
         self._goal = None         # (x, y) in the odom/world frame
         self._scan = None         # (LaserScan, monotonic_recv_time)
+        self._camera = None       # the latest detector frame (dict), or None
+        self._object_goal = None  # the operator's requested thing, e.g. "red cup"
+        self._object_refusal = None   # last refusal reason, logged once
+        self._camera_healthy = True   # last reported channel health, logged on change
 
         self._pub = self.create_publisher(Twist, self.get_parameter('cmd_topic').value, 10)
         self.create_subscription(Odometry, self.get_parameter('odom_topic').value, self._on_odom, 20)
         self.create_subscription(PoseStamped, self.get_parameter('goal_topic').value, self._on_goal, 10)
         self.create_subscription(LaserScan, self.get_parameter('scan_topic').value, self._on_scan, SCAN_QOS)
+        self.create_subscription(
+            String, self.get_parameter('camera_detections_topic').value, self._on_camera, 10)
+        self.create_subscription(
+            String, self.get_parameter('object_goal_topic').value, self._on_object_goal, 10)
         self.create_timer(1.0 / self.get_parameter('plan_hz').value, self._tick)
 
         if not REQUESTS_AVAILABLE:
@@ -184,6 +214,22 @@ class OccyDoer(Node):
 
     def _on_scan(self, msg: LaserScan):
         self._scan = (msg, time.monotonic())
+
+    def _on_camera(self, msg: String):
+        """Store the detector frame. Undecodable JSON drops it (armed -> faults)."""
+        try:
+            frame = json.loads(msg.data)
+        except (ValueError, TypeError):
+            self._camera = None
+            return
+        self._camera = frame if isinstance(frame, dict) else None
+
+    def _on_object_goal(self, msg: String):
+        phrase = (msg.data or '').strip()
+        self._object_goal = phrase or None
+        self._object_refusal = None
+        self.get_logger().info(
+            f'object goal: {self._object_goal!r}' if self._object_goal else 'object goal cleared')
 
     # --- Mick intent consumption (intents, never commands) -------------------
     def _poll_mick(self):
@@ -234,31 +280,78 @@ class OccyDoer(Node):
         if not REQUESTS_AVAILABLE:
             return self._hold('no-requests')
         self._poll_mick()
-        if self._pose is None or self._goal is None:
-            return self._hold('awaiting pose/goal')
+        if self._pose is None:
+            return self._hold('awaiting pose')
+        if self._goal is None and self._object_goal is None:
+            return self._hold('awaiting goal')
         if self._scan is None or (time.monotonic() - self._scan[1]) > self._scan_stale_s:
             return self._hold('stale-scan')  # fail-soft: no fresh perception → hold
 
         rx, ry, ryaw, speed = self._pose
-        gx, gy = goal_to_base(rx, ry, ryaw, self._goal[0], self._goal[1])
-        if goal_reached(gx, gy, self._goal_tol):
-            return self._hold('goal-reached')
+        # The positional goal (if any). With an object goal set, the planner ignores
+        # this in favour of the camera-grounded one — but every numeric field must
+        # still be finite, so the ego is the neutral placeholder.
+        if self._goal is not None:
+            gx, gy = goal_to_base(rx, ry, ryaw, self._goal[0], self._goal[1])
+            if self._object_goal is None and goal_reached(gx, gy, self._goal_tol):
+                return self._hold('goal-reached')
+        else:
+            gx, gy = 0.0, 0.0
 
         scan = self._scan[0]
+        # ONE clock domain for every stamp in the request (AOU-TIMESYNC-001): the
+        # scan's own header stamp is `now_ms` for the camera-freshness comparison,
+        # so a camera stamp from the same ROS clock is judged correctly. Phase A is
+        # unaffected (it derives age as now_ms - scan.stamp_ms, i.e. zero either way).
+        scan_stamp_ms = int(scan.header.stamp.sec * 1000
+                            + scan.header.stamp.nanosec // 1_000_000)
+
+        # The object-goal channel decides BEFORE any request goes out: a refusal is
+        # a hold, never a quiet fall-back to some other goal.
+        if object_goal_reached(self._object_goal, self._camera, self._goal_tol):
+            return self._hold('object-goal-reached')
+        goal_fields, refusal = plan_object_goal_fields(
+            self._object_goal, self._camera, scan_stamp_ms)
+        if refusal:
+            if refusal != self._object_refusal:
+                self._object_refusal = refusal
+                self.get_logger().warn(f'object goal {self._object_goal!r}: {refusal}')
+            return self._hold(f'object-goal-refused:{refusal}')
+        self._object_refusal = None
+
         try:
-            taj = requests.post(f'{self._taj}/perception', timeout=self._timeout_s, json={
+            perception = {
                 'angle_min_rad': float(scan.angle_min),
                 'angle_increment_rad': float(scan.angle_increment),
                 'range_min_m': float(scan.range_min),
                 'range_max_m': float(scan.range_max),
                 'ranges': [float(r) for r in scan.ranges],
-                'stamp_ms': 0, 'forward_extent_m': self._extent,
-            }).json()
+                'stamp_ms': scan_stamp_ms, 'forward_extent_m': self._extent,
+            }
+            # Camera Phase-B (tighten-only). Disarmed → this is {'camera_armed': False}
+            # and the endpoint is byte-identical to the lidar-only path.
+            perception.update(camera_perception_fields(
+                self._camera_armed, self._camera, self._camera_max_age_ms))
+            taj = requests.post(
+                f'{self._taj}/perception', timeout=self._timeout_s, json=perception).json()
+            if self._camera_armed:
+                # Taj already floored the speed cap; say so once per transition so an
+                # operator sees WHY the robot crawled rather than guessing — and once
+                # per transition rather than every tick, so the log stays readable.
+                healthy = taj.get('camera_healthy') is not False
+                if healthy != self._camera_healthy:
+                    self._camera_healthy = healthy
+                    if healthy:
+                        self.get_logger().info('camera channel healthy again')
+                    else:
+                        self.get_logger().warn(
+                            'camera channel unhealthy — Taj floored the speed cap '
+                            '(no usable frame: detector down, stale, or blind)')
 
             # Extend the Taj corridor behind the robot (footprint containment) and tell the
             # checker the robot's real size, so KIRRA judges a robot — not a 4.8 m car.
             left, right = extend_corridor_back(taj.get('left', []), taj.get('right', []), self._back_m)
-            plan = requests.post(f'{self._planner}/plan', timeout=self._timeout_s, json={
+            plan_req = {
                 'ego': {'x': 0.0, 'y': 0.0, 'heading': 0.0, 'speed': float(speed)},
                 'goal': {'x': gx, 'y': gy},
                 'cruise': self._cruise,
@@ -266,7 +359,11 @@ class OccyDoer(Node):
                 'right': right,
                 'objects': taj.get('objects', []),
                 'vehicle': self._vehicle,
-            }).json()
+            }
+            if goal_fields:
+                plan_req.update(goal_fields)
+            plan = requests.post(
+                f'{self._planner}/plan', timeout=self._timeout_s, json=plan_req).json()
         except Exception as e:  # noqa: BLE001 — any fault holds (fail-soft)
             return self._hold(f'service-error:{e}')
 

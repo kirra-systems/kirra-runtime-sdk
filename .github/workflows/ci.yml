@@ -1357,7 +1357,9 @@ jobs:
           # fail-closed cores are deliberately rclpy-free): enforcement
           # decision, the A3 wheelbase cross-check, the ADR-0033 release-frame
           # carriage (strict 32/96 parse, never slice/pad), perception cap,
-          # and the doer geometry + staleness-budget validation.
+          # the doer geometry + staleness-budget validation, and the classical-CV
+          # camera detector core (pixel->ego projection, colour grounding, and the
+          # fail-closed "a frame I could not see is not `clear`" stamp rule).
           python3 -m pip install --quiet pytest
           python3 -m pytest ros2_ws/src/kirra_safety/test/ -q
       - name: Install cargo-audit

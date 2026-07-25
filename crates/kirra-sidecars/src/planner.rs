@@ -28,6 +28,10 @@ use kirra_planner::{
     plan_for_intent, EgoState, FleetPosture, GeometricPlanner, GeometricPlannerConfig, Goal,
     MickIntent, PlanInput, Pose, ProposalKind,
 };
+use kirra_taj::object_goal::{
+    resolve_object_goal, LabeledTarget, DEFAULT_GOAL_MAX_AGE_MS, DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_TIE_EPSILON_M,
+};
 use kirra_trajectory::corridor::{CorridorSource, Point};
 use kirra_trajectory::state::{PerceivedObject, TrajectoryVerdict};
 use kirra_trajectory::validation::validate_trajectory_slow_explained;
@@ -85,6 +89,41 @@ pub struct PlanRequest {
     /// behavior, byte-identical).
     #[serde(default)]
     pub intent: Option<serde_json::Value>,
+    /// **Object goal** (OPT-IN) — the operator's requested thing, e.g. `"red cup"`.
+    /// Resolved against `targets` into a plain `GoTo`, so it is a DESTINATION and
+    /// asserts nothing about drivability (`kirra_taj::object_goal`). Absent →
+    /// byte-identical prior behaviour. Supplying BOTH this and `intent` is a
+    /// rejected ambiguity (two goal sources), never a silent precedence rule.
+    #[serde(default)]
+    pub object_goal: Option<String>,
+    /// Camera-detected LABELLED things, in the **ego frame** (+X forward, +Y left) —
+    /// the goal channel's input. Not a drivability claim; the corridor still comes
+    /// from lidar (see `taj::CameraDetection` for the drivability channel).
+    #[serde(default)]
+    pub targets: Vec<TargetReq>,
+    /// Producer stamp of the camera frame `targets` came from. Absent while
+    /// `object_goal` is set → refused as STALE ("the detector did not look" is
+    /// never "it isn't there").
+    #[serde(default)]
+    pub targets_stamp_ms: Option<u64>,
+    /// Consumer clock for the freshness check. Absent → the frame's own stamp
+    /// (age 0), matching this service's stateless convention where wall-clock
+    /// staleness is the caller's job.
+    #[serde(default)]
+    pub now_ms: Option<u64>,
+}
+
+/// One labelled camera target on the wire — see [`PlanRequest::targets`].
+#[derive(Deserialize)]
+pub struct TargetReq {
+    pub label: String,
+    pub x: f64,
+    pub y: f64,
+    #[serde(default = "default_target_confidence")]
+    pub confidence: f32,
+}
+fn default_target_confidence() -> f32 {
+    1.0
 }
 fn default_cruise() -> f64 {
     10.0
@@ -320,7 +359,62 @@ fn validate_in_map(req: &PlanRequest, target: (f64, f64)) -> Result<(), SeamReje
 /// (the ONE fail-closed parse — a rejected intent is a [`SeamRejection`],
 /// never a fallback to the request goal), else a `GoTo` at the request goal
 /// (the pre-intent behavior).
+/// Resolve an `object_goal` request ("drive to the red cup") into a plain
+/// `MickIntent::GoTo`.
+///
+/// 🔴 The resolved point is a DESTINATION ONLY — it makes no drivability claim.
+/// The corridor still comes from lidar and the checker still bounds the
+/// trajectory, so a target that is visible but unreachable yields a plan that
+/// stops short rather than one that drives at it. Emitting an ordinary `GoTo`
+/// (rather than a new intent variant) is what keeps that true: nothing
+/// downstream can tell this goal came from a camera.
+///
+/// The resolver works in the EGO frame; `GoTo` is world-framed, so the goal is
+/// transformed through the ego pose (`ObjectGoal::to_world`). Every refusal is
+/// fail-closed → `SeamRejection` → NO MOTION, carrying the stable machine code
+/// plus the operator sentence for narration.
+fn object_goal_intent(req: &PlanRequest, label: &str) -> Result<MickIntent, SeamRejection> {
+    if req.intent.is_some() {
+        return Err(SeamRejection {
+            code: "PLAN_AMBIGUOUS_GOAL_SOURCE",
+            detail: "both `intent` and `object_goal` were supplied — refusing rather \
+                     than silently preferring one; NO MOTION"
+                .to_string(),
+        });
+    }
+    let targets: Vec<LabeledTarget> = req
+        .targets
+        .iter()
+        .map(|t| LabeledTarget {
+            label: t.label.clone(),
+            x_m: t.x,
+            y_m: t.y,
+            confidence: t.confidence,
+        })
+        .collect();
+    // Stateless freshness: absent consumer clock → the frame's own stamp (age 0).
+    let now = req.now_ms.or(req.targets_stamp_ms).unwrap_or(0);
+    let goal = resolve_object_goal(
+        label,
+        &targets,
+        req.targets_stamp_ms,
+        now,
+        DEFAULT_GOAL_MAX_AGE_MS,
+        DEFAULT_MIN_CONFIDENCE,
+        DEFAULT_TIE_EPSILON_M,
+    )
+    .map_err(|why| SeamRejection {
+        code: why.code(),
+        detail: kirra_taj::object_goal::refusal_sentence(label, why),
+    })?;
+    let (x_m, y_m) = goal.to_world(req.ego.x, req.ego.y, req.ego.heading);
+    Ok(MickIntent::GoTo { x_m, y_m })
+}
+
 fn effective_intent(req: &PlanRequest) -> Result<MickIntent, SeamRejection> {
+    if let Some(label) = req.object_goal.as_deref() {
+        return object_goal_intent(req, label);
+    }
     match &req.intent {
         None => Ok(MickIntent::GoTo {
             x_m: req.goal.x,
@@ -502,6 +596,12 @@ mod tests {
             objects: vec![],
             vehicle: None,
             intent: None,
+            // Object-goal channel off by default, so every pre-existing
+            // assertion still describes the plain-goal path.
+            object_goal: None,
+            targets: vec![],
+            targets_stamp_ms: None,
+            now_ms: None,
         }
     }
 
@@ -537,6 +637,93 @@ mod tests {
             r#"{"intent":"go_to","x_m":40.0,"y_m":0.0}"#
         ));
         handle_plan(&req).expect("string-embedded intent admits");
+    }
+
+    // ---- object goal: "drive to the red cup" -------------------------------
+
+    fn target(label: &str, x: f64, y: f64) -> TargetReq {
+        TargetReq {
+            label: label.into(),
+            x,
+            y,
+            confidence: 0.9,
+        }
+    }
+
+    /// The end-to-end shape of "drive to the red cup": a named camera target
+    /// becomes an ordinary `GoTo` and is planned + checked like any other goal.
+    #[test]
+    fn object_goal_grounds_a_named_target_as_a_plain_goto() {
+        let mut req = base_request();
+        req.object_goal = Some("red cup".into());
+        req.targets = vec![target("red cup", 30.0, 0.0)];
+        req.targets_stamp_ms = Some(1_000);
+        req.now_ms = Some(1_000);
+        let resp = handle_plan(&req).expect("a seen, reachable cup plans");
+        assert!(
+            !resp.trajectory.is_empty(),
+            "an admitted plan carries its trajectory"
+        );
+    }
+
+    /// Every resolver refusal is fail-closed at the seam: NO MOTION, carrying the
+    /// stable `OBJECT_GOAL_*` code — never a silent fallback to the request goal.
+    #[test]
+    fn object_goal_refusals_fail_closed_to_no_motion() {
+        // Not seen.
+        let mut req = base_request();
+        req.object_goal = Some("red cup".into());
+        req.targets = vec![target("chair", 10.0, 0.0)];
+        req.targets_stamp_ms = Some(1_000);
+        let e = handle_plan(&req).expect_err("an unseen target must refuse");
+        assert_eq!(e.code, "OBJECT_GOAL_NOT_SEEN");
+
+        // Armed but no camera frame → stale, never "it isn't there".
+        let mut req = base_request();
+        req.object_goal = Some("red cup".into());
+        req.targets = vec![target("red cup", 10.0, 0.0)];
+        req.targets_stamp_ms = None;
+        assert_eq!(
+            handle_plan(&req).expect_err("no frame must refuse").code,
+            "OBJECT_GOAL_STALE"
+        );
+
+        // A red request must never drive to a blue cup.
+        let mut req = base_request();
+        req.object_goal = Some("red cup".into());
+        req.targets = vec![target("blue cup", 10.0, 0.0)];
+        req.targets_stamp_ms = Some(1_000);
+        assert_eq!(
+            handle_plan(&req)
+                .expect_err("wrong colour must refuse")
+                .code,
+            "OBJECT_GOAL_NOT_SEEN"
+        );
+    }
+
+    /// Two goal sources is an ambiguity we refuse rather than resolve by a silent
+    /// precedence rule.
+    #[test]
+    fn object_goal_plus_typed_intent_is_a_refused_ambiguity() {
+        let mut req = base_request();
+        req.object_goal = Some("red cup".into());
+        req.targets = vec![target("red cup", 30.0, 0.0)];
+        req.targets_stamp_ms = Some(1_000);
+        req.intent = Some(serde_json::json!({"intent":"go_to","x_m":40.0,"y_m":0.0}));
+        assert_eq!(
+            handle_plan(&req)
+                .expect_err("two goal sources must refuse")
+                .code,
+            "PLAN_AMBIGUOUS_GOAL_SOURCE"
+        );
+    }
+
+    /// Absent `object_goal` leaves the endpoint byte-identical to its prior form.
+    #[test]
+    fn no_object_goal_is_unchanged_behaviour() {
+        let req = base_request();
+        assert!(req.object_goal.is_none() && req.targets.is_empty());
+        handle_plan(&req).expect("the plain-goal path still plans");
     }
 
     #[test]
