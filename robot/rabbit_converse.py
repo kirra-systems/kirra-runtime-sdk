@@ -55,6 +55,7 @@ import turn_state  # noqa: E402 — cross-process "turn in progress" signal (Sli
 import skill_registry  # noqa: E402 — opt-in named-skill router (motion → the SAME /intent fence)
 import world_model  # noqa: E402 — opt-in situation report (read-only TTL'd projection)
 import mission  # noqa: E402 — opt-in multi-step Executive (each step → the SAME /intent fence)
+import rabbit_stream  # noqa: E402 — opt-in first-clause streaming of the reply to TTS
 from rabbit_persona import name_slot, operator_name  # noqa: E402
 
 MAX_TURNS = 10  # rolling conversation memory (user+assistant pairs kept)
@@ -102,6 +103,29 @@ STAGE2_SYSTEM = (
     '  creep forward one meter  -> {"say": "Creeping forward a meter; the checker will bound it.", "directive": "creep forward one meter"}\n'
     '  take us to the door      -> {"say": "Heading for the door.", "directive": "take us to the door"}\n'
     '  what do you see?         -> {"say": "Nearest obstacle is about two meters ahead.", "directive": null}'
+)
+
+# Streaming reply-to-TTS (Slice T, OPT-IN via KIRRA_RABBIT_STREAM_TTS). Default
+# OFF → this whole block is inert and the turn path is byte-identical. When ON,
+# the router uses a DIRECTIVE-FIRST variant of the SAME contract so the routing
+# decision is known BEFORE any speech: a CHAT turn streams its `say` aloud clause
+# by clause as the model generates it (the latency win); a DRIVE turn voices
+# nothing until the door has decided, exactly as today. All the routing
+# guardrails above are preserved verbatim — only the field ORDER changes — and
+# any non-directive-first / malformed reply falls back to the normal path, so
+# streaming can only match or beat current behaviour, never alter routing.
+STREAM_TTS = (os.environ.get("KIRRA_RABBIT_STREAM_TTS") or "").strip().lower() in \
+    ("1", "true", "yes", "on")
+
+STAGE2_SYSTEM_STREAM = (
+    STAGE2_SYSTEM
+    + "\n\nOUTPUT ORDER (IMPORTANT): put the `directive` field FIRST and `say` "
+    "SECOND, so the object reads {\"directive\": <null or the request>, \"say\": "
+    "\"...\"}. The routing decision must precede the spoken words. Everything else "
+    "above — when to set `directive`, never nulling a drive request — is unchanged.\n"
+    "Examples:\n"
+    '  creep forward one meter  -> {"directive": "creep forward one meter", "say": "Creeping forward a meter; the checker will bound it."}\n'
+    '  what do you see?         -> {"directive": null, "say": "Nearest obstacle is about two meters ahead."}'
 )
 
 
@@ -233,6 +257,70 @@ def _speak_reply(text):
                                  barge_in.make_file_cancel_check(path, baseline))
 
 
+def _stream_messages(history, context, utterance):
+    """Router messages for the streaming path — identical to ask_llm's, but with
+    the DIRECTIVE-FIRST system prompt so routing resolves before the spoken words."""
+    return ([{"role": "system", "content": STAGE2_SYSTEM_STREAM}] + list(history)
+            + [{"role": "user", "content": f"{context}\n\nOperator says: {utterance}"}])
+
+
+def _make_stream_speaker():
+    """(speak_clause, cancelled): speak streamed clauses sharing ONE barge-in
+    baseline for the whole reply, so a single barge-in stops the REST of it (no
+    regression vs the single-call _speak_reply). Off → plain speak()."""
+    if not barge_in.enabled():
+        return (lambda text: speak(text)), (lambda: False)
+    tts_argv = (os.environ.get("KIRRA_TTS_CMD") or "").split()
+    path = barge_in.signal_path()
+    cancel_check = barge_in.make_file_cancel_check(path, barge_in.read_epoch(path))
+    state = {"cancelled": False}
+
+    def speak_clause(text):
+        if state["cancelled"] or cancel_check():
+            state["cancelled"] = True
+            return
+        barge_in.speak_interruptible(text, tts_argv, cancel_check)
+        if cancel_check():
+            state["cancelled"] = True
+
+    return speak_clause, (lambda: state["cancelled"])
+
+
+def route_stream(messages, on_clause, cancelled):
+    """Stream the router reply, speaking CHAT clauses via on_clause as they arrive.
+    Returns the parser's finish() plan (with `raw` for the caller's fallback
+    parse), or None on any HTTP/stream failure → caller falls back to ask_llm.
+    A DRIVE turn speaks nothing (the parser emits no clauses before routing)."""
+    parser = rabbit_stream.StreamingSayParser()
+    try:
+        with requests.post(f"{OLLAMA}/api/chat", timeout=60.0, stream=True,
+                           json={"model": MODEL, "stream": True, "messages": messages,
+                                 "keep_alive": KEEP_ALIVE, "options": ROUTER_LLM_OPTIONS}) as r:
+            if r.status_code != 200:
+                return None
+            for line in r.iter_lines():
+                if cancelled():
+                    break
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                piece = (obj.get("message") or {}).get("content") or ""
+                if piece:
+                    for clause in parser.feed(piece):
+                        on_clause(clause)
+                if obj.get("done"):
+                    break
+    except Exception:  # noqa: BLE001 — any streaming failure → non-streaming fallback
+        return None
+    plan = parser.finish()
+    for clause in plan["trailing"]:
+        on_clause(clause)
+    return plan
+
+
 def handle_turn(history, utterance):
     # System commands (OTA "check/apply update") are matched DETERMINISTICALLY and
     # handled BEFORE the LLM/movement path — they run local kirra-ota-ctl, never
@@ -332,7 +420,24 @@ def handle_turn(history, utterance):
         del history[: max(0, len(history) - 2 * MAX_TURNS)]
         return
 
-    say, directive = ask_llm(history, context, utterance)
+    # Default free-form {say, directive} router. Streaming (opt-in) voices a CHAT
+    # reply clause-by-clause as it generates; a DRIVE turn and every failure mode
+    # fall through to the exact non-streaming path below. `already_spoken` marks a
+    # CHAT reply that streaming has already voiced (so we don't say it twice).
+    say = directive = None
+    already_spoken = False
+    if STREAM_TTS:
+        speak_clause, cancelled = _make_stream_speaker()
+        plan = route_stream(_stream_messages(history, context, utterance),
+                            speak_clause, cancelled)
+        if plan is not None:
+            # parse_reply is ALWAYS the authority on the directive (fail-closed);
+            # streaming only decides whether `say` was voiced early.
+            say, directive = parse_reply(plan["raw"])
+            already_spoken = bool(plan.get("streamed")) and directive is None
+    if say is None and directive is None and not already_spoken:
+        say, directive = ask_llm(history, context, utterance)   # non-streaming / fallback
+
     if say is None:
         say = "My voice module is offline for a moment."
         directive = None
@@ -346,10 +451,13 @@ def handle_turn(history, utterance):
                       "safe destination — could you say it another way?")
         else:  # error
             spoken = "I can't reach my driving control right now, so I'm staying put."
+    elif already_spoken:
+        spoken = say                       # a CHAT reply streaming already voiced
     else:
         spoken = say
 
-    _speak_reply(spoken)
+    if not already_spoken:
+        _speak_reply(spoken)
     # rolling memory (store the spoken reply, not the raw grounding)
     history.append({"role": "user", "content": utterance})
     history.append({"role": "assistant", "content": spoken})
