@@ -115,29 +115,94 @@ Response gains `camera_healthy` and `camera_clip_x_m` (where the fusion clipped,
 3. **Arm it** — send `camera_armed: true` with a stamped frame. Start with the
    channel **disarmed** and confirm parity with lidar-only, then arm.
 
-## Detector: what produces the detections
+## The detector (shipped: classical CV)
 
-The `SemanticDetector` seam (`kirra_taj`) is detector-agnostic — anything that
-produces ego-frame regions plugs in. Practical options, in the order they make
-sense on an Orin NX:
+`camera_detect` (`ros2_ws/src/kirra_safety/kirra_safety/camera_detect.py`) is the
+producer. Split the house way: every decision that could affect motion lives in
+the **pure core** `camera_detect_core.py` (stdlib only — no rclpy, cv2, numpy or
+camera, host-tested in `test/test_camera_detect_core.py`), and the node does only
+the pixel work (HSV threshold → morphology → connected components, plus a coarse
+depth grid).
 
-- **Classical CV (recommended first).** Depth + colour/blob segmentation via
-  OpenCV: fast enough for the per-tick loop, deterministic, testable, no model to
-  ship. Sufficient for both the drivability classes and a coloured-object goal
-  ("red cup").
+```
+camera_detect ──/camera_detect/detections (JSON)──▶ occy_doer
+                                                      ├─ POST /perception  detections  (tighten-only)
+                                                      └─ POST /plan        object_goal + targets
+```
+
+Run it:
+
+```bash
+ros2 run kirra_safety camera_detect --ros-args \
+  -p colours:="['red','blue']" \
+  -p mount_x_m:=0.10 -p mount_z_m:=0.20 -p mount_pitch_deg:=15.0
+```
+
+🔴 **HONEST SCOPE — the classical detector grounds colour, not nouns.** It can
+confirm "there is a red thing at 2.4 m"; it cannot confirm the thing is a *cup*.
+So `colour_term("red cup") -> "red"` and the emitted target label is the colour
+term. Labelling a red blob `"red cup"` would be a fabrication, so the code
+refuses to; verifying the noun is what the ML tier is for.
+
+Its own fail-closed rules (each tested):
+
+| Situation | Behaviour |
+|---|---|
+| Blob with no valid depth / non-finite maths | dropped — never a guessed range |
+| Blob that projects behind the ego (`x <= 0`) | dropped — not a destination |
+| Unknown colour token | refused |
+| Depth not registered to colour (different sizes) | frame refused — a wrong depth would put the target metres off |
+| Depth frame mostly INVALID (`frame_valid_fraction` below floor) | **stamp withheld** → the consumer's channel faults → MRC floor |
+| No known colour configured at startup | node refuses to start (an empty `targets` forever would read as "the object is not there") |
+
+Other detector tiers, when the classical one is not enough:
+
 - **ML detector (ADR-0015's plan).** An RGB detector through
-  `parko-onnx --features cuda` / `parko-tensorrt`. General labels; needs the CUDA
-  path (see `docs/hardware/JETSON_CUDA_SETUP.md`) and a model.
+  `parko-onnx --features cuda` / `parko-tensorrt`. General labels — this is the
+  tier that can verify the noun; needs the CUDA path (see
+  `docs/hardware/JETSON_CUDA_SETUP.md`) and a model.
 - **VLM (`gemma3:4b` is multimodal).** Good for *conversation* ("what do you
   see?") — Channel A. **Not** for the control loop: seconds-scale latency, not
   per-tick safe, and never a drivability authority.
 
+## The consumer hop (`occy_doer`)
+
+Both channels are **opt-in**; with the defaults the endpoint is byte-identical to
+the lidar-only path.
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `camera_armed` | `false` | Arms the Taj Phase-B fusion (tighten-only). |
+| `camera_detections_topic` | `/camera_detect/detections` | Where the detector frame arrives. |
+| `camera_max_age_ms` | 500 | Relayed freshness budget. |
+| `object_goal_topic` | `/object_goal` | A `std_msgs/String` phrase; empty clears. |
+
+Relay discipline: the doer is a **faithful relay, not a second opinion.**
+Freshness is Taj's call, so the doer sends the scan's own ROS header stamp as
+`stamp_ms` and the depth frame's as `camera_stamp_ms` — **one clock domain**, per
+`AOU-TIMESYNC-001`. Armed with no usable frame ⇒ armed but *no stamp* ⇒ Taj
+resolves Faulted ⇒ speed cap floored.
+
+Object-goal flow, all fail-closed:
+
+- The phrase is reduced to its colour term; ungroundable (`"cup"`) or ambiguous
+  (`"red blue thing"`) ⇒ **hold**, logged once, never a fall-back to another goal.
+- No usable camera frame ⇒ hold.
+- Otherwise `object_goal` + `targets` + `targets_stamp_ms` + `now_ms` go to
+  `/plan`, which resolves and refuses on its own terms (not seen / low confidence
+  / ambiguous / stale / behind ego).
+- **Arrival** is latched by `object_goal_reached` on the same tolerance the
+  positional goal uses. Without it the loop oscillates at close range: the target
+  leaves the detector's usable band, the planner refuses, the doer holds, the
+  target reappears, the robot nudges. Arrival is a *positive* claim — not-seen
+  falls through to the planner's refusal rather than reporting "we are there".
+
 ## What is NOT wired yet
 
-- The detector itself (above) — the seam is live, the producer is the remaining work.
-- The ROS 2 node hop that fills `detections` on each `/perception` POST.
 - Camera frames into rabbit/mick for conversation (Channel A; `gemma3:4b` accepts
   images via Ollama, so this is a doer-side UX addition with no safety surface).
+- A launch file wiring `camera_detect` into the R2 stack (run it standalone for
+  bring-up; the vendor camera node comes up separately either way).
 
 ## The object-goal call site (`POST /plan`, planner_service)
 
