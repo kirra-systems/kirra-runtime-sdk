@@ -88,6 +88,43 @@ pub const DEFAULT_GOAL_MAX_AGE_MS: u64 = 750;
 /// Minimum detector confidence for a target to be drivable-to as a GOAL.
 pub const DEFAULT_MIN_CONFIDENCE: f32 = 0.40;
 
+/// Two matches whose ranges differ by less than this are "equally near" → ambiguous.
+pub const DEFAULT_TIE_EPSILON_M: f64 = 0.25;
+
+impl GoalRefusal {
+    /// Stable machine code for a refusal — the narration/telemetry counterpart of
+    /// the checker's `TRAJECTORY_*` reason codes.
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            GoalRefusal::NoRequestedLabel => "OBJECT_GOAL_NO_LABEL",
+            GoalRefusal::NotSeen => "OBJECT_GOAL_NOT_SEEN",
+            GoalRefusal::LowConfidence => "OBJECT_GOAL_LOW_CONFIDENCE",
+            GoalRefusal::Ambiguous => "OBJECT_GOAL_AMBIGUOUS",
+            GoalRefusal::Stale => "OBJECT_GOAL_STALE",
+            GoalRefusal::NonFinite => "OBJECT_GOAL_NON_FINITE",
+            GoalRefusal::BehindEgo => "OBJECT_GOAL_BEHIND_EGO",
+        }
+    }
+}
+
+impl ObjectGoal {
+    /// Ego-frame → world-frame, for callers whose goal type is world-framed (the
+    /// planner's `GoTo`). Standard 2-D rigid transform about the ego pose:
+    /// `world = ego_xy + R(heading) · ego_frame_xy`.
+    ///
+    /// Getting this wrong would aim the robot at the wrong place, so it is a
+    /// named, tested function rather than inline arithmetic at the call site.
+    #[must_use]
+    pub fn to_world(&self, ego_x_m: f64, ego_y_m: f64, ego_heading_rad: f64) -> (f64, f64) {
+        let (s, c) = ego_heading_rad.sin_cos();
+        (
+            ego_x_m + self.x_m * c - self.y_m * s,
+            ego_y_m + self.x_m * s + self.y_m * c,
+        )
+    }
+}
+
 /// Does `label` satisfy the operator's `requested` phrase?
 ///
 /// Deliberately simple + predictable (no fuzzy matching): every whitespace token
@@ -348,6 +385,63 @@ mod tests {
     }
 
     // ---- narration ----------------------------------------------------------
+
+    // ---- ego → world transform ---------------------------------------------
+
+    #[test]
+    fn to_world_at_origin_heading_zero_is_identity() {
+        let g = ObjectGoal {
+            label: "cup".into(),
+            x_m: 2.0,
+            y_m: 0.5,
+            confidence: 0.9,
+        };
+        let (x, y) = g.to_world(0.0, 0.0, 0.0);
+        assert!((x - 2.0).abs() < 1e-9 && (y - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn to_world_rotates_and_translates() {
+        // Ego at (10, 5) facing +90° (north): a target 2 m AHEAD of the ego lands
+        // 2 m north of the ego, i.e. (10, 7).
+        let g = ObjectGoal {
+            label: "cup".into(),
+            x_m: 2.0,
+            y_m: 0.0,
+            confidence: 0.9,
+        };
+        let (x, y) = g.to_world(10.0, 5.0, std::f64::consts::FRAC_PI_2);
+        assert!((x - 10.0).abs() < 1e-9, "x={x}");
+        assert!((y - 7.0).abs() < 1e-9, "y={y}");
+        // A target 1 m to the ego's LEFT while facing north lands 1 m WEST (-x).
+        let l = ObjectGoal {
+            label: "cup".into(),
+            x_m: 0.0,
+            y_m: 1.0,
+            confidence: 0.9,
+        };
+        let (lx, ly) = l.to_world(10.0, 5.0, std::f64::consts::FRAC_PI_2);
+        assert!((lx - 9.0).abs() < 1e-9, "lx={lx}");
+        assert!((ly - 5.0).abs() < 1e-9, "ly={ly}");
+    }
+
+    #[test]
+    fn every_refusal_has_a_stable_code() {
+        let mut seen = std::collections::HashSet::new();
+        for why in [
+            GoalRefusal::NoRequestedLabel,
+            GoalRefusal::NotSeen,
+            GoalRefusal::LowConfidence,
+            GoalRefusal::Ambiguous,
+            GoalRefusal::Stale,
+            GoalRefusal::NonFinite,
+            GoalRefusal::BehindEgo,
+        ] {
+            let c = why.code();
+            assert!(c.starts_with("OBJECT_GOAL_"), "{why:?} -> {c}");
+            assert!(seen.insert(c), "duplicate code {c}");
+        }
+    }
 
     #[test]
     fn every_refusal_has_an_operator_sentence() {

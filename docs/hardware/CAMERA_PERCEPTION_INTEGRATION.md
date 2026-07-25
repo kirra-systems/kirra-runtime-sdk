@@ -138,5 +138,31 @@ sense on an Orin NX:
 - The ROS 2 node hop that fills `detections` on each `/perception` POST.
 - Camera frames into rabbit/mick for conversation (Channel A; `gemma3:4b` accepts
   images via Ollama, so this is a doer-side UX addition with no safety surface).
-- The `object_goal` → `GoTo` call site in the mick/planner sidecar (the resolver
-  and its refusal narration are in place and tested).
+
+## The object-goal call site (`POST /plan`, planner_service)
+
+The resolver is **wired live** on the planner sidecar. Send a label plus the
+ego-frame targets the detector produced; the sidecar grounds it to a plain
+`MickIntent::GoTo` in world coordinates and runs the ordinary checker path:
+
+```jsonc
+{
+  "ego": { "x": 0.0, "y": 0.0, "heading": 0.0, "speed": 0.0 },
+  "object_goal": "red cup",
+  "targets": [ { "label": "red cup", "x": 2.4, "y": 0.3, "confidence": 0.9 } ],
+  "targets_stamp_ms": 1234500,
+  "now_ms": 1234600
+}
+```
+
+Fail-closed properties (each has a test):
+
+- `object_goal` **and** a typed `intent` in the same request → refused
+  (`PLAN_AMBIGUOUS_GOAL_SOURCE`); there is exactly one goal source per plan.
+- Every `GoalRefusal` (not seen / low confidence / ambiguous / stale /
+  non-finite / behind ego) → refusal, i.e. **no motion** — never a guessed goal.
+  `GoalRefusal::code()` gives the machine token, `refusal_sentence` the operator
+  sentence Rabbit can speak.
+- Absent `object_goal` → byte-identical prior behaviour.
+- The ego→world hop is `ObjectGoal::to_world(ego_x, ego_y, ego_heading)`; the
+  detector never has to know the world frame.
