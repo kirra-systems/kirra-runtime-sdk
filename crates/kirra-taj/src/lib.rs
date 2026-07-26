@@ -345,6 +345,27 @@ pub struct TajPhaseA {
     pub cfg: TajConfig,
 }
 
+/// Minimum positive longitudinal coordinate admitted into corridor-boundary
+/// extraction.
+///
+/// This rejects near-origin lateral returns that can collapse both boundaries at
+/// x≈0 while preserving genuine parallel side walls farther from the sensor.
+///
+/// This is separate from the sidecar's collision-object forward cone: corridor
+/// geometry and frontal collision-object gating have different semantics.
+const MIN_CORRIDOR_POINT_X_M: f64 = 0.15;
+
+/// Minimum lateral displacement for a lidar return to define a corridor side.
+///
+/// Returns near the vehicle centerline represent frontal obstacles. They remain
+/// available to object clustering and assured-clear-distance braking, but must
+/// not masquerade as left/right corridor walls and collapse the corridor to a
+/// few millimetres.
+///
+/// This value is below the R2 required half-width of 0.2515 m, so genuine
+/// passage boundaries near the vehicle envelope remain eligible.
+const MIN_CORRIDOR_BOUNDARY_ABS_Y_M: f64 = 0.26;
+
 impl TajPhaseA {
     #[must_use]
     pub fn new(cfg: TajConfig) -> Self {
@@ -428,8 +449,14 @@ impl TajPhaseA {
             let mut left_y = cap; // nearest left obstacle in this station's window
             let mut right_y = -cap; // nearest right obstacle
             for &(x, y) in points {
-                if x <= 0.0 || x > ext || (x - xs).abs() > step {
-                    continue; // forward cone, local window only
+                if !x.is_finite()
+                    || !y.is_finite()
+                    || x < MIN_CORRIDOR_POINT_X_M
+                    || y.abs() < MIN_CORRIDOR_BOUNDARY_ABS_Y_M
+                    || x > ext
+                    || (x - xs).abs() > step
+                {
+                    continue; // exclude rear and near-origin lateral returns
                 }
                 if y > 0.0 && y < left_y {
                     left_y = y;
@@ -590,8 +617,28 @@ impl TajTracker {
                 if used[j] {
                     continue;
                 }
+                let elapsed_ms = now_ms.saturating_sub(tr.stamp_ms);
+                if elapsed_ms == 0 {
+                    continue;
+                }
+
+                let dt_s = elapsed_ms as f64 / 1000.0;
+
+                // Bound association by physically plausible frame-to-frame
+                // motion while retaining the configured absolute ceiling.
+                //
+                // At the R2's normal ~100 ms scan interval this permits about
+                // 1.25 m, preserving the existing 10 m/s tracker tests while
+                // rejecting the larger cross-object jumps observed live.
+                const ASSOCIATION_JITTER_M: f64 = 0.25;
+                const MAX_ASSOCIATION_SPEED_MPS: f64 = 10.0;
+
+                let time_scaled_gate = ASSOCIATION_JITTER_M + MAX_ASSOCIATION_SPEED_MPS * dt_s;
+                let effective_gate = gate.min(time_scaled_gate);
+
                 let d = (obj.pos.x_m - tr.pos.x_m).hypot(obj.pos.y_m - tr.pos.y_m);
-                if d <= gate && best.is_none_or(|(_, bd)| d < bd) {
+
+                if d <= effective_gate && best.is_none_or(|(_, bd)| d < bd) {
                     best = Some((j, d));
                 }
             }
@@ -600,6 +647,7 @@ impl TajTracker {
                 Some((j, _)) => {
                     used[j] = true;
                     let tr = self.tracks[j];
+
                     let dt = f64::from(
                         u32::try_from(now_ms.saturating_sub(tr.stamp_ms)).unwrap_or(u32::MAX),
                     ) / 1000.0;
@@ -646,6 +694,7 @@ impl TajTracker {
                     obj.velocity_mps = 0.0;
                     obj.vel = Point { x_m: 0.0, y_m: 0.0 };
                     obj.heading_rad = 0.0;
+
                     next_tracks.push(Track {
                         id,
                         pos: obj.pos,
@@ -824,6 +873,73 @@ mod tests {
             "per-station boundary"
         );
         assert_eq!(out.corridor.age_ms(), 5);
+    }
+
+    #[test]
+    fn frontal_centerline_returns_do_not_become_corridor_walls() {
+        let taj = TajPhaseA::default();
+
+        // A real frontal obstacle around 0.57 m with tiny lateral variation.
+        // It must remain an object/ACD bound, but must not collapse the
+        // left/right corridor boundaries to millimetres.
+        let scan = scan_from(
+            10.0,
+            0,
+            |theta| {
+                if theta.abs() < 0.05 {
+                    Some(0.57)
+                } else {
+                    None
+                }
+            },
+        );
+
+        let out = taj.process(&scan, 0);
+        let left = out.corridor.left_boundary()[0].y_m;
+        let right = out.corridor.right_boundary()[0].y_m;
+        let width = left - right;
+
+        assert!(
+            width >= 0.503,
+            "frontal centerline return collapsed corridor width to {width}"
+        );
+
+        assert!(
+            out.objects.iter().any(|object| object.pos.x_m < 1.0),
+            "frontal return must remain represented as an object"
+        );
+    }
+
+    #[test]
+    fn near_origin_lateral_returns_do_not_collapse_the_corridor() {
+        let taj = TajPhaseA::default();
+
+        // Returns near ±87 degrees at 0.6 m have x≈0.03 m. They are beside the
+        // lidar origin, not usable forward corridor boundaries.
+        let scan = scan_from(
+            10.0,
+            0,
+            |theta| {
+                if theta.abs() > 1.50 {
+                    Some(0.60)
+                } else {
+                    None
+                }
+            },
+        );
+
+        let out = taj.process(&scan, 0);
+        let left = out.corridor.left_boundary()[0].y_m;
+        let right = out.corridor.right_boundary()[0].y_m;
+
+        assert!(
+            left > 1.0,
+            "near-origin lateral returns collapsed left boundary to {left}"
+        );
+        assert!(
+            right < -1.0,
+            "near-origin lateral returns collapsed right boundary to {right}"
+        );
     }
 
     #[test]

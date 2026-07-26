@@ -14,9 +14,9 @@ use std::net::{TcpListener, TcpStream};
 
 use kirra_sidecars::http::{read_request, respond, respond_error};
 use kirra_sidecars::net::{allow_nonlocal_from_env, enforce_bind_policy};
-use kirra_sidecars::taj::{handle_perception, PerceptionRequest};
+use kirra_sidecars::taj::{handle_perception_tracked, PerceptionRequest, TrackedPerceptionState};
 
-fn serve(mut stream: TcpStream) {
+fn serve(mut stream: TcpStream, perception_state: &mut TrackedPerceptionState) {
     let req = match read_request(&mut stream) {
         Ok(r) => r,
         Err(status) => return respond_error(&mut stream, status),
@@ -27,7 +27,8 @@ fn serve(mut stream: TcpStream) {
             Ok(p) => respond(
                 &mut stream,
                 "200 OK",
-                &serde_json::to_string(&handle_perception(&p)).unwrap_or_else(|_| "{}".into()),
+                &serde_json::to_string(&handle_perception_tracked(&p, perception_state))
+                    .unwrap_or_else(|_| "{}".into()),
             ),
             Err(e) => respond(
                 &mut stream,
@@ -54,9 +55,13 @@ fn main() {
         std::process::exit(1);
     });
     println!("Taj perception service on http://{addr}  (POST /perception, GET /health)");
+    // Single-threaded service: one deterministic tracker state persists
+    // across consecutive POST /perception requests.
+    let mut perception_state = TrackedPerceptionState::new();
+
     for stream in listener.incoming() {
         match stream {
-            Ok(s) => serve(s),
+            Ok(s) => serve(s, &mut perception_state),
             Err(e) => eprintln!("taj_service: accept error: {e}"),
         }
     }
