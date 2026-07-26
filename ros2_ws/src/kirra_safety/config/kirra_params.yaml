@@ -86,7 +86,7 @@ perception_governor:
     forward_extent_m: 8.0        # Taj geometric horizon (m)
     decel_mps2: 1.5              # assumed comfortable brake for the ACD cap
     margin_m: 0.4                # standoff distance (matches the checker's lateral margin)
-    lane_half_m: 0.6             # in-lane half-width for object gating (m)
+    lane_half_m: 0.26            # R2 width 0.203 m + 0.15 m clearance each side
     confidence_floor: 0.5        # corridor confidence below this -> unhealthy -> 0.0 cap
 
 sensor_monitor:

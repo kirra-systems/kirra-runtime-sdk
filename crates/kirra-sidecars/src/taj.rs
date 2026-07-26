@@ -103,6 +103,13 @@ pub struct PerceptionRequest {
     pub margin_m: f64,
     #[serde(default = "default_lane_half")]
     pub lane_half_m: f64,
+    /// Physical vehicle width used to validate whether the perceived corridor
+    /// can safely contain the platform.
+    #[serde(default = "default_vehicle_width")]
+    pub vehicle_width_m: f64,
+    /// Required free-space clearance on each side of the vehicle.
+    #[serde(default = "default_lateral_clearance")]
+    pub lateral_clearance_m: f64,
     #[serde(default = "default_floor")]
     pub confidence_floor: f32,
     /// Phase-B camera channel (OPT-IN). `false` (default) → the camera fusion
@@ -169,8 +176,143 @@ fn default_margin() -> f64 {
 fn default_lane_half() -> f64 {
     0.6
 }
+fn default_vehicle_width() -> f64 {
+    0.203
+}
+fn default_lateral_clearance() -> f64 {
+    0.15
+}
 fn default_floor() -> f32 {
     0.5
+}
+
+/// Maximum number of lidar rays accepted by the safety-facing perception
+/// endpoint.
+///
+/// This bounds request allocation and Phase-A processing work. The R2 TG30
+/// currently emits approximately 2,020 samples per scan, so 4,096 leaves
+/// platform headroom without permitting an unbounded request body to drive
+/// checker-adjacent WCET.
+const MAX_LIDAR_RAYS: usize = 4_096;
+
+/// Stable validation failures for malformed or contradictory perception input.
+///
+/// The HTTP endpoint currently returns a normal fail-closed response rather
+/// than exposing this code on the wire. Keeping the reason typed here makes the
+/// gate testable and ready for structured diagnostics without changing the
+/// existing response schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PerceptionRequestError {
+    InvalidAngleMinimum,
+    InvalidAngleIncrement,
+    InvalidRangeBounds,
+    EmptyScan,
+    ScanTooLarge,
+    NanRangeSample,
+    InvalidForwardExtent,
+    InvalidDeceleration,
+    InvalidMargin,
+    InvalidLaneHalfWidth,
+    InvalidVehicleWidth,
+    InvalidLateralClearance,
+    LaneNarrowerThanRequiredCorridor,
+    InvalidConfidenceFloor,
+}
+
+/// Validate all request-level assumptions before allocation, geometry
+/// processing or ACD arithmetic.
+///
+/// Positive infinity in `ranges` is intentionally accepted: ROS LaserScan uses
+/// it as a normal "no return" value. NaN is rejected because it represents an
+/// undecodable measurement rather than an absent return.
+fn validate_perception_request(req: &PerceptionRequest) -> Result<(), PerceptionRequestError> {
+    if !req.angle_min_rad.is_finite() {
+        return Err(PerceptionRequestError::InvalidAngleMinimum);
+    }
+
+    if !req.angle_increment_rad.is_finite() || req.angle_increment_rad == 0.0 {
+        return Err(PerceptionRequestError::InvalidAngleIncrement);
+    }
+
+    if !req.range_min_m.is_finite()
+        || !req.range_max_m.is_finite()
+        || req.range_min_m < 0.0
+        || req.range_max_m <= req.range_min_m
+    {
+        return Err(PerceptionRequestError::InvalidRangeBounds);
+    }
+
+    if req.ranges.is_empty() {
+        return Err(PerceptionRequestError::EmptyScan);
+    }
+
+    if req.ranges.len() > MAX_LIDAR_RAYS {
+        return Err(PerceptionRequestError::ScanTooLarge);
+    }
+
+    if req.ranges.iter().any(|range| range.is_nan()) {
+        return Err(PerceptionRequestError::NanRangeSample);
+    }
+
+    if !req.forward_extent_m.is_finite() || req.forward_extent_m <= MIN_FORWARD_OBJECT_X_M {
+        return Err(PerceptionRequestError::InvalidForwardExtent);
+    }
+
+    if !req.decel_mps2.is_finite() || req.decel_mps2 <= 0.0 {
+        return Err(PerceptionRequestError::InvalidDeceleration);
+    }
+
+    if !req.margin_m.is_finite() || req.margin_m < 0.0 || req.margin_m >= req.forward_extent_m {
+        return Err(PerceptionRequestError::InvalidMargin);
+    }
+
+    if !req.lane_half_m.is_finite() || req.lane_half_m <= 0.0 {
+        return Err(PerceptionRequestError::InvalidLaneHalfWidth);
+    }
+
+    if !req.vehicle_width_m.is_finite() || req.vehicle_width_m <= 0.0 {
+        return Err(PerceptionRequestError::InvalidVehicleWidth);
+    }
+
+    if !req.lateral_clearance_m.is_finite() || req.lateral_clearance_m < 0.0 {
+        return Err(PerceptionRequestError::InvalidLateralClearance);
+    }
+
+    let required_corridor_width_m = req.vehicle_width_m + 2.0 * req.lateral_clearance_m;
+
+    if !required_corridor_width_m.is_finite() || 2.0 * req.lane_half_m < required_corridor_width_m {
+        return Err(PerceptionRequestError::LaneNarrowerThanRequiredCorridor);
+    }
+
+    if !req.confidence_floor.is_finite() || !(0.0..=1.0).contains(&req.confidence_floor) {
+        return Err(PerceptionRequestError::InvalidConfidenceFloor);
+    }
+
+    Ok(())
+}
+
+/// Normal-schema fail-closed result for an invalid perception request.
+///
+/// Empty geometry prevents downstream consumers from accidentally planning
+/// against partially processed evidence, while `healthy=false` and
+/// `speed_cap_mps=0.0` enforce stop-and-hold behavior.
+fn invalid_perception_response(camera_armed: bool) -> PerceptionResponse {
+    PerceptionResponse {
+        healthy: false,
+        confidence: 0.0,
+        age_ms: 0,
+        clear_distance_m: 0.0,
+        nearest_object_m: None,
+        object_count: 0,
+        minimum_corridor_width_m: None,
+        required_corridor_width_m: 0.0,
+        speed_cap_mps: 0.0,
+        left: Vec::new(),
+        right: Vec::new(),
+        objects: Vec::new(),
+        camera_healthy: !camera_armed,
+        camera_clip_x_m: None,
+    }
 }
 
 #[derive(Serialize)]
@@ -190,6 +332,10 @@ pub struct PerceptionResponse {
     pub clear_distance_m: f64,
     pub nearest_object_m: Option<f64>,
     pub object_count: usize,
+    /// Narrowest measured free-space width across the fused corridor.
+    pub minimum_corridor_width_m: Option<f64>,
+    /// Width required for the configured vehicle plus bilateral clearance.
+    pub required_corridor_width_m: f64,
     pub speed_cap_mps: f64,
     // The corridor geometry + objects, in the SAME shapes the Occy planner
     // endpoint (POST /plan) consumes, so the doer bridge passes them through.
@@ -216,7 +362,126 @@ fn corridor_reach(corr: &impl CorridorSource) -> f64 {
     far(corr.left_boundary()).min(far(corr.right_boundary()))
 }
 
+/// Minimum traversable corridor width before the terminal reach.
+///
+/// Left and right boundaries may contain different numbers of vertices after
+/// camera hazard clipping. Width is therefore measured only at longitudinal
+/// stations represented by both boundaries.
+///
+/// The terminal stopping boundary is excluded: it limits forward reach rather
+/// than representing space through which the vehicle must fit.
+fn minimum_corridor_width_before_reach_m(
+    corr: &impl CorridorSource,
+    corridor_reach_m: f64,
+) -> Option<f64> {
+    const X_EPSILON_M: f64 = 1e-6;
+
+    if !corridor_reach_m.is_finite() || corridor_reach_m <= 0.0 {
+        return None;
+    }
+
+    let left = corr.left_boundary();
+    let right = corr.right_boundary();
+
+    if left.is_empty() || right.is_empty() {
+        return None;
+    }
+
+    // Reject malformed geometry anywhere in either boundary, including points
+    // that are not ultimately used as shared width stations.
+    if left
+        .iter()
+        .chain(right.iter())
+        .any(|point| !point.x_m.is_finite() || !point.y_m.is_finite())
+    {
+        return None;
+    }
+
+    let mut minimum_width_m = f64::INFINITY;
+    let mut shared_station_count = 0usize;
+
+    for left_point in left {
+        // A clipped terminal point represents the stop line/hazard boundary.
+        // It constrains reach but is not traversable corridor width.
+        if left_point.x_m >= corridor_reach_m - X_EPSILON_M {
+            continue;
+        }
+
+        let Some(right_point) = right
+            .iter()
+            .find(|point| (point.x_m - left_point.x_m).abs() <= X_EPSILON_M)
+        else {
+            continue;
+        };
+
+        let width_m = left_point.y_m - right_point.y_m;
+
+        if !width_m.is_finite() || width_m <= 0.0 {
+            return None;
+        }
+
+        minimum_width_m = minimum_width_m.min(width_m);
+        shared_station_count += 1;
+    }
+
+    if shared_station_count == 0 || !minimum_width_m.is_finite() {
+        None
+    } else {
+        Some(minimum_width_m)
+    }
+}
+
+/// Minimum forward longitudinal distance for an object to participate in
+/// collision-distance gating.
+///
+/// Returns closer than this are treated as near-origin/self-geometry candidates.
+/// This does NOT remove them from raw perception or corridor construction.
+const MIN_FORWARD_OBJECT_X_M: f64 = 0.15;
+
+/// Maximum bearing from the vehicle forward axis for an object to participate in
+/// the scalar nearest-object braking bound.
+///
+/// Objects outside this cone may still influence corridor geometry and turning
+/// safety; this predicate only governs the straight-ahead ACD object bound.
+const MAX_FORWARD_OBJECT_BEARING_RAD: f64 = std::f64::consts::FRAC_PI_3;
+
+/// Whether a perceived object is eligible for the nearest-forward-object
+/// assured-clear-distance bound.
+///
+/// Collision-object gating is intentionally separate from corridor-boundary
+/// extraction. Side walls and nearly lateral returns must not become frontal
+/// collision objects, but they may still define drivable-space boundaries.
+#[inline]
+#[must_use]
+fn is_forward_object_candidate(
+    x_m: f64,
+    y_m: f64,
+    forward_extent_m: f64,
+    lane_half_m: f64,
+) -> bool {
+    if !x_m.is_finite()
+        || !y_m.is_finite()
+        || !forward_extent_m.is_finite()
+        || !lane_half_m.is_finite()
+        || forward_extent_m <= 0.0
+        || lane_half_m < 0.0
+    {
+        return false;
+    }
+
+    x_m >= MIN_FORWARD_OBJECT_X_M
+        && x_m <= forward_extent_m
+        && y_m.abs() <= lane_half_m
+        && y_m.atan2(x_m).abs() <= MAX_FORWARD_OBJECT_BEARING_RAD
+}
+
 pub fn handle_perception(req: &PerceptionRequest) -> PerceptionResponse {
+    // Priority 0: validate every request-level assumption before cloning the
+    // scan, constructing Taj, or performing floating-point safety arithmetic.
+    if validate_perception_request(req).is_err() {
+        return invalid_perception_response(req.camera_armed);
+    }
+
     let scan = LaserScan {
         angle_min_rad: req.angle_min_rad,
         angle_increment_rad: req.angle_increment_rad,
@@ -266,16 +531,29 @@ pub fn handle_perception(req: &PerceptionRequest) -> PerceptionResponse {
 
     let confidence = corridor.confidence();
     let age_ms = corridor.age_ms();
-    // Fail-closed conjunction: the corridor must clear the confidence floor AND
-    // the camera channel must not be faulted.
-    let healthy = confidence >= req.confidence_floor && camera_healthy;
+    // The platform must physically fit inside every observed corridor station.
+    // Configuration validation already proves these inputs are finite and
+    // internally consistent.
+    let required_corridor_width_m = req.vehicle_width_m + 2.0 * req.lateral_clearance_m;
+    let corridor_reach_m = corridor_reach(&corridor);
+    let minimum_observed_corridor_width_m =
+        minimum_corridor_width_before_reach_m(&corridor, corridor_reach_m);
+
+    // Fail closed when confidence is insufficient, the armed camera is faulted,
+    // corridor geometry is malformed, or observed free space is too narrow.
+    let corridor_width_healthy = minimum_observed_corridor_width_m
+        .is_some_and(|width_m| width_m >= required_corridor_width_m);
+
+    let healthy = confidence >= req.confidence_floor && camera_healthy && corridor_width_healthy;
 
     // The nearest IN-LANE object (|y| within half a lane), as a discrete
     // clear-distance bound that complements the corridor reach.
     let nearest_object_m = perception
         .objects
         .iter()
-        .filter(|o| o.pos.y_m.abs() <= req.lane_half_m && o.pos.x_m > 0.0)
+        .filter(|o| {
+            is_forward_object_candidate(o.pos.x_m, o.pos.y_m, req.forward_extent_m, req.lane_half_m)
+        })
         .map(|o| o.pos.x_m)
         .fold(f64::INFINITY, f64::min);
     let nearest_object_m = nearest_object_m.is_finite().then_some(nearest_object_m);
@@ -284,7 +562,7 @@ pub fn handle_perception(req: &PerceptionRequest) -> PerceptionResponse {
     // in-lane object.
     // Reach is measured on the CLIPPED corridor, so a camera hazard tightens the
     // clear distance and therefore the ACD speed cap.
-    let clear = corridor_reach(&corridor)
+    let clear = corridor_reach_m
         .min(nearest_object_m.unwrap_or(f64::INFINITY))
         .max(0.0);
 
@@ -321,6 +599,8 @@ pub fn handle_perception(req: &PerceptionRequest) -> PerceptionResponse {
         clear_distance_m: clear,
         nearest_object_m,
         object_count: perception.objects.len(),
+        minimum_corridor_width_m: minimum_observed_corridor_width_m,
+        required_corridor_width_m,
         speed_cap_mps,
         left,
         right,
@@ -348,6 +628,8 @@ mod tests {
             decel_mps2: default_decel(),
             margin_m: default_margin(),
             lane_half_m: default_lane_half(),
+            vehicle_width_m: default_vehicle_width(),
+            lateral_clearance_m: default_lateral_clearance(),
             confidence_floor: default_floor(),
             camera_armed: false,
             detections: Vec::new(),
@@ -359,7 +641,34 @@ mod tests {
     /// A clear-ahead scan: returns far out on every ray, so Phase A yields a
     /// healthy corridor with real forward reach for the camera to clip.
     fn clear_scan() -> Vec<f32> {
-        vec![10.0; 300]
+        // A wide, traversable corridor bounded by parallel walls at y = ±2 m.
+        //
+        // Returning the same range on every ray would describe a circular wall
+        // around the lidar, not clear road. That synthetic geometry can narrow
+        // the extracted corridor and incorrectly fail the physical-width gate.
+        let angle_min_rad = -1.5_f64;
+        let angle_increment_rad = 0.01_f64;
+        let wall_half_width_m = 2.0_f64;
+        let range_max_m = 12.0_f64;
+
+        (0..300)
+            .map(|index| {
+                let angle_rad = angle_min_rad + index as f64 * angle_increment_rad;
+                let sin_angle = angle_rad.sin().abs();
+
+                if sin_angle < 1e-6 {
+                    // Looking parallel to the walls: no return.
+                    f32::INFINITY
+                } else {
+                    let range_m = wall_half_width_m / sin_angle;
+                    if range_m <= range_max_m {
+                        range_m as f32
+                    } else {
+                        f32::INFINITY
+                    }
+                }
+            })
+            .collect()
     }
 
     fn det(class: &str, near_x: f64, lat_min: f64, lat_max: f64) -> CameraDetection {
@@ -369,6 +678,271 @@ mod tests {
             lateral_min_m: lat_min,
             lateral_max_m: lat_max,
         }
+    }
+
+    #[test]
+    fn nearly_lateral_return_is_not_a_forward_collision_object() {
+        assert!(
+            !is_forward_object_candidate(0.03, -0.60, 8.0, 0.60),
+            "a nearly lateral return must not become the frontal ACD object"
+        );
+        assert!(
+            !is_forward_object_candidate(0.03, 0.60, 8.0, 0.60),
+            "the rule must be symmetric across the vehicle centerline"
+        );
+    }
+
+    #[test]
+    fn real_forward_obstacle_remains_eligible() {
+        assert!(
+            is_forward_object_candidate(0.50, -0.20, 8.0, 0.25),
+            "a real obstacle inside the R2 forward lane must remain visible"
+        );
+        assert!(
+            is_forward_object_candidate(0.60, 0.0, 8.0, 0.25),
+            "a directly forward obstacle must remain visible"
+        );
+    }
+
+    #[test]
+    fn rear_out_of_horizon_and_nonfinite_objects_are_excluded() {
+        assert!(!is_forward_object_candidate(-0.20, 0.0, 8.0, 0.25));
+        assert!(!is_forward_object_candidate(8.01, 0.0, 8.0, 0.25));
+        assert!(!is_forward_object_candidate(f64::NAN, 0.0, 8.0, 0.25));
+        assert!(!is_forward_object_candidate(1.0, f64::INFINITY, 8.0, 0.25));
+    }
+
+    #[test]
+    fn invalid_forward_region_configuration_fails_closed() {
+        assert!(!is_forward_object_candidate(1.0, 0.0, 0.0, 0.25));
+        assert!(!is_forward_object_candidate(1.0, 0.0, 8.0, -0.1));
+        assert!(!is_forward_object_candidate(1.0, 0.0, f64::NAN, 0.25));
+    }
+
+    #[test]
+    fn malformed_request_configuration_fails_closed_before_processing() {
+        let mut cases = Vec::new();
+
+        let mut invalid = req(clear_scan());
+        invalid.angle_min_rad = f64::NAN;
+        cases.push(invalid);
+
+        let mut invalid = req(clear_scan());
+        invalid.angle_increment_rad = 0.0;
+        cases.push(invalid);
+
+        let mut invalid = req(clear_scan());
+        invalid.range_min_m = 2.0;
+        invalid.range_max_m = 1.0;
+        cases.push(invalid);
+
+        let mut invalid = req(clear_scan());
+        invalid.forward_extent_m = 0.1;
+        cases.push(invalid);
+
+        let mut invalid = req(clear_scan());
+        invalid.decel_mps2 = 0.0;
+        cases.push(invalid);
+
+        let mut invalid = req(clear_scan());
+        invalid.margin_m = invalid.forward_extent_m;
+        cases.push(invalid);
+
+        let mut invalid = req(clear_scan());
+        invalid.lane_half_m = 0.0;
+        cases.push(invalid);
+
+        let mut invalid = req(clear_scan());
+        invalid.confidence_floor = 1.1;
+        cases.push(invalid);
+
+        for invalid in cases {
+            let response = handle_perception(&invalid);
+            assert!(!response.healthy);
+            assert_eq!(response.speed_cap_mps, 0.0);
+            assert_eq!(response.clear_distance_m, 0.0);
+            assert!(response.left.is_empty());
+            assert!(response.right.is_empty());
+            assert!(response.objects.is_empty());
+        }
+    }
+
+    #[test]
+    fn empty_oversized_and_nan_scans_fail_closed() {
+        let empty = handle_perception(&req(Vec::new()));
+        assert!(!empty.healthy);
+        assert_eq!(empty.speed_cap_mps, 0.0);
+
+        let oversized = handle_perception(&req(vec![1.0; MAX_LIDAR_RAYS + 1]));
+        assert!(!oversized.healthy);
+        assert_eq!(oversized.speed_cap_mps, 0.0);
+
+        let mut nan_scan = clear_scan();
+        nan_scan[10] = f32::NAN;
+        let nan = handle_perception(&req(nan_scan));
+        assert!(!nan.healthy);
+        assert_eq!(nan.speed_cap_mps, 0.0);
+    }
+
+    #[test]
+    fn infinite_no_return_samples_remain_valid_input() {
+        let request = req(vec![f32::INFINITY; 300]);
+
+        assert_eq!(validate_perception_request(&request), Ok(()));
+
+        let response = handle_perception(&request);
+        assert_eq!(
+            response.speed_cap_mps, 0.0,
+            "an all-no-return scan may be syntactically valid but must remain              perception-unhealthy"
+        );
+    }
+
+    #[test]
+    fn invalid_request_preserves_armed_camera_fail_closed_state() {
+        let mut request = req(Vec::new());
+        request.camera_armed = true;
+
+        let response = handle_perception(&request);
+
+        assert!(!response.healthy);
+        assert!(!response.camera_healthy);
+        assert_eq!(response.speed_cap_mps, 0.0);
+    }
+
+    #[test]
+    fn corridor_wider_than_vehicle_and_clearance_remains_eligible() {
+        let request = req(clear_scan());
+
+        assert_eq!(
+            validate_perception_request(&request),
+            Ok(()),
+            "default request must provide enough width for the configured platform"
+        );
+
+        let required_width = request.vehicle_width_m + 2.0 * request.lateral_clearance_m;
+
+        assert!(
+            2.0 * request.lane_half_m >= required_width,
+            "configured corridor width must contain vehicle plus clearance"
+        );
+    }
+
+    #[test]
+    fn observed_corridor_narrower_than_r2_requirement_fails_closed() {
+        let mut request = req(clear_scan());
+        request.vehicle_width_m = 0.203;
+        request.lateral_clearance_m = 0.15;
+        request.lane_half_m = 0.26;
+
+        // A very close pair of parallel walls creates an observed corridor
+        // narrower than the R2 required width of 0.503 m.
+        request.ranges = vec![0.20; request.ranges.len()];
+
+        let response = handle_perception(&request);
+
+        assert!(
+            response
+                .minimum_corridor_width_m
+                .is_some_and(|width| width < response.required_corridor_width_m),
+            "test setup must produce an undersized observed corridor"
+        );
+        assert!(!response.healthy);
+        assert_eq!(response.speed_cap_mps, 0.0);
+    }
+
+    #[test]
+    fn malformed_or_empty_corridor_width_fails_closed() {
+        struct EmptyCorridor;
+
+        impl CorridorSource for EmptyCorridor {
+            fn left_boundary(&self) -> &[kirra_core::corridor::Point] {
+                &[]
+            }
+
+            fn right_boundary(&self) -> &[kirra_core::corridor::Point] {
+                &[]
+            }
+
+            fn confidence(&self) -> f32 {
+                1.0
+            }
+
+            fn age_ms(&self) -> u64 {
+                0
+            }
+        }
+
+        assert_eq!(
+            minimum_corridor_width_before_reach_m(&EmptyCorridor, 1.0),
+            None
+        );
+    }
+
+    #[test]
+    fn deployed_r2_dimensions_are_internally_consistent() {
+        let mut request = req(clear_scan());
+        request.lane_half_m = 0.26;
+        request.vehicle_width_m = 0.203;
+        request.lateral_clearance_m = 0.15;
+
+        assert_eq!(validate_perception_request(&request), Ok(()));
+
+        let available_width_m = 2.0 * request.lane_half_m;
+        let required_width_m = request.vehicle_width_m + 2.0 * request.lateral_clearance_m;
+
+        assert!(
+            available_width_m >= required_width_m,
+            "R2 available width {available_width_m} m is below required width {required_width_m} m"
+        );
+    }
+
+    #[test]
+    fn corridor_narrower_than_vehicle_and_clearance_fails_closed() {
+        let mut request = req(clear_scan());
+        request.lane_half_m = 0.20;
+        request.vehicle_width_m = 0.203;
+        request.lateral_clearance_m = 0.15;
+
+        assert_eq!(
+            validate_perception_request(&request),
+            Err(PerceptionRequestError::LaneNarrowerThanRequiredCorridor)
+        );
+
+        let response = handle_perception(&request);
+        assert!(!response.healthy);
+        assert_eq!(response.speed_cap_mps, 0.0);
+    }
+
+    #[test]
+    fn contradictory_lane_and_platform_dimensions_fail_validation() {
+        let mut request = req(clear_scan());
+        request.lane_half_m = 0.25;
+        request.vehicle_width_m = 0.40;
+        request.lateral_clearance_m = 0.10;
+
+        assert_eq!(
+            validate_perception_request(&request),
+            Err(PerceptionRequestError::LaneNarrowerThanRequiredCorridor)
+        );
+    }
+
+    #[test]
+    fn invalid_platform_dimensions_fail_closed() {
+        let mut invalid_width = req(clear_scan());
+        invalid_width.vehicle_width_m = 0.0;
+        assert_eq!(
+            validate_perception_request(&invalid_width),
+            Err(PerceptionRequestError::InvalidVehicleWidth)
+        );
+        assert_eq!(handle_perception(&invalid_width).speed_cap_mps, 0.0);
+
+        let mut invalid_clearance = req(clear_scan());
+        invalid_clearance.lateral_clearance_m = -0.01;
+        assert_eq!(
+            validate_perception_request(&invalid_clearance),
+            Err(PerceptionRequestError::InvalidLateralClearance)
+        );
+        assert_eq!(handle_perception(&invalid_clearance).speed_cap_mps, 0.0);
     }
 
     /// An empty / all-no-return scan reads as an unhealthy corridor → the
