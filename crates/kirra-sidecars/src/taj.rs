@@ -315,7 +315,7 @@ fn invalid_perception_response(camera_armed: bool) -> PerceptionResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ObjOut {
     pub id: u64,
     pub x: f64,
@@ -324,7 +324,7 @@ pub struct ObjOut {
     pub vy: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct PerceptionResponse {
     pub healthy: bool,
     pub confidence: f32,
@@ -481,6 +481,7 @@ pub struct TrackedPerceptionState {
     tracker: Option<TajTracker>,
     tracker_config: Option<TajConfig>,
     last_stamp_ms: Option<u64>,
+    last_response: Option<PerceptionResponse>,
 }
 
 impl Default for TrackedPerceptionState {
@@ -496,6 +497,7 @@ impl TrackedPerceptionState {
             tracker: None,
             tracker_config: None,
             last_stamp_ms: None,
+            last_response: None,
         }
     }
 
@@ -503,6 +505,7 @@ impl TrackedPerceptionState {
         self.tracker = None;
         self.tracker_config = None;
         self.last_stamp_ms = None;
+        self.last_response = None;
     }
 }
 
@@ -529,6 +532,19 @@ pub fn handle_perception_tracked(
     if validate_perception_request(req).is_err() {
         state.reset();
         return invalid_perception_response(req.camera_armed);
+    }
+
+    // Multiple consumers may submit the exact same LaserScan. Replaying a
+    // duplicate must not advance tracking, increment frames_seen, or overwrite
+    // velocity with a zero-dt estimate.
+    if state.last_stamp_ms == Some(req.stamp_ms) {
+        if let Some(response) = state.last_response.as_ref() {
+            return response.clone();
+        }
+
+        // Defensive fallback: duplicate metadata without a cached response is
+        // inconsistent state, so reset rather than process ambiguously.
+        state.reset();
     }
 
     let scan = LaserScan {
@@ -573,8 +589,6 @@ pub fn handle_perception_tracked(
         .as_mut()
         .expect("tracker initialized above")
         .track(&scan, req.stamp_ms);
-
-    state.last_stamp_ms = Some(req.stamp_ms);
 
     // ---- Phase B: camera fusion (TIGHTEN-ONLY) -----------------------------
     // The camera may only SHORTEN the drivable corridor Phase A produced; it can
@@ -669,7 +683,7 @@ pub fn handle_perception_tracked(
         })
         .collect();
 
-    PerceptionResponse {
+    let response = PerceptionResponse {
         healthy,
         confidence,
         age_ms,
@@ -684,7 +698,11 @@ pub fn handle_perception_tracked(
         objects,
         camera_healthy,
         camera_clip_x_m,
-    }
+    };
+
+    state.last_stamp_ms = Some(req.stamp_ms);
+    state.last_response = Some(response.clone());
+    response
 }
 
 #[cfg(test)]
@@ -1336,5 +1354,68 @@ mod tracked_perception_tests {
         assert_eq!(recovered.objects.len(), 1);
         assert_eq!(recovered.objects[0].vx, 0.0);
         assert_eq!(recovered.objects[0].vy, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod duplicate_frame_tracking_tests {
+    use super::*;
+
+    fn request(range_m: f64, stamp_ms: u64) -> PerceptionRequest {
+        let angle_min_rad = -1.5;
+        let angle_increment_rad = 0.01;
+        let ranges = (0..301)
+            .map(|index| {
+                let angle = angle_min_rad + index as f64 * angle_increment_rad;
+                if angle.abs() < 0.035 {
+                    range_m as f32
+                } else {
+                    f32::INFINITY
+                }
+            })
+            .collect();
+
+        PerceptionRequest {
+            angle_min_rad,
+            angle_increment_rad,
+            range_min_m: 0.1,
+            range_max_m: 12.0,
+            ranges,
+            stamp_ms,
+            forward_extent_m: default_extent(),
+            decel_mps2: default_decel(),
+            margin_m: default_margin(),
+            lane_half_m: default_lane_half(),
+            vehicle_width_m: default_vehicle_width(),
+            lateral_clearance_m: default_lateral_clearance(),
+            confidence_floor: 0.5,
+            camera_armed: false,
+            camera_stamp_ms: None,
+            camera_max_age_ms: DEFAULT_CAMERA_MAX_AGE_MS,
+            detections: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn duplicate_scan_timestamp_replays_response_without_advancing_tracker() {
+        let mut state = TrackedPerceptionState::new();
+
+        let first = handle_perception_tracked(&request(5.0, 1_000), &mut state);
+        let duplicate = handle_perception_tracked(&request(5.0, 1_000), &mut state);
+        let moved = handle_perception_tracked(&request(5.1, 1_100), &mut state);
+
+        assert_eq!(first.objects.len(), 1);
+        assert_eq!(duplicate.objects.len(), 1);
+        assert_eq!(first.objects[0].id, duplicate.objects[0].id);
+        assert_eq!(first.objects[0].vx, duplicate.objects[0].vx);
+        assert_eq!(first.objects[0].vy, duplicate.objects[0].vy);
+
+        assert_eq!(moved.objects.len(), 1);
+        assert_eq!(moved.objects[0].id, first.objects[0].id);
+        assert!(
+            moved.objects[0].vx > 0.5 && moved.objects[0].vx < 1.5,
+            "expected roughly 1 m/s after one real 100 ms interval, got {}",
+            moved.objects[0].vx,
+        );
     }
 }

@@ -617,8 +617,28 @@ impl TajTracker {
                 if used[j] {
                     continue;
                 }
+                let elapsed_ms = now_ms.saturating_sub(tr.stamp_ms);
+                if elapsed_ms == 0 {
+                    continue;
+                }
+
+                let dt_s = elapsed_ms as f64 / 1000.0;
+
+                // Bound association by physically plausible frame-to-frame
+                // motion while retaining the configured absolute ceiling.
+                //
+                // At the R2's normal ~100 ms scan interval this permits about
+                // 1.25 m, preserving the existing 10 m/s tracker tests while
+                // rejecting the larger cross-object jumps observed live.
+                const ASSOCIATION_JITTER_M: f64 = 0.25;
+                const MAX_ASSOCIATION_SPEED_MPS: f64 = 10.0;
+
+                let time_scaled_gate = ASSOCIATION_JITTER_M + MAX_ASSOCIATION_SPEED_MPS * dt_s;
+                let effective_gate = gate.min(time_scaled_gate);
+
                 let d = (obj.pos.x_m - tr.pos.x_m).hypot(obj.pos.y_m - tr.pos.y_m);
-                if d <= gate && best.is_none_or(|(_, bd)| d < bd) {
+
+                if d <= effective_gate && best.is_none_or(|(_, bd)| d < bd) {
                     best = Some((j, d));
                 }
             }
@@ -627,6 +647,7 @@ impl TajTracker {
                 Some((j, _)) => {
                     used[j] = true;
                     let tr = self.tracks[j];
+
                     let dt = f64::from(
                         u32::try_from(now_ms.saturating_sub(tr.stamp_ms)).unwrap_or(u32::MAX),
                     ) / 1000.0;
@@ -673,6 +694,7 @@ impl TajTracker {
                     obj.velocity_mps = 0.0;
                     obj.vel = Point { x_m: 0.0, y_m: 0.0 };
                     obj.heading_rad = 0.0;
+
                     next_tracks.push(Track {
                         id,
                         pos: obj.pos,
