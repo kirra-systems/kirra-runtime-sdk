@@ -355,6 +355,17 @@ pub struct TajPhaseA {
 /// geometry and frontal collision-object gating have different semantics.
 const MIN_CORRIDOR_POINT_X_M: f64 = 0.15;
 
+/// Minimum lateral displacement for a lidar return to define a corridor side.
+///
+/// Returns near the vehicle centerline represent frontal obstacles. They remain
+/// available to object clustering and assured-clear-distance braking, but must
+/// not masquerade as left/right corridor walls and collapse the corridor to a
+/// few millimetres.
+///
+/// This value is below the R2 required half-width of 0.2515 m, so genuine
+/// passage boundaries near the vehicle envelope remain eligible.
+const MIN_CORRIDOR_BOUNDARY_ABS_Y_M: f64 = 0.26;
+
 impl TajPhaseA {
     #[must_use]
     pub fn new(cfg: TajConfig) -> Self {
@@ -441,6 +452,7 @@ impl TajPhaseA {
                 if !x.is_finite()
                     || !y.is_finite()
                     || x < MIN_CORRIDOR_POINT_X_M
+                    || y.abs() < MIN_CORRIDOR_BOUNDARY_ABS_Y_M
                     || x > ext
                     || (x - xs).abs() > step
                 {
@@ -839,6 +851,41 @@ mod tests {
             "per-station boundary"
         );
         assert_eq!(out.corridor.age_ms(), 5);
+    }
+
+    #[test]
+    fn frontal_centerline_returns_do_not_become_corridor_walls() {
+        let taj = TajPhaseA::default();
+
+        // A real frontal obstacle around 0.57 m with tiny lateral variation.
+        // It must remain an object/ACD bound, but must not collapse the
+        // left/right corridor boundaries to millimetres.
+        let scan = scan_from(
+            10.0,
+            0,
+            |theta| {
+                if theta.abs() < 0.05 {
+                    Some(0.57)
+                } else {
+                    None
+                }
+            },
+        );
+
+        let out = taj.process(&scan, 0);
+        let left = out.corridor.left_boundary()[0].y_m;
+        let right = out.corridor.right_boundary()[0].y_m;
+        let width = left - right;
+
+        assert!(
+            width >= 0.503,
+            "frontal centerline return collapsed corridor width to {width}"
+        );
+
+        assert!(
+            out.objects.iter().any(|object| object.pos.x_m < 1.0),
+            "frontal return must remain represented as an object"
+        );
     }
 
     #[test]

@@ -91,6 +91,7 @@ perception_governor:
     lateral_clearance_m: 0.15    # required clearance on each side
     confidence_floor: 0.5        # below this -> unhealthy -> 0.0 cap
     cap_rise_rate_mps_per_s: 0.50
+    cap_restriction_epsilon_mps: 0.03
     cap_clear_confirmations: 5   # 0.5 s confirmation at approximately 10 Hz
     cap_maximum_dt_ms: 250       # larger processing gap resets to zero
 

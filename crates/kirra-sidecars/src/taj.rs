@@ -830,21 +830,53 @@ mod tests {
     #[test]
     fn observed_corridor_narrower_than_r2_requirement_fails_closed() {
         let mut request = req(clear_scan());
-        request.vehicle_width_m = 0.203;
-        request.lateral_clearance_m = 0.15;
-        request.lane_half_m = 0.26;
 
-        // A very close pair of parallel walls creates an observed corridor
-        // narrower than the R2 required width of 0.503 m.
-        request.ranges = vec![0.20; request.ranges.len()];
+        // Use legitimate side-wall geometry outside the frontal-centerline
+        // exclusion band. The observed corridor is approximately 0.80 m wide.
+        //
+        // Configure a deliberately larger platform requirement so this test
+        // isolates the observed-width fail-closed gate instead of depending on
+        // near-centerline returns that corridor extraction intentionally rejects.
+        request.vehicle_width_m = 0.70;
+        request.lateral_clearance_m = 0.10;
+        request.lane_half_m = 0.50;
+
+        let wall_half_width_m = 0.40;
+        request.ranges = request
+            .ranges
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let theta = request.angle_min_rad + index as f64 * request.angle_increment_rad;
+                let sin_theta = theta.sin().abs();
+
+                if sin_theta <= 1e-6 {
+                    f32::INFINITY
+                } else {
+                    let range_m = wall_half_width_m / sin_theta;
+                    if range_m >= request.range_min_m && range_m <= request.range_max_m {
+                        range_m as f32
+                    } else {
+                        f32::INFINITY
+                    }
+                }
+            })
+            .collect();
 
         let response = handle_perception(&request);
 
+        let observed_width_m = response
+            .minimum_corridor_width_m
+            .expect("parallel walls must produce a measurable corridor width");
+
         assert!(
-            response
-                .minimum_corridor_width_m
-                .is_some_and(|width| width < response.required_corridor_width_m),
-            "test setup must produce an undersized observed corridor"
+            observed_width_m < response.required_corridor_width_m,
+            "test setup must produce an undersized observed corridor:              {observed_width_m} vs {}",
+            response.required_corridor_width_m,
+        );
+        assert!(
+            observed_width_m > 0.60 && observed_width_m < 1.00,
+            "fixture should produce a realistic approximately 0.80 m corridor,              got {observed_width_m}",
         );
         assert!(!response.healthy);
         assert_eq!(response.speed_cap_mps, 0.0);

@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "kirra_safety"))
 from perception_cap import (  # noqa: E402
+    GOV_PASS,
     apply_perception_cap,
     DISABLED,
     STALE,
@@ -219,3 +220,87 @@ def test_invalid_governor_configuration_is_rejected():
 
     with pytest.raises(ValueError):
         SpeedCapGovernorConfig(initial_cap_mps=-0.1)
+
+
+def test_small_raw_cap_jitter_does_not_reset_confirmation():
+    cap = governor()
+    start = 1_000_000_000
+
+    raw_caps = [0.73, 0.74, 0.72, 0.74, 0.73, 0.74]
+
+    decisions = [
+        cap.update(raw, start + index * 100_000_000)
+        for index, raw in enumerate(raw_caps)
+    ]
+
+    assert decisions[4].governed_cap_mps > 0.0
+    assert decisions[-1].reason in (GOV_RISING, GOV_PASS)
+    assert decisions[-1].clear_streak >= 5
+
+
+def test_raw_cap_drop_beyond_epsilon_is_restrictive():
+    cap = governor()
+    start = 1_000_000_000
+
+    for index in range(8):
+        cap.update(0.74, start + index * 100_000_000)
+
+    decision = cap.update(0.69, start + 800_000_000)
+
+    assert decision.reason == GOV_RESTRICTED
+    assert decision.governed_cap_mps <= 0.69
+    assert decision.clear_streak == 0
+
+
+def test_restriction_epsilon_configuration_is_validated():
+    import pytest
+
+    with pytest.raises(ValueError):
+        SpeedCapGovernorConfig(restriction_epsilon_mps=-0.01)
+
+    with pytest.raises(ValueError):
+        SpeedCapGovernorConfig(restriction_epsilon_mps=float("nan"))
+
+def test_one_centimeter_per_second_drop_clamps_without_resetting_streak():
+    cap = SpeedCapGovernor(
+        SpeedCapGovernorConfig(
+            rise_rate_mps_per_s=0.50,
+            restriction_epsilon_mps=0.03,
+            clear_confirmations=5,
+            maximum_dt_s=0.25,
+            initial_cap_mps=0.74,
+        )
+    )
+    start = 2_000_000_000
+
+    for index in range(5):
+        cap.update(0.74, start + index * 100_000_000)
+
+    previous_streak = cap.clear_streak
+    decision = cap.update(0.73, start + 500_000_000)
+
+    assert decision.governed_cap_mps == 0.73
+    assert decision.reason == GOV_PASS
+    assert decision.clear_streak == previous_streak
+
+
+def test_material_drop_still_resets_streak_and_clamps_immediately():
+    cap = SpeedCapGovernor(
+        SpeedCapGovernorConfig(
+            rise_rate_mps_per_s=0.50,
+            restriction_epsilon_mps=0.03,
+            clear_confirmations=5,
+            maximum_dt_s=0.25,
+            initial_cap_mps=0.74,
+        )
+    )
+    start = 3_000_000_000
+
+    for index in range(5):
+        cap.update(0.74, start + index * 100_000_000)
+
+    decision = cap.update(0.60, start + 500_000_000)
+
+    assert decision.governed_cap_mps == 0.60
+    assert decision.reason == GOV_RESTRICTED
+    assert decision.clear_streak == 0

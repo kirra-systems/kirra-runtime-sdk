@@ -73,6 +73,10 @@ class PerceptionGovernor(Node):
             0.50,
         )
         self.declare_parameter(
+            "cap_restriction_epsilon_mps",
+            0.03,
+        )
+        self.declare_parameter(
             "cap_clear_confirmations",
             5,
         )
@@ -113,12 +117,21 @@ class PerceptionGovernor(Node):
             self.get_parameter("confidence_floor").value
         )
 
+        self._cap_restriction_epsilon_mps = float(
+            self.get_parameter(
+                "cap_restriction_epsilon_mps"
+            ).value
+        )
+
         self._cap_governor = SpeedCapGovernor(
             SpeedCapGovernorConfig(
                 rise_rate_mps_per_s=float(
                     self.get_parameter(
                         "cap_rise_rate_mps_per_s"
                     ).value
+                ),
+                restriction_epsilon_mps=(
+                    self._cap_restriction_epsilon_mps
                 ),
                 clear_confirmations=int(
                     self.get_parameter(

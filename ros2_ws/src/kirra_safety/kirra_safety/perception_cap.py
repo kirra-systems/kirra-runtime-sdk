@@ -45,6 +45,7 @@ class SpeedCapGovernorConfig:
     """Configuration for asymmetric perception-cap stabilization."""
 
     rise_rate_mps_per_s: float = 0.50
+    restriction_epsilon_mps: float = 0.03
     clear_confirmations: int = 5
     maximum_dt_s: float = 0.25
     initial_cap_mps: float = 0.0
@@ -55,6 +56,13 @@ class SpeedCapGovernorConfig:
             or self.rise_rate_mps_per_s <= 0.0
         ):
             raise ValueError("rise_rate_mps_per_s must be finite and positive")
+        if (
+            not math.isfinite(self.restriction_epsilon_mps)
+            or self.restriction_epsilon_mps < 0.0
+        ):
+            raise ValueError(
+                "restriction_epsilon_mps must be finite and non-negative"
+            )
         if (
             isinstance(self.clear_confirmations, bool)
             or not isinstance(self.clear_confirmations, int)
@@ -197,7 +205,8 @@ class SpeedCapGovernor:
         # when the stabilized output is already below the new raw cap.
         raw_became_more_restrictive = (
             previous_raw_cap_mps is not None
-            and raw_cap_mps < previous_raw_cap_mps
+            and raw_cap_mps
+            < previous_raw_cap_mps - self._config.restriction_epsilon_mps
         )
 
         if raw_became_more_restrictive:
@@ -216,16 +225,32 @@ class SpeedCapGovernor:
                 0,
             )
 
-        # Also immediately apply any raw cap below the governed result.
+        # The governed output must never exceed the newest raw safety bound.
+        # Small decreases inside the jitter epsilon clamp immediately but do
+        # not restart the clear-confirmation history.
         if raw_cap_mps < self._governed_cap_mps:
+            decrease_mps = (
+                self._governed_cap_mps - raw_cap_mps
+            )
             self._governed_cap_mps = raw_cap_mps
-            self._clear_streak = 0
+
+            if (
+                decrease_mps
+                > self._config.restriction_epsilon_mps
+            ):
+                self._clear_streak = 0
+                return SpeedCapDecision(
+                    raw_cap_mps,
+                    self._governed_cap_mps,
+                    GOV_RESTRICTED,
+                    0,
+                )
 
             return SpeedCapDecision(
                 raw_cap_mps,
                 self._governed_cap_mps,
-                GOV_RESTRICTED,
-                0,
+                GOV_PASS,
+                self._clear_streak,
             )
 
         if raw_cap_mps == self._governed_cap_mps:
