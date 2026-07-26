@@ -12,7 +12,7 @@
 use kirra_core::corridor::CorridorSource;
 use kirra_taj::{
     clip_corridor_to_hazards, hazard_clip_x, LaserScan, SemanticClass, SemanticDetection,
-    TajConfig, TajTracker,
+    TajConfig, TajTracker, VruClassifierConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -310,6 +310,7 @@ fn invalid_perception_response(camera_armed: bool) -> PerceptionResponse {
         left: Vec::new(),
         right: Vec::new(),
         objects: Vec::new(),
+        pedestrians: Vec::new(),
         camera_healthy: !camera_armed,
         camera_clip_x_m: None,
     }
@@ -322,6 +323,18 @@ pub struct ObjOut {
     pub y: f64,
     pub vx: f64,
     pub vy: f64,
+}
+
+/// One tracked pedestrian/VRU emitted by Taj for the planner's pedestrian RSS
+/// scene. Coordinates and velocity are in the ego frame used by `objects`.
+#[derive(Clone, Serialize)]
+pub struct PedestrianOut {
+    pub id: u64,
+    pub x: f64,
+    pub y: f64,
+    pub vx: f64,
+    pub vy: f64,
+    pub age_s: f64,
 }
 
 #[derive(Clone, Serialize)]
@@ -342,6 +355,11 @@ pub struct PerceptionResponse {
     pub left: Vec<[f64; 2]>,
     pub right: Vec<[f64; 2]>,
     pub objects: Vec<ObjOut>,
+    /// Conservative VRU classifications derived from the persistent tracker.
+    ///
+    /// First sightings with a pedestrian-sized footprint are included because
+    /// unknown velocity cannot safely disprove the pedestrian envelope.
+    pub pedestrians: Vec<PedestrianOut>,
     /// Phase-B observability: `false` when the camera channel is ARMED but the
     /// frame is missing / stale / undecodable (the request then fails closed to
     /// the MRC floor). `true` when disarmed (nothing to be unhealthy about) or
@@ -590,6 +608,16 @@ pub fn handle_perception_tracked(
         .expect("tracker initialized above")
         .track(&scan, req.stamp_ms);
 
+    // WP-10 production producer: classify the same persistent tracks that
+    // supplied the object IDs and velocities above. Classification uncertainty
+    // tightens toward pedestrian; every classified track also remains in
+    // `objects`, so the VRU bound is additive rather than substitutive.
+    let classified_pedestrians = state
+        .tracker
+        .as_ref()
+        .expect("tracker initialized above")
+        .classify_pedestrians(req.stamp_ms, &VruClassifierConfig::default());
+
     // ---- Phase B: camera fusion (TIGHTEN-ONLY) -----------------------------
     // The camera may only SHORTEN the drivable corridor Phase A produced; it can
     // never extend it (`clip_corridor_to_hazards` truncates the boundaries, and
@@ -683,6 +711,18 @@ pub fn handle_perception_tracked(
         })
         .collect();
 
+    let pedestrians = classified_pedestrians
+        .iter()
+        .map(|pedestrian| PedestrianOut {
+            id: pedestrian.id,
+            x: pedestrian.pos.x_m,
+            y: pedestrian.pos.y_m,
+            vx: pedestrian.vel.x_m,
+            vy: pedestrian.vel.y_m,
+            age_s: pedestrian.age_s,
+        })
+        .collect();
+
     let response = PerceptionResponse {
         healthy,
         confidence,
@@ -696,6 +736,7 @@ pub fn handle_perception_tracked(
         left,
         right,
         objects,
+        pedestrians,
         camera_healthy,
         camera_clip_x_m,
     };
@@ -773,6 +814,35 @@ mod tests {
             lateral_min_m: lat_min,
             lateral_max_m: lat_max,
         }
+    }
+
+    #[test]
+    fn tracked_response_emits_conservative_pedestrian_channel() {
+        let mut state = TrackedPerceptionState::new();
+        let request = req((0..301)
+            .map(|index| {
+                let angle = -1.5 + index as f64 * 0.01;
+                if angle.abs() < 0.035 {
+                    3.0
+                } else {
+                    f32::INFINITY
+                }
+            })
+            .collect());
+
+        let response = handle_perception_tracked(&request, &mut state);
+
+        assert_eq!(response.objects.len(), 1);
+        assert_eq!(
+            response.pedestrians.len(),
+            1,
+            "a first-sighting pedestrian-sized cluster must feed the VRU channel"
+        );
+        assert_eq!(
+            response.pedestrians[0].id, response.objects[0].id,
+            "the additive object and VRU channels must preserve the same track ID"
+        );
+        assert_eq!(response.pedestrians[0].age_s, 0.0);
     }
 
     #[test]
