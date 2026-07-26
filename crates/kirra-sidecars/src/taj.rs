@@ -352,6 +352,15 @@ pub struct PedestrianOut {
     pub vx: f64,
     pub vy: f64,
     pub age_s: f64,
+    /// Geometric lidar classification before camera influence.
+    pub lidar_classification: &'static str,
+    /// Final classification used for pedestrian RSS membership.
+    pub fused_classification: &'static str,
+    /// Stable explanation of the camera influence decision.
+    pub fusion_reason: &'static str,
+    pub camera_observation_id: Option<u64>,
+    pub camera_confidence: Option<f64>,
+    pub association_distance_m: Option<f64>,
 }
 
 /// Auditable supporting association between camera/depth geometry and an
@@ -638,16 +647,6 @@ pub fn handle_perception_tracked(
         .expect("tracker initialized above")
         .track(&scan, req.stamp_ms);
 
-    // WP-10 production producer: classify the same persistent tracks that
-    // supplied the object IDs and velocities above. Classification uncertainty
-    // tightens toward pedestrian; every classified track also remains in
-    // `objects`, so the VRU bound is additive rather than substitutive.
-    let classified_pedestrians = state
-        .tracker
-        .as_ref()
-        .expect("tracker initialized above")
-        .classify_pedestrians(req.stamp_ms, &VruClassifierConfig::default());
-
     // Supporting-only camera/depth association. The lidar tracker remains
     // authoritative: camera observations cannot create tracks, alter track
     // state, or change pedestrian classifier membership.
@@ -673,6 +672,19 @@ pub fn handle_perception_tracked(
             &camera_observations,
             req.stamp_ms,
             &CameraVruFusionConfig::default(),
+        );
+
+    // Canonical fused classification. Camera evidence may tighten semantic
+    // membership, but it cannot create a lidar track, change its geometry, or
+    // remove the ordinary object-RSS channel.
+    let fused_vrus = state
+        .tracker
+        .as_ref()
+        .expect("tracker initialized above")
+        .classify_vrus_fused(
+            req.stamp_ms,
+            &VruClassifierConfig::default(),
+            &camera_associations,
         );
 
     // ---- Phase B: camera fusion (TIGHTEN-ONLY) -----------------------------
@@ -778,15 +790,22 @@ pub fn handle_perception_tracked(
         })
         .collect();
 
-    let pedestrians = classified_pedestrians
+    let pedestrians = fused_vrus
         .iter()
-        .map(|pedestrian| PedestrianOut {
-            id: pedestrian.id,
-            x: pedestrian.pos.x_m,
-            y: pedestrian.pos.y_m,
-            vx: pedestrian.vel.x_m,
-            vy: pedestrian.vel.y_m,
-            age_s: pedestrian.age_s,
+        .filter(|result| result.fused_classification.feeds_pedestrian_rss())
+        .map(|result| PedestrianOut {
+            id: result.pedestrian.id,
+            x: result.pedestrian.pos.x_m,
+            y: result.pedestrian.pos.y_m,
+            vx: result.pedestrian.vel.x_m,
+            vy: result.pedestrian.vel.y_m,
+            age_s: result.pedestrian.age_s,
+            lidar_classification: result.lidar_classification.as_str(),
+            fused_classification: result.fused_classification.as_str(),
+            fusion_reason: result.fusion_reason.as_str(),
+            camera_observation_id: result.camera_observation_id,
+            camera_confidence: result.camera_confidence,
+            association_distance_m: result.association_distance_m,
         })
         .collect();
 
@@ -912,6 +931,19 @@ mod tests {
             "the additive object and VRU channels must preserve the same track ID"
         );
         assert_eq!(response.pedestrians[0].age_s, 0.0);
+        assert_eq!(
+            response.pedestrians[0].lidar_classification,
+            "possible_pedestrian"
+        );
+        assert_eq!(
+            response.pedestrians[0].fused_classification,
+            "possible_pedestrian"
+        );
+        assert_eq!(
+            response.pedestrians[0].fusion_reason,
+            "lidar_possible_pedestrian"
+        );
+        assert_eq!(response.pedestrians[0].camera_observation_id, None);
     }
 
     #[test]

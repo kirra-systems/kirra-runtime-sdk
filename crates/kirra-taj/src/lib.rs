@@ -656,6 +656,83 @@ pub struct ClassifiedVru {
     pub frames_seen: u32,
 }
 
+/// Final frame-local VRU classification after applying supporting camera
+/// evidence to the authoritative lidar track.
+///
+/// Camera evidence never creates a track, alters its geometry, or removes the
+/// ordinary object-RSS bound. Conflicting evidence tightens toward pedestrian
+/// RSS rather than silently trusting either sensor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FusedVruClassification {
+    PossiblePedestrian,
+    CameraSupportedPedestrian,
+    NotPedestrian,
+    ConflictingEvidence,
+}
+
+impl FusedVruClassification {
+    /// Stable machine-readable wire value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PossiblePedestrian => "possible_pedestrian",
+            Self::CameraSupportedPedestrian => "camera_supported_pedestrian",
+            Self::NotPedestrian => "not_pedestrian",
+            Self::ConflictingEvidence => "conflicting_evidence",
+        }
+    }
+
+    /// Whether this result must feed the pedestrian reachable-set check.
+    #[must_use]
+    pub const fn feeds_pedestrian_rss(self) -> bool {
+        matches!(
+            self,
+            Self::PossiblePedestrian | Self::CameraSupportedPedestrian | Self::ConflictingEvidence
+        )
+    }
+}
+
+/// Stable explanation for the fused VRU decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FusionInfluenceReason {
+    LidarPossiblePedestrian,
+    CameraSupportsLidarPedestrian,
+    LidarNotPedestrian,
+    CameraConflictsWithLidarExclusion,
+}
+
+impl FusionInfluenceReason {
+    /// Stable machine-readable wire value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LidarPossiblePedestrian => "lidar_possible_pedestrian",
+            Self::CameraSupportsLidarPedestrian => "camera_supports_lidar_pedestrian",
+            Self::LidarNotPedestrian => "lidar_not_pedestrian",
+            Self::CameraConflictsWithLidarExclusion => "camera_conflicts_with_lidar_exclusion",
+        }
+    }
+}
+
+/// One lidar track plus its auditable fused VRU decision.
+///
+/// The camera fields are association evidence only. Position, velocity, age,
+/// extent, and track identity remain lidar-derived.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FusedClassifiedVru {
+    pub pedestrian: PerceivedPedestrian,
+    pub lidar_classification: VruClassification,
+    pub lidar_reason: VruClassificationReason,
+    pub fused_classification: FusedVruClassification,
+    pub fusion_reason: FusionInfluenceReason,
+    pub camera_observation_id: Option<u64>,
+    pub camera_confidence: Option<f64>,
+    pub association_distance_m: Option<f64>,
+    pub extent_m: f64,
+    pub speed_mps: f64,
+    pub frames_seen: u32,
+}
+
 /// One persistent object track: a stable id + last position/stamp, kept across
 /// frames so the next frame can estimate velocity from displacement.
 #[derive(Debug, Clone, Copy)]
@@ -1126,6 +1203,73 @@ impl TajTracker {
         associate_camera_vrus_to_tracks(&self.tracks, observations, now_ms, cfg)
     }
 
+    /// Fuse supporting camera associations into the lidar VRU decisions.
+    ///
+    /// Safety invariants:
+    ///
+    /// - lidar remains authoritative for track existence and geometry;
+    /// - camera-only evidence cannot create a result;
+    /// - camera evidence cannot remove ordinary object RSS;
+    /// - conflicting evidence feeds pedestrian RSS;
+    /// - an empty association set preserves lidar-only membership.
+    #[must_use]
+    pub fn classify_vrus_fused(
+        &self,
+        now_ms: u64,
+        classifier_cfg: &VruClassifierConfig,
+        associations: &[CameraVruAssociation],
+    ) -> Vec<FusedClassifiedVru> {
+        self.classify_vrus(now_ms, classifier_cfg)
+            .into_iter()
+            .map(|lidar| {
+                // Association is already deterministic and one-to-one. Use a
+                // minimum-key fallback defensively if a malformed caller
+                // supplies duplicate track associations.
+                let camera = associations
+                    .iter()
+                    .filter(|association| association.track_id == lidar.pedestrian.id)
+                    .min_by(|left, right| {
+                        left.distance_m
+                            .total_cmp(&right.distance_m)
+                            .then_with(|| left.observation_id.cmp(&right.observation_id))
+                    });
+
+                let (fused_classification, fusion_reason) = match (lidar.classification, camera) {
+                    (VruClassification::PossiblePedestrian, Some(_)) => (
+                        FusedVruClassification::CameraSupportedPedestrian,
+                        FusionInfluenceReason::CameraSupportsLidarPedestrian,
+                    ),
+                    (VruClassification::PossiblePedestrian, None) => (
+                        FusedVruClassification::PossiblePedestrian,
+                        FusionInfluenceReason::LidarPossiblePedestrian,
+                    ),
+                    (VruClassification::NotPedestrian, Some(_)) => (
+                        FusedVruClassification::ConflictingEvidence,
+                        FusionInfluenceReason::CameraConflictsWithLidarExclusion,
+                    ),
+                    (VruClassification::NotPedestrian, None) => (
+                        FusedVruClassification::NotPedestrian,
+                        FusionInfluenceReason::LidarNotPedestrian,
+                    ),
+                };
+
+                FusedClassifiedVru {
+                    pedestrian: lidar.pedestrian,
+                    lidar_classification: lidar.classification,
+                    lidar_reason: lidar.reason,
+                    fused_classification,
+                    fusion_reason,
+                    camera_observation_id: camera.map(|value| value.observation_id),
+                    camera_confidence: camera.map(|value| value.confidence),
+                    association_distance_m: camera.map(|value| value.distance_m),
+                    extent_m: lidar.extent_m,
+                    speed_mps: lidar.speed_mps,
+                    frames_seen: lidar.frames_seen,
+                }
+            })
+            .collect()
+    }
+
     /// Compatibility view consumed by the pedestrian RSS producer.
     ///
     /// Safety membership is derived from [`Self::classify_vrus`], keeping one
@@ -1564,6 +1708,185 @@ mod tests {
             forward[0].observation_id, 10,
             "lowest geometric error wins, not input order or confidence"
         );
+    }
+
+    #[test]
+    fn fused_classifier_without_camera_preserves_lidar_membership() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+        let scan = scan_from(10.0, 1_000, |theta| {
+            if theta.abs() < 0.035 {
+                Some(3.0)
+            } else {
+                None
+            }
+        });
+        tracker.track(&scan, 1_000);
+
+        let fused = tracker.classify_vrus_fused(1_000, &VruClassifierConfig::default(), &[]);
+
+        assert_eq!(fused.len(), 1);
+        assert_eq!(
+            fused[0].fused_classification,
+            FusedVruClassification::PossiblePedestrian
+        );
+        assert!(fused[0].fused_classification.feeds_pedestrian_rss());
+        assert_eq!(fused[0].camera_observation_id, None);
+    }
+
+    #[test]
+    fn fused_classifier_camera_supports_lidar_pedestrian() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+        let scan = scan_from(10.0, 1_000, |theta| {
+            if theta.abs() < 0.035 {
+                Some(3.0)
+            } else {
+                None
+            }
+        });
+        let perception = tracker.track(&scan, 1_000);
+        let track_id = perception.objects[0].id;
+
+        let association = CameraVruAssociation {
+            track_id,
+            observation_id: 44,
+            distance_m: 0.08,
+            confidence: 0.92,
+        };
+
+        let fused =
+            tracker.classify_vrus_fused(1_000, &VruClassifierConfig::default(), &[association]);
+
+        assert_eq!(fused.len(), 1);
+        assert_eq!(
+            fused[0].fused_classification,
+            FusedVruClassification::CameraSupportedPedestrian
+        );
+        assert_eq!(
+            fused[0].fusion_reason,
+            FusionInfluenceReason::CameraSupportsLidarPedestrian
+        );
+        assert_eq!(fused[0].camera_observation_id, Some(44));
+        assert_eq!(fused[0].pedestrian.id, track_id);
+        assert!(fused[0].fused_classification.feeds_pedestrian_rss());
+    }
+
+    #[test]
+    fn fused_classifier_conflict_tightens_to_pedestrian_rss() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+
+        let first = scan_from(10.0, 1_000, |theta| {
+            if theta.abs() < 0.035 {
+                Some(3.0)
+            } else {
+                None
+            }
+        });
+        let second = scan_from(10.0, 1_100, |theta| {
+            if theta.abs() < 0.035 {
+                Some(3.5)
+            } else {
+                None
+            }
+        });
+
+        tracker.track(&first, 1_000);
+        let perception = tracker.track(&second, 1_100);
+        let track_id = perception.objects[0].id;
+
+        let lidar = tracker.classify_vrus(1_100, &VruClassifierConfig::default());
+        assert_eq!(
+            lidar[0].classification,
+            VruClassification::NotPedestrian,
+            "the synthetic 5 m/s track must first be excluded by lidar geometry"
+        );
+
+        let association = CameraVruAssociation {
+            track_id,
+            observation_id: 45,
+            distance_m: 0.05,
+            confidence: 0.95,
+        };
+
+        let fused =
+            tracker.classify_vrus_fused(1_100, &VruClassifierConfig::default(), &[association]);
+
+        assert_eq!(
+            fused[0].fused_classification,
+            FusedVruClassification::ConflictingEvidence
+        );
+        assert_eq!(
+            fused[0].fusion_reason,
+            FusionInfluenceReason::CameraConflictsWithLidarExclusion
+        );
+        assert!(
+            fused[0].fused_classification.feeds_pedestrian_rss(),
+            "sensor disagreement must tighten, never silently remove VRU RSS"
+        );
+    }
+
+    #[test]
+    fn fused_classifier_lidar_exclusion_without_camera_remains_not_pedestrian() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+
+        let first = scan_from(10.0, 1_000, |theta| {
+            if theta.abs() < 0.035 {
+                Some(3.0)
+            } else {
+                None
+            }
+        });
+        let second = scan_from(10.0, 1_100, |theta| {
+            if theta.abs() < 0.035 {
+                Some(3.5)
+            } else {
+                None
+            }
+        });
+
+        tracker.track(&first, 1_000);
+        let perception = tracker.track(&second, 1_100);
+
+        let fused = tracker.classify_vrus_fused(1_100, &VruClassifierConfig::default(), &[]);
+
+        assert_eq!(
+            fused[0].fused_classification,
+            FusedVruClassification::NotPedestrian
+        );
+        assert!(!fused[0].fused_classification.feeds_pedestrian_rss());
+        assert_eq!(
+            fused[0].pedestrian.id, perception.objects[0].id,
+            "the lidar track remains in the ordinary object channel"
+        );
+    }
+
+    #[test]
+    fn fused_classifier_ignores_association_for_unknown_track() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+        let scan = scan_from(10.0, 1_000, |theta| {
+            if theta.abs() < 0.035 {
+                Some(3.0)
+            } else {
+                None
+            }
+        });
+        tracker.track(&scan, 1_000);
+
+        let association = CameraVruAssociation {
+            track_id: u64::MAX,
+            observation_id: 46,
+            distance_m: 0.01,
+            confidence: 0.99,
+        };
+
+        let fused =
+            tracker.classify_vrus_fused(1_000, &VruClassifierConfig::default(), &[association]);
+
+        assert_eq!(fused.len(), 1);
+        assert_eq!(
+            fused[0].fused_classification,
+            FusedVruClassification::PossiblePedestrian
+        );
+        assert_eq!(fused[0].camera_observation_id, None);
     }
 
     #[test]
