@@ -25,6 +25,10 @@
 
 use kirra_core::frame_integrity::FrameTrust;
 use kirra_planner::{
+    behavior::{
+        predicted_vru_speed_cap, PredictedVruOccupancy, DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M,
+        DEFAULT_VRU_YIELD_STANDOFF_M,
+    },
     plan_for_intent, EgoState, FleetPosture, GeometricPlanner, GeometricPlannerConfig, Goal,
     MickIntent, PlanInput, Pose, ProposalKind,
 };
@@ -80,6 +84,38 @@ pub struct PedestrianReq {
     pub age_s: f64,
 }
 
+/// One future occupied point for a fused lidar-authoritative VRU track.
+///
+/// Coordinates use the same frame as `pedestrians` and Taj's corridor output.
+#[derive(Debug, Deserialize)]
+pub struct PredictedVruPointReq {
+    pub time_s: f64,
+    pub x: f64,
+    pub y: f64,
+    pub uncertainty_radius_m: f64,
+}
+
+/// Bounded VRU prediction produced by Taj.
+///
+/// The model and fallback fields remain auditable metadata. Occy's behavioral
+/// decision consumes the occupied points rather than reinterpreting the model.
+#[derive(Debug, Deserialize)]
+pub struct PredictedVruReq {
+    pub track_id: u64,
+    pub model: String,
+    pub points: Vec<PredictedVruPointReq>,
+    pub horizon_s: f64,
+    pub step_s: f64,
+    pub source_age_s: f64,
+    pub frames_seen: u32,
+    #[serde(default)]
+    pub fallback_reason: Option<String>,
+}
+
+const MAX_PREDICTED_VRUS: usize = 64;
+const MAX_PREDICTED_VRU_POINTS: usize = 16;
+const OCCY_VRU_BRAKE_DECEL_MPS2: f64 = 1.0;
+
 #[derive(Deserialize)]
 pub struct PlanRequest {
     pub ego: EgoReq,
@@ -95,6 +131,13 @@ pub struct PlanRequest {
     /// Empty or absent preserves the pre-VRU planner path byte-for-byte.
     #[serde(default)]
     pub pedestrians: Vec<PedestrianReq>,
+    /// Taj's bounded future occupancy for fused pedestrian-RSS tracks.
+    ///
+    /// Empty or absent preserves the current planner behavior. Every prediction
+    /// must refer to an entry in `pedestrians`; camera-only evidence cannot
+    /// introduce a planning authority through this channel.
+    #[serde(default)]
+    pub predicted_vrus: Vec<PredictedVruReq>,
     /// Optional vehicle footprint/kinematics for the CHECKER. Absent → the
     /// urban-car default (4.8 m). A small differential robot MUST pass its own
     /// dimensions, or the car-sized footprint can't fit a robot-scale corridor
@@ -287,6 +330,151 @@ fn pts(v: &[[f64; 2]]) -> Vec<Point> {
         .collect()
 }
 
+fn valid_vru_model(value: &str) -> bool {
+    matches!(
+        value,
+        "stationary" | "constant_velocity" | "bounded_turn_rate" | "omnidirectional_fallback"
+    )
+}
+
+fn valid_vru_fallback(value: &str) -> bool {
+    matches!(
+        value,
+        "invalid_configuration"
+            | "non_finite_track_state"
+            | "insufficient_history"
+            | "stale_track"
+            | "excessive_speed"
+            | "excessive_yaw_rate"
+    )
+}
+
+/// Validate prediction bounds and authority relationships.
+///
+/// A prediction cannot exist without a matching fused pedestrian entry. This
+/// preserves lidar-authoritative track creation and prevents a second semantic
+/// channel from independently influencing motion.
+fn validate_predicted_vrus(req: &PlanRequest) -> Result<(), SeamRejection> {
+    if req.predicted_vrus.len() > MAX_PREDICTED_VRUS {
+        return Err(SeamRejection {
+            code: "PREDICTED_VRU_BOUND_EXCEEDED",
+            detail: format!(
+                "predicted_vrus contains {} tracks; maximum is {}",
+                req.predicted_vrus.len(),
+                MAX_PREDICTED_VRUS
+            ),
+        });
+    }
+
+    let pedestrian_ids: std::collections::BTreeSet<u64> = req
+        .pedestrians
+        .iter()
+        .map(|pedestrian| pedestrian.id)
+        .collect();
+
+    let mut prediction_ids = std::collections::BTreeSet::new();
+
+    for prediction in &req.predicted_vrus {
+        if !pedestrian_ids.contains(&prediction.track_id) {
+            return Err(SeamRejection {
+                code: "PREDICTED_VRU_WITHOUT_PEDESTRIAN",
+                detail: format!(
+                    "prediction track {} has no fused pedestrian authority",
+                    prediction.track_id
+                ),
+            });
+        }
+
+        if !prediction_ids.insert(prediction.track_id) {
+            return Err(SeamRejection {
+                code: "DUPLICATE_PREDICTED_VRU_TRACK",
+                detail: format!(
+                    "prediction track {} appears more than once",
+                    prediction.track_id
+                ),
+            });
+        }
+
+        if !valid_vru_model(&prediction.model) {
+            return Err(SeamRejection {
+                code: "UNKNOWN_VRU_PREDICTION_MODEL",
+                detail: format!(
+                    "track {} supplied unknown model {:?}",
+                    prediction.track_id, prediction.model
+                ),
+            });
+        }
+
+        if prediction
+            .fallback_reason
+            .as_deref()
+            .is_some_and(|reason| !valid_vru_fallback(reason))
+        {
+            return Err(SeamRejection {
+                code: "UNKNOWN_VRU_FALLBACK_REASON",
+                detail: format!(
+                    "track {} supplied an unknown fallback reason",
+                    prediction.track_id
+                ),
+            });
+        }
+
+        if prediction.points.is_empty() || prediction.points.len() > MAX_PREDICTED_VRU_POINTS {
+            return Err(SeamRejection {
+                code: "PREDICTED_VRU_POINT_BOUND",
+                detail: format!(
+                    "track {} contains {} prediction points; valid range is 1..={}",
+                    prediction.track_id,
+                    prediction.points.len(),
+                    MAX_PREDICTED_VRU_POINTS
+                ),
+            });
+        }
+
+        if !prediction.horizon_s.is_finite()
+            || prediction.horizon_s <= 0.0
+            || !prediction.step_s.is_finite()
+            || prediction.step_s <= 0.0
+            || !prediction.source_age_s.is_finite()
+            || prediction.source_age_s < 0.0
+        {
+            return Err(SeamRejection {
+                code: "NONFINITE_VRU_PREDICTION",
+                detail: format!(
+                    "track {} contains invalid prediction metadata",
+                    prediction.track_id
+                ),
+            });
+        }
+
+        let mut previous_time_s = -1.0_f64;
+
+        for point in &prediction.points {
+            if !point.time_s.is_finite()
+                || point.time_s < 0.0
+                || point.time_s <= previous_time_s
+                || point.time_s > prediction.horizon_s + f64::EPSILON
+                || !point.x.is_finite()
+                || !point.y.is_finite()
+                || !point.uncertainty_radius_m.is_finite()
+                || point.uncertainty_radius_m < 0.0
+            {
+                return Err(SeamRejection {
+                    code: "NONFINITE_VRU_PREDICTION",
+                    detail: format!(
+                        "track {} contains malformed or non-monotonic points",
+                        prediction.track_id
+                    ),
+                });
+            }
+
+            previous_time_s = point.time_s;
+        }
+    }
+
+    Ok(())
+}
+
 /// Finite-input validation (seam hygiene): every numeric the request carries.
 fn validate_finite(req: &PlanRequest) -> Result<(), SeamRejection> {
     let finite = |vals: &[f64]| vals.iter().all(|v| v.is_finite());
@@ -464,6 +652,7 @@ fn effective_intent(req: &PlanRequest) -> Result<MickIntent, SeamRejection> {
 /// the KIRRA slow-loop checker bounds it and narrates a refusal.
 pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
     validate_finite(req)?;
+    validate_predicted_vrus(req)?;
     let intent = effective_intent(req)?;
     let target = intent_target(&intent).unwrap_or((req.goal.x, req.goal.y));
     validate_in_map(req, target)?;
@@ -510,6 +699,33 @@ pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
         barriers: &[],
     };
 
+    // Taj points are expressed in the same ego-relative planning frame as the
+    // fused pedestrian channel. Occy consumes their conservative occupied
+    // regions and derives only a LOWER speed ceiling.
+    let predicted_vru_occupancies: Vec<PredictedVruOccupancy> = req
+        .predicted_vrus
+        .iter()
+        .flat_map(|prediction| {
+            prediction
+                .points
+                .iter()
+                .map(move |point| PredictedVruOccupancy {
+                    track_id: prediction.track_id,
+                    time_s: point.time_s,
+                    ahead_m: point.x,
+                    lateral_offset_m: point.y,
+                    uncertainty_radius_m: point.uncertainty_radius_m,
+                })
+        })
+        .collect();
+
+    let predicted_vru_cap_mps = predicted_vru_speed_cap(
+        &predicted_vru_occupancies,
+        DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M,
+        DEFAULT_VRU_YIELD_STANDOFF_M,
+        OCCY_VRU_BRAKE_DECEL_MPS2,
+    );
+
     let world = PlanInput {
         ego: EgoState {
             pose: Pose {
@@ -539,7 +755,7 @@ pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
         no_overtake_ids: &[],
         drivable: None,
         posture: FleetPosture::Nominal,
-        target_speed_mps: None,
+        target_speed_mps: predicted_vru_cap_mps,
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
@@ -642,6 +858,7 @@ mod tests {
             right: vec![[-5.0, -5.0], [100.0, -5.0]],
             objects: vec![],
             pedestrians: vec![],
+            predicted_vrus: vec![],
             vehicle: None,
             intent: None,
             // Object-goal channel off by default, so every pre-existing
@@ -832,6 +1049,125 @@ mod tests {
         );
         assert!(!response.admitted);
         assert!(response.trajectory.is_empty());
+    }
+
+    fn predicted_point(
+        time_s: f64,
+        x: f64,
+        y: f64,
+        uncertainty_radius_m: f64,
+    ) -> PredictedVruPointReq {
+        PredictedVruPointReq {
+            time_s,
+            x,
+            y,
+            uncertainty_radius_m,
+        }
+    }
+
+    fn predicted_vru(track_id: u64, points: Vec<PredictedVruPointReq>) -> PredictedVruReq {
+        PredictedVruReq {
+            track_id,
+            model: "constant_velocity".to_string(),
+            points,
+            horizon_s: 3.0,
+            step_s: 1.0,
+            source_age_s: 0.0,
+            frames_seen: 3,
+            fallback_reason: None,
+        }
+    }
+
+    #[test]
+    fn predicted_crossing_vru_derates_occy_before_snapshot_conflict() {
+        let mut baseline = base_request();
+        baseline.cruise = 3.0;
+
+        let baseline_response = handle_plan(&baseline).expect("baseline planning request");
+
+        let baseline_peak = baseline_response
+            .trajectory
+            .iter()
+            .map(|point| point.v)
+            .fold(0.0_f64, f64::max);
+
+        let mut predicted = base_request();
+        predicted.cruise = 3.0;
+        predicted.pedestrians = vec![PedestrianReq {
+            id: 44,
+            x: 5.0,
+            y: 2.0,
+            vx: 0.0,
+            vy: -0.8,
+            age_s: 0.0,
+        }];
+        predicted.predicted_vrus = vec![predicted_vru(
+            44,
+            vec![
+                predicted_point(1.0, 5.0, 1.2, 0.25),
+                predicted_point(2.0, 5.0, 0.2, 0.35),
+                predicted_point(3.0, 5.0, -0.4, 0.45),
+            ],
+        )];
+
+        let response = handle_plan(&predicted).expect("valid prediction reaches Occy");
+
+        let predicted_peak = response
+            .trajectory
+            .iter()
+            .map(|point| point.v)
+            .fold(0.0_f64, f64::max);
+
+        assert!(
+            predicted_peak < baseline_peak,
+            "future crossing must tighten Occy's speed: {predicted_peak} < {baseline_peak}"
+        );
+    }
+
+    #[test]
+    fn prediction_without_fused_pedestrian_is_refused() {
+        let mut request = base_request();
+        request.predicted_vrus = vec![predicted_vru(99, vec![predicted_point(1.0, 4.0, 0.0, 0.2)])];
+
+        assert_eq!(
+            handle_plan(&request).unwrap_err().code,
+            "PREDICTED_VRU_WITHOUT_PEDESTRIAN"
+        );
+    }
+
+    #[test]
+    fn malformed_prediction_fails_closed_at_the_seam() {
+        let mut request = base_request();
+        request.pedestrians = vec![PedestrianReq {
+            id: 55,
+            x: 5.0,
+            y: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            age_s: 0.0,
+        }];
+        request.predicted_vrus = vec![predicted_vru(
+            55,
+            vec![predicted_point(1.0, 4.0, 0.0, f64::NAN)],
+        )];
+
+        assert_eq!(
+            handle_plan(&request).unwrap_err().code,
+            "NONFINITE_VRU_PREDICTION"
+        );
+    }
+
+    #[test]
+    fn absent_prediction_channel_preserves_existing_plan_path() {
+        let mut request = base_request();
+        request.predicted_vrus.clear();
+
+        let response = handle_plan(&request).expect("empty prediction channel is a no-op");
+
+        assert!(
+            matches!(response.verdict.as_str(), "Accept" | "Clamp"),
+            "empty prediction channel must preserve the clean planning path"
+        );
     }
 
     #[test]

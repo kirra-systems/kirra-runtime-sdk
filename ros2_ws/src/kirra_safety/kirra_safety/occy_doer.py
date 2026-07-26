@@ -359,6 +359,7 @@ class OccyDoer(Node):
                 'right': right,
                 'objects': taj.get('objects', []),
                 'pedestrians': taj.get('pedestrians', []),
+                'predicted_vrus': taj.get('predicted_vrus', []),
                 'vehicle': self._vehicle,
             }
             if goal_fields:

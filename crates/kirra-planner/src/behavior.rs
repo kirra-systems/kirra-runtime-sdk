@@ -282,6 +282,121 @@ pub fn yield_to_vru_speed_cap(
     })
 }
 
+/// One future occupied VRU region expressed relative to the ego path.
+///
+/// `ahead_m` is longitudinal distance in the current ego/path frame.
+/// `lateral_offset_m` is signed lateral displacement from the path center.
+/// `uncertainty_radius_m` expands the occupied region in every direction.
+///
+/// This is deliberately a plain bounded sample rather than a semantic motion
+/// model. Taj owns model selection; Occy consumes only the conservative occupied
+/// region that model produced.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PredictedVruOccupancy {
+    pub track_id: u64,
+    pub time_s: f64,
+    pub ahead_m: f64,
+    pub lateral_offset_m: f64,
+    pub uncertainty_radius_m: f64,
+}
+
+/// Use predicted VRU occupancy to derive a restrictive Occy speed ceiling.
+///
+/// Safety properties:
+///
+/// - empty input is a no-op;
+/// - malformed input fails closed to `Some(0.0)`;
+/// - uncertainty is treated as occupied space, never ignored;
+/// - future predictions may only lower speed;
+/// - a more uncertain prediction can never produce a higher cap;
+/// - this does not create VRU membership or alter KIRRA's independent check.
+///
+/// Two ceilings are applied to every conflicting prediction sample:
+///
+/// 1. assured-clear-distance braking before the expanded VRU boundary;
+/// 2. a time-aligned ceiling preventing the ego from reaching that boundary
+///    before the predicted occupancy time.
+///
+/// The minimum across every sample and track binds.
+#[must_use]
+pub fn predicted_vru_speed_cap(
+    occupancies: &[PredictedVruOccupancy],
+    band_half_width_m: f64,
+    standoff_m: f64,
+    brake_decel_mps2: f64,
+) -> Option<f64> {
+    if occupancies.is_empty() {
+        return None;
+    }
+
+    if !band_half_width_m.is_finite()
+        || band_half_width_m < 0.0
+        || !standoff_m.is_finite()
+        || standoff_m < 0.0
+        || !brake_decel_mps2.is_finite()
+        || brake_decel_mps2 <= 0.0
+    {
+        return Some(0.0);
+    }
+
+    let mut binding_cap_mps = f64::INFINITY;
+    let mut conflict_found = false;
+
+    for occupancy in occupancies {
+        if !occupancy.time_s.is_finite()
+            || occupancy.time_s < 0.0
+            || !occupancy.ahead_m.is_finite()
+            || !occupancy.lateral_offset_m.is_finite()
+            || !occupancy.uncertainty_radius_m.is_finite()
+            || occupancy.uncertainty_radius_m < 0.0
+        {
+            return Some(0.0);
+        }
+
+        let occupied_half_width_m = band_half_width_m + occupancy.uncertainty_radius_m;
+
+        if occupancy.lateral_offset_m.abs() > occupied_half_width_m {
+            continue;
+        }
+
+        let nearest_occupied_ahead_m = occupancy.ahead_m - occupancy.uncertainty_radius_m;
+
+        // Occupancy entirely behind the ego is not a forward planning conflict.
+        if nearest_occupied_ahead_m < 0.0
+            && occupancy.ahead_m + occupancy.uncertainty_radius_m < 0.0
+        {
+            continue;
+        }
+
+        conflict_found = true;
+
+        let available_distance_m = (nearest_occupied_ahead_m - standoff_m).max(0.0);
+
+        let braking_cap_mps =
+            assured_clear_distance_speed_cap(available_distance_m, brake_decel_mps2);
+
+        let time_aligned_cap_mps = if occupancy.time_s > 0.0 {
+            available_distance_m / occupancy.time_s
+        } else {
+            braking_cap_mps
+        };
+
+        let sample_cap_mps = braking_cap_mps.min(time_aligned_cap_mps);
+
+        if !sample_cap_mps.is_finite() || sample_cap_mps < 0.0 {
+            return Some(0.0);
+        }
+
+        binding_cap_mps = binding_cap_mps.min(sample_cap_mps);
+    }
+
+    if conflict_found {
+        Some(binding_cap_mps)
+    } else {
+        None
+    }
+}
+
 /// Safety margin (s) added to a crosswalk crossing's clear time before the courier commits.
 pub const DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S: f64 = 2.0;
 
@@ -1025,6 +1140,110 @@ mod tests {
         assert!(
             near < far,
             "the nearer pedestrian must bind the lower cap ({near} < {far})"
+        );
+    }
+
+    fn predicted_vru(
+        track_id: u64,
+        time_s: f64,
+        ahead_m: f64,
+        lateral_offset_m: f64,
+        uncertainty_radius_m: f64,
+    ) -> PredictedVruOccupancy {
+        PredictedVruOccupancy {
+            track_id,
+            time_s,
+            ahead_m,
+            lateral_offset_m,
+            uncertainty_radius_m,
+        }
+    }
+
+    #[test]
+    fn absent_vru_prediction_is_a_noop() {
+        assert_eq!(predicted_vru_speed_cap(&[], BAND, STANDOFF, DECEL), None);
+    }
+
+    #[test]
+    fn predicted_crossing_vru_derates_before_snapshot_conflict() {
+        // Currently outside the path, but predicted inside it in two seconds.
+        let occupancies = [
+            predicted_vru(7, 0.0, 5.0, 2.0, 0.2),
+            predicted_vru(7, 2.0, 5.0, 0.2, 0.4),
+        ];
+
+        let cap = predicted_vru_speed_cap(&occupancies, BAND, STANDOFF, DECEL)
+            .expect("future crossing must bind");
+
+        assert!(
+            cap > 0.0 && cap < 3.0,
+            "future crossing should cause an early positive derate, got {cap}"
+        );
+    }
+
+    #[test]
+    fn parallel_out_of_band_vru_does_not_derate() {
+        let occupancies = [
+            predicted_vru(8, 1.0, 3.0, 3.0, 0.2),
+            predicted_vru(8, 2.0, 5.0, 3.1, 0.3),
+        ];
+
+        assert_eq!(
+            predicted_vru_speed_cap(&occupancies, BAND, STANDOFF, DECEL,),
+            None
+        );
+    }
+
+    #[test]
+    fn uncertainty_radius_counts_as_occupied_space() {
+        let precise = [predicted_vru(9, 2.0, 5.0, 1.2, 0.1)];
+        let uncertain = [predicted_vru(9, 2.0, 5.0, 1.2, 0.6)];
+
+        let precise_cap = predicted_vru_speed_cap(&precise, BAND, STANDOFF, DECEL);
+        let uncertain_cap = predicted_vru_speed_cap(&uncertain, BAND, STANDOFF, DECEL)
+            .expect("expanded uncertainty must reach the path band");
+
+        assert_eq!(
+            precise_cap, None,
+            "precise prediction remains outside the path band"
+        );
+        assert!(
+            uncertain_cap >= 0.0,
+            "uncertain occupied region must produce a valid restrictive cap"
+        );
+    }
+
+    #[test]
+    fn larger_uncertainty_never_raises_the_cap() {
+        let smaller = [predicted_vru(10, 2.0, 5.0, 0.0, 0.2)];
+        let larger = [predicted_vru(10, 2.0, 5.0, 0.0, 0.8)];
+
+        let smaller_cap = predicted_vru_speed_cap(&smaller, BAND, STANDOFF, DECEL).unwrap();
+        let larger_cap = predicted_vru_speed_cap(&larger, BAND, STANDOFF, DECEL).unwrap();
+
+        assert!(
+            larger_cap <= smaller_cap,
+            "greater uncertainty may only tighten: {larger_cap} <= {smaller_cap}"
+        );
+    }
+
+    #[test]
+    fn malformed_prediction_fails_closed() {
+        let malformed = [predicted_vru(11, f64::NAN, 50.0, 50.0, 0.1)];
+
+        assert_eq!(
+            predicted_vru_speed_cap(&malformed, BAND, STANDOFF, DECEL,),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn prediction_inside_standoff_stops_occy() {
+        let occupancies = [predicted_vru(12, 0.5, 0.8, 0.0, 0.2)];
+
+        assert_eq!(
+            predicted_vru_speed_cap(&occupancies, BAND, STANDOFF, DECEL,),
+            Some(0.0)
         );
     }
 
