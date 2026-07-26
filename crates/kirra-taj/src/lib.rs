@@ -787,6 +787,62 @@ impl VruMotionModel {
     }
 }
 
+/// Conservative frame-local interpretation of a tracked VRU's motion.
+///
+/// Intent is auditable metadata only. It does not create tracks, alter fused
+/// pedestrian membership, reduce uncertainty, or replace the existing
+/// omnidirectional pedestrian RSS bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VruIntentClass {
+    Unknown,
+    AlongPath,
+    CrossingLeftToRight,
+    CrossingRightToLeft,
+    WaitingNearPath,
+    MovingAway,
+}
+
+impl VruIntentClass {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::AlongPath => "along_path",
+            Self::CrossingLeftToRight => "crossing_left_to_right",
+            Self::CrossingRightToLeft => "crossing_right_to_left",
+            Self::WaitingNearPath => "waiting_near_path",
+            Self::MovingAway => "moving_away",
+        }
+    }
+}
+
+/// Stable explanation for the frame-local VRU intent classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VruIntentReason {
+    InsufficientHistory,
+    NonFiniteMotion,
+    NearlyStationaryNearPath,
+    LongitudinalMotionDominant,
+    LateralMotionTowardPath,
+    LateralMotionAwayFromPath,
+    AmbiguousMotion,
+}
+
+impl VruIntentReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InsufficientHistory => "insufficient_history",
+            Self::NonFiniteMotion => "non_finite_motion",
+            Self::NearlyStationaryNearPath => "nearly_stationary_near_path",
+            Self::LongitudinalMotionDominant => "longitudinal_motion_dominant",
+            Self::LateralMotionTowardPath => "lateral_motion_toward_path",
+            Self::LateralMotionAwayFromPath => "lateral_motion_away_from_path",
+            Self::AmbiguousMotion => "ambiguous_motion",
+        }
+    }
+}
+
 /// Stable reason why directional VRU prediction was withheld.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VruPredictionFallbackReason {
@@ -825,6 +881,12 @@ pub struct PredictedVruPoint {
 pub struct PredictedVruMotion {
     pub track_id: u64,
     pub model: VruMotionModel,
+    /// Conservative interpretation of current tracked motion.
+    ///
+    /// Metadata only: it does not modify the prediction model or uncertainty.
+    pub intent: VruIntentClass,
+    pub intent_confidence: f64,
+    pub intent_reason: VruIntentReason,
     pub points: Vec<PredictedVruPoint>,
     pub horizon_s: f64,
     pub step_s: f64,
@@ -1105,6 +1167,89 @@ pub struct TajTracker {
     phase_a: TajPhaseA,
     tracks: Vec<Track>,
     next_id: u64,
+}
+
+fn classify_vru_motion_intent(
+    track: &Track,
+    cfg: &VruMotionPredictionConfig,
+) -> (VruIntentClass, f64, VruIntentReason) {
+    let speed_mps = track.vel.x_m.hypot(track.vel.y_m);
+
+    if !track.pos.x_m.is_finite()
+        || !track.pos.y_m.is_finite()
+        || !track.vel.x_m.is_finite()
+        || !track.vel.y_m.is_finite()
+        || !speed_mps.is_finite()
+    {
+        return (
+            VruIntentClass::Unknown,
+            0.0,
+            VruIntentReason::NonFiniteMotion,
+        );
+    }
+
+    if track.frames_seen < 2 {
+        return (
+            VruIntentClass::Unknown,
+            0.0,
+            VruIntentReason::InsufficientHistory,
+        );
+    }
+
+    if speed_mps <= cfg.stationary_speed_mps {
+        return (
+            VruIntentClass::WaitingNearPath,
+            1.0,
+            VruIntentReason::NearlyStationaryNearPath,
+        );
+    }
+
+    let longitudinal_mps = track.vel.x_m.abs();
+    let lateral_mps = track.vel.y_m.abs();
+
+    if longitudinal_mps >= lateral_mps * 1.5 {
+        return (
+            VruIntentClass::AlongPath,
+            (longitudinal_mps / speed_mps).clamp(0.0, 1.0),
+            VruIntentReason::LongitudinalMotionDominant,
+        );
+    }
+
+    // +Y is left. A track on the left moving toward the path has negative vy;
+    // a track on the right moving toward the path has positive vy.
+    let moving_toward_path = (track.pos.y_m > 0.0 && track.vel.y_m < 0.0)
+        || (track.pos.y_m < 0.0 && track.vel.y_m > 0.0);
+
+    if moving_toward_path && lateral_mps > longitudinal_mps {
+        let intent = if track.vel.y_m < 0.0 {
+            VruIntentClass::CrossingLeftToRight
+        } else {
+            VruIntentClass::CrossingRightToLeft
+        };
+
+        return (
+            intent,
+            (lateral_mps / speed_mps).clamp(0.0, 1.0),
+            VruIntentReason::LateralMotionTowardPath,
+        );
+    }
+
+    let moving_away_from_path = (track.pos.y_m > 0.0 && track.vel.y_m > 0.0)
+        || (track.pos.y_m < 0.0 && track.vel.y_m < 0.0);
+
+    if moving_away_from_path && lateral_mps > longitudinal_mps {
+        return (
+            VruIntentClass::MovingAway,
+            (lateral_mps / speed_mps).clamp(0.0, 1.0),
+            VruIntentReason::LateralMotionAwayFromPath,
+        );
+    }
+
+    (
+        VruIntentClass::Unknown,
+        0.0,
+        VruIntentReason::AmbiguousMotion,
+    )
 }
 
 impl TajTracker {
@@ -1445,6 +1590,7 @@ impl TajTracker {
         let mut predictions = Vec::with_capacity(self.tracks.len());
 
         for track in &self.tracks {
+            let (intent, intent_confidence, intent_reason) = classify_vru_motion_intent(track, cfg);
             let source_age_ms = now_ms.saturating_sub(track.stamp_ms);
             let source_age_s = source_age_ms as f64 / 1_000.0;
             let speed_mps = track.vel.x_m.hypot(track.vel.y_m);
@@ -1537,6 +1683,9 @@ impl TajTracker {
             predictions.push(PredictedVruMotion {
                 track_id: track.id,
                 model,
+                intent,
+                intent_confidence,
+                intent_reason,
                 points,
                 horizon_s: cfg.horizon_s,
                 step_s: cfg.step_s,
@@ -2915,6 +3064,134 @@ mod tests {
         let _ = taj.track(&point_blob_scan(12.0, 0.5, 200), 200);
         let _ = taj.track(&point_blob_scan(14.0, 1.5, 400), 400);
         taj
+    }
+
+    fn intent_track(
+        id: u64,
+        x_m: f64,
+        y_m: f64,
+        vx_mps: f64,
+        vy_mps: f64,
+        frames_seen: u32,
+    ) -> Track {
+        Track {
+            id,
+            pos: Point { x_m, y_m },
+            stamp_ms: 1_000,
+            vel: Point {
+                x_m: vx_mps,
+                y_m: vy_mps,
+            },
+            yaw_rate: 0.0,
+            extent_m: 0.3,
+            frames_seen,
+        }
+    }
+
+    #[test]
+    fn vru_intent_classifies_left_to_right_crossing() {
+        let track = intent_track(1, 4.0, 1.5, 0.1, -0.8, 3);
+        let cfg = VruMotionPredictionConfig::default();
+
+        let (intent, confidence, reason) = classify_vru_motion_intent(&track, &cfg);
+
+        assert_eq!(intent, VruIntentClass::CrossingLeftToRight);
+        assert_eq!(reason, VruIntentReason::LateralMotionTowardPath);
+        assert!(confidence > 0.9);
+    }
+
+    #[test]
+    fn vru_intent_classifies_right_to_left_crossing() {
+        let track = intent_track(2, 4.0, -1.5, 0.1, 0.8, 3);
+        let cfg = VruMotionPredictionConfig::default();
+
+        let (intent, confidence, reason) = classify_vru_motion_intent(&track, &cfg);
+
+        assert_eq!(intent, VruIntentClass::CrossingRightToLeft);
+        assert_eq!(reason, VruIntentReason::LateralMotionTowardPath);
+        assert!(confidence > 0.9);
+    }
+
+    #[test]
+    fn vru_intent_classifies_along_path_motion() {
+        let track = intent_track(3, 4.0, 0.3, 1.0, 0.1, 3);
+        let cfg = VruMotionPredictionConfig::default();
+
+        let (intent, confidence, reason) = classify_vru_motion_intent(&track, &cfg);
+
+        assert_eq!(intent, VruIntentClass::AlongPath);
+        assert_eq!(reason, VruIntentReason::LongitudinalMotionDominant);
+        assert!(confidence > 0.9);
+    }
+
+    #[test]
+    fn vru_intent_classifies_stationary_track_as_waiting() {
+        let track = intent_track(4, 3.0, 0.5, 0.0, 0.0, 3);
+        let cfg = VruMotionPredictionConfig::default();
+
+        let (intent, confidence, reason) = classify_vru_motion_intent(&track, &cfg);
+
+        assert_eq!(intent, VruIntentClass::WaitingNearPath);
+        assert_eq!(reason, VruIntentReason::NearlyStationaryNearPath);
+        assert_eq!(confidence, 1.0);
+    }
+
+    #[test]
+    fn vru_intent_classifies_motion_away_from_path() {
+        let track = intent_track(5, 4.0, 1.0, 0.1, 0.8, 3);
+        let cfg = VruMotionPredictionConfig::default();
+
+        let (intent, confidence, reason) = classify_vru_motion_intent(&track, &cfg);
+
+        assert_eq!(intent, VruIntentClass::MovingAway);
+        assert_eq!(reason, VruIntentReason::LateralMotionAwayFromPath);
+        assert!(confidence > 0.9);
+    }
+
+    #[test]
+    fn vru_intent_insufficient_history_remains_unknown() {
+        let track = intent_track(6, 4.0, 1.0, 0.0, -0.8, 1);
+        let cfg = VruMotionPredictionConfig::default();
+
+        let (intent, confidence, reason) = classify_vru_motion_intent(&track, &cfg);
+
+        assert_eq!(intent, VruIntentClass::Unknown);
+        assert_eq!(reason, VruIntentReason::InsufficientHistory);
+        assert_eq!(confidence, 0.0);
+    }
+
+    #[test]
+    fn vru_intent_metadata_does_not_change_prediction_geometry() {
+        let track = intent_track(77, 4.0, 1.0, 0.1, -0.8, 4);
+        let cfg = VruMotionPredictionConfig::default();
+
+        let tracker = TajTracker {
+            tracks: vec![track],
+            ..TajTracker::default()
+        };
+
+        // Establish the prediction generated from the authoritative track state.
+        let before = tracker.predict_vru_motion(1_000, &cfg);
+        assert_eq!(before.len(), 1);
+
+        // Intent classification is metadata-only and must not mutate the track,
+        // configuration, prediction model, geometry, or uncertainty.
+        let (intent, confidence, reason) = classify_vru_motion_intent(&tracker.tracks[0], &cfg);
+
+        assert_eq!(intent, VruIntentClass::CrossingLeftToRight);
+        assert!(confidence.is_finite());
+        assert!(confidence > 0.0);
+        assert_eq!(reason, VruIntentReason::LateralMotionTowardPath);
+
+        let after = tracker.predict_vru_motion(1_000, &cfg);
+        assert_eq!(after.len(), 1);
+
+        assert_eq!(before[0].model, after[0].model);
+        assert_eq!(before[0].fallback_reason, after[0].fallback_reason);
+        assert_eq!(before[0].points, after[0].points);
+        assert_eq!(before[0].horizon_s, after[0].horizon_s);
+        assert_eq!(before[0].step_s, after[0].step_s);
+        assert_eq!(before[0].source_age_s, after[0].source_age_s);
     }
 
     #[test]
