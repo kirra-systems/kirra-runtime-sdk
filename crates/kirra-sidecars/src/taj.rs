@@ -12,7 +12,8 @@
 use kirra_core::corridor::CorridorSource;
 use kirra_taj::{
     clip_corridor_to_hazards, hazard_clip_x, CameraVruFusionConfig, CameraVruObservation,
-    LaserScan, SemanticClass, SemanticDetection, TajConfig, TajTracker, VruClassifierConfig,
+    LaserScan, PredictedVruMotion, SemanticClass, SemanticDetection, TajConfig, TajTracker,
+    VruClassifierConfig, VruMotionModel, VruMotionPredictionConfig, VruPredictionFallbackReason,
 };
 use serde::{Deserialize, Serialize};
 
@@ -328,6 +329,7 @@ fn invalid_perception_response(camera_armed: bool) -> PerceptionResponse {
         objects: Vec::new(),
         camera_associations: Vec::new(),
         pedestrians: Vec::new(),
+        predicted_vrus: Vec::new(),
         camera_healthy: !camera_armed,
         camera_clip_x_m: None,
     }
@@ -373,6 +375,31 @@ pub struct CameraAssociationOut {
     pub confidence: f64,
 }
 
+/// One bounded future sample for a fused VRU track.
+#[derive(Clone, Serialize)]
+pub struct PredictedVruPointOut {
+    pub time_s: f64,
+    pub x: f64,
+    pub y: f64,
+    pub uncertainty_radius_m: f64,
+}
+
+/// Auditable VRU motion prediction emitted by Taj.
+///
+/// Prediction remains supporting evidence. It does not create tracks, alter
+/// fused classification membership, or replace Kirra's pedestrian RSS bound.
+#[derive(Clone, Serialize)]
+pub struct PredictedVruMotionOut {
+    pub track_id: u64,
+    pub model: &'static str,
+    pub fallback_reason: Option<&'static str>,
+    pub horizon_s: f64,
+    pub step_s: f64,
+    pub source_age_s: f64,
+    pub frames_seen: u32,
+    pub points: Vec<PredictedVruPointOut>,
+}
+
 #[derive(Clone, Serialize)]
 pub struct PerceptionResponse {
     pub healthy: bool,
@@ -399,6 +426,9 @@ pub struct PerceptionResponse {
     /// First sightings with a pedestrian-sized footprint are included because
     /// unknown velocity cannot safely disprove the pedestrian envelope.
     pub pedestrians: Vec<PedestrianOut>,
+    /// Bounded predictions for tracks whose fused classification feeds
+    /// pedestrian RSS. Missing predictions preserve snapshot-only behavior.
+    pub predicted_vrus: Vec<PredictedVruMotionOut>,
     /// Phase-B observability: `false` when the camera channel is ARMED but the
     /// frame is missing / stale / undecodable (the request then fails closed to
     /// the MRC floor). `true` when disarmed (nothing to be unhealthy about) or
@@ -573,6 +603,50 @@ impl TrackedPerceptionState {
 pub fn handle_perception(req: &PerceptionRequest) -> PerceptionResponse {
     let mut state = TrackedPerceptionState::new();
     handle_perception_tracked(req, &mut state)
+}
+
+fn vru_motion_model_wire_name(model: VruMotionModel) -> &'static str {
+    match model {
+        VruMotionModel::Stationary => "stationary",
+        VruMotionModel::ConstantVelocity => "constant_velocity",
+        VruMotionModel::BoundedTurnRate => "bounded_turn_rate",
+        VruMotionModel::OmnidirectionalFallback => "omnidirectional_fallback",
+    }
+}
+
+fn vru_prediction_fallback_wire_name(reason: VruPredictionFallbackReason) -> &'static str {
+    match reason {
+        VruPredictionFallbackReason::InvalidConfiguration => "invalid_configuration",
+        VruPredictionFallbackReason::NonFiniteTrackState => "nonfinite_track_state",
+        VruPredictionFallbackReason::InsufficientHistory => "insufficient_history",
+        VruPredictionFallbackReason::StaleTrack => "stale_track",
+        VruPredictionFallbackReason::ExcessiveSpeed => "excessive_speed",
+        VruPredictionFallbackReason::ExcessiveYawRate => "excessive_yaw_rate",
+    }
+}
+
+fn predicted_vru_to_wire(prediction: &PredictedVruMotion) -> PredictedVruMotionOut {
+    PredictedVruMotionOut {
+        track_id: prediction.track_id,
+        model: vru_motion_model_wire_name(prediction.model),
+        fallback_reason: prediction
+            .fallback_reason
+            .map(vru_prediction_fallback_wire_name),
+        horizon_s: prediction.horizon_s,
+        step_s: prediction.step_s,
+        source_age_s: prediction.source_age_s,
+        frames_seen: prediction.frames_seen,
+        points: prediction
+            .points
+            .iter()
+            .map(|point| PredictedVruPointOut {
+                time_s: point.time_s,
+                x: point.pos.x_m,
+                y: point.pos.y_m,
+                uncertainty_radius_m: point.uncertainty_radius_m,
+            })
+            .collect(),
+    }
 }
 
 /// Stateful perception path used by the Taj service.
@@ -809,6 +883,24 @@ pub fn handle_perception_tracked(
         })
         .collect();
 
+    // Produce predictions only for tracks whose final fused classification
+    // feeds pedestrian RSS. Camera-only evidence still cannot create a track.
+    let pedestrian_track_ids: std::collections::BTreeSet<u64> = fused_vrus
+        .iter()
+        .filter(|result| result.fused_classification.feeds_pedestrian_rss())
+        .map(|result| result.pedestrian.id)
+        .collect();
+
+    let predicted_vrus: Vec<PredictedVruMotionOut> = state
+        .tracker
+        .as_ref()
+        .expect("tracker initialized above")
+        .predict_vru_motion(req.stamp_ms, &VruMotionPredictionConfig::default())
+        .iter()
+        .filter(|prediction| pedestrian_track_ids.contains(&prediction.track_id))
+        .map(predicted_vru_to_wire)
+        .collect();
+
     let response = PerceptionResponse {
         healthy,
         confidence,
@@ -824,6 +916,7 @@ pub fn handle_perception_tracked(
         objects,
         camera_associations,
         pedestrians,
+        predicted_vrus,
         camera_healthy,
         camera_clip_x_m,
     };
@@ -944,6 +1037,47 @@ mod tests {
             "lidar_possible_pedestrian"
         );
         assert_eq!(response.pedestrians[0].camera_observation_id, None);
+    }
+
+    #[test]
+    fn tracked_response_emits_prediction_for_fused_vru() {
+        let mut state = TrackedPerceptionState::new();
+        let request = req((0..301)
+            .map(|index| {
+                let angle = -1.5 + index as f64 * 0.01;
+                if angle.abs() < 0.035 {
+                    3.0
+                } else {
+                    f32::INFINITY
+                }
+            })
+            .collect());
+
+        let response = handle_perception_tracked(&request, &mut state);
+
+        assert_eq!(response.pedestrians.len(), 1);
+        assert_eq!(response.predicted_vrus.len(), 1);
+        assert_eq!(
+            response.predicted_vrus[0].track_id,
+            response.pedestrians[0].id
+        );
+        assert!(
+            !response.predicted_vrus[0].points.is_empty(),
+            "a fused VRU must carry bounded prediction evidence"
+        );
+        assert!(
+            response.predicted_vrus[0].points.len() <= 16,
+            "the default prediction contract must remain hard bounded"
+        );
+    }
+
+    #[test]
+    fn invalid_perception_response_has_no_vru_predictions() {
+        let response = invalid_perception_response(true);
+
+        assert!(response.predicted_vrus.is_empty());
+        assert!(!response.healthy);
+        assert_eq!(response.speed_cap_mps, 0.0);
     }
 
     #[test]
