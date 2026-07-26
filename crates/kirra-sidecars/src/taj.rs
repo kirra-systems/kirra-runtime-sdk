@@ -11,8 +11,8 @@
 
 use kirra_core::corridor::CorridorSource;
 use kirra_taj::{
-    clip_corridor_to_hazards, hazard_clip_x, LaserScan, SemanticClass, SemanticDetection,
-    TajConfig, TajTracker, VruClassifierConfig,
+    clip_corridor_to_hazards, hazard_clip_x, CameraVruFusionConfig, CameraVruObservation,
+    LaserScan, SemanticClass, SemanticDetection, TajConfig, TajTracker, VruClassifierConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -73,6 +73,18 @@ impl CameraDetection {
     }
 }
 
+/// Supporting camera/depth position observation.
+///
+/// This is geometry evidence only. It does not assert pedestrian identity,
+/// create a track, or loosen any lidar-derived bound.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CameraObservationReq {
+    pub observation_id: u64,
+    pub x: f64,
+    pub y: f64,
+    pub confidence: f64,
+}
+
 /// Camera (Phase-B) channel verdict for one request — the same three-way,
 /// fail-closed decision the occlusion / VRU channels make: DISARMED → no-op,
 /// armed+fresh → live fusion, armed+silent-or-garbage → MRC floor.
@@ -121,6 +133,10 @@ pub struct PerceptionRequest {
     /// means "the camera looked and saw no hazard".
     #[serde(default)]
     pub detections: Vec<CameraDetection>,
+    /// Supporting depth-camera geometry for association with existing lidar
+    /// tracks. This channel never creates tracks or pedestrian membership.
+    #[serde(default)]
+    pub camera_observations: Vec<CameraObservationReq>,
     /// Producer stamp of the camera frame the detections came from. `None` while
     /// `camera_armed` is a SILENT channel → fail closed ("the detector did not
     /// look" is never "clear").
@@ -310,6 +326,7 @@ fn invalid_perception_response(camera_armed: bool) -> PerceptionResponse {
         left: Vec::new(),
         right: Vec::new(),
         objects: Vec::new(),
+        camera_associations: Vec::new(),
         pedestrians: Vec::new(),
         camera_healthy: !camera_armed,
         camera_clip_x_m: None,
@@ -337,6 +354,16 @@ pub struct PedestrianOut {
     pub age_s: f64,
 }
 
+/// Auditable supporting association between camera/depth geometry and an
+/// existing lidar track.
+#[derive(Clone, Serialize)]
+pub struct CameraAssociationOut {
+    pub track_id: u64,
+    pub observation_id: u64,
+    pub distance_m: f64,
+    pub confidence: f64,
+}
+
 #[derive(Clone, Serialize)]
 pub struct PerceptionResponse {
     pub healthy: bool,
@@ -355,6 +382,9 @@ pub struct PerceptionResponse {
     pub left: Vec<[f64; 2]>,
     pub right: Vec<[f64; 2]>,
     pub objects: Vec<ObjOut>,
+    /// Supporting-only camera/depth associations. These do not create tracks,
+    /// modify positions, or change pedestrian classification membership.
+    pub camera_associations: Vec<CameraAssociationOut>,
     /// Conservative VRU classifications derived from the persistent tracker.
     ///
     /// First sightings with a pedestrian-sized footprint are included because
@@ -618,6 +648,33 @@ pub fn handle_perception_tracked(
         .expect("tracker initialized above")
         .classify_pedestrians(req.stamp_ms, &VruClassifierConfig::default());
 
+    // Supporting-only camera/depth association. The lidar tracker remains
+    // authoritative: camera observations cannot create tracks, alter track
+    // state, or change pedestrian classifier membership.
+    let camera_observations: Vec<CameraVruObservation> = req
+        .camera_observations
+        .iter()
+        .map(|observation| CameraVruObservation {
+            observation_id: observation.observation_id,
+            pos: kirra_core::corridor::Point {
+                x_m: observation.x,
+                y_m: observation.y,
+            },
+            confidence: observation.confidence,
+            stamp_ms: req.camera_stamp_ms.unwrap_or(req.stamp_ms),
+        })
+        .collect();
+
+    let camera_associations = state
+        .tracker
+        .as_ref()
+        .expect("tracker initialized above")
+        .associate_camera_vrus(
+            &camera_observations,
+            req.stamp_ms,
+            &CameraVruFusionConfig::default(),
+        );
+
     // ---- Phase B: camera fusion (TIGHTEN-ONLY) -----------------------------
     // The camera may only SHORTEN the drivable corridor Phase A produced; it can
     // never extend it (`clip_corridor_to_hazards` truncates the boundaries, and
@@ -711,6 +768,16 @@ pub fn handle_perception_tracked(
         })
         .collect();
 
+    let camera_associations: Vec<CameraAssociationOut> = camera_associations
+        .iter()
+        .map(|association| CameraAssociationOut {
+            track_id: association.track_id,
+            observation_id: association.observation_id,
+            distance_m: association.distance_m,
+            confidence: association.confidence,
+        })
+        .collect();
+
     let pedestrians = classified_pedestrians
         .iter()
         .map(|pedestrian| PedestrianOut {
@@ -736,6 +803,7 @@ pub fn handle_perception_tracked(
         left,
         right,
         objects,
+        camera_associations,
         pedestrians,
         camera_healthy,
         camera_clip_x_m,
@@ -769,6 +837,7 @@ mod tests {
             confidence_floor: default_floor(),
             camera_armed: false,
             detections: Vec::new(),
+            camera_observations: Vec::new(),
             camera_stamp_ms: None,
             camera_max_age_ms: DEFAULT_CAMERA_MAX_AGE_MS,
         }
@@ -1353,6 +1422,7 @@ mod tracked_perception_tests {
             camera_stamp_ms: None,
             camera_max_age_ms: DEFAULT_CAMERA_MAX_AGE_MS,
             detections: Vec::new(),
+            camera_observations: Vec::new(),
         }
     }
 
@@ -1463,6 +1533,7 @@ mod duplicate_frame_tracking_tests {
             camera_stamp_ms: None,
             camera_max_age_ms: DEFAULT_CAMERA_MAX_AGE_MS,
             detections: Vec::new(),
+            camera_observations: Vec::new(),
         }
     }
 

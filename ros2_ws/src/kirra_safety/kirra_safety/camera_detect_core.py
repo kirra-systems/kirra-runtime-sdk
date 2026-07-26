@@ -254,6 +254,58 @@ def blob_to_target(
     }
 
 
+def blobs_to_camera_vrus(
+    blobs: Iterable[Blob],
+    intr: CameraIntrinsics,
+    extr: CameraExtrinsics,
+    cfg: DetectConfig,
+) -> List[dict]:
+    """Convert usable camera blobs into supporting VRU observations.
+
+    These rows do not assert pedestrian identity and do not create tracks.
+    Taj must associate them with an existing lidar track before they can become
+    fusion evidence. The current classical detector therefore labels them only
+    as ``possible_person``.
+    """
+    rows = []
+    for index, blob in enumerate(blobs):
+        confidence = blob_confidence(blob, cfg)
+        if confidence <= 0.0:
+            continue
+
+        ego = pixel_to_ego(
+            blob.u,
+            blob.v,
+            blob.depth_m,
+            intr,
+            extr,
+            cfg.max_range_m,
+        )
+        if ego is None:
+            continue
+
+        x_m, y_m, _z_m = ego
+        if x_m <= 0.0:
+            continue
+
+        rows.append({
+            "observation_id": int(index),
+            "class": "possible_person",
+            "x": float(x_m),
+            "y": float(y_m),
+            "confidence": float(confidence),
+        })
+
+    rows.sort(
+        key=lambda row: (
+            row["x"],
+            row["y"],
+            row["observation_id"],
+        )
+    )
+    return rows
+
+
 def blobs_to_targets(
     blobs: Iterable[Blob],
     intr: CameraIntrinsics,
@@ -356,6 +408,11 @@ def build_detection_frame(
         ),
         "detections": points_to_obstacle_detections(points, cfg) if usable else [],
         "targets": blobs_to_targets(blobs, intr, extr, cfg) if usable else [],
+        "camera_observations": (
+            blobs_to_camera_vrus(blobs, intr, extr, cfg)
+            if usable
+            else []
+        ),
     }
 
 
@@ -394,7 +451,16 @@ def camera_perception_fields(
         if isinstance(stamp, int) and not isinstance(stamp, bool) and stamp >= 0:
             out["camera_stamp_ms"] = stamp
             out["detections"] = [
-                d for d in (frame.get("detections") or []) if isinstance(d, dict)
+                detection
+                for detection in (frame.get("detections") or [])
+                if isinstance(detection, dict)
+            ]
+            out["camera_observations"] = [
+                observation
+                for observation in (
+                    frame.get("camera_observations") or []
+                )
+                if isinstance(observation, dict)
             ]
     return out
 

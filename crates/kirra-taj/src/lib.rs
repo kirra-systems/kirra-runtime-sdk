@@ -544,6 +544,49 @@ impl TajPhaseA {
     }
 }
 
+/// One camera-derived VRU observation in the ego frame.
+///
+/// This observation is supporting evidence only. A camera-only observation
+/// never creates a safety-authoritative pedestrian track; it must associate
+/// with an existing lidar track before it may influence classification.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraVruObservation {
+    pub observation_id: u64,
+    pub pos: Point,
+    pub confidence: f64,
+    pub stamp_ms: u64,
+}
+
+/// Result of deterministic lidar-camera VRU association.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraVruAssociation {
+    pub track_id: u64,
+    pub observation_id: u64,
+    pub distance_m: f64,
+    pub confidence: f64,
+}
+
+/// Configuration for the supporting camera-VRU fusion seam.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraVruFusionConfig {
+    /// Maximum ego-frame position error for association.
+    pub association_gate_m: f64,
+    /// Minimum camera confidence admitted as supporting evidence.
+    pub minimum_confidence: f64,
+    /// Maximum age difference between lidar track time and camera observation.
+    pub maximum_age_ms: u64,
+}
+
+impl Default for CameraVruFusionConfig {
+    fn default() -> Self {
+        Self {
+            association_gate_m: 0.75,
+            minimum_confidence: 0.60,
+            maximum_age_ms: 250,
+        }
+    }
+}
+
 /// Auditable result of Taj's geometric VRU classifier.
 ///
 /// `PossiblePedestrian` feeds the stricter pedestrian RSS bound.
@@ -753,6 +796,112 @@ fn associate_tracks_globally(
     matches
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CameraVruEdge {
+    track_index: usize,
+    observation_index: usize,
+    distance_m: f64,
+    track_id: u64,
+    observation_id: u64,
+}
+
+/// Deterministically associate camera VRU observations to existing lidar tracks.
+///
+/// Camera evidence is supporting-only:
+///
+/// - no lidar track means no association;
+/// - one observation can support at most one track;
+/// - one track can consume at most one observation;
+/// - malformed, stale, low-confidence, or out-of-gate observations are ignored;
+/// - association order is independent of input storage order.
+fn associate_camera_vrus_to_tracks(
+    tracks: &[Track],
+    observations: &[CameraVruObservation],
+    now_ms: u64,
+    cfg: &CameraVruFusionConfig,
+) -> Vec<CameraVruAssociation> {
+    let config_valid = cfg.association_gate_m.is_finite()
+        && cfg.association_gate_m > 0.0
+        && cfg.minimum_confidence.is_finite()
+        && (0.0..=1.0).contains(&cfg.minimum_confidence);
+
+    if !config_valid || tracks.is_empty() || observations.is_empty() {
+        return Vec::new();
+    }
+
+    let mut edges = Vec::new();
+
+    for (track_index, track) in tracks.iter().enumerate() {
+        let predicted = predicted_track_position(track, now_ms);
+
+        for (observation_index, observation) in observations.iter().enumerate() {
+            if !observation.pos.x_m.is_finite()
+                || !observation.pos.y_m.is_finite()
+                || !observation.confidence.is_finite()
+                || observation.confidence < cfg.minimum_confidence
+            {
+                continue;
+            }
+
+            let age_ms = now_ms.abs_diff(observation.stamp_ms);
+            if age_ms > cfg.maximum_age_ms {
+                continue;
+            }
+
+            let distance_m =
+                (observation.pos.x_m - predicted.x_m).hypot(observation.pos.y_m - predicted.y_m);
+
+            if distance_m.is_finite() && distance_m <= cfg.association_gate_m {
+                edges.push(CameraVruEdge {
+                    track_index,
+                    observation_index,
+                    distance_m,
+                    track_id: track.id,
+                    observation_id: observation.observation_id,
+                });
+            }
+        }
+    }
+
+    edges.sort_by(|left, right| {
+        left.distance_m
+            .total_cmp(&right.distance_m)
+            .then_with(|| left.track_id.cmp(&right.track_id))
+            .then_with(|| left.observation_id.cmp(&right.observation_id))
+            .then_with(|| left.track_index.cmp(&right.track_index))
+            .then_with(|| left.observation_index.cmp(&right.observation_index))
+    });
+
+    let mut track_used = vec![false; tracks.len()];
+    let mut observation_used = vec![false; observations.len()];
+    let mut associations = Vec::new();
+
+    for edge in edges {
+        if track_used[edge.track_index] || observation_used[edge.observation_index] {
+            continue;
+        }
+
+        track_used[edge.track_index] = true;
+        observation_used[edge.observation_index] = true;
+
+        let observation = observations[edge.observation_index];
+        associations.push(CameraVruAssociation {
+            track_id: edge.track_id,
+            observation_id: edge.observation_id,
+            distance_m: edge.distance_m,
+            confidence: observation.confidence,
+        });
+    }
+
+    associations.sort_by(|left, right| {
+        left.track_id
+            .cmp(&right.track_id)
+            .then_with(|| left.observation_id.cmp(&right.observation_id))
+    });
+
+    associations
+}
+
 /// Taj **temporal tracker** — wraps the Phase-A geometric pipeline and adds
 /// frame-to-frame object association + velocity estimation. Phase-A is
 /// single-frame (every object static); the tracker associates each new detection
@@ -960,6 +1109,21 @@ impl TajTracker {
                 }
             })
             .collect()
+    }
+
+    /// Associate supporting camera VRU evidence with current lidar tracks.
+    ///
+    /// This method never creates tracks and never returns camera-only VRUs.
+    /// The returned associations are diagnostic/supporting evidence for a
+    /// subsequent fusion policy.
+    #[must_use]
+    pub fn associate_camera_vrus(
+        &self,
+        observations: &[CameraVruObservation],
+        now_ms: u64,
+        cfg: &CameraVruFusionConfig,
+    ) -> Vec<CameraVruAssociation> {
+        associate_camera_vrus_to_tracks(&self.tracks, observations, now_ms, cfg)
     }
 
     /// Compatibility view consumed by the pedestrian RSS producer.
@@ -1271,6 +1435,137 @@ mod tests {
 
     /// `age_s` reflects real measurement staleness at classify time (#789 F8:
     /// the reachable disc has already grown for that long).
+    #[test]
+    fn camera_vru_association_requires_an_existing_lidar_track() {
+        let tracker = TajTracker::new(TajConfig::default());
+        let observations = [CameraVruObservation {
+            observation_id: 90,
+            pos: Point { x_m: 3.0, y_m: 0.2 },
+            confidence: 0.95,
+            stamp_ms: 1_000,
+        }];
+
+        let associations =
+            tracker.associate_camera_vrus(&observations, 1_000, &CameraVruFusionConfig::default());
+
+        assert!(
+            associations.is_empty(),
+            "camera-only evidence must never create a safety-authoritative VRU"
+        );
+    }
+
+    #[test]
+    fn camera_vru_association_matches_existing_lidar_track() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+        let scan = scan_from(10.0, 1_000, |theta| {
+            if theta.abs() < 0.035 {
+                Some(3.0)
+            } else {
+                None
+            }
+        });
+        let perception = tracker.track(&scan, 1_000);
+        assert_eq!(perception.objects.len(), 1);
+
+        let observation = CameraVruObservation {
+            observation_id: 91,
+            pos: Point {
+                x_m: perception.objects[0].pos.x_m + 0.05,
+                y_m: perception.objects[0].pos.y_m,
+            },
+            confidence: 0.90,
+            stamp_ms: 1_000,
+        };
+
+        let associations =
+            tracker.associate_camera_vrus(&[observation], 1_000, &CameraVruFusionConfig::default());
+
+        assert_eq!(associations.len(), 1);
+        assert_eq!(associations[0].track_id, perception.objects[0].id);
+        assert_eq!(associations[0].observation_id, 91);
+    }
+
+    #[test]
+    fn camera_vru_association_rejects_stale_low_confidence_and_out_of_gate_rows() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+        let scan = scan_from(10.0, 1_000, |theta| {
+            if theta.abs() < 0.035 {
+                Some(3.0)
+            } else {
+                None
+            }
+        });
+        tracker.track(&scan, 1_000);
+
+        let observations = [
+            CameraVruObservation {
+                observation_id: 1,
+                pos: Point { x_m: 3.0, y_m: 0.0 },
+                confidence: 0.20,
+                stamp_ms: 1_000,
+            },
+            CameraVruObservation {
+                observation_id: 2,
+                pos: Point { x_m: 3.0, y_m: 0.0 },
+                confidence: 0.95,
+                stamp_ms: 100,
+            },
+            CameraVruObservation {
+                observation_id: 3,
+                pos: Point { x_m: 8.0, y_m: 4.0 },
+                confidence: 0.95,
+                stamp_ms: 1_000,
+            },
+        ];
+
+        assert!(tracker
+            .associate_camera_vrus(&observations, 1_000, &CameraVruFusionConfig::default(),)
+            .is_empty());
+    }
+
+    #[test]
+    fn camera_vru_association_is_independent_of_observation_order() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+        let scan = scan_from(10.0, 1_000, |theta| {
+            if theta.abs() < 0.035 {
+                Some(3.0)
+            } else {
+                None
+            }
+        });
+        tracker.track(&scan, 1_000);
+
+        let a = CameraVruObservation {
+            observation_id: 10,
+            pos: Point {
+                x_m: 3.05,
+                y_m: 0.0,
+            },
+            confidence: 0.90,
+            stamp_ms: 1_000,
+        };
+        let b = CameraVruObservation {
+            observation_id: 11,
+            pos: Point {
+                x_m: 3.20,
+                y_m: 0.0,
+            },
+            confidence: 0.99,
+            stamp_ms: 1_000,
+        };
+
+        let cfg = CameraVruFusionConfig::default();
+        let forward = tracker.associate_camera_vrus(&[a, b], 1_000, &cfg);
+        let reversed = tracker.associate_camera_vrus(&[b, a], 1_000, &cfg);
+
+        assert_eq!(forward, reversed);
+        assert_eq!(forward.len(), 1);
+        assert_eq!(
+            forward[0].observation_id, 10,
+            "lowest geometric error wins, not input order or confidence"
+        );
+    }
+
     #[test]
     fn classifier_invalid_configuration_fails_closed_to_possible_pedestrian() {
         let mut tracker = TajTracker::new(TajConfig::default());
