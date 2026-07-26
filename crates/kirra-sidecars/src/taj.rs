@@ -12,7 +12,7 @@
 use kirra_core::corridor::CorridorSource;
 use kirra_taj::{
     clip_corridor_to_hazards, hazard_clip_x, LaserScan, SemanticClass, SemanticDetection,
-    TajConfig, TajPhaseA,
+    TajConfig, TajTracker,
 };
 use serde::{Deserialize, Serialize};
 
@@ -475,10 +475,59 @@ fn is_forward_object_candidate(
         && y_m.atan2(x_m).abs() <= MAX_FORWARD_OBJECT_BEARING_RAD
 }
 
+const MAX_TRACKING_GAP_MS: u64 = 500;
+
+pub struct TrackedPerceptionState {
+    tracker: Option<TajTracker>,
+    tracker_config: Option<TajConfig>,
+    last_stamp_ms: Option<u64>,
+}
+
+impl Default for TrackedPerceptionState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TrackedPerceptionState {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            tracker: None,
+            tracker_config: None,
+            last_stamp_ms: None,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.tracker = None;
+        self.tracker_config = None;
+        self.last_stamp_ms = None;
+    }
+}
+
+/// Stateless compatibility entry point.
+///
+/// Production callers should use [`handle_perception_tracked`] with persistent
+/// state so object IDs and velocity estimates survive across scan frames.
 pub fn handle_perception(req: &PerceptionRequest) -> PerceptionResponse {
+    let mut state = TrackedPerceptionState::new();
+    handle_perception_tracked(req, &mut state)
+}
+
+/// Stateful perception path used by the Taj service.
+///
+/// Tracking state is reset on malformed input, timestamp regression, excessive
+/// inter-frame gaps, or a material tracker-configuration change. Every reset
+/// returns to conservative first-sighting behavior with zero estimated velocity.
+pub fn handle_perception_tracked(
+    req: &PerceptionRequest,
+    state: &mut TrackedPerceptionState,
+) -> PerceptionResponse {
     // Priority 0: validate every request-level assumption before cloning the
     // scan, constructing Taj, or performing floating-point safety arithmetic.
     if validate_perception_request(req).is_err() {
+        state.reset();
         return invalid_perception_response(req.camera_armed);
     }
 
@@ -490,14 +539,42 @@ pub fn handle_perception(req: &PerceptionRequest) -> PerceptionResponse {
         ranges: req.ranges.clone(),
         stamp_ms: req.stamp_ms,
     };
-    // Process at the scan's own stamp → age 0; wall-clock staleness is the
-    // consumer's job (the ROS node times the cap topic), keeping this
-    // service stateless.
-    let taj = TajPhaseA::new(TajConfig {
+    // Process at the scan's own stamp. Wall-clock staleness remains the
+    // downstream consumer's responsibility, while this stateful service tracks
+    // object identity and velocity between consecutive scans.
+    let tracker_config = TajConfig {
         forward_extent_m: req.forward_extent_m,
         ..Default::default()
+    };
+
+    let timestamp_fault = state.last_stamp_ms.is_some_and(|last_stamp_ms| {
+        req.stamp_ms < last_stamp_ms
+            || req.stamp_ms.saturating_sub(last_stamp_ms) > MAX_TRACKING_GAP_MS
     });
-    let perception = taj.process(&scan, req.stamp_ms);
+
+    let configuration_changed = state.tracker_config.is_some_and(|previous| {
+        previous.forward_extent_m.to_bits() != tracker_config.forward_extent_m.to_bits()
+            || previous.track_assoc_gate_m.to_bits() != tracker_config.track_assoc_gate_m.to_bits()
+            || previous.cluster_gap_m.to_bits() != tracker_config.cluster_gap_m.to_bits()
+            || previous.min_cluster_points != tracker_config.min_cluster_points
+    });
+
+    if timestamp_fault || configuration_changed {
+        state.reset();
+    }
+
+    if state.tracker.is_none() {
+        state.tracker = Some(TajTracker::new(tracker_config));
+        state.tracker_config = Some(tracker_config);
+    }
+
+    let perception = state
+        .tracker
+        .as_mut()
+        .expect("tracker initialized above")
+        .track(&scan, req.stamp_ms);
+
+    state.last_stamp_ms = Some(req.stamp_ms);
 
     // ---- Phase B: camera fusion (TIGHTEN-ONLY) -----------------------------
     // The camera may only SHORTEN the drivable corridor Phase A produced; it can
@@ -1147,5 +1224,117 @@ mod tests {
         r.camera_stamp_ms = Some(1_000);
         r.detections = vec![det("water", 2.0, 8.0, 9.0)];
         assert_eq!(handle_perception(&r).camera_clip_x_m, None);
+    }
+}
+
+#[cfg(test)]
+mod tracked_perception_tests {
+    use super::*;
+
+    fn tracked_request(range_m: f64, stamp_ms: u64) -> PerceptionRequest {
+        let ray_count = 301usize;
+        let angle_min_rad = -1.5;
+        let angle_increment_rad = 0.01;
+
+        let ranges = (0..ray_count)
+            .map(|index| {
+                let angle = angle_min_rad + index as f64 * angle_increment_rad;
+                if angle.abs() < 0.035 {
+                    range_m as f32
+                } else {
+                    f32::INFINITY
+                }
+            })
+            .collect();
+
+        PerceptionRequest {
+            angle_min_rad,
+            angle_increment_rad,
+            range_min_m: 0.1,
+            range_max_m: 12.0,
+            ranges,
+            stamp_ms,
+            forward_extent_m: default_extent(),
+            decel_mps2: default_decel(),
+            margin_m: default_margin(),
+            lane_half_m: default_lane_half(),
+            vehicle_width_m: default_vehicle_width(),
+            lateral_clearance_m: default_lateral_clearance(),
+            confidence_floor: 0.0,
+            camera_armed: false,
+            camera_stamp_ms: None,
+            camera_max_age_ms: DEFAULT_CAMERA_MAX_AGE_MS,
+            detections: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn tracked_handler_preserves_object_id_and_estimates_velocity() {
+        let mut state = TrackedPerceptionState::new();
+
+        let first = handle_perception_tracked(&tracked_request(5.0, 1_000), &mut state);
+        let second = handle_perception_tracked(&tracked_request(5.1, 1_100), &mut state);
+
+        assert_eq!(first.objects.len(), 1);
+        assert_eq!(second.objects.len(), 1);
+        assert_eq!(first.objects[0].id, second.objects[0].id);
+
+        assert!(
+            second.objects[0].vx > 0.5,
+            "expected positive tracked velocity, got {}",
+            second.objects[0].vx,
+        );
+        assert!(
+            second.objects[0].vx < 1.5,
+            "expected approximately 1 m/s, got {}",
+            second.objects[0].vx,
+        );
+        assert!(second.objects[0].vy.abs() < 0.2);
+    }
+
+    #[test]
+    fn timestamp_regression_resets_tracking_to_first_sighting() {
+        let mut state = TrackedPerceptionState::new();
+
+        let first = handle_perception_tracked(&tracked_request(5.0, 1_000), &mut state);
+        let second = handle_perception_tracked(&tracked_request(5.1, 900), &mut state);
+
+        assert_eq!(first.objects.len(), 1);
+        assert_eq!(second.objects.len(), 1);
+        assert_eq!(second.objects[0].vx, 0.0);
+        assert_eq!(second.objects[0].vy, 0.0);
+    }
+
+    #[test]
+    fn excessive_tracking_gap_resets_velocity_history() {
+        let mut state = TrackedPerceptionState::new();
+
+        handle_perception_tracked(&tracked_request(5.0, 1_000), &mut state);
+        let response = handle_perception_tracked(&tracked_request(5.2, 1_501), &mut state);
+
+        assert_eq!(response.objects.len(), 1);
+        assert_eq!(response.objects[0].vx, 0.0);
+        assert_eq!(response.objects[0].vy, 0.0);
+    }
+
+    #[test]
+    fn malformed_request_clears_existing_tracking_state() {
+        let mut state = TrackedPerceptionState::new();
+
+        handle_perception_tracked(&tracked_request(5.0, 1_000), &mut state);
+
+        let mut invalid = tracked_request(5.1, 1_100);
+        invalid.ranges.clear();
+
+        let invalid_response = handle_perception_tracked(&invalid, &mut state);
+
+        assert!(!invalid_response.healthy);
+        assert_eq!(invalid_response.speed_cap_mps, 0.0);
+
+        let recovered = handle_perception_tracked(&tracked_request(5.2, 1_200), &mut state);
+
+        assert_eq!(recovered.objects.len(), 1);
+        assert_eq!(recovered.objects[0].vx, 0.0);
+        assert_eq!(recovered.objects[0].vy, 0.0);
     }
 }
