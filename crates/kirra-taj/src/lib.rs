@@ -573,10 +573,122 @@ pub struct PredictedPath {
     pub points: Vec<Point>,
 }
 
+/// Candidate edge between a previous track and current detection.
+#[derive(Debug, Clone, Copy)]
+struct AssociationEdge {
+    track_index: usize,
+    detection_index: usize,
+    distance_m: f64,
+    track_id: u64,
+}
+
+/// Predict a track to the current measurement time using constant velocity.
+///
+/// Invalid prediction arithmetic conservatively falls back to the last observed
+/// position.
+fn predicted_track_position(track: &Track, now_ms: u64) -> Point {
+    let elapsed_ms = now_ms.saturating_sub(track.stamp_ms);
+
+    if elapsed_ms == 0 {
+        return track.pos;
+    }
+
+    let dt_s = elapsed_ms as f64 / 1_000.0;
+    let x_m = track.pos.x_m + track.vel.x_m * dt_s;
+    let y_m = track.pos.y_m + track.vel.y_m * dt_s;
+
+    if x_m.is_finite() && y_m.is_finite() {
+        Point { x_m, y_m }
+    } else {
+        track.pos
+    }
+}
+
+/// Deterministic one-to-one association using predicted track positions.
+///
+/// All admissible edges are globally sorted before selection. This removes
+/// dependence on detection iteration order and prevents one track from being
+/// assigned to multiple detections.
+fn associate_tracks_globally(
+    tracks: &[Track],
+    detections: &[PerceivedObject],
+    now_ms: u64,
+    configured_gate_m: f64,
+) -> Vec<Option<usize>> {
+    const ASSOCIATION_JITTER_M: f64 = 0.25;
+    const MAX_ASSOCIATION_SPEED_MPS: f64 = 10.0;
+
+    let mut matches = vec![None; detections.len()];
+
+    if !configured_gate_m.is_finite() || configured_gate_m <= 0.0 {
+        return matches;
+    }
+
+    let mut edges = Vec::new();
+
+    for (track_index, track) in tracks.iter().enumerate() {
+        let elapsed_ms = now_ms.saturating_sub(track.stamp_ms);
+
+        // A zero-time update cannot provide a physically meaningful velocity
+        // estimate. Duplicate service requests are replayed by the sidecar
+        // cache before reaching the tracker.
+        if elapsed_ms == 0 {
+            continue;
+        }
+
+        let dt_s = elapsed_ms as f64 / 1_000.0;
+        let effective_gate_m =
+            configured_gate_m.min(ASSOCIATION_JITTER_M + MAX_ASSOCIATION_SPEED_MPS * dt_s);
+
+        let predicted = predicted_track_position(track, now_ms);
+
+        for (detection_index, detection) in detections.iter().enumerate() {
+            let distance_m =
+                (detection.pos.x_m - predicted.x_m).hypot(detection.pos.y_m - predicted.y_m);
+
+            if distance_m.is_finite() && distance_m <= effective_gate_m {
+                edges.push(AssociationEdge {
+                    track_index,
+                    detection_index,
+                    distance_m,
+                    track_id: track.id,
+                });
+            }
+        }
+    }
+
+    // Global deterministic ordering:
+    //   1. lowest prediction error
+    //   2. lowest persistent track ID
+    //   3. lowest detection index
+    //   4. lowest storage index
+    edges.sort_by(|left, right| {
+        left.distance_m
+            .total_cmp(&right.distance_m)
+            .then_with(|| left.track_id.cmp(&right.track_id))
+            .then_with(|| left.detection_index.cmp(&right.detection_index))
+            .then_with(|| left.track_index.cmp(&right.track_index))
+    });
+
+    let mut track_used = vec![false; tracks.len()];
+
+    for edge in edges {
+        if track_used[edge.track_index] || matches[edge.detection_index].is_some() {
+            continue;
+        }
+
+        track_used[edge.track_index] = true;
+        matches[edge.detection_index] = Some(edge.track_index);
+    }
+
+    matches
+}
+
 /// Taj **temporal tracker** — wraps the Phase-A geometric pipeline and adds
 /// frame-to-frame object association + velocity estimation. Phase-A is
 /// single-frame (every object static); the tracker associates each new detection
-/// with the nearest prior track (within `track_assoc_gate_m`), estimates its
+/// with one admissible prior track using deterministic predicted-position
+/// association within `track_assoc_gate_m`, estimates its
 /// ground velocity from the displacement over the inter-frame `dt`, and carries a
 /// **persistent id**. So KIRRA's RSS sees real object motion (`velocity_mps` +
 /// the `vel` vector) instead of treating a fast-approaching object as parked.
@@ -606,46 +718,16 @@ impl TajTracker {
         let (mut perception, extents) = self.phase_a.process_parts(scan, now_ms);
         let gate = self.phase_a.cfg.track_assoc_gate_m;
 
+        let associations =
+            associate_tracks_globally(&self.tracks, &perception.objects, now_ms, gate);
         let mut next_tracks: Vec<Track> = Vec::with_capacity(perception.objects.len());
-        let mut used = vec![false; self.tracks.len()];
 
         for (obj_idx, obj) in perception.objects.iter_mut().enumerate() {
             let extent_m = extents.get(obj_idx).copied().unwrap_or(f64::INFINITY);
-            // Nearest unused prior track within the association gate.
-            let mut best: Option<(usize, f64)> = None;
-            for (j, tr) in self.tracks.iter().enumerate() {
-                if used[j] {
-                    continue;
-                }
-                let elapsed_ms = now_ms.saturating_sub(tr.stamp_ms);
-                if elapsed_ms == 0 {
-                    continue;
-                }
+            let matched_track = associations.get(obj_idx).copied().flatten();
 
-                let dt_s = elapsed_ms as f64 / 1000.0;
-
-                // Bound association by physically plausible frame-to-frame
-                // motion while retaining the configured absolute ceiling.
-                //
-                // At the R2's normal ~100 ms scan interval this permits about
-                // 1.25 m, preserving the existing 10 m/s tracker tests while
-                // rejecting the larger cross-object jumps observed live.
-                const ASSOCIATION_JITTER_M: f64 = 0.25;
-                const MAX_ASSOCIATION_SPEED_MPS: f64 = 10.0;
-
-                let time_scaled_gate = ASSOCIATION_JITTER_M + MAX_ASSOCIATION_SPEED_MPS * dt_s;
-                let effective_gate = gate.min(time_scaled_gate);
-
-                let d = (obj.pos.x_m - tr.pos.x_m).hypot(obj.pos.y_m - tr.pos.y_m);
-
-                if d <= effective_gate && best.is_none_or(|(_, bd)| d < bd) {
-                    best = Some((j, d));
-                }
-            }
-
-            match best {
-                Some((j, _)) => {
-                    used[j] = true;
+            match matched_track {
+                Some(j) => {
                     let tr = self.tracks[j];
 
                     let dt = f64::from(
@@ -1349,6 +1431,150 @@ mod tests {
         assert_eq!(
             a.objects[0].id, b.objects[0].id,
             "same object keeps its track id"
+        );
+    }
+
+    #[test]
+    fn association_uses_predicted_position_for_fast_object() {
+        let track = Track {
+            id: 7,
+            pos: Point {
+                x_m: 10.0,
+                y_m: 0.0,
+            },
+            stamp_ms: 1_000,
+            vel: Point {
+                x_m: 10.0,
+                y_m: 0.0,
+            },
+            yaw_rate: 0.0,
+            extent_m: 0.3,
+            frames_seen: 3,
+        };
+
+        // At 1.2 s, the predicted position is x=12 rather than the stale x=10.
+        let detections = vec![PerceivedObject {
+            id: 0,
+            pos: Point {
+                x_m: 12.05,
+                y_m: 0.0,
+            },
+            velocity_mps: 0.0,
+            heading_rad: 0.0,
+            vel: Point { x_m: 0.0, y_m: 0.0 },
+        }];
+
+        let matches = associate_tracks_globally(&[track], &detections, 1_200, 0.40);
+        assert_eq!(matches, vec![Some(0)]);
+    }
+
+    #[test]
+    fn association_outside_gate_creates_no_match() {
+        let track = Track {
+            id: 4,
+            pos: Point { x_m: 1.0, y_m: 0.0 },
+            stamp_ms: 0,
+            vel: Point { x_m: 0.0, y_m: 0.0 },
+            yaw_rate: 0.0,
+            extent_m: 0.3,
+            frames_seen: 2,
+        };
+
+        let detections = vec![PerceivedObject {
+            id: 0,
+            pos: Point { x_m: 2.0, y_m: 0.0 },
+            velocity_mps: 0.0,
+            heading_rad: 0.0,
+            vel: Point { x_m: 0.0, y_m: 0.0 },
+        }];
+
+        let matches = associate_tracks_globally(&[track], &detections, 100, 0.40);
+        assert_eq!(matches, vec![None]);
+    }
+
+    #[test]
+    fn global_assignment_is_independent_of_track_storage_order() {
+        let make_track = |id: u64, x_m: f64| Track {
+            id,
+            pos: Point { x_m, y_m: 0.0 },
+            stamp_ms: 0,
+            vel: Point { x_m: 0.0, y_m: 0.0 },
+            yaw_rate: 0.0,
+            extent_m: 0.3,
+            frames_seen: 2,
+        };
+
+        let detections = vec![
+            PerceivedObject {
+                id: 0,
+                pos: Point {
+                    x_m: 1.05,
+                    y_m: 0.0,
+                },
+                velocity_mps: 0.0,
+                heading_rad: 0.0,
+                vel: Point { x_m: 0.0, y_m: 0.0 },
+            },
+            PerceivedObject {
+                id: 0,
+                pos: Point {
+                    x_m: 2.05,
+                    y_m: 0.0,
+                },
+                velocity_mps: 0.0,
+                heading_rad: 0.0,
+                vel: Point { x_m: 0.0, y_m: 0.0 },
+            },
+        ];
+
+        let ordered = vec![make_track(10, 1.0), make_track(20, 2.0)];
+        let reversed = vec![make_track(20, 2.0), make_track(10, 1.0)];
+
+        let ordered_matches = associate_tracks_globally(&ordered, &detections, 100, 0.40);
+        let reversed_matches = associate_tracks_globally(&reversed, &detections, 100, 0.40);
+
+        let ordered_ids: Vec<Option<u64>> = ordered_matches
+            .iter()
+            .map(|matched| matched.map(|index| ordered[index].id))
+            .collect();
+
+        let reversed_ids: Vec<Option<u64>> = reversed_matches
+            .iter()
+            .map(|matched| matched.map(|index| reversed[index].id))
+            .collect();
+
+        assert_eq!(ordered_ids, vec![Some(10), Some(20)]);
+        assert_eq!(reversed_ids, ordered_ids);
+    }
+
+    #[test]
+    fn equal_cost_association_uses_lower_track_id() {
+        let make_track = |id: u64, y_m: f64| Track {
+            id,
+            pos: Point { x_m: 5.0, y_m },
+            stamp_ms: 0,
+            vel: Point { x_m: 0.0, y_m: 0.0 },
+            yaw_rate: 0.0,
+            extent_m: 0.3,
+            frames_seen: 2,
+        };
+
+        let tracks = vec![make_track(20, -0.1), make_track(10, 0.1)];
+        let detections = vec![PerceivedObject {
+            id: 0,
+            pos: Point { x_m: 5.0, y_m: 0.0 },
+            velocity_mps: 0.0,
+            heading_rad: 0.0,
+            vel: Point { x_m: 0.0, y_m: 0.0 },
+        }];
+
+        let matches = associate_tracks_globally(&tracks, &detections, 100, 0.40);
+        let matched_id = matches[0].map(|index| tracks[index].id);
+
+        assert_eq!(
+            matched_id,
+            Some(10),
+            "equal geometric cost must resolve by persistent track ID"
         );
     }
 
