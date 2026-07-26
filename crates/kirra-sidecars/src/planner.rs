@@ -35,6 +35,7 @@ use kirra_taj::object_goal::{
 use kirra_trajectory::corridor::{CorridorSource, Point};
 use kirra_trajectory::state::{PerceivedObject, TrajectoryVerdict};
 use kirra_trajectory::validation::validate_trajectory_slow_explained;
+use kirra_trajectory::vru::{PedestrianScene, PerceivedPedestrian, VruRssParams};
 use kirra_trajectory::VehicleConfig;
 use serde::{Deserialize, Serialize};
 
@@ -65,6 +66,20 @@ pub struct ObjReq {
     pub vy: f64,
 }
 
+/// One tracked pedestrian/VRU supplied by Taj.
+///
+/// Coordinates, velocity, and age are already expressed in the ego-frame
+/// perception contract consumed by the checker.
+#[derive(Deserialize)]
+pub struct PedestrianReq {
+    pub id: u64,
+    pub x: f64,
+    pub y: f64,
+    pub vx: f64,
+    pub vy: f64,
+    pub age_s: f64,
+}
+
 #[derive(Deserialize)]
 pub struct PlanRequest {
     pub ego: EgoReq,
@@ -75,6 +90,11 @@ pub struct PlanRequest {
     pub right: Vec<[f64; 2]>,
     #[serde(default)]
     pub objects: Vec<ObjReq>,
+    /// Taj's conservative tracked VRU classifications.
+    ///
+    /// Empty or absent preserves the pre-VRU planner path byte-for-byte.
+    #[serde(default)]
+    pub pedestrians: Vec<PedestrianReq>,
     /// Optional vehicle footprint/kinematics for the CHECKER. Absent → the
     /// urban-car default (4.8 m). A small differential robot MUST pass its own
     /// dimensions, or the car-sized footprint can't fit a robot-scale corridor
@@ -278,6 +298,10 @@ fn validate_finite(req: &PlanRequest) -> Result<(), SeamRejection> {
         .chain(req.right.iter())
         .all(|p| finite(&[p[0], p[1]]));
     let obj_ok = req.objects.iter().all(|o| finite(&[o.x, o.y, o.vx, o.vy]));
+    let pedestrian_ok = req
+        .pedestrians
+        .iter()
+        .all(|p| finite(&[p.x, p.y, p.vx, p.vy, p.age_s]) && p.age_s >= 0.0);
     // The optional vehicle overrides feed the checker's VehicleConfig and the
     // planner preset — a NaN footprint would mask comparisons downstream, so
     // they get the same gate (review: Copilot on #894).
@@ -295,7 +319,7 @@ fn validate_finite(req: &PlanRequest) -> Result<(), SeamRejection> {
         .flatten()
         .all(|x| x.is_finite())
     });
-    if ego_ok && goal_ok && corr_ok && obj_ok && veh_ok {
+    if ego_ok && goal_ok && corr_ok && obj_ok && pedestrian_ok && veh_ok {
         Ok(())
     } else {
         Err(SeamRejection {
@@ -463,6 +487,29 @@ pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
         })
         .collect();
 
+    let pedestrians: Vec<PerceivedPedestrian> = req
+        .pedestrians
+        .iter()
+        .map(|pedestrian| PerceivedPedestrian {
+            id: pedestrian.id,
+            pos: Point {
+                x_m: pedestrian.x,
+                y_m: pedestrian.y,
+            },
+            vel: Point {
+                x_m: pedestrian.vx,
+                y_m: pedestrian.vy,
+            },
+            age_s: pedestrian.age_s,
+        })
+        .collect();
+
+    let pedestrian_scene = PedestrianScene {
+        pedestrians: &pedestrians,
+        params: VruRssParams::default(),
+        barriers: &[],
+    };
+
     let world = PlanInput {
         ego: EgoState {
             pose: Pose {
@@ -525,7 +572,7 @@ pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
         None,
         None,
         None,
-        None,
+        Some(&pedestrian_scene),
         FrameTrust::Trusted,
     );
 
@@ -594,6 +641,7 @@ mod tests {
             left: vec![[-5.0, 5.0], [100.0, 5.0]],
             right: vec![[-5.0, -5.0], [100.0, -5.0]],
             objects: vec![],
+            pedestrians: vec![],
             vehicle: None,
             intent: None,
             // Object-goal channel off by default, so every pre-existing
@@ -757,6 +805,74 @@ mod tests {
                 "no motion may ride on a rejected intent"
             );
         }
+    }
+
+    #[test]
+    fn pedestrian_channel_binds_the_real_checker() {
+        let mut req = base_request();
+
+        // Keep the proposal short and slow enough that the ordinary vehicle
+        // checks admit it, then place a pedestrian directly in its path.
+        req.goal = Xy { x: 6.0, y: 0.0 };
+        req.cruise = 1.0;
+        req.pedestrians = vec![PedestrianReq {
+            id: 44,
+            x: 3.0,
+            y: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            age_s: 0.0,
+        }];
+
+        let response = handle_plan(&req).expect("valid VRU request reaches checker");
+
+        assert_eq!(
+            response.verdict, "MRCFallback",
+            "a pedestrian in the proposed path must bind the VRU RSS checker"
+        );
+        assert!(!response.admitted);
+        assert!(response.trajectory.is_empty());
+    }
+
+    #[test]
+    fn absent_pedestrian_channel_preserves_existing_plan_path() {
+        let mut req = base_request();
+        req.pedestrians.clear();
+
+        let response = handle_plan(&req).expect("empty VRU channel is a no-op");
+
+        assert!(
+            matches!(response.verdict.as_str(), "Accept" | "Clamp"),
+            "empty VRU input must preserve the existing clean-plan path, got {}",
+            response.verdict
+        );
+    }
+
+    #[test]
+    fn malformed_pedestrian_input_is_refused_at_the_seam() {
+        let mut req = base_request();
+        req.pedestrians = vec![PedestrianReq {
+            id: 1,
+            x: f64::NAN,
+            y: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            age_s: 0.0,
+        }];
+
+        assert_eq!(handle_plan(&req).unwrap_err().code, "NONFINITE_INPUT");
+
+        let mut req = base_request();
+        req.pedestrians = vec![PedestrianReq {
+            id: 1,
+            x: 2.0,
+            y: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            age_s: -0.1,
+        }];
+
+        assert_eq!(handle_plan(&req).unwrap_err().code, "NONFINITE_INPUT");
     }
 
     #[test]

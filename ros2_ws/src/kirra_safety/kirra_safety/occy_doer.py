@@ -358,6 +358,7 @@ class OccyDoer(Node):
                 'left': left,
                 'right': right,
                 'objects': taj.get('objects', []),
+                'pedestrians': taj.get('pedestrians', []),
                 'vehicle': self._vehicle,
             }
             if goal_fields:
