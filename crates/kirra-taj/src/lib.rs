@@ -762,6 +762,116 @@ pub struct PredictedPath {
     pub points: Vec<Point>,
 }
 
+/// Production VRU motion model selected for one authoritative lidar track.
+///
+/// These models never create tracks and never weaken the pedestrian RSS bound.
+/// `OmnidirectionalFallback` represents an expanding reachable region rather
+/// than a directional movement claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VruMotionModel {
+    OmnidirectionalFallback,
+    Stationary,
+    ConstantVelocity,
+    BoundedTurnRate,
+}
+
+impl VruMotionModel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OmnidirectionalFallback => "omnidirectional_fallback",
+            Self::Stationary => "stationary",
+            Self::ConstantVelocity => "constant_velocity",
+            Self::BoundedTurnRate => "bounded_turn_rate",
+        }
+    }
+}
+
+/// Stable reason why directional VRU prediction was withheld.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VruPredictionFallbackReason {
+    InvalidConfiguration,
+    NonFiniteTrackState,
+    InsufficientHistory,
+    StaleTrack,
+    ExcessiveSpeed,
+    ExcessiveYawRate,
+}
+
+impl VruPredictionFallbackReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration => "invalid_configuration",
+            Self::NonFiniteTrackState => "non_finite_track_state",
+            Self::InsufficientHistory => "insufficient_history",
+            Self::StaleTrack => "stale_track",
+            Self::ExcessiveSpeed => "excessive_speed",
+            Self::ExcessiveYawRate => "excessive_yaw_rate",
+        }
+    }
+}
+
+/// One bounded prediction sample for an authoritative lidar track.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PredictedVruPoint {
+    pub time_s: f64,
+    pub pos: Point,
+    pub uncertainty_radius_m: f64,
+}
+
+/// Auditable frame-local motion prediction for one lidar track.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PredictedVruMotion {
+    pub track_id: u64,
+    pub model: VruMotionModel,
+    pub points: Vec<PredictedVruPoint>,
+    pub horizon_s: f64,
+    pub step_s: f64,
+    pub source_age_s: f64,
+    pub frames_seen: u32,
+    pub fallback_reason: Option<VruPredictionFallbackReason>,
+}
+
+/// Hard WCET/allocation ceiling independent of runtime configuration.
+pub const MAX_VRU_PREDICTION_POINTS: usize = 32;
+
+/// Configuration for bounded VRU motion prediction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VruMotionPredictionConfig {
+    pub horizon_s: f64,
+    pub step_s: f64,
+    pub stationary_speed_mps: f64,
+    pub maximum_track_speed_mps: f64,
+    pub minimum_turn_speed_mps: f64,
+    pub minimum_abs_yaw_rate_rad_s: f64,
+    pub maximum_abs_yaw_rate_rad_s: f64,
+    pub maximum_track_age_ms: u64,
+    pub base_uncertainty_m: f64,
+    pub uncertainty_growth_mps: f64,
+    pub fallback_growth_mps: f64,
+    pub maximum_points: usize,
+}
+
+impl Default for VruMotionPredictionConfig {
+    fn default() -> Self {
+        Self {
+            horizon_s: 3.0,
+            step_s: 0.25,
+            stationary_speed_mps: 0.10,
+            maximum_track_speed_mps: 5.0,
+            minimum_turn_speed_mps: 0.20,
+            minimum_abs_yaw_rate_rad_s: 0.05,
+            maximum_abs_yaw_rate_rad_s: 2.5,
+            maximum_track_age_ms: 500,
+            base_uncertainty_m: 0.25,
+            uncertainty_growth_mps: 0.35,
+            fallback_growth_mps: 2.0,
+            maximum_points: 16,
+        }
+    }
+}
+
 /// Candidate edge between a previous track and current detection.
 #[derive(Debug, Clone, Copy)]
 struct AssociationEdge {
@@ -1285,6 +1395,159 @@ impl TajTracker {
             .filter(|result| result.classification.feeds_pedestrian_rss())
             .map(|result| result.pedestrian)
             .collect()
+    }
+
+    /// Produce bounded, auditable VRU motion predictions for current lidar tracks.
+    ///
+    /// Directional prediction is used only when track history and kinematics are
+    /// sufficiently trustworthy. Otherwise the result falls back to a stationary
+    /// centre with an expanding omnidirectional uncertainty radius.
+    ///
+    /// This is prediction evidence only. It never creates tracks, changes fused
+    /// VRU membership, or weakens the existing omnidirectional pedestrian RSS
+    /// bound.
+    #[must_use]
+    pub fn predict_vru_motion(
+        &self,
+        now_ms: u64,
+        cfg: &VruMotionPredictionConfig,
+    ) -> Vec<PredictedVruMotion> {
+        let config_valid = cfg.horizon_s.is_finite()
+            && cfg.horizon_s > 0.0
+            && cfg.step_s.is_finite()
+            && cfg.step_s > 0.0
+            && cfg.stationary_speed_mps.is_finite()
+            && cfg.stationary_speed_mps >= 0.0
+            && cfg.maximum_track_speed_mps.is_finite()
+            && cfg.maximum_track_speed_mps > 0.0
+            && cfg.minimum_turn_speed_mps.is_finite()
+            && cfg.minimum_turn_speed_mps >= 0.0
+            && cfg.minimum_abs_yaw_rate_rad_s.is_finite()
+            && cfg.minimum_abs_yaw_rate_rad_s >= 0.0
+            && cfg.maximum_abs_yaw_rate_rad_s.is_finite()
+            && cfg.maximum_abs_yaw_rate_rad_s > 0.0
+            && cfg.maximum_abs_yaw_rate_rad_s >= cfg.minimum_abs_yaw_rate_rad_s
+            && cfg.base_uncertainty_m.is_finite()
+            && cfg.base_uncertainty_m >= 0.0
+            && cfg.uncertainty_growth_mps.is_finite()
+            && cfg.uncertainty_growth_mps >= 0.0
+            && cfg.fallback_growth_mps.is_finite()
+            && cfg.fallback_growth_mps >= cfg.uncertainty_growth_mps
+            && cfg.maximum_points > 0
+            && cfg.maximum_points <= MAX_VRU_PREDICTION_POINTS;
+
+        let bounded_steps = if config_valid {
+            ((cfg.horizon_s / cfg.step_s).ceil() as usize).clamp(1, cfg.maximum_points)
+        } else {
+            1
+        };
+
+        let mut predictions = Vec::with_capacity(self.tracks.len());
+
+        for track in &self.tracks {
+            let source_age_ms = now_ms.saturating_sub(track.stamp_ms);
+            let source_age_s = source_age_ms as f64 / 1_000.0;
+            let speed_mps = track.vel.x_m.hypot(track.vel.y_m);
+
+            let track_finite = track.pos.x_m.is_finite()
+                && track.pos.y_m.is_finite()
+                && track.vel.x_m.is_finite()
+                && track.vel.y_m.is_finite()
+                && track.yaw_rate.is_finite()
+                && track.extent_m.is_finite();
+
+            let fallback_reason = if !config_valid {
+                Some(VruPredictionFallbackReason::InvalidConfiguration)
+            } else if !track_finite {
+                Some(VruPredictionFallbackReason::NonFiniteTrackState)
+            } else if track.frames_seen < 2 {
+                Some(VruPredictionFallbackReason::InsufficientHistory)
+            } else if source_age_ms > cfg.maximum_track_age_ms {
+                Some(VruPredictionFallbackReason::StaleTrack)
+            } else if !speed_mps.is_finite() || speed_mps > cfg.maximum_track_speed_mps {
+                Some(VruPredictionFallbackReason::ExcessiveSpeed)
+            } else if track.yaw_rate.abs() > cfg.maximum_abs_yaw_rate_rad_s {
+                Some(VruPredictionFallbackReason::ExcessiveYawRate)
+            } else {
+                None
+            };
+
+            let model = if fallback_reason.is_some() {
+                VruMotionModel::OmnidirectionalFallback
+            } else if speed_mps <= cfg.stationary_speed_mps {
+                VruMotionModel::Stationary
+            } else if speed_mps >= cfg.minimum_turn_speed_mps
+                && track.yaw_rate.abs() >= cfg.minimum_abs_yaw_rate_rad_s
+            {
+                VruMotionModel::BoundedTurnRate
+            } else {
+                VruMotionModel::ConstantVelocity
+            };
+
+            let mut points = Vec::with_capacity(bounded_steps);
+
+            if !config_valid || !track_finite {
+                points.push(PredictedVruPoint {
+                    time_s: 0.0,
+                    pos: track.pos,
+                    uncertainty_radius_m: f64::INFINITY,
+                });
+            } else {
+                let mut x_m = track.pos.x_m;
+                let mut y_m = track.pos.y_m;
+                let mut heading_rad = if speed_mps > cfg.stationary_speed_mps {
+                    track.vel.y_m.atan2(track.vel.x_m)
+                } else {
+                    0.0
+                };
+
+                for index in 1..=bounded_steps {
+                    let time_s = (index as f64 * cfg.step_s).min(cfg.horizon_s);
+
+                    match model {
+                        VruMotionModel::OmnidirectionalFallback | VruMotionModel::Stationary => {}
+                        VruMotionModel::ConstantVelocity => {
+                            x_m = track.pos.x_m + track.vel.x_m * time_s;
+                            y_m = track.pos.y_m + track.vel.y_m * time_s;
+                        }
+                        VruMotionModel::BoundedTurnRate => {
+                            heading_rad += track.yaw_rate * cfg.step_s;
+                            x_m += speed_mps * heading_rad.cos() * cfg.step_s;
+                            y_m += speed_mps * heading_rad.sin() * cfg.step_s;
+                        }
+                    }
+
+                    let growth_mps = if model == VruMotionModel::OmnidirectionalFallback {
+                        cfg.fallback_growth_mps
+                    } else {
+                        cfg.uncertainty_growth_mps
+                    };
+
+                    let uncertainty_radius_m =
+                        cfg.base_uncertainty_m + growth_mps * (source_age_s + time_s);
+
+                    points.push(PredictedVruPoint {
+                        time_s,
+                        pos: Point { x_m, y_m },
+                        uncertainty_radius_m,
+                    });
+                }
+            }
+
+            predictions.push(PredictedVruMotion {
+                track_id: track.id,
+                model,
+                points,
+                horizon_s: cfg.horizon_s,
+                step_s: cfg.step_s,
+                source_age_s,
+                frames_seen: track.frames_seen,
+                fallback_reason,
+            });
+        }
+
+        predictions.sort_by_key(|prediction| prediction.track_id);
+        predictions
     }
 
     /// Predict each tracked object's future path over `horizon_s` (sampled every
@@ -2652,6 +2915,201 @@ mod tests {
         let _ = taj.track(&point_blob_scan(12.0, 0.5, 200), 200);
         let _ = taj.track(&point_blob_scan(14.0, 1.5, 400), 400);
         taj
+    }
+
+    #[test]
+    fn vru_prediction_first_sighting_uses_omnidirectional_fallback() {
+        let mut tracker = TajTracker::default();
+        tracker.track(&point_blob_scan(3.0, 0.0, 1_000), 1_000);
+
+        let predictions = tracker.predict_vru_motion(1_000, &VruMotionPredictionConfig::default());
+
+        assert_eq!(predictions.len(), 1);
+        assert_eq!(
+            predictions[0].model,
+            VruMotionModel::OmnidirectionalFallback
+        );
+        assert_eq!(
+            predictions[0].fallback_reason,
+            Some(VruPredictionFallbackReason::InsufficientHistory)
+        );
+        assert!(predictions[0]
+            .points
+            .windows(2)
+            .all(|window| window[1].uncertainty_radius_m >= window[0].uncertainty_radius_m));
+    }
+
+    #[test]
+    fn vru_prediction_stationary_track_remains_stationary() {
+        let mut tracker = TajTracker::default();
+        tracker.track(&point_blob_scan(3.0, 0.0, 1_000), 1_000);
+        tracker.track(&point_blob_scan(3.0, 0.0, 1_100), 1_100);
+
+        let predictions = tracker.predict_vru_motion(1_100, &VruMotionPredictionConfig::default());
+
+        assert_eq!(predictions.len(), 1);
+        assert_eq!(predictions[0].model, VruMotionModel::Stationary);
+
+        let first = predictions[0].points.first().expect("prediction point");
+        let last = predictions[0].points.last().expect("prediction point");
+
+        assert!((first.pos.x_m - last.pos.x_m).abs() < 1e-9);
+        assert!((first.pos.y_m - last.pos.y_m).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vru_prediction_straight_motion_uses_constant_velocity() {
+        let mut tracker = TajTracker::default();
+        tracker.track(&point_blob_scan(3.0, 0.0, 1_000), 1_000);
+        tracker.track(&point_blob_scan(3.1, 0.0, 1_100), 1_100);
+
+        let predictions = tracker.predict_vru_motion(1_100, &VruMotionPredictionConfig::default());
+
+        assert_eq!(predictions.len(), 1);
+        assert_eq!(predictions[0].model, VruMotionModel::ConstantVelocity);
+
+        let first = predictions[0].points.first().expect("prediction point");
+        let last = predictions[0].points.last().expect("prediction point");
+
+        assert!(last.pos.x_m > first.pos.x_m);
+        assert!((last.pos.y_m - first.pos.y_m).abs() < 0.2);
+    }
+
+    #[test]
+    fn vru_prediction_excessive_speed_falls_back() {
+        // The generic CTRV fixture moves roughly 10–11 m/s. That is useful for
+        // object prediction, but outside the trusted pedestrian-motion envelope.
+        let tracker = turning_tracker();
+
+        let predictions = tracker.predict_vru_motion(400, &VruMotionPredictionConfig::default());
+
+        assert_eq!(predictions.len(), 1);
+        assert_eq!(
+            predictions[0].model,
+            VruMotionModel::OmnidirectionalFallback
+        );
+        assert_eq!(
+            predictions[0].fallback_reason,
+            Some(VruPredictionFallbackReason::ExcessiveSpeed)
+        );
+        assert!(
+            predictions[0]
+                .points
+                .windows(2)
+                .all(|window| window[1].uncertainty_radius_m >= window[0].uncertainty_radius_m),
+            "the fail-closed fallback uncertainty must never shrink"
+        );
+    }
+
+    #[test]
+    fn vru_prediction_turning_track_uses_bounded_turn_rate() {
+        let mut tracker = TajTracker::default();
+
+        // Smooth pedestrian-scale left turn:
+        // approximately 0.7–0.9 m/s with enough history that the measured
+        // heading change is physically plausible rather than a two-sample spike.
+        tracker.track(&point_blob_scan(3.00, 0.00, 0), 0);
+        tracker.track(&point_blob_scan(3.15, 0.01, 200), 200);
+        tracker.track(&point_blob_scan(3.28, 0.04, 400), 400);
+        tracker.track(&point_blob_scan(3.41, 0.09, 600), 600);
+        tracker.track(&point_blob_scan(3.53, 0.16, 800), 800);
+
+        let predictions = tracker.predict_vru_motion(800, &VruMotionPredictionConfig::default());
+
+        assert_eq!(predictions.len(), 1);
+        assert_eq!(
+            predictions[0].model,
+            VruMotionModel::BoundedTurnRate,
+            "smooth pedestrian turning motion should use bounded-turn prediction; \
+             fallback={:?}, prediction={:#?}",
+            predictions[0].fallback_reason,
+            predictions[0]
+        );
+        assert_eq!(predictions[0].fallback_reason, None);
+        assert!(
+            predictions[0].points.len() >= 3,
+            "bounded-turn prediction needs multiple future samples"
+        );
+
+        let points = &predictions[0].points;
+        let first = points.first().expect("prediction point");
+        let last = points.last().expect("prediction point");
+
+        assert!(
+            last.pos.x_m > first.pos.x_m,
+            "predicted pedestrian should continue moving forward"
+        );
+        assert!(
+            last.pos.y_m > first.pos.y_m,
+            "positive tracked yaw rate should produce a left-curving prediction"
+        );
+        assert!(
+            last.uncertainty_radius_m >= first.uncertainty_radius_m,
+            "prediction uncertainty must not shrink over the horizon"
+        );
+    }
+
+    #[test]
+    fn vru_prediction_stale_track_falls_back_and_expands() {
+        let mut tracker = TajTracker::default();
+        tracker.track(&point_blob_scan(3.0, 0.0, 1_000), 1_000);
+        tracker.track(&point_blob_scan(3.1, 0.0, 1_100), 1_100);
+
+        let predictions = tracker.predict_vru_motion(2_000, &VruMotionPredictionConfig::default());
+
+        assert_eq!(
+            predictions[0].model,
+            VruMotionModel::OmnidirectionalFallback
+        );
+        assert_eq!(
+            predictions[0].fallback_reason,
+            Some(VruPredictionFallbackReason::StaleTrack)
+        );
+
+        let first = predictions[0].points.first().expect("prediction point");
+        let last = predictions[0].points.last().expect("prediction point");
+
+        assert!(last.uncertainty_radius_m > first.uncertainty_radius_m);
+        assert!((last.pos.x_m - first.pos.x_m).abs() < 1e-9);
+        assert!((last.pos.y_m - first.pos.y_m).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vru_prediction_invalid_config_fails_closed_with_infinite_uncertainty() {
+        let mut tracker = TajTracker::default();
+        tracker.track(&point_blob_scan(3.0, 0.0, 1_000), 1_000);
+
+        let cfg = VruMotionPredictionConfig {
+            step_s: f64::NAN,
+            ..VruMotionPredictionConfig::default()
+        };
+
+        let predictions = tracker.predict_vru_motion(1_000, &cfg);
+
+        assert_eq!(
+            predictions[0].fallback_reason,
+            Some(VruPredictionFallbackReason::InvalidConfiguration)
+        );
+        assert_eq!(predictions[0].points.len(), 1);
+        assert!(predictions[0].points[0].uncertainty_radius_m.is_infinite());
+    }
+
+    #[test]
+    fn vru_prediction_point_count_is_hard_bounded() {
+        let mut tracker = TajTracker::default();
+        tracker.track(&point_blob_scan(3.0, 0.0, 1_000), 1_000);
+        tracker.track(&point_blob_scan(3.1, 0.0, 1_100), 1_100);
+
+        let cfg = VruMotionPredictionConfig {
+            horizon_s: 100.0,
+            step_s: 0.001,
+            maximum_points: MAX_VRU_PREDICTION_POINTS,
+            ..VruMotionPredictionConfig::default()
+        };
+
+        let predictions = tracker.predict_vru_motion(1_100, &cfg);
+
+        assert_eq!(predictions[0].points.len(), MAX_VRU_PREDICTION_POINTS);
     }
 
     #[test]
