@@ -544,6 +544,75 @@ impl TajPhaseA {
     }
 }
 
+/// Auditable result of Taj's geometric VRU classifier.
+///
+/// `PossiblePedestrian` feeds the stricter pedestrian RSS bound.
+/// `NotPedestrian` remains protected by ordinary object RSS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VruClassification {
+    PossiblePedestrian,
+    NotPedestrian,
+}
+
+impl VruClassification {
+    /// Stable machine-readable wire value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PossiblePedestrian => "possible_pedestrian",
+            Self::NotPedestrian => "not_pedestrian",
+        }
+    }
+
+    /// Whether this result must feed the pedestrian RSS scene.
+    #[must_use]
+    pub const fn feeds_pedestrian_rss(self) -> bool {
+        matches!(self, Self::PossiblePedestrian)
+    }
+}
+
+/// Stable reason vocabulary for a VRU classification decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VruClassificationReason {
+    InvalidConfiguration,
+    NonFiniteExtent,
+    FirstSightingUnknownVelocity,
+    NonFiniteVelocity,
+    WithinPedestrianEnvelope,
+    ExtentAboveEnvelope,
+    SpeedAboveEnvelope,
+}
+
+impl VruClassificationReason {
+    /// Stable machine-readable wire value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration => "invalid_configuration",
+            Self::NonFiniteExtent => "non_finite_extent",
+            Self::FirstSightingUnknownVelocity => "first_sighting_unknown_velocity",
+            Self::NonFiniteVelocity => "non_finite_velocity",
+            Self::WithinPedestrianEnvelope => "within_pedestrian_envelope",
+            Self::ExtentAboveEnvelope => "extent_above_envelope",
+            Self::SpeedAboveEnvelope => "speed_above_envelope",
+        }
+    }
+}
+
+/// One active track plus its auditable VRU-classifier decision.
+///
+/// The measured extent and speed are preserved for diagnostics, including
+/// non-finite values. They are not sanitized into fabricated safe values.
+#[derive(Debug, Clone, Copy)]
+pub struct ClassifiedVru {
+    pub pedestrian: PerceivedPedestrian,
+    pub classification: VruClassification,
+    pub reason: VruClassificationReason,
+    pub extent_m: f64,
+    pub speed_mps: f64,
+    pub frames_seen: u32,
+}
+
 /// One persistent object track: a stable id + last position/stamp, kept across
 /// frames so the next frame can estimate velocity from displacement.
 #[derive(Debug, Clone, Copy)]
@@ -816,35 +885,97 @@ impl TajTracker {
     /// bound always applies; the VRU bound is strictly ADDITIVE. `age_s` is
     /// the track's measurement age at `now_ms` (#789 F8 — the reachable disc
     /// has already grown for that long).
+    /// Classify every active track and retain the decision evidence.
+    ///
+    /// Rule ordering is deliberate and fail-closed:
+    ///
+    /// 1. invalid classifier configuration → possible pedestrian;
+    /// 2. non-finite extent → possible pedestrian;
+    /// 3. provably oversized extent → not pedestrian;
+    /// 4. first sighting / unknown velocity → possible pedestrian;
+    /// 5. non-finite velocity → possible pedestrian;
+    /// 6. speed inside the pedestrian envelope → possible pedestrian;
+    /// 7. otherwise → not pedestrian.
+    #[must_use]
+    pub fn classify_vrus(&self, now_ms: u64, cfg: &VruClassifierConfig) -> Vec<ClassifiedVru> {
+        let configuration_valid = cfg.max_extent_m.is_finite()
+            && cfg.max_extent_m > 0.0
+            && cfg.max_speed_mps.is_finite()
+            && cfg.max_speed_mps >= 0.0;
+
+        self.tracks
+            .iter()
+            .map(|track| {
+                let speed_mps = track.vel.x_m.hypot(track.vel.y_m);
+
+                let (classification, reason) = if !configuration_valid {
+                    (
+                        VruClassification::PossiblePedestrian,
+                        VruClassificationReason::InvalidConfiguration,
+                    )
+                } else if !track.extent_m.is_finite() {
+                    (
+                        VruClassification::PossiblePedestrian,
+                        VruClassificationReason::NonFiniteExtent,
+                    )
+                } else if track.extent_m > cfg.max_extent_m {
+                    (
+                        VruClassification::NotPedestrian,
+                        VruClassificationReason::ExtentAboveEnvelope,
+                    )
+                } else if track.frames_seen < 2 {
+                    (
+                        VruClassification::PossiblePedestrian,
+                        VruClassificationReason::FirstSightingUnknownVelocity,
+                    )
+                } else if !speed_mps.is_finite() {
+                    (
+                        VruClassification::PossiblePedestrian,
+                        VruClassificationReason::NonFiniteVelocity,
+                    )
+                } else if speed_mps <= cfg.max_speed_mps {
+                    (
+                        VruClassification::PossiblePedestrian,
+                        VruClassificationReason::WithinPedestrianEnvelope,
+                    )
+                } else {
+                    (
+                        VruClassification::NotPedestrian,
+                        VruClassificationReason::SpeedAboveEnvelope,
+                    )
+                };
+
+                ClassifiedVru {
+                    pedestrian: PerceivedPedestrian {
+                        id: track.id,
+                        pos: track.pos,
+                        vel: track.vel,
+                        age_s: now_ms.saturating_sub(track.stamp_ms) as f64 / 1_000.0,
+                    },
+                    classification,
+                    reason,
+                    extent_m: track.extent_m,
+                    speed_mps,
+                    frames_seen: track.frames_seen,
+                }
+            })
+            .collect()
+    }
+
+    /// Compatibility view consumed by the pedestrian RSS producer.
+    ///
+    /// Safety membership is derived from [`Self::classify_vrus`], keeping one
+    /// canonical source of VRU-classification truth.
     #[must_use]
     pub fn classify_pedestrians(
         &self,
         now_ms: u64,
         cfg: &VruClassifierConfig,
     ) -> Vec<PerceivedPedestrian> {
-        self.tracks
-            .iter()
-            .filter(|tr| {
-                // Fail-closed on a non-finite extent: NaN compares false on
-                // BOTH orderings, so require the *large* proof explicitly —
-                // absent it, the track counts as small (the stricter bound).
-                let provably_large = tr.extent_m.partial_cmp(&cfg.max_extent_m)
-                    == Some(core::cmp::Ordering::Greater);
-                let small = !provably_large;
-                if !small {
-                    return false;
-                }
-                let speed = tr.vel.x_m.hypot(tr.vel.y_m);
-                let velocity_known = tr.frames_seen >= 2 && speed.is_finite();
-                // Unknown velocity cannot rule the pedestrian envelope out.
-                !velocity_known || speed <= cfg.max_speed_mps
-            })
-            .map(|tr| PerceivedPedestrian {
-                id: tr.id,
-                pos: tr.pos,
-                vel: tr.vel,
-                age_s: (now_ms.saturating_sub(tr.stamp_ms) as f64) / 1000.0,
-            })
+        self.classify_vrus(now_ms, cfg)
+            .into_iter()
+            .filter(|result| result.classification.feeds_pedestrian_rss())
+            .map(|result| result.pedestrian)
             .collect()
     }
 
@@ -1140,6 +1271,90 @@ mod tests {
 
     /// `age_s` reflects real measurement staleness at classify time (#789 F8:
     /// the reachable disc has already grown for that long).
+    #[test]
+    fn classifier_invalid_configuration_fails_closed_to_possible_pedestrian() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+
+        let first = scan_from(
+            10.0,
+            0,
+            |theta| if theta.abs() < 0.035 { Some(5.0) } else { None },
+        );
+        let second = scan_from(10.0, 100, |theta| {
+            if theta.abs() < 0.035 {
+                Some(5.1)
+            } else {
+                None
+            }
+        });
+
+        tracker.track(&first, 0);
+        tracker.track(&second, 100);
+
+        for cfg in [
+            VruClassifierConfig {
+                max_extent_m: f64::NAN,
+                ..VruClassifierConfig::default()
+            },
+            VruClassifierConfig {
+                max_speed_mps: f64::NAN,
+                ..VruClassifierConfig::default()
+            },
+            VruClassifierConfig {
+                max_extent_m: -1.0,
+                ..VruClassifierConfig::default()
+            },
+            VruClassifierConfig {
+                max_speed_mps: -1.0,
+                ..VruClassifierConfig::default()
+            },
+        ] {
+            let results = tracker.classify_vrus(100, &cfg);
+
+            assert_eq!(results.len(), 1);
+            assert_eq!(
+                results[0].classification,
+                VruClassification::PossiblePedestrian
+            );
+            assert_eq!(
+                results[0].reason,
+                VruClassificationReason::InvalidConfiguration
+            );
+
+            let pedestrians = tracker.classify_pedestrians(100, &cfg);
+            assert_eq!(
+                pedestrians.len(),
+                1,
+                "invalid classifier configuration must never remove a track \
+                 from pedestrian RSS"
+            );
+        }
+    }
+
+    #[test]
+    fn detailed_classifier_reason_matches_pedestrian_membership() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+        let scan = scan_from(
+            10.0,
+            0,
+            |theta| if theta.abs() < 0.035 { Some(5.0) } else { None },
+        );
+
+        tracker.track(&scan, 0);
+
+        let results = tracker.classify_vrus(0, &VruClassifierConfig::default());
+        let pedestrians = tracker.classify_pedestrians(0, &VruClassifierConfig::default());
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].reason,
+            VruClassificationReason::FirstSightingUnknownVelocity
+        );
+        assert!(results[0].classification.feeds_pedestrian_rss());
+        assert_eq!(pedestrians.len(), 1);
+        assert_eq!(pedestrians[0].id, results[0].pedestrian.id);
+    }
+
     #[test]
     fn classifier_age_reflects_measurement_staleness() {
         let mut tracker = TajTracker::new(TajConfig::default());
