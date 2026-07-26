@@ -397,6 +397,125 @@ pub fn predicted_vru_speed_cap(
     }
 }
 
+/// Planner interpretation of Taj's auditable VRU intent token.
+///
+/// This metadata may only tighten behavioral caution. It never removes a
+/// geometric prediction conflict and never weakens pedestrian RSS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PredictedVruIntent {
+    Unknown,
+    WaitingNearPath,
+    AlongPath,
+    CrossingLeftToRight,
+    CrossingRightToLeft,
+    MovingAway,
+}
+
+/// One future occupied VRU region with its conservative motion interpretation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IntentAwarePredictedVruOccupancy {
+    pub track_id: u64,
+    pub intent: PredictedVruIntent,
+    pub intent_confidence: f64,
+    pub time_s: f64,
+    pub ahead_m: f64,
+    pub lateral_offset_m: f64,
+    pub uncertainty_radius_m: f64,
+}
+
+/// Extra lateral anticipation applied to confidently crossing VRUs.
+pub const DEFAULT_CROSSING_INTENT_BAND_EXTENSION_M: f64 = 0.6;
+
+/// Minimum confidence required before intent may add extra caution.
+pub const DEFAULT_MINIMUM_VRU_INTENT_CONFIDENCE: f64 = 0.70;
+
+/// Derive a tighten-only speed ceiling from predicted occupancy and VRU intent.
+///
+/// Safety invariants:
+///
+/// - every ordinary geometric conflict remains binding regardless of intent;
+/// - crossing intent may widen the conflict band and therefore lower speed;
+/// - parallel or moving-away intent never raises the baseline prediction cap;
+/// - malformed input fails closed to `Some(0.0)`;
+/// - intent cannot create safety authority independently of predicted geometry.
+#[must_use]
+pub fn intent_aware_predicted_vru_speed_cap(
+    predictions: &[IntentAwarePredictedVruOccupancy],
+    baseline_cap_mps: Option<f64>,
+    band_half_width_m: f64,
+    crossing_band_extension_m: f64,
+    standoff_m: f64,
+    brake_decel_mps2: f64,
+    minimum_intent_confidence: f64,
+) -> Option<f64> {
+    let config_valid = band_half_width_m.is_finite()
+        && band_half_width_m >= 0.0
+        && crossing_band_extension_m.is_finite()
+        && crossing_band_extension_m >= 0.0
+        && standoff_m.is_finite()
+        && standoff_m >= 0.0
+        && brake_decel_mps2.is_finite()
+        && brake_decel_mps2 > 0.0
+        && minimum_intent_confidence.is_finite()
+        && (0.0..=1.0).contains(&minimum_intent_confidence)
+        && baseline_cap_mps.is_none_or(|cap| cap.is_finite() && cap >= 0.0);
+
+    if !config_valid {
+        return Some(0.0);
+    }
+
+    let mut intent_cap_mps: Option<f64> = None;
+
+    for prediction in predictions {
+        let point_valid = prediction.intent_confidence.is_finite()
+            && (0.0..=1.0).contains(&prediction.intent_confidence)
+            && prediction.time_s.is_finite()
+            && prediction.time_s >= 0.0
+            && prediction.ahead_m.is_finite()
+            && prediction.lateral_offset_m.is_finite()
+            && prediction.uncertainty_radius_m.is_finite()
+            && prediction.uncertainty_radius_m >= 0.0;
+
+        if !point_valid {
+            return Some(0.0);
+        }
+
+        let confident_crossing = prediction.intent_confidence >= minimum_intent_confidence
+            && matches!(
+                prediction.intent,
+                PredictedVruIntent::CrossingLeftToRight | PredictedVruIntent::CrossingRightToLeft
+            );
+
+        // Intent may widen the conflict band, never shrink it.
+        let effective_band_m = if confident_crossing {
+            band_half_width_m + crossing_band_extension_m
+        } else {
+            band_half_width_m
+        };
+
+        let occupied_lateral_clearance_m =
+            prediction.lateral_offset_m.abs() - prediction.uncertainty_radius_m;
+
+        if prediction.ahead_m <= 0.0 || occupied_lateral_clearance_m > effective_band_m {
+            continue;
+        }
+
+        let cap_mps = assured_clear_distance_speed_cap(
+            (prediction.ahead_m - standoff_m).max(0.0),
+            brake_decel_mps2,
+        );
+
+        intent_cap_mps = Some(intent_cap_mps.map_or(cap_mps, |current| current.min(cap_mps)));
+    }
+
+    match (baseline_cap_mps, intent_cap_mps) {
+        (Some(baseline), Some(intent)) => Some(baseline.min(intent)),
+        (Some(baseline), None) => Some(baseline),
+        (None, Some(intent)) => Some(intent),
+        (None, None) => None,
+    }
+}
+
 /// Safety margin (s) added to a crosswalk crossing's clear time before the courier commits.
 pub const DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S: f64 = 2.0;
 
@@ -1243,6 +1362,153 @@ mod tests {
 
         assert_eq!(
             predicted_vru_speed_cap(&occupancies, BAND, STANDOFF, DECEL,),
+            Some(0.0)
+        );
+    }
+
+    fn intent_prediction(
+        intent: PredictedVruIntent,
+        confidence: f64,
+        ahead_m: f64,
+        lateral_offset_m: f64,
+        uncertainty_radius_m: f64,
+    ) -> IntentAwarePredictedVruOccupancy {
+        IntentAwarePredictedVruOccupancy {
+            track_id: 1,
+            intent,
+            intent_confidence: confidence,
+            time_s: 1.0,
+            ahead_m,
+            lateral_offset_m,
+            uncertainty_radius_m,
+        }
+    }
+
+    #[test]
+    fn crossing_intent_can_only_tighten_the_baseline_cap() {
+        let baseline = 2.5;
+        let prediction =
+            intent_prediction(PredictedVruIntent::CrossingLeftToRight, 0.95, 4.0, 1.1, 0.1);
+
+        let cap = intent_aware_predicted_vru_speed_cap(
+            &[prediction],
+            Some(baseline),
+            DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M,
+            DEFAULT_CROSSING_INTENT_BAND_EXTENSION_M,
+            DEFAULT_VRU_YIELD_STANDOFF_M,
+            1.0,
+            DEFAULT_MINIMUM_VRU_INTENT_CONFIDENCE,
+        )
+        .expect("crossing prediction produces a cap");
+
+        assert!(cap <= baseline);
+    }
+
+    #[test]
+    fn crossing_intent_derates_before_normal_band_intersection() {
+        let prediction =
+            intent_prediction(PredictedVruIntent::CrossingRightToLeft, 0.95, 4.0, 1.2, 0.1);
+
+        let cap = intent_aware_predicted_vru_speed_cap(
+            &[prediction],
+            None,
+            DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M,
+            DEFAULT_CROSSING_INTENT_BAND_EXTENSION_M,
+            DEFAULT_VRU_YIELD_STANDOFF_M,
+            1.0,
+            DEFAULT_MINIMUM_VRU_INTENT_CONFIDENCE,
+        );
+
+        assert!(
+            cap.is_some(),
+            "crossing intent widens the anticipation band"
+        );
+    }
+
+    #[test]
+    fn low_confidence_crossing_does_not_expand_the_band() {
+        let prediction =
+            intent_prediction(PredictedVruIntent::CrossingLeftToRight, 0.20, 4.0, 1.2, 0.1);
+
+        let cap = intent_aware_predicted_vru_speed_cap(
+            &[prediction],
+            None,
+            DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M,
+            DEFAULT_CROSSING_INTENT_BAND_EXTENSION_M,
+            DEFAULT_VRU_YIELD_STANDOFF_M,
+            1.0,
+            DEFAULT_MINIMUM_VRU_INTENT_CONFIDENCE,
+        );
+
+        assert_eq!(cap, None);
+    }
+
+    #[test]
+    fn parallel_motion_outside_the_normal_band_adds_no_penalty() {
+        let prediction = intent_prediction(PredictedVruIntent::AlongPath, 0.99, 5.0, 1.5, 0.2);
+
+        let cap = intent_aware_predicted_vru_speed_cap(
+            &[prediction],
+            None,
+            DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M,
+            DEFAULT_CROSSING_INTENT_BAND_EXTENSION_M,
+            DEFAULT_VRU_YIELD_STANDOFF_M,
+            1.0,
+            DEFAULT_MINIMUM_VRU_INTENT_CONFIDENCE,
+        );
+
+        assert_eq!(cap, None);
+    }
+
+    #[test]
+    fn parallel_motion_still_binds_when_uncertainty_reaches_the_path() {
+        let prediction = intent_prediction(PredictedVruIntent::AlongPath, 0.99, 5.0, 1.1, 0.4);
+
+        let cap = intent_aware_predicted_vru_speed_cap(
+            &[prediction],
+            None,
+            DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M,
+            DEFAULT_CROSSING_INTENT_BAND_EXTENSION_M,
+            DEFAULT_VRU_YIELD_STANDOFF_M,
+            1.0,
+            DEFAULT_MINIMUM_VRU_INTENT_CONFIDENCE,
+        );
+
+        assert!(cap.is_some());
+    }
+
+    #[test]
+    fn moving_away_never_removes_a_geometric_conflict() {
+        let baseline = Some(1.2);
+        let prediction = intent_prediction(PredictedVruIntent::MovingAway, 0.99, 3.0, 0.3, 0.2);
+
+        let cap = intent_aware_predicted_vru_speed_cap(
+            &[prediction],
+            baseline,
+            DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M,
+            DEFAULT_CROSSING_INTENT_BAND_EXTENSION_M,
+            DEFAULT_VRU_YIELD_STANDOFF_M,
+            1.0,
+            DEFAULT_MINIMUM_VRU_INTENT_CONFIDENCE,
+        );
+
+        assert!(cap.is_some_and(|value| value <= 1.2));
+    }
+
+    #[test]
+    fn malformed_intent_prediction_fails_closed() {
+        let prediction = intent_prediction(PredictedVruIntent::Unknown, f64::NAN, 4.0, 0.0, 0.2);
+
+        assert_eq!(
+            intent_aware_predicted_vru_speed_cap(
+                &[prediction],
+                None,
+                DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M,
+                DEFAULT_CROSSING_INTENT_BAND_EXTENSION_M,
+                DEFAULT_VRU_YIELD_STANDOFF_M,
+                1.0,
+                DEFAULT_MINIMUM_VRU_INTENT_CONFIDENCE,
+            ),
             Some(0.0)
         );
     }

@@ -26,8 +26,10 @@
 use kirra_core::frame_integrity::FrameTrust;
 use kirra_planner::{
     behavior::{
-        predicted_vru_speed_cap, PredictedVruOccupancy, DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M,
-        DEFAULT_VRU_YIELD_STANDOFF_M,
+        intent_aware_predicted_vru_speed_cap, predicted_vru_speed_cap,
+        IntentAwarePredictedVruOccupancy, PredictedVruIntent, PredictedVruOccupancy,
+        DEFAULT_CROSSING_INTENT_BAND_EXTENSION_M, DEFAULT_MINIMUM_VRU_INTENT_CONFIDENCE,
+        DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M, DEFAULT_VRU_YIELD_STANDOFF_M,
     },
     plan_for_intent, EgoState, FleetPosture, GeometricPlanner, GeometricPlannerConfig, Goal,
     MickIntent, PlanInput, Pose, ProposalKind,
@@ -103,6 +105,9 @@ pub struct PredictedVruPointReq {
 pub struct PredictedVruReq {
     pub track_id: u64,
     pub model: String,
+    pub intent: String,
+    pub intent_confidence: f64,
+    pub intent_reason: String,
     pub points: Vec<PredictedVruPointReq>,
     pub horizon_s: f64,
     pub step_s: f64,
@@ -330,6 +335,18 @@ fn pts(v: &[[f64; 2]]) -> Vec<Point> {
         .collect()
 }
 
+fn parse_predicted_vru_intent(value: &str) -> Option<PredictedVruIntent> {
+    match value {
+        "unknown" => Some(PredictedVruIntent::Unknown),
+        "waiting_near_path" => Some(PredictedVruIntent::WaitingNearPath),
+        "along_path" => Some(PredictedVruIntent::AlongPath),
+        "crossing_left_to_right" => Some(PredictedVruIntent::CrossingLeftToRight),
+        "crossing_right_to_left" => Some(PredictedVruIntent::CrossingRightToLeft),
+        "moving_away" => Some(PredictedVruIntent::MovingAway),
+        _ => None,
+    }
+}
+
 fn valid_vru_model(value: &str) -> bool {
     matches!(
         value,
@@ -375,6 +392,38 @@ fn validate_predicted_vrus(req: &PlanRequest) -> Result<(), SeamRejection> {
     let mut prediction_ids = std::collections::BTreeSet::new();
 
     for prediction in &req.predicted_vrus {
+        if parse_predicted_vru_intent(&prediction.intent).is_none() {
+            return Err(SeamRejection {
+                code: "UNKNOWN_VRU_INTENT",
+                detail: format!(
+                    "prediction track {} carries unknown intent token {:?}",
+                    prediction.track_id, prediction.intent
+                ),
+            });
+        }
+
+        if !prediction.intent_confidence.is_finite()
+            || !(0.0..=1.0).contains(&prediction.intent_confidence)
+        {
+            return Err(SeamRejection {
+                code: "INVALID_VRU_INTENT_CONFIDENCE",
+                detail: format!(
+                    "prediction track {} carries invalid intent confidence",
+                    prediction.track_id
+                ),
+            });
+        }
+
+        if prediction.intent_reason.is_empty() {
+            return Err(SeamRejection {
+                code: "INVALID_VRU_INTENT_REASON",
+                detail: format!(
+                    "prediction track {} carries an empty intent reason",
+                    prediction.track_id
+                ),
+            });
+        }
+
         if !pedestrian_ids.contains(&prediction.track_id) {
             return Err(SeamRejection {
                 code: "PREDICTED_VRU_WITHOUT_PEDESTRIAN",
@@ -719,11 +768,43 @@ pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
         })
         .collect();
 
-    let predicted_vru_cap_mps = predicted_vru_speed_cap(
+    let baseline_predicted_vru_cap_mps = predicted_vru_speed_cap(
         &predicted_vru_occupancies,
         DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M,
         DEFAULT_VRU_YIELD_STANDOFF_M,
         OCCY_VRU_BRAKE_DECEL_MPS2,
+    );
+
+    let intent_aware_occupancies: Vec<IntentAwarePredictedVruOccupancy> = req
+        .predicted_vrus
+        .iter()
+        .flat_map(|prediction| {
+            let intent = parse_predicted_vru_intent(&prediction.intent)
+                .expect("validated predicted VRU intent above");
+
+            prediction
+                .points
+                .iter()
+                .map(move |point| IntentAwarePredictedVruOccupancy {
+                    track_id: prediction.track_id,
+                    intent,
+                    intent_confidence: prediction.intent_confidence,
+                    time_s: point.time_s,
+                    ahead_m: point.x,
+                    lateral_offset_m: point.y,
+                    uncertainty_radius_m: point.uncertainty_radius_m,
+                })
+        })
+        .collect();
+
+    let predicted_vru_cap_mps = intent_aware_predicted_vru_speed_cap(
+        &intent_aware_occupancies,
+        baseline_predicted_vru_cap_mps,
+        DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M,
+        DEFAULT_CROSSING_INTENT_BAND_EXTENSION_M,
+        DEFAULT_VRU_YIELD_STANDOFF_M,
+        OCCY_VRU_BRAKE_DECEL_MPS2,
+        DEFAULT_MINIMUM_VRU_INTENT_CONFIDENCE,
     );
 
     let world = PlanInput {
@@ -1069,6 +1150,9 @@ mod tests {
         PredictedVruReq {
             track_id,
             model: "constant_velocity".to_string(),
+            intent: "unknown".to_string(),
+            intent_confidence: 0.0,
+            intent_reason: "ambiguous_motion".to_string(),
             points,
             horizon_s: 3.0,
             step_s: 1.0,
