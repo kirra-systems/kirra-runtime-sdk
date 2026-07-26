@@ -3,7 +3,7 @@ cmd_vel_interceptor:
     kirra_url: "http://localhost:8090"
     kirra_token: ""              # Set via environment variable KIRRA_ADMIN_TOKEN or launch arg
     kirra_client_id: "ros2-interceptor-01"
-    wheelbase_m: 0.2             # Hiwonder ROSOrin wheelbase (meters)
+    wheelbase_m: 0.229             # Hiwonder ROSOrin wheelbase (meters)
     # ── R2-CLASS FLIP (draft, GATED — 2 of 3 uncomment sites) ─────────────────
     # The interceptor cross-checks wheelbase_m against the wheelbase the verifier
     # reports for its ACTIVE class contract; a mismatch (>1e-6) latches a
