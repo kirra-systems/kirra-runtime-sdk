@@ -13,7 +13,8 @@ use kirra_core::corridor::CorridorSource;
 use kirra_taj::{
     clip_corridor_to_hazards, hazard_clip_x, CameraVruFusionConfig, CameraVruObservation,
     LaserScan, PredictedVruMotion, SemanticClass, SemanticDetection, TajConfig, TajTracker,
-    VruClassifierConfig, VruMotionModel, VruMotionPredictionConfig, VruPredictionFallbackReason,
+    VruClassifierConfig, VruIntentClass, VruIntentReason, VruMotionModel,
+    VruMotionPredictionConfig, VruPredictionFallbackReason,
 };
 use serde::{Deserialize, Serialize};
 
@@ -392,6 +393,9 @@ pub struct PredictedVruPointOut {
 pub struct PredictedVruMotionOut {
     pub track_id: u64,
     pub model: &'static str,
+    pub intent: &'static str,
+    pub intent_confidence: f64,
+    pub intent_reason: &'static str,
     pub fallback_reason: Option<&'static str>,
     pub horizon_s: f64,
     pub step_s: f64,
@@ -614,6 +618,14 @@ fn vru_motion_model_wire_name(model: VruMotionModel) -> &'static str {
     }
 }
 
+fn vru_intent_wire_name(intent: VruIntentClass) -> &'static str {
+    intent.as_str()
+}
+
+fn vru_intent_reason_wire_name(reason: VruIntentReason) -> &'static str {
+    reason.as_str()
+}
+
 fn vru_prediction_fallback_wire_name(reason: VruPredictionFallbackReason) -> &'static str {
     match reason {
         VruPredictionFallbackReason::InvalidConfiguration => "invalid_configuration",
@@ -629,6 +641,9 @@ fn predicted_vru_to_wire(prediction: &PredictedVruMotion) -> PredictedVruMotionO
     PredictedVruMotionOut {
         track_id: prediction.track_id,
         model: vru_motion_model_wire_name(prediction.model),
+        intent: vru_intent_wire_name(prediction.intent),
+        intent_confidence: prediction.intent_confidence,
+        intent_reason: vru_intent_reason_wire_name(prediction.intent_reason),
         fallback_reason: prediction
             .fallback_reason
             .map(vru_prediction_fallback_wire_name),
