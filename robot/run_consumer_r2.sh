@@ -66,7 +66,35 @@ export KIRRA_GOVERNOR_VK_HEX
 : "${KIRRA_R2_M_PER_TICK:=0.00025101}";       export KIRRA_R2_M_PER_TICK
 : "${KIRRA_R2_V_PER_PWM_RIGHT:=0.0194}";      export KIRRA_R2_V_PER_PWM_RIGHT
 
+# --- pinned platform profile digest (evidence-bound V2, REQUIRED) -------------
+# The consumer refuses any release whose SIGNED profile digest differs from this
+# pinned value, so a robot cannot be driven under another platform's envelope.
+#
+# There is deliberately NO default. Unlike the dev governor key (derivable from
+# the dev seed above), this digest is a property of the DEPLOYED PLATFORM: Taj
+# computes it from the perception request for this robot, and it must match
+# byte-for-byte. Inventing one here would either refuse every release or, worse,
+# pin the wrong platform — both are silent-config failures the fail-closed rule
+# exists to prevent.
+#
+# Obtain it from the Taj sidecar's own answer for this robot, e.g.
+#   curl -s localhost:8101/perception -d @perception.json -H 'content-type: application/json' \
+#     | python3 -c 'import json,sys; print(json.load(sys.stdin)["frame_id"]["profile_digest"])'
+# then pin it (64 LOWERCASE hex) in /etc/kirra/robot.env.
+if [ -z "${KIRRA_PROFILE_DIGEST:-}" ]; then
+  echo "FATAL: KIRRA_PROFILE_DIGEST is unset — the evidence-bound consumer pins the" >&2
+  echo "       platform profile digest and refuses releases minted under another." >&2
+  echo "       Set it to this robot's 64-lowercase-hex Taj profile digest (see the" >&2
+  echo "       comment above this check in robot/run_consumer_r2.sh)." >&2
+  exit 1
+fi
+export KIRRA_PROFILE_DIGEST
+
 # --- ADR-0033 timing + demo caps + hardware (validated first-run values) -------
+# NOTE (V2): the consumer now reads this as the MAXIMUM TOKEN LIFETIME the core
+# will accept — V2 enforces the token's own signed expires_at_ms, and this bounds
+# how long any single mint may remain valid. The variable name is unchanged so
+# existing robot.env files keep working.
 : "${KIRRA_FRESHNESS_WINDOW_MS:=200}";        export KIRRA_FRESHNESS_WINDOW_MS
 : "${KIRRA_CONTROL_PERIOD_MS:=100}";          export KIRRA_CONTROL_PERIOD_MS
 : "${KIRRA_MISSED_PERIODS:=3}";               export KIRRA_MISSED_PERIODS
@@ -92,6 +120,7 @@ if [ -z "${KIRRA_CONSUMER_LIB:-}" ] \
   exit 1
 fi
 
-echo "── KIRRA consumer: r2_ackermann, VK=${KIRRA_GOVERNOR_VK_HEX:0:16}…, port=$KIRRA_MOTOR_PORT, domain=$ROS_DOMAIN_ID"
+echo "── KIRRA consumer: r2_ackermann, VK=${KIRRA_GOVERNOR_VK_HEX:0:16}…, profile=${KIRRA_PROFILE_DIGEST:0:16}…, port=$KIRRA_MOTOR_PORT, domain=$ROS_DOMAIN_ID"
+echo "   (evidence-bound V2: 272-byte frames only; V1 128-byte frames are refused)"
 echo "   (car-type 5 will be set + read back at init; Ctrl-C to stop)"
 exec python3 "$REPO/robot/kirra_motor_consumer.py"

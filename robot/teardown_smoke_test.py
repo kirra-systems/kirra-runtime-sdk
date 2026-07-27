@@ -255,8 +255,14 @@ def main() -> int:
         check(len(node.pub.published) == 3,
               "(1) publisher must still publish its frames (behavior unchanged)")
         check(node.destroyed == 1, "(1) node destroyed exactly once")
+        # kirra_release_publisher is the V1 BENCH publisher (it mints through
+        # the V1-only kirra_ros_release_mint), so 128 bytes is correct here and
+        # is NOT a stale assertion. The live R2 path is evidence-bound V2 (272
+        # bytes) and the motor consumer refuses these V1 frames — this bench
+        # tool can therefore no longer drive the live consumer. See
+        # robot/bound_consumer_test.py for the V2 wire contract.
         check(all(len(f) == 128 for f in node.pub.published),
-              "(1) valid mode still emits 128-byte signed frames")
+              "(1) valid mode still emits 128-byte V1 bench frames")
         print(f"(1) publisher/SIGTERM → exit 0, {len(node.pub.published)} frames, "
               f"no double shutdown")
     check(ctx.shutdown_calls == 0,
@@ -302,6 +308,12 @@ def main() -> int:
     ).stdout.strip()
     os.environ.update({
         "KIRRA_GOVERNOR_VK_HEX": vk,
+        # Evidence-bound V2: the consumer pins the platform profile digest from
+        # trusted config and refuses to start without a valid 64-lowercase-hex
+        # value. A stand-in is fine here — this harness tests teardown paths,
+        # and the digest's own parsing/refusal rules are covered in
+        # robot/bound_consumer_test.py.
+        "KIRRA_PROFILE_DIGEST": "ab" * 32,
         "KIRRA_FRESHNESS_WINDOW_MS": "200",
         "KIRRA_CONTROL_PERIOD_MS": "100",
         "KIRRA_MISSED_PERIODS": "3",

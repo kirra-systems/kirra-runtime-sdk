@@ -21,7 +21,8 @@
                                      verifier MINTS a signed release
                                              │  (interceptor RELAYS the bytes)
                                              ▼
-                                       /kirra/release  (128-byte signed frame)
+                                 /kirra/release  (272-byte evidence-bound V2
+                                  signed frame: payload 176 + token 96)
                                              │
                      kirra_motor_consumer ───┤  Rust FFI Ed25519 verify-before-release
                      (R2 closed-loop drive)  ▼

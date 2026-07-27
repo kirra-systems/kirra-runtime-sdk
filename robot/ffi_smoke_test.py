@@ -21,7 +21,15 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from kirra_ffi import KirraConsumer, split_frame  # noqa: E402
+from kirra_ffi import (  # noqa: E402
+    BOUND_PAYLOAD_LEN,
+    BOUND_REFUSAL_NAMES,
+    BoundKirraConsumer,
+    KirraConsumer,
+    bound_refusal_name,
+    split_bound_frame,
+    split_frame,
+)
 
 REPO = Path(__file__).resolve().parent.parent
 # The dev/demo governor key (well-known [42u8;32]) — DEV ONLY, matches the Rust
@@ -174,6 +182,83 @@ def main() -> int:
     p128 = split_frame(b"\x01" * 128)
     check(p128 is not None and len(p128[1]) == 96, "(g) exact 128 → token of exactly 96")
     print("(g) malformed lengths (0/31/33/127/129/256) → rejected by the strict parse")
+
+    # ------------------------------------------------------------------
+    # (h) The evidence-bound V2 boundary, against the REAL .so.
+    #
+    # There is no V2 mint tool yet (kirra_ros_release_mint is V1-only), so this
+    # cannot assert a positive release. It asserts the fail-closed half, which
+    # is the half that must never regress: the core refuses a bad configuration
+    # outright, and refuses V2 frames it did not sign. A valid-signature V2
+    # release is covered by the Rust tests in kirra-actuation-consumer.
+    # ------------------------------------------------------------------
+    profile_digest = bytes.fromhex("ab" * 32)
+
+    def new_bound(vk_bytes=vk, digest=profile_digest, **over):
+        kwargs = dict(
+            maximum_token_lifetime_ms=200, control_period_ms=100, missed_periods=3,
+            stop_decel_mps2=1.0, vx_max=VX_MAX, vz_max=VZ_MAX,
+        )
+        kwargs.update(over)
+        return BoundKirraConsumer(vk_bytes, digest, **kwargs)
+
+    # (h1) A well-formed configuration constructs.
+    bc = new_bound()
+    check(bc is not None, "(h1) a valid V2 configuration must construct")
+
+    # (h2) Fail-closed configurations must raise, never yield a usable handle.
+    for label, over in (
+        ("all-zero profile digest", {"digest": b"\x00" * 32}),
+        ("zero maximum lifetime", {"maximum_token_lifetime_ms": 0}),
+        ("non-finite vx_max", {"vx_max": float("inf")}),
+        ("zero vx_max", {"vx_max": 0.0}),
+    ):
+        try:
+            new_bound(**over)
+        except ValueError:
+            pass
+        else:
+            check(False, f"(h2) {label} must be refused (fail-closed NULL handle)")
+    print("(h2) bad V2 configs (zero digest / zero lifetime / bad envelope) → refused")
+
+    # (h3) A tokenless V2 frame → NO_TOKEN, no write.
+    bc = new_bound()
+    r = bc.on_frame(b"\x00" * BOUND_PAYLOAD_LEN, None, 10_000)
+    check(r.write == 0, "(h3) a tokenless V2 frame must not actuate")
+    check(r.refusal_code == 100,
+          f"(h3) tokenless must be NO_TOKEN(100), got {r.refusal_code}")
+    print(f"(h3) V2 tokenless → refused code=NO_TOKEN write={r.write}")
+
+    # (h4) A V2 frame this core never signed → refused, no write.
+    bc = new_bound()
+    forged = bytes(range(256))[:BOUND_PAYLOAD_LEN]
+    r = bc.on_frame(forged, b"\x5a" * 96, 10_000)
+    check(r.write == 0, "(h4) an unsigned-by-us V2 frame must not actuate")
+    check(r.refusal_code in BOUND_REFUSAL_NAMES,
+          f"(h4) refusal must be a known V2 code, got {r.refusal_code}")
+    print(f"(h4) V2 forged → refused code={bound_refusal_name(r.refusal_code)} write={r.write}")
+
+    # (h5) The strict V2 parse: only 272, and never a V1 downgrade.
+    check(split_bound_frame(b"\x00" * 272) is not None, "(h5) exact 272 must parse")
+    for n in (0, 32, 96, 128, 176, 271, 273):
+        check(split_bound_frame(b"\x00" * n) is None, f"(h5) length {n} must be refused")
+    print("(h5) V2 parse: 272 only (0/32/96/128/176/271/273 refused, incl. V1 128)")
+
+    # (h6) Health starts clean and counts the refusals we just caused.
+    h = bc.health()
+    check(h.releases == 0, "(h6) no releases can have occurred")
+    check(h.refusals_total >= 1, "(h6) the forged frame must be counted")
+    print(f"(h6) V2 health: releases={h.releases} refusals_total={h.refusals_total}")
+
+    # (h7) close() is idempotent and the handle is not reusable.
+    bc.close()
+    bc.close()
+    try:
+        bc.on_tick(10_000)
+    except ValueError:
+        print("(h7) V2 close is idempotent; a closed handle refuses reuse")
+    else:
+        check(False, "(h7) a closed V2 consumer must refuse reuse")
 
     print()
     if failures:

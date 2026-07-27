@@ -290,12 +290,14 @@ close the perception-to-wheels chain:
    (`kirra-ros2-adapter::ingress_sensor_qos`).
 2. **The release relay** — the verifier's actuator 200 carries the ADR-0033
    `release` object (signed payload+token), but nothing republished it for
-   the consumer. The `cmd_vel_interceptor` now relays it as the 128-byte
-   `payload(32)‖token(96)` frame on `release_topic` (default
-   `/kirra/release`) — strict pure-carriage (`release_frame`): a malformed
-   release publishes **nothing** and the consumer starves into its
+   the consumer. The `cmd_vel_interceptor` now relays it as the 272-byte
+   evidence-bound V2 `payload(176)‖token(96)` frame on `release_topic`
+   (default `/kirra/release`) — strict pure-carriage (`release_frame`): a
+   malformed release publishes **nothing** and the consumer starves into its
    decel-to-zero. Relay happens ONLY on a Forward decision; a wheelbase
-   mismatch or contract-violating 200 relays nothing.
+   mismatch or contract-violating 200 relays nothing. The V2 payload binds
+   the perception/profile/proposal identity into the signed bytes, and the
+   consumer refuses a V1 128-byte frame outright (no silent downgrade).
 3. **`scan_stale_s` is now REQUIRED** on `occy_doer` (0.0 unset-sentinel →
    refuse to start), replacing the silent 0.5 s default: the staleness budget
    is a safety number and is operator-set per deployment

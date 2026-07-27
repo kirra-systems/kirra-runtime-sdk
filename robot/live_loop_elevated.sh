@@ -12,9 +12,14 @@
 # The chain under test (every hop live):
 #   /scan (lidar, BEST_EFFORT) ──> perception_governor ──> /kirra/perception_speed_cap
 #                              └─> occy_doer (+Taj corridor +Occy plan) ──> /cmd_vel_raw
+#                                   (std_msgs/String: evidence-bound proposal envelope)
 #   /cmd_vel_raw ──> cmd_vel_interceptor [Taj cap → KIRRA verifier → mint]
-#                       └──> /kirra/release (payload‖token, 128-byte signed frames)
+#                       └──> /kirra/release (payload‖token, 272-byte evidence-bound
+#                            V2 signed frames: payload 176 + token 96)
 #   /kirra/release ──> kirra_motor_consumer [Rust FFI verify] ──> /dev/myserial
+#
+# The consumer pins KIRRA_PROFILE_DIGEST (trusted config) and refuses any release
+# whose signed profile digest differs, plus V1 128-byte frames outright.
 #
 # The four phases:
 #   (a) NOMINAL           clear corridor + goal ahead → wheels spin (governed)
