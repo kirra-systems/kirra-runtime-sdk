@@ -268,6 +268,218 @@ pub fn verify_ros_bound_command_release(
         .map_err(|_| ReleaseDenied::SignatureInvalid)
 }
 
+/// Why the evidence-bound motor gate refused release.
+///
+/// Every refusal is fail-closed and leaves sequence, nonce, and perception-frame
+/// watermarks unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RosBoundCommandRefusal {
+    NoToken,
+    Denied(ReleaseDenied),
+    Undecodable(RosBoundCommandDecodeError),
+
+    /// The payload claims to have been issued after the consumer's current time.
+    FutureIssued {
+        issued_at_ms: u64,
+        now_ms: u64,
+    },
+
+    /// The signed command has reached or passed its explicit expiration.
+    Expired {
+        expires_at_ms: u64,
+        now_ms: u64,
+    },
+
+    /// The author requested a lifetime larger than the configured safety bound.
+    LifetimeTooLong {
+        lifetime_ms: u64,
+        maximum_ms: u64,
+    },
+
+    /// The command sequence did not strictly advance.
+    SequenceNotAdvanced {
+        presented: u64,
+        last_released: u64,
+    },
+
+    /// The nonce did not strictly advance.
+    ///
+    /// V2 deliberately requires monotonic nonces rather than retaining an
+    /// unbounded set of every nonce ever observed. This provides single-use
+    /// behavior with constant memory on the actuation hot path.
+    NonceNotAdvanced {
+        presented: u64,
+        last_released: u64,
+    },
+
+    /// The presented platform/profile identity does not match the consumer's
+    /// configured deployment identity.
+    ProfileDigestMismatch,
+
+    /// A newer perception frame has already released.
+    PerceptionFrameSuperseded {
+        presented_tracker_generation: u64,
+        presented_scan_sequence: u64,
+        latest_tracker_generation: u64,
+        latest_scan_sequence: u64,
+    },
+}
+
+/// Motor-side verification gate for the V2 evidence-bound ROS payload.
+///
+/// The gate owns only constant-size state:
+/// - last released command sequence;
+/// - last released nonce;
+/// - newest released Taj tracker/scan identity.
+///
+/// A full release verifies the exact signed bytes, decodes all bound fields,
+/// checks profile identity and timing, rejects superseded evidence, and only
+/// then atomically advances the in-memory watermarks.
+pub struct RosBoundCommandGate {
+    governor_vk: VerifyingKey,
+    expected_profile_digest: [u8; 32],
+    maximum_lifetime_ms: u64,
+
+    last_released_sequence: Option<u64>,
+    last_released_nonce: Option<u64>,
+    latest_perception_frame: Option<(u64, u64)>,
+}
+
+impl RosBoundCommandGate {
+    #[must_use]
+    pub fn new(
+        governor_vk: VerifyingKey,
+        expected_profile_digest: [u8; 32],
+        maximum_lifetime_ms: u64,
+    ) -> Self {
+        Self {
+            governor_vk,
+            expected_profile_digest,
+            maximum_lifetime_ms,
+            last_released_sequence: None,
+            last_released_nonce: None,
+            latest_perception_frame: None,
+        }
+    }
+
+    pub fn release(
+        &mut self,
+        payload_bytes: &[u8; ROS_BOUND_COMMAND_PAYLOAD_LEN],
+        token: Option<&ReleaseToken>,
+        now_ms: u64,
+    ) -> Result<RosBoundCommandPayload, RosBoundCommandRefusal> {
+        // 1. No proof means no motion.
+        let token = token.ok_or(RosBoundCommandRefusal::NoToken)?;
+
+        // 2. The signature must approve exactly the presented V2 bytes.
+        verify_ros_bound_command_release(token, payload_bytes, &self.governor_vk)
+            .map_err(RosBoundCommandRefusal::Denied)?;
+
+        // 3. Decode and structurally validate every bound field.
+        let payload = RosBoundCommandPayload::decode(payload_bytes)
+            .map_err(RosBoundCommandRefusal::Undecodable)?;
+
+        // 4. The consumer must be operating under the same platform/profile.
+        if payload.profile_digest != self.expected_profile_digest {
+            return Err(RosBoundCommandRefusal::ProfileDigestMismatch);
+        }
+
+        // 5. Explicit issue/expiration checks.
+        if payload.issued_at_ms > now_ms {
+            return Err(RosBoundCommandRefusal::FutureIssued {
+                issued_at_ms: payload.issued_at_ms,
+                now_ms,
+            });
+        }
+
+        if now_ms >= payload.expires_at_ms {
+            return Err(RosBoundCommandRefusal::Expired {
+                expires_at_ms: payload.expires_at_ms,
+                now_ms,
+            });
+        }
+
+        let lifetime_ms = payload.expires_at_ms - payload.issued_at_ms;
+        if lifetime_ms > self.maximum_lifetime_ms {
+            return Err(RosBoundCommandRefusal::LifetimeTooLong {
+                lifetime_ms,
+                maximum_ms: self.maximum_lifetime_ms,
+            });
+        }
+
+        // 6. Command replay/reordering protection.
+        if let Some(last) = self.last_released_sequence {
+            if payload.sequence <= last {
+                return Err(RosBoundCommandRefusal::SequenceNotAdvanced {
+                    presented: payload.sequence,
+                    last_released: last,
+                });
+            }
+        }
+
+        // 7. Single-use nonce protection with a constant-memory monotonic rule.
+        if let Some(last) = self.last_released_nonce {
+            if payload.nonce <= last {
+                return Err(RosBoundCommandRefusal::NonceNotAdvanced {
+                    presented: payload.nonce,
+                    last_released: last,
+                });
+            }
+        }
+
+        // 8. Reject evidence older than the newest frame already released.
+        //
+        // Tracker generation is the primary epoch. Within one tracker
+        // generation, scan sequence must never move backward. An equal frame is
+        // allowed for several control commands derived from one perception
+        // frame, provided command sequence and nonce both advance.
+        if let Some((latest_generation, latest_scan)) = self.latest_perception_frame {
+            let superseded = payload.tracker_generation < latest_generation
+                || (payload.tracker_generation == latest_generation
+                    && payload.scan_sequence < latest_scan);
+
+            if superseded {
+                return Err(RosBoundCommandRefusal::PerceptionFrameSuperseded {
+                    presented_tracker_generation: payload.tracker_generation,
+                    presented_scan_sequence: payload.scan_sequence,
+                    latest_tracker_generation: latest_generation,
+                    latest_scan_sequence: latest_scan,
+                });
+            }
+        }
+
+        // Full pass: advance all watermarks together.
+        self.last_released_sequence = Some(payload.sequence);
+        self.last_released_nonce = Some(payload.nonce);
+
+        match self.latest_perception_frame {
+            Some((generation, scan))
+                if payload.tracker_generation == generation && payload.scan_sequence <= scan => {}
+            _ => {
+                self.latest_perception_frame =
+                    Some((payload.tracker_generation, payload.scan_sequence));
+            }
+        }
+
+        Ok(payload)
+    }
+
+    #[must_use]
+    pub fn last_released_sequence(&self) -> Option<u64> {
+        self.last_released_sequence
+    }
+
+    #[must_use]
+    pub fn last_released_nonce(&self) -> Option<u64> {
+        self.last_released_nonce
+    }
+
+    #[must_use]
+    pub fn latest_perception_frame(&self) -> Option<(u64, u64)> {
+        self.latest_perception_frame
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +506,185 @@ mod tests {
             evidence_digest: [0x22; 32],
             proposal_digest: [0x33; 32],
         }
+    }
+
+    fn gate() -> RosBoundCommandGate {
+        RosBoundCommandGate::new(signing_key().verifying_key(), [0x11; 32], 200)
+    }
+
+    fn signed(payload: &RosBoundCommandPayload) -> ReleaseToken {
+        issue_ros_bound_command_release(payload, &signing_key())
+    }
+
+    #[test]
+    fn gate_releases_an_honest_evidence_bound_command() {
+        let mut gate = gate();
+        let payload = payload();
+        let token = signed(&payload);
+
+        assert_eq!(
+            gate.release(&payload.encode(), Some(&token), 10_050),
+            Ok(payload)
+        );
+        assert_eq!(gate.last_released_sequence(), Some(10));
+        assert_eq!(gate.last_released_nonce(), Some(9001));
+        assert_eq!(gate.latest_perception_frame(), Some((3, 77)));
+    }
+
+    #[test]
+    fn gate_rejects_expired_future_and_excessive_lifetime_commands() {
+        let mut expired = payload();
+        expired.expires_at_ms = 10_050;
+        let token = signed(&expired);
+        assert_eq!(
+            gate().release(&expired.encode(), Some(&token), 10_050),
+            Err(RosBoundCommandRefusal::Expired {
+                expires_at_ms: 10_050,
+                now_ms: 10_050,
+            })
+        );
+
+        let mut future = payload();
+        future.issued_at_ms = 10_100;
+        future.expires_at_ms = 10_200;
+        let token = signed(&future);
+        assert_eq!(
+            gate().release(&future.encode(), Some(&token), 10_050),
+            Err(RosBoundCommandRefusal::FutureIssued {
+                issued_at_ms: 10_100,
+                now_ms: 10_050,
+            })
+        );
+
+        let mut long = payload();
+        long.expires_at_ms = 10_201;
+        let token = signed(&long);
+        assert_eq!(
+            gate().release(&long.encode(), Some(&token), 10_050),
+            Err(RosBoundCommandRefusal::LifetimeTooLong {
+                lifetime_ms: 201,
+                maximum_ms: 200,
+            })
+        );
+    }
+
+    #[test]
+    fn gate_rejects_sequence_replay_and_duplicate_nonce() {
+        let mut gate = gate();
+        let first = payload();
+        let first_token = signed(&first);
+        gate.release(&first.encode(), Some(&first_token), 10_050)
+            .unwrap();
+
+        let mut replay = first;
+        replay.nonce += 1;
+        let replay_token = signed(&replay);
+        assert_eq!(
+            gate.release(&replay.encode(), Some(&replay_token), 10_050),
+            Err(RosBoundCommandRefusal::SequenceNotAdvanced {
+                presented: 10,
+                last_released: 10,
+            })
+        );
+
+        let mut duplicate_nonce = first;
+        duplicate_nonce.sequence += 1;
+        let duplicate_token = signed(&duplicate_nonce);
+        assert_eq!(
+            gate.release(&duplicate_nonce.encode(), Some(&duplicate_token), 10_050),
+            Err(RosBoundCommandRefusal::NonceNotAdvanced {
+                presented: 9001,
+                last_released: 9001,
+            })
+        );
+
+        // Refusals do not poison any watermark.
+        assert_eq!(gate.last_released_sequence(), Some(10));
+        assert_eq!(gate.last_released_nonce(), Some(9001));
+    }
+
+    #[test]
+    fn gate_rejects_profile_mismatch_without_advancing() {
+        let mut gate = gate();
+        let mut payload = payload();
+        payload.profile_digest = [0x44; 32];
+        let token = signed(&payload);
+
+        assert_eq!(
+            gate.release(&payload.encode(), Some(&token), 10_050),
+            Err(RosBoundCommandRefusal::ProfileDigestMismatch)
+        );
+        assert_eq!(gate.last_released_sequence(), None);
+        assert_eq!(gate.last_released_nonce(), None);
+        assert_eq!(gate.latest_perception_frame(), None);
+    }
+
+    #[test]
+    fn gate_rejects_superseded_perception_but_allows_same_frame_commands() {
+        let mut gate = gate();
+
+        let first = payload();
+        let token = signed(&first);
+        gate.release(&first.encode(), Some(&token), 10_050).unwrap();
+
+        // Another command from the exact same evidence frame is valid when its
+        // command sequence and nonce advance.
+        let mut same_frame = first;
+        same_frame.sequence += 1;
+        same_frame.nonce += 1;
+        let token = signed(&same_frame);
+        gate.release(&same_frame.encode(), Some(&token), 10_060)
+            .unwrap();
+
+        // Move the released perception watermark forward.
+        let mut newer = same_frame;
+        newer.sequence += 1;
+        newer.nonce += 1;
+        newer.scan_sequence += 1;
+        let token = signed(&newer);
+        gate.release(&newer.encode(), Some(&token), 10_070).unwrap();
+
+        // A later command sequence cannot resurrect the older evidence frame.
+        let mut superseded = newer;
+        superseded.sequence += 1;
+        superseded.nonce += 1;
+        superseded.scan_sequence -= 1;
+        let token = signed(&superseded);
+
+        assert_eq!(
+            gate.release(&superseded.encode(), Some(&token), 10_080),
+            Err(RosBoundCommandRefusal::PerceptionFrameSuperseded {
+                presented_tracker_generation: 3,
+                presented_scan_sequence: 77,
+                latest_tracker_generation: 3,
+                latest_scan_sequence: 78,
+            })
+        );
+
+        assert_eq!(gate.last_released_sequence(), Some(12));
+        assert_eq!(gate.last_released_nonce(), Some(9003));
+        assert_eq!(gate.latest_perception_frame(), Some((3, 78)));
+    }
+
+    #[test]
+    fn gate_rejects_missing_or_tampered_tokens() {
+        let payload = payload();
+
+        assert_eq!(
+            gate().release(&payload.encode(), None, 10_050),
+            Err(RosBoundCommandRefusal::NoToken)
+        );
+
+        let mut changed = payload;
+        let token = signed(&payload);
+        changed.proposal_digest[0] ^= 1;
+
+        assert_eq!(
+            gate().release(&changed.encode(), Some(&token), 10_050),
+            Err(RosBoundCommandRefusal::Denied(
+                ReleaseDenied::DigestMismatch
+            ))
+        );
     }
 
     #[test]
