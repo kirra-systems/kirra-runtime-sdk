@@ -353,6 +353,16 @@ pub struct ObjOut {
     pub y: f64,
     pub vx: f64,
     pub vy: f64,
+    /// True when this object was NOT observed this frame — a coasted track,
+    /// retained through a detection dropout and emitted at an extrapolated
+    /// position.
+    ///
+    /// The checker treats it exactly as an observed object: retaining a hazard
+    /// tightens, and a consumer ignoring this flag gets the conservative
+    /// reading. The flag exists so an AUDIT can tell what the robot actually
+    /// saw from what it inferred — which is why it is also hashed into the
+    /// evidence digest rather than being presentation-only.
+    pub coasted: bool,
 }
 
 /// One tracked pedestrian/VRU emitted by Taj for the planner's pedestrian RSS
@@ -374,6 +384,13 @@ pub struct PedestrianOut {
     pub camera_observation_id: Option<u64>,
     pub camera_confidence: Option<f64>,
     pub association_distance_m: Option<f64>,
+    /// True when the underlying lidar track was NOT observed this frame.
+    ///
+    /// This channel is the reason the marker matters most: a coasted track
+    /// already reaches the checker's omnidirectional pedestrian RSS bound
+    /// (`classify_vrus` walks every retained track), so without this flag a
+    /// pedestrian the sensor did not see is indistinguishable from one it did.
+    pub coasted: bool,
 }
 
 /// Auditable supporting association between camera/depth geometry and an
@@ -591,6 +608,10 @@ fn compute_perception_evidence_digest(response: &PerceptionResponse) -> String {
         hash_f64(&mut hasher, object.y);
         hash_f64(&mut hasher, object.vx);
         hash_f64(&mut hasher, object.vy);
+        // Observed vs coasted changes what the evidence MEANS, so it belongs
+        // in the digest: two frames identical but for which objects were
+        // actually seen must not share an evidence identity.
+        hash_bool(&mut hasher, object.coasted);
     }
 
     hash_usize(&mut hasher, response.camera_associations.len());
@@ -612,6 +633,7 @@ fn compute_perception_evidence_digest(response: &PerceptionResponse) -> String {
         hash_str(&mut hasher, pedestrian.lidar_classification);
         hash_str(&mut hasher, pedestrian.fused_classification);
         hash_str(&mut hasher, pedestrian.fusion_reason);
+        hash_bool(&mut hasher, pedestrian.coasted);
         hash_optional_u64(&mut hasher, pedestrian.camera_observation_id);
         hash_optional_f64(&mut hasher, pedestrian.camera_confidence);
         hash_optional_f64(&mut hasher, pedestrian.association_distance_m);
@@ -1151,6 +1173,14 @@ pub fn handle_perception_tracked(
     let to_poly = |pts: &[kirra_core::corridor::Point]| -> Vec<[f64; 2]> {
         pts.iter().map(|p| [p.x_m, p.y_m]).collect()
     };
+    // Which emitted objects the sensor did not actually see this frame. Set
+    // membership rather than a field on `PerceivedObject`: coasting is a Taj
+    // concept, and that type is the WCET-critical one the checker consumes,
+    // with ~138 construction sites across this workspace and parko that have
+    // no opinion about it. The marker becomes structural HERE, at the wire.
+    let coasted_ids: std::collections::BTreeSet<u64> =
+        perception.coasted_ids.iter().copied().collect();
+
     let left = to_poly(corridor.left_boundary());
     let right = to_poly(corridor.right_boundary());
     let objects = perception
@@ -1162,6 +1192,7 @@ pub fn handle_perception_tracked(
             y: o.pos.y_m,
             vx: o.vel.x_m,
             vy: o.vel.y_m,
+            coasted: coasted_ids.contains(&o.id),
         })
         .collect();
 
@@ -1191,6 +1222,7 @@ pub fn handle_perception_tracked(
             camera_observation_id: result.camera_observation_id,
             camera_confidence: result.camera_confidence,
             association_distance_m: result.association_distance_m,
+            coasted: coasted_ids.contains(&result.pedestrian.id),
         })
         .collect();
 
@@ -1286,6 +1318,92 @@ mod tests {
             camera_stamp_ms: None,
             camera_max_age_ms: DEFAULT_CAMERA_MAX_AGE_MS,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Coasted-object marker
+    //
+    // A coasted track is a hazard the sensor did NOT report this frame. It is
+    // emitted so the hazard survives a dropout, and the checker treats it as
+    // real — the conservative reading. What must never happen is an audit being
+    // unable to tell it apart from an observation, so the marker rides the wire
+    // AND the evidence digest.
+    // -----------------------------------------------------------------------
+
+    /// An obstacle straight ahead at `bx` metres.
+    fn blob_ranges(bx: f32) -> Vec<f32> {
+        (0..300)
+            .map(|i| {
+                let theta = -1.5 + (i as f64) * 0.01;
+                if theta.abs() < 0.15 {
+                    (f64::from(bx) / theta.cos()) as f32
+                } else {
+                    f32::INFINITY
+                }
+            })
+            .collect()
+    }
+
+    fn at(ranges: Vec<f32>, stamp_ms: u64) -> PerceptionRequest {
+        let mut r = req(ranges);
+        r.stamp_ms = stamp_ms;
+        r
+    }
+
+    #[test]
+    fn an_observed_object_is_never_marked_coasted() {
+        let mut state = TrackedPerceptionState::default();
+        let response = handle_perception_tracked(&at(blob_ranges(4.0), 1_000), &mut state);
+        assert!(
+            !response.objects.is_empty(),
+            "fixture must detect something"
+        );
+        assert!(
+            response.objects.iter().all(|o| !o.coasted),
+            "a detected object must never carry the coasted marker"
+        );
+    }
+
+    #[test]
+    fn a_coasted_object_reaches_the_wire_marked() {
+        let mut state = TrackedPerceptionState::default();
+        let seen = handle_perception_tracked(&at(blob_ranges(4.0), 1_000), &mut state);
+        let id = seen.objects[0].id;
+
+        // The detector reports nothing; the hazard is retained.
+        let gap = handle_perception_tracked(&at(vec![f32::INFINITY; 300], 1_100), &mut state);
+        let coasted: Vec<&ObjOut> = gap.objects.iter().filter(|o| o.id == id).collect();
+        assert_eq!(coasted.len(), 1, "the hazard must survive the dropout");
+        assert!(
+            coasted[0].coasted,
+            "an object the sensor did not see must be marked on the wire"
+        );
+    }
+
+    #[test]
+    fn the_marker_changes_the_evidence_digest() {
+        // The load-bearing property: observed and coasted are DIFFERENT
+        // evidence, so two frames identical but for what was actually seen must
+        // not share an evidence identity. If the marker were presentation-only
+        // this assertion fails and the audit trail is forgeable by omission.
+        let mut response = invalid_perception_response(false);
+        response.objects = vec![ObjOut {
+            id: 7,
+            x: 4.0,
+            y: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            coasted: false,
+        }];
+        let observed = compute_perception_evidence_digest(&response);
+
+        response.objects[0].coasted = true;
+        let coasted = compute_perception_evidence_digest(&response);
+
+        assert_ne!(
+            observed, coasted,
+            "the coasted marker must be part of the evidence identity"
+        );
     }
 
     /// A clear-ahead scan: returns far out on every ray, so Phase A yields a
