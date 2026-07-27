@@ -1345,6 +1345,131 @@ mod tests {
         );
     }
 
+    fn intent_probability(intent: &str, probability: f64) -> PredictedVruIntentProbabilityReq {
+        PredictedVruIntentProbabilityReq {
+            intent: intent.to_string(),
+            probability,
+        }
+    }
+
+    fn complete_intent_distribution(
+        unknown: f64,
+        waiting: f64,
+        along_path: f64,
+        crossing_left_to_right: f64,
+        crossing_right_to_left: f64,
+        moving_away: f64,
+    ) -> Vec<PredictedVruIntentProbabilityReq> {
+        vec![
+            intent_probability("unknown", unknown),
+            intent_probability("waiting_near_path", waiting),
+            intent_probability("along_path", along_path),
+            intent_probability("crossing_left_to_right", crossing_left_to_right),
+            intent_probability("crossing_right_to_left", crossing_right_to_left),
+            intent_probability("moving_away", moving_away),
+        ]
+    }
+
+    fn peak_trajectory_speed(response: &PlanResponse) -> f64 {
+        response
+            .trajectory
+            .iter()
+            .map(|point| point.v)
+            .fold(0.0_f64, f64::max)
+    }
+
+    #[test]
+    fn higher_crossing_probability_only_tightens_the_checked_plan() {
+        let mut low_probability_request = base_request();
+        low_probability_request.cruise = 3.0;
+        low_probability_request.pedestrians = vec![PedestrianReq {
+            id: 77,
+            x: 5.0,
+            y: 1.5,
+            vx: 0.0,
+            vy: -0.5,
+            age_s: 0.0,
+        }];
+
+        let mut low_prediction = predicted_vru(
+            77,
+            vec![
+                predicted_point(1.0, 5.0, 1.45, 0.10),
+                predicted_point(2.0, 5.0, 1.30, 0.10),
+            ],
+        );
+        low_prediction.intent = "crossing_left_to_right".to_string();
+        low_prediction.intent_confidence = 0.80;
+        low_prediction.intent_reason = "lateral_motion_toward_path".to_string();
+        low_prediction.intent_probabilities =
+            complete_intent_distribution(0.05, 0.05, 0.75, 0.05, 0.05, 0.05);
+
+        low_probability_request.predicted_vrus = vec![low_prediction];
+
+        let mut high_probability_request = base_request();
+        high_probability_request.cruise = 3.0;
+        high_probability_request.pedestrians = vec![PedestrianReq {
+            id: 77,
+            x: 5.0,
+            y: 1.5,
+            vx: 0.0,
+            vy: -0.5,
+            age_s: 0.0,
+        }];
+
+        let mut high_prediction = predicted_vru(
+            77,
+            vec![
+                predicted_point(1.0, 5.0, 1.45, 0.10),
+                predicted_point(2.0, 5.0, 1.30, 0.10),
+            ],
+        );
+        high_prediction.intent = "crossing_left_to_right".to_string();
+        high_prediction.intent_confidence = 0.80;
+        high_prediction.intent_reason = "lateral_motion_toward_path".to_string();
+        high_prediction.intent_probabilities =
+            complete_intent_distribution(0.05, 0.05, 0.05, 0.75, 0.05, 0.05);
+
+        high_probability_request.predicted_vrus = vec![high_prediction];
+
+        let low_response = handle_plan(&low_probability_request)
+            .expect("low crossing probability reaches Occy and Kirra");
+        let high_response = handle_plan(&high_probability_request)
+            .expect("high crossing probability reaches Occy and Kirra");
+
+        let low_peak = peak_trajectory_speed(&low_response);
+        let high_peak = peak_trajectory_speed(&high_response);
+
+        assert!(
+            high_peak <= low_peak,
+            "greater crossing probability must never increase planned speed: \
+             high={high_peak}, low={low_peak}"
+        );
+
+        assert!(
+            matches!(
+                low_response.verdict.as_str(),
+                "Accept" | "Clamp" | "MRCFallback"
+            ),
+            "low-probability trajectory must pass through Kirra, got {}",
+            low_response.verdict
+        );
+
+        assert!(
+            matches!(
+                high_response.verdict.as_str(),
+                "Accept" | "Clamp" | "MRCFallback"
+            ),
+            "high-probability trajectory must pass through Kirra, got {}",
+            high_response.verdict
+        );
+
+        assert!(
+            high_response.advisory,
+            "planner-side Kirra verdict remains advisory"
+        );
+    }
+
     #[test]
     fn prediction_without_fused_pedestrian_is_refused() {
         let mut request = base_request();
