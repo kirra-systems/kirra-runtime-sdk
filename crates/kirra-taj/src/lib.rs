@@ -843,6 +843,22 @@ impl VruIntentReason {
     }
 }
 
+/// One normalized hypothesis in a bounded VRU intent distribution.
+///
+/// This is planning metadata only. It cannot create tracks, alter fused VRU
+/// membership, reduce uncertainty, or weaken pedestrian RSS.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VruIntentProbability {
+    pub intent: VruIntentClass,
+    pub probability: f64,
+}
+
+/// Stable number of supported VRU intent hypotheses.
+pub const VRU_INTENT_HYPOTHESIS_COUNT: usize = 6;
+
+/// Deterministic probability normalization tolerance.
+pub const VRU_INTENT_PROBABILITY_EPSILON: f64 = 1e-9;
+
 /// Stable reason why directional VRU prediction was withheld.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VruPredictionFallbackReason {
@@ -887,6 +903,8 @@ pub struct PredictedVruMotion {
     pub intent: VruIntentClass,
     pub intent_confidence: f64,
     pub intent_reason: VruIntentReason,
+    /// Complete normalized probability distribution in stable enum order.
+    pub intent_probabilities: Vec<VruIntentProbability>,
     pub points: Vec<PredictedVruPoint>,
     pub horizon_s: f64,
     pub step_s: f64,
@@ -1167,6 +1185,62 @@ pub struct TajTracker {
     phase_a: TajPhaseA,
     tracks: Vec<Track>,
     next_id: u64,
+}
+
+fn vru_intent_probability_distribution(
+    intent: VruIntentClass,
+    confidence: f64,
+) -> Vec<VruIntentProbability> {
+    const INTENTS: [VruIntentClass; VRU_INTENT_HYPOTHESIS_COUNT] = [
+        VruIntentClass::Unknown,
+        VruIntentClass::WaitingNearPath,
+        VruIntentClass::AlongPath,
+        VruIntentClass::CrossingLeftToRight,
+        VruIntentClass::CrossingRightToLeft,
+        VruIntentClass::MovingAway,
+    ];
+
+    // Malformed confidence or an unknown classification carries no directional
+    // authority. Collapse completely to Unknown rather than inventing belief.
+    if !confidence.is_finite()
+        || !(0.0..=1.0).contains(&confidence)
+        || intent == VruIntentClass::Unknown
+    {
+        return INTENTS
+            .into_iter()
+            .map(|candidate| VruIntentProbability {
+                intent: candidate,
+                probability: if candidate == VruIntentClass::Unknown {
+                    1.0
+                } else {
+                    0.0
+                },
+            })
+            .collect();
+    }
+
+    // The classifier confidence is assigned to its selected hypothesis.
+    // Remaining mass stays Unknown. No probability is assigned to unsupported
+    // directional alternatives.
+    let unknown_probability = 1.0 - confidence;
+
+    INTENTS
+        .into_iter()
+        .map(|candidate| {
+            let probability = if candidate == intent {
+                confidence
+            } else if candidate == VruIntentClass::Unknown {
+                unknown_probability
+            } else {
+                0.0
+            };
+
+            VruIntentProbability {
+                intent: candidate,
+                probability,
+            }
+        })
+        .collect()
 }
 
 fn classify_vru_motion_intent(
@@ -1686,6 +1760,10 @@ impl TajTracker {
                 intent,
                 intent_confidence,
                 intent_reason,
+                intent_probabilities: vru_intent_probability_distribution(
+                    intent,
+                    intent_confidence,
+                ),
                 points,
                 horizon_s: cfg.horizon_s,
                 step_s: cfg.step_s,
@@ -3086,6 +3164,71 @@ mod tests {
             extent_m: 0.3,
             frames_seen,
         }
+    }
+
+    #[test]
+    fn vru_intent_distribution_is_complete_and_normalized() {
+        let distribution =
+            vru_intent_probability_distribution(VruIntentClass::CrossingLeftToRight, 0.80);
+
+        assert_eq!(distribution.len(), VRU_INTENT_HYPOTHESIS_COUNT);
+
+        let total: f64 = distribution
+            .iter()
+            .map(|hypothesis| hypothesis.probability)
+            .sum();
+
+        assert!(
+            (total - 1.0).abs() <= VRU_INTENT_PROBABILITY_EPSILON,
+            "intent probabilities must sum to one, got {total}"
+        );
+
+        assert!(distribution.iter().all(|hypothesis| {
+            hypothesis.probability.is_finite() && (0.0..=1.0).contains(&hypothesis.probability)
+        }));
+
+        let crossing = distribution
+            .iter()
+            .find(|hypothesis| hypothesis.intent == VruIntentClass::CrossingLeftToRight)
+            .expect("crossing hypothesis");
+
+        let unknown = distribution
+            .iter()
+            .find(|hypothesis| hypothesis.intent == VruIntentClass::Unknown)
+            .expect("unknown hypothesis");
+
+        assert!((crossing.probability - 0.80).abs() < 1e-12);
+        assert!((unknown.probability - 0.20).abs() < 1e-12);
+    }
+
+    #[test]
+    fn unknown_intent_distribution_is_fully_unknown() {
+        let distribution = vru_intent_probability_distribution(VruIntentClass::Unknown, 0.95);
+
+        for hypothesis in distribution {
+            if hypothesis.intent == VruIntentClass::Unknown {
+                assert_eq!(hypothesis.probability, 1.0);
+            } else {
+                assert_eq!(hypothesis.probability, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn nonfinite_intent_confidence_fails_closed_to_unknown() {
+        let distribution =
+            vru_intent_probability_distribution(VruIntentClass::MovingAway, f64::NAN);
+
+        let unknown = distribution
+            .iter()
+            .find(|hypothesis| hypothesis.intent == VruIntentClass::Unknown)
+            .expect("unknown hypothesis");
+
+        assert_eq!(unknown.probability, 1.0);
+        assert!(distribution
+            .iter()
+            .filter(|hypothesis| hypothesis.intent != VruIntentClass::Unknown)
+            .all(|hypothesis| hypothesis.probability == 0.0));
     }
 
     #[test]
