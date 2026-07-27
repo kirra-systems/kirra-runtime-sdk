@@ -150,7 +150,7 @@ sys.path.insert(0, os.path.join(_HERE, "..", "kirra_safety"))
 sys.path.insert(0, os.path.join(_HERE, ".."))
 
 from kirra_safety import occy_doer as doer  # noqa: E402
-from kirra_safety.async_plan import JobResult  # noqa: E402
+from kirra_safety.async_plan import HoldMonitor, JobResult  # noqa: E402
 from kirra_safety.bound_proposal import (  # noqa: E402
     build_release_binding, encode_bound_proposal,
 )
@@ -317,9 +317,12 @@ def _node(requests_stub, **over):
     n._job_lock = threading.Lock()
     n._job_in_flight = False
     n._pending_result = None
+    n._job_started_s = None
     n._scan_seq = 0
     n._last_used_scan_sequence = 0
     n._last_issued_scan_sequence = 0
+    n._hold_monitor = HoldMonitor()
+    n._job_overdue_warned = False
 
     n._mick_lock = threading.Lock()
     n._mick_in_flight = False
@@ -519,7 +522,7 @@ def test_an_unbindable_plan_holds():
     n._pub.published.clear()
     n._tick()
     assert n._pub.published == [doer.HOLD_ENVELOPE]
-    assert 'unbound-plan' in n._logger.text()
+    assert 'plan-unbound' in n._logger.text()
 
 
 # ---------------------------------------------------------------------------
@@ -716,6 +719,168 @@ def test_a_scan_arriving_mid_job_advances_identity_without_touching_the_slot():
     # "a newer scan exists".
     with n._job_lock:
         assert n._pending_result.requested_scan_sequence == 1
+
+
+# ---------------------------------------------------------------------------
+# Hold observability
+#
+# Every hold below was ALREADY fail-closed before these landed. What is being
+# tested is that a hold which repeats forever stops being invisible: a wedged
+# sidecar and a robot with nothing to do produce identical motion, and only a
+# log line can tell an operator which one they are looking at.
+# ---------------------------------------------------------------------------
+
+def _warns(node):
+    return [m for level, m in node._logger.records if level == 'warn']
+
+
+def test_a_sustained_hold_warns_once_and_names_the_cause():
+    # The sidecar is down for good: every tick holds ABSENT/FAULT.
+    n = _node(_Requests(raises={'perception': ConnectionError('down')}))
+    for _ in range(40):
+        _push_scan(n)
+        n._tick()
+        assert _await_idle(n)
+    holding = [m for m in _warns(n) if 'plan cycle holding' in m]
+    assert len(holding) == 1, _warns(n)
+    assert 'FAULT' in holding[0]
+    assert 'no motion is being proposed' in holding[0]
+    # Safety is unchanged: it held on every single tick regardless.
+    assert set(n._pub.published) == {doer.HOLD_ENVELOPE}
+
+
+def test_a_brief_hold_is_not_announced():
+    # The first ticks of any healthy start-up hold while the pipeline fills.
+    # That must not warn, or the warning means nothing.
+    n = _node(_Requests())
+    _push_scan(n)
+    n._tick()
+    assert _await_idle(n)
+    _push_scan(n)
+    n._tick()
+    assert _await_idle(n)
+    assert [m for m in _warns(n) if 'plan cycle' in m] == []
+
+
+def test_recovery_is_reported_and_re_arms():
+    n = _node(_Requests(raises={'plan': TimeoutError('slow')}))
+    for _ in range(20):
+        _push_scan(n)
+        n._tick()
+        assert _await_idle(n)
+    assert len([m for m in _warns(n) if 'plan cycle holding' in m]) == 1
+
+    # The planner comes back.
+    doer.requests = _Requests()
+    for _ in range(3):
+        _push_scan(n)
+        n._tick()
+        assert _await_idle(n)
+    recovered = [m for _, m in n._logger.records if 'plan cycle recovered' in m]
+    assert len(recovered) == 1
+    assert 'FAULT' in recovered[0]
+
+    # And it goes down again — a second episode must be announced, not
+    # swallowed by the first one's latch.
+    doer.requests = _Requests(raises={'plan': TimeoutError('slow again')})
+    for _ in range(20):
+        _push_scan(n)
+        n._tick()
+        assert _await_idle(n)
+    assert len([m for m in _warns(n) if 'plan cycle holding' in m]) == 2
+
+
+def test_an_unbindable_plan_counts_as_a_hold_not_a_recovery():
+    # The result RESOLVED usable and only failed at the emit stage. If USE were
+    # folded in at resolution time this episode would look like it recovered on
+    # every tick and never warn.
+    sentinel = _frame_id(scan_sequence=7, profile_digest='', evidence_digest='')
+    n = _node(_Requests(taj=_taj_body(frame_id=sentinel),
+                        plan=_plan_body(perception_frame_id=sentinel)))
+    for _ in range(30):
+        _push_scan(n)
+        n._tick()
+        assert _await_idle(n)
+    holding = [m for m in _warns(n) if 'plan cycle holding' in m]
+    assert len(holding) == 1
+    assert 'UNBOUND' in holding[0]
+
+
+def test_an_overdue_job_warns_once_and_does_not_start_a_replacement():
+    # The failure this exists for: `requests` timeouts bound each socket
+    # operation, not the whole request, so a sidecar that never closes the
+    # connection holds the one permitted worker open forever. Before this, the
+    # doer stopped planning for good and said nothing.
+    gate = threading.Event()
+    req = _Requests(gate=gate)
+    n = _node(req, _timeout_s=0.001)   # 2 ms budget → overdue almost at once
+    try:
+        _push_scan(n)
+        n._tick()
+        assert req.entered.wait(JOIN_TIMEOUT_S)
+        deadline = time.monotonic() + JOIN_TIMEOUT_S
+        overdue = []
+        while time.monotonic() < deadline and not overdue:
+            _push_scan(n)
+            n._tick()
+            overdue = [m for m in _warns(n) if 'plan job overdue' in m]
+            time.sleep(0.005)
+        assert len(overdue) == 1, _warns(n)
+        assert 'the doer stays held' in overdue[0]
+        # Latched: ticking on does not repeat it...
+        for _ in range(10):
+            _push_scan(n)
+            n._tick()
+        assert len([m for m in _warns(n) if 'plan job overdue' in m]) == 1
+        # ...and the one-job bound is intact — no replacement worker was
+        # spawned against a sidecar that is already sick.
+        assert len(_live_workers()) == 1
+        assert req.count('/perception') == 1
+    finally:
+        gate.set()
+        _await_idle(n)
+
+
+def test_an_overdue_job_is_reported_even_when_the_tick_holds_for_another_reason():
+    # A dead lidar and a wedged sidecar are two faults. The stale-scan guard
+    # returns before the plan cycle, so the overdue check runs ahead of it.
+    gate = threading.Event()
+    n = _node(_Requests(gate=gate), _timeout_s=0.001)
+    try:
+        _push_scan(n)
+        n._tick()
+        assert doer.requests.entered.wait(JOIN_TIMEOUT_S)
+        scan, _ = n._scan
+        n._scan = (scan, time.monotonic() - 10.0)   # lidar goes silent too
+        deadline = time.monotonic() + JOIN_TIMEOUT_S
+        while time.monotonic() < deadline:
+            n._tick()
+            if [m for m in _warns(n) if 'plan job overdue' in m]:
+                break
+            time.sleep(0.005)
+        assert [m for m in _warns(n) if 'plan job overdue' in m]
+        assert 'stale-scan' in n._logger.text()     # it did take the early return
+    finally:
+        gate.set()
+        _await_idle(n)
+
+
+def test_a_job_inside_its_budget_never_warns_overdue():
+    n = _node(_Requests())
+    for _ in range(5):
+        _push_scan(n)
+        n._tick()
+        assert _await_idle(n)
+    assert [m for m in _warns(n) if 'overdue' in m] == []
+
+
+def test_the_overdue_latch_re_arms_between_jobs():
+    n = _node(_Requests())
+    n._job_overdue_warned = True
+    _push_scan(n)
+    n._tick()                       # no job overdue → the latch resets
+    assert n._job_overdue_warned is False
+    assert _await_idle(n)
 
 
 # ---------------------------------------------------------------------------

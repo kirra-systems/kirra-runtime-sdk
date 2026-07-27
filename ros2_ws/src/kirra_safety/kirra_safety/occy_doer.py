@@ -78,12 +78,18 @@ from kirra_safety.camera_detect_core import (
 )
 from kirra_safety.bound_proposal import build_release_binding, encode_bound_proposal
 from kirra_safety.async_plan import (
+    ANNOUNCE,
     ISSUE,
+    RECOVERED,
+    UNBOUND,
+    UNENCODABLE,
     USE,
+    HoldMonitor,
     JobRequest,
     JobResult,
     decide_issue,
     evidence_sequences,
+    job_overdue_s,
     resolve_result,
 )
 from kirra_safety.sensor_freshness import (
@@ -275,6 +281,9 @@ class OccyDoer(Node):
         self._job_lock = threading.Lock()
         self._job_in_flight = False
         self._pending_result = None
+        # Monotonic time the in-flight job started, or None. Written under the
+        # lock alongside `_job_in_flight` so the pair can never disagree.
+        self._job_started_s = None
         # Node-local monotonic scan id. ROS 2 removed `header.seq`, so this is
         # the only "which lidar scan" identity available. Written in _on_scan
         # and read in _tick — both on the executor thread, so it needs no lock.
@@ -287,6 +296,13 @@ class OccyDoer(Node):
         # guaranteed to discard, so a tick with no new perception simply does
         # not start a job (NO_FRESH_INPUT). Executor thread only.
         self._last_issued_scan_sequence = 0
+        # Hold observability. Every plan-cycle hold is fail-closed and safe,
+        # but a hold that repeats forever because a sidecar wedged looks
+        # exactly like a robot with nothing to do. These two make the
+        # difference audible; neither can change a verdict. Executor-thread
+        # state, touched only from _tick's call chain.
+        self._hold_monitor = HoldMonitor()
+        self._job_overdue_warned = False
 
         # The Mick intent fetch gets the same treatment: it is HTTP reachable
         # from the timer, so it cannot run inline either. Its own slot, because
@@ -501,6 +517,10 @@ class OccyDoer(Node):
     def _tick(self):
         if not REQUESTS_AVAILABLE:
             return self._hold('no-requests')
+        # Before the guards below, so a wedged worker is still reported when the
+        # tick is also holding for another reason (a dead lidar and a dead
+        # sidecar are two faults, and the operator needs to hear about both).
+        self._check_overdue_job()
         self._poll_mick()
         if self._pose is None:
             return self._hold('awaiting pose')
@@ -605,7 +625,7 @@ class OccyDoer(Node):
             scan_stale_s=self._scan_stale_s,
         )
         if resolution.state != USE:
-            return self._hold(f'plan-{resolution.state.lower()}:{resolution.reason}')
+            return self._note_plan_hold(resolution.state, resolution.reason)
 
         # Camera-channel health is NODE state, so the transition log lives here
         # rather than in the worker. Once per transition, not per tick.
@@ -635,16 +655,72 @@ class OccyDoer(Node):
             # No usable evidence identity — e.g. Taj returned its invalid-frame
             # sentinel, or the planner answered without a digest. Hold rather
             # than propose motion the verifier could not bind.
-            return self._hold('unbound-plan')
+            return self._note_plan_hold(UNBOUND, 'plan carries no bindable evidence')
 
         envelope = encode_bound_proposal(v, 0.0, w, binding)
         if envelope is None:
-            return self._hold('unencodable-proposal')
+            return self._note_plan_hold(UNENCODABLE, 'proposal could not be encoded')
+
+        # USE is folded in only HERE, once a proposal is actually going out —
+        # so a plan that resolved usable but could not be bound or encoded
+        # counts as the hold it is, not as a recovery.
+        notice = self._hold_monitor.observe(USE)
+        if notice.action == RECOVERED:
+            self.get_logger().info(
+                f'plan cycle recovered from {notice.state} after '
+                f'{notice.count} consecutive holds — proposing motion again')
 
         # Advance the watermark only once the proposal is actually published.
         self._last_used_scan_sequence = result.requested_scan_sequence
         self._publish_envelope(envelope)
         self.get_logger().debug(f'{reason}  v={v:.2f} w={w:.2f}  goal_base=({gx:.1f},{gy:.1f})')
+
+    def _note_plan_hold(self, state: str, detail: str):
+        """Fold one plan-cycle hold into the monitor, then hold.
+
+        The hold itself is unconditional and unchanged — this only decides
+        whether to say so out loud. A sustained episode warns ONCE, and warns
+        again if the cause changes; motion resuming re-arms it.
+        """
+        notice = self._hold_monitor.observe(state)
+        if notice.action == ANNOUNCE:
+            self.get_logger().warn(
+                f'plan cycle holding on {notice.state} ({detail}) for '
+                f'{notice.count} consecutive ticks — no motion is being '
+                'proposed and the robot will remain stopped'
+            )
+        return self._hold(f'plan-{state.lower()}:{detail}')
+
+    def _check_overdue_job(self):
+        """WARN once when a job has been in flight far past its budget.
+
+        A `requests` timeout is per SOCKET OPERATION, not wall-clock, so a
+        sidecar that dribbles bytes can hold a worker open indefinitely
+        without ever tripping its own timeout. Since exactly one job may run,
+        that ends planning for good — and, before this, silently.
+
+        Detecting it deliberately does NOT start a replacement job: the
+        one-job bound is what keeps thread creation bounded against a sick
+        sidecar, so the doer stays held (fail-closed) and says so instead.
+        """
+        with self._job_lock:
+            started_s = self._job_started_s if self._job_in_flight else None
+        # The nominal budget is the two bounded round trips the job makes.
+        overdue_s = job_overdue_s(
+            started_s, time.monotonic(), 2.0 * self._timeout_s)
+        if overdue_s is None:
+            self._job_overdue_warned = False
+            return
+        if self._job_overdue_warned:
+            return
+        self._job_overdue_warned = True
+        self.get_logger().warn(
+            f'plan job overdue by {overdue_s * 1000:.0f} ms past its '
+            f'{2.0 * self._timeout_s * 1000:.0f} ms budget — a sidecar is not '
+            'closing the connection (an HTTP timeout bounds each socket read, '
+            'not the whole request). No further plan jobs will start until it '
+            'returns; the doer stays held.'
+        )
 
     def _maybe_issue(self, request):
         """Start one plan job if none is running. Never publishes."""
@@ -655,6 +731,7 @@ class OccyDoer(Node):
             if decision != ISSUE:
                 return decision
             self._job_in_flight = True
+            self._job_started_s = time.monotonic()
         self._last_issued_scan_sequence = request.scan_sequence
         # Thread creation happens OUTSIDE the lock. `daemon=True` is the
         # teardown contract: a worker blocked on a hung sidecar can never keep
@@ -671,6 +748,7 @@ class OccyDoer(Node):
         with self._job_lock:
             self._pending_result = result
             self._job_in_flight = False
+            self._job_started_s = None
 
     def _execute_job(self, request):
         """WORKER THREAD. The two bounded POSTs, as a pure request→result map.

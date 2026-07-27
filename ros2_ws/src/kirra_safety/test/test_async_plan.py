@@ -14,12 +14,16 @@ Run:  pytest ros2_ws/src/kirra_safety/test/test_async_plan.py
 import os
 import sys
 
+import pytest
+
 sys.path.insert(
     0, os.path.join(os.path.dirname(__file__), "..", "kirra_safety")
 )
 from async_plan import (  # noqa: E402
-    ABSENT, FAULT, IN_FLIGHT, ISSUE, NO_FRESH_INPUT, STALE, SUPERSEDED, USE,
-    JobResult, decide_issue, evidence_sequences, resolve_result,
+    ABSENT, ANNOUNCE, FAULT, IN_FLIGHT, ISSUE, NO_FRESH_INPUT, RECOVERED,
+    SILENT, STALE, SUPERSEDED, USE,
+    HoldMonitor, JobResult, decide_issue, evidence_sequences, job_overdue_s,
+    resolve_result,
 )
 
 BUDGET_S = 0.25
@@ -171,3 +175,109 @@ def test_evidence_sequences_tolerates_missing_structure():
     assert evidence_sequences({}, {}) == (None, None)
     assert evidence_sequences(None, None) == (None, None)
     assert evidence_sequences({"frame_id": "nope"}, {"perception_frame_id": 3}) == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# HoldMonitor — observability only; it can never change a verdict
+# ---------------------------------------------------------------------------
+
+STREAK = 4
+
+
+def _monitor():
+    return HoldMonitor(warn_streak=STREAK)
+
+
+def _hold_n(monitor, n, state=FAULT):
+    return [monitor.observe(state) for _ in range(n)]
+
+
+def test_a_short_run_of_holds_says_nothing():
+    # A slow round trip or a dropped frame must not log. Only a SUSTAINED
+    # episode is worth an operator's attention.
+    monitor = _monitor()
+    for notice in _hold_n(monitor, STREAK - 1):
+        assert notice.action == SILENT
+
+
+def test_a_sustained_hold_is_announced_exactly_once():
+    monitor = _monitor()
+    notices = _hold_n(monitor, STREAK + 20)
+    announced = [n for n in notices if n.action == ANNOUNCE]
+    assert len(announced) == 1
+    assert announced[0].state == FAULT
+    assert announced[0].count == STREAK
+    # The tick that crossed the threshold is the one that announced.
+    assert notices[STREAK - 1].action == ANNOUNCE
+
+
+def test_a_changed_cause_is_announced_again():
+    # "The sidecar stopped timing out but now returns mismatched evidence" is a
+    # different fault with a different fix, so it must not be swallowed by the
+    # latch on the previous one.
+    monitor = _monitor()
+    _hold_n(monitor, STREAK)
+    assert monitor.observe(STALE).action == ANNOUNCE
+    assert monitor.observe(STALE).action == SILENT
+
+
+def test_recovery_is_reported_and_re_arms_the_latch():
+    monitor = _monitor()
+    _hold_n(monitor, STREAK)
+    recovered = monitor.observe(USE)
+    assert recovered.action == RECOVERED
+    assert recovered.state == FAULT
+    assert recovered.count == STREAK
+    assert monitor.consecutive == 0
+    # Re-armed: the next episode announces rather than staying latched.
+    assert [n.action for n in _hold_n(monitor, STREAK)][-1] == ANNOUNCE
+
+
+def test_recovery_from_an_unannounced_run_is_silent():
+    # Holding briefly and then driving on is normal. It is not an event.
+    monitor = _monitor()
+    _hold_n(monitor, STREAK - 1)
+    assert monitor.observe(USE).action == SILENT
+
+
+def test_one_success_breaks_the_streak():
+    monitor = _monitor()
+    for _ in range(20):
+        _hold_n(monitor, STREAK - 1)
+        assert monitor.observe(USE).action == SILENT
+    assert monitor.consecutive == 0
+
+
+def test_a_warn_streak_below_one_is_clamped_not_disabled():
+    # A misconfigured 0 must not mean "announce nothing" — that would silently
+    # remove the very thing this monitor exists for.
+    monitor = HoldMonitor(warn_streak=0)
+    assert monitor.observe(FAULT).action == ANNOUNCE
+
+
+# ---------------------------------------------------------------------------
+# job_overdue_s
+# ---------------------------------------------------------------------------
+
+BUDGET_JOB_S = 0.12
+FACTOR = 5.0
+DEADLINE_S = BUDGET_JOB_S * FACTOR
+
+
+def test_no_job_in_flight_is_never_overdue():
+    assert job_overdue_s(None, 1e9, BUDGET_JOB_S, FACTOR) is None
+
+
+def test_a_job_inside_its_deadline_is_not_overdue():
+    assert job_overdue_s(100.0, 100.0 + DEADLINE_S, BUDGET_JOB_S, FACTOR) is None
+
+
+def test_a_job_past_its_deadline_reports_the_excess():
+    over = job_overdue_s(100.0, 100.0 + DEADLINE_S + 0.25, BUDGET_JOB_S, FACTOR)
+    assert over == pytest.approx(0.25)
+
+
+def test_an_unusable_budget_disables_the_check():
+    # Rather than turning a misconfigured timeout into an alarm every tick.
+    for bad in (0.0, -1.0, float("nan"), float("inf")):
+        assert job_overdue_s(100.0, 1e9, bad, FACTOR) is None, bad
