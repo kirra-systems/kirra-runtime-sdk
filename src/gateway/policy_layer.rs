@@ -9,6 +9,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -160,6 +161,80 @@ pub struct EnforcementOutcome {
     pub original_steering_angle_deg: f64,
     pub enforced_linear_velocity_mps: f64,
     pub enforced_steering_angle_deg: f64,
+}
+
+/// Evidence/proposal identity supplied with an actuator request.
+///
+/// This metadata has no authority by itself. After fail-closed validation, the
+/// governor binds it into the signed V2 motor-release payload.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ActuatorReleaseBinding {
+    pub scan_sequence: u64,
+    pub camera_sequence: Option<u64>,
+    pub tracker_generation: u64,
+    pub profile_digest: String,
+    pub evidence_digest: String,
+    pub proposal_digest: String,
+}
+
+fn decode_lowercase_sha256(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return None;
+    }
+
+    let decoded = hex::decode(value).ok()?;
+    decoded.try_into().ok()
+}
+
+/// Validated binary form threaded from the HTTP perimeter to the release mint.
+///
+/// Keeping fixed-width digest bytes here prevents later code from accidentally
+/// signing malformed, uppercase, truncated, or otherwise non-canonical text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidatedActuatorReleaseBinding {
+    pub scan_sequence: u64,
+    pub camera_sequence: Option<u64>,
+    pub tracker_generation: u64,
+    pub profile_digest: [u8; 32],
+    pub evidence_digest: [u8; 32],
+    pub proposal_digest: [u8; 32],
+}
+
+impl ActuatorReleaseBinding {
+    fn validate(&self) -> Option<ValidatedActuatorReleaseBinding> {
+        if self.scan_sequence == 0
+            || self.tracker_generation == 0
+            || self.camera_sequence == Some(0)
+        {
+            return None;
+        }
+
+        Some(ValidatedActuatorReleaseBinding {
+            scan_sequence: self.scan_sequence,
+            camera_sequence: self.camera_sequence,
+            tracker_generation: self.tracker_generation,
+            profile_digest: decode_lowercase_sha256(&self.profile_digest)?,
+            evidence_digest: decode_lowercase_sha256(&self.evidence_digest)?,
+            proposal_digest: decode_lowercase_sha256(&self.proposal_digest)?,
+        })
+    }
+}
+
+/// Route-local actuator request.
+///
+/// `ProposedVehicleCommand` remains the reusable kinematics kernel type; binding
+/// metadata exists only at the HTTP actuation seam.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ActuatorMotionCommandRequest {
+    #[serde(flatten)]
+    pub command: ProposedVehicleCommand,
+
+    #[serde(default)]
+    pub release_binding: Option<ActuatorReleaseBinding>,
 }
 
 /// The enforcement action a 200 response carries (deny is a 4xx, not a 200).
@@ -337,8 +412,19 @@ pub async fn enforce_actuator_safety_envelope(
         .await
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
 
-    let proposed_cmd: ProposedVehicleCommand =
+    let actuator_request: ActuatorMotionCommandRequest =
         serde_json::from_slice(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let validated_release_binding = match actuator_request.release_binding.as_ref() {
+        Some(binding) => Some(binding.validate().ok_or(StatusCode::BAD_REQUEST)?),
+        None => None,
+    };
+
+    if let Some(binding) = validated_release_binding {
+        parts.extensions.insert(binding);
+    }
+
+    let proposed_cmd = actuator_request.command.clone();
 
     // §7: read the clock ONCE per request and thread it — the perception-cap
     // staleness read, the capture record, and the audit record all want "now" and
@@ -459,8 +545,11 @@ pub async fn enforce_actuator_safety_envelope(
             );
             let mut clamped_cmd = proposed_cmd.clone();
             clamped_cmd.linear_velocity_mps = safe_speed;
-            let serialized =
-                serde_json::to_vec(&clamped_cmd).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let serialized = serde_json::to_vec(&ActuatorMotionCommandRequest {
+                command: clamped_cmd,
+                release_binding: actuator_request.release_binding.clone(),
+            })
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             parts
                 .extensions
                 .insert(EnforcementOutcome::clamp_linear(&proposed_cmd, safe_speed));
@@ -476,8 +565,11 @@ pub async fn enforce_actuator_safety_envelope(
             );
             let mut clamped_cmd = proposed_cmd.clone();
             clamped_cmd.steering_angle_deg = safe_angle;
-            let serialized =
-                serde_json::to_vec(&clamped_cmd).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let serialized = serde_json::to_vec(&ActuatorMotionCommandRequest {
+                command: clamped_cmd,
+                release_binding: actuator_request.release_binding.clone(),
+            })
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             parts.extensions.insert(EnforcementOutcome::clamp_steering(
                 &proposed_cmd,
                 safe_angle,
@@ -501,8 +593,11 @@ pub async fn enforce_actuator_safety_envelope(
             let mut clamped_cmd = proposed_cmd.clone();
             clamped_cmd.linear_velocity_mps = linear;
             clamped_cmd.steering_angle_deg = steering;
-            let serialized =
-                serde_json::to_vec(&clamped_cmd).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let serialized = serde_json::to_vec(&ActuatorMotionCommandRequest {
+                command: clamped_cmd,
+                release_binding: actuator_request.release_binding.clone(),
+            })
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             parts.extensions.insert(EnforcementOutcome::clamp_both(
                 &proposed_cmd,
                 linear,
