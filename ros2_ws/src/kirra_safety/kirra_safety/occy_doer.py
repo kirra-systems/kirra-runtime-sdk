@@ -23,11 +23,19 @@ signed as "some robot asked for this".
 The proposal then flows through the cmd_vel_interceptor (Taj speed cap + the KIRRA
 kinematic governor) before reaching the wheels, so Occy only PROPOSES and KIRRA still
 DISPOSES — twice (the planner runs the slow-loop checker; the interceptor runs the
-fast-loop one). The doer is fail-soft: no goal, a stale scan, a service error, a
-refused plan, or a plan whose evidence identity cannot be established all publish an
-EMPTY envelope (hold) — which the interceptor refuses fail-closed into a stop. A hold
-deliberately publishes nothing actuatable rather than a zero-velocity envelope bound
-to evidence this tick may not have.
+fast-loop one). The doer is fail-soft: no goal, a stale scan, an unhealthy scan
+stream, a service error, a refused plan, or a plan whose evidence identity cannot be
+established all publish an EMPTY envelope (hold) — which the interceptor refuses
+fail-closed into a stop. A hold deliberately publishes nothing actuatable rather than
+a zero-velocity envelope bound to evidence this tick may not have.
+
+Frame health (opt-in, `frame_health_enabled`): `scan_stale_s` measures ARRIVAL, so it
+cannot tell a live lidar from a driver republishing its last buffer at the full rate —
+that stream looks perfectly fresh while the world it describes is frozen. The
+detectors in `sensor_freshness.py` track frame IDENTITY progression (the producer's
+header stamp) and hold the doer with a SPECIFIC reason when it stalls. Content
+fingerprinting is corroborating evidence only: a stationary robot facing a wall
+legitimately emits identical scans forever, and that is never a fault.
 
   doer (this node) ─/cmd_vel_raw→ cmd_vel_interceptor [Taj cap + KIRRA] ─/cmd_vel→ wheels
 
@@ -57,6 +65,14 @@ from kirra_safety.camera_detect_core import (
     plan_object_goal_fields,
 )
 from kirra_safety.bound_proposal import build_release_binding, encode_bound_proposal
+from kirra_safety.sensor_freshness import (
+    FAIL_CLOSED,
+    FrameHealthConfig,
+    FrameHealthTracker,
+    FrameObservation,
+    invalid_ray_ratio,
+    scan_fingerprint,
+)
 
 try:
     import requests
@@ -122,6 +138,18 @@ class OccyDoer(Node):
         # the ros2-adapter's KIRRA_SUBSCRIPTION_STALENESS_MS discipline and
         # the interceptor's required wheelbase_m.
         self.declare_parameter('scan_stale_s', 0.0)
+        # --- frame-health detectors (OPT-IN; default off = byte-identical) ---
+        # `scan_stale_s` above measures ARRIVAL: it cannot tell a live lidar from
+        # a driver republishing its last buffer at the full rate. These track
+        # frame IDENTITY progression instead (see sensor_freshness.py). Armed but
+        # frozen holds the doer, exactly as an armed-but-silent channel does.
+        self.declare_parameter('frame_health_enabled', False)
+        # Consecutive non-advancing scans tolerated before holding. One
+        # duplicated frame must not stop the robot; a sustained stall must.
+        self.declare_parameter('frame_stall_budget', 3)
+        # Both thresholds are sentinel-disabled: 0.0 Hz and ratio 1.0 never fire.
+        self.declare_parameter('scan_min_rate_hz', 0.0)
+        self.declare_parameter('scan_max_invalid_ray_ratio', 1.0)
         self.declare_parameter('http_timeout_ms', 60)
         # The robot's footprint/kinematics for the CHECKER. A small differential robot MUST
         # pass these, or the planner's default urban-car (4.8 m) footprint can't fit a
@@ -176,6 +204,22 @@ class OccyDoer(Node):
             raise SystemExit(2)
         self._timeout_s = self.get_parameter('http_timeout_ms').value / 1000.0
         self._back_m = self.get_parameter('corridor_back_m').value
+
+        # Frame-health tracker. Disarmed unless explicitly enabled, in which
+        # case every resolution is a no-op DISARMED and the tick path below is
+        # byte-identical to its prior behaviour.
+        self._frame_health_enabled = bool(self.get_parameter('frame_health_enabled').value)
+        if self._frame_health_enabled:
+            frame_cfg = FrameHealthConfig.armed(
+                stall_budget=int(self.get_parameter('frame_stall_budget').value),
+                min_rate_hz=float(self.get_parameter('scan_min_rate_hz').value),
+                max_invalid_ray_ratio=float(
+                    self.get_parameter('scan_max_invalid_ray_ratio').value),
+            )
+        else:
+            frame_cfg = FrameHealthConfig.disarmed()
+        self._frame_health = FrameHealthTracker(frame_cfg)
+        self._frame_health_reason = None  # latched, so a hold logs once per episode
         self._vehicle = {
             'class': self.get_parameter('vehicle_class').value,
             'wheelbase_m': self.get_parameter('wheelbase_m').value,
@@ -232,6 +276,24 @@ class OccyDoer(Node):
 
     def _on_scan(self, msg: LaserScan):
         self._scan = (msg, time.monotonic())
+        # Fold the arrival into the frame-health tracker. This does NOT change
+        # the request architecture — the callback still only stores and returns;
+        # the HTTP path is untouched (that is PR 3b). The work is skipped
+        # entirely when disarmed, so the nominal path costs nothing.
+        if not self._frame_health_enabled:
+            return
+        stamp_ms = int(msg.header.stamp.sec * 1000
+                       + msg.header.stamp.nanosec // 1_000_000)
+        ranges = msg.ranges
+        self._frame_health.observe(FrameObservation(
+            stamp_ms=stamp_ms,
+            # Supporting evidence only: it distinguishes a replayed buffer from
+            # a broken stamp. The stamp is what decides (sensor_freshness.py).
+            fingerprint=scan_fingerprint(ranges),
+            monotonic_s=self._scan[1],
+            invalid_ratio=invalid_ray_ratio(
+                ranges, float(msg.range_min), float(msg.range_max)),
+        ))
 
     def _on_camera(self, msg: String):
         """Store the detector frame. Undecodable JSON drops it (armed -> faults)."""
@@ -299,6 +361,29 @@ class OccyDoer(Node):
         self._publish_envelope(HOLD_ENVELOPE)
         self.get_logger().debug(f'hold: {why}')
 
+    def _hold_frame_health(self, health):
+        """Hold on a frame-health fault, naming the SPECIFIC detector.
+
+        Warn-level and latched on the reason code: a frozen lidar holds every
+        tick, so an unlatched log would flood, but the operator must still see
+        WHICH fault fired — "the driver is replaying a buffer" and "the stamp is
+        broken but data is moving" have different fixes. Re-armed by recovery,
+        so a fresh episode logs again.
+        """
+        if self._frame_health_reason != health.reason:
+            self._frame_health_reason = health.reason
+            self.get_logger().warn(
+                f'frame health {health.reason}: {health.detail} — holding '
+                f'(no motion proposed until the scan stream recovers)'
+            )
+        return self._hold(f'frame-health:{health.reason}')
+
+    def _clear_frame_health(self):
+        if self._frame_health_reason is not None:
+            self.get_logger().info(
+                f'frame health recovered from {self._frame_health_reason}')
+            self._frame_health_reason = None
+
     def _tick(self):
         if not REQUESTS_AVAILABLE:
             return self._hold('no-requests')
@@ -309,6 +394,13 @@ class OccyDoer(Node):
             return self._hold('awaiting goal')
         if self._scan is None or (time.monotonic() - self._scan[1]) > self._scan_stale_s:
             return self._hold('stale-scan')  # fail-soft: no fresh perception → hold
+        # Frame-identity health. A scan can arrive on cadence and still be the
+        # same frame the driver published ten cycles ago — the check above
+        # cannot see that, this one can. Disarmed → never FAIL_CLOSED.
+        health = self._frame_health.health
+        if health.state == FAIL_CLOSED:
+            return self._hold_frame_health(health)
+        self._clear_frame_health()
 
         rx, ry, ryaw, speed = self._pose
         # The positional goal (if any). With an object goal set, the planner ignores
