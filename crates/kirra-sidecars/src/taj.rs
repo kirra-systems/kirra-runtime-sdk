@@ -17,6 +17,7 @@ use kirra_taj::{
     VruMotionPredictionConfig, VruPredictionFallbackReason,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Default freshness budget for the camera (Phase-B) channel, ms.
 pub const DEFAULT_CAMERA_MAX_AGE_MS: u64 = 500;
@@ -316,6 +317,7 @@ fn validate_perception_request(req: &PerceptionRequest) -> Result<(), Perception
 /// `speed_cap_mps=0.0` enforce stop-and-hold behavior.
 fn invalid_perception_response(camera_armed: bool) -> PerceptionResponse {
     PerceptionResponse {
+        frame_id: PerceptionFrameId::invalid(),
         healthy: false,
         confidence: 0.0,
         age_ms: 0,
@@ -413,8 +415,238 @@ pub struct PredictedVruMotionOut {
     pub points: Vec<PredictedVruPointOut>,
 }
 
+/// Stable identity for one accepted Taj perception result.
+///
+/// Sequence and generation fields prevent stale or replayed evidence from being
+/// confused with a newer perception cycle. The evidence digest binds the
+/// safety-relevant result bytes using a deterministic canonical encoder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PerceptionFrameId {
+    pub scan_sequence: u64,
+    pub camera_sequence: Option<u64>,
+    pub tracker_generation: u64,
+    pub profile_digest: String,
+    pub evidence_digest: String,
+}
+
+impl PerceptionFrameId {
+    #[must_use]
+    fn invalid() -> Self {
+        Self {
+            scan_sequence: 0,
+            camera_sequence: None,
+            tracker_generation: 0,
+            profile_digest: String::new(),
+            evidence_digest: String::new(),
+        }
+    }
+
+    /// Temporary construction used until the canonical profile/evidence digest
+    /// encoder is wired in the next slice.
+    #[must_use]
+    fn pending(scan_sequence: u64, camera_sequence: Option<u64>, tracker_generation: u64) -> Self {
+        Self {
+            scan_sequence,
+            camera_sequence,
+            tracker_generation,
+            profile_digest: String::new(),
+            evidence_digest: String::new(),
+        }
+    }
+}
+
+fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
+    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    hasher.update(len.to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn hash_str(hasher: &mut Sha256, value: &str) {
+    hash_bytes(hasher, value.as_bytes());
+}
+
+fn hash_bool(hasher: &mut Sha256, value: bool) {
+    hasher.update([u8::from(value)]);
+}
+
+fn hash_u64(hasher: &mut Sha256, value: u64) {
+    hasher.update(value.to_le_bytes());
+}
+
+fn hash_usize(hasher: &mut Sha256, value: usize) {
+    hash_u64(hasher, u64::try_from(value).unwrap_or(u64::MAX));
+}
+
+fn hash_f64(hasher: &mut Sha256, value: f64) {
+    hasher.update(value.to_bits().to_le_bytes());
+}
+
+fn hash_f32(hasher: &mut Sha256, value: f32) {
+    hasher.update(value.to_bits().to_le_bytes());
+}
+
+fn hash_optional_u64(hasher: &mut Sha256, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            hash_bool(hasher, true);
+            hash_u64(hasher, value);
+        }
+        None => hash_bool(hasher, false),
+    }
+}
+
+fn hash_optional_f64(hasher: &mut Sha256, value: Option<f64>) {
+    match value {
+        Some(value) => {
+            hash_bool(hasher, true);
+            hash_f64(hasher, value);
+        }
+        None => hash_bool(hasher, false),
+    }
+}
+
+fn hash_optional_str(hasher: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hash_bool(hasher, true);
+            hash_str(hasher, value);
+        }
+        None => hash_bool(hasher, false),
+    }
+}
+
+/// Digest of the safety-relevant configuration used to interpret one request.
+///
+/// This deliberately excludes sensor observations and timestamps. Those belong
+/// to the evidence digest. The domain tag prevents reuse as another Kirra hash.
+fn compute_perception_profile_digest(req: &PerceptionRequest) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"KIRRA-TAJ-PROFILE-V1");
+
+    hash_f64(&mut hasher, req.angle_min_rad);
+    hash_f64(&mut hasher, req.angle_increment_rad);
+    hash_f64(&mut hasher, req.range_min_m);
+    hash_f64(&mut hasher, req.range_max_m);
+    hash_f64(&mut hasher, req.forward_extent_m);
+    hash_f64(&mut hasher, req.decel_mps2);
+    hash_f64(&mut hasher, req.margin_m);
+    hash_f64(&mut hasher, req.lane_half_m);
+    hash_f64(&mut hasher, req.vehicle_width_m);
+    hash_f64(&mut hasher, req.lateral_clearance_m);
+    hash_f32(&mut hasher, req.confidence_floor);
+    hash_bool(&mut hasher, req.camera_armed);
+    hash_u64(&mut hasher, req.camera_max_age_ms);
+
+    hex::encode(hasher.finalize())
+}
+
+/// Digest of the complete accepted safety-relevant Taj output.
+///
+/// `frame_id.evidence_digest` is intentionally excluded to avoid circular
+/// hashing. The already-computed profile digest is included, binding evidence
+/// interpretation to the exact configuration that produced it.
+fn compute_perception_evidence_digest(response: &PerceptionResponse) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"KIRRA-TAJ-EVIDENCE-V1");
+
+    hash_u64(&mut hasher, response.frame_id.scan_sequence);
+    hash_optional_u64(&mut hasher, response.frame_id.camera_sequence);
+    hash_u64(&mut hasher, response.frame_id.tracker_generation);
+    hash_str(&mut hasher, &response.frame_id.profile_digest);
+
+    hash_bool(&mut hasher, response.healthy);
+    hash_f32(&mut hasher, response.confidence);
+    hash_u64(&mut hasher, response.age_ms);
+    hash_f64(&mut hasher, response.clear_distance_m);
+    hash_optional_f64(&mut hasher, response.nearest_object_m);
+    hash_usize(&mut hasher, response.object_count);
+    hash_optional_f64(&mut hasher, response.minimum_corridor_width_m);
+    hash_f64(&mut hasher, response.required_corridor_width_m);
+    hash_f64(&mut hasher, response.speed_cap_mps);
+
+    hash_usize(&mut hasher, response.left.len());
+    for point in &response.left {
+        hash_f64(&mut hasher, point[0]);
+        hash_f64(&mut hasher, point[1]);
+    }
+
+    hash_usize(&mut hasher, response.right.len());
+    for point in &response.right {
+        hash_f64(&mut hasher, point[0]);
+        hash_f64(&mut hasher, point[1]);
+    }
+
+    hash_usize(&mut hasher, response.objects.len());
+    for object in &response.objects {
+        hash_u64(&mut hasher, object.id);
+        hash_f64(&mut hasher, object.x);
+        hash_f64(&mut hasher, object.y);
+        hash_f64(&mut hasher, object.vx);
+        hash_f64(&mut hasher, object.vy);
+    }
+
+    hash_usize(&mut hasher, response.camera_associations.len());
+    for association in &response.camera_associations {
+        hash_u64(&mut hasher, association.track_id);
+        hash_u64(&mut hasher, association.observation_id);
+        hash_f64(&mut hasher, association.distance_m);
+        hash_f64(&mut hasher, association.confidence);
+    }
+
+    hash_usize(&mut hasher, response.pedestrians.len());
+    for pedestrian in &response.pedestrians {
+        hash_u64(&mut hasher, pedestrian.id);
+        hash_f64(&mut hasher, pedestrian.x);
+        hash_f64(&mut hasher, pedestrian.y);
+        hash_f64(&mut hasher, pedestrian.vx);
+        hash_f64(&mut hasher, pedestrian.vy);
+        hash_f64(&mut hasher, pedestrian.age_s);
+        hash_str(&mut hasher, pedestrian.lidar_classification);
+        hash_str(&mut hasher, pedestrian.fused_classification);
+        hash_str(&mut hasher, pedestrian.fusion_reason);
+        hash_optional_u64(&mut hasher, pedestrian.camera_observation_id);
+        hash_optional_f64(&mut hasher, pedestrian.camera_confidence);
+        hash_optional_f64(&mut hasher, pedestrian.association_distance_m);
+    }
+
+    hash_usize(&mut hasher, response.predicted_vrus.len());
+    for prediction in &response.predicted_vrus {
+        hash_u64(&mut hasher, prediction.track_id);
+        hash_str(&mut hasher, prediction.model);
+        hash_str(&mut hasher, prediction.intent);
+        hash_f64(&mut hasher, prediction.intent_confidence);
+        hash_str(&mut hasher, prediction.intent_reason);
+
+        hash_usize(&mut hasher, prediction.intent_probabilities.len());
+        for hypothesis in &prediction.intent_probabilities {
+            hash_str(&mut hasher, hypothesis.intent);
+            hash_f64(&mut hasher, hypothesis.probability);
+        }
+
+        hash_optional_str(&mut hasher, prediction.fallback_reason);
+        hash_f64(&mut hasher, prediction.horizon_s);
+        hash_f64(&mut hasher, prediction.step_s);
+        hash_f64(&mut hasher, prediction.source_age_s);
+        hash_u64(&mut hasher, u64::from(prediction.frames_seen));
+
+        hash_usize(&mut hasher, prediction.points.len());
+        for point in &prediction.points {
+            hash_f64(&mut hasher, point.time_s);
+            hash_f64(&mut hasher, point.x);
+            hash_f64(&mut hasher, point.y);
+            hash_f64(&mut hasher, point.uncertainty_radius_m);
+        }
+    }
+
+    hash_bool(&mut hasher, response.camera_healthy);
+    hash_optional_f64(&mut hasher, response.camera_clip_x_m);
+
+    hex::encode(hasher.finalize())
+}
+
 #[derive(Clone, Serialize)]
 pub struct PerceptionResponse {
+    pub frame_id: PerceptionFrameId,
     pub healthy: bool,
     pub confidence: f32,
     pub age_ms: u64,
@@ -582,6 +814,14 @@ pub struct TrackedPerceptionState {
     tracker_config: Option<TajConfig>,
     last_stamp_ms: Option<u64>,
     last_response: Option<PerceptionResponse>,
+    /// Monotonic identity of accepted scan frames.
+    scan_sequence: u64,
+    /// Monotonic identity of accepted camera frames.
+    camera_sequence: u64,
+    /// Producer timestamp of the last accepted camera frame.
+    last_camera_stamp_ms: Option<u64>,
+    /// Advances whenever temporal tracking state is invalidated.
+    tracker_generation: u64,
 }
 
 impl Default for TrackedPerceptionState {
@@ -598,6 +838,10 @@ impl TrackedPerceptionState {
             tracker_config: None,
             last_stamp_ms: None,
             last_response: None,
+            scan_sequence: 0,
+            camera_sequence: 0,
+            last_camera_stamp_ms: None,
+            tracker_generation: 0,
         }
     }
 
@@ -606,6 +850,8 @@ impl TrackedPerceptionState {
         self.tracker_config = None;
         self.last_stamp_ms = None;
         self.last_response = None;
+        self.last_camera_stamp_ms = None;
+        self.tracker_generation = self.tracker_generation.saturating_add(1);
     }
 }
 
@@ -933,7 +1179,26 @@ pub fn handle_perception_tracked(
         .map(predicted_vru_to_wire)
         .collect();
 
-    let response = PerceptionResponse {
+    state.scan_sequence = state.scan_sequence.saturating_add(1);
+
+    let camera_sequence = if req.camera_armed {
+        req.camera_stamp_ms.map(|camera_stamp_ms| {
+            if state.last_camera_stamp_ms != Some(camera_stamp_ms) {
+                state.camera_sequence = state.camera_sequence.saturating_add(1);
+                state.last_camera_stamp_ms = Some(camera_stamp_ms);
+            }
+            state.camera_sequence
+        })
+    } else {
+        None
+    };
+
+    let mut response = PerceptionResponse {
+        frame_id: PerceptionFrameId::pending(
+            state.scan_sequence,
+            camera_sequence,
+            state.tracker_generation,
+        ),
         healthy,
         confidence,
         age_ms,
@@ -952,6 +1217,9 @@ pub fn handle_perception_tracked(
         camera_healthy,
         camera_clip_x_m,
     };
+
+    response.frame_id.profile_digest = compute_perception_profile_digest(req);
+    response.frame_id.evidence_digest = compute_perception_evidence_digest(&response);
 
     state.last_stamp_ms = Some(req.stamp_ms);
     state.last_response = Some(response.clone());
