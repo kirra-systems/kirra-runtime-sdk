@@ -21,8 +21,9 @@ use tower::ServiceExt; // oneshot
 
 use ed25519_dalek::SigningKey;
 use kirra_persistence::VerifierStore;
+use kirra_release_token::ros_bound_command::{RosBoundCommandGate, ROS_BOUND_COMMAND_PAYLOAD_LEN};
 use kirra_verifier::gateway::policy_layer::enforce_actuator_safety_envelope;
-use kirra_verifier::governor_release::{RosReleaseGate, RosReleaseSigner};
+use kirra_verifier::governor_release::RosReleaseSigner;
 use kirra_verifier::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
 
@@ -99,6 +100,14 @@ fn command_json(linear: f64) -> String {
         "current_velocity_mps": 0.9,
         "current_steering_angle_deg": 0.0,
         "delta_time_s": 0.1,
+        "release_binding": {
+            "scan_sequence": 77,
+            "camera_sequence": 88,
+            "tracker_generation": 3,
+            "profile_digest": "11".repeat(32),
+            "evidence_digest": "22".repeat(32),
+            "proposal_digest": "33".repeat(32),
+        },
     })
     .to_string()
 }
@@ -139,25 +148,25 @@ async fn enforced_200_mints_a_token_that_verifies_over_exactly_the_enforced_byte
     let payload_hex = release["payload_hex"].as_str().expect("payload_hex");
     let token_hex = release["token_hex"].as_str().expect("token_hex");
 
-    let payload_bytes: [u8; 32] = hex::decode(payload_hex)
+    let payload_bytes: [u8; ROS_BOUND_COMMAND_PAYLOAD_LEN] = hex::decode(payload_hex)
         .expect("hex payload")
         .try_into()
-        .expect("32-byte payload image");
+        .expect("176-byte V2 payload image");
     let token_bytes: [u8; 96] = hex::decode(token_hex)
         .expect("hex token")
         .try_into()
         .expect("96-byte token");
     let token = kirra_verifier::governor_release::ReleaseToken::from_bytes(&token_bytes);
 
-    // The SAME gate a consumer runs: verify + decode FROM the signed bytes.
-    let mut gate = RosReleaseGate::new(vk, 60_000);
+    // The SAME evidence-bound gate the V2 motor consumer runs.
+    let mut gate = RosBoundCommandGate::new(vk, [0x11; 32], 200);
     let released = gate
         .release(
             &payload_bytes,
             Some(&token),
             release["issued_at_ms"].as_u64().unwrap(),
         )
-        .expect("the minted token must release through the consumer gate");
+        .expect("the minted V2 token must release through the bound consumer gate");
 
     // The signed twist is EXACTLY the enforced command the body reports.
     assert_eq!(

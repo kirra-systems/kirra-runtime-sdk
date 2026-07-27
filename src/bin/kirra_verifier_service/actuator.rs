@@ -8,7 +8,10 @@
 use super::*;
 use kirra_persistence::FenceError;
 use kirra_verifier::gateway::contract_profiles::{contract_for, global_vehicle_class};
+use kirra_verifier::gateway::policy_layer::ValidatedActuatorReleaseBinding;
 use kirra_verifier::governor_release::RosReleaseSigner;
+
+const ROS_BOUND_RELEASE_LIFETIME_MS: u64 = 200;
 
 pub(crate) async fn handle_actuator_motion_command(
     State(svc): State<Arc<ServiceState>>,
@@ -24,6 +27,7 @@ pub(crate) async fn handle_actuator_motion_command(
     // refuses everything into its safe stop — fail-closed at the boundary that
     // matters, without breaking non-consumer deployments.
     signer: Option<Extension<Arc<RosReleaseSigner>>>,
+    binding: Option<Extension<ValidatedActuatorReleaseBinding>>,
     Json(cmd): Json<ProposedVehicleCommand>,
 ) -> impl IntoResponse {
     let now = now_ms();
@@ -130,38 +134,42 @@ pub(crate) async fn handle_actuator_motion_command(
     // The token binds the ENFORCED twist: the payload's little-endian image is
     // the wire truth the consumer verifies and decodes — the JSON floats in
     // this body are observability, never the trust path.
-    if let Some(Extension(signer)) = signer {
-        // The steering→angular mapping is the interceptor's bicycle relation
-        // (`cmd_vel_interceptor.py:311`): angular_rad_s = tan(steering_rad) ×
-        // |v| / wheelbase, with the wheelbase of the ACTIVE vehicle class —
-        // a physical constant of the platform, identical across that class's
-        // nominal and MRC profiles.
+    if let (Some(Extension(signer)), Some(Extension(binding))) = (signer, binding) {
         let wheelbase_m = contract_for(global_vehicle_class()).wheelbase_m;
         let angular_rad_s = (outcome.enforced_steering_angle_deg.to_radians()).tan()
             * outcome.enforced_linear_velocity_mps.abs()
             / wheelbase_m;
-        let (payload, token) =
-            signer.mint(outcome.enforced_linear_velocity_mps, angular_rad_s, now);
+
+        let expires_at_ms = now.saturating_add(ROS_BOUND_RELEASE_LIFETIME_MS);
+
+        let (payload, token) = signer.mint_bound(
+            outcome.enforced_linear_velocity_mps,
+            angular_rad_s,
+            now,
+            expires_at_ms,
+            binding.scan_sequence,
+            binding.camera_sequence,
+            binding.tracker_generation,
+            binding.profile_digest,
+            binding.evidence_digest,
+            binding.proposal_digest,
+        );
+
         body["release"] = serde_json::json!({
-            // The signed 32-byte payload image (hex) — the consumer verifies
-            // the token over EXACTLY these bytes and decodes its twist FROM
-            // them (no cross-language float re-canonicalization).
+            "version": 2,
             "payload_hex": hex::encode(payload.encode()),
-            // The canonical 96-byte token (hex): digest(32) || signature(64).
             "token_hex": hex::encode(token.to_bytes()),
             "sequence": payload.sequence,
+            "nonce": payload.nonce,
             "issued_at_ms": payload.issued_at_ms,
-            // Forensic key id (hex SHA-256 of the verifying key) — lets a
-            // consumer log WHICH key signed without trusting this field.
+            "expires_at_ms": payload.expires_at_ms,
+            "scan_sequence": payload.scan_sequence,
+            "camera_sequence": payload.camera_sequence,
+            "tracker_generation": payload.tracker_generation,
+            "profile_digest": hex::encode(payload.profile_digest),
+            "evidence_digest": hex::encode(payload.evidence_digest),
+            "proposal_digest": hex::encode(payload.proposal_digest),
             "key_id": signer.key_id(),
-            // Track-A A3 (single wheelbase source): the wheelbase this mint's
-            // steering→angular conversion used — by construction the ACTIVE
-            // class contract's wheelbase, i.e. the same L the P6 lateral-accel
-            // check ran against. Observability, not trust path (that is the
-            // signed payload bytes): the ROS interceptor cross-checks its own
-            // `wheelbase_m` parameter against this on every release and
-            // fail-closes on mismatch — closing the L_i≠L_v round-trip
-            // scaling bug class (executed yaw = commanded yaw × L_i/L_v).
             "wheelbase_m": wheelbase_m,
         });
     }

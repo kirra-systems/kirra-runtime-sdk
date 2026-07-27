@@ -34,6 +34,9 @@ pub use kirra_release_token::ros_twist::{
 };
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use kirra_release_token::ros_bound_command::{
+    issue_ros_bound_command_release, RosBoundCommandPayload,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Forensic key id of the governor signing key — the `audit_chain` key-id
@@ -67,6 +70,7 @@ pub fn governor_key_id(vk: &VerifyingKey) -> String {
 pub struct RosReleaseSigner {
     signing_key: SigningKey,
     sequence: AtomicU64,
+    nonce: AtomicU64,
 }
 
 impl RosReleaseSigner {
@@ -75,6 +79,7 @@ impl RosReleaseSigner {
         Self {
             signing_key,
             sequence: AtomicU64::new(sequence_seed),
+            nonce: AtomicU64::new(sequence_seed),
         }
     }
 
@@ -100,6 +105,47 @@ impl RosReleaseSigner {
             angular_rad_s,
         };
         let token = issue_ros_release(&payload, &self.signing_key);
+        (payload, token)
+    }
+
+    /// Mint an evidence-bound V2 release over the exact enforced command.
+    ///
+    /// The caller supplies only already-validated fixed-width evidence identity.
+    /// Sequence and nonce advance independently and atomically. The explicit
+    /// expiration is checked by the motor-side V2 gate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mint_bound(
+        &self,
+        linear_mps: f64,
+        angular_rad_s: f64,
+        issued_at_ms: u64,
+        expires_at_ms: u64,
+        scan_sequence: u64,
+        camera_sequence: Option<u64>,
+        tracker_generation: u64,
+        profile_digest: [u8; 32],
+        evidence_digest: [u8; 32],
+        proposal_digest: [u8; 32],
+    ) -> (RosBoundCommandPayload, ReleaseToken) {
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let nonce = self.nonce.fetch_add(1, Ordering::Relaxed) + 1;
+
+        let payload = RosBoundCommandPayload {
+            sequence,
+            nonce,
+            issued_at_ms,
+            expires_at_ms,
+            linear_mps,
+            angular_rad_s,
+            scan_sequence,
+            camera_sequence,
+            tracker_generation,
+            profile_digest,
+            evidence_digest,
+            proposal_digest,
+        };
+
+        let token = issue_ros_bound_command_release(&payload, &self.signing_key);
         (payload, token)
     }
 
