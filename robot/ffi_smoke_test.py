@@ -184,15 +184,30 @@ def main() -> int:
     print("(g) malformed lengths (0/31/33/127/129/256) → rejected by the strict parse")
 
     # ------------------------------------------------------------------
-    # (h) The evidence-bound V2 boundary, against the REAL .so.
+    # (h) The evidence-bound V2 boundary, against the REAL .so, driven by
+    # real governor-signed frames from `kirra_ros_release_mint frame-v2`.
     #
-    # There is no V2 mint tool yet (kirra_ros_release_mint is V1-only), so this
-    # cannot assert a positive release. It asserts the fail-closed half, which
-    # is the half that must never regress: the core refuses a bad configuration
-    # outright, and refuses V2 frames it did not sign. A valid-signature V2
-    # release is covered by the Rust tests in kirra-actuation-consumer.
+    # Same shape as the V1 half above: a positive release proves the marshalling
+    # is non-vacuous, and each refusal arm proves the core is actually policing
+    # the evidence binding rather than waving bytes through.
     # ------------------------------------------------------------------
-    profile_digest = bytes.fromhex("ab" * 32)
+    PROFILE_HEX = "ab" * 32
+    profile_digest = bytes.fromhex(PROFILE_HEX)
+
+    def v2(seq: str, *extra: str) -> tuple[bytes, bytes]:
+        """A signed 272-byte V2 frame, split ready for the FFI.
+
+        Defaults describe a releasable command; `extra` overrides whichever
+        field a negative case needs to break. `extra` is passed BEFORE the
+        defaults because the minter takes the FIRST occurrence of a flag
+        (`arg_val` uses `position`), so an earlier value wins.
+        """
+        frame = mint("frame-v2", "--seq", seq, *extra,
+                     "--issued-ms", "10000", "--linear", "0.1", "--angular", "0.0",
+                     "--profile-digest", PROFILE_HEX)
+        parsed = split_bound_frame(frame)
+        assert parsed is not None, f"minted V2 frame has bad length {len(frame)}"
+        return parsed
 
     def new_bound(vk_bytes=vk, digest=profile_digest, **over):
         kwargs = dict(
@@ -259,6 +274,73 @@ def main() -> int:
         print("(h7) V2 close is idempotent; a closed handle refuses reuse")
     else:
         check(False, "(h7) a closed V2 consumer must refuse reuse")
+
+    # (h8) A real governor-signed V2 command ABOVE the demo envelope →
+    # Released + clamped, with the bound evidence identity surfaced.
+    bc = new_bound()
+    payload, token = v2("1", "--linear", "0.5", "--angular", "2.0",
+                        "--scan-seq", "813", "--tracker-gen", "7",
+                        "--camera-seq", "41")
+    r = bc.on_frame(payload, token, 10_050)
+    check(r.kind == 0, f"(h8) a valid V2 frame must Release, got kind={r.kind}")
+    check(r.write == 1, "(h8) a V2 release must actuate")
+    check(abs(r.linear - VX_MAX) < 1e-9, f"(h8) linear must clamp to {VX_MAX}, got {r.linear}")
+    check(abs(r.angular - VZ_MAX) < 1e-9, f"(h8) angular must clamp to {VZ_MAX}, got {r.angular}")
+    check(r.scan_sequence == 813 and r.tracker_generation == 7,
+          f"(h8) bound evidence must survive the FFI, got scan={r.scan_sequence} "
+          f"gen={r.tracker_generation}")
+    print(f"(h8) V2 valid → Released write={r.write} twist=({r.linear:.3f},{r.angular:.3f}) "
+          f"[clamped] seq={r.sequence} nonce={r.nonce} scan={r.scan_sequence} gen={r.tracker_generation}")
+
+    # (h9) Replay of an already-released V2 frame → SEQUENCE_NOT_ADVANCED.
+    r = bc.on_frame(payload, token, 10_060)
+    check(r.write == 0 and r.refusal_code == 107,
+          f"(h9) V2 replay must be SEQUENCE_NOT_ADVANCED(107), got {r.refusal_code}")
+    print(f"(h9) V2 replay → refused code={bound_refusal_name(r.refusal_code)}")
+
+    # (h10) The evidence gates, each reached by breaking exactly one field.
+    # This is what makes the binding non-decorative: the SAME governor key
+    # signs every one of these, so only the bound evidence can refuse them.
+    for label, code, consumer_digest, extra in (
+        ("wrong platform profile", 109, b"\xcd" * 32, ()),
+        ("expired token", 105, profile_digest, ("--lifetime-ms", "50")),
+        ("over-long lifetime", 106, profile_digest, ("--lifetime-ms", "999999")),
+        ("corrupt signature", 102, profile_digest, ("--corrupt-sig",)),
+    ):
+        c2 = new_bound(digest=consumer_digest)
+        p2, t2 = v2("1", *extra)
+        # `expired token` needs a clock past the 50 ms lifetime; the rest are
+        # judged at a nominal in-window time.
+        at = 10_500 if code == 105 else 10_050
+        rr = c2.on_frame(p2, t2, at)
+        check(rr.write == 0, f"(h10) {label} must not actuate")
+        check(rr.refusal_code == code,
+              f"(h10) {label} must be code {code} "
+              f"({bound_refusal_name(code)}), got {rr.refusal_code} "
+              f"({bound_refusal_name(rr.refusal_code)})")
+        print(f"(h10) V2 {label} → refused code={bound_refusal_name(rr.refusal_code)}")
+
+    # (h11) A superseded perception frame is refused even though the command
+    # sequence and nonce both advanced — evidence age is its own gate.
+    c2 = new_bound()
+    c2.on_frame(*v2("1", "--scan-seq", "9"), 10_050)
+    r = c2.on_frame(*v2("2", "--scan-seq", "5"), 10_060)
+    check(r.write == 0 and r.refusal_code == 110,
+          f"(h11) a stale perception frame must be PERCEPTION_FRAME_SUPERSEDED(110), "
+          f"got {r.refusal_code}")
+    print(f"(h11) V2 stale evidence → refused code={bound_refusal_name(r.refusal_code)}")
+
+    # (h12) Starvation on the V2 core → the SS-002 decel ramp, then silence.
+    c2 = new_bound()
+    c2.on_frame(*v2("1", "--linear", "0.15"), 10_000)
+    ramp = [t.linear for t in
+            (c2.on_tick(10_000 + 300 + k * 100) for k in range(1, 21)) if t.write == 1]
+    check(len(ramp) >= 1, "(h12) V2 starvation must produce an active stop ramp")
+    check(ramp[-1] == 0.0, f"(h12) V2 ramp must reach zero, got {ramp}")
+    check(all(a >= b - 1e-12 for a, b in zip(ramp, ramp[1:])),
+          f"(h12) V2 ramp must not increase: {ramp}")
+    check(c2.health().silent == 1, "(h12) after the ramp the V2 consumer must be silent")
+    print(f"(h12) V2 starvation → ramp={[round(x, 3) for x in ramp]} silent=True")
 
     print()
     if failures:
