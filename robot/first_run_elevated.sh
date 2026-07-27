@@ -44,7 +44,8 @@ PUB="python3 ${HERE}/kirra_release_publisher.py"
 if [ -z "${KIRRA_PROFILE_DIGEST:-}" ]; then
   echo "FATAL: KIRRA_PROFILE_DIGEST is unset — export this robot's 64-lowercase-hex" >&2
   echo "       platform profile digest (the same value the consumer pins) before" >&2
-  echo "       running this test. See robot/run_consumer_r2.sh for how to obtain it." >&2
+  echo "       running this test. Obtain/verify it with:" >&2
+  echo "         python3 robot/kirra_doctor.py --module profile_digest" >&2
   exit 1
 fi
 

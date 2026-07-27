@@ -80,7 +80,7 @@ DNS) is `WARN` — the doctor must not cry wolf. `UNKNOWN` = could not verify
 |---|---|---|
 | `config` | ✔ | robot.env readable/structured, placeholders, `lint_robot_env.sh` |
 | `devices` | ✔ | motor/lidar serial, camera, `/dev/snd`, gpiochip, group memberships |
-| `governor` | ✔ | verify key pinned, consumer FFI present, verifier `/health` (implies `KIRRA_VEHICLE_CLASS` — startup aborts without one) |
+| `governor` | ✔ | verify key pinned, **`KIRRA_PROFILE_DIGEST` pinned + well-formed** (64 lowercase hex — the consumer aborts without it), consumer FFI present, verifier `/health` (implies `KIRRA_VEHICLE_CLASS` — startup aborts without one) |
 | `network` | ✔ | interfaces up, DNS (WARN offline), NTP sync |
 | `services` | ✔ | verifier/mick/ollama ports; systemd states (inactive = staged-by-design → PASS; `failed`/restart-looping → FAIL/WARN) |
 | `snapshot` | ✔ | per-robot config capture present + fresh (status only — never captures) |
@@ -89,6 +89,7 @@ DNS) is `WARN` — the doctor must not cry wolf. `UNKNOWN` = could not verify
 | `voice` | ✔ | wraps `kirra_voice_doctor.sh` (engines, models, ALSA plughw drift) |
 | `autostart` | opt-in | wraps `preflight_autostart.sh` (sudo reads can prompt → never in the timer path) |
 | `cold_boot` | opt-in | wraps `cold_boot_drill.sh` (slow, needs ROS + the stack up) |
+| `profile_digest` | opt-in | pinned `KIRRA_PROFILE_DIGEST` **vs the digest Taj actually computes** for this robot. Reads `/scan` geometry (`ros2 topic echo`) + occy_doer's params, probes Taj `/perception`, compares. A mismatch means every release is refused `PROFILE_DIGEST_MISMATCH` and the robot never moves — indistinguishable from a broken signer. Opt-in: it shells to `ros2` and POSTs to a sidecar |
 
 ## CLI
 

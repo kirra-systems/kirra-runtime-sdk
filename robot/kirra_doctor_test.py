@@ -178,6 +178,193 @@ def test_cli_list_and_json_run() -> None:
     assert code in (0, 1, 2)
 
 
+# ---- profile digest: pinned KIRRA_PROFILE_DIGEST vs what Taj computes --------
+#
+# The failure this guards is silent-by-construction: a mismatched pin makes the
+# motor consumer refuse EVERY release with PROFILE_DIGEST_MISMATCH, which looks
+# exactly like a broken signer. All network/ROS access is stubbed here.
+
+from doctor.modules import governor as governor_mod  # noqa: E402
+from doctor.modules import profile_digest as pd_mod  # noqa: E402
+
+GOOD_DIGEST = "ab" * 32
+OTHER_DIGEST = "cd" * 32
+
+SCAN_ECHO = """header:
+  stamp:
+    sec: 1774
+    nanosec: 500000000
+  frame_id: laser_frame
+angle_min: -3.14159
+angle_max: 3.14159
+angle_increment: 0.0087
+time_increment: 0.0
+scan_time: 0.1
+range_min: 0.15
+range_max: 12.0
+ranges: '<sequence type: float, length: 720>'
+intensities: '<sequence type: float, length: 720>'
+---
+"""
+
+GEOMETRY = {"angle_min_rad": -3.14159, "angle_increment_rad": 0.0087,
+            "range_min_m": 0.15, "range_max_m": 12.0}
+
+
+def test_parse_scan_echo_reads_the_four_geometry_fields() -> None:
+    assert pd_mod.parse_scan_echo(SCAN_ECHO) == GEOMETRY
+
+
+def test_parse_scan_echo_ignores_nested_header_fields() -> None:
+    # `header:` nests its own scalars; matching an indented key would silently
+    # read the wrong number into a safety-relevant comparison.
+    geo = pd_mod.parse_scan_echo(SCAN_ECHO)
+    assert geo is not None and all(isinstance(v, float) for v in geo.values())
+    assert "sec" not in geo and "frame_id" not in geo
+
+
+def test_parse_scan_echo_takes_the_first_message_when_echo_repeats() -> None:
+    doubled = SCAN_ECHO + SCAN_ECHO.replace("angle_min: -3.14159", "angle_min: -1.0")
+    assert pd_mod.parse_scan_echo(doubled)["angle_min_rad"] == -3.14159
+
+
+def test_parse_scan_echo_is_none_when_incomplete_or_unparseable() -> None:
+    assert pd_mod.parse_scan_echo("") is None
+    assert pd_mod.parse_scan_echo(None) is None
+    assert pd_mod.parse_scan_echo("angle_min: -3.14\nrange_min: 0.1\n") is None  # missing 2
+    assert pd_mod.parse_scan_echo(SCAN_ECHO.replace("range_max: 12.0",
+                                                    "range_max: not-a-number")) is None
+
+
+def test_build_probe_sends_exactly_one_ray() -> None:
+    # An EMPTY ranges list makes Taj answer with its invalid-frame sentinel
+    # (empty digest), which would read as a mismatch rather than an error.
+    probe = pd_mod.build_probe(GEOMETRY, 8.0, False, 500)
+    assert probe["ranges"] == [1.0]
+    assert probe["forward_extent_m"] == 8.0
+    for k, v in GEOMETRY.items():
+        assert probe[k] == v
+
+
+def test_build_probe_omits_camera_max_age_when_disarmed() -> None:
+    # Mirrors camera_perception_fields: disarmed sends ONLY camera_armed, so
+    # Taj hashes its own default. Sending the field would agree only while the
+    # two defaults coincide, and would false-mismatch as soon as an operator
+    # set a non-default age with the camera off.
+    disarmed = pd_mod.build_probe(GEOMETRY, 8.0, False, 123)
+    assert disarmed["camera_armed"] is False
+    assert "camera_max_age_ms" not in disarmed
+
+    armed = pd_mod.build_probe(GEOMETRY, 8.0, True, 123)
+    assert armed["camera_armed"] is True and armed["camera_max_age_ms"] == 123
+
+
+def test_looks_like_digest_rules_match_the_consumer() -> None:
+    assert pd_mod.looks_like_digest(GOOD_DIGEST)
+    for bad in ("AB" * 32, "a" * 63, "a" * 65, "", None, 42, "g" * 64):
+        assert not pd_mod.looks_like_digest(bad), repr(bad)
+
+
+def _pd_run(env, *, echo_rc=0, echo_out=SCAN_ECHO, taj=(GOOD_DIGEST, None)):
+    """Run the module with ros2 + Taj stubbed."""
+    real_cmd, real_taj = pd_mod.run_cmd, pd_mod.taj_profile_digest
+    pd_mod.run_cmd = lambda *a, **k: (echo_rc, echo_out, "" if echo_rc == 0 else "boom")
+    pd_mod.taj_profile_digest = lambda *a, **k: taj
+    try:
+        return pd_mod.run({"robot_env": env})["details"]
+    finally:
+        pd_mod.run_cmd, pd_mod.taj_profile_digest = real_cmd, real_taj
+
+
+def _status_of(details, needle):
+    for d in details:
+        if needle in d["check"]:
+            return d["status"], d["info"]
+    raise AssertionError(f"no check matching {needle!r} in {[d['check'] for d in details]}")
+
+
+def test_pd_matching_digest_passes() -> None:
+    details = _pd_run({"KIRRA_PROFILE_DIGEST": GOOD_DIGEST})
+    assert _status_of(details, "matches Taj")[0] == "PASS"
+
+
+def test_pd_mismatched_digest_fails_loudly_with_the_fix() -> None:
+    details = _pd_run({"KIRRA_PROFILE_DIGEST": OTHER_DIGEST})
+    status, info = _status_of(details, "matches Taj")
+    assert status == "FAIL"
+    assert "PROFILE_DIGEST_MISMATCH" in info
+    fix = next(d["fix"] for d in details if "matches Taj" in d["check"])
+    # The fix must hand the operator the ACTUAL value, not just say "wrong".
+    assert GOOD_DIGEST in fix
+
+
+def test_pd_unset_pin_is_unknown_not_fail() -> None:
+    # "I could not check this" must never read like "these disagree"; the
+    # governor module owns the FAIL for a missing pin.
+    for env in ({}, {"KIRRA_PROFILE_DIGEST": ""}, {"KIRRA_PROFILE_DIGEST": "AB" * 32}):
+        details = _pd_run(env)
+        assert _status_of(details, "pinned digest available")[0] == "UNKNOWN", env
+
+
+def test_pd_no_ros2_or_no_scan_is_unknown() -> None:
+    assert _status_of(_pd_run({"KIRRA_PROFILE_DIGEST": GOOD_DIGEST}, echo_rc=-1),
+                      "live scan geometry")[0] == "UNKNOWN"
+    assert _status_of(_pd_run({"KIRRA_PROFILE_DIGEST": GOOD_DIGEST}, echo_out=""),
+                      "live scan geometry")[0] == "UNKNOWN"
+
+
+def test_pd_taj_unreachable_is_unknown() -> None:
+    details = _pd_run({"KIRRA_PROFILE_DIGEST": GOOD_DIGEST}, taj=(None, "connection refused"))
+    status, info = _status_of(details, "Taj profile digest")
+    assert status == "UNKNOWN" and "connection refused" in info
+
+
+def test_pd_never_compares_against_an_unusable_taj_digest() -> None:
+    # Taj's invalid-frame sentinel is an EMPTY digest. Comparing a real pin
+    # against "" would report a confident FAIL from a failed query.
+    details = _pd_run({"KIRRA_PROFILE_DIGEST": GOOD_DIGEST}, taj=(None, "not usable ('')"))
+    assert _status_of(details, "Taj profile digest")[0] == "UNKNOWN"
+    assert not any("matches Taj" in d["check"] for d in details)
+
+
+def test_pd_module_is_opt_in() -> None:
+    # It shells to ros2 and POSTs to a sidecar, so it must stay out of the
+    # always-on read-only default set.
+    assert pd_mod.DEFAULT is False
+    default_names = [m.NAME for m in core.discover_modules() if getattr(m, "DEFAULT", True)]
+    assert "profile_digest" not in default_names
+    assert "profile_digest" in [m.NAME for m in core.discover_modules()]
+
+
+# ---- governor: the pinned-digest FORMAT check (pure env, default module) -----
+
+def _gov(env):
+    return governor_mod.run({"robot_env": env})["details"]
+
+
+def test_governor_passes_a_well_formed_pin() -> None:
+    assert _status_of(_gov({"KIRRA_PROFILE_DIGEST": GOOD_DIGEST}),
+                      "profile digest pinned")[0] == "PASS"
+
+
+def test_governor_fails_an_absent_or_placeholder_pin() -> None:
+    for env in ({}, {"KIRRA_PROFILE_DIGEST": ""}, {"KIRRA_PROFILE_DIGEST": "__FILLED__"}):
+        assert _status_of(_gov(env), "profile digest pinned")[0] == "FAIL", env
+
+
+def test_governor_fails_uppercase_and_wrong_length_pins() -> None:
+    # The consumer aborts startup on these, so a WARN would understate it.
+    for bad in ("AB" * 32, "a" * 63, "a" * 65, "g" * 64):
+        status, _ = _status_of(_gov({"KIRRA_PROFILE_DIGEST": bad}), "profile digest pinned")
+        assert status == "FAIL", bad
+
+
+def test_governor_digest_predicate_matches_the_consumer_rule() -> None:
+    assert governor_mod.looks_like_pinned_digest(GOOD_DIGEST)
+    for bad in ("AB" * 32, "a" * 63, "", None, 42):
+        assert not governor_mod.looks_like_pinned_digest(bad), repr(bad)
+
+
 def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print("kirra_doctor host tests (no hardware):")

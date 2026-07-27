@@ -77,10 +77,11 @@ export KIRRA_GOVERNOR_VK_HEX
 # pin the wrong platform — both are silent-config failures the fail-closed rule
 # exists to prevent.
 #
-# Obtain it from the Taj sidecar's own answer for this robot, e.g.
-#   curl -s localhost:8101/perception -d @perception.json -H 'content-type: application/json' \
-#     | python3 -c 'import json,sys; print(json.load(sys.stdin)["frame_id"]["profile_digest"])'
-# then pin it (64 LOWERCASE hex) in /etc/kirra/robot.env.
+# To obtain (or verify) it, with the lidar and the Taj sidecar up:
+#   python3 robot/kirra_doctor.py --module profile_digest
+# That reads this robot's live /scan geometry, probes Taj, and either confirms
+# the pin or prints the exact value to export. Pin it (64 LOWERCASE hex) in
+# /etc/kirra/robot.env so every process in the run agrees.
 if [ -z "${KIRRA_PROFILE_DIGEST:-}" ]; then
   echo "FATAL: KIRRA_PROFILE_DIGEST is unset — the evidence-bound consumer pins the" >&2
   echo "       platform profile digest and refuses releases minted under another." >&2
