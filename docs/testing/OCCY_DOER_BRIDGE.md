@@ -8,9 +8,16 @@ Phase-2 perception upgrade):
 ```
   goal (RViz / Mick) ─/goal_pose─┐
   /odom (pose, speed) ───────────┤
-  /scan (lidar) ──▶ Taj :8101 (corridor + objects) ─┐
-                                 ▼                   ▼
-                         occy_doer ──▶ Occy :8100 /plan (proposes + KIRRA slow-loop)
+  /scan (lidar) ─────────────────┤
+                                 ▼
+                            occy_doer
+                    ┌────────────┴────────────┐
+                    │                         │
+        TIMER (ROS executor thread)    WORKER (one bounded job)
+        take result → publish/hold     Taj :8101 ─▶ Occy :8100 /plan
+        then issue the next job        (proposes + KIRRA slow-loop)
+                    ▲                         │
+                    └──── JobResult slot ◀────┘
                                  │
                      pure-pursuit → bound proposal envelope
                                  ▼
@@ -18,23 +25,63 @@ Phase-2 perception upgrade):
              (std_msgs/String: velocities + release_binding, one atomic message)
 ```
 
-Each tick (`occy_doer`, default 5 Hz):
+**The sidecar calls do not run in the timer callback.** rclpy's executor is
+single-threaded, so two sequential blocking POSTs stalled every other callback on the node —
+including the scan subscription, so a slow sidecar froze perception ingest as well as
+planning. They run in one bounded background job instead: the **worker computes, the timer
+publishes**. The worker never publishes, never touches goal/pose/scan/frame-health state, and
+deposits only an immutable result into a lock-protected slot. Every actuation-relevant
+decision stays on the executor thread.
+
+Each tick (`occy_doer`, `plan_hz` — 10 Hz in the shipped `kirra_params.yaml`; the node's own
+default is 5):
 1. read the robot pose + speed (`/odom`) and the current goal (`/goal_pose`),
-2. POST the latest scan to **Taj** → the geometric corridor (left/right polylines) + objects,
-3. transform the goal into the base frame, extend the corridor behind the robot (footprint
-   containment), and POST `{ego, goal, corridor, objects, vehicle}` to **Occy** `/plan`,
-4. turn Occy's **KIRRA-validated** trajectory into velocities (pure pursuit) and publish them
-   on `/cmd_vel_raw` as an **atomic evidence-bound proposal envelope** — canonical JSON in a
-   `std_msgs/String` carrying the velocities *and* the `release_binding` (Taj scan/camera/
-   tracker identity, platform profile digest, Occy proposal digest) they were authored
-   against, so the verifier can bind that evidence into the signed V2 motor release. A bare
-   `Twist` names no evidence and is refused by the interceptor.
+2. **take** the last completed job's result (taken, not peeked — one verdict per result, so
+   reuse is structurally impossible) and decide whether it is usable,
+3. if it is, turn Occy's **KIRRA-validated** trajectory into velocities (pure pursuit) and
+   publish them on `/cmd_vel_raw` as an **atomic evidence-bound proposal envelope** —
+   canonical JSON in a `std_msgs/String` carrying the velocities *and* the `release_binding`
+   (Taj scan/camera/tracker identity, platform profile digest, Occy proposal digest) they were
+   authored against, so the verifier can bind that evidence into the signed V2 motor release.
+   A bare `Twist` names no evidence and is refused by the interceptor. If it is not usable,
+   **hold**,
+4. then start the next job if a new scan has arrived: snapshot the scan as plain values, POST
+   it to **Taj** → the geometric corridor + objects, extend the corridor behind the robot
+   (footprint containment), and POST `{ego, goal, corridor, objects, vehicle}` to
+   **Occy** `/plan`.
+
+Exactly one publish per tick — a proposal or a hold. Consume-then-issue makes this a
+**pipeline**: the tick acts on the previous tick's perception while the next round trip is
+already in flight, so perception is one tick period plus one round trip old when used. That is
+why `plan_hz` is a safety-adjacent number: it must fit inside `scan_stale_s` (the node WARNs at
+startup when it does not — see
+[`R2_FIELD_DIAGNOSTICS.md`](../hardware/R2_FIELD_DIAGNOSTICS.md) §4c).
+
+A result is used only if it carries no fault, Taj's `frame_id.scan_sequence` matches the
+planner's echoed `perception_frame_id.scan_sequence` (both sidecars describing the *same*
+perception), its scan strictly advances a local watermark, and that scan is still inside
+`scan_stale_s`. Anything else holds. ROS 2 removed `header.seq`, so scan identity is a
+node-local arrival counter; Taj's sequence is used only for the cross-sidecar consistency
+check.
 
 **Occy only PROPOSES; KIRRA DISPOSES — twice:** the planner runs the slow-loop checker
 (`validate_trajectory_slow`) and returns a verdict; the `cmd_vel_interceptor` then re-checks
 every command with the fast-loop kinematic governor + the Taj speed cap. The doer is
-**fail-soft**: no goal, a stale scan, a service error, or a refused plan all publish a zero
-Twist (hold) — and even if it didn't, the interceptor + governor are the safety authority.
+**fail-soft**: no goal, a stale scan, an unhealthy scan stream, a service error, a refused
+plan, or a plan whose evidence cannot be bound all **hold** — and even if they didn't, the
+interceptor + governor are the safety authority.
+
+A hold publishes an **empty** envelope, not a zero Twist. Empty data is not a parseable
+envelope, so the interceptor refuses it fail-closed into a stop — which is what a hold means.
+It is deliberately *not* a zero-velocity envelope: most holds happen before the tick has any
+evidence frame, and fabricating a binding to describe "no motion" would invent perception
+identity the doer never observed.
+
+**Holds are audible.** Safe is not the same as visible: a wedged sidecar holds forever and
+looks exactly like a robot standing at a delivered goal. A sustained hold warns once naming its
+cause, and again if the cause changes; a job stuck far past its budget warns too (an HTTP
+timeout bounds each socket read, not the whole request). Idle holds — waiting for a goal,
+arrived — never warn. Operator recipes per cause: `R2_FIELD_DIAGNOSTICS.md` §4.
 
 ## Run it
 
@@ -48,8 +95,11 @@ curl -s localhost:8102/intent -X POST -H 'content-type: application/json'      -
 # → {"ok":true,"seq":1,"intent":{"intent":"go_to","x_m":8.0,"y_m":0.0}}
 ```
 
-The doer polls `GET /intent/last`, grounds a NEW positional intent as the goal
-(ego frame at receipt → odom) and clears it on `hold`. Fail-closed end-to-end: an
+The doer polls `GET /intent/last` — on its own background fetch, for the same reason the
+sidecar calls moved off the timer — and grounds a NEW positional intent as the goal
+(ego frame at receipt → odom), clearing it on `hold`. The fetch worker only deposits the raw
+wire dict; **all goal mutation happens on the executor thread**, and a Mick outage can neither
+stall nor fault the plan cycle. Fail-closed end-to-end: an
 unparseable model reply never latches an intent, an unreachable Mick keeps the
 current goal, and KIRRA still bounds every proposal — Mick publishes INTENTS,
 never commands (the actuation fence is CI-enforced:
@@ -97,6 +147,22 @@ class, not a shrunk car — creep + assured-clear-distance + impact-energy, *not
 The robotaxi numbers are **frozen and unchanged** (proven by
 `default_urban_rss_band_is_the_frozen_robotaxi_value`), so the courier profile **cannot regress the
 AV path** — the only difference is the numbers.
+
+### Timing parameters (not chassis tuning)
+
+Kept out of the table above on purpose — these are not knobs to fit to a robot, they are the
+pipeline's timing contract.
+
+- **`scan_stale_s`** — REQUIRED, no default; the node refuses to start without it. How old the
+  perception behind a proposal may be. This is the safety bound on how blind the doer can be
+  while still proposing motion, set per deployment from the lidar rate (0.25 s for the
+  bench-verified ~10 Hz TG30). **Do not widen it to silence a warning.**
+- **`plan_hz`** — the decision-loop rate (10.0 shipped). Because the cycle is a pipeline, one
+  tick period plus one round trip has to fit inside `scan_stale_s`, or plans age out and the
+  doer holds intermittently on a *healthy* lidar. Raising it above the lidar rate is free: a
+  job is only issued when a new scan has actually arrived.
+- **`http_timeout_ms`** — per-request budget for each sidecar call. Note it bounds each socket
+  operation, not the whole request, which is why there is a separate overdue-job watchdog.
 
 ## What it does today (honest scope)
 
