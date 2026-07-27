@@ -366,6 +366,52 @@ const MIN_CORRIDOR_POINT_X_M: f64 = 0.15;
 /// passage boundaries near the vehicle envelope remain eligible.
 const MIN_CORRIDOR_BOUNDARY_ABS_Y_M: f64 = 0.26;
 
+/// Hard ceiling on the number of corridor stations `extract_corridor` will
+/// build, whatever configuration it is handed.
+///
+/// This is a LIBRARY BACKSTOP, not a policy. Callers that validate their input
+/// (the Taj sidecar rejects `forward_extent_m` above its own
+/// `MAX_FORWARD_EXTENT_M`, which is exactly this ceiling × the 0.1 m station
+/// floor) never reach it. It exists because `TajConfig` is public and
+/// unvalidated: a direct caller can set `forward_extent_m` to any finite f64,
+/// and Rust's float→int `as` cast SATURATES, so `(1e300 / 0.1).ceil() as usize`
+/// yields `usize::MAX`. The subsequent `nstations + 1` then panicked with an
+/// integer overflow in debug and wrapped to a ~1.8e19-iteration loop in release.
+///
+/// Clamping is fail-SAFE rather than fail-open: fewer stations produce a
+/// SHORTER corridor, i.e. less claimed free space, so a downstream containment
+/// check becomes more conservative, never less.
+const MAX_CORRIDOR_STATIONS: usize = 5_000;
+
+/// Number of corridor stations for a forward extent and station spacing,
+/// saturating-cast safe and bounded by [`MAX_CORRIDOR_STATIONS`].
+///
+/// Returns 0 for any non-finite or non-positive input rather than propagating a
+/// garbage count into an allocation.
+fn corridor_station_count(forward_extent_m: f64, station_m: f64) -> usize {
+    if !forward_extent_m.is_finite()
+        || forward_extent_m <= 0.0
+        || !station_m.is_finite()
+        || station_m <= 0.0
+    {
+        return 0;
+    }
+    let raw = (forward_extent_m / station_m).ceil();
+    if raw.is_nan() || raw <= 0.0 {
+        return 0;
+    }
+    // The DIVISION itself can overflow f64 (`f64::MAX / 0.1` is +inf). That
+    // means "astronomically many stations", not "none" — clamp it like any
+    // other over-large count rather than collapsing to an empty corridor.
+    //
+    // Compare in f64 BEFORE casting: `as usize` saturates, so testing the cast
+    // result against the ceiling would already have lost the overflow.
+    if !raw.is_finite() || raw >= MAX_CORRIDOR_STATIONS as f64 {
+        return MAX_CORRIDOR_STATIONS;
+    }
+    raw as usize
+}
+
 impl TajPhaseA {
     #[must_use]
     pub fn new(cfg: TajConfig) -> Self {
@@ -441,9 +487,13 @@ impl TajPhaseA {
         let cap = self.cfg.open_half_width_m;
         let step = self.cfg.corridor_station_m.max(0.1);
 
-        let nstations = (ext / step).ceil() as usize;
-        let mut left = Vec::with_capacity(nstations + 1);
-        let mut right = Vec::with_capacity(nstations + 1);
+        // Bounded + saturating-cast safe: `TajConfig` is public and unvalidated,
+        // so a direct caller can hand us any finite extent (see
+        // `corridor_station_count`). `saturating_add` keeps the `+ 1` honest
+        // even at the ceiling.
+        let nstations = corridor_station_count(ext, step);
+        let mut left = Vec::with_capacity(nstations.saturating_add(1));
+        let mut right = Vec::with_capacity(nstations.saturating_add(1));
         for i in 0..=nstations {
             let xs = (i as f64 * step).min(ext);
             let mut left_y = cap; // nearest left obstacle in this station's window
@@ -3704,6 +3754,98 @@ mod tests {
         assert!(
             max_y < 1.0,
             "straight (CV) path stays near y≈0, got {max_y}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Corridor-station bound (library backstop)
+    //
+    // `TajConfig` is public and unvalidated, so these cover the callers that
+    // bypass the sidecar's `MAX_FORWARD_EXTENT_M` check entirely. Before the
+    // bound, `forward_extent_m = 1e300` saturated the float->usize cast to
+    // `usize::MAX` and `nstations + 1` panicked with an integer overflow at
+    // this file's line 445 (debug) / wrapped into a ~1.8e19-iteration loop
+    // (release).
+    // -----------------------------------------------------------------
+
+    fn probe_scan() -> LaserScan {
+        LaserScan {
+            angle_min_rad: -1.0,
+            angle_increment_rad: 0.01,
+            range_min_m: 0.1,
+            range_max_m: 12.0,
+            ranges: vec![1.0; 16],
+            stamp_ms: 1_000,
+        }
+    }
+
+    #[test]
+    fn corridor_station_count_is_bounded_and_saturation_safe() {
+        // Normal configured geometry is untouched by the clamp.
+        assert_eq!(corridor_station_count(8.0, 1.0), 8);
+        assert_eq!(corridor_station_count(20.0, 1.0), 20);
+        assert_eq!(corridor_station_count(40.0, 1.0), 40);
+        // The sidecar's accepted maximum at the 0.1 m station floor lands
+        // EXACTLY on the ceiling — the two constants are deliberately paired,
+        // so a validated request never engages the clamp.
+        assert_eq!(corridor_station_count(500.0, 0.1), MAX_CORRIDOR_STATIONS);
+        // Beyond it, the count is clamped rather than saturating to usize::MAX.
+        assert_eq!(corridor_station_count(1e300, 0.1), MAX_CORRIDOR_STATIONS);
+        assert_eq!(corridor_station_count(f64::MAX, 0.1), MAX_CORRIDOR_STATIONS);
+        // Degenerate inputs yield 0 rather than a garbage allocation size.
+        for (ext, step) in [
+            (f64::NAN, 1.0),
+            (f64::INFINITY, 1.0),
+            (f64::NEG_INFINITY, 1.0),
+            (-1.0, 1.0),
+            (0.0, 1.0),
+            (8.0, f64::NAN),
+            (8.0, 0.0),
+            (8.0, -1.0),
+        ] {
+            assert_eq!(corridor_station_count(ext, step), 0, "{ext:e} / {step:e}");
+        }
+    }
+
+    #[test]
+    fn huge_finite_extent_does_not_panic_or_hang() {
+        // The exact reported crasher, driven straight at the library.
+        for extent in [1e300, 1e30, f64::MAX, 1e6] {
+            let taj = TajPhaseA::new(TajConfig {
+                forward_extent_m: extent,
+                ..Default::default()
+            });
+            let out = taj.process(&probe_scan(), 1_000);
+            // Reaching this line at all is the assertion: no overflow panic in
+            // debug, no unbounded loop in release.
+            assert!(
+                out.corridor.left.len() <= MAX_CORRIDOR_STATIONS + 1,
+                "{extent:e} produced {} boundary vertices",
+                out.corridor.left.len()
+            );
+            assert!(out.corridor.right.len() <= MAX_CORRIDOR_STATIONS + 1);
+        }
+    }
+
+    #[test]
+    fn clamping_shortens_the_corridor_rather_than_extending_it() {
+        // Fail-SAFE, not fail-open: clamping yields FEWER stations, so less
+        // claimed free space. A corridor that grew under clamping would be the
+        // dangerous direction.
+        let taj = TajPhaseA::new(TajConfig {
+            forward_extent_m: 1e300,
+            ..Default::default()
+        });
+        let clamped = taj.process(&probe_scan(), 1_000);
+        let furthest = clamped
+            .corridor
+            .left
+            .iter()
+            .map(|p| p.x_m)
+            .fold(0.0_f64, f64::max);
+        assert!(
+            furthest.is_finite(),
+            "every boundary vertex must be finite, got {furthest}"
         );
     }
 }
