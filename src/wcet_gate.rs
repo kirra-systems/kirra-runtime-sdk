@@ -159,10 +159,17 @@ pub const GOVERNOR_VERDICT_WCET_CI_THRESHOLD_MICROS: u64 = 1000;
 /// The containment check is structurally heavier than the per-command
 /// kinematic guards: per call it does
 ///   `MAX_TRAJECTORY_HORIZON × (left_vertices + right_vertices) × 4`
-/// polygon-edge tests at worst case (≈ 50 × 256 × 4 = 51 200 tests, each
-/// a ray-cast crossing test + a closed-form segment-distance computation).
+/// polygon-edge tests at worst case (≈ 50 × 256 × 4 = 51 200 tests).
 /// That's ~3 orders of magnitude more scalar work than the per-command
 /// checks, so the per-command threshold (1 ms) does not apply directly.
+///
+/// Since the C1 swept-footprint change each test is a segment-to-segment
+/// distance (an orientation-based crossing test, then up to four
+/// point-to-segment distances) rather than a single point-to-segment
+/// distance — the corner's whole CHORD between consecutive poses is checked,
+/// not just its sampled endpoints. Same test COUNT and same `O(poses ×
+/// vertices)`, roughly 3× the arithmetic inside each: measured ~340 µs → ~950 µs
+/// p99.9 release on the CI-class host, still ~10× under this threshold.
 ///
 /// 10 000 µs is generous for debug-mode CI (where this test runs by
 /// default — release builds are ~5–10× faster, putting the same workload

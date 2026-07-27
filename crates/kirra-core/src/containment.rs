@@ -74,6 +74,30 @@ pub const CORRIDOR_WINDING_AREA_EPS_M2: f64 = 1e-9;
 /// `CONTAINMENT_LATERAL_MARGIN_M` inside the corridor polygon's edges.
 pub const CONTAINMENT_LATERAL_MARGIN_M: f64 = 0.40;
 
+/// Largest heading change (rad) tolerated between two CONSECUTIVE poses before
+/// the swept-footprint bound refuses to reason about the segment.
+///
+/// The sweep bound models motion between consecutive poses as ONE
+/// constant-curvature rigid-body segment — the bicycle-model arc every doer
+/// here emits, and what makes the sagitta formula valid. A half-turn or more
+/// between two samples is not a sampling of such an arc: it is a mis-ordered
+/// trajectory, a wrapped heading, or a planner sampling far too sparsely to
+/// bound. No inflation rescues an unmodellable segment, so it fails closed.
+///
+/// π rather than something smaller because the formula stays valid right up to
+/// a half-turn — this marks where the MODEL stops applying, not where the
+/// geometry gets uncomfortable. Tighter sampling discipline belongs in the
+/// planner contract, not here.
+const MAX_SEGMENT_HEADING_CHANGE_RAD: f64 = core::f64::consts::PI;
+
+/// Heading change (rad) below which a segment is treated as exactly straight.
+///
+/// Both `R = chord / (2 sin(θ/2))` and the sagitta are 0/0 at exactly zero.
+/// Below this threshold the true sagitta is under 1e-18 × chord — orders of
+/// magnitude beneath f64 resolution at metre scale — so returning zero is exact
+/// in floating point and sidesteps the singularity.
+const STRAIGHT_SEGMENT_HEADING_EPS_RAD: f64 = 1e-9;
+
 /// Vehicle pose in world frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pose {
@@ -266,15 +290,46 @@ pub fn validate_trajectory_containment(
         return EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture);
     }
 
-    let margin_sq = margin * margin;
-
     for pose in trajectory.iter() {
         if !pose_is_finite(pose) {
             return EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture);
         }
-        let corners = footprint_corners(pose, footprint);
-        for corner in &corners {
+    }
+
+    // A single pose sweeps nothing: check it where it stands. Byte-identical to
+    // the pre-sweep behaviour for this input class.
+    if trajectory.len() == 1 {
+        let margin_sq = margin * margin;
+        for corner in &footprint_corners(&trajectory[0], footprint) {
             if !corner_inside_corridor(corner, corridor, margin_sq) {
+                return EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture);
+            }
+        }
+        return EnforceAction::Allow;
+    }
+
+    // C1 swept-footprint check. Every corner's CHORD between consecutive poses
+    // is tested as a segment, inflated by the segment's sagitta — so the
+    // along-track span is covered continuously (no sampling gap) and the
+    // cross-track arc bulge is covered by the inflation. Every pose is an
+    // endpoint of some chord, so per-pose containment is subsumed, not skipped.
+    let r_max = max_corner_radius_m(footprint);
+    for i in 1..trajectory.len() {
+        let (prev, cur) = (&trajectory[i - 1], &trajectory[i]);
+        let sagitta = match segment_sagitta_m(prev, cur, r_max) {
+            Some(s) => s,
+            // Unmodellable segment: no inflation makes it safe, so refuse.
+            None => return EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
+        };
+        let inflated = margin + sagitta;
+        if !inflated.is_finite() {
+            return EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture);
+        }
+        let margin_sq = inflated * inflated;
+        let from = footprint_corners(prev, footprint);
+        let to = footprint_corners(cur, footprint);
+        for c in 0..4 {
+            if !chord_clears_corridor(&from[c], &to[c], corridor, margin_sq) {
                 return EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture);
             }
         }
@@ -407,6 +462,192 @@ fn corner_inside_corridor(corner: &Point, corridor: &Corridor, margin_sq: f64) -
     }
 
     inside && min_dist_sq >= margin_sq
+}
+
+/// Distance (m) from the rear axle to the FARTHEST footprint corner.
+///
+/// One radius bounds the whole body, so the sagitta is valid for every corner
+/// at once. The rear corners sit closer and are therefore bounded slightly more
+/// conservatively than strictly necessary — centimetres at robot scale, traded
+/// for one bound instead of four.
+#[inline]
+fn max_corner_radius_m(f: &VehicleFootprint) -> f64 {
+    let half_w = f.width_m * 0.5;
+    let front = (f.wheelbase_m + f.overhang_front_m).hypot(half_w);
+    let rear = f.overhang_rear_m.hypot(half_w);
+    if front > rear {
+        front
+    } else {
+        rear
+    }
+}
+
+/// Wraps an angle to `(-π, π]`. A raw difference of `+3π/2` is a quarter-turn
+/// the other way, not a three-quarter turn; without this an ordinary heading
+/// wrap would look like an unmodellable segment and fail closed spuriously.
+#[inline]
+fn wrap_to_pi(a: f64) -> f64 {
+    let two_pi = 2.0 * core::f64::consts::PI;
+    let mut x = a % two_pi;
+    if x > core::f64::consts::PI {
+        x -= two_pi;
+    } else if x <= -core::f64::consts::PI {
+        x += two_pi;
+    }
+    x
+}
+
+/// Maximum distance (m) any footprint corner strays from its own CHORD while
+/// traversing one trajectory segment. `None` = unmodellable, fail closed.
+///
+/// # What this covers, and why a chord
+///
+/// Sampling the footprint AT poses misses the region swept BETWEEN them. Two
+/// distinct holes live there: the along-track span the samples never test, and
+/// the cross-track BULGE where a turning corner's path bows away from the
+/// straight line between its sampled positions.
+///
+/// Testing the chord as a segment closes the first hole exactly — there is no
+/// residual along-track gap to bound. This function bounds only the second.
+///
+/// Note what does NOT work: the convex hull of two consecutive footprints. The
+/// arc bulges outside it, so the hull is not a conservative envelope. Neither
+/// is an isotropic "within L/2 of an endpoint" displacement bound: it is
+/// rigorous but scales with total travel, so a straight 10 m segment down the
+/// middle of a corridor would demand 5 m of lateral clearance. The deviation
+/// has to be measured from the chord, which is what the sagitta is.
+///
+/// # The bound
+///
+/// Modelling the segment as a constant-curvature rigid-body arc, a point at
+/// radius `R` about the instantaneous centre deviates from its chord by
+/// `R·(1 − cos(θ/2))` at the midpoint, the maximum over the arc. The rear axle
+/// turns at `R_axle = chord / (2 sin(θ/2))`, and no corner is farther than
+/// `r_max` from the axle, so every corner satisfies
+///
+///   `sagitta ≤ (R_axle + r_max) · (1 − cos(θ/2))`
+///
+/// Straight motion gives exactly zero: the bound costs nothing where there is
+/// no curvature, and grows only with the turn actually proposed.
+#[inline]
+fn segment_sagitta_m(a: &Pose, b: &Pose, r_max: f64) -> Option<f64> {
+    let theta = wrap_to_pi(b.heading_rad - a.heading_rad).abs();
+    if !theta.is_finite() || theta >= MAX_SEGMENT_HEADING_CHANGE_RAD {
+        return None;
+    }
+    if theta < STRAIGHT_SEGMENT_HEADING_EPS_RAD {
+        return Some(0.0);
+    }
+    let chord = (b.x_m - a.x_m).hypot(b.y_m - a.y_m);
+    if !chord.is_finite() || !r_max.is_finite() {
+        return None;
+    }
+    let half = 0.5 * theta;
+    let r_axle = chord / (2.0 * half.sin());
+    let sagitta = (r_axle + r_max) * (1.0 - half.cos());
+    if !sagitta.is_finite() {
+        return None;
+    }
+    Some(sagitta)
+}
+
+/// True iff the whole segment `a→b` lies inside the corridor with at least
+/// `margin` (squared) clearance from every polygon edge.
+///
+/// Same shape as [`corner_inside_corridor`], lifted from a point to a segment:
+/// one PNPoly test anchors which side we are on, and the clearance test becomes
+/// segment-to-edge. Clearance `≥ margin > 0` on every edge means the segment
+/// cannot have crossed the boundary, so anchoring inside-ness at one endpoint
+/// is sufficient for the whole chord.
+fn chord_clears_corridor(a: &Point, b: &Point, corridor: &Corridor, margin_sq: f64) -> bool {
+    if !(point_is_finite(a) && point_is_finite(b)) {
+        return false;
+    }
+
+    let n_left = corridor.left.len();
+    let n_right = corridor.right.len();
+    let n_total = n_left + n_right;
+    if n_total < 4 {
+        return false; // degenerate; conservative reject
+    }
+
+    let mut inside = false;
+    let mut min_dist_sq = f64::INFINITY;
+
+    let mut k = 0;
+    while k < n_total {
+        let e0 = polygon_vertex(corridor, k);
+        let e1 = polygon_vertex(corridor, (k + 1) % n_total);
+
+        if !(point_is_finite(&e0) && point_is_finite(&e1)) {
+            return false; // degenerate vertex; conservative reject
+        }
+
+        // Ray-cast inside test for endpoint `a` (standard PNPoly).
+        if (e0.y_m > a.y_m) != (e1.y_m > a.y_m) {
+            let dy = e1.y_m - e0.y_m;
+            if dy != 0.0 {
+                let x_cross = (e1.x_m - e0.x_m) * (a.y_m - e0.y_m) / dy + e0.x_m;
+                if a.x_m < x_cross {
+                    inside = !inside;
+                }
+            }
+        }
+
+        let dist_sq = segment_to_segment_dist_sq(a, b, &e0, &e1);
+        if dist_sq < min_dist_sq {
+            min_dist_sq = dist_sq;
+        }
+
+        k += 1;
+    }
+
+    inside && min_dist_sq >= margin_sq
+}
+
+/// Squared distance between segments `p0→p1` and `q0→q1`. Zero if they cross.
+///
+/// Non-crossing segments attain their minimum separation at an endpoint of one
+/// against the other, so the four point-to-segment distances cover every case.
+#[inline]
+fn segment_to_segment_dist_sq(p0: &Point, p1: &Point, q0: &Point, q1: &Point) -> f64 {
+    if segments_intersect(p0, p1, q0, q1) {
+        return 0.0;
+    }
+    let mut best = point_to_segment_dist_sq(p0, q0, q1);
+    let d = point_to_segment_dist_sq(p1, q0, q1);
+    if d < best {
+        best = d;
+    }
+    let d = point_to_segment_dist_sq(q0, p0, p1);
+    if d < best {
+        best = d;
+    }
+    let d = point_to_segment_dist_sq(q1, p0, p1);
+    if d < best {
+        best = d;
+    }
+    best
+}
+
+#[inline]
+fn cross_z(o: &Point, a: &Point, b: &Point) -> f64 {
+    (a.x_m - o.x_m) * (b.y_m - o.y_m) - (a.y_m - o.y_m) * (b.x_m - o.x_m)
+}
+
+/// Proper-or-touching segment intersection via the four orientation signs.
+///
+/// Collinear-overlap cases return `false` here; they are still caught, because
+/// an overlapping pair has zero endpoint-to-segment distance and the caller
+/// takes the minimum over all four.
+#[inline]
+fn segments_intersect(p0: &Point, p1: &Point, q0: &Point, q1: &Point) -> bool {
+    let d1 = cross_z(p0, p1, q0);
+    let d2 = cross_z(p0, p1, q1);
+    let d3 = cross_z(q0, q1, p0);
+    let d4 = cross_z(q0, q1, p1);
+    ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
 }
 
 #[inline]
@@ -1090,5 +1331,344 @@ mod tests {
         // Internal consistency: length should be wheelbase + overhangs.
         let derived = c.wheelbase_m + c.overhang_front_m + c.overhang_rear_m;
         assert!((c.length_m - derived).abs() < 1e-9);
+    }
+    // -----------------------------------------------------------------------
+    // C1 — swept-footprint containment
+    //
+    // The pre-C1 check sampled the footprint AT poses, so two holes lived
+    // between samples: the along-track span nothing tested, and the cross-track
+    // bulge of a turning corner. These pin both, and pin that closing them did
+    // not cost the straight-line cases.
+    // -----------------------------------------------------------------------
+
+    /// A small differential robot, the deployed R2 scale.
+    fn r2() -> VehicleFootprint {
+        VehicleFootprint {
+            width_m: 0.30,
+            length_m: 0.47,
+            overhang_front_m: 0.18,
+            overhang_rear_m: 0.09,
+            wheelbase_m: 0.20,
+        }
+    }
+
+    /// Poses along a circular arc of radius `r`, rear axle on the arc, heading
+    /// tangent — the constant-curvature bicycle segment the bound models.
+    fn arc_poses(cx: f64, cy: f64, r: f64, from_rad: f64, to_rad: f64, n: usize) -> Vec<Pose> {
+        (0..n)
+            .map(|i| {
+                let t = from_rad + (to_rad - from_rad) * (i as f64) / ((n - 1) as f64);
+                Pose {
+                    x_m: cx + r * t.cos(),
+                    y_m: cy + r * t.sin(),
+                    heading_rad: t + core::f64::consts::FRAC_PI_2,
+                }
+            })
+            .collect()
+    }
+
+    // --- the bound itself ---------------------------------------------------
+
+    #[test]
+    fn straight_motion_has_exactly_zero_sagitta() {
+        // The whole point of measuring deviation from the CHORD rather than
+        // from an endpoint: straight travel costs nothing, however far it goes.
+        for chord in [0.1, 1.0, 10.0, 100.0] {
+            let a = Pose {
+                x_m: 0.0,
+                y_m: 0.0,
+                heading_rad: 0.3,
+            };
+            let b = Pose {
+                x_m: chord * 0.3_f64.cos(),
+                y_m: chord * 0.3_f64.sin(),
+                heading_rad: 0.3,
+            };
+            assert_eq!(segment_sagitta_m(&a, &b, 1.0), Some(0.0), "chord {chord}");
+        }
+    }
+
+    #[test]
+    fn sagitta_grows_with_curvature() {
+        let r_max = 0.3;
+        let mut previous = -1.0;
+        for deg in [1.0_f64, 5.0, 15.0, 30.0, 60.0, 120.0] {
+            let theta = deg.to_radians();
+            let a = Pose {
+                x_m: 0.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            };
+            let b = Pose {
+                x_m: 0.5,
+                y_m: 0.0,
+                heading_rad: theta,
+            };
+            let s = segment_sagitta_m(&a, &b, r_max).expect("modellable");
+            assert!(
+                s > previous,
+                "sagitta must grow with heading change at {deg}deg"
+            );
+            previous = s;
+        }
+    }
+
+    #[test]
+    fn a_heading_wrap_is_not_a_half_turn() {
+        // Crossing +pi is an ordinary small turn. Without wrapping, the raw
+        // difference (~ -6.2 rad) would look unmodellable and fail closed on a
+        // perfectly normal trajectory.
+        let a = Pose {
+            x_m: 0.0,
+            y_m: 0.0,
+            heading_rad: 3.10,
+        };
+        let b = Pose {
+            x_m: 0.1,
+            y_m: 0.0,
+            heading_rad: -3.10,
+        };
+        let s = segment_sagitta_m(&a, &b, 0.3).expect("a wrap is modellable");
+        assert!(s.is_finite() && s < 0.05, "small turn through pi, got {s}");
+    }
+
+    #[test]
+    fn a_half_turn_between_samples_is_unmodellable() {
+        let a = Pose {
+            x_m: 0.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        };
+        let b = Pose {
+            x_m: 0.1,
+            y_m: 0.0,
+            heading_rad: core::f64::consts::PI,
+        };
+        assert_eq!(segment_sagitta_m(&a, &b, 0.3), None);
+    }
+
+    #[test]
+    fn an_unmodellable_segment_fails_closed_end_to_end() {
+        let (left, right) = straight_corridor(3.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        // Both poses sit dead centre and would pass individually.
+        let traj = vec![pose(20.0, 0.0, 0.0), pose(21.0, 0.0, core::f64::consts::PI)];
+        assert_eq!(
+            validate_trajectory_containment(&traj, &corridor, &r2(), FrameTrust::Trusted),
+            EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
+        );
+    }
+
+    // --- the holes it closes ------------------------------------------------
+
+    #[test]
+    fn an_inter_sample_excursion_is_caught() {
+        // Two poses inside an L-bend, sampled sparsely enough that the straight
+        // path between them cuts the inside corner. Both endpoints pass the
+        // pose-only check; the chord does not.
+        let left = vec![
+            Point { x_m: 0.0, y_m: 1.2 },
+            Point { x_m: 4.0, y_m: 1.2 },
+            Point {
+                x_m: 4.0,
+                y_m: 12.0,
+            },
+        ];
+        let right = vec![
+            Point {
+                x_m: 0.0,
+                y_m: -1.2,
+            },
+            Point {
+                x_m: 8.0,
+                y_m: -1.2,
+            },
+            Point {
+                x_m: 8.0,
+                y_m: 12.0,
+            },
+        ];
+        let corridor = healthy_corridor(&left, &right);
+        let fp = r2();
+
+        let entering = pose(1.0, 0.0, 0.0);
+        let leaving = pose(6.0, 8.0, core::f64::consts::FRAC_PI_2);
+
+        // Each pose on its own is comfortably contained...
+        for p in [entering, leaving] {
+            assert_eq!(
+                validate_trajectory_containment(&[p], &corridor, &fp, FrameTrust::Trusted),
+                EnforceAction::Allow,
+                "endpoint must pass in isolation, else the test proves nothing"
+            );
+        }
+        // ...but travelling straight between them leaves the corridor.
+        assert_eq!(
+            validate_trajectory_containment(
+                &[entering, leaving],
+                &corridor,
+                &fp,
+                FrameTrust::Trusted
+            ),
+            EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
+            "the path between two contained poses must itself be contained"
+        );
+    }
+
+    #[test]
+    fn a_straight_run_down_a_corridor_is_still_admitted() {
+        // The regression guard for the bound being too fat: an ordinary
+        // straight trajectory, sampled sparsely, must still Allow.
+        let (left, right) = straight_corridor(1.2, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let traj: Vec<Pose> = (0..20)
+            .map(|i| pose(5.0 + i as f64 * 4.0, 0.0, 0.0))
+            .collect();
+        assert_eq!(
+            validate_trajectory_containment(&traj, &corridor, &r2(), FrameTrust::Trusted),
+            EnforceAction::Allow,
+        );
+    }
+
+    #[test]
+    fn a_gentle_arc_inside_a_wide_corridor_is_admitted() {
+        // Curvature alone must not reject: the inflation has to be proportional
+        // to the actual bulge, not to the fact that a turn happened.
+        let (left, right) = straight_corridor(3.0, 60.0);
+        let corridor = healthy_corridor(&left, &right);
+        // A very shallow arc that stays near the centreline.
+        let traj: Vec<Pose> = (0..10)
+            .map(|i| {
+                let x = 10.0 + i as f64 * 2.0;
+                pose(x, 0.0002 * (x - 10.0) * (x - 10.0), 0.0004 * (x - 10.0))
+            })
+            .collect();
+        assert_eq!(
+            validate_trajectory_containment(&traj, &corridor, &r2(), FrameTrust::Trusted),
+            EnforceAction::Allow,
+        );
+    }
+
+    #[test]
+    fn a_single_pose_trajectory_is_unchanged_by_the_sweep_check() {
+        // No segment, nothing swept: the pre-C1 verdict must be preserved
+        // exactly, on both sides of the boundary.
+        let (left, right) = straight_corridor(1.2, 50.0);
+        let corridor = healthy_corridor(&left, &right);
+        let fp = r2();
+        assert_eq!(
+            validate_trajectory_containment(
+                &[pose(10.0, 0.0, 0.0)],
+                &corridor,
+                &fp,
+                FrameTrust::Trusted
+            ),
+            EnforceAction::Allow,
+        );
+        assert_eq!(
+            validate_trajectory_containment(
+                &[pose(10.0, 1.1, 0.0)],
+                &corridor,
+                &fp,
+                FrameTrust::Trusted
+            ),
+            EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
+        );
+    }
+
+    // --- the oracle ---------------------------------------------------------
+
+    /// Densely resample a constant-curvature segment and run the POSE-ONLY
+    /// check at every substep. This is the reference for "what the sweep really
+    /// does" — expensive, but it does not need to be fast in a test.
+    fn dense_pose_check(
+        a: &Pose,
+        b: &Pose,
+        corridor: &Corridor,
+        fp: &VehicleFootprint,
+        margin: f64,
+        steps: usize,
+    ) -> bool {
+        let margin_sq = margin * margin;
+        let dtheta = wrap_to_pi(b.heading_rad - a.heading_rad);
+        for i in 0..=steps {
+            let t = i as f64 / steps as f64;
+            // Interpolate along the arc: heading linearly, position along the
+            // chord plus the arc offset. For the shallow segments used here the
+            // chord interpolation with heading blend is a close approximation,
+            // and any residual only makes the oracle LESS strict — which is the
+            // safe direction for the assertion below.
+            let p = Pose {
+                x_m: a.x_m + (b.x_m - a.x_m) * t,
+                y_m: a.y_m + (b.y_m - a.y_m) * t,
+                heading_rad: a.heading_rad + dtheta * t,
+            };
+            for corner in &footprint_corners(&p, fp) {
+                if !corner_inside_corridor(corner, corridor, margin_sq) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn the_shipped_bound_is_never_looser_than_a_dense_sweep() {
+        // The conservatism claim, checked rather than asserted: wherever a dense
+        // resampling of the real motion finds a departure, the shipped
+        // chord+sagitta check must also refuse. A failure here means the bound
+        // admits something that actually leaves the corridor.
+        let (left, right) = straight_corridor(1.0, 40.0);
+        let corridor = healthy_corridor(&left, &right);
+        let fp = r2();
+        let margin = containment_margin_m(FrameTrust::Trusted).unwrap();
+
+        let mut checked = 0;
+        let mut oracle_rejections = 0;
+        // Sweep arcs of many radii and offsets across the corridor.
+        for radius in [2.0_f64, 4.0, 8.0, 16.0, 40.0] {
+            for offset in [-0.5_f64, -0.25, 0.0, 0.25, 0.5] {
+                for span_deg in [5.0_f64, 15.0, 40.0] {
+                    let span = span_deg.to_radians();
+                    let poses = arc_poses(
+                        8.0,
+                        offset - radius,
+                        radius,
+                        core::f64::consts::FRAC_PI_2 - span * 0.5,
+                        core::f64::consts::FRAC_PI_2 + span * 0.5,
+                        6,
+                    );
+                    for w in poses.windows(2) {
+                        checked += 1;
+                        let dense = dense_pose_check(&w[0], &w[1], &corridor, &fp, margin, 200);
+                        let shipped = validate_trajectory_containment(
+                            &[w[0], w[1]],
+                            &corridor,
+                            &fp,
+                            FrameTrust::Trusted,
+                        ) == EnforceAction::Allow;
+                        if !dense {
+                            oracle_rejections += 1;
+                            assert!(
+                                !shipped,
+                                "dense sweep found a departure the shipped bound admitted: \
+                                 radius={radius} offset={offset} span={span_deg}deg \
+                                 a={:?} b={:?}",
+                                w[0], w[1]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 100,
+            "corpus too small to mean anything: {checked}"
+        );
+        assert!(
+            oracle_rejections > 0,
+            "no segment in the corpus departed, so the assertion never fired — \
+             the corpus must contain real departures to be evidence of anything"
+        );
     }
 }
