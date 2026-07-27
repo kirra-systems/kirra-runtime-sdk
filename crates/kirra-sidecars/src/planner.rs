@@ -27,7 +27,8 @@ use kirra_core::frame_integrity::FrameTrust;
 use kirra_planner::{
     behavior::{
         intent_aware_predicted_vru_speed_cap, predicted_vru_speed_cap,
-        IntentAwarePredictedVruOccupancy, PredictedVruIntent, PredictedVruOccupancy,
+        probabilistic_vru_uncertainty_radius, IntentAwarePredictedVruOccupancy, PredictedVruIntent,
+        PredictedVruIntentProbability, PredictedVruOccupancy,
         DEFAULT_CROSSING_INTENT_BAND_EXTENSION_M, DEFAULT_MINIMUM_VRU_INTENT_CONFIDENCE,
         DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M, DEFAULT_VRU_YIELD_STANDOFF_M,
     },
@@ -97,6 +98,16 @@ pub struct PredictedVruPointReq {
     pub uncertainty_radius_m: f64,
 }
 
+/// One normalized intent hypothesis produced by Taj.
+///
+/// This is planner metadata only. It cannot create a track, create pedestrian
+/// authority, remove geometric occupancy, or weaken pedestrian RSS.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PredictedVruIntentProbabilityReq {
+    pub intent: String,
+    pub probability: f64,
+}
+
 /// Bounded VRU prediction produced by Taj.
 ///
 /// The model and fallback fields remain auditable metadata. Occy's behavioral
@@ -108,6 +119,11 @@ pub struct PredictedVruReq {
     pub intent: String,
     pub intent_confidence: f64,
     pub intent_reason: String,
+    /// Complete normalized intent distribution emitted by Taj.
+    ///
+    /// Empty preserves compatibility with older producers.
+    #[serde(default)]
+    pub intent_probabilities: Vec<PredictedVruIntentProbabilityReq>,
     pub points: Vec<PredictedVruPointReq>,
     pub horizon_s: f64,
     pub step_s: f64,
@@ -120,6 +136,18 @@ pub struct PredictedVruReq {
 const MAX_PREDICTED_VRUS: usize = 64;
 const MAX_PREDICTED_VRU_POINTS: usize = 16;
 const OCCY_VRU_BRAKE_DECEL_MPS2: f64 = 1.0;
+
+/// Maximum additional occupied radius contributed by crossing probability.
+///
+/// This is tighten-only: probability may increase uncertainty but can never
+/// shrink Taj's geometric uncertainty or weaken the baseline VRU cap.
+const OCCY_PROBABILISTIC_CROSSING_EXTENSION_M: f64 = 0.60;
+
+/// Additional occupied radius contributed by waiting-near-path probability.
+const OCCY_PROBABILISTIC_WAITING_EXTENSION_M: f64 = 0.25;
+
+/// Additional occupied radius contributed by unresolved intent probability.
+const OCCY_PROBABILISTIC_UNKNOWN_EXTENSION_M: f64 = 0.40;
 
 #[derive(Deserialize)]
 pub struct PlanRequest {
@@ -366,6 +394,78 @@ fn valid_vru_fallback(value: &str) -> bool {
     )
 }
 
+fn validate_intent_probability_distribution(
+    prediction: &PredictedVruReq,
+) -> Result<(), SeamRejection> {
+    if prediction.intent_probabilities.is_empty() {
+        return Ok(());
+    }
+
+    const EXPECTED_INTENT_COUNT: usize = 6;
+    const NORMALIZATION_EPSILON: f64 = 1.0e-6;
+
+    if prediction.intent_probabilities.len() != EXPECTED_INTENT_COUNT {
+        return Err(SeamRejection {
+            code: "INVALID_VRU_INTENT_DISTRIBUTION",
+            detail: format!(
+                "prediction track {} carries {} intent hypotheses; expected {}",
+                prediction.track_id,
+                prediction.intent_probabilities.len(),
+                EXPECTED_INTENT_COUNT
+            ),
+        });
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut probability_sum = 0.0;
+
+    for hypothesis in &prediction.intent_probabilities {
+        let intent =
+            parse_predicted_vru_intent(&hypothesis.intent).ok_or_else(|| SeamRejection {
+                code: "UNKNOWN_VRU_INTENT_PROBABILITY",
+                detail: format!(
+                    "prediction track {} carries unknown probability intent token {:?}",
+                    prediction.track_id, hypothesis.intent
+                ),
+            })?;
+
+        if !seen.insert(hypothesis.intent.as_str()) {
+            return Err(SeamRejection {
+                code: "DUPLICATE_VRU_INTENT_PROBABILITY",
+                detail: format!(
+                    "prediction track {} repeats intent token {:?}",
+                    prediction.track_id, hypothesis.intent
+                ),
+            });
+        }
+
+        if !hypothesis.probability.is_finite() || !(0.0..=1.0).contains(&hypothesis.probability) {
+            return Err(SeamRejection {
+                code: "INVALID_VRU_INTENT_PROBABILITY",
+                detail: format!(
+                    "prediction track {} carries invalid probability for {:?}",
+                    prediction.track_id, hypothesis.intent
+                ),
+            });
+        }
+
+        let _ = intent;
+        probability_sum += hypothesis.probability;
+    }
+
+    if !probability_sum.is_finite() || (probability_sum - 1.0).abs() > NORMALIZATION_EPSILON {
+        return Err(SeamRejection {
+            code: "UNNORMALIZED_VRU_INTENT_DISTRIBUTION",
+            detail: format!(
+                "prediction track {} intent probabilities sum to {}",
+                prediction.track_id, probability_sum
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 /// Validate prediction bounds and authority relationships.
 ///
 /// A prediction cannot exist without a matching fused pedestrian entry. This
@@ -392,6 +492,8 @@ fn validate_predicted_vrus(req: &PlanRequest) -> Result<(), SeamRejection> {
     let mut prediction_ids = std::collections::BTreeSet::new();
 
     for prediction in &req.predicted_vrus {
+        validate_intent_probability_distribution(prediction)?;
+
         if parse_predicted_vru_intent(&prediction.intent).is_none() {
             return Err(SeamRejection {
                 code: "UNKNOWN_VRU_INTENT",
@@ -755,16 +857,33 @@ pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
         .predicted_vrus
         .iter()
         .flat_map(|prediction| {
-            prediction
-                .points
+            let probability_distribution: Vec<PredictedVruIntentProbability> = prediction
+                .intent_probabilities
                 .iter()
-                .map(move |point| PredictedVruOccupancy {
+                .map(|hypothesis| PredictedVruIntentProbability {
+                    intent: parse_predicted_vru_intent(&hypothesis.intent)
+                        .expect("validated intent probability token above"),
+                    probability: hypothesis.probability,
+                })
+                .collect();
+
+            prediction.points.iter().map(move |point| {
+                let uncertainty_radius_m = probabilistic_vru_uncertainty_radius(
+                    point.uncertainty_radius_m,
+                    &probability_distribution,
+                    OCCY_PROBABILISTIC_CROSSING_EXTENSION_M,
+                    OCCY_PROBABILISTIC_WAITING_EXTENSION_M,
+                    OCCY_PROBABILISTIC_UNKNOWN_EXTENSION_M,
+                );
+
+                PredictedVruOccupancy {
                     track_id: prediction.track_id,
                     time_s: point.time_s,
                     ahead_m: point.x,
                     lateral_offset_m: point.y,
-                    uncertainty_radius_m: point.uncertainty_radius_m,
-                })
+                    uncertainty_radius_m,
+                }
+            })
         })
         .collect();
 
@@ -782,18 +901,35 @@ pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
             let intent = parse_predicted_vru_intent(&prediction.intent)
                 .expect("validated predicted VRU intent above");
 
-            prediction
-                .points
+            let probability_distribution: Vec<PredictedVruIntentProbability> = prediction
+                .intent_probabilities
                 .iter()
-                .map(move |point| IntentAwarePredictedVruOccupancy {
+                .map(|hypothesis| PredictedVruIntentProbability {
+                    intent: parse_predicted_vru_intent(&hypothesis.intent)
+                        .expect("validated intent probability token above"),
+                    probability: hypothesis.probability,
+                })
+                .collect();
+
+            prediction.points.iter().map(move |point| {
+                let uncertainty_radius_m = probabilistic_vru_uncertainty_radius(
+                    point.uncertainty_radius_m,
+                    &probability_distribution,
+                    OCCY_PROBABILISTIC_CROSSING_EXTENSION_M,
+                    OCCY_PROBABILISTIC_WAITING_EXTENSION_M,
+                    OCCY_PROBABILISTIC_UNKNOWN_EXTENSION_M,
+                );
+
+                IntentAwarePredictedVruOccupancy {
                     track_id: prediction.track_id,
                     intent,
                     intent_confidence: prediction.intent_confidence,
                     time_s: point.time_s,
                     ahead_m: point.x,
                     lateral_offset_m: point.y,
-                    uncertainty_radius_m: point.uncertainty_radius_m,
-                })
+                    uncertainty_radius_m,
+                }
+            })
         })
         .collect();
 
@@ -1153,6 +1289,7 @@ mod tests {
             intent: "unknown".to_string(),
             intent_confidence: 0.0,
             intent_reason: "ambiguous_motion".to_string(),
+            intent_probabilities: vec![],
             points,
             horizon_s: 3.0,
             step_s: 1.0,
