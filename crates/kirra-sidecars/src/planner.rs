@@ -45,6 +45,7 @@ use kirra_trajectory::validation::validate_trajectory_slow_explained;
 use kirra_trajectory::vru::{PedestrianScene, PerceivedPedestrian, VruRssParams};
 use kirra_trajectory::VehicleConfig;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// In-map goal slack (m): how far outside the supplied corridor's bounding
 /// box a goal may point. A PLUMBING bound, not a safety number — the checker
@@ -260,7 +261,7 @@ pub struct VehicleReq {
     pub lateral_clearance_target_m: Option<f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TrajPt {
     pub x: f64,
     pub y: f64,
@@ -274,6 +275,12 @@ pub struct PlanResponse {
     /// Exact Taj evidence frame against which this proposal was authored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub perception_frame_id: Option<PerceptionFrameIdReq>,
+    /// Deterministic SHA-256 identity of the complete Occy proposal and the
+    /// Taj evidence frame used to author it.
+    ///
+    /// This is proposal identity only, not actuation authority. The downstream
+    /// release-token path must bind and verify this digest before motor release.
+    pub proposal_digest: String,
     pub kind: String,
     pub verdict: String,
     /// F13 (#1097): this `/plan` result is ADVISORY — a demo/inspection verdict from
@@ -320,6 +327,79 @@ impl SeamRejection {
         })
         .to_string()
     }
+}
+
+const OCCY_PROPOSAL_DIGEST_DOMAIN: &[u8] = b"KIRRA-OCCY-PROPOSAL-DIGEST-V1";
+
+fn proposal_hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn proposal_hash_str(hasher: &mut Sha256, value: &str) {
+    proposal_hash_bytes(hasher, value.as_bytes());
+}
+
+fn proposal_hash_u64(hasher: &mut Sha256, value: u64) {
+    hasher.update(value.to_le_bytes());
+}
+
+fn proposal_hash_f64(hasher: &mut Sha256, value: f64) {
+    hasher.update(value.to_bits().to_le_bytes());
+}
+
+/// Compute the deterministic identity of an Occy-authored proposal.
+///
+/// The digest covers:
+/// - an explicit domain/version;
+/// - the complete Taj perception-frame identity, when present;
+/// - proposal kind;
+/// - the complete ordered trajectory authored by Occy.
+///
+/// It deliberately excludes verdict narration and other presentation metadata.
+/// A checker wording change must not alter the identity of the proposal that was
+/// evaluated.
+fn compute_proposal_digest(
+    frame: Option<&PerceptionFrameIdReq>,
+    kind: &str,
+    trajectory: &[TrajPt],
+) -> String {
+    let mut hasher = Sha256::new();
+
+    proposal_hash_bytes(&mut hasher, OCCY_PROPOSAL_DIGEST_DOMAIN);
+
+    match frame {
+        Some(frame) => {
+            hasher.update([1u8]);
+            proposal_hash_u64(&mut hasher, frame.scan_sequence);
+
+            match frame.camera_sequence {
+                Some(sequence) => {
+                    hasher.update([1u8]);
+                    proposal_hash_u64(&mut hasher, sequence);
+                }
+                None => hasher.update([0u8]),
+            }
+
+            proposal_hash_u64(&mut hasher, frame.tracker_generation);
+            proposal_hash_str(&mut hasher, &frame.profile_digest);
+            proposal_hash_str(&mut hasher, &frame.evidence_digest);
+        }
+        None => hasher.update([0u8]),
+    }
+
+    proposal_hash_str(&mut hasher, kind);
+    proposal_hash_u64(&mut hasher, trajectory.len() as u64);
+
+    for point in trajectory {
+        proposal_hash_f64(&mut hasher, point.x);
+        proposal_hash_f64(&mut hasher, point.y);
+        proposal_hash_f64(&mut hasher, point.heading);
+        proposal_hash_f64(&mut hasher, point.v);
+        proposal_hash_f64(&mut hasher, point.t);
+    }
+
+    hex::encode(hasher.finalize())
 }
 
 fn is_lowercase_sha256_hex(value: &str) -> bool {
@@ -1097,22 +1177,48 @@ pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
         TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
     );
 
+    let kind = match plan.kind {
+        ProposalKind::Motion => "Motion",
+        ProposalKind::SafeStop => "SafeStop",
+    }
+    .to_string();
+
+    let verdict_wire = match verdict {
+        TrajectoryVerdict::Accept => "Accept",
+        TrajectoryVerdict::Clamp => "Clamp",
+        TrajectoryVerdict::MRCFallback => "MRCFallback",
+        // Transitional registration state — never produced by the checker;
+        // named for exhaustiveness (fails closed downstream regardless).
+        TrajectoryVerdict::Pending => "Pending",
+    }
+    .to_string();
+
+    // Build the complete proposal representation once. The proposal digest
+    // always covers these authored points, including when a checker refusal
+    // causes the public response to hide them.
+    let proposed_trajectory: Vec<TrajPt> = plan
+        .trajectory
+        .iter()
+        .map(|p| TrajPt {
+            x: p.pose.x_m,
+            y: p.pose.y_m,
+            heading: p.pose.heading_rad,
+            v: p.velocity_mps,
+            t: p.time_from_start_s,
+        })
+        .collect();
+
+    let proposal_digest = compute_proposal_digest(
+        req.perception_frame_id.as_ref(),
+        &kind,
+        &proposed_trajectory,
+    );
+
     Ok(PlanResponse {
         perception_frame_id: req.perception_frame_id.clone(),
-        kind: match plan.kind {
-            ProposalKind::Motion => "Motion",
-            ProposalKind::SafeStop => "SafeStop",
-        }
-        .to_string(),
-        verdict: match verdict {
-            TrajectoryVerdict::Accept => "Accept",
-            TrajectoryVerdict::Clamp => "Clamp",
-            TrajectoryVerdict::MRCFallback => "MRCFallback",
-            // Transitional registration state — never produced by the checker;
-            // named for exhaustiveness (fails closed downstream regardless).
-            TrajectoryVerdict::Pending => "Pending",
-        }
-        .to_string(),
+        proposal_digest,
+        kind,
+        verdict: verdict_wire,
         // F13 (#1097): an advisory result, never actuation authority.
         advisory: true,
         admitted,
@@ -1120,16 +1226,7 @@ pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
         // A refusal returns an EMPTY trajectory so a consumer that ignores the
         // verdict field cannot read a refused proposal's poses as a drivable path.
         trajectory: if admitted {
-            plan.trajectory
-                .iter()
-                .map(|p| TrajPt {
-                    x: p.pose.x_m,
-                    y: p.pose.y_m,
-                    heading: p.pose.heading_rad,
-                    v: p.velocity_mps,
-                    t: p.time_from_start_s,
-                })
-                .collect()
+            proposed_trajectory
         } else {
             Vec::new()
         },
@@ -1167,6 +1264,61 @@ mod tests {
             targets_stamp_ms: None,
             now_ms: None,
         }
+    }
+
+    fn evidence_frame() -> PerceptionFrameIdReq {
+        PerceptionFrameIdReq {
+            scan_sequence: 7,
+            camera_sequence: Some(11),
+            tracker_generation: 3,
+            profile_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            evidence_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_string(),
+        }
+    }
+
+    #[test]
+    fn proposal_digest_is_lowercase_sha256_and_deterministic() {
+        let mut req = base_request();
+        req.perception_frame_id = Some(evidence_frame());
+
+        let first = handle_plan(&req).expect("first plan");
+        let second = handle_plan(&req).expect("second equivalent plan");
+
+        assert_eq!(first.proposal_digest, second.proposal_digest);
+        assert!(is_lowercase_sha256_hex(&first.proposal_digest));
+    }
+
+    #[test]
+    fn proposal_digest_changes_when_evidence_identity_changes() {
+        let mut first_req = base_request();
+        first_req.perception_frame_id = Some(evidence_frame());
+
+        let mut second_req = base_request();
+        let mut changed = evidence_frame();
+        changed.scan_sequence += 1;
+        second_req.perception_frame_id = Some(changed);
+
+        let first = handle_plan(&first_req).expect("first plan");
+        let second = handle_plan(&second_req).expect("second plan");
+
+        assert_ne!(first.proposal_digest, second.proposal_digest);
+    }
+
+    #[test]
+    fn proposal_digest_changes_when_authored_trajectory_changes() {
+        let mut first_req = base_request();
+        first_req.perception_frame_id = Some(evidence_frame());
+
+        let mut second_req = base_request();
+        second_req.perception_frame_id = Some(evidence_frame());
+        second_req.cruise = 1.5;
+
+        let first = handle_plan(&first_req).expect("first plan");
+        let second = handle_plan(&second_req).expect("second plan");
+
+        assert_ne!(first.proposal_digest, second.proposal_digest);
     }
 
     #[test]
@@ -1735,6 +1887,22 @@ mod tests {
     /// The #893 narration rides on a refused proposal: a corridor far too
     /// tight for the vehicle footprint forces a containment refusal, and the
     /// response carries the SPECIFIC reason — code + operator sentence.
+    #[test]
+    fn refused_proposal_still_has_a_deterministic_digest() {
+        let mut req = base_request();
+        req.perception_frame_id = Some(evidence_frame());
+        req.left = vec![[-5.0, 0.05], [100.0, 0.05]];
+        req.right = vec![[-5.0, -0.05], [100.0, -0.05]];
+
+        let first = handle_plan(&req).expect("seam admits; checker refuses");
+        let second = handle_plan(&req).expect("equivalent refusal repeats");
+
+        assert!(!first.admitted);
+        assert!(first.trajectory.is_empty());
+        assert!(is_lowercase_sha256_hex(&first.proposal_digest));
+        assert_eq!(first.proposal_digest, second.proposal_digest);
+    }
+
     #[test]
     fn refused_plan_carries_the_specific_narration_reason() {
         let mut req = base_request();
