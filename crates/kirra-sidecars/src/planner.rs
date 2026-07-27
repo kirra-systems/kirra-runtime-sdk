@@ -149,6 +149,19 @@ const OCCY_PROBABILISTIC_WAITING_EXTENSION_M: f64 = 0.25;
 /// Additional occupied radius contributed by unresolved intent probability.
 const OCCY_PROBABILISTIC_UNKNOWN_EXTENSION_M: f64 = 0.40;
 
+/// Identity of the exact Taj evidence frame used to author this proposal.
+///
+/// Optional temporarily for backward compatibility. When present, every field
+/// is validated fail-closed and echoed unchanged in the plan response.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PerceptionFrameIdReq {
+    pub scan_sequence: u64,
+    pub camera_sequence: Option<u64>,
+    pub tracker_generation: u64,
+    pub profile_digest: String,
+    pub evidence_digest: String,
+}
+
 #[derive(Deserialize)]
 pub struct PlanRequest {
     pub ego: EgoReq,
@@ -171,6 +184,12 @@ pub struct PlanRequest {
     /// introduce a planning authority through this channel.
     #[serde(default)]
     pub predicted_vrus: Vec<PredictedVruReq>,
+    /// Exact Taj evidence frame used to construct this planning request.
+    ///
+    /// Optional only for transitional compatibility. A supplied identity is
+    /// fully validated; malformed or partial evidence fails closed.
+    #[serde(default)]
+    pub perception_frame_id: Option<PerceptionFrameIdReq>,
     /// Optional vehicle footprint/kinematics for the CHECKER. Absent → the
     /// urban-car default (4.8 m). A small differential robot MUST pass its own
     /// dimensions, or the car-sized footprint can't fit a robot-scale corridor
@@ -252,6 +271,9 @@ pub struct TrajPt {
 
 #[derive(Debug, Serialize)]
 pub struct PlanResponse {
+    /// Exact Taj evidence frame against which this proposal was authored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub perception_frame_id: Option<PerceptionFrameIdReq>,
     pub kind: String,
     pub verdict: String,
     /// F13 (#1097): this `/plan` result is ADVISORY — a demo/inspection verdict from
@@ -298,6 +320,63 @@ impl SeamRejection {
         })
         .to_string()
     }
+}
+
+fn is_lowercase_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn validate_perception_frame_id(req: &PlanRequest) -> Result<(), SeamRejection> {
+    let Some(frame) = req.perception_frame_id.as_ref() else {
+        // Transitional compatibility path. A later production gate will make
+        // the evidence identity mandatory for R2 motion.
+        return Ok(());
+    };
+
+    if frame.scan_sequence == 0 {
+        return Err(SeamRejection {
+            code: "INVALID_PERCEPTION_SCAN_SEQUENCE",
+            detail: "perception scan_sequence must be greater than zero; NO MOTION".to_string(),
+        });
+    }
+
+    if frame.tracker_generation == 0 {
+        return Err(SeamRejection {
+            code: "INVALID_PERCEPTION_FRAME_ID",
+            detail: "perception tracker_generation must be greater than zero; NO MOTION"
+                .to_string(),
+        });
+    }
+
+    if frame.camera_sequence == Some(0) {
+        return Err(SeamRejection {
+            code: "INVALID_PERCEPTION_CAMERA_SEQUENCE",
+            detail: "present camera_sequence must be greater than zero; NO MOTION".to_string(),
+        });
+    }
+
+    if !is_lowercase_sha256_hex(&frame.profile_digest) {
+        return Err(SeamRejection {
+            code: "INVALID_PERCEPTION_PROFILE_DIGEST",
+            detail: "profile_digest must be exactly 64 lowercase hexadecimal characters; \
+                     NO MOTION"
+                .to_string(),
+        });
+    }
+
+    if !is_lowercase_sha256_hex(&frame.evidence_digest) {
+        return Err(SeamRejection {
+            code: "INVALID_PERCEPTION_EVIDENCE_DIGEST",
+            detail: "evidence_digest must be exactly 64 lowercase hexadecimal characters; \
+                     NO MOTION"
+                .to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 fn vehicle_config(req: &PlanRequest) -> VehicleConfig {
@@ -804,6 +883,7 @@ fn effective_intent(req: &PlanRequest) -> Result<MickIntent, SeamRejection> {
 pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
     validate_finite(req)?;
     validate_predicted_vrus(req)?;
+    validate_perception_frame_id(req)?;
     let intent = effective_intent(req)?;
     let target = intent_target(&intent).unwrap_or((req.goal.x, req.goal.y));
     validate_in_map(req, target)?;
@@ -1018,6 +1098,7 @@ pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
     );
 
     Ok(PlanResponse {
+        perception_frame_id: req.perception_frame_id.clone(),
         kind: match plan.kind {
             ProposalKind::Motion => "Motion",
             ProposalKind::SafeStop => "SafeStop",
@@ -1063,6 +1144,7 @@ mod tests {
 
     fn base_request() -> PlanRequest {
         PlanRequest {
+            perception_frame_id: None,
             ego: EgoReq {
                 x: 2.0,
                 y: 0.0,
@@ -1297,6 +1379,48 @@ mod tests {
             frames_seen: 3,
             fallback_reason: None,
         }
+    }
+
+    fn perception_frame_id() -> PerceptionFrameIdReq {
+        PerceptionFrameIdReq {
+            scan_sequence: 42,
+            camera_sequence: Some(17),
+            tracker_generation: 3,
+            profile_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            evidence_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_string(),
+        }
+    }
+
+    #[test]
+    fn valid_perception_frame_identity_is_echoed_unchanged() {
+        let mut request = base_request();
+        request.perception_frame_id = Some(perception_frame_id());
+
+        let response = handle_plan(&request).expect("valid evidence-bound request");
+
+        assert_eq!(
+            response.perception_frame_id, request.perception_frame_id,
+            "Occy must preserve the exact Taj evidence identity it planned against"
+        );
+    }
+
+    #[test]
+    fn absent_perception_frame_identity_preserves_backward_compatibility() {
+        let mut request = base_request();
+        request.perception_frame_id = None;
+
+        let response = handle_plan(&request).expect("legacy request remains accepted");
+
+        assert!(
+            response.perception_frame_id.is_none(),
+            "an absent legacy identity must remain absent, never be invented"
+        );
+        assert!(
+            matches!(response.verdict.as_str(), "Accept" | "Clamp"),
+            "legacy clean-road behavior must remain unchanged"
+        );
     }
 
     #[test]

@@ -360,6 +360,7 @@ class OccyDoer(Node):
                 'objects': taj.get('objects', []),
                 'pedestrians': taj.get('pedestrians', []),
                 'predicted_vrus': taj.get('predicted_vrus', []),
+                'perception_frame_id': taj.get('frame_id'),
                 'vehicle': self._vehicle,
             }
             if goal_fields:
