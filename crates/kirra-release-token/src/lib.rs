@@ -50,6 +50,12 @@ use kirra_contract_channel::GovernorContractView;
 /// from (file / dev-fixed; TPM-unseal deferred). See [`provisioning`].
 pub mod provisioning;
 
+/// Phase 12 evidence-bound ROS command payload V2.
+///
+/// This is versioned separately from `ros_twist` so the deployed 32-byte V1
+/// ABI remains unchanged while evidence, proposal, expiry, and nonce binding
+/// are introduced.
+pub mod ros_bound_command;
 /// ADR-0033 — the ROS-path release token (verify-before-release at the motor
 /// boundary of the `ros2_ws` deployment topology): its own payload type and
 /// domain pair, plus [`ros_twist::RosReleaseGate`], the ONE motor-side

@@ -1245,6 +1245,13 @@ jobs:
           cargo build --locked -p kirra-consumer-ffi
           cargo build --locked -p kirra-release-token --bin kirra_ros_release_mint
           python3 robot/ffi_smoke_test.py
+          # Evidence-bound V2 motor-consumer path (pure: no ROS, no motor, no
+          # .so). The strict 272-byte wire parse (a V1 128-byte frame is refused,
+          # never downgraded), the pinned-profile-digest config rules, and the
+          # serial chokepoint: a released frame writes exactly once, a refused
+          # one never writes, and the tick stop-ramp still writes.
+          # See robot/kirra_ffi.py::BoundKirraConsumer.
+          python3 robot/bound_consumer_test.py
           # Teardown exactly-once guard (hardware first-run finding): stub-rclpy
           # harness drives the REAL publisher/consumer main() through the
           # signal-shutdown paths; an unguarded second rclpy.shutdown() fails it.

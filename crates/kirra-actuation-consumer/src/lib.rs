@@ -30,6 +30,10 @@
 /// [`enrollment`].
 pub mod enrollment;
 
+pub use kirra_release_token::ros_bound_command::{
+    RosBoundCommandGate, RosBoundCommandPayload, RosBoundCommandRefusal,
+    ROS_BOUND_COMMAND_PAYLOAD_LEN,
+};
 pub use kirra_release_token::ros_twist::{
     RosReleaseGate, RosReleaseRefusal, RosTwistPayload, ROS_TWIST_PAYLOAD_LEN,
 };
@@ -200,6 +204,99 @@ pub struct ConsumerHealth {
 
 impl ConsumerHealth {
     /// The operator sentence for the latched alarm, if any.
+    #[must_use]
+    pub fn alarm_explanation(&self) -> Option<&'static str> {
+        self.key_mismatch_alarm
+            .then_some(KEY_MISMATCH_ALARM_EXPLANATION)
+    }
+}
+
+/// Result of ingesting one V2 evidence-bound frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BoundFrameOutcome {
+    /// The V2 gate passed and the exact signed twist reached the serial seam.
+    Released {
+        sequence: u64,
+        nonce: u64,
+        scan_sequence: u64,
+        tracker_generation: u64,
+    },
+    /// The release was valid, but the serial write failed.
+    SerialError,
+    /// The V2 gate refused. Nothing was written and liveness was not fed.
+    Refused(RosBoundCommandRefusal),
+}
+
+/// Per-class V2 refusal telemetry.
+///
+/// Kept separate from the deployed V1 `RefusalBreakdown` so adding the richer
+/// evidence-binding taxonomy does not alter an existing telemetry contract.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BoundRefusalBreakdown {
+    pub no_token: u64,
+    pub digest_mismatch: u64,
+    pub signature_invalid: u64,
+    pub undecodable: u64,
+    pub future_issued: u64,
+    pub expired: u64,
+    pub lifetime_too_long: u64,
+    pub sequence_not_advanced: u64,
+    pub nonce_not_advanced: u64,
+    pub profile_digest_mismatch: u64,
+    pub perception_frame_superseded: u64,
+}
+
+impl BoundRefusalBreakdown {
+    fn count(&mut self, refusal: &RosBoundCommandRefusal) {
+        match refusal {
+            RosBoundCommandRefusal::NoToken => self.no_token += 1,
+            RosBoundCommandRefusal::Denied(ReleaseDenied::DigestMismatch) => {
+                self.digest_mismatch += 1
+            }
+            RosBoundCommandRefusal::Denied(ReleaseDenied::SignatureInvalid) => {
+                self.signature_invalid += 1
+            }
+            RosBoundCommandRefusal::Undecodable(_) => self.undecodable += 1,
+            RosBoundCommandRefusal::FutureIssued { .. } => self.future_issued += 1,
+            RosBoundCommandRefusal::Expired { .. } => self.expired += 1,
+            RosBoundCommandRefusal::LifetimeTooLong { .. } => self.lifetime_too_long += 1,
+            RosBoundCommandRefusal::SequenceNotAdvanced { .. } => self.sequence_not_advanced += 1,
+            RosBoundCommandRefusal::NonceNotAdvanced { .. } => self.nonce_not_advanced += 1,
+            RosBoundCommandRefusal::ProfileDigestMismatch => self.profile_digest_mismatch += 1,
+            RosBoundCommandRefusal::PerceptionFrameSuperseded { .. } => {
+                self.perception_frame_superseded += 1
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.no_token
+            + self.digest_mismatch
+            + self.signature_invalid
+            + self.undecodable
+            + self.future_issued
+            + self.expired
+            + self.lifetime_too_long
+            + self.sequence_not_advanced
+            + self.nonce_not_advanced
+            + self.profile_digest_mismatch
+            + self.perception_frame_superseded
+    }
+}
+
+/// Health surface for the parallel V2 evidence-bound consumer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoundConsumerHealth {
+    pub releases: u64,
+    pub refusals: BoundRefusalBreakdown,
+    pub serial_errors: u64,
+    pub consecutive_signature_invalid: u32,
+    pub key_mismatch_alarm: bool,
+    pub silent: bool,
+}
+
+impl BoundConsumerHealth {
     #[must_use]
     pub fn alarm_explanation(&self) -> Option<&'static str> {
         self.key_mismatch_alarm
@@ -414,10 +511,226 @@ impl<S: MotorSerial> MotorConsumer<S> {
     }
 }
 
+/// Parallel V2 evidence-bound motor consumer.
+///
+/// This is intentionally separate from `MotorConsumer` during migration:
+/// - V1 remains ABI-compatible for current FFI and ROS deployments;
+/// - V2 cannot silently fall back to V1;
+/// - all V2 evidence, proposal, nonce, expiration, and profile checks occur
+///   before the serial seam.
+///
+/// Like the V1 consumer, refusals never feed liveness. A flood of invalid V2
+/// frames therefore starves into the active stop ramp and then output silence.
+pub struct BoundMotorConsumer<S: MotorSerial> {
+    gate: RosBoundCommandGate,
+    serial: S,
+    cfg: ConsumerConfig,
+    state: DriveState,
+    last_valid_at_ms: Option<u64>,
+    releases: u64,
+    refusal_breakdown: BoundRefusalBreakdown,
+    consecutive_signature_invalid: u32,
+    key_mismatch_alarm: bool,
+    serial_errors: u64,
+}
+
+impl<S: MotorSerial> BoundMotorConsumer<S> {
+    pub fn new(
+        governor_vk: VerifyingKey,
+        expected_profile_digest: [u8; 32],
+        maximum_token_lifetime_ms: u64,
+        cfg: ConsumerConfig,
+        serial: S,
+    ) -> Result<Self, ConfigError> {
+        if !(cfg.stop_decel_mps2.is_finite() && cfg.stop_decel_mps2 > 0.0) {
+            return Err(ConfigError::InvalidStopDecel);
+        }
+        if cfg.control_period_ms == 0 || cfg.missed_periods == 0 || maximum_token_lifetime_ms == 0 {
+            return Err(ConfigError::InvalidDeadline);
+        }
+
+        Ok(Self {
+            gate: RosBoundCommandGate::new(
+                governor_vk,
+                expected_profile_digest,
+                maximum_token_lifetime_ms,
+            ),
+            serial,
+            cfg,
+            state: DriveState::NeverReleased,
+            last_valid_at_ms: None,
+            releases: 0,
+            refusal_breakdown: BoundRefusalBreakdown::default(),
+            consecutive_signature_invalid: 0,
+            key_mismatch_alarm: false,
+            serial_errors: 0,
+        })
+    }
+
+    /// Ingest one 176-byte V2 evidence-bound command and optional 96-byte token.
+    ///
+    /// Only a complete `RosBoundCommandGate` pass can reach `MotorSerial`.
+    pub fn on_bound_frame(
+        &mut self,
+        payload_bytes: &[u8; ROS_BOUND_COMMAND_PAYLOAD_LEN],
+        token: Option<&ReleaseToken>,
+        now_ms: u64,
+    ) -> BoundFrameOutcome {
+        match self.gate.release(payload_bytes, token, now_ms) {
+            Ok(released) => {
+                self.last_valid_at_ms = Some(now_ms);
+                self.state = DriveState::Driving {
+                    last_linear: released.linear_mps,
+                };
+                self.releases += 1;
+                self.consecutive_signature_invalid = 0;
+                self.key_mismatch_alarm = false;
+
+                match self
+                    .serial
+                    .write_twist(released.linear_mps, released.angular_rad_s)
+                {
+                    Ok(()) => BoundFrameOutcome::Released {
+                        sequence: released.sequence,
+                        nonce: released.nonce,
+                        scan_sequence: released.scan_sequence,
+                        tracker_generation: released.tracker_generation,
+                    },
+                    Err(_) => {
+                        self.serial_errors += 1;
+                        BoundFrameOutcome::SerialError
+                    }
+                }
+            }
+            Err(refusal) => {
+                // Refusals are not liveness.
+                self.refusal_breakdown.count(&refusal);
+
+                if matches!(
+                    refusal,
+                    RosBoundCommandRefusal::Denied(ReleaseDenied::SignatureInvalid)
+                ) {
+                    self.consecutive_signature_invalid =
+                        self.consecutive_signature_invalid.saturating_add(1);
+
+                    if self.consecutive_signature_invalid >= DEFAULT_SIGNATURE_INVALID_ALARM_STREAK
+                    {
+                        self.key_mismatch_alarm = true;
+                    }
+                } else {
+                    self.consecutive_signature_invalid = 0;
+                }
+
+                BoundFrameOutcome::Refused(refusal)
+            }
+        }
+    }
+
+    /// Same SS-002 liveness behavior as V1: starve → active decreasing stop →
+    /// final zero → silence. Never hold the last released command.
+    pub fn on_tick(&mut self, now_ms: u64) {
+        let deadline_ms = self.cfg.control_period_ms * u64::from(self.cfg.missed_periods);
+
+        let starved = match self.last_valid_at_ms {
+            None => false,
+            Some(last) => now_ms.saturating_sub(last) > deadline_ms,
+        };
+
+        if !starved {
+            return;
+        }
+
+        if let DriveState::Driving { last_linear } = self.state {
+            self.state = DriveState::Stopping {
+                current_linear: last_linear,
+            };
+        }
+
+        if let DriveState::Stopping { current_linear } = self.state {
+            let step = self.cfg.stop_decel_mps2 * (self.cfg.control_period_ms as f64 / 1000.0);
+
+            let next = if current_linear.abs() <= step {
+                0.0
+            } else {
+                current_linear - step * current_linear.signum()
+            };
+
+            if self.serial.write_twist(next, 0.0).is_err() {
+                self.serial_errors += 1;
+            }
+
+            self.state = if next == 0.0 {
+                DriveState::Silent
+            } else {
+                DriveState::Stopping {
+                    current_linear: next,
+                }
+            };
+        }
+    }
+
+    #[must_use]
+    pub fn health(&self) -> BoundConsumerHealth {
+        BoundConsumerHealth {
+            releases: self.releases,
+            refusals: self.refusal_breakdown,
+            serial_errors: self.serial_errors,
+            consecutive_signature_invalid: self.consecutive_signature_invalid,
+            key_mismatch_alarm: self.key_mismatch_alarm,
+            silent: self.state == DriveState::Silent,
+        }
+    }
+
+    #[must_use]
+    pub fn is_silent(&self) -> bool {
+        self.state == DriveState::Silent
+    }
+
+    #[must_use]
+    pub fn release_count(&self) -> u64 {
+        self.releases
+    }
+
+    #[must_use]
+    pub fn refusal_count(&self) -> u64 {
+        self.refusal_breakdown.total()
+    }
+
+    #[must_use]
+    pub fn serial_error_count(&self) -> u64 {
+        self.serial_errors
+    }
+
+    #[must_use]
+    pub fn serial(&self) -> &S {
+        &self.serial
+    }
+
+    pub fn serial_mut(&mut self) -> &mut S {
+        &mut self.serial
+    }
+
+    #[must_use]
+    pub fn last_released_sequence(&self) -> Option<u64> {
+        self.gate.last_released_sequence()
+    }
+
+    #[must_use]
+    pub fn last_released_nonce(&self) -> Option<u64> {
+        self.gate.last_released_nonce()
+    }
+
+    #[must_use]
+    pub fn latest_perception_frame(&self) -> Option<(u64, u64)> {
+        self.gate.latest_perception_frame()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
+    use kirra_release_token::ros_bound_command::issue_ros_bound_command_release;
     use kirra_release_token::ros_twist::issue_ros_release;
 
     /// Records every write; the Tier-1 assertion surface.
@@ -460,6 +773,199 @@ mod tests {
             angular_rad_s: 0.0,
         };
         (p.encode(), issue_ros_release(&p, &sk()))
+    }
+
+    const TEST_PROFILE_DIGEST: [u8; 32] = [0x11; 32];
+
+    fn bound_consumer() -> BoundMotorConsumer<RecordingSerial> {
+        BoundMotorConsumer::new(
+            sk().verifying_key(),
+            TEST_PROFILE_DIGEST,
+            200,
+            cfg(),
+            RecordingSerial::default(),
+        )
+        .unwrap()
+    }
+
+    fn bound_payload(
+        sequence: u64,
+        nonce: u64,
+        issued_at_ms: u64,
+        linear_mps: f64,
+    ) -> RosBoundCommandPayload {
+        RosBoundCommandPayload {
+            sequence,
+            nonce,
+            issued_at_ms,
+            expires_at_ms: issued_at_ms + 200,
+            linear_mps,
+            angular_rad_s: 0.1,
+            scan_sequence: 77,
+            camera_sequence: Some(88),
+            tracker_generation: 3,
+            profile_digest: TEST_PROFILE_DIGEST,
+            evidence_digest: [0x22; 32],
+            proposal_digest: [0x33; 32],
+        }
+    }
+
+    fn bound_frame(
+        sequence: u64,
+        nonce: u64,
+        issued_at_ms: u64,
+        linear_mps: f64,
+    ) -> ([u8; ROS_BOUND_COMMAND_PAYLOAD_LEN], ReleaseToken) {
+        let payload = bound_payload(sequence, nonce, issued_at_ms, linear_mps);
+        let token = issue_ros_bound_command_release(&payload, &sk());
+        (payload.encode(), token)
+    }
+
+    #[test]
+    fn bound_consumer_releases_only_after_full_v2_gate_pass() {
+        let mut consumer = bound_consumer();
+        let (bytes, token) = bound_frame(1, 1001, 10_000, 0.25);
+
+        assert!(matches!(
+            consumer.on_bound_frame(&bytes, Some(&token), 10_050),
+            BoundFrameOutcome::Released {
+                sequence: 1,
+                nonce: 1001,
+                scan_sequence: 77,
+                tracker_generation: 3,
+            }
+        ));
+
+        assert_eq!(consumer.serial().writes, vec![(0.25, 0.1)]);
+        assert_eq!(consumer.release_count(), 1);
+        assert_eq!(consumer.last_released_sequence(), Some(1));
+        assert_eq!(consumer.last_released_nonce(), Some(1001));
+        assert_eq!(consumer.latest_perception_frame(), Some((3, 77)));
+    }
+
+    #[test]
+    fn bound_consumer_tampered_proposal_never_reaches_serial() {
+        let mut consumer = bound_consumer();
+
+        let original = bound_payload(1, 1001, 10_000, 0.25);
+        let token = issue_ros_bound_command_release(&original, &sk());
+
+        let mut tampered = original;
+        tampered.proposal_digest[0] ^= 1;
+
+        assert!(matches!(
+            consumer.on_bound_frame(&tampered.encode(), Some(&token), 10_050),
+            BoundFrameOutcome::Refused(RosBoundCommandRefusal::Denied(
+                ReleaseDenied::DigestMismatch
+            ))
+        ));
+
+        assert!(consumer.serial().writes.is_empty());
+        assert_eq!(consumer.release_count(), 0);
+        assert_eq!(consumer.refusal_count(), 1);
+        assert_eq!(consumer.health().refusals.digest_mismatch, 1);
+    }
+
+    #[test]
+    fn bound_consumer_rejects_replay_and_superseded_evidence() {
+        let mut consumer = bound_consumer();
+
+        let first = bound_payload(1, 1001, 10_000, 0.25);
+        let first_token = issue_ros_bound_command_release(&first, &sk());
+        consumer.on_bound_frame(&first.encode(), Some(&first_token), 10_050);
+
+        let replay_token = issue_ros_bound_command_release(&first, &sk());
+        assert!(matches!(
+            consumer.on_bound_frame(&first.encode(), Some(&replay_token), 10_060),
+            BoundFrameOutcome::Refused(RosBoundCommandRefusal::SequenceNotAdvanced { .. })
+        ));
+
+        let mut newer = first;
+        newer.sequence = 2;
+        newer.nonce = 1002;
+        newer.scan_sequence = 78;
+        newer.issued_at_ms = 10_060;
+        newer.expires_at_ms = 10_260;
+        let newer_token = issue_ros_bound_command_release(&newer, &sk());
+
+        assert!(matches!(
+            consumer.on_bound_frame(&newer.encode(), Some(&newer_token), 10_070),
+            BoundFrameOutcome::Released { sequence: 2, .. }
+        ));
+
+        let mut old_frame = newer;
+        old_frame.sequence = 3;
+        old_frame.nonce = 1003;
+        old_frame.scan_sequence = 77;
+        old_frame.issued_at_ms = 10_070;
+        old_frame.expires_at_ms = 10_270;
+        let old_token = issue_ros_bound_command_release(&old_frame, &sk());
+
+        assert!(matches!(
+            consumer.on_bound_frame(&old_frame.encode(), Some(&old_token), 10_080),
+            BoundFrameOutcome::Refused(RosBoundCommandRefusal::PerceptionFrameSuperseded { .. })
+        ));
+
+        assert_eq!(consumer.serial().writes.len(), 2);
+        assert_eq!(consumer.health().refusals.perception_frame_superseded, 1);
+    }
+
+    #[test]
+    fn bound_refusal_flood_does_not_feed_liveness() {
+        let mut consumer = bound_consumer();
+        let (valid, token) = bound_frame(1, 1001, 10_000, 0.25);
+
+        assert!(matches!(
+            consumer.on_bound_frame(&valid, Some(&token), 10_000),
+            BoundFrameOutcome::Released { .. }
+        ));
+
+        let (rogue, _) = bound_frame(99, 9999, 10_050, 3.0);
+        let mut stop_started = false;
+
+        for step in 1..=12u64 {
+            let now = 10_000 + step * 50;
+
+            assert!(matches!(
+                consumer.on_bound_frame(&rogue, None, now),
+                BoundFrameOutcome::Refused(RosBoundCommandRefusal::NoToken)
+            ));
+
+            consumer.on_tick(now);
+
+            if consumer.serial().writes.len() > 1 {
+                stop_started = true;
+                assert!(now >= 10_350);
+                break;
+            }
+        }
+
+        assert!(stop_started);
+        assert_eq!(consumer.release_count(), 1);
+        assert!(consumer.refusal_count() > 0);
+    }
+
+    #[test]
+    fn bound_consumer_starvation_ramps_then_silences() {
+        let mut consumer = bound_consumer();
+        let (bytes, token) = bound_frame(1, 1001, 10_000, 0.25);
+
+        consumer.on_bound_frame(&bytes, Some(&token), 10_000);
+
+        for step in 1..=10u64 {
+            consumer.on_tick(10_000 + 300 + step * 100);
+        }
+
+        let writes = &consumer.serial().writes;
+        assert_eq!(writes[0], (0.25, 0.1));
+
+        let ramp: Vec<f64> = writes[1..].iter().map(|(linear, _)| *linear).collect();
+
+        assert!(!ramp.is_empty());
+        assert_eq!(*ramp.last().unwrap(), 0.0);
+        assert!(writes[1..].iter().all(|(_, angular)| *angular == 0.0));
+        assert!(consumer.is_silent());
+        assert!(consumer.health().silent);
     }
 
     #[test]

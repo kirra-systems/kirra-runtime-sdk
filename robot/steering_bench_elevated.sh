@@ -21,6 +21,19 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PUB="python3 ${HERE}/kirra_release_publisher.py"
+
+# Evidence-bound V2 preflight: the publisher binds the pinned platform profile
+# digest into every frame, and the consumer refuses any frame whose digest
+# differs. Check it HERE so a missing export fails before the guided procedure
+# starts, rather than aborting the publisher mid-phase. Export the SAME value
+# the consumer terminal uses.
+if [ -z "${KIRRA_PROFILE_DIGEST:-}" ]; then
+  echo "FATAL: KIRRA_PROFILE_DIGEST is unset — export this robot's 64-lowercase-hex" >&2
+  echo "       platform profile digest (the same value the consumer pins) before" >&2
+  echo "       running this test. Obtain/verify it with:" >&2
+  echo "         python3 robot/kirra_doctor.py --module profile_digest" >&2
+  exit 1
+fi
 LOG="${HERE}/steering_bench_results.txt"
 
 say()  { echo; echo "== $*"; }

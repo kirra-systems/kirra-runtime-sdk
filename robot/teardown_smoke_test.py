@@ -238,6 +238,9 @@ def main() -> int:
     os.environ.update({
         "KIRRA_MINT_BIN": mint,
         "KIRRA_PUB_RATE_HZ": "500",  # fast loop; content/timing logic unchanged
+        # The publisher now mints evidence-bound V2 frames, which bind a pinned
+        # platform profile digest and so require one to be configured.
+        "KIRRA_PROFILE_DIGEST": "ab" * 32,
     })
     ctx.ok_calls_until_signal = 3  # 3 loop iterations, then "SIGTERM arrived"
     sys.argv = ["kirra_release_publisher.py", "--valid"]
@@ -255,8 +258,12 @@ def main() -> int:
         check(len(node.pub.published) == 3,
               "(1) publisher must still publish its frames (behavior unchanged)")
         check(node.destroyed == 1, "(1) node destroyed exactly once")
-        check(all(len(f) == 128 for f in node.pub.published),
-              "(1) valid mode still emits 128-byte signed frames")
+        # The bench publisher mints through the minter's `frame-v2` subcommand,
+        # so --valid emits the evidence-bound 272-byte frame the live motor
+        # consumer accepts (payload 176 + token 96). See bound_consumer_test.py
+        # for the wire contract and ffi_smoke_test.py (h8-h12) for end-to-end.
+        check(all(len(f) == 272 for f in node.pub.published),
+              "(1) valid mode must emit 272-byte evidence-bound V2 frames")
         print(f"(1) publisher/SIGTERM → exit 0, {len(node.pub.published)} frames, "
               f"no double shutdown")
     check(ctx.shutdown_calls == 0,
@@ -302,6 +309,12 @@ def main() -> int:
     ).stdout.strip()
     os.environ.update({
         "KIRRA_GOVERNOR_VK_HEX": vk,
+        # Evidence-bound V2: the consumer pins the platform profile digest from
+        # trusted config and refuses to start without a valid 64-lowercase-hex
+        # value. A stand-in is fine here — this harness tests teardown paths,
+        # and the digest's own parsing/refusal rules are covered in
+        # robot/bound_consumer_test.py.
+        "KIRRA_PROFILE_DIGEST": "ab" * 32,
         "KIRRA_FRESHNESS_WINDOW_MS": "200",
         "KIRRA_CONTROL_PERIOD_MS": "100",
         "KIRRA_MISSED_PERIODS": "3",

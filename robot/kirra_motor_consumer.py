@@ -5,25 +5,48 @@ This node IS the motor bringup. Per ADR-0033 we do NOT stand up the vendor
 `/cmd_vel` driver and retrofit a fence — the verifying consumer is the ONLY
 thing that opens the motor board (`/dev/myserial`) and the ONLY thing that calls
 `Rosmaster.set_car_motion`. A command is actuated ONLY if the Rust verify core
-(libkirra_consumer_ffi, ADR-0033 decision (c)) releases it: token → Ed25519 over
-the exact bytes → freshness → strictly-advancing sequence. No token / stale /
-replayed / bad-signature → refused, no motor write.
+(libkirra_consumer_ffi, ADR-0033 decision (c)) releases it.
 
-🔴 Nothing here re-implements verification. Every gate/watermark/freshness/
-liveness/decel/alarm decision is made in Rust and returned across the FFI; this
-node presents wire bytes and actuates whatever twist the core decides.
+🔴 EVIDENCE-BOUND V2 ONLY. This node consumes the 272-byte V2 frame
+(payload(176) || token(96)) whose signed payload carries not just the enforced
+twist but the perception scan/camera/tracker identity, the platform profile
+digest and the Occy proposal digest it was authored against. The core verifies
+the Ed25519 signature over exactly those bytes AND that the evidence identity
+is acceptable: the pinned profile digest matches, the perception frame has not
+been superseded, sequence and nonce strictly advance, and the signed expiry has
+not passed. The 128-byte V1 frame is REFUSED here — it names no evidence, so
+accepting it would strip the binding while still producing motion. V1 remains
+available in the Rust library and in `kirra_ffi.KirraConsumer` for the bench
+publisher and compatibility, but never on this live path.
+
+🔴 Nothing here re-implements verification. Decoding, signature, expiry,
+lifetime, replay, nonce, profile digest, evidence supersession, proposal digest
+and liveness are ALL decided in Rust and returned across the FFI; this node
+validates its own config, splits fixed-size wire bytes, and actuates whatever
+twist the core releases. It never decodes or compares an evidence field itself.
 
 🔴 No vendor base node. Do NOT launch `yahboomcar_bringup` alongside this — it
 would be a second, UNFENCED writer to the motor board. This node owning
 `/dev/myserial` (exclusive) is the structural guarantee.
 
 Wire input: topic KIRRA_RELEASE_TOPIC (default /kirra/release),
-`std_msgs/UInt8MultiArray`, data = payload(32) || token(96) for a governed
-command, or payload(32) alone for an unsigned one (→ refused).
+`std_msgs/UInt8MultiArray`, data = payload(176) || token(96) — exactly 272
+bytes. Any other length is malformed and ignored (no motor write).
 
 Config — ALL required, NO defaults (fail-closed; a missing var aborts):
     KIRRA_GOVERNOR_VK_HEX      64-hex Ed25519 public key this consumer pins
-    KIRRA_FRESHNESS_WINDOW_MS  freshness window (ADR-0033 decision 3; e.g. 200)
+    KIRRA_PROFILE_DIGEST       64 LOWERCASE hex (32 bytes) — the platform
+                               profile digest this robot is pinned to. TRUSTED
+                               CONFIGURATION: it is never read from an incoming
+                               payload, the ROS proposal, or a verifier
+                               response. The core refuses any release whose
+                               signed profile digest differs, so a robot cannot
+                               be driven under another platform's envelope.
+                               Missing/uppercase/non-hex/wrong-length → abort.
+    KIRRA_FRESHNESS_WINDOW_MS  MAXIMUM token lifetime (ms) the core will accept.
+                               V2 enforces the signed `expires_at_ms`; this is
+                               the upper bound on how long a mint may be valid
+                               (a signer cannot hand itself an eternal token).
     KIRRA_CONTROL_PERIOD_MS    control period (e.g. 100 at 10 Hz)
     KIRRA_MISSED_PERIODS       liveness deadline in periods (ADR-0033: 3)
     KIRRA_STOP_DECEL_MPS2      MRC decel for the safe stop (class MRC profile)
@@ -62,10 +85,17 @@ import os
 import signal
 import sys
 import time
+from collections import namedtuple
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from kirra_ffi import KirraConsumer, REFUSAL_NAMES, split_frame  # noqa: E402
+from kirra_ffi import (  # noqa: E402
+    BOUND_FRAME_LEN,
+    BoundKirraConsumer,
+    bound_refusal_name,
+    parse_profile_digest_hex,
+    split_bound_frame,
+)
 from r2_drive import (  # noqa: E402
     ClosedLoopSpeedMatcher,
     R2CalibrationError,
@@ -119,8 +149,149 @@ def _req_int(name: str) -> int:
 
 def now_ms() -> int:
     # UNIX epoch ms — MUST share a synchronized clock with the signer
-    # (AOU-TIMESYNC-001): freshness compares this to the token's issued_at_ms.
+    # (AOU-TIMESYNC-001): the core compares this to the token's signed
+    # issued_at_ms / expires_at_ms.
     return int(time.time() * 1000)
+
+
+def read_profile_digest(environ) -> "bytes | None":
+    """The pinned platform profile digest, from TRUSTED configuration only.
+
+    Returns 32 bytes, or None if `KIRRA_PROFILE_DIGEST` is absent/empty or is
+    not exactly 64 lowercase hex characters (the caller aborts startup).
+
+    🔴 This value must NEVER be derived from the incoming 176-byte payload, the
+    ROS proposal, a verifier response, or any other command-carried field. The
+    whole point of pinning is that the robot states independently which
+    platform profile it is, so the core can refuse a release minted under a
+    different one. Reading it from the command would let the command authorize
+    itself.
+    """
+    return parse_profile_digest_hex((environ.get("KIRRA_PROFILE_DIGEST") or "").strip())
+
+
+# One decision for one inbound release message. `reason` is None on a release
+# and a short stable tag otherwise (used for latched logging).
+FrameDecision = namedtuple("FrameDecision", ["write", "linear", "angular", "reason"])
+
+
+def decide_bound_frame(consumer, data: bytes, now_ms_val: int) -> FrameDecision:
+    """Split one V2 wire frame and ask the core what to do with it.
+
+    Python decides NOTHING about legitimacy here: a well-formed 272-byte frame
+    is handed to Rust verbatim and the core's `write` flag is the only thing
+    consulted. Python's own refusal is limited to the one thing it must do
+    itself — refusing bytes that are not a V2 frame at all, so the FFI is never
+    handed a short buffer.
+    """
+    parsed = split_bound_frame(data)
+    if parsed is None:
+        # Includes a 128-byte V1 frame: refused, never downgraded.
+        return FrameDecision(False, 0.0, 0.0, f"MALFORMED_FRAME_{len(data)}B")
+
+    payload, token = parsed
+    res = consumer.on_frame(payload, token, now_ms_val)
+    if res.write == 1:
+        return FrameDecision(True, res.linear, res.angular, None)
+    return FrameDecision(False, 0.0, 0.0, bound_refusal_name(res.refusal_code))
+
+
+# Health counters worth naming when a refusal episode starts/changes. Ordered
+# so the most diagnostic ones read first.
+_BOUND_HEALTH_FIELDS = (
+    "signature_invalid",
+    "digest_mismatch",
+    "profile_digest_mismatch",
+    "perception_frame_superseded",
+    "sequence_not_advanced",
+    "nonce_not_advanced",
+    "expired",
+    "future_issued",
+    "lifetime_too_long",
+    "undecodable",
+    "no_token",
+)
+
+
+def format_bound_health(health) -> str:
+    """A compact one-line diagnostic of the non-zero refusal counters."""
+    parts = [
+        f"{name}={getattr(health, name)}"
+        for name in _BOUND_HEALTH_FIELDS
+        if getattr(health, name, 0)
+    ]
+    if getattr(health, "silent", 0) == 1:
+        parts.append("silent=1")
+    if getattr(health, "key_mismatch_alarm", 0) == 1:
+        parts.append("key_mismatch_alarm=1")
+    return " ".join(parts) if parts else "no refusals recorded"
+
+
+def make_frame_handler(consumer, actuate, warn, error, now_fn=now_ms):
+    """Build the `/kirra/release` callback.
+
+    Factored out of `main` so the release path is testable without ROS, a motor
+    board, or a real .so: the caller injects the consumer, the single serial
+    chokepoint (`actuate`) and the log sinks.
+
+    Latched logging (the project's existing style, cf. the interceptor's relay
+    latch): a refusal logs when the reason CHANGES, not every cycle — releases
+    arrive at the control rate, so an unfixed fault would otherwise flood the
+    log. The suppressed count is reported when the state changes, so a storm is
+    still visible without being noisy. A successful release re-arms the latch,
+    so a fresh episode always logs again.
+    """
+    state = {"reason": None, "suppressed": 0, "alarm": False}
+
+    def _flush_suppressed() -> None:
+        if state["suppressed"]:
+            warn(f"(+{state['suppressed']} further {state['reason']} refusals suppressed)")
+        state["suppressed"] = 0
+
+    def handle(data: bytes) -> None:
+        decision = decide_bound_frame(consumer, data, now_fn())
+        # One health snapshot per message: it feeds both the refusal diagnostic
+        # and the alarm latch below, and each call is an FFI crossing.
+        health = consumer.health()
+
+        if decision.write:
+            # 🔴 The single serial chokepoint. Reached only when the Rust core
+            # released this exact frame.
+            actuate(decision.linear, decision.angular)
+            if state["reason"] is not None:
+                _flush_suppressed()
+                state["reason"] = None
+        elif decision.reason == state["reason"]:
+            state["suppressed"] += 1
+        else:
+            _flush_suppressed()
+            state["reason"] = decision.reason
+            warn(f"REFUSED ({decision.reason}) — no motor write; "
+                 f"{format_bound_health(health)}")
+
+        # 🔴 #892 loud, DISTINCT key-mismatch diagnostic (latched once).
+        if health.key_mismatch_alarm == 1 and not state["alarm"]:
+            state["alarm"] = True
+            error("🔴 " + consumer.alarm_explanation())
+        elif health.key_mismatch_alarm == 0:
+            state["alarm"] = False
+
+    return handle
+
+
+def make_tick_handler(consumer, actuate, now_fn=now_ms):
+    """Build the liveness-clock callback (SS-002 decel-to-zero ramp).
+
+    A refusal does NOT feed liveness — the core's watermark only advances on a
+    release — so a refusal flood starves into the same stop as silence.
+    """
+
+    def on_tick() -> None:
+        tick = consumer.on_tick(now_fn())
+        if tick.write == 1:
+            actuate(tick.linear, tick.angular)
+
+    return on_tick
 
 
 def main() -> int:
@@ -141,7 +312,23 @@ def main() -> int:
         print("FATAL: KIRRA_GOVERNOR_VK_HEX must be 32 bytes (64 hex)", file=sys.stderr)
         return 2
 
-    freshness_window_ms = _req_int("KIRRA_FRESHNESS_WINDOW_MS")
+    # 🔴 The pinned platform profile digest — trusted configuration, never a
+    # command-carried field. Without it the core could not tell a release
+    # minted for THIS platform from one minted for another envelope.
+    profile_digest = read_profile_digest(os.environ)
+    if profile_digest is None:
+        raw = os.environ.get("KIRRA_PROFILE_DIGEST")
+        print(
+            "FATAL: KIRRA_PROFILE_DIGEST must be exactly 64 LOWERCASE hexadecimal "
+            "characters (the 32-byte platform profile digest this robot is pinned "
+            f"to) — refusing to start. Got {raw!r}. It comes from trusted robot "
+            "configuration only; it is never taken from an incoming release "
+            "payload or a verifier response.",
+            file=sys.stderr,
+        )
+        return 2
+
+    maximum_token_lifetime_ms = _req_int("KIRRA_FRESHNESS_WINDOW_MS")
     control_period_ms = _req_int("KIRRA_CONTROL_PERIOD_MS")
     missed_periods = _req_int("KIRRA_MISSED_PERIODS")
     stop_decel_mps2 = _req_float("KIRRA_STOP_DECEL_MPS2")
@@ -220,10 +407,11 @@ def main() -> int:
 
     topic = os.environ.get("KIRRA_RELEASE_TOPIC", "/kirra/release")
 
-    # The verify core (fail-closed: raises on a NULL handle).
-    consumer = KirraConsumer(
+    # The evidence-bound V2 verify core (fail-closed: raises on a NULL handle).
+    consumer = BoundKirraConsumer(
         governor_vk,
-        freshness_window_ms=freshness_window_ms,
+        profile_digest,
+        maximum_token_lifetime_ms=maximum_token_lifetime_ms,
         control_period_ms=control_period_ms,
         missed_periods=missed_periods,
         stop_decel_mps2=stop_decel_mps2,
@@ -352,6 +540,9 @@ def main() -> int:
     node = Node("kirra_motor_consumer")
     node.get_logger().info(
         f"KIRRA consumer OWNS {motor_port} (sole writer). topic={topic} "
+        f"evidence-bound V2 only: {BOUND_FRAME_LEN}-byte frames "
+        f"(payload 176 + token 96); V1 128-byte frames are REFUSED. "
+        f"profile_digest pinned to {profile_digest.hex()[:16]}… "
         f"envelope: vx_max={vx_max} m/s vz_max={vz_max} rad/s (DEMO backstop; "
         f"Kirra's checker is the authority). Vendor base node must NOT be running."
     )
@@ -360,7 +551,6 @@ def main() -> int:
             f"r2_ackermann drive: {'CLOSED-LOOP speed matching' if r2_matcher else 'open-loop equal-PWM'}"
         )
 
-    alarm_announced = False
     cl_debug_ctr = 0  # throttle counter for the closed-loop debug log
     last_delta_rad = 0.0  # steering angle of the last actuation (odom heading source)
 
@@ -418,45 +608,27 @@ def main() -> int:
             # both already clamped by the Rust capture seam.
             bot.set_car_motion(linear, 0.0, angular)
 
+    # The release path. STRICT V2 wire parse (exactly 272 bytes) → the Rust
+    # core → `actuate` only on a release. Built by a factory so the whole
+    # decision path is host-testable without ROS or a motor (see
+    # robot/bound_consumer_test.py); `actuate` stays the single serial
+    # chokepoint.
+    frame_handler = make_frame_handler(
+        consumer,
+        actuate,
+        warn=node.get_logger().warn,
+        error=node.get_logger().error,
+    )
+
     def on_msg(msg: UInt8MultiArray) -> None:
-        nonlocal alarm_announced
-        data = bytes(msg.data)
-        # STRICT wire parse (Copilot #901): exactly 32 (unsigned) or exactly
-        # 128 (signed). Anything else is malformed — ignored with a warn, never
-        # sliced into an oversized token (which raised ValueError in the
-        # callback and let hostile input take down the consumer).
-        parsed = split_frame(data)
-        if parsed is None:
-            node.get_logger().warn(
-                f"malformed release frame ({len(data)} bytes; expected 32 or 128) — ignored"
-            )
-            return
-        payload, token = parsed
-        res = consumer.on_frame(payload, token, now_ms())
-        if res.write == 1:
-            actuate(res.linear, res.angular)
-        else:
-            name = REFUSAL_NAMES.get(res.refusal_code, f"code{res.refusal_code}")
-            node.get_logger().warn(f"REFUSED ({name}) — no motor write")
-        # 🔴 #892 loud, DISTINCT key-mismatch diagnostic (latched once).
-        h = consumer.health()
-        if h.key_mismatch_alarm == 1 and not alarm_announced:
-            alarm_announced = True
-            node.get_logger().error("🔴 " + consumer.alarm_explanation())
-        elif h.key_mismatch_alarm == 0:
-            alarm_announced = False
+        frame_handler(bytes(msg.data))
 
     node.create_subscription(UInt8MultiArray, topic, on_msg, 10)
 
     # Liveness clock: on_tick every control period drives the SS-002 decel-to-zero
     # ramp when releases stop arriving (never hold-last). A refusal does NOT feed
     # liveness — a flood starves into the stop exactly as silence does.
-    def on_timer() -> None:
-        t = consumer.on_tick(now_ms())
-        if t.write == 1:
-            actuate(t.linear, t.angular)
-
-    node.create_timer(control_period_ms / 1000.0, on_timer)
+    node.create_timer(control_period_ms / 1000.0, make_tick_handler(consumer, actuate))
 
     # R2 wheel-odometry publisher (opt-in). Reads the rear-wheel encoders each
     # period and publishes an Ackermann dead-reckoning pose so the planner sees

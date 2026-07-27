@@ -43,17 +43,20 @@ use std::os::raw::c_char;
 
 use ed25519_dalek::VerifyingKey;
 use kirra_actuation_consumer::{
-    ConsumerConfig, FrameOutcome, MotorConsumer, MotorSerial, RosReleaseRefusal,
-    KEY_MISMATCH_ALARM_EXPLANATION,
+    BoundFrameOutcome, BoundMotorConsumer, ConsumerConfig, FrameOutcome, MotorConsumer,
+    MotorSerial, RosBoundCommandRefusal, RosReleaseRefusal, KEY_MISMATCH_ALARM_EXPLANATION,
 };
+use kirra_release_token::ros_bound_command::ROS_BOUND_COMMAND_PAYLOAD_LEN;
 use kirra_release_token::ros_twist::ROS_TWIST_PAYLOAD_LEN;
 use kirra_release_token::{ReleaseDenied, ReleaseToken};
 
 /// Wire lengths the Python side must present (re-exported as constants so the
 /// ctypes binding and any C consumer agree with the Rust truth).
 pub const KIRRA_PAYLOAD_LEN: usize = ROS_TWIST_PAYLOAD_LEN; // 32
+pub const KIRRA_BOUND_PAYLOAD_LEN: usize = ROS_BOUND_COMMAND_PAYLOAD_LEN; // 176
 pub const KIRRA_TOKEN_LEN: usize = 96;
 pub const KIRRA_VK_LEN: usize = 32;
+pub const KIRRA_DIGEST_LEN: usize = 32;
 
 // ---------------------------------------------------------------------------
 // The capture serial seam: the demo-envelope clamp + a one-slot record of the
@@ -112,6 +115,14 @@ pub struct KirraConsumer {
     inner: MotorConsumer<CaptureSerial>,
 }
 
+/// Opaque handle for the parallel evidence-bound V2 consumer.
+///
+/// This is deliberately a distinct handle type: a V2 payload can never be
+/// accidentally submitted to the V1 consumer or silently downgraded.
+pub struct KirraBoundConsumer {
+    inner: BoundMotorConsumer<CaptureSerial>,
+}
+
 // ---------------------------------------------------------------------------
 // C ABI result structs — `#[repr(C)]`, scalar-only, no pointers into Rust state.
 // ---------------------------------------------------------------------------
@@ -126,6 +137,23 @@ pub struct KirraFrameResult {
     /// 1 → Python must actuate `(linear, angular)`; 0 → do not touch the motor.
     pub write: u8,
     pub sequence: u64,
+    pub linear: f64,
+    pub angular: f64,
+}
+
+/// Outcome of one evidence-bound V2 frame.
+///
+/// `kind`: 0 = Released, 1 = SerialError, 2 = Refused.
+/// `refusal_code` is meaningful only when `kind == 2`.
+#[repr(C)]
+pub struct KirraBoundFrameResult {
+    pub kind: i32,
+    pub refusal_code: i32,
+    pub write: u8,
+    pub sequence: u64,
+    pub nonce: u64,
+    pub scan_sequence: u64,
+    pub tracker_generation: u64,
     pub linear: f64,
     pub angular: f64,
 }
@@ -159,6 +187,27 @@ pub struct KirraHealth {
     pub silent: u8,
 }
 
+/// Evidence-bound V2 health snapshot.
+#[repr(C)]
+pub struct KirraBoundHealth {
+    pub releases: u64,
+    pub refusals_total: u64,
+    pub no_token: u64,
+    pub digest_mismatch: u64,
+    pub signature_invalid: u64,
+    pub undecodable: u64,
+    pub future_issued: u64,
+    pub expired: u64,
+    pub lifetime_too_long: u64,
+    pub sequence_not_advanced: u64,
+    pub nonce_not_advanced: u64,
+    pub profile_digest_mismatch: u64,
+    pub perception_frame_superseded: u64,
+    pub consecutive_signature_invalid: u32,
+    pub key_mismatch_alarm: u8,
+    pub silent: u8,
+}
+
 // Refusal-class codes (wire-stable; mirror `RosReleaseRefusal`).
 const REF_NO_TOKEN: i32 = 0;
 const REF_DIGEST_MISMATCH: i32 = 1;
@@ -175,6 +224,40 @@ fn refusal_code(r: &RosReleaseRefusal) -> i32 {
         RosReleaseRefusal::Undecodable(_) => REF_UNDECODABLE,
         RosReleaseRefusal::Stale { .. } => REF_STALE,
         RosReleaseRefusal::SequenceNotAdvanced { .. } => REF_SEQUENCE_NOT_ADVANCED,
+    }
+}
+
+// V2 refusal codes. Kept in a separate range so telemetry cannot confuse a
+// V2 evidence-binding refusal with a V1 freshness refusal.
+const BOUND_REF_NO_TOKEN: i32 = 100;
+const BOUND_REF_DIGEST_MISMATCH: i32 = 101;
+const BOUND_REF_SIGNATURE_INVALID: i32 = 102;
+const BOUND_REF_UNDECODABLE: i32 = 103;
+const BOUND_REF_FUTURE_ISSUED: i32 = 104;
+const BOUND_REF_EXPIRED: i32 = 105;
+const BOUND_REF_LIFETIME_TOO_LONG: i32 = 106;
+const BOUND_REF_SEQUENCE_NOT_ADVANCED: i32 = 107;
+const BOUND_REF_NONCE_NOT_ADVANCED: i32 = 108;
+const BOUND_REF_PROFILE_DIGEST_MISMATCH: i32 = 109;
+const BOUND_REF_PERCEPTION_FRAME_SUPERSEDED: i32 = 110;
+
+fn bound_refusal_code(refusal: &RosBoundCommandRefusal) -> i32 {
+    match refusal {
+        RosBoundCommandRefusal::NoToken => BOUND_REF_NO_TOKEN,
+        RosBoundCommandRefusal::Denied(ReleaseDenied::DigestMismatch) => BOUND_REF_DIGEST_MISMATCH,
+        RosBoundCommandRefusal::Denied(ReleaseDenied::SignatureInvalid) => {
+            BOUND_REF_SIGNATURE_INVALID
+        }
+        RosBoundCommandRefusal::Undecodable(_) => BOUND_REF_UNDECODABLE,
+        RosBoundCommandRefusal::FutureIssued { .. } => BOUND_REF_FUTURE_ISSUED,
+        RosBoundCommandRefusal::Expired { .. } => BOUND_REF_EXPIRED,
+        RosBoundCommandRefusal::LifetimeTooLong { .. } => BOUND_REF_LIFETIME_TOO_LONG,
+        RosBoundCommandRefusal::SequenceNotAdvanced { .. } => BOUND_REF_SEQUENCE_NOT_ADVANCED,
+        RosBoundCommandRefusal::NonceNotAdvanced { .. } => BOUND_REF_NONCE_NOT_ADVANCED,
+        RosBoundCommandRefusal::ProfileDigestMismatch => BOUND_REF_PROFILE_DIGEST_MISMATCH,
+        RosBoundCommandRefusal::PerceptionFrameSuperseded { .. } => {
+            BOUND_REF_PERCEPTION_FRAME_SUPERSEDED
+        }
     }
 }
 
@@ -233,6 +316,95 @@ pub unsafe extern "C" fn kirra_consumer_new(
         Ok(inner) => Box::into_raw(Box::new(KirraConsumer { inner })),
         // ConfigError (bad decel / deadline) → fail closed, NULL.
         Err(_) => core::ptr::null_mut(),
+    }
+}
+
+/// Construct an evidence-bound V2 consumer.
+///
+/// FAIL-CLOSED: returns NULL on malformed key/profile pointers, an all-zero
+/// profile digest, zero maximum token lifetime, invalid liveness configuration,
+/// or invalid envelope bounds.
+///
+/// # Safety
+/// - `vk` points to exactly `KIRRA_VK_LEN` readable bytes.
+/// - `expected_profile_digest` points to exactly `KIRRA_DIGEST_LEN` readable
+///   bytes.
+#[no_mangle]
+pub unsafe extern "C" fn kirra_bound_consumer_new(
+    vk: *const u8,
+    expected_profile_digest: *const u8,
+    maximum_token_lifetime_ms: u64,
+    control_period_ms: u64,
+    missed_periods: u32,
+    stop_decel_mps2: f64,
+    vx_max: f64,
+    vz_max: f64,
+) -> *mut KirraBoundConsumer {
+    if vk.is_null() || expected_profile_digest.is_null() {
+        return core::ptr::null_mut();
+    }
+
+    if maximum_token_lifetime_ms == 0
+        || !(vx_max.is_finite() && vx_max > 0.0 && vz_max.is_finite() && vz_max > 0.0)
+    {
+        return core::ptr::null_mut();
+    }
+
+    let mut vk_bytes = [0u8; KIRRA_VK_LEN];
+    core::ptr::copy_nonoverlapping(vk, vk_bytes.as_mut_ptr(), KIRRA_VK_LEN);
+
+    let Ok(governor_vk) = VerifyingKey::from_bytes(&vk_bytes) else {
+        return core::ptr::null_mut();
+    };
+
+    let mut profile_digest = [0u8; KIRRA_DIGEST_LEN];
+    core::ptr::copy_nonoverlapping(
+        expected_profile_digest,
+        profile_digest.as_mut_ptr(),
+        KIRRA_DIGEST_LEN,
+    );
+
+    if profile_digest == [0u8; KIRRA_DIGEST_LEN] {
+        return core::ptr::null_mut();
+    }
+
+    let cfg = ConsumerConfig {
+        // V2 uses explicit signed expiry rather than the V1 freshness window.
+        // This field remains part of the shared liveness config but is not
+        // consulted by RosBoundCommandGate.
+        freshness_window_ms: maximum_token_lifetime_ms,
+        control_period_ms,
+        missed_periods,
+        stop_decel_mps2,
+    };
+
+    let serial = CaptureSerial {
+        vx_max,
+        vz_max,
+        pending: None,
+    };
+
+    match BoundMotorConsumer::new(
+        governor_vk,
+        profile_digest,
+        maximum_token_lifetime_ms,
+        cfg,
+        serial,
+    ) {
+        Ok(inner) => Box::into_raw(Box::new(KirraBoundConsumer { inner })),
+        Err(_) => core::ptr::null_mut(),
+    }
+}
+
+/// Free a V2 consumer handle. NULL is a no-op.
+///
+/// # Safety
+/// `h` must be a live pointer returned by `kirra_bound_consumer_new`, and must
+/// not have already been freed.
+#[no_mangle]
+pub unsafe extern "C" fn kirra_bound_consumer_free(h: *mut KirraBoundConsumer) {
+    if !h.is_null() {
+        drop(Box::from_raw(h));
     }
 }
 
@@ -451,6 +623,222 @@ pub unsafe extern "C" fn kirra_consumer_health(h: *const KirraConsumer, out: *mu
     core::ptr::write(out, result);
 }
 
+/// Ingest one evidence-bound V2 frame.
+///
+/// The FFI copies raw bytes only. All decoding, signature, evidence, proposal,
+/// profile, replay, nonce, expiry, and supersession checks remain in Rust.
+///
+/// # Safety
+/// - `h` is a live V2 handle.
+/// - `payload` points to exactly `KIRRA_BOUND_PAYLOAD_LEN` readable bytes.
+/// - `token` is NULL, or points to exactly `KIRRA_TOKEN_LEN` readable bytes.
+/// - `out` points to writable `KirraBoundFrameResult`.
+#[no_mangle]
+pub unsafe extern "C" fn kirra_bound_consumer_on_frame(
+    h: *mut KirraBoundConsumer,
+    payload: *const u8,
+    token: *const u8,
+    token_len: usize,
+    now_ms: u64,
+    out: *mut KirraBoundFrameResult,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    core::ptr::write(
+        out,
+        KirraBoundFrameResult {
+            kind: 2,
+            refusal_code: -1,
+            write: 0,
+            sequence: 0,
+            nonce: 0,
+            scan_sequence: 0,
+            tracker_generation: 0,
+            linear: 0.0,
+            angular: 0.0,
+        },
+    );
+
+    if h.is_null() || payload.is_null() {
+        return;
+    }
+
+    let consumer = &mut *h;
+
+    let mut payload_bytes = [0u8; KIRRA_BOUND_PAYLOAD_LEN];
+    core::ptr::copy_nonoverlapping(payload, payload_bytes.as_mut_ptr(), KIRRA_BOUND_PAYLOAD_LEN);
+
+    let token_obj = if token.is_null() || token_len != KIRRA_TOKEN_LEN {
+        None
+    } else {
+        let mut token_bytes = [0u8; KIRRA_TOKEN_LEN];
+        core::ptr::copy_nonoverlapping(token, token_bytes.as_mut_ptr(), KIRRA_TOKEN_LEN);
+        Some(ReleaseToken::from_bytes(&token_bytes))
+    };
+
+    consumer.reset_capture();
+
+    let result = match consumer
+        .inner
+        .on_bound_frame(&payload_bytes, token_obj.as_ref(), now_ms)
+    {
+        BoundFrameOutcome::Released {
+            sequence,
+            nonce,
+            scan_sequence,
+            tracker_generation,
+        } => {
+            let (linear, angular) = consumer.pending().unwrap_or((0.0, 0.0));
+
+            KirraBoundFrameResult {
+                kind: 0,
+                refusal_code: -1,
+                write: 1,
+                sequence,
+                nonce,
+                scan_sequence,
+                tracker_generation,
+                linear,
+                angular,
+            }
+        }
+        BoundFrameOutcome::SerialError => KirraBoundFrameResult {
+            kind: 1,
+            refusal_code: -1,
+            write: 0,
+            sequence: 0,
+            nonce: 0,
+            scan_sequence: 0,
+            tracker_generation: 0,
+            linear: 0.0,
+            angular: 0.0,
+        },
+        BoundFrameOutcome::Refused(refusal) => KirraBoundFrameResult {
+            kind: 2,
+            refusal_code: bound_refusal_code(&refusal),
+            write: 0,
+            sequence: 0,
+            nonce: 0,
+            scan_sequence: 0,
+            tracker_generation: 0,
+            linear: 0.0,
+            angular: 0.0,
+        },
+    };
+
+    core::ptr::write(out, result);
+}
+
+/// Run the V2 liveness clock.
+///
+/// # Safety
+/// `h` is a live V2 handle and `out` points to writable `KirraTickResult`.
+#[no_mangle]
+pub unsafe extern "C" fn kirra_bound_consumer_on_tick(
+    h: *mut KirraBoundConsumer,
+    now_ms: u64,
+    out: *mut KirraTickResult,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    core::ptr::write(
+        out,
+        KirraTickResult {
+            write: 0,
+            linear: 0.0,
+            angular: 0.0,
+        },
+    );
+
+    if h.is_null() {
+        return;
+    }
+
+    let consumer = &mut *h;
+    consumer.reset_capture();
+    consumer.inner.on_tick(now_ms);
+
+    if let Some((linear, angular)) = consumer.pending() {
+        core::ptr::write(
+            out,
+            KirraTickResult {
+                write: 1,
+                linear,
+                angular,
+            },
+        );
+    }
+}
+
+/// Snapshot V2 health telemetry.
+///
+/// # Safety
+/// `h` is a live V2 handle and `out` points to writable `KirraBoundHealth`.
+#[no_mangle]
+pub unsafe extern "C" fn kirra_bound_consumer_health(
+    h: *const KirraBoundConsumer,
+    out: *mut KirraBoundHealth,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    core::ptr::write(
+        out,
+        KirraBoundHealth {
+            releases: 0,
+            refusals_total: 0,
+            no_token: 0,
+            digest_mismatch: 0,
+            signature_invalid: 0,
+            undecodable: 0,
+            future_issued: 0,
+            expired: 0,
+            lifetime_too_long: 0,
+            sequence_not_advanced: 0,
+            nonce_not_advanced: 0,
+            profile_digest_mismatch: 0,
+            perception_frame_superseded: 0,
+            consecutive_signature_invalid: 0,
+            key_mismatch_alarm: 0,
+            silent: 0,
+        },
+    );
+
+    if h.is_null() {
+        return;
+    }
+
+    let health = (*h).inner.health();
+    let refusals = health.refusals;
+
+    core::ptr::write(
+        out,
+        KirraBoundHealth {
+            releases: health.releases,
+            refusals_total: refusals.total(),
+            no_token: refusals.no_token,
+            digest_mismatch: refusals.digest_mismatch,
+            signature_invalid: refusals.signature_invalid,
+            undecodable: refusals.undecodable,
+            future_issued: refusals.future_issued,
+            expired: refusals.expired,
+            lifetime_too_long: refusals.lifetime_too_long,
+            sequence_not_advanced: refusals.sequence_not_advanced,
+            nonce_not_advanced: refusals.nonce_not_advanced,
+            profile_digest_mismatch: refusals.profile_digest_mismatch,
+            perception_frame_superseded: refusals.perception_frame_superseded,
+            consecutive_signature_invalid: health.consecutive_signature_invalid,
+            key_mismatch_alarm: u8::from(health.key_mismatch_alarm),
+            silent: u8::from(health.silent),
+        },
+    );
+}
+
 /// The latched key-mismatch alarm's operator sentence, as a static
 /// NUL-terminated C string (valid for the program lifetime; never freed by the
 /// caller). Returned regardless of latch state so callers can display it; check
@@ -506,10 +894,23 @@ impl KirraConsumer {
     }
 }
 
+impl KirraBoundConsumer {
+    fn reset_capture(&mut self) {
+        self.inner.serial_mut().pending = None;
+    }
+
+    fn pending(&self) -> Option<(f64, f64)> {
+        self.inner.serial().pending()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
+    use kirra_release_token::ros_bound_command::{
+        issue_ros_bound_command_release, RosBoundCommandPayload,
+    };
     use kirra_release_token::ros_twist::{issue_ros_release, RosTwistPayload};
 
     fn sk() -> SigningKey {
@@ -536,6 +937,211 @@ mod tests {
             angular_rad_s: ang,
         };
         (p.encode(), issue_ros_release(&p, &sk()).to_bytes())
+    }
+
+    const PROFILE_DIGEST: [u8; 32] = [0x11; 32];
+
+    unsafe fn new_bound_consumer() -> *mut KirraBoundConsumer {
+        kirra_bound_consumer_new(
+            sk().verifying_key().as_bytes().as_ptr(),
+            PROFILE_DIGEST.as_ptr(),
+            200,
+            100,
+            3,
+            1.0,
+            0.15,
+            0.4,
+        )
+    }
+
+    fn bound_frame(
+        sequence: u64,
+        nonce: u64,
+        issued_at_ms: u64,
+        scan_sequence: u64,
+    ) -> ([u8; KIRRA_BOUND_PAYLOAD_LEN], [u8; KIRRA_TOKEN_LEN]) {
+        let payload = RosBoundCommandPayload {
+            sequence,
+            nonce,
+            issued_at_ms,
+            expires_at_ms: issued_at_ms + 200,
+            linear_mps: 0.25,
+            angular_rad_s: 0.1,
+            scan_sequence,
+            camera_sequence: Some(88),
+            tracker_generation: 3,
+            profile_digest: PROFILE_DIGEST,
+            evidence_digest: [0x22; 32],
+            proposal_digest: [0x33; 32],
+        };
+
+        let token = issue_ros_bound_command_release(&payload, &sk());
+        (payload.encode(), token.to_bytes())
+    }
+
+    #[test]
+    fn bound_ffi_valid_frame_returns_exact_clamped_motor_decision() {
+        unsafe {
+            let handle = new_bound_consumer();
+            assert!(!handle.is_null());
+
+            let (payload, token) = bound_frame(1, 1001, 10_000, 77);
+            let mut out = KirraBoundFrameResult {
+                kind: -1,
+                refusal_code: -1,
+                write: 0,
+                sequence: 0,
+                nonce: 0,
+                scan_sequence: 0,
+                tracker_generation: 0,
+                linear: 0.0,
+                angular: 0.0,
+            };
+
+            kirra_bound_consumer_on_frame(
+                handle,
+                payload.as_ptr(),
+                token.as_ptr(),
+                token.len(),
+                10_050,
+                &mut out,
+            );
+
+            assert_eq!(out.kind, 0);
+            assert_eq!(out.write, 1);
+            assert_eq!(out.sequence, 1);
+            assert_eq!(out.nonce, 1001);
+            assert_eq!(out.scan_sequence, 77);
+            assert_eq!(out.tracker_generation, 3);
+
+            // CaptureSerial backstop clamps 0.25 to configured 0.15.
+            assert_eq!(out.linear, 0.15);
+            assert_eq!(out.angular, 0.1);
+
+            kirra_bound_consumer_free(handle);
+        }
+    }
+
+    #[test]
+    fn bound_ffi_tampered_proposal_is_refused_without_write() {
+        unsafe {
+            let handle = new_bound_consumer();
+            let (mut payload, token) = bound_frame(1, 1001, 10_000, 77);
+
+            // proposal_digest starts at byte 144.
+            payload[144] ^= 1;
+
+            let mut out = core::mem::zeroed::<KirraBoundFrameResult>();
+
+            kirra_bound_consumer_on_frame(
+                handle,
+                payload.as_ptr(),
+                token.as_ptr(),
+                token.len(),
+                10_050,
+                &mut out,
+            );
+
+            assert_eq!(out.kind, 2);
+            assert_eq!(out.write, 0);
+            assert_eq!(out.refusal_code, BOUND_REF_DIGEST_MISMATCH);
+
+            let mut health = core::mem::zeroed::<KirraBoundHealth>();
+            kirra_bound_consumer_health(handle, &mut health);
+            assert_eq!(health.digest_mismatch, 1);
+            assert_eq!(health.releases, 0);
+
+            kirra_bound_consumer_free(handle);
+        }
+    }
+
+    #[test]
+    fn bound_ffi_replay_and_superseded_frame_are_refused() {
+        unsafe {
+            let handle = new_bound_consumer();
+
+            let (first, first_token) = bound_frame(1, 1001, 10_000, 77);
+            let mut out = core::mem::zeroed::<KirraBoundFrameResult>();
+
+            kirra_bound_consumer_on_frame(
+                handle,
+                first.as_ptr(),
+                first_token.as_ptr(),
+                first_token.len(),
+                10_050,
+                &mut out,
+            );
+            assert_eq!(out.kind, 0);
+
+            kirra_bound_consumer_on_frame(
+                handle,
+                first.as_ptr(),
+                first_token.as_ptr(),
+                first_token.len(),
+                10_060,
+                &mut out,
+            );
+            assert_eq!(out.refusal_code, BOUND_REF_SEQUENCE_NOT_ADVANCED);
+
+            let (newer, newer_token) = bound_frame(2, 1002, 10_060, 78);
+            kirra_bound_consumer_on_frame(
+                handle,
+                newer.as_ptr(),
+                newer_token.as_ptr(),
+                newer_token.len(),
+                10_070,
+                &mut out,
+            );
+            assert_eq!(out.kind, 0);
+
+            let (older, older_token) = bound_frame(3, 1003, 10_070, 77);
+            kirra_bound_consumer_on_frame(
+                handle,
+                older.as_ptr(),
+                older_token.as_ptr(),
+                older_token.len(),
+                10_080,
+                &mut out,
+            );
+
+            assert_eq!(out.refusal_code, BOUND_REF_PERCEPTION_FRAME_SUPERSEDED);
+            assert_eq!(out.write, 0);
+
+            kirra_bound_consumer_free(handle);
+        }
+    }
+
+    #[test]
+    fn bound_ffi_expired_and_missing_tokens_fail_closed() {
+        unsafe {
+            let handle = new_bound_consumer();
+            let (payload, token) = bound_frame(1, 1001, 10_000, 77);
+            let mut out = core::mem::zeroed::<KirraBoundFrameResult>();
+
+            kirra_bound_consumer_on_frame(
+                handle,
+                payload.as_ptr(),
+                token.as_ptr(),
+                token.len(),
+                10_200,
+                &mut out,
+            );
+            assert_eq!(out.refusal_code, BOUND_REF_EXPIRED);
+            assert_eq!(out.write, 0);
+
+            kirra_bound_consumer_on_frame(
+                handle,
+                payload.as_ptr(),
+                core::ptr::null(),
+                0,
+                10_050,
+                &mut out,
+            );
+            assert_eq!(out.refusal_code, BOUND_REF_NO_TOKEN);
+            assert_eq!(out.write, 0);
+
+            kirra_bound_consumer_free(handle);
+        }
     }
 
     #[test]

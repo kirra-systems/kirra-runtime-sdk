@@ -108,28 +108,38 @@ def wheelbase_consistent(param_m, reported_m):
 # Live-loop relay — gateway `release` object -> /kirra/release wire frame
 # ---------------------------------------------------------------------------
 
-# ADR-0033 wire shape (mirrors robot/kirra_ffi.py::split_frame, the consumer's
-# strict parse): payload(32) || token(96) = one 128-byte governed frame.
-RELEASE_PAYLOAD_LEN = 32
+# ADR-0033 wire shape, evidence-bound V2: payload(176) || token(96) = one
+# 272-byte governed frame. The payload is `RosBoundCommandPayload::encode`
+# (crates/kirra-release-token/src/ros_bound_command.rs) — the enforced twist
+# PLUS the perception/profile/proposal identity it was authored against; the
+# token is digest(32) || signature(64) over exactly those bytes.
+#
+# The 32-byte V1 `RosTwistPayload` is NOT accepted here. V1 remains in the
+# Rust library as compatibility code, but it carries no evidence binding, so
+# admitting it on this live path would be a silent downgrade: an attacker (or
+# a stale verifier) could strip the evidence identity and still get a frame
+# the relay would happily forward. A V1-length payload therefore fails the
+# length check below and nothing is published.
+RELEASE_PAYLOAD_LEN = 176
 RELEASE_TOKEN_LEN = 96
 
 
 def release_frame(release):
-    """Build the 128-byte `payload(32) || token(96)` wire frame from a gateway
-    200's `release` object, or return None when no valid frame exists.
+    """Build the 272-byte `payload(176) || token(96)` V2 wire frame from a
+    gateway 200's `release` object, or return None when no valid frame exists.
 
     STRICT: `release` must be a dict whose `payload_hex` / `token_hex` are hex
-    strings decoding to EXACTLY 32 and 96 bytes. Anything else -> None, and the
-    relay publishes NOTHING — the verifying motor consumer then starves into
-    its decel-to-zero, the same fail-closed outcome as a verifier with no
+    strings decoding to EXACTLY 176 and 96 bytes. Anything else -> None, and
+    the relay publishes NOTHING — the verifying motor consumer then starves
+    into its decel-to-zero, the same fail-closed outcome as a verifier with no
     signer provisioned. Never publish a "best effort" frame: the consumer's
     strict parser would discard a malformed one anyway, but a sliced/padded
     frame must not even be offered (review #901's oversized-token lesson).
 
     This is pure CARRIAGE: the bytes are relayed exactly as the verifier
     hex-encoded them. The trust path is the consumer's Ed25519 verify over
-    exactly these bytes — this function never re-encodes floats or
-    reinterprets the payload.
+    exactly these bytes — this function never re-encodes floats, rebuilds the
+    evidence identity, or otherwise reinterprets the payload.
     """
     if not isinstance(release, dict):
         return None

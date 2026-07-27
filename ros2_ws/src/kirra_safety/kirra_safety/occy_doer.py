@@ -10,14 +10,24 @@ KIRRA. Each tick it:
      (left/right polylines) + objects,
   3. POSTs {ego, goal-in-base, Taj corridor, objects} to the Occy planner sidecar
      (/plan) → a KIRRA-validated trajectory,
-  4. converts that trajectory to a Twist (pure pursuit) and publishes it on
-     /cmd_vel_raw — the PROPOSAL.
+  4. converts that trajectory to velocities (pure pursuit) and publishes them on
+     /cmd_vel_raw as an ATOMIC evidence-bound proposal envelope — the PROPOSAL.
+
+The envelope is canonical JSON in a std_msgs/String (see bound_proposal.py), not a
+bare Twist: it carries the proposed velocities AND the `release_binding` naming the
+exact Taj evidence frame, platform profile, and Occy proposal digest they were
+authored against. That pairing is what lets the verifier mint a signed V2 release the
+motor consumer can police — a bare Twist names no evidence, so it could only ever be
+signed as "some robot asked for this".
 
 The proposal then flows through the cmd_vel_interceptor (Taj speed cap + the KIRRA
 kinematic governor) before reaching the wheels, so Occy only PROPOSES and KIRRA still
 DISPOSES — twice (the planner runs the slow-loop checker; the interceptor runs the
-fast-loop one). The doer is fail-soft: no goal, a stale scan, a service error, or a
-refused plan all publish a zero Twist (hold).
+fast-loop one). The doer is fail-soft: no goal, a stale scan, a service error, a
+refused plan, or a plan whose evidence identity cannot be established all publish an
+EMPTY envelope (hold) — which the interceptor refuses fail-closed into a stop. A hold
+deliberately publishes nothing actuatable rather than a zero-velocity envelope bound
+to evidence this tick may not have.
 
   doer (this node) ─/cmd_vel_raw→ cmd_vel_interceptor [Taj cap + KIRRA] ─/cmd_vel→ wheels
 
@@ -33,7 +43,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from geometry_msgs.msg import Twist, PoseStamped
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
@@ -46,6 +56,7 @@ from kirra_safety.camera_detect_core import (
     DEFAULT_CAMERA_MAX_AGE_MS, camera_perception_fields, object_goal_reached,
     plan_object_goal_fields,
 )
+from kirra_safety.bound_proposal import build_release_binding, encode_bound_proposal
 
 try:
     import requests
@@ -53,7 +64,12 @@ try:
 except ImportError:
     REQUESTS_AVAILABLE = False
 
-ZERO = Twist()
+# A hold. Empty data is not a parseable envelope, so the interceptor refuses it
+# fail-closed and stops — which is exactly what a hold means. It is deliberately
+# NOT a zero-velocity envelope: most holds happen before this tick has any
+# evidence frame, and fabricating a binding to describe "no motion" would invent
+# perception identity the doer never actually observed.
+HOLD_ENVELOPE = ''
 
 # Lidar-ingress QoS (hardware finding: the TG30 driver publishes /scan
 # BEST_EFFORT; a default RELIABLE subscription silently matches ZERO messages —
@@ -183,7 +199,9 @@ class OccyDoer(Node):
         self._object_refusal = None   # last refusal reason, logged once
         self._camera_healthy = True   # last reported channel health, logged on change
 
-        self._pub = self.create_publisher(Twist, self.get_parameter('cmd_topic').value, 10)
+        # The proposal topic carries the atomic evidence-bound envelope as
+        # canonical JSON (std_msgs/String), never a bare Twist.
+        self._pub = self.create_publisher(String, self.get_parameter('cmd_topic').value, 10)
         self.create_subscription(Odometry, self.get_parameter('odom_topic').value, self._on_odom, 20)
         self.create_subscription(PoseStamped, self.get_parameter('goal_topic').value, self._on_goal, 10)
         self.create_subscription(LaserScan, self.get_parameter('scan_topic').value, self._on_scan, SCAN_QOS)
@@ -272,8 +290,13 @@ class OccyDoer(Node):
             self.get_logger().debug(f'mick poll: {e}')
 
     # --- the doer loop ------------------------------------------------------
+    def _publish_envelope(self, data: str):
+        msg = String()
+        msg.data = data
+        self._pub.publish(msg)
+
     def _hold(self, why: str):
-        self._pub.publish(ZERO)
+        self._publish_envelope(HOLD_ENVELOPE)
         self.get_logger().debug(f'hold: {why}')
 
     def _tick(self):
@@ -371,10 +394,26 @@ class OccyDoer(Node):
             return self._hold(f'service-error:{e}')
 
         v, w, reason = decide(plan, self._lookahead, self._max_v, self._max_w)
-        twist = Twist()
-        twist.linear.x = v
-        twist.angular.z = w
-        self._pub.publish(twist)
+
+        # Bind the velocities to the evidence they were authored against. Both
+        # halves come from the SAME plan response: `perception_frame_id` is the
+        # planner's own statement of the Taj frame it planned against, and
+        # `proposal_digest` is computed over exactly that frame plus the
+        # authored trajectory. Taking both from one response is what makes the
+        # published envelope atomic.
+        binding = build_release_binding(
+            plan.get('perception_frame_id'), plan.get('proposal_digest'))
+        if binding is None:
+            # No usable evidence identity — e.g. Taj returned its invalid-frame
+            # sentinel, or the planner answered without a digest. Hold rather
+            # than propose motion the verifier could not bind.
+            return self._hold('unbound-plan')
+
+        envelope = encode_bound_proposal(v, 0.0, w, binding)
+        if envelope is None:
+            return self._hold('unencodable-proposal')
+
+        self._publish_envelope(envelope)
         self.get_logger().debug(f'{reason}  v={v:.2f} w={w:.2f}  goal_base=({gx:.1f},{gy:.1f})')
 
 
