@@ -229,6 +229,10 @@ enum PerceptionRequestError {
     ScanTooLarge,
     NanRangeSample,
     InvalidForwardExtent,
+    /// Finite, but beyond [`MAX_FORWARD_EXTENT_M`]. Distinct from
+    /// `InvalidForwardExtent` so a unit mistake (metres given as millimetres,
+    /// say) is diagnosable as "too far" rather than "malformed".
+    ForwardExtentTooLarge,
     InvalidDeceleration,
     InvalidMargin,
     InvalidLaneHalfWidth,
@@ -275,6 +279,10 @@ fn validate_perception_request(req: &PerceptionRequest) -> Result<(), Perception
 
     if !req.forward_extent_m.is_finite() || req.forward_extent_m <= MIN_FORWARD_OBJECT_X_M {
         return Err(PerceptionRequestError::InvalidForwardExtent);
+    }
+
+    if req.forward_extent_m > MAX_FORWARD_EXTENT_M {
+        return Err(PerceptionRequestError::ForwardExtentTooLarge);
     }
 
     if !req.decel_mps2.is_finite() || req.decel_mps2 <= 0.0 {
@@ -769,6 +777,31 @@ fn minimum_corridor_width_before_reach_m(
 /// Returns closer than this are treated as near-origin/self-geometry candidates.
 /// This does NOT remove them from raw perception or corridor construction.
 const MIN_FORWARD_OBJECT_X_M: f64 = 0.15;
+
+/// Maximum accepted `forward_extent_m` (metres) for a perception request.
+///
+/// PHYSICAL RATIONALE. The forward extent is a perception HORIZON, and no
+/// ground-vehicle horizon usefully exceeds this. The longest-range production
+/// automotive lidars reach roughly 250-300 m; the deployed R2 TG30 maxes at
+/// 12 m, and every extent configured anywhere in this repository is 8-40 m. So
+/// 500 m is ~2x the best sensor in the industry and >12x the largest value we
+/// actually use — generous enough that no legitimate deployment meets it, tight
+/// enough that a unit mistake does not sail through.
+///
+/// COMPUTATIONAL RATIONALE. `TajPhaseA::extract_corridor` is
+/// O(stations x points) with `stations = ceil(extent / station_m)` and
+/// `station_m` floored at 0.1 m, so the extent alone sets the work. Capping at
+/// 500 m bounds stations at 5,000 (== `kirra_taj::MAX_CORRIDOR_STATIONS`),
+/// keeping the corridor pass finite and predictable for any accepted request.
+/// Without a cap the cost is unbounded in a caller-supplied f64: 1e300 m does
+/// not merely run slowly, it saturates the float->usize cast to `usize::MAX`,
+/// which panicked on `nstations + 1` in debug and became a ~1.8e19-iteration
+/// loop in release.
+///
+/// Deliberately paired with that library ceiling: a request accepted here can
+/// never reach the backstop, and the backstop covers callers that bypass this
+/// validation entirely (`TajConfig` is public).
+const MAX_FORWARD_EXTENT_M: f64 = 500.0;
 
 /// Maximum bearing from the vehicle forward axis for an object to participate in
 /// the scalar nearest-object braking bound.
@@ -1480,6 +1513,99 @@ mod tests {
             assert!(response.left.is_empty());
             assert!(response.right.is_empty());
             assert!(response.objects.is_empty());
+        }
+    }
+
+    /// The forward-extent bound, walked across its whole domain.
+    ///
+    /// The load-bearing rows are `1e300` and `just above the maximum`: both are
+    /// FINITE, so the pre-existing `is_finite() || <= MIN` guard admitted them.
+    /// A finite-but-enormous extent is not merely slow — `extract_corridor`
+    /// saturates its float->usize station cast to `usize::MAX`, which panicked
+    /// on `nstations + 1` in debug and became a ~1.8e19-iteration loop in
+    /// release.
+    #[test]
+    fn forward_extent_bound_accepts_the_usable_range_and_refuses_the_rest() {
+        use PerceptionRequestError::{ForwardExtentTooLarge, InvalidForwardExtent};
+
+        let cases: [(f64, Option<PerceptionRequestError>); 11] = [
+            // --- lower bound: unchanged pre-existing behaviour ---
+            (f64::NAN, Some(InvalidForwardExtent)),
+            (f64::INFINITY, Some(InvalidForwardExtent)),
+            (f64::NEG_INFINITY, Some(InvalidForwardExtent)),
+            (-1.0, Some(InvalidForwardExtent)),
+            (0.0, Some(InvalidForwardExtent)),
+            (MIN_FORWARD_OBJECT_X_M, Some(InvalidForwardExtent)), // boundary is exclusive
+            // --- normal configured values (kirra_params.yaml, defaults, tests) ---
+            (8.0, None),
+            (default_extent(), None),
+            // --- the new upper bound ---
+            (MAX_FORWARD_EXTENT_M, None), // exact maximum is ACCEPTED
+            (
+                MAX_FORWARD_EXTENT_M + f64::EPSILON * MAX_FORWARD_EXTENT_M,
+                Some(ForwardExtentTooLarge),
+            ),
+            (1e300, Some(ForwardExtentTooLarge)), // the reported crasher
+        ];
+
+        for (extent, expected) in cases {
+            let mut request = req(clear_scan());
+            request.forward_extent_m = extent;
+            // `margin_m` must stay below the extent or it masks the case under
+            // test with InvalidMargin.
+            request.margin_m = 0.0;
+            assert_eq!(
+                validate_perception_request(&request).err(),
+                expected,
+                "forward_extent_m = {extent:e}"
+            );
+        }
+    }
+
+    /// Regression: a huge FINITE extent is refused at the perimeter, so the
+    /// request never reaches Taj computation — and the endpoint answers with
+    /// the fail-closed response rather than panicking or hanging.
+    ///
+    /// Exercised in both profiles: debug catches the arithmetic overflow that
+    /// used to fire at `kirra_taj::lib.rs:445`, release catches the wrapped
+    /// loop that used to hang instead.
+    #[test]
+    fn huge_finite_forward_extent_is_refused_before_taj_computation() {
+        for extent in [1e300, 1e30, f64::MAX, MAX_FORWARD_EXTENT_M * 2.0] {
+            let mut request = req(clear_scan());
+            request.forward_extent_m = extent;
+            request.margin_m = 0.0;
+
+            assert_eq!(
+                validate_perception_request(&request).err(),
+                Some(PerceptionRequestError::ForwardExtentTooLarge),
+                "forward_extent_m = {extent:e} must be refused"
+            );
+
+            // The full endpoint must return the fail-closed response — reaching
+            // here at all proves no panic and no unbounded loop.
+            let response = handle_perception(&request);
+            assert!(!response.healthy, "{extent:e}");
+            assert_eq!(response.speed_cap_mps, 0.0, "{extent:e}");
+            assert!(response.left.is_empty() && response.right.is_empty());
+            assert!(response.objects.is_empty());
+        }
+    }
+
+    /// Every extent configured anywhere in the repository must remain valid, so
+    /// the new ceiling cannot have broken a live deployment.
+    #[test]
+    fn all_shipped_forward_extents_are_within_the_bound() {
+        // kirra_params.yaml (perception_governor + occy_doer), TajConfig's own
+        // default, the sidecar default, and the largest test-stack value.
+        for extent in [8.0, 8.0, 20.0, default_extent(), 40.0] {
+            assert!(
+                extent > MIN_FORWARD_OBJECT_X_M && extent <= MAX_FORWARD_EXTENT_M,
+                "shipped extent {extent} is outside the accepted band"
+            );
+            let mut request = req(clear_scan());
+            request.forward_extent_m = extent;
+            assert!(validate_perception_request(&request).is_ok(), "{extent}");
         }
     }
 
