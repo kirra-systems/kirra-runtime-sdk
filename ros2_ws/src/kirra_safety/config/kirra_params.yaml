@@ -38,6 +38,17 @@ occy_doer:
     # a different lidar rate needs a deployment-review update here.
     scan_stale_s: 0.25
 
+    # Plan-cycle rate. The Taj + planner calls run in a background job, so a
+    # tick publishes the PREVIOUS tick's result: perception is one tick period
+    # plus one round trip old when it is used. At the node default of 5 Hz that
+    # is 200 ms + up to 120 ms of HTTP against a 250 ms budget, so plans would
+    # age out and the doer would hold intermittently on a healthy lidar. 10 Hz
+    # (100 ms) matches the bench-verified TG30 scan rate and leaves the
+    # staleness budget intact. The node WARNs at startup if this no longer
+    # fits. Raising it above the lidar rate costs nothing: a job is issued only
+    # when a new scan has arrived.
+    plan_hz: 10.0
+
     # --- frame-health detectors (OPT-IN; default off) --------------------
     # scan_stale_s above measures ARRIVAL. It cannot distinguish a live lidar
     # from a driver that has wedged and is republishing its last buffer at the

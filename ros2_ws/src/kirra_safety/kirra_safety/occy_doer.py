@@ -13,6 +13,17 @@ KIRRA. Each tick it:
   4. converts that trajectory to velocities (pure pursuit) and publishes them on
      /cmd_vel_raw as an ATOMIC evidence-bound proposal envelope — the PROPOSAL.
 
+Steps 2-3 do NOT run inside the timer callback. rclpy's executor is
+single-threaded, so two sequential blocking POSTs (up to 2x http_timeout_ms of a
+1/plan_hz period) stalled every other callback on this node — including the scan
+subscription, so a slow sidecar froze perception ingest as well as planning. They
+now run in ONE bounded background job: the worker COMPUTES and the timer
+PUBLISHES. A tick therefore publishes the PREVIOUS tick's result — a pipeline,
+one tick of latency — and a result is used at most once, only for a scan the
+doer has not already acted on, and only while the perception behind it is inside
+`scan_stale_s`. Anything else holds. The decision algebra is pure and lives in
+`async_plan.py`; this module is the ROS shim around it.
+
 The envelope is canonical JSON in a std_msgs/String (see bound_proposal.py), not a
 bare Twist: it carries the proposed velocities AND the `release_binding` naming the
 exact Taj evidence frame, platform profile, and Occy proposal digest they were
@@ -46,6 +57,7 @@ unchanged. Mick (the LLM) fits by publishing the goal/intent instead of RViz.
 
 import json
 import math
+import threading
 import time
 
 import rclpy
@@ -65,6 +77,15 @@ from kirra_safety.camera_detect_core import (
     plan_object_goal_fields,
 )
 from kirra_safety.bound_proposal import build_release_binding, encode_bound_proposal
+from kirra_safety.async_plan import (
+    ISSUE,
+    USE,
+    JobRequest,
+    JobResult,
+    decide_issue,
+    evidence_sequences,
+    resolve_result,
+)
 from kirra_safety.sensor_freshness import (
     FAIL_CLOSED,
     FrameHealthConfig,
@@ -205,6 +226,26 @@ class OccyDoer(Node):
         self._timeout_s = self.get_parameter('http_timeout_ms').value / 1000.0
         self._back_m = self.get_parameter('corridor_back_m').value
 
+        # The plan cycle is a PIPELINE: a tick publishes the PREVIOUS tick's
+        # result, so the perception behind a proposal is always at least one
+        # tick period plus one round trip old. If that does not fit inside
+        # `scan_stale_s`, results age out and the doer holds intermittently
+        # even with a perfectly healthy lidar — a liveness fault that looks
+        # like a sensor fault. WARN rather than abort: the real round-trip time
+        # is a measured deployment number and a fast sidecar pair can make a
+        # marginal configuration work; refusing to start would be worse.
+        self._plan_hz = float(self.get_parameter('plan_hz').value)
+        pipeline_s = (1.0 / self._plan_hz) + 2.0 * self._timeout_s
+        if pipeline_s > self._scan_stale_s:
+            self.get_logger().warn(
+                f'plan pipeline budget {pipeline_s * 1000:.0f} ms '
+                f'(1/plan_hz={1000.0 / self._plan_hz:.0f} ms + 2x http_timeout_ms) '
+                f'exceeds scan_stale_s ({self._scan_stale_s * 1000:.0f} ms): '
+                'plans will age out and the doer will hold intermittently. '
+                'Raise plan_hz, lower http_timeout_ms, or review the staleness '
+                'budget against the deployment lidar rate.'
+            )
+
         # Frame-health tracker. Disarmed unless explicitly enabled, in which
         # case every resolution is a no-op DISARMED and the tick path below is
         # byte-identical to its prior behaviour.
@@ -220,6 +261,40 @@ class OccyDoer(Node):
             frame_cfg = FrameHealthConfig.disarmed()
         self._frame_health = FrameHealthTracker(frame_cfg)
         self._frame_health_reason = None  # latched, so a hold logs once per episode
+
+        # --- non-blocking plan cycle -------------------------------------
+        # The Taj + planner POSTs run in ONE bounded background job so the
+        # timer callback never blocks. Thread discipline (see async_plan.py):
+        # the worker COMPUTES, the timer PUBLISHES. The worker touches only
+        # `_pending_result` / `_job_in_flight`, both under `_job_lock`; it never
+        # publishes, never calls _hold, and never reads or mutates goal, pose,
+        # scan or frame-health state.
+        #
+        # The lock is held ONLY for the slot swap — never across network I/O,
+        # so a hung sidecar cannot block the executor thread on acquisition.
+        self._job_lock = threading.Lock()
+        self._job_in_flight = False
+        self._pending_result = None
+        # Node-local monotonic scan id. ROS 2 removed `header.seq`, so this is
+        # the only "which lidar scan" identity available. Written in _on_scan
+        # and read in _tick — both on the executor thread, so it needs no lock.
+        self._scan_seq = 0
+        # Strictly-advancing watermark: a result is consumed at most once and
+        # never goes backwards (the V2 release gate's discipline).
+        self._last_used_scan_sequence = 0
+        # The scan the last job was issued for. Re-issuing against the same
+        # scan would spend a sidecar round-trip on a result the watermark is
+        # guaranteed to discard, so a tick with no new perception simply does
+        # not start a job (NO_FRESH_INPUT). Executor thread only.
+        self._last_issued_scan_sequence = 0
+
+        # The Mick intent fetch gets the same treatment: it is HTTP reachable
+        # from the timer, so it cannot run inline either. Its own slot, because
+        # it is a different endpoint on a different failure budget — a Mick
+        # outage must not stall or fault the plan cycle.
+        self._mick_lock = threading.Lock()
+        self._mick_in_flight = False
+        self._mick_result = None
         self._vehicle = {
             'class': self.get_parameter('vehicle_class').value,
             'wheelbase_m': self.get_parameter('wheelbase_m').value,
@@ -253,7 +328,7 @@ class OccyDoer(Node):
             String, self.get_parameter('camera_detections_topic').value, self._on_camera, 10)
         self.create_subscription(
             String, self.get_parameter('object_goal_topic').value, self._on_object_goal, 10)
-        self.create_timer(1.0 / self.get_parameter('plan_hz').value, self._tick)
+        self.create_timer(1.0 / self._plan_hz, self._tick)
 
         if not REQUESTS_AVAILABLE:
             self.get_logger().error('python3-requests missing — doer holds (publishes zero).')
@@ -275,11 +350,15 @@ class OccyDoer(Node):
         self.get_logger().info(f'new goal: ({self._goal[0]:.2f}, {self._goal[1]:.2f})')
 
     def _on_scan(self, msg: LaserScan):
+        # Node-local scan identity. Incremented BEFORE the slot is replaced so
+        # `_scan_seq` and `_scan` are always consistent when _tick reads them
+        # (same thread, so this is ordering discipline rather than a race fix).
+        self._scan_seq += 1
         self._scan = (msg, time.monotonic())
-        # Fold the arrival into the frame-health tracker. This does NOT change
-        # the request architecture — the callback still only stores and returns;
-        # the HTTP path is untouched (that is PR 3b). The work is skipped
-        # entirely when disarmed, so the nominal path costs nothing.
+        # Fold the arrival into the frame-health tracker. The callback still
+        # only stores and returns — it makes no request and takes no lock. The
+        # work is skipped entirely when disarmed, so the nominal path costs
+        # nothing.
         if not self._frame_health_enabled:
             return
         stamp_ms = int(msg.header.stamp.sec * 1000
@@ -313,7 +392,12 @@ class OccyDoer(Node):
 
     # --- Mick intent consumption (intents, never commands) -------------------
     def _poll_mick(self):
-        """Ground a NEW Mick intent, fail-closed at every step.
+        """Apply a NEW Mick intent, fail-closed at every step.
+
+        The FETCH is a background job (see `_maybe_issue_mick`) so the timer
+        callback never blocks on Mick either; this half runs on the executor
+        thread and is the ONLY place the goal is mutated — the worker deposits
+        the raw wire dict and nothing else.
 
         Any fault — Mick unreachable, malformed JSON, an unknown tag, a
         non-finite coordinate — leaves the current goal untouched (the same
@@ -322,8 +406,13 @@ class OccyDoer(Node):
         """
         if not self._mick or self._pose is None:
             return
+        self._maybe_issue_mick()
+        with self._mick_lock:
+            wire = self._mick_result
+            self._mick_result = None
+        if wire is None:
+            return  # nothing fetched yet, or the fetch faulted
         try:
-            wire = requests.get(f'{self._mick}/intent/last', timeout=self._timeout_s).json()
             intent = wire.get('intent')
             seq = int(wire.get('seq', 0))
             if not isinstance(intent, dict) or seq <= self._mick_seq:
@@ -350,6 +439,31 @@ class OccyDoer(Node):
                     f'mick intent #{seq}: `{tag}` carries no goal for this bridge — ignored')
         except Exception as e:  # noqa: BLE001 — any fault keeps the current goal (fail-soft)
             self.get_logger().debug(f'mick poll: {e}')
+
+    def _maybe_issue_mick(self):
+        """Start one background Mick fetch if none is running. Never publishes,
+        never touches the goal — it deposits the raw wire dict only."""
+        with self._mick_lock:
+            if self._mick_in_flight:
+                return
+            self._mick_in_flight = True
+        threading.Thread(
+            target=self._run_mick_fetch, name='occy-doer-mick', daemon=True,
+        ).start()
+
+    def _run_mick_fetch(self):
+        """WORKER THREAD. One bounded GET; the wire dict or nothing."""
+        wire = None
+        try:
+            payload = requests.get(
+                f'{self._mick}/intent/last', timeout=self._timeout_s).json()
+            if isinstance(payload, dict):
+                wire = payload
+        except Exception:  # noqa: BLE001 — a fault is simply "no new intent"
+            wire = None
+        with self._mick_lock:
+            self._mick_result = wire
+            self._mick_in_flight = False
 
     # --- the doer loop ------------------------------------------------------
     def _publish_envelope(self, data: str):
@@ -434,57 +548,79 @@ class OccyDoer(Node):
             return self._hold(f'object-goal-refused:{refusal}')
         self._object_refusal = None
 
-        try:
-            perception = {
-                'angle_min_rad': float(scan.angle_min),
-                'angle_increment_rad': float(scan.angle_increment),
-                'range_min_m': float(scan.range_min),
-                'range_max_m': float(scan.range_max),
-                'ranges': [float(r) for r in scan.ranges],
-                'stamp_ms': scan_stamp_ms, 'forward_extent_m': self._extent,
-            }
-            # Camera Phase-B (tighten-only). Disarmed → this is {'camera_armed': False}
-            # and the endpoint is byte-identical to the lidar-only path.
-            perception.update(camera_perception_fields(
-                self._camera_armed, self._camera, self._camera_max_age_ms))
-            taj = requests.post(
-                f'{self._taj}/perception', timeout=self._timeout_s, json=perception).json()
-            if self._camera_armed:
-                # Taj already floored the speed cap; say so once per transition so an
-                # operator sees WHY the robot crawled rather than guessing — and once
-                # per transition rather than every tick, so the log stays readable.
-                healthy = taj.get('camera_healthy') is not False
-                if healthy != self._camera_healthy:
-                    self._camera_healthy = healthy
-                    if healthy:
-                        self.get_logger().info('camera channel healthy again')
-                    else:
-                        self.get_logger().warn(
-                            'camera channel unhealthy — Taj floored the speed cap '
-                            '(no usable frame: detector down, stale, or blind)')
+        # Snapshot every input the job needs, as PLAIN PYTHON VALUES. The scan's
+        # ranges are copied here, on the executor thread, so the worker can
+        # never read a ROS message the executor is replacing underneath it.
+        perception = {
+            'angle_min_rad': float(scan.angle_min),
+            'angle_increment_rad': float(scan.angle_increment),
+            'range_min_m': float(scan.range_min),
+            'range_max_m': float(scan.range_max),
+            'ranges': [float(r) for r in scan.ranges],
+            'stamp_ms': scan_stamp_ms, 'forward_extent_m': self._extent,
+        }
+        # Camera Phase-B (tighten-only). Disarmed → this is {'camera_armed': False}
+        # and the endpoint is byte-identical to the lidar-only path.
+        perception.update(camera_perception_fields(
+            self._camera_armed, self._camera, self._camera_max_age_ms))
+        request = JobRequest(
+            scan_sequence=self._scan_seq,
+            scan_received_s=self._scan[1],
+            taj_url=self._taj,
+            planner_url=self._planner,
+            timeout_s=self._timeout_s,
+            perception=perception,
+            plan_fields={
+                'speed': float(speed), 'gx': gx, 'gy': gy,
+                'cruise': self._cruise, 'back_m': self._back_m,
+                'vehicle': self._vehicle, 'goal_fields': goal_fields,
+            },
+        )
 
-            # Extend the Taj corridor behind the robot (footprint containment) and tell the
-            # checker the robot's real size, so KIRRA judges a robot — not a 4.8 m car.
-            left, right = extend_corridor_back(taj.get('left', []), taj.get('right', []), self._back_m)
-            plan_req = {
-                'ego': {'x': 0.0, 'y': 0.0, 'heading': 0.0, 'speed': float(speed)},
-                'goal': {'x': gx, 'y': gy},
-                'cruise': self._cruise,
-                'left': left,
-                'right': right,
-                'objects': taj.get('objects', []),
-                'pedestrians': taj.get('pedestrians', []),
-                'predicted_vrus': taj.get('predicted_vrus', []),
-                'perception_frame_id': taj.get('frame_id'),
-                'vehicle': self._vehicle,
-            }
-            if goal_fields:
-                plan_req.update(goal_fields)
-            plan = requests.post(
-                f'{self._planner}/plan', timeout=self._timeout_s, json=plan_req).json()
-        except Exception as e:  # noqa: BLE001 — any fault holds (fail-soft)
-            return self._hold(f'service-error:{e}')
+        # Exactly one publish per tick — a proposal built from the LAST job's
+        # result, or a hold. Then start the next job. The consume-then-issue
+        # order is what makes this a pipeline: this tick acts on the previous
+        # tick's perception while the next round-trip is already in flight.
+        self._publish_from_pending(gx, gy)
+        self._maybe_issue(request)
 
+    # --- the non-blocking plan cycle ---------------------------------------
+
+    def _publish_from_pending(self, gx: float, gy: float):
+        """Publish a proposal from the last completed job, or hold.
+
+        Runs on the EXECUTOR thread and is the only place a proposal is built.
+        The result is TAKEN from the slot (not peeked), so every result gets
+        exactly one verdict and reuse is structurally impossible.
+        """
+        with self._job_lock:
+            result = self._pending_result
+            self._pending_result = None
+        # Resolution is pure and runs OUTSIDE the lock.
+        resolution = resolve_result(
+            result,
+            newest_scan_sequence=self._scan_seq,
+            last_used_scan_sequence=self._last_used_scan_sequence,
+            now_s=time.monotonic(),
+            scan_stale_s=self._scan_stale_s,
+        )
+        if resolution.state != USE:
+            return self._hold(f'plan-{resolution.state.lower()}:{resolution.reason}')
+
+        # Camera-channel health is NODE state, so the transition log lives here
+        # rather than in the worker. Once per transition, not per tick.
+        if self._camera_armed:
+            healthy = result.camera_healthy is not False
+            if healthy != self._camera_healthy:
+                self._camera_healthy = healthy
+                if healthy:
+                    self.get_logger().info('camera channel healthy again')
+                else:
+                    self.get_logger().warn(
+                        'camera channel unhealthy — Taj floored the speed cap '
+                        '(no usable frame: detector down, stale, or blind)')
+
+        plan = result.plan
         v, w, reason = decide(plan, self._lookahead, self._max_v, self._max_w)
 
         # Bind the velocities to the evidence they were authored against. Both
@@ -505,8 +641,99 @@ class OccyDoer(Node):
         if envelope is None:
             return self._hold('unencodable-proposal')
 
+        # Advance the watermark only once the proposal is actually published.
+        self._last_used_scan_sequence = result.requested_scan_sequence
         self._publish_envelope(envelope)
         self.get_logger().debug(f'{reason}  v={v:.2f} w={w:.2f}  goal_base=({gx:.1f},{gy:.1f})')
+
+    def _maybe_issue(self, request):
+        """Start one plan job if none is running. Never publishes."""
+        fresh = request is not None and (
+            request.scan_sequence > self._last_issued_scan_sequence)
+        with self._job_lock:
+            decision = decide_issue(self._job_in_flight, fresh)
+            if decision != ISSUE:
+                return decision
+            self._job_in_flight = True
+        self._last_issued_scan_sequence = request.scan_sequence
+        # Thread creation happens OUTSIDE the lock. `daemon=True` is the
+        # teardown contract: a worker blocked on a hung sidecar can never keep
+        # the process alive at shutdown, and nothing joins it.
+        threading.Thread(
+            target=self._run_job, args=(request,),
+            name='occy-doer-plan', daemon=True,
+        ).start()
+        return ISSUE
+
+    def _run_job(self, request):
+        """WORKER THREAD. Computes, deposits, and touches nothing else."""
+        result = self._execute_job(request)
+        with self._job_lock:
+            self._pending_result = result
+            self._job_in_flight = False
+
+    def _execute_job(self, request):
+        """WORKER THREAD. The two bounded POSTs, as a pure request→result map.
+
+        No lock is held here: all network I/O happens outside `_job_lock`.
+        Every failure becomes a JobResult carrying a fault tag, so a fault can
+        never be mistaken for "no result yet".
+        """
+        def faulted(reason):
+            return JobResult(
+                requested_scan_sequence=request.scan_sequence,
+                scan_received_s=request.scan_received_s,
+                taj_scan_sequence=None, plan_scan_sequence=None,
+                plan=None, camera_healthy=None, fault=reason,
+            )
+
+        fields = request.plan_fields
+        try:
+            taj = requests.post(
+                f'{request.taj_url}/perception',
+                timeout=request.timeout_s, json=request.perception).json()
+            if not isinstance(taj, dict):
+                # Named explicitly rather than left to blow up on `.get` below,
+                # so the operator sees WHICH sidecar answered wrongly.
+                return faulted('taj-response-not-an-object')
+            # Extend the Taj corridor behind the robot (footprint containment) and
+            # tell the checker the robot's real size, so KIRRA judges a robot — not
+            # a 4.8 m car.
+            left, right = extend_corridor_back(
+                taj.get('left', []), taj.get('right', []), fields['back_m'])
+            plan_req = {
+                'ego': {'x': 0.0, 'y': 0.0, 'heading': 0.0, 'speed': fields['speed']},
+                'goal': {'x': fields['gx'], 'y': fields['gy']},
+                'cruise': fields['cruise'],
+                'left': left,
+                'right': right,
+                'objects': taj.get('objects', []),
+                'pedestrians': taj.get('pedestrians', []),
+                'predicted_vrus': taj.get('predicted_vrus', []),
+                'perception_frame_id': taj.get('frame_id'),
+                'vehicle': fields['vehicle'],
+            }
+            if fields['goal_fields']:
+                plan_req.update(fields['goal_fields'])
+            plan = requests.post(
+                f'{request.planner_url}/plan',
+                timeout=request.timeout_s, json=plan_req).json()
+        except Exception as e:  # noqa: BLE001 — any fault holds (fail-soft)
+            return faulted(f'service-error:{type(e).__name__}')
+
+        if not isinstance(plan, dict):
+            return faulted('planner-response-not-an-object')
+
+        taj_seq, plan_seq = evidence_sequences(taj, plan)
+        return JobResult(
+            requested_scan_sequence=request.scan_sequence,
+            scan_received_s=request.scan_received_s,
+            taj_scan_sequence=taj_seq,
+            plan_scan_sequence=plan_seq,
+            plan=plan,
+            camera_healthy=taj.get('camera_healthy'),
+            fault=None,
+        )
 
 
 def main(args=None):
