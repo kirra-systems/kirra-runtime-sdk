@@ -742,6 +742,12 @@ struct Track {
     stamp_ms: u64,
     /// Latest estimated ground velocity (m/s) — retained for CTRV prediction.
     vel: Point,
+    /// Previous valid velocity estimate.
+    ///
+    /// Retained for deterministic frame-to-frame intent stabilization. This
+    /// history is metadata only and cannot weaken geometric prediction,
+    /// uncertainty, pedestrian RSS, or ordinary object RSS.
+    prior_vel: Point,
     /// Latest estimated yaw rate (rad/s) from the heading change across frames.
     yaw_rate: f64,
     /// Latest cluster extent (bbox diagonal, m) — the WP-10 VRU-classifier
@@ -1326,6 +1332,47 @@ fn classify_vru_motion_intent(
     )
 }
 
+/// Build a temporally stable intent distribution from consecutive velocity
+/// estimates.
+///
+/// The latest geometric prediction remains authoritative. Temporal history only
+/// governs intent metadata:
+///
+/// - fewer than three observations preserve the current frame-local result;
+/// - agreement preserves the current normalized distribution;
+/// - disagreement collapses directional authority to Unknown;
+/// - malformed prior motion also collapses to Unknown.
+///
+/// This can only remove speculative directional confidence. It cannot shrink
+/// uncertainty, remove predicted occupancy, weaken pedestrian RSS, or create a
+/// new track.
+fn temporally_stable_vru_intent_distribution(
+    track: &Track,
+    cfg: &VruMotionPredictionConfig,
+    current_intent: VruIntentClass,
+    current_confidence: f64,
+) -> Vec<VruIntentProbability> {
+    if track.frames_seen < 3 {
+        return vru_intent_probability_distribution(current_intent, current_confidence);
+    }
+
+    if !track.prior_vel.x_m.is_finite() || !track.prior_vel.y_m.is_finite() {
+        return vru_intent_probability_distribution(VruIntentClass::Unknown, 0.0);
+    }
+
+    let mut prior_track = *track;
+    prior_track.vel = track.prior_vel;
+    prior_track.frames_seen = track.frames_seen.saturating_sub(1);
+
+    let (prior_intent, _, _) = classify_vru_motion_intent(&prior_track, cfg);
+
+    if prior_intent == current_intent {
+        vru_intent_probability_distribution(current_intent, current_confidence)
+    } else {
+        vru_intent_probability_distribution(VruIntentClass::Unknown, 0.0)
+    }
+}
+
 impl TajTracker {
     #[must_use]
     pub fn new(cfg: TajConfig) -> Self {
@@ -1387,6 +1434,7 @@ impl TajTracker {
                         pos: obj.pos,
                         stamp_ms: now_ms,
                         vel: obj.vel,
+                        prior_vel: tr.vel,
                         yaw_rate,
                         extent_m,
                         frames_seen: tr.frames_seen.saturating_add(1),
@@ -1406,6 +1454,7 @@ impl TajTracker {
                         pos: obj.pos,
                         stamp_ms: now_ms,
                         vel: Point { x_m: 0.0, y_m: 0.0 },
+                        prior_vel: Point { x_m: 0.0, y_m: 0.0 },
                         yaw_rate: 0.0,
                         extent_m,
                         frames_seen: 1,
@@ -1760,7 +1809,9 @@ impl TajTracker {
                 intent,
                 intent_confidence,
                 intent_reason,
-                intent_probabilities: vru_intent_probability_distribution(
+                intent_probabilities: temporally_stable_vru_intent_distribution(
+                    track,
+                    cfg,
                     intent,
                     intent_confidence,
                 ),
@@ -2770,6 +2821,7 @@ mod tests {
                 x_m: 10.0,
                 y_m: 0.0,
             },
+            prior_vel: Point { x_m: 0.0, y_m: 0.0 },
             yaw_rate: 0.0,
             extent_m: 0.3,
             frames_seen: 3,
@@ -2798,6 +2850,7 @@ mod tests {
             pos: Point { x_m: 1.0, y_m: 0.0 },
             stamp_ms: 0,
             vel: Point { x_m: 0.0, y_m: 0.0 },
+            prior_vel: Point { x_m: 0.0, y_m: 0.0 },
             yaw_rate: 0.0,
             extent_m: 0.3,
             frames_seen: 2,
@@ -2822,6 +2875,7 @@ mod tests {
             pos: Point { x_m, y_m: 0.0 },
             stamp_ms: 0,
             vel: Point { x_m: 0.0, y_m: 0.0 },
+            prior_vel: Point { x_m: 0.0, y_m: 0.0 },
             yaw_rate: 0.0,
             extent_m: 0.3,
             frames_seen: 2,
@@ -2877,6 +2931,7 @@ mod tests {
             pos: Point { x_m: 5.0, y_m },
             stamp_ms: 0,
             vel: Point { x_m: 0.0, y_m: 0.0 },
+            prior_vel: Point { x_m: 0.0, y_m: 0.0 },
             yaw_rate: 0.0,
             extent_m: 0.3,
             frames_seen: 2,
@@ -3160,6 +3215,7 @@ mod tests {
                 x_m: vx_mps,
                 y_m: vy_mps,
             },
+            prior_vel: Point { x_m: 0.0, y_m: 0.0 },
             yaw_rate: 0.0,
             extent_m: 0.3,
             frames_seen,
@@ -3229,6 +3285,72 @@ mod tests {
             .iter()
             .filter(|hypothesis| hypothesis.intent != VruIntentClass::Unknown)
             .all(|hypothesis| hypothesis.probability == 0.0));
+    }
+
+    #[test]
+    fn stable_consecutive_crossing_preserves_directional_probability() {
+        let mut track = intent_track(90, 4.0, 1.5, 0.1, -0.8, 4);
+        track.prior_vel = Point {
+            x_m: 0.1,
+            y_m: -0.7,
+        };
+
+        let cfg = VruMotionPredictionConfig::default();
+        let (intent, confidence, _) = classify_vru_motion_intent(&track, &cfg);
+
+        let distribution =
+            temporally_stable_vru_intent_distribution(&track, &cfg, intent, confidence);
+
+        let crossing_probability = distribution
+            .iter()
+            .find(|entry| entry.intent == VruIntentClass::CrossingLeftToRight)
+            .expect("complete distribution")
+            .probability;
+
+        assert!(
+            crossing_probability > 0.5,
+            "stable crossing history should retain directional probability"
+        );
+    }
+
+    #[test]
+    fn one_frame_direction_reversal_collapses_to_unknown() {
+        let mut track = intent_track(91, 4.0, 1.5, 0.1, -0.8, 4);
+        track.prior_vel = Point { x_m: 0.1, y_m: 0.8 };
+
+        let cfg = VruMotionPredictionConfig::default();
+        let (intent, confidence, _) = classify_vru_motion_intent(&track, &cfg);
+
+        let distribution =
+            temporally_stable_vru_intent_distribution(&track, &cfg, intent, confidence);
+
+        for entry in distribution {
+            let expected = if entry.intent == VruIntentClass::Unknown {
+                1.0
+            } else {
+                0.0
+            };
+            assert_eq!(entry.probability, expected);
+        }
+    }
+
+    #[test]
+    fn insufficient_temporal_history_preserves_frame_local_distribution() {
+        let mut track = intent_track(92, 4.0, 1.5, 0.1, -0.8, 2);
+        track.prior_vel = Point { x_m: 0.1, y_m: 0.8 };
+
+        let cfg = VruMotionPredictionConfig::default();
+        let (intent, confidence, _) = classify_vru_motion_intent(&track, &cfg);
+
+        let distribution =
+            temporally_stable_vru_intent_distribution(&track, &cfg, intent, confidence);
+
+        assert!(
+            distribution.iter().any(|entry| {
+                entry.intent == VruIntentClass::CrossingLeftToRight && entry.probability > 0.5
+            }),
+            "two-frame tracks should preserve existing frame-local behavior"
+        );
     }
 
     #[test]
