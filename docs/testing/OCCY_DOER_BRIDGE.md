@@ -12,9 +12,10 @@ Phase-2 perception upgrade):
                                  ▼                   ▼
                          occy_doer ──▶ Occy :8100 /plan (proposes + KIRRA slow-loop)
                                  │
-                          pure-pursuit → Twist
+                     pure-pursuit → bound proposal envelope
                                  ▼
             /cmd_vel_raw ─▶ cmd_vel_interceptor [Taj speed cap + KIRRA fast-loop] ─/cmd_vel─▶ wheels
+             (std_msgs/String: velocities + release_binding, one atomic message)
 ```
 
 Each tick (`occy_doer`, default 5 Hz):
@@ -22,7 +23,12 @@ Each tick (`occy_doer`, default 5 Hz):
 2. POST the latest scan to **Taj** → the geometric corridor (left/right polylines) + objects,
 3. transform the goal into the base frame, extend the corridor behind the robot (footprint
    containment), and POST `{ego, goal, corridor, objects, vehicle}` to **Occy** `/plan`,
-4. turn Occy's **KIRRA-validated** trajectory into a Twist (pure pursuit) on `/cmd_vel_raw`.
+4. turn Occy's **KIRRA-validated** trajectory into velocities (pure pursuit) and publish them
+   on `/cmd_vel_raw` as an **atomic evidence-bound proposal envelope** — canonical JSON in a
+   `std_msgs/String` carrying the velocities *and* the `release_binding` (Taj scan/camera/
+   tracker identity, platform profile digest, Occy proposal digest) they were authored
+   against, so the verifier can bind that evidence into the signed V2 motor release. A bare
+   `Twist` names no evidence and is refused by the interceptor.
 
 **Occy only PROPOSES; KIRRA DISPOSES — twice:** the planner runs the slow-loop checker
 (`validate_trajectory_slow`) and returns a verdict; the `cmd_vel_interceptor` then re-checks

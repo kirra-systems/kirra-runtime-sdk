@@ -1,18 +1,36 @@
 #!/usr/bin/env python3
 """
-Kirra /cmd_vel Safety Interceptor
+Kirra Safety Interceptor — evidence-bound proposals in, governed motion out.
 
-Subscribes to /cmd_vel (from nav stack / AI planner).
-Sends each command through Kirra kinematic enforcement.
-Publishes enforced command to /cmd_vel_safe (to motor controllers).
+Subscribes to the doer's PROPOSAL topic (from Occy / nav stack / AI planner).
+Sends each proposal through Kirra kinematic enforcement.
+Publishes the enforced command to /cmd_vel_safe (to motor controllers).
+
+The input is an ATOMIC evidence-bound proposal envelope — canonical JSON in a
+`std_msgs/String`, not a bare `geometry_msgs/Twist`. One message carries both
+the proposed velocities AND the `release_binding` identifying the exact
+perception frame, platform profile, and Occy proposal they were authored
+against (see `bound_proposal.py`). Command and evidence therefore cannot go
+stale independently, and the verifier can bind the evidence into the signed
+V2 release payload the motor consumer verifies.
+
+The envelope is parsed fail-closed BEFORE anything else happens: a malformed
+or empty proposal stops the robot and never reaches the verifier. The Twist
+that this node reasons about is reconstructed locally from that one validated
+message, so the velocities and the binding are always from the same atomic
+proposal — no previous Twist and no previous binding is ever reused.
 
 Topic flow:
-  /cmd_vel (geometry_msgs/Twist) [FROM planner]
+  /cmd_vel_raw (std_msgs/String: bound proposal envelope) [FROM doer]
       |
-  Kirra POST /actuator/motion/command (HTTP)
+      | parse_bound_proposal -> velocities + release_binding (atomic)
+      |
+  Kirra POST /actuator/motion/command (HTTP, carrying release_binding)
       | enforce kinematic contract
       | check fleet posture
+      | mint the evidence-bound V2 release
   /cmd_vel_safe (geometry_msgs/Twist) [TO motors]
+  /kirra/release (std_msgs/UInt8MultiArray: 272-byte signed frame) [TO consumer]
   /kirra/enforcement_action (std_msgs/String) [FOR monitoring]
 """
 
@@ -25,6 +43,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import String, Float64, UInt8MultiArray
 
+from kirra_safety.bound_proposal import parse_bound_proposal
 from kirra_safety.enforcement_decision import (
     decide_enforcement, Forward, wheelbase_consistent, release_frame,
 )
@@ -67,10 +86,12 @@ class CmdVelInterceptor(Node):
         self.declare_parameter('perception_cap_topic', '/kirra/perception_speed_cap')
         self.declare_parameter('perception_cap_stale_ms', 300)
         # ADR-0033 live-loop relay: when the verifier's 200 carries a `release`
-        # object (signer provisioned), its payload_hex||token_hex bytes are
-        # republished as one 128-byte frame on this topic for the verifying
-        # motor consumer (robot/kirra_motor_consumer.py). Pure carriage — the
-        # consumer's Ed25519 verify over exactly these bytes is the trust path.
+        # object (signer provisioned AND the request carried a valid
+        # release_binding), its payload_hex||token_hex bytes are republished as
+        # one 272-byte V2 frame on this topic for the verifying motor consumer
+        # (robot/kirra_motor_consumer.py). Pure carriage — the consumer's
+        # Ed25519 verify over exactly these bytes, plus its own evidence-
+        # identity checks, are the trust path.
         self.declare_parameter('release_topic', '/kirra/release')
 
         self._kirra_url = self.get_parameter('kirra_url').value
@@ -135,9 +156,18 @@ class CmdVelInterceptor(Node):
         self._release_relay_announced = False
         self._release_malformed_announced = False
 
-        # Subscriber
+        # Latched log for a persistently malformed proposal stream: proposals
+        # arrive at rate, so an unfixed doer would otherwise warn every cycle.
+        # Re-armed by the next VALID envelope, so a fresh episode logs again.
+        # Set BEFORE the subscription exists — the callback reads it.
+        self._proposal_invalid_announced = False
+
+        # Subscriber. The proposal topic carries the ATOMIC evidence-bound
+        # envelope as canonical JSON in a std_msgs/String — NOT a Twist. A
+        # bare Twist cannot name the perception frame it was authored against,
+        # so it could never be bound into a signed V2 release.
         self._sub = self.create_subscription(
-            Twist,
+            String,
             input_topic,
             self._on_cmd_vel,
             10,
@@ -158,8 +188,10 @@ class CmdVelInterceptor(Node):
 
         self.get_logger().info(
             f'Kirra cmd_vel interceptor started: '
-            f'{input_topic} -> Kirra -> {output_topic} '
-            f'(fallback={self._fallback}, timeout={self._timeout_s*1000:.0f}ms)'
+            f'{input_topic} (std_msgs/String bound proposal envelope) -> Kirra -> '
+            f'{output_topic} (geometry_msgs/Twist) '
+            f'(fallback={self._fallback}, timeout={self._timeout_s*1000:.0f}ms). '
+            f'Proposals without a valid release_binding are refused (fail-closed).'
         )
 
     def _headers(self):
@@ -208,6 +240,22 @@ class CmdVelInterceptor(Node):
             'current_steering_angle_deg': current_s,
         }
 
+    @staticmethod
+    def _twist_from_proposal(proposal) -> Twist:
+        """Rebuild the proposed Twist from one validated envelope.
+
+        A plain field copy — the parser already established that all three
+        components are finite floats. This exists so the rest of the node can
+        keep reasoning in Twist terms (the bicycle conversion, the safe-Twist
+        reconstruction, the passthrough fallback) without any of them needing
+        to know the input is now an envelope.
+        """
+        twist = Twist()
+        twist.linear.x = proposal.linear_x
+        twist.linear.y = proposal.linear_y
+        twist.angular.z = proposal.angular_z
+        return twist
+
     def _on_perception_cap(self, msg: Float64):
         with self._lock:
             self._perception_cap = float(msg.data)
@@ -229,7 +277,7 @@ class CmdVelInterceptor(Node):
         proposed['linear_velocity_mps'] = capped_v
         return '' if reason == DISABLED else f'|{reason}'
 
-    def _on_cmd_vel(self, msg: Twist):
+    def _on_cmd_vel(self, msg: String):
         if not REQUESTS_AVAILABLE:
             self._publish_stop('NO_REQUESTS_LIB')
             return
@@ -242,10 +290,47 @@ class CmdVelInterceptor(Node):
             self._publish_stop('WHEELBASE_MISMATCH_LATCHED')
             return
 
-        proposed = self._twist_to_proposed_command(msg)
+        # The atomic parse, BEFORE anything else. A malformed, empty, or
+        # unbound envelope stops the robot and makes NO request: an unbound
+        # command has no evidence for the verifier to sign, so asking would
+        # either 400 or — worse, if the binding were quietly omitted — mint a
+        # release the motor consumer's evidence check could not police.
+        #
+        # Nothing is carried over from the previous message. There is no
+        # last-good Twist and no last-good binding to fall back on, by
+        # construction: reusing either would re-authorize stale velocities
+        # against evidence the doer never paired them with.
+        proposal = parse_bound_proposal(getattr(msg, 'data', None))
+        if proposal is None:
+            self._publish_stop('INVALID_BOUND_PROPOSAL')
+            self._publish_action('BLOCKED:INVALID_BOUND_PROPOSAL')
+            if not self._proposal_invalid_announced:
+                self._proposal_invalid_announced = True
+                self.get_logger().warn(
+                    'bound proposal envelope malformed, empty, or missing its '
+                    'release_binding — stopping, fail-closed (no request made); '
+                    'latched until a valid envelope arrives'
+                )
+            return
+        self._proposal_invalid_announced = False
+
+        # Reconstruct the Twist LOCALLY from the validated envelope. These
+        # velocities and `release_binding` below come from the same single
+        # message, which is the whole point of the atomic envelope.
+        twist = self._twist_from_proposal(proposal)
+        release_binding = proposal.release_binding
+
+        proposed = self._twist_to_proposed_command(twist)
         # Taj tightens the proposed speed BEFORE the governor (perception derate); the
         # governor then bounds whatever survives. Fail-closed on a stale/absent cap.
         cap_suffix = self._apply_perception_cap(proposed)
+
+        # The exact binding the parser validated, forwarded verbatim. It is
+        # NOT rebuilt, re-cased, re-encoded, or re-derived from anything this
+        # node knows: the verifier decodes these digests into the bytes it
+        # signs, so any normalization here would sign an identity the doer
+        # never authored.
+        proposed['release_binding'] = release_binding
 
         try:
             resp = requests.post(
@@ -296,16 +381,18 @@ class CmdVelInterceptor(Node):
                 decision = decide_enforcement(200, parsed, proposed)
                 if isinstance(decision, Forward):
                     safe_twist = self._build_safe_twist(
-                        msg, decision.enforced_v, decision.enforced_s)
+                        twist, decision.enforced_v, decision.enforced_s)
                     self._pub_safe.publish(safe_twist)
                     self._publish_action(f'{decision.action}:v={decision.enforced_v:.2f}{cap_suffix}')
 
                     # ADR-0033 live-loop relay: republish the verifier-minted
-                    # signed frame (payload||token, 128 bytes) for the verifying
-                    # motor consumer. ONLY on a Forward decision — a wheelbase
-                    # mismatch or contract-violating 200 returned above and
-                    # relays nothing. No/malformed release → nothing published;
-                    # the consumer starves into its decel-to-zero (fail-closed).
+                    # signed frame (payload||token, 272 bytes: the 176-byte
+                    # evidence-bound V2 payload + its 96-byte token) for the
+                    # verifying motor consumer. ONLY on a Forward decision — a
+                    # wheelbase mismatch or contract-violating 200 returned
+                    # above and relays nothing. No/malformed/unbound release →
+                    # nothing published; the consumer starves into its
+                    # decel-to-zero (fail-closed).
                     self._relay_release(release)
 
                     with self._lock:
@@ -334,9 +421,11 @@ class CmdVelInterceptor(Node):
                 self.get_logger().error(f'Kirra returned unexpected status: {resp.status_code}')
 
         except requests.Timeout:
-            self._handle_timeout(msg, proposed)
+            # The reconstructed Twist, never the raw String envelope — the
+            # passthrough fallback publishes this onto a Twist topic.
+            self._handle_timeout(twist, proposed)
         except requests.ConnectionError:
-            self._handle_connection_error(msg)
+            self._handle_connection_error(twist)
         except Exception as e:
             self.get_logger().error(f'Unexpected error in Kirra enforcement: {e}')
             self._publish_stop('UNEXPECTED_ERROR')
@@ -367,9 +456,9 @@ class CmdVelInterceptor(Node):
             self._publish_action('CONNECTION_ERROR:STOP')
 
     def _relay_release(self, release):
-        """Republish the gateway 200's release object as the 128-byte wire
-        frame the verifying motor consumer parses (`split_frame`). Strictness
-        lives in the pure `release_frame`; a None (absent OR malformed release)
+        """Republish the gateway 200's release object as the 272-byte V2 wire
+        frame the verifying motor consumer parses. Strictness lives in the pure
+        `release_frame`; a None (absent, malformed, or non-V2-length release)
         publishes nothing — starving the consumer into decel is the fail-closed
         outcome, never a guessed frame."""
         if release is None:

@@ -155,15 +155,20 @@ def test_wheelbase_bad_param_fails_closed():
 
 
 # ---------------------------------------------------------------------------
-# Live-loop relay — release_frame (release object -> 128-byte wire frame)
+# Live-loop relay — release_frame (release object -> 272-byte V2 wire frame)
 # ---------------------------------------------------------------------------
 
 from enforcement_decision import (  # noqa: E402
     release_frame, RELEASE_PAYLOAD_LEN, RELEASE_TOKEN_LEN,
 )
 
-PAYLOAD = bytes(range(RELEASE_PAYLOAD_LEN))            # 32 distinct bytes
+# The evidence-bound V2 shape: a 176-byte RosBoundCommandPayload image plus its
+# 96-byte token. `bytes(range(...))` needs distinct values, so the payload
+# cycles 0..255 (176 < 256, so every byte here is in fact distinct).
+PAYLOAD = bytes(range(RELEASE_PAYLOAD_LEN))            # 176 distinct bytes
 TOKEN = bytes(255 - (i % 256) for i in range(RELEASE_TOKEN_LEN))  # 96 bytes
+
+V2_FRAME_LEN = 272
 
 
 def _release(payload=PAYLOAD, token=TOKEN, **extra):
@@ -175,13 +180,28 @@ def _release(payload=PAYLOAD, token=TOKEN, **extra):
 def test_release_frame_valid_is_exact_carriage():
     frame = release_frame(_release())
     assert frame == PAYLOAD + TOKEN            # byte-exact, payload first
-    assert len(frame) == 128                    # the consumer's strict length
+    assert len(frame) == V2_FRAME_LEN          # the consumer's strict length
+    assert RELEASE_PAYLOAD_LEN == 176 and RELEASE_TOKEN_LEN == 96
+
+
+def test_release_frame_refuses_v1_length_payload():
+    # V1 (32-byte RosTwistPayload) carries NO evidence binding. It stays in the
+    # Rust library as compatibility code, but admitting it here would be a
+    # silent downgrade of the live R2 path — strip the evidence, keep the
+    # motion. The length check must refuse it outright.
+    v1_payload = bytes(range(32))
+    assert release_frame(_release(payload=v1_payload)) is None
 
 
 def test_release_frame_extra_keys_ignored():
-    # sequence/issued_at_ms/key_id/wheelbase_m ride alongside — carriage only
-    # cares about the two hex fields.
-    assert release_frame(_release(sequence=7, key_id="ab" * 32)) == PAYLOAD + TOKEN
+    # version/sequence/nonce/issued_at_ms/expires_at_ms/key_id/wheelbase_m and
+    # the echoed evidence fields ride alongside — carriage only cares about the
+    # two hex fields.
+    assert release_frame(_release(
+        version=2, sequence=7, nonce=9, key_id="ab" * 32,
+        scan_sequence=813, tracker_generation=7,
+        proposal_digest="cd" * 32,
+    )) == PAYLOAD + TOKEN
 
 
 def test_release_frame_absent_or_non_dict_is_none():
@@ -198,7 +218,7 @@ def test_release_frame_missing_or_non_string_hex_is_none():
 
 
 def test_release_frame_undecodable_hex_is_none():
-    assert release_frame(_release() | {"payload_hex": "zz" * 32}) is None
+    assert release_frame(_release() | {"payload_hex": "zz" * RELEASE_PAYLOAD_LEN}) is None
     assert release_frame(_release() | {"token_hex": TOKEN.hex()[:-1]}) is None  # odd length
 
 
