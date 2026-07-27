@@ -24,7 +24,8 @@
 #   STAGE A (ELEVATED, wheels up) — the governed consumer in r2 mode:
 #     A1 VALID governed command → wheels drive at the CLAMPED demo speed, front
 #        wheels centred (straight); a governed gentle turn steers the correct way
-#     A2 UNSIGNED command       → ZERO motion + loud REFUSED in the consumer log
+#     A2 UNSIGNED command       → ZERO motion + REFUSED at the strict wire parse
+#     A2b CORRUPT SIGNATURE     → ZERO motion + REFUSED by the Ed25519 gate
 #     A3 kill the consumer      → wheels STOP + steering centres (SS-002)
 #   STAGE B (FLOOR, tethered, e-stop in hand) — the same proofs on the ground:
 #     B1 VALID governed          → gentle straight creep (tether short, hand on e-stop)
@@ -61,6 +62,18 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PUB="python3 ${HERE}/kirra_release_publisher.py"
+
+# Evidence-bound V2 preflight: the publisher binds the pinned platform profile
+# digest into every frame, and the consumer refuses any frame whose digest
+# differs. Check it HERE so a missing export fails before the guided procedure
+# starts, rather than aborting the publisher mid-phase. Export the SAME value
+# the consumer terminal uses.
+if [ -z "${KIRRA_PROFILE_DIGEST:-}" ]; then
+  echo "FATAL: KIRRA_PROFILE_DIGEST is unset — export this robot's 64-lowercase-hex" >&2
+  echo "       platform profile digest (the same value the consumer pins) before" >&2
+  echo "       running this test. See robot/run_consumer_r2.sh for how to obtain it." >&2
+  exit 1
+fi
 
 confirm() {  # confirm "question" -> exits non-zero on anything but y/Y
   read -r -p "$1 [y/N] " ans
@@ -106,7 +119,16 @@ echo "── A2: UNSIGNED command (expect ZERO motion + REFUSED in the consumer 
 echo "Publishing UNSIGNED frames for 5 s... watch the consumer terminal for 'REFUSED'."
 timeout 5s ${PUB} --unsigned || true
 confirm "Did the wheels stay COMPLETELY STILL (no drive, no steer)?"
-confirm "Did the consumer log 'REFUSED' (NO_TOKEN / bad-signature — no motor write)?"
+confirm "Did the consumer log 'REFUSED' (MALFORMED_FRAME_176B — no motor write)?"
+
+# ── A2b: corrupt signature → the crypto gate itself ──────────────────────────
+echo
+echo "── A2b: CORRUPT SIGNATURE (expect ZERO motion + REFUSED) ──"
+echo "Well-formed 272-byte frames with a flipped signature bit: these reach the"
+echo "verify core, so this proves the Ed25519 check, not just the wire parse."
+timeout 5s ${PUB} --corrupt-sig || true
+confirm "Did the wheels stay COMPLETELY STILL (no drive, no steer)?"
+confirm "Did the consumer log 'REFUSED (SIGNATURE_INVALID)' (no motor write)?"
 
 # ── A3: kill the consumer → wheels stop + steering centres ───────────────────
 echo

@@ -238,6 +238,9 @@ def main() -> int:
     os.environ.update({
         "KIRRA_MINT_BIN": mint,
         "KIRRA_PUB_RATE_HZ": "500",  # fast loop; content/timing logic unchanged
+        # The publisher now mints evidence-bound V2 frames, which bind a pinned
+        # platform profile digest and so require one to be configured.
+        "KIRRA_PROFILE_DIGEST": "ab" * 32,
     })
     ctx.ok_calls_until_signal = 3  # 3 loop iterations, then "SIGTERM arrived"
     sys.argv = ["kirra_release_publisher.py", "--valid"]
@@ -255,15 +258,12 @@ def main() -> int:
         check(len(node.pub.published) == 3,
               "(1) publisher must still publish its frames (behavior unchanged)")
         check(node.destroyed == 1, "(1) node destroyed exactly once")
-        # kirra_release_publisher is the V1 BENCH publisher — it still calls the
-        # minter's V1 `frame` subcommand — so 128 bytes is correct here and is
-        # NOT a stale assertion. The live R2 path is evidence-bound V2 (272
-        # bytes) and the motor consumer refuses these V1 frames, so this bench
-        # tool cannot drive the live consumer until it is moved to the minter's
-        # `frame-v2` subcommand. See robot/bound_consumer_test.py for the V2
-        # wire contract and ffi_smoke_test.py (h8-h12) for V2 end-to-end.
-        check(all(len(f) == 128 for f in node.pub.published),
-              "(1) valid mode still emits 128-byte V1 bench frames")
+        # The bench publisher mints through the minter's `frame-v2` subcommand,
+        # so --valid emits the evidence-bound 272-byte frame the live motor
+        # consumer accepts (payload 176 + token 96). See bound_consumer_test.py
+        # for the wire contract and ffi_smoke_test.py (h8-h12) for end-to-end.
+        check(all(len(f) == 272 for f in node.pub.published),
+              "(1) valid mode must emit 272-byte evidence-bound V2 frames")
         print(f"(1) publisher/SIGTERM → exit 0, {len(node.pub.published)} frames, "
               f"no double shutdown")
     check(ctx.shutdown_calls == 0,
