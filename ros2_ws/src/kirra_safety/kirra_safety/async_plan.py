@@ -14,11 +14,16 @@ rclpy's single-threaded executor that stalls every other callback on the node,
 including the scan subscription, so a slow or hung sidecar froze perception
 ingest as well as planning.
 
-The calls now run in one bounded background job. This module owns the two
-decisions that keeps that safe:
+The calls now run in one bounded background job. This module owns the decisions
+that keep that safe:
 
-  1. ISSUE   — may the tick start a job at all?
-  2. RESOLVE — may the tick USE the result a job left behind?
+  1. ISSUE    — may the tick start a job at all?
+  2. RESOLVE  — may the tick USE the result a job left behind?
+  3. ANNOUNCE — is this run of holds worth telling the operator about?
+
+The third is observability, not safety: every hold is already fail-closed. But
+a hold that repeats forever because a sidecar wedged looks exactly like a robot
+that has nothing to do, and only a log line can tell those apart.
 
 THREAD DISCIPLINE THIS MODULE ASSUMES
 -------------------------------------
@@ -65,6 +70,38 @@ SUPERSEDED = "SUPERSEDED"  # the result describes a scan we have moved past
 STALE = "STALE"            # the perception behind it aged out of the budget
 FAULT = "FAULT"            # the job failed, or its two responses disagree
 
+# Emit-stage hold causes. These are not resolutions — the result was accepted
+# and only failed to become a publishable envelope — but they are holds, so the
+# monitor below tracks them under the same vocabulary.
+UNBOUND = "UNBOUND"          # a usable plan carrying no bindable evidence identity
+UNENCODABLE = "UNENCODABLE"  # the envelope could not be encoded
+
+# Tick-stage hold causes: the guards that return BEFORE the plan cycle runs.
+# Exactly one hold cause fires per tick — the guards are a chain of early
+# returns and the plan cycle is what happens when none of them trip — so one
+# monitor can carry the whole "why is this robot not moving" story.
+NO_REQUESTS = "NO_REQUESTS"                    # python3-requests is not installed
+AWAITING_POSE = "AWAITING_POSE"                # no /odom yet
+AWAITING_GOAL = "AWAITING_GOAL"                # nothing has been asked of the robot
+STALE_SCAN = "STALE_SCAN"                      # newest scan is past the arrival budget
+FRAME_HEALTH = "FRAME_HEALTH"                  # a frame-identity detector fired
+GOAL_REACHED = "GOAL_REACHED"                  # arrived
+OBJECT_GOAL_REACHED = "OBJECT_GOAL_REACHED"    # arrived at the camera-grounded goal
+OBJECT_GOAL_REFUSED = "OBJECT_GOAL_REFUSED"    # the object goal could not be grounded
+
+# Holds that mean "nothing has been asked of me", NOT "something I need is
+# missing or broken". An idle robot must never accumulate toward a warning:
+# if standing at a delivered goal warned, the warning would fire constantly
+# during normal operation and stop meaning anything. These reset the run.
+IDLE_HOLDS = frozenset({AWAITING_GOAL, GOAL_REACHED, OBJECT_GOAL_REACHED})
+
+# Holds that ALREADY carry their own latched operator warning, naming a more
+# specific cause than this monitor could (which detector fired, which phrase
+# could not be grounded). They still count as holds — the run continues, and a
+# later change of cause is still announced — but the monitor stays quiet rather
+# than saying the same thing twice in two voices.
+SELF_ANNOUNCED_HOLDS = frozenset({FRAME_HEALTH, OBJECT_GOAL_REFUSED})
+
 # One completed job. Immutable, and built ONLY from values the worker copied out
 # of the HTTP responses — never a live ROS message.
 JobResult = namedtuple("JobResult", [
@@ -93,6 +130,107 @@ JobRequest = namedtuple("JobRequest", [
 Resolution = namedtuple("Resolution", ["state", "reason"])
 
 _ABSENT = Resolution(ABSENT, "no completed job yet")
+
+# --- hold observability ----------------------------------------------------
+# Every hold above is FAIL-CLOSED and therefore SAFE: nothing actuatable is
+# published and the interceptor stops the robot. It is not, on its own,
+# VISIBLE. A wedged sidecar leaves the slot empty forever, so every tick
+# resolves ABSENT and logs at debug — the robot sits still and the operator is
+# told nothing. These two monitors are the observability half: they never
+# change a verdict, they only decide when to say something out loud.
+SILENT = "SILENT"        # nothing to announce
+ANNOUNCE = "ANNOUNCE"    # a sustained hold episode (or a changed cause) — warn
+RECOVERED = "RECOVERED"  # motion resumed after an announced episode — info
+
+HoldNotice = namedtuple("HoldNotice", ["action", "state", "count"])
+
+_SILENT_NOTICE = HoldNotice(SILENT, None, 0)
+
+# Consecutive holds before the doer announces one. At 10 Hz this is ~1 s of not
+# proposing motion: far past a single slow round trip or a dropped frame, far
+# short of a per-tick log flood.
+DEFAULT_HOLD_WARN_STREAK = 10
+
+# A job is OVERDUE once it has been in flight this many times its nominal
+# budget (two bounded round trips). The multiple exists because a `requests`
+# timeout is PER SOCKET OPERATION, not wall-clock: a server that dribbles bytes
+# can hold a worker open indefinitely without ever tripping its own timeout,
+# and since exactly one job may be in flight, that silently ends planning for
+# good. Detecting it does NOT start a replacement job — the one-job bound is
+# what keeps thread creation bounded against a sick sidecar, so the doer stays
+# held (fail-closed) and says so loudly instead.
+DEFAULT_JOB_OVERDUE_FACTOR = 5.0
+
+
+class HoldMonitor:
+    """Decides when a run of holds is worth announcing. Pure: no clock, no ROS.
+
+    Latched on the CAUSE, like the frame-health tracker: a sustained episode
+    warns once, and warns again if the cause changes (a sidecar that stops
+    timing out but starts returning mismatched evidence is a different fault
+    with a different fix). Motion resuming re-arms it, so the next episode is
+    announced too.
+
+    It sees EVERY hold the doer takes, tick-stage guards included, because
+    exactly one fires per tick. That is what lets "the lidar went stale and
+    then the planner died" read as two announcements in one story rather than
+    two unrelated silences. Which holds may be announced is a classification,
+    not a threshold: see IDLE_HOLDS and SELF_ANNOUNCED_HOLDS above.
+    """
+
+    def __init__(self, warn_streak=DEFAULT_HOLD_WARN_STREAK):
+        self._warn_streak = max(1, int(warn_streak))
+        self._consecutive = 0
+        self._announced_state = None
+
+    @property
+    def consecutive(self):
+        return self._consecutive
+
+    def observe(self, state):
+        """Fold in one tick's outcome — USE or any hold. Returns a `HoldNotice`."""
+        if state == USE:
+            announced, count = self._announced_state, self._consecutive
+            self._consecutive = 0
+            self._announced_state = None
+            if announced is not None:
+                return HoldNotice(RECOVERED, announced, count)
+            return _SILENT_NOTICE
+
+        if state in IDLE_HOLDS:
+            # Not a fault, so the run is forgotten — but SILENTLY, never as a
+            # recovery: clearing a goal does not fix a dead lidar, it only
+            # stops asking. If the goal comes back and the fault is still
+            # there, that is a fresh episode and is announced again.
+            self._consecutive = 0
+            self._announced_state = None
+            return _SILENT_NOTICE
+
+        self._consecutive += 1
+        if state in SELF_ANNOUNCED_HOLDS:
+            return _SILENT_NOTICE  # counted, but someone else does the talking
+        if self._consecutive < self._warn_streak:
+            return _SILENT_NOTICE
+        if self._announced_state == state:
+            return _SILENT_NOTICE  # already said this, once is enough
+        self._announced_state = state
+        return HoldNotice(ANNOUNCE, state, self._consecutive)
+
+
+def job_overdue_s(in_flight_since_s, now_s, budget_s, factor=DEFAULT_JOB_OVERDUE_FACTOR):
+    """How long a job has been in flight past `factor * budget_s`, else None.
+
+    `in_flight_since_s` is None when no job is running. A non-positive or
+    non-finite budget disables the check rather than dividing the operator's
+    configuration into an alarm that fires every tick.
+    """
+    if in_flight_since_s is None:
+        return None
+    if not (budget_s > 0.0) or budget_s != budget_s or budget_s == float("inf"):
+        return None
+    elapsed_s = now_s - in_flight_since_s
+    deadline_s = budget_s * factor
+    return elapsed_s - deadline_s if elapsed_s > deadline_s else None
 
 
 def decide_issue(job_in_flight, has_fresh_input):
