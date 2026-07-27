@@ -20,8 +20,9 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(__file__), "..", "kirra_safety")
 )
 from async_plan import (  # noqa: E402
-    ABSENT, ANNOUNCE, FAULT, IN_FLIGHT, ISSUE, NO_FRESH_INPUT, RECOVERED,
-    SILENT, STALE, SUPERSEDED, USE,
+    ABSENT, ANNOUNCE, AWAITING_GOAL, FAULT, FRAME_HEALTH, GOAL_REACHED,
+    IN_FLIGHT, ISSUE, NO_FRESH_INPUT, OBJECT_GOAL_REACHED, RECOVERED, SILENT,
+    STALE, STALE_SCAN, SUPERSEDED, USE,
     HoldMonitor, JobResult, decide_issue, evidence_sequences, job_overdue_s,
     resolve_result,
 )
@@ -246,6 +247,56 @@ def test_one_success_breaks_the_streak():
         _hold_n(monitor, STREAK - 1)
         assert monitor.observe(USE).action == SILENT
     assert monitor.consecutive == 0
+
+
+def test_an_idle_robot_is_never_announced():
+    # Standing at a delivered goal, or waiting to be given one, is normal
+    # operation. If it warned, the warning would fire constantly and stop
+    # meaning anything — which is the whole reason holds are classified.
+    monitor = _monitor()
+    for state in (AWAITING_GOAL, GOAL_REACHED, OBJECT_GOAL_REACHED):
+        assert all(n.action == SILENT for n in _hold_n(monitor, 100, state)), state
+        assert monitor.consecutive == 0, state
+
+
+def test_going_idle_resets_the_run_without_claiming_a_recovery():
+    # Clearing the goal does not fix a dead lidar; it only stops asking. So the
+    # run is forgotten, but nothing is reported as recovered.
+    monitor = _monitor()
+    _hold_n(monitor, STREAK, STALE_SCAN)         # announced the dead lidar
+    assert monitor.observe(AWAITING_GOAL).action == SILENT
+    assert monitor.consecutive == 0
+    # A fresh goal against the same unfixed fault is a fresh episode.
+    assert [n.action for n in _hold_n(monitor, STREAK, STALE_SCAN)][-1] == ANNOUNCE
+
+
+def test_a_self_announced_hold_counts_but_stays_quiet():
+    # Frame health already warns, naming which detector fired — more specific
+    # than this monitor could be. Two voices saying it is worse than one.
+    monitor = _monitor()
+    notices = _hold_n(monitor, 50, FRAME_HEALTH)
+    assert all(n.action == SILENT for n in notices)
+    # But it was COUNTED: the doer really has been held for 50 ticks.
+    assert monitor.consecutive == 50
+
+
+def test_a_cause_changing_off_a_self_announced_hold_is_announced():
+    # The frozen lidar recovers, and now the planner is down. The second fault
+    # must not be swallowed just because the first one was doing its own
+    # talking while the run built up.
+    monitor = _monitor()
+    _hold_n(monitor, 50, FRAME_HEALTH)
+    assert monitor.observe(FAULT).action == ANNOUNCE
+
+
+def test_tick_stage_and_plan_stage_causes_share_one_story():
+    # Exactly one hold cause fires per tick, so a lidar that goes stale and a
+    # planner that then dies read as two announcements in one narrative.
+    monitor = _monitor()
+    assert [n.action for n in _hold_n(monitor, STREAK, STALE_SCAN)][-1] == ANNOUNCE
+    announced = monitor.observe(FAULT)
+    assert announced.action == ANNOUNCE
+    assert announced.state == FAULT
 
 
 def test_a_warn_streak_below_one_is_clamped_not_disabled():

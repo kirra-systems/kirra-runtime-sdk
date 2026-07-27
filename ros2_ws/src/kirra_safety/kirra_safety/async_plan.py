@@ -76,6 +76,32 @@ FAULT = "FAULT"            # the job failed, or its two responses disagree
 UNBOUND = "UNBOUND"          # a usable plan carrying no bindable evidence identity
 UNENCODABLE = "UNENCODABLE"  # the envelope could not be encoded
 
+# Tick-stage hold causes: the guards that return BEFORE the plan cycle runs.
+# Exactly one hold cause fires per tick — the guards are a chain of early
+# returns and the plan cycle is what happens when none of them trip — so one
+# monitor can carry the whole "why is this robot not moving" story.
+NO_REQUESTS = "NO_REQUESTS"                    # python3-requests is not installed
+AWAITING_POSE = "AWAITING_POSE"                # no /odom yet
+AWAITING_GOAL = "AWAITING_GOAL"                # nothing has been asked of the robot
+STALE_SCAN = "STALE_SCAN"                      # newest scan is past the arrival budget
+FRAME_HEALTH = "FRAME_HEALTH"                  # a frame-identity detector fired
+GOAL_REACHED = "GOAL_REACHED"                  # arrived
+OBJECT_GOAL_REACHED = "OBJECT_GOAL_REACHED"    # arrived at the camera-grounded goal
+OBJECT_GOAL_REFUSED = "OBJECT_GOAL_REFUSED"    # the object goal could not be grounded
+
+# Holds that mean "nothing has been asked of me", NOT "something I need is
+# missing or broken". An idle robot must never accumulate toward a warning:
+# if standing at a delivered goal warned, the warning would fire constantly
+# during normal operation and stop meaning anything. These reset the run.
+IDLE_HOLDS = frozenset({AWAITING_GOAL, GOAL_REACHED, OBJECT_GOAL_REACHED})
+
+# Holds that ALREADY carry their own latched operator warning, naming a more
+# specific cause than this monitor could (which detector fired, which phrase
+# could not be grounded). They still count as holds — the run continues, and a
+# later change of cause is still announced — but the monitor stays quiet rather
+# than saying the same thing twice in two voices.
+SELF_ANNOUNCED_HOLDS = frozenset({FRAME_HEALTH, OBJECT_GOAL_REFUSED})
+
 # One completed job. Immutable, and built ONLY from values the worker copied out
 # of the HTTP responses — never a live ROS message.
 JobResult = namedtuple("JobResult", [
@@ -144,6 +170,12 @@ class HoldMonitor:
     timing out but starts returning mismatched evidence is a different fault
     with a different fix). Motion resuming re-arms it, so the next episode is
     announced too.
+
+    It sees EVERY hold the doer takes, tick-stage guards included, because
+    exactly one fires per tick. That is what lets "the lidar went stale and
+    then the planner died" read as two announcements in one story rather than
+    two unrelated silences. Which holds may be announced is a classification,
+    not a threshold: see IDLE_HOLDS and SELF_ANNOUNCED_HOLDS above.
     """
 
     def __init__(self, warn_streak=DEFAULT_HOLD_WARN_STREAK):
@@ -156,7 +188,7 @@ class HoldMonitor:
         return self._consecutive
 
     def observe(self, state):
-        """Fold in one tick's resolution state. Returns a `HoldNotice`."""
+        """Fold in one tick's outcome — USE or any hold. Returns a `HoldNotice`."""
         if state == USE:
             announced, count = self._announced_state, self._consecutive
             self._consecutive = 0
@@ -165,7 +197,18 @@ class HoldMonitor:
                 return HoldNotice(RECOVERED, announced, count)
             return _SILENT_NOTICE
 
+        if state in IDLE_HOLDS:
+            # Not a fault, so the run is forgotten — but SILENTLY, never as a
+            # recovery: clearing a goal does not fix a dead lidar, it only
+            # stops asking. If the goal comes back and the fault is still
+            # there, that is a fresh episode and is announced again.
+            self._consecutive = 0
+            self._announced_state = None
+            return _SILENT_NOTICE
+
         self._consecutive += 1
+        if state in SELF_ANNOUNCED_HOLDS:
+            return _SILENT_NOTICE  # counted, but someone else does the talking
         if self._consecutive < self._warn_streak:
             return _SILENT_NOTICE
         if self._announced_state == state:

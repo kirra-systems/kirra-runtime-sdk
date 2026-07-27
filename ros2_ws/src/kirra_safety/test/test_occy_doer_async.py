@@ -156,7 +156,7 @@ from kirra_safety.bound_proposal import (  # noqa: E402
 )
 from kirra_safety.doer_core import decide, extend_corridor_back  # noqa: E402
 from kirra_safety.sensor_freshness import (  # noqa: E402
-    FrameHealthConfig, FrameHealthTracker,
+    FAIL_CLOSED, FrameHealthConfig, FrameHealthTracker,
 )
 
 DOER_SOURCE = os.path.join(_HERE, "..", "kirra_safety", "occy_doer.py")
@@ -734,6 +734,19 @@ def _warns(node):
     return [m for level, m in node._logger.records if level == 'warn']
 
 
+class _FrozenTracker:
+    """A frame-health tracker permanently reporting FAIL_CLOSED."""
+
+    health = types.SimpleNamespace(
+        state=FAIL_CLOSED,
+        reason='STAMP_NOT_ADVANCING',
+        detail='header stamp has not advanced',
+    )
+
+    def observe(self, observation):
+        pass
+
+
 def test_a_sustained_hold_warns_once_and_names_the_cause():
     # The sidecar is down for good: every tick holds ABSENT/FAULT.
     n = _node(_Requests(raises={'perception': ConnectionError('down')}))
@@ -741,7 +754,7 @@ def test_a_sustained_hold_warns_once_and_names_the_cause():
         _push_scan(n)
         n._tick()
         assert _await_idle(n)
-    holding = [m for m in _warns(n) if 'plan cycle holding' in m]
+    holding = [m for m in _warns(n) if 'doer holding' in m]
     assert len(holding) == 1, _warns(n)
     assert 'FAULT' in holding[0]
     assert 'no motion is being proposed' in holding[0]
@@ -759,7 +772,7 @@ def test_a_brief_hold_is_not_announced():
     _push_scan(n)
     n._tick()
     assert _await_idle(n)
-    assert [m for m in _warns(n) if 'plan cycle' in m] == []
+    assert [m for m in _warns(n) if 'doer holding' in m] == []
 
 
 def test_recovery_is_reported_and_re_arms():
@@ -768,7 +781,7 @@ def test_recovery_is_reported_and_re_arms():
         _push_scan(n)
         n._tick()
         assert _await_idle(n)
-    assert len([m for m in _warns(n) if 'plan cycle holding' in m]) == 1
+    assert len([m for m in _warns(n) if 'doer holding' in m]) == 1
 
     # The planner comes back.
     doer.requests = _Requests()
@@ -776,7 +789,7 @@ def test_recovery_is_reported_and_re_arms():
         _push_scan(n)
         n._tick()
         assert _await_idle(n)
-    recovered = [m for _, m in n._logger.records if 'plan cycle recovered' in m]
+    recovered = [m for _, m in n._logger.records if 'doer recovered' in m]
     assert len(recovered) == 1
     assert 'FAULT' in recovered[0]
 
@@ -787,7 +800,7 @@ def test_recovery_is_reported_and_re_arms():
         _push_scan(n)
         n._tick()
         assert _await_idle(n)
-    assert len([m for m in _warns(n) if 'plan cycle holding' in m]) == 2
+    assert len([m for m in _warns(n) if 'doer holding' in m]) == 2
 
 
 def test_an_unbindable_plan_counts_as_a_hold_not_a_recovery():
@@ -801,9 +814,88 @@ def test_an_unbindable_plan_counts_as_a_hold_not_a_recovery():
         _push_scan(n)
         n._tick()
         assert _await_idle(n)
-    holding = [m for m in _warns(n) if 'plan cycle holding' in m]
+    holding = [m for m in _warns(n) if 'doer holding' in m]
     assert len(holding) == 1
     assert 'UNBOUND' in holding[0]
+
+
+@pytest.mark.parametrize('state, setup', [
+    ('AWAITING_GOAL', lambda n: setattr(n, '_goal', None)),
+    ('GOAL_REACHED', lambda n: setattr(n, '_goal', (0.0, 0.0))),
+])
+def test_an_idle_robot_is_never_warned_about(state, setup):
+    # A robot with nothing to do, or standing at a goal it has reached, holds
+    # forever by design. Warning about that would fire during normal operation
+    # and make the warning worthless.
+    n = _node(_Requests())
+    setup(n)
+    for _ in range(60):
+        _push_scan(n)
+        n._tick()
+        assert _await_idle(n)
+    assert _warns(n) == []
+    assert set(n._pub.published) == {doer.HOLD_ENVELOPE}
+
+
+def test_going_idle_does_not_read_as_a_recovery():
+    # Clearing the goal while the sidecar is down must not log "recovered" —
+    # nothing was fixed, the robot just stopped being asked.
+    n = _node(_Requests(raises={'perception': ConnectionError('down')}))
+    for _ in range(20):
+        _push_scan(n)
+        n._tick()
+        assert _await_idle(n)
+    assert len([m for m in _warns(n) if 'doer holding' in m]) == 1
+    n._goal = None
+    for _ in range(20):
+        _push_scan(n)
+        n._tick()
+        assert _await_idle(n)
+    assert [m for _, m in n._logger.records if 'recovered' in m] == []
+
+
+def test_a_dead_lidar_warns_once_naming_the_stale_scan():
+    n = _node(_Requests())
+    _push_scan(n)
+    scan, _ = n._scan
+    n._scan = (scan, time.monotonic() - 10.0)
+    for _ in range(60):
+        n._tick()
+    holding = [m for m in _warns(n) if 'doer holding' in m]
+    assert len(holding) == 1, _warns(n)
+    assert 'STALE_SCAN' in holding[0]
+    assert 'stale-scan' in holding[0]        # the debug tag is unchanged
+    assert set(n._pub.published) == {doer.HOLD_ENVELOPE}
+
+
+def test_frame_health_speaks_for_itself_and_is_not_announced_twice():
+    # It already warns naming WHICH detector fired — more specific than the
+    # monitor could be. The monitor still counts the hold.
+    n = _node(_Requests(), _frame_health=_FrozenTracker())
+    for _ in range(60):
+        _push_scan(n)
+        n._tick()
+    assert [m for m in _warns(n) if 'doer holding' in m] == []
+    assert len([m for m in _warns(n) if 'frame health' in m]) == 1
+    assert n._hold_monitor.consecutive == 60
+
+
+def test_a_cause_change_off_frame_health_is_announced():
+    # The frozen lidar recovers into a dead planner. The second fault must be
+    # heard even though the first was doing its own talking.
+    n = _node(_Requests(raises={'perception': ConnectionError('down')}),
+              _frame_health=_FrozenTracker())
+    for _ in range(20):
+        _push_scan(n)
+        n._tick()
+    assert [m for m in _warns(n) if 'doer holding' in m] == []
+    n._frame_health = FrameHealthTracker(FrameHealthConfig.disarmed())
+    _push_scan(n)
+    n._tick()                       # ABSENT — first plan-cycle hold
+    assert _await_idle(n)
+    holding = [m for m in _warns(n) if 'doer holding' in m]
+    assert len(holding) == 1
+    assert 'ABSENT' in holding[0]
 
 
 def test_an_overdue_job_warns_once_and_does_not_start_a_replacement():
