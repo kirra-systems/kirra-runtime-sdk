@@ -423,6 +423,96 @@ pub struct IntentAwarePredictedVruOccupancy {
     pub uncertainty_radius_m: f64,
 }
 
+/// One bounded intent hypothesis consumed by Occy's probabilistic VRU policy.
+///
+/// Probabilities are metadata used only to expand conservative occupied space.
+/// They cannot remove geometric occupancy, create VRU authority, or weaken RSS.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PredictedVruIntentProbability {
+    pub intent: PredictedVruIntent,
+    pub probability: f64,
+}
+
+/// Maximum lateral anticipation added when crossing probability is 1.0.
+pub const OCCY_PROBABILISTIC_CROSSING_EXTENSION_M: f64 = 0.6;
+
+/// Maximum lateral anticipation added when waiting-near-path probability is 1.0.
+pub const OCCY_PROBABILISTIC_WAITING_EXTENSION_M: f64 = 0.3;
+
+/// Maximum lateral anticipation added for unresolved/unknown intent probability.
+pub const OCCY_PROBABILISTIC_UNKNOWN_EXTENSION_M: f64 = 0.2;
+
+/// Convert a bounded intent distribution into additional occupied radius.
+///
+/// This function is tighten-only:
+///
+/// - crossing, waiting, and unknown probability may expand occupancy;
+/// - along-path and moving-away probability add no expansion;
+/// - malformed or non-normalized distributions fail closed to infinity;
+/// - the original geometric uncertainty is never reduced.
+#[must_use]
+pub fn probabilistic_vru_uncertainty_radius(
+    base_uncertainty_radius_m: f64,
+    probabilities: &[PredictedVruIntentProbability],
+    crossing_extension_m: f64,
+    waiting_extension_m: f64,
+    unknown_extension_m: f64,
+) -> f64 {
+    let config_valid = base_uncertainty_radius_m.is_finite()
+        && base_uncertainty_radius_m >= 0.0
+        && crossing_extension_m.is_finite()
+        && crossing_extension_m >= 0.0
+        && waiting_extension_m.is_finite()
+        && waiting_extension_m >= 0.0
+        && unknown_extension_m.is_finite()
+        && unknown_extension_m >= 0.0;
+
+    if !config_valid {
+        return f64::INFINITY;
+    }
+
+    if probabilities.is_empty() {
+        return base_uncertainty_radius_m;
+    }
+
+    let mut total_probability = 0.0;
+    let mut crossing_probability = 0.0;
+    let mut waiting_probability = 0.0;
+    let mut unknown_probability = 0.0;
+
+    for hypothesis in probabilities {
+        if !hypothesis.probability.is_finite() || !(0.0..=1.0).contains(&hypothesis.probability) {
+            return f64::INFINITY;
+        }
+
+        total_probability += hypothesis.probability;
+
+        match hypothesis.intent {
+            PredictedVruIntent::CrossingLeftToRight | PredictedVruIntent::CrossingRightToLeft => {
+                crossing_probability += hypothesis.probability;
+            }
+            PredictedVruIntent::WaitingNearPath => {
+                waiting_probability += hypothesis.probability;
+            }
+            PredictedVruIntent::Unknown => {
+                unknown_probability += hypothesis.probability;
+            }
+            PredictedVruIntent::AlongPath | PredictedVruIntent::MovingAway => {}
+        }
+    }
+
+    const NORMALIZATION_EPSILON: f64 = 1e-6;
+    if !total_probability.is_finite() || (total_probability - 1.0).abs() > NORMALIZATION_EPSILON {
+        return f64::INFINITY;
+    }
+
+    let added_radius_m = crossing_probability * crossing_extension_m
+        + waiting_probability * waiting_extension_m
+        + unknown_probability * unknown_extension_m;
+
+    base_uncertainty_radius_m + added_radius_m
+}
+
 /// Extra lateral anticipation applied to confidently crossing VRUs.
 pub const DEFAULT_CROSSING_INTENT_BAND_EXTENSION_M: f64 = 0.6;
 
