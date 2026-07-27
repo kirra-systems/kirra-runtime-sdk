@@ -385,6 +385,13 @@ pub struct PredictedVruPointOut {
     pub uncertainty_radius_m: f64,
 }
 
+/// One normalized intent hypothesis emitted by Taj.
+#[derive(Clone, Serialize)]
+pub struct PredictedVruIntentProbabilityOut {
+    pub intent: &'static str,
+    pub probability: f64,
+}
+
 /// Auditable VRU motion prediction emitted by Taj.
 ///
 /// Prediction remains supporting evidence. It does not create tracks, alter
@@ -396,6 +403,8 @@ pub struct PredictedVruMotionOut {
     pub intent: &'static str,
     pub intent_confidence: f64,
     pub intent_reason: &'static str,
+    /// Complete normalized distribution in stable intent order.
+    pub intent_probabilities: Vec<PredictedVruIntentProbabilityOut>,
     pub fallback_reason: Option<&'static str>,
     pub horizon_s: f64,
     pub step_s: f64,
@@ -644,6 +653,14 @@ fn predicted_vru_to_wire(prediction: &PredictedVruMotion) -> PredictedVruMotionO
         intent: vru_intent_wire_name(prediction.intent),
         intent_confidence: prediction.intent_confidence,
         intent_reason: vru_intent_reason_wire_name(prediction.intent_reason),
+        intent_probabilities: prediction
+            .intent_probabilities
+            .iter()
+            .map(|hypothesis| PredictedVruIntentProbabilityOut {
+                intent: vru_intent_wire_name(hypothesis.intent),
+                probability: hypothesis.probability,
+            })
+            .collect(),
         fallback_reason: prediction
             .fallback_reason
             .map(vru_prediction_fallback_wire_name),
@@ -1079,6 +1096,22 @@ mod tests {
         assert!(
             !response.predicted_vrus[0].points.is_empty(),
             "a fused VRU must carry bounded prediction evidence"
+        );
+        assert_eq!(
+            response.predicted_vrus[0].intent_probabilities.len(),
+            kirra_taj::VRU_INTENT_HYPOTHESIS_COUNT,
+            "the sidecar must preserve Taj's complete intent distribution"
+        );
+
+        let probability_sum: f64 = response.predicted_vrus[0]
+            .intent_probabilities
+            .iter()
+            .map(|hypothesis| hypothesis.probability)
+            .sum();
+
+        assert!(
+            (probability_sum - 1.0).abs() <= 1.0e-6,
+            "the emitted intent distribution must remain normalized"
         );
         assert!(
             response.predicted_vrus[0].points.len() <= 16,
