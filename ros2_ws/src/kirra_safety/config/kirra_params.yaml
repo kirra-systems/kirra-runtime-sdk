@@ -38,6 +38,25 @@ occy_doer:
     # a different lidar rate needs a deployment-review update here.
     scan_stale_s: 0.25
 
+    # --- frame-health detectors (OPT-IN; default off) --------------------
+    # scan_stale_s above measures ARRIVAL. It cannot distinguish a live lidar
+    # from a driver that has wedged and is republishing its last buffer at the
+    # full rate — that stream is "fresh" by every arrival-time check while the
+    # doer plans against a frozen world. These detectors track frame IDENTITY
+    # progression (producer header stamp) instead. See sensor_freshness.py.
+    #
+    # Leave false until the deployment lidar's stamp behaviour is confirmed
+    # sane on the bench: a driver that never populates header.stamp would trip
+    # STAMP_NOT_ADVANCING immediately and hold the robot.
+    frame_health_enabled: false
+    # Consecutive non-advancing scans tolerated before holding. 3 at ~10 Hz is
+    # ~300 ms — rides out a single duplicated frame, far short of a stall.
+    frame_stall_budget: 3
+    # Both sentinel-disabled: 0.0 Hz and ratio 1.0 never fire. Arm only with a
+    # measured floor for the deployed lidar, not a guessed one.
+    scan_min_rate_hz: 0.0
+    scan_max_invalid_ray_ratio: 1.0
+
     # Mick typed-intent sidecar (kirra-sidecars mick_service). Empty = off
     # (goals come from /goal_pose only). Set here so occy_doer polls GET
     # /intent/last each tick and grounds NEW positional intents as its goal —
