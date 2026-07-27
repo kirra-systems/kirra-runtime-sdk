@@ -154,12 +154,18 @@ this over SSH-only** — you need eyes on the robot and a hand on the e-stop.
    ros2 launch kirra_safety kirra_with_robot.launch.py \
         use_occy_doer:=true use_perception_cap:=true kirra_url:=http://localhost:8090
    ```
-9. **Consumer** — the R2 closed-loop drive, pinned to the 2a key (matches the verifier):
+9. **Consumer** — the R2 closed-loop drive, pinned to the 2a key (matches the verifier).
+   Evidence-bound V2 also needs the platform profile digest pinned; obtain it once
+   with the lidar and Taj up, then export it (`run_consumer_r2.sh` refuses to start
+   without it):
    ```bash
+   python3 robot/kirra_doctor.py --module profile_digest   # prints/verifies the value
+   export KIRRA_PROFILE_DIGEST=<64-lowercase-hex>
    export KIRRA_R2_CLOSED_LOOP=1 KIRRA_R2_CLOSED_LOOP_DEBUG=1 \
           KIRRA_R2_SPEED_KP=40 KIRRA_R2_SPEED_EMA_ALPHA=0.3
    ./robot/run_consumer_r2.sh
    # log must show: car-type 5 read back + "CLOSED-LOOP speed matching"
+   #                + "evidence-bound V2 only: 272-byte frames"
    ```
 10. **Run the guided acceptance** — `robot/live_loop_elevated.sh` walks the four
     wheels-up phases: (a) nominal governed motion, (b) obstacle → Taj cap → STOP,

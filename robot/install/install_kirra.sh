@@ -154,6 +154,11 @@ else
   else
     warn "KIRRA_GOVERNOR_VK_HEX left as a placeholder — the consumer will refuse to start until you pin a key (re-run with --dev-key for the bench, or enroll a real key)."
   fi
+  # The evidence-bound V2 profile digest can NEVER be auto-filled: unlike the
+  # dev VK it is not derivable from a key, it is a property of THIS deployment
+  # (Taj computes it from the perception request for this robot). It stays a
+  # placeholder under --dev-key too, so say so explicitly.
+  warn "KIRRA_PROFILE_DIGEST left as a placeholder — the consumer will refuse to start until you pin this robot's 64-lowercase-hex platform profile digest. Obtain it with: python3 ${OPT}/robot/kirra_doctor.py --module profile_digest"
   sudo install -m 0644 "${TMP_ENV}" "${ENVFILE}"
   rm -f "${TMP_ENV}"
   ok "rendered ${ENVFILE} from env.template"

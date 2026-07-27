@@ -32,10 +32,11 @@ sources of truth):
 
 ```
  signed frame (topic)                     Rust: libkirra_consumer_ffi
- payload(32)||token(96)   ──ctypes──▶  MotorConsumer<CaptureSerial>
-        │                                 = RosReleaseGate (verify→decode→
-        │                                   freshness→watermark) + SS-002
-        │                                   liveness/decel + #892 alarm
+ payload(176)||token(96)  ──ctypes──▶  BoundMotorConsumer<CaptureSerial>
+   = 272 bytes, V2         │             = RosBoundCommandGate (verify→decode→
+        │                  │               profile digest→expiry→sequence/nonce
+        │                  │               →supersession) + SS-002
+        │                  │               liveness/decel + #892 alarm
         ▼                                        │ decides a twist (or refuses)
  kirra_motor_consumer.py  ◀──decision──────────┘
         │ set_car_motion(v_x, 0, v_z)   (only if the core said "write")
@@ -43,10 +44,23 @@ sources of truth):
    /dev/myserial  (Rosmaster_Lib)   ← this node is the SOLE writer
 ```
 
+🔴 **The live path is evidence-bound V2.** The consumer accepts ONLY the
+272-byte frame and refuses the 128-byte V1 frame outright (no silent
+downgrade). V1 (`payload(32)||token(96)`, `MotorConsumer` / `RosReleaseGate`)
+remains in the Rust library and in `kirra_ffi.KirraConsumer` as compatibility
+code for the V1 smoke test, but nothing on this path uses it.
+
+V2 additionally requires **`KIRRA_PROFILE_DIGEST`** — the 64-lowercase-hex
+platform profile digest this robot is pinned to, from trusted configuration
+only. The consumer REFUSES TO START without a well-formed value, and refuses
+any release whose signed digest differs. Obtain or verify it with
+`python3 robot/kirra_doctor.py --module profile_digest`.
+
 **No verification logic lives in Python.** `robot/kirra_ffi.py` marshals bytes in
 and a decision out; every gate decision is made by the reused
-`kirra-actuation-consumer::MotorConsumer` (`crates/kirra-actuation-consumer/src/lib.rs`),
-whose gate is `RosReleaseGate` (`crates/kirra-release-token/src/ros_twist.rs`).
+`kirra-actuation-consumer::BoundMotorConsumer` (`crates/kirra-actuation-consumer/src/lib.rs`),
+whose gate is `RosBoundCommandGate`
+(`crates/kirra-release-token/src/ros_bound_command.rs`).
 
 ### The FFI surface (reused from #891, and how it was extended)
 
@@ -77,19 +91,34 @@ docs: *"the C-ABI surface for the Python node"*), because none existed yet:
 
 ## 2. Verify-before-drive (ADR-0033)
 
-Every actuated command passes the five-step gate (`RosReleaseGate::release`):
-token exists → Ed25519 over the exact bytes (ROS domain) → finite decode →
-freshness window → strictly-advancing sequence. Refusal taxonomy (wire-stable
-codes) and the failure that produced each:
+Every actuated command passes the evidence-bound gate
+(`RosBoundCommandGate::release`): token exists → Ed25519 over the exact bytes
+(V2 domain) → finite decode of every bound field → pinned profile digest →
+issue/expiry + maximum lifetime → strictly-advancing sequence AND nonce →
+perception frame not superseded. Only then do all watermarks advance together;
+**every refusal leaves them unchanged**, and a refusal never feeds liveness (a
+flood starves into the SS-002 stop exactly as silence does).
+
+Refusal taxonomy (wire-stable codes, V2 range 100–110) and the failure that
+produced each:
 
 | Refusal | Meaning |
 |---|---|
-| `NO_TOKEN` | unsigned command / rogue publisher → **no motor write** |
+| `NO_TOKEN` | no token presented → **no motor write** |
 | `DIGEST_MISMATCH` | bytes substituted after signing |
 | `SIGNATURE_INVALID` | wrong/rotated key or tamper |
-| `UNDECODABLE` | non-finite twist (never actuate NaN/Inf) |
-| `STALE` | outside freshness window (replay / clock skew) |
+| `UNDECODABLE` | non-finite twist / structurally invalid bound field |
+| `FUTURE_ISSUED` | issued after the consumer's clock (skew) |
+| `EXPIRED` | past the token's own signed `expires_at_ms` |
+| `LIFETIME_TOO_LONG` | mint asked for a longer life than the configured maximum |
 | `SEQUENCE_NOT_ADVANCED` | replay / reorder |
+| `NONCE_NOT_ADVANCED` | single-use nonce replay |
+| `PROFILE_DIGEST_MISMATCH` | release minted for a different platform profile |
+| `PERCEPTION_FRAME_SUPERSEDED` | evidence older than the newest already released |
+
+A frame that is not exactly 272 bytes never reaches the core at all: the
+Python wire parse (`split_bound_frame`) refuses it and logs
+`REFUSED (MALFORMED_FRAME_<n>B)`. That is where a V1 128-byte frame dies.
 
 🔴 **Loud key-mismatch diagnostic (#892).** A *sustained* run of
 `SIGNATURE_INVALID` (≥10 consecutive, ~½–1 s at 10–20 Hz) **latches** a distinct
@@ -155,6 +184,13 @@ export KIRRA_GOVERNOR_VK_HEX=$(target/release/kirra_ros_release_mint --seed $KIR
 ### Start the consumer (it OWNS the motor board)
 
 ```bash
+# REQUIRED (evidence-bound V2): the 64-LOWERCASE-hex platform profile digest
+# this robot is pinned to. No default — the consumer refuses to start without
+# it. Obtain/verify with the lidar and Taj up:
+#   python3 robot/kirra_doctor.py --module profile_digest
+export KIRRA_PROFILE_DIGEST=<64-lowercase-hex>
+# NOTE: the consumer reads this as the MAXIMUM token lifetime under V2 (the
+# token carries its own signed expiry); the name is unchanged for compatibility.
 export KIRRA_FRESHNESS_WINDOW_MS=200
 export KIRRA_CONTROL_PERIOD_MS=100
 export KIRRA_MISSED_PERIODS=3
@@ -165,6 +201,10 @@ export KIRRA_MOTOR_PORT=/dev/myserial
 export ROS_DOMAIN_ID=28
 python3 robot/kirra_motor_consumer.py
 ```
+
+The bench publisher binds the SAME digest into every frame it mints, so export
+`KIRRA_PROFILE_DIGEST` in the publisher's terminal too — a mismatch refuses
+every release with `PROFILE_DIGEST_MISMATCH`.
 
 🔴 **Do NOT launch `yahboomcar_bringup` (the vendor base node).** It would be a
 second, unfenced writer to `/dev/myserial`. This consumer holding the port is the
@@ -179,12 +219,16 @@ In a second terminal:
 robot/first_run_elevated.sh
 ```
 
-It guides three phases and asks you to confirm each (you are the acceptance
+It guides the phases and asks you to confirm each (you are the acceptance
 sensor — it cannot see the wheels):
 
 - **(a)** valid governed command → wheels spin at the **clamped** demo speed;
-- **(b)** unsigned command → **zero** wheel motion + `REFUSED (NO_TOKEN)` in the
-  consumer log;
+- **(b)** unsigned command → **zero** wheel motion + `REFUSED (MALFORMED_FRAME_176B)`
+  in the consumer log. V2 has no unsigned wire form, so a token-less payload
+  dies at the strict 272-byte parse and never reaches the verify core;
+- **(b2)** corrupt signature → **zero** wheel motion + `REFUSED (SIGNATURE_INVALID)`.
+  These frames are well-formed and DO reach the core, so this is what proves the
+  Ed25519 gate rather than the wire parse;
 - **(c)** kill the consumer (Ctrl-C) → wheels **stop immediately**.
 
 ### Host pre-check (no robot required)
