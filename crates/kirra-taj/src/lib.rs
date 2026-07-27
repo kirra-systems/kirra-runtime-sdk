@@ -84,6 +84,16 @@ pub struct TajConfig {
     /// Max distance a detection may move between frames to associate with the same
     /// track (the [`TajTracker`] velocity-estimation gate).
     pub track_assoc_gate_m: f64,
+    /// How long (ms) an unmatched track is retained as `Coasting` before it
+    /// expires. Measured from the last frame that actually matched a
+    /// detection, so it is a real time budget rather than a frame count — a
+    /// slower lidar does not silently get a longer coast.
+    ///
+    /// 250 ms is ~2 scan periods of the bench-verified ~10 Hz TG30: enough to
+    /// ride out a single dropped detection, short enough that a genuinely
+    /// departed object cannot linger. Coasting only preserves identity and
+    /// motion history; it does not itself emit anything to the checker.
+    pub track_coast_budget_ms: u64,
 }
 
 impl Default for TajConfig {
@@ -95,6 +105,7 @@ impl Default for TajConfig {
             min_cluster_points: 3,
             corridor_station_m: 1.0,
             track_assoc_gate_m: 3.0,
+            track_coast_budget_ms: 250,
         }
     }
 }
@@ -783,6 +794,14 @@ pub struct FusedClassifiedVru {
     pub frames_seen: u32,
 }
 
+/// Hard cap on retained tracks, so COASTING can never grow the working set.
+///
+/// Detections are already bounded upstream; coasting is the one path that adds
+/// tracks the sensor did not report this frame, so it needs its own ceiling.
+/// Matches the checker's `MAX_TRACKED_OBJECTS`, which is the real consumer-side
+/// limit — retaining past it would produce a set the checker refuses anyway.
+const MAX_RETAINED_TRACKS: usize = 256;
+
 /// One persistent object track: a stable id + last position/stamp, kept across
 /// frames so the next frame can estimate velocity from displacement.
 #[derive(Debug, Clone, Copy)]
@@ -804,8 +823,25 @@ struct Track {
     /// footprint signal, captured before the lean contract drops it.
     extent_m: f64,
     /// Consecutive frames this track has been observed (1 = first sighting,
-    /// velocity not yet estimable).
+    /// velocity not yet estimable). Coasting does NOT advance it: a frame
+    /// nobody observed is not evidence of persistence.
     frames_seen: u32,
+    /// Timestamp of the last frame that actually MATCHED a detection.
+    ///
+    /// The coast budget is measured from here, NOT from `stamp_ms`, which
+    /// advances every frame so association keeps predicting from now. The two
+    /// together encode the lifecycle without a separate field: a track is
+    /// COASTING iff `last_seen_ms < stamp_ms`, and EXPIRED tracks are dropped
+    /// rather than represented.
+    ///
+    /// A detection dropping for a frame used to DELETE the track: the next
+    /// frame's detection became a NEW track — new id, velocity re-estimated
+    /// from zero, `frames_seen` back to 1. That reset is not cosmetic;
+    /// `frames_seen` gates velocity (`< 2`) and yaw-rate (`< 3`) estimation and
+    /// drives the first-sighting arm of the VRU classifier, so a pedestrian
+    /// that blinked for one scan lost its motion history and its established
+    /// classification.
+    last_seen_ms: u64,
 }
 
 /// A predicted future path for one tracked object (constant-turn-rate,
@@ -1488,6 +1524,7 @@ impl TajTracker {
                         yaw_rate,
                         extent_m,
                         frames_seen: tr.frames_seen.saturating_add(1),
+                        last_seen_ms: now_ms,
                     });
                 }
                 None => {
@@ -1508,9 +1545,50 @@ impl TajTracker {
                         yaw_rate: 0.0,
                         extent_m,
                         frames_seen: 1,
+                        last_seen_ms: now_ms,
                     });
                 }
             }
+        }
+        // Retain unmatched tracks as COASTING rather than deleting them.
+        //
+        // Before this, an unmatched track was simply dropped: one missed
+        // detection destroyed identity, velocity history and `frames_seen`,
+        // so the next frame's detection came back as a first sighting. See
+        // `Track::last_seen_ms`.
+        //
+        // Scope: this keeps the TRACK alive. It does not emit anything — the
+        // objects the checker sees are still exactly this frame's detections.
+        // Retaining the hazard itself is a separate, wire-visible change.
+        let matched: Vec<u64> = next_tracks.iter().map(|t| t.id).collect();
+        for tr in &self.tracks {
+            if matched.contains(&tr.id) {
+                continue;
+            }
+            // Budget measured from the last real observation, so coasting
+            // cannot extend itself frame after frame.
+            if now_ms.saturating_sub(tr.last_seen_ms) > self.phase_a.cfg.track_coast_budget_ms {
+                continue; // expired
+            }
+            if next_tracks.len() >= MAX_RETAINED_TRACKS {
+                break; // bounded: coasting can never grow the set without limit
+            }
+            let predicted = predicted_track_position(tr, now_ms);
+            next_tracks.push(Track {
+                id: tr.id,
+                pos: predicted,
+                // `stamp_ms` advances so the next association predicts from
+                // now; `last_seen_ms` deliberately does not.
+                stamp_ms: now_ms,
+                vel: tr.vel,
+                prior_vel: tr.prior_vel,
+                yaw_rate: tr.yaw_rate,
+                extent_m: tr.extent_m,
+                // A frame nobody observed is not evidence of persistence, so
+                // the classifier's history gates neither advance nor reset.
+                frames_seen: tr.frames_seen,
+                last_seen_ms: tr.last_seen_ms,
+            });
         }
         self.tracks = next_tracks;
         perception
@@ -2807,6 +2885,119 @@ mod tests {
         })
     }
 
+    /// A scan with no returns at all — the detection dropout this exists for.
+    fn empty_scan(stamp_ms: u64) -> LaserScan {
+        scan_from(20.0, stamp_ms, |_| None)
+    }
+
+    // -----------------------------------------------------------------------
+    // Track lifecycle: coasting through a dropout
+    //
+    // An unmatched track used to be DELETED. The next frame's detection came
+    // back as a brand-new track — new id, velocity from zero, frames_seen back
+    // to 1 — and `frames_seen` gates velocity (< 2), yaw rate (< 3) and the
+    // first-sighting arm of the VRU classifier. These pin that a bounded gap no
+    // longer costs any of that, and that the retention stays bounded.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_track_survives_a_one_frame_dropout() {
+        let mut taj = TajTracker::default();
+        let first = taj.track(&blob_scan(10.0, 0), 0);
+        let id = first.objects[0].id;
+
+        // Frame 2: the detector reports nothing.
+        let gap = taj.track(&empty_scan(100), 100);
+        assert!(
+            gap.objects.is_empty(),
+            "no detection means no object emitted"
+        );
+
+        // Frame 3: the object is seen again, close to where it was.
+        let back = taj.track(&blob_scan(10.2, 200), 200);
+        assert_eq!(
+            back.objects[0].id, id,
+            "the same physical object must keep its track id across one dropped scan"
+        );
+    }
+
+    #[test]
+    fn a_dropout_does_not_reset_motion_history() {
+        // The reason identity matters: frames_seen gates velocity and yaw-rate
+        // estimation, so a reset silently downgrades the track to a first
+        // sighting with no velocity.
+        let mut taj = TajTracker::default();
+        let _ = taj.track(&blob_scan(10.0, 0), 0);
+        let _ = taj.track(&blob_scan(11.0, 100), 100);
+        let _ = taj.track(&empty_scan(200), 200);
+        let out = taj.track(&blob_scan(13.0, 300), 300);
+
+        assert!(
+            out.objects[0].velocity_mps > 1.0,
+            "velocity must be estimable straight after a dropout, got {}",
+            out.objects[0].velocity_mps
+        );
+    }
+
+    #[test]
+    fn a_track_expires_after_the_coast_budget() {
+        // Coasting is bounded: a genuinely departed object must not linger.
+        let mut taj = TajTracker::default();
+        let first = taj.track(&blob_scan(10.0, 0), 0);
+        let id = first.objects[0].id;
+
+        let budget = TajConfig::default().track_coast_budget_ms;
+        let past = budget + 100;
+        let _ = taj.track(&empty_scan(past), past);
+
+        let back = taj.track(&blob_scan(10.0, past + 100), past + 100);
+        assert_ne!(
+            back.objects[0].id, id,
+            "past the budget the track must expire, so re-detection is a NEW object"
+        );
+    }
+
+    #[test]
+    fn coasting_emits_no_objects() {
+        // Scope boundary for this change: it keeps the TRACK alive, it does not
+        // put an unobserved object in front of the checker. Retaining the
+        // hazard itself is a separate, wire-visible change.
+        let mut taj = TajTracker::default();
+        let _ = taj.track(&blob_scan(10.0, 0), 0);
+        for (i, t) in [100_u64, 150, 200].iter().enumerate() {
+            let out = taj.track(&empty_scan(*t), *t);
+            assert!(
+                out.objects.is_empty(),
+                "coasting frame {i} emitted an object the sensor never saw"
+            );
+        }
+    }
+
+    #[test]
+    fn the_coast_budget_is_measured_from_the_last_real_observation() {
+        // Guard against a coasting track refreshing its own budget every frame
+        // and living forever. Several dropout frames INSIDE the budget, then
+        // one past it: the track must be gone.
+        let mut taj = TajTracker::default();
+        let first = taj.track(&blob_scan(10.0, 0), 0);
+        let id = first.objects[0].id;
+
+        let budget = TajConfig::default().track_coast_budget_ms;
+        let mut t = 0;
+        while t < budget {
+            t += 50;
+            let _ = taj.track(&empty_scan(t), t);
+        }
+        t += 100; // now definitively past the budget
+        let _ = taj.track(&empty_scan(t), t);
+
+        let back = taj.track(&blob_scan(10.0, t + 50), t + 50);
+        assert_ne!(
+            back.objects[0].id, id,
+            "repeated coasting must not extend the budget"
+        );
+    }
+
     #[test]
     fn tracker_estimates_velocity_of_moving_object() {
         // Object moves +2 m over a 200 ms inter-frame gap → ~10 m/s in +x.
@@ -2875,6 +3066,7 @@ mod tests {
             yaw_rate: 0.0,
             extent_m: 0.3,
             frames_seen: 3,
+            last_seen_ms: 1_000,
         };
 
         // At 1.2 s, the predicted position is x=12 rather than the stale x=10.
@@ -2904,6 +3096,7 @@ mod tests {
             yaw_rate: 0.0,
             extent_m: 0.3,
             frames_seen: 2,
+            last_seen_ms: 0,
         };
 
         let detections = vec![PerceivedObject {
@@ -2929,6 +3122,7 @@ mod tests {
             yaw_rate: 0.0,
             extent_m: 0.3,
             frames_seen: 2,
+            last_seen_ms: 0,
         };
 
         let detections = vec![
@@ -2985,6 +3179,7 @@ mod tests {
             yaw_rate: 0.0,
             extent_m: 0.3,
             frames_seen: 2,
+            last_seen_ms: 0,
         };
 
         let tracks = vec![make_track(20, -0.1), make_track(10, 0.1)];
@@ -3269,6 +3464,7 @@ mod tests {
             yaw_rate: 0.0,
             extent_m: 0.3,
             frames_seen,
+            last_seen_ms: 1_000,
         }
     }
 
