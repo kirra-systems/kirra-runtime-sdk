@@ -23,6 +23,7 @@
 
 pub mod http;
 pub mod mick;
+pub mod mick_fence;
 pub mod narrator;
 pub mod net;
 pub mod planner;

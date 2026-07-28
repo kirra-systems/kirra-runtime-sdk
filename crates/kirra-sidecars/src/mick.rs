@@ -14,6 +14,15 @@
 //! intent there is no goal, no plan, no proposal. There is no default goal
 //! and no "proceed cautiously" arm anywhere on this path.
 //!
+//! **Deterministic non-motion fence:** obvious conversational and read-only
+//! text (`hello rabbit`, `what do you see`) is classified BEFORE the model runs
+//! and returns [`IntentOutcome::NonMotion`] — no LLM call, no intent, and
+//! critically no latch or `seq` change, so `GET /intent/last` cannot present an
+//! older motion command as newly requested. Defense in depth only; the deployed
+//! model returns valid-looking MOTION json for those utterances and the parse
+//! correctly admits it, because the parse checks shape, not whether motion was
+//! asked for. See [`crate::mick_fence`].
+//!
 //! Mick can only ever SLOW the system down: the intent is advice to the doer;
 //! Occy grounds it, KIRRA bounds it, and the verifying consumer enforces it —
 //! all in other processes, across the actuation fence.
@@ -21,6 +30,7 @@
 use kirra_planner::{LlmBrain, MickIntent, ModelClient, WorldContext};
 use serde::Deserialize;
 
+use crate::mick_fence::{classify_non_motion, NonMotionKind};
 use crate::net::RateLimiter;
 
 /// LLM-call rate bound (burst / steady-state per second). A plumbing bound:
@@ -120,6 +130,22 @@ impl AcceptedIntent {
     }
 }
 
+/// The outcome of one typed-text request.
+///
+/// Three states, not two: a request can be accepted, REFUSED (an `Err`,
+/// fail-closed), or recognised as deterministically non-motion. The last is a
+/// success that carries no intent — an enum rather than an `Option` so a caller
+/// cannot silently treat "the operator said hello" as "the model failed".
+#[derive(Clone, Debug, PartialEq)]
+pub enum IntentOutcome {
+    /// The model produced an intent that passed the fail-closed parse; it is
+    /// latched and `seq` has advanced.
+    Accepted(MickIntent, AcceptedIntent),
+    /// Deterministically non-motion text. No model call was made, no intent
+    /// exists, and the latch and `seq` are UNCHANGED.
+    NonMotion(NonMotionKind),
+}
+
 /// The service core: brain + latch + rate limit. Single-threaded, like the
 /// serve loop that drives it.
 pub struct IntentService<M: ModelClient> {
@@ -127,6 +153,11 @@ pub struct IntentService<M: ModelClient> {
     limiter: RateLimiter,
     last: Option<AcceptedIntent>,
     seq: u64,
+    /// How many requests the deterministic fence has absorbed this process.
+    non_motion_fenced: u64,
+    /// Last kind announced, so a greeting arriving at voice rate logs once per
+    /// episode rather than once per utterance.
+    announced_kind: Option<NonMotionKind>,
 }
 
 impl<M: ModelClient> IntentService<M> {
@@ -137,6 +168,8 @@ impl<M: ModelClient> IntentService<M> {
             limiter: RateLimiter::new(MICK_RATE_BURST, MICK_RATE_PER_S),
             last: None,
             seq: 0,
+            non_motion_fenced: 0,
+            announced_kind: None,
         }
     }
 
@@ -148,11 +181,36 @@ impl<M: ModelClient> IntentService<M> {
         &mut self,
         req: &IntentRequest,
         now_ms: u64,
-    ) -> Result<(MickIntent, AcceptedIntent), &'static str> {
+    ) -> Result<IntentOutcome, &'static str> {
         if !self.limiter.admit(now_ms) {
             return Err("MICK_RATE_LIMITED");
         }
         let ctx = world_context(req.context.as_ref().unwrap_or(&ContextReq::default()))?;
+        // Deterministic fence, BEFORE the model and before any state moves.
+        // Ordering is deliberate: after the rate limit (so the fence cannot be
+        // used to bypass shedding) and after context validation (so a caller's
+        // malformed context still surfaces), but before the LLM call — which is
+        // the only thing this needs to prevent.
+        if let Some(kind) = classify_non_motion(&req.text) {
+            self.non_motion_fenced += 1;
+            // Announce once per episode, not once per utterance: a greeting can
+            // arrive at voice rate. No transcript is logged — the kind and the
+            // running count carry the signal without the speech.
+            if self.announced_kind != Some(kind) {
+                self.announced_kind = Some(kind);
+                eprintln!(
+                    "mick: non-motion fence engaged (kind={}, fenced={}) — no model call, \
+                     no intent, latch unchanged",
+                    kind.as_str(),
+                    self.non_motion_fenced
+                );
+            }
+            // NOTHING mutates: not `last`, not `seq`. An unchanged `seq` is what
+            // stops a consumer re-reading the previous motion intent as fresh —
+            // the doer applies an intent at most once by tracking the last seq
+            // it consumed, so a stalled seq is a no-op there by construction.
+            return Ok(IntentOutcome::NonMotion(kind));
+        }
         let (intent, slice) = self.brain.decide_request(&ctx, &req.text)?;
         // The slice must stand alone as a JSON object for verbatim
         // re-publication (`to_wire`). `parse_llm_json` guarantees this; if
@@ -171,7 +229,14 @@ impl<M: ModelClient> IntentService<M> {
             intent_json: slice,
         };
         self.last = Some(accepted.clone());
-        Ok((intent, accepted))
+        self.announced_kind = None; // a real intent ends the fenced episode
+        Ok(IntentOutcome::Accepted(intent, accepted))
+    }
+
+    /// How many requests the deterministic fence has absorbed this process.
+    #[must_use]
+    pub fn non_motion_fenced(&self) -> u64 {
+        self.non_motion_fenced
     }
 
     /// The last accepted intent, if any (the `GET /intent/last` source).
@@ -200,9 +265,12 @@ mod tests {
     #[test]
     fn accepted_intent_is_latched_and_wire_round_trips_through_the_one_parse() {
         let mut svc = service(r#"{"intent":"go_to","x_m":12.0,"y_m":-2.0}"#);
-        let (intent, accepted) = svc
+        let IntentOutcome::Accepted(intent, accepted) = svc
             .handle_text(&req("take me to the dock"), 10_000)
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("a motion request must be accepted, not fenced");
+        };
         assert_eq!(
             intent,
             MickIntent::GoTo {
@@ -274,6 +342,163 @@ mod tests {
             }),
         };
         assert_eq!(svc.handle_text(&r, 10_000).unwrap_err(), "MICK_BAD_CONTEXT");
+    }
+
+    // --- deterministic non-motion fence ------------------------------------
+
+    /// A model that counts calls, so "never reached the LLM" is an assertion
+    /// about a counter rather than about a log line.
+    struct CountingModel {
+        reply: String,
+        calls: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl kirra_planner::ModelClient for CountingModel {
+        fn complete(&self, _prompt: &str) -> Result<String, kirra_planner::ModelError> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.reply.clone())
+        }
+    }
+
+    /// A service whose model reports how many times it was asked. The reply is
+    /// the MOTION json gemma3:4b actually returned for "hello rabbit" — so if
+    /// the fence ever stops working, these tests latch a cruise intent and fail
+    /// loudly rather than passing on a coincidence.
+    /// Returns the service and a HANDLE to the call counter — the test holds
+    /// its own reference rather than reaching into `LlmBrain`'s private model,
+    /// so proving "no LLM call" costs no API surface in another crate.
+    fn counting_service(
+        reply: &str,
+    ) -> (
+        IntentService<CountingModel>,
+        std::rc::Rc<std::cell::Cell<u32>>,
+    ) {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let svc = IntentService::new(LlmBrain::new(CountingModel {
+            reply: reply.to_string(),
+            calls: std::rc::Rc::clone(&calls),
+        }));
+        (svc, calls)
+    }
+
+    const LIVE_CRUISE_REPLY: &str = r#"{"intent":"cruise","target_speed_mps":5.0}"#;
+
+    #[test]
+    fn the_observed_live_non_motion_inputs_never_reach_the_model() {
+        for text in ["hello rabbit", "hello parker", "what do you see"] {
+            let (mut svc, calls) = counting_service(LIVE_CRUISE_REPLY);
+            let out = svc.handle_text(&req(text), 10_000).unwrap();
+            assert!(
+                matches!(out, IntentOutcome::NonMotion(_)),
+                "{text:?} must be fenced, got {out:?}"
+            );
+            assert_eq!(calls.get(), 0, "{text:?} reached the LLM");
+            assert!(svc.last().is_none(), "{text:?} latched an intent");
+        }
+    }
+
+    #[test]
+    fn a_real_motion_request_still_takes_the_model_path() {
+        let (mut svc, calls) = counting_service(r#"{"intent":"go_to","x_m":1.0,"y_m":0.0}"#);
+        let out = svc
+            .handle_text(&req("drive forward one meter"), 10_000)
+            .unwrap();
+        let IntentOutcome::Accepted(intent, accepted) = out else {
+            panic!("an explicit motion request must not be fenced");
+        };
+        assert_eq!(intent, MickIntent::GoTo { x_m: 1.0, y_m: 0.0 });
+        assert_eq!(calls.get(), 1);
+        assert_eq!(accepted.seq, 1);
+        assert_eq!(svc.last(), Some(&accepted));
+    }
+
+    #[test]
+    fn a_wake_prefix_with_a_command_still_reaches_the_model() {
+        for text in [
+            "hello rabbit, drive forward one meter",
+            "hey parker turn left",
+            "rabbit, stop",
+        ] {
+            let (mut svc, calls) = counting_service(r#"{"intent":"hold"}"#);
+            let out = svc.handle_text(&req(text), 10_000).unwrap();
+            assert!(
+                matches!(out, IntentOutcome::Accepted(..)),
+                "{text:?} must reach the model, got {out:?}"
+            );
+            assert_eq!(calls.get(), 1, "{text:?}");
+        }
+    }
+
+    // --- the state rule: a greeting must not re-present an old command ------
+
+    #[test]
+    fn a_greeting_after_a_motion_intent_advances_nothing() {
+        // The hazard: the operator says "go to the dock", the doer consumes
+        // seq 1, then the operator says "hello rabbit". If the greeting bumped
+        // seq (or relatched), the doer would see a "new" intent whose payload
+        // is the OLD drive command and move again, unasked.
+        let (mut svc, calls) = counting_service(r#"{"intent":"go_to","x_m":12.0,"y_m":-2.0}"#);
+        let IntentOutcome::Accepted(_, first) = svc
+            .handle_text(&req("take me to the dock"), 10_000)
+            .unwrap()
+        else {
+            panic!("setup: the motion request must be accepted");
+        };
+        let before = svc.last().cloned();
+        assert_eq!(first.seq, 1);
+
+        for (i, text) in ["hello rabbit", "what do you see", "thanks"]
+            .iter()
+            .enumerate()
+        {
+            let out = svc
+                .handle_text(&req(text), 11_000 + i as u64 * 1_000)
+                .unwrap();
+            assert!(matches!(out, IntentOutcome::NonMotion(_)), "{text:?}");
+            assert_eq!(
+                svc.last().cloned(),
+                before,
+                "{text:?} changed the latch — a consumer would re-read the drive command"
+            );
+        }
+        // seq is still 1: the doer's apply-once check (`seq <= last_consumed`)
+        // makes the stale latch a structural no-op, not a matter of timing.
+        assert_eq!(svc.last().unwrap().seq, 1);
+        assert_eq!(calls.get(), 1, "only the real request called the model");
+
+        // And a genuine follow-up command still advances normally.
+        let IntentOutcome::Accepted(_, next) = svc
+            .handle_text(&req("take me to the dock"), 20_000)
+            .unwrap()
+        else {
+            panic!("a later real request must still be accepted");
+        };
+        assert_eq!(next.seq, 2, "the fence must not stall real intents");
+    }
+
+    #[test]
+    fn a_greeting_before_any_intent_leaves_intent_last_empty() {
+        // `GET /intent/last` renders `{"intent":null}` when nothing is latched;
+        // a greeting must not conjure a first intent out of nothing.
+        let (mut svc, calls) = counting_service(LIVE_CRUISE_REPLY);
+        assert!(matches!(
+            svc.handle_text(&req("hello rabbit"), 10_000).unwrap(),
+            IntentOutcome::NonMotion(_)
+        ));
+        assert!(svc.last().is_none());
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn the_fence_counter_tracks_absorbed_requests() {
+        let (mut svc, calls) = counting_service(LIVE_CRUISE_REPLY);
+        assert_eq!(svc.non_motion_fenced(), 0);
+        for (i, text) in ["hello", "hi", "thanks"].iter().enumerate() {
+            svc.handle_text(&req(text), 10_000 + i as u64 * 2_000)
+                .unwrap();
+        }
+        assert_eq!(svc.non_motion_fenced(), 3);
+        assert_eq!(calls.get(), 0, "no fenced request may reach the LLM");
     }
 
     #[test]
