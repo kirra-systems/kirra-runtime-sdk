@@ -46,7 +46,19 @@ struct CommandAck {
     // watchdog-driven controlled stop answers no frame.
     std::uint32_t received_sequence{0U};
     std::uint64_t applied_at_us{0U};
-    AckResult result{AckResult::accepted};
+    // 🔴 The default is `invalid`, NOT `accepted`.
+    //
+    // decode_command_ack resets the destination on any failure, and a
+    // zero-initialised struct would leave `accepted` (value 0) sitting in the
+    // one field a caller is most likely to branch on. A caller that ignores
+    // the status would then read a REJECTED payload as a successful command.
+    //
+    // Defaulting to `invalid` makes the fail-closed direction the one you get
+    // for free. It is deliberately not the zero value: "the numbers are fixed
+    // by PROTOCOL.md" and "the safe default is 0" are different requirements,
+    // and where they conflict the safe default wins in the struct rather than
+    // on the wire.
+    AckResult result{AckResult::invalid};
     std::uint8_t safety_state{
         static_cast<std::uint8_t>(r2::safety::SafetyState::standby)};
     std::uint8_t reserved{0U};

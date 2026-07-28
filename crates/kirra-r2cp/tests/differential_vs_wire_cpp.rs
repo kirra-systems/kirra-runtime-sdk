@@ -114,6 +114,17 @@ int main(){ std::string line;
       std::uint8_t buf[64];
       if(encode_command_ack(a,buf,sizeof buf)) std::cout<<tohex(buf,kCommandAckPayloadSize)<<"\n";
       else std::cout<<"ENCFAIL\n"; }
+    else if(op=="ADX"){ std::string ph; is>>ph; std::uint8_t buf[128];
+      std::size_t n=(ph=="-")?0:fromhex(ph,buf,sizeof buf);
+      // Pre-fill with a SENTINEL that would be unmistakable if it leaked, and
+      // whose result is `accepted` — the value a careless caller wants to see.
+      CommandAck a{}; a.command_id=0xAAAAAAAAu; a.received_sequence=0xBBBBBBBBu;
+      a.applied_at_us=0xCCCCCCCCCCCCCCCCull; a.result=AckResult::accepted;
+      a.safety_state=4U; a.active_faults=0xDDDDDDDDDDDDDDDDull;
+      AckDecodeStatus st=decode_command_ack(buf,n,a);
+      std::cout<<ackstatusname(st)<<" "<<a.command_id<<" "<<a.received_sequence<<" "
+        <<a.applied_at_us<<" "<<(unsigned)a.result<<" "<<(unsigned)a.safety_state<<" "
+        <<a.active_faults<<"\n"; }
     else if(op=="AD"){ std::string ph; is>>ph; std::uint8_t buf[128];
       std::size_t n=(ph=="-")?0:fromhex(ph,buf,sizeof buf); CommandAck a{};
       AckDecodeStatus st=decode_command_ack(buf,n,a);
@@ -667,4 +678,94 @@ fn an_unsolicited_ack_carries_sequence_zero_on_both_sides() {
     ));
     assert_eq!(ours, theirs);
     assert_eq!(CommandAck::parse(&unhex(&theirs)), Ok(ack));
+}
+
+#[test]
+fn a_rejected_ack_never_leaves_readable_data_in_the_destination() {
+    // The acceptance test for fail-closed parsing, proven rather than
+    // inspected. Two distinct hazards, and the second is the one that bites:
+    //
+    //   1. a field from the MALFORMED payload leaking into the destination
+    //      (partial population), and
+    //   2. the destination being left saying `accepted`.
+    //
+    // (2) is what a caller who ignores the status actually reads. Writing this
+    // test is how I found that `CommandAck{}`'s zero-initialised `result` WAS
+    // `accepted` — so a rejected payload left the single most consequential
+    // field claiming success. The struct now defaults to `invalid`.
+    let Some(mut oracle) = oracle() else {
+        skipped_loudly();
+        return;
+    };
+
+    let good = ack_sample(AckResult::Accepted, 4).encode().unwrap();
+
+    // Every malformed shape, plus the sentinel values the oracle pre-fills.
+    let mut malformed: Vec<(&str, Vec<u8>)> = Vec::new();
+    let mut short = good.clone();
+    short.truncate(20);
+    malformed.push(("truncated", short));
+    let mut long = good.clone();
+    long.extend_from_slice(&[0xEE; 4]);
+    malformed.push(("over-long", long));
+    let mut bad_result = good.clone();
+    bad_result[16..18].copy_from_slice(&4242u16.to_le_bytes());
+    malformed.push(("unassigned result", bad_result));
+    let mut bad_state = good.clone();
+    bad_state[18] = 99;
+    malformed.push(("unknown safety state", bad_state));
+    let mut bad_reserved = good.clone();
+    bad_reserved[19] = 0x5A;
+    malformed.push(("reserved not zero", bad_reserved));
+    malformed.push(("empty", Vec::new()));
+
+    for (name, bytes) in &malformed {
+        // --- host side: there is no destination to corrupt. `parse` returns a
+        // Result, so a refusal cannot produce a value at all — the type system
+        // carries the guarantee the C++ side has to enforce by hand.
+        assert!(
+            CommandAck::parse(bytes).is_err(),
+            "{name}: host must refuse"
+        );
+
+        // --- firmware side: dump the destination a careless caller would read.
+        let hexed = if bytes.is_empty() {
+            "-".to_string()
+        } else {
+            hex(bytes)
+        };
+        let reply = oracle.ask(&format!("ADX {hexed}"));
+        let f: Vec<&str> = reply.split_whitespace().collect();
+        assert_ne!(f[0], "ok", "{name}: firmware must refuse");
+
+        // (2) — the destination must NOT claim success.
+        let result: u16 = f[4].parse().unwrap();
+        assert_ne!(
+            result,
+            AckResult::Accepted.as_u16(),
+            "{name}: a REJECTED payload left `accepted` in the destination — a \
+             caller that ignores the status would read success"
+        );
+        assert_eq!(
+            result,
+            AckResult::Invalid.as_u16(),
+            "{name}: the reset destination should read as a refusal"
+        );
+
+        // (1) — no sentinel survived, so nothing was partially populated and
+        // no prior value was left in place either.
+        assert_eq!(f[1], "0", "{name}: command_id leaked");
+        assert_eq!(f[2], "0", "{name}: received_sequence leaked");
+        assert_eq!(f[3], "0", "{name}: applied_at_us leaked");
+        assert_eq!(f[6], "0", "{name}: active_faults leaked");
+    }
+
+    // Non-vacuity: the SAME pre-filled destination, given a VALID payload, is
+    // fully overwritten with the payload's values — so the zeros above are the
+    // refusal doing its job, not a decoder that never writes anything.
+    let reply = oracle.ask(&format!("ADX {}", hex(&good)));
+    let f: Vec<&str> = reply.split_whitespace().collect();
+    assert_eq!(f[0], "ok");
+    assert_eq!(f[1], "3735928559"); // 0xDEADBEEF from ack_sample
+    assert_eq!(f[4], AckResult::Accepted.as_u16().to_string());
 }
