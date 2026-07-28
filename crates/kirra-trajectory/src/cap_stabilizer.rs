@@ -394,6 +394,13 @@ impl CapStabilizer {
         self.stabilized_mps = 0.0;
         self.clear_streak = 0;
         self.last_now_ms = None;
+        // Defensive, and deliberately unobservable: clearing `last_now_ms` above
+        // sends the next observation down the first-observation path, which
+        // overwrites `last_raw_mps` before anything reads it. No test can
+        // distinguish this line's presence today. It stays because it costs nothing
+        // and the first-observation path is not guaranteed to keep that property —
+        // a reader adding an early `raw_tightened` check would silently depend on
+        // it. Noted so nobody hunts for the missing test.
         self.last_raw_mps = None;
         self.limiting = None;
     }
@@ -988,14 +995,104 @@ mod tests {
             CapStabilizerConfig::from_legacy_params(0.5, 0.03, 5, 250, 0.05, 0.74),
             Err(CapConfigError::LegacyInitialCapRejected { cap: 0.74 })
         );
-        // NaN is not zero, so it is refused too rather than slipping through a
-        // comparison that only tested for positivity.
-        assert!(matches!(
-            CapStabilizerConfig::from_legacy_params(0.5, 0.03, 5, 250, 0.05, f64::NAN),
-            Err(CapConfigError::LegacyInitialCapRejected { .. })
-        ));
-        // …and zero migrates cleanly.
+
+        // EVERY non-zero value is refused, not merely the positive finite ones. A
+        // guard written as `> 0.0` would silently admit NaN (all comparisons false),
+        // both infinities' sign checks, and negatives — so the check is `!= 0.0` and
+        // this walks the cases that would slip through the weaker form.
+        for bad in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -1.0,
+            -0.0001,
+            f64::MIN_POSITIVE,
+        ] {
+            assert!(
+                matches!(
+                    CapStabilizerConfig::from_legacy_params(0.5, 0.03, 5, 250, 0.05, bad),
+                    Err(CapConfigError::LegacyInitialCapRejected { .. })
+                ),
+                "legacy startup cap {bad} must be refused"
+            );
+        }
+
+        // …and zero migrates cleanly. Negative zero is zero.
         assert!(CapStabilizerConfig::from_legacy_params(0.5, 0.03, 5, 250, 0.05, 0.0).is_ok());
+        assert!(CapStabilizerConfig::from_legacy_params(0.5, 0.03, 5, 250, 0.05, -0.0).is_ok());
+    }
+
+    /// `reset()` and process construction are BEHAVIOURALLY EQUIVALENT, not merely
+    /// similar in the fields anyone thought to assert.
+    ///
+    /// Checking observable state field-by-field only proves the fields that were
+    /// checked. This drives a reset instance and a fresh one through the same
+    /// sequence and requires every decision to match exactly — reason, both caps,
+    /// streak and limiting identity — so any state the reset forgot to clear shows
+    /// up as a divergence rather than as an unasserted field.
+    ///
+    /// The reset instance is given a deliberately messy history first: an earned
+    /// cap, a limiting object, and a fault. If any of that survived, the sequences
+    /// would diverge.
+    #[test]
+    fn a_reset_stabilizer_is_indistinguishable_from_a_fresh_one() {
+        let mut fresh = stab();
+
+        let mut reused = stab();
+        let t = settle_at(&mut reused, 1.7, 0);
+        let _ = reused.observe(obs_with(1.7, t + 100, Some(9)));
+        let _ = reused.observe(obs(f64::NAN, t + 200)); // fault, with identity held
+        let _ = reused.observe(obs(0.4, t + 10_000)); // gap, new epoch
+                                                      // …then leave it MID-CLIMB holding a limiting object, so cap, evidence,
+                                                      // identity and clock anchor are ALL non-default at the moment of reset. Any
+                                                      // one of them surviving would diverge the sequence below.
+        let mut t2 = t + 10_000;
+        for _ in 0..8 {
+            t2 += 100;
+            let _ = reused.observe(obs_with(5.0, t2, Some(9)));
+        }
+        assert!(reused.stabilized_cap_mps() > 0.0, "precondition");
+        assert!(reused.clear_streak() > 0, "precondition");
+        reused.reset();
+
+        // A sequence exercising hold, confirm, rise, restriction and jitter.
+        let sequence: [(f64, u64); 12] = [
+            (0.0, 0),
+            (2.0, 100),
+            (2.0, 200),
+            (2.0, 300),
+            (2.0, 400),
+            (2.0, 500),
+            (2.0, 600),
+            (0.5, 700),
+            (0.49, 800),
+            (2.0, 900),
+            (2.0, 1_000),
+            (2.0, 1_100),
+        ];
+        for (raw, now) in sequence {
+            let a = fresh.observe(obs(raw, now));
+            let b = reused.observe(obs(raw, now));
+            assert_eq!(
+                a, b,
+                "a reset stabilizer diverged from a fresh one at raw={raw} t={now}"
+            );
+        }
+
+        // Non-vacuity: the sequence actually visits several distinct states, so
+        // "they matched" is a real claim rather than two stabilizers both sitting at
+        // zero the whole way.
+        let mut check = stab();
+        let mut reasons: Vec<CapReason> = sequence
+            .iter()
+            .map(|&(raw, now)| check.observe(obs(raw, now)).reason)
+            .collect();
+        reasons.sort_unstable_by_key(|r| r.code());
+        reasons.dedup();
+        assert!(
+            reasons.len() >= 4,
+            "the equivalence sequence must exercise several states, saw {reasons:?}"
+        );
     }
 
     /// Every fail-closed transition clears BOTH the cap and the limiting identity,
@@ -1036,11 +1133,29 @@ mod tests {
     /// justify.
     #[test]
     fn a_reset_discards_an_earned_cap_and_its_evidence() {
+        // Reset MID-CLIMB, the only state where an earned cap and live evidence
+        // coexist: once the climb catches up the streak is spent, so resetting from
+        // a settled cap asserts `streak == 0` against a streak that was already
+        // zero. That is how this test originally passed without exercising the
+        // clearing at all.
         let mut s = stab();
-        let t = settle_at(&mut s, 1.5, 0);
+        let mut t = 0;
+        for _ in 0..8 {
+            t += 100;
+            let _ = s.observe(obs(5.0, t));
+        }
         assert!(
             s.stabilized_cap_mps() > 0.0,
             "precondition: a cap was earned"
+        );
+        assert!(
+            s.clear_streak() > 0,
+            "precondition: evidence is live mid-climb, or the streak assertion below \
+             is vacuous"
+        );
+        assert!(
+            s.stabilized_cap_mps() < 5.0,
+            "precondition: still climbing, not caught up"
         );
 
         s.reset();
