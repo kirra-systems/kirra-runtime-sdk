@@ -1459,6 +1459,531 @@ mod tests {
         );
     }
 
+    // --- helper arithmetic (mutation-gate kills) ----------------------------
+    //
+    // The C1 tests below exercise COMPOSED behaviour: they drive
+    // `validate_trajectory_containment` and check verdicts. That left the
+    // helpers' arithmetic untested — a mutation run over the #1192 diff found
+    // 32 survivors, including `max_corner_radius_m -> 0.0`, which shrinks the
+    // sagitta and makes the bound LESS conservative without flipping any
+    // composed verdict. These pin the arithmetic directly.
+
+    #[test]
+    fn max_corner_radius_is_the_farthest_corner_from_the_rear_axle() {
+        // Front-dominant: the front corners are farther, so the front diagonal
+        // wins. Exact value, so a wrong operator or a constant cannot pass.
+        let f = VehicleFootprint {
+            width_m: 0.30,
+            length_m: 0.47,
+            overhang_front_m: 0.18,
+            overhang_rear_m: 0.09,
+            wheelbase_m: 0.20,
+        };
+        // front = hypot(0.20 + 0.18, 0.15), rear = hypot(0.09, 0.15)
+        let expected = (0.38_f64).hypot(0.15);
+        assert!((max_corner_radius_m(&f) - expected).abs() < 1e-12);
+        assert!(
+            max_corner_radius_m(&f) > (0.09_f64).hypot(0.15),
+            "front must win here"
+        );
+    }
+
+    #[test]
+    fn max_corner_radius_takes_the_rear_when_the_rear_overhangs_further() {
+        // The `>` branch must actually select, not always return one side.
+        let f = VehicleFootprint {
+            width_m: 0.30,
+            length_m: 2.0,
+            overhang_front_m: 0.05,
+            overhang_rear_m: 1.50,
+            wheelbase_m: 0.20,
+        };
+        let expected = (1.50_f64).hypot(0.15);
+        assert!((max_corner_radius_m(&f) - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn max_corner_radius_scales_with_width() {
+        // Kills `* 0.5` → `+ 0.5` / `/ 0.5` on the half-width, and any constant
+        // return: a wider body must have a strictly larger corner radius.
+        let narrow = VehicleFootprint {
+            width_m: 0.30,
+            length_m: 0.47,
+            overhang_front_m: 0.18,
+            overhang_rear_m: 0.09,
+            wheelbase_m: 0.20,
+        };
+        let wide = VehicleFootprint {
+            width_m: 2.00,
+            ..narrow
+        };
+        assert!(
+            max_corner_radius_m(&wide) > max_corner_radius_m(&narrow) + 0.5,
+            "a 2 m-wide body must reach much further than a 0.3 m one"
+        );
+        // And it is a real distance, never a constant.
+        assert!(max_corner_radius_m(&narrow) > 0.0);
+    }
+
+    #[test]
+    fn wrap_to_pi_maps_angles_onto_the_half_open_turn() {
+        // Exact expectations either side of both branches. `>` vs `>=` at
+        // exactly +pi is the difference between +pi and -pi, and the `-=`/`+=`
+        // direction is the difference between a small turn and a huge one.
+        let pi = core::f64::consts::PI;
+        let cases = [
+            (0.0, 0.0),
+            (0.5, 0.5),
+            (-0.5, -0.5),
+            (pi, pi),  // +pi stays +pi (the interval is (-pi, pi])
+            (-pi, pi), // -pi wraps UP to +pi
+            (pi + 0.25, -pi + 0.25),
+            (-pi - 0.25, pi - 0.25),
+            (3.0 * pi / 2.0, -pi / 2.0),
+            (2.0 * pi, 0.0),
+        ];
+        for (input, expected) in cases {
+            let got = wrap_to_pi(input);
+            assert!(
+                (got - expected).abs() < 1e-12,
+                "wrap_to_pi({input}) = {got}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_to_pi_always_lands_inside_the_interval() {
+        let pi = core::f64::consts::PI;
+        let mut a = -20.0_f64;
+        while a < 20.0 {
+            let w = wrap_to_pi(a);
+            assert!(w > -pi - 1e-12 && w <= pi + 1e-12, "wrap_to_pi({a}) = {w}");
+            a += 0.37;
+        }
+    }
+
+    #[test]
+    fn sagitta_matches_the_closed_form() {
+        // Exact value, so every operator in the expression is pinned:
+        // r_axle = chord / (2 sin(theta/2)); sagitta = (r_axle + r_max)(1 - cos(theta/2)).
+        let theta = 0.6_f64;
+        let chord = 0.5_f64;
+        let r_max = 0.29_f64;
+        // Deliberately NOT at the origin: with a = (0, 0) the chord's
+        // `b - a` is indistinguishable from `b + a`, and the subtraction
+        // mutants survive. An offset frame pins the differencing.
+        let a = Pose {
+            x_m: 7.0,
+            y_m: -3.0,
+            heading_rad: 0.0,
+        };
+        let b = Pose {
+            x_m: 7.0 + chord * 0.6,
+            y_m: -3.0 + chord * 0.8,
+            heading_rad: theta,
+        };
+        let half = 0.5 * theta;
+        let expected = (chord / (2.0 * half.sin()) + r_max) * (1.0 - half.cos());
+        let got = segment_sagitta_m(&a, &b, r_max).expect("modellable");
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "sagitta {got} != closed form {expected}"
+        );
+    }
+
+    #[test]
+    fn sagitta_grows_with_the_corner_radius() {
+        // Kills `max_corner_radius_m -> 0.0` reaching here, and `+ r_max` being
+        // dropped or turned into `*`: a body that reaches further must bulge more.
+        let a = Pose {
+            x_m: 0.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        };
+        let b = Pose {
+            x_m: 0.5,
+            y_m: 0.0,
+            heading_rad: 0.6,
+        };
+        let small = segment_sagitta_m(&a, &b, 0.1).unwrap();
+        let large = segment_sagitta_m(&a, &b, 2.0).unwrap();
+        // The r_max term is exactly (r_large - r_small)(1 - cos(theta/2)).
+        let expected_delta = (2.0 - 0.1) * (1.0 - (0.3_f64).cos());
+        assert!(
+            (large - small - expected_delta).abs() < 1e-12,
+            "small={small} large={large}, delta != {expected_delta}"
+        );
+    }
+
+    #[test]
+    fn sagitta_grows_with_the_chord_at_fixed_curvature() {
+        // Pins the chord term: `chord / (2 sin)` mutated to `*` or `%` breaks
+        // this monotonicity.
+        let theta = 0.6_f64;
+        let mut previous = -1.0;
+        for chord in [0.1_f64, 0.5, 1.0, 2.0] {
+            let a = Pose {
+                x_m: 0.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            };
+            let b = Pose {
+                x_m: chord,
+                y_m: 0.0,
+                heading_rad: theta,
+            };
+            let s = segment_sagitta_m(&a, &b, 0.29).unwrap();
+            assert!(s > previous, "chord {chord} did not increase sagitta");
+            previous = s;
+        }
+    }
+
+    #[test]
+    fn sagitta_refuses_a_non_finite_chord_or_radius() {
+        // The `||` in the finiteness guard: `&&` would let a single non-finite
+        // input through.
+        let a = Pose {
+            x_m: 0.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        };
+        let far = Pose {
+            x_m: f64::MAX,
+            y_m: f64::MAX,
+            heading_rad: 0.6,
+        };
+        assert_eq!(segment_sagitta_m(&a, &far, 0.29), None, "non-finite chord");
+        let b = Pose {
+            x_m: 0.5,
+            y_m: 0.0,
+            heading_rad: 0.6,
+        };
+        assert_eq!(
+            segment_sagitta_m(&a, &b, f64::INFINITY),
+            None,
+            "non-finite r_max"
+        );
+        assert_eq!(segment_sagitta_m(&a, &b, f64::NAN), None, "NaN r_max");
+    }
+
+    #[test]
+    fn the_straight_short_circuit_agrees_with_the_arc_at_the_epsilon() {
+        // Both sides of the epsilon return EXACTLY 0.0, and that is the point:
+        // at theta = 1e-9, `1 - cos(theta/2)` underflows to exactly 0.0 in f64,
+        // so the computed branch produces the same answer the short-circuit
+        // does. The threshold is therefore a performance/singularity guard, not
+        // a behavioural boundary — which is why `< eps` vs `<= eps` is an
+        // EQUIVALENT mutant, excluded with justification in .cargo/mutants.toml.
+        // This test pins the property that makes it equivalent, so if the
+        // epsilon is ever raised into a range where the arc IS representable,
+        // this fails and the exclusion must be re-justified.
+        let a = Pose {
+            x_m: 0.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        };
+        for scale in [0.5, 1.0, 2.0] {
+            let b = Pose {
+                x_m: 0.5,
+                y_m: 0.0,
+                heading_rad: scale * STRAIGHT_SEGMENT_HEADING_EPS_RAD,
+            };
+            assert_eq!(
+                segment_sagitta_m(&a, &b, 0.29),
+                Some(0.0),
+                "at {scale}x the epsilon the sagitta must still be exactly zero"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chord_is_refused_when_either_endpoint_is_non_finite() {
+        // The `&&` in the endpoint finiteness guard: `||` would admit a chord
+        // with one NaN end.
+        let (left, right) = straight_corridor(3.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let good = Point {
+            x_m: 20.0,
+            y_m: 0.0,
+        };
+        let bad = Point {
+            x_m: f64::NAN,
+            y_m: 0.0,
+        };
+        let margin_sq = 0.16;
+        assert!(chord_clears_corridor(&good, &good, &corridor, margin_sq));
+        assert!(!chord_clears_corridor(&bad, &good, &corridor, margin_sq));
+        assert!(!chord_clears_corridor(&good, &bad, &corridor, margin_sq));
+    }
+
+    #[test]
+    fn a_chord_clears_only_when_it_beats_the_margin() {
+        // Pins the clearance comparison and the margin arithmetic: a chord down
+        // the centre of a 3 m half-width corridor clears a 2 m margin but not a
+        // 4 m one.
+        let (left, right) = straight_corridor(3.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let a = Point {
+            x_m: 20.0,
+            y_m: 0.0,
+        };
+        let b = Point {
+            x_m: 40.0,
+            y_m: 0.0,
+        };
+        assert!(chord_clears_corridor(&a, &b, &corridor, 2.0 * 2.0));
+        assert!(!chord_clears_corridor(&a, &b, &corridor, 4.0 * 4.0));
+    }
+
+    #[test]
+    fn a_chord_beyond_the_corridor_is_refused_even_though_it_clears_every_edge() {
+        // THE case the PNPoly ray-cast exists for. A chord far past the end of
+        // the corridor is further than the margin from every edge, so the
+        // distance test alone ADMITS it. Only the inside/outside verdict
+        // refuses it — so this is what pins the ray-cast arithmetic (the
+        // `>` comparisons, the `dy` difference, the `x_cross` product/quotient
+        // and the `<` crossing test). Points just outside an edge do not pin
+        // it, because they fail the distance test anyway.
+        let (left, right) = straight_corridor(3.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let margin_sq = 0.16;
+
+        // Beyond the far end, on the centreline.
+        let a = Point {
+            x_m: 200.0,
+            y_m: 0.0,
+        };
+        let b = Point {
+            x_m: 240.0,
+            y_m: 0.0,
+        };
+        assert!(!chord_clears_corridor(&a, &b, &corridor, margin_sq));
+
+        // Behind the near end, likewise.
+        let c = Point {
+            x_m: -200.0,
+            y_m: 0.0,
+        };
+        let d = Point {
+            x_m: -160.0,
+            y_m: 0.0,
+        };
+        assert!(!chord_clears_corridor(&c, &d, &corridor, margin_sq));
+
+        // Far to the side, level with the corridor's y-span.
+        let e = Point {
+            x_m: 50.0,
+            y_m: 80.0,
+        };
+        let f = Point {
+            x_m: 60.0,
+            y_m: 80.0,
+        };
+        assert!(!chord_clears_corridor(&e, &f, &corridor, margin_sq));
+
+        // Sanity: the same chord INSIDE clears, so the refusals above are the
+        // inside test talking, not a blanket reject.
+        let g = Point {
+            x_m: 40.0,
+            y_m: 0.0,
+        };
+        let h = Point {
+            x_m: 60.0,
+            y_m: 0.0,
+        };
+        assert!(chord_clears_corridor(&g, &h, &corridor, margin_sq));
+    }
+
+    /// A corridor whose boundaries are SLANTED, not axis-aligned.
+    ///
+    /// Load-bearing for the ray-cast tests. On an axis-aligned rectangle every
+    /// vertical edge has `e1.x - e0.x == 0`, so the `x_cross` formula collapses
+    /// to `e0.x` no matter what its `*` and `/` do — the arithmetic is
+    /// unreachable and its mutants cannot be killed. A slanted edge makes every
+    /// term of `(e1.x - e0.x) * (a.y - e0.y) / dy + e0.x` matter.
+    fn slanted_corridor(half_w: f64, x_max: f64, slope: f64) -> (Vec<Point>, Vec<Point>) {
+        let n = 8;
+        let dx = x_max / (n as f64 - 1.0);
+        let mut left = Vec::with_capacity(n);
+        let mut right = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = i as f64 * dx;
+            left.push(Point {
+                x_m: x,
+                y_m: half_w + slope * x,
+            });
+            right.push(Point {
+                x_m: x,
+                y_m: -half_w + slope * x,
+            });
+        }
+        (left, right)
+    }
+
+    #[test]
+    fn the_ray_cast_holds_on_a_slanted_corridor() {
+        // With slanted boundaries the `x_cross` interpolation is genuinely
+        // exercised, so a wrong product, quotient or difference in it changes
+        // the inside/outside verdict rather than cancelling out.
+        let (left, right) = slanted_corridor(3.0, 100.0, 0.4);
+        let corridor = healthy_corridor(&left, &right);
+        let margin_sq = 0.16;
+
+        // On the slanted centreline: inside.
+        let a = Point {
+            x_m: 40.0,
+            y_m: 0.4 * 40.0,
+        };
+        let b = Point {
+            x_m: 60.0,
+            y_m: 0.4 * 60.0,
+        };
+        assert!(
+            chord_clears_corridor(&a, &b, &corridor, margin_sq),
+            "a chord down the slanted centreline must clear"
+        );
+
+        // Same x-range, but far off the slanted band and far from every edge:
+        // only the ray-cast can refuse this.
+        let c = Point {
+            x_m: 40.0,
+            y_m: 0.4 * 40.0 + 60.0,
+        };
+        let d = Point {
+            x_m: 60.0,
+            y_m: 0.4 * 60.0 + 60.0,
+        };
+        assert!(
+            !chord_clears_corridor(&c, &d, &corridor, margin_sq),
+            "a chord far above the slanted band must be refused"
+        );
+
+        // Below the band, likewise.
+        let e = Point {
+            x_m: 40.0,
+            y_m: 0.4 * 40.0 - 60.0,
+        };
+        let f = Point {
+            x_m: 60.0,
+            y_m: 0.4 * 60.0 - 60.0,
+        };
+        assert!(!chord_clears_corridor(&e, &f, &corridor, margin_sq));
+    }
+
+    #[test]
+    fn the_x_cross_interpolation_decides_points_a_wrong_operator_would_admit() {
+        // These two points were found by exhaustively searching the slanted
+        // corridor for places where a mutated `x_cross` flips the inside/outside
+        // verdict WHILE the point stays far from every edge — i.e. where the
+        // distance term cannot cover for a broken ray-cast. Both are genuinely
+        // outside; a wrong `/` reports them inside, and the function would then
+        // clear a chord that never touches the corridor.
+        let (left, right) = slanted_corridor(3.0, 100.0, 0.4);
+        let corridor = healthy_corridor(&left, &right);
+        let margin_sq = 0.16;
+
+        // Far past the end of the band (clearance ~201 m).
+        let a = Point {
+            x_m: 299.0,
+            y_m: 7.0,
+        };
+        let b = Point {
+            x_m: 310.0,
+            y_m: 7.0,
+        };
+        assert!(
+            !chord_clears_corridor(&a, &b, &corridor, margin_sq),
+            "a chord 200 m outside the corridor must never clear"
+        );
+
+        // Below the slanted band at mid-length (clearance ~6.9 m): at x = 76 the
+        // band spans y in [27.4, 33.4], so y = 20 is outside.
+        let c = Point {
+            x_m: 76.0,
+            y_m: 20.0,
+        };
+        let d = Point {
+            x_m: 78.0,
+            y_m: 20.0,
+        };
+        assert!(
+            !chord_clears_corridor(&c, &d, &corridor, margin_sq),
+            "a chord below the slanted band must never clear"
+        );
+    }
+
+    #[test]
+    fn the_ray_cast_is_stable_when_a_vertex_sits_exactly_on_the_ray() {
+        // The `>` half-open comparisons in the crossing test exist to stop a
+        // vertex lying exactly at the test point's y from being counted twice.
+        // A point level with a boundary vertex is the case that pins them.
+        let (left, right) = straight_corridor(3.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let margin_sq = 0.01;
+
+        // Exactly level with the LEFT boundary's vertices (y = +3.0), but far
+        // outside in x — so distance cannot refuse it and the parity must.
+        let a = Point {
+            x_m: 300.0,
+            y_m: 3.0,
+        };
+        let b = Point {
+            x_m: 340.0,
+            y_m: 3.0,
+        };
+        assert!(
+            !chord_clears_corridor(&a, &b, &corridor, margin_sq),
+            "a chord level with the boundary vertices but far beyond the \
+             corridor must be refused"
+        );
+
+        // And level with the RIGHT boundary's vertices (y = -3.0).
+        let c = Point {
+            x_m: 300.0,
+            y_m: -3.0,
+        };
+        let d = Point {
+            x_m: 340.0,
+            y_m: -3.0,
+        };
+        assert!(!chord_clears_corridor(&c, &d, &corridor, margin_sq));
+    }
+
+    #[test]
+    fn a_corridor_with_a_non_finite_vertex_is_refused() {
+        // The `&&` guard over the polygon's own vertices (distinct from the
+        // chord-endpoint guard): one bad vertex must fail the whole test.
+        let (mut left, right) = straight_corridor(3.0, 100.0);
+        left[3].x_m = f64::NAN;
+        let corridor = healthy_corridor(&left, &right);
+        let a = Point {
+            x_m: 20.0,
+            y_m: 0.0,
+        };
+        let b = Point {
+            x_m: 40.0,
+            y_m: 0.0,
+        };
+        assert!(!chord_clears_corridor(&a, &b, &corridor, 0.16));
+    }
+
+    #[test]
+    fn a_chord_leaving_the_corridor_is_refused() {
+        // The crossing case: both endpoints inside, the segment bulging out is
+        // impossible for a straight chord, so drive one endpoint outside.
+        let (left, right) = straight_corridor(1.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let inside = Point {
+            x_m: 20.0,
+            y_m: 0.0,
+        };
+        let outside = Point {
+            x_m: 40.0,
+            y_m: 5.0,
+        };
+        assert!(!chord_clears_corridor(&inside, &outside, &corridor, 0.16));
+    }
+
     // --- the holes it closes ------------------------------------------------
 
     #[test]

@@ -1,7 +1,11 @@
 # cargo-mutants configuration (WP-08 / MGA G-6 — mutation-testing gate).
 #
-# SCOPE. Mutation runs target the CHECKER crate (`-p kirra-trajectory`,
-# passed on the command line by the CI lane / the baseline scripts). The
+# SCOPE. Mutation runs target the CHECKER crates (`-p kirra-trajectory`
+# `-p kirra-core`, passed on the command line by the CI lane / the baseline
+# scripts). #1196 added kirra-core: the SG2 containment check, the frozen
+# kinematics-contract talisman and the Track-C perception guard live there and
+# were outside the gate entirely. The CI lane enumerates WHICH kirra-core
+# modules count as checker; see the `mutation-gate` job comment. The
 # checker's slow-loop test battery now lives WITH the checker code
 # (`crates/kirra-trajectory/tests/validation_tests.rs`, relocated from the
 # adapter alongside the code it covers); the adapter crate is kept in scope
@@ -17,7 +21,15 @@
 # ...]` — that does NOT change which package's tests cargo-mutants runs, so
 # the adapter suite never executed and adapter-killed mutants showed as
 # survivors. `test_package` is the fix.)
-test_package = ["kirra-trajectory", "kirra-ros2-adapter"]
+#
+# `kirra-core` must appear here as well as on the command line. cargo-mutants
+# defaults to running the MUTATED package's own tests, but an explicit
+# `test_package` REPLACES that default for every mutant — so without this entry
+# a kirra-core mutant would be judged by the trajectory + adapter suites alone,
+# its own containment/talisman tests would never execute, and it would report
+# as a survivor. That is the same trap the `additional_cargo_test_args` note
+# above describes, one crate over.
+test_package = ["kirra-trajectory", "kirra-ros2-adapter", "kirra-core"]
 
 # Generous per-mutant timeout: some mutations turn bounded loops degenerate;
 # the suite itself runs in seconds, so 300 s cleanly separates "hung mutant"
@@ -82,4 +94,68 @@ exclude_re = [
     # per-window coverage test (a wrong span flips the in-span verdict).
     "replace < with <= in ego_time_span",
     "replace > with >= in ego_time_span",
+    # C1 (#1192) straight-segment short circuit in `segment_sagitta_m`:
+    # `theta < STRAIGHT_SEGMENT_HEADING_EPS_RAD` vs `<=` differ only at theta
+    # EXACTLY 1e-9 — and at that theta both branches return exactly Some(0.0),
+    # because `1 - cos(theta/2)` underflows to 0.0 in f64 well before 1e-9. The
+    # threshold is a singularity guard (the closed form is 0/0 at theta = 0),
+    # not a behavioural boundary, so no test can distinguish the two forms.
+    # TRULY equivalent, like the ego_time_span pair above rather than merely
+    # measure-zero. Pinned by `the_straight_short_circuit_agrees_with_the_arc_at_
+    # the_epsilon`, which fails if the epsilon is ever raised into a range where
+    # the arc IS representable — at which point this exclusion must be re-earned.
+    "replace < with <= in segment_sagitta_m",
+    # C1 front/rear corner selector: `if front > rear { front } else { rear }`
+    # vs `>=`. The two differ ONLY when front == rear to the bit — and there
+    # both arms return the SAME VALUE, so the function's output is identical for
+    # every input. Truly equivalent, not measure-zero. (The selector genuinely
+    # selecting is pinned by `max_corner_radius_is_the_farthest_corner_from_the_
+    # rear_axle` + the rear-dominant twin.)
+    "replace > with >= in max_corner_radius_m",
+    # C1 sagitta input guard: `!chord.is_finite() || !r_max.is_finite()` vs
+    # `&&`. The `&&` form skips the EARLY return when only one input is
+    # non-finite — but a non-finite chord or radius then propagates through
+    # `r_axle`/`sagitta`, and the FINAL `!sagitta.is_finite()` guard returns
+    # None anyway. Same observable result (None) for every input, so no test can
+    # distinguish them; the early guard is defensive clarity, not the mechanism.
+    # `sagitta_refuses_a_non_finite_chord_or_radius` pins the OBSERVABLE
+    # contract, which is what actually matters.
+    # NOTE the escaping: `||` is regex ALTERNATION. Unescaped, this pattern
+    # parses as `(replace )|( with && in segment_sagitta_m)` — an EMPTY branch
+    # that matches every mutant description, silently excluding the entire file
+    # and making the gate vacuous for exactly the code it was widened to cover.
+    "replace \\|\\| with && in segment_sagitta_m",
+    # C1 PNPoly ray direction in `chord_clears_corridor`: `a.x < x_cross`
+    # (a half-line toward +x) vs `>` (toward -x). Ray casting is
+    # DIRECTION-INDEPENDENT: for any simple polygon a ray from a point crosses
+    # the boundary an odd number of times iff the point is inside, whichever
+    # way it points. Both forms therefore compute the same parity for every
+    # input — truly equivalent, not measure-zero. The ray-cast doing its job at
+    # all is pinned by `the_ray_cast_holds_on_a_slanted_corridor` and
+    # `a_chord_beyond_the_corridor_is_refused_even_though_it_clears_every_edge`.
+    "replace < with > in chord_clears_corridor",
+    # Two exact-tie boundaries in the same function, same class as the
+    # `CenterlineFrenet::project` exclusion above. `a.x < x_cross` vs `<=`
+    # differs only when the test point lies EXACTLY on an edge's interpolated
+    # crossing; `dist_sq < min_dist_sq` vs `<=` differs only when two edges are
+    # EXACTLY equidistant, and either choice retains the same minimum. Both are
+    # measure-zero and behaviourally identical for any real corridor.
+    "replace < with <= in chord_clears_corridor",
+    # C1 PNPoly half-open vertex comparison: `(e0.y > a.y) != (e1.y > a.y)` vs
+    # `>=`. The half-open rule only matters for a point whose y coincides with a
+    # boundary VERTEX's y — and on a corridor polygon that means the point lies
+    # exactly ON the boundary. The function returns
+    # `inside && min_dist_sq >= margin_sq`, so at clearance 0 the conjunction is
+    # false whatever `inside` says: the mutant cannot change the OUTPUT for any
+    # positive margin.
+    #
+    # Not asserted — measured. An exhaustive grid search over three corridor
+    # shapes (rectangular, L-bend, slanted parallelogram) found every differing
+    # point at clearance EXACTLY 0.0, and none anywhere else. The same search is
+    # what produced the killing points for the `x_cross` division mutants, which
+    # ARE now killed by
+    # `the_x_cross_interpolation_decides_points_a_wrong_operator_would_admit` —
+    # so the method distinguishes "equivalent" from "not yet killed" rather than
+    # excusing both.
+    "replace > with >= in chord_clears_corridor",
 ]

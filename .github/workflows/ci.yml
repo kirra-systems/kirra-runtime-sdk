@@ -736,7 +736,7 @@ jobs:
           done
 
   # WP-08 (MGA G-6) — mutation gate on the CHECKER. Runs cargo-mutants ONLY
-  # over the mutants lying in this PR's diff of the checker crate
+  # over the mutants lying in this PR's diff of the checker sources
   # (`--in-diff`): new/changed checker code must kill its own mutants, while
   # the pre-existing survivor debt (tracked + triaged in
   # docs/testing/MUTATION_BASELINE.md, ratcheted DOWN by targeted kill tests)
@@ -744,6 +744,29 @@ jobs:
   # seconds. The test scope (checker + the adapter validation suite, where the
   # checker's deepest tests live) comes from .cargo/mutants.toml — measured on
   # the 2026-07-07 baseline, own-tests-only overstates survivors 318 vs 202.
+  #
+  # SCOPE (#1196): the diff covers kirra-trajectory AND the checker modules in
+  # kirra-core. It used to be kirra-trajectory alone, which left the SG2
+  # drivable-space containment check, the frozen kinematics-contract talisman
+  # and the Track-C perception guard — all safety authority — outside the gate
+  # entirely. Four merged changes (#1192, #1193, #1194, #1195) touched
+  # kirra-core / kirra-taj and the gate reported "no checker changes" in ~5
+  # seconds each.
+  #
+  # Widening is safe for existing code precisely BECAUSE of `--in-diff`: the
+  # gate only ever mutates lines a PR changed, so pre-existing survivors in the
+  # newly-covered files are not tested and cannot red anything. The cost lands
+  # only on future PRs that change those files, which is the point.
+  #
+  # kirra-core is enumerated MODULE BY MODULE rather than as a whole crate: it
+  # also holds non-authority code (capture, kinematics_sim, posture_tracker,
+  # corridor/trajectory types) that should not carry a mutation obligation.
+  # Adding a checker module here is a deliberate act, and the list is greppable.
+  #
+  # The talisman is in scope and that is safe: its blob pin is a CI SHELL step
+  # (`git hash-object`, in the rustfmt job), not a Rust test, and cargo-mutants
+  # mutates a scratch copy of the tree. A mutant cannot trip the pin, so it
+  # cannot produce a false "caught".
   mutation-gate:
     name: Mutation gate (checker diff, WP-08)
     if: github.event_name == 'pull_request'
@@ -758,7 +781,15 @@ jobs:
         run: |
           set -euo pipefail
           git diff "origin/${{ github.base_ref }}"...HEAD -- \
-            crates/kirra-trajectory/src > checker.diff
+            crates/kirra-trajectory/src \
+            crates/kirra-core/src/containment.rs \
+            crates/kirra-core/src/kinematics_contract.rs \
+            crates/kirra-core/src/perception_monitor.rs \
+            crates/kirra-core/src/governor_guard.rs \
+            crates/kirra-core/src/frame_integrity.rs \
+            crates/kirra-core/src/platform_kinematics.rs \
+            crates/kirra-core/src/contract_consumer.rs \
+            > checker.diff
           wc -l checker.diff
       - name: Install cargo-mutants
         if: hashFiles('checker.diff') != ''
@@ -771,8 +802,40 @@ jobs:
             echo "No checker changes in this PR — mutation gate not applicable."
             exit 0
           fi
-          cargo mutants -p kirra-trajectory --in-diff checker.diff \
-            --timeout 300 -j 1 --no-shuffle
+          # CI-HONESTY (#1196, same doctrine as the WCET gate's "running 0
+          # tests" check): a gate that can pass while asserting NOTHING is not a
+          # gate. The realised failure was an `exclude_re` entry written as
+          # `replace || with && in ...` — `||` is regex ALTERNATION with an
+          # EMPTY branch, so it matched every mutant description and silently
+          # excluded all 399 containment mutants.
+          #
+          # The check is on the CONFIG, not on this PR's diff. Diff-shape is the
+          # wrong signal: a test-only change to a checker file legitimately
+          # yields zero mutants (cargo-mutants does not mutate `#[cfg(test)]`
+          # code), so failing on "non-empty diff, zero mutants" would red every
+          # test-only PR — including the one that introduced this gate. Asking
+          # instead whether the checker sources are mutable AT ALL catches an
+          # over-matching exclusion regardless of what the PR happens to touch.
+          total=$(cargo mutants -p kirra-trajectory -p kirra-core --list \
+            2>/dev/null | grep -c 'crates/kirra-core/src/containment.rs' || true)
+          echo "mutable containment mutants under the active config: $total"
+          if [ "$total" -eq 0 ]; then
+            echo "::error::.cargo/mutants.toml excludes EVERY containment mutant \
+          — the gate would pass vacuously. Check exclude_re for an over-matching \
+          pattern (unescaped regex metacharacters such as a bare '||')."
+            exit 1
+          fi
+          # Zero mutants IN THE DIFF is a legitimate skip: comments, tests, or
+          # doc changes to checker files are not mutable code.
+          in_diff=$(cargo mutants -p kirra-trajectory -p kirra-core \
+            --in-diff checker.diff --list 2>/dev/null | wc -l)
+          if [ "$in_diff" -eq 0 ]; then
+            echo "Checker diff touches no mutable code (tests/comments only) — nothing to gate."
+            exit 0
+          fi
+          echo "mutants in diff: $in_diff"
+          cargo mutants -p kirra-trajectory -p kirra-core \
+            --in-diff checker.diff --timeout 300 -j 1 --no-shuffle
 
   wcet-gate:
     name: WCET Gate (non-instrumented timing)
