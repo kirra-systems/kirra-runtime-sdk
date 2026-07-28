@@ -366,3 +366,4 @@ pub fn split_frames(stream: &[u8]) -> (Vec<Vec<u8>>, Vec<u8>) {
     let _ = saw_delim;
     (frames, remainder)
 }
+pub mod sim;
