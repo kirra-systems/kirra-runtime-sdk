@@ -29,6 +29,7 @@ add_library(r2_platform_core STATIC
     kinematics/src/ackermann.cpp
     control/src/motion_controller.cpp
     protocol/src/wire.cpp
+    protocol/src/command_ack.cpp
     safety/src/safety_manager.cpp
     firmware/src/configuration.cpp
     firmware/src/control_loop.cpp

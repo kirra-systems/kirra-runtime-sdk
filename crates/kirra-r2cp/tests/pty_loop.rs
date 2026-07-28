@@ -13,8 +13,9 @@ use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use kirra_r2cp::command_ack::AckResult;
 use kirra_r2cp::pty::SimulatedMcuPty;
-use kirra_r2cp::sim::{ack_result, MotionCommand, Outcome, SafetyState, SimulatedMcu, MODE_TRACK};
+use kirra_r2cp::sim::{MotionCommand, Outcome, SafetyState, SimulatedMcu, MODE_TRACK};
 use kirra_r2cp::{decode, encode, Frame, FrameReader, MessageType, MAX_ENCODED_FRAME};
 
 const VALID_FOR: u32 = 100_000;
@@ -121,7 +122,7 @@ fn arm_and_activate(pty: &mut SimulatedMcuPty, mcu: &mut SimulatedMcu, bridge: &
         assert_eq!(acks.len(), 1, "{ty:?} must be acknowledged");
         let (recv, result, state) = ack_fields(&acks[0]);
         assert_eq!(recv, seq);
-        assert_eq!(result, ack_result::ACCEPTED);
+        assert_eq!(result, AckResult::Accepted.as_u16());
         assert_eq!(state, expect_state.to_wire());
     }
 }
@@ -140,7 +141,11 @@ fn a_bridge_opening_the_device_path_is_acknowledged_over_the_wire() {
     let (recv, result, state) = ack_fields(&bridge.read_frames(200)[0]);
     assert_eq!(
         (recv, result, state),
-        (3, ack_result::ACCEPTED, SafetyState::Active.to_wire())
+        (
+            3,
+            AckResult::Accepted.as_u16(),
+            SafetyState::Active.to_wire()
+        )
     );
 }
 
@@ -157,7 +162,7 @@ fn a_refusal_comes_back_as_a_result_code_rather_than_silence() {
     assert!(handled[0].acknowledged, "a refusal is still acknowledged");
     let (recv, result, state) = ack_fields(&bridge.read_frames(200)[0]);
     assert_eq!(recv, 1);
-    assert_eq!(result, ack_result::DISARMED);
+    assert_eq!(result, AckResult::Disarmed.as_u16());
     assert_eq!(state, SafetyState::Standby.to_wire());
 
     // A replay of the same frame answers REPLAY, so the two refusals are
@@ -168,7 +173,7 @@ fn a_refusal_comes_back_as_a_result_code_rather_than_silence() {
     bridge.send(&Frame::new(MessageType::Arm, 5, 0));
     pty.pump(&mut mcu, 0, 200).expect("pump");
     let (_, result, _) = ack_fields(&bridge.read_frames(200)[0]);
-    assert_eq!(result, ack_result::REPLAY);
+    assert_eq!(result, AckResult::Replay.as_u16());
 }
 
 #[test]
