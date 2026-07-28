@@ -211,6 +211,12 @@ def gather_perception():
             "range_min_m": float(scan.range_min),
             "range_max_m": float(scan.range_max),
             "ranges": ranges, "stamp_ms": 0, "forward_extent_m": 8.0,
+            # #1211: a one-shot "what do you see" query with a fixed
+            # stamp_ms. It shares taj_service state with the live scan
+            # stream, so without this flag repeated queries would look
+            # like a frozen driver and leave the real robot owing a
+            # recovery streak.
+            "diagnostic_probe": True,
         }).json()
         objs = taj.get("objects", [])
         left, right = taj.get("left", []), taj.get("right", [])
