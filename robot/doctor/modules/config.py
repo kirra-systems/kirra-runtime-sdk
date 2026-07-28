@@ -52,7 +52,7 @@ def run(ctx):
             if env.get(key):
                 details.append(detail(f"{key} set", "WARN",
                                       f"set but not used in mode {mode}",
-                                      fix=f"remove it, or switch modes"))
+                                      fix="remove it, or switch drive mode"))
     except Exception as e:  # noqa: BLE001 — never crash the doctor
         details.append(detail("required actuation config", "UNKNOWN",
                               f"contract unavailable: {e}"))

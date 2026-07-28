@@ -35,7 +35,6 @@ robot, no serial port and no systemd. Only `collect()` touches the system.
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 
 # Verdicts. PASS/FAIL follow the doctor's vocabulary; UNKNOWN is used only when
