@@ -92,8 +92,9 @@ pub enum CapConfigError {
     ClearConfirmationsZero,
     /// `max_dt_ms` of zero — every frame would read as a continuity break.
     MaxDtZero,
-    /// `initial_cap_mps` not finite, or negative.
-    InitialCapNegative { cap: f64 },
+    /// A legacy configuration carried a non-zero startup cap. Refused, not
+    /// honoured and not silently zeroed — see [`CapStabilizerConfig::from_legacy_params`].
+    LegacyInitialCapRejected { cap: f64 },
 }
 
 impl std::fmt::Display for CapConfigError {
@@ -117,9 +118,13 @@ impl std::fmt::Display for CapConfigError {
             Self::MaxDtZero => {
                 write!(f, "max_dt_ms of 0 would treat every frame as a gap")
             }
-            Self::InitialCapNegative { cap } => {
-                write!(f, "initial_cap_mps {cap} must be finite and non-negative")
-            }
+            Self::LegacyInitialCapRejected { cap } => write!(
+                f,
+                "legacy initial_cap_mps {cap} is refused: a fresh stabilizer has no \
+                 trusted observation history, so it may not permit motion. Remove the \
+                 setting; a startup allowance, if ever justified, belongs outside this \
+                 state machine"
+            ),
         }
     }
 }
@@ -139,8 +144,6 @@ pub struct CapStabilizerConfig {
     pub clear_confirmations: u32,
     /// Inter-frame gap beyond which continuity is lost → fail closed.
     pub max_dt_ms: u64,
-    /// Cap before any observation. Zero: start stopped, earn motion.
-    pub initial_cap_mps: f64,
     /// Release hysteresis — a frame counts as clear only if the raw cap exceeds the
     /// standing stabilized cap by at least this much.
     pub release_margin_mps: f64,
@@ -153,7 +156,6 @@ impl Default for CapStabilizerConfig {
             restriction_epsilon_mps: DEFAULT_RESTRICTION_EPSILON_MPS,
             clear_confirmations: DEFAULT_CLEAR_CONFIRMATIONS,
             max_dt_ms: DEFAULT_MAX_DT_MS,
-            initial_cap_mps: 0.0,
             release_margin_mps: DEFAULT_RELEASE_MARGIN_MPS,
         }
     }
@@ -165,8 +167,7 @@ impl CapStabilizerConfig {
     /// # Errors
     ///
     /// Returns [`CapConfigError`] for a non-positive rise rate, a negative epsilon
-    /// or margin, a zero confirmation count, a zero gap budget, or a negative
-    /// initial cap.
+    /// or margin, a zero confirmation count, or a zero gap budget.
     pub fn validate(&self) -> Result<(), CapConfigError> {
         if !self.rise_rate_mps_per_s.is_finite() || self.rise_rate_mps_per_s <= 0.0 {
             return Err(CapConfigError::RiseRateNotPositive {
@@ -189,12 +190,54 @@ impl CapStabilizerConfig {
         if self.max_dt_ms == 0 {
             return Err(CapConfigError::MaxDtZero);
         }
-        if !self.initial_cap_mps.is_finite() || self.initial_cap_mps < 0.0 {
-            return Err(CapConfigError::InitialCapNegative {
-                cap: self.initial_cap_mps,
+        Ok(())
+    }
+}
+
+impl CapStabilizerConfig {
+    /// Build from the legacy Python `SpeedCapGovernorConfig` field set, **refusing**
+    /// a non-zero `initial_cap_mps`.
+    ///
+    /// The legacy type carried a configurable startup cap. It is gone from this
+    /// struct deliberately: a fresh or reset stabilizer has no trusted observation
+    /// history, so permitting any positive cap at that moment contradicts the
+    /// module's fail-closed contract and would make `reset()` semantically weaker
+    /// than a process restart. A startup allowance, if it is ever justified, belongs
+    /// outside this state machine where it is visible as a decision rather than
+    /// hidden as compatibility.
+    ///
+    /// The refusal is loud on purpose. Silently zeroing a non-zero legacy value
+    /// would migrate a deployment to different behaviour without telling anyone,
+    /// which is the same class of problem as the Python owning this logic in the
+    /// first place: a safety property that changed while appearing not to.
+    ///
+    /// # Errors
+    ///
+    /// [`CapConfigError::LegacyInitialCapRejected`] when `legacy_initial_cap_mps` is
+    /// anything other than zero — including NaN, which is not zero. Otherwise the
+    /// usual [`validate`](Self::validate) errors.
+    pub fn from_legacy_params(
+        rise_rate_mps_per_s: f64,
+        restriction_epsilon_mps: f64,
+        clear_confirmations: u32,
+        max_dt_ms: u64,
+        release_margin_mps: f64,
+        legacy_initial_cap_mps: f64,
+    ) -> Result<Self, CapConfigError> {
+        if legacy_initial_cap_mps != 0.0 {
+            return Err(CapConfigError::LegacyInitialCapRejected {
+                cap: legacy_initial_cap_mps,
             });
         }
-        Ok(())
+        let cfg = Self {
+            rise_rate_mps_per_s,
+            restriction_epsilon_mps,
+            clear_confirmations,
+            max_dt_ms,
+            release_margin_mps,
+        };
+        cfg.validate()?;
+        Ok(cfg)
     }
 }
 
@@ -300,7 +343,9 @@ impl CapStabilizer {
     pub fn new(cfg: CapStabilizerConfig) -> Result<Self, CapConfigError> {
         cfg.validate()?;
         Ok(Self {
-            stabilized_mps: cfg.initial_cap_mps,
+            // Unconditionally zero. There is no configurable startup allowance: a
+            // stabilizer that has observed nothing permits nothing.
+            stabilized_mps: 0.0,
             cfg,
             clear_streak: 0,
             last_now_ms: None,
@@ -321,21 +366,18 @@ impl CapStabilizer {
         self.clear_streak
     }
 
-    /// Return to the starting state: the configured initial cap, no accumulated
-    /// evidence, no continuity, no limiting object.
+    /// Return to the starting state: zero cap, no accumulated evidence, no
+    /// continuity, no limiting object.
     ///
     /// Mirrors the Python's `reset()`. A restart must not inherit a cap that was
     /// earned against observations this instance can no longer see — the evidence
     /// and the clock history are gone, so the permission they bought goes with them.
     ///
-    /// **Hazard note on `initial_cap_mps`.** With the default configuration this
-    /// lands on the fail-closed floor (0.0): start stopped, earn motion. The field
-    /// is configurable because the port is faithful, but any non-zero value means a
-    /// fresh or reset stabilizer permits motion having observed *nothing* — which
-    /// contradicts every other decision in this module. Treat a non-zero initial cap
-    /// as a deliberate, reviewed exception, not a tuning knob.
+    /// The cap returns to zero unconditionally, so `reset()` is exactly as strong as
+    /// a process restart — there is no configuration that makes either of them start
+    /// permissive.
     pub fn reset(&mut self) {
-        self.stabilized_mps = self.cfg.initial_cap_mps;
+        self.stabilized_mps = 0.0;
         self.clear_streak = 0;
         self.last_now_ms = None;
         self.last_raw_mps = None;
@@ -851,6 +893,113 @@ mod tests {
         assert_eq!(s.clear_streak(), 0);
     }
 
+    /// **No configuration can make a fresh instance emit a positive cap.**
+    ///
+    /// The startup allowance was removed from the config rather than defaulted to
+    /// zero, so there is no field to set and no path — construction or reset — that
+    /// starts permissive. This walks every public construction route and asserts the
+    /// first emitted decision is zero.
+    ///
+    /// Non-vacuity is the second half: the same stabilizer DOES reach a positive cap
+    /// once evidence is earned. Without that, a stabilizer hard-wired to zero
+    /// forever would satisfy the first half perfectly.
+    #[test]
+    fn no_configuration_lets_a_fresh_instance_emit_a_positive_cap() {
+        // Route 1: Default.
+        let mut a = CapStabilizer::new(CapStabilizerConfig::default()).expect("valid");
+        // Route 2: struct literal with every knob pushed permissive.
+        let permissive = CapStabilizerConfig {
+            rise_rate_mps_per_s: 1_000.0,
+            restriction_epsilon_mps: 10.0,
+            clear_confirmations: 1,
+            max_dt_ms: 100_000,
+            release_margin_mps: 0.0,
+        };
+        let mut b = CapStabilizer::new(permissive).expect("valid");
+        // Route 3: the legacy migration path with a zero startup cap.
+        let migrated = CapStabilizerConfig::from_legacy_params(0.5, 0.03, 5, 250, 0.05, 0.0)
+            .expect("a zero legacy cap migrates cleanly");
+        let mut c = CapStabilizer::new(migrated).expect("valid");
+
+        for (name, s) in [
+            ("default", &mut a),
+            ("permissive", &mut b),
+            ("migrated", &mut c),
+        ] {
+            assert_eq!(s.stabilized_cap_mps(), 0.0, "{name}: fresh instance");
+            let d = s.observe(obs(99.0, 0));
+            assert_eq!(
+                d.stabilized_cap_mps, 0.0,
+                "{name}: a huge first raw cap must still emit zero"
+            );
+            s.reset();
+            assert_eq!(s.stabilized_cap_mps(), 0.0, "{name}: after reset");
+        }
+
+        // Non-vacuity: a positive cap IS reachable, once earned.
+        let mut earned = stab();
+        let _ = settle_at(&mut earned, 1.0, 0);
+        assert!(
+            earned.stabilized_cap_mps() > 0.0,
+            "the stabilizer must be able to permit motion, or the assertions above \
+             are satisfied by a stabilizer that never permits anything"
+        );
+    }
+
+    /// A legacy non-zero startup cap is REFUSED at migration, not silently zeroed.
+    ///
+    /// Silently zeroing would migrate a deployment to different behaviour without
+    /// telling anyone — the same class of problem as the Python owning this logic in
+    /// the first place: a safety property that changed while appearing not to. The
+    /// Python's own tests use 0.74, so this value is not hypothetical.
+    #[test]
+    fn a_legacy_nonzero_startup_cap_is_refused_not_zeroed() {
+        assert_eq!(
+            CapStabilizerConfig::from_legacy_params(0.5, 0.03, 5, 250, 0.05, 0.74),
+            Err(CapConfigError::LegacyInitialCapRejected { cap: 0.74 })
+        );
+        // NaN is not zero, so it is refused too rather than slipping through a
+        // comparison that only tested for positivity.
+        assert!(matches!(
+            CapStabilizerConfig::from_legacy_params(0.5, 0.03, 5, 250, 0.05, f64::NAN),
+            Err(CapConfigError::LegacyInitialCapRejected { .. })
+        ));
+        // …and zero migrates cleanly.
+        assert!(CapStabilizerConfig::from_legacy_params(0.5, 0.03, 5, 250, 0.05, 0.0).is_ok());
+    }
+
+    /// Every fail-closed transition clears BOTH the cap and the limiting identity,
+    /// and leaves no accumulated evidence. Checked across all three fault arms
+    /// together so a new arm that forgets one of the three is caught.
+    #[test]
+    fn every_fail_closed_arm_clears_cap_evidence_and_identity() {
+        let cases: [(&str, f64, u64); 3] = [
+            ("malformed cap", f64::NAN, 100),
+            ("backwards clock", 1.0, 0),
+            ("oversized gap", 1.0, 10_000),
+        ];
+        for (name, raw, now) in cases {
+            let mut s = stab();
+            let t = settle_at(&mut s, 1.0, 1_000);
+            let d = s.observe(obs_with(1.0, t + 100, Some(41)));
+            assert_eq!(d.limiting_object, Some(41), "{name}: precondition");
+            assert!(s.stabilized_cap_mps() > 0.0, "{name}: precondition");
+
+            let now_ms = if now == 0 { t } else { t + now };
+            let d = s.observe(obs_with(raw, now_ms, Some(41)));
+            assert!(
+                d.reason.is_fault(),
+                "{name}: expected a fault, got {:?}",
+                d.reason
+            );
+            assert_eq!(d.stabilized_cap_mps, 0.0, "{name}: cap");
+            assert_eq!(d.limiting_object, None, "{name}: identity");
+            assert_eq!(d.clear_streak, 0, "{name}: evidence");
+            assert_eq!(s.stabilized_cap_mps(), 0.0, "{name}: state cap");
+            assert_eq!(s.clear_streak(), 0, "{name}: state evidence");
+        }
+    }
+
     /// …and a reset returns to exactly that state, discarding a cap that had been
     /// earned. The evidence and the clock history are gone, so the permission they
     /// bought goes with them — a restart must not inherit clearance it can no longer
@@ -1228,7 +1377,7 @@ mod tests {
             CapConfigError::ReleaseMarginNegative { margin: -2.0 },
             CapConfigError::ClearConfirmationsZero,
             CapConfigError::MaxDtZero,
-            CapConfigError::InitialCapNegative { cap: -3.0 },
+            CapConfigError::LegacyInitialCapRejected { cap: 0.74 },
         ];
         let rendered: Vec<String> = errors.iter().map(ToString::to_string).collect();
         for text in &rendered {
@@ -1247,7 +1396,7 @@ mod tests {
         );
         assert!(rendered[3].contains("no evidence"), "{}", rendered[3]);
         assert!(rendered[4].contains("gap"), "{}", rendered[4]);
-        assert!(rendered[5].contains("-3"), "{}", rendered[5]);
+        assert!(rendered[5].contains("0.74"), "{}", rendered[5]);
 
         let mut unique = rendered.clone();
         unique.sort();
@@ -1286,10 +1435,6 @@ mod tests {
             Err(CapConfigError::ClearConfirmationsZero)
         );
         assert_eq!(bad(|c| c.max_dt_ms = 0), Err(CapConfigError::MaxDtZero));
-        assert!(matches!(
-            bad(|c| c.initial_cap_mps = -1.0),
-            Err(CapConfigError::InitialCapNegative { .. })
-        ));
         // …and an unenforceable config cannot build a stabilizer.
         let c = CapStabilizerConfig {
             clear_confirmations: 0,
