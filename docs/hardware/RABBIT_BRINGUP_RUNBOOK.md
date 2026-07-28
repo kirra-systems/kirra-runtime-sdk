@@ -159,8 +159,11 @@ tuned. In order of impact:
    ```
 3. **tiny.en for the wake listener** (`KIRRA_WAKE_STT_CMD`) so the always-on
    detector sips CPU; keep `base.en` on `KIRRA_STT_CMD` for turn transcription.
-4. **VAD endpointing** for the turn recorder (`KIRRA_RECORD_CMD=…vad_record.py`)
-   so a terse command returns in ~1 s instead of the fixed `-d 4` window.
+4. **VAD endpointing** for the turn recorder (`KIRRA_RECORD_CMD=…vad_record.py`
+   plus the REQUIRED `KIRRA_VAD_DEVICE`) so a short command's capture costs
+   ~1.3 s instead of the flat 4 s `-d 4` window — a ~2.6 s saving on every terse
+   turn, and less STT work on the shorter clip. Still a bounded mic (hard
+   ceiling + a wall-clock stall bound); see `RABBIT_AUDIO_STACK.md` §1a.
 5. **Event-driven re-arm + follow-up mode** (Slices R/F) so back-to-back
    questions need neither a dead-window wait nor a fresh wake word.
 6. **First-clause streaming to TTS** (Slice T, `KIRRA_RABBIT_STREAM_TTS=1`,

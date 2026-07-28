@@ -34,6 +34,8 @@ RENV="${KIRRA_ROBOT_ENV:-/etc/kirra/robot.env}"
 
 # first token of a command string (the binary/script it invokes)
 first_tok() { set -- $1; printf '%s' "${1:-}"; }
+# nth (1-based) token of a command string, or ""
+nth_tok() { local n="$1"; shift; set -- $1; shift $((n - 1)) 2>/dev/null || return 0; printf '%s' "${1:-}"; }
 # value following <flag> in a command string, or "" (e.g. opt_val -m "$KIRRA_STT_CMD")
 opt_val() { local f="$1"; shift; set -- $1; while [ "$#" -gt 0 ]; do [ "$1" = "$f" ] && { printf '%s' "${2:-}"; return; }; shift; done; }
 # ALSA card reference from a device spec: plughw:N,0 / hw:N,0 (numeric) or
@@ -84,17 +86,117 @@ else
   warn "KIRRA_TTS_CMD unset — Rabbit will PRINT, not speak"
 fi
 
-# 4. MIC device present in arecord -l  (the drift check)
-mic_spec="$(opt_val -D "${KIRRA_RECORD_CMD:-}")"
-mc="$(card_ref "$mic_spec")"
-if [ -n "${mc#*:}" ]; then
-  if command -v arecord >/dev/null 2>&1 && card_present arecord "$mc"; then
-    ok "mic device present: -D $mic_spec"
-  else
-    bad "mic device NOT in arecord -l (card drifted?): -D $mic_spec"; fix "arecord -l → update KIRRA_RECORD_CMD -D plughw:<N>,0 (or the more robust plughw:CARD=<name>,DEV=0) — §0"
-  fi
-else
-  warn "KIRRA_RECORD_CMD has no -D plughw:N,0 (mic device not pinned)"
+# 4. TURN recorder: which mode, and is its mic pinned + present?
+#    Two shapes are valid and their device lives in DIFFERENT places:
+#      arecord -d N …                 → the device is this command's -D
+#      python3 …/vad_record.py        → the device is KIRRA_VAD_DEVICE
+#    Reading -D off the vad_record.py line would find nothing and wrongly report
+#    "not pinned" on a correctly configured VAD robot.
+# The VAD form is "python3 <path>/vad_record.py", so the FIRST token is the
+# interpreter — classify on the script it runs, not on argv[0].
+turn_prog="$(basename "$(first_tok "${KIRRA_RECORD_CMD:-}")")"
+case "${KIRRA_RECORD_CMD:-}" in
+  *vad_record.py*) turn_prog="vad_record.py" ;;
+esac
+case "$turn_prog" in
+  vad_record.py)
+    # 4a. the recorder must actually be installed and runnable.
+    # the command is "python3 <script>" — the script is the 2nd token.
+    # nth_tok, not `set --`: this runs at top level, where `set --` would
+    # clobber the doctor's own arguments.
+    turn_script="$(nth_tok 2 "${KIRRA_RECORD_CMD}")"
+    case "$turn_script" in *vad_record.py) : ;; *) turn_script="$(first_tok "${KIRRA_RECORD_CMD}")" ;; esac
+    if [ -z "$turn_script" ] || [ ! -f "$turn_script" ]; then
+      bad "KIRRA_RECORD_CMD points at vad_record.py but ${turn_script:-<none>} is missing"
+      fix "re-run robot/install/install_robot_units.sh (it stages /opt/kirra/robot/vad_record.py)"
+    elif [ ! -r "$turn_script" ]; then
+      bad "turn VAD recorder not readable: $turn_script"; fix "sudo chmod 0755 $turn_script"
+    else
+      ok "turn recorder: VAD endpointing ($turn_script)"
+    fi
+    # 4b. the VAD mic — REQUIRED, and it must not have drifted.
+    if [ -n "${KIRRA_VAD_CAPTURE_CMD:-}" ]; then
+      vcp="$(basename "$(first_tok "$KIRRA_VAD_CAPTURE_CMD")")"
+      if [ "$vcp" = "arecord" ]; then
+        vdev="$(opt_val -D "$KIRRA_VAD_CAPTURE_CMD")"
+        [ -n "$vdev" ] || vdev="$(opt_val --device "$KIRRA_VAD_CAPTURE_CMD")"
+        if [ -z "$vdev" ]; then
+          bad "KIRRA_VAD_CAPTURE_CMD uses arecord with no -D/--device (ALSA DEFAULT — every turn would record near-silence)"
+          fix 'arecord -l → add -D plughw:CARD=<name>,DEV=0'
+        else
+          ok "VAD capture command pins its device: -D $vdev"
+        fi
+      else
+        ok "VAD uses a custom capture backend ($vcp) — no ALSA rule applied"
+      fi
+    elif [ -z "${KIRRA_VAD_DEVICE:-}" ]; then
+      bad "KIRRA_RECORD_CMD is vad_record.py but KIRRA_VAD_DEVICE is unset (it will REFUSE to start — there is no ALSA default)"
+      fix 'arecord -l → KIRRA_VAD_DEVICE="plughw:CARD=<name>,DEV=0" — §0'
+    else
+      vc="$(card_ref "$KIRRA_VAD_DEVICE")"
+      if command -v arecord >/dev/null 2>&1 && card_present arecord "$vc"; then
+        ok "VAD mic device present: $KIRRA_VAD_DEVICE"
+      else
+        bad "VAD mic device NOT in arecord -l (card drifted?): $KIRRA_VAD_DEVICE"
+        fix "arecord -l → update KIRRA_VAD_DEVICE to plughw:CARD=<name>,DEV=0 — §0"
+      fi
+    fi
+    # 4c. the bounds must be positive and actually bounded (the no-open-mic claim).
+    vmax="${KIRRA_VAD_MAX_MS:-8000}"; vsto="${KIRRA_VAD_START_TIMEOUT_MS:-3000}"
+    vabs=30000
+    if ! printf '%s' "$vmax" | grep -qE '^[0-9]+$' || [ "$vmax" -le 0 ]; then
+      bad "KIRRA_VAD_MAX_MS='$vmax' is not a positive integer"; fix "set e.g. KIRRA_VAD_MAX_MS=6000"
+    elif [ "$vmax" -gt "$vabs" ]; then
+      bad "KIRRA_VAD_MAX_MS=$vmax exceeds the ${vabs}ms absolute ceiling (vad_record.py will refuse)"; fix "set KIRRA_VAD_MAX_MS <= $vabs"
+    elif ! printf '%s' "$vsto" | grep -qE '^[0-9]+$' || [ "$vsto" -le 0 ]; then
+      bad "KIRRA_VAD_START_TIMEOUT_MS='$vsto' is not a positive integer"; fix "set e.g. KIRRA_VAD_START_TIMEOUT_MS=3000"
+    elif [ "$vsto" -gt "$vmax" ]; then
+      bad "KIRRA_VAD_START_TIMEOUT_MS=$vsto exceeds KIRRA_VAD_MAX_MS=$vmax (it could never fire)"; fix "set the start timeout below the ceiling"
+    else
+      ok "VAD bounds sane: max ${vmax}ms, start timeout ${vsto}ms, silence ${KIRRA_VAD_SILENCE_MS:-800}ms"
+    fi
+    ;;
+  arecord)
+    mic_spec="$(opt_val -D "${KIRRA_RECORD_CMD:-}")"
+    mc="$(card_ref "$mic_spec")"
+    if [ -n "${mc#*:}" ]; then
+      if command -v arecord >/dev/null 2>&1 && card_present arecord "$mc"; then
+        ok "mic device present: -D $mic_spec"
+      else
+        bad "mic device NOT in arecord -l (card drifted?): -D $mic_spec"; fix "arecord -l → update KIRRA_RECORD_CMD -D plughw:<N>,0 (or the more robust plughw:CARD=<name>,DEV=0) — §0"
+      fi
+    else
+      warn "KIRRA_RECORD_CMD has no -D plughw:N,0 (mic device not pinned)"
+    fi
+    rdb="$(opt_val -d "${KIRRA_RECORD_CMD}")"
+    if [ -n "$rdb" ]; then
+      warn "turn recorder is the FIXED ${rdb}s window — every turn costs ${rdb}s however short"
+      fix "switch to VAD endpointing: KIRRA_RECORD_CMD=\"python3 /opt/kirra/robot/vad_record.py\" + KIRRA_VAD_DEVICE — see rabbit.env.example"
+    else
+      bad "KIRRA_RECORD_CMD uses arecord with no -d bound — that is an UNBOUNDED microphone"; fix "add -d 4, or switch to vad_record.py"
+    fi
+    ;;
+  "")
+    warn "KIRRA_RECORD_CMD unset — the turn recorder defaults to a fixed arecord window"
+    ;;
+  *)
+    ok "turn recorder: custom backend ($turn_prog) — no ALSA rule applied"
+    ;;
+esac
+
+# 4d. the two recorder contracts must not be swapped. KIRRA_WAKE_RECORD_CMD is
+# the always-on RAW stream (-t raw, no -d); KIRRA_RECORD_CMD is the one-turn WAV
+# recorder. Swap them and the turn recorder never terminates, or the listener
+# stops after one window — both fail in confusing, intermittent ways.
+if [ -n "${KIRRA_RECORD_CMD:-}" ] && [ "$turn_prog" = "arecord" ]; then
+  case " ${KIRRA_RECORD_CMD} " in
+    *" -t raw "*|*" -t raw") bad "KIRRA_RECORD_CMD is a RAW stream (-t raw) — that is the WAKE recorder's contract, not the turn recorder's"; fix "the turn recorder must write a bounded WAV: \"arecord -D <dev> -d 4 -f S16_LE -r 16000 -c 1\" (or vad_record.py)" ;;
+  esac
+fi
+if [ -n "${KIRRA_WAKE_RECORD_CMD:-}" ]; then
+  case " ${KIRRA_WAKE_RECORD_CMD} " in
+    *" -d "*) bad "KIRRA_WAKE_RECORD_CMD has a -d bound — that is the TURN recorder's contract; the wake listener needs an UNBOUNDED raw stream"; fix "drop -d and add -t raw" ;;
+  esac
 fi
 
 # 5. SPEAKER device present in aplay -l (parse the plughw from the TTS wrapper file)
@@ -189,7 +291,13 @@ sys.exit(0 if parse_phrases(os.environ.get('KIRRA_WAKE_PHRASES', DEFAULT_PHRASES
     # 8c. hold-off must cover the turn recorder's -d bound (mic contention:
     # the listener releases the device for holdoff; a short holdoff steals it
     # back mid-turn and the turn recorder fails SILENTLY).
-    rd="$(opt_val -d "${KIRRA_RECORD_CMD:-arecord -d 4}")"
+    # The turn recorder's WORST-CASE seconds: -d for the fixed window, the VAD
+    # hard ceiling for the endpointing recorder (that is what the mic can hold).
+    if [ "$turn_prog" = "vad_record.py" ]; then
+      rd=$(( ${KIRRA_VAD_MAX_MS:-8000} / 1000 ))
+    else
+      rd="$(opt_val -d "${KIRRA_RECORD_CMD:-arecord -d 4}")"
+    fi
     ho="${KIRRA_WAKE_HOLDOFF_S:-10}"
     if [ -n "$rd" ] && awk "BEGIN{exit !($ho >= $rd + 3)}" 2>/dev/null; then
       ok "wake holdoff ${ho}s covers the ${rd}s turn recording (+STT/TTS)"
