@@ -1359,6 +1359,14 @@ jobs:
           # buys nothing and fails invisibly (everything works, just slowly, and
           # only after an idle gap).
           python3 robot/rabbit_keepalive_test.py
+          # Opt-in per-turn latency staging. Injected clock only — no sleeps, so
+          # it cannot flake on a loaded runner. Pins that it is OFF by default and
+          # inert when off, that the summary carries stage names + integers and
+          # NEVER speech, that a broken clock or timer is swallowed rather than
+          # raised into the turn, and (via an ast walk, not a grep) that no
+          # timing value is ever branched on — observability must not quietly
+          # become control.
+          python3 robot/rabbit_latency_test.py
           # Turn-state re-arm gate (Slice R, pure, no audio): the cross-process
           # "turn in progress" signal (fail-safe parse, active/done round-trip,
           # seq monotonicity) and the bounded rearm_decision that fixes the wake
