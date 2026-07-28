@@ -1335,3 +1335,7 @@ mod tests {
         }
     }
 }
+
+/// The R2CP link surface (stage 4 of the MCU migration). Separate module,
+/// same rule: decisions across the boundary, never wire bytes.
+pub mod r2cp;

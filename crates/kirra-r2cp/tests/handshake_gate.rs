@@ -13,9 +13,10 @@ use std::os::fd::AsFd;
 use std::path::PathBuf;
 
 use kirra_r2cp::handshake::{
-    evaluate_hello_response, HandshakeError, Hello, HOST_IMPLEMENTATION_ID, SIM_IMPLEMENTATION_ID,
+    evaluate_hello_response, HandshakeError, Hello, HOST_IMPLEMENTATION_ID, MIN_ADVERTISED_FRAME,
+    SIM_IMPLEMENTATION_ID,
 };
-use kirra_r2cp::link::{LinkError, SerialLink};
+use kirra_r2cp::link::{LinkError, LinkFault, SerialLink, FRAMING_FAILURE_THRESHOLD};
 use kirra_r2cp::pty::SimulatedMcuPty;
 use kirra_r2cp::sim::{MotionCommand, Outcome, SimulatedMcu, MODE_TRACK};
 use kirra_r2cp::{encode, Frame, MessageType, MAX_PAYLOAD};
@@ -130,18 +131,73 @@ fn version_ranges_must_overlap_and_overlap_is_enough() {
 #[test]
 fn a_peer_that_cannot_receive_our_largest_frame_is_refused_up_front() {
     // Better than discovering it when a long command is silently dropped.
+    // 64 is a CONFORMING advertisement (above the protocol floor) that is
+    // still too small for a 128-byte requirement, which is what isolates this
+    // refusal from the two protocol-conformance ones below.
     let probe = Hello::probe(NONCE);
     let mut small = peer_hello(NONCE);
-    small.maximum_frame = 32;
+    small.maximum_frame = 64;
     assert_eq!(
-        evaluate_hello_response(&probe, &small.to_frame(1, 0, true), 64),
+        evaluate_hello_response(&probe, &small.to_frame(1, 0, true), 128),
         Err(HandshakeError::FrameTooSmall {
-            peer_maximum: 32,
-            required: 64
+            peer_maximum: 64,
+            required: 128
         })
     );
     // Positive control: exactly enough is enough.
-    assert!(evaluate_hello_response(&probe, &small.to_frame(1, 0, true), 32).is_ok());
+    assert!(evaluate_hello_response(&probe, &small.to_frame(1, 0, true), 64).is_ok());
+}
+
+#[test]
+fn a_peer_below_the_protocol_frame_floor_is_not_a_conforming_peer() {
+    // The floor is derived from PROTOCOL.md §MOTION_COMMAND (44 bytes with
+    // auth_tag), not chosen: a peer under it cannot receive a fully-specified
+    // motion command, whatever else it claims about itself.
+    let probe = Hello::probe(NONCE);
+    for advertised in [0u16, 1, MIN_ADVERTISED_FRAME - 1] {
+        let mut tiny = peer_hello(NONCE);
+        tiny.maximum_frame = advertised;
+        assert_eq!(
+            // required_frame is small here ON PURPOSE: the floor must fire on
+            // protocol conformance alone, not because we happen to want a big
+            // frame today.
+            evaluate_hello_response(&probe, &tiny.to_frame(1, 0, true), 8),
+            Err(HandshakeError::FrameBelowProtocolMinimum {
+                peer_maximum: advertised,
+                minimum: MIN_ADVERTISED_FRAME
+            }),
+            "advertised {advertised} is below the protocol floor"
+        );
+    }
+    // Positive control: the floor itself is acceptable.
+    let mut exact = peer_hello(NONCE);
+    exact.maximum_frame = MIN_ADVERTISED_FRAME;
+    assert!(evaluate_hello_response(&probe, &exact.to_frame(1, 0, true), 8).is_ok());
+}
+
+#[test]
+fn a_peer_claiming_more_than_the_major_version_permits_is_refused_not_clamped() {
+    // Within an agreed major the maximum is FIXED, so a larger claim means the
+    // two ends disagree about the format they just agreed on. Clamping would
+    // paper over that; a peer whose framing assumptions cannot be pinned down
+    // is not one to command motion on.
+    let probe = Hello::probe(NONCE);
+    for advertised in [(MAX_PAYLOAD as u16) + 1, 4096, u16::MAX] {
+        let mut huge = peer_hello(NONCE);
+        huge.maximum_frame = advertised;
+        assert_eq!(
+            evaluate_hello_response(&probe, &huge.to_frame(1, 0, true), 8),
+            Err(HandshakeError::FrameAboveProtocolMaximum {
+                peer_maximum: advertised,
+                maximum: MAX_PAYLOAD as u16
+            }),
+            "advertised {advertised} exceeds what major 1 permits"
+        );
+    }
+    // Positive control: the ceiling itself is acceptable.
+    let mut exact = peer_hello(NONCE);
+    exact.maximum_frame = MAX_PAYLOAD as u16;
+    assert!(evaluate_hello_response(&probe, &exact.to_frame(1, 0, true), 8).is_ok());
 }
 
 #[test]
@@ -235,12 +291,22 @@ fn a_device_that_chatters_a_foreign_protocol_still_refuses() {
     assert!(link.peer().is_none());
 }
 
+/// A live simulator on a background thread, plus a channel that makes it emit
+/// arbitrary bytes — so a test can degrade a peer that was previously fine,
+/// which is a different failure from a peer that was never right.
+struct SimHandle {
+    device: PathBuf,
+    inject: std::sync::mpsc::Sender<Vec<u8>>,
+    stop: std::sync::mpsc::Sender<()>,
+}
+
 /// Run the simulated MCU on a background thread so the link talks to a live
 /// peer, exactly as the consumer will.
-fn spawn_sim() -> (PathBuf, std::sync::mpsc::Sender<()>) {
+fn spawn_sim() -> SimHandle {
     let pty = SimulatedMcuPty::open().expect("allocate a pty");
     let device = pty.device_path().to_path_buf();
     let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let (inject_tx, inject_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         let mut pty = pty;
         let mut mcu = SimulatedMcu::new();
@@ -249,33 +315,42 @@ fn spawn_sim() -> (PathBuf, std::sync::mpsc::Sender<()>) {
             if stop_rx.try_recv().is_ok() {
                 return;
             }
+            while let Ok(bytes) = inject_rx.try_recv() {
+                if pty.write_raw(&bytes).is_err() {
+                    return;
+                }
+            }
             let now_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
             if pty.pump(&mut mcu, now_us, 20).is_err() {
                 return;
             }
         }
     });
-    (device, stop_tx)
+    SimHandle {
+        device,
+        inject: inject_tx,
+        stop: stop_tx,
+    }
 }
 
 #[test]
 fn a_live_simulator_satisfies_the_gate_and_identifies_itself() {
     // Positive control for the two refusals above: the identical code path,
     // against a peer that does speak R2CP, succeeds.
-    let (device, stop) = spawn_sim();
-    let mut link = SerialLink::open(&device, None).expect("open");
+    let sim = spawn_sim();
+    let mut link = SerialLink::open(&sim.device, None).expect("open");
 
     let peer = link.handshake(NONCE, 1000).expect("the simulator answers");
     assert_eq!(peer.implementation_id, SIM_IMPLEMENTATION_ID);
     assert_eq!(peer.agreed_major, 1);
     assert!(link.peer().is_some());
-    let _ = stop.send(());
+    let _ = sim.stop.send(());
 }
 
 #[test]
 fn commands_are_refused_before_the_handshake_and_accepted_after() {
-    let (device, stop) = spawn_sim();
-    let mut link = SerialLink::open(&device, None).expect("open");
+    let sim = spawn_sim();
+    let mut link = SerialLink::open(&sim.device, None).expect("open");
 
     let cmd = MotionCommand {
         command_id: 1,
@@ -311,7 +386,7 @@ fn commands_are_refused_before_the_handshake_and_accepted_after() {
         kirra_r2cp::link::ack_result(acked),
         Some(kirra_r2cp::sim::ack_result::ACCEPTED)
     );
-    let _ = stop.send(());
+    let _ = sim.stop.send(());
 }
 
 #[test]
@@ -324,6 +399,119 @@ fn a_stop_is_sendable_without_a_handshake() {
     assert!(link.peer().is_none());
     link.send_stop(100_000, 0)
         .expect("a stop is always sendable");
+}
+
+#[test]
+fn sustained_framing_failure_drops_the_peer_and_forces_a_fresh_handshake() {
+    // The ends have lost agreement about where frames begin; everything
+    // decoded after that point is guesswork, so the identification cannot
+    // stand. A caller must re-handshake, not carry on.
+    let sim = spawn_sim();
+    let mut link = SerialLink::open(&sim.device, None).expect("open");
+    link.handshake(NONCE, 1000).expect("handshake");
+    assert!(link.peer().is_some());
+
+    // Garbage that frames (delimiters present) but never decodes, which is
+    // what a baud-rate mismatch or a desynchronised peer actually looks like —
+    // not an absence of bytes.
+    let mut noise = Vec::new();
+    for i in 0..(FRAMING_FAILURE_THRESHOLD + 4) {
+        noise.extend_from_slice(&[0x41 + (i as u8 % 16), 0x42, 0x43, 0x44, 0x00]);
+    }
+    sim.inject.send(noise).expect("inject");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    while link.peer().is_some() && std::time::Instant::now() < deadline {
+        let _ = link.receive(100).expect("receive");
+    }
+    assert!(
+        link.peer().is_none(),
+        "sustained undecodable traffic must drop the peer"
+    );
+    assert!(matches!(link.fault(), Some(LinkFault::FramingLost { .. })));
+    // And the gate is now closed again: commands refuse until re-identified.
+    assert!(matches!(
+        link.arm_and_activate(100),
+        Err(LinkError::NotHandshaken)
+    ));
+    let _ = sim.stop.send(());
+}
+
+#[test]
+fn one_corrupt_frame_does_not_drop_the_peer() {
+    // Non-vacuity for the threshold: a single corrupt frame is ORDINARY on a
+    // real UART — that is what the CRC is for — and re-handshaking on every
+    // one would make the link unusable. The streak must count sustained
+    // failure, not a lifetime total.
+    let sim = spawn_sim();
+    let mut link = SerialLink::open(&sim.device, None).expect("open");
+    link.handshake(NONCE, 1000).expect("handshake");
+
+    sim.inject
+        .send(vec![0x41, 0x42, 0x43, 0x00])
+        .expect("inject");
+    let _ = link.receive(150).expect("receive");
+    assert!(
+        link.peer().is_some(),
+        "a single corrupt frame must not drop the peer"
+    );
+    assert!(link.fault().is_none());
+    let _ = sim.stop.send(());
+}
+
+#[test]
+fn an_explicit_reset_forces_a_fresh_handshake() {
+    // The hook for a watchdog-triggered stop: after it, the peer's state is
+    // uncertain, and re-identifying is cheaper than guessing.
+    let sim = spawn_sim();
+    let mut link = SerialLink::open(&sim.device, None).expect("open");
+    link.handshake(NONCE, 1000).expect("handshake");
+    link.arm_and_activate(1000).expect("arm");
+
+    link.reset();
+    assert!(link.peer().is_none());
+    assert_eq!(link.fault(), Some(LinkFault::Reset));
+    assert!(matches!(
+        link.arm_and_activate(100),
+        Err(LinkError::NotHandshaken)
+    ));
+
+    // Positive control: re-handshaking restores the link rather than
+    // permanently poisoning it.
+    link.handshake([3u8; 16], 1000).expect("re-handshake");
+    assert!(link.peer().is_some());
+    let _ = sim.stop.send(());
+}
+
+#[test]
+fn a_reopened_link_starts_unidentified_by_construction() {
+    // The peer state lives on the instance, so a reopen cannot inherit a
+    // stale identification — there is no global or caller-held flag to forget
+    // to clear.
+    let sim = spawn_sim();
+    let mut first = SerialLink::open(&sim.device, None).expect("open");
+    first.handshake(NONCE, 1000).expect("handshake");
+    assert!(first.peer().is_some());
+    drop(first);
+
+    let mut second = SerialLink::open(&sim.device, None).expect("reopen");
+    assert!(second.peer().is_none(), "a reopen is not identified");
+    assert!(matches!(
+        second.send_motion(
+            &MotionCommand {
+                command_id: 1,
+                valid_for_us: 100_000,
+                velocity_mps: 0.3,
+                curvature_per_m: 0.0,
+                acceleration_limit_mps2: 1.0,
+                jerk_limit_mps3: 5.0,
+                mode: MODE_TRACK,
+            },
+            0
+        ),
+        Err(LinkError::NotHandshaken)
+    ));
+    let _ = sim.stop.send(());
 }
 
 #[test]

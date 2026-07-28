@@ -39,3 +39,11 @@ kirra-release-token = { path = "../kirra-release-token" }
 # across the boundary. No signing happens here — this is the actuation path,
 # past the verdict (ADR-0031 separation is upheld: the checker signed upstream).
 ed25519-dalek = { version = "2" }
+# The R2CP host codec + link. Framing, nonce handling, ACK interpretation and
+# transport state stay HERE, in Rust, for the same reason the crypto does: a
+# Python re-implementation would be a third dialect that nothing differentially
+# tests against `wire.cpp` or against this one.
+kirra-r2cp = { path = "../kirra-r2cp" }
+
+[dev-dependencies]
+nix = { version = "0.31.3", features = ["term", "poll"] }

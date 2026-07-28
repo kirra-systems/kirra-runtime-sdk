@@ -175,6 +175,22 @@ impl SimulatedMcuPty {
         Ok(handled)
     }
 
+    /// Emit arbitrary bytes toward the bridge.
+    ///
+    /// The mid-session fault-injection seam, and the counterpart to
+    /// [`crate::sim::inject`]: that one corrupts a frame before it is sent,
+    /// this one lets the simulator behave like a peer that has GONE WRONG —
+    /// a baud-rate mismatch, a desynchronised sender, a board emitting a
+    /// different protocol after a reset. A bridge must survive its peer
+    /// degrading, not only its peer being wrong from the first byte.
+    ///
+    /// # Errors
+    /// Propagates write failures on the PTY.
+    pub fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.master.write_all(bytes)?;
+        self.master.flush()
+    }
+
     /// Advance the MCU's clock, writing an unsolicited ACK if the watchdog
     /// fired. A controlled stop the host did not ask for is exactly the event a
     /// bridge must not learn about by inference.

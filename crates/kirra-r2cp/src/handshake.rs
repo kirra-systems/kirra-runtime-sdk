@@ -147,7 +147,38 @@ pub enum HandshakeError {
         peer_maximum: u16,
         required: u16,
     },
+    /// The peer advertises a limit below the protocol's own floor — it could
+    /// not accept a fully-specified MOTION_COMMAND, so it cannot be a
+    /// conforming v1 peer whatever else it claims.
+    FrameBelowProtocolMinimum {
+        peer_maximum: u16,
+        minimum: u16,
+    },
+    /// The peer advertises a limit ABOVE what this major version permits.
+    /// Not harmless: within an agreed major the maximum is fixed, so a larger
+    /// claim means the two ends do not agree on the format they just agreed
+    /// on. Refused rather than clamped — a peer whose framing assumptions we
+    /// cannot pin down is not one to command motion on.
+    FrameAboveProtocolMaximum {
+        peer_maximum: u16,
+        maximum: u16,
+    },
 }
+
+/// The smallest maximum-frame a conforming v1 peer may advertise.
+///
+/// Derived, not chosen: `PROTOCOL.md` §MOTION_COMMAND is
+/// `command_id:u32, valid_for_us:u32, velocity_mps:f32, curvature_per_m:f32,
+/// acceleration_limit_mps2:f32, jerk_limit_mps3:f32, mode:u8, reserved[3],
+/// auth_tag[16]` — 44 bytes. A peer that cannot receive 44 cannot receive a
+/// fully-specified motion command.
+///
+/// This crate currently emits the 28-byte UNAUTHENTICATED form (the
+/// `auth_tag` path is a named phase gate, not implemented), so the floor is
+/// deliberately stricter than what we send today: a peer that cannot take an
+/// authenticated command should be rejected now rather than at the point
+/// authentication lands and motion silently stops.
+pub const MIN_ADVERTISED_FRAME: u16 = 44;
 
 /// A peer that answered acceptably.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +224,24 @@ pub fn evaluate_hello_response(
         return Err(HandshakeError::VersionMismatch {
             peer_min: peer.minimum_major,
             peer_max: peer.maximum_major,
+        });
+    }
+    // Three separate frame checks, because they mean three different things
+    // and collapsing them would hide which one an operator has to fix.
+    //
+    //   below the protocol floor → the peer is not a conforming v1 peer
+    //   above the protocol ceiling → the peer disagrees about the format
+    //   below what WE need → the peer is conforming but we cannot use it here
+    if peer.maximum_frame < MIN_ADVERTISED_FRAME {
+        return Err(HandshakeError::FrameBelowProtocolMinimum {
+            peer_maximum: peer.maximum_frame,
+            minimum: MIN_ADVERTISED_FRAME,
+        });
+    }
+    if peer.maximum_frame > MAX_PAYLOAD as u16 {
+        return Err(HandshakeError::FrameAboveProtocolMaximum {
+            peer_maximum: peer.maximum_frame,
+            maximum: MAX_PAYLOAD as u16,
         });
     }
     if peer.maximum_frame < required_frame {

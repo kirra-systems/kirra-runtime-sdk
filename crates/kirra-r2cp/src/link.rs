@@ -48,6 +48,30 @@ pub struct Received {
     pub undecodable: usize,
 }
 
+/// Consecutive undecodable runs that end the session's trust in its peer.
+///
+/// Not zero: a single corrupt frame is ordinary on a real UART (that is what
+/// the CRC is for) and re-handshaking on every one would make the link
+/// unusable. Not large either: sustained framing failure means the two ends
+/// have lost agreement about where frames begin, and everything decoded after
+/// that point is guesswork. The streak RESETS on any good frame, so this
+/// counts *sustained* failure rather than a total.
+pub const FRAMING_FAILURE_THRESHOLD: usize = 8;
+
+/// Why the link stopped trusting its peer. Kept so the caller can distinguish
+/// "never handshaken" from "was fine, then something broke" — the second is a
+/// hardware-availability event, the first is usually configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkFault {
+    /// Sustained framing failure: the ends disagree about frame boundaries.
+    FramingLost { consecutive: usize },
+    /// The device went away — EOF or EIO on read. A cable pull, a USB
+    /// re-enumeration, an MCU reset.
+    Disconnected,
+    /// A caller explicitly reset the link (e.g. after a watchdog stop).
+    Reset,
+}
+
 #[derive(Debug)]
 pub struct SerialLink {
     port: File,
@@ -56,7 +80,13 @@ pub struct SerialLink {
     /// `sequence <= last_accepted`, so this must never repeat or go backwards
     /// within a session.
     next_sequence: u32,
+    /// The identified peer. Lives HERE, on the instance — not in a global and
+    /// not as a boolean the caller maintains. A new `SerialLink` (a reopen)
+    /// therefore starts unidentified by construction rather than by the
+    /// caller remembering to reset something.
     peer: Option<Peer>,
+    consecutive_undecodable: usize,
+    fault: Option<LinkFault>,
 }
 
 impl SerialLink {
@@ -81,14 +111,41 @@ impl SerialLink {
             reader: FrameReader::new(),
             next_sequence: 1,
             peer: None,
+            consecutive_undecodable: 0,
+            fault: None,
         })
     }
 
     /// The peer established by a successful [`Self::handshake`]. `None` until
-    /// then — and a caller must treat `None` as "do not send commands".
+    /// then, and `None` again after any [`LinkFault`] — a caller must treat
+    /// `None` as "do not send commands", which is enforced by
+    /// [`Self::arm_and_activate`] and [`Self::send_motion`] rather than left
+    /// to the caller's discipline.
     #[must_use]
     pub fn peer(&self) -> Option<Peer> {
         self.peer
+    }
+
+    /// Why the peer was dropped, if it was. `None` means either "still
+    /// identified" or "never was" — [`Self::peer`] distinguishes those.
+    #[must_use]
+    pub fn fault(&self) -> Option<LinkFault> {
+        self.fault
+    }
+
+    /// Drop the identified peer, requiring a fresh handshake before any
+    /// further command.
+    ///
+    /// Call this after a watchdog-triggered stop or any other event that makes
+    /// the peer's state uncertain. Re-identifying is cheap; commanding a peer
+    /// whose state we are guessing at is not.
+    pub fn reset(&mut self) {
+        self.invalidate(LinkFault::Reset);
+    }
+
+    fn invalidate(&mut self, fault: LinkFault) {
+        self.peer = None;
+        self.fault = Some(fault);
     }
 
     fn take_sequence(&mut self) -> u32 {
@@ -132,15 +189,39 @@ impl SerialLink {
             }
             let mut chunk = [0u8; 512];
             let n = match self.port.read(&mut chunk) {
-                Ok(0) => break,
+                // EOF and EIO both mean the device went away. On a real link
+                // that is a cable pull, a USB re-enumeration or an MCU reset —
+                // in every case the peer's state is now unknown, so the
+                // identification is dropped and a fresh handshake is required.
+                Ok(0) => {
+                    self.invalidate(LinkFault::Disconnected);
+                    break;
+                }
                 Ok(n) => n,
-                Err(e) if e.raw_os_error() == Some(nix::libc::EIO) => break,
+                Err(e) if e.raw_os_error() == Some(nix::libc::EIO) => {
+                    self.invalidate(LinkFault::Disconnected);
+                    break;
+                }
                 Err(e) => return Err(e),
             };
             for candidate in self.reader.push(&chunk[..n]) {
                 match decode(&candidate) {
-                    Ok(f) => out.frames.push(f),
-                    Err(_) => out.undecodable += 1,
+                    Ok(f) => {
+                        // A good frame proves the ends still agree on where
+                        // frames begin, so the streak is sustained failure,
+                        // not a lifetime total.
+                        self.consecutive_undecodable = 0;
+                        out.frames.push(f);
+                    }
+                    Err(_) => {
+                        out.undecodable += 1;
+                        self.consecutive_undecodable += 1;
+                        if self.consecutive_undecodable >= FRAMING_FAILURE_THRESHOLD {
+                            self.invalidate(LinkFault::FramingLost {
+                                consecutive: self.consecutive_undecodable,
+                            });
+                        }
+                    }
                 }
             }
             if !out.frames.is_empty() {
@@ -240,9 +321,26 @@ impl SerialLink {
     /// in Active where the next command can be honoured. DISARM is the
     /// heavier, one-way request.
     ///
+    /// 🔴 **BEST-EFFORT WHEN THE PEER IS UNIDENTIFIED, AND THE RETURN VALUE IS
+    /// NOT A STOP.** Unlike the others this does not require a handshake — a
+    /// shutdown path must not be blocked by the gate that protects startup —
+    /// but that means it may be writing to a device that is not an R2CP peer
+    /// at all. `Ok` here means *the bytes were written to the file
+    /// descriptor*. It is NOT evidence that:
+    ///
+    /// * a vendor board understood the frame (it did not — it does not speak
+    ///   R2CP, which is the entire reason [`Self::handshake`] exists);
+    /// * an R2CP peer received it (nothing is read back);
+    /// * the motors stopped.
+    ///
+    /// The thing that actually stops a governed robot is the peer's own
+    /// watchdog: commands cease, the command window lapses, the MCU enters
+    /// ControlledStop on its own. This call is an attempt to make that
+    /// immediate, not a substitute for it. A caller must not log it as
+    /// "stopped", only as "stop sent".
+    ///
     /// # Errors
-    /// Write failures. Unlike the others this does NOT require a handshake:
-    /// a stop must be attemptable on a link whose state is uncertain.
+    /// Write failures only.
     pub fn send_stop(&mut self, valid_for_us: u32, source_time_us: u64) -> io::Result<u32> {
         let cmd = MotionCommand {
             command_id: 0,
