@@ -206,6 +206,41 @@ conflate them: the **configured** residency, whether the model is **loaded right
 now**, and whether the **server is unreachable**. A model that has legitimately
 unloaded on a healthy server with a finite keep-alive is normal, and is never a
 failure on its own.
+## 5d. Where did the time go? (latency staging)
+
+"Rabbit feels slow" is not actionable. Turn on staging and each turn reports one
+line per process:
+
+```bash
+# /etc/kirra/robot.env
+KIRRA_RABBIT_LATENCY_LOG=1
+sudo systemctl restart kirra-rabbit-voice
+journalctl -u kirra-rabbit-voice -f | grep rabbit_latency
+```
+
+```
+rabbit_latency: wake 40ms (wake_ack 40)
+rabbit_latency: capture 1520ms (record 1340, stt 180)
+rabbit_latency: reply 4520ms (llm 4100, door 120, tts 300)
+```
+
+Three lines because a turn spans three processes (`wake_word.py` →
+`rabbit_voice.sh` → `rabbit_converse.py`). The wake trigger is one bare newline
+with no payload — that is load-bearing for the wake fence — so there is no
+timestamp to thread through and **no end-to-end total is fabricated**. Add the
+three numbers yourself; a guessed total would be the one figure here worth
+distrusting.
+
+Reading it: `record` still at ~4000 ms means VAD is not enabled (§4/§1a of
+`RABBIT_AUDIO_STACK.md`). `llm` spiking on the first turn after an idle gap but
+not afterwards is the cold-reload stall — pin residency (§5c). `tts` dominating
+means the reply is too long; consider `KIRRA_RABBIT_STREAM_TTS=1`.
+
+Observability only: no timing value gates a turn, changes routing, touches the
+fenced `/intent` door, or affects actuation, and a timing failure is swallowed
+rather than raised. Privacy is unchanged — stage names and durations, never
+audio, transcripts or reply text. Off by default; unset it and the path is
+byte-identical.
 
 ## 6. The Rabbit experience (all together)
 

@@ -56,6 +56,7 @@ import skill_registry  # noqa: E402 — opt-in named-skill router (motion → th
 import world_model  # noqa: E402 — opt-in situation report (read-only TTL'd projection)
 import mission  # noqa: E402 — opt-in multi-step Executive (each step → the SAME /intent fence)
 import rabbit_stream  # noqa: E402 — opt-in first-clause streaming of the reply to TTS
+import rabbit_latency  # noqa: E402 — opt-in per-turn stage timing (observability only)
 from rabbit_persona import name_slot, operator_name  # noqa: E402
 
 MAX_TURNS = 10  # rolling conversation memory (user+assistant pairs kept)
@@ -353,7 +354,16 @@ def route_stream(messages, on_clause, cancelled):
     return plan
 
 
+# The timer for the turn in flight. Module-level because handle_turn has many
+# early returns (the deterministic OTA / diag / wake / sitrep commands), and
+# _run_turn's finally is the one place that sees EVERY completed turn. Safe as
+# a single slot: rabbit_converse handles one utterance at a time (the stdin
+# loop is serial), the same assumption turn_state already relies on.
+_TURN_TIMER = rabbit_latency.TurnTimer("reply")
+
+
 def handle_turn(history, utterance):
+    timer = _TURN_TIMER
     # System commands (OTA "check/apply update") are matched DETERMINISTICALLY and
     # handled BEFORE the LLM/movement path — they run local kirra-ota-ctl, never
     # the fenced mick /intent door, and a movement utterance never reaches here.
@@ -469,6 +479,7 @@ def handle_turn(history, utterance):
             already_spoken = bool(plan.get("streamed")) and directive is None
     if say is None and directive is None and not already_spoken:
         say, directive = ask_llm(history, context, utterance)   # non-streaming / fallback
+    timer.mark(rabbit_latency.LLM)
 
     if say is None:
         say = "My voice module is offline for a moment."
@@ -476,6 +487,7 @@ def handle_turn(history, utterance):
 
     if directive:
         result = offer_to_door(directive)
+        timer.mark(rabbit_latency.DOOR)
         if result == "ok":
             spoken = say or f"On our way{name_slot()} — the governor will keep us honest."
         elif result == "reject":
@@ -490,6 +502,7 @@ def handle_turn(history, utterance):
 
     if not already_spoken:
         _speak_reply(spoken)
+    timer.mark(rabbit_latency.TTS)
     # rolling memory (store the spoken reply, not the raw grounding)
     history.append({"role": "user", "content": utterance})
     history.append({"role": "assistant", "content": spoken})
@@ -501,11 +514,22 @@ def _run_turn(history, utterance):
     listener re-arms its mic the instant the reply finishes (Slice R) instead of
     on a blind timer. mark_active spans exactly the LLM+TTS stretch the listener
     can't see; mark_done runs in a finally so a mid-turn error still re-arms."""
+    global _TURN_TIMER
+    # Stage timing for THIS turn. This process owns transcript→spoken; the
+    # capture stages belong to rabbit_voice.sh, which reports its own span (the
+    # trigger carries no payload to thread a start time through, and an invented
+    # end-to-end total would be the one number here worth distrusting).
+    _TURN_TIMER = rabbit_latency.TurnTimer("reply")
     turn_state.mark_active()
     try:
         handle_turn(history, utterance)
     finally:
         turn_state.mark_done()
+        # ONE line per completed turn — stage names + durations only, never the
+        # transcript or the reply. In `finally`, so a deterministic command (OTA
+        # / diagnostics / sitrep) and a mid-turn error are reported too. Off
+        # unless KIRRA_RABBIT_LATENCY_LOG=1.
+        rabbit_latency.log_summary(_TURN_TIMER)
 
 
 def main():

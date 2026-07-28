@@ -46,16 +46,31 @@ if [ -z "${KIRRA_STT_CMD:-}" ]; then
 fi
 : "${KIRRA_RECORD_CMD:=arecord -d 4 -f S16_LE -r 16000 -c 1}"
 
+# Opt-in stage timing (KIRRA_RABBIT_LATENCY_LOG=1). Monotonic ms; a shell
+# without EPOCHREALTIME degrades to no timing rather than to wrong timing.
+# Off → `now_ms` is never called and the loop is byte-identical.
+LATENCY=0
+case "${KIRRA_RABBIT_LATENCY_LOG:-}" in 1|true|yes|on|TRUE|YES|ON) LATENCY=1 ;; esac
+now_ms() { date +%s%3N 2>/dev/null || echo 0; }
+
 # Producer: one transcript line per trigger. STT/RECORD are word-split command
 # lists (the house convention: the WAV path is APPENDED as the last argument).
 transcribe() {
-  local wav text
+  local wav text t0 t1 t2
   while IFS= read -r _; do
     wav="$(mktemp --suffix=.wav)"
+    [ "$LATENCY" = 1 ] && t0="$(now_ms)"
     # shellcheck disable=SC2086
     if $KIRRA_RECORD_CMD "$wav" >/dev/null 2>&1; then
+      [ "$LATENCY" = 1 ] && t1="$(now_ms)"
       # shellcheck disable=SC2086
       text="$($KIRRA_STT_CMD "$wav" 2>/dev/null | tr '\r\n' '  ' | sed 's/  */ /g;s/^ //;s/ $//')"
+      if [ "$LATENCY" = 1 ]; then
+        t2="$(now_ms)"
+        # Stage NAMES and durations only — never the transcript (the privacy
+        # policy is transcribe-and-discard and this must not widen it).
+        echo "rabbit_latency: capture $((t2 - t0))ms (record $((t1 - t0)), stt $((t2 - t1)))" >&2
+      fi
       [ -n "${text// /}" ] && printf '%s\n' "$text"
     else
       echo "rabbit_voice: recorder failed — nothing captured" >&2

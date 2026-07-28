@@ -76,6 +76,7 @@ import wave
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import turn_state  # noqa: E402 — cross-process "turn in progress" signal (Slice R)
+import rabbit_latency  # noqa: E402 — opt-in stage timing (observability only)
 
 # ---------------------------------------------------------------------------
 # Pure logic (host-tested in robot/wake_word_test.py — no audio, no GPIO)
@@ -244,10 +245,15 @@ def _fire_trigger_and_wait(turn_state_file, rearm_mode, holdoff_s,
     the wake path and the follow-up path so both re-arm identically. The mic is
     already CLOSED by the caller before this runs (release-before-trigger)."""
     baseline_seq = turn_state.read_state(turn_state_file)[1]
+    timer = rabbit_latency.TurnTimer("wake")
     sys.stdout.write("\n")   # THE TRIGGER — sole stdout writer
     sys.stdout.flush()
     if after_fire is not None:
         after_fire()
+    # How long the operator waited between being heard and hearing "Yes?".
+    # Stage name + duration only — never the phrase (transcribe-and-discard).
+    timer.mark(rabbit_latency.WAKE_ACK)
+    rabbit_latency.log_summary(timer)
     if rearm_mode == "timer":
         time.sleep(holdoff_s)   # legacy: blind fixed hold-off
     else:
