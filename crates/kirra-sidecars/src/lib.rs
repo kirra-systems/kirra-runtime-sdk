@@ -21,6 +21,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod capabilities;
 pub mod http;
 pub mod mick;
 pub mod mick_fence;

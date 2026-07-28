@@ -1386,6 +1386,17 @@ jobs:
           # surfaced one missing value per restart — 200+ restarts to learn eight
           # facts. Lint answers "valid shell file"; this answers "can it start".
           python3 robot/install/preflight_consumer_env_test.py
+          # Deployment verification + env migration. The live R2 ran STALE
+          # /opt/kirra artifacts against a newer checkout and everything looked
+          # fine: units active, /health "ok", consumer started — the installed
+          # taj_service was simply an older build with no frame_id. These pin the
+          # three-state contract classification (unavailable / current / LEGACY,
+          # where "healthy but old" is its own state), that the FFI is dlopen'd
+          # explicitly rather than inferred from a successful startup, that both
+          # tools are read-only (ast-checked, so a `fix=` hint that mentions sudo
+          # is not mistaken for running it), and that the migration report never
+          # prints the governor verifying key.
+          python3 robot/install/deployment_verify_test.py
           # Turn-state re-arm gate (Slice R, pure, no audio): the cross-process
           # "turn in progress" signal (fail-safe parse, active/done round-trip,
           # seq monotonicity) and the bounded rearm_decision that fixes the wake

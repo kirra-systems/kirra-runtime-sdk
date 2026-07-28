@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""verify_deployment.py — is the INSTALLED system what we think it is?
+
+The live R2 ran stale `/opt/kirra` artifacts against a newer checkout for an
+entire bring-up session. Everything looked fine: the units were active, `/health`
+answered `ok`, and the consumer started. The installed `taj_service` was simply
+an older build returning the legacy perception shape, and nothing checked.
+
+`cargo test` proves the CHECKOUT is good. This proves the ROBOT is, which is a
+different claim and the one that was wrong:
+
+  1. expected installed paths exist and are executable
+  2. installed hashes / build IDs recorded (so drift is detectable next time)
+  3. Taj reports a CURRENT capability contract, not merely 200 OK
+  4. other sidecars report compatible contracts where they advertise one
+  5. the consumer FFI LOADS — probed explicitly, not inferred from startup
+  6. systemd units reference the expected installed paths
+  7. the consumer environment satisfies consumer_config_contract
+  8. services reach the expected healthy/current state
+
+Read-only. Nothing is installed, started, stopped or written.
+
+    robot/install/verify_deployment.py            # human report
+    robot/install/verify_deployment.py --json     # machine-readable
+
+Exit 0 iff every check passes.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import consumer_config_contract as contract  # noqa: E402
+
+OPT = os.environ.get("KIRRA_OPT_DIR", "/opt/kirra")
+ROBOT_ENV = os.environ.get("KIRRA_ROBOT_ENV", "/etc/kirra/robot.env")
+
+# (path, must_be_executable) — the artifacts a governed robot actually runs.
+EXPECTED_ARTIFACTS = [
+    (f"{OPT}/robot/kirra_motor_consumer.py", True),
+    (f"{OPT}/robot/serial_exclusivity.py", False),
+    (f"{OPT}/robot/motor_authority.py", False),
+    (f"{OPT}/libkirra_consumer_ffi.so", False),
+    (f"{OPT}/taj_service", True),
+    (f"{OPT}/mick_service", True),
+]
+
+# service → (url, minimum contract). A service with no advertised contract yet
+# is probed for liveness only; `None` means "no contract requirement declared".
+EXPECTED_SERVICES = [
+    ("taj", os.environ.get("KIRRA_TAJ_URL", "http://127.0.0.1:8101"), 2),
+    ("mick", os.environ.get("KIRRA_MICK_URL", "http://127.0.0.1:8102"), None),
+]
+
+PASS, FAIL, WARN = "PASS", "FAIL", "WARN"
+
+
+class Report:
+    def __init__(self):
+        self.rows: list[dict] = []
+
+    def add(self, check, status, detail, fix=None):
+        self.rows.append({"check": check, "status": status,
+                          "detail": detail, "fix": fix})
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for r in self.rows if r["status"] == FAIL)
+
+
+def sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def http_get(url: str, timeout: float = 3.0):
+    """(reachable, body). No requests dependency — urllib is stdlib."""
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return True, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return True, f"__HTTP_{e.code}__"      # answered, just not with a body
+    except Exception:  # noqa: BLE001
+        return False, ""
+
+
+def classify_contract(reachable, body, required):
+    """Mirrors kirra_sidecars::capabilities::classify — three distinct states.
+    A reachable peer with no parseable capabilities is a PRE-CAPABILITY build
+    (legacy), not 'unavailable': the operator actions differ."""
+    if not reachable:
+        return "unavailable", None
+    contract_v = 1
+    try:
+        j = json.loads(body)
+        if isinstance(j.get("contract"), int):
+            contract_v = j["contract"]
+    except Exception:  # noqa: BLE001
+        pass
+    if required is None:
+        return "current", contract_v
+    return ("current" if contract_v >= required else "legacy"), contract_v
+
+
+def check_artifacts(rep: Report) -> dict:
+    digests = {}
+    for path, must_exec in EXPECTED_ARTIFACTS:
+        if not os.path.exists(path):
+            rep.add(f"artifact {os.path.basename(path)}", FAIL, f"{path} missing",
+                    fix="re-run the installer (install_robot_units.sh / install_kirra.sh)")
+            continue
+        if must_exec and not os.access(path, os.X_OK):
+            rep.add(f"artifact {os.path.basename(path)}", FAIL,
+                    f"{path} not executable", fix=f"sudo chmod +x {path}")
+            continue
+        d = sha256_file(path)
+        digests[path] = d
+        rep.add(f"artifact {os.path.basename(path)}", PASS,
+                f"{path} sha256={d[:12]}…")
+    return digests
+
+
+def probe_ffi(rep: Report, env: dict) -> None:
+    """Load the consumer FFI EXPLICITLY.
+
+    Deliberately not "the consumer started, so the library must be fine": that
+    conflates a config abort, a missing ROS environment and a broken .so into
+    one restart, which is exactly how the live FFI failure hid inside a restart
+    loop. A dlopen either works or names its own error.
+    """
+    lib = (env.get("KIRRA_CONSUMER_LIB") or "").strip() or f"{OPT}/libkirra_consumer_ffi.so"
+    if not os.path.exists(lib):
+        rep.add("consumer FFI loads", FAIL, f"{lib} missing",
+                fix="build + install libkirra_consumer_ffi.so")
+        return
+    code = ("import ctypes,sys\n"
+            "try:\n"
+            "    ctypes.CDLL(sys.argv[1])\n"
+            "    print('OK')\n"
+            "except OSError as e:\n"
+            "    print('ERR', e); sys.exit(1)\n")
+    try:
+        d = subprocess.run([sys.executable, "-c", code, lib],
+                           capture_output=True, text=True, timeout=20)
+        if d.returncode == 0:
+            rep.add("consumer FFI loads", PASS, f"dlopen({lib}) OK")
+        else:
+            rep.add("consumer FFI loads", FAIL,
+                    f"dlopen({lib}) failed: {d.stdout.strip()[:160]}",
+                    fix="rebuild the FFI for THIS architecture; check ldd for "
+                        "missing shared objects")
+    except Exception as e:  # noqa: BLE001
+        rep.add("consumer FFI loads", FAIL, f"probe errored: {e}")
+
+
+def check_services(rep: Report) -> None:
+    for name, base, required in EXPECTED_SERVICES:
+        reachable, body = http_get(f"{base}/capabilities")
+        if not reachable:                      # fall back to /health for liveness
+            reachable, body = http_get(f"{base}/health")
+        state, contract_v = classify_contract(reachable, body, required)
+        if state == "unavailable":
+            rep.add(f"{name} service", FAIL, f"{base} unavailable",
+                    fix=f"systemctl status kirra-{name}")
+        elif state == "legacy":
+            rep.add(f"{name} capability contract", FAIL,
+                    f"healthy but LEGACY: contract v{contract_v}, need v{required} "
+                    "— an OLD binary is installed",
+                    fix=f"rebuild and reinstall {OPT}/{name}_service, then restart it")
+        else:
+            v = f" (contract v{contract_v})" if contract_v else ""
+            rep.add(f"{name} service", PASS, f"{base} healthy and current{v}")
+
+
+def check_units(rep: Report) -> None:
+    for unit, expect in (("kirra-consumer.service", f"{OPT}/robot/kirra_motor_consumer.py"),):
+        try:
+            out = subprocess.run(["systemctl", "cat", unit],
+                                 capture_output=True, text=True, timeout=5).stdout
+        except Exception:  # noqa: BLE001
+            rep.add(f"unit {unit}", WARN, "systemctl unavailable (not the robot?)")
+            continue
+        if not out:
+            rep.add(f"unit {unit}", FAIL, "not installed",
+                    fix="robot/install/install_robot_units.sh")
+        elif expect not in out:
+            rep.add(f"unit {unit}", FAIL,
+                    f"does not reference the installed path {expect}",
+                    fix="re-run the installer — the unit points somewhere else")
+        else:
+            rep.add(f"unit {unit}", PASS, f"references {expect}")
+
+
+def check_env(rep: Report, env: dict) -> None:
+    r = contract.report(env)
+    if r["missing"]:
+        rep.add("consumer env complete", FAIL,
+                f"{len(r['missing'])} required key(s) missing for mode {r['mode']}: "
+                + ", ".join(r["missing"]),
+                fix="robot/install/preflight_consumer_env.py")
+    else:
+        rep.add("consumer env complete", PASS,
+                f"all {r['required_count']} required key(s) set for mode {r['mode']}")
+
+
+def run() -> Report:
+    rep = Report()
+    from preflight_consumer_env import parse_env_file
+    env = parse_env_file(ROBOT_ENV) if os.path.isfile(ROBOT_ENV) else {}
+    if not env:
+        rep.add("robot.env readable", FAIL, f"{ROBOT_ENV} missing or empty")
+    check_artifacts(rep)
+    check_env(rep, env)
+    probe_ffi(rep, env)
+    check_units(rep)
+    check_services(rep)
+    return rep
+
+
+def main(argv) -> int:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    rep = run()
+    if "--json" in argv:
+        print(json.dumps({"rows": rep.rows, "failed": rep.failed}, indent=2))
+        return 1 if rep.failed else 0
+    print("== deployment verification ==")
+    for r in rep.rows:
+        mark = {"PASS": "✔", "FAIL": "❌", "WARN": "⚠"}[r["status"]]
+        print(f"  {mark} {r['check']}: {r['detail']}")
+        if r["fix"] and r["status"] != PASS:
+            print(f"       ↳ fix: {r['fix']}")
+    print(f"\n{'❌ ' + str(rep.failed) + ' check(s) FAILED' if rep.failed else '✔ deployment verified'}")
+    return 1 if rep.failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

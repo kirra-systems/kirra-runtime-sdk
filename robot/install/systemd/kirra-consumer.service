@@ -12,6 +12,11 @@
 # the installer checks and warns. Confirm on the unit: groups <user>.
 
 [Unit]
+# A transient crash-loop is bounded so a genuinely flapping RUNTIME fault
+# surfaces as `failed` instead of spinning forever. These belong in [Unit] —
+# systemd >= 229 ignores them under [Service].
+StartLimitIntervalSec=300
+StartLimitBurst=10
 Description=KIRRA verifying motor consumer (ADR-0033 chokepoint — sole /dev/myserial writer)
 # No After=multi-user.target: combined with WantedBy=multi-user.target it
 # forms an ordering cycle (review #906). DDS/serial are local; no ordering
@@ -25,10 +30,25 @@ EnvironmentFile=/etc/kirra/robot.env
 # SIGTERM reaches the consumer's signal handler (safe stop before shutdown,
 # robot/kirra_motor_consumer.py:228-235).
 ExecStart=/bin/bash -c 'source /opt/kirra/robot/ros_env.sh && kirra_source_ros && exec python3 /opt/kirra/robot/kirra_motor_consumer.py'
-# on-failure only: a fail-closed config abort (exit 2 — missing env, car-type
-# mismatch) must NOT hot-loop the board opener.
+# on-failure only: a TRANSIENT fault (a serial glitch, a lost ROS peer) should
+# come back on its own.
 Restart=on-failure
 RestartSec=5
+# ...but exit 2 is the DETERMINISTIC config abort — a missing required env var,
+# a non-numeric value, an unloadable FFI, a car-type mismatch. Restarting into
+# it just reproduces it. The comment above always said this "must NOT hot-loop
+# the board opener"; Restart=on-failure restarts on ANY non-zero status, so the
+# intent was stated but never enforced, and R2 bring-up reached 200+ restarts
+# discovering ONE missing variable per cycle. The churn buried the real cause.
+#
+# RestartPreventExitStatus makes exit 2 terminal: the unit stops in `failed`,
+# `systemctl status` shows the FATAL line as the last log, and the fix is
+# `preflight_consumer_env.py` (which reports the WHOLE missing set at once)
+# followed by `systemctl start`. This does NOT weaken fail-closed startup —
+# the consumer still refuses to run misconfigured, it just stops re-announcing
+# it every five seconds.
+RestartPreventExitStatus=2
+
 
 [Install]
 WantedBy=multi-user.target
