@@ -147,6 +147,49 @@ directive at worst becomes a checker-APPROVED bounded motion; an unparseable tur
 drives nothing. The only actuation-adjacent call in the whole script is the
 text-to-`/intent` POST — no publisher, no serial, no release token.
 
+#### Reading mick's reply: two 200 shapes, one of which moves nothing
+
+mick's deterministic non-motion fence (`crates/kirra-sidecars/src/mick_fence.rs`)
+answers plainly conversational text — a bare wake phrase, a greeting, a read-only
+question — **without calling the model and without latching anything**. So
+`POST /intent` now has two success shapes:
+
+| reply | meaning | `offer_to_door` |
+|---|---|---|
+| `{"ok":true,"intent":{…},"seq":n,"at_ms":t}` | an intent was latched; `seq` advanced | `ok` |
+| `{"ok":true,"intent":null}` | deterministically non-motion: no intent, no latch, **`seq` unchanged** | `reject` |
+
+**`ok` means an intent EXISTS, not merely that the request was well-formed.**
+Keying on the `ok` flag alone would report the second shape as a successful
+drive — Rabbit would say *"On our way"* while standing still, and in mission mode
+the Executive would **advance past a step that never ran**. `offer_to_door`
+therefore requires a non-null `intent`; every caller's existing non-`ok` arm then
+does the right thing (converse re-asks, `mission._decide` halts, skills say the
+governor wouldn't clear it). `intent` is present and non-null on every accepted
+reply both before and after the fence existed, so this reads correctly against
+either mick build — no coordinated deploy.
+
+This is a *reply-reading* rule, not a new route. Regression:
+`robot/rabbit_converse_test.py`.
+
+#### The fence does not touch the conversation channel
+
+A greeting never reaches mick at all. Rabbit routes it as `directive: null`
+(Channel A), which makes **no `/intent` call whatsoever** — the fence is not even
+on that path. The wake phrase itself is likewise never an utterance: `wake_word.py`
+emits **one bare newline** as its trigger (`_fire_trigger_and_wait`) and
+`rabbit_voice.sh` reads it with `read -r _`, discarding the payload by
+construction, then records a **separate** clip for the actual turn. The heard
+phrase is transcribed, matched and thrown away inside the listener process.
+
+So the two channels stay disjoint on the same words: `"hello rabbit"` sent
+*directly* to mick yields no intent (correct — mick is the motion door), while the
+same conversational turn through Rabbit produces a spoken reply and touches
+nothing actuation-adjacent. Both halves are pinned —
+`test_the_same_words_are_conversation_to_rabbit_and_nothing_to_mick`
+(`robot/rabbit_converse_test.py`) and the Rust fence tests
+(`crates/kirra-sidecars/tests/mick_non_motion_endpoint.rs`).
+
 ### Stage 3 — how to run (`robot/rabbit_watch.py`)
 
 ```bash
