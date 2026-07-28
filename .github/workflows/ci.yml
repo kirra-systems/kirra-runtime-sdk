@@ -802,6 +802,24 @@ jobs:
             echo "No checker changes in this PR — mutation gate not applicable."
             exit 0
           fi
+          # CI-HONESTY (#1196, same doctrine as the WCET gate's "running 0
+          # tests" check). A non-empty checker diff that yields ZERO mutants
+          # means the gate asserted nothing while reporting success. That is
+          # not hypothetical: an `exclude_re` entry written as
+          # `replace || with && in ...` parses as regex ALTERNATION with an
+          # EMPTY branch, which matches every mutant description and silently
+          # excluded all 399 containment mutants — a green, vacuous gate on the
+          # exact file the scope was widened to cover. List first, and fail hard
+          # if the diff is non-empty but nothing is mutable.
+          mutants=$(cargo mutants -p kirra-trajectory -p kirra-core \
+            --in-diff checker.diff --list | wc -l)
+          echo "mutants in diff: $mutants"
+          if [ "$mutants" -eq 0 ]; then
+            echo "::error::checker diff is non-empty but produced 0 mutants — \
+          the gate would pass vacuously. Check .cargo/mutants.toml exclude_re \
+          for an over-matching pattern (unescaped regex metacharacters)."
+            exit 1
+          fi
           cargo mutants -p kirra-trajectory -p kirra-core \
             --in-diff checker.diff --timeout 300 -j 1 --no-shuffle
 

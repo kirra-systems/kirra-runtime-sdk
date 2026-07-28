@@ -105,4 +105,24 @@ exclude_re = [
     # the_epsilon`, which fails if the epsilon is ever raised into a range where
     # the arc IS representable — at which point this exclusion must be re-earned.
     "replace < with <= in segment_sagitta_m",
+    # C1 front/rear corner selector: `if front > rear { front } else { rear }`
+    # vs `>=`. The two differ ONLY when front == rear to the bit — and there
+    # both arms return the SAME VALUE, so the function's output is identical for
+    # every input. Truly equivalent, not measure-zero. (The selector genuinely
+    # selecting is pinned by `max_corner_radius_is_the_farthest_corner_from_the_
+    # rear_axle` + the rear-dominant twin.)
+    "replace > with >= in max_corner_radius_m",
+    # C1 sagitta input guard: `!chord.is_finite() || !r_max.is_finite()` vs
+    # `&&`. The `&&` form skips the EARLY return when only one input is
+    # non-finite — but a non-finite chord or radius then propagates through
+    # `r_axle`/`sagitta`, and the FINAL `!sagitta.is_finite()` guard returns
+    # None anyway. Same observable result (None) for every input, so no test can
+    # distinguish them; the early guard is defensive clarity, not the mechanism.
+    # `sagitta_refuses_a_non_finite_chord_or_radius` pins the OBSERVABLE
+    # contract, which is what actually matters.
+    # NOTE the escaping: `||` is regex ALTERNATION. Unescaped, this pattern
+    # parses as `(replace )|( with && in segment_sagitta_m)` — an EMPTY branch
+    # that matches every mutant description, silently excluding the entire file
+    # and making the gate vacuous for exactly the code it was widened to cover.
+    "replace \\|\\| with && in segment_sagitta_m",
 ]

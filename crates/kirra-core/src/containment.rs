@@ -1569,14 +1569,17 @@ mod tests {
         let theta = 0.6_f64;
         let chord = 0.5_f64;
         let r_max = 0.29_f64;
+        // Deliberately NOT at the origin: with a = (0, 0) the chord's
+        // `b - a` is indistinguishable from `b + a`, and the subtraction
+        // mutants survive. An offset frame pins the differencing.
         let a = Pose {
-            x_m: 0.0,
-            y_m: 0.0,
+            x_m: 7.0,
+            y_m: -3.0,
             heading_rad: 0.0,
         };
         let b = Pose {
-            x_m: chord,
-            y_m: 0.0,
+            x_m: 7.0 + chord * 0.6,
+            y_m: -3.0 + chord * 0.8,
             heading_rad: theta,
         };
         let half = 0.5 * theta;
@@ -1730,6 +1733,83 @@ mod tests {
         };
         assert!(chord_clears_corridor(&a, &b, &corridor, 2.0 * 2.0));
         assert!(!chord_clears_corridor(&a, &b, &corridor, 4.0 * 4.0));
+    }
+
+    #[test]
+    fn a_chord_beyond_the_corridor_is_refused_even_though_it_clears_every_edge() {
+        // THE case the PNPoly ray-cast exists for. A chord far past the end of
+        // the corridor is further than the margin from every edge, so the
+        // distance test alone ADMITS it. Only the inside/outside verdict
+        // refuses it — so this is what pins the ray-cast arithmetic (the
+        // `>` comparisons, the `dy` difference, the `x_cross` product/quotient
+        // and the `<` crossing test). Points just outside an edge do not pin
+        // it, because they fail the distance test anyway.
+        let (left, right) = straight_corridor(3.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let margin_sq = 0.16;
+
+        // Beyond the far end, on the centreline.
+        let a = Point {
+            x_m: 200.0,
+            y_m: 0.0,
+        };
+        let b = Point {
+            x_m: 240.0,
+            y_m: 0.0,
+        };
+        assert!(!chord_clears_corridor(&a, &b, &corridor, margin_sq));
+
+        // Behind the near end, likewise.
+        let c = Point {
+            x_m: -200.0,
+            y_m: 0.0,
+        };
+        let d = Point {
+            x_m: -160.0,
+            y_m: 0.0,
+        };
+        assert!(!chord_clears_corridor(&c, &d, &corridor, margin_sq));
+
+        // Far to the side, level with the corridor's y-span.
+        let e = Point {
+            x_m: 50.0,
+            y_m: 80.0,
+        };
+        let f = Point {
+            x_m: 60.0,
+            y_m: 80.0,
+        };
+        assert!(!chord_clears_corridor(&e, &f, &corridor, margin_sq));
+
+        // Sanity: the same chord INSIDE clears, so the refusals above are the
+        // inside test talking, not a blanket reject.
+        let g = Point {
+            x_m: 40.0,
+            y_m: 0.0,
+        };
+        let h = Point {
+            x_m: 60.0,
+            y_m: 0.0,
+        };
+        assert!(chord_clears_corridor(&g, &h, &corridor, margin_sq));
+    }
+
+    #[test]
+    fn a_corridor_with_a_non_finite_vertex_is_refused() {
+        // The `&&` guard over the polygon's own vertices (distinct from the
+        // chord-endpoint guard): one bad vertex must fail the whole test.
+        let (mut left, right) = straight_corridor(3.0, 100.0);
+        left[3].x_m = f64::NAN;
+        let corridor = healthy_corridor(&left, &right);
+        let a = Point {
+            x_m: 20.0,
+            y_m: 0.0,
+        };
+        let b = Point {
+            x_m: 40.0,
+            y_m: 0.0,
+        };
+        assert!(!chord_clears_corridor(&a, &b, &corridor, 0.16));
     }
 
     #[test]
