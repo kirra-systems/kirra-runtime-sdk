@@ -117,6 +117,38 @@ from r2_drive import (  # noqa: E402
 # docs/hardware/R2_PATH_B_ACKERMANN_DRIVE.md §6. Off by default.
 DRIVE_MODE_X3 = "x3_set_car_motion"
 DRIVE_MODE_R2 = "r2_ackermann"
+# 🔴 R2CP: the last hop is the Kirra MCU protocol, NOT the vendor board.
+# In this mode the vendor library is never imported, never constructed, and
+# never called — see the r2cp branch in main(). There is deliberately NO
+# fallback to r2_ackermann or x3: if the R2CP peer cannot be identified,
+# motion stays unavailable. A fallback would silently return actuation to the
+# unverified vendor path precisely when the verified one failed.
+DRIVE_MODE_R2CP = "r2cp"
+
+
+def _now_us() -> int:
+    """Monotonic microseconds for the R2CP source-time field.
+
+    Monotonic, never wall clock: a clock step backwards would make fresh
+    commands look stale and stale ones fresh, which is AOU-TIMESYNC-001 and
+    exactly the property the peer's freshness rule depends on.
+    """
+    return time.monotonic_ns() // 1000
+
+
+_COMMAND_ID = 0
+
+
+def _next_command_id() -> int:
+    """A strictly advancing correlation id for the ACK to echo.
+
+    Not a security property — the peer's replay watermark is on the frame
+    SEQUENCE, which the Rust link owns. This is only so a log can pair a
+    command with its acknowledgement.
+    """
+    global _COMMAND_ID
+    _COMMAND_ID = (_COMMAND_ID + 1) & 0xFFFF_FFFF
+    return _COMMAND_ID
 R2_CAR_TYPE = 5  # Ackermann drive model; RAM-volatile, re-asserted every start.
 
 
@@ -300,7 +332,18 @@ def main() -> int:
     import rclpy
     from rclpy.node import Node
     from std_msgs.msg import UInt8MultiArray
-    from Rosmaster_Lib import Rosmaster
+
+    # The mode is resolved BEFORE the vendor import so an r2cp deployment does
+    # not need Rosmaster_Lib installed at all. "No vendor library" is then a
+    # property of the image, not a promise about which code path runs.
+    drive_mode = (os.environ.get("KIRRA_DRIVE_MODE") or DRIVE_MODE_X3).strip() or DRIVE_MODE_X3
+    if drive_mode not in (DRIVE_MODE_X3, DRIVE_MODE_R2, DRIVE_MODE_R2CP):
+        print(f"FATAL: KIRRA_DRIVE_MODE must be {DRIVE_MODE_X3!r}, "
+              f"{DRIVE_MODE_R2!r} or {DRIVE_MODE_R2CP!r}, got {drive_mode!r}",
+              file=sys.stderr)
+        return 2
+    if drive_mode != DRIVE_MODE_R2CP:
+        from Rosmaster_Lib import Rosmaster
 
     vk_hex = _req("KIRRA_GOVERNOR_VK_HEX").strip()
     try:
@@ -335,15 +378,19 @@ def main() -> int:
     vx_max = _req_float("KIRRA_DEMO_VX_MAX")
     vz_max = _req_float("KIRRA_DEMO_VZ_MAX")
     motor_port = _req("KIRRA_MOTOR_PORT")
-    drive_mode = (os.environ.get("KIRRA_DRIVE_MODE") or DRIVE_MODE_X3).strip() or DRIVE_MODE_X3
-    if drive_mode not in (DRIVE_MODE_X3, DRIVE_MODE_R2):
-        print(f"FATAL: KIRRA_DRIVE_MODE must be {DRIVE_MODE_X3!r} or "
-              f"{DRIVE_MODE_R2!r}, got {drive_mode!r}", file=sys.stderr)
-        return 2
     # x3 mode asserts the board's car-type register against the platform
     # mapping; r2 mode SETS car-type 5 (below) and loads the measured
     # calibration instead — fail-closed if any measured value is missing.
     expected_car_type = _req_int("KIRRA_EXPECTED_CAR_TYPE") if drive_mode == DRIVE_MODE_X3 else None
+    # r2cp link settings. Required in that mode only; the MCU owns everything
+    # physical (PWM scaling, steering geometry, limits, watchdog policy), so
+    # none of the R2 measured calibration is read here.
+    r2cp_handshake_timeout_ms = (
+        _req_int("KIRRA_R2CP_HANDSHAKE_TIMEOUT_MS") if drive_mode == DRIVE_MODE_R2CP else 0
+    )
+    r2cp_command_timeout_ms = (
+        _req_int("KIRRA_R2CP_COMMAND_TIMEOUT_MS") if drive_mode == DRIVE_MODE_R2CP else 0
+    )
     r2_cal = None
     r2_matcher = None  # closed-loop speed matcher (r2 mode + KIRRA_R2_CLOSED_LOOP)
     if drive_mode == DRIVE_MODE_R2:
@@ -436,20 +483,65 @@ def main() -> int:
     print(("WARNING: " if verdict == "acknowledged" else "") + sentinel_msg,
           file=sys.stderr)
 
-    bot = Rosmaster(com=motor_port)
+    r2cp_link = None
+    if drive_mode == DRIVE_MODE_R2CP:
+        # 🔴 No Rosmaster construction, no car-type read or write, no
+        # set_motor, no set_car_motion. The vendor library was not even
+        # imported. `bot` stays None and every use of it below is behind a
+        # mode branch.
+        #
+        # ⚠ TIOCEXCL is NOT claimed on this path: the file descriptor lives
+        # inside the Rust link, and reaching into it from Python would defeat
+        # the point of the opaque handle. The boot sentinel above (owner,
+        # 0600, no other holder) and the udev rule still hold, so the port is
+        # still not shareable — but kernel-enforced session exclusivity is a
+        # recorded gap for the r2cp path, not something this claims to have.
+        bot = None
+        import kirra_r2cp as r2cp_mod
+
+        # Same .so the verify core already loaded — one dlopen, one library.
+        r2cp_lib = r2cp_mod.bind(consumer.lib)
+        try:
+            r2cp_link = r2cp_mod.open(r2cp_lib, motor_port, r2cp_handshake_timeout_ms)
+        except r2cp_mod.R2cpError as e:
+            # Exit CLASS matters: kirra-consumer.service carries
+            # RestartPreventExitStatus=2, so returning 2 here for a peer that
+            # is merely absent would leave the unit permanently dead after
+            # someone reconnects the MCU. Only deterministic configuration
+            # earns 2.
+            print(f"FATAL: R2CP peer unavailable: {e}", file=sys.stderr)
+            print("motion output remains unavailable", file=sys.stderr)
+            return 2 if e.is_config else 1
+        info = r2cp_link.peer_info()
+        print(f"R2CP peer identified: {info.describe()}", file=sys.stderr)
+        try:
+            r2cp_link.activate(r2cp_command_timeout_ms)
+        except r2cp_mod.R2cpError as e:
+            print(f"FATAL: R2CP peer would not arm: {e}", file=sys.stderr)
+            print("motion output remains unavailable", file=sys.stderr)
+            r2cp_link.send_stop(1_000_000, 0)
+            r2cp_link.close()
+            return 2 if e.is_config else 1
+        print("R2CP drive mode armed", file=sys.stderr)
+    else:
+        bot = Rosmaster(com=motor_port)
     # Layer 2 — kernel-enforced exclusivity for the session: TIOCEXCL makes
     # every further non-root open of the port fail EBUSY while we hold it.
     # Best-effort by design: a vendor-lib layout change (fd not found) or a
     # non-tty degrades to a WARN — the boot sentinel + udev rule still hold.
-    _ser_fd = serial_exclusivity.serial_fd_of(bot)
+    #
+    # Skipped in r2cp mode: the descriptor lives inside the Rust link and there
+    # is no vendor object to reach into. See the note in that branch.
+    _ser_fd = None if bot is None else serial_exclusivity.serial_fd_of(bot)
     if _ser_fd is not None and serial_exclusivity.claim_exclusive(_ser_fd):
         print(f"serial exclusivity: TIOCEXCL claimed on {motor_port} "
               "(further opens refused by the kernel)", file=sys.stderr)
-    else:
+    elif bot is not None:
         print("WARNING: could not set TIOCEXCL on the motor port (vendor lib "
               "layout changed?) — boot sentinel + udev mode still enforce "
               "exclusivity", file=sys.stderr)
-    bot.create_receive_threading()
+    if bot is not None:
+        bot.create_receive_threading()
 
     # Closed-loop speed matching AND wheel-odometry read the encoders
     # (get_motor_encoder), which ONLY update from the MCU's auto-report frames.
@@ -457,7 +549,7 @@ def main() -> int:
     # a stale 0, so the matcher would trip a stall→MRC fault (or never converge)
     # and odom would never advance. Open-loop-without-odom paths never read
     # encoders, so this is scoped to those consumers only (byte-identical otherwise).
-    if r2_matcher is not None or odom_enabled:
+    if bot is not None and (r2_matcher is not None or odom_enabled):
         try:
             bot.set_auto_report_state(True)
         except Exception as e:  # noqa: BLE001 — no encoder feed → refuse to start
@@ -485,7 +577,11 @@ def main() -> int:
                 return t
         return None
 
-    if drive_mode == DRIVE_MODE_R2:
+    if drive_mode == DRIVE_MODE_R2CP:
+        # No car-type register exists on this path: the peer is a Kirra MCU
+        # reached over R2CP, already identified and armed above.
+        pass
+    elif drive_mode == DRIVE_MODE_R2:
         # 🔴 R2 Path-B init: enable the AKM steering servo by setting car-type 5
         # (§2a — RAM-volatile, re-asserted every start). set_motor drive is
         # car-type independent; set_car_motion is NEVER called in this mode
@@ -527,7 +623,16 @@ def main() -> int:
     def safe_stop() -> None:
         # SS-002 shutdown guarantee: command zero, best-effort, idempotent.
         try:
-            if drive_mode == DRIVE_MODE_R2:
+            if drive_mode == DRIVE_MODE_R2CP:
+                # Best-effort: True means the bytes were written, NOT that
+                # anything stopped. The peer's own watchdog is what actually
+                # halts a governed robot when commands cease.
+                sent = r2cp_link is not None and r2cp_link.send_stop(
+                    max(r2cp_command_timeout_ms, 1) * 1000, _now_us()
+                )
+                print(f"safe_stop: R2CP stop {'sent' if sent else 'NOT sent'}",
+                      file=sys.stderr)
+            elif drive_mode == DRIVE_MODE_R2:
                 r2_safe_stop(bot)  # set_motor(0,0,0,0) + centre steering
             else:
                 bot.set_car_motion(0.0, 0.0, 0.0)
@@ -556,6 +661,34 @@ def main() -> int:
 
     def actuate(linear: float, angular: float) -> None:
         nonlocal cl_debug_ctr, last_delta_rad
+        if drive_mode == DRIVE_MODE_R2CP:
+            # 🔴 TRANSPORT ONLY. `linear`/`angular` are what the verify core
+            # already released; nothing here decides, clamps or authorizes.
+            # Exactly one MOTION_COMMAND per call — the release boundary is
+            # upstream, and a refused release never reaches this function.
+            #
+            # Curvature from angular/linear: at a standstill there is no
+            # kinematic curvature to express, so a stop carries zero rather
+            # than an infinity the peer would refuse as non-finite.
+            curvature = (angular / linear) if abs(linear) > 1e-6 else 0.0
+            ack = r2cp_link.command(
+                velocity_mps=linear,
+                curvature_per_m=curvature,
+                acceleration_limit_mps2=stop_decel_mps2,
+                jerk_limit_mps3=0.0,
+                valid_for_us=max(control_period_ms * missed_periods, 20) * 1000,
+                command_id=_next_command_id(),
+                source_time_us=_now_us(),
+                timeout_ms=r2cp_command_timeout_ms,
+            )
+            if not ack.accepted:
+                # A refusal is an expected operating condition (disarmed,
+                # stale, replayed), not a link fault — surfaced, never
+                # retried, and never worked around.
+                print(f"R2CP command refused: result={ack.result} "
+                      f"safety_state={ack.safety_state} "
+                      f"timed_out={ack.timed_out}", file=sys.stderr)
+            return
         if drive_mode == DRIVE_MODE_R2:
             # Path B: the Ackermann last-hop runs AFTER verify (the same place
             # the x3 firmware mixing runs after verify). translate() is

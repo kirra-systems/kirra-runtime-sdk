@@ -926,6 +926,27 @@ jobs:
           fi
       - name: Clippy
         run: cargo clippy -p kirra-r2cp --all-targets --locked -- -D warnings
+      - name: R2CP consumer path — FFI boundary + release boundary
+        # The stage-4 surface. `--lib` carries the release-boundary proof
+        # (accepted release => exactly one MOTION_COMMAND and one ACK;
+        # refused/replayed release => zero motion frames, with a live-link
+        # positive control so the zero is the refusal and not a dead wire).
+        # The two integration targets drive the exported C entry points
+        # against the PTY simulator and a scripted mis-answering peer.
+        run: |
+          cargo test -p kirra-consumer-ffi --locked --lib
+          cargo test -p kirra-consumer-ffi --locked \
+            --test r2cp_against_simulator --test r2cp_scripted_peer
+          cargo clippy -p kirra-consumer-ffi --all-targets --locked -- -D warnings
+      - name: Python stays free of R2CP protocol detail
+        # There is ONE R2CP implementation on the host. This walks the AST of
+        # the guarded Python files (a grep would fire on the docstrings that
+        # explain why there is no COBS there) and self-tests that the detector
+        # can flag a dirty sample.
+        run: |
+          python3 robot/r2cp_purity_test.py
+          python3 robot/consumer_config_contract_test.py
+          python3 -m compileall -q robot/kirra_r2cp.py robot/kirra_motor_consumer.py
 
   parko-safety:
     name: Parko Safety Tests (no ROS, no ORT)

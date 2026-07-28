@@ -27,6 +27,7 @@ from __future__ import annotations
 
 MODE_R2 = "r2_ackermann"
 MODE_X3 = "x3"
+MODE_R2CP = "r2cp"
 
 # Required in EVERY mode — the governed-consumer safety envelope.
 ALWAYS_REQUIRED = (
@@ -57,6 +58,23 @@ R2_REQUIRED = (
     "KIRRA_R2_STEER_SIGN",
     "KIRRA_R2_CENTER_TRIM",
 )
+
+# R2CP: the host speaks GOVERNED PHYSICAL UNITS to an MCU that owns its own
+# calibration, so none of the R2 Ackermann measurements above apply here. PWM
+# scaling, steering geometry, drive limits and watchdog policy belong in the
+# MCU's manifest/firmware, not duplicated on the Jetson — duplicating them is
+# how the two ends drift, and the MCU is the one attached to the motors.
+#
+# What the host genuinely needs is the link itself.
+R2CP_REQUIRED = (
+    "KIRRA_MOTOR_PORT",  # also in ALWAYS_REQUIRED; named here for the reader
+    "KIRRA_R2CP_HANDSHAKE_TIMEOUT_MS",
+    "KIRRA_R2CP_COMMAND_TIMEOUT_MS",
+)
+
+# Deliberately NOT required yet: an expected MCU identity. The protocol does
+# not define stable identity semantics, and inventing one here would create a
+# host-only convention the firmware never agreed to. Revisit when it does.
 
 # Only when the corresponding feature is switched on.
 ODOM_REQUIRED = ("KIRRA_R2_M_PER_TICK",)
@@ -89,7 +107,12 @@ def required_keys(env) -> list[str]:
     """Every key this env's MODE actually needs, in report order."""
     mode = drive_mode(env)
     keys = list(ALWAYS_REQUIRED) + [FFI_KEY]
-    if mode == MODE_R2:
+    if mode == MODE_R2CP:
+        # Only the link settings on top of the always-required envelope. No
+        # vendor car-type handshake and no measured calibration: the MCU holds
+        # its own.
+        keys += [k for k in R2CP_REQUIRED if k not in ALWAYS_REQUIRED]
+    elif mode == MODE_R2:
         keys += list(R2_REQUIRED)
         if odom_enabled(env):
             keys += list(ODOM_REQUIRED)
@@ -104,6 +127,15 @@ def inapplicable_keys(env) -> list[str]:
     """Keys that belong to a DIFFERENT mode than the configured one. Reported
     as a warning, never a failure — a leftover value is untidy, not unsafe."""
     mode = drive_mode(env)
+    if mode == MODE_R2CP:
+        # Everything physical belongs to the MCU in this mode.
+        return (
+            list(X3_ONLY)
+            + list(R2_REQUIRED)
+            + list(ODOM_REQUIRED)
+            + list(CLOSED_LOOP_REQUIRED)
+            + ["KIRRA_R2_DRIVE_DEADBAND_PWM"]
+        )
     if mode == MODE_R2:
         out = list(X3_ONLY)
         if not odom_enabled(env):
