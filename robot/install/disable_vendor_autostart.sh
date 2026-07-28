@@ -22,9 +22,20 @@ DISABLE=0
 [[ "${1:-}" == "--disable" ]] && DISABLE=1
 [[ "${1:-}" == "--report" || -z "${1:-}" ]] || { [[ $DISABLE -eq 1 ]] || { echo "usage: $0 [--disable]"; exit 2; }; }
 
-# Vendor signatures — what a Yahboom base autostart looks like. Deliberately does
-# NOT match 'kirra' (our own units must never be caught).
-PAT='rosmaster_main|Rosmaster_Lib|yahboom|Yahboom|ros_robot_controller|handsfree|bringup.*rosmaster|start_ros\.sh'
+# 🔴 MOTOR-BASE signatures. These name PROGRAMS, never a vendor, a workspace or
+# a hostname. The previous pattern included a bare 'yahboom|Yahboom' and, run
+# with --disable on the live R2, it:
+#   * disabled ollama.service          (a Yahboom workspace was on its PATH)
+#   * pkill'd the YDLIDAR driver       (its exe lived under yahboomcar_ros2_ws)
+#   * disabled the OLED display unit
+#   * flagged 'avahi-daemon: running [yahboom.local]' as a motor base
+# None of them ever opened /dev/myserial. Ollama and the lidar had to be
+# restored by hand. A vendor's NAME is evidence of nothing; owning the motor
+# serial device is the invariant, so that is what this script acts on.
+PAT='rosmaster_main|Rosmaster_Lib|ros_robot_controller|yahboomcar_bringup|yahboomcar_base_node'
+# Never act on these, whatever else matches — each is a real thing that lives in
+# or is named after the vendor workspace and is NOT a motor base.
+EXCLUDE='ydlidar|lidar|avahi|ollama|oled|astra|usb_cam|camera|kirra'
 found=0
 acted=0
 
@@ -40,7 +51,14 @@ mapfile -t UNITS < <(
 for u in "${UNITS[@]}"; do
   frag="$(systemctl cat "$u" 2>/dev/null || true)"
   [[ -z "$frag" ]] && continue
-  if grep -qiE "$PAT" <<<"$frag"; then
+  # Match ONLY the ExecStart line — a vendor path in Environment=, PATH=,
+  # WorkingDirectory= or a comment is not a motor base. This is what saved
+  # ollama.service, whose unit merely carried the workspace on PATH.
+  exec_lines="$(grep -iE '^\s*ExecStart' <<<"$frag" || true)"
+  if grep -qiE "$EXCLUDE" <<<"$u $exec_lines"; then
+    continue
+  fi
+  if grep -qiE "$PAT" <<<"$exec_lines"; then
     state="$(systemctl is-enabled "$u" 2>/dev/null || echo '?')"
     active="$(systemctl is-active "$u" 2>/dev/null || echo '?')"
     echo "  ⚠ ${u}  (enabled=${state} active=${active})"
@@ -70,7 +88,7 @@ echo "== 3. rc.local / autostart scripts =="
 r=0
 for f in /etc/rc.local "$HOME/.bashrc" "$HOME/.profile" "$HOME/.config/autostart"/*.desktop; do
   [[ -e "$f" ]] || continue
-  if grep -qiE "$PAT" "$f" 2>/dev/null; then
+  if grep -qiE "$PAT" "$f" 2>/dev/null && ! grep -qiE "$EXCLUDE" "$f" 2>/dev/null; then
     echo "  ⚠ $f references the vendor bringup:"
     grep -niE "$PAT" "$f" | sed 's/^/       /' | head -3
     r=$((r + 1)); found=$((found + 1))
@@ -86,14 +104,28 @@ done
 [[ $r -eq 0 ]] && echo "  (none found)"
 
 # ---- 4. currently-running process (advisory) ------------------------------
-echo "== 4. running now? =="
-if pgrep -af "$PAT" 2>/dev/null | grep -viE 'disable_vendor_autostart|grep'; then
-  echo "  ⚠ a vendor process is running NOW."
-  [[ $DISABLE -eq 1 ]] && { sudo pkill -f "$PAT" 2>/dev/null && echo "  ✔ pkill sent" || true; }
-  echo "  (a running process is separate from the boot autostart above — disable both.)"
+echo "== 4. who actually OWNS the motor port? =="
+# THE authoritative check. A process is a conflict because it holds the
+# configured motor device, not because of what it is called. `pkill -f` on a
+# name is gone: that is the line that killed the lidar.
+AUTH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/motor_authority.py"
+if [[ -f "$AUTH" ]]; then
+  python3 "$AUTH" "${KIRRA_MOTOR_PORT:-/dev/myserial}" 2>&1 | sed 's/^/  /' || true
 else
-  echo "  (no vendor process running)"
+  echo "  (motor_authority.py not found — run from the repo checkout)"
 fi
+echo
+echo "  Processes matching a motor-base signature (secondary evidence only —"
+echo "  never acted on unless they hold the motor port above):"
+if pgrep -af "$PAT" 2>/dev/null | grep -viE "disable_vendor_autostart|grep|$EXCLUDE"; then
+  echo "  ⚠ review the list above against the port owner."
+else
+  echo "  (none)"
+fi
+echo "  NOTE: this script never kills a process by name. If one of the above"
+echo "  owns the motor port, stop its SERVICE deliberately after reading the"
+echo "  ownership evidence."
+
 
 hr
 if [[ $found -eq 0 ]]; then

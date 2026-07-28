@@ -24,12 +24,38 @@ def run(ctx):
         return {"details": details}
 
     env = ctx["robot_env"]
-    for key in ("KIRRA_MOTOR_PORT", "KIRRA_EXPECTED_CAR_TYPE"):
-        if env.get(key):
-            details.append(detail(f"{key} set", "PASS", env[key]))
+    # MODE-AWARE. KIRRA_EXPECTED_CAR_TYPE is an X3-ONLY guard (the consumer
+    # reads it only on the X3 path); warning about it in r2_ackermann told the
+    # operator to set a variable that mode ignores. Requirements come from the
+    # one shared contract so the doctor, preflight and installer cannot drift.
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))))
+    try:
+        import consumer_config_contract as contract
+        missing = contract.missing_keys(env)
+        mode = contract.drive_mode(env)
+        details.append(detail("drive mode", "PASS", mode))
+        for key in contract.required_keys(env):
+            if env.get(key):
+                details.append(detail(f"{key} set", "PASS", env[key]))
+        if missing:
+            details.append(detail(
+                "required actuation config", "FAIL",
+                f"{len(missing)} missing for mode {mode}: " + ", ".join(missing),
+                fix="robot/install/preflight_consumer_env.py lists the full set "
+                    "in one run — see robot/install/env.template"))
         else:
-            details.append(detail(f"{key} set", "WARN", "unset",
-                                  fix="see robot/install/env.template"))
+            details.append(detail("required actuation config", "PASS",
+                                  f"complete for mode {mode}"))
+        for key in contract.inapplicable_keys(env):
+            if env.get(key):
+                details.append(detail(f"{key} set", "WARN",
+                                      f"set but not used in mode {mode}",
+                                      fix=f"remove it, or switch modes"))
+    except Exception as e:  # noqa: BLE001 — never crash the doctor
+        details.append(detail("required actuation config", "UNKNOWN",
+                              f"contract unavailable: {e}"))
     placeholders = [k for k, v in env.items() if "__FILLED" in v]
     if placeholders:
         details.append(detail("placeholder values", "FAIL", ", ".join(placeholders),

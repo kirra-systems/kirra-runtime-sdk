@@ -74,13 +74,34 @@ clog="$(journalctl -u kirra-consumer -n 60 --no-pager 2>/dev/null || true)"
 grep -q 'OWNS /dev/myserial' <<<"$clog" && ok "consumer OWNS /dev/myserial" || bad "no 'OWNS /dev/myserial' in recent consumer log"
 if grep -qE 'FATAL' <<<"$clog"; then bad "consumer logged a FATAL"; grep -E 'FATAL' <<<"$clog" | tail -1 | sed 's/^/     /'; else ok "no consumer FATAL"; fi
 
-# 5. vendor autostart gone.
-echo "-- vendor node absent --"
-if pgrep -af 'rosmaster_main|Rosmaster_Lib|yahboom' 2>/dev/null | grep -viE 'grep|cold_boot|disable_vendor' >/dev/null; then
-  bad "a vendor base process is RUNNING (will fight the consumer for /dev/myserial)"
-  note "disable it: robot/install/disable_vendor_autostart.sh --disable"
+# 5. motor-port AUTHORITY — who actually holds the device.
+#
+# This used to be `pgrep -af '...|yahboom'`, which on the live R2 matched
+# `avahi-daemon: running [yahboom.local]` and the YDLIDAR node under
+# ~/yahboomcar_ros2_ws, and so reported "a vendor base process is RUNNING"
+# while the Kirra consumer held exclusive ownership. Neither ever opened
+# /dev/myserial. The question is ownership, not branding.
+echo "-- motor port authority --"
+AUTH_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/motor_authority.py"
+MOTOR_PORT="${KIRRA_MOTOR_PORT:-/dev/myserial}"
+if [[ -f "$AUTH_PY" ]]; then
+  if auth_out="$(python3 "$AUTH_PY" "$MOTOR_PORT" 2>&1)"; then
+    ok "consumer is the sole motor-port opener"
+    sed 's/^/     /' <<<"$auth_out"
+    ok "no competing motor-base process owns the motor port"
+  else
+    bad "motor-port ownership check FAILED"
+    sed 's/^/     /' <<<"$auth_out"
+    note "review the holders above; disable_vendor_autostart.sh --report explains"
+  fi
 else
-  ok "no vendor base process running"
+  note "motor_authority.py not found (running outside the checkout?) — skipped"
+fi
+# Vendor-NAMED processes are listed for context only and never fail the drill.
+vendor_named="$(pgrep -af 'yahboom' 2>/dev/null | grep -viE 'grep|cold_boot|disable_vendor' || true)"
+if [[ -n "$vendor_named" ]]; then
+  note "vendor-named processes present and IGNORED (they do not hold the motor port):"
+  sed 's/^/     /' <<<"$vendor_named"
 fi
 
 # 6. sensor topics (advisory — lidar is a separate launch, may be off at boot).
