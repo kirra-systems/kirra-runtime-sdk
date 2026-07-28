@@ -47,3 +47,8 @@ occy_standards.sh
 
 # cargo-cyclonedx trial outputs (release SBOMs are generated in CI)
 *.cdx.json
+
+# cargo-mutants scratch output (local runs only; CI uses --in-diff and keeps
+# nothing). Large, regenerated per run, and never evidence on its own.
+mutants.out/
+mutants.out.old/

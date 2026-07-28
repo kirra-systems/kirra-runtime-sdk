@@ -1,26 +1,58 @@
 # Mutation-Testing Baseline — the Checker Crate (WP-08 / MGA G-6)
 
 **Date:** 2026-07-07 · **Tool:** cargo-mutants · **Scope:** `crates/kirra-trajectory`
++ the checker modules of `crates/kirra-core` (widened #1196 — see §1)
 **Status of this document:** living debt register — update on every targeted-kill PR and on every full re-baseline.
 
 ## 1. What gates, what ratchets
 
 - **PR gate (CI `mutation-gate` lane):** `cargo mutants --in-diff` over the PR's
-  diff of `crates/kirra-trajectory/src` — every mutant lying in NEW/CHANGED
-  checker code must be killed by the suite, or the PR reds. A PR that does not
-  touch the checker skips in seconds. This makes new survivor debt impossible
-  without making the pre-existing debt block unrelated work.
+  diff of the checker sources — every mutant lying in NEW/CHANGED checker code
+  must be killed by the suite, or the PR reds. A PR that does not touch the
+  checker skips in seconds. This makes new survivor debt impossible without
+  making the pre-existing debt block unrelated work.
+- **Gate scope (#1196):** `crates/kirra-trajectory/src` PLUS the checker modules
+  of `crates/kirra-core` — `containment.rs` (SG2 drivable space),
+  `kinematics_contract.rs` (the frozen talisman), `perception_monitor.rs`
+  (Track-C plausibility), `governor_guard.rs`, `frame_integrity.rs`,
+  `platform_kinematics.rs`, `contract_consumer.rs`.
+
+  It was `kirra-trajectory` alone until #1196, which left SG2 containment and
+  the talisman — safety authority — outside the gate entirely. Four merged
+  changes (#1192–#1195) touched `kirra-core`/`kirra-taj` and the lane reported
+  "no checker changes" in ~5 seconds each. Measured on #1192's real diff: the
+  old scope yielded **0** diff lines and **0** mutants; the widened scope yields
+  626 lines and **181** mutants.
+
+  Widening is safe for existing code *because* of `--in-diff`: only lines a PR
+  changes are ever mutated, so pre-existing survivors in newly-covered files are
+  not tested and cannot red anything. The cost lands only on PRs that change
+  those files.
+
+  `kirra-core` is enumerated module by module rather than as a whole crate: it
+  also holds non-authority code (capture, kinematics_sim, posture_tracker,
+  corridor/trajectory types) that should not carry a mutation obligation.
+  Adding a module is a deliberate act.
+
+  The talisman is in scope and that is safe: its blob pin is a CI **shell** step
+  (`git hash-object`, rustfmt job), not a Rust test, and cargo-mutants mutates a
+  scratch copy — so a mutant cannot trip the pin and produce a false "caught".
 - **Debt ratchet (this document + `mutation_baseline_missed_2026-07-07.txt`):**
   the surviving-mutant snapshot only shrinks — targeted-kill PRs retire
   clusters and update the snapshot; a full re-baseline that GROWS the list
   needs the growth explained (usually new code that predates the gate).
 - **Test scope** (pinned in `.cargo/mutants.toml` via `test_package`): the
-  checker's own tests PLUS `kirra-ros2-adapter`'s validation suite, where the
+  checker crates' own tests PLUS `kirra-ros2-adapter`'s validation suite, where the
   checker's deepest tests live. This is load-bearing — see §2. NOTE: the scope
   MUST use cargo-mutants' `test_package` key; the earlier
   `additional_cargo_test_args = ["--package", ...]` did NOT change which
   package's tests ran (cargo-mutants defaults to the mutated package's own
   tests only), so the adapter suite silently never executed under the harness.
+  The same trap applies one crate over: because an explicit `test_package`
+  REPLACES the mutated-package default, `kirra-core` had to be added to the list
+  in #1196 — otherwise a kirra-core mutant would be judged by the trajectory +
+  adapter suites alone, its own containment/talisman tests would never run, and
+  it would report as a survivor.
 
 ## 2. The scoping lesson (measured)
 
