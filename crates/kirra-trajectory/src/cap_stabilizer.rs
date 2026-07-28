@@ -321,6 +321,27 @@ impl CapStabilizer {
         self.clear_streak
     }
 
+    /// Return to the starting state: the configured initial cap, no accumulated
+    /// evidence, no continuity, no limiting object.
+    ///
+    /// Mirrors the Python's `reset()`. A restart must not inherit a cap that was
+    /// earned against observations this instance can no longer see — the evidence
+    /// and the clock history are gone, so the permission they bought goes with them.
+    ///
+    /// **Hazard note on `initial_cap_mps`.** With the default configuration this
+    /// lands on the fail-closed floor (0.0): start stopped, earn motion. The field
+    /// is configurable because the port is faithful, but any non-zero value means a
+    /// fresh or reset stabilizer permits motion having observed *nothing* — which
+    /// contradicts every other decision in this module. Treat a non-zero initial cap
+    /// as a deliberate, reviewed exception, not a tuning knob.
+    pub fn reset(&mut self) {
+        self.stabilized_mps = self.cfg.initial_cap_mps;
+        self.clear_streak = 0;
+        self.last_now_ms = None;
+        self.last_raw_mps = None;
+        self.limiting = None;
+    }
+
     /// Drop to the floor and forget continuity. Used by every fault arm: a
     /// stabilizer that cannot trust its inputs must not keep a standing cap that
     /// was derived from them.
@@ -816,6 +837,115 @@ mod tests {
         assert!(
             (d.stabilized_cap_mps - 1.0).abs() < 1e-12,
             "a within-margin nudge must not move a settled cap"
+        );
+    }
+
+    // ----- restart / reset -----
+
+    /// A fresh stabilizer begins stopped, having observed nothing. Motion is earned,
+    /// never assumed.
+    #[test]
+    fn a_fresh_stabilizer_begins_at_the_fail_closed_floor() {
+        let s = stab();
+        assert_eq!(s.stabilized_cap_mps(), 0.0);
+        assert_eq!(s.clear_streak(), 0);
+    }
+
+    /// …and a reset returns to exactly that state, discarding a cap that had been
+    /// earned. The evidence and the clock history are gone, so the permission they
+    /// bought goes with them — a restart must not inherit clearance it can no longer
+    /// justify.
+    #[test]
+    fn a_reset_discards_an_earned_cap_and_its_evidence() {
+        let mut s = stab();
+        let t = settle_at(&mut s, 1.5, 0);
+        assert!(
+            s.stabilized_cap_mps() > 0.0,
+            "precondition: a cap was earned"
+        );
+
+        s.reset();
+        assert_eq!(
+            s.stabilized_cap_mps(),
+            0.0,
+            "the earned cap does not survive"
+        );
+        assert_eq!(s.clear_streak(), 0);
+
+        // Continuity is gone too: the next frame is a first observation again, so it
+        // cannot release anything on its own.
+        let d = s.observe(obs(1.5, t + 100));
+        assert_eq!(d.reason, CapReason::InitialHold);
+        assert_eq!(d.stabilized_cap_mps, 0.0);
+        assert_eq!(d.limiting_object, None);
+    }
+
+    /// A reset clears a retained limiting object as well — the identity was evidence
+    /// about a hazard, and it does not outlive the state it belonged to.
+    #[test]
+    fn a_reset_clears_the_limiting_object() {
+        let mut s = stab();
+        let t = settle_at(&mut s, 0.5, 0);
+        let d = s.observe(obs_with(0.5, t + 100, Some(41)));
+        assert_eq!(d.limiting_object, Some(41));
+
+        s.reset();
+        let d = s.observe(obs(2.0, t + 200));
+        assert_eq!(d.limiting_object, None);
+    }
+
+    // ----- limiting-object identity is absent unless something limits -----
+
+    /// Identity is absent when nothing limits — not a stale id, not a placeholder.
+    /// A consumer logging "held by object N" must be able to trust that N is real.
+    #[test]
+    fn identity_is_absent_when_nothing_limits() {
+        let mut s = stab();
+        let mut t = 0;
+        for _ in 0..30 {
+            t += 100;
+            let d = s.observe(obs_with(2.0, t, None));
+            assert_eq!(
+                d.limiting_object, None,
+                "an unlimited stream must never report a limiting object"
+            );
+        }
+    }
+
+    /// A fail-closed arm clears the identity too. The stabilizer no longer trusts
+    /// its inputs, so it must not keep asserting which object was responsible.
+    #[test]
+    fn a_fail_closed_arm_clears_the_limiting_object() {
+        let mut s = stab();
+        let t = settle_at(&mut s, 0.5, 0);
+        let d = s.observe(obs_with(0.5, t + 100, Some(41)));
+        assert_eq!(
+            d.limiting_object,
+            Some(41),
+            "precondition: an object is limiting"
+        );
+
+        let d = s.observe(obs_with(f64::NAN, t + 200, Some(41)));
+        assert_eq!(d.reason, CapReason::Invalid);
+        assert_eq!(
+            d.limiting_object, None,
+            "a stabilizer that distrusts its input must not attribute the refusal              to an object"
+        );
+    }
+
+    /// Negative time is unrepresentable rather than merely rejected: `now_ms` is a
+    /// `u64`, so the type forbids what the Python had to validate at runtime. This
+    /// test documents that the guarantee is structural.
+    #[test]
+    fn negative_time_is_structurally_impossible() {
+        let obs = CapObservation {
+            raw_cap_mps: 1.0,
+            limiting_object: None,
+            now_ms: u64::MIN,
+        };
+        assert_eq!(
+            obs.now_ms, 0,
+            "the clock type has no negative values to reject"
         );
     }
 
