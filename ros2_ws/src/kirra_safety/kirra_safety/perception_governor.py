@@ -297,7 +297,29 @@ class PerceptionGovernor(Node):
                 self._lateral_clearance
             ),
             "confidence_floor": self._floor,
+            # #1211 scan liveness. Publisher count can ONLY be obtained by
+            # inspecting the ROS graph, which the Taj sidecar (plain HTTP) cannot
+            # do — so this node, which holds the subscription, observes it and
+            # carries it as data. Taj reports `publisher_count_observed` so an
+            # omission is visible rather than silently read as zero.
+            "publisher_count": self._scan_publisher_count(),
         }
+
+    def _scan_publisher_count(self):
+        """Publishers currently advertising the scan topic, or None.
+
+        Zero publishers is a real, distinct fault (the driver died or never
+        started) and must reach Taj as 0. None means this rclpy build could not
+        tell us — reported as unobserved so the check is skipped rather than
+        firing on an unknown.
+        """
+        subscription = self._scan_subscription
+        if subscription is None:
+            return None
+        try:
+            return int(subscription.get_publisher_count())
+        except (AttributeError, TypeError, ValueError):
+            return None
 
     def _on_scan(self, msg: LaserScan) -> None:
         if self._session is None:

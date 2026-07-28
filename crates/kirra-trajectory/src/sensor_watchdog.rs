@@ -71,13 +71,16 @@
 //! [`LowValidRayRatio`] would refuse it regardless. Stopping is right in both
 //! readings of that frame.
 //!
-//! ## Disarmed by default
+//! ## Arming
 //!
-//! Like every sibling channel, the watchdog ships disarmed
-//! ([`SENSOR_WATCHDOG_ENABLED_ENV`]) and is byte-identical to prior behaviour when
-//! off. Arming it on a fleet whose LiDAR rate has never been characterised would
-//! ground robots on a threshold nobody measured; the rate floor in particular is a
-//! per-platform number.
+//! This module defaults DISARMED, like every sibling channel: it is a library with
+//! unknown consumers, and arming it on a fleet whose LiDAR rate has never been
+//! characterised would ground robots on a threshold nobody measured.
+//!
+//! The R2 deployment inverts that default at the integration layer — the Taj
+//! sidecar arms the watchdog unless `KIRRA_SENSOR_WATCHDOG_ENABLED=0`, because that
+//! sidecar IS the robot #1211 was filed about. The inversion belongs there, where
+//! the platform is known, not here. See `kirra_sidecars::taj::watchdog_armed_from_env`.
 
 use std::collections::VecDeque;
 
@@ -323,9 +326,13 @@ pub enum SensorHealth {
     /// streak. Motion stays refused — this is the state that stops a flapping
     /// sensor from being trusted the instant it blinks back.
     Recovering { healthy_streak: u32, required: u32 },
-    /// Not yet enough frames to measure a rate. Other checks still apply; the rate
-    /// check alone is suspended. Not a fault — a starting sensor is not a broken one,
-    /// and genuine silence during warm-up is caught by [`SensorFault::NoMessages`].
+    /// Not yet enough frames to measure a rate. Not a *fault* — a starting sensor
+    /// is not a broken one, and the distinction is worth reporting — but it **caps
+    /// like one**: a sensor that has produced one frame has not yet evidenced that
+    /// it produces a second, and "publishes at all" is not "publishes at rate".
+    ///
+    /// Startup therefore begins unavailable and earns availability, which is the
+    /// same direction as every other decision here.
     WarmingUp { frames: usize },
 }
 
@@ -334,14 +341,21 @@ impl SensorHealth {
     /// [`crate::perception_redundancy::more_restrictive_cap`] into the same Track-C
     /// derate the sibling channels use.
     ///
-    /// `Some(0.0)` — the MRC floor — for both [`Faulted`](Self::Faulted) and
-    /// [`Recovering`](Self::Recovering). Recovering caps deliberately: releasing
-    /// motion on the first healthy frame is what the streak exists to prevent.
+    /// `Some(0.0)` — the MRC floor — for everything except [`Disarmed`] and
+    /// [`Healthy`]. [`Recovering`] caps because releasing motion on the first
+    /// healthy frame is what the streak exists to prevent; [`WarmingUp`] caps
+    /// because a sensor that has not yet been observed at rate has not yet
+    /// evidenced that it runs at rate.
+    ///
+    /// [`Disarmed`]: Self::Disarmed
+    /// [`Healthy`]: Self::Healthy
+    /// [`Recovering`]: Self::Recovering
+    /// [`WarmingUp`]: Self::WarmingUp
     #[must_use]
     pub fn perception_cap(&self) -> Option<f64> {
         match self {
-            Self::Faulted(_) | Self::Recovering { .. } => Some(0.0),
-            Self::Disarmed | Self::Healthy | Self::WarmingUp { .. } => None,
+            Self::Faulted(_) | Self::Recovering { .. } | Self::WarmingUp { .. } => Some(0.0),
+            Self::Disarmed | Self::Healthy => None,
         }
     }
 
@@ -463,6 +477,21 @@ impl SensorWatchdog {
                 self.was_faulted = true;
                 self.healthy_streak = 0;
                 self.streak_started_ms = None;
+                // A break in the stream invalidates the arrival window that was
+                // measuring it. Without this, the gap created BY the fault stays in
+                // the window and keeps the measured rate under the floor long after
+                // the sensor recovered — so recovery would take "until the outage
+                // ages out of the window" rather than the configured streak, and
+                // the sensor would be punished twice for one fault.
+                //
+                // `RateBelowFloor` is the exception: that fault IS the window's own
+                // verdict, and erasing the evidence for it would make a genuinely
+                // starved sensor oscillate between reporting the rate fault and
+                // reporting nothing measurable. It stays fail-closed either way,
+                // but the operator deserves the stable, accurate code.
+                if !matches!(fault, SensorFault::RateBelowFloor { .. }) {
+                    self.arrivals.clear();
+                }
                 SensorHealth::Faulted(fault)
             }
             None => self.advance_recovery(tick.now_ms),
@@ -1050,13 +1079,24 @@ mod tests {
         }
     }
 
-    /// Warm-up suspends only the rate check, and does not cap. A starting sensor is
-    /// not a broken one; genuine silence during warm-up is caught as NoMessages.
+    /// Startup begins UNAVAILABLE and earns availability. Warm-up is reported
+    /// distinctly from a fault — a starting sensor is not a broken one — but it caps
+    /// exactly like one, because a sensor observed once has not evidenced that it
+    /// publishes at rate, and "publishes at all" is not "publishes at rate".
     #[test]
-    fn warm_up_does_not_cap() {
+    fn warm_up_caps_so_startup_begins_unavailable() {
         let mut w = armed();
         let h = w.observe(tick(0, Some(good_frame(0))));
         assert_eq!(h, SensorHealth::WarmingUp { frames: 1 });
+        assert_eq!(
+            h.perception_cap(),
+            Some(0.0),
+            "a single observation must not release motion"
+        );
+        // The second frame establishes a measurable rate, and only then is the
+        // sensor available.
+        let h = w.observe(tick(100, Some(good_frame(1))));
+        assert_eq!(h, SensorHealth::Healthy);
         assert_eq!(h.perception_cap(), None);
     }
 
@@ -1208,6 +1248,69 @@ mod tests {
         );
         // …and nothing else faulted, so the restart is attributable to the window.
         assert!(h.fault().is_none());
+    }
+
+    /// A break in the stream clears the arrival window, so recovery takes the
+    /// configured streak rather than "until the outage ages out of the window".
+    /// Without this the gap created BY the fault keeps the measured rate under the
+    /// floor and the sensor is punished twice for one fault.
+    #[test]
+    fn a_stream_break_clears_the_rate_window_so_recovery_is_the_streak() {
+        let mut w = armed();
+        // Healthy at 10 Hz.
+        run_healthy(&mut w, 0, 0, 6);
+        // A one-second outage.
+        let h = w.observe(tick(1_500, None));
+        assert!(matches!(
+            h,
+            SensorHealth::Faulted(SensorFault::NoMessages { .. })
+        ));
+
+        // Frames resume at 10 Hz. If the window still held the pre-outage arrivals,
+        // the measured rate across the gap would be ~1 Hz and this would fault.
+        for i in 1..SENSOR_RECOVERY_STREAK as u64 {
+            let h = w.observe(tick(1_500 + i * 100, Some(good_frame(10 + i))));
+            assert_eq!(
+                h,
+                SensorHealth::Recovering {
+                    healthy_streak: i as u32,
+                    required: SENSOR_RECOVERY_STREAK
+                },
+                "recovery must progress on the streak, not stall on a stale window"
+            );
+        }
+        let h = w.observe(tick(
+            1_500 + SENSOR_RECOVERY_STREAK as u64 * 100,
+            Some(good_frame(99)),
+        ));
+        assert_eq!(h, SensorHealth::Healthy);
+    }
+
+    /// …but a RATE fault keeps its window: that fault IS the window's verdict, and
+    /// erasing its evidence would make a genuinely starved sensor oscillate between
+    /// reporting the rate fault and reporting nothing measurable.
+    #[test]
+    fn a_rate_fault_keeps_its_own_evidence() {
+        let mut w = armed();
+        // 2 Hz — under the 5 Hz floor.
+        let mut last = SensorHealth::Disarmed;
+        for i in 0..5 {
+            last = w.observe(tick(i * 500, Some(good_frame(i))));
+        }
+        assert!(matches!(
+            last,
+            SensorHealth::Faulted(SensorFault::RateBelowFloor { .. })
+        ));
+        // Still starved on the next frame, and still REPORTED as starved rather
+        // than degrading to an unmeasurable warm-up.
+        let next = w.observe(tick(3_000, Some(good_frame(9))));
+        assert!(
+            matches!(
+                next,
+                SensorHealth::Faulted(SensorFault::RateBelowFloor { .. })
+            ),
+            "got {next:?}"
+        );
     }
 
     // ----- bounded restart -----

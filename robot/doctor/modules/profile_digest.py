@@ -126,6 +126,12 @@ def build_probe(geometry, forward_extent_m, camera_armed, camera_max_age_ms):
         "stamp_ms": 0,
         "forward_extent_m": forward_extent_m,
         "camera_armed": camera_armed,
+        # #1211: this probe POSTs identical bytes at a fixed stamp on every run,
+        # which is exactly what a frozen lidar driver looks like. Flag it so the
+        # scan-liveness watchdog does not observe it — a diagnostic must not be
+        # able to cause the fault it is diagnosing, nor leave the live stream
+        # owing a recovery streak afterwards.
+        "diagnostic_probe": True,
     })
     if camera_armed:
         probe["camera_max_age_ms"] = camera_max_age_ms

@@ -16,7 +16,22 @@ use std::net::{TcpListener, TcpStream};
 use kirra_sidecars::capabilities::Capabilities;
 use kirra_sidecars::http::{read_request, respond, respond_error};
 use kirra_sidecars::net::{allow_nonlocal_from_env, enforce_bind_policy};
-use kirra_sidecars::taj::{handle_perception_tracked, PerceptionRequest, TrackedPerceptionState};
+use kirra_sidecars::taj::{
+    handle_perception_tracked_at, watchdog_armed_from_env, PerceptionRequest, SensorWatchdogConfig,
+    TrackedPerceptionState,
+};
+
+/// Wall clock in ms, for the watchdog's ARRIVAL observation.
+///
+/// Read here in the binary rather than inside the perception core so the core
+/// stays a pure function of its inputs and every test can inject a clock instead
+/// of sleeping.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 fn serve(mut stream: TcpStream, perception_state: &mut TrackedPerceptionState) {
     let req = match read_request(&mut stream) {
@@ -44,8 +59,12 @@ fn serve(mut stream: TcpStream, perception_state: &mut TrackedPerceptionState) {
             Ok(p) => respond(
                 &mut stream,
                 "200 OK",
-                &serde_json::to_string(&handle_perception_tracked(&p, perception_state))
-                    .unwrap_or_else(|_| "{}".into()),
+                &serde_json::to_string(&handle_perception_tracked_at(
+                    &p,
+                    perception_state,
+                    now_ms(),
+                ))
+                .unwrap_or_else(|_| "{}".into()),
             ),
             Err(e) => respond(
                 &mut stream,
@@ -74,7 +93,21 @@ fn main() {
     println!("Taj perception service on http://{addr}  (POST /perception, GET /health)");
     // Single-threaded service: one deterministic tracker state persists
     // across consecutive POST /perception requests.
-    let mut perception_state = TrackedPerceptionState::new();
+    let armed = watchdog_armed_from_env();
+    if armed {
+        eprintln!(
+            "taj_service: scan-liveness watchdog ARMED (#1211) — a frozen, starved \
+             or blinded /scan floors the speed cap. Set \
+             KIRRA_SENSOR_WATCHDOG_ENABLED=0 to opt out."
+        );
+    } else {
+        eprintln!(
+            "taj_service: scan-liveness watchdog DISARMED — a frozen /scan will \
+             NOT be detected. This is the pre-#1211 behaviour."
+        );
+    }
+    let mut perception_state =
+        TrackedPerceptionState::with_watchdog(SensorWatchdogConfig::r2_lidar(), armed);
 
     for stream in listener.incoming() {
         match stream {

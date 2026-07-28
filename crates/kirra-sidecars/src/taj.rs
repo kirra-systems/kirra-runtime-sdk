@@ -10,12 +10,19 @@
 //! `speed_cap_mps: 0.0` (the MRC floor — the consumer holds).
 
 use kirra_core::corridor::CorridorSource;
+use kirra_trajectory::sensor_watchdog::{
+    fingerprint_from_ranges, FrameObservation, SensorHealth, SensorTick, SensorWatchdog,
+    SENSOR_WATCHDOG_ENABLED_ENV,
+};
+// Re-exported so the service binary configures the watchdog through this module
+// rather than depending on kirra-trajectory directly.
 use kirra_taj::{
     clip_corridor_to_hazards, hazard_clip_x, CameraVruFusionConfig, CameraVruObservation,
     LaserScan, PredictedVruMotion, SemanticClass, SemanticDetection, TajConfig, TajTracker,
     VruClassifierConfig, VruIntentClass, VruIntentReason, VruMotionModel,
     VruMotionPredictionConfig, VruPredictionFallbackReason,
 };
+pub use kirra_trajectory::sensor_watchdog::SensorWatchdogConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -148,6 +155,35 @@ pub struct PerceptionRequest {
     /// Freshness budget for `camera_stamp_ms` against `stamp_ms`.
     #[serde(default = "default_camera_age")]
     pub camera_max_age_ms: u64,
+    /// Publishers currently advertising the scan topic, as observed by the ROS
+    /// subscriber that produced this request (#1211).
+    ///
+    /// This value can only be obtained by inspecting the ROS graph, which this
+    /// HTTP service cannot do — so it is carried as DATA from the layer that can.
+    /// `None` means "not observed", not "zero": a non-ROS caller (a test harness,
+    /// `inspect_corridor.py`) has no graph to look at, and faulting it for a fact
+    /// it cannot know would make the publisher check fire on the wrong condition.
+    /// The response reports which case applied via
+    /// [`PerceptionResponse::publisher_count_observed`], so an omission is visible
+    /// rather than silent.
+    #[serde(default)]
+    pub publisher_count: Option<usize>,
+    /// This request is a DIAGNOSTIC PROBE, not a frame from the live scan stream
+    /// (`kirra_doctor`'s profile-digest probe, `verify_deployment`). Excluded from
+    /// liveness accounting.
+    ///
+    /// Necessary because those tools POST a canned scan — identical bytes, a fixed
+    /// `stamp_ms` — on every run. To the watchdog that is indistinguishable from a
+    /// driver republishing one buffer forever, so an unflagged probe run would trip
+    /// `SENSOR_FROZEN_FRAME` and hold the real robot in recovery afterwards. A
+    /// diagnostic must not be able to cause the fault it is diagnosing.
+    ///
+    /// This never RELAXES a bound: a probe is not observed, so it can neither set
+    /// nor clear a fault, and any standing verdict from the live stream is
+    /// untouched. The probe's own response reports `sensor_liveness: "disarmed"`,
+    /// because liveness genuinely was not assessed for it.
+    #[serde(default)]
+    pub diagnostic_probe: bool,
 }
 fn default_camera_age() -> u64 {
     DEFAULT_CAMERA_MAX_AGE_MS
@@ -323,8 +359,8 @@ fn validate_perception_request(req: &PerceptionRequest) -> Result<(), Perception
 /// Empty geometry prevents downstream consumers from accidentally planning
 /// against partially processed evidence, while `healthy=false` and
 /// `speed_cap_mps=0.0` enforce stop-and-hold behavior.
-fn invalid_perception_response(camera_armed: bool) -> PerceptionResponse {
-    PerceptionResponse {
+fn invalid_perception_response(camera_armed: bool, health: SensorHealth) -> PerceptionResponse {
+    let mut response = PerceptionResponse {
         frame_id: PerceptionFrameId::invalid(),
         healthy: false,
         confidence: 0.0,
@@ -343,7 +379,15 @@ fn invalid_perception_response(camera_armed: bool) -> PerceptionResponse {
         predicted_vrus: Vec::new(),
         camera_healthy: !camera_armed,
         camera_clip_x_m: None,
-    }
+        sensor_liveness: "disarmed",
+        sensor_fault: None,
+        sensor_measured_hz: None,
+        publisher_count_observed: false,
+    };
+    // The response is already at the MRC floor, so the liveness verdict cannot
+    // lower it further — it is stamped so the REASON travels with the refusal.
+    apply_sensor_health(&mut response, health, false);
+    response
 }
 
 #[derive(Clone, Serialize)]
@@ -713,6 +757,21 @@ pub struct PerceptionResponse {
     /// detection bound it. `None` = no camera hazard bound the corridor. The
     /// clip can only SHORTEN the drivable space.
     pub camera_clip_x_m: Option<f64>,
+    /// #1211 sensor-liveness verdict for this scan: `disarmed` | `healthy` |
+    /// `warming_up` | `recovering` | `faulted`.
+    pub sensor_liveness: &'static str,
+    /// The distinct fault code when the watchdog faulted (`SENSOR_FROZEN_FRAME`,
+    /// `SENSOR_RATE_BELOW_FLOOR`, …), else `None`. Never collapsed into a single
+    /// "sensor bad" — the whole point of #1211's reason codes.
+    pub sensor_fault: Option<&'static str>,
+    /// Measured publish rate over the watchdog's arrival window, when enough
+    /// frames have been seen to compute one. A NUMBER, so an operator can see how
+    /// starved the sensor is rather than only that it tripped a threshold.
+    pub sensor_measured_hz: Option<f64>,
+    /// Whether the request carried a ROS-observed publisher count. `false` means
+    /// the publisher check did not run for this frame because the caller had no
+    /// ROS graph to observe — surfaced so the gap is visible, never silent.
+    pub publisher_count_observed: bool,
 }
 
 /// The corridor's straight-ahead reach: the smaller of the two boundary
@@ -877,6 +936,12 @@ pub struct TrackedPerceptionState {
     last_camera_stamp_ms: Option<u64>,
     /// Advances whenever temporal tracking state is invalidated.
     tracker_generation: u64,
+    /// #1211 sensor-liveness watchdog. Deliberately OUTSIDE [`Self::reset`]: the
+    /// tracker resets on a timestamp regression or an oversized gap, and those are
+    /// exactly the events the watchdog exists to remember. Clearing its history
+    /// alongside the tracker would let a frozen driver launder its record by
+    /// tripping a tracker reset each time it stalled.
+    watchdog: SensorWatchdog,
 }
 
 impl Default for TrackedPerceptionState {
@@ -886,8 +951,25 @@ impl Default for TrackedPerceptionState {
 }
 
 impl TrackedPerceptionState {
+    /// State with the watchdog ARMED on the R2 LiDAR defaults — the deployment
+    /// posture, since #1211's whole subject is that a frozen scan currently drives
+    /// the robot. `KIRRA_SENSOR_WATCHDOG_ENABLED=0` is the opt-out; see
+    /// [`watchdog_armed_from_env`].
     #[must_use]
     pub fn new() -> Self {
+        Self::with_watchdog(SensorWatchdogConfig::r2_lidar(), true)
+    }
+
+    /// State with an explicitly configured watchdog. Tests use this to inject
+    /// thresholds and to run the disarmed path.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `cfg` fails [`SensorWatchdogConfig::validate`]. Callers holding a
+    /// config from configuration input should validate it themselves first and
+    /// report the error; this constructor is for statically-known configs.
+    #[must_use]
+    pub fn with_watchdog(cfg: SensorWatchdogConfig, armed: bool) -> Self {
         Self {
             tracker: None,
             tracker_config: None,
@@ -897,9 +979,11 @@ impl TrackedPerceptionState {
             camera_sequence: 0,
             last_camera_stamp_ms: None,
             tracker_generation: 0,
+            watchdog: SensorWatchdog::new(cfg, armed).expect("watchdog config must be valid"),
         }
     }
 
+    /// Reset TRACKING state. The watchdog is untouched — see the field comment.
     pub fn reset(&mut self) {
         self.tracker = None;
         self.tracker_config = None;
@@ -908,6 +992,179 @@ impl TrackedPerceptionState {
         self.last_camera_stamp_ms = None;
         self.tracker_generation = self.tracker_generation.saturating_add(1);
     }
+
+    /// Operator reset of the watchdog's terminal latch (the counterpart to its
+    /// sticky restart exhaustion). Separate from [`Self::reset`] precisely because
+    /// clearing a terminal sensor fault is a human decision, not a side effect of
+    /// a tracking discontinuity.
+    pub fn reset_sensor_watchdog(&mut self) {
+        self.watchdog.reset();
+    }
+
+    /// The watchdog's current terminal state, for operator surfaces.
+    #[must_use]
+    pub fn sensor_watchdog_terminal(&self) -> bool {
+        self.watchdog.is_terminal()
+    }
+}
+
+/// Whether the scan-liveness watchdog is armed, from
+/// `KIRRA_SENSOR_WATCHDOG_ENABLED`.
+///
+/// **Default ARMED**, inverting the pure module's default-off. The inversion is
+/// deliberate and belongs here: `kirra_trajectory::sensor_watchdog` defaults off
+/// because it is a library with unknown consumers, while this sidecar IS the R2
+/// deployment, and #1211 exists because a frozen LiDAR currently drives that
+/// robot. Shipping the wiring disarmed would leave the failure exactly where the
+/// issue found it.
+///
+/// `0` / `false` / `no` (case-insensitive) opts out — the immediate mitigation if
+/// bring-up shows false trips before the thresholds are characterised on hardware.
+#[must_use]
+pub fn watchdog_armed_from_env() -> bool {
+    std::env::var(SENSOR_WATCHDOG_ENABLED_ENV)
+        .map(|v| {
+            let t = v.trim();
+            !(t == "0" || t.eq_ignore_ascii_case("false") || t.eq_ignore_ascii_case("no"))
+        })
+        .unwrap_or(true)
+}
+
+/// Whether a rejected request was rejected because of the SENSOR or because of
+/// the CALLER's configuration.
+///
+/// The split matters because the two have different owners and different fixes. A
+/// sensor fault must reach the watchdog (it resets the recovery streak, and it is
+/// what an operator needs to see); a caller's bad `margin_m` must not, or a
+/// misconfigured client could pin a perfectly healthy LiDAR in recovery forever.
+fn is_scan_fault(err: PerceptionRequestError) -> bool {
+    match err {
+        // The scan itself, or the geometry describing it.
+        PerceptionRequestError::EmptyScan
+        | PerceptionRequestError::ScanTooLarge
+        | PerceptionRequestError::NanRangeSample
+        | PerceptionRequestError::InvalidRangeBounds
+        | PerceptionRequestError::InvalidAngleMinimum
+        | PerceptionRequestError::InvalidAngleIncrement => true,
+        // Everything else describes how the CALLER wants the scan interpreted.
+        PerceptionRequestError::InvalidForwardExtent
+        | PerceptionRequestError::ForwardExtentTooLarge
+        | PerceptionRequestError::InvalidDeceleration
+        | PerceptionRequestError::InvalidMargin
+        | PerceptionRequestError::InvalidLaneHalfWidth
+        | PerceptionRequestError::InvalidVehicleWidth
+        | PerceptionRequestError::InvalidLateralClearance
+        | PerceptionRequestError::LaneNarrowerThanRequiredCorridor
+        | PerceptionRequestError::InvalidConfidenceFloor => false,
+    }
+}
+
+/// Count returns that are finite AND inside the sensor's own declared range
+/// bounds.
+///
+/// The ROS convention is that a no-return reads `+inf`, so an infinite value is
+/// not a broken ray — it is "nothing out there". It is still not *evidence of
+/// clear space* the way a real measurement is, which is why it does not count
+/// toward the valid ratio: a scan of nothing but no-returns is a scan that saw
+/// nothing, and `SENSOR_LOW_VALID_RAY_RATIO` is the correct verdict on it.
+fn count_valid_rays(req: &PerceptionRequest) -> u32 {
+    req.ranges
+        .iter()
+        .filter(|r| r.is_finite() && **r >= req.range_min_m as f32 && **r <= req.range_max_m as f32)
+        .count()
+        .min(u32::MAX as usize) as u32
+}
+
+/// Build the frame observation and tick the watchdog.
+///
+/// The fingerprint comes from `kirra_trajectory::sensor_watchdog` rather than
+/// being computed here. That is not merely code reuse: the freeze check's entire
+/// discrimination between a frozen buffer and a static scene rests on hashing raw
+/// IEEE bits, and a second implementation in this file would be free to quantise
+/// and silently destroy it.
+fn observe_scan(
+    state: &mut TrackedPerceptionState,
+    req: &PerceptionRequest,
+    now_ms: u64,
+) -> SensorHealth {
+    let frame = FrameObservation {
+        header_stamp_ms: req.stamp_ms,
+        fingerprint: fingerprint_from_ranges(&req.ranges),
+        valid_rays: count_valid_rays(req),
+        total_rays: req.ranges.len().min(u32::MAX as usize) as u32,
+    };
+    state.watchdog.observe(SensorTick {
+        now_ms,
+        // An unobserved publisher count is passed as 1 — "not zero" — so the
+        // publisher check is inert rather than firing on a fact the caller could
+        // not know. `publisher_count_observed` on the response records which
+        // happened, so this is visible rather than an invisible default.
+        publisher_count: req.publisher_count.unwrap_or(1),
+        frame: Some(frame),
+    })
+}
+
+/// Tick the watchdog for a scan that failed validation.
+///
+/// The frame is reported as it actually is — zero valid rays for an empty or
+/// all-NaN scan — so a malformed scan lands on the same `SENSOR_LOW_VALID_RAY_RATIO`
+/// code a blinded one does, rather than inventing a parallel vocabulary for the
+/// same physical condition.
+fn observe_scan_fault(
+    state: &mut TrackedPerceptionState,
+    req: &PerceptionRequest,
+    now_ms: u64,
+) -> SensorHealth {
+    let total_rays = req.ranges.len().min(u32::MAX as usize) as u32;
+    let frame = FrameObservation {
+        header_stamp_ms: req.stamp_ms,
+        fingerprint: fingerprint_from_ranges(&req.ranges),
+        // Range bounds may themselves be the invalid thing, so no ray can be
+        // certified valid against them.
+        valid_rays: 0,
+        total_rays,
+    };
+    state.watchdog.observe(SensorTick {
+        now_ms,
+        publisher_count: req.publisher_count.unwrap_or(1),
+        frame: Some(frame),
+    })
+}
+
+/// The wire name for a liveness verdict.
+fn sensor_liveness_name(health: SensorHealth) -> &'static str {
+    match health {
+        SensorHealth::Disarmed => "disarmed",
+        SensorHealth::Healthy => "healthy",
+        SensorHealth::WarmingUp { .. } => "warming_up",
+        SensorHealth::Recovering { .. } => "recovering",
+        SensorHealth::Faulted(_) => "faulted",
+    }
+}
+
+/// Compose the liveness verdict into a response.
+///
+/// The cap is composed with `min`, never assignment, so a watchdog fault cannot be
+/// overwritten by a healthier channel — and equally, a healthy watchdog cannot
+/// raise a cap that Taj's own corridor arithmetic, the camera channel, or the
+/// confidence floor already lowered. Whichever bound is tighter wins, which is the
+/// same composition rule every sibling perception channel uses.
+fn apply_sensor_health(
+    response: &mut PerceptionResponse,
+    health: SensorHealth,
+    publisher_count_observed: bool,
+) {
+    response.sensor_liveness = sensor_liveness_name(health);
+    response.sensor_fault = health.fault().map(|f| f.code());
+    response.publisher_count_observed = publisher_count_observed;
+
+    if let Some(cap) = health.perception_cap() {
+        response.speed_cap_mps = response.speed_cap_mps.min(cap);
+        // A sensor that is not demonstrably live makes the whole perception
+        // result unhealthy, not merely slow. A consumer watching `healthy` must
+        // not read "the corridor is fine" off evidence the watchdog just refused.
+        response.healthy = false;
+    }
 }
 
 /// Stateless compatibility entry point.
@@ -915,7 +1172,18 @@ impl TrackedPerceptionState {
 /// Production callers should use [`handle_perception_tracked`] with persistent
 /// state so object IDs and velocity estimates survive across scan frames.
 pub fn handle_perception(req: &PerceptionRequest) -> PerceptionResponse {
-    let mut state = TrackedPerceptionState::new();
+    // The watchdog is DISARMED on this path, and that is a correctness choice
+    // rather than a compatibility concession. Liveness is a property of a STREAM:
+    // frozen stamps, repeated buffers and measured rate all mean "compared to the
+    // frames before this one". A stateless call has no frames before this one, so
+    // an armed watchdog here would report `WarmingUp` on every single call and cap
+    // every caller forever — asserting a liveness verdict from one sample with no
+    // continuity to derive it from.
+    //
+    // `sensor_liveness: "disarmed"` is the truthful answer for a one-shot
+    // evaluation. Callers that need liveness must hold state, which is what the
+    // service does.
+    let mut state = TrackedPerceptionState::with_watchdog(SensorWatchdogConfig::r2_lidar(), false);
     handle_perception_tracked(req, &mut state)
 }
 
@@ -987,23 +1255,94 @@ fn predicted_vru_to_wire(prediction: &PredictedVruMotion) -> PredictedVruMotionO
 /// Tracking state is reset on malformed input, timestamp regression, excessive
 /// inter-frame gaps, or a material tracker-configuration change. Every reset
 /// returns to conservative first-sighting behavior with zero estimated velocity.
+///
+/// Reads the wall clock for the watchdog's arrival observation. Prefer
+/// [`handle_perception_tracked_at`], which takes the clock as a parameter — the
+/// service binary uses it, and every test does.
 pub fn handle_perception_tracked(
     req: &PerceptionRequest,
     state: &mut TrackedPerceptionState,
 ) -> PerceptionResponse {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    handle_perception_tracked_at(req, state, now_ms)
+}
+
+/// [`handle_perception_tracked`] with the arrival clock supplied by the caller.
+///
+/// `now_ms` is the time this scan was OBSERVED, not the stamp the sensor wrote.
+/// Keeping them separate is the point: a frozen driver's stamp stops advancing
+/// while arrivals keep coming, and a watchdog reading liveness off the sensor's
+/// own stamp would freeze with it.
+pub fn handle_perception_tracked_at(
+    req: &PerceptionRequest,
+    state: &mut TrackedPerceptionState,
+    now_ms: u64,
+) -> PerceptionResponse {
     // Priority 0: validate every request-level assumption before cloning the
     // scan, constructing Taj, or performing floating-point safety arithmetic.
-    if validate_perception_request(req).is_err() {
+    if let Err(err) = validate_perception_request(req) {
         state.reset();
-        return invalid_perception_response(req.camera_armed);
+        // A rejected request still tells the watchdog something — but only when
+        // the SENSOR is what was wrong. An empty scan, a NaN ray or impossible
+        // range bounds are sensor faults and must land on the #1211 reason codes
+        // (and must reset any recovery streak). A bad `margin_m` or
+        // `confidence_floor` is the CALLER's configuration error: faulting the
+        // sensor for it would blame the wrong component and, worse, would let a
+        // misconfigured client hold a healthy sensor in recovery indefinitely.
+        let health = if is_scan_fault(err) && !req.diagnostic_probe {
+            observe_scan_fault(state, req, now_ms)
+        } else {
+            SensorHealth::Disarmed
+        };
+        return invalid_perception_response(req.camera_armed, health);
     }
+
+    // Observe BEFORE the duplicate short-circuit below — a driver republishing one
+    // frame forever produces exactly the duplicate-stamp case, so a tick placed
+    // after the short-circuit would never see the freeze it exists to catch.
+    //
+    // But a repeated stamp is NOT automatically a frozen sensor here. This service
+    // has several legitimate consumers (`perception_governor` and `occy_doer` both
+    // post the same live scan; that is why the short-circuit below exists at all),
+    // so the same frame arriving twice usually means two nodes asked about it.
+    // Counting the second copy as a fresh observation would let a perfectly healthy
+    // two-consumer deployment trip the frozen-stamp check and ground the robot.
+    //
+    // So a re-post is observed as an ARRIVAL THAT CARRIES NO NEW FRAME. A frozen
+    // driver still fails closed, because it produces no NEW frames either: the
+    // watchdog's silence budget expires and the fault surfaces as
+    // `SENSOR_NO_MESSAGES` — "nothing new arrived", which is exactly the truth
+    // about a driver replaying one buffer. Detection is preserved; the false
+    // positive is not.
+    let is_repost = state.last_stamp_ms == Some(req.stamp_ms);
+    let health = if req.diagnostic_probe {
+        SensorHealth::Disarmed
+    } else if is_repost {
+        state.watchdog.observe(SensorTick {
+            now_ms,
+            publisher_count: req.publisher_count.unwrap_or(1),
+            frame: None,
+        })
+    } else {
+        observe_scan(state, req, now_ms)
+    };
 
     // Multiple consumers may submit the exact same LaserScan. Replaying a
     // duplicate must not advance tracking, increment frames_seen, or overwrite
     // velocity with a zero-dt estimate.
     if state.last_stamp_ms == Some(req.stamp_ms) {
         if let Some(response) = state.last_response.as_ref() {
-            return response.clone();
+            // Serve the cached perception, but re-apply THIS tick's liveness
+            // verdict: the cached response was computed when the sensor may still
+            // have looked healthy, and a stale cap is exactly what a frozen driver
+            // would be served otherwise.
+            let mut response = response.clone();
+            response.sensor_measured_hz = state.watchdog.measured_hz();
+            apply_sensor_health(&mut response, health, req.publisher_count.is_some());
+            return response;
         }
 
         // Defensive fallback: duplicate metadata without a cached response is
@@ -1298,13 +1637,35 @@ pub fn handle_perception_tracked(
         predicted_vrus,
         camera_healthy,
         camera_clip_x_m,
+        sensor_liveness: "disarmed",
+        sensor_fault: None,
+        sensor_measured_hz: None,
+        publisher_count_observed: false,
     };
 
     response.frame_id.profile_digest = compute_perception_profile_digest(req);
+    // The evidence digest is computed BEFORE the liveness verdict is stamped, and
+    // the cached response is stored before it too. Both are deliberate.
+    //
+    // The digest identifies the perception EVIDENCE — what the sensor showed and
+    // what Taj made of it. Liveness is a verdict about whether that evidence is
+    // CURRENT, which is orthogonal: the same scan bytes produce the same evidence
+    // whether they arrived first or third in a frozen run. Folding it in would make
+    // the digest of a scan depend on the history of unrelated scans, and would
+    // change the identity of a frame that a downstream consumer binds commands to.
+    // This is the same line #1210 drew for the rejection tally.
+    //
+    // Caching pre-verdict matters for the duplicate path: a stale `Some(0.0)` baked
+    // into the cache would compose with `min` forever, so a transient fault would
+    // outlive itself. The cache holds the perception result; the verdict is applied
+    // fresh on every serve, including every replay.
     response.frame_id.evidence_digest = compute_perception_evidence_digest(&response);
 
     state.last_stamp_ms = Some(req.stamp_ms);
     state.last_response = Some(response.clone());
+
+    response.sensor_measured_hz = state.watchdog.measured_hz();
+    apply_sensor_health(&mut response, health, req.publisher_count.is_some());
     response
 }
 
@@ -1314,7 +1675,7 @@ mod tests {
 
     /// A request over `ranges`, with the camera channel DISARMED by default —
     /// so every pre-existing assertion still describes the lidar-only path.
-    fn req(ranges: Vec<f32>) -> PerceptionRequest {
+    pub(super) fn req(ranges: Vec<f32>) -> PerceptionRequest {
         PerceptionRequest {
             angle_min_rad: -1.5,
             angle_increment_rad: 0.01,
@@ -1334,6 +1695,8 @@ mod tests {
             camera_observations: Vec::new(),
             camera_stamp_ms: None,
             camera_max_age_ms: DEFAULT_CAMERA_MAX_AGE_MS,
+            publisher_count: None,
+            diagnostic_probe: false,
         }
     }
 
@@ -1403,7 +1766,7 @@ mod tests {
         // evidence, so two frames identical but for what was actually seen must
         // not share an evidence identity. If the marker were presentation-only
         // this assertion fails and the audit trail is forgeable by omission.
-        let mut response = invalid_perception_response(false);
+        let mut response = invalid_perception_response(false, SensorHealth::Disarmed);
         response.objects = vec![ObjOut {
             id: 7,
             x: 4.0,
@@ -1627,7 +1990,7 @@ mod tests {
 
     #[test]
     fn invalid_perception_response_has_no_vru_predictions() {
-        let response = invalid_perception_response(true);
+        let response = invalid_perception_response(true, SensorHealth::Disarmed);
 
         assert!(response.predicted_vrus.is_empty());
         assert!(!response.healthy);
@@ -2234,6 +2597,8 @@ mod tracked_perception_tests {
             camera_armed: false,
             camera_stamp_ms: None,
             camera_max_age_ms: DEFAULT_CAMERA_MAX_AGE_MS,
+            publisher_count: None,
+            diagnostic_probe: false,
             detections: Vec::new(),
             camera_observations: Vec::new(),
         }
@@ -2345,6 +2710,8 @@ mod duplicate_frame_tracking_tests {
             camera_armed: false,
             camera_stamp_ms: None,
             camera_max_age_ms: DEFAULT_CAMERA_MAX_AGE_MS,
+            publisher_count: None,
+            diagnostic_probe: false,
             detections: Vec::new(),
             camera_observations: Vec::new(),
         }
@@ -2370,6 +2737,406 @@ mod duplicate_frame_tracking_tests {
             moved.objects[0].vx > 0.5 && moved.objects[0].vx < 1.5,
             "expected roughly 1 m/s after one real 100 ms interval, got {}",
             moved.objects[0].vx,
+        );
+    }
+}
+
+#[cfg(test)]
+mod scan_liveness_tests {
+    //! #1211 end-to-end: a frozen `/scan` reaching the served speed cap.
+    //!
+    //! Every test injects scans and a clock. Nothing sleeps — wall-clock waits
+    //! would make a timing gate's own tests the flakiest thing in CI.
+
+    use super::*;
+
+    /// A live-stream scan: an obstacle straight ahead, with per-frame variation
+    /// in the low bits so consecutive frames are NOT bit-identical. Real sensor
+    /// noise looks like this, and it is what the freeze check keys on.
+    fn live_scan(stamp_ms: u64, seq: u32) -> PerceptionRequest {
+        let ranges: Vec<f32> = (0..300)
+            .map(|i| {
+                let theta = -1.5 + f64::from(i) * 0.01;
+                let base = if theta.abs() < 0.15 {
+                    6.0 / theta.cos()
+                } else {
+                    8.0
+                };
+                // One ulp of jitter, varying per frame — the low-bit noise a real
+                // lidar produces even when nothing in the world moved.
+                f32::from_bits((base as f32).to_bits() + (seq % 7))
+            })
+            .collect();
+        let mut r = super::tests::req(ranges);
+        r.stamp_ms = stamp_ms;
+        r.publisher_count = Some(1);
+        r
+    }
+
+    /// The same buffer and the same stamp, forever — a driver republishing one
+    /// frame.
+    fn frozen_scan() -> PerceptionRequest {
+        live_scan(1_000, 0)
+    }
+
+    fn state() -> TrackedPerceptionState {
+        TrackedPerceptionState::with_watchdog(SensorWatchdogConfig::r2_lidar(), true)
+    }
+
+    /// THE issue: repeated identical `/scan` messages eventually floor the served
+    /// cap. Before this wiring the same sequence produced a healthy corridor and a
+    /// non-zero cap indefinitely.
+    #[test]
+    fn repeated_identical_scans_eventually_floor_the_served_cap() {
+        let mut st = state();
+        let frozen = frozen_scan();
+
+        // Warm-up already holds the cap, so step past it on live frames first and
+        // confirm the service is genuinely serving motion before the freeze.
+        let mut now = 0;
+        for seq in 0..6 {
+            let _ = handle_perception_tracked_at(
+                &live_scan(1_000 + u64::from(seq) * 100, seq),
+                &mut st,
+                now,
+            );
+            now += 100;
+        }
+        let healthy = handle_perception_tracked_at(&live_scan(1_600, 99), &mut st, now);
+        assert_eq!(healthy.sensor_liveness, "healthy");
+        assert!(
+            healthy.speed_cap_mps > 0.0,
+            "precondition: a live stream must serve a moving cap, else the \
+             assertion below proves nothing"
+        );
+
+        // Now the driver freezes: same bytes, same stamp, still arriving at the
+        // same 10 Hz. Run past the 500 ms silence budget.
+        let mut last = healthy;
+        for _ in 0..8 {
+            now += 100;
+            last = handle_perception_tracked_at(&frozen, &mut st, now);
+        }
+
+        assert_eq!(last.sensor_liveness, "faulted");
+        assert_eq!(last.speed_cap_mps, 0.0, "a frozen scan must floor the cap");
+        assert!(!last.healthy);
+        // A driver replaying one buffer produces no NEW frames, so the liveness
+        // failure surfaces as "nothing new arrived" rather than as a frozen-stamp
+        // count. See the dedupe rationale in `handle_perception_tracked_at`: the
+        // frozen-stamp counter cannot be used at this call site without falsely
+        // faulting a healthy two-consumer deployment.
+        assert_eq!(last.sensor_fault, Some("SENSOR_NO_MESSAGES"));
+    }
+
+    /// Recovery takes the EXACT streak — not one frame, not an approximation.
+    #[test]
+    fn health_returns_only_after_the_exact_recovery_streak() {
+        let mut st = state();
+        let mut now = 0;
+
+        // Fault it: a frozen stream, run past the silence budget.
+        for _ in 0..10 {
+            let _ = handle_perception_tracked_at(&frozen_scan(), &mut st, now);
+            now += 100;
+        }
+        assert_eq!(
+            handle_perception_tracked_at(&frozen_scan(), &mut st, now).sensor_liveness,
+            "faulted"
+        );
+
+        // Valid, CHANGING frames at an acceptable rate. The cap must stay floored
+        // for exactly `recovery_streak - 1` of them.
+        let streak = SensorWatchdogConfig::r2_lidar().recovery_streak;
+        for i in 1..streak {
+            now += 100;
+            let r = handle_perception_tracked_at(
+                &live_scan(5_000 + u64::from(i) * 100, i),
+                &mut st,
+                now,
+            );
+            assert_eq!(
+                r.sensor_liveness, "recovering",
+                "frame {i} of {streak} must still be recovering"
+            );
+            assert_eq!(r.speed_cap_mps, 0.0, "frame {i} must stay floored");
+            assert!(!r.healthy);
+        }
+
+        now += 100;
+        let r = handle_perception_tracked_at(
+            &live_scan(5_000 + u64::from(streak) * 100, streak),
+            &mut st,
+            now,
+        );
+        assert_eq!(r.sensor_liveness, "healthy");
+        assert!(
+            r.speed_cap_mps > 0.0,
+            "the streak completed, so motion must be released"
+        );
+        assert!(r.healthy);
+    }
+
+    /// Startup begins unavailable: the very first scan is capped, because one
+    /// observation is not evidence of a rate.
+    #[test]
+    fn startup_begins_unavailable() {
+        let mut st = state();
+        let first = handle_perception_tracked_at(&live_scan(1_000, 0), &mut st, 0);
+        assert_eq!(first.sensor_liveness, "warming_up");
+        assert_eq!(first.speed_cap_mps, 0.0);
+        assert!(!first.healthy);
+    }
+
+    /// A watchdog fault cannot be overwritten by a healthy camera channel. The
+    /// cap composes with `min`, so the tighter bound always wins regardless of
+    /// which channel produced it.
+    #[test]
+    fn a_healthy_camera_cannot_lift_a_watchdog_fault() {
+        let mut st = state();
+        let mut now = 0;
+        for _ in 0..10 {
+            let _ = handle_perception_tracked_at(&frozen_scan(), &mut st, now);
+            now += 100;
+        }
+
+        // Same frozen scan, but with the camera channel armed and fresh — the
+        // healthiest possible companion channel.
+        let mut req = frozen_scan();
+        req.camera_armed = true;
+        req.camera_stamp_ms = Some(req.stamp_ms);
+        let r = handle_perception_tracked_at(&req, &mut st, now + 100);
+
+        assert!(
+            r.camera_healthy,
+            "precondition: the camera channel is healthy"
+        );
+        assert_eq!(r.sensor_liveness, "faulted");
+        assert_eq!(
+            r.speed_cap_mps, 0.0,
+            "a healthy camera must not lift the scan-liveness floor"
+        );
+    }
+
+    /// The duplicate-stamp short-circuit serves a CACHED perception result. That
+    /// path must still carry this tick's liveness verdict — otherwise a frozen
+    /// driver is served the healthy cap computed before it froze, which is
+    /// precisely the bug.
+    #[test]
+    fn the_cached_duplicate_response_still_carries_the_verdict() {
+        let mut st = state();
+        let mut now = 0;
+        for seq in 0..6 {
+            let _ = handle_perception_tracked_at(
+                &live_scan(1_000 + u64::from(seq) * 100, seq),
+                &mut st,
+                now,
+            );
+            now += 100;
+        }
+        // Establish a cached healthy response at this stamp.
+        let seeded = handle_perception_tracked_at(&live_scan(9_000, 1), &mut st, now);
+        assert_eq!(seeded.sensor_liveness, "healthy");
+        assert!(seeded.speed_cap_mps > 0.0);
+
+        // Replay the SAME stamp until the freeze trips. Every reply is served from
+        // cache, so if the verdict were not re-applied these would stay healthy.
+        let replay = live_scan(9_000, 1);
+        let mut last = seeded;
+        for _ in 0..8 {
+            now += 100;
+            last = handle_perception_tracked_at(&replay, &mut st, now);
+        }
+        assert_eq!(last.sensor_liveness, "faulted");
+        assert_eq!(last.speed_cap_mps, 0.0);
+    }
+
+    /// Two legitimate consumers posting the SAME live scan must not read as a
+    /// frozen sensor.
+    ///
+    /// `perception_governor` and `occy_doer` both subscribe to `/scan` and both POST
+    /// what they receive, so every frame reaches this service twice. Counting the
+    /// second copy as a fresh observation would trip the frozen-stamp check on a
+    /// perfectly healthy robot — the false positive that would have grounded the R2
+    /// the first time this shipped.
+    #[test]
+    fn two_consumers_posting_the_same_scan_are_not_a_frozen_sensor() {
+        let mut st = state();
+        let mut now = 0;
+        let mut last = None;
+        for seq in 0..12 {
+            let scan = live_scan(1_000 + u64::from(seq) * 100, seq);
+            // Consumer A, then consumer B, on the identical frame.
+            let _ = handle_perception_tracked_at(&scan, &mut st, now);
+            last = Some(handle_perception_tracked_at(&scan, &mut st, now + 10));
+            now += 100;
+        }
+        let last = last.expect("ran");
+        assert_eq!(
+            last.sensor_liveness, "healthy",
+            "a double-posted healthy stream must stay healthy"
+        );
+        assert_eq!(last.sensor_fault, None);
+        assert!(last.speed_cap_mps > 0.0);
+    }
+
+    /// A diagnostic probe is excluded from liveness accounting, so running the
+    /// doctor repeatedly cannot manufacture the freeze it is looking for.
+    #[test]
+    fn a_diagnostic_probe_cannot_trip_the_freeze_it_diagnoses() {
+        let mut st = state();
+        let mut now = 0;
+        for seq in 0..6 {
+            let _ = handle_perception_tracked_at(
+                &live_scan(1_000 + u64::from(seq) * 100, seq),
+                &mut st,
+                now,
+            );
+            now += 100;
+        }
+
+        // Ten identical probes, INTERLEAVED with the live stream — which is how a
+        // doctor run actually happens: the lidar keeps publishing while the tool
+        // pokes the service. (Ten probes with no live frames between them would be
+        // a genuine one-second scan outage, and the watchdog is right to fault
+        // that; excluding probes from liveness must not extend to masking silence.)
+        let mut probe = frozen_scan();
+        probe.diagnostic_probe = true;
+        for seq in 10..20 {
+            let r = handle_perception_tracked_at(&probe, &mut st, now);
+            assert_eq!(r.sensor_liveness, "disarmed", "a probe is not assessed");
+            now += 100;
+            let _ = handle_perception_tracked_at(
+                &live_scan(2_000 + u64::from(seq) * 100, seq),
+                &mut st,
+                now,
+            );
+        }
+
+        // The live stream is untouched: still healthy, no recovery streak owed.
+        now += 100;
+        let live = handle_perception_tracked_at(&live_scan(20_000, 3), &mut st, now);
+        assert_eq!(
+            live.sensor_liveness, "healthy",
+            "probes must not have left the live stream in recovery"
+        );
+        assert!(live.speed_cap_mps > 0.0);
+    }
+
+    /// A malformed scan lands on the already-defined reason code rather than a
+    /// parallel vocabulary for the same physical condition.
+    #[test]
+    fn an_all_invalid_scan_reports_the_ray_ratio_code() {
+        let mut st = state();
+        let mut bad = live_scan(1_000, 0);
+        bad.ranges = vec![f32::NAN; 300];
+        let r = handle_perception_tracked_at(&bad, &mut st, 0);
+        assert_eq!(r.sensor_fault, Some("SENSOR_LOW_VALID_RAY_RATIO"));
+        assert_eq!(r.speed_cap_mps, 0.0);
+        assert!(!r.healthy);
+    }
+
+    /// A CALLER's configuration error is not a sensor fault. Blaming the sensor
+    /// would both misdirect the operator and let a misconfigured client hold a
+    /// healthy lidar in recovery indefinitely.
+    #[test]
+    fn a_caller_config_error_is_not_charged_to_the_sensor() {
+        let mut st = state();
+        let mut now = 0;
+        for seq in 0..6 {
+            let _ = handle_perception_tracked_at(
+                &live_scan(1_000 + u64::from(seq) * 100, seq),
+                &mut st,
+                now,
+            );
+            now += 100;
+        }
+        assert_eq!(
+            handle_perception_tracked_at(&live_scan(2_000, 9), &mut st, now).sensor_liveness,
+            "healthy"
+        );
+
+        // A bad margin — nothing to do with the lidar.
+        now += 100;
+        let mut bad = live_scan(2_100, 10);
+        bad.margin_m = -1.0;
+        let r = handle_perception_tracked_at(&bad, &mut st, now);
+        assert_eq!(r.speed_cap_mps, 0.0, "the request is still refused");
+        assert_eq!(r.sensor_fault, None, "…but not blamed on the sensor");
+
+        // …and the sensor is still healthy on the next good frame, with no
+        // recovery streak owed.
+        now += 100;
+        let r = handle_perception_tracked_at(&live_scan(2_200, 11), &mut st, now);
+        assert_eq!(r.sensor_liveness, "healthy");
+        assert!(r.speed_cap_mps > 0.0);
+    }
+
+    /// An unobserved publisher count is reported as unobserved rather than
+    /// silently treated as zero publishers.
+    #[test]
+    fn an_unobserved_publisher_count_is_visible_not_assumed() {
+        let mut st = state();
+        let mut req = live_scan(1_000, 0);
+        req.publisher_count = None;
+        let r = handle_perception_tracked_at(&req, &mut st, 0);
+        assert!(!r.publisher_count_observed);
+        assert_eq!(r.sensor_fault, None, "absence is not a NoPublisher fault");
+
+        let mut req = live_scan(1_100, 1);
+        req.publisher_count = Some(1);
+        let r = handle_perception_tracked_at(&req, &mut st, 100);
+        assert!(r.publisher_count_observed);
+    }
+
+    /// Zero publishers, observed at the ROS layer, is its own fault code.
+    #[test]
+    fn zero_observed_publishers_faults_distinctly() {
+        let mut st = state();
+        let mut req = live_scan(1_000, 0);
+        req.publisher_count = Some(0);
+        let r = handle_perception_tracked_at(&req, &mut st, 0);
+        assert_eq!(r.sensor_fault, Some("SENSOR_NO_PUBLISHER"));
+        assert_eq!(r.speed_cap_mps, 0.0);
+    }
+
+    /// The disarmed path is byte-identical to pre-#1211 behaviour: no cap, no
+    /// verdict, whatever the stream does.
+    #[test]
+    fn the_disarmed_path_is_unchanged() {
+        let mut st = TrackedPerceptionState::with_watchdog(SensorWatchdogConfig::r2_lidar(), false);
+        let frozen = frozen_scan();
+        let mut now = 0;
+        let mut last = None;
+        for _ in 0..10 {
+            last = Some(handle_perception_tracked_at(&frozen, &mut st, now));
+            now += 100;
+        }
+        let last = last.expect("ran");
+        assert_eq!(last.sensor_liveness, "disarmed");
+        assert_eq!(last.sensor_fault, None);
+        assert!(
+            last.speed_cap_mps > 0.0,
+            "disarmed must not floor the cap — that is the pre-#1211 behaviour \
+             this gate exists to change only when armed"
+        );
+    }
+
+    /// The evidence digest identifies the perception EVIDENCE, not the liveness
+    /// verdict about it: the same scan bytes digest identically whether they
+    /// arrived first or third in a frozen run.
+    #[test]
+    fn the_liveness_verdict_stays_out_of_the_evidence_digest() {
+        let mut st = state();
+        let frozen = frozen_scan();
+        let first = handle_perception_tracked_at(&frozen, &mut st, 0);
+
+        let mut fresh = state();
+        let independent = handle_perception_tracked_at(&frozen, &mut fresh, 0);
+
+        assert_eq!(
+            first.frame_id.evidence_digest, independent.frame_id.evidence_digest,
+            "identical scan bytes must carry identical evidence identity"
         );
     }
 }
