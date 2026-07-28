@@ -33,9 +33,38 @@
 [Unit]
 Description=KIRRA Rabbit voice listener (wake word -> bounded turn -> fenced intent door)
 Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
-# Talks to mick/verifier/Ollama but is fail-soft per turn — no hard dependency.
-After=network-online.target kirra.target
-Wants=network-online.target
+#
+# 🔴 ORDERING ONLY — NEVER A HARD DEPENDENCY.
+#
+# Rabbit talks to Ollama (the persona/router model) and to mick (the fenced
+# intent door), so on a cold boot it should come up AFTER them: the operator's
+# very first "hello rabbit" then lands on a warm stack instead of eating a
+# connection error. That is all `After=` buys, and it is worth having.
+#
+# But every one of those calls is fail-soft PER TURN, and that property is what
+# must survive:
+#
+#   * Ollama down  → ask_llm returns (None, None) → Rabbit SPEAKS
+#                    "My voice module is offline for a moment." It still wakes,
+#                    still acknowledges, still answers truthfully.
+#   * mick down    → offer_to_door returns 'error' → "I can't reach my driving
+#                    control right now, so I'm staying put." No motion, said out
+#                    loud rather than silently dropped.
+#
+# So these are `Wants=`, not `Requires=`/`BindsTo=`/`PartOf=`. With a hard
+# dependency, stopping Ollama for thirty seconds to swap a model would STOP THE
+# WAKE LISTENER — the robot would go deaf, and the operator would have no way to
+# ask it what was wrong. Losing the ears is worse than losing the answers.
+#
+# Restart=on-failure below is likewise unchanged: an unreachable HTTP endpoint is
+# handled IN-PROCESS and never exits, so a downstream outage cannot produce a
+# restart storm. The listener only restarts if the listener itself dies.
+#
+# kirra-mick.service is ordering-ONLY (no Wants): kirra.target already pulls it
+# in on a box running the governor stack, and the voice layer has no business
+# force-starting that stack on a box where the operator installed only Rabbit.
+After=network-online.target kirra.target ollama.service kirra-mick.service
+Wants=network-online.target ollama.service
 
 [Service]
 Type=simple

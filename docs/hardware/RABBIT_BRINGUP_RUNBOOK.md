@@ -121,6 +121,92 @@ In its own terminal, alongside any of the above:
 Put an obstacle in front → the checker refuses → Rabbit: *"I've had to refuse a
 command. …"*. Force a lockout → *"I'm locking out and holding a safe stop."*
 
+## 5b. Service ordering and downstream resilience
+
+The voice stack talks to two backends: **Ollama** (the persona/router model) and
+**mick** (the fenced `/intent` door). Both are ordered-before, neither is a hard
+dependency:
+
+| Unit | Declares | Deliberately NOT |
+|---|---|---|
+| `kirra-mick.service` | `Wants=`/`After=ollama.service` | `Requires=`/`BindsTo=` |
+| `kirra-rabbit-voice.service` | `After=… ollama.service kirra-mick.service`, `Wants=ollama.service` | any hard dep on either |
+
+**Ordering is not readiness.** `After=` only places a unit later in the boot
+ordering — it does not wait for Ollama to be *listening*, and no systemd
+directive would. Both services therefore still tolerate an absent backend at
+runtime, which is the property that actually matters:
+
+- Ollama down → Rabbit says *"My voice module is offline for a moment."*
+- mick down → *"I can't reach my driving control right now, so I'm staying put."*
+- mick with Ollama down → a fail-closed 422: no intent, no motion.
+
+**Why not `Requires=`.** A hard dependency would mean that stopping Ollama for
+thirty seconds to swap a model also **stops the wake listener** — the robot goes
+deaf, and the operator loses the very channel they would use to ask what is
+wrong. Losing the answers is recoverable; losing the ears is not. `Restart=` is
+unchanged for the same reason: an unreachable HTTP endpoint is handled
+in-process and never exits, so a downstream outage cannot cause a restart storm.
+(`kirra-rabbit-voice` keeps `Restart=on-failure`, not `always`, so a listener
+disabled via `KIRRA_WAKE_ENABLED` exits 0 and rests inactive instead of
+restart-looping.)
+
+Structural regression: `python3 robot/service_units_test.py`.
+
+Verify what is actually installed:
+
+```bash
+systemctl show kirra-mick        -p After -p Wants -p Requires -p BindsTo
+systemctl show kirra-rabbit-voice -p After -p Wants -p Requires -p BindsTo
+systemctl list-dependencies --reverse ollama.service    # who would follow it down
+systemctl cat kirra-rabbit-voice | grep -c '^ExecStart' # exactly 1, no stale drop-in
+```
+
+## 5c. Model residency — pin Gemma on a dedicated robot
+
+Without residency Ollama unloads `gemma3:4b` after ~5 minutes idle and the next
+turn pays a multi-second cold reload — the single worst "why is it slow *this*
+time" effect. `KIRRA_RABBIT_KEEP_ALIVE` is sent as `keep_alive` on **every**
+Rabbit request (normal and streaming); it is residency only and cannot change
+what the model says.
+
+```bash
+# /etc/kirra/robot.env — on a DEDICATED Rabbit robot:
+KIRRA_RABBIT_KEEP_ALIVE=-1      # pin indefinitely
+# on a SHARED or development host, keep a finite hold instead:
+# KIRRA_RABBIT_KEEP_ALIVE=30m
+```
+
+There is deliberately **no global `-1`**: pinning holds the weights + KV cache
+for the life of the Ollama server, which is comfortable on a 16 GB Orin NX
+alongside the ROS stack and is not on an 8 GB board or with a second model
+loaded. It is a per-robot decision — so **verify, don't assume**:
+
+```bash
+# 1. baseline BEFORE the turn
+curl -s http://127.0.0.1:11434/api/ps | python3 -m json.tool
+free -h
+timeout 5 tegrastats
+
+# 2. trigger ONE Rabbit turn (say "Hello Rabbit", then "How are you?")
+
+# 3. after ~10 minutes idle — well past the old ~5 min unload:
+curl -s http://127.0.0.1:11434/api/ps | python3 -m json.tool   # gemma3:4b STILL listed?
+free -h                                                        # headroom still comfortable?
+timeout 5 tegrastats
+```
+
+`gemma3:4b` still listed after the idle gap = pinned and working. If `free -h`
+shows the box under memory pressure, **revert to a finite value** (`30m`) and
+restart the Rabbit units — a resident model is a latency optimization, never
+worth swapping.
+
+`robot/kirra_voice_doctor.sh` reports the three states separately and does not
+conflate them: the **configured** residency, whether the model is **loaded right
+now**, and whether the **server is unreachable**. A model that has legitimately
+unloaded on a healthy server with a finite keep-alive is normal, and is never a
+failure on its own.
+
 ## 6. The Rabbit experience (all together)
 
 Three terminals + the loop:
