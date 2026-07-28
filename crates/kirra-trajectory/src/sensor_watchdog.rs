@@ -1262,6 +1262,203 @@ mod tests {
         assert_eq!(run_healthy(&mut w, 0, 0, 8), SensorHealth::Healthy);
     }
 
+    // -----------------------------------------------------------------------
+    // Boundary pinning (mutation gate, WP-08)
+    //
+    // Every threshold below is a comparison whose OFF-BY-ONE form is still
+    // plausible code. A gate that admits `<=` where it meant `<` is a gate that
+    // fires one frame late or one frame early forever, so each boundary gets an
+    // exact-equality case rather than only a comfortably-past-it one.
+    // -----------------------------------------------------------------------
+
+    /// A ratio EXACTLY at the floor is acceptable, not a fault. `0.5` and `150/300`
+    /// are both exact in binary, so this pins the boundary without float slop.
+    #[test]
+    fn a_ratio_exactly_at_the_floor_is_not_a_fault() {
+        let cfg = cfg_with(|c| c.valid_ray_floor = 0.5);
+        let mut w = SensorWatchdog::new(cfg, true).expect("valid");
+        let f = FrameObservation {
+            valid_rays: 150,
+            total_rays: 300,
+            ..good_frame(0)
+        };
+        assert!(
+            w.observe(tick(0, Some(f))).fault().is_none(),
+            "a ratio exactly at the floor must pass — the floor is a minimum, not              a value to exceed"
+        );
+        // …and one ray below it does not.
+        let f = FrameObservation {
+            valid_rays: 149,
+            total_rays: 300,
+            ..good_frame(1)
+        };
+        assert!(matches!(
+            w.observe(tick(100, Some(f))),
+            SensorHealth::Faulted(SensorFault::LowValidRayRatio { .. })
+        ));
+    }
+
+    /// A rate EXACTLY at the floor is acceptable. Frames 100 ms apart measure
+    /// exactly 10.0 Hz, so a 10 Hz floor is met, not breached.
+    #[test]
+    fn a_rate_exactly_at_the_floor_is_not_a_fault() {
+        let cfg = cfg_with(|c| c.min_hz = 10.0);
+        let mut w = SensorWatchdog::new(cfg, true).expect("valid");
+        assert!(w.observe(tick(0, Some(good_frame(0)))).fault().is_none());
+        let h = w.observe(tick(100, Some(good_frame(1))));
+        assert_eq!(
+            h,
+            SensorHealth::Healthy,
+            "exactly the floor must pass, else every deployment running at its              nominal rate reds"
+        );
+        // …and a hair under it faults.
+        let mut w = SensorWatchdog::new(cfg, true).expect("valid");
+        let _ = w.observe(tick(0, Some(good_frame(0))));
+        assert!(matches!(
+            w.observe(tick(101, Some(good_frame(1)))),
+            SensorHealth::Faulted(SensorFault::RateBelowFloor { .. })
+        ));
+    }
+
+    /// A rate becomes measurable at EXACTLY two arrivals — one interval is enough
+    /// to measure. Requiring three would leave the rate check dark for an extra
+    /// frame on every start and every recovery.
+    #[test]
+    fn a_rate_is_measurable_from_exactly_two_arrivals() {
+        let mut w = armed();
+        let _ = w.observe(tick(0, Some(good_frame(0))));
+        assert_eq!(w.measured_hz(), None, "one arrival spans no interval");
+        let _ = w.observe(tick(100, Some(good_frame(1))));
+        assert_eq!(
+            w.measured_hz(),
+            Some(10.0),
+            "two arrivals 100 ms apart are exactly 10 Hz"
+        );
+    }
+
+    /// …and two arrivals are also enough to leave warm-up. Warm-up ends when a
+    /// rate can be computed, which is the same boundary.
+    #[test]
+    fn exactly_two_frames_leave_warm_up() {
+        let mut w = armed();
+        assert_eq!(
+            w.observe(tick(0, Some(good_frame(0)))),
+            SensorHealth::WarmingUp { frames: 1 }
+        );
+        assert_eq!(
+            w.observe(tick(100, Some(good_frame(1)))),
+            SensorHealth::Healthy,
+            "the second frame makes a rate measurable, so warm-up is over"
+        );
+    }
+
+    /// A streak frame arriving EXACTLY at the window boundary still counts. The
+    /// window is a budget the streak must fit inside, so landing on the last
+    /// millisecond is inside it.
+    #[test]
+    fn a_streak_frame_exactly_at_the_window_boundary_still_counts() {
+        let cfg = cfg_with(|c| {
+            c.silence_timeout_ms = 100_000;
+            c.min_hz = 0.1;
+            c.recovery_window_ms = 300;
+        });
+        let mut w = SensorWatchdog::new(cfg, true).expect("valid");
+        let _ = w.observe(SensorTick {
+            now_ms: 0,
+            publisher_count: 0,
+            frame: None,
+        });
+        assert_eq!(
+            w.observe(tick(100, Some(good_frame(1)))),
+            SensorHealth::Recovering {
+                healthy_streak: 1,
+                required: 5
+            }
+        );
+        // 400 - 100 == 300 == the window. Inside it, so the streak CONTINUES.
+        assert_eq!(
+            w.observe(tick(400, Some(good_frame(2)))),
+            SensorHealth::Recovering {
+                healthy_streak: 2,
+                required: 5
+            },
+            "a frame landing exactly on the window boundary must not restart the              streak"
+        );
+        // One millisecond past it does restart.
+        let mut w = SensorWatchdog::new(cfg, true).expect("valid");
+        let _ = w.observe(SensorTick {
+            now_ms: 0,
+            publisher_count: 0,
+            frame: None,
+        });
+        let _ = w.observe(tick(100, Some(good_frame(1))));
+        assert_eq!(
+            w.observe(tick(401, Some(good_frame(2)))),
+            SensorHealth::Recovering {
+                healthy_streak: 1,
+                required: 5
+            }
+        );
+    }
+
+    /// The restart budget is spent one attempt at a time. The FIRST attempt of
+    /// three is not terminal — a ceiling that latched immediately would make the
+    /// budget a lie and escalate to a human on the first retry.
+    #[test]
+    fn the_restart_budget_is_spent_one_attempt_at_a_time() {
+        let mut w = armed();
+        let _ = w.observe(SensorTick {
+            now_ms: 0,
+            publisher_count: 0,
+            frame: None,
+        });
+
+        w.record_restart_attempt();
+        assert_eq!(w.restart_attempts(), 1);
+        assert!(!w.is_terminal(), "one of three attempts is not exhaustion");
+
+        w.record_restart_attempt();
+        assert_eq!(w.restart_attempts(), 2);
+        assert!(!w.is_terminal(), "two of three attempts is not exhaustion");
+
+        w.record_restart_attempt();
+        assert_eq!(w.restart_attempts(), 3);
+        assert!(w.is_terminal(), "the third attempt exhausts the budget");
+    }
+
+    /// Every config error renders a distinct, non-empty operator message naming
+    /// the offending value. A refusal whose reason does not reach the operator is
+    /// a silent refusal.
+    #[test]
+    fn every_config_error_renders_a_distinct_message() {
+        let errors = [
+            WatchdogConfigError::ValidRayFloorOutOfRange { floor: 1.5 },
+            WatchdogConfigError::RateFloorNotPositive { min_hz: 0.0 },
+            WatchdogConfigError::SilenceTimeoutZero,
+            WatchdogConfigError::ThresholdZero {
+                field: "recovery_streak",
+            },
+        ];
+        let rendered: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        for text in &rendered {
+            assert!(!text.is_empty(), "a config refusal must say why");
+        }
+        assert!(rendered[0].contains("1.5"), "{}", rendered[0]);
+        assert!(rendered[0].contains("valid_ray_floor"), "{}", rendered[0]);
+        assert!(rendered[1].contains("min_hz"), "{}", rendered[1]);
+        assert!(rendered[2].contains("every tick"), "{}", rendered[2]);
+        assert!(rendered[3].contains("recovery_streak"), "{}", rendered[3]);
+
+        let mut unique = rendered.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            rendered.len(),
+            "messages must be distinguishable"
+        );
+    }
+
     // ----- fingerprint -----
 
     /// The bit-exactness the freeze check depends on: two scans differing in the
@@ -1284,6 +1481,69 @@ mod tests {
         assert_eq!(
             fingerprint_from_ranges(&base),
             fingerprint_from_ranges(&base.clone())
+        );
+    }
+
+    /// Known-answer test pinning the FNV-1a construction itself.
+    ///
+    /// The distinctness tests around this one assert that the fingerprint is
+    /// injective on the samples they try — and a degraded mixer (one that ORs bits
+    /// together instead of XORing, say) can still be injective on any finite
+    /// sample while having a far worse collision distribution across the whole
+    /// 2^64 space. Sampling cannot distinguish those; only pinning the algorithm
+    /// can.
+    ///
+    /// These constants are the FNV-1a values for the stated inputs — offset basis
+    /// `0xcbf29ce484222325`, prime `0x100000001b3`, ray count folded in first as
+    /// eight little-endian bytes, then each `f32::to_bits` as four. A reviewer can
+    /// recompute them from that description alone. They are not a stability
+    /// promise to any consumer (the fingerprint is only ever compared within one
+    /// process); changing the construction deliberately means changing them
+    /// deliberately, which is the point.
+    #[test]
+    fn the_fingerprint_is_fnv1a_over_length_then_raw_bits() {
+        assert_eq!(fingerprint_from_ranges(&[]), 0xa8c7_f832_281a_39c5);
+        assert_eq!(fingerprint_from_ranges(&[1.0]), 0x60d7_5439_c3b4_02a9);
+        assert_eq!(
+            fingerprint_from_ranges(&[1.0, 2.0, 3.0]),
+            0x722f_7faa_7b49_2d67
+        );
+    }
+
+    /// The mixing step must actually MIX. A fingerprint whose combine operation
+    /// only ever sets bits (`|`) or only ever clears them (`&`) degenerates: the
+    /// accumulator saturates or collapses, distinct scans start sharing a
+    /// fingerprint, and the freeze check silently stops distinguishing a repeated
+    /// buffer from a changing one — failing OPEN, in the one place this module
+    /// cannot afford it.
+    ///
+    /// Sweeping a single ray through many values across several positions catches
+    /// that: under a degenerate combine these collapse into far fewer distinct
+    /// values than inputs.
+    #[test]
+    fn the_fingerprint_mixes_rather_than_saturating() {
+        let base: Vec<f32> = (0..64).map(|i| 1.0 + i as f32 * 0.25).collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut inputs = 0;
+
+        // Vary each of several positions — including the FIRST, which a combine
+        // that collapses to "the last byte wins" would ignore entirely.
+        for pos in [0usize, 1, 17, 31, 63] {
+            // From 1: step 0 would leave the vector unmodified, producing the
+            // same input at every position and a self-inflicted collision.
+            for step in 1..64u32 {
+                let mut v = base.clone();
+                v[pos] = f32::from_bits(base[pos].to_bits() ^ step.wrapping_mul(2_654_435_761));
+                seen.insert(fingerprint_from_ranges(&v));
+                inputs += 1;
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            inputs,
+            "every distinct scan must fingerprint distinctly; {} inputs collapsed              to {} fingerprints, so the combine is not mixing",
+            inputs,
+            seen.len()
         );
     }
 
