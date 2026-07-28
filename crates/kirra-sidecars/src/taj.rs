@@ -383,6 +383,10 @@ fn invalid_perception_response(camera_armed: bool, health: SensorHealth) -> Perc
         sensor_fault: None,
         sensor_measured_hz: None,
         publisher_count_observed: false,
+        // A refused request never reached ingest, so nothing was discarded —
+        // as distinct from "discarded nothing", which this shape cannot
+        // express. The frame is already marked unhealthy with a zero cap.
+        rejected: RejectionOut::default(),
     };
     // The response is already at the MRC floor, so the liveness verdict cannot
     // lower it further — it is stamped so the REASON travels with the refusal.
@@ -772,6 +776,53 @@ pub struct PerceptionResponse {
     /// the publisher check did not run for this frame because the caller had no
     /// ROS graph to observe — surfaced so the gap is visible, never silent.
     pub publisher_count_observed: bool,
+    /// Per-reason accounting for the lidar returns this frame discarded
+    /// (#1210) — the operator-facing half of the self-filter.
+    ///
+    /// **Observability only, deliberately OUTSIDE the evidence digest.** The
+    /// tally does not change any verdict, and the one way self-filtering can
+    /// affect safety — a mask consuming so much of the scan that the remainder
+    /// is thin evidence — already reaches the digest through `confidence`,
+    /// which the ray-fraction ceiling drives to zero. Folding a pure counter
+    /// into the digest would make two frames with identical geometry hash
+    /// differently because one had a noisier ray, which is not what evidence
+    /// identity should mean.
+    pub rejected: RejectionOut,
+}
+
+/// Wire form of [`kirra_taj::RejectionTally`].
+///
+/// Mirrored rather than re-exported so the JSON field names are owned by this
+/// wire contract: a rename in the perception crate should break this file
+/// loudly rather than silently reshaping what an operator's dashboard reads.
+#[derive(Clone, Copy, Default, Serialize)]
+pub struct RejectionOut {
+    /// Range was NaN — a sensor producing garbage. Note that `+inf` is NOT
+    /// counted here: it is the ROS no-return convention and lands in
+    /// `beyond_max_range`, so an empty room does not read as a failing lidar.
+    pub not_a_number: u32,
+    /// Range below the scan's declared minimum.
+    pub below_min_range: u32,
+    /// Range above the scan's declared maximum, including the `+inf` a ROS
+    /// LaserScan uses for "no return on this ray". A count near the ray total
+    /// is open space or blocked optics — the two look identical here, which is
+    /// why the watchdog work in #1211 is a separate issue.
+    pub beyond_max_range: u32,
+    /// Discarded as the robot's own body. Zero whenever no mask is configured;
+    /// a value that climbs after a mask revision is the signal that the new
+    /// geometry filters more than the old one.
+    pub self_masked: u32,
+}
+
+impl From<kirra_taj::RejectionTally> for RejectionOut {
+    fn from(t: kirra_taj::RejectionTally) -> Self {
+        Self {
+            not_a_number: t.not_a_number,
+            below_min_range: t.below_min_range,
+            beyond_max_range: t.beyond_max_range,
+            self_masked: t.self_masked,
+        }
+    }
 }
 
 /// The corridor's straight-ahead reach: the smaller of the two boundary
@@ -1653,6 +1704,7 @@ pub fn handle_perception_tracked_at(
         sensor_fault: None,
         sensor_measured_hz: None,
         publisher_count_observed: false,
+        rejected: perception.rejected.into(),
     };
 
     response.frame_id.profile_digest = compute_perception_profile_digest(req);
@@ -1769,6 +1821,76 @@ mod tests {
         assert!(
             coasted[0].coasted,
             "an object the sensor did not see must be marked on the wire"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rejection accounting (#1210)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_rejection_tally_reaches_the_wire() {
+        // An all-infinity scan is the ROS no-return convention over every ray.
+        // It must land in `beyond_max_range` and nowhere else — an empty room
+        // is not a broken lidar.
+        let response = handle_perception(&req(vec![f32::INFINITY; 300]));
+        assert_eq!(response.rejected.beyond_max_range, 300);
+        assert_eq!(response.rejected.not_a_number, 0);
+        assert_eq!(response.rejected.self_masked, 0);
+    }
+
+    #[test]
+    fn a_nan_ray_refuses_the_whole_frame_rather_than_being_counted() {
+        // At THIS boundary a NaN never reaches the tally, because
+        // `validate_perception_request` refuses the entire request first. That
+        // is the stronger behaviour and worth pinning: an undecodable
+        // measurement is not something to count and carry on past.
+        //
+        // The per-ray `not_a_number` counter still earns its place — callers
+        // that drive `TajPhaseA` directly (the ROS adapter, the tracker) have
+        // no such request gate in front of them.
+        let mut ranges = vec![f32::INFINITY; 300];
+        ranges[0] = f32::NAN;
+        let response = handle_perception(&req(ranges));
+        assert!(!response.healthy, "a NaN range must fail the frame closed");
+        assert_eq!(response.speed_cap_mps, 0.0);
+        assert_eq!(
+            response.rejected.not_a_number, 0,
+            "the frame never reached ingest, so nothing was counted"
+        );
+    }
+
+    #[test]
+    fn the_tally_stays_out_of_the_evidence_digest() {
+        // The claim in `PerceptionResponse::rejected`'s doc comment, proven
+        // rather than asserted.
+        //
+        // Both scans admit exactly the same points — no ray produces one — so
+        // the geometry, the confidence and therefore the evidence are
+        // identical. They differ only in WHY each ray produced nothing: one
+        // scan is all no-return, the other reads short of the minimum range.
+        // Evidence identity must track what was perceived, not the health
+        // counters alongside it.
+        let below_min = vec![0.05_f32; 300]; // req() sets range_min_m = 0.1
+        let clean_response = handle_perception(&req(vec![f32::INFINITY; 300]));
+        let short_response = handle_perception(&req(below_min));
+
+        assert_eq!(
+            clean_response.rejected.beyond_max_range, 300,
+            "fixture: every ray is a no-return"
+        );
+        assert_eq!(
+            short_response.rejected.below_min_range, 300,
+            "fixture: every ray reads short"
+        );
+        assert_ne!(
+            clean_response.rejected.beyond_max_range, short_response.rejected.beyond_max_range,
+            "the two tallies must actually differ, else this proves nothing"
+        );
+        assert_eq!(
+            compute_perception_evidence_digest(&clean_response),
+            compute_perception_evidence_digest(&short_response),
+            "identical evidence must keep one identity regardless of the tally"
         );
     }
 

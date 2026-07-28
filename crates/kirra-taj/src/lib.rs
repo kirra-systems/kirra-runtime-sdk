@@ -48,6 +48,15 @@ pub use semantic_eval::{
 /// Deliberately separate from the drivability fusion above — see the module docs.
 pub mod object_goal;
 
+/// Self-filtering: discarding the robot's own returns (#1210). The ONE
+/// operation in Taj that removes evidence rather than tightening — see the
+/// module docs for why its safety argument runs the other way.
+pub mod self_filter;
+pub use self_filter::{
+    MountProvenance, RejectionTally, ScanIngest, SelfFilterBounds, SelfFilterError, SelfFilterMask,
+    SelfFilterPolygon, SensorMount,
+};
+
 /// Minimal range-scan input — a `sensor_msgs/LaserScan` subset.
 ///
 /// Angles are measured from the ego **+X** axis (forward); **+Y** is left.
@@ -206,6 +215,14 @@ pub struct TajPerception {
     /// makes the consumer fall back to the centroid — today's behaviour, never
     /// worse.
     pub near_edge_x_m: Vec<(u64, f64)>,
+    /// Per-reason accounting for the returns this frame discarded (#1210).
+    ///
+    /// Ingest is the single funnel — corridor extraction, clustering and
+    /// tracking all consume its output — so a discarded return is invisible
+    /// everywhere downstream. Carrying the tally out with the perception makes
+    /// the discarding auditable at the point of use rather than requiring a
+    /// separate metrics channel to be believed.
+    pub rejected: RejectionTally,
 }
 
 // ===========================================================================
@@ -382,9 +399,21 @@ pub fn clip_corridor_to_hazards(
 }
 
 /// Taj Phase-A geometric perception pipeline.
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// `Clone` but deliberately not `Copy`: the optional self-filter owns polygon
+/// geometry, and a mask is a thing you configure once and hand around, not a
+/// value that should silently duplicate on every use.
+#[derive(Debug, Clone, Default)]
 pub struct TajPhaseA {
     pub cfg: TajConfig,
+    /// Robot-body mask (#1210). `None` — the default — filters nothing, which
+    /// is today's behaviour and the correct configuration until a physical
+    /// capture on the actual robot says which returns are the robot.
+    ///
+    /// Unfiltered self-returns make the robot over-conservative: it sees its
+    /// own mast as an obstacle and slows for it. A wrong mask makes it blind.
+    /// Of the two ways to be wrong, this defaults to the survivable one.
+    pub self_filter: Option<SelfFilterMask>,
 }
 
 /// Minimum positive longitudinal coordinate admitted into corridor-boundary
@@ -425,6 +454,58 @@ const MIN_CORRIDOR_BOUNDARY_ABS_Y_M: f64 = 0.26;
 /// check becomes more conservative, never less.
 const MAX_CORRIDOR_STATIONS: usize = 5_000;
 
+/// Largest fraction of a scan's rays the self-filter may consume before the
+/// frame is treated as unhealthy.
+///
+/// The [`SelfFilterBounds`] radius check bounds a mask in METRES, which is the
+/// right bound for "can this mask reach out to where obstacles are". It is not
+/// a bound on how much of the SCAN a mask consumes: a thin annulus hugging the
+/// sensor stays well inside the radius limit while subtending every ray.
+///
+/// That matters because [`scan_confidence`] excludes masked rays from its
+/// denominator — a ray the robot's own body blocks genuinely cannot report the
+/// world, so counting it as a failed return would permanently depress
+/// confidence and make the mask unusable. But the same exclusion means a
+/// runaway mask could shrink the denominator until a handful of surviving rays
+/// read as full confidence.
+///
+/// So past this fraction the frame is declared unhealthy outright rather than
+/// trusted at high confidence on thin evidence. Half is deliberately generous:
+/// a real R2 mask covers the body and mast, single-digit percent of a 360°
+/// scan. Anything near this ceiling is a misconfiguration, not a tight fit.
+const MAX_SELF_MASKED_RAY_FRACTION: f32 = 0.5;
+
+/// Corridor confidence for a scan: what fraction of the rays that *could* see
+/// the world actually returned something usable.
+///
+/// Masked rays leave BOTH the numerator and the denominator. The alternative —
+/// keeping them in the denominator — would mean arming a correct mask lowers
+/// confidence, since a self-return counts as a valid return today and stops
+/// counting once it is recognised as the robot. A safety feature whose only
+/// visible effect is to push the corridor unhealthy would simply never be
+/// enabled.
+///
+/// Fail-closed at the edges: no rays at all, or a mask consuming more than
+/// [`MAX_SELF_MASKED_RAY_FRACTION`] of the scan, yields 0.0 → unhealthy
+/// corridor → the checker MRCs.
+fn scan_confidence(total_rays: usize, admitted: usize, self_masked: u32) -> f32 {
+    if total_rays == 0 {
+        return 0.0;
+    }
+    let total = total_rays as f32;
+    let masked = self_masked as f32;
+
+    if masked / total > MAX_SELF_MASKED_RAY_FRACTION {
+        return 0.0;
+    }
+
+    let visible = total - masked;
+    if visible <= 0.0 {
+        return 0.0;
+    }
+    (admitted as f32 / visible).clamp(0.0, 1.0)
+}
+
 /// Number of corridor stations for a forward extent and station spacing,
 /// saturating-cast safe and bounded by [`MAX_CORRIDOR_STATIONS`].
 ///
@@ -457,23 +538,99 @@ fn corridor_station_count(forward_extent_m: f64, station_m: f64) -> usize {
 impl TajPhaseA {
     #[must_use]
     pub fn new(cfg: TajConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            self_filter: None,
+        }
     }
 
-    /// Convert a scan to ego-frame Cartesian points, dropping invalid returns.
-    /// The result is angle-ordered (same order as `scan.ranges`).
+    /// Phase A with a validated robot-body mask (#1210).
+    ///
+    /// Takes an already-constructed [`SelfFilterMask`], which can only exist if
+    /// it passed its bounds — so there is no path from here to an unvalidated
+    /// mask being applied to a scan.
     #[must_use]
-    pub fn scan_to_points(&self, scan: &LaserScan) -> Vec<(f64, f64)> {
-        let mut pts = Vec::with_capacity(scan.ranges.len());
+    pub fn with_self_filter(cfg: TajConfig, mask: SelfFilterMask) -> Self {
+        Self {
+            cfg,
+            self_filter: Some(mask),
+        }
+    }
+
+    /// Convert a scan to base-frame Cartesian points, dropping invalid returns
+    /// and (when a mask is configured) the robot's own body.
+    ///
+    /// The result is angle-ordered (same order as `scan.ranges`).
+    ///
+    /// This is the single funnel: corridor extraction, clustering and tracking
+    /// all consume its output, so a return discarded here is invisible to every
+    /// downstream stage. That is exactly why the rejection reasons are counted
+    /// rather than dropped on the floor — see [`RejectionTally`].
+    #[must_use]
+    pub fn ingest_scan(&self, scan: &LaserScan) -> ScanIngest {
+        let mut points = Vec::with_capacity(scan.ranges.len());
+        let mut rejected = RejectionTally::default();
+
         for (i, &r) in scan.ranges.iter().enumerate() {
             let r = f64::from(r);
-            if !r.is_finite() || r < scan.range_min_m || r > scan.range_max_m {
-                continue; // no return on this ray
+            // Ordered so each ray is counted under exactly one reason, and
+            // NaN is separated from infinity on purpose. `+inf` is the ROS
+            // no-return convention and belongs with "nothing out there";
+            // NaN is a sensor producing garbage. The comparisons below place
+            // +/-inf in the range buckets on their own, so only NaN needs to
+            // be caught here.
+            if r.is_nan() {
+                rejected.not_a_number = rejected.not_a_number.saturating_add(1);
+                continue;
             }
+            if r < scan.range_min_m {
+                rejected.below_min_range = rejected.below_min_range.saturating_add(1);
+                continue;
+            }
+            if r > scan.range_max_m {
+                rejected.beyond_max_range = rejected.beyond_max_range.saturating_add(1);
+                continue;
+            }
+
             let theta = scan.angle_min_rad + (i as f64) * scan.angle_increment_rad;
-            pts.push((r * theta.cos(), r * theta.sin()));
+            let (sx, sy) = (r * theta.cos(), r * theta.sin());
+
+            // Masking happens in the SENSOR frame, before the mount transform.
+            // The mask describes where the robot's body is relative to the
+            // sensor, which is a fact about the physical mounting; it does not
+            // depend on the transform being right. Filtering after the
+            // transform would make the mask only as correct as an offset that
+            // has never been measured.
+            if let Some(mask) = &self.self_filter {
+                if mask.masks(sx, sy) {
+                    rejected.self_masked = rejected.self_masked.saturating_add(1);
+                    continue;
+                }
+            }
+
+            let (x, y) = match &self.self_filter {
+                Some(mask) => mask.mount().to_base(sx, sy),
+                // No mask configured means no declared mount either, so the
+                // historical implicit identity stands. Stated rather than
+                // silent: see `SensorMount::ASSUMED_IDENTITY`.
+                None => (sx, sy),
+            };
+            points.push((x, y));
         }
-        pts
+
+        ScanIngest { points, rejected }
+    }
+
+    /// Convert a scan to base-frame Cartesian points, discarding the rejection
+    /// accounting.
+    ///
+    /// Retained because it is the shape callers outside this crate already use.
+    /// Prefer [`ingest_scan`](Self::ingest_scan) where the tally matters — a
+    /// caller that cannot see how many returns were dropped cannot tell a clear
+    /// road from a dead sensor.
+    #[must_use]
+    pub fn scan_to_points(&self, scan: &LaserScan) -> Vec<(f64, f64)> {
+        self.ingest_scan(scan).points
     }
 
     /// Run the full Phase-A pipeline: scan → corridor + objects + health.
@@ -487,11 +644,8 @@ impl TajPhaseA {
     /// footprint scale alive long enough for VRU classification without
     /// touching the lean `PerceivedObject`/`TajPerception` contracts.
     fn process_parts(&self, scan: &LaserScan, now_ms: u64) -> (TajPerception, Vec<f64>) {
-        let points = self.scan_to_points(scan);
-        // Confidence = fraction of rays that produced a valid return. An empty /
-        // all-invalid scan → 0.0 → the corridor is unhealthy → checker MRCs.
-        let total = scan.ranges.len().max(1);
-        let confidence = (points.len() as f32 / total as f32).clamp(0.0, 1.0);
+        let ScanIngest { points, rejected } = self.ingest_scan(scan);
+        let confidence = scan_confidence(scan.ranges.len(), points.len(), rejected.self_masked);
 
         let corridor = self.extract_corridor(&points, confidence, now_ms, scan.stamp_ms);
         let with_extent = self.cluster_objects_with_extent(&points);
@@ -510,6 +664,7 @@ impl TajPhaseA {
                 corridor,
                 objects,
                 stamp_ms: scan.stamp_ms,
+                rejected,
             },
             extents,
         )
@@ -1508,6 +1663,23 @@ impl TajTracker {
     pub fn new(cfg: TajConfig) -> Self {
         Self {
             phase_a: TajPhaseA::new(cfg),
+            tracks: Vec::new(),
+            next_id: 0,
+        }
+    }
+
+    /// A tracker whose Phase-A ingest applies a validated robot-body mask
+    /// (#1210).
+    ///
+    /// The mask has to be installed here rather than bolted on downstream: a
+    /// self-return that survives ingest becomes a detection, associates into a
+    /// persistent track, and acquires an estimated velocity from the robot's
+    /// own motion. Filtering after tracking would mean deleting tracks that
+    /// already exist, which is a far harder thing to argue is safe.
+    #[must_use]
+    pub fn with_self_filter(cfg: TajConfig, mask: SelfFilterMask) -> Self {
+        Self {
+            phase_a: TajPhaseA::with_self_filter(cfg, mask),
             tracks: Vec::new(),
             next_id: 0,
         }
@@ -4150,5 +4322,311 @@ mod tests {
             furthest.is_finite(),
             "every boundary vertex must be finite, got {furthest}"
         );
+    }
+
+    // =======================================================================
+    // Self-filter, at pipeline level (#1210)
+    //
+    // The unit tests in `self_filter` prove the mask's geometry and bounds.
+    // These prove the thing that actually matters: what a mask does to the
+    // perception a checker consumes.
+    // =======================================================================
+
+    /// Walls at ±2 m, plus a short-range blob at `blob_range_m` centred on
+    /// +0.30 rad — the shape a mast or a bracket in the sensor's own field of
+    /// view produces.
+    fn scan_with_blob(blob_range_m: f64) -> LaserScan {
+        scan_from(10.0, 0, |theta| {
+            if (theta - 0.30).abs() < 0.06 {
+                return Some(blob_range_m);
+            }
+            let s = theta.sin();
+            if s.abs() < 1e-3 {
+                None
+            } else {
+                Some(2.0 / s.abs())
+            }
+        })
+    }
+
+    /// A mask covering the blob at 0.20 m and nothing beyond ~0.28 m.
+    fn mast_mask() -> SelfFilterMask {
+        let poly = SelfFilterPolygon::new(vec![
+            (0.13, -0.02),
+            (0.25, -0.02),
+            (0.25, 0.12),
+            (0.13, 0.12),
+        ]);
+        SelfFilterMask::new(
+            1,
+            vec![poly],
+            SensorMount::ASSUMED_IDENTITY,
+            SelfFilterBounds::for_footprint(0.203, 0.330, &SensorMount::ASSUMED_IDENTITY),
+        )
+        .expect("the mast mask fits inside the R2 bound")
+    }
+
+    /// How many objects sit within 0.5 m of the sensor — i.e. how many
+    /// near-field phantoms the pipeline is reporting.
+    fn near_objects(p: &TajPerception) -> usize {
+        p.objects
+            .iter()
+            .filter(|o| o.pos.x_m.hypot(o.pos.y_m) < 0.5)
+            .count()
+    }
+
+    #[test]
+    fn without_a_mask_the_robots_own_return_becomes_an_obstacle() {
+        // The baseline, and the reason #1210 exists. This is not a bug being
+        // asserted as correct — it is the current behaviour, recorded, so the
+        // masked case below is measured against something real.
+        let unmasked = TajPhaseA::default().process(&scan_with_blob(0.20), 0);
+        assert_eq!(
+            near_objects(&unmasked),
+            1,
+            "a 0.20 m return currently clusters into a near-field object"
+        );
+    }
+
+    #[test]
+    fn a_mask_removes_the_phantom_it_covers() {
+        let masked = TajPhaseA::with_self_filter(TajConfig::default(), mast_mask())
+            .process(&scan_with_blob(0.20), 0);
+        assert_eq!(
+            near_objects(&masked),
+            0,
+            "the masked return must not reach the checker as an obstacle"
+        );
+        assert!(
+            masked.rejected.self_masked > 0,
+            "and the discarding must be counted, not silent"
+        );
+    }
+
+    #[test]
+    fn a_real_obstacle_just_beyond_the_mask_survives() {
+        // 0.35 m at +0.30 rad is (0.334, 0.103) — outside the mask, which stops
+        // at x = 0.25. This is the assertion that matters: the filter must not
+        // eat the world.
+        let out = TajPhaseA::with_self_filter(TajConfig::default(), mast_mask())
+            .process(&scan_with_blob(0.35), 0);
+        assert_eq!(
+            near_objects(&out),
+            1,
+            "an obstacle beyond the mask boundary must still be reported"
+        );
+        assert_eq!(
+            out.rejected.self_masked, 0,
+            "and nothing should have been masked at all"
+        );
+    }
+
+    #[test]
+    fn the_survival_test_is_not_vacuous() {
+        // NON-VACUITY. `a_real_obstacle_just_beyond_the_mask_survives` would
+        // pass just as well if the mask were never applied — so prove the same
+        // pipeline, same scan shape, DOES remove the object once it moves
+        // inside the mask. One assertion is only meaningful because the other
+        // one holds.
+        let taj = TajPhaseA::with_self_filter(TajConfig::default(), mast_mask());
+        let outside = taj.process(&scan_with_blob(0.35), 0);
+        let inside = taj.process(&scan_with_blob(0.20), 0);
+        assert_eq!(near_objects(&outside), 1);
+        assert_eq!(near_objects(&inside), 0);
+        assert!(
+            outside.rejected.self_masked == 0 && inside.rejected.self_masked > 0,
+            "the filter must be the thing that made the difference"
+        );
+    }
+
+    #[test]
+    fn an_unarmed_pipeline_is_unchanged_by_this_work() {
+        // The disarmed path must be behaviourally identical to the pipeline
+        // before the self-filter existed — same objects, same corridor, same
+        // confidence — so enabling nothing costs nothing.
+        let scan = scan_with_blob(0.20);
+        let out = TajPhaseA::default().process(&scan, 0);
+
+        assert_eq!(out.rejected.self_masked, 0);
+        // Confidence still divides by the full ray count when nothing is
+        // masked: the admitted rays over the 181 rays the scan carries.
+        let admitted = TajPhaseA::default().ingest_scan(&scan).points.len();
+        let expected = admitted as f32 / scan.ranges.len() as f32;
+        assert!(
+            (out.corridor.confidence() - expected).abs() < 1e-6,
+            "unarmed confidence must be the historical ratio: expected {expected}, got {}",
+            out.corridor.confidence()
+        );
+    }
+
+    #[test]
+    fn rejection_reasons_are_counted_separately() {
+        // Each reason means something different to an operator, so each is
+        // counted separately rather than collapsed into one total.
+        let mut scan = scan_with_blob(2.0);
+        scan.ranges[0] = f32::NAN;
+        scan.ranges[1] = f32::INFINITY;
+        scan.ranges[2] = 0.001; // below range_min_m
+        scan.ranges[3] = 99.0; // beyond range_max_m
+
+        let ingest = TajPhaseA::default().ingest_scan(&scan);
+        assert_eq!(
+            ingest.rejected.not_a_number, 1,
+            "only the NaN ray — +inf is the no-return convention, not a fault"
+        );
+        assert_eq!(ingest.rejected.below_min_range, 1);
+        assert!(
+            ingest.rejected.beyond_max_range >= 1,
+            "the explicit 99.0 plus the helper's own no-return rays"
+        );
+        assert_eq!(
+            ingest.rejected.total() as usize + ingest.points.len(),
+            scan.ranges.len(),
+            "every ray is accounted for exactly once"
+        );
+    }
+
+    #[test]
+    fn a_ray_is_counted_under_exactly_one_reason() {
+        // A NaN range is also, technically, not within [min, max]. It must be
+        // counted as nonfinite and nothing else — conflating a dying sensor
+        // with an empty room is the failure this separation exists to prevent.
+        let mut scan = scan_with_blob(2.0);
+        for r in scan.ranges.iter_mut() {
+            *r = f32::NAN;
+        }
+        let ingest = TajPhaseA::default().ingest_scan(&scan);
+        assert_eq!(ingest.rejected.not_a_number as usize, scan.ranges.len());
+        assert_eq!(ingest.rejected.below_min_range, 0);
+        assert_eq!(ingest.rejected.beyond_max_range, 0);
+    }
+
+    #[test]
+    fn a_mask_consuming_most_of_the_scan_fails_closed() {
+        // A mask cannot buy itself confidence by shrinking the denominator.
+        // This one is inside the radius bound but subtends nearly every ray,
+        // which the metre-based bound alone would happily admit.
+        let ring = SelfFilterPolygon::new(vec![
+            (-0.28, -0.28),
+            (0.28, -0.28),
+            (0.28, 0.28),
+            (-0.28, 0.28),
+        ]);
+        let mask = SelfFilterMask::new(
+            1,
+            vec![ring],
+            SensorMount::ASSUMED_IDENTITY,
+            SelfFilterBounds {
+                max_vertex_radius_m: self_filter::MAX_SELF_MASK_VERTEX_RADIUS_M,
+            },
+        )
+        .expect("inside the radius bound");
+
+        // Every ray returns 0.10 m — the whole scan lands inside the mask.
+        let scan = scan_from(10.0, 0, |_| Some(0.10));
+        let out = TajPhaseA::with_self_filter(TajConfig::default(), mask).process(&scan, 0);
+
+        assert_eq!(
+            out.corridor.confidence(),
+            0.0,
+            "past the masked-ray ceiling the frame is unhealthy, not confident"
+        );
+    }
+
+    #[test]
+    fn a_correct_mask_costs_at_most_its_own_share_of_confidence() {
+        // The other side of the ray-fraction rule.
+        //
+        // Arming a mask does move confidence DOWN a little, and that is
+        // arithmetic rather than a defect: the masked rays were returning
+        // something, so they counted as successes before and now count as
+        // nothing at all. What must hold is that the movement is proportional
+        // to how much of the scan the mask covers — a mask over a few percent
+        // of the rays cannot push a healthy corridor to unhealthy, or nobody
+        // would ever enable it.
+        let scan = scan_with_blob(0.20);
+        let unmasked = TajPhaseA::default().process(&scan, 0);
+        let masked =
+            TajPhaseA::with_self_filter(TajConfig::default(), mast_mask()).process(&scan, 0);
+
+        assert!(masked.rejected.self_masked > 0, "the mask must have acted");
+
+        let masked_fraction = masked.rejected.self_masked as f32 / scan.ranges.len() as f32;
+        let drop = unmasked.corridor.confidence() - masked.corridor.confidence();
+        assert!(
+            drop >= 0.0 && drop <= masked_fraction,
+            "confidence moved {drop} on a mask covering {masked_fraction} of the scan"
+        );
+        assert!(
+            masked_fraction < 0.05,
+            "sanity: the mast mask is a few percent of the scan, got {masked_fraction}"
+        );
+    }
+
+    #[test]
+    fn a_measured_mount_offset_moves_the_reported_geometry() {
+        // Worth pinning explicitly, because it is the one consequence of this
+        // work that could surprise someone: the mount transform rides on the
+        // mask, so arming a mask that carries a MEASURED offset also shifts
+        // every reported position by that offset.
+        //
+        // That is the intended behaviour, not a coupling to be apologised for.
+        // Taj has always treated the sensor origin as the base origin, and if
+        // the lidar is really mounted 0.12 m forward then the old positions
+        // were wrong by 0.12 m. Measuring the offset is what fixes them. The
+        // test exists so the change is visible in the suite rather than
+        // discovered on a robot.
+        let mount = SensorMount {
+            x_m: 0.12,
+            y_m: 0.0,
+            yaw_rad: 0.0,
+            provenance: MountProvenance::Measured,
+        };
+        let mask = SelfFilterMask::new(
+            1,
+            vec![SelfFilterPolygon::new(vec![
+                (0.13, -0.02),
+                (0.25, -0.02),
+                (0.25, 0.12),
+                (0.13, 0.12),
+            ])],
+            mount,
+            SelfFilterBounds::for_footprint(0.203, 0.330, &mount),
+        )
+        .expect("valid");
+
+        let scan = scan_with_blob(4.0);
+        let unmounted = TajPhaseA::default().process(&scan, 0);
+        let mounted = TajPhaseA::with_self_filter(TajConfig::default(), mask).process(&scan, 0);
+
+        let far = |p: &TajPerception| {
+            p.objects
+                .iter()
+                .map(|o| o.pos.x_m)
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
+        assert!(
+            (far(&mounted) - far(&unmounted) - 0.12).abs() < 1e-9,
+            "a 0.12 m measured offset must move reported x by exactly 0.12 m: \
+             {} vs {}",
+            far(&mounted),
+            far(&unmounted)
+        );
+    }
+
+    #[test]
+    fn the_tracker_filters_before_it_tracks() {
+        // A self-return that survives ingest becomes a persistent track with an
+        // estimated velocity taken from the robot's own motion. Filtering has
+        // to happen upstream of association, so prove it does.
+        let mut tracker = TajTracker::with_self_filter(TajConfig::default(), mast_mask());
+        for frame in 0..3u64 {
+            let out = tracker.track(&scan_with_blob(0.20), frame * 100);
+            assert_eq!(
+                near_objects(&out),
+                0,
+                "frame {frame}: the mast must never become a track"
+            );
+        }
     }
 }
