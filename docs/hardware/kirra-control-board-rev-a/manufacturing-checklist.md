@@ -46,6 +46,10 @@
 
 ## Outputs
 
+- [ ] **DF-1 Design Freeze passed** (`design-reviews.md`) before any
+      output below was generated — worksheets fully measured, CubeMX ↔
+      schematic ↔ firmware pin manifest cross-checked, interface docs
+      unchanged since DR-2, independent sign-off recorded.
 - [ ] BOM reviewed: manufacturer part numbers for every line, no
       placeholders, availability checked.
 - [ ] Assembly variants documented (e.g. unpopulated optional footprints:

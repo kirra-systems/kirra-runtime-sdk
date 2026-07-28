@@ -2,8 +2,9 @@
 
 > Reviews are gates, not estimates — the same rule the firmware roadmap
 > applies to benchmarks. A phase is complete when its review passes with
-> recorded evidence, never because its documents exist. **No fabrication
-> order occurs before DR-4.**
+> recorded evidence, never because its documents exist. **No Gerbers are
+> generated before DF-1 passes, and no fabrication order occurs before
+> DR-4.**
 
 ## DR-1 — Architecture Review
 
@@ -58,6 +59,39 @@ Freezes:
   USB/ST-LINK reachable with the Nucleo mounted.
 
 Exit: DRC clean; 3D/mechanical check done; layout review notes resolved.
+
+## DF-1 — Design Freeze (pre-Gerber checkpoint)
+
+A short, mandatory consistency checkpoint after DR-2/DR-3 and **before any
+fabrication outputs are generated**. DR-2 freezes the schematic and DR-3
+the layout, but neither forces a *final cross-comparison* of the
+documentation, the firmware's assumptions, and the schematic as actually
+drawn — DF-1 does exactly that, and it exists because that comparison is
+what tends to save a board revision. **No Gerbers are generated before
+DF-1 passes**; DR-4 then reviews the outputs DF-1 authorized.
+
+DF-1 requires, all recorded:
+
+- **all worksheet entries measured** — no remaining `Pending` /
+  `Unverified` / `Requires measurement` item that affects Rev A, across
+  `pin-allocation.md`, `connector-map.md`, and the
+  `mechanical-reference.md` worksheet columns for the platform(s) this
+  build claims;
+- **CubeMX pin allocation finalized** — the exported project matches the
+  frozen `pin-allocation.md` table exactly;
+- **schematic complete** — no placeholder symbols, no TBD values;
+- **ERC clean** (or individually waived with rationale);
+- **interface documents unchanged since DR-2** — `interfaces.md`,
+  `system-interfaces.md`, `connector-map.md`, and `safety.md` diffed
+  against their DR-2-approved revisions; any change re-opens the affected
+  review scope instead of slipping through;
+- **firmware pin manifest updated to match the schematic** — the G474
+  board-revision manifest (the BSP input, in the style of
+  `firmware/rosmaster-r2/hal/include/r2/hal/board_manifest.hpp`)
+  regenerated from the frozen allocation, so firmware and copper cannot
+  disagree from day one;
+- **independent review completed** — a non-author walks the comparison
+  above and signs it.
 
 ## DR-4 — Manufacturing Review
 
