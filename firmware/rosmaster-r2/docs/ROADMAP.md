@@ -40,21 +40,47 @@ pending validation.
 
 ### Near-term bridge state — R2CP over the vendor board
 
-The next boundary move is the **Jetson-side R2CP bridge**, which does not exist
-yet (grep confirms no `R2CP` reference outside `firmware/`). This is the single
+The next boundary move is the **Jetson-side R2CP bridge**. This is the single
 largest gap between the spec in `PROTOCOL.md` and anything runnable, and it is
-host-side work — no board bring-up required to start it:
+host-side work — no board bring-up required:
 
-1. a host encoder/decoder for the canonical frame (`wire.cpp` is the reference
-   implementation and the conformance oracle — do NOT write a second dialect);
-2. a differential test harness: host encoder → `wire.cpp` decoder and back,
-   sharing `fuzz/corpus/` so the two implementations cannot drift;
-3. a **simulated MCU** speaking R2CP over a PTY, so the consumer's serial path
-   is exercised end to end with no hardware;
-4. the consumer gaining an R2CP drive mode alongside `r2_ackermann`/`x3`, gated
-   by `KIRRA_DRIVE_MODE` exactly as the existing modes are.
+1. ✅ a host encoder/decoder for the canonical frame — `crates/kirra-r2cp`
+   (`lib.rs`). `wire.cpp` remains the reference implementation and the
+   conformance oracle; where the two disagree, `wire.cpp` is right;
+2. ✅ a differential test harness — `tests/differential_vs_wire_cpp.rs` compiles
+   the real `wire.cpp` into an oracle subprocess and compares encoder bytes and
+   decoder VERDICTS in both directions, so the two implementations cannot drift
+   silently;
+3. ✅ a **simulated MCU** speaking R2CP over a PTY — `sim.rs` (the rules) and
+   `pty.rs` (the binding). `kirra-r2cp-sim` prints a `/dev/pts/N` path a real
+   bridge can open;
+4. ⬜ the consumer gaining an R2CP drive mode alongside `r2_ackermann`/`x3`,
+   gated by `KIRRA_DRIVE_MODE` exactly as the existing modes are.
 
 Only then does firmware flashing become a *swap* rather than a leap.
+
+**What the PTY stage does and does not prove.** It exercises the bridge against
+a peer that enforces the protocol's refusals — replay (`sequence <=
+last_accepted`), staleness, state gating, the watchdog, malformed payloads —
+over a real device path with real read boundaries and a real line discipline.
+Passing is evidence about the **bridge**. It is not evidence about the firmware,
+and a PTY cannot model baud rate, framing errors, line noise, cable pull,
+brown-out or on-target timing. HIL is what tests the link.
+
+> **Open obligation — COMMAND_ACK result codes.** `PROTOCOL.md` §COMMAND_ACK
+> names the eight results in prose ("accepted, clamped, stale, replay,
+> unauthenticated, invalid, disarmed and faulted") but binds no numbers, and no
+> firmware emits an ACK yet. `kirra_r2cp::sim::ack_result` assigns them in prose
+> order **provisionally**, and says so at its definition. When the firmware
+> implements COMMAND_ACK it must either adopt those values or change them in
+> both places; the differential harness is what will catch a silent
+> disagreement. Until then a bridge test asserting a result code is asserting
+> against a proposal, not against the protocol.
+>
+> `SafetyState` is NOT in that position: its wire bytes are mirrored from the
+> `safety_manager.hpp` discriminants (`boot`=0 … `firmware_update`=7), which is
+> why `sim::SafetyState::to_wire` writes the numbers out instead of deriving
+> them from its own smaller enum.
 
 ### Final Kirra-owned state — and what it does NOT remove
 
