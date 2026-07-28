@@ -39,21 +39,46 @@ def run(ctx):
         import sys as _sys
         _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__)))))
+        # AUTHORITY, not "is anyone holding it". serial_exclusivity.preflight()
+        # is the CONSUMER'S STARTUP sentinel, where any holder is a violation
+        # because the consumer has not opened the port yet. Reusing it here
+        # inverted the meaning: at diagnostic time the running consumer IS the
+        # holder, so a correctly-owned port reported
+        #   "/dev/myserial is already open in pid <consumer> — FAIL"
+        # i.e. the healthy state read as the failure. motor_authority compares
+        # holders against the unit's MainPID, so sole-consumer is PASS and any
+        # OTHER opener is still strictly FAIL.
         try:
-            import serial_exclusivity
-            violations = serial_exclusivity.preflight(motor)
+            import motor_authority
+            auth = motor_authority.collect(motor)
+            mode_v = []
+            try:
+                import serial_exclusivity
+                st = os.stat(motor)
+                mode_v = serial_exclusivity.mode_violations(
+                    st.st_mode, st.st_uid, os.geteuid(), motor)
+            except Exception:  # noqa: BLE001 — perms are a separate concern
+                pass
         except Exception as e:  # noqa: BLE001 — census must never crash the doctor
-            violations = [f"exclusivity check errored: {e}"]
-        if violations:
+            auth, mode_v = None, [f"authority check errored: {e}"]
+
+        if auth is None:
+            details.append(detail("motor serial exclusivity", "UNKNOWN",
+                                  "; ".join(mode_v)[:200]))
+        elif auth["verdict"] != motor_authority.PASS or mode_v:
+            why = auth["summary"] + ("; " + "; ".join(mode_v) if mode_v else "")
             details.append(detail(
-                "motor serial exclusivity", "FAIL",
-                f"{motor}: " + "; ".join(violations)[:200],
+                "motor serial exclusivity", "FAIL", why[:240],
                 fix="install robot/install/99-kirra-serial-exclusivity.rules "
                     "(owner=<consumer user>, MODE=0600) + udevadm trigger; "
-                    "stop other openers (disable_vendor_autostart.sh)"))
+                    "stop other openers (disable_vendor_autostart.sh --report)"))
         else:
-            details.append(detail("motor serial exclusivity", "PASS",
-                                  f"{motor} (owner+mode 0600, no other holder)"))
+            dev = auth["port"] if auth["port"] == auth["resolved"] \
+                else f"{auth['port']} → {auth['resolved']}"
+            details.append(detail(
+                "motor serial exclusivity", "PASS",
+                f"{dev} held only by {motor_authority.CONSUMER_UNIT} "
+                f"pid={auth['consumer_pid']} (owner+mode 0600)"))
     else:
         details.append(detail("motor serial", "FAIL", f"{motor} missing",
                               fix="check the USB lead + vendor udev rules (capture_from_robot.sh)"))

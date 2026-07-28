@@ -1367,6 +1367,25 @@ jobs:
           # timing value is ever branched on — observability must not quietly
           # become control.
           python3 robot/rabbit_latency_test.py
+          # SERIAL AUTHORITY, not vendor branding. The old detector asked "does
+          # any process have a vendor name?" and, run with --disable on the live
+          # R2, disabled ollama.service (Yahboom workspace on its PATH), pkill'd
+          # the YDLIDAR driver (exe under yahboomcar_ros2_ws), disabled the OLED
+          # unit and flagged `avahi-daemon: running [yahboom.local]`. None held
+          # /dev/myserial. These pin the ten ownership states and prove the four
+          # live false positives are matched by the OLD pattern and by nothing in
+          # the new one (non-vacuity), while a real rosmaster_main still matches.
+          python3 robot/motor_authority_test.py
+          # ONE definition of what the consumer needs, so the doctor, preflight
+          # and installer cannot drift. KIRRA_EXPECTED_CAR_TYPE is X3-ONLY (the
+          # doctor used to demand it in r2_ackermann, a mode that ignores it);
+          # odometry/closed-loop keys are required only when their flag is on.
+          python3 robot/consumer_config_contract_test.py
+          # The preflight that reports EVERY missing key in one run. A lint-clean
+          # Rabbit-only robot.env passed the syntax linter and the consumer then
+          # surfaced one missing value per restart — 200+ restarts to learn eight
+          # facts. Lint answers "valid shell file"; this answers "can it start".
+          python3 robot/install/preflight_consumer_env_test.py
           # Turn-state re-arm gate (Slice R, pure, no audio): the cross-process
           # "turn in progress" signal (fail-safe parse, active/done round-trip,
           # seq monotonicity) and the bounded rearm_decision that fixes the wake

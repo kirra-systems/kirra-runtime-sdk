@@ -3,6 +3,125 @@
 Benchmarks are gates, not estimates. Host timing is indicative; only target and
 electrical measurements support real-time/safety claims.
 
+## Deployment reality — where the live R2 actually is (2026-07)
+
+The phases below describe the *target*. This section records what is deployed
+on the bring-up robot today, so the gap is legible without reading eleven
+phases. Three states, deliberately separated.
+
+### Current implemented state — Yahboom base, Kirra chokepoint
+
+The Jetson Orin NX (Ubuntu 22.04 / JetPack 6.2, ROS 2 Humble) drives a **stock
+Yahboom/Rosmaster motor controller** over `/dev/myserial`. None of the firmware
+in this tree is on the robot. What *is* live is the ADR-0033 chokepoint:
+
+```
+Rabbit / Mick → planner → verifier / governor
+              → kirra_motor_consumer.py   (verifies the Ed25519 release token)
+              → /dev/myserial             (TIOCEXCL, 0600, single writer)
+              → Yahboom MCU               (vendor firmware, unverified)
+```
+
+Live evidence from bring-up: `serial exclusivity: OK`,
+`TIOCEXCL claimed on /dev/myserial`, `KIRRA consumer OWNS /dev/myserial`,
+`r2_ackermann drive: open-loop equal-PWM`.
+
+So the **authorization** boundary is already Kirra's, in Linux userspace. The
+**actuation** boundary is still the vendor's: the Yahboom MCU accepts whatever
+bytes reach it, and the single-writer property is what stops anything else
+sending them. Closed-loop wheel matching and R2 odometry are deliberately off
+pending validation.
+
+> The consumer is a *sole-writer* guard, not an authenticated link. It cannot
+> stop a process that gains the port; it stops there being a second process
+> with the port. That distinction is why the udev rule, `TIOCEXCL` and the
+> boot sentinel are all load-bearing, and why they must stay after the MCU
+> work lands.
+
+### Near-term bridge state — R2CP over the vendor board
+
+The next boundary move is the **Jetson-side R2CP bridge**, which does not exist
+yet (grep confirms no `R2CP` reference outside `firmware/`). This is the single
+largest gap between the spec in `PROTOCOL.md` and anything runnable, and it is
+host-side work — no board bring-up required to start it:
+
+1. a host encoder/decoder for the canonical frame (`wire.cpp` is the reference
+   implementation and the conformance oracle — do NOT write a second dialect);
+2. a differential test harness: host encoder → `wire.cpp` decoder and back,
+   sharing `fuzz/corpus/` so the two implementations cannot drift;
+3. a **simulated MCU** speaking R2CP over a PTY, so the consumer's serial path
+   is exercised end to end with no hardware;
+4. the consumer gaining an R2CP drive mode alongside `r2_ackermann`/`x3`, gated
+   by `KIRRA_DRIVE_MODE` exactly as the existing modes are.
+
+Only then does firmware flashing become a *swap* rather than a leap.
+
+### Final Kirra-owned state — and what it does NOT remove
+
+```
+… → verifier / governor → consumer → R2CP (authenticated) → Kirra MCU firmware
+                                                          → motors, steering,
+                                                            encoders, watchdog,
+                                                            e-stop
+```
+
+**Replacing the firmware does not remove the Jetson verifier or governor.**
+`PROTOCOL.md` already states this and it bears repeating here because it is the
+easiest thing to get wrong: R2CP's `AUTH_TAG` authenticates the *link* — it
+proves the bridge sent the bytes. It says nothing about whether the checker
+authorized the motion they encode. Until either the MCU verifies the Kirra
+release token itself, or a dedicated Kirra signer emits an authorization MAC
+under a key the bridge never holds, ADR-0033's token-verifying consumer, the
+serial ACL and the startup sentinel remain the trust boundary. A Kirra-owned
+MCU moves the *watchdog and safe-state* into hardware; it does not move the
+*authorization decision* out of the governor.
+
+What the MCU does buy: a hardware watchdog with a bounded FTTI, boot-safe motor
+state, an e-stop input that is not mediated by Linux, encoder/battery/fault
+telemetry the checker can trust, and a firmware image whose provenance we
+control (`bootloader/image_verifier.hpp`).
+
+### Staged migration
+
+| Stage | Boundary | Verifier/governor | Vendor MCU |
+|---|---|---|---|
+| 0 — today | consumer + `TIOCEXCL` | required | present, unverified |
+| 1 — bridge | consumer speaks R2CP to a **simulated** MCU | required | present |
+| 2 — HIL | R2CP to Kirra firmware on a bench board | required | bench only |
+| 3 — swap | R2CP to Kirra firmware on the robot | required | removed |
+| 4 — bound | MCU verifies Kirra authorization | required | — |
+
+Rollback at every stage is `KIRRA_DRIVE_MODE` plus reflashing the vendor image;
+stages 0–2 are rollback-free because the robot never stops using the vendor
+board. Do not skip stage 1: it is the only stage that can fail cheaply.
+
+### Compatibility and test strategy
+
+- **Conformance**: the host encoder is tested against `wire.cpp`, not against a
+  second specification. One decoder is normative.
+- **Simulated MCU** (stage 1) carries the FDIT matrix — truncated frames, CRC
+  flips, replayed sequences, stale timestamps, oversize payloads — reusing the
+  existing `fuzz/corpus/` seeds so host and target see identical bytes.
+- **HIL** (stage 2) adds what simulation cannot: real UART timing, brown-out,
+  cable pull, watchdog expiry under load, and the on-target WCET measurements
+  the crypto phase gate requires.
+- The existing `tools/check.sh` and the `rosmaster-r2-firmware` CI lane stay the
+  gate for firmware changes; the bridge gets a lane of its own when it lands.
+
+### Diagnostics that must survive the migration
+
+Bring-up produced four false positives from *vendor-name* matching — a lidar in
+`yahboomcar_ros2_ws`, the `yahboom.local` mDNS hostname, an OLED unit, and
+`ollama.service` with the workspace on its `PATH`. Acting on them disabled
+Ollama and killed the lidar. `robot/motor_authority.py` replaced that with
+**serial-authority** detection: who actually holds the configured motor device,
+compared against the consumer's systemd MainPID.
+
+That check is written against a device path, not a protocol, so it keeps
+working unchanged when the byte stream on `/dev/myserial` becomes R2CP. The
+single-writer invariant is what it verifies, and that invariant outlives the
+vendor board.
+
 ## Phase 0 — system safety and security baseline
 
 **Deliverables**
