@@ -367,6 +367,128 @@ def test_wake_recorder_is_not_inherited_from_the_turn_recorder() -> None:
     assert "KIRRA_WAKE_RECORD_CMD" in done.stderr
 
 
+# --- the trigger + acknowledgement contract ----------------------------------
+#
+# What the wake produces is ONE NEWLINE and a spoken "Yes?" — never the heard
+# words. rabbit_voice.sh reads the trigger with `read -r _` (the payload is
+# discarded by construction) and then records a SEPARATE clip for the actual
+# turn. That is why a wake phrase can never be a motion request: the phrase is
+# transcribed, matched, and thrown away inside this process.
+
+
+def _fire_once(**overrides):
+    """Run the real `_fire_trigger_and_wait` with sleeps stubbed out, and
+    return (what reached stdout, what the ack sink was handed)."""
+    import io
+    import tempfile
+    import wake_word as ww
+
+    spoken: list[str] = []
+    saved_sleep, saved_stdout = ww.time.sleep, sys.stdout
+    ww.time.sleep = lambda _s: None
+    sys.stdout = io.StringIO()
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".json") as state:
+            kwargs = dict(turn_state_file=state.name, rearm_mode="timer",
+                          holdoff_s=0, grace_s=0, max_s=0, cooldown_s=0,
+                          after_fire=lambda: spoken.append("<ack>"))
+            kwargs.update(overrides)
+            ww._fire_trigger_and_wait(**kwargs)
+        return sys.stdout.getvalue(), spoken
+    finally:
+        ww.time.sleep = saved_sleep
+        sys.stdout = saved_stdout
+
+
+def test_a_wake_emits_exactly_one_trigger_newline() -> None:
+    out, _ = _fire_once()
+    assert out == "\n", f"the trigger must be exactly one newline, got {out!r}"
+    assert out.count("\n") == 1, "a double trigger would record two clips per wake"
+
+
+def test_the_trigger_carries_no_text_so_a_wake_phrase_is_never_a_request() -> None:
+    # The heard phrase never leaves this process. rabbit_voice.sh records a NEW
+    # clip per trigger, so "hello rabbit" cannot arrive at rabbit_converse (and
+    # therefore cannot reach mick /intent) as an utterance.
+    out, _ = _fire_once()
+    assert out.strip() == "", f"the trigger payload must be empty, got {out!r}"
+    for phrase in ("hello", "rabbit", "parker", "hey", "yo"):
+        assert phrase not in out.lower(), f"the wake phrase leaked into the trigger: {out!r}"
+
+
+def test_the_ack_fires_once_per_wake() -> None:
+    _, spoken = _fire_once()
+    assert spoken == ["<ack>"], f"exactly one ack per wake, got {spoken}"
+    # A follow-up turn fires with no after_fire — the "Yes?" is the WAKE cue only.
+    _, none_spoken = _fire_once(after_fire=None)
+    assert none_spoken == [], "a follow-up trigger must not re-ack"
+
+
+def test_the_default_acknowledgement_is_yes() -> None:
+    """`_ack` speaks the literal "Yes?" through KIRRA_TTS_CMD when no explicit
+    KIRRA_WAKE_ACK_CMD is configured (voice line W1)."""
+    import subprocess
+    import wake_word as ww
+
+    calls = []
+    saved = subprocess.run
+    subprocess.run = lambda *a, **k: calls.append((a, k)) or None
+    try:
+        ww._ack(None, "piper --model en_GB-alba-medium")
+        assert len(calls) == 1, calls
+        args, kwargs = calls[0]
+        assert kwargs.get("input") == "Yes?", \
+            f'the default wake acknowledgement must be "Yes?", got {kwargs.get("input")!r}'
+        assert args[0][0] == "piper", "it must go through the configured TTS command"
+
+        # An explicit ack command wins, and is run as a command (no stdin text).
+        calls.clear()
+        ww._ack("aplay /opt/kirra/chime.wav", "piper --model x")
+        assert len(calls) == 1 and calls[0][0][0] == ["aplay", "/opt/kirra/chime.wav"]
+        assert "input" not in calls[0][1], "an ack COMMAND takes no spoken text"
+    finally:
+        subprocess.run = saved
+
+
+def test_ack_never_blocks_the_trigger_when_tts_is_broken() -> None:
+    # The trigger is already on stdout by the time the ack runs; a dead TTS must
+    # not raise back into the listener loop.
+    import subprocess
+    import wake_word as ww
+
+    saved = subprocess.run
+
+    def _boom(*a, **k):
+        raise OSError("no audio device")
+
+    subprocess.run = _boom
+    try:
+        ww._ack(None, "piper --model x")   # must not raise
+    finally:
+        subprocess.run = saved
+
+
+# --- a configured second name ("parker") -------------------------------------
+
+def test_a_configured_parker_phrase_wakes() -> None:
+    """"hello parker" is NOT a default phrase — it wakes only when configured
+    via KIRRA_WAKE_PHRASES. Both facts are pinned so a bring-up that expects
+    "hello parker" knows it must set the variable."""
+    assert _hit("hello parker") is None, \
+        "hello parker must NOT wake on the default phrase set"
+
+    configured = parse_phrases("hello rabbit,hey rabbit,yo rabbit,"
+                               "hello parker,hey parker,yo parker")
+    assert wake_hit(transcript_tokens("hello parker"), configured) == "hello parker"
+    assert wake_hit(transcript_tokens("hey parker"), configured) == "hey parker"
+    # Same matcher, so the same guarantees carry over: mid-sentence wakes, a
+    # mishear of the long token is absorbed, and the anchor alone does not.
+    assert wake_hit(transcript_tokens("well hello parker"), configured) == "hello parker"
+    assert wake_hit(transcript_tokens("hello parkers"), configured) == "hello parker"
+    assert wake_hit(transcript_tokens("parker"), configured) is None, \
+        "the name alone must not wake — the phrase needs its anchor"
+
+
 def _run_all() -> int:
     failures = 0
     for name, fn in sorted(globals().items()):

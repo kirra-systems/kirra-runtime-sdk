@@ -1387,6 +1387,16 @@ jobs:
           # routing guardrails, and parse_reply (the fail-closed directive authority)
           # is order-agnostic. See robot/rabbit_converse.py.
           python3 robot/rabbit_stream_integration_test.py
+          # Rabbit's conversation channel across mick's non-motion fence (skips
+          # where requests is absent, e.g. this lane): a greeting/question still
+          # gets a SPOKEN reply and makes NO /intent call at all, a drive request
+          # still sends exactly one directive, and mick's second 200 shape
+          # ({"ok":true,"intent":null} — fenced, nothing latched) is read as
+          # 'reject', never as a successful drive. Keying on the `ok` flag alone
+          # would have Rabbit announce motion that never happened and would
+          # ADVANCE a mission past a step that never ran. See
+          # robot/rabbit_converse.py::offer_to_door.
+          python3 robot/rabbit_converse_test.py
           # Lidar orientation check (pure geometry, no ROS/hardware): the scan
           # angle→direction labelling (0°=FRONT, +90°=LEFT), in-band return
           # filtering, per-direction nearest, and the forward-aligned verdict — the

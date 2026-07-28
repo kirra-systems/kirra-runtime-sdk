@@ -132,6 +132,80 @@ Press the button, ask *"what's ahead?"* → it looks and answers. Say *"take us
 that way"* → it routes the directive through the door; the checker bounds it;
 Rabbit confirms. Approach an obstacle → it warns, unprompted. That's Rabbit.
 
+## 7. Greeting check — speech vs motion (read-only, wheels up)
+
+Four utterances that prove the conversation channel still talks after mick's
+non-motion fence, and that only the fourth asks for motion. **Wheels raised or
+motion disabled** for the whole sequence (§0) — you should not need the floor,
+and step 4 is the only one that can move anything.
+
+Two terminals to watch first:
+
+```bash
+# T1 — Rabbit's voice stack. Under the unit it logs to the JOURNAL, not a file
+# (kirra-rabbit-voice.service is `wake_word.py | rabbit_voice.sh`, no redirect):
+journalctl -u kirra-rabbit-voice -f
+# Running it by hand instead? Nothing writes /tmp/rabbit.log on its own — tee it:
+python3 robot/wake_word.py | ./robot/rabbit_voice.sh 2>&1 | tee /tmp/rabbit.log
+
+# T2 — mick's motion door. The ONLY thing that moves is a new `seq`.
+watch -n1 'curl -s http://localhost:8102/intent/last'
+```
+
+Baseline the door before you speak, so "unchanged" is a fact and not an
+impression:
+
+```bash
+curl -s http://localhost:8102/intent/last     # note `seq` (or {"intent":null})
+```
+
+| # | Say | Expect to hear | `/intent/last` |
+|---|---|---|---|
+| 1 | "Hello Rabbit" | **"Yes?"**, then it listens | **unchanged** |
+| 2 | "How are you?" | a conversational answer | **unchanged** |
+| 3 | "What do you see?" | a grounded answer, or a truthful *"I can't see that right now"* | **unchanged** |
+| 4 | "Drive forward one meter" | a confirmation | **`seq` +1**, `intent` present |
+
+Steps 1–3 must leave `seq` **exactly** where the baseline was. A bump on 1–3 means
+a conversational turn reached the motion door — stop and report it.
+
+What each step is really checking:
+
+1. **Wake ack.** `wake_word.py` matched the phrase and fired **one** trigger; the
+   `"Yes?"` comes from its `_ack` (`KIRRA_WAKE_ACK_CMD`, else `KIRRA_TTS_CMD`).
+   The phrase itself is discarded — `rabbit_voice.sh` records a *new* clip for
+   your next sentence. Log line: `wake_word: wake: "hello rabbit"`.
+   Silent instead? `KIRRA_WAKE_ACK_CMD`/`KIRRA_TTS_CMD` are unset — the listener
+   logs `wake ack (… — silent)` and the trigger still fires.
+2. **Chat.** Channel A end to end: Ollama → TTS. No `/intent` call is made at
+   all for a `directive: null` turn.
+3. **Read-only grounding.** Same channel, plus the perception grab. An
+   unreachable sensor must produce a truthful *unavailable* line, never a
+   confident guess and never motion.
+4. **The motion door.** The one directive-bearing turn. `seq` advances and
+   `intent` is non-null; the checker/governor then bound whatever it grounds to.
+
+Distinguishing speech from motion at the topics, if you want it belt-and-braces
+(read-only subscribes, run alongside):
+
+```bash
+ros2 topic echo /cmd_vel_raw --once   # occy_doer's PROPOSAL — silent on steps 1-3
+ros2 topic echo /cmd_vel --once       # the governed output after the interceptor
+```
+
+Say "Hello Rabbit" straight into mick instead, and you should see the fence
+answer — this is the boundary, not a fault:
+
+```bash
+curl -s localhost:8102/intent -XPOST -H 'content-type: application/json' \
+     -d '{"text":"hello rabbit"}'
+# {"ok":true,"intent":null}    ← no intent, no latch, seq unchanged
+curl -s localhost:8102/intent/last          # still the baseline
+```
+
+That is mick behaving correctly: it is the motion door, not the conversation
+channel. Rabbit answers greetings; mick does not.
+
 ---
 
 ## Speed — making Rabbit reply fast

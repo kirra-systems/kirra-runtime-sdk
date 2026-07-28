@@ -240,11 +240,32 @@ def parse_reply(raw):
 def offer_to_door(directive_text):
     """Hand the directive TEXT to the ONE fail-closed door (mick POST /intent).
     Returns 'ok' | 'reject' | 'error'. This is the sole actuation-adjacent call —
-    it is text-to-the-door, exactly what a human typing does."""
+    it is text-to-the-door, exactly what a human typing does.
+
+    'ok' means AN INTENT EXISTS, not merely that the request was well-formed.
+    mick has two 200 shapes and only one of them moves anything:
+
+        {"ok":true,"intent":{...},"seq":n,"at_ms":t}   an intent was latched
+        {"ok":true,"intent":null}                      deterministically non-motion
+                                                       (mick's greeting/read-only
+                                                       fence): no intent, no latch,
+                                                       seq UNCHANGED — nothing moves
+
+    Keying 'ok' on the `ok` flag alone would report the second shape as a
+    successful drive, and Rabbit would say "On our way" while standing still —
+    a false success acknowledgement, and worse in mission mode, where 'ok'
+    ADVANCES to the next step. So an absent or null `intent` is 'reject': the
+    door declined to produce motion, which is exactly what every caller's
+    non-'ok' arm already handles (converse re-asks, mission halts, skills say so).
+
+    `intent` is present and non-null on every accepted reply, before and after
+    the fence existed, so this reads correctly against either mick build — no
+    coordinated deploy."""
     try:
         r = requests.post(f"{MICK}/intent", timeout=60.0, json={"text": directive_text})
         j = r.json() if r.content else {}
-        if r.status_code == 200 and isinstance(j, dict) and j.get("ok"):
+        if (r.status_code == 200 and isinstance(j, dict) and j.get("ok")
+                and j.get("intent") is not None):
             return "ok"
         return "reject"
     except Exception:  # noqa: BLE001
