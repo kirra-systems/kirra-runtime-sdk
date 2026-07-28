@@ -192,6 +192,20 @@ pub struct TajPerception {
     /// design. The marker exists so an AUDIT can tell them apart, not to gate
     /// behaviour.
     pub coasted_ids: Vec<u64>,
+    /// `(object id, nearest forward edge x)` in the ego frame.
+    ///
+    /// An object is NOT at its centroid. The clustering already computes each
+    /// cluster's bounding box and then throws it away, so a clear-distance
+    /// bound taken from `pos.x_m` treats a 0.5 m-wide obstacle as ~0.25 m
+    /// further away than it is — material against a 0.40 m margin at robot
+    /// scale.
+    ///
+    /// Carried by id for the same reason as `coasted_ids`: this is Taj
+    /// geometry, and `PerceivedObject` is the WCET-critical checker type with
+    /// ~138 construction sites that have no opinion about it. An absent entry
+    /// makes the consumer fall back to the centroid — today's behaviour, never
+    /// worse.
+    pub near_edge_x_m: Vec<(u64, f64)>,
 }
 
 // ===========================================================================
@@ -483,13 +497,16 @@ impl TajPhaseA {
         let with_extent = self.cluster_objects_with_extent(&points);
         let mut objects = Vec::with_capacity(with_extent.len());
         let mut extents = Vec::with_capacity(with_extent.len());
-        for (o, e) in with_extent {
+        let mut near_edges = Vec::with_capacity(with_extent.len());
+        for (o, e, near_edge_x_m) in with_extent {
+            near_edges.push((o.id, near_edge_x_m));
             objects.push(o);
             extents.push(e);
         }
         (
             TajPerception {
                 coasted_ids: Vec::new(),
+                near_edge_x_m: near_edges,
                 corridor,
                 objects,
                 stamp_ms: scan.stamp_ms,
@@ -570,7 +587,10 @@ impl TajPhaseA {
     /// lean `PerceivedObject` contract deliberately drops, needed by the
     /// WP-10 VRU classifier ([`TajTracker::classify_pedestrians`]) before it
     /// is lost at the contract boundary.
-    fn cluster_objects_with_extent(&self, points: &[(f64, f64)]) -> Vec<(PerceivedObject, f64)> {
+    fn cluster_objects_with_extent(
+        &self,
+        points: &[(f64, f64)],
+    ) -> Vec<(PerceivedObject, f64, f64)> {
         let mut objects = Vec::new();
         if points.is_empty() {
             return objects;
@@ -601,6 +621,11 @@ impl TajPhaseA {
                         max_y = max_y.max(y);
                     }
                     let extent_m = (max_x - min_x).hypot(max_y - min_y);
+                    // The cluster's NEAREST FORWARD EDGE. The box is computed
+                    // here anyway; collapsing it to a diagonal and keeping only
+                    // the centroid discarded the one number a clear-distance
+                    // bound actually wants — an object is not at its middle.
+                    let near_edge_x_m = min_x;
                     objects.push((
                         PerceivedObject {
                             id: next_id,
@@ -613,6 +638,7 @@ impl TajPhaseA {
                             vel: Point { x_m: 0.0, y_m: 0.0 },
                         },
                         extent_m,
+                        near_edge_x_m,
                     ));
                     next_id += 1;
                 }
@@ -1613,6 +1639,16 @@ impl TajTracker {
                 vel: tr.vel,
             });
             perception.coasted_ids.push(tr.id);
+            // A coasted object has no fresh cluster, so derive its near edge
+            // from the last known extent. Half the bbox DIAGONAL is >= the true
+            // half-extent along x, so this places the edge at least as close as
+            // reality — conservative, the only acceptable direction for a
+            // hazard nobody can currently see.
+            if tr.extent_m.is_finite() && tr.extent_m >= 0.0 {
+                perception
+                    .near_edge_x_m
+                    .push((tr.id, predicted.x_m - 0.5 * tr.extent_m));
+            }
             next_tracks.push(Track {
                 id: tr.id,
                 pos: predicted,

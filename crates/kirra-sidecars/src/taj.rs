@@ -1143,13 +1143,30 @@ pub fn handle_perception_tracked(
 
     // The nearest IN-LANE object (|y| within half a lane), as a discrete
     // clear-distance bound that complements the corridor reach.
+    // Measured to each object's NEAREST FORWARD EDGE, not its centroid: an
+    // obstacle is not at its middle, and the centroid reading reported it as up
+    // to half its own extent further away than it is. An absent entry (an
+    // object Taj did not cluster this frame) falls back to the centroid —
+    // today's behaviour, never worse. `min` with the centroid means a
+    // pathological edge BEHIND the centroid can only tighten, never relax.
+    //
+    // Eligibility still uses the centroid, so WHICH objects count as forward
+    // and in-lane is unchanged; only the DISTANCE to a counted object tightens.
+    let near_edge_of: std::collections::BTreeMap<u64, f64> =
+        perception.near_edge_x_m.iter().copied().collect();
     let nearest_object_m = perception
         .objects
         .iter()
         .filter(|o| {
             is_forward_object_candidate(o.pos.x_m, o.pos.y_m, req.forward_extent_m, req.lane_half_m)
         })
-        .map(|o| o.pos.x_m)
+        .map(|o| {
+            near_edge_of
+                .get(&o.id)
+                .copied()
+                .filter(|edge: &f64| edge.is_finite())
+                .map_or(o.pos.x_m, |edge: f64| edge.min(o.pos.x_m))
+        })
         .fold(f64::INFINITY, f64::min);
     let nearest_object_m = nearest_object_m.is_finite().then_some(nearest_object_m);
 
@@ -1404,6 +1421,76 @@ mod tests {
             observed, coasted,
             "the coasted marker must be part of the evidence identity"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Nearest-forward-edge clear distance
+    //
+    // Clear distance used to be measured to an object's CENTROID, reporting an
+    // obstacle as up to half its own extent further away than it is. The
+    // clustering already computes each cluster's bounding box and discarded it.
+    // -----------------------------------------------------------------------
+
+    /// A wide obstacle at range `bx`, spanning enough rays to have real
+    /// x-EXTENT — the whole point of the test.
+    ///
+    /// Constant RANGE, deliberately: it traces an arc about the lidar, so
+    /// `x = bx·cos θ` varies across the cluster and its nearest edge sits
+    /// genuinely nearer than its centroid. The `bx / cos θ` form used elsewhere
+    /// in this file describes a flat wall — every point at `x == bx` exactly —
+    /// which has NO near edge and would make these assertions vacuous.
+    fn wide_blob_ranges(bx: f32) -> Vec<f32> {
+        (0..300)
+            .map(|i| {
+                let theta = -1.5 + (i as f64) * 0.01;
+                if theta.abs() < 0.35 {
+                    bx
+                } else {
+                    f32::INFINITY
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn clear_distance_is_measured_to_the_near_edge_not_the_centroid() {
+        let mut state = TrackedPerceptionState::default();
+        let response = handle_perception_tracked(&at(wide_blob_ranges(4.0), 1_000), &mut state);
+
+        let object = response
+            .objects
+            .first()
+            .expect("fixture must produce an obstacle");
+        let clear = response.clear_distance_m;
+
+        // A real gap, not floating-point noise: the arc spans |theta| < 0.35 at
+        // range 4, so the near edge sits ~4(1 - cos 0.35) ~ 0.24 m nearer than
+        // the centroid. Requiring a centimetre-scale gap is what stops a
+        // zero-extent fixture passing this vacuously.
+        assert!(
+            clear < object.x - 0.05,
+            "clear distance {clear} must be materially nearer than the centroid \
+             {} — an obstacle is not at its middle",
+            object.x
+        );
+    }
+
+    #[test]
+    fn the_near_edge_never_reports_an_object_further_than_its_centroid() {
+        // Direction guard. Whatever the geometry, this change may only TIGHTEN:
+        // a bound that could relax would be a safety regression, not a fix.
+        let mut state = TrackedPerceptionState::default();
+        for bx in [2.0_f32, 4.0, 6.0, 8.0] {
+            let response = handle_perception_tracked(&at(wide_blob_ranges(bx), 1_000), &mut state);
+            if let Some(object) = response.objects.first() {
+                let clear = response.clear_distance_m;
+                assert!(
+                    clear <= object.x + 1e-9,
+                    "at bx={bx} clear distance {clear} exceeded the centroid {}",
+                    object.x
+                );
+            }
+        }
     }
 
     /// A clear-ahead scan: returns far out on every ray, so Phase A yields a
