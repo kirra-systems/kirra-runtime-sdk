@@ -1559,6 +1559,32 @@ mod tests {
         assert!(w.is_terminal(), "the third attempt exhausts the budget");
     }
 
+    /// The arm-state accessor must report the truth, because a diagnostic surface
+    /// consumes it: the Taj sidecar puts it on `GET /health` so a DISARMED
+    /// watchdog is visible rather than indistinguishable from an armed one that is
+    /// passing. An accessor stuck at `true` would have a switched-off safety check
+    /// reporting itself as on — the exact confusion it was added to prevent.
+    #[test]
+    fn the_arm_state_accessor_reports_the_truth() {
+        let cfg = SensorWatchdogConfig::r2_lidar();
+        assert!(
+            SensorWatchdog::new(cfg, true).expect("valid").is_armed(),
+            "an armed watchdog must report armed"
+        );
+        assert!(
+            !SensorWatchdog::new(cfg, false).expect("valid").is_armed(),
+            "a disarmed watchdog must report disarmed — never claim a check is \
+             running when it is not"
+        );
+        // …and it survives an operator reset, which rebuilds the state.
+        let mut w = SensorWatchdog::new(cfg, false).expect("valid");
+        w.reset();
+        assert!(
+            !w.is_armed(),
+            "reset must not silently arm a disarmed watchdog"
+        );
+    }
+
     /// Every config error renders a distinct, non-empty operator message naming
     /// the offending value. A refusal whose reason does not reach the operator is
     /// a silent refusal.
