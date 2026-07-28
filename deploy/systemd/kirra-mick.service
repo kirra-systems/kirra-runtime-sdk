@@ -15,6 +15,25 @@ Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
 After=network-online.target
 Wants=network-online.target
 PartOf=kirra.target
+# Mick's model backend. Wants+After, deliberately NOT Requires/BindsTo:
+#
+#   ORDERING IS NOT READINESS. `After=` only says "start Mick later in the boot
+#   ordering"; it does not wait for Ollama to be LISTENING, and no systemd
+#   directive would. Mick must therefore still tolerate a backend that is not up
+#   yet — and it does: a request while Ollama is unreachable fails CLOSED (no
+#   intent, no motion, a bounded connection error), which is the correct answer
+#   at any time, not just during boot.
+#
+#   `Wants=` pulls Ollama in but does not couple lifecycles. If it were
+#   `Requires=`, restarting or momentarily stopping Ollama would take Mick down
+#   with it — turning a recoverable "the model is briefly away" into "the intent
+#   door has vanished", which is strictly worse for an operator.
+#
+# On a box with no ollama.service installed both lines are inert (systemd logs
+# the missing Wants and proceeds), so this stays correct for a remote-model or
+# model-less deployment.
+Wants=ollama.service
+After=ollama.service
 
 [Service]
 Type=simple

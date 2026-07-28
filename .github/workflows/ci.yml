@@ -1344,6 +1344,21 @@ jobs:
           # rabbit_wake control matcher incl. non-overlap with the OTA/diag/
           # drive matchers. See docs/hardware/RABBIT_AUDIO_STACK.md §3b.
           python3 robot/wake_word_test.py
+          # Shipped systemd units, structurally. ORDERING IS NOT A DEPENDENCY:
+          # mick and the Rabbit voice listener are ordered AFTER ollama (and mick),
+          # but must never Requires=/BindsTo= them — a hard dep would mean that
+          # stopping Ollama for thirty seconds to swap a model also STOPS THE WAKE
+          # LISTENER, leaving the operator with a deaf robot and no way to ask why.
+          # Also pins the restart policies, exactly one ExecStart per unit, and
+          # that the installer's sed only renders the user placeholder.
+          python3 robot/service_units_test.py
+          # Model residency actually reaches Ollama. KIRRA_RABBIT_KEEP_ALIVE=-1
+          # must serialize as the JSON NUMBER -1 (the string "-1" would be
+          # rejected) and must appear on EVERY request body including the
+          # streaming router path — a config value that never reaches the wire
+          # buys nothing and fails invisibly (everything works, just slowly, and
+          # only after an idle gap).
+          python3 robot/rabbit_keepalive_test.py
           # Turn-state re-arm gate (Slice R, pure, no audio): the cross-process
           # "turn in progress" signal (fail-safe parse, active/done round-trip,
           # seq monotonicity) and the bounded rearm_decision that fixes the wake

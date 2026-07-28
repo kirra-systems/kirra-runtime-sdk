@@ -220,6 +220,41 @@ for pair in "8090:verifier" "8102:mick" "11434:ollama"; do
   if ss -tlnH 2>/dev/null | grep -qE ":${p}([[:space:]]|$)"; then ok "$n listening (:$p)"; else warn "$n not listening (:$p)"; fix "bring up the loop — R2_LIVE_LOOP_BRINGUP.md"; fi
 done
 
+# 6b. Rabbit model residency. THREE DISTINCT STATES, deliberately not collapsed:
+#       configured residency — what robot.env asks for
+#       currently loaded     — what Ollama reports right now
+#       server unavailable   — we cannot tell, and must not guess
+#     A model that has legitimately unloaded on a HEALTHY server with a finite
+#     keep-alive is NORMAL, not a fault, so it is never a ❌ on its own.
+ka="${KIRRA_RABBIT_KEEP_ALIVE:-30m}"
+rmodel="${KIRRA_RABBIT_MODEL:-gemma3:4b}"
+case "$ka" in
+  -1)   ok "Rabbit keep-alive: -1 (PINNED RESIDENT — the dedicated-robot setting)" ;;
+  0)    warn "Rabbit keep-alive: 0 (unload immediately — every turn pays a cold reload)"; fix "set KIRRA_RABBIT_KEEP_ALIVE=-1 on a dedicated robot" ;;
+  *)    # A duration string ("30m", "1h") or a positive number of seconds. Empty
+        # already resolved to the 30m default above, exactly as rabbit_ask does.
+        ok "Rabbit keep-alive: $ka (finite hold)" ;;
+esac
+ourl="${KIRRA_OLLAMA_URL:-http://localhost:11434}"
+if ! command -v curl >/dev/null 2>&1; then
+  warn "curl not installed — cannot check whether $rmodel is loaded"
+else
+  ps_json="$(curl -sf --max-time 3 "${ourl}/api/ps" 2>/dev/null)"
+  if [ -z "$ps_json" ]; then
+    # Server unavailable is its own state: it says nothing about residency.
+    warn "Ollama not reachable at $ourl — residency unknown (this is a SERVER state, not a config fault)"
+    fix "systemctl status ollama; then re-run"
+  elif printf '%s' "$ps_json" | grep -q "$rmodel"; then
+    ok "$rmodel is loaded now (resident)"
+  elif [ "$ka" = "-1" ]; then
+    # Pinned but absent = nothing has warmed it since the server started.
+    warn "$rmodel is NOT loaded although keep-alive is -1 — nothing has warmed it since Ollama started"
+    fix "run one Rabbit turn (or: ollama run $rmodel hi >/dev/null) — it then stays pinned"
+  else
+    ok "$rmodel not loaded right now — expected with a finite keep-alive ($ka); it loads on the next turn"
+  fi
+fi
+
 # 7. Jetson.GPIO (PTT button) — WARN (Enter-key path works without it)
 if python3 -c "import Jetson.GPIO" >/dev/null 2>&1; then
   ok "Jetson.GPIO importable (PTT ready)"
