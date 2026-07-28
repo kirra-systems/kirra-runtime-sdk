@@ -472,6 +472,11 @@ impl SensorWatchdog {
             });
         }
 
+        // Whether this tick carried a NEW frame. Only a new frame is evidence of
+        // liveness, so only a new frame may advance the recovery streak — see
+        // `advance_recovery`.
+        let had_frame = tick.frame.is_some();
+
         match self.check(tick) {
             Some(fault) => {
                 self.was_faulted = true;
@@ -494,7 +499,7 @@ impl SensorWatchdog {
                 }
                 SensorHealth::Faulted(fault)
             }
-            None => self.advance_recovery(tick.now_ms),
+            None => self.advance_recovery(tick.now_ms, had_frame),
         }
     }
 
@@ -646,16 +651,33 @@ impl SensorWatchdog {
 
     /// A clean tick. Report warm-up, hold the cap through the recovery streak, or
     /// clear to healthy.
-    fn advance_recovery(&mut self, now_ms: u64) -> SensorHealth {
+    ///
+    /// `had_frame` is whether this tick carried a NEW frame, and it gates the
+    /// streak. A tick that arrived without one — a second consumer re-posting a
+    /// frame already observed, an idle poll between frames — is not silence (the
+    /// budget has not expired) but it is not evidence of liveness either. Letting
+    /// it advance the streak would mean a frozen driver's own re-posts earned its
+    /// recovery: the stream would "recover" from a freeze on the strength of the
+    /// very repetitions that constitute the freeze.
+    fn advance_recovery(&mut self, now_ms: u64, had_frame: bool) -> SensorHealth {
         if !self.was_faulted {
             // Never faulted — nothing to recover from. Warm-up is reported so the
-            // caller can see the rate check is not yet live, but it does not cap.
+            // caller can see the rate check is not yet live.
             if self.arrivals.len() < 2 {
                 return SensorHealth::WarmingUp {
                     frames: self.arrivals.len(),
                 };
             }
             return SensorHealth::Healthy;
+        }
+
+        if !had_frame {
+            // Recovering, but no new evidence this tick — hold the streak exactly
+            // where it is. The cap stays floored either way.
+            return SensorHealth::Recovering {
+                healthy_streak: self.healthy_streak,
+                required: self.cfg.recovery_streak,
+            };
         }
 
         // The streak is time-bounded as well as counted. A count alone is satisfied
@@ -715,6 +737,14 @@ impl SensorWatchdog {
     #[must_use]
     pub fn is_terminal(&self) -> bool {
         self.terminal
+    }
+
+    /// Whether this watchdog is armed. Exposed so an integration layer can report
+    /// a disarmed safety check on its diagnostic surfaces instead of leaving it
+    /// indistinguishable from an armed one that is passing.
+    #[must_use]
+    pub fn is_armed(&self) -> bool {
+        self.armed
     }
 
     /// Operator reset — clears the terminal latch and all history. The deliberate

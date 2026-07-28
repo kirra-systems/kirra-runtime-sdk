@@ -1006,6 +1006,18 @@ impl TrackedPerceptionState {
     pub fn sensor_watchdog_terminal(&self) -> bool {
         self.watchdog.is_terminal()
     }
+
+    /// Whether scan-liveness checking is ARMED on this service.
+    ///
+    /// Surfaced on `GET /health` so a disarmed deployment is legible to a
+    /// diagnostic rather than only to whoever read the startup log. A safety check
+    /// that is off must never be indistinguishable from one that is on and
+    /// passing — that is the same failure the `/health` endpoint's own contract
+    /// field exists to prevent.
+    #[must_use]
+    pub fn sensor_watchdog_armed(&self) -> bool {
+        self.watchdog.is_armed()
+    }
 }
 
 /// Whether the scan-liveness watchdog is armed, from
@@ -2750,6 +2762,9 @@ mod scan_liveness_tests {
 
     use super::*;
 
+    /// The configured recovery streak, for readability in the tests below.
+    const SENSOR_RECOVERY_STREAK_LOCAL: u32 = 5;
+
     /// A live-stream scan: an obstacle straight ahead, with per-frame variation
     /// in the low bits so consecutive frames are NOT bit-identical. Real sensor
     /// noise looks like this, and it is what the freeze check keys on.
@@ -3120,6 +3135,223 @@ mod scan_liveness_tests {
             "disarmed must not floor the cap — that is the pre-#1211 behaviour \
              this gate exists to change only when armed"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Pre-merge review focus (#1223). Each names the property it pins.
+    // -----------------------------------------------------------------------
+
+    /// (1) A diagnostic probe cannot advance the recovery streak.
+    ///
+    /// `diagnostic_probe` must be observationally INERT: it may neither create
+    /// liveness state nor clear it. A probe that could pay down a recovery streak
+    /// would let a diagnostic tool restore motion the sensor had not earned.
+    #[test]
+    fn a_probe_cannot_advance_the_recovery_streak() {
+        let mut st = state();
+        let mut now = 0;
+        // Fault the stream.
+        for _ in 0..10 {
+            let _ = handle_perception_tracked_at(&frozen_scan(), &mut st, now);
+            now += 100;
+        }
+
+        // A live frame starts the streak at 1.
+        now += 100;
+        let r = handle_perception_tracked_at(&live_scan(50_000, 1), &mut st, now);
+        assert_eq!(
+            r.sensor_liveness, "recovering",
+            "precondition: the stream is recovering"
+        );
+
+        // Probes in between must not pay it down.
+        let mut probe = live_scan(51_000, 2);
+        probe.diagnostic_probe = true;
+        for _ in 0..10 {
+            now += 10;
+            let _ = handle_perception_tracked_at(&probe, &mut st, now);
+        }
+
+        now += 100;
+        let r = handle_perception_tracked_at(&live_scan(50_100, 2), &mut st, now);
+        assert_eq!(
+            r.sensor_liveness, "recovering",
+            "10 probes must not have completed a 5-frame streak"
+        );
+        assert_eq!(r.speed_cap_mps, 0.0);
+    }
+
+    /// (2) Duplicate re-posts cannot advance the recovery streak.
+    ///
+    /// The subtle one. A re-post is not silence — the budget has not expired — so
+    /// it reaches the watchdog as a clean tick. If a clean tick advanced the
+    /// streak, a frozen driver's own repetitions would earn its recovery: the
+    /// stream would "recover" from a freeze on the strength of the very
+    /// repetitions that constitute the freeze.
+    #[test]
+    fn duplicate_reposts_cannot_advance_the_recovery_streak() {
+        let mut st = state();
+        let mut now = 0;
+        for _ in 0..10 {
+            let _ = handle_perception_tracked_at(&frozen_scan(), &mut st, now);
+            now += 100;
+        }
+
+        // One real frame — streak 1.
+        now += 100;
+        let fresh = live_scan(60_000, 1);
+        let r = handle_perception_tracked_at(&fresh, &mut st, now);
+        assert_eq!(r.sensor_liveness, "recovering");
+
+        // Re-post that SAME frame repeatedly, inside the silence budget.
+        for _ in 0..10 {
+            now += 10;
+            let r = handle_perception_tracked_at(&fresh, &mut st, now);
+            assert_eq!(
+                r.sensor_liveness, "recovering",
+                "a re-post must never complete the streak"
+            );
+            assert_eq!(r.speed_cap_mps, 0.0);
+        }
+
+        // The streak is still owed: four more REAL frames are required.
+        for i in 2..SENSOR_RECOVERY_STREAK_LOCAL {
+            now += 100;
+            let r = handle_perception_tracked_at(
+                &live_scan(60_000 + u64::from(i) * 100, i),
+                &mut st,
+                now,
+            );
+            assert_eq!(
+                r.sensor_liveness, "recovering",
+                "frame {i} still recovering"
+            );
+        }
+        now += 100;
+        let r = handle_perception_tracked_at(&live_scan(70_000, 9), &mut st, now);
+        assert_eq!(r.sensor_liveness, "healthy");
+    }
+
+    /// (3) Continuous duplicate re-posts eventually fault as no-new-messages.
+    #[test]
+    fn continuous_reposts_fault_as_no_new_messages() {
+        let mut st = state();
+        let mut now = 0;
+        for seq in 0..8 {
+            let _ = handle_perception_tracked_at(
+                &live_scan(1_000 + u64::from(seq) * 100, seq),
+                &mut st,
+                now,
+            );
+            now += 100;
+        }
+        let seeded = live_scan(80_000, 1);
+        assert_eq!(
+            handle_perception_tracked_at(&seeded, &mut st, now).sensor_liveness,
+            "healthy"
+        );
+
+        // Nothing but re-posts from here.
+        let mut last = None;
+        for _ in 0..10 {
+            now += 100;
+            last = Some(handle_perception_tracked_at(&seeded, &mut st, now));
+        }
+        let last = last.expect("ran");
+        assert_eq!(last.sensor_fault, Some("SENSOR_NO_MESSAGES"));
+        assert_eq!(last.speed_cap_mps, 0.0);
+    }
+
+    /// (4) A real new frame after duplicates resumes from the correct state —
+    /// recovering with the streak the stream actually earned, not healthy and not
+    /// reset to zero.
+    #[test]
+    fn a_real_frame_after_duplicates_resumes_correctly() {
+        let mut st = state();
+        let mut now = 0;
+        for seq in 0..8 {
+            let _ = handle_perception_tracked_at(
+                &live_scan(1_000 + u64::from(seq) * 100, seq),
+                &mut st,
+                now,
+            );
+            now += 100;
+        }
+
+        // Freeze into a fault via re-posts.
+        let stuck = live_scan(90_000, 1);
+        for _ in 0..10 {
+            now += 100;
+            let _ = handle_perception_tracked_at(&stuck, &mut st, now);
+        }
+        assert_eq!(
+            handle_perception_tracked_at(&stuck, &mut st, now).sensor_fault,
+            Some("SENSOR_NO_MESSAGES")
+        );
+
+        // A genuinely new frame resumes recovery from 1 — not healthy (the streak
+        // is owed) and not stuck faulted (the sensor is producing again).
+        now += 100;
+        let r = handle_perception_tracked_at(&live_scan(95_000, 2), &mut st, now);
+        assert_eq!(
+            r.sensor_liveness, "recovering",
+            "a new frame after a freeze resumes recovery"
+        );
+        assert_eq!(r.speed_cap_mps, 0.0);
+
+        // …and the streak completes normally from there.
+        for i in 2..SENSOR_RECOVERY_STREAK_LOCAL {
+            now += 100;
+            let _ = handle_perception_tracked_at(
+                &live_scan(95_000 + u64::from(i) * 100, i),
+                &mut st,
+                now,
+            );
+        }
+        now += 100;
+        let r = handle_perception_tracked_at(&live_scan(99_000, 9), &mut st, now);
+        assert_eq!(r.sensor_liveness, "healthy");
+        assert!(r.speed_cap_mps > 0.0);
+    }
+
+    /// (5) Two live clients posting the same scan cannot double the measured rate.
+    ///
+    /// If re-posts recorded arrivals, a 10 Hz sensor read by two consumers would
+    /// measure 20 Hz — which would mask a sensor that had genuinely halved its
+    /// rate to 10 Hz while two clients kept it looking nominal.
+    #[test]
+    fn two_clients_cannot_double_the_measured_rate() {
+        let mut st = state();
+        let mut now = 0;
+        let mut last = None;
+        for seq in 0..12 {
+            let scan = live_scan(1_000 + u64::from(seq) * 100, seq);
+            let _ = handle_perception_tracked_at(&scan, &mut st, now);
+            last = Some(handle_perception_tracked_at(&scan, &mut st, now + 10));
+            now += 100;
+        }
+        let hz = last.expect("ran").sensor_measured_hz.expect("measurable");
+        assert!(
+            (hz - 10.0).abs() < 0.5,
+            "double-posted 10 Hz must measure ~10 Hz, got {hz}"
+        );
+    }
+
+    /// (7) A restarted sidecar begins unavailable and stays there until the
+    /// required healthy evidence has arrived — fresh state is the restart.
+    #[test]
+    fn a_restarted_sidecar_begins_unavailable() {
+        let mut st = state();
+        let first = handle_perception_tracked_at(&live_scan(1_000, 0), &mut st, 0);
+        assert_eq!(first.sensor_liveness, "warming_up");
+        assert_eq!(first.speed_cap_mps, 0.0);
+        assert!(!first.healthy);
+
+        // Availability arrives only with a second observation — the first frame
+        // that makes a rate measurable.
+        let second = handle_perception_tracked_at(&live_scan(1_100, 1), &mut st, 100);
+        assert_eq!(second.sensor_liveness, "healthy");
+        assert!(second.speed_cap_mps > 0.0);
     }
 
     /// The evidence digest identifies the perception EVIDENCE, not the liveness

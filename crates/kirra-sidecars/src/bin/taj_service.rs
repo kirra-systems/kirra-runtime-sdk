@@ -45,12 +45,23 @@ fn serve(mut stream: TcpStream, perception_state: &mut TrackedPerceptionState) {
         // healthy during R2 bring-up.
         ("GET", "/health") => {
             let caps = Capabilities::taj();
+            // #1211: report whether scan-liveness checking is ARMED, and whether it
+            // has latched terminal. A safety check that is switched off must not be
+            // indistinguishable from one that is on and passing — the same reason
+            // this endpoint already reports `contract` instead of a bare "ok".
             respond(
                 &mut stream,
                 "200 OK",
                 &format!(
-                    "{{\"status\":\"ok\",\"service\":\"taj\",\"contract\":{}}}",
-                    caps.contract
+                    "{{\"status\":\"ok\",\"service\":\"taj\",\"contract\":{},\
+                     \"scan_liveness_watchdog\":\"{}\",\"scan_liveness_terminal\":{}}}",
+                    caps.contract,
+                    if perception_state.sensor_watchdog_armed() {
+                        "armed"
+                    } else {
+                        "disarmed"
+                    },
+                    perception_state.sensor_watchdog_terminal(),
                 ),
             )
         }
