@@ -1073,7 +1073,16 @@ mod tests {
     struct CountingSim {
         device: std::path::PathBuf,
         motion_frames: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        acks_sent: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// ACKs for MOTION frames specifically.
+        ///
+        /// NOT a total. An earlier version diffed a total across setup and
+        /// measurement, which is racy: the sim writes a reply and increments
+        /// AFTERWARDS, so the link can observe the ACTIVATE ack and move on
+        /// before the counter catches up — the "before" snapshot then reads
+        /// stale and setup leaks into the result. It passed locally and failed
+        /// on a CI runner. Counting only motion acks removes the window
+        /// entirely: HELLO, ARM and ACTIVATE never touch these.
+        motion_acks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         stop: std::sync::mpsc::Sender<()>,
     }
 
@@ -1084,9 +1093,9 @@ mod tests {
         let pty = kirra_r2cp::pty::SimulatedMcuPty::open().expect("pty");
         let device = pty.device_path().to_path_buf();
         let motion_frames = Arc::new(AtomicUsize::new(0));
-        let acks_sent = Arc::new(AtomicUsize::new(0));
+        let motion_acks = Arc::new(AtomicUsize::new(0));
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
-        let (mf, ak) = (Arc::clone(&motion_frames), Arc::clone(&acks_sent));
+        let (mf, ak) = (Arc::clone(&motion_frames), Arc::clone(&motion_acks));
 
         std::thread::spawn(move || {
             let mut pty = pty;
@@ -1101,16 +1110,19 @@ mod tests {
                     return;
                 };
                 for h in handled {
-                    // Count what the state machine SAW, not what it allowed.
-                    if matches!(
+                    // Count what the state machine SAW, not what it allowed:
+                    // a frame the peer refuses still LEFT THE HOST, which is
+                    // what a bypass would look like.
+                    let is_motion = matches!(
                         h.outcome,
                         Ok(kirra_r2cp::sim::Outcome::Accepted { .. })
                             | Ok(kirra_r2cp::sim::Outcome::Refused(_))
-                    ) {
+                    );
+                    if is_motion {
                         mf.fetch_add(1, Ordering::SeqCst);
-                    }
-                    if h.acknowledged {
-                        ak.fetch_add(1, Ordering::SeqCst);
+                        if h.acknowledged {
+                            ak.fetch_add(1, Ordering::SeqCst);
+                        }
                     }
                 }
             }
@@ -1118,13 +1130,30 @@ mod tests {
         CountingSim {
             device,
             motion_frames,
-            acks_sent,
+            motion_acks,
             stop: stop_tx,
         }
     }
 
-    /// Open + activate, returning the handle and the ACK count that setup
-    /// consumed, so a test can measure only what its own commands added.
+    /// Wait until `counter` reaches `target`, then a little longer to catch an
+    /// overshoot. Returns whatever it settled on.
+    ///
+    /// Deliberately not a bare sleep: a fixed interval is a guess about a
+    /// scheduler, and on a loaded CI runner it is the wrong guess.
+    fn settle_until(counter: &std::sync::atomic::AtomicUsize, target: usize) -> usize {
+        use std::sync::atomic::Ordering;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+        while counter.load(Ordering::SeqCst) < target && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // A short quiet period so an EXTRA frame would be observed too — the
+        // assertion is "exactly one", not "at least one".
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        counter.load(Ordering::SeqCst)
+    }
+
+    /// Open + activate. Setup frames are HELLO/ARM/ACTIVATE, none of which are
+    /// motion, so they never touch the counters a test asserts on.
     unsafe fn r2cp_ready(sim: &CountingSim) -> *mut crate::r2cp::KirraR2cpLink {
         use std::ffi::CString;
         let c = CString::new(sim.device.to_str().unwrap()).unwrap();
@@ -1188,21 +1217,24 @@ mod tests {
             let link = r2cp_ready(&sim);
             let consumer = new_bound_consumer();
 
-            let acks_before = sim.acks_sent.load(Ordering::SeqCst);
             let (payload, token) = bound_frame(1, 1001, 10_000, 77);
             let out = verify_then_maybe_actuate(consumer, link, &payload, &token, 10_050, 1);
 
             assert_eq!(out.kind, 0, "the release should verify");
             assert_eq!(out.write, 1, "the core should release");
 
-            std::thread::sleep(std::time::Duration::from_millis(120));
+            // Wait for the count to REACH one rather than sleeping a fixed
+            // interval and hoping, then keep watching to prove it does not go
+            // higher. A bare sleep is both slower and weaker.
+            settle_until(&sim.motion_frames, 1);
             assert_eq!(
                 sim.motion_frames.load(Ordering::SeqCst),
                 1,
                 "exactly one MOTION_COMMAND should reach the peer"
             );
+            settle_until(&sim.motion_acks, 1);
             assert_eq!(
-                sim.acks_sent.load(Ordering::SeqCst) - acks_before,
+                sim.motion_acks.load(Ordering::SeqCst),
                 1,
                 "exactly one COMMAND_ACK should come back"
             );
@@ -1260,7 +1292,9 @@ mod tests {
                 let out = verify_then_maybe_actuate(consumer, link, &payload, &token, now_ms, 1);
 
                 assert_eq!(out.write, 0, "{name}: the core must not release");
-                std::thread::sleep(std::time::Duration::from_millis(120));
+                // Target 0 means "wait the quiet period and confirm nothing
+                // arrived", which is what a zero-claim actually requires.
+                settle_until(&sim.motion_frames, 0);
                 assert_eq!(
                     sim.motion_frames.load(Ordering::SeqCst),
                     0,
@@ -1274,7 +1308,7 @@ mod tests {
                 let released =
                     verify_then_maybe_actuate(consumer, link, &ok_payload, &ok_token, 10_050, 2);
                 assert_eq!(released.write, 1, "{name}: control release should pass");
-                std::thread::sleep(std::time::Duration::from_millis(120));
+                settle_until(&sim.motion_frames, 1);
                 assert_eq!(
                     sim.motion_frames.load(Ordering::SeqCst),
                     1,
@@ -1306,7 +1340,7 @@ mod tests {
             let second = verify_then_maybe_actuate(consumer, link, &payload, &token, 10_060, 2);
             assert_eq!(second.write, 0, "a replayed release must not re-release");
 
-            std::thread::sleep(std::time::Duration::from_millis(120));
+            settle_until(&sim.motion_frames, 1);
             assert_eq!(
                 sim.motion_frames.load(Ordering::SeqCst),
                 1,
