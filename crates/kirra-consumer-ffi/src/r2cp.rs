@@ -208,17 +208,18 @@ pub struct KirraR2cpPeerInfo {
     pub exclusive: u8,
 }
 
-/// The outcome of one command. `result` is the peer's COMMAND_ACK result code.
+/// The outcome of one command. `result` is the peer's COMMAND_ACK result code,
+/// bound normatively in `PROTOCOL.md` §COMMAND_ACK.
 ///
-/// ⚠ Those numeric values are PROVISIONAL — `PROTOCOL.md` names the results in
-/// prose but binds no wire values. A caller should log `accepted` and treat
-/// `result`/`safety_state` as diagnostics until the firmware adopts them.
+/// `accepted` is still the field to branch on: it already folds in `clamped`
+/// (honoured, tightened against the calibrated envelope), which a caller must
+/// not mistake for a refusal.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct KirraR2cpAck {
     /// 1 if the peer acknowledged with ACCEPTED. This is the field to branch on.
     pub accepted: u8,
-    /// Mirrors `safety_manager.hpp` discriminants — NOT provisional.
+    /// `safety_manager.hpp` discriminants.
     pub safety_state: u8,
     pub result: u16,
     /// 1 if no acknowledgement arrived within the timeout.
@@ -381,7 +382,7 @@ pub unsafe extern "C" fn kirra_r2cp_command(
         return KIRRA_R2CP_NOT_ACKNOWLEDGED;
     };
     let result = kirra_r2cp::link::ack_result(ack).unwrap_or(u16::MAX);
-    let accepted = u8::from(result == kirra_r2cp::sim::ack_result::ACCEPTED);
+    let accepted = u8::from(result == kirra_r2cp::command_ack::AckResult::Accepted.as_u16());
     // SAFETY: caller guarantees a writable struct.
     unsafe {
         *out = KirraR2cpAck {

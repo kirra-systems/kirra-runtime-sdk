@@ -68,32 +68,6 @@ impl SafetyState {
     }
 }
 
-/// COMMAND_ACK `result` codes.
-///
-/// ⚠ **PROVISIONAL — this crate is defining them, not mirroring them.**
-/// `PROTOCOL.md` §COMMAND_ACK names the eight results in prose ("accepted,
-/// clamped, stale, replay, unauthenticated, invalid, disarmed and faulted") but
-/// binds no numbers, and the firmware does not yet emit an ACK. The values below
-/// take the prose order.
-///
-/// The obligation this creates is recorded in `firmware/rosmaster-r2/docs/
-/// ROADMAP.md`: when the firmware implements COMMAND_ACK it must either adopt
-/// these values or change them here, and the differential harness is what will
-/// catch a silent disagreement. Until then, a bridge test asserting on a result
-/// code is asserting against a proposal.
-pub mod ack_result {
-    pub const ACCEPTED: u16 = 0;
-    /// The sim never emits this: it refuses out-of-envelope commands rather
-    /// than tightening them. Reserved so the numbering matches the prose.
-    pub const CLAMPED: u16 = 1;
-    pub const STALE: u16 = 2;
-    pub const REPLAY: u16 = 3;
-    pub const UNAUTHENTICATED: u16 = 4;
-    pub const INVALID: u16 = 5;
-    pub const DISARMED: u16 = 6;
-    pub const FAULTED: u16 = 7;
-}
-
 /// Why a command was refused. Returned to the caller AND encoded into the
 /// COMMAND_ACK, so a bridge test can assert the reason, not just the failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,17 +82,19 @@ pub enum Refusal {
 }
 
 impl Refusal {
+    /// The bound `AckResult` for this refusal (`PROTOCOL.md` §COMMAND_ACK).
     #[must_use]
-    pub fn to_ack_result(self) -> u16 {
+    pub fn to_ack_result(self) -> crate::command_ack::AckResult {
+        use crate::command_ack::AckResult;
         match self {
-            Refusal::Replay => ack_result::REPLAY,
-            Refusal::Stale => ack_result::STALE,
-            Refusal::NotActive => ack_result::DISARMED,
-            Refusal::FaultLatched => ack_result::FAULTED,
+            Refusal::Replay => AckResult::Replay,
+            Refusal::Stale => AckResult::Stale,
+            Refusal::NotActive => AckResult::Disarmed,
+            Refusal::FaultLatched => AckResult::Faulted,
             // A payload the MCU could not parse and a type it does not accept
-            // are both "the frame was well-formed on the wire and wrong above
-            // it" — the operator-visible distinction is in the log, not here.
-            Refusal::MalformedPayload | Refusal::UnexpectedType => ack_result::INVALID,
+            // are both "well-formed on the wire and wrong above it" — the
+            // operator-visible distinction is in the log, not the wire.
+            Refusal::MalformedPayload | Refusal::UnexpectedType => AckResult::Invalid,
         }
     }
 }
@@ -290,9 +266,11 @@ impl SimulatedMcu {
     /// in-sequence, fresh and admissible in the current state. It says nothing
     /// about wheels turning, and a bridge must not read it as motion confirmed.
     pub fn ack_for(&mut self, to: &Frame, outcome: Outcome, now_us: u64) -> Frame {
+        use crate::command_ack::{AckResult, CommandAck};
+
         let result = match outcome {
             Outcome::Accepted { .. } | Outcome::StateChanged(_) | Outcome::Ignored => {
-                ack_result::ACCEPTED
+                AckResult::Accepted
             }
             Outcome::Refused(r) => r.to_ack_result(),
         };
@@ -301,15 +279,21 @@ impl SimulatedMcu {
         // is sent — the received_sequence field is what correlates then.
         let command_id = MotionCommand::parse(&to.payload).map_or(0, |c| c.command_id);
 
-        let mut p = Vec::with_capacity(28);
-        p.extend_from_slice(&command_id.to_le_bytes());
-        p.extend_from_slice(&to.sequence.to_le_bytes());
-        p.extend_from_slice(&now_us.to_le_bytes());
-        p.extend_from_slice(&result.to_le_bytes());
-        p.push(self.state.to_wire());
-        p.push(0); // reserved
-        let active_faults: u64 = u64::from(self.state == SafetyState::FaultLatched);
-        p.extend_from_slice(&active_faults.to_le_bytes());
+        // Built through the BOUND codec, not hand-rolled bytes: the layout
+        // now has one definition per language and a differential test holding
+        // them together.
+        let p = CommandAck {
+            command_id,
+            received_sequence: to.sequence,
+            applied_at_us: now_us,
+            result,
+            safety_state: self.state.to_wire(),
+            active_faults: u64::from(self.state == SafetyState::FaultLatched),
+        }
+        .encode()
+        // Can only fail on an out-of-range safety_state, and `to_wire` cannot
+        // produce one — a panic here would be a bug in this crate.
+        .expect("SafetyState::to_wire always yields an assigned discriminant");
 
         let seq = self.next_ack_sequence;
         self.next_ack_sequence = self.next_ack_sequence.wrapping_add(1);

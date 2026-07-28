@@ -431,7 +431,7 @@ impl SerialLink {
             if !got.frames.iter().any(|f| {
                 f.message_type == MessageType::CommandAcknowledgement
                     && ack_received_sequence(f) == Some(seq)
-                    && ack_result(f) == Some(crate::sim::ack_result::ACCEPTED)
+                    && ack_result(f) == Some(crate::command_ack::AckResult::Accepted.as_u16())
             }) {
                 return Err(LinkError::NotAcknowledged(ty));
             }
@@ -512,8 +512,11 @@ pub fn ack_received_sequence(frame: &Frame) -> Option<u32> {
     Some(u32::from_le_bytes(frame.payload[4..8].try_into().ok()?))
 }
 
-/// `result` from a COMMAND_ACK payload. See `sim::ack_result` — these values
-/// are PROVISIONAL until the firmware binds them.
+/// `result` from a COMMAND_ACK payload, as the raw u16.
+///
+/// Prefer [`crate::command_ack::CommandAck::parse`] for anything that acts on
+/// the value: it rejects unassigned codes rather than handing back a number
+/// the caller may quietly treat as success.
 #[must_use]
 pub fn ack_result(frame: &Frame) -> Option<u16> {
     if frame.message_type != MessageType::CommandAcknowledgement || frame.payload.len() < 28 {
@@ -523,7 +526,7 @@ pub fn ack_result(frame: &Frame) -> Option<u16> {
 }
 
 /// `safety_state` from a COMMAND_ACK payload. Mirrors the firmware's
-/// `safety_manager.hpp` discriminants — NOT provisional.
+/// `safety_manager.hpp` discriminants (`PROTOCOL.md` §COMMAND_ACK).
 #[must_use]
 pub fn ack_safety_state(frame: &Frame) -> Option<u8> {
     if frame.message_type != MessageType::CommandAcknowledgement || frame.payload.len() < 28 {

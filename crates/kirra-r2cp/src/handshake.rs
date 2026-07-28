@@ -22,8 +22,10 @@
 //! `PROTOCOL.md` specifies HELLO's payload byte-for-byte. CAPABILITIES it
 //! describes only in prose ("fixed bitset plus board revision, MCU ID, IMU
 //! type, …") with no layout, so implementing it here would mean inventing a
-//! second, larger provisional wire format on top of the COMMAND_ACK result
-//! codes. One provisional area is a recorded obligation; two is a dialect.
+//! second, larger wire format with no normative definition to hold it to.
+//! COMMAND_ACK earned one (`PROTOCOL.md` §COMMAND_ACK, differentially tested);
+//! CAPABILITIES has not, and inventing a layout the firmware never agreed to
+//! is how a host-only dialect starts.
 //!
 //! HELLO is sufficient for the job: it carries a nonce (so a reply can be tied
 //! to *this* probe rather than a stale or replayed one) and the peer's

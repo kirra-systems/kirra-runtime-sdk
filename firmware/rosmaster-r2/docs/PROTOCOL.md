@@ -149,10 +149,61 @@ never itself physical acknowledgement.
 ### COMMAND_ACK
 
 `command_id:u32, received_sequence:u32, applied_at_us:u64, result:u16,
-safety_state:u8, reserved:u8, active_faults:u64`.
+safety_state:u8, reserved:u8, active_faults:u64` — 28 bytes, little-endian,
+at these offsets:
 
-ACK proves protocol handling, not physical movement. Result distinguishes
-accepted, clamped, stale, replay, unauthenticated, invalid, disarmed and faulted.
+| off | size | field |
+|-----|------|-------|
+| 0 | 4 | `command_id` — echoes the sender's correlation id; `0` when the frame carried no parseable one |
+| 4 | 4 | `received_sequence` — the frame sequence being acknowledged; `0` for an UNSOLICITED ack (a watchdog stop answers no frame) |
+| 8 | 8 | `applied_at_us` — MCU monotonic time |
+| 16 | 2 | `result` (see below) |
+| 18 | 1 | `safety_state` |
+| 19 | 1 | `reserved` — MUST be zero in v1 |
+| 20 | 8 | `active_faults` — `r2::safety::Fault` bitset |
+
+ACK proves protocol handling, not physical movement.
+
+#### `result` values (normative)
+
+| value | name | meaning |
+|-------|------|---------|
+| 0 | `accepted` | the command was well-formed, in-sequence, fresh and admissible in the current state |
+| 1 | `clamped` | honoured, but tightened against the calibrated envelope |
+| 2 | `stale` | the command was older than its own `valid_for_us` |
+| 3 | `replay` | `sequence <= last_accepted` (equal included) |
+| 4 | `unauthenticated` | required `AUTH_TAG` absent or its MAC did not verify |
+| 5 | `invalid` | the payload did not parse, or the type is not accepted here |
+| 6 | `disarmed` | well-formed, but motion is not honoured in the current state |
+| 7 | `faulted` | refused because a fault is latched |
+
+Values 8–65535 are UNASSIGNED. A decoder MUST reject an unrecognised value
+rather than coerce it: a `result` the receiver does not understand is not
+evidence that a command succeeded, and mapping it to the nearest known code
+would turn "I do not know what happened" into "accepted".
+
+`clamped` is the one result that reports a command was **honoured in modified
+form**. A sender must treat it as success-with-derate, never as refusal —
+`effective = min(commanded, calibrated_hard_limit)` per §MOTION_COMMAND, so a
+clamp means the MCU's envelope was tighter, not that the command was wrong.
+
+#### `safety_state` values (normative)
+
+The `r2::safety::SafetyState` discriminants verbatim: `boot`=0, `self_test`=1,
+`standby`=2, `armed`=3, `active`=4, `controlled_stop`=5, `fault_latched`=6,
+`firmware_update`=7. Values 8–255 are UNASSIGNED and MUST be rejected.
+
+These are deliberately NOT renumbered to start at the states a running MCU can
+report: a decoder that shares the enum's discriminants can be checked against
+the header, and one that invented its own numbering could not.
+
+#### Conformance
+
+`protocol/src/command_ack.cpp` is the normative implementation, and the host
+bridge's `kirra_r2cp::command_ack` is differentially tested against it over the
+same bytes (`crates/kirra-r2cp/tests/differential_vs_wire_cpp.rs`). The two must
+agree on encoded bytes AND on the rejection verdict for every malformed input;
+a disagreement is a bug in the host, not a dialect.
 
 ### ROBOT_STATE / ODOMETRY
 

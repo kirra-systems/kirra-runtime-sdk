@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use kirra_r2cp::command_ack::{AckDecodeError, AckResult, CommandAck, MAX_ASSIGNED_SAFETY_STATE};
 use kirra_r2cp::{decode, encode, DecodeError, Frame, MessageType};
 
 fn repo_root() -> PathBuf {
@@ -43,7 +44,8 @@ fn build_oracle(cc: &str) -> Option<PathBuf> {
     let root = repo_root();
     let proto = root.join("firmware/rosmaster-r2/protocol");
     let wire = proto.join("src/wire.cpp");
-    if !wire.is_file() {
+    let ack = proto.join("src/command_ack.cpp");
+    if !wire.is_file() || !ack.is_file() {
         return None;
     }
     let out = std::env::temp_dir().join("r2cp_oracle");
@@ -52,8 +54,11 @@ fn build_oracle(cc: &str) -> Option<PathBuf> {
     let status = Command::new(cc)
         .args(["-std=c++17", "-O1", "-I"])
         .arg(proto.join("include"))
+        .arg("-I")
+        .arg(root.join("firmware/rosmaster-r2/safety/include"))
         .arg(&src)
         .arg(&wire)
+        .arg(&ack)
         .arg("-o")
         .arg(&out)
         .status()
@@ -65,6 +70,7 @@ fn build_oracle(cc: &str) -> Option<PathBuf> {
 ///         "D <encoded-hex>"                                  → "OK <fields>" | "ERR <status>"
 const ORACLE_CPP: &str = r#"
 #include <r2/protocol/wire.hpp>
+#include <r2/protocol/command_ack.hpp>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -85,6 +91,12 @@ static const char* statusname(DecodeStatus s){ switch(s){
   case DecodeStatus::invalid_length:return "invalid_length"; case DecodeStatus::crc_mismatch:return "crc_mismatch";
   case DecodeStatus::unknown_message:return "unknown_message"; case DecodeStatus::invalid_flags:return "invalid_flags";
   case DecodeStatus::auth_required:return "auth_required"; default:return "auth_mac_mismatch"; } }
+static const char* ackstatusname(AckDecodeStatus s){ switch(s){
+  case AckDecodeStatus::ok:return "ok";
+  case AckDecodeStatus::invalid_length:return "invalid_length";
+  case AckDecodeStatus::unknown_result:return "unknown_result";
+  case AckDecodeStatus::unknown_safety_state:return "unknown_safety_state";
+  default:return "reserved_not_zero"; } }
 int main(){ std::string line;
   while(std::getline(std::cin,line)){ std::istringstream is(line); std::string op; is>>op;
     if(op=="E"){ unsigned t,f,seq; unsigned long long tm; std::string ph; is>>t>>f>>seq>>tm>>ph;
@@ -93,6 +105,22 @@ int main(){ std::string line;
       if(ph!="-") fr.payload_length=(std::uint16_t)fromhex(ph,fr.payload.data(),fr.payload.size());
       EncodedFrame out{}; if(encode(fr,out)) std::cout<<tohex(out.bytes.data(),out.length)<<"\n";
       else std::cout<<"ENCFAIL\n"; }
+    else if(op=="AE"){ unsigned cid,rseq,res,ss,rsv; unsigned long long at,af;
+      is>>cid>>rseq>>at>>res>>ss>>rsv>>af;
+      CommandAck a{}; a.command_id=(std::uint32_t)cid; a.received_sequence=(std::uint32_t)rseq;
+      a.applied_at_us=(std::uint64_t)at; a.result=static_cast<AckResult>((std::uint16_t)res);
+      a.safety_state=(std::uint8_t)ss; a.reserved=(std::uint8_t)rsv;
+      a.active_faults=(std::uint64_t)af;
+      std::uint8_t buf[64];
+      if(encode_command_ack(a,buf,sizeof buf)) std::cout<<tohex(buf,kCommandAckPayloadSize)<<"\n";
+      else std::cout<<"ENCFAIL\n"; }
+    else if(op=="AD"){ std::string ph; is>>ph; std::uint8_t buf[128];
+      std::size_t n=(ph=="-")?0:fromhex(ph,buf,sizeof buf); CommandAck a{};
+      AckDecodeStatus st=decode_command_ack(buf,n,a);
+      if(st==AckDecodeStatus::ok) std::cout<<"OK "<<a.command_id<<" "<<a.received_sequence<<" "
+        <<a.applied_at_us<<" "<<(unsigned)a.result<<" "<<(unsigned)a.safety_state<<" "
+        <<a.active_faults<<"\n";
+      else std::cout<<"ERR "<<ackstatusname(st)<<"\n"; }
     else if(op=="D"){ std::string eh; is>>eh; std::uint8_t buf[512];
       std::size_t n=fromhex(eh,buf,sizeof buf); Frame fr{};
       DecodeStatus st=decode(buf,n,fr);
@@ -145,9 +173,30 @@ fn unhex(s: &str) -> Vec<u8> {
         .collect()
 }
 
+/// The compiled oracle path, built at most once per test binary.
+///
+/// `build_oracle` compiles to a FIXED path. With the suite running in
+/// parallel, every test racing to write and exec that same file meant a loser
+/// got a failed build, `oracle()` returned None, and the test RETURNED EARLY —
+/// passing while asserting nothing. That is the worst possible failure mode
+/// for a differential harness, and it is how a deliberate renumbering slipped
+/// through the full suite while failing in isolation. Building once removes
+/// the race; `skipped_loudly` below removes the silence.
+static ORACLE_BIN: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// Say plainly that a skipped differential test asserted NOTHING. A quiet
+/// `return` here reads as a pass in every CI summary.
+fn skipped_loudly() {
+    eprintln!(
+        "SKIP: no C++ oracle available — THIS TEST ASSERTED NOTHING. The host \
+         and the firmware were not compared. Install a C++ compiler to run it."
+    );
+}
+
 fn oracle() -> Option<Oracle> {
-    let cc = have_cxx()?;
-    let bin = build_oracle(&cc)?;
+    let bin = ORACLE_BIN
+        .get_or_init(|| have_cxx().and_then(|cc| build_oracle(&cc)))
+        .clone()?;
     let mut child = Command::new(bin)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -372,4 +421,250 @@ fn resynchronisation_costs_exactly_one_frame() {
         decode(&frames[1]).is_ok(),
         "the NEXT frame must still decode — bounded resync"
     );
+}
+
+// ---------------------------------------------------------------------------
+// COMMAND_ACK — the payload whose meaning a host must ACT on.
+//
+// `PROTOCOL.md` binds the result values normatively; these hold the two
+// implementations to that binding over the same bytes. Before this existed the
+// numbers agreed only because one person wrote both, which is exactly the
+// disagreement that would first appear with a real MCU attached to motors.
+// ---------------------------------------------------------------------------
+
+fn ack_sample(result: AckResult, safety_state: u8) -> CommandAck {
+    CommandAck {
+        command_id: 0xDEAD_BEEF,
+        received_sequence: 0x0102_0304,
+        applied_at_us: 0x1122_3344_5566_7788,
+        result,
+        safety_state,
+        active_faults: 0x00FF_00FF_00FF_00FF,
+    }
+}
+
+const ALL_RESULTS: [AckResult; 8] = [
+    AckResult::Accepted,
+    AckResult::Clamped,
+    AckResult::Stale,
+    AckResult::Replay,
+    AckResult::Unauthenticated,
+    AckResult::Invalid,
+    AckResult::Disarmed,
+    AckResult::Faulted,
+];
+
+#[test]
+fn ack_encoding_is_byte_identical_for_every_bound_result() {
+    let Some(mut oracle) = oracle() else {
+        skipped_loudly();
+        return;
+    };
+
+    for result in ALL_RESULTS {
+        for safety_state in 0..=MAX_ASSIGNED_SAFETY_STATE {
+            let ack = ack_sample(result, safety_state);
+            let ours = hex(&ack.encode().expect("assigned state encodes"));
+            let theirs = oracle.ask(&format!(
+                "AE {} {} {} {} {} 0 {}",
+                ack.command_id,
+                ack.received_sequence,
+                ack.applied_at_us,
+                result.as_u16(),
+                safety_state,
+                ack.active_faults
+            ));
+            assert_eq!(
+                ours, theirs,
+                "ACK bytes differ for result={result:?} safety_state={safety_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_bound_result_values_match_protocol_md_without_any_oracle() {
+    // Deliberately NOT behind the oracle guard. The numbers are fixed by
+    // PROTOCOL.md, so this is checkable with no C++ present — and a value
+    // assertion that can be skipped is one that will be, on the runner where
+    // it matters. The oracle test below then confirms the FIRMWARE agrees.
+    for (expected_value, result) in ALL_RESULTS.iter().enumerate() {
+        assert_eq!(
+            result.as_u16() as usize,
+            expected_value,
+            "{result:?} is not at its PROTOCOL.md value"
+        );
+        assert_eq!(
+            AckResult::from_u16(result.as_u16()),
+            Some(*result),
+            "{result:?} does not round-trip through its own value"
+        );
+    }
+    // Unassigned values are refused, not coerced.
+    for unassigned in [8u16, 9, 255, 4096, u16::MAX] {
+        assert_eq!(AckResult::from_u16(unassigned), None);
+    }
+}
+
+#[test]
+fn the_bound_result_values_agree_with_the_firmware() {
+    // THE point of binding them. Every name maps to the same NUMBER on both
+    // sides — checked by encoding with our value and asking the firmware to
+    // decode it back, so a renumbering on either side is caught as a
+    // disagreement rather than discovered on a robot.
+    let Some(mut oracle) = oracle() else {
+        skipped_loudly();
+        return;
+    };
+
+    for result in ALL_RESULTS.iter() {
+        let ack = ack_sample(*result, 4); // active
+        let bytes = ack.encode().unwrap();
+        let reply = oracle.ask(&format!("AD {}", hex(&bytes)));
+        let fields: Vec<&str> = reply.split_whitespace().collect();
+        assert_eq!(fields[0], "OK", "firmware refused our {result:?}: {reply}");
+        assert_eq!(
+            fields[4],
+            result.as_u16().to_string(),
+            "{result:?} decoded to a different value on the firmware side"
+        );
+    }
+}
+
+#[test]
+fn both_sides_refuse_the_same_malformed_acks_with_the_same_verdict() {
+    let Some(mut oracle) = oracle() else {
+        skipped_loudly();
+        return;
+    };
+
+    let good = ack_sample(AckResult::Accepted, 4).encode().unwrap();
+
+    // Each case pairs OUR error with the firmware's status NAME, so the test
+    // compares verdicts rather than merely "both said no".
+    let mut cases: Vec<(&str, Vec<u8>, AckDecodeError, &str)> = Vec::new();
+
+    let mut short = good.clone();
+    short.truncate(27);
+    cases.push((
+        "one byte short",
+        short,
+        AckDecodeError::InvalidLength,
+        "invalid_length",
+    ));
+
+    let mut long = good.clone();
+    long.push(0);
+    cases.push((
+        "one byte long",
+        long,
+        AckDecodeError::InvalidLength,
+        "invalid_length",
+    ));
+
+    for bad in [8u16, 9, 255, 4096, u16::MAX] {
+        let mut b = good.clone();
+        b[16..18].copy_from_slice(&bad.to_le_bytes());
+        cases.push((
+            "unassigned result",
+            b,
+            AckDecodeError::UnknownResult,
+            "unknown_result",
+        ));
+    }
+    for bad in [8u8, 9, 200, 255] {
+        let mut b = good.clone();
+        b[18] = bad;
+        cases.push((
+            "unknown safety state",
+            b,
+            AckDecodeError::UnknownSafetyState,
+            "unknown_safety_state",
+        ));
+    }
+    for bad in [1u8, 0x80, 0xFF] {
+        let mut b = good.clone();
+        b[19] = bad;
+        cases.push((
+            "reserved not zero",
+            b,
+            AckDecodeError::ReservedNotZero,
+            "reserved_not_zero",
+        ));
+    }
+
+    for (name, bytes, ours, theirs) in cases {
+        assert_eq!(CommandAck::parse(&bytes), Err(ours), "{name}: host verdict");
+        let reply = oracle.ask(&format!("AD {}", hex(&bytes)));
+        assert_eq!(reply, format!("ERR {theirs}"), "{name}: firmware verdict");
+    }
+
+    // Non-vacuity: the untouched sample is accepted by BOTH, so the refusals
+    // above are about the mutation and not about a payload neither side ever
+    // liked.
+    assert!(CommandAck::parse(&good).is_ok());
+    assert!(oracle.ask(&format!("AD {}", hex(&good))).starts_with("OK "));
+}
+
+#[test]
+fn each_side_decodes_the_others_ack_to_identical_fields() {
+    let Some(mut oracle) = oracle() else {
+        skipped_loudly();
+        return;
+    };
+
+    for result in ALL_RESULTS {
+        let ack = ack_sample(result, 6); // fault_latched
+                                         // Firmware encodes → we decode.
+        let theirs = oracle.ask(&format!(
+            "AE {} {} {} {} {} 0 {}",
+            ack.command_id,
+            ack.received_sequence,
+            ack.applied_at_us,
+            result.as_u16(),
+            ack.safety_state,
+            ack.active_faults
+        ));
+        let bytes = unhex(&theirs);
+        assert_eq!(
+            CommandAck::parse(&bytes),
+            Ok(ack),
+            "we decoded the firmware's {result:?} differently"
+        );
+
+        // We encode → firmware decodes.
+        let reply = oracle.ask(&format!("AD {}", hex(&ack.encode().unwrap())));
+        let f: Vec<&str> = reply.split_whitespace().collect();
+        assert_eq!(f[0], "OK");
+        assert_eq!(f[1], ack.command_id.to_string());
+        assert_eq!(f[2], ack.received_sequence.to_string());
+        assert_eq!(f[3], ack.applied_at_us.to_string());
+        assert_eq!(f[4], result.as_u16().to_string());
+        assert_eq!(f[5], ack.safety_state.to_string());
+        assert_eq!(f[6], ack.active_faults.to_string());
+    }
+}
+
+#[test]
+fn an_unsolicited_ack_carries_sequence_zero_on_both_sides() {
+    // The watchdog stop answers no frame, so `received_sequence` is 0 and that
+    // must survive the round trip rather than being treated as absent.
+    let Some(mut oracle) = oracle() else {
+        skipped_loudly();
+        return;
+    };
+
+    let mut ack = ack_sample(AckResult::Accepted, 5); // controlled_stop
+    ack.received_sequence = 0;
+    ack.command_id = 0;
+    let ours = hex(&ack.encode().unwrap());
+    let theirs = oracle.ask(&format!(
+        "AE 0 0 {} {} {} 0 {}",
+        ack.applied_at_us,
+        ack.result.as_u16(),
+        ack.safety_state,
+        ack.active_faults
+    ));
+    assert_eq!(ours, theirs);
+    assert_eq!(CommandAck::parse(&unhex(&theirs)), Ok(ack));
 }

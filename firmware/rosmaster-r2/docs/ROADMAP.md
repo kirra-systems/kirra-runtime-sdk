@@ -54,8 +54,9 @@ host-side work — no board bring-up required:
 3. ✅ a **simulated MCU** speaking R2CP over a PTY — `sim.rs` (the rules) and
    `pty.rs` (the binding). `kirra-r2cp-sim` prints a `/dev/pts/N` path a real
    bridge can open;
-4. ⬜ the consumer gaining an R2CP drive mode alongside `r2_ackermann`/`x3`,
-   gated by `KIRRA_DRIVE_MODE` exactly as the existing modes are.
+4. ✅ the consumer gaining an R2CP drive mode alongside `r2_ackermann`/`x3`,
+   gated by `KIRRA_DRIVE_MODE` exactly as the existing modes are — behind a
+   HELLO handshake gate, with no fallback to the vendor path on failure.
 
 Only then does firmware flashing become a *swap* rather than a leap.
 
@@ -67,20 +68,23 @@ Passing is evidence about the **bridge**. It is not evidence about the firmware,
 and a PTY cannot model baud rate, framing errors, line noise, cable pull,
 brown-out or on-target timing. HIL is what tests the link.
 
-> **Open obligation — COMMAND_ACK result codes.** `PROTOCOL.md` §COMMAND_ACK
-> names the eight results in prose ("accepted, clamped, stale, replay,
-> unauthenticated, invalid, disarmed and faulted") but binds no numbers, and no
-> firmware emits an ACK yet. `kirra_r2cp::sim::ack_result` assigns them in prose
-> order **provisionally**, and says so at its definition. When the firmware
-> implements COMMAND_ACK it must either adopt those values or change them in
-> both places; the differential harness is what will catch a silent
-> disagreement. Until then a bridge test asserting a result code is asserting
-> against a proposal, not against the protocol.
->
-> `SafetyState` is NOT in that position: its wire bytes are mirrored from the
-> `safety_manager.hpp` discriminants (`boot`=0 … `firmware_update`=7), which is
-> why `sim::SafetyState::to_wire` writes the numbers out instead of deriving
-> them from its own smaller enum.
+**COMMAND_ACK is bound.** `PROTOCOL.md` §COMMAND_ACK now fixes the eight
+`result` values, the `safety_state` discriminants and the field offsets
+normatively; `protocol/src/command_ack.cpp` is the reference implementation and
+the host's `kirra_r2cp::command_ack` is differentially tested against it — on
+encoded bytes AND on the rejection verdict for every malformed input, including
+an unassigned result, an unknown safety state and a non-zero reserved byte. The
+values are also asserted against the spec with NO oracle present, so a
+renumbering fails on a runner with no C++ compiler rather than skipping.
+
+That closes the pre-HIL obligation that mattered most: had the firmware later
+chosen different numbers, a bridge would have read `accepted` where the MCU
+meant `stale` or `disarmed` — a wrong-way failure, on a board wired to motors,
+discoverable only with hardware attached.
+
+What is still NOT bound is CAPABILITIES: `PROTOCOL.md` describes it in prose
+with no layout, and the handshake gate deliberately uses HELLO (which IS
+specified byte-for-byte) rather than inventing one.
 
 ### Final Kirra-owned state — and what it does NOT remove
 

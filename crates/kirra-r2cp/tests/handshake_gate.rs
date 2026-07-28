@@ -384,7 +384,7 @@ fn commands_are_refused_before_the_handshake_and_accepted_after() {
         .expect("the motion command is acknowledged");
     assert_eq!(
         kirra_r2cp::link::ack_result(acked),
-        Some(kirra_r2cp::sim::ack_result::ACCEPTED)
+        Some(kirra_r2cp::command_ack::AckResult::Accepted.as_u16())
     );
     let _ = sim.stop.send(());
 }

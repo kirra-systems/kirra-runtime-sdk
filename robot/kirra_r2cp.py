@@ -109,9 +109,13 @@ class PeerInfo:
 class Ack:
     """One command's outcome.
 
-    `accepted` is the field to branch on. `result` and `safety_state` are
-    DIAGNOSTICS: the numeric ACK result codes are provisional until the
-    firmware binds them, so no control flow here may depend on their values.
+    `accepted` is the field to branch on. It already folds in the `clamped`
+    result — honoured, but tightened against the MCU's calibrated envelope —
+    which must not be mistaken for a refusal.
+
+    `result` and `safety_state` are DIAGNOSTICS. Their values are bound in
+    PROTOCOL.md §COMMAND_ACK, but they are interpreted in Rust, and this layer
+    must not grow a second opinion about what a code means.
     """
 
     accepted: bool

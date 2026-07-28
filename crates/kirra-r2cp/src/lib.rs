@@ -445,6 +445,7 @@ impl FrameReader {
     }
 }
 
+pub mod command_ack;
 pub mod handshake;
 pub mod sim;
 
