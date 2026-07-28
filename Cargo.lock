@@ -2499,9 +2499,11 @@ dependencies = [
 name = "kirra-taj"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "kirra-core",
  "kirra-trajectory",
  "kirra-verifier",
+ "sha2 0.10.9",
 ]
 
 [[package]]

@@ -32,6 +32,11 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 # on it directly (instead of the heavy `kirra-ros2-adapter`) keeps taj's library off
 # the adapter's ros2/tokio tree (review M3).
 kirra-core = { path = "../kirra-core" }
+# Self-filter mask digest (#1210): a mask change must be a digest change, so the
+# platform profile can pin the geometry a deployment is allowed to filter with.
+# Same vetted SHA-256 + hex pair the rest of the workspace uses.
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 # Integration tests only: prove Taj's corridor output feeds the real #131 checker.
