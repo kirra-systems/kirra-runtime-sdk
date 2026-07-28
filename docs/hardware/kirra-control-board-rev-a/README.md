@@ -86,6 +86,7 @@ Jetson verifier, governor, or consumer; see
 | Document | Contents |
 |---|---|
 | `architecture.md` | System context, current state, Rev A block-level architecture, boundaries |
+| `system-interfaces.md` | One-page wiring architecture; the three frozen interfaces (Jetson↔MCU, MCU↔driver, MCU↔safety) and Rev A success criteria |
 | `requirements.md` | Numbered Rev A requirements: includes, excludes, constraints |
 | `safety.md` | The hardware safety boundary: `DRIVER_ENABLE_HW` logic, signal definitions, safe-behavior matrix |
 | `interfaces.md` | Signal-interface and connector philosophy; R2CP transport interface |

@@ -12,6 +12,8 @@ Freezes:
 - **mission** (`README.md` §Mission),
 - **scope** — inclusions and exclusions (`requirements.md` §2–3),
 - **interfaces** — the interface set and philosophy (`interfaces.md`),
+  including the three signal-role interfaces frozen in
+  `system-interfaces.md` (Jetson↔MCU, MCU↔driver, MCU↔safety),
 - **safety boundary** — the `DRIVER_ENABLE_HW` logic and safe-behavior
   matrix (`safety.md`),
 - **power philosophy** (`power-and-grounding.md` §1–4),
