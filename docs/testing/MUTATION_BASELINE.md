@@ -54,12 +54,35 @@
   adapter suites alone, its own containment/talisman tests would never run, and
   it would report as a survivor.
 
-## 1b. #1196 kill wave — scope widened, survivors cleared
+## 1b. #1196 kill wave — scope widened, survivors partly cleared
 
 Widening the scope surfaced **32 survivors** on #1192's diff, all in the C1
-swept-footprint bound. Kill tests and justified equivalence exclusions took that
-to **zero**: 32 → 14 → 9 → 4 → **0** (92 caught, 1 timeout — an infinite-loop
-mutant, which counts as detected).
+swept-footprint bound. Kill tests and justified equivalence exclusions cleared
+the four functions first examined — `max_corner_radius_m`, `wrap_to_pi`,
+`segment_sagitta_m`, `chord_clears_corridor` — to zero (92 caught, 1 timeout).
+
+**A full end-to-end run over the whole diff then found 20 more: 145 caught, 20
+missed.** The intermediate runs used a `--re` filter naming those four
+functions, which silently omitted `segments_intersect` and
+`segment_to_segment_dist_sq` — two further helpers the same PR introduced. A
+targeted re-run is not evidence about a diff; only the diff-scoped run is. That
+mistake is recorded here because it is the same shape as the vacuous-exclusion
+one below: a filter that quietly narrows what is being checked while the
+result still reads as a pass.
+
+**Open survivors (20):**
+
+| location | count | note |
+|---|---|---|
+| `validate_trajectory_containment:328` | 1 | `margin_sq = inflated * inflated` → `/`, giving a constant 1.0. STRICTER, so every existing test still passes; needs an admission case clearing by between 0.40 m and 1.0 m. |
+| `segment_to_segment_dist_sq:619-627` | 5 | the four-way min selection |
+| `segments_intersect:649-650` | 14 | the orientation-sign comparisons |
+
+`segments_intersect` is load-bearing, not an optimisation: two segments crossing
+in an X have all four endpoint-to-segment distances non-zero (a unit X gives 1.0
+each), so without the crossing test a chord that cuts a boundary reports ample
+clearance. The killing case is therefore a chord with its FIRST endpoint inside
+(so PNPoly admits) crossing an edge whose endpoints are all far from it.
 
 Each round needed a different insight, and the ones that mattered were things
 reasoning got wrong and measurement got right:
@@ -102,7 +125,8 @@ answers differed, which is the point of the method:
 
 That the same search killed one pair and cleared the other is what makes the
 equivalence claim credible — it separates "actually equivalent" from "not yet
-killed" instead of excusing both.
+killed" instead of excusing both. The same search should be pointed at the 20
+remaining survivors rather than reasoning about their geometry.
 
 ### Equivalence exclusions added (#1196)
 
