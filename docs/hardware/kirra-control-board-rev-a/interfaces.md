@@ -18,7 +18,9 @@
    channels, all PWM outputs, logic supply, and ground references.
 3. **Connectors are keyed and locking where practical**, and distinct enough
    that harnesses cannot be cross-plugged (the manufacturing checklist
-   verifies drawings against physical parts).
+   verifies drawings against physical parts). The connector inventory,
+   pin-1/orientation conventions, and harness-label scheme live in
+   `connector-map.md`.
 4. **Read-only means read-only.** Sense and fault inputs (`E_STOP_SENSE`,
    `DRIVER_FAULT_*_N`, optional `STEERING_FB`) are conditioned as inputs
    only; no board path allows the MCU to drive them.

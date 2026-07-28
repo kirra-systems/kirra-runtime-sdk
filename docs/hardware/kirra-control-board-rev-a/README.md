@@ -77,6 +77,7 @@ Jetson verifier, governor, or consumer; see
 | `requirements.md` | Numbered Rev A requirements: includes, excludes, constraints |
 | `safety.md` | The hardware safety boundary: `DRIVER_ENABLE_HW` logic, signal definitions, safe-behavior matrix |
 | `interfaces.md` | Signal-interface and connector philosophy; R2CP transport interface |
+| `connector-map.md` | Mechanical connector inventory, keying/labeling conventions, mating-part worksheet (families/MPNs pending) |
 | `pin-allocation.md` | The verified pin-allocation **process** and the worksheet (all rows pending) |
 | `power-and-grounding.md` | Grounding and logic-power philosophy |
 | `design-reviews.md` | DR-1…DR-4 review gates; no fabrication before DR-4 |
