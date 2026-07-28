@@ -319,6 +319,20 @@ pub struct CapDecision {
     pub limiting_object: Option<u64>,
 }
 
+/// Where a fault leaves the clock anchor.
+///
+/// The distinction is subtle enough to be worth a type rather than a bool: two of
+/// the three faults must NOT let the faulting frame define where time is measured
+/// from, and the reasons differ (a malformed frame is untrustworthy; a regressed
+/// timestamp is actively dangerous to adopt).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnchorPolicy {
+    /// Keep the last trusted anchor — the faulting frame establishes nothing.
+    Retain,
+    /// Begin a new continuity epoch at this timestamp.
+    NewEpoch(u64),
+}
+
 /// Asymmetric temporal stabilizer for the raw ACD speed cap.
 ///
 /// Pure and deterministic: the caller supplies every clock reading.
@@ -384,15 +398,20 @@ impl CapStabilizer {
         self.limiting = None;
     }
 
-    /// Drop to the floor and forget continuity. Used by every fault arm: a
-    /// stabilizer that cannot trust its inputs must not keep a standing cap that
-    /// was derived from them.
-    fn fail_closed(&mut self, raw: f64, reason: CapReason, now_ms: Option<u64>) -> CapDecision {
+    /// What a fault does to the clock anchor. Every fault clears the same permission
+    /// state; they differ only in whether the faulting frame may define where time
+    /// is measured from next.
+    fn fail_closed(&mut self, raw: f64, reason: CapReason, anchor: AnchorPolicy) -> CapDecision {
         self.stabilized_mps = 0.0;
         self.clear_streak = 0;
-        self.last_now_ms = now_ms;
         self.last_raw_mps = None;
         self.limiting = None;
+        match anchor {
+            // The faulting frame is not a trusted observation, so it does not get to
+            // say when "now" is.
+            AnchorPolicy::Retain => {}
+            AnchorPolicy::NewEpoch(t) => self.last_now_ms = Some(t),
+        }
         CapDecision {
             raw_cap_mps: raw,
             stabilized_cap_mps: 0.0,
@@ -441,7 +460,10 @@ impl CapStabilizer {
         let raw = obs.raw_cap_mps;
 
         if !raw.is_finite() || raw < 0.0 {
-            return self.fail_closed(raw, CapReason::Invalid, Some(obs.now_ms));
+            // A malformed frame must not reset the clock baseline. If it did, the
+            // gap it sits inside would be papered over: time really did pass without
+            // a trusted observation, and the next frame has to answer for all of it.
+            return self.fail_closed(raw, CapReason::Invalid, AnchorPolicy::Retain);
         }
 
         let Some(last_now) = self.last_now_ms else {
@@ -460,11 +482,19 @@ impl CapStabilizer {
         };
 
         if obs.now_ms < last_now {
-            return self.fail_closed(raw, CapReason::TimeBackward, Some(obs.now_ms));
+            // NEVER move the anchor backward. Adopting a regressed timestamp would
+            // let the regressed clock redefine itself as valid on the very next
+            // frame — the second frame of a backward jump would compare against the
+            // first and look perfectly monotonic.
+            return self.fail_closed(raw, CapReason::TimeBackward, AnchorPolicy::Retain);
         }
         let dt_ms = obs.now_ms - last_now;
         if dt_ms > self.cfg.max_dt_ms {
-            return self.fail_closed(raw, CapReason::TimeGap, Some(obs.now_ms));
+            // A gap is the one fault where the faulting frame IS trustworthy as a
+            // timestamp — the clock advanced sanely, there was simply nothing to see
+            // in between. It opens a new continuity epoch. Permission still has to be
+            // re-earned in full from the floor.
+            return self.fail_closed(raw, CapReason::TimeGap, AnchorPolicy::NewEpoch(obs.now_ms));
         }
 
         let prev_raw = self.last_raw_mps;
@@ -1079,6 +1109,128 @@ mod tests {
         assert_eq!(
             d.limiting_object, None,
             "a stabilizer that distrusts its input must not attribute the refusal              to an object"
+        );
+    }
+
+    // ----- clock-anchor policy, per fault type -----
+
+    /// (1) A backward timestamp, then another still below the last TRUSTED time,
+    /// remains faulted.
+    ///
+    /// This is the hole that adopting the faulting frame's timestamp would open: the
+    /// second frame of a backward jump would be compared against the first, look
+    /// perfectly monotonic, and the regressed clock would have redefined itself as
+    /// valid. The anchor never moves backward, so every frame below the last trusted
+    /// time keeps faulting until the clock genuinely catches up.
+    #[test]
+    fn a_regressed_clock_cannot_redefine_itself_as_valid() {
+        let mut s = stab();
+        let t = settle_at(&mut s, 1.0, 1_000);
+
+        let d = s.observe(obs(1.0, t - 100));
+        assert_eq!(d.reason, CapReason::TimeBackward);
+
+        // Still below the last trusted anchor — must still fault, NOT be accepted as
+        // monotonic relative to the regressed frame.
+        let d = s.observe(obs(1.0, t - 50));
+        assert_eq!(
+            d.reason,
+            CapReason::TimeBackward,
+            "the anchor must not have followed the clock backward"
+        );
+        let d = s.observe(obs(1.0, t - 10));
+        assert_eq!(d.reason, CapReason::TimeBackward);
+
+        // Once the clock genuinely advances past the trusted anchor, it recovers.
+        let d = s.observe(obs(1.0, t + 100));
+        assert!(!d.reason.is_fault(), "got {:?}", d.reason);
+    }
+
+    /// (2) A malformed frame cannot reset the clock baseline.
+    ///
+    /// If it could, the gap it sits inside would be papered over. Time really did
+    /// pass without a trusted observation, and the next frame has to answer for all
+    /// of it — so a valid frame arriving long after a malformed one is a GAP,
+    /// measured from the last frame that was actually believed.
+    #[test]
+    fn a_malformed_frame_cannot_reset_the_clock_baseline() {
+        let cfg = CapStabilizerConfig::default();
+        let mut s = stab();
+        let t = settle_at(&mut s, 1.0, 1_000);
+
+        // Malformed, far in the future. It establishes nothing.
+        let d = s.observe(obs(f64::NAN, t + 10_000));
+        assert_eq!(d.reason, CapReason::Invalid);
+
+        // A valid frame just past the malformed one is a GAP relative to the last
+        // TRUSTED frame, not a normal 100 ms step relative to the malformed one.
+        let d = s.observe(obs(1.0, t + 10_100));
+        assert_eq!(
+            d.reason,
+            CapReason::TimeGap,
+            "the gap must be measured from the last trusted frame, not the bad one"
+        );
+
+        // …and a frame within the budget of the last TRUSTED anchor is not a gap,
+        // which pins that the anchor really did stay put.
+        let mut s = stab();
+        let t = settle_at(&mut s, 1.0, 1_000);
+        let _ = s.observe(obs(f64::NAN, t + 10_000));
+        let d = s.observe(obs(1.0, t + cfg.max_dt_ms));
+        assert_ne!(
+            d.reason,
+            CapReason::TimeGap,
+            "still inside the budget measured from the retained anchor"
+        );
+    }
+
+    /// (3) A large forward gap opens a NEW epoch — but the next frame is still held
+    /// at the floor until the whole recovery streak is earned.
+    ///
+    /// The gap is the one fault whose timestamp is trustworthy: the clock advanced
+    /// sanely, there was simply nothing to see. So continuity may restart there.
+    /// Permission may not — it is re-earned from zero, exactly as after any other
+    /// fault.
+    #[test]
+    fn a_gap_opens_a_new_epoch_but_permission_is_still_earned_from_zero() {
+        let cfg = CapStabilizerConfig::default();
+        let mut s = stab();
+        let t = settle_at(&mut s, 1.0, 1_000);
+        assert!(
+            s.stabilized_cap_mps() > 0.0,
+            "precondition: a cap was earned"
+        );
+
+        let gap_at = t + 10_000;
+        let d = s.observe(obs(1.0, gap_at));
+        assert_eq!(d.reason, CapReason::TimeGap);
+        assert_eq!(d.stabilized_cap_mps, 0.0, "the earned cap is gone");
+
+        // The new epoch works, and permission takes the FULL streak to re-earn.
+        // Counting the frames asserts the exact cost rather than "eventually".
+        let mut now = gap_at;
+        let mut frames = 0_u32;
+        let mut rose_after = None;
+        for _ in 0..20 {
+            now += 100;
+            frames += 1;
+            let d = s.observe(obs(1.0, now));
+            assert_ne!(
+                d.reason,
+                CapReason::TimeGap,
+                "the gap frame should have anchored a new epoch, so 100 ms steps \
+                 within it are not further gaps"
+            );
+            if d.stabilized_cap_mps > 0.0 {
+                rose_after = Some(frames);
+                break;
+            }
+        }
+        assert_eq!(
+            rose_after,
+            Some(cfg.clear_confirmations),
+            "a gap costs the entire recovery streak — no partial credit for the \
+             evidence earned before it"
         );
     }
 
