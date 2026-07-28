@@ -175,6 +175,23 @@ pub struct TajPerception {
     pub corridor: TajCorridor,
     pub objects: Vec<PerceivedObject>,
     pub stamp_ms: u64,
+    /// Ids of the objects in `objects` that were NOT observed this frame —
+    /// coasted tracks, retained through a detection dropout and emitted with
+    /// an extrapolated position.
+    ///
+    /// Carried here rather than as a field on `PerceivedObject` deliberately.
+    /// That type has ~138 construction sites across this workspace and parko —
+    /// planner, map, KPI gate, ROS adapter — none of which have any opinion
+    /// about coasting, and it is the WCET-critical type the checker consumes.
+    /// Coasting is a Taj tracker concept, so the id set travels with Taj's own
+    /// output and is applied at the wire boundary, where it becomes a per-object
+    /// `coasted` flag on the response and enters the evidence digest.
+    ///
+    /// A consumer that ignores this list treats coasted objects exactly as
+    /// observed ones — the conservative reading, and what the checker does by
+    /// design. The marker exists so an AUDIT can tell them apart, not to gate
+    /// behaviour.
+    pub coasted_ids: Vec<u64>,
 }
 
 // ===========================================================================
@@ -472,6 +489,7 @@ impl TajPhaseA {
         }
         (
             TajPerception {
+                coasted_ids: Vec::new(),
                 corridor,
                 objects,
                 stamp_ms: scan.stamp_ms,
@@ -1574,6 +1592,27 @@ impl TajTracker {
                 break; // bounded: coasting can never grow the set without limit
             }
             let predicted = predicted_track_position(tr, now_ms);
+            // Emit the retained track as an object so the HAZARD survives the
+            // dropout, not just the track identity. Position is extrapolated
+            // from the last estimated velocity — freezing it at last-seen would
+            // under-protect against an object that was closing.
+            //
+            // The id goes on `coasted_ids`, which becomes a per-object marker
+            // on the wire and enters the evidence digest: a synthetic object in
+            // front of the checker must never be indistinguishable from an
+            // observed one in an audit.
+            perception.objects.push(PerceivedObject {
+                id: tr.id,
+                pos: predicted,
+                velocity_mps: tr.vel.x_m.hypot(tr.vel.y_m),
+                heading_rad: if tr.vel.x_m.hypot(tr.vel.y_m) > 1e-6 {
+                    tr.vel.y_m.atan2(tr.vel.x_m)
+                } else {
+                    0.0
+                },
+                vel: tr.vel,
+            });
+            perception.coasted_ids.push(tr.id);
             next_tracks.push(Track {
                 id: tr.id,
                 pos: predicted,
@@ -2906,11 +2945,14 @@ mod tests {
         let first = taj.track(&blob_scan(10.0, 0), 0);
         let id = first.objects[0].id;
 
-        // Frame 2: the detector reports nothing.
+        // Frame 2: the detector reports nothing — the hazard is coasted.
         let gap = taj.track(&empty_scan(100), 100);
-        assert!(
-            gap.objects.is_empty(),
-            "no detection means no object emitted"
+        assert_eq!(gap.objects.len(), 1, "the hazard must survive the dropout");
+        assert_eq!(gap.objects[0].id, id);
+        assert_eq!(
+            gap.coasted_ids,
+            vec![id],
+            "and must be marked as unobserved"
         );
 
         // Frame 3: the object is seen again, close to where it was.
@@ -2958,19 +3000,48 @@ mod tests {
     }
 
     #[test]
-    fn coasting_emits_no_objects() {
-        // Scope boundary for this change: it keeps the TRACK alive, it does not
-        // put an unobserved object in front of the checker. Retaining the
-        // hazard itself is a separate, wire-visible change.
+    fn a_coasted_object_is_emitted_and_always_marked() {
+        // The point of retention: the HAZARD survives, not just the track id.
+        // Every synthetic object must carry the marker, on every coasted frame
+        // — an unobserved object that an audit cannot distinguish from a real
+        // detection is the failure mode this exists to prevent.
         let mut taj = TajTracker::default();
-        let _ = taj.track(&blob_scan(10.0, 0), 0);
-        for (i, t) in [100_u64, 150, 200].iter().enumerate() {
-            let out = taj.track(&empty_scan(*t), *t);
-            assert!(
-                out.objects.is_empty(),
-                "coasting frame {i} emitted an object the sensor never saw"
+        let first = taj.track(&blob_scan(10.0, 0), 0);
+        let id = first.objects[0].id;
+        assert!(
+            first.coasted_ids.is_empty(),
+            "an observed object must never be marked coasted"
+        );
+
+        for t in [100_u64, 150, 200] {
+            let out = taj.track(&empty_scan(t), t);
+            assert_eq!(out.objects.len(), 1, "hazard dropped at t={t}");
+            assert_eq!(
+                out.coasted_ids,
+                vec![id],
+                "coasted object emitted UNMARKED at t={t}"
             );
         }
+    }
+
+    #[test]
+    fn every_unobserved_object_is_in_the_marker_set() {
+        // The invariant an audit relies on: `coasted_ids` is exactly the set of
+        // emitted objects the sensor did not report this frame — never a
+        // subset, and never containing an id that was not emitted.
+        let mut taj = TajTracker::default();
+        let _ = taj.track(&blob_scan(10.0, 0), 0);
+        let out = taj.track(&empty_scan(100), 100);
+
+        let emitted: Vec<u64> = out.objects.iter().map(|o| o.id).collect();
+        for coasted in &out.coasted_ids {
+            assert!(
+                emitted.contains(coasted),
+                "marker names id {coasted}, which was not emitted"
+            );
+        }
+        // Everything emitted this frame was coasted, since nothing was detected.
+        assert_eq!(out.coasted_ids.len(), emitted.len());
     }
 
     #[test]
