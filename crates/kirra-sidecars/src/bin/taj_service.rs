@@ -5,13 +5,15 @@
 //! perception.
 //!
 //!   POST /perception  → {"healthy":..,"speed_cap_mps":..,"left":..,...}
-//!   GET  /health      → {"status":"ok"}
+//!   GET  /health      → {"status":"ok","service":"taj","contract":N}
+//!   GET  /capabilities → {"service":"taj","contract":N,"capabilities":[…]}
 //!
 //! Config: `KIRRA_TAJ_ADDR` (default 127.0.0.1:8101);
 //! `KIRRA_SIDECAR_ALLOW_NONLOCAL=1` to permit a routable bind.
 
 use std::net::{TcpListener, TcpStream};
 
+use kirra_sidecars::capabilities::Capabilities;
 use kirra_sidecars::http::{read_request, respond, respond_error};
 use kirra_sidecars::net::{allow_nonlocal_from_env, enforce_bind_policy};
 use kirra_sidecars::taj::{handle_perception_tracked, PerceptionRequest, TrackedPerceptionState};
@@ -22,7 +24,22 @@ fn serve(mut stream: TcpStream, perception_state: &mut TrackedPerceptionState) {
         Err(status) => return respond_error(&mut stream, status),
     };
     match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/health") => respond(&mut stream, "200 OK", "{\"status\":\"ok\"}"),
+        // Liveness AND capability in one place: a stale binary is ALIVE, so
+        // {"status":"ok"} alone can never distinguish current from legacy —
+        // which is exactly how an installed pre-frame_id taj_service read as
+        // healthy during R2 bring-up.
+        ("GET", "/health") => {
+            let caps = Capabilities::taj();
+            respond(
+                &mut stream,
+                "200 OK",
+                &format!(
+                    "{{\"status\":\"ok\",\"service\":\"taj\",\"contract\":{}}}",
+                    caps.contract
+                ),
+            )
+        }
+        ("GET", "/capabilities") => respond(&mut stream, "200 OK", &Capabilities::taj().to_json()),
         ("POST", "/perception") => match serde_json::from_slice::<PerceptionRequest>(&req.body) {
             Ok(p) => respond(
                 &mut stream,

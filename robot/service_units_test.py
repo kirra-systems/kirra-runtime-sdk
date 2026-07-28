@@ -32,6 +32,7 @@ REPO = Path(__file__).resolve().parent.parent
 MICK = REPO / "deploy" / "systemd" / "kirra-mick.service"
 VOICE = REPO / "robot" / "install" / "systemd" / "kirra-rabbit-voice.service"
 INSTALLER = REPO / "robot" / "install" / "install_robot_units.sh"
+CONSUMER = REPO / "robot" / "install" / "systemd" / "kirra-consumer.service"
 
 # Directives that couple LIFECYCLES rather than just ordering.
 HARD_DEPS = ("Requires", "Requisite", "BindsTo", "PartOf")
@@ -184,6 +185,58 @@ def test_no_stale_dropin_shipped_for_these_units():
         text = tuning.read_text()
         check("ExecStart" not in text,
               "the Ollama tuning drop-in must set Environment only, never ExecStart")
+
+
+# ── the consumer: permanent config abort vs transient fault ─────────────────
+
+def _section_of(text, key):
+    """Which [Section] a directive is declared under (systemd cares)."""
+    sec = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            sec = line
+        elif line.startswith(key + "="):
+            return sec
+    return None
+
+
+def test_a_deterministic_config_abort_does_not_restart_forever():
+    """Exit 2 is the consumer's fail-closed config abort (missing env var,
+    non-numeric value, unloadable FFI). Restart=on-failure restarts on ANY
+    non-zero status, so R2 bring-up reached 200+ restarts surfacing ONE missing
+    variable per cycle and the churn buried the cause."""
+    text = _unit(CONSUMER)
+    check("2" in directive(text, "RestartPreventExitStatus"),
+          "exit 2 must be terminal — RestartPreventExitStatus=2")
+    check(_section_of(text, "RestartPreventExitStatus") == "[Service]",
+          "RestartPreventExitStatus belongs in [Service]")
+
+
+def test_transient_failures_still_restart():
+    """The other half: a serial glitch or a lost ROS peer must still recover
+    on its own. Weakening that would trade one problem for a worse one."""
+    text = _unit(CONSUMER)
+    check(directive(text, "Restart") == ["on-failure"],
+          f"transient restart must survive: {directive(text, 'Restart')}")
+    check(directive(text, "RestartSec"), "RestartSec must stay set")
+
+
+def test_the_crash_loop_is_bounded_and_the_limits_are_where_systemd_reads_them():
+    text = _unit(CONSUMER)
+    for key in ("StartLimitIntervalSec", "StartLimitBurst"):
+        check(directive(text, key), f"{key} must be set (bound a flapping fault)")
+        check(_section_of(text, key) == "[Unit]",
+              f"{key} must be in [Unit] — systemd >= 229 IGNORES it under [Service]")
+
+
+def test_fail_closed_startup_is_not_weakened():
+    """The consumer must still REFUSE to run misconfigured — this change only
+    stops it re-announcing the refusal every five seconds."""
+    src = (REPO / "robot" / "kirra_motor_consumer.py").read_text()
+    check("sys.exit(2)" in src, "the config abort must still exit non-zero")
+    check("FATAL: required env var" in src,
+          "a missing required env var must still be fatal, not defaulted")
 
 
 def _run_all() -> int:
