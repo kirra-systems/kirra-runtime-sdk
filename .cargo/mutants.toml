@@ -141,4 +141,21 @@ exclude_re = [
     # EXACTLY equidistant, and either choice retains the same minimum. Both are
     # measure-zero and behaviourally identical for any real corridor.
     "replace < with <= in chord_clears_corridor",
+    # C1 PNPoly half-open vertex comparison: `(e0.y > a.y) != (e1.y > a.y)` vs
+    # `>=`. The half-open rule only matters for a point whose y coincides with a
+    # boundary VERTEX's y — and on a corridor polygon that means the point lies
+    # exactly ON the boundary. The function returns
+    # `inside && min_dist_sq >= margin_sq`, so at clearance 0 the conjunction is
+    # false whatever `inside` says: the mutant cannot change the OUTPUT for any
+    # positive margin.
+    #
+    # Not asserted — measured. An exhaustive grid search over three corridor
+    # shapes (rectangular, L-bend, slanted parallelogram) found every differing
+    # point at clearance EXACTLY 0.0, and none anywhere else. The same search is
+    # what produced the killing points for the `x_cross` division mutants, which
+    # ARE now killed by
+    # `the_x_cross_interpolation_decides_points_a_wrong_operator_would_admit` —
+    # so the method distinguishes "equivalent" from "not yet killed" rather than
+    # excusing both.
+    "replace > with >= in chord_clears_corridor",
 ]

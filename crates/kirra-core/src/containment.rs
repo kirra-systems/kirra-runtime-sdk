@@ -1871,6 +1871,48 @@ mod tests {
     }
 
     #[test]
+    fn the_x_cross_interpolation_decides_points_a_wrong_operator_would_admit() {
+        // These two points were found by exhaustively searching the slanted
+        // corridor for places where a mutated `x_cross` flips the inside/outside
+        // verdict WHILE the point stays far from every edge — i.e. where the
+        // distance term cannot cover for a broken ray-cast. Both are genuinely
+        // outside; a wrong `/` reports them inside, and the function would then
+        // clear a chord that never touches the corridor.
+        let (left, right) = slanted_corridor(3.0, 100.0, 0.4);
+        let corridor = healthy_corridor(&left, &right);
+        let margin_sq = 0.16;
+
+        // Far past the end of the band (clearance ~201 m).
+        let a = Point {
+            x_m: 299.0,
+            y_m: 7.0,
+        };
+        let b = Point {
+            x_m: 310.0,
+            y_m: 7.0,
+        };
+        assert!(
+            !chord_clears_corridor(&a, &b, &corridor, margin_sq),
+            "a chord 200 m outside the corridor must never clear"
+        );
+
+        // Below the slanted band at mid-length (clearance ~6.9 m): at x = 76 the
+        // band spans y in [27.4, 33.4], so y = 20 is outside.
+        let c = Point {
+            x_m: 76.0,
+            y_m: 20.0,
+        };
+        let d = Point {
+            x_m: 78.0,
+            y_m: 20.0,
+        };
+        assert!(
+            !chord_clears_corridor(&c, &d, &corridor, margin_sq),
+            "a chord below the slanted band must never clear"
+        );
+    }
+
+    #[test]
     fn the_ray_cast_is_stable_when_a_vertex_sits_exactly_on_the_ray() {
         // The `>` half-open comparisons in the crossing test exist to stop a
         // vertex lying exactly at the test point's y from being counted twice.
