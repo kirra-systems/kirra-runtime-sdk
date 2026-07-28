@@ -15,8 +15,6 @@ use kirra_consumer_ffi::r2cp::*;
 use kirra_r2cp::pty::SimulatedMcuPty;
 use kirra_r2cp::sim::SimulatedMcu;
 
-const NONCE: [u8; 16] = [0x5A; 16];
-
 struct SimHandle {
     device: PathBuf,
     stop: std::sync::mpsc::Sender<()>,
@@ -69,7 +67,7 @@ impl SilentPeer {
 fn open_link(device: &std::path::Path, timeout_ms: u16) -> (i32, *mut KirraR2cpLink) {
     let c = CString::new(device.to_str().unwrap()).unwrap();
     let mut handle: *mut KirraR2cpLink = std::ptr::null_mut();
-    let status = unsafe { kirra_r2cp_open(c.as_ptr(), NONCE.as_ptr(), timeout_ms, &mut handle) };
+    let status = unsafe { kirra_r2cp_open(c.as_ptr(), timeout_ms, &mut handle) };
     (status, handle)
 }
 

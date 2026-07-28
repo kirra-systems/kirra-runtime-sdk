@@ -215,23 +215,22 @@ pub struct KirraR2cpAck {
 /// [`kirra_r2cp_close`]. On failure `*out` is left NULL and the return value
 /// names the reason — **there is no handle to an unidentified device.**
 ///
-/// `nonce` must be 16 unpredictable bytes. It is what ties the peer's reply to
-/// this probe; a constant would let a recorded reply satisfy the gate. The
-/// caller supplies it rather than this layer generating one so the entropy
-/// source stays the caller's explicit choice.
+/// The handshake nonce is drawn from the OS entropy pool INSIDE this call. It
+/// is deliberately not a parameter: the caller is a Python node that must not
+/// hold nonce logic, and a predictable nonce silently converts the gate into
+/// theatre with no visible symptom. One audited entropy source beats a
+/// contract every caller has to honour.
 ///
 /// # Safety
 /// - `device` is a NUL-terminated C string.
-/// - `nonce` points to 16 readable bytes.
 /// - `out` points to a writable pointer slot.
 #[no_mangle]
 pub unsafe extern "C" fn kirra_r2cp_open(
     device: *const c_char,
-    nonce: *const u8,
     timeout_ms: u16,
     out: *mut *mut KirraR2cpLink,
 ) -> i32 {
-    if device.is_null() || nonce.is_null() || out.is_null() {
+    if device.is_null() || out.is_null() {
         return KIRRA_R2CP_NULL_ARGUMENT;
     }
     // SAFETY: caller guarantees a writable slot.
@@ -242,15 +241,11 @@ pub unsafe extern "C" fn kirra_r2cp_open(
         Ok(s) if !s.is_empty() => PathBuf::from(s),
         _ => return KIRRA_R2CP_BAD_PATH,
     };
-    let mut nonce_buf = [0u8; 16];
-    // SAFETY: caller guarantees 16 readable bytes.
-    nonce_buf.copy_from_slice(unsafe { std::slice::from_raw_parts(nonce, 16) });
-
     let mut link = match SerialLink::open(&path, None) {
         Ok(l) => l,
         Err(e) => return classify_open_error(&e),
     };
-    if let Err(e) = link.handshake(nonce_buf, timeout_ms) {
+    if let Err(e) = link.handshake_fresh(timeout_ms) {
         return classify_link_error(&e);
     }
     let boxed = Box::new(KirraR2cpLink { link, device: path });
@@ -521,9 +516,8 @@ mod tests {
     #[test]
     fn null_arguments_are_refused_not_dereferenced() {
         let mut out: *mut KirraR2cpLink = std::ptr::null_mut();
-        let nonce = [0u8; 16];
         assert_eq!(
-            unsafe { kirra_r2cp_open(std::ptr::null(), nonce.as_ptr(), 10, &mut out) },
+            unsafe { kirra_r2cp_open(std::ptr::null(), 10, &mut out) },
             KIRRA_R2CP_NULL_ARGUMENT
         );
         assert_eq!(
@@ -541,9 +535,8 @@ mod tests {
     #[test]
     fn a_missing_device_is_configuration_not_availability() {
         let mut out: *mut KirraR2cpLink = std::ptr::null_mut();
-        let nonce = [1u8; 16];
         let path = c"/dev/definitely-not-a-real-device-kirra";
-        let status = unsafe { kirra_r2cp_open(path.as_ptr(), nonce.as_ptr(), 10, &mut out) };
+        let status = unsafe { kirra_r2cp_open(path.as_ptr(), 10, &mut out) };
         assert_eq!(status, KIRRA_R2CP_DEVICE_NOT_FOUND);
         assert_eq!(kirra_r2cp_status_class(status), KIRRA_R2CP_CLASS_CONFIG);
         assert!(out.is_null(), "no handle on failure");

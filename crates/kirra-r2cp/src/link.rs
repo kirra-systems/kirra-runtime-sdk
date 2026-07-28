@@ -231,10 +231,31 @@ impl SerialLink {
         Ok(out)
     }
 
+    /// [`Self::handshake`] with a nonce drawn from the OS entropy pool.
+    ///
+    /// This is the entry point every non-test caller should use. Taking the
+    /// nonce as a parameter is right for tests, which need a known value, but
+    /// wrong as the only option: it pushes "must be unpredictable" out to every
+    /// caller, and a caller that gets it wrong produces a gate a recorded reply
+    /// can satisfy — with no visible symptom. One audited entropy source is the
+    /// safer default.
+    ///
+    /// # Errors
+    /// [`LinkError::Io`] if `/dev/urandom` cannot be read. FAIL-CLOSED on
+    /// purpose: there is no weaker fallback nonce, because a predictable one
+    /// silently converts the gate into theatre.
+    pub fn handshake_fresh(&mut self, timeout_ms: u16) -> Result<Peer, LinkError> {
+        let mut nonce = [0u8; 16];
+        let mut urandom = File::open("/dev/urandom")?;
+        urandom.read_exact(&mut nonce)?;
+        self.handshake(nonce, timeout_ms)
+    }
+
     /// Probe the peer and refuse unless it answers acceptably.
     ///
     /// `nonce` must be unpredictable — it is the only thing tying the reply to
     /// this probe, so a constant would let a recorded reply satisfy the gate.
+    /// Prefer [`Self::handshake_fresh`] outside tests.
     ///
     /// # Errors
     /// [`LinkError::Handshake`] for every refusal; see [`HandshakeError`]. The
