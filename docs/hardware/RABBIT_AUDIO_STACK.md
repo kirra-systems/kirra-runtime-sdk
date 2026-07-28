@@ -28,8 +28,9 @@ recipe below). The two dominant terms are the **fixed record window** and the
 
 | Stage | Typical | Notes |
 |---|---|---|
-| record (`arecord -d 4`) | **4.0 s fixed** | it waits the whole window — the biggest lever (see tuning) |
-| STT (whisper `base.en`) | ~0.5–2 s | for a 4 s clip; CUDA build << CPU build |
+| record (`arecord -d 4`) | **4.0 s fixed** | it waits the whole window, however short the command |
+| record (`vad_record.py`) | **~1.3 s** for a short command | stops on trailing silence; §1a — the biggest lever |
+| STT (whisper `base.en`) | ~0.5–2 s | for a 4 s clip; shorter clip → less STT too; CUDA build << CPU build |
 | LLM (`gemma3:4b`) | ~2–5 s | the conversational cost; local, no cloud |
 | TTS (piper `medium`) | ~0.3–1 s | faster than real-time for a sentence |
 
@@ -67,31 +68,76 @@ KIRRA_RECORD_CMD="arecord -d 4 -f S16_LE -r 16000 -c 1"   # 4 s, 16 kHz mono, th
 The `-d 4` bound is the single biggest latency lever. To make Rabbit feel snappier,
 either shorten it (`-d 2` for terse commands) or use **VAD endpointing** (below).
 
-### 1a. VAD endpointing (`vad_record.py`) — opt-in, stop on silence
+### 1a. VAD endpointing (`vad_record.py`) — RECOMMENDED, stop on silence
 
 `robot/vad_record.py` is a **drop-in replacement** for the `arecord` line: it
 records ONE utterance that ends on trailing silence instead of always waiting the
-full window, so a terse "check yourself" returns in ~1 s while a longer sentence
-still gets its time — up to a hard ceiling. It writes the appended WAV path (the
-same `$KIRRA_RECORD_CMD "$wav"` contract), so nothing else in the pipeline
-changes:
+full window, so a short command returns in ~1.3 s while a longer sentence still
+gets its time — up to a hard ceiling. It writes the appended WAV path (the same
+`$KIRRA_RECORD_CMD "$wav"` contract), so nothing else in the pipeline changes:
 
 ```bash
-KIRRA_RECORD_CMD="python3 /opt/kirra/robot/vad_record.py"    # opt in
-#   (left as the arecord line above → byte-identical prior behaviour)
+KIRRA_RECORD_CMD="python3 /opt/kirra/robot/vad_record.py"
+KIRRA_VAD_DEVICE="plughw:CARD=<YOUR_CARD>,DEV=0"   # REQUIRED — `arecord -l`
+KIRRA_VAD_SILENCE_MS=650      # trailing silence that ends the utterance
+KIRRA_VAD_MIN_SPEECH_MS=250   # min ACTUAL speech before an endpoint is honored
+KIRRA_VAD_MAX_MS=6000         # HARD ceiling
+KIRRA_VAD_START_TIMEOUT_MS=3000
 ```
 
-It stays a **bounded** mic, not an open one: `KIRRA_VAD_MAX_MS` (default 8 s) is a
-hard ceiling the endpointer always stops at, exactly like arecord's `-d` bound,
-and a silence-only capture ends at `KIRRA_VAD_START_TIMEOUT_MS` with an empty clip
-→ the fenced parser latches nothing → no motion. It emits only a WAV the existing
-STT transcribes — **no new authority**. The default backend is `energy` (RMS vs
-`KIRRA_VAD_RMS_FLOOR`, zero new deps — the same idea as `wake_word.py`'s pre-gate);
-`KIRRA_VAD_BACKEND` is a fail-closed seam for a future Silero/webrtc detector (an
-unimplemented value is refused, never silently ignored). The endpoint state
-machine (min actual speech + trailing-silence + hard cap) is host-tested in
-`robot/vad_record_test.py`; the capture loop is the hardware seam. Full env set:
+**The device is required.** There is deliberately no default: ALSA's default is
+whichever card the kernel enumerated first, which on the R2 is not the
+microphone, and the failure is *silent* — near-silence arrives, every turn
+endpoints as "no speech", and the robot simply appears not to hear you. Unset →
+`vad_record.py` refuses at startup, **before opening anything**. This is the same
+rule the wake listener already enforces on `KIRRA_WAKE_RECORD_CMD`, and for the
+same reason; the two remain separate variables and separate contracts.
+
+What the ~2.6 s saving looks like on a short command ("how are you?", ~690 ms of
+speech):
+
+| | capture | note |
+|---|---|---|
+| `arecord -d 4` | **4000 ms** | every turn, however short |
+| VAD (`silence 650`) | **~1340 ms** | 690 ms speech + 650 ms trailing silence |
+
+It stays a **bounded** mic, not an open one, and there are now three bounds, not
+one:
+
+- `KIRRA_VAD_MAX_MS` — the hard sample-time ceiling the endpointer always stops
+  at, exactly like arecord's `-d`. It is itself capped at `VAD_ABSOLUTE_MAX_MS`
+  (30 s), so a config typo cannot quietly turn a 6-second recorder into a
+  ten-minute one.
+- A **wall-clock deadline** (`max_ms + 2 s`). The endpointer counts *samples*; a
+  wedged capture device delivers none, so sample-time stops advancing and a plain
+  blocking read would hold the mic open forever. The deadline is what actually
+  bounds that case — it exits non-zero with `capture stalled`.
+- `KIRRA_VAD_START_TIMEOUT_MS` — silence-only ends here with an empty clip → the
+  fenced parser latches nothing → no motion.
+
+**Exit status is part of the contract.** Non-zero means "no usable clip"
+(unconfigured device, wedged card, capture program died), and `rabbit_voice.sh`
+logs `recorder failed — nothing captured` and drops the turn — no transcript, no
+intent, no motion. A dead microphone therefore reports itself instead of looking
+like a mishearing.
+
+It emits only a WAV the existing STT transcribes — **no new authority**. The
+default backend is `energy` (RMS vs `KIRRA_VAD_RMS_FLOOR`, zero new deps — the
+same idea as `wake_word.py`'s pre-gate); `KIRRA_VAD_BACKEND` is a fail-closed seam
+for a future Silero/webrtc detector (an unimplemented value is refused, never
+silently ignored). A non-arecord `KIRRA_VAD_CAPTURE_CMD` is used verbatim and gets
+no ALSA-specific validation — a custom backend has its own device convention.
+
+The endpoint state machine, the config validators and the capture seam are all
+tested in `robot/vad_record_test.py`; `robot/kirra_voice_doctor.sh` reports the
+effective settings and flags a missing device, a drifted card, an out-of-range
+bound, or the two recorder contracts being swapped. Full env set:
 `robot/install/rabbit.env.example`.
+
+> **Deployment:** an already-provisioned robot keeps its existing
+> `/etc/kirra/robot.env` — the installer never rewrites it. Adopting VAD is a
+> manual edit of that file plus a restart of the voice units. Until then the
+> fixed 4 s window stands.
 
 ## 2. TTS — piper
 

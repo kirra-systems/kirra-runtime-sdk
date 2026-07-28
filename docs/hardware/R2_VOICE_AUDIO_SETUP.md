@@ -96,8 +96,24 @@ KIRRA_RECORD_CMD="arecord -D plughw:CARD=Device,DEV=0 -d 4 -f S16_LE -r 16000 -c
 # KIRRA_MICK_AUDITOR_TOKEN="<auditor principal token>"
 ```
 Only the two `-D plughw:CARD=…` values and the real paths differ from
-`robot/install/rabbit.env.example`. `-d 4` is the record window (drop to `-d 3`
-for snappier turns).
+`robot/install/rabbit.env.example`. `-d 4` is the record window — but prefer
+**VAD endpointing**, which stops on trailing silence instead of always waiting
+the full window (~1.3 s for a short command vs a flat 4 s):
+
+```bash
+KIRRA_RECORD_CMD="python3 /opt/kirra/robot/vad_record.py"
+KIRRA_VAD_DEVICE="plughw:CARD=Device,DEV=0"   # REQUIRED — there is NO default
+KIRRA_VAD_SILENCE_MS=650
+KIRRA_VAD_MIN_SPEECH_MS=250
+KIRRA_VAD_MAX_MS=6000
+KIRRA_VAD_START_TIMEOUT_MS=3000
+```
+
+The device moves from the `arecord -D` flag to `KIRRA_VAD_DEVICE`, and it is
+**required**: unset, `vad_record.py` refuses before opening anything rather than
+falling back to ALSA's default (which is not the mic, and fails silently). Still
+a bounded mic — `KIRRA_VAD_MAX_MS` is a hard ceiling and a wedged device is
+bounded by a wall clock. Details + tuning: `RABBIT_AUDIO_STACK.md` §1a.
 
 ## 5. PTT button (GPIO) — the Orin gotchas
 ```bash
