@@ -266,3 +266,52 @@ fn the_exclusivity_probe_itself_is_not_vacuous() {
     drop(link);
     let _ = sim.stop.send(());
 }
+
+#[test]
+fn dropping_a_link_whose_peer_vanished_does_not_panic() {
+    // Review point: the release ioctl must not panic or block cleanup. Drop
+    // runs on paths where there is nobody left to report to, so it ignores the
+    // ioctl result — this proves it stays quiet when the far end is gone,
+    // which is the shape of a cable pull or an MCU reset during shutdown.
+    let sim = spawn_sim();
+    let mut link = SerialLink::open(&sim.device, None).expect("open");
+    link.handshake(NONCE, 1000).expect("handshake");
+
+    // The peer disappears, then we tear down.
+    let _ = sim.stop.send(());
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    let _ = link.receive(50); // notice the disconnect
+    drop(link); // must not panic
+}
+
+#[test]
+fn drop_covers_the_link_from_the_moment_it_exists() {
+    // Review point: exclusivity must not leak on a partially-initialised open.
+    //
+    // `SerialLink::open` constructs Self BEFORE claiming, so every fallible
+    // step is inside Drop's coverage. This pins the ordering behaviourally:
+    // after a successful open the tty is exclusive, and after the drop it is
+    // not — with the tty kept alive throughout by a separate descriptor, which
+    // is precisely the case where relying on "last close" would fail.
+    let pair = nix::pty::openpty(None, None).expect("openpty");
+    let device = nix::unistd::ttyname(pair.slave.as_fd()).expect("ttyname");
+    let keepalive = second_open(&device).expect("hold the tty open independently");
+
+    {
+        let link = SerialLink::open(&device, None).expect("open");
+        assert!(link.is_exclusive());
+        assert!(
+            crate_read_exclusive(&keepalive),
+            "the flag is on the TTY, so an independent fd sees it too"
+        );
+    }
+
+    assert!(
+        !crate_read_exclusive(&keepalive),
+        "Drop must clear exclusive mode even though another descriptor is \
+         still holding the tty open — this is the case where waiting for the \
+         last close would leave the port permanently locked"
+    );
+    drop(keepalive);
+    drop(pair);
+}

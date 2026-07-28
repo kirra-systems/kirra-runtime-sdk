@@ -193,31 +193,40 @@ impl SerialLink {
         }
         tcsetattr(fd, SetArg::TCSANOW, &attrs).map_err(io::Error::from)?;
 
-        // Exclusivity is claimed HERE — after the descriptor exists and the
-        // line is configured, but BEFORE a single handshake byte goes out.
-        // The ordering is the point: a second writer that appears between the
-        // open and the claim would be invisible, and the whole reason this
-        // link exists is that exactly one process may reach the motors.
+        // Construct FIRST, then claim. This ordering is deliberate and is the
+        // difference between "nothing fallible happens to follow the claim
+        // today" and "a leaked claim is impossible".
         //
-        // On failure the `?` drops `port`, which closes the descriptor and
-        // releases any claim with it. There is no half-owned state to unwind.
-        claim_exclusive(&port)?;
-        // Confirmed, not assumed: a caller may only claim exclusivity in a log
-        // if the kernel says it holds. `TIOCGEXCL` predates nothing we support,
-        // but treat an error as "cannot confirm" rather than failing the open —
-        // the claim above already succeeded, and refusing to start because we
-        // could not re-read it would be stricter than the guarantee requires.
-        let exclusive = read_exclusive(&port).unwrap_or(false);
-
-        Ok(Self {
-            exclusive,
+        // Once `Self` exists, `Drop` covers it: any `?` below unwinds through
+        // `release_exclusive` and then closes the descriptor. Claiming before
+        // construction would mean that a fallible step added later — a second
+        // ioctl, a probe, a timeout — silently leaks exclusive mode on the
+        // error path, and on a tty another process is keeping alive that leak
+        // is permanent (see `release_exclusive`).
+        let mut link = Self {
             port,
             reader: FrameReader::new(),
             next_sequence: 1,
             peer: None,
             consecutive_undecodable: 0,
             fault: None,
-        })
+            exclusive: false,
+        };
+
+        // Exclusivity is claimed HERE — after the descriptor exists and the
+        // line is configured, but BEFORE a single handshake byte goes out.
+        // A second writer appearing between the open and the claim would be
+        // invisible, and the whole reason this link exists is that exactly one
+        // process may reach the motors.
+        claim_exclusive(&link.port)?;
+
+        // Confirmed, not assumed: a caller may only report exclusivity if the
+        // kernel says it holds. An error reading it back is "cannot confirm",
+        // not a failed open — the claim already succeeded, and refusing to
+        // start because the read-back was unavailable would be stricter than
+        // the guarantee requires.
+        link.exclusive = read_exclusive(&link.port).unwrap_or(false);
+        Ok(link)
     }
 
     /// The peer established by a successful [`Self::handshake`]. `None` until

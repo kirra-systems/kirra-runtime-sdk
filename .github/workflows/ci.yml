@@ -938,6 +938,12 @@ jobs:
           cargo test -p kirra-consumer-ffi --locked \
             --test r2cp_against_simulator --test r2cp_scripted_peer
           cargo clippy -p kirra-consumer-ffi --all-targets --locked -- -D warnings
+      - name: unsafe stays confined to the three ioctl wrappers
+        # kirra-r2cp is deny(unsafe_code) with three narrow #[allow]s (TIOCEXCL
+        # claim, TIOCGEXCL read-back, TIOCNXCL release). The value of that is
+        # entirely in how narrow it stays, and "only in link.rs" is the kind of
+        # boundary that erodes one convenient exception at a time.
+        run: python3 ci/check_r2cp_unsafe.py
       - name: Python stays free of R2CP protocol detail
         # There is ONE R2CP implementation on the host. This walks the AST of
         # the guarded Python files (a grep would fire on the docstrings that
