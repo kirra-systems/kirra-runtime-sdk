@@ -142,7 +142,8 @@ def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print("preflight_consumer_env_test:")
     for t in tests:
-        b = len(_F); t()
+        b = len(_F)
+        t()
         print(f"  {'ok  ' if len(_F) == b else 'FAIL'} {t.__name__}")
     if _F:
         print(f"\n{len(_F)} check(s) FAILED", file=sys.stderr)

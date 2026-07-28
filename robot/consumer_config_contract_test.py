@@ -56,7 +56,8 @@ def test_r2_does_not_require_expected_car_type():
           "r2_ackermann must NOT require the X3-only car type")
     check("KIRRA_EXPECTED_CAR_TYPE" in c.inapplicable_keys(LIVE_R2),
           "it should be reported as inapplicable in R2 mode")
-    env = dict(LIVE_R2); env.pop("KIRRA_DRIVE_MODE")
+    env = dict(LIVE_R2)
+    env.pop("KIRRA_DRIVE_MODE")
     check("KIRRA_EXPECTED_CAR_TYPE" in c.required_keys(env),
           "X3 mode must still require it")
 
@@ -89,7 +90,8 @@ def test_odom_and_closed_loop_are_conditional():
 
 def test_r2_calibration_is_required_not_defaulted():
     for key in c.R2_REQUIRED:
-        env = dict(LIVE_R2); env.pop(key)
+        env = dict(LIVE_R2)
+        env.pop(key)
         check(key in c.missing_keys(env),
               f"{key} is a per-robot MEASUREMENT and must be required")
 
@@ -111,7 +113,8 @@ def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print("consumer_config_contract_test:")
     for t in tests:
-        b = len(_F); t()
+        b = len(_F)
+        t()
         print(f"  {'ok  ' if len(_F) == b else 'FAIL'} {t.__name__}")
     if _F:
         print(f"\n{len(_F)} check(s) FAILED", file=sys.stderr)
