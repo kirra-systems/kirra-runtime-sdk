@@ -37,6 +37,13 @@ pub mod vru_channel;
 // disarmed/live/fail-closed shape as `vru_channel`.
 pub mod occlusion_channel;
 
+// R2 sensor liveness watchdog (#1211) — the checks that separate a LIVE sensor
+// from a merely FRESH one (frozen stamp, frozen frame, valid-ray ratio, measured
+// rate, publisher count), each with a distinct reason code, plus the bounded
+// restart budget and the recovery streak that gate motion afterwards. Pure, no
+// ROS; disarmed by default like its sibling channels.
+pub mod sensor_watchdog;
+
 // Phase 2A Adversarial Review Hardening
 pub mod redundancy_hardening;
 pub mod validation_hardening;
