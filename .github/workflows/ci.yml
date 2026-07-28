@@ -892,6 +892,41 @@ jobs:
           cargo test --no-default-features
           cargo clippy --all-targets -- -D warnings
 
+  r2cp-bridge:
+    name: R2CP host bridge (PTY loop + dependency-free core)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: clippy
+      - name: PTY loop runs (default features, Linux)
+        # `cargo test --workspace` already covers this crate, but only
+        # INCIDENTALLY: the PTY suite needs a real /dev/ptmx and a devpts mount,
+        # so it is the one part of the tree that can be silently skipped by a
+        # container change rather than failing. Naming the lane makes the
+        # requirement explicit, and `--test pty_loop` fails rather than
+        # no-ops if the target ever stops being built.
+        run: cargo test -p kirra-r2cp --locked --test pty_loop --test frame_reader
+      - name: The core stays dependency-free without `pty`
+        # The layering claim in the crate manifest, checked instead of asserted:
+        # the codec (lib.rs) and the simulated MCU's rules (sim.rs) must not
+        # acquire an OS dependency. `cargo tree -e normal` is the SHIPPING
+        # graph; nix is still a dev-dependency because the tests act as the
+        # bridge, which is why this greps the normal edges specifically.
+        run: |
+          cargo build -p kirra-r2cp --locked --no-default-features
+          cargo test -p kirra-r2cp --locked --no-default-features
+          tree=$(cargo tree -p kirra-r2cp --no-default-features -e normal)
+          echo "$tree"
+          if [ "$(echo "$tree" | wc -l)" -ne 1 ]; then
+            echo "FAIL: kirra-r2cp gained a dependency without the pty feature" >&2
+            exit 1
+          fi
+      - name: Clippy
+        run: cargo clippy -p kirra-r2cp --all-targets --locked -- -D warnings
+
   parko-safety:
     name: Parko Safety Tests (no ROS, no ORT)
     runs-on: ubuntu-latest

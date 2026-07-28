@@ -127,7 +127,7 @@ fn a_frame_of_exactly_the_maximum_length_still_gets_through() {
     // Non-vacuity for the bound above: it must sit strictly above the largest
     // LEGAL frame, or the discard would be silently dropping valid traffic.
     let big = Frame::new(MessageType::ConfigurationSet, 1, 0)
-        .with_payload(&vec![0xABu8; kirra_r2cp::MAX_PAYLOAD]);
+        .with_payload(&[0xABu8; kirra_r2cp::MAX_PAYLOAD]);
     let bytes = encode(&big).expect("a maximum-payload frame encodes");
     assert!(bytes.len() <= MAX_ENCODED_FRAME);
 
