@@ -143,21 +143,27 @@ impl SimulatedMcuPty {
             match decode(&candidate) {
                 Ok(frame) => {
                     let outcome = mcu.handle(&frame, now_us);
-                    let ack = mcu.ack_for(&frame, outcome, now_us);
-                    // encode() only fails on an over-long payload or an illegal
-                    // flag, neither of which ack_for can produce; an error here
-                    // would be a bug in this crate, not a link fault.
-                    let bytes = encode(&ack).map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("unencodable ACK: {e:?}"),
-                        )
-                    })?;
-                    self.master.write_all(&bytes)?;
-                    self.master.flush()?;
+                    let acknowledged = match mcu.reply_for(&frame, outcome, now_us) {
+                        Some(reply) => {
+                            // encode() only fails on an over-long payload or an
+                            // illegal flag, neither of which reply_for can
+                            // produce; an error here would be a bug in this
+                            // crate, not a link fault.
+                            let bytes = encode(&reply).map_err(|e| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("unencodable reply: {e:?}"),
+                                )
+                            })?;
+                            self.master.write_all(&bytes)?;
+                            self.master.flush()?;
+                            true
+                        }
+                        None => false,
+                    };
                     handled.push(Handled {
                         outcome: Ok(outcome),
-                        acknowledged: true,
+                        acknowledged,
                     });
                 }
                 Err(e) => handled.push(Handled {
@@ -167,6 +173,22 @@ impl SimulatedMcuPty {
             }
         }
         Ok(handled)
+    }
+
+    /// Emit arbitrary bytes toward the bridge.
+    ///
+    /// The mid-session fault-injection seam, and the counterpart to
+    /// [`crate::sim::inject`]: that one corrupts a frame before it is sent,
+    /// this one lets the simulator behave like a peer that has GONE WRONG —
+    /// a baud-rate mismatch, a desynchronised sender, a board emitting a
+    /// different protocol after a reset. A bridge must survive its peer
+    /// degrading, not only its peer being wrong from the first byte.
+    ///
+    /// # Errors
+    /// Propagates write failures on the PTY.
+    pub fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.master.write_all(bytes)?;
+        self.master.flush()
     }
 
     /// Advance the MCU's clock, writing an unsolicited ACK if the watchdog

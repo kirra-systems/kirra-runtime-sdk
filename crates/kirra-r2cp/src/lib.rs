@@ -43,7 +43,24 @@
 //!   *refuses* a tagged frame with [`DecodeError::AuthRequired`], exactly as
 //!   `wire.cpp`'s `decode()` does — fail-closed, never a silent pass-through.
 
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`, for exactly ONE reason: claiming TIOCEXCL on the serial
+// port is an ioctl, and there is no safe wrapper for it. `forbid` cannot be
+// overridden even locally, so it would push the claim out of this crate and
+// into the caller — which is worse, because the claim must happen between
+// opening the descriptor and the first handshake byte, and only this crate is
+// in that position.
+//
+// The exceptions are THREE `#[allow(unsafe_code)]` functions in `link.rs`, one
+// per ioctl — claim (`TIOCEXCL`), read back (`TIOCGEXCL`) and release
+// (`TIOCNXCL`) — each a single call with a SAFETY comment. Nothing else in the
+// crate is exempt: the codec (`lib.rs`), the simulated MCU's rules (`sim.rs`),
+// the handshake evaluator (`handshake.rs`) and the PTY binding (`pty.rs`)
+// contain no `unsafe` at all, and a `--no-default-features` build — which drops
+// `link.rs` and `pty.rs` — has none anywhere.
+//
+// `ci/check_r2cp_unsafe.py` enforces that split, because "only in link.rs" is
+// the kind of boundary that erodes one convenient exception at a time.
+#![deny(unsafe_code)]
 
 pub const MAGIC: u16 = 0x3252;
 pub const PROTOCOL_MAJOR: u8 = 1;
@@ -428,7 +445,11 @@ impl FrameReader {
     }
 }
 
+pub mod handshake;
 pub mod sim;
+
+#[cfg(feature = "pty")]
+pub mod link;
 
 #[cfg(feature = "pty")]
 pub mod pty;

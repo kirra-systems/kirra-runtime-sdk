@@ -1055,6 +1055,304 @@ mod tests {
         }
     }
 
+    // ---------------------------------------------------------------------
+    // THE RELEASE BOUNDARY (stage 4)
+    //
+    // R2CP transports authorized motion. R2CP must never become a second
+    // intent or authorization path. These tests fuse the two FFI surfaces in
+    // exactly the order the Python consumer does — verify, then (only on a
+    // release) actuate — and COUNT the MOTION_COMMAND frames that reach the
+    // wire, because "no motion" and "no frame" are different claims and only
+    // the second one rules out a bypass.
+    // ---------------------------------------------------------------------
+
+    /// A simulated MCU that counts the MOTION_COMMAND frames it receives,
+    /// including refused ones. The sim's own `accepted_commands` is not
+    /// enough: a frame the peer refuses still LEFT THE HOST, which is what a
+    /// bypass would look like.
+    struct CountingSim {
+        device: std::path::PathBuf,
+        motion_frames: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// ACKs for MOTION frames specifically.
+        ///
+        /// NOT a total. An earlier version diffed a total across setup and
+        /// measurement, which is racy: the sim writes a reply and increments
+        /// AFTERWARDS, so the link can observe the ACTIVATE ack and move on
+        /// before the counter catches up — the "before" snapshot then reads
+        /// stale and setup leaks into the result. It passed locally and failed
+        /// on a CI runner. Counting only motion acks removes the window
+        /// entirely: HELLO, ARM and ACTIVATE never touch these.
+        motion_acks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        stop: std::sync::mpsc::Sender<()>,
+    }
+
+    fn spawn_counting_sim() -> CountingSim {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let pty = kirra_r2cp::pty::SimulatedMcuPty::open().expect("pty");
+        let device = pty.device_path().to_path_buf();
+        let motion_frames = Arc::new(AtomicUsize::new(0));
+        let motion_acks = Arc::new(AtomicUsize::new(0));
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let (mf, ak) = (Arc::clone(&motion_frames), Arc::clone(&motion_acks));
+
+        std::thread::spawn(move || {
+            let mut pty = pty;
+            let mut mcu = kirra_r2cp::sim::SimulatedMcu::new();
+            let started = std::time::Instant::now();
+            loop {
+                if stop_rx.try_recv().is_ok() {
+                    return;
+                }
+                let now_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                let Ok(handled) = pty.pump(&mut mcu, now_us, 20) else {
+                    return;
+                };
+                for h in handled {
+                    // Count what the state machine SAW, not what it allowed:
+                    // a frame the peer refuses still LEFT THE HOST, which is
+                    // what a bypass would look like.
+                    let is_motion = matches!(
+                        h.outcome,
+                        Ok(kirra_r2cp::sim::Outcome::Accepted { .. })
+                            | Ok(kirra_r2cp::sim::Outcome::Refused(_))
+                    );
+                    if is_motion {
+                        mf.fetch_add(1, Ordering::SeqCst);
+                        if h.acknowledged {
+                            ak.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                }
+            }
+        });
+        CountingSim {
+            device,
+            motion_frames,
+            motion_acks,
+            stop: stop_tx,
+        }
+    }
+
+    /// Wait until `counter` reaches `target`, then a little longer to catch an
+    /// overshoot. Returns whatever it settled on.
+    ///
+    /// Deliberately not a bare sleep: a fixed interval is a guess about a
+    /// scheduler, and on a loaded CI runner it is the wrong guess.
+    fn settle_until(counter: &std::sync::atomic::AtomicUsize, target: usize) -> usize {
+        use std::sync::atomic::Ordering;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+        while counter.load(Ordering::SeqCst) < target && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // A short quiet period so an EXTRA frame would be observed too — the
+        // assertion is "exactly one", not "at least one".
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        counter.load(Ordering::SeqCst)
+    }
+
+    /// Open + activate. Setup frames are HELLO/ARM/ACTIVATE, none of which are
+    /// motion, so they never touch the counters a test asserts on.
+    unsafe fn r2cp_ready(sim: &CountingSim) -> *mut crate::r2cp::KirraR2cpLink {
+        use std::ffi::CString;
+        let c = CString::new(sim.device.to_str().unwrap()).unwrap();
+        let mut handle: *mut crate::r2cp::KirraR2cpLink = core::ptr::null_mut();
+        let status = crate::r2cp::kirra_r2cp_open(c.as_ptr(), 2000, &mut handle);
+        assert_eq!(
+            status,
+            crate::r2cp::KIRRA_R2CP_OK,
+            "simulator should answer"
+        );
+        assert_eq!(
+            crate::r2cp::kirra_r2cp_activate(handle, 2000),
+            crate::r2cp::KIRRA_R2CP_OK
+        );
+        handle
+    }
+
+    /// The consumer's control flow, in one place: verify, and actuate ONLY on
+    /// a release. Deliberately the whole of it — if actuation could happen on
+    /// any other branch, this is where it would show.
+    unsafe fn verify_then_maybe_actuate(
+        consumer: *mut KirraBoundConsumer,
+        link: *mut crate::r2cp::KirraR2cpLink,
+        payload: &[u8],
+        token: &[u8],
+        now_ms: u64,
+        command_id: u32,
+    ) -> KirraBoundFrameResult {
+        let mut out = core::mem::zeroed::<KirraBoundFrameResult>();
+        kirra_bound_consumer_on_frame(
+            consumer,
+            payload.as_ptr(),
+            token.as_ptr(),
+            token.len(),
+            now_ms,
+            &mut out,
+        );
+        if out.write == 1 {
+            let mut ack = crate::r2cp::KirraR2cpAck::default();
+            crate::r2cp::kirra_r2cp_command(
+                link,
+                out.linear as f32,
+                0.0,
+                1.0,
+                5.0,
+                100_000,
+                command_id,
+                0,
+                1000,
+                &mut ack,
+            );
+        }
+        out
+    }
+
+    #[test]
+    fn an_accepted_release_sends_exactly_one_motion_command_and_gets_one_ack() {
+        use std::sync::atomic::Ordering;
+        unsafe {
+            let sim = spawn_counting_sim();
+            let link = r2cp_ready(&sim);
+            let consumer = new_bound_consumer();
+
+            let (payload, token) = bound_frame(1, 1001, 10_000, 77);
+            let out = verify_then_maybe_actuate(consumer, link, &payload, &token, 10_050, 1);
+
+            assert_eq!(out.kind, 0, "the release should verify");
+            assert_eq!(out.write, 1, "the core should release");
+
+            // Wait for the count to REACH one rather than sleeping a fixed
+            // interval and hoping, then keep watching to prove it does not go
+            // higher. A bare sleep is both slower and weaker.
+            settle_until(&sim.motion_frames, 1);
+            assert_eq!(
+                sim.motion_frames.load(Ordering::SeqCst),
+                1,
+                "exactly one MOTION_COMMAND should reach the peer"
+            );
+            settle_until(&sim.motion_acks, 1);
+            assert_eq!(
+                sim.motion_acks.load(Ordering::SeqCst),
+                1,
+                "exactly one COMMAND_ACK should come back"
+            );
+
+            kirra_bound_consumer_free(consumer);
+            crate::r2cp::kirra_r2cp_close(link);
+            let _ = sim.stop.send(());
+        }
+    }
+
+    #[test]
+    fn a_rejected_release_sends_zero_motion_frames() {
+        use std::sync::atomic::Ordering;
+        unsafe {
+            // Three independent ways a release can be refused. Each must reach
+            // the wire ZERO times — not "reach it and get refused by the
+            // peer", which would mean the host had become a second
+            // authorization path that happened to be caught downstream.
+            #[derive(Clone, Copy, Debug)]
+            enum Bad {
+                TamperedProposal,
+                Expired,
+                TamperedSignature,
+            }
+
+            for case in [Bad::TamperedProposal, Bad::Expired, Bad::TamperedSignature] {
+                let sim = spawn_counting_sim();
+                let link = r2cp_ready(&sim);
+                let consumer = new_bound_consumer();
+                let name = format!("{case:?}");
+                let (payload, token) = match case {
+                    Bad::TamperedProposal => {
+                        let (mut p, t) = bound_frame(1, 1001, 10_000, 77);
+                        p[144] ^= 1; // proposal_digest starts at byte 144
+                        (p, t)
+                    }
+                    Bad::Expired => bound_frame(1, 1001, 10_000, 77),
+                    Bad::TamperedSignature => {
+                        let (p, mut t) = bound_frame(1, 1001, 10_000, 77);
+                        let last = t.len() - 1;
+                        t[last] ^= 1;
+                        (p, t)
+                    }
+                };
+
+                // Expiry is the one that needs a late clock; the others are
+                // refused whatever the time is. Matched on the ENUM, not on a
+                // formatted name — a rename must not silently turn this into
+                // an in-window release that the test then reports as passing.
+                let now_ms = if matches!(case, Bad::Expired) {
+                    99_000
+                } else {
+                    10_050
+                };
+                let out = verify_then_maybe_actuate(consumer, link, &payload, &token, now_ms, 1);
+
+                assert_eq!(out.write, 0, "{name}: the core must not release");
+                // Target 0 means "wait the quiet period and confirm nothing
+                // arrived", which is what a zero-claim actually requires.
+                settle_until(&sim.motion_frames, 0);
+                assert_eq!(
+                    sim.motion_frames.load(Ordering::SeqCst),
+                    0,
+                    "{name}: a refused release must put ZERO motion frames on the wire"
+                );
+
+                // Non-vacuity, on THIS link and THIS sim: a zero count would
+                // also be what a broken link looks like, so prove the wire
+                // still works by pushing a good release through it.
+                let (ok_payload, ok_token) = bound_frame(9, 9001, 10_000, 77);
+                let released =
+                    verify_then_maybe_actuate(consumer, link, &ok_payload, &ok_token, 10_050, 2);
+                assert_eq!(released.write, 1, "{name}: control release should pass");
+                settle_until(&sim.motion_frames, 1);
+                assert_eq!(
+                    sim.motion_frames.load(Ordering::SeqCst),
+                    1,
+                    "{name}: the link was live, so the zero above was the refusal"
+                );
+
+                kirra_bound_consumer_free(consumer);
+                crate::r2cp::kirra_r2cp_close(link);
+                let _ = sim.stop.send(());
+            }
+        }
+    }
+
+    #[test]
+    fn a_replayed_release_sends_no_second_motion_frame() {
+        use std::sync::atomic::Ordering;
+        unsafe {
+            let sim = spawn_counting_sim();
+            let link = r2cp_ready(&sim);
+            let consumer = new_bound_consumer();
+
+            let (payload, token) = bound_frame(1, 1001, 10_000, 77);
+            let first = verify_then_maybe_actuate(consumer, link, &payload, &token, 10_050, 1);
+            assert_eq!(first.write, 1);
+
+            // The SAME release again. The verify core's watermark refuses it,
+            // so the count must not move — the replay is stopped at the
+            // authorization boundary, before the wire, not by the peer.
+            let second = verify_then_maybe_actuate(consumer, link, &payload, &token, 10_060, 2);
+            assert_eq!(second.write, 0, "a replayed release must not re-release");
+
+            settle_until(&sim.motion_frames, 1);
+            assert_eq!(
+                sim.motion_frames.load(Ordering::SeqCst),
+                1,
+                "the replay must add no second motion frame"
+            );
+
+            kirra_bound_consumer_free(consumer);
+            crate::r2cp::kirra_r2cp_close(link);
+            let _ = sim.stop.send(());
+        }
+    }
+
     #[test]
     fn bound_ffi_replay_and_superseded_frame_are_refused() {
         unsafe {
@@ -1335,3 +1633,7 @@ mod tests {
         }
     }
 }
+
+/// The R2CP link surface (stage 4 of the MCU migration). Separate module,
+/// same rule: decisions across the boundary, never wire bytes.
+pub mod r2cp;

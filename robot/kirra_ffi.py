@@ -474,6 +474,12 @@ class BoundKirraConsumer:
                 "stop_decel_mps2 (finite > 0), and vx_max/vz_max (finite > 0)."
             )
 
+    @property
+    def lib(self) -> ctypes.CDLL:
+        """The loaded library, so sibling bindings (e.g. the R2CP link) reuse
+        this handle instead of dlopening a second copy of the same .so."""
+        return self._lib
+
     def _handle(self):
         if not getattr(self, "_h", None):
             # A use-after-free would pass a dangling pointer to Rust. Refuse.
