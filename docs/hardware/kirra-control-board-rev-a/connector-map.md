@@ -53,7 +53,19 @@
    termination (never a signal pin), and is **never used as a signal or
    power return**. Whether any Rev A harness needs a shield is a DR-2
    outcome of the signal-integrity measurements, not a default.
-10. **Required evidence before a connector family is frozen** (per
+10. **Strain relief.** Every off-board harness is strain-relieved at both
+    ends by a mechanical feature (clamp, tie-down point, grommet, or
+    service loop anchored to board/plate/chassis). A connector latch is
+    retention, not strain relief, and **harnesses are never structural
+    restraints** (`mechanical-reference.md` §7–8). Strain-relief
+    provisions on the carrier are a DR-3 layout item.
+11. **Cable routing and bend radius.** Each harness records its wire's
+    minimum bend radius at DR-2 (once gauge/insulation are selected), and
+    routing on the vehicle must respect it — routed paths and clearances
+    are per-platform fields in the `mechanical-reference.md` §5 worksheet.
+    No harness routes across suspension travel, steering sweep, or
+    driveline clearance zones without a reviewed path.
+12. **Required evidence before a connector family is frozen** (per
     connector, recorded in the §3 *Evidence source* column):
     the manufacturer drawing for the exact housing/terminal series; a
     physical mating check against the real vendor-harness end (J4–J8);
@@ -116,6 +128,6 @@ Expanded to one row per designator when the first family is selected;
 verified against physical parts at DR-4. A row without a recorded crimp
 tool is not buildable and blocks DR-4.
 
-| Designator | Board connector MPN | Mating housing MPN | Crimp terminal MPN | Crimp tool | Manufacturer drawing ref | Physical mating check | Status |
-|---|---|---|---|---|---|---|---|
-| J1–J9 | Pending | Pending | Pending | Pending | Pending | Pending | Pending |
+| Designator | Board connector MPN | Mating housing MPN | Crimp terminal MPN | Retention method | Wire gauge / min bend radius | Crimp tool | Manufacturer drawing ref | Physical mating check | Status |
+|---|---|---|---|---|---|---|---|---|---|
+| J1–J9 | Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending |

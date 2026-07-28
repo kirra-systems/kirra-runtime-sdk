@@ -40,6 +40,9 @@
 - [ ] USB/ST-LINK access checked with the Nucleo mounted (connector
       clearance and cable path).
 - [ ] STEP model reviewed (carrier + Nucleo + mated connectors).
+- [ ] Mechanical compatibility class (`mechanical-reference.md` §4)
+      recorded with its evidence worksheet for every platform the release
+      claims to fit; no Class A claim without a passed MR-1.
 
 ## Outputs
 

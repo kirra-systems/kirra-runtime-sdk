@@ -72,6 +72,20 @@ Requires, all recorded:
 Exit: the `manufacturing-checklist.md` is fully checked and a release tag
 is created. **Only then** may a fabrication order be placed.
 
+## MR-1 — Chassis Selection Review (mechanical, parallel track)
+
+A separate mechanical gate defined normatively in
+`mechanical-reference.md` §6 — it selects the exact Traxxas 1/10 chassis
+for Mechanical Reference A. It does not replace or renumber DR-1…DR-4:
+
+- MR-1 may run in parallel with DR-1/DR-2 (the electrical work does not
+  wait on a chassis).
+- **No Class A mounting pattern may be frozen before MR-1 passes.**
+- DR-3 freezes mechanical fit only against reference platforms whose
+  evidence exists: the Reference B (Yahboom R2) fit needs the
+  `mechanical-reference.md` §5 Reference B measurements; a Class A fit
+  additionally needs MR-1.
+
 ## Review mechanics
 
 - Reviewers: at least one person who did not author the artifact under

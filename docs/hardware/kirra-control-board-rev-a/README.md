@@ -8,11 +8,16 @@
 
 ## Mission
 
-Kirra Control Board Rev A is a safety-focused carrier board for an STM32
-NUCLEO-G474RE. It replaces the Yahboom MCU while retaining the current
-external motor drivers, steering hardware, motors, and encoders. It
-communicates with the Jetson over the Kirra R2 Control Protocol (R2CP) and
-enforces a hardware actuation gate independently of Linux.
+Kirra Control Board Rev A is a safety-focused STM32 NUCLEO-G474RE carrier
+used first on the Yahboom ROSMASTER R2 bring-up platform. It replaces the
+Yahboom MCU while retaining the current external motor drivers, steering
+hardware, motors, and encoders; it communicates with the Jetson over the
+Kirra R2 Control Protocol (R2CP) and enforces a hardware actuation gate
+independently of Linux. Its interfaces and mechanical documentation are
+structured so the controller can migrate to a selected Traxxas 1/10-based
+Kirra platform (`mechanical-reference.md`, HDR-0007) without changing R2CP
+or the actuation authorization boundary. No Traxxas fit is claimed until
+verified — Rev A's mechanical compatibility class is **Unclassified**.
 
 Rev A is the hardware realization of two decisions already on the record:
 
@@ -35,6 +40,13 @@ hardware* into Kirra's hands without taking on motor-power electronics,
 battery distribution, or a custom MCU package. See
 `decisions/HDR-0002-carrier-before-custom-pcb.md`.
 
+The **mechanical** dimension is tracked separately from these electrical
+states (`mechanical-reference.md`): the Yahboom R2 is Mechanical
+Reference B (the bring-up adapter platform, retained through the
+migration), and the long-term mechanical reference is a Traxxas
+1/10-based Kirra platform (Reference A — platform class adopted, exact
+chassis model pending the MR-1 selection review; HDR-0007).
+
 ## What Kirra owns today vs. what Rev A adds
 
 Kirra currently owns (all software, all on the Jetson):
@@ -47,8 +59,8 @@ Kirra currently owns (all software, all on the Jetson):
   detection);
 - the R2CP host codec (`crates/kirra-r2cp`);
 - the PTY simulated MCU (`kirra-r2cp-sim`);
-- the developing R2CP consumer drive mode (roadmap bridge item 4, not yet
-  landed — the consumer today speaks `x3` / `r2_ackermann` only).
+- the R2CP consumer drive mode (`KIRRA_DRIVE_MODE=r2cp`, landed with the
+  governed consumer drive mode work — the roadmap's bridge item 4).
 
 Kirra does **not** yet own:
 
@@ -78,6 +90,7 @@ Jetson verifier, governor, or consumer; see
 | `safety.md` | The hardware safety boundary: `DRIVER_ENABLE_HW` logic, signal definitions, safe-behavior matrix |
 | `interfaces.md` | Signal-interface and connector philosophy; R2CP transport interface |
 | `connector-map.md` | Mechanical connector inventory, keying/labeling conventions, mating-part worksheet (families/MPNs pending) |
+| `mechanical-reference.md` | Mechanical References A (Kirra/Traxxas 1/10) and B (Yahboom R2 adapter), compatibility classes, evidence worksheet, MR-1 gate |
 | `pin-allocation.md` | The verified pin-allocation **process** and the worksheet (all rows pending) |
 | `power-and-grounding.md` | Grounding and logic-power philosophy |
 | `design-reviews.md` | DR-1…DR-4 review gates; no fabrication before DR-4 |
@@ -94,6 +107,12 @@ Jetson verifier, governor, or consumer; see
 | Schematic | Not started |
 | PCB layout | Not started |
 | Manufacturing release | **Not approved** |
+| Traxxas 1/10 mechanical reference | **Adopted as a platform direction** (HDR-0007) |
+| Exact chassis model | **Pending MR-1** |
+| Yahboom R2 adapter reference | Retained for Rev A bring-up |
+| Class A mounting definition | Not frozen |
+| Adapter plate | Not designed |
+| 3D fit verification | Not started |
 
 Hardware phases are never marked complete because documentation exists;
 each phase closes only at its design-review gate (`design-reviews.md`).

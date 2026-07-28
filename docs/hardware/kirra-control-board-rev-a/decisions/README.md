@@ -23,6 +23,9 @@ Numbering: `HDR-NNNN-slug.md`, monotonically increasing, never reused.
 | HDR-0004 | Hardware-combined actuator enable | Proposed (DR-1) |
 | HDR-0005 | Continuous ground plane | Proposed (DR-1) |
 | HDR-0006 | Retain external motor drivers in Rev A | Proposed (DR-1) |
+| HDR-0007 | Adopt a Traxxas 1/10 ecosystem as the long-term Kirra mechanical reference | Proposed (platform direction; exact model gated on MR-1) |
 
 Statuses follow the ADR pattern: `Proposed` until the corresponding review
-gate (here DR-1) ratifies them.
+gate ratifies them (DR-1 for HDR-0001…0006; HDR-0007's platform direction
+ratifies at DR-1 while its exact-model selection waits on MR-1 —
+`../mechanical-reference.md` §6).

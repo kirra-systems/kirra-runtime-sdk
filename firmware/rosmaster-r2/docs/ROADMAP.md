@@ -129,6 +129,18 @@ A NUCLEO-G474RE BSP in this tree is future work, gated exactly like the
 F103 BSP (`drivers/README.md`): no register code before physical
 verification.
 
+Mechanical platform direction
+(`docs/hardware/kirra-control-board-rev-a/mechanical-reference.md`,
+HDR-0007) — the R2 stays the bring-up vehicle; the long-term mechanical
+reference moves off Yahboom-specific geometry:
+
+- Traxxas 1/10 mechanical reference — **adopted as a platform direction**;
+- exact chassis model — **pending MR-1** (Chassis Selection Review);
+- Yahboom R2 adapter reference — retained for Rev A bring-up;
+- Class A mounting definition — not frozen;
+- adapter plate — not designed;
+- 3D fit verification — not started.
+
 ### Staged migration
 
 | Stage | Boundary | Verifier/governor | Vendor MCU |
