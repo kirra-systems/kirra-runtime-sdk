@@ -428,7 +428,11 @@ impl FrameReader {
     }
 }
 
+pub mod handshake;
 pub mod sim;
+
+#[cfg(feature = "pty")]
+pub mod link;
 
 #[cfg(feature = "pty")]
 pub mod pty;

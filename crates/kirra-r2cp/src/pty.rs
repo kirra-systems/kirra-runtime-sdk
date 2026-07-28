@@ -143,21 +143,27 @@ impl SimulatedMcuPty {
             match decode(&candidate) {
                 Ok(frame) => {
                     let outcome = mcu.handle(&frame, now_us);
-                    let ack = mcu.ack_for(&frame, outcome, now_us);
-                    // encode() only fails on an over-long payload or an illegal
-                    // flag, neither of which ack_for can produce; an error here
-                    // would be a bug in this crate, not a link fault.
-                    let bytes = encode(&ack).map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("unencodable ACK: {e:?}"),
-                        )
-                    })?;
-                    self.master.write_all(&bytes)?;
-                    self.master.flush()?;
+                    let acknowledged = match mcu.reply_for(&frame, outcome, now_us) {
+                        Some(reply) => {
+                            // encode() only fails on an over-long payload or an
+                            // illegal flag, neither of which reply_for can
+                            // produce; an error here would be a bug in this
+                            // crate, not a link fault.
+                            let bytes = encode(&reply).map_err(|e| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("unencodable reply: {e:?}"),
+                                )
+                            })?;
+                            self.master.write_all(&bytes)?;
+                            self.master.flush()?;
+                            true
+                        }
+                        None => false,
+                    };
                     handled.push(Handled {
                         outcome: Ok(outcome),
-                        acknowledged: true,
+                        acknowledged,
                     });
                 }
                 Err(e) => handled.push(Handled {

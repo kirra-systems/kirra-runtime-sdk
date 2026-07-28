@@ -247,6 +247,42 @@ impl SimulatedMcu {
         }
     }
 
+    /// The frame to send back, if any.
+    ///
+    /// One dispatcher rather than an ACK-for-everything rule, because a HELLO
+    /// must be answered with a HELLO: a peer probing for "is anything there
+    /// that speaks R2CP" learns nothing from a COMMAND_ACK, and the whole point
+    /// of the probe is that a NON-peer cannot accidentally satisfy it.
+    ///
+    /// An undecodable frame never reaches here — the MCU cannot echo a
+    /// sequence it never read, so silence is the only honest answer.
+    pub fn reply_for(&mut self, to: &Frame, outcome: Outcome, now_us: u64) -> Option<Frame> {
+        if to.message_type == MessageType::Hello {
+            // A HELLO already marked as a response is someone else's answer,
+            // not a probe; replying would start a loop between two peers.
+            if to.flags & crate::FLAG_RESPONSE != 0 {
+                return None;
+            }
+            let probe = crate::handshake::Hello::parse(&to.payload).ok()?;
+            let seq = self.next_ack_sequence;
+            self.next_ack_sequence = self.next_ack_sequence.wrapping_add(1);
+            return Some(
+                crate::handshake::Hello {
+                    // The nonce is ECHOED, never regenerated: it is what ties
+                    // this answer to that probe.
+                    nonce: probe.nonce,
+                    implementation_id: crate::handshake::SIM_IMPLEMENTATION_ID,
+                    firmware_semver: 0,
+                    minimum_major: crate::PROTOCOL_MAJOR,
+                    maximum_major: crate::PROTOCOL_MAJOR,
+                    maximum_frame: crate::MAX_PAYLOAD as u16,
+                }
+                .to_frame(seq, now_us, true),
+            );
+        }
+        Some(self.ack_for(to, outcome, now_us))
+    }
+
     /// Build the COMMAND_ACK for `outcome`, in reply to `to`.
     ///
     /// "ACK proves protocol handling, not physical movement" (`PROTOCOL.md`
@@ -348,6 +384,8 @@ impl SimulatedMcu {
                     Outcome::Refused(Refusal::FaultLatched)
                 }
             }
+            // A HELLO is answered (see `reply_for`), not acted on: it changes
+            // no state, so it is `Ignored` by the state machine specifically.
             MessageType::Hello | MessageType::TimeSyncRequest => Outcome::Ignored,
             _ => {
                 self.refusals += 1;
