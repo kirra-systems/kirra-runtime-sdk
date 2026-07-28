@@ -4,4 +4,26 @@ version = "0.1.0"
 edition = "2021"
 description = "Host-side R2CP v1 codec — the Jetson half of the MCU link"
 
+[features]
+# On by default so the standard `cargo test` lane exercises the PTY loop.
+#
+# The split is a layering statement, not a build convenience: the CODEC
+# (`lib.rs`) and the simulated MCU's RULES (`sim.rs`) are pure and have no
+# dependencies, so they stay portable and are the parts a differential test
+# compares against `wire.cpp`. Only the PTY BINDING needs an OS.
+default = ["pty"]
+pty = ["dep:nix"]
+
 [dependencies]
+nix = { version = "0.31.3", features = ["term", "poll"], optional = true }
+
+[dev-dependencies]
+# The tests act as the BRIDGE: they open the PTY's device path and need the same
+# bounded-wait read the real bridge does, rather than a blocking read that would
+# hang the suite on a regression instead of failing it.
+nix = { version = "0.31.3", features = ["term", "poll"] }
+
+[[bin]]
+name = "kirra-r2cp-sim"
+path = "src/bin/sim_mcu.rs"
+required-features = ["pty"]

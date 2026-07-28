@@ -52,6 +52,11 @@ pub const HEADER_SIZE: usize = 20;
 pub const CRC_SIZE: usize = 4;
 pub const MAX_PAYLOAD: usize = 192;
 pub const MAX_DECODED_FRAME: usize = HEADER_SIZE + MAX_PAYLOAD + CRC_SIZE;
+/// The largest a legal frame can be ON THE WIRE: the decoded maximum plus COBS's
+/// worst-case one-byte-per-254 overhead plus its leading code byte and the
+/// trailing delimiter. Anything longer cannot be a valid frame, which is what
+/// makes discarding it safe rather than lossy.
+pub const MAX_ENCODED_FRAME: usize = MAX_DECODED_FRAME + MAX_DECODED_FRAME / 254 + 2;
 /// Only bits 0..3 are defined in v1; 4..7 MUST be zero.
 pub const KNOWN_FLAG_MASK: u8 = 0x0F;
 pub const FLAG_ACK_REQUIRED: u8 = 0x01;
@@ -284,7 +289,7 @@ pub fn decode(encoded: &[u8]) -> Result<Frame, DecodeError> {
     if encoded.is_empty() {
         return Err(DecodeError::Empty);
     }
-    if encoded.len() > MAX_DECODED_FRAME + MAX_DECODED_FRAME / 254 + 2 {
+    if encoded.len() > MAX_ENCODED_FRAME {
         return Err(DecodeError::Oversized);
     }
     let decoded = cobs_decode(encoded).ok_or(DecodeError::MalformedCobs)?;
@@ -366,4 +371,64 @@ pub fn split_frames(stream: &[u8]) -> (Vec<Vec<u8>>, Vec<u8>) {
     let _ = saw_delim;
     (frames, remainder)
 }
+/// Streaming framer: feed it whatever a `read()` returned, get back the frames
+/// that are now complete.
+///
+/// [`split_frames`] is the one-shot form and is fine for a test buffer, but a
+/// serial read boundary is NOT a frame boundary — a 64-byte UART read routinely
+/// lands mid-frame, and re-splitting a whole session on every read would be both
+/// quadratic and wrong. This holds the partial tail across reads.
+///
+/// **Memory is bounded.** A peer that never emits a delimiter — a stuck line
+/// pulled high, a desynchronised sender, a hostile one — would otherwise grow
+/// the host's buffer without limit. Once the pending run exceeds
+/// [`MAX_ENCODED_FRAME`] it CANNOT still become a valid frame, so it is
+/// discarded and the run counted. Discarding is safe precisely because the bound
+/// is derived from the format, not guessed.
+#[derive(Debug, Default)]
+pub struct FrameReader {
+    pending: Vec<u8>,
+    /// How many over-long runs have been discarded. A bridge should surface a
+    /// non-zero value: it means the link is desynchronised, not merely noisy.
+    pub discarded_runs: u64,
+}
+
+impl FrameReader {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Absorb `bytes`, returning every frame completed by them (delimiters
+    /// stripped, ready for [`decode`]).
+    pub fn push(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
+        for &b in bytes {
+            if b == 0 {
+                if !self.pending.is_empty() {
+                    frames.push(std::mem::take(&mut self.pending));
+                }
+                // An empty run between two delimiters is idle line, not a frame.
+            } else {
+                self.pending.push(b);
+                if self.pending.len() > MAX_ENCODED_FRAME {
+                    self.pending.clear();
+                    self.discarded_runs += 1;
+                }
+            }
+        }
+        frames
+    }
+
+    /// Bytes held back awaiting a delimiter. Diagnostics only — a bridge must
+    /// never act on a frame that has not been terminated.
+    #[must_use]
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+}
+
 pub mod sim;
+
+#[cfg(feature = "pty")]
+pub mod pty;

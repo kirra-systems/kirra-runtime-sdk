@@ -51,6 +51,49 @@ pub enum SafetyState {
     FaultLatched,
 }
 
+impl SafetyState {
+    /// The byte the firmware puts on the wire. MIRRORED from the discriminants
+    /// in `safety_manager.hpp` — `boot`/`self_test` occupy 0/1 and
+    /// `firmware_update` occupies 7, which is why the numbers here start at 2
+    /// and are written out rather than derived from this enum's own order.
+    #[must_use]
+    pub fn to_wire(self) -> u8 {
+        match self {
+            SafetyState::Standby => 2,
+            SafetyState::Armed => 3,
+            SafetyState::Active => 4,
+            SafetyState::ControlledStop => 5,
+            SafetyState::FaultLatched => 6,
+        }
+    }
+}
+
+/// COMMAND_ACK `result` codes.
+///
+/// ⚠ **PROVISIONAL — this crate is defining them, not mirroring them.**
+/// `PROTOCOL.md` §COMMAND_ACK names the eight results in prose ("accepted,
+/// clamped, stale, replay, unauthenticated, invalid, disarmed and faulted") but
+/// binds no numbers, and the firmware does not yet emit an ACK. The values below
+/// take the prose order.
+///
+/// The obligation this creates is recorded in `firmware/rosmaster-r2/docs/
+/// ROADMAP.md`: when the firmware implements COMMAND_ACK it must either adopt
+/// these values or change them here, and the differential harness is what will
+/// catch a silent disagreement. Until then, a bridge test asserting on a result
+/// code is asserting against a proposal.
+pub mod ack_result {
+    pub const ACCEPTED: u16 = 0;
+    /// The sim never emits this: it refuses out-of-envelope commands rather
+    /// than tightening them. Reserved so the numbering matches the prose.
+    pub const CLAMPED: u16 = 1;
+    pub const STALE: u16 = 2;
+    pub const REPLAY: u16 = 3;
+    pub const UNAUTHENTICATED: u16 = 4;
+    pub const INVALID: u16 = 5;
+    pub const DISARMED: u16 = 6;
+    pub const FAULTED: u16 = 7;
+}
+
 /// Why a command was refused. Returned to the caller AND encoded into the
 /// COMMAND_ACK, so a bridge test can assert the reason, not just the failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +105,22 @@ pub enum Refusal {
     MalformedPayload,
     /// The frame decoded, but the type is not one the MCU accepts here.
     UnexpectedType,
+}
+
+impl Refusal {
+    #[must_use]
+    pub fn to_ack_result(self) -> u16 {
+        match self {
+            Refusal::Replay => ack_result::REPLAY,
+            Refusal::Stale => ack_result::STALE,
+            Refusal::NotActive => ack_result::DISARMED,
+            Refusal::FaultLatched => ack_result::FAULTED,
+            // A payload the MCU could not parse and a type it does not accept
+            // are both "the frame was well-formed on the wire and wrong above
+            // it" — the operator-visible distinction is in the log, not here.
+            Refusal::MalformedPayload | Refusal::UnexpectedType => ack_result::INVALID,
+        }
+    }
 }
 
 // No `Eq`: `Accepted` carries f32, which is only `PartialEq`. Comparing
@@ -160,6 +219,11 @@ pub struct SimulatedMcu {
     pub physical_ack_asserted: bool,
     pub accepted_commands: u64,
     pub refusals: u64,
+    /// The MCU's OWN sequence space for the frames it sends. It is separate from
+    /// `last_accepted_sequence` (the host's) because the two directions are
+    /// independently replay-checked — sharing one counter would let traffic in
+    /// one direction advance the other's watermark.
+    pub next_ack_sequence: u32,
 }
 
 impl Default for SimulatedMcu {
@@ -179,7 +243,47 @@ impl SimulatedMcu {
             physical_ack_asserted: false,
             accepted_commands: 0,
             refusals: 0,
+            next_ack_sequence: 1,
         }
+    }
+
+    /// Build the COMMAND_ACK for `outcome`, in reply to `to`.
+    ///
+    /// "ACK proves protocol handling, not physical movement" (`PROTOCOL.md`
+    /// §COMMAND_ACK) — an `ACCEPTED` here says the frame was well-formed,
+    /// in-sequence, fresh and admissible in the current state. It says nothing
+    /// about wheels turning, and a bridge must not read it as motion confirmed.
+    pub fn ack_for(&mut self, to: &Frame, outcome: Outcome, now_us: u64) -> Frame {
+        let result = match outcome {
+            Outcome::Accepted { .. } | Outcome::StateChanged(_) | Outcome::Ignored => {
+                ack_result::ACCEPTED
+            }
+            Outcome::Refused(r) => r.to_ack_result(),
+        };
+        // command_id is the sender's own correlation id, carried in the motion
+        // payload. A frame whose payload did not parse has none to echo, so 0
+        // is sent — the received_sequence field is what correlates then.
+        let command_id = MotionCommand::parse(&to.payload).map_or(0, |c| c.command_id);
+
+        let mut p = Vec::with_capacity(28);
+        p.extend_from_slice(&command_id.to_le_bytes());
+        p.extend_from_slice(&to.sequence.to_le_bytes());
+        p.extend_from_slice(&now_us.to_le_bytes());
+        p.extend_from_slice(&result.to_le_bytes());
+        p.push(self.state.to_wire());
+        p.push(0); // reserved
+        let active_faults: u64 = u64::from(self.state == SafetyState::FaultLatched);
+        p.extend_from_slice(&active_faults.to_le_bytes());
+
+        let seq = self.next_ack_sequence;
+        self.next_ack_sequence = self.next_ack_sequence.wrapping_add(1);
+        let mut frame =
+            Frame::new(MessageType::CommandAcknowledgement, seq, now_us).with_payload(&p);
+        frame.flags = crate::FLAG_RESPONSE;
+        if self.state == SafetyState::FaultLatched {
+            frame.flags |= crate::FLAG_FAULT_LATCHED;
+        }
+        frame
     }
 
     /// The replay rule, shared with the QNX judge and the iceoryx2 carrier:
