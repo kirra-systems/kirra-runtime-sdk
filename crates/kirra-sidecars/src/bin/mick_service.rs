@@ -12,6 +12,9 @@
 //!   POST /intent          {"text":"take me to the loading dock",
 //!                          "context"?: {"ego_speed_mps":..,"posture":"NOMINAL",..}}
 //!     → 200 {"ok":true,"seq":n,"at_ms":t,"intent":{"intent":"go_to",...}}
+//!     → 200 {"ok":true,"intent":null}   (deterministic non-motion: a greeting or
+//!                                        read-only question; no model call, no
+//!                                        intent, latch and seq UNCHANGED)
 //!     → 422 {"ok":false,"error":"MICK_JSON_PARSE_ERROR"}   (fail-closed: no intent latched)
 //!     → 429 {"ok":false,"error":"MICK_RATE_LIMITED"}
 //!   GET  /intent/last     → {"intent":{...},"seq":n,"at_ms":t} | {"intent":null}
@@ -35,7 +38,7 @@ use std::net::{TcpListener, TcpStream};
 use kirra_mick::OllamaClient;
 use kirra_planner::LlmBrain;
 use kirra_sidecars::http::{read_request, respond, respond_error};
-use kirra_sidecars::mick::{IntentRequest, IntentService};
+use kirra_sidecars::mick::{IntentOutcome, IntentRequest, IntentService};
 use kirra_sidecars::narrator::{fetch_last_verdict, NarratorConfig};
 use kirra_sidecars::net::{allow_nonlocal_from_env, enforce_bind_policy, now_ms};
 
@@ -55,7 +58,16 @@ fn serve(
                 // The accepted slice embeds verbatim — validated as a
                 // standalone JSON object at acceptance, so there is no
                 // re-parse and no silent-null fallback here.
-                Ok((_, accepted)) => respond(&mut stream, "200 OK", &accepted.to_post_wire()),
+                Ok(IntentOutcome::Accepted(_, accepted)) => {
+                    respond(&mut stream, "200 OK", &accepted.to_post_wire())
+                }
+                // Deterministic non-motion: a SUCCESS that carries no intent.
+                // `{"intent":null}` is the shape `GET /intent/last` already
+                // publishes for "nothing latched", so consumers parse one null
+                // form, not two. The latch and seq are untouched.
+                Ok(IntentOutcome::NonMotion(_)) => {
+                    respond(&mut stream, "200 OK", "{\"ok\":true,\"intent\":null}")
+                }
                 Err("MICK_RATE_LIMITED") => respond(
                     &mut stream,
                     "429 Too Many Requests",

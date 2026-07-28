@@ -45,7 +45,7 @@ use kirra_planner::{
     PlanInput, PlanOutput, Planner, Pose, TrajectoryPoint,
 };
 use kirra_release_token::ros_twist::issue_ros_release;
-use kirra_sidecars::mick::{IntentRequest, IntentService};
+use kirra_sidecars::mick::{IntentOutcome, IntentRequest, IntentService};
 use kirra_sidecars::speech::{
     narration_sentence, pcm16_wav_bytes, speech_turn, utterance_for, Speaker, SpeechTurn,
     Transcriber,
@@ -282,7 +282,12 @@ fn spoken_turn<M: ModelClient>(
             context: None,
         };
         match door.handle_text(&req, now_ms) {
-            Ok((_, accepted)) => Ok(accepted.to_post_wire()),
+            Ok(IntentOutcome::Accepted(_, accepted)) => Ok(accepted.to_post_wire()),
+            // The same body `mick_service` returns for deterministically
+            // non-motion speech: a success carrying no intent. Unreachable for
+            // this drill's utterances (they are explicit requests), but the
+            // binding has to stay a faithful mirror of the route.
+            Ok(IntentOutcome::NonMotion(_)) => Ok(r#"{"ok":true,"intent":null}"#.to_string()),
             Err(code) => Err(code.to_string()),
         }
     };
