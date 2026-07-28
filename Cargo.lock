@@ -2410,6 +2410,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-r2cp"
+version = "0.1.0"
+
+[[package]]
 name = "kirra-release-token"
 version = "0.1.0"
 dependencies = [
