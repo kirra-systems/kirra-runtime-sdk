@@ -92,6 +92,7 @@ class PeerInfo:
     maximum_frame: int
     agreed_major: int
     identified: bool
+    exclusive: bool
 
     def describe(self) -> str:
         # Rendered as ASCII when the id is four printable bytes (the
@@ -126,6 +127,7 @@ class _PeerInfoStruct(ctypes.Structure):
         ("maximum_frame", ctypes.c_uint16),
         ("agreed_major", ctypes.c_uint8),
         ("identified", ctypes.c_uint8),
+        ("exclusive", ctypes.c_uint8),
     ]
 
 
@@ -221,6 +223,7 @@ class R2cpLink:
             maximum_frame=int(out.maximum_frame),
             agreed_major=int(out.agreed_major),
             identified=bool(out.identified),
+            exclusive=bool(out.exclusive),
         )
 
     def activate(self, timeout_ms: int) -> None:

@@ -43,7 +43,18 @@
 //!   *refuses* a tagged frame with [`DecodeError::AuthRequired`], exactly as
 //!   `wire.cpp`'s `decode()` does — fail-closed, never a silent pass-through.
 
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`, for exactly ONE reason: claiming TIOCEXCL on the serial
+// port is an ioctl, and there is no safe wrapper for it. `forbid` cannot be
+// overridden even locally, so it would push the claim out of this crate and
+// into the caller — which is worse, because the claim must happen between
+// opening the descriptor and the first handshake byte, and only this crate is
+// in that position.
+//
+// The single exception is marked `#[allow(unsafe_code)]` in `link.rs` and is
+// three lines wide. The codec (`lib.rs`, `sim.rs`, `handshake.rs`) contains no
+// unsafe at all, and a `--no-default-features` build — which drops `link.rs`
+// and `pty.rs` — has none anywhere.
+#![deny(unsafe_code)]
 
 pub const MAGIC: u16 = 0x3252;
 pub const PROTOCOL_MAJOR: u8 = 1;

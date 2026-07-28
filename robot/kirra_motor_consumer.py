@@ -514,6 +514,16 @@ def main() -> int:
             return 2 if e.is_config else 1
         info = r2cp_link.peer_info()
         print(f"R2CP peer identified: {info.describe()}", file=sys.stderr)
+        # Only claimed when the KERNEL confirms it (TIOCGEXCL read back in
+        # Rust). Saying "exclusivity claimed" because a call returned 0 is the
+        # kind of unearned assurance ADR-0033 Tier-3 exists to remove.
+        if info.exclusive:
+            print(f"serial exclusivity: TIOCEXCL confirmed on {motor_port} "
+                  "(further non-root opens refused by the kernel)", file=sys.stderr)
+        else:
+            print(f"WARNING: kernel exclusivity NOT confirmed on {motor_port} — "
+                  "the boot sentinel and udev mode still apply, but this session "
+                  "is not kernel-locked", file=sys.stderr)
         try:
             r2cp_link.activate(r2cp_command_timeout_ms)
         except r2cp_mod.R2cpError as e:

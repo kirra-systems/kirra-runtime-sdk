@@ -48,6 +48,89 @@ pub struct Received {
     pub undecodable: usize,
 }
 
+/// Claim `TIOCEXCL` — kernel-enforced exclusive access for this descriptor's
+/// lifetime. While it is held, every further non-root `open(2)` of the port
+/// fails `EBUSY`.
+///
+/// This is ADR-0033's Tier-3 sole-writer guarantee for the R2CP path. The boot
+/// sentinel (owner, mode 0600, no other holder) proves nobody held the port
+/// *before* we started; this is what stops anyone taking it *after*.
+///
+/// The one `unsafe` in this crate. There is no safe wrapper for `TIOCEXCL` in
+/// `nix`, and the call is a plain `ioctl` with no arguments on a descriptor we
+/// own — the borrow of `port` is what keeps it valid across the call.
+#[allow(unsafe_code)]
+fn claim_exclusive(port: &File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: `port` is an open descriptor owned by the caller and borrowed
+    // for the duration of this call; TIOCEXCL takes no argument and writes
+    // nothing back through the pointer-free varargs slot.
+    let rc = unsafe { nix::libc::ioctl(port.as_raw_fd(), nix::libc::TIOCEXCL) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Read back whether the tty is in exclusive mode (`TIOCGEXCL`, Linux 3.8+).
+///
+/// The claim is only worth logging if it can be CONFIRMED, and `TIOCEXCL`
+/// returning 0 is not confirmation of much — so the startup path reports
+/// exclusivity from this, not from the fact that the claim call did not error.
+///
+/// It is also the only way to observe the claim from a privileged process:
+/// `tty_ioctl(4)` exempts `CAP_SYS_ADMIN` from the `EBUSY` that `TIOCEXCL`
+/// imposes on everyone else, so a root test can verify the STATE even though
+/// it cannot be blocked by it.
+#[allow(unsafe_code)]
+fn read_exclusive(port: &File) -> io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    let mut set: i32 = 0;
+    // SAFETY: `port` is an open descriptor borrowed for this call, and
+    // TIOCGEXCL writes exactly one `int` through the pointer we supply.
+    let rc = unsafe {
+        nix::libc::ioctl(
+            port.as_raw_fd(),
+            nix::libc::TIOCGEXCL,
+            std::ptr::addr_of_mut!(set),
+        )
+    };
+    if rc == 0 {
+        Ok(set != 0)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Release exclusive mode (`TIOCNXCL`).
+///
+/// Closing the descriptor is NOT reliably enough. The kernel clears the tty's
+/// exclusive flag when the tty itself is released — which happens on the last
+/// close of a real UART, but NOT while any other descriptor keeps the tty
+/// alive. I confirmed that here: dropping the link's fd left the flag set
+/// because the simulator's pty master was still open.
+///
+/// On the robot the consumer is normally the sole opener, so the flag would
+/// usually clear anyway. "Usually" is the problem: if anything else is holding
+/// the tty when the consumer exits, the port stays exclusive, and the
+/// consumer's own unprivileged restart is then refused `EBUSY` — permanently,
+/// with no configuration wrong. Releasing explicitly costs one ioctl.
+#[allow(unsafe_code)]
+fn release_exclusive(port: &File) {
+    use std::os::fd::AsRawFd;
+    // SAFETY: `port` is an open descriptor borrowed for this call; TIOCNXCL
+    // takes no argument. The result is deliberately ignored — this runs in
+    // `Drop`, where there is nobody left to report to.
+    let _ = unsafe { nix::libc::ioctl(port.as_raw_fd(), nix::libc::TIOCNXCL) };
+}
+
+impl Drop for SerialLink {
+    fn drop(&mut self) {
+        release_exclusive(&self.port);
+    }
+}
+
 /// Consecutive undecodable runs that end the session's trust in its peer.
 ///
 /// Not zero: a single corrupt frame is ordinary on a real UART (that is what
@@ -87,6 +170,9 @@ pub struct SerialLink {
     peer: Option<Peer>,
     consecutive_undecodable: usize,
     fault: Option<LinkFault>,
+    /// Kernel-CONFIRMED exclusive mode, read back after the claim. A caller
+    /// may only tell an operator the port is exclusive when this is true.
+    exclusive: bool,
 }
 
 impl SerialLink {
@@ -106,7 +192,25 @@ impl SerialLink {
             cfsetspeed(&mut attrs, b).map_err(io::Error::from)?;
         }
         tcsetattr(fd, SetArg::TCSANOW, &attrs).map_err(io::Error::from)?;
+
+        // Exclusivity is claimed HERE — after the descriptor exists and the
+        // line is configured, but BEFORE a single handshake byte goes out.
+        // The ordering is the point: a second writer that appears between the
+        // open and the claim would be invisible, and the whole reason this
+        // link exists is that exactly one process may reach the motors.
+        //
+        // On failure the `?` drops `port`, which closes the descriptor and
+        // releases any claim with it. There is no half-owned state to unwind.
+        claim_exclusive(&port)?;
+        // Confirmed, not assumed: a caller may only claim exclusivity in a log
+        // if the kernel says it holds. `TIOCGEXCL` predates nothing we support,
+        // but treat an error as "cannot confirm" rather than failing the open —
+        // the claim above already succeeded, and refusing to start because we
+        // could not re-read it would be stricter than the guarantee requires.
+        let exclusive = read_exclusive(&port).unwrap_or(false);
+
         Ok(Self {
+            exclusive,
             port,
             reader: FrameReader::new(),
             next_sequence: 1,
@@ -124,6 +228,17 @@ impl SerialLink {
     #[must_use]
     pub fn peer(&self) -> Option<Peer> {
         self.peer
+    }
+
+    /// Whether the kernel CONFIRMS this descriptor holds the tty exclusively.
+    ///
+    /// Not "we called TIOCEXCL and it returned 0" — this is the state read
+    /// back with `TIOCGEXCL`. Report exclusivity to an operator only when it
+    /// is true; claiming it otherwise is exactly the kind of unearned
+    /// assurance ADR-0033 Tier-3 exists to remove.
+    #[must_use]
+    pub fn is_exclusive(&self) -> bool {
+        self.exclusive
     }
 
     /// Why the peer was dropped, if it was. `None` means either "still

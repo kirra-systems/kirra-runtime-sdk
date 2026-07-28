@@ -62,6 +62,11 @@ pub const KIRRA_R2CP_NOT_A_SERIAL_DEVICE: i32 = 13;
 pub const KIRRA_R2CP_NO_PEER: i32 = 20;
 pub const KIRRA_R2CP_DISCONNECTED: i32 = 21;
 pub const KIRRA_R2CP_FRAMING_LOST: i32 = 22;
+/// The port is already held exclusively by another process. AVAILABILITY, not
+/// configuration: the other holder may exit without anything about this
+/// robot's config changing, and a permanent stop would then need a manual
+/// `systemctl reset-failed` to undo.
+pub const KIRRA_R2CP_PORT_BUSY: i32 = 23;
 
 // 30..39 — PROTOCOL DISAGREEMENT. A peer answered and we cannot work with it.
 // Deterministic for a given pair of builds, but a firmware update fixes it
@@ -132,6 +137,10 @@ pub extern "C" fn kirra_r2cp_status_message(status: i32) -> *const c_char {
               send it frames"
         }
         KIRRA_R2CP_DISCONNECTED => c"the device went away (cable, power or MCU reset)",
+        KIRRA_R2CP_PORT_BUSY => {
+            c"the serial port is already held exclusively by another process — \
+              refusing to share the path to the motors (ADR-0033 sole writer)"
+        }
         KIRRA_R2CP_FRAMING_LOST => {
             c"sustained framing failure: the two ends disagree about frame boundaries"
         }
@@ -155,6 +164,9 @@ fn classify_open_error(e: &std::io::Error) -> i32 {
     match e.kind() {
         std::io::ErrorKind::NotFound => KIRRA_R2CP_DEVICE_NOT_FOUND,
         std::io::ErrorKind::PermissionDenied => KIRRA_R2CP_PERMISSION_DENIED,
+        // EBUSY: someone else holds TIOCEXCL on this port. Availability, not
+        // configuration — see KIRRA_R2CP_PORT_BUSY.
+        std::io::ErrorKind::ResourceBusy => KIRRA_R2CP_PORT_BUSY,
         // ENOTTY from tcgetattr/tcsetattr: the path exists and opened, but it
         // is not a terminal — a regular file or a socket someone pointed the
         // config at. That is configuration, not availability.
@@ -190,6 +202,10 @@ pub struct KirraR2cpPeerInfo {
     /// 1 while the peer is identified; 0 after a disconnect, sustained framing
     /// failure, or an explicit reset. A caller seeing 0 must re-open.
     pub identified: u8,
+    /// 1 when the KERNEL CONFIRMS this descriptor holds the tty exclusively
+    /// (read back with TIOCGEXCL, not inferred from the claim returning 0).
+    /// A caller may only tell an operator the port is exclusive when this is 1.
+    pub exclusive: u8,
 }
 
 /// The outcome of one command. `result` is the peer's COMMAND_ACK result code.
@@ -288,8 +304,15 @@ pub unsafe extern "C" fn kirra_r2cp_peer_info(
             maximum_frame: p.maximum_frame,
             agreed_major: p.agreed_major,
             identified: 1,
+            exclusive: u8::from(link.link.is_exclusive()),
         },
-        None => KirraR2cpPeerInfo::default(),
+        None => KirraR2cpPeerInfo {
+            // Exclusivity is a property of the DESCRIPTOR, not of
+            // identification: a de-identified link still holds the port, and
+            // reporting otherwise would understate what is held.
+            exclusive: u8::from(link.link.is_exclusive()),
+            ..KirraR2cpPeerInfo::default()
+        },
     };
     // SAFETY: caller guarantees a writable struct.
     unsafe { *out = info };
@@ -457,6 +480,12 @@ mod tests {
             kirra_r2cp_status_class(KIRRA_R2CP_DISCONNECTED),
             KIRRA_R2CP_CLASS_AVAILABILITY
         );
+        // Another process holding the port may release it without any config
+        // change, so a permanent stop would be wrong here too.
+        assert_eq!(
+            kirra_r2cp_status_class(KIRRA_R2CP_PORT_BUSY),
+            KIRRA_R2CP_CLASS_AVAILABILITY
+        );
         assert_eq!(
             kirra_r2cp_status_class(KIRRA_R2CP_DEVICE_NOT_FOUND),
             KIRRA_R2CP_CLASS_CONFIG
@@ -482,6 +511,7 @@ mod tests {
             KIRRA_R2CP_NOT_A_SERIAL_DEVICE,
             KIRRA_R2CP_NO_PEER,
             KIRRA_R2CP_DISCONNECTED,
+            KIRRA_R2CP_PORT_BUSY,
             KIRRA_R2CP_FRAMING_LOST,
             KIRRA_R2CP_VERSION_MISMATCH,
             KIRRA_R2CP_FRAME_LIMIT,

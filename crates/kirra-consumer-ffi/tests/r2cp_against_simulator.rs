@@ -193,6 +193,76 @@ fn case_8_a_stop_is_attempted_even_when_the_peer_was_de_identified() {
 }
 
 #[test]
+fn case_6_an_exclusivity_failure_maps_to_the_right_class_and_yields_no_handle() {
+    // A port already held exclusively by another process. Availability, not
+    // configuration: the other holder may exit without anything about this
+    // robot's config changing, so a permanent stop would be wrong.
+    //
+    // NOTE: tty_ioctl(4) exempts CAP_SYS_ADMIN from TIOCEXCL's EBUSY, so a
+    // ROOT test cannot actually be refused. The classification is asserted
+    // directly (it is pure), and the live refusal is checked unprivileged.
+    assert_eq!(
+        kirra_r2cp_status_class(KIRRA_R2CP_PORT_BUSY),
+        KIRRA_R2CP_CLASS_AVAILABILITY,
+        "a busy port must be restartable, not a permanent stop"
+    );
+    assert_ne!(
+        kirra_r2cp_status_class(KIRRA_R2CP_PORT_BUSY),
+        KIRRA_R2CP_CLASS_CONFIG
+    );
+
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    if unsafe { nix::libc::geteuid() } == 0 {
+        eprintln!(
+            "SKIP: running as root, which tty_ioctl(4) exempts from TIOCEXCL's \
+             EBUSY — the live refusal cannot be observed here. On the robot the \
+             consumer runs as a rendered non-root User=, where it does bite."
+        );
+        return;
+    }
+
+    let sim = spawn_sim();
+    let (first_status, first) = open_link(&sim.device, 1000);
+    assert_eq!(first_status, KIRRA_R2CP_OK);
+
+    let (status, handle) = open_link(&sim.device, 1000);
+    assert_eq!(status, KIRRA_R2CP_PORT_BUSY);
+    assert!(handle.is_null(), "a busy port must yield no handle");
+
+    unsafe { kirra_r2cp_close(first) };
+    let _ = sim.stop.send(());
+}
+
+#[test]
+fn a_live_link_reports_kernel_confirmed_exclusivity() {
+    // The startup log may only claim exclusivity when the KERNEL confirms it,
+    // so the flag has to travel across the FFI rather than being inferred by
+    // the caller from "open succeeded".
+    let sim = spawn_sim();
+    let (status, handle) = open_link(&sim.device, 1000);
+    assert_eq!(status, KIRRA_R2CP_OK);
+
+    let mut info = KirraR2cpPeerInfo::default();
+    assert_eq!(
+        unsafe { kirra_r2cp_peer_info(handle, &mut info) },
+        KIRRA_R2CP_OK
+    );
+    assert_eq!(info.exclusive, 1, "TIOCGEXCL should confirm the claim");
+
+    // Exclusivity belongs to the DESCRIPTOR, not to identification: a
+    // de-identified link still holds the port, and saying otherwise would
+    // understate what is held.
+    assert_eq!(unsafe { kirra_r2cp_reset(handle) }, KIRRA_R2CP_OK);
+    let mut after = KirraR2cpPeerInfo::default();
+    let _ = unsafe { kirra_r2cp_peer_info(handle, &mut after) };
+    assert_eq!(after.identified, 0);
+    assert_eq!(after.exclusive, 1, "the port is still held");
+
+    unsafe { kirra_r2cp_close(handle) };
+    let _ = sim.stop.send(());
+}
+
+#[test]
 fn a_handle_is_only_ever_produced_for_an_identified_peer() {
     // The structural claim the whole surface rests on, stated once as a test:
     // across every failure mode, `out` is left NULL. "Command a peer we never

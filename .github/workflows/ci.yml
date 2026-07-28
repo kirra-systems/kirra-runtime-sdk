@@ -908,7 +908,7 @@ jobs:
         # container change rather than failing. Naming the lane makes the
         # requirement explicit, and `--test pty_loop` fails rather than
         # no-ops if the target ever stops being built.
-        run: cargo test -p kirra-r2cp --locked --test pty_loop --test frame_reader
+        run: cargo test -p kirra-r2cp --locked --test pty_loop --test frame_reader --test exclusivity
       - name: The core stays dependency-free without `pty`
         # The layering claim in the crate manifest, checked instead of asserted:
         # the codec (lib.rs) and the simulated MCU's rules (sim.rs) must not
