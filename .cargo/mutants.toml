@@ -94,4 +94,15 @@ exclude_re = [
     # per-window coverage test (a wrong span flips the in-span verdict).
     "replace < with <= in ego_time_span",
     "replace > with >= in ego_time_span",
+    # C1 (#1192) straight-segment short circuit in `segment_sagitta_m`:
+    # `theta < STRAIGHT_SEGMENT_HEADING_EPS_RAD` vs `<=` differ only at theta
+    # EXACTLY 1e-9 — and at that theta both branches return exactly Some(0.0),
+    # because `1 - cos(theta/2)` underflows to 0.0 in f64 well before 1e-9. The
+    # threshold is a singularity guard (the closed form is 0/0 at theta = 0),
+    # not a behavioural boundary, so no test can distinguish the two forms.
+    # TRULY equivalent, like the ego_time_span pair above rather than merely
+    # measure-zero. Pinned by `the_straight_short_circuit_agrees_with_the_arc_at_
+    # the_epsilon`, which fails if the epsilon is ever raised into a range where
+    # the arc IS representable — at which point this exclusion must be re-earned.
+    "replace < with <= in segment_sagitta_m",
 ]

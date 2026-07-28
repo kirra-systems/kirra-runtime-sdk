@@ -1459,6 +1459,296 @@ mod tests {
         );
     }
 
+    // --- helper arithmetic (mutation-gate kills) ----------------------------
+    //
+    // The C1 tests below exercise COMPOSED behaviour: they drive
+    // `validate_trajectory_containment` and check verdicts. That left the
+    // helpers' arithmetic untested — a mutation run over the #1192 diff found
+    // 32 survivors, including `max_corner_radius_m -> 0.0`, which shrinks the
+    // sagitta and makes the bound LESS conservative without flipping any
+    // composed verdict. These pin the arithmetic directly.
+
+    #[test]
+    fn max_corner_radius_is_the_farthest_corner_from_the_rear_axle() {
+        // Front-dominant: the front corners are farther, so the front diagonal
+        // wins. Exact value, so a wrong operator or a constant cannot pass.
+        let f = VehicleFootprint {
+            width_m: 0.30,
+            length_m: 0.47,
+            overhang_front_m: 0.18,
+            overhang_rear_m: 0.09,
+            wheelbase_m: 0.20,
+        };
+        // front = hypot(0.20 + 0.18, 0.15), rear = hypot(0.09, 0.15)
+        let expected = (0.38_f64).hypot(0.15);
+        assert!((max_corner_radius_m(&f) - expected).abs() < 1e-12);
+        assert!(
+            max_corner_radius_m(&f) > (0.09_f64).hypot(0.15),
+            "front must win here"
+        );
+    }
+
+    #[test]
+    fn max_corner_radius_takes_the_rear_when_the_rear_overhangs_further() {
+        // The `>` branch must actually select, not always return one side.
+        let f = VehicleFootprint {
+            width_m: 0.30,
+            length_m: 2.0,
+            overhang_front_m: 0.05,
+            overhang_rear_m: 1.50,
+            wheelbase_m: 0.20,
+        };
+        let expected = (1.50_f64).hypot(0.15);
+        assert!((max_corner_radius_m(&f) - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn max_corner_radius_scales_with_width() {
+        // Kills `* 0.5` → `+ 0.5` / `/ 0.5` on the half-width, and any constant
+        // return: a wider body must have a strictly larger corner radius.
+        let narrow = VehicleFootprint {
+            width_m: 0.30,
+            length_m: 0.47,
+            overhang_front_m: 0.18,
+            overhang_rear_m: 0.09,
+            wheelbase_m: 0.20,
+        };
+        let wide = VehicleFootprint {
+            width_m: 2.00,
+            ..narrow
+        };
+        assert!(
+            max_corner_radius_m(&wide) > max_corner_radius_m(&narrow) + 0.5,
+            "a 2 m-wide body must reach much further than a 0.3 m one"
+        );
+        // And it is a real distance, never a constant.
+        assert!(max_corner_radius_m(&narrow) > 0.0);
+    }
+
+    #[test]
+    fn wrap_to_pi_maps_angles_onto_the_half_open_turn() {
+        // Exact expectations either side of both branches. `>` vs `>=` at
+        // exactly +pi is the difference between +pi and -pi, and the `-=`/`+=`
+        // direction is the difference between a small turn and a huge one.
+        let pi = core::f64::consts::PI;
+        let cases = [
+            (0.0, 0.0),
+            (0.5, 0.5),
+            (-0.5, -0.5),
+            (pi, pi),  // +pi stays +pi (the interval is (-pi, pi])
+            (-pi, pi), // -pi wraps UP to +pi
+            (pi + 0.25, -pi + 0.25),
+            (-pi - 0.25, pi - 0.25),
+            (3.0 * pi / 2.0, -pi / 2.0),
+            (2.0 * pi, 0.0),
+        ];
+        for (input, expected) in cases {
+            let got = wrap_to_pi(input);
+            assert!(
+                (got - expected).abs() < 1e-12,
+                "wrap_to_pi({input}) = {got}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_to_pi_always_lands_inside_the_interval() {
+        let pi = core::f64::consts::PI;
+        let mut a = -20.0_f64;
+        while a < 20.0 {
+            let w = wrap_to_pi(a);
+            assert!(w > -pi - 1e-12 && w <= pi + 1e-12, "wrap_to_pi({a}) = {w}");
+            a += 0.37;
+        }
+    }
+
+    #[test]
+    fn sagitta_matches_the_closed_form() {
+        // Exact value, so every operator in the expression is pinned:
+        // r_axle = chord / (2 sin(theta/2)); sagitta = (r_axle + r_max)(1 - cos(theta/2)).
+        let theta = 0.6_f64;
+        let chord = 0.5_f64;
+        let r_max = 0.29_f64;
+        let a = Pose {
+            x_m: 0.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        };
+        let b = Pose {
+            x_m: chord,
+            y_m: 0.0,
+            heading_rad: theta,
+        };
+        let half = 0.5 * theta;
+        let expected = (chord / (2.0 * half.sin()) + r_max) * (1.0 - half.cos());
+        let got = segment_sagitta_m(&a, &b, r_max).expect("modellable");
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "sagitta {got} != closed form {expected}"
+        );
+    }
+
+    #[test]
+    fn sagitta_grows_with_the_corner_radius() {
+        // Kills `max_corner_radius_m -> 0.0` reaching here, and `+ r_max` being
+        // dropped or turned into `*`: a body that reaches further must bulge more.
+        let a = Pose {
+            x_m: 0.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        };
+        let b = Pose {
+            x_m: 0.5,
+            y_m: 0.0,
+            heading_rad: 0.6,
+        };
+        let small = segment_sagitta_m(&a, &b, 0.1).unwrap();
+        let large = segment_sagitta_m(&a, &b, 2.0).unwrap();
+        // The r_max term is exactly (r_large - r_small)(1 - cos(theta/2)).
+        let expected_delta = (2.0 - 0.1) * (1.0 - (0.3_f64).cos());
+        assert!(
+            (large - small - expected_delta).abs() < 1e-12,
+            "small={small} large={large}, delta != {expected_delta}"
+        );
+    }
+
+    #[test]
+    fn sagitta_grows_with_the_chord_at_fixed_curvature() {
+        // Pins the chord term: `chord / (2 sin)` mutated to `*` or `%` breaks
+        // this monotonicity.
+        let theta = 0.6_f64;
+        let mut previous = -1.0;
+        for chord in [0.1_f64, 0.5, 1.0, 2.0] {
+            let a = Pose {
+                x_m: 0.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            };
+            let b = Pose {
+                x_m: chord,
+                y_m: 0.0,
+                heading_rad: theta,
+            };
+            let s = segment_sagitta_m(&a, &b, 0.29).unwrap();
+            assert!(s > previous, "chord {chord} did not increase sagitta");
+            previous = s;
+        }
+    }
+
+    #[test]
+    fn sagitta_refuses_a_non_finite_chord_or_radius() {
+        // The `||` in the finiteness guard: `&&` would let a single non-finite
+        // input through.
+        let a = Pose {
+            x_m: 0.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        };
+        let far = Pose {
+            x_m: f64::MAX,
+            y_m: f64::MAX,
+            heading_rad: 0.6,
+        };
+        assert_eq!(segment_sagitta_m(&a, &far, 0.29), None, "non-finite chord");
+        let b = Pose {
+            x_m: 0.5,
+            y_m: 0.0,
+            heading_rad: 0.6,
+        };
+        assert_eq!(
+            segment_sagitta_m(&a, &b, f64::INFINITY),
+            None,
+            "non-finite r_max"
+        );
+        assert_eq!(segment_sagitta_m(&a, &b, f64::NAN), None, "NaN r_max");
+    }
+
+    #[test]
+    fn the_straight_short_circuit_agrees_with_the_arc_at_the_epsilon() {
+        // Both sides of the epsilon return EXACTLY 0.0, and that is the point:
+        // at theta = 1e-9, `1 - cos(theta/2)` underflows to exactly 0.0 in f64,
+        // so the computed branch produces the same answer the short-circuit
+        // does. The threshold is therefore a performance/singularity guard, not
+        // a behavioural boundary — which is why `< eps` vs `<= eps` is an
+        // EQUIVALENT mutant, excluded with justification in .cargo/mutants.toml.
+        // This test pins the property that makes it equivalent, so if the
+        // epsilon is ever raised into a range where the arc IS representable,
+        // this fails and the exclusion must be re-justified.
+        let a = Pose {
+            x_m: 0.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        };
+        for scale in [0.5, 1.0, 2.0] {
+            let b = Pose {
+                x_m: 0.5,
+                y_m: 0.0,
+                heading_rad: scale * STRAIGHT_SEGMENT_HEADING_EPS_RAD,
+            };
+            assert_eq!(
+                segment_sagitta_m(&a, &b, 0.29),
+                Some(0.0),
+                "at {scale}x the epsilon the sagitta must still be exactly zero"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chord_is_refused_when_either_endpoint_is_non_finite() {
+        // The `&&` in the endpoint finiteness guard: `||` would admit a chord
+        // with one NaN end.
+        let (left, right) = straight_corridor(3.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let good = Point {
+            x_m: 20.0,
+            y_m: 0.0,
+        };
+        let bad = Point {
+            x_m: f64::NAN,
+            y_m: 0.0,
+        };
+        let margin_sq = 0.16;
+        assert!(chord_clears_corridor(&good, &good, &corridor, margin_sq));
+        assert!(!chord_clears_corridor(&bad, &good, &corridor, margin_sq));
+        assert!(!chord_clears_corridor(&good, &bad, &corridor, margin_sq));
+    }
+
+    #[test]
+    fn a_chord_clears_only_when_it_beats_the_margin() {
+        // Pins the clearance comparison and the margin arithmetic: a chord down
+        // the centre of a 3 m half-width corridor clears a 2 m margin but not a
+        // 4 m one.
+        let (left, right) = straight_corridor(3.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let a = Point {
+            x_m: 20.0,
+            y_m: 0.0,
+        };
+        let b = Point {
+            x_m: 40.0,
+            y_m: 0.0,
+        };
+        assert!(chord_clears_corridor(&a, &b, &corridor, 2.0 * 2.0));
+        assert!(!chord_clears_corridor(&a, &b, &corridor, 4.0 * 4.0));
+    }
+
+    #[test]
+    fn a_chord_leaving_the_corridor_is_refused() {
+        // The crossing case: both endpoints inside, the segment bulging out is
+        // impossible for a straight chord, so drive one endpoint outside.
+        let (left, right) = straight_corridor(1.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let inside = Point {
+            x_m: 20.0,
+            y_m: 0.0,
+        };
+        let outside = Point {
+            x_m: 40.0,
+            y_m: 5.0,
+        };
+        assert!(!chord_clears_corridor(&inside, &outside, &corridor, 0.16));
+    }
+
     // --- the holes it closes ------------------------------------------------
 
     #[test]
