@@ -125,4 +125,20 @@ exclude_re = [
     # that matches every mutant description, silently excluding the entire file
     # and making the gate vacuous for exactly the code it was widened to cover.
     "replace \\|\\| with && in segment_sagitta_m",
+    # C1 PNPoly ray direction in `chord_clears_corridor`: `a.x < x_cross`
+    # (a half-line toward +x) vs `>` (toward -x). Ray casting is
+    # DIRECTION-INDEPENDENT: for any simple polygon a ray from a point crosses
+    # the boundary an odd number of times iff the point is inside, whichever
+    # way it points. Both forms therefore compute the same parity for every
+    # input — truly equivalent, not measure-zero. The ray-cast doing its job at
+    # all is pinned by `the_ray_cast_holds_on_a_slanted_corridor` and
+    # `a_chord_beyond_the_corridor_is_refused_even_though_it_clears_every_edge`.
+    "replace < with > in chord_clears_corridor",
+    # Two exact-tie boundaries in the same function, same class as the
+    # `CenterlineFrenet::project` exclusion above. `a.x < x_cross` vs `<=`
+    # differs only when the test point lies EXACTLY on an edge's interpolated
+    # crossing; `dist_sq < min_dist_sq` vs `<=` differs only when two edges are
+    # EXACTLY equidistant, and either choice retains the same minimum. Both are
+    # measure-zero and behaviourally identical for any real corridor.
+    "replace < with <= in chord_clears_corridor",
 ]

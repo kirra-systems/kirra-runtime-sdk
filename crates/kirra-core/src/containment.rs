@@ -1794,6 +1794,119 @@ mod tests {
         assert!(chord_clears_corridor(&g, &h, &corridor, margin_sq));
     }
 
+    /// A corridor whose boundaries are SLANTED, not axis-aligned.
+    ///
+    /// Load-bearing for the ray-cast tests. On an axis-aligned rectangle every
+    /// vertical edge has `e1.x - e0.x == 0`, so the `x_cross` formula collapses
+    /// to `e0.x` no matter what its `*` and `/` do — the arithmetic is
+    /// unreachable and its mutants cannot be killed. A slanted edge makes every
+    /// term of `(e1.x - e0.x) * (a.y - e0.y) / dy + e0.x` matter.
+    fn slanted_corridor(half_w: f64, x_max: f64, slope: f64) -> (Vec<Point>, Vec<Point>) {
+        let n = 8;
+        let dx = x_max / (n as f64 - 1.0);
+        let mut left = Vec::with_capacity(n);
+        let mut right = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = i as f64 * dx;
+            left.push(Point {
+                x_m: x,
+                y_m: half_w + slope * x,
+            });
+            right.push(Point {
+                x_m: x,
+                y_m: -half_w + slope * x,
+            });
+        }
+        (left, right)
+    }
+
+    #[test]
+    fn the_ray_cast_holds_on_a_slanted_corridor() {
+        // With slanted boundaries the `x_cross` interpolation is genuinely
+        // exercised, so a wrong product, quotient or difference in it changes
+        // the inside/outside verdict rather than cancelling out.
+        let (left, right) = slanted_corridor(3.0, 100.0, 0.4);
+        let corridor = healthy_corridor(&left, &right);
+        let margin_sq = 0.16;
+
+        // On the slanted centreline: inside.
+        let a = Point {
+            x_m: 40.0,
+            y_m: 0.4 * 40.0,
+        };
+        let b = Point {
+            x_m: 60.0,
+            y_m: 0.4 * 60.0,
+        };
+        assert!(
+            chord_clears_corridor(&a, &b, &corridor, margin_sq),
+            "a chord down the slanted centreline must clear"
+        );
+
+        // Same x-range, but far off the slanted band and far from every edge:
+        // only the ray-cast can refuse this.
+        let c = Point {
+            x_m: 40.0,
+            y_m: 0.4 * 40.0 + 60.0,
+        };
+        let d = Point {
+            x_m: 60.0,
+            y_m: 0.4 * 60.0 + 60.0,
+        };
+        assert!(
+            !chord_clears_corridor(&c, &d, &corridor, margin_sq),
+            "a chord far above the slanted band must be refused"
+        );
+
+        // Below the band, likewise.
+        let e = Point {
+            x_m: 40.0,
+            y_m: 0.4 * 40.0 - 60.0,
+        };
+        let f = Point {
+            x_m: 60.0,
+            y_m: 0.4 * 60.0 - 60.0,
+        };
+        assert!(!chord_clears_corridor(&e, &f, &corridor, margin_sq));
+    }
+
+    #[test]
+    fn the_ray_cast_is_stable_when_a_vertex_sits_exactly_on_the_ray() {
+        // The `>` half-open comparisons in the crossing test exist to stop a
+        // vertex lying exactly at the test point's y from being counted twice.
+        // A point level with a boundary vertex is the case that pins them.
+        let (left, right) = straight_corridor(3.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let margin_sq = 0.01;
+
+        // Exactly level with the LEFT boundary's vertices (y = +3.0), but far
+        // outside in x — so distance cannot refuse it and the parity must.
+        let a = Point {
+            x_m: 300.0,
+            y_m: 3.0,
+        };
+        let b = Point {
+            x_m: 340.0,
+            y_m: 3.0,
+        };
+        assert!(
+            !chord_clears_corridor(&a, &b, &corridor, margin_sq),
+            "a chord level with the boundary vertices but far beyond the \
+             corridor must be refused"
+        );
+
+        // And level with the RIGHT boundary's vertices (y = -3.0).
+        let c = Point {
+            x_m: 300.0,
+            y_m: -3.0,
+        };
+        let d = Point {
+            x_m: 340.0,
+            y_m: -3.0,
+        };
+        assert!(!chord_clears_corridor(&c, &d, &corridor, margin_sq));
+    }
+
     #[test]
     fn a_corridor_with_a_non_finite_vertex_is_refused() {
         // The `&&` guard over the polygon's own vertices (distinct from the
