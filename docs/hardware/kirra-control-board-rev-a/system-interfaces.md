@@ -53,6 +53,13 @@
 The buck sits **off-board** for Rev A (final production power distribution
 is excluded, RA-X7); the carrier begins at the protected `LOGIC_5V_IN`.
 
+The E-stop relay chain is **off-board wiring in the external motor-supply
+path** (`../R2_ESTOP_SPEC.md`) — the switching of motor battery current
+happens entirely outside the carrier. Rev A is never part of the raw
+motor-current route (RA-X3): its only contact with the E-stop system is
+logic-level — the NC loop feeding `E_STOP_OK_HW` and the read-only
+`E_STOP_SENSE`.
+
 ## 3. Interface 1 — Jetson ↔ MCU (frozen)
 
 | Signal | Role |
