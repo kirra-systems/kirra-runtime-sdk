@@ -107,6 +107,28 @@ state, an e-stop input that is not mediated by Linux, encoder/battery/fault
 telemetry the checker can trust, and a firmware image whose provenance we
 control (`bootloader/image_verifier.hpp`).
 
+### Rev A carrier hardware — the stage-2 bench board
+
+The hardware side of stages 2–3 now has a documentation foundation:
+**Kirra Control Board Rev A** (`docs/hardware/kirra-control-board-rev-a/`),
+a safety-focused carrier for an STM32 NUCLEO-G474RE — the concrete first
+vehicle for the STM32G4 control-board revision already planned in
+`ARCHITECTURE.md` §Decision summary. It retains the external motor
+drivers/motors/encoders/steering, speaks R2CP to the Jetson, and adds a
+hardware-combined driver enable (E-stop AND independent watchdog AND
+firmware request). Status — documentation only, nothing is fabricated:
+
+- Rev A documentation foundation — **started**;
+- pin allocation — **blocked** on the exact Nucleo (MB1367) revision and
+  external measurements;
+- schematic — not started;
+- PCB layout — not started;
+- manufacturing release — **not approved**.
+
+A NUCLEO-G474RE BSP in this tree is future work, gated exactly like the
+F103 BSP (`drivers/README.md`): no register code before physical
+verification.
+
 ### Staged migration
 
 | Stage | Boundary | Verifier/governor | Vendor MCU |
