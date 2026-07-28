@@ -168,6 +168,28 @@ As a service: `kirra-rabbit-voice.service` (staged by `install_robot_units.sh`,
 enable deliberately). Master gate `KIRRA_WAKE_ENABLED` in `robot.env`; the
 listener exits cleanly when unset. Full env set: `robot/install/rabbit.env.example`.
 
+**`KIRRA_WAKE_RECORD_CMD` is mandatory when the gate is on**, and must name an
+ALSA device (`-D` or `--device`). There is no default. A bare `arecord` captures
+from ALSA's default — the first card the kernel enumerated, which on the R2 is
+not the microphone — and the failure is silent: the stream opens, delivers
+near-silence, the unit looks healthy and nobody is ever heard. `wake_word.py`
+validates the command *before* opening anything and exits **non-zero** if it is
+missing, blank, unparseable, or a bare `arecord`.
+
+That non-zero matters: the listener is piped into `rabbit_voice.sh`, so exiting
+0 on a config error would leave the pipeline running with no listener behind it.
+`rabbit-voice.service` restarts visibly instead. A non-`arecord` capture backend
+is exempt from the device rule — it has its own convention.
+
+```bash
+arecord -l    # → card 1: Device [USB Audio Device]  →  CARD=Device
+KIRRA_WAKE_RECORD_CMD="arecord -D plughw:CARD=Device,DEV=0 -f S16_LE -r 16000 -c 1 -t raw"
+```
+
+`kirra_voice_doctor.sh` FAILs on a missing/bare/malformed wake recorder and, on
+pass, prints the selected device and checks the card is still enumerated (the
+same drift check the turn mic gets).
+
 **Detection** (no LLM anywhere): `arecord` raw stream → in-memory ring buffer →
 **RMS energy pre-gate** (a silent room runs zero inference) → whisper.cpp
 **tiny** (`KIRRA_WAKE_STT_CMD` — a second, smaller model than the turn STT) on a
@@ -285,9 +307,25 @@ So:
    ALSA to convert sample rate/format). `hw:` = no conversion, one process at a
    time — fine here (one speaker, one mic).
    ```bash
-   # speak.sh   → aplay -D plughw:1,0 -r 22050 -f S16_LE -t raw -
-   # KIRRA_RECORD_CMD → arecord -D plughw:1,0 -d 4 -f S16_LE -r 16000 -c 1
+   # speak.sh              → aplay   -D plughw:1,0 -r 22050 -f S16_LE -t raw -
+   # KIRRA_RECORD_CMD      → arecord -D plughw:1,0 -d 4 -f S16_LE -r 16000 -c 1
+   # KIRRA_WAKE_RECORD_CMD → arecord -D plughw:1,0 -f S16_LE -r 16000 -c 1 -t raw
    ```
+   Prefer the by-NAME form (`plughw:CARD=Device,DEV=0`) over the number: card
+   numbers drift across reboots, names do not.
+
+   **`KIRRA_RECORD_CMD` and `KIRRA_WAKE_RECORD_CMD` are different contracts** and
+   must not be copied into one another:
+
+   | | contract | shape |
+   |---|---|---|
+   | `KIRRA_RECORD_CMD` | ONE turn | BOUNDED — `-d N`, writes a wav file (path appended) |
+   | `KIRRA_WAKE_RECORD_CMD` | always-on listener | UNBOUNDED — `-t raw` to stdout, never exits |
+
+   The wake recorder is **mandatory** when `KIRRA_WAKE_ENABLED=1` and has no
+   default: a bare `arecord` would take ALSA's default device, and the listener
+   would run deaf without erroring. `wake_word.py` refuses to start rather than
+   allow that; see §3b.
 2. **Put the service user in `audio`.** `sudo usermod -aG audio <user>` (the
    installer renders `User=` to the invoking user — that user needs `audio`).
 3. **No Pulse in the path.** With `-D hw:/plughw:` there is no dependency on the
@@ -338,6 +376,8 @@ Sum = PTT-release → spoken reply. If it's too slow: shorten `-d`, drop to
 | `aplay: ... No such file or directory` | wrong `hw:` card number | `aplay -l`; the USB codec is often not card 0 |
 | Chipmunk / slow-mo voice | `aplay -r` ≠ voice sample rate | match `-r` to the piper voice (medium = 22050) |
 | Records silence/garbage from a service | wrong `arecord -D` / not in `audio` | name the capture device; `usermod -aG audio` |
+| Wake word never triggers, unit looks healthy | `KIRRA_WAKE_RECORD_CMD` on the wrong mic | `arecord -l` → pin `-D plughw:CARD=<name>,DEV=0`; `kirra_voice_doctor.sh` reports the selected device |
+| `rabbit-voice` restart-loops with a wake FATAL | `KIRRA_WAKE_RECORD_CMD` unset, blank, or bare `arecord` | set it with an explicit `-D`/`--device`; this is deliberate — exiting 0 would leave the pipeline up with no listener |
 | Greeting never speaks on boot | TTS device unreachable in-service | validate with `systemd-run --uid`; it degraded to print |
 
 ## References

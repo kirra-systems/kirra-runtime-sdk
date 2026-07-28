@@ -24,7 +24,7 @@ import rabbit_wake  # noqa: E402
 from rabbit_ota import match_command  # noqa: E402
 from wake_word import (  # noqa: E402
     DEFAULT_PHRASES, followup_decision, parse_phrases, rms, transcript_tokens,
-    wake_allowed, wake_hit,
+    validate_record_cmd, wake_allowed, wake_hit, wake_record_device,
 )
 
 PHRASES = parse_phrases(DEFAULT_PHRASES)
@@ -219,6 +219,153 @@ def test_replies_state_the_resume_asymmetry() -> None:
 
 
 # --- standalone runner (house pattern) ----------------------------------------
+
+# --- wake microphone selection (fail closed) ---------------------------------
+#
+# The listener used to default to a bare `arecord`, i.e. ALSA's default device —
+# the first card the kernel enumerated. On the R2 that is not the microphone,
+# and the failure mode is SILENT: the stream opens, delivers near-silence, the
+# unit looks healthy and nobody is ever heard. These pin that an enabled
+# listener refuses to start rather than run deaf.
+
+def test_missing_record_cmd_is_refused() -> None:
+    argv, why = validate_record_cmd("")
+    assert argv is None
+    assert "unset or blank" in why
+    assert "-D plughw:" in why, "the message must show the operator the fix"
+
+
+def test_whitespace_only_record_cmd_is_refused() -> None:
+    for blank in ("   ", "\t", "\n", " \t\n "):
+        argv, why = validate_record_cmd(blank)
+        assert argv is None, repr(blank)
+        assert "unset or blank" in why
+
+
+def test_bare_arecord_is_refused() -> None:
+    # The exact string that used to be the built-in default.
+    argv, why = validate_record_cmd("arecord -f S16_LE -r 16000 -c 1 -t raw")
+    assert argv is None
+    assert "DEFAULT device" in why
+
+
+def test_arecord_with_short_device_flag_is_accepted() -> None:
+    cmd = "arecord -D plughw:CARD=Device,DEV=0 -f S16_LE -r 16000 -c 1 -t raw"
+    argv, why = validate_record_cmd(cmd)
+    assert why == ""
+    assert argv is not None and argv[0] == "arecord"
+    assert wake_record_device(argv) == "plughw:CARD=Device,DEV=0"
+
+
+def test_arecord_with_long_device_flag_is_accepted() -> None:
+    cmd = "arecord --device plughw:CARD=Device,DEV=0 -f S16_LE -r 16000 -c 1 -t raw"
+    argv, why = validate_record_cmd(cmd)
+    assert why == ""
+    assert wake_record_device(argv) == "plughw:CARD=Device,DEV=0"
+
+
+def test_device_rule_follows_the_program_not_the_path() -> None:
+    # An absolute path to arecord is still arecord.
+    argv, why = validate_record_cmd("/usr/bin/arecord -f S16_LE -t raw")
+    assert argv is None and "DEFAULT device" in why
+    argv, why = validate_record_cmd("/usr/bin/arecord -D hw:1,0 -f S16_LE -t raw")
+    assert why == "" and wake_record_device(argv) == "hw:1,0"
+
+
+def test_custom_capture_backend_is_left_alone() -> None:
+    # A non-arecord backend has its own device convention; imposing ALSA's
+    # would refuse a perfectly good configuration.
+    argv, why = validate_record_cmd("my-capture --rate 16000 --raw")
+    assert why == ""
+    assert argv == ["my-capture", "--rate", "16000", "--raw"]
+    assert wake_record_device(argv) == ""
+
+
+def test_unparseable_command_is_refused() -> None:
+    argv, why = validate_record_cmd('arecord -D "unterminated')
+    assert argv is None
+    assert "not parseable" in why
+
+
+def test_validation_never_spawns_anything() -> None:
+    # The whole point of validating before the loop: no microphone is opened
+    # and no process is started while deciding whether the config is usable.
+    import subprocess
+    calls = []
+    for name in ("Popen", "run", "call", "check_call", "check_output"):
+        original = getattr(subprocess, name)
+        setattr(subprocess, name,
+                lambda *a, _n=name, **k: calls.append(_n) or (_ for _ in ()).throw(
+                    AssertionError(f"validation spawned via subprocess.{_n}")))
+        globals().setdefault("_restore", []).append((name, original))
+    try:
+        for cmd in ("", "   ", "arecord -f S16_LE",
+                    "arecord -D plughw:CARD=Device,DEV=0 -f S16_LE",
+                    "my-capture --raw"):
+            validate_record_cmd(cmd)
+    finally:
+        for name, original in globals().pop("_restore"):
+            setattr(subprocess, name, original)
+    assert calls == []
+
+
+# --- process-level contract (what systemd sees) ------------------------------
+#
+# `rabbit-voice.service` runs the listener alongside `rabbit_voice.sh`. If
+# wake_word.py exited 0 on a config error the unit would look fine while no
+# listener existed — so the exit CODE is part of the contract, not just the log.
+
+def _run_wake(env_extra):
+    import os
+    import subprocess
+    env = {k: v for k, v in os.environ.items() if not k.startswith("KIRRA_")}
+    env["PATH"] = os.environ.get("PATH", "")
+    env.update(env_extra)
+    return subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parent / "wake_word.py")],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+
+
+def test_wake_disabled_needs_no_wake_config() -> None:
+    # Off is a clean exit, with no microphone requirement at all.
+    done = _run_wake({})
+    assert done.returncode == 0, done.stderr
+    assert "arecord" not in done.stderr
+
+
+def test_wake_enabled_without_record_cmd_exits_nonzero() -> None:
+    done = _run_wake({
+        "KIRRA_WAKE_ENABLED": "1",
+        "KIRRA_WAKE_STT_CMD": "whisper-cli -m /tmp/none.bin -np -nt -f",
+    })
+    assert done.returncode != 0, "an enabled listener with no mic must NOT exit 0"
+    assert "FATAL" in done.stderr
+    assert "KIRRA_WAKE_RECORD_CMD" in done.stderr
+
+
+def test_wake_enabled_with_bare_arecord_exits_nonzero() -> None:
+    done = _run_wake({
+        "KIRRA_WAKE_ENABLED": "1",
+        "KIRRA_WAKE_STT_CMD": "whisper-cli -m /tmp/none.bin -np -nt -f",
+        "KIRRA_WAKE_RECORD_CMD": "arecord -f S16_LE -r 16000 -c 1 -t raw",
+    })
+    assert done.returncode != 0
+    assert "DEFAULT device" in done.stderr
+
+
+def test_wake_recorder_is_not_inherited_from_the_turn_recorder() -> None:
+    # KIRRA_RECORD_CMD is a BOUNDED wav-file recorder (-d N, writes a file); the
+    # listener needs an UNBOUNDED raw stream. Silently reusing it would produce
+    # a listener that stops after N seconds.
+    done = _run_wake({
+        "KIRRA_WAKE_ENABLED": "1",
+        "KIRRA_WAKE_STT_CMD": "whisper-cli -m /tmp/none.bin -np -nt -f",
+        "KIRRA_RECORD_CMD": "arecord -D plughw:CARD=Device,DEV=0 -d 4 -f S16_LE /tmp/t.wav",
+    })
+    assert done.returncode != 0, "the turn recorder must not satisfy the wake recorder"
+    assert "KIRRA_WAKE_RECORD_CMD" in done.stderr
+
 
 def _run_all() -> int:
     failures = 0

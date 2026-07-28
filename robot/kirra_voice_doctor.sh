@@ -148,6 +148,44 @@ sys.exit(0 if parse_phrases(os.environ.get('KIRRA_WAKE_PHRASES', DEFAULT_PHRASES
     else
       bad "KIRRA_WAKE_PHRASES parses to nothing"; fix "comma-separated phrases, e.g. \"hello rabbit,hey rabbit\""
     fi
+    # 8b2. the WAKE microphone. Distinct from KIRRA_RECORD_CMD: that one is a
+    # BOUNDED wav recorder (-d N, writes a file), this is an UNBOUNDED raw
+    # stream. A bare `arecord` takes ALSA's DEFAULT device — the first card the
+    # kernel enumerated, which on the R2 is not the mic — and the failure is
+    # SILENT: the stream opens, delivers near-silence, and nobody is heard.
+    # So this is a FAIL, not a warning.
+    if [ -z "${KIRRA_WAKE_RECORD_CMD:-}" ]; then
+      bad "KIRRA_WAKE_ENABLED is on but KIRRA_WAKE_RECORD_CMD unset"; fix 'set it with an EXPLICIT device, e.g. "arecord -D plughw:CARD=Device,DEV=0 -f S16_LE -r 16000 -c 1 -t raw" (arecord -l for the card name) — §0'
+    else
+      wrb="$(first_tok "$KIRRA_WAKE_RECORD_CMD")"
+      if [ -z "$wrb" ]; then
+        bad "KIRRA_WAKE_RECORD_CMD has no program"; fix 'e.g. "arecord -D plughw:CARD=Device,DEV=0 -f S16_LE -r 16000 -c 1 -t raw"'
+      else
+        wmic="$(opt_val -D "$KIRRA_WAKE_RECORD_CMD")"
+        [ -n "$wmic" ] || wmic="$(opt_val --device "$KIRRA_WAKE_RECORD_CMD")"
+        case "$(basename "$wrb")" in
+          arecord)
+            if [ -z "$wmic" ]; then
+              bad "KIRRA_WAKE_RECORD_CMD uses arecord with no -D/--device (ALSA DEFAULT device — the listener would run deaf)"; fix 'arecord -l → "arecord -D plughw:CARD=<name>,DEV=0 -f S16_LE -r 16000 -c 1 -t raw" — §0'
+            else
+              # Same drift check the full-turn mic gets: a pinned card that is
+              # no longer enumerated is exactly as deaf as no pin at all.
+              wmc="$(card_ref "$wmic")"
+              if command -v arecord >/dev/null 2>&1 && card_present arecord "$wmc"; then
+                ok "wake mic device present: -D $wmic"
+              else
+                bad "wake mic device NOT in arecord -l (card drifted?): -D $wmic"; fix "arecord -l → update KIRRA_WAKE_RECORD_CMD -D plughw:CARD=<name>,DEV=0 — §0"
+              fi
+            fi
+            ;;
+          *)
+            # A custom capture backend has its own device convention; imposing
+            # ALSA's would refuse a working configuration.
+            ok "wake capture backend: $wrb (custom — no ALSA device rule applied)"
+            ;;
+        esac
+      fi
+    fi
     # 8c. hold-off must cover the turn recorder's -d bound (mic contention:
     # the listener releases the device for holdoff; a short holdoff steals it
     # back mid-turn and the turn recorder fails SILENTLY).

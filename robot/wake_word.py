@@ -42,7 +42,16 @@ Env (robot/install/rabbit.env.example has the annotated set):
   KIRRA_WAKE_STT_CMD      REQUIRED when enabled — whisper-cli + a TINY model;
                           wav path appended as the last arg (house convention)
   KIRRA_WAKE_PHRASES      comma-separated, default "hello rabbit,hey rabbit,yo rabbit"
-  KIRRA_WAKE_RECORD_CMD   raw-stream capture, default "arecord -f S16_LE -r 16000 -c 1 -t raw"
+  KIRRA_WAKE_RECORD_CMD   REQUIRED when enabled — raw-stream capture, and it must
+                          name an ALSA device explicitly, e.g.
+                          "arecord -D plughw:CARD=Device,DEV=0 -f S16_LE -r 16000 -c 1 -t raw".
+                          There is deliberately NO default: ALSA's default device
+                          is whichever card the kernel enumerated first, which on
+                          the R2 is not the microphone, and the listener would sit
+                          on the wrong input hearing nothing. NOT derived from
+                          KIRRA_RECORD_CMD — that one is a BOUNDED WAV-file
+                          recorder (-d N, writes a file); this is an UNBOUNDED raw
+                          stream. Different contracts, separate variables.
   KIRRA_WAKE_RMS_FLOOR    energy gate (default 300; 16-bit full scale = 32767)
   KIRRA_WAKE_COOLDOWN_S   refractory period between wakes (default 2)
   KIRRA_WAKE_HOLDOFF_S    mic released this long after a trigger (default 10;
@@ -378,6 +387,56 @@ def _listen_for_speech_onset(record_cmd, rms_floor, window_s, onset_hops,
     return onset
 
 
+def validate_record_cmd(raw: str) -> tuple[list[str] | None, str]:
+    """Parse and check the wake recorder command. Returns `(argv, "")` or `(None, reason)`.
+
+    Pure: no spawning, no device probing. The listener calls this BEFORE opening
+    anything, so a misconfigured wake unit dies at startup instead of running
+    deaf on the wrong microphone.
+
+    Two rules:
+      - the command must be parseable and name a program;
+      - if that program is `arecord`, it must select a device explicitly
+        (`-D DEVICE` or `--device DEVICE`). A bare `arecord` takes ALSA's
+        default, which is the first card the kernel enumerated — on the R2 that
+        is not the mic, and the failure is SILENT: the stream opens, delivers
+        near-silence, and the listener simply never wakes.
+
+    A non-`arecord` program is left alone. A custom capture backend has its own
+    device-selection convention and this module has no business guessing it.
+    """
+    if not raw or not raw.strip():
+        return None, ("KIRRA_WAKE_RECORD_CMD is unset or blank; an explicit ALSA "
+                      'device is required, e.g. "-D plughw:CARD=...,DEV=0"')
+    try:
+        argv = shlex.split(raw)
+    except ValueError as exc:
+        return None, f"KIRRA_WAKE_RECORD_CMD is not parseable as a command: {exc}"
+    if not argv:
+        return None, "KIRRA_WAKE_RECORD_CMD parsed to an empty command"
+    program = os.path.basename(argv[0])
+    if program == "arecord" and not any(a in ("-D", "--device") for a in argv[1:]):
+        return None, ("KIRRA_WAKE_RECORD_CMD uses arecord without -D/--device, so it "
+                      "would capture from ALSA's DEFAULT device — on this platform "
+                      "that is not the microphone, and the listener would run deaf "
+                      'without erroring. Name the device, e.g. '
+                      '"arecord -D plughw:CARD=Device,DEV=0 -f S16_LE -r 16000 -c 1 -t raw"')
+    return argv, ""
+
+
+def wake_record_device(argv: list[str]) -> str:
+    """The ALSA device `argv` selects, or "" if it names none.
+
+    Used for diagnostics — reporting WHICH microphone the listener opened is the
+    difference between "wake word is on" and "wake word is on, listening to the
+    right thing".
+    """
+    for flag, value in zip(argv, argv[1:]):
+        if flag in ("-D", "--device"):
+            return value
+    return ""
+
+
 def main() -> int:
     if not _truthy(os.environ.get("KIRRA_WAKE_ENABLED")):
         _log("KIRRA_WAKE_ENABLED not set — wake word off (exit 0; PTT/Enter still work)")
@@ -397,8 +456,15 @@ def main() -> int:
              "with no phrases is a misconfiguration")
         return 1
 
-    record_cmd = shlex.split(os.environ.get(
-        "KIRRA_WAKE_RECORD_CMD", "arecord -f S16_LE -r 16000 -c 1 -t raw"))
+    # Fail closed on the microphone BEFORE anything is opened or spawned. An
+    # enabled listener on the wrong input is worse than a disabled one: the unit
+    # looks healthy, the logs look healthy, and nobody is heard.
+    record_cmd, why = validate_record_cmd(os.environ.get("KIRRA_WAKE_RECORD_CMD", ""))
+    if record_cmd is None:
+        _log(f"FATAL: KIRRA_WAKE_ENABLED is on but {why}")
+        return 1
+    device = wake_record_device(record_cmd)
+    _log(f"wake microphone: {device or os.path.basename(record_cmd[0]) + ' (custom backend)'}")
     rms_floor = float(os.environ.get("KIRRA_WAKE_RMS_FLOOR", "300"))
     cooldown_s = float(os.environ.get("KIRRA_WAKE_COOLDOWN_S", "2"))
     holdoff_s = float(os.environ.get("KIRRA_WAKE_HOLDOFF_S", "10"))
