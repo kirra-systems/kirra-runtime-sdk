@@ -54,48 +54,75 @@
   adapter suites alone, its own containment/talisman tests would never run, and
   it would report as a survivor.
 
-## 1b. #1196 kill wave — and 4 remaining survivors
+## 1b. #1196 kill wave — scope widened, survivors cleared
 
 Widening the scope surfaced **32 survivors** on #1192's diff, all in the C1
-swept-footprint bound. Kill tests and justified equivalence exclusions took
-that to **4**. Progression: 32 → 14 → 9 → 4 (90 caught, 1 timeout).
+swept-footprint bound. Kill tests and justified equivalence exclusions took that
+to **zero**: 32 → 14 → 9 → 4 → **0** (92 caught, 1 timeout — an infinite-loop
+mutant, which counts as detected).
 
-**Still surviving, in `chord_clears_corridor`'s PNPoly ray-cast:**
+Each round needed a different insight, and the ones that mattered were things
+reasoning got wrong and measurement got right:
 
-| line | mutant |
-|---|---|
-| 587:20 | `replace > with >=` |
-| 587:40 | `replace > with >=` |
-| 590:68 | `replace / with %` |
-| 590:68 | `replace / with *` |
+1. **Composed tests do not cover helper arithmetic.** #1192's tests drove
+   `validate_trajectory_containment` and asserted verdicts, against corridors
+   wide enough that a wrong helper never flipped one. `max_corner_radius_m -> 0.0`
+   survived — it shrinks the sagitta and makes the bound LESS conservative.
+   The dense-sweep oracle missed it too: it only samples geometries where the
+   sagitta is small, so a wrong sagitta still passes.
+2. **`a` at the origin hides differencing.** `b - a` is indistinguishable from
+   `b + a` there. The sagitta tests now use an offset frame.
+3. **PNPoly is only load-bearing far outside.** A point just outside an edge
+   fails the distance test anyway, so it pins nothing. The killing cases are
+   chords far beyond the corridor that clear every edge by a wide margin.
+4. **Axis-aligned corridors make `x_cross` unreachable.** Every crossing edge
+   has `e1.x - e0.x == 0`, so the formula collapses to `e0.x` regardless of its
+   `*` and `/`. True of the rectangle AND of the L-bend — the slant, not the
+   non-convexity, is what exercises the interpolation.
 
-These are the half-open vertex comparison and the `x_cross` division. They are
-**NOT** excluded, because equivalence has not been proven — only not-yet-killed.
-Reaching them needs a geometry where a boundary vertex lies exactly on the test
-ray AND the resulting parity flip changes the verdict; on the rectangular and
-parallelogram corridors used so far the parity comes out the same either way,
-and on axis-aligned edges `e1.x - e0.x == 0` collapses `x_cross` to `e0.x`
-regardless of the arithmetic. A non-convex corridor (an L-bend) is the most
-likely killing shape and is the recommended next attempt.
+### Finding the last four by search, not argument
 
-**Consequence, stated plainly:** a PR that changes lines 587–590 will red the
-gate until these are killed or justified. That is the gate working as designed;
-it is recorded here rather than silenced with a blanket exclusion.
+Two earlier geometric predictions were wrong, so the remaining survivors were
+resolved by exhaustively searching three corridor shapes (rectangular, L-bend,
+slanted parallelogram) for points where each mutant flips the inside/outside
+verdict, recording how far each such point sits from the boundary. The two
+answers differed, which is the point of the method:
 
-**Equivalence exclusions added (#1196)** — each argued in `.cargo/mutants.toml`:
-the straight-segment epsilon (both branches return exactly `0.0` because
-`1 - cos` underflows), the front/rear corner selector (`>` vs `>=` return the
-same value when equal), the sagitta's early finiteness guard (redundant with the
-final `!sagitta.is_finite()` check), the PNPoly ray DIRECTION (`<` vs `>` — ray
-casting is direction-independent for a simple polygon), and two exact-tie
-comparisons of the same class as the existing `CenterlineFrenet::project` entry.
+- **`x_cross` division (`/` -> `*`, `/` -> `%`) — KILLED.** Points exist that
+  flip the verdict while staying far from every edge: (299, 7) with 201 m of
+  clearance and (76, 20) with 6.9 m, both genuinely outside the slanted band
+  and both reported INSIDE by the mutant. Asserted in
+  `the_x_cross_interpolation_decides_points_a_wrong_operator_would_admit`.
+- **Half-open vertex comparison (`>` -> `>=`) — EQUIVALENT.** It differs only
+  where a point's y coincides with a boundary vertex's y, i.e. exactly ON the
+  boundary. The function returns `inside && min_dist_sq >= margin_sq`, so at
+  clearance 0 the conjunction is false whatever `inside` says. Across all three
+  shapes every differing point had clearance EXACTLY 0.0 and there were none
+  elsewhere.
 
-**A near-miss worth remembering.** The exclusion `"replace || with && in
-segment_sagitta_m"` reads as a literal but is a REGEX: `||` is alternation with
-an empty branch, matching every mutant description. It silently excluded all 399
-containment mutants — a green, vacuous gate on the exact file the scope was
-widened to cover. The lane now lists mutants first and FAILS if a non-empty
-checker diff yields zero, which catches the whole class.
+That the same search killed one pair and cleared the other is what makes the
+equivalence claim credible — it separates "actually equivalent" from "not yet
+killed" instead of excusing both.
+
+### Equivalence exclusions added (#1196)
+
+Each argued in `.cargo/mutants.toml`: the straight-segment epsilon (both
+branches return exactly `0.0` because `1 - cos` underflows below it), the
+front/rear corner selector (`>` vs `>=` return the same value when equal), the
+sagitta's early finiteness guard (redundant with the final
+`!sagitta.is_finite()` check), the PNPoly ray DIRECTION (`<` vs `>` — ray
+casting is direction-independent for a simple polygon), the half-open vertex
+comparison above, and two exact-tie comparisons of the same class as the
+existing `CenterlineFrenet::project` entry.
+
+### A near-miss worth remembering
+
+The exclusion `"replace || with && in segment_sagitta_m"` reads as a literal but
+is a REGEX: `||` is alternation with an empty branch, matching every mutant
+description. It silently excluded all 399 containment mutants — a green, vacuous
+gate on the exact file the scope was widened to cover. It parses as valid TOML
+and would have survived review. The lane now lists mutants first and FAILS if a
+non-empty checker diff yields zero, which catches the whole class.
 
 ## 2. The scoping lesson (measured)
 
