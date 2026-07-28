@@ -107,6 +107,40 @@ state, an e-stop input that is not mediated by Linux, encoder/battery/fault
 telemetry the checker can trust, and a firmware image whose provenance we
 control (`bootloader/image_verifier.hpp`).
 
+### Rev A carrier hardware — the stage-2 bench board
+
+The hardware side of stages 2–3 now has a documentation foundation:
+**Kirra Control Board Rev A** (`docs/hardware/kirra-control-board-rev-a/`),
+a safety-focused carrier for an STM32 NUCLEO-G474RE — the concrete first
+vehicle for the STM32G4 control-board revision already planned in
+`ARCHITECTURE.md` §Decision summary. It retains the external motor
+drivers/motors/encoders/steering, speaks R2CP to the Jetson, and adds a
+hardware-combined driver enable (E-stop AND independent watchdog AND
+firmware request). Status — documentation only, nothing is fabricated:
+
+- Rev A documentation foundation — **started**;
+- pin allocation — **blocked** on the exact Nucleo (MB1367) revision and
+  external measurements;
+- schematic — not started;
+- PCB layout — not started;
+- manufacturing release — **not approved**.
+
+A NUCLEO-G474RE BSP in this tree is future work, gated exactly like the
+F103 BSP (`drivers/README.md`): no register code before physical
+verification.
+
+Mechanical platform direction
+(`docs/hardware/kirra-control-board-rev-a/mechanical-reference.md`,
+HDR-0007) — the R2 stays the bring-up vehicle; the long-term mechanical
+reference moves off Yahboom-specific geometry:
+
+- Traxxas 1/10 mechanical reference — **adopted as a platform direction**;
+- exact chassis model — **pending MR-1** (Chassis Selection Review);
+- Yahboom R2 adapter reference — retained for Rev A bring-up;
+- Class A mounting definition — not frozen;
+- adapter plate — not designed;
+- 3D fit verification — not started.
+
 ### Staged migration
 
 | Stage | Boundary | Verifier/governor | Vendor MCU |
