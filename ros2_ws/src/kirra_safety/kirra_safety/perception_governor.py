@@ -23,8 +23,8 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float64, String
 
 from kirra_safety.perception_cap import (
-    SpeedCapGovernor,
-    SpeedCapGovernorConfig,
+    STABILIZED_OK,
+    resolve_stabilized_cap,
 )
 
 SCAN_QOS = QoSProfile(
@@ -123,30 +123,6 @@ class PerceptionGovernor(Node):
             ).value
         )
 
-        self._cap_governor = SpeedCapGovernor(
-            SpeedCapGovernorConfig(
-                rise_rate_mps_per_s=float(
-                    self.get_parameter(
-                        "cap_rise_rate_mps_per_s"
-                    ).value
-                ),
-                restriction_epsilon_mps=(
-                    self._cap_restriction_epsilon_mps
-                ),
-                clear_confirmations=int(
-                    self.get_parameter(
-                        "cap_clear_confirmations"
-                    ).value
-                ),
-                maximum_dt_s=float(
-                    self.get_parameter(
-                        "cap_maximum_dt_ms"
-                    ).value
-                )
-                / 1000.0,
-                initial_cap_mps=0.0,
-            )
-        )
 
         self._session = (
             requests.Session()
@@ -209,7 +185,6 @@ class PerceptionGovernor(Node):
 
     def _publish_fault(self, reason: str) -> None:
         # A fault invalidates all accumulated release evidence.
-        self._cap_governor.reset()
         self._publish(0.0, reason)
 
     @staticmethod
@@ -234,6 +209,7 @@ class PerceptionGovernor(Node):
         clear_distance_m: float,
         minimum_corridor_width_m,
         required_corridor_width_m,
+        data=None,
     ) -> None:
         # Never accept a nonzero cap from a response marked unhealthy.
         effective_raw_cap = (
@@ -242,10 +218,23 @@ class PerceptionGovernor(Node):
             else 0.0
         )
 
-        decision = self._cap_governor.update(
+        # #1212: the CHECKER stabilizes the cap. This node relays the number Taj
+        # served and does not compute one. The local state machine used to decide
+        # here, in the doer layer, outside the safety authority — which looked done
+        # while being unenforceable.
+        #
+        # Fail closed if the field is absent or malformed: an older Taj that does
+        # not serve a stabilized cap is not a licence to fall back on the raw one.
+        governed_cap_mps, relay_reason = resolve_stabilized_cap(
+            data,
             effective_raw_cap,
-            time.monotonic_ns(),
         )
+        if relay_reason != STABILIZED_OK:
+            self._publish_fault("TAJ_NO_STABILIZED_CAP")
+            return
+        cap_reason = data.get("cap_reason") or "NONE"
+        cap_streak = data.get("cap_clear_streak")
+        cap_limiting = data.get("cap_limiting_object")
 
         min_width = self._format_optional_number(
             minimum_corridor_width_m
@@ -258,14 +247,15 @@ class PerceptionGovernor(Node):
             f'{"OK" if healthy else "UNHEALTHY"}:'
             f"clear={clear_distance_m:.2f}m:"
             f"raw={effective_raw_cap:.2f}:"
-            f"governed={decision.governed_cap_mps:.2f}:"
-            f"state={decision.reason}:"
-            f"streak={decision.clear_streak}:"
+            f"governed={governed_cap_mps:.2f}:"
+            f"state={cap_reason}:"
+            f"streak={cap_streak}:"
+            f"limiting={cap_limiting}:"
             f"width={min_width}/{required_width}m"
         )
 
         self._publish(
-            decision.governed_cap_mps,
+            governed_cap_mps,
             health,
         )
 
@@ -364,6 +354,7 @@ class PerceptionGovernor(Node):
                 required_corridor_width_m=data.get(
                     "required_corridor_width_m"
                 ),
+                data=data,
             )
 
         except requests.Timeout:
