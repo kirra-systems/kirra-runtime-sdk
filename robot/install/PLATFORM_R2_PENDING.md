@@ -104,7 +104,7 @@ steering, dynamic limits VALIDATION-PENDING). The deployment switch is drafted a
 
 | # | File | Change |
 |---|------|--------|
-| 1 | `installer/platform_map.toml` | `profile_class = "courier"` → `"r2"` |
+| 1 | `installer/platform_map.toml` | ✅ DONE — `profile_class = "r2"` (#1219) |
 | 2 | `ros2_ws/src/kirra_safety/config/kirra_params.yaml` | interceptor `wheelbase_m: 0.2` → `0.229` (r2 contract == physical) |
 | 3 | `robot/install/env.template` (verifier env) | uncomment `KIRRA_VEHICLE_CLASS=r2`; on the R2 image also `KIRRA_EXPECTED_CAR_TYPE=5` |
 

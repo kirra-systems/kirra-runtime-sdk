@@ -443,6 +443,168 @@ fn r2_mrc() -> VehicleKinematicsContract {
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // #1219 — the R2 must not be run under a more permissive class.
+    //
+    // `courier` was borrowed as an interim "closest reviewed class" while the
+    // r2 dynamic limits stayed VALIDATION-PENDING. The reasoning preferred a
+    // REVIEWED envelope over UNVALIDATED numbers, which is the wrong ordering
+    // rule for a safety envelope: the question is which values are more
+    // conservative, not which were reviewed. A reviewed optimistic constant is
+    // still optimistic.
+    //
+    // These tests pin the property that replaces that judgement call:
+    //
+    //   The default and documented profile for the R2 must not assume more
+    //   braking, speed, or steering-rate authority than the R2 contract
+    //   declares.
+    // -----------------------------------------------------------------------
+
+    /// The authority-relevant terms, and the direction that is UNSAFE to
+    /// increase. Steering ANGLE is deliberately absent — see the test below.
+    fn authority_terms(c: &VehicleKinematicsContract) -> [(&'static str, f64); 4] {
+        [
+            ("effective_max_speed_mps", c.effective_max_speed_mps()),
+            ("max_brake_mps2", c.max_brake_mps2),
+            ("max_accel_mps2", c.max_accel_mps2),
+            ("max_steering_rate_deg_s", c.max_steering_rate_deg_s),
+        ]
+    }
+
+    /// The R2 contract is no more permissive than `courier` on any term where
+    /// being more permissive would be unsafe.
+    ///
+    /// Braking is the sharpest of these. `max_brake_mps2` is what every
+    /// stopping-distance computation divides by, so assuming more deceleration
+    /// than the platform has UNDER-estimates stopping distance directly — and
+    /// courier assumes 3.0 m/s² against the R2 contract's 1.5.
+    #[test]
+    fn the_r2_profile_claims_no_more_authority_than_the_courier_interim() {
+        let r2 = contract_for(VehicleClass::R2);
+        let courier = contract_for(VehicleClass::Courier);
+
+        for ((name, r2_value), (_, courier_value)) in authority_terms(&r2)
+            .iter()
+            .zip(authority_terms(&courier).iter())
+        {
+            assert!(
+                r2_value <= courier_value,
+                "{name}: r2 claims {r2_value} vs courier {courier_value} — running \
+                 the R2 under its own class must not WIDEN any authority term, or \
+                 the flip away from the courier interim is not a safety improvement"
+            );
+        }
+    }
+
+    /// Non-vacuity: courier really is the more permissive envelope, so the
+    /// assertion above is doing work rather than comparing a profile to itself.
+    ///
+    /// Without this, `authority_terms` returning identical values for both
+    /// classes would satisfy the test while proving nothing.
+    #[test]
+    fn the_courier_interim_really_was_more_permissive() {
+        let r2 = contract_for(VehicleClass::R2);
+        let courier = contract_for(VehicleClass::Courier);
+
+        assert!(
+            courier.max_brake_mps2 > r2.max_brake_mps2,
+            "courier assumes {} m/s2 of braking against the R2's {} — if this \
+             ever becomes equal, the whole argument for the flip has changed and \
+             the reasoning above needs revisiting",
+            courier.max_brake_mps2,
+            r2.max_brake_mps2,
+        );
+        assert!(
+            courier.effective_max_speed_mps() > r2.effective_max_speed_mps(),
+            "courier permits {} m/s against the R2's {}",
+            courier.effective_max_speed_mps(),
+            r2.effective_max_speed_mps(),
+        );
+    }
+
+    /// The ONE term where r2 exceeds courier, stated explicitly so it is a
+    /// recorded decision rather than an oversight.
+    ///
+    /// `max_steering_deg` is 39 on the R2 versus courier's 30 — and the R2's
+    /// value is MEASURED (full-lock road-wheel angle, bench Phase C), not an
+    /// estimate. A larger steering ANGLE does not grant authority in the way a
+    /// larger brake or speed figure does: the per-pose kinematics check bounds
+    /// what a command may request, and every downstream geometric check
+    /// (containment, swept footprint) evaluates the resulting path on its own
+    /// terms. Running the R2 under courier's 30 deg would REFUSE steering the
+    /// robot can physically perform — an availability cost, not a safety one.
+    #[test]
+    fn steering_angle_is_the_documented_exception_and_is_measured() {
+        let r2 = contract_for(VehicleClass::R2);
+        let courier = contract_for(VehicleClass::Courier);
+
+        assert!(
+            r2.max_steering_deg > courier.max_steering_deg,
+            "if the R2 no longer steers further than courier, this exception is \
+             stale and should be folded back into the general rule"
+        );
+        // …and it is not a back door into more speed or brake.
+        assert!(r2.effective_max_speed_mps() <= courier.effective_max_speed_mps());
+        assert!(r2.max_brake_mps2 <= courier.max_brake_mps2);
+    }
+
+    /// The deployed interceptor wheelbase and the selected class must agree, or
+    /// the live loop latches a permanent stop before any envelope question
+    /// arises.
+    ///
+    /// `enforcement_decision.wheelbase_consistent` compares the interceptor's
+    /// configured `wheelbase_m` against the wheelbase the verifier reports for
+    /// its ACTIVE class, with a 1e-6 m tolerance, and a mismatch is a permanent
+    /// stop — executed yaw would not be the yaw Kirra approved.
+    ///
+    /// `kirra_params.yaml` configures 0.229, the R2's measured wheelbase. That
+    /// makes the class selection and the interceptor wheelbase ONE decision:
+    /// under `courier` the verifier reports 0.5 and the two disagree. So the
+    /// flip away from the courier interim is not only the more conservative
+    /// envelope, it is required for the loop to run.
+    #[test]
+    fn the_r2_contract_wheelbase_matches_the_deployed_interceptor_configuration() {
+        // The value in ros2_ws/src/kirra_safety/config/kirra_params.yaml.
+        const DEPLOYED_INTERCEPTOR_WHEELBASE_M: f64 = 0.229;
+        const TOLERANCE_M: f64 = 1e-6; // enforcement_decision.WHEELBASE_TOLERANCE_M
+
+        let r2 = contract_for(VehicleClass::R2);
+        assert!(
+            (r2.wheelbase_m - DEPLOYED_INTERCEPTOR_WHEELBASE_M).abs() <= TOLERANCE_M,
+            "r2 contract wheelbase {} does not match the deployed interceptor \
+             configuration {} — the live loop would latch a permanent stop",
+            r2.wheelbase_m,
+            DEPLOYED_INTERCEPTOR_WHEELBASE_M,
+        );
+
+        // Non-vacuity: the interim class genuinely would NOT have matched, so
+        // this test is about agreement rather than about any two floats.
+        let courier = contract_for(VehicleClass::Courier);
+        assert!(
+            (courier.wheelbase_m - DEPLOYED_INTERCEPTOR_WHEELBASE_M).abs() > TOLERANCE_M,
+            "courier wheelbase now matches the deployed interceptor too, so this \
+             test no longer distinguishes the classes"
+        );
+    }
+
+    /// The MRC envelope must satisfy the same property: falling back to the R2
+    /// MRC may not claim more authority than falling back to courier's.
+    #[test]
+    fn the_mrc_fallback_holds_the_same_property() {
+        let r2 = mrc_fallback_for(VehicleClass::R2);
+        let courier = mrc_fallback_for(VehicleClass::Courier);
+
+        for ((name, r2_value), (_, courier_value)) in authority_terms(&r2)
+            .iter()
+            .zip(authority_terms(&courier).iter())
+        {
+            assert!(
+                r2_value <= courier_value,
+                "MRC {name}: r2 {r2_value} vs courier {courier_value}"
+            );
+        }
+    }
+
     /// Every family member, Nominal + MRC, as (name, nominal, mrc).
     fn family() -> Vec<(
         VehicleClass,

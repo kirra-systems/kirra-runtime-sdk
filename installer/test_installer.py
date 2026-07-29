@@ -96,6 +96,25 @@ def main() -> int:
               f"the class profile / deployment review, never the installer")
     print("(6) rendered config: select-not-infer holds (class name + mapping values only)")
 
+    # (6b) #1219 — the R2 renders the R2 class, and each platform renders its
+    #      OWN class. Only x3 was checked before, so nothing asserted that an R2
+    #      install selects the R2 envelope rather than borrowing another
+    #      platform's. courier assumes 2x the braking (3.0 vs 1.5 m/s2) and 2.5x
+    #      the speed ceiling, and over-estimating available brake under-estimates
+    #      stopping distance directly.
+    r2_cfg = "\n".join(render_config("r2", platforms["r2"]).values())
+    check("KIRRA_VEHICLE_CLASS=r2" in r2_cfg,
+          "(6b) an R2 install must select the r2 class, not borrow another platform's")
+    check("KIRRA_VEHICLE_CLASS=courier" not in r2_cfg,
+          "(6b) an R2 install must NOT select courier")
+    check("KIRRA_EXPECTED_CAR_TYPE=5" in r2_cfg,
+          "(6b) R2 expected car type from the mapping")
+    # …and the classes are genuinely distinct, so the check above is not
+    # satisfied by every platform rendering the same string.
+    check("KIRRA_VEHICLE_CLASS=courier" in joined,
+          "(6b) non-vacuity: x3 still renders its own (different) class")
+    print("(6b) each platform renders its OWN class (r2 -> r2, x3 -> courier)")
+
     # (7) detect_board_mode never invents a name for an unknown register value.
     check(detect_board_mode(lambda: 99)["mode_name"] is None,
           "(7) unknown car-type value must map to None (refused upstream)")
