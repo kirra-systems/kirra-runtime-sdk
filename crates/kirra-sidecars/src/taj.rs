@@ -26,6 +26,7 @@ use kirra_taj::{
 pub use kirra_trajectory::sensor_watchdog::SensorWatchdogConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::num::NonZeroU64;
 
 /// Default freshness budget for the camera (Phase-B) channel, ms.
 pub const DEFAULT_CAMERA_MAX_AGE_MS: u64 = 500;
@@ -514,7 +515,14 @@ const RESERVED_INVALID_TRACKER_GENERATION: u64 = 0;
 
 /// The first generation a live tracker may report. See
 /// [`RESERVED_INVALID_TRACKER_GENERATION`].
-const FIRST_TRACKER_GENERATION: u64 = RESERVED_INVALID_TRACKER_GENERATION + 1;
+/// The live counter's type is [`std::num::NonZeroU64`], so the reserved value is
+/// not merely avoided by the code that advances it — it is unrepresentable. That
+/// is deliberately stronger than a guard at each mutation site: the original
+/// defect was a single initializer holding zero, and a scattered-guard scheme
+/// depends on every future initializer and every future arithmetic call
+/// remembering the reservation. `saturating_add` cannot wrap to zero today, but
+/// nothing except the type stops someone changing it to `wrapping_add`.
+const FIRST_TRACKER_GENERATION: NonZeroU64 = NonZeroU64::MIN;
 
 /// Stable identity for one accepted Taj perception result.
 ///
@@ -1082,7 +1090,9 @@ pub struct TrackedPerceptionState {
     /// Producer timestamp of the last accepted camera frame.
     last_camera_stamp_ms: Option<u64>,
     /// Advances whenever temporal tracking state is invalidated.
-    tracker_generation: u64,
+    /// Live generation counter. NonZero by TYPE: zero is the invalid-frame
+    /// sentinel and must be unrepresentable here, not merely unwritten.
+    tracker_generation: NonZeroU64,
     /// #1211 sensor-liveness watchdog. Deliberately OUTSIDE [`Self::reset`]: the
     /// tracker resets on a timestamp regression or an oversized gap, and those are
     /// exactly the events the watchdog exists to remember. Clearing its history
@@ -1168,6 +1178,10 @@ impl TrackedPerceptionState {
         self.last_stamp_ms = None;
         self.last_response = None;
         self.last_camera_stamp_ms = None;
+        // Saturates at u64::MAX rather than wrapping. NonZeroU64::saturating_add
+        // cannot produce zero, so exhausting the counter degrades to a stuck
+        // generation (frames stop reading as new) rather than to one that reads as
+        // invalid evidence.
         self.tracker_generation = self.tracker_generation.saturating_add(1);
     }
 
@@ -1827,7 +1841,7 @@ pub fn handle_perception_tracked_at(
         frame_id: PerceptionFrameId::pending(
             state.scan_sequence,
             camera_sequence,
-            state.tracker_generation,
+            state.tracker_generation.get(),
         ),
         healthy,
         confidence,
@@ -4357,7 +4371,40 @@ mod evidence_frame_identity_tests {
         st.reset();
         now += 100;
         let after = handle_perception_tracked_at(&live_scan(99, 6.0), &mut st, now);
-        assert!(after.frame_id.tracker_generation > FIRST_TRACKER_GENERATION);
+        assert!(after.frame_id.tracker_generation > FIRST_TRACKER_GENERATION.get());
+    }
+
+    /// Exhausting the generation counter cannot wrap it back onto the sentinel.
+    ///
+    /// The counter is `NonZeroU64` and advances with `saturating_add`, so at the
+    /// ceiling it sticks at `u64::MAX`. The degradation is that further resets
+    /// stop being distinguishable as new epochs — a real loss, but a
+    /// conservative one: the supersession rule keeps refusing anything OLDER,
+    /// and the frame never reads as invalid evidence.
+    ///
+    /// Reaching this requires 2^64 resets, so the test drives the counter
+    /// directly rather than pretending to get there. The point is the shape of
+    /// the failure at the boundary, not its reachability.
+    #[test]
+    fn an_exhausted_generation_counter_saturates_rather_than_reaching_the_sentinel() {
+        let ceiling = NonZeroU64::new(u64::MAX).expect("nonzero");
+        let advanced = ceiling.saturating_add(1);
+        assert_eq!(
+            advanced.get(),
+            u64::MAX,
+            "the counter must stick at the ceiling, not wrap"
+        );
+        assert_ne!(
+            advanced.get(),
+            RESERVED_INVALID_TRACKER_GENERATION,
+            "wrapping onto the sentinel would turn counter exhaustion into \
+             every frame reading as invalid evidence"
+        );
+
+        // And one below the ceiling still advances normally, so the assertion
+        // above is about saturation rather than a counter that never moves.
+        let below = NonZeroU64::new(u64::MAX - 1).expect("nonzero");
+        assert_eq!(below.saturating_add(1).get(), u64::MAX);
     }
 
     /// Track ids never recycle WITHIN a generation, and every tracker
