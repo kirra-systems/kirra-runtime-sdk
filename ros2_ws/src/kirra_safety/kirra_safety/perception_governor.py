@@ -5,6 +5,13 @@ Kirra Perception Governor.
 Receives the latest lidar scan, requests a fused safety envelope from Taj, and
 publishes an asymmetrically stabilized speed cap.
 
+#1218: the scan callback is NON-BLOCKING. It stamps and copies the scan into a
+one-entry latest-frame slot and returns; a single bounded worker performs the
+HTTP round trip; a publish timer decides what reaches the wire. The callback no
+longer waits on a socket, so a slow sidecar cannot back up sensor ingest, and a
+reply can no longer be attributed to a scan other than the one it was issued
+for. Decisions live in `async_perception`; this module is the shell.
+
 Safety behavior:
 - Restrictive cap changes apply immediately.
 - Permissive changes require consecutive confirmation and rate-limited release.
@@ -14,6 +21,7 @@ Safety behavior:
 """
 
 import math
+import threading
 import time
 
 import rclpy
@@ -22,6 +30,18 @@ from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float64, String
 
+from kirra_safety.async_perception import (
+    ISSUE,
+    LatestFrameSlot,
+    PerceptionRequest,
+    PerceptionResult,
+    STALE,
+    SUPERSEDED,
+    USE,
+    deadline_breached,
+    decide_issue,
+    resolve_result,
+)
 from kirra_safety.perception_cap import (
     STABILIZED_OK,
     STABILIZED_UNSTABILIZED,
@@ -107,6 +127,34 @@ class PerceptionGovernor(Node):
             self.get_parameter("confidence_floor").value
         )
 
+        # #1218 non-blocking cycle. The publish period is what bounds how long a
+        # wedged sidecar can leave a stale cap on the wire, and the deadline is
+        # what floors it — deliberately separate from `timeout_ms`, which is a
+        # PER-SOCKET-OPERATION budget and cannot bound wall-clock latency.
+        self.declare_parameter("publish_period_ms", 100)
+        self.declare_parameter("deadline_ms", 250)
+        self.declare_parameter("scan_stale_ms", 500)
+        publish_period_s = (
+            float(self.get_parameter("publish_period_ms").value) / 1000.0
+        )
+        self._deadline_s = float(self.get_parameter("deadline_ms").value) / 1000.0
+        self._scan_stale_s = (
+            float(self.get_parameter("scan_stale_ms").value) / 1000.0
+        )
+
+        # One lock over everything the worker and the executor thread both
+        # touch. The in-flight flag and the slot MUST be read together — "is a
+        # job running" and "what would it run on" is one question, and splitting
+        # it is a race that starts two workers.
+        self._lock = threading.Lock()
+        self._slot = LatestFrameSlot()
+        self._request_sequence = 0
+        self._last_published_sequence = 0
+        self._in_flight_since_s = None
+        self._result = None
+        self._discarded_replies = 0
+        self._deadline_breaches = 0
+
         self._session = (
             requests.Session()
             if REQUESTS_AVAILABLE
@@ -139,6 +187,12 @@ class PerceptionGovernor(Node):
             self._on_scan,
             SCAN_QOS,
         )
+        # The only publisher. Runs whether or not scans are arriving, which is
+        # the point: a sidecar that stops answering, or a lidar that stops
+        # producing, must still floor the cap on a schedule this node controls.
+        self._publish_timer = self.create_timer(
+            publish_period_s, self._on_publish_timer
+        )
 
         if not REQUESTS_AVAILABLE:
             self.get_logger().error(
@@ -166,9 +220,24 @@ class PerceptionGovernor(Node):
             String(data=health)
         )
 
+    def _counters(self) -> str:
+        """#1218 counters, appended to every health message.
+
+        On the health topic rather than a new one: an operator diagnosing "why
+        is the cap zero" is already reading this string, and a counter they have
+        to go and find separately is a counter they will not find. Read without
+        the lock — these are diagnostic totals, and a torn read costs nothing
+        that matters.
+        """
+        return (
+            f"discarded={self._discarded_replies}:"
+            f"deadline={self._deadline_breaches}:"
+            f"overwritten={self._slot.overwrites}"
+        )
+
     def _publish_fault(self, reason: str) -> None:
         # A fault invalidates all accumulated release evidence.
-        self._publish(0.0, reason)
+        self._publish(0.0, f"{reason}:{self._counters()}")
 
     @staticmethod
     def _finite_number(value) -> bool:
@@ -242,7 +311,8 @@ class PerceptionGovernor(Node):
             f"state={cap_reason}:"
             f"streak={cap_streak}:"
             f"limiting={cap_limiting}:"
-            f"width={min_width}/{required_width}m"
+            f"width={min_width}/{required_width}m:"
+            f"{self._counters()}"
         )
 
         self._publish(
@@ -302,63 +372,176 @@ class PerceptionGovernor(Node):
         except (AttributeError, TypeError, ValueError):
             return None
 
+    # ------------------------------------------------------------------
+    # #1218 non-blocking scan cycle.
+    #
+    # The callback COPIES and RETURNS; a worker does the network; a timer
+    # publishes. Nothing here waits on a socket, so a slow or wedged sidecar can
+    # no longer back up the sensor ingest it is being asked to judge.
+    #
+    # The decisions live in `async_perception` so they are testable without a
+    # ROS graph. This node is the shell: it owns the lock, the thread and the
+    # publishers, and asks that module what to do.
+    # ------------------------------------------------------------------
+
     def _on_scan(self, msg: LaserScan) -> None:
+        """Stamp, copy, offer, return. No network, no publishing, no blocking.
+
+        Publishing from here is deliberately avoided even for the
+        NO_REQUESTS_LIB case: the timer already floors the cap when nothing
+        resolves, so a second publisher on the scan callback would only add a
+        path that could disagree with it.
+        """
+        received_s = time.monotonic()
+        # Built BEFORE the lock. It reads the live ROS message — which the
+        # worker must never touch, hence copying here — but that copy is pure
+        # computation over a few hundred floats and holding the lock across it
+        # would stall the worker's deposit for no reason.
+        body = self._request_body(msg)
+        with self._lock:
+            self._request_sequence += 1
+            self._slot.offer(
+                PerceptionRequest(
+                    request_sequence=self._request_sequence,
+                    scan_received_s=received_s,
+                    taj_url=self._taj_url,
+                    timeout_s=self._timeout_s,
+                    body=body,
+                )
+            )
+        self._maybe_issue()
+
+    def _maybe_issue(self) -> None:
+        """Start a worker if one may run. Returns immediately either way."""
         if self._session is None:
-            self._publish_fault("NO_REQUESTS_LIB")
             return
+        with self._lock:
+            if decide_issue(self._in_flight_since_s is not None,
+                            self._slot.has_pending) != ISSUE:
+                return
+            pending = self._slot.take()
+            self._in_flight_since_s = time.monotonic()
+
+        worker = threading.Thread(
+            target=self._run_request, args=(pending,), daemon=True
+        )
+        worker.start()
+
+    def _run_request(self, pending) -> None:
+        """Worker body. Computes; deposits; touches nothing else.
+
+        Every exit path deposits a result, including the failures. A worker that
+        returned without depositing would leave the node unable to distinguish
+        "still working" from "died", and the deadline would be the only thing
+        that ever cleared it.
+        """
+        outcome = self._fetch(pending)
+        with self._lock:
+            self._result = outcome
+            self._in_flight_since_s = None
+        # A scan may have arrived while this ran; start its request now rather
+        # than waiting for the next one.
+        self._maybe_issue()
+
+    def _fetch(self, pending) -> PerceptionResult:
+        def faulted(reason):
+            return PerceptionResult(
+                request_sequence=pending.request_sequence,
+                scan_received_s=pending.scan_received_s,
+                response=None,
+                fault=reason,
+            )
 
         try:
             response = self._session.post(
-                f"{self._taj_url}/perception",
-                json=self._request_body(msg),
-                timeout=self._timeout_s,
+                f"{pending.taj_url}/perception",
+                json=pending.body,
+                timeout=pending.timeout_s,
             )
-
             if response.status_code != 200:
-                self._publish_fault(
-                    f"TAJ_HTTP_{response.status_code}"
-                )
-                return
+                return faulted(f"TAJ_HTTP_{response.status_code}")
 
             data = response.json()
-
             cap = data.get("speed_cap_mps")
             clear = data.get("clear_distance_m")
             healthy_value = data.get("healthy")
-
             if (
                 not self._finite_number(cap)
                 or float(cap) < 0.0
                 or not self._finite_number(clear)
                 or not isinstance(healthy_value, bool)
             ):
-                self._publish_fault("TAJ_MALFORMED")
-                return
+                return faulted("TAJ_MALFORMED")
 
-            self._publish_stabilized(
-                raw_cap_mps=float(cap),
-                healthy=healthy_value,
-                clear_distance_m=float(clear),
-                minimum_corridor_width_m=data.get(
-                    "minimum_corridor_width_m"
-                ),
-                required_corridor_width_m=data.get(
-                    "required_corridor_width_m"
-                ),
-                data=data,
+            return PerceptionResult(
+                request_sequence=pending.request_sequence,
+                scan_received_s=pending.scan_received_s,
+                response=data,
+                fault=None,
             )
-
         except requests.Timeout:
-            self._publish_fault("TAJ_TIMEOUT")
+            return faulted("TAJ_TIMEOUT")
         except requests.ConnectionError:
-            self._publish_fault("TAJ_UNREACHABLE")
+            return faulted("TAJ_UNREACHABLE")
         except (ValueError, TypeError):
-            self._publish_fault("TAJ_MALFORMED")
+            return faulted("TAJ_MALFORMED")
         except Exception as error:  # noqa: BLE001
-            self.get_logger().error(
-                f"perception governor error: {error}"
-            )
-            self._publish_fault("TAJ_ERROR")
+            self.get_logger().error(f"perception governor error: {error}")
+            return faulted("TAJ_ERROR")
+
+    def _on_publish_timer(self) -> None:
+        """The only publisher. Decides once per period and always publishes.
+
+        Always, not only on success: a cap that stops being republished is a cap
+        a consumer will age out on its own staleness rule, which is fail-closed
+        but silent. Publishing the floor with a named reason says WHY the robot
+        is holding.
+        """
+        now_s = time.monotonic()
+
+        # Decide under the lock; publish outside it. Holding a lock across a ROS
+        # publish would couple the worker's deposit to publisher latency, which
+        # is exactly the kind of coupling this issue exists to remove.
+        accepted = None
+        fault = None
+        with self._lock:
+            if self._session is None:
+                fault = "NO_REQUESTS_LIB"
+            elif deadline_breached(self._in_flight_since_s, now_s, self._deadline_s):
+                self._deadline_breaches += 1
+                # The request is left running — it cannot be cancelled, and the
+                # one-in-flight bound is what keeps a sick sidecar from spawning
+                # threads. It will deposit late and be refused as superseded.
+                fault = "TAJ_DEADLINE"
+            else:
+                verdict = resolve_result(
+                    self._result,
+                    newest_request_sequence=self._request_sequence,
+                    last_published_sequence=self._last_published_sequence,
+                    now_s=now_s,
+                    scan_stale_s=self._scan_stale_s,
+                )
+                if verdict.state == USE:
+                    accepted = self._result
+                    self._last_published_sequence = accepted.request_sequence
+                else:
+                    if verdict.state in (SUPERSEDED, STALE):
+                        self._discarded_replies += 1
+                    fault = f"TAJ_{verdict.state}"
+
+        if accepted is None:
+            self._publish_fault(fault)
+            return
+
+        data = accepted.response
+        self._publish_stabilized(
+            raw_cap_mps=float(data.get("speed_cap_mps")),
+            healthy=data.get("healthy"),
+            clear_distance_m=float(data.get("clear_distance_m")),
+            minimum_corridor_width_m=data.get("minimum_corridor_width_m"),
+            required_corridor_width_m=data.get("required_corridor_width_m"),
+            data=data,
+        )
 
     def destroy_node(self):
         if self._session is not None:
