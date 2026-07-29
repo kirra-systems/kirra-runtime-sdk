@@ -14,6 +14,7 @@ For the full task-level roadmap (PARK-001 through PARK-040), see
 |----------|-------------|----------|---------------------|------------|
 | [RSS_KIRRA_INTEGRATION.md](RSS_KIRRA_INTEGRATION.md) | IEEE 2846 / RSS-style behavioral safety extension — canonical perception types, safe-distance evaluator, posture engine wiring, and audit chain entries | After Increment 2 (HAL complete) | parko-core v0.1.0 tagged (PARK-006); InferenceBackend finalized (PARK-008) | PARK-013 – PARK-019 |
 | [APOLLO_KIRRA_INTEGRATION.md](APOLLO_KIRRA_INTEGRATION.md) | Apollo AV stack integration — Cyber RT bridge between Control and Canbus, posture sideband, demo scenarios | After Increment 3 + ROS2 demo | QNX spike (PARK-024); ROS2 bring-up (PARK-036, PARK-037) | Extends Increment 4 |
+| [QNX_MISSION_ASSURANCE_RUNTIME.md](QNX_MISSION_ASSURANCE_RUNTIME.md) | **Proposed planning baseline (no current capability):** Kirra Mission Assurance Runtime for QNX — a mission plane above the checker spine. Product plan + gates MA-A…MA-F; companions: [QNX_MISSION_ASSURANCE_ARCHITECTURE.md](QNX_MISSION_ASSURANCE_ARCHITECTURE.md) (planes, mission/capability/authority models, QNX/HAM integration), [QNX_MISSION_ASSURANCE_BACKLOG.md](QNX_MISSION_ASSURANCE_BACKLOG.md) (issue-ready epics MAR-01…MAR-12) | Proposed — owner review first (Gate MA-A) | Owner sign-off on plane ownership + vertical; EPIC #270 QNX toolchain groundwork for Phase 2+ | None — uses its own `MAR-*` namespace (declared in the plan §0) |
 
 ## Current Execution Order
 

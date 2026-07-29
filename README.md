@@ -222,6 +222,7 @@ includes honest caveats, effort estimates, and explicit sequencing dependencies.
 | [IEEE 2846 / RSS](docs/roadmap/RSS_KIRRA_INTEGRATION.md) | Behavioral safety invariants based on IEEE 2846 — safe distance enforcement given perception state | **Implemented** (parko-core RSS, wired via SG3 in #131) |
 | [QNX governor transport lane](docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md) | Rust-end-to-end command path on a QNX safety partition; hypervisor contract channel + iceoryx2 transport; FFI demoted to integration boundary (EPIC #270) | In progress — RTM harness + HVCHAN/WCET specs landed (#271/#272/#278/#274 docs); QNX cross-compile + hardware fault-injection campaigns blocked (#274/#279) |
 | [Apollo AV Stack](docs/roadmap/APOLLO_KIRRA_INTEGRATION.md) | Cyber RT bridge between Apollo Control and Canbus — kinematic enforcement and lockout in the Apollo pipeline | Planned — after QNX + robot demo |
+| [Mission Assurance Runtime for QNX](docs/roadmap/QNX_MISSION_ASSURANCE_RUNTIME.md) | Planning baseline for a mission plane above the checker spine: bounded mission graphs, capability contracts, mission-scoped authority, structured evidence + exact mission replay, QNX service/HAM integration (KIRRA-MAR-PLAN/ARCH/BACKLOG-001) | **Proposed — planning baseline only; describes no current capability** |
 | Ferrocene compiler qualification | Switch from upstream `rustc` to Ferrocene + `criticalup.toml` for the ASIL-D toolchain claim | Planned — tracked in #132 |
 
 See [docs/roadmap/](docs/roadmap/) for sequencing dependencies and execution plans.
