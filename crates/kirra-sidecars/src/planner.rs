@@ -410,10 +410,30 @@ fn is_lowercase_sha256_hex(value: &str) -> bool {
 }
 
 fn validate_perception_frame_id(req: &PlanRequest) -> Result<(), SeamRejection> {
+    // #1214: evidence identity is REQUIRED. This was a transitional
+    // compatibility path that accepted a plan request naming no evidence and
+    // still answered 200 with a well-formed `proposal_digest`.
+    //
+    // The ROS doer already refused to propose motion from such a plan
+    // (`build_release_binding` returns None → hold), so nothing unsafe rode this
+    // path in the shipped configuration. But that put the refusal in the caller
+    // rather than in the authority: the planner is the one component that knows
+    // whether it had evidence when it authored a trajectory, and a second caller
+    // written without the same downstream check would have inherited a silent
+    // fail-open. A plan is a claim about a world state; a plan that cannot name
+    // the world state it was authored against is not a weaker claim, it is a
+    // different kind of object.
+    //
+    // The field stays `Option` on the wire so absence produces THIS coded,
+    // explicit refusal rather than a generic deserialization error — a caller
+    // must be able to tell "you sent no evidence" from "your JSON was malformed".
     let Some(frame) = req.perception_frame_id.as_ref() else {
-        // Transitional compatibility path. A later production gate will make
-        // the evidence identity mandatory for R2 motion.
-        return Ok(());
+        return Err(SeamRejection {
+            code: "MISSING_PERCEPTION_FRAME_ID",
+            detail: "perception_frame_id is required: a proposal must name the \
+                     evidence frame it was authored against; NO MOTION"
+                .to_string(),
+        });
     };
 
     if frame.scan_sequence == 0 {
@@ -1241,7 +1261,11 @@ mod tests {
 
     fn base_request() -> PlanRequest {
         PlanRequest {
-            perception_frame_id: None,
+            // #1214: evidence identity is required, so the shared fixture
+            // carries one. Tests about its ABSENCE clear it explicitly, which
+            // keeps "this test is about the missing-frame path" visible at the
+            // test rather than implied by a default.
+            perception_frame_id: Some(evidence_frame()),
             ego: EgoReq {
                 x: 2.0,
                 y: 0.0,
@@ -1558,20 +1582,45 @@ mod tests {
         );
     }
 
+    /// #1214: a plan request naming no evidence is REFUSED, where it used to be
+    /// answered with a 200 and a well-formed `proposal_digest`.
+    ///
+    /// The ROS doer already declined to propose motion from such a plan, so
+    /// nothing unsafe rode the old path in the shipped configuration. The change
+    /// moves the refusal into the authority that actually knows whether it had
+    /// evidence, so a second caller written without that downstream check does
+    /// not inherit a silent fail-open.
     #[test]
-    fn absent_perception_frame_identity_preserves_backward_compatibility() {
+    fn a_plan_request_naming_no_evidence_is_refused() {
         let mut request = base_request();
         request.perception_frame_id = None;
 
-        let response = handle_plan(&request).expect("legacy request remains accepted");
+        let rejection = handle_plan(&request)
+            .expect_err("a proposal that cannot name its evidence must not be planned");
 
+        assert_eq!(rejection.code, "MISSING_PERCEPTION_FRAME_ID");
         assert!(
-            response.perception_frame_id.is_none(),
-            "an absent legacy identity must remain absent, never be invented"
+            rejection.detail.contains("NO MOTION"),
+            "the refusal must say what it costs: {}",
+            rejection.detail
         );
-        assert!(
-            matches!(response.verdict.as_str(), "Accept" | "Clamp"),
-            "legacy clean-road behavior must remain unchanged"
+    }
+
+    /// Non-vacuity for the test above: the SAME request with an evidence frame
+    /// present plans normally. Without this, the refusal could be coming from
+    /// anything else in the fixture.
+    #[test]
+    fn the_same_request_with_evidence_plans_normally() {
+        let mut request = base_request();
+        request.perception_frame_id = Some(evidence_frame());
+
+        let response = handle_plan(&request).expect("evidence-bound request is accepted");
+
+        assert!(matches!(response.verdict.as_str(), "Accept" | "Clamp"));
+        assert_eq!(
+            response.perception_frame_id,
+            Some(evidence_frame()),
+            "the identity is echoed unchanged, never re-derived"
         );
     }
 
