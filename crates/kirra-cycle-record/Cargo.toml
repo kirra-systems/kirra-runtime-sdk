@@ -1,0 +1,23 @@
+[package]
+name = "kirra-cycle-record"
+version = "0.1.0"
+edition = "2021"
+# MSRV floor inherited from the workspace root ([workspace.package]) — one
+# source of truth per workspace (#797 F3).
+rust-version.workspace = true
+description = "The #1215 joined cycle record — per-stage flight-recorder events joined on the #1214 evidence-identity chain into one artifact per control cycle, with a bounded pre/post-trigger ring buffer."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+authors = ["Kirra Systems, LLC <justin.looney@kirrasystems.com>"]
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+# SAFETY BOUNDARY: this crate is an OBSERVABILITY layer. It depends on serde
+# only, carries no governor types, and holds no safety authority — a recorder
+# that could influence a verdict would be on the wrong side of the doer-checker
+# line. The join keys it consumes are the #1214 identity chain, which the
+# RELEASE TOKEN already carries to the wheels; this crate adds no new plumbing.
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]

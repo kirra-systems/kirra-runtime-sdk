@@ -2198,6 +2198,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-cycle-record"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kirra-doer-eval"
 version = "0.1.0"
 dependencies = [
