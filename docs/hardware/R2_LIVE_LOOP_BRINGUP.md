@@ -58,7 +58,7 @@ a different quantity from the motor consumer's physical
 `wheelbase_m` to the exact CLASS value.
 
 ⚠️ **The shipped config is wrong for courier:** `kirra_params.yaml` currently has
-`wheelbase_m: 0.2`. Under `KIRRA_VEHICLE_CLASS=courier` the verifier reports 0.5,
+`wheelbase_m: 0.2`. Under `KIRRA_VEHICLE_CLASS=r2` the verifier reports 0.229,
 so 0.2 ≠ 0.5 → instant latched stop. Change it to `0.5` (courier) — or pick the
 class whose contract wheelbase you set.
 
@@ -77,7 +77,7 @@ class whose contract wheelbase you set.
 |---|---|---|
 | Governor key | verifier `KIRRA_GOVERNOR_SIGNING_KEY_SOURCE=file:<2a seed>` | consumer `KIRRA_GOVERNOR_VK_HEX` (= pubkey 0x2a) |
 | `KIRRA_ADMIN_TOKEN` | verifier (required to boot) | interceptor `kirra_token` Bearer |
-| Vehicle class | verifier `KIRRA_VEHICLE_CLASS=courier` | fixes the contract wheelbase below |
+| Vehicle class | verifier `KIRRA_VEHICLE_CLASS=r2` | the R2's own envelope — courier assumes 2x braking (#1219) |
 | Interceptor `wheelbase_m` | `ros2_ws/.../config/kirra_params.yaml` | courier contract **0.5** (NOT 0.229) |
 | `ROS_DOMAIN_ID` | everywhere (consumer forces **28**) | 28 on the launch/robot side too |
 | Ports | verifier 8090 · planner 8100 · taj 8101 · mick 8102 · ollama 11434 | interceptor `kirra_url`, `planner_url`, `taj_url` match |
@@ -141,7 +141,7 @@ this over SSH-only** — you need eyes on the robot and a hand on the e-stop.
 7. **Verifier** (mints; 2a key so the consumer accepts it):
    ```bash
    export KIRRA_ADMIN_TOKEN=<pick-a-token>
-   export KIRRA_VEHICLE_CLASS=courier
+   export KIRRA_VEHICLE_CLASS=r2
    export KIRRA_GOVERNOR_SIGNING_KEY_SOURCE=file:/etc/kirra/gov_2a.seed
    cargo run --bin kirra_verifier_service --release      # listens 0.0.0.0:8090
    curl -s localhost:8090/health

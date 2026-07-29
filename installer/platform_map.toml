@@ -24,18 +24,18 @@ required_car_type = 5          # board must report CARTYPE_R2; wrong mode → RE
 # (one-wheel drive — findings doc). The installer VERIFIES mode 5 and working
 # metadata; it cannot create the R2 base image.
 base_image = "yahboom-r2 (vendor artifact — operator-flashed; see docs/hardware/R2_GOLDEN_BUILD.md)"
-# INTERIM until the measurement-gated `r2` contract profile lands (Track-A A2):
-# courier is the closest reviewed class; the demo envelope stays the backstop.
-# profile_class = "courier"
-# ── R2-CLASS FLIP (draft, GATED — 1 of 3 uncomment sites) ─────────────────────
-# The `r2` kinematic + SG6 classes now EXIST (src/gateway/contract_profiles.rs +
-# parko impact.rs; measured footprint + full-lock steering). To retire the
-# courier interim: comment the `profile_class = "courier"` line above and
-# uncomment the line below — but ONLY AFTER the 4 remaining bench captures land
-# (front-to-rear wheelbase confirm, servo slew rate, overhang split, track width)
-# AND the r2 DYNAMIC limits are benched. Flip all THREE sites together (see
-# robot/install/PLATFORM_R2_PENDING.md "THE FLIP"): this, the verifier's
-# KIRRA_VEHICLE_CLASS, and the interceptor wheelbase_m (→ 0.229).
+# #1219: `r2`, not the former `courier` interim. The interim borrowed the
+# "closest reviewed class" while the r2 dynamic limits were VALIDATION-PENDING —
+# preferring a REVIEWED envelope over UNVALIDATED numbers. That is the wrong
+# ordering rule for a safety envelope: what matters is which values are more
+# conservative, and courier's are not. courier assumes 3.0 m/s2 of braking
+# against the R2 contract's 1.5, and permits 2.5 m/s against 1.0. Over-estimating
+# available brake under-estimates stopping distance directly.
+#
+# The r2 dynamic limits remain VALIDATION-PENDING (4 bench captures still owed:
+# front-to-rear wheelbase confirm, servo slew rate, overhang split, track width).
+# They are nonetheless the safer selection — if both are estimates, the lower one
+# is. See src/gateway/contract_profiles.rs tests for the pinned property.
 profile_class = "r2"
 motor_port = "/dev/myserial"
 [platform.r2.lidar]

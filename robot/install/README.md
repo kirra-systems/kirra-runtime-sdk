@@ -101,8 +101,26 @@ it generates the secrets (`deploy/systemd/install.sh:61-79`) but NOT
 **fails closed at startup** until you append it to `/etc/kirra/kirra.env`:
 
 ```bash
-echo 'KIRRA_VEHICLE_CLASS=courier' | sudo tee -a /etc/kirra/kirra.env  # interim reviewed class, installer/platform_map.toml:29
+echo 'KIRRA_VEHICLE_CLASS=r2' | sudo tee -a /etc/kirra/kirra.env  # matches installer/platform_map.toml
 ```
+
+> **Why `r2` and not `courier` (#1219).** `courier` was borrowed as the
+> "closest reviewed class" while the r2 dynamic limits were VALIDATION-PENDING.
+> That preferred a *reviewed* envelope over *unvalidated* numbers — the wrong
+> ordering rule for a safety envelope, where what matters is which values are
+> more conservative. A reviewed optimistic constant is still optimistic.
+>
+> `courier` assumes **3.0 m/s² of braking** against the R2 contract's **1.5**,
+> and permits **2.5 m/s** against the R2's **1.0**. Braking is the sharpest of
+> those: it is what every stopping-distance computation divides by, so assuming
+> more deceleration than the platform has under-estimates stopping distance
+> directly. courier's larger footprint is geometrically conservative, but a
+> bigger box does nothing for stopping distance.
+>
+> The R2's dynamic limits remain VALIDATION-PENDING — but they are uniformly
+> *lower*, and if both are estimates the lower one is the safe choice. The
+> automated installer already selects `r2`
+> (`installer/platform_map.toml`); this manual step now matches it.
 
 Minting (needed for the live loop) additionally requires
 `KIRRA_GOVERNOR_SIGNING_KEY_SOURCE` (+ `KIRRA_GOVERNOR_SIGNING_KEY_ALLOW_DEV=1`

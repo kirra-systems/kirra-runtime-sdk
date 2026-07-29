@@ -67,10 +67,34 @@ else
   grep -qE '^KIRRA_ADMIN_TOKEN=.+' <<<"$kenv" && ok "KIRRA_ADMIN_TOKEN set" || { bad "KIRRA_ADMIN_TOKEN empty (verifier 503s)"; fix "re-run deploy/systemd/install.sh"; }
   grep -qE '^KIRRA_SUPERVISOR_RESET_KEY=.+' <<<"$kenv" && ok "KIRRA_SUPERVISOR_RESET_KEY set" || bad "KIRRA_SUPERVISOR_RESET_KEY empty"
   if grep -qE '^KIRRA_VEHICLE_CLASS=(courier|delivery-av|robotaxi|r2)$' <<<"$kenv"; then
-    ok "KIRRA_VEHICLE_CLASS = $(grep -oE '^KIRRA_VEHICLE_CLASS=.*' <<<"$kenv" | cut -d= -f2)"
+    kcls="$(grep -oE '^KIRRA_VEHICLE_CLASS=.*' <<<"$kenv" | cut -d= -f2)"
+    if [[ "$kcls" == "r2" ]]; then
+      ok "KIRRA_VEHICLE_CLASS = r2"
+    else
+      # #1219: parseable but not this platform's class. Every non-r2 class is a
+      # MORE PERMISSIVE envelope on the dynamics — courier alone assumes 2x the
+      # braking (3.0 vs 1.5 m/s2) and 2.5x the speed ceiling. Over-estimating
+      # available brake under-estimates stopping distance directly.
+      #
+      # A WARN rather than a failure: R2 hardware running the vendor X3 image is
+      # a real configuration, and courier is the right class there. Only the
+      # operator knows which image is flashed.
+      warn "KIRRA_VEHICLE_CLASS = $kcls (not r2) — MORE PERMISSIVE envelope for R2 hardware:"
+      warn "  $kcls assumes more braking than the R2 contract declares, and"
+      warn "  over-estimating brake UNDER-estimates stopping distance."
+      warn "  It ALSO mismatches the interceptor wheelbase: kirra_params.yaml sets"
+      warn "  0.229 (the R2's measured value) and the verifier reports this class's"
+      warn "  own wheelbase — enforcement_decision.wheelbase_consistent then latches"
+      warn "  a PERMANENT stop, so the live loop will not run."
+      fix "set KIRRA_VEHICLE_CLASS=r2 — UNLESS this robot is flashed with the vendor"
+      fix "  X3 image, where $kcls is correct and the interceptor wheelbase must"
+      fix "  match that class instead. Only you can tell which image is flashed;"
+      fix "  this check cannot. (#1219)"
+    fi
   else
     bad "KIRRA_VEHICLE_CLASS unset/invalid (verifier + parko fail-closed abort)"
-    fix "set KIRRA_VEHICLE_CLASS=courier (interim) or r2 in $KENV"
+    fix "set KIRRA_VEHICLE_CLASS=r2 in $KENV (courier is the X3 class and is a \
+MORE PERMISSIVE envelope for an R2 — 2x assumed braking; see #1219)"
   fi
   if grep -qE '^KIRRA_GOVERNOR_SIGNING_KEY_SOURCE=.+' <<<"$kenv"; then
     ok "KIRRA_GOVERNOR_SIGNING_KEY_SOURCE set"
