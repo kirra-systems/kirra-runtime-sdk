@@ -409,11 +409,17 @@ fn r2_nominal() -> VehicleKinematicsContract {
         // (r2.footprint)
         width_m: 0.203,
         length_m: 0.330,
-        // ESTIMATE (overhang split UNMEASURED): (length − wheelbase)/2 ≈ 0.05 m
-        // each → front+rear+wheelbase ≈ length. Firm up per PLATFORM_R2_PENDING.
+        // ESTIMATE (overhang split UNMEASURED): (length − wheelbase)/2 =
+        // (0.330 − 0.229)/2 = 0.0505 m each → front+rear+wheelbase = length
+        // EXACTLY. The stated formula, not a rounding of it: at 0.05 the parts
+        // summed to 0.329 against a measured length of 0.330, so
+        // `containment::footprint_corners` placed the swept body 1 mm SHORTER
+        // than the robot — the unsafe direction, and the one #1215's closure
+        // test now refuses. The split itself is still assumed even; the
+        // measurement is owed per PLATFORM_R2_PENDING / #1213.
         // (r2.overhangs)
-        overhang_front_m: 0.05,
-        overhang_rear_m: 0.05,
+        overhang_front_m: 0.0505,
+        overhang_rear_m: 0.0505,
         // The bench-robot ODD ceiling (sibling of COURIER_ODD_SPEED_CAP_MPS).
         odd_speed_cap_mps: Some(R2_ODD_SPEED_CAP_MPS),
     }
@@ -432,8 +438,8 @@ fn r2_mrc() -> VehicleKinematicsContract {
         wheelbase_m: 0.229,
         width_m: 0.203,
         length_m: 0.330,
-        overhang_front_m: 0.05,
-        overhang_rear_m: 0.05,
+        overhang_front_m: 0.0505,
+        overhang_rear_m: 0.0505,
         // MRC crawl (0.5) is already below the R2 ODD cap; leave None so min()
         // selects 0.5 (the frozen-MRC idiom).
         odd_speed_cap_mps: None,

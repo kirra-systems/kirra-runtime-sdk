@@ -2549,6 +2549,8 @@ dependencies = [
  "kirra-policy-types",
  "kirra-release-token",
  "kirra-safety-authority",
+ "kirra-taj",
+ "kirra-trajectory",
  "parko-core",
  "parko-kirra",
  "proptest",

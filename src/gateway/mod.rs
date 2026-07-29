@@ -1,6 +1,8 @@
 // src/gateway/mod.rs
 
 pub mod contract_profiles;
+#[cfg(test)]
+pub mod deployment_geometry;
 pub mod policy;
 pub mod policy_layer;
 pub mod provenance;

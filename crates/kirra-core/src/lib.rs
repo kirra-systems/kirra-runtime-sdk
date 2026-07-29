@@ -52,6 +52,12 @@ pub mod contract_consumer;
 /// existing path (the ROS2 adapter, the planner) holds.
 pub mod containment;
 
+/// #1215 — typed geometric regions (collision / corridor-observation /
+/// self-filter / turn-swept) derived from the canonical platform contract.
+/// Gives each region its meaning, its FRAME and an explicitly named margin, so
+/// a consumer can never independently re-derive a physical vehicle dimension.
+pub mod regions;
+
 /// The fail-closed frame-integrity gate (Stage S-FI1a, behind AOU-LOCALIZATION-001) —
 /// the graduated localization-trust verdict (`FrameIntegrity` / `FrameTrust` /
 /// `resolve_frame_trust` / `containment_margin_m`) that selects the SG2 containment
