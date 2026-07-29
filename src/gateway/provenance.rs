@@ -96,9 +96,11 @@ pub const TALISMAN_PIN_DOC: &str = "docs/CAPTURE_PIPELINE_SPEC.md";
 /// Every authority-relevant field of [`VehicleKinematicsContract`].
 ///
 /// [`Field::ALL`] is the completeness denominator: a field added to the contract
-/// struct and not added here would silently escape coverage, so
-/// [`tests::every_contract_struct_field_appears_in_the_field_enum`] pins the
-/// count against the struct's own serialized shape.
+/// struct and not added here would silently escape coverage, so the test
+/// `every_contract_struct_field_appears_in_the_field_enum` pins this list
+/// against the struct's own serialized shape rather than against a hand-kept
+/// count. (Named, not linked: it is `#[cfg(test)]`, so an intra-doc link to it
+/// cannot resolve when rustdoc runs.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Field {
