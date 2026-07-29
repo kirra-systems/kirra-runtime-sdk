@@ -79,8 +79,17 @@ else
       # A WARN rather than a failure: R2 hardware running the vendor X3 image is
       # a real configuration, and courier is the right class there. Only the
       # operator knows which image is flashed.
-      warn "KIRRA_VEHICLE_CLASS = $kcls (not r2) — a MORE PERMISSIVE envelope for R2 hardware"
-      fix "set KIRRA_VEHICLE_CLASS=r2 unless this robot is running the vendor X3 image (see #1219)"
+      warn "KIRRA_VEHICLE_CLASS = $kcls (not r2) — MORE PERMISSIVE envelope for R2 hardware:"
+      warn "  $kcls assumes more braking than the R2 contract declares, and"
+      warn "  over-estimating brake UNDER-estimates stopping distance."
+      warn "  It ALSO mismatches the interceptor wheelbase: kirra_params.yaml sets"
+      warn "  0.229 (the R2's measured value) and the verifier reports this class's"
+      warn "  own wheelbase — enforcement_decision.wheelbase_consistent then latches"
+      warn "  a PERMANENT stop, so the live loop will not run."
+      fix "set KIRRA_VEHICLE_CLASS=r2 — UNLESS this robot is flashed with the vendor"
+      fix "  X3 image, where $kcls is correct and the interceptor wheelbase must"
+      fix "  match that class instead. Only you can tell which image is flashed;"
+      fix "  this check cannot. (#1219)"
     fi
   else
     bad "KIRRA_VEHICLE_CLASS unset/invalid (verifier + parko fail-closed abort)"
