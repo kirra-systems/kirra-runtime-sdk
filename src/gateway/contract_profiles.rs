@@ -339,7 +339,12 @@ fn delivery_av_nominal() -> VehicleKinematicsContract {
         min_follow_distance_m: 3.5, // VALIDATION-PENDING: ~0.3 s @ 11 m/s + reaction (delivery-av.follow)
         max_lateral_accel_mps2: 2.5, // VALIDATION-PENDING: between courier 1.5 and robotaxi 3.5 (delivery-av.lat_accel)
         wheelbase_m: 1.9,            // VALIDATION-PENDING: small road pod (delivery-av.wheelbase)
-        width_m: 1.1, // VALIDATION-PENDING: narrow pod footprint (delivery-av.footprint)
+        // VALIDATION-PENDING: narrow pod footprint; width/length/overhangs all
+        // positive. A LEADING block comment, deliberately: as a trailing comment
+        // on `width_m` it governed that one field and left length + both
+        // overhangs unattributed, which the #1219 coverage check now refuses.
+        // (delivery-av.footprint)
+        width_m: 1.1,
         length_m: 2.9,
         overhang_front_m: 0.5,
         overhang_rear_m: 0.5,

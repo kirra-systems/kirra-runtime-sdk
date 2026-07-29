@@ -206,6 +206,101 @@ fail-closed guarantee lives at the binary startup boundary.)
 
 ---
 
+## Provenance coverage (#1219 part 2) — a derived view, not a second inventory
+
+The per-parameter status flags in the tables above are prose. `src/gateway/provenance.rs`
+makes them **executable**, under one property:
+
+> Every authority-relevant field and externally applied constraint has exactly one
+> provenance mapping; inherited mappings identify **and equal** their upstream source;
+> serialized representations remain derived from the Rust contract and existing reviewed
+> integrity pins.
+
+**It contains no numbers.** Records name a `Field`; values are read live from
+`contract_for` / `mrc_fallback_for` when a check or a serialization runs. A hand-authored
+"field → value → provenance" table would be a second numeric authority and would drift
+from `contract_profiles.rs` exactly as the R2 geometry literals drifted from the platform
+config. The one constant it names — the robotaxi external cap — is a reference to
+`ROBOTAXI_ODD_SPEED_CAP_MPS`, not a re-typed `22.35`.
+
+### Coverage is field-to-key, not key-set equality
+
+Tag granularity is deliberately non-uniform: `r2` splits `r2.overhangs` from `r2.footprint`
+*because their provenance differs* (body MEASURED, split ESTIMATE), while `courier` lumps
+all four geometry fields under one key. Computing an expected key set as classes × fields
+would force uniformity and erase that distinction. So the assertion is total coverage at
+the **field** level — every (class, profile, field) triple governed by exactly one record.
+
+That inversion is what found the live defect this work closed: `delivery_av_nominal`'s
+`length_m` and both overhangs carried no provenance, because the `(delivery-av.footprint)`
+tag was a *trailing* comment governing `width_m` alone. A "every key resolves" check passed
+on that tree — all 49 tags were valid and unique.
+
+### The four classifications, and two that are executed
+
+| Token | Meaning |
+|---|---|
+| `MEASURED` | Observed directly; cites the measurement. |
+| `ESTIMATE` | Calculated or approximated; states from what. |
+| `VALIDATION-PENDING` | Asserted, awaiting a named validation. |
+| `INHERITED` | Sourced from another key — which is **resolved and compared bit-for-bit**. |
+| `DERIVED-PRECONDITION` | Justified by an inequality that is **executed**. |
+
+`INHERITED` is not a politer word for unattributed. The 15 authored MRC relationships
+(3 classes × wheelbase + 4 footprint fields) previously asserted equality in prose;
+6 of them — the overhang pairs — were asserted nowhere, and those are the fields that
+place the swept-footprint corners in `containment.rs`.
+
+`DERIVED-PRECONDITION` covers the MRC `odd_speed_cap_mps: None` values, whose justification
+is `mrc.max_speed <= class ODD cap` (so `min()` selects the crawl). Executing that rule
+immediately rejected a mis-classification: robotaxi **nominal** also carries `None`, but its
+`max_speed` is 35.0, far *above* the 22.35 cap — its `None` is justified by the deployment
+applying the cap externally, a different claim with a different obligation. A prose
+rationale would have carried the wrong reason indefinitely.
+
+### Split authority is surfaced, not hidden
+
+`contract_for(Robotaxi)` returns the frozen instance with `odd_speed_cap_mps: None`, so the
+serialized contract alone derives a ceiling of **35.0 m/s** while the deployment enforces
+**22.35**. `ExternalConstraint` carries that cap as its own row — where it is applied, what
+supplies it, and whether it participates in the effective ceiling — and
+`effective_ceiling_mps` composes it. Only robotaxi needs one; the other three classes carry
+their caps in the contract, and a test refuses a phantom constraint on them.
+
+This also closed a latent gap: `mrc_leq_nominal_per_field_every_class` compares *mechanical*
+maxima, so a courier MRC crawl of 2.8 would pass (2.8 ≤ 3.0) while exceeding the class's own
+nominal **enforced** ceiling of 2.5 — more permissive in degraded posture than in nominal,
+in the only sense that reaches the wheels.
+
+### The frozen class, and the pin it binds to
+
+Robotaxi's numbers live in the byte-frozen talisman, where the git blob hash is the integrity
+pin, so provenance comments cannot be added beside them. Its records live in a sidecar valid
+**only** against that existing pin — `git hash-object` versus the hash in
+`docs/CAPTURE_PIPELINE_SPEC.md`, the same check `ci/build_safety_case.py` and the `ci.yml`
+rustfmt lane already run. A second hash pin would give the anti-drift mechanism its own drift
+problem. If the blob changes, the association fails closed until the sidecar is deliberately
+revisited.
+
+### The loop is closed
+
+`check_source_agreement` parses this file's sibling source with a **tag-led** grammar —
+locate the stable `(class.field)` tag, then read the classification only from its one
+permitted syntactic position — and asserts the table agrees with every tag it finds (52
+today: 49 field-dialect plus 3 const-dialect ODD caps). Without it the table would itself
+be a second authored inventory.
+
+The grammar is tag-led rather than classification-searching because each alternative fails
+cleanly-but-wrongly: `ESTIMATE (overhang split UNMEASURED)` contains `MEASURED` (a substring
+match promotes the one estimate to a measurement, optimistically); the ODD caps use a `///`
+dialect a field-dialect parser drops entirely; and narrative like "the FIRST profile with
+MEASURED geometry" would invent rows.
+
+Run: `cargo test --lib gateway::provenance` (42 tests; every positive assertion paired with a
+negative that proves it can fail).
+
+---
+
 ## Cross-references
 
 - `src/gateway/contract_profiles.rs` — the envelope family + `VehicleClass`

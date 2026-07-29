@@ -3,6 +3,7 @@
 pub mod contract_profiles;
 pub mod policy;
 pub mod policy_layer;
+pub mod provenance;
 
 #[cfg(test)]
 mod kinematics_proptest;
