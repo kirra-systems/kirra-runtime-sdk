@@ -350,3 +350,65 @@ def test_the_guard_would_notice_a_blocking_call():
         "the detector found nothing blocking in the worker, so finding nothing "
         "in the callback proves nothing"
     )
+
+
+# ---------------------------------------------------------------------------
+# Deadline and freshness are INDEPENDENT axes.
+#
+# They answer different questions:
+#
+#   deadline   — did the sidecar respond within the permitted service interval?
+#   freshness  — is the underlying scan still recent enough to use NOW?
+#
+# Conflating them is the "simplification" a future reader is most likely to
+# attempt: treating any post-deadline reply as invalid, or treating transport
+# completion as evidence of freshness. Both are wrong, and the matrix below is
+# what makes that concrete rather than a comment.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_at(now_s, scan_received_s=100.0):
+    return resolve_result(
+        result(sequence=5, scan_received_s=scan_received_s),
+        newest_request_sequence=5,
+        last_published_sequence=4,
+        now_s=now_s,
+        scan_stale_s=STALE_S,
+    )
+
+
+def test_matrix_reply_before_deadline_with_a_fresh_scan_is_used():
+    assert _resolve_at(100.25).state == USE
+    assert deadline_breached(100.0, 100.25, 0.5) is False
+
+
+def test_matrix_reply_after_deadline_with_a_fresh_scan_is_still_used():
+    # The case that must NOT be simplified away. The deadline already did its
+    # job — the cap was floored while the node waited. Once real, current
+    # evidence arrives, refusing it would mean one slow round trip permanently
+    # discarded a usable scan.
+    assert deadline_breached(100.0, 100.25, 0.0625) is True, "deadline passed"
+    assert _resolve_at(100.25).state == USE, "…but the scan is still fresh"
+
+
+def test_matrix_reply_before_deadline_with_an_already_stale_scan_is_refused():
+    # The converse: fast transport is not evidence of fresh perception. A reply
+    # that arrives promptly about a scan submitted long ago is still stale.
+    assert deadline_breached(100.0, 100.0625, 0.5) is False, "inside the deadline"
+    assert _resolve_at(100.0625, scan_received_s=99.0).state == STALE
+
+
+def test_matrix_reply_after_both_deadline_and_freshness_is_refused():
+    assert deadline_breached(100.0, 101.0, 0.0625) is True
+    assert _resolve_at(101.0).state == STALE
+
+
+def test_freshness_is_judged_at_publish_time_not_at_reply_time():
+    # The same result becomes unusable as it ages in the slot, with no new
+    # information arriving. That is the property that stops a wedged sidecar's
+    # last good answer being served indefinitely.
+    held = result(sequence=5, scan_received_s=100.0)
+    fresh = resolve_result(held, 5, 4, 100.25, STALE_S)
+    later = resolve_result(held, 5, 4, 101.0, STALE_S)
+    assert fresh.state == USE
+    assert later.state == STALE, "the identical result must age out where it sits"

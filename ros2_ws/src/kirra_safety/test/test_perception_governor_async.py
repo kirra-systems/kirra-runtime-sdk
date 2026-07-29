@@ -327,3 +327,137 @@ def test_counters_reach_the_health_wire():
     _cap, health = gov.published[-1]
     for field in ("discarded=", "deadline=", "overwritten="):
         assert field in health, f"{field} missing from {health}"
+
+
+# ---------------------------------------------------------------------------
+# Permanent worker blockage — SAFE, but an availability limitation.
+#
+# This is the case the async pattern does NOT fix, and the claim boundary
+# matters: it makes the ROS EXECUTOR recoverable, not a blocked socket. If the
+# worker never returns, the one-in-flight bound means no replacement is ever
+# started and the newest scan is never processed. The cap stays floored — safe
+# — but the node does not recover on its own.
+# ---------------------------------------------------------------------------
+
+
+class WedgedSession(FakeSession):
+    """A sidecar whose socket never completes and never times out."""
+
+    def __init__(self):
+        super().__init__()
+        self._never = threading.Event()
+
+    def post(self, *_a, **_k):
+        with self._lock:
+            self.calls += 1
+        self._never.wait()  # released only by `unwedge`
+
+    def unwedge(self):
+        self._never.set()
+
+
+def test_a_permanently_wedged_worker_floors_the_cap_and_keeps_it_floored():
+    session = WedgedSession()
+    gov = governor(session, deadline_s=0.02)
+
+    gov._on_scan(object())
+    time.sleep(0.05)
+    for _ in range(5):
+        gov._on_scan(object())
+
+    for _ in range(6):
+        gov._on_publish_timer()
+
+    assert all(cap == 0.0 for cap, _ in gov.published), "the cap must stay floored"
+    assert {h.split(":")[0] for _, h in gov.published} == {"TAJ_DEADLINE"}
+    assert gov._deadline_breaches == 6
+    session.unwedge()
+
+
+def test_a_wedged_worker_blocks_every_later_scan_which_is_an_availability_limit():
+    # Documented, not defended. Exactly one request was ever sent; the newest
+    # scan sits in the slot unprocessed for as long as the worker is stuck.
+    #
+    # Recovery is a RUNTIME concern (supervision, sidecar restart, or a
+    # replaceable process rather than a thread) — see the module docstring. This
+    # test exists so the limitation cannot be forgotten, and so that a future
+    # change which DOES add recovery has to come here and say so.
+    session = WedgedSession()
+    gov = governor(session, deadline_s=0.02)
+
+    gov._on_scan(object())
+    time.sleep(0.05)
+    for _ in range(4):
+        gov._on_scan(object())
+        gov._on_publish_timer()
+
+    assert session.calls == 1, (
+        "a second worker must never start — that bound is what stops thread "
+        "exhaustion against a sick sidecar"
+    )
+    with gov._lock:
+        assert gov._in_flight_since_s is not None, "still wedged"
+        assert gov._slot.has_pending, "the newest scan is waiting and will keep waiting"
+    session.unwedge()
+
+
+# ---------------------------------------------------------------------------
+# Timer idempotence and late-worker authority
+# ---------------------------------------------------------------------------
+
+
+def test_repeated_timer_ticks_with_no_new_evidence_keep_publishing_the_floor():
+    # Idempotent in the way that matters: the same absence produces the same
+    # verdict, and the cap never drifts upward because nothing happened.
+    gov = governor(FakeSession(payload=healthy_payload()))
+    for _ in range(8):
+        gov._on_publish_timer()
+    assert {cap for cap, _ in gov.published} == {0.0}
+    assert all(h.startswith("TAJ_ABSENT") for _, h in gov.published)
+
+
+def test_a_late_worker_cannot_restore_a_cap_after_its_scan_has_aged_out():
+    # The authority question behind the deadline: a worker that completes long
+    # after the runtime moved on must not be able to lift the floor. It is
+    # refused on FRESHNESS, which is the check that does not care how late the
+    # transport was — only how old the perception is.
+    session = FakeSession(payload=healthy_payload())
+    gov = governor(session, deadline_s=0.01, scan_stale_s=0.05)
+
+    gov._on_scan(object())
+    assert settle(gov), "the worker completed"
+
+    time.sleep(0.08)                 # the scan ages past the 50 ms budget
+    gov._on_publish_timer()
+
+    cap, health = gov.published[-1]
+    assert cap == 0.0
+    assert health.startswith("TAJ_STALE"), health
+
+
+def test_completion_and_arrival_racing_never_starts_two_workers():
+    # The determinism question: scans arriving exactly as a worker finishes.
+    # `_run_request` calls `_maybe_issue` after depositing, and `_on_scan` calls
+    # it too, so both paths can try to start the successor at once. The shared
+    # lock is what makes the outcome deterministic rather than a coin flip.
+    session = FakeSession(latency_s=0.002, payload=healthy_payload())
+    gov = governor(session)
+
+    stop = threading.Event()
+
+    def flood():
+        while not stop.is_set():
+            gov._on_scan(object())
+
+    threads = [threading.Thread(target=flood, daemon=True) for _ in range(4)]
+    for t in threads:
+        t.start()
+    time.sleep(0.4)
+    stop.set()
+    for t in threads:
+        t.join(timeout=1.0)
+
+    assert session.max_concurrent == 1, (
+        f"{session.max_concurrent} concurrent requests under a 4-thread flood"
+    )
+    assert session.calls > 1, "non-vacuity: the flood did drive real requests"

@@ -74,6 +74,30 @@ cannot presently justify a non-zero speed cap, so it publishes zero. They are
 kept as distinct reasons because the operator response differs, not because the
 verdict does.
 
+WHAT THIS DOES NOT FIX — a claim boundary worth stating
+-------------------------------------------------------
+This makes the ROS EXECUTOR recoverable. It does not make a blocked socket
+recoverable. Those are different claims and conflating them would be the most
+consequential misreading of this module.
+
+If a worker never returns — a socket that neither completes nor times out — the
+one-in-flight bound means no replacement is ever started, and the newest scan
+sits in the slot unprocessed for as long as that lasts. The cap stays floored,
+so the outcome is SAFE; but the node does not recover on its own, and
+availability is lost indefinitely.
+
+That bound is not a defect to remove. It is what stops a sick sidecar exhausting
+threads, and abandoning a worker whose socket may still be live would trade a
+bounded availability loss for an unbounded resource one.
+
+Recovery therefore belongs to the RUNTIME, not to this module, and the options
+are process-level rather than thread-level: supervision that restarts the node,
+a sidecar circuit-breaker and restart, a replaceable worker PROCESS rather than
+a thread, or transport cancellation where the transport supports it. None is
+implemented here. Pinned by
+`test_a_wedged_worker_blocks_every_later_scan_which_is_an_availability_limit`,
+so a future change that does add recovery has to come here and say so.
+
 TRANSPORT IS TRANSITIONAL
 ------------------------
 JSON over HTTP is not the intended long-term carrier for a per-scan safety
