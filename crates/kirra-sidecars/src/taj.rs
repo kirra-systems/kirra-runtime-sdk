@@ -10,6 +10,7 @@
 //! `speed_cap_mps: 0.0` (the MRC floor — the consumer holds).
 
 use kirra_core::corridor::CorridorSource;
+use kirra_trajectory::cap_stabilizer::{CapObservation, CapStabilizer, CapStabilizerConfig};
 use kirra_trajectory::sensor_watchdog::{
     fingerprint_from_ranges, FrameObservation, SensorHealth, SensorTick, SensorWatchdog,
     SENSOR_WATCHDOG_ENABLED_ENV,
@@ -383,6 +384,13 @@ fn invalid_perception_response(camera_armed: bool, health: SensorHealth) -> Perc
         sensor_fault: None,
         sensor_measured_hz: None,
         publisher_count_observed: false,
+        // A refused request produced no perception, so there is no raw cap to
+        // report and nothing was stabilized. Zero is the enforced value either way.
+        raw_speed_cap_mps: 0.0,
+        stabilized_speed_cap_mps: 0.0,
+        cap_reason: None,
+        cap_clear_streak: 0,
+        cap_limiting_object: None,
         // A refused request never reached ingest, so nothing was discarded —
         // as distinct from "discarded nothing", which this shape cannot
         // express. The frame is already marked unhealthy with a zero cap.
@@ -776,6 +784,32 @@ pub struct PerceptionResponse {
     /// the publisher check did not run for this frame because the caller had no
     /// ROS graph to observe — surfaced so the gap is visible, never silent.
     pub publisher_count_observed: bool,
+    /// #1212: the assured-clear-distance cap **as perception computed it**, before
+    /// temporal stabilization. Observability only — `speed_cap_mps` is the enforced
+    /// number. Carried separately because conflating the two is how the Python
+    /// version's behaviour became invisible: a consumer that only ever saw one
+    /// number could not tell a hazard from a filter still catching up.
+    pub raw_speed_cap_mps: f64,
+    /// The stabilized cap the checker enforces. Always equal to `speed_cap_mps`;
+    /// named explicitly so the wire is unambiguous about which authority produced
+    /// it.
+    pub stabilized_speed_cap_mps: f64,
+    /// Why the stabilizer produced this value (`CAP_RESTRICTED`, `CAP_RISING`,
+    /// `CAP_TIME_GAP`, `CAP_REPLAY_HELD`, …).
+    ///
+    /// `None` means **this sidecar performed no stabilization at all** — a stateless
+    /// call or a build that does not stabilize. It is a statement about the
+    /// authority that produced `speed_cap_mps`, not about the outcome, which is why
+    /// a consumer may treat it as unusable and fail closed. Every path where the
+    /// stabilizer DID author the number carries a code, including a replay of a cap
+    /// it is holding from an earlier frame.
+    pub cap_reason: Option<&'static str>,
+    /// Consecutive clear frames accumulated toward a release.
+    pub cap_clear_streak: u32,
+    /// The object currently holding the cap down, including one retained through a
+    /// single-scan dropout. `None` when the corridor geometry binds rather than an
+    /// object, or when nothing limits.
+    pub cap_limiting_object: Option<u64>,
     /// Per-reason accounting for the lidar returns this frame discarded
     /// (#1210) — the operator-facing half of the self-filter.
     ///
@@ -972,6 +1006,48 @@ fn is_forward_object_candidate(
         && y_m.atan2(x_m).abs() <= MAX_FORWARD_OBJECT_BEARING_RAD
 }
 
+/// Pick the nearest `(id, distance)` candidate, or `None` when none is usable.
+///
+/// Extracted from the perception path so the ordering is testable on its own. It has
+/// two properties the caller depends on and neither is obvious from the call site:
+///
+/// **Non-finite distances are dropped BEFORE the comparison**, not after a winner is
+/// chosen. The ordering below is a total order over finite values only; a NaN reaching
+/// it compares `false` against every candidate and therefore WINS every match arm.
+/// Filtering afterwards would discard that winner and report no nearest object at all
+/// — so one malformed distance would hide every real obstacle in the frame. Today the
+/// caller's inputs are already proven finite (`is_forward_object_candidate` rejects a
+/// non-finite `x`, and the near-edge lookup is finite-filtered), which is exactly why
+/// the guard belongs here: the invariant lives with the code that needs it rather than
+/// depending on two callers upstream continuing to hold it.
+///
+/// **Ties break on the lower id, compared exactly.** Two objects at an identical
+/// distance must not alternate the reported identity frame to frame — to the
+/// stabilizer's limiting-object persistence that alternation is indistinguishable from
+/// a dropout. The comparison is never epsilon-based: an approximate "near enough"
+/// predicate is not transitive, so a three-candidate frame could order inconsistently
+/// depending on iteration order. Two distances differing in the last bit are two
+/// distances, and the nearer one wins.
+#[must_use]
+fn nearest_candidate(candidates: impl Iterator<Item = (u64, f64)>) -> Option<(u64, f64)> {
+    candidates
+        .filter(|(_, d)| d.is_finite())
+        .fold(None::<(u64, f64)>, |acc, (id, d)| match acc {
+            Some((bid, bd)) if bd < d || (bd == d && bid <= id) => Some((bid, bd)),
+            _ => Some((id, d)),
+        })
+}
+
+/// `cap_reason` for a cap served WITHOUT the stabilizer observing the frame — a
+/// duplicate re-post, served the value the stabilizer is currently holding.
+///
+/// Sidecar-local rather than a [`kirra_trajectory::cap_stabilizer::CapReason`]
+/// variant, because it is not a decision the stabilizer made. The stabilizer never
+/// saw this frame; the sidecar chose not to show it one. Putting it in the checker's
+/// enum would oblige every consumer of that enum to reason about a state the state
+/// machine cannot enter.
+const CAP_REPLAY_HELD: &str = "CAP_REPLAY_HELD";
+
 const MAX_TRACKING_GAP_MS: u64 = 500;
 
 pub struct TrackedPerceptionState {
@@ -993,6 +1069,18 @@ pub struct TrackedPerceptionState {
     /// alongside the tracker would let a frozen driver launder its record by
     /// tripping a tracker reset each time it stalled.
     watchdog: SensorWatchdog,
+    /// #1212 cap stabilizer. Like the watchdog, deliberately OUTSIDE [`Self::reset`]:
+    /// a tracking reset is a discontinuity in object identity, not evidence that the
+    /// speed envelope may be relaxed. Clearing the stabilizer here would let a
+    /// tracker reset hand back an unearned cap.
+    stabilizer: CapStabilizer,
+    /// Whether cap stabilization runs. Off only for the stateless entry point, for
+    /// the same reason the watchdog is off there: stabilization is a property of a
+    /// STREAM — a restriction is "tighter than the last frame", a release is "clear
+    /// for N frames". A one-shot call has no previous frame, so an armed stabilizer
+    /// would hold every caller at the floor forever while asserting a temporal
+    /// judgement it has no history to make.
+    stabilize: bool,
 }
 
 impl Default for TrackedPerceptionState {
@@ -1021,6 +1109,19 @@ impl TrackedPerceptionState {
     /// report the error; this constructor is for statically-known configs.
     #[must_use]
     pub fn with_watchdog(cfg: SensorWatchdogConfig, armed: bool) -> Self {
+        Self::with_options(cfg, armed, true)
+    }
+
+    /// State with independent control of the liveness watchdog and cap
+    /// stabilization. They are separate concerns — one asks whether the sensor is
+    /// alive, the other how fast the envelope may change — so a deployment that
+    /// disables one must not silently disable the other.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `cfg` fails validation; see [`Self::with_watchdog`].
+    #[must_use]
+    pub fn with_options(cfg: SensorWatchdogConfig, armed: bool, stabilize: bool) -> Self {
         Self {
             tracker: None,
             tracker_config: None,
@@ -1031,6 +1132,9 @@ impl TrackedPerceptionState {
             last_camera_stamp_ms: None,
             tracker_generation: 0,
             watchdog: SensorWatchdog::new(cfg, armed).expect("watchdog config must be valid"),
+            stabilizer: CapStabilizer::new(CapStabilizerConfig::default())
+                .expect("the default stabilizer config is valid"),
+            stabilize,
         }
     }
 
@@ -1246,7 +1350,8 @@ pub fn handle_perception(req: &PerceptionRequest) -> PerceptionResponse {
     // `sensor_liveness: "disarmed"` is the truthful answer for a one-shot
     // evaluation. Callers that need liveness must hold state, which is what the
     // service does.
-    let mut state = TrackedPerceptionState::with_watchdog(SensorWatchdogConfig::r2_lidar(), false);
+    let mut state =
+        TrackedPerceptionState::with_options(SensorWatchdogConfig::r2_lidar(), false, false);
     handle_perception_tracked(req, &mut state)
 }
 
@@ -1405,6 +1510,9 @@ pub fn handle_perception_tracked_at(
             let mut response = response.clone();
             response.sensor_measured_hz = state.watchdog.measured_hz();
             apply_sensor_health(&mut response, health, req.publisher_count.is_some());
+            if state.stabilize {
+                apply_cap_without_observing(&mut response, &state.stabilizer);
+            }
             return response;
         }
 
@@ -1556,21 +1664,36 @@ pub fn handle_perception_tracked_at(
     // and in-lane is unchanged; only the DISTANCE to a counted object tightens.
     let near_edge_of: std::collections::BTreeMap<u64, f64> =
         perception.near_edge_x_m.iter().copied().collect();
-    let nearest_object_m = perception
-        .objects
-        .iter()
-        .filter(|o| {
-            is_forward_object_candidate(o.pos.x_m, o.pos.y_m, req.forward_extent_m, req.lane_half_m)
-        })
-        .map(|o| {
-            near_edge_of
-                .get(&o.id)
-                .copied()
-                .filter(|edge: &f64| edge.is_finite())
-                .map_or(o.pos.x_m, |edge: f64| edge.min(o.pos.x_m))
-        })
-        .fold(f64::INFINITY, f64::min);
-    let nearest_object_m = nearest_object_m.is_finite().then_some(nearest_object_m);
+    // #1212: track WHICH object is nearest, not just how near. The identity is what
+    // lets a cap transition be logged as "held at 0.8 by object 41" instead of an
+    // unattributable number, and it is what the stabilizer's limiting-object
+    // persistence keys on across a detection dropout.
+    let nearest = nearest_candidate(
+        perception
+            .objects
+            .iter()
+            .filter(|o| {
+                is_forward_object_candidate(
+                    o.pos.x_m,
+                    o.pos.y_m,
+                    req.forward_extent_m,
+                    req.lane_half_m,
+                )
+            })
+            .map(|o| {
+                let d = near_edge_of
+                    .get(&o.id)
+                    .copied()
+                    .filter(|edge: &f64| edge.is_finite())
+                    .map_or(o.pos.x_m, |edge: f64| edge.min(o.pos.x_m));
+                (o.id, d)
+            }),
+    );
+    // One Option, destructured — the identity and the distance are the same fact and
+    // must not be able to disagree. A `Some` id beside a `None` distance would name an
+    // object bounding a cap that reports nothing bounding it.
+    let nearest_object_id = nearest.map(|(id, _)| id);
+    let nearest_object_m = nearest.map(|(_, d)| d);
 
     // Clear distance = the tighter of the corridor reach and the nearest
     // in-lane object.
@@ -1704,6 +1827,11 @@ pub fn handle_perception_tracked_at(
         sensor_fault: None,
         sensor_measured_hz: None,
         publisher_count_observed: false,
+        raw_speed_cap_mps: speed_cap_mps,
+        stabilized_speed_cap_mps: speed_cap_mps,
+        cap_reason: None,
+        cap_clear_streak: 0,
+        cap_limiting_object: None,
         rejected: perception.rejected.into(),
     };
 
@@ -1730,7 +1858,99 @@ pub fn handle_perception_tracked_at(
 
     response.sensor_measured_hz = state.watchdog.measured_hz();
     apply_sensor_health(&mut response, health, req.publisher_count.is_some());
+
+    // Stabilize LAST, over the liveness-adjusted cap.
+    //
+    // The ordering is the point. `apply_sensor_health` floors the cap to zero on a
+    // sensor fault, and feeding that zero through the stabilizer as the raw
+    // observation makes a liveness fault behave exactly like a hazard: restrict
+    // instantly, then re-earn the full streak on recovery. That is what the Python
+    // did with `effective_raw_cap = 0.0 if not healthy`, and it is the composition
+    // that keeps a blinking sensor from ratcheting the robot back up to speed
+    // between faults.
+    //
+    // The limiting object is reported only when an OBJECT bound the clear distance.
+    // When the corridor geometry is the tighter constraint there is no object to
+    // name, and inventing one would make the persistence logic hold a cap against a
+    // hazard that never existed.
+    let limiting =
+        nearest_object_id.filter(|_| nearest_object_m.is_some_and(|d| d <= corridor_reach_m));
+    if state.stabilize {
+        apply_cap_stabilization(&mut response, &mut state.stabilizer, limiting, now_ms);
+    }
     response
+}
+
+/// Run the stabilizer over a response's already-liveness-adjusted cap and stamp the
+/// result. `speed_cap_mps` becomes the stabilized value — the enforced number — with
+/// the pre-stabilization value preserved on `raw_speed_cap_mps`.
+fn apply_cap_stabilization(
+    response: &mut PerceptionResponse,
+    stabilizer: &mut CapStabilizer,
+    limiting_object: Option<u64>,
+    now_ms: u64,
+) {
+    // The stabilizer observes the LIVENESS-ADJUSTED cap (zero on a sensor fault),
+    // which is what makes a fault behave like a hazard.
+    //
+    // Two numbers reach the wire: `raw_speed_cap_mps` — perception's own proposal,
+    // set when the response was built and NOT overwritten here — and the enforced
+    // stabilized cap. The liveness-adjusted value in between is not carried as a
+    // third field; it is recoverable from `sensor_fault` / `sensor_liveness`, which
+    // say whether liveness floored the cap and why. Carrying perception's proposal
+    // is the part that matters: without it a consumer cannot tell a real hazard from
+    // a filter still climbing, which is precisely how the Python version's behaviour
+    // became invisible.
+    let observed = response.speed_cap_mps;
+    let decision = stabilizer.observe(CapObservation {
+        raw_cap_mps: observed,
+        limiting_object,
+        now_ms,
+    });
+    response.stabilized_speed_cap_mps = decision.stabilized_cap_mps;
+    response.speed_cap_mps = decision.stabilized_cap_mps;
+    response.cap_reason = Some(decision.reason.code());
+    response.cap_clear_streak = decision.clear_streak;
+    response.cap_limiting_object = decision.limiting_object;
+    // A cap held below what was observed means the envelope is not yet the one
+    // perception would allow, so the frame is not "healthy" in the sense a consumer
+    // enforces on.
+    if decision.stabilized_cap_mps < observed {
+        response.healthy = false;
+    }
+}
+
+/// Serve a response WITHOUT advancing the stabilizer, stamping the cap it is
+/// currently holding.
+///
+/// Used for re-posts and diagnostic probes. Same reasoning as the watchdog: a frame
+/// the stabilizer has already accounted for is not new evidence, and letting a
+/// second consumer's copy advance the clock would inflate the measured frame rate
+/// the rise limiter divides by — a two-consumer deployment would climb twice as
+/// fast as a one-consumer deployment on identical perception.
+fn apply_cap_without_observing(response: &mut PerceptionResponse, stabilizer: &CapStabilizer) {
+    let observed = response.speed_cap_mps;
+    let held = stabilizer.stabilized_cap_mps().min(observed);
+    response.stabilized_speed_cap_mps = held;
+    response.speed_cap_mps = held;
+    // A replay is still a stabilizer-authored number, so it is stamped as one — with
+    // its own code, because "the stabilizer evaluated this frame and passed it" and
+    // "the stabilizer never saw this frame and is holding" are different facts and a
+    // consumer deciding whether to enforce needs to tell them apart.
+    //
+    // It is NOT left as `None`. A consumer that fail-closes on a missing reason (the
+    // ROS relay does) would floor a duplicate to zero, and a two-node deployment
+    // where the second node re-posts would then stutter between the held cap and
+    // zero on identical perception. Absent-reason must keep meaning "this sidecar
+    // does not stabilize", which is the case the relay exists to refuse.
+    response.cap_reason = Some(CAP_REPLAY_HELD);
+    response.cap_clear_streak = stabilizer.clear_streak();
+    // The identity travels with the number. Reporting the held cap while clearing the
+    // limiting object would describe a cap held against nothing.
+    response.cap_limiting_object = stabilizer.limiting_object();
+    if held < observed {
+        response.healthy = false;
+    }
 }
 
 #[cfg(test)]
@@ -2910,6 +3130,25 @@ mod scan_liveness_tests {
         r
     }
 
+    /// A live scan with an obstacle at `blob_x` metres, for the #1212 cap tests.
+    pub(super) fn live_scan_for_cap(seq: u32, blob_x: f64) -> PerceptionRequest {
+        let ranges: Vec<f32> = (0..300)
+            .map(|i| {
+                let theta = -1.5 + f64::from(i) * 0.01;
+                let base = if theta.abs() < 0.15 {
+                    blob_x / theta.cos()
+                } else {
+                    8.0
+                };
+                f32::from_bits((base as f32).to_bits() + (seq % 7))
+            })
+            .collect();
+        let mut r = super::tests::req(ranges);
+        r.stamp_ms = 1_000 + u64::from(seq) * 100;
+        r.publisher_count = Some(1);
+        r
+    }
+
     /// The same buffer and the same stamp, forever — a driver republishing one
     /// frame.
     fn frozen_scan() -> PerceptionRequest {
@@ -3006,12 +3245,18 @@ mod scan_liveness_tests {
             &mut st,
             now,
         );
-        assert_eq!(r.sensor_liveness, "healthy");
-        assert!(
-            r.speed_cap_mps > 0.0,
-            "the streak completed, so motion must be released"
+        assert_eq!(
+            r.sensor_liveness, "healthy",
+            "the LIVENESS streak completed — this test's subject"
         );
-        assert!(r.healthy);
+        // The cap is a separate claim. #1212's stabilizer must also earn its own
+        // streak before the envelope widens, so liveness recovering does not by
+        // itself release motion. `a_recovering_sensor_must_earn_both_streaks` pins
+        // the composition.
+        assert_eq!(
+            r.speed_cap_mps, 0.0,
+            "liveness recovery alone does not release the cap"
+        );
     }
 
     /// Startup begins unavailable: the very first scan is capped, because one
@@ -3241,7 +3486,11 @@ mod scan_liveness_tests {
     /// verdict, whatever the stream does.
     #[test]
     fn the_disarmed_path_is_unchanged() {
-        let mut st = TrackedPerceptionState::with_watchdog(SensorWatchdogConfig::r2_lidar(), false);
+        // Both gates off: this test is about the LIVENESS watchdog being disarmed,
+        // so cap stabilization (#1212, a separate concern) is off too — otherwise it
+        // would be asserting the absence of two features while naming one.
+        let mut st =
+            TrackedPerceptionState::with_options(SensorWatchdogConfig::r2_lidar(), false, false);
         let frozen = frozen_scan();
         let mut now = 0;
         let mut last = None;
@@ -3433,7 +3682,8 @@ mod scan_liveness_tests {
         now += 100;
         let r = handle_perception_tracked_at(&live_scan(99_000, 9), &mut st, now);
         assert_eq!(r.sensor_liveness, "healthy");
-        assert!(r.speed_cap_mps > 0.0);
+        // Cap release is the stabilizer's separate judgement — see
+        // `a_recovering_sensor_must_earn_both_streaks`.
     }
 
     /// (5) Two live clients posting the same scan cannot double the measured rate.
@@ -3472,8 +3722,13 @@ mod scan_liveness_tests {
         // Availability arrives only with a second observation — the first frame
         // that makes a rate measurable.
         let second = handle_perception_tracked_at(&live_scan(1_100, 1), &mut st, 100);
-        assert_eq!(second.sensor_liveness, "healthy");
-        assert!(second.speed_cap_mps > 0.0);
+        assert_eq!(
+            second.sensor_liveness, "healthy",
+            "two observations make a rate measurable — the liveness claim"
+        );
+        // The cap stays floored: the stabilizer has its own evidence to gather, and
+        // a restarted sidecar has none of it.
+        assert_eq!(second.speed_cap_mps, 0.0);
     }
 
     /// The evidence digest identifies the perception EVIDENCE, not the liveness
@@ -3492,5 +3747,520 @@ mod scan_liveness_tests {
             first.frame_id.evidence_digest, independent.frame_id.evidence_digest,
             "identical scan bytes must carry identical evidence identity"
         );
+    }
+}
+
+#[cfg(test)]
+mod cap_authority_tests {
+    //! #1212 authority migration: the checker's stabilizer is what the sidecar
+    //! serves. Injected scans and an injected clock throughout; nothing sleeps.
+
+    use super::scan_liveness_tests::live_scan_for_cap as live_scan;
+    use super::*;
+
+    fn state() -> TrackedPerceptionState {
+        TrackedPerceptionState::with_watchdog(SensorWatchdogConfig::r2_lidar(), true)
+    }
+
+    /// Warm both the liveness watchdog and the stabilizer to steady state, so a test
+    /// about one is not measuring the other's warm-up. Returns the next timestamp.
+    fn warm(st: &mut TrackedPerceptionState, seq_from: u32, mut now: u64) -> (u32, u64) {
+        let mut seq = seq_from;
+        for _ in 0..20 {
+            now += 100;
+            seq += 1;
+            let _ = handle_perception_tracked_at(&live_scan(seq, 6.0), st, now);
+        }
+        (seq, now)
+    }
+
+    /// The served `speed_cap_mps` is the STABILIZED value, and the pre-stabilization
+    /// number is carried alongside rather than discarded. A consumer that only ever
+    /// saw one number could not tell a hazard from a filter still catching up —
+    /// which is how the Python's behaviour became invisible.
+    #[test]
+    fn the_served_cap_is_the_stabilized_one_with_raw_alongside() {
+        let mut st = state();
+        let mut now = 0;
+        let mut seq = 0;
+
+        // First frame: perception proposes a real cap, the stabilizer holds at zero.
+        now += 100;
+        seq += 1;
+        let r = handle_perception_tracked_at(&live_scan(seq, 6.0), &mut st, now);
+        assert!(
+            r.raw_speed_cap_mps > 0.0,
+            "perception proposed a cap: {}",
+            r.raw_speed_cap_mps
+        );
+        assert_eq!(r.speed_cap_mps, 0.0, "…and the checker holds it");
+        assert_eq!(r.stabilized_speed_cap_mps, r.speed_cap_mps);
+        assert_eq!(r.cap_reason, Some("CAP_INITIAL_HOLD"));
+    }
+
+    /// A restriction reaches the wire on the frame it is observed — no smoothing on
+    /// the way down, through the whole sidecar path.
+    #[test]
+    fn a_restriction_reaches_the_wire_immediately() {
+        let mut st = state();
+        let (mut seq, mut now) = warm(&mut st, 0, 0);
+        let before = {
+            now += 100;
+            seq += 1;
+            handle_perception_tracked_at(&live_scan(seq, 6.0), &mut st, now)
+        };
+        assert!(
+            before.speed_cap_mps > 0.5,
+            "precondition: a cap was earned, got {}",
+            before.speed_cap_mps
+        );
+
+        // An obstacle appears VERY close, so the new raw cap is below the standing
+        // stabilized one and the drop is visible. A nearer-but-still-above-standing
+        // hazard would register as CAP_RESTRICTED without moving the served number,
+        // because the enforced cap was already more conservative than the new
+        // hazard requires — correct, but it proves nothing about immediacy.
+        now += 100;
+        seq += 1;
+        let r = handle_perception_tracked_at(&live_scan(seq, 0.4), &mut st, now);
+        assert_eq!(r.cap_reason, Some("CAP_RESTRICTED"));
+        assert!(
+            r.speed_cap_mps < before.speed_cap_mps,
+            "a tightening cap must apply on this frame: {} -> {}",
+            before.speed_cap_mps,
+            r.speed_cap_mps
+        );
+        assert!(
+            r.speed_cap_mps <= r.raw_speed_cap_mps + 1e-9,
+            "and the served cap never exceeds what perception proposed"
+        );
+    }
+
+    /// A recovering sensor must earn BOTH streaks — liveness and stabilization.
+    ///
+    /// They are different claims: "the sensor is producing frames again" and "the
+    /// envelope may widen". Composing them is deliberate, and it means recovery
+    /// costs more than either alone. This pins that the cap is still floored at the
+    /// moment liveness reports healthy.
+    #[test]
+    fn a_recovering_sensor_must_earn_both_streaks() {
+        let mut st = state();
+        let (mut seq, mut now) = warm(&mut st, 0, 0);
+
+        // Fault it: no publisher.
+        now += 100;
+        let mut dead = live_scan(seq + 1, 6.0);
+        dead.publisher_count = Some(0);
+        let r = handle_perception_tracked_at(&dead, &mut st, now);
+        assert_eq!(r.sensor_fault, Some("SENSOR_NO_PUBLISHER"));
+        assert_eq!(r.speed_cap_mps, 0.0);
+
+        // Drive recovery and record when each claim clears.
+        let mut liveness_healthy_at = None;
+        let mut cap_released_at = None;
+        for i in 1..40 {
+            now += 100;
+            seq += 1;
+            let r = handle_perception_tracked_at(&live_scan(seq, 6.0), &mut st, now);
+            if liveness_healthy_at.is_none() && r.sensor_liveness == "healthy" {
+                liveness_healthy_at = Some(i);
+            }
+            if cap_released_at.is_none() && r.speed_cap_mps > 0.0 {
+                cap_released_at = Some(i);
+            }
+        }
+        let live_at = liveness_healthy_at.expect("liveness must recover");
+        let cap_at = cap_released_at.expect("the cap must eventually be released");
+        assert!(
+            cap_at >= live_at,
+            "the cap must not be released before liveness recovers (cap {cap_at}, \
+             liveness {live_at})"
+        );
+        assert!(
+            cap_at > 1,
+            "the cap must not be released on the first frame after a fault"
+        );
+    }
+
+    /// A re-post does not advance the stabilizer.
+    ///
+    /// Two consumers posting the same scan would otherwise inflate the frame rate
+    /// the rise limiter divides by, so a two-consumer deployment would climb twice
+    /// as fast as a one-consumer deployment on identical perception.
+    #[test]
+    fn a_repost_does_not_advance_the_stabilizer() {
+        let mut single = state();
+        let mut doubled = state();
+        let mut now = 0;
+        let mut seq = 0;
+        let mut last_single = None;
+        let mut last_doubled = None;
+        for _ in 0..25 {
+            now += 100;
+            seq += 1;
+            let scan = live_scan(seq, 6.0);
+            last_single = Some(handle_perception_tracked_at(&scan, &mut single, now));
+            // Consumer A then consumer B, same frame.
+            let _ = handle_perception_tracked_at(&scan, &mut doubled, now);
+            last_doubled = Some(handle_perception_tracked_at(&scan, &mut doubled, now + 10));
+        }
+        let a = last_single.expect("ran").speed_cap_mps;
+        let b = last_doubled.expect("ran").speed_cap_mps;
+        assert!(
+            (a - b).abs() < 1e-9,
+            "double-posting must not change the climb: single {a}, doubled {b}"
+        );
+    }
+
+    /// The stabilizer is not cleared by a tracking reset. A tracker reset is a
+    /// discontinuity in object identity, not evidence that the speed envelope may be
+    /// relaxed — clearing it there would hand back an unearned cap.
+    #[test]
+    fn a_tracking_reset_does_not_hand_back_the_cap() {
+        let mut st = state();
+        let (seq, now) = warm(&mut st, 0, 0);
+        let earned = handle_perception_tracked_at(&live_scan(seq + 1, 6.0), &mut st, now + 100)
+            .speed_cap_mps;
+        assert!(earned > 0.0, "precondition");
+
+        st.reset();
+        let r = handle_perception_tracked_at(&live_scan(seq + 2, 6.0), &mut st, now + 200);
+
+        // The cap may continue its normal bounded climb — one frame of rise is
+        // expected and correct. What must NOT happen is the reset handing back the
+        // full perception cap, which is what clearing the stabilizer would do.
+        let one_step = kirra_trajectory::cap_stabilizer::DEFAULT_RISE_RATE_MPS_PER_S * 0.1;
+        assert!(
+            r.speed_cap_mps <= earned + one_step + 1e-9,
+            "a tracking reset must not jump the cap beyond one bounded step: {} > {} \
+             + {}",
+            r.speed_cap_mps,
+            earned,
+            one_step
+        );
+        assert!(
+            r.speed_cap_mps < r.raw_speed_cap_mps,
+            "…and certainly not to perception's full proposal"
+        );
+    }
+
+    /// Stabilization does not run on the stateless entry point, and says so rather
+    /// than reporting a stabilized number it did not compute.
+    #[test]
+    fn the_stateless_path_does_not_stabilize() {
+        let r = handle_perception(&live_scan(1, 6.0));
+        assert_eq!(r.cap_reason, None, "no stabilization was performed");
+        assert_eq!(
+            r.speed_cap_mps, r.raw_speed_cap_mps,
+            "the served cap is perception's own, unfiltered"
+        );
+    }
+
+    /// A duplicate frame is served the cap the stabilizer is HOLDING, and says so.
+    ///
+    /// The reason is not left absent. A consumer that fail-closes on a missing reason
+    /// — the ROS relay does, deliberately, so an unstabilized sidecar cannot pass its
+    /// raw cap off as stabilized — would floor every duplicate to zero, and a
+    /// two-node deployment where the second node re-posts would stutter between the
+    /// held cap and a stop on identical perception.
+    #[test]
+    fn a_replayed_frame_reports_a_held_cap_as_a_held_cap() {
+        let mut st = state();
+        let (seq, now) = warm(&mut st, 0, 0);
+
+        let scan = live_scan(seq + 1, 6.0);
+        let first = handle_perception_tracked_at(&scan, &mut st, now + 100);
+        assert!(first.speed_cap_mps > 0.0, "precondition: a cap was earned");
+
+        // The same frame again, from a second consumer.
+        let replay = handle_perception_tracked_at(&scan, &mut st, now + 110);
+        assert_eq!(
+            replay.cap_reason,
+            Some("CAP_REPLAY_HELD"),
+            "a replay is stabilizer-authored and must claim authorship"
+        );
+        assert_eq!(
+            replay.speed_cap_mps, replay.stabilized_speed_cap_mps,
+            "the served number is the stabilized one"
+        );
+        assert!(
+            replay.speed_cap_mps <= first.speed_cap_mps,
+            "a replay must never climb: {} > {}",
+            replay.speed_cap_mps,
+            first.speed_cap_mps
+        );
+    }
+
+    /// A replay reports the limiting object along with the cap it is holding.
+    ///
+    /// Serving the held number while clearing the identity describes a cap held
+    /// against nothing — which reads as an open corridor, the opposite of the truth,
+    /// to anything that attributes the restriction.
+    #[test]
+    fn a_replay_carries_the_limiting_identity_with_the_number() {
+        let mut st = state();
+        let (seq, now) = warm(&mut st, 0, 0);
+
+        // A blob close enough to bind the clear distance rather than the corridor.
+        let scan = live_scan(seq + 1, 1.2);
+        let first = handle_perception_tracked_at(&scan, &mut st, now + 100);
+        let held = first.cap_limiting_object;
+        assert!(
+            held.is_some(),
+            "precondition: an object bound the cap, got {held:?}"
+        );
+
+        let replay = handle_perception_tracked_at(&scan, &mut st, now + 110);
+        assert_eq!(
+            replay.cap_limiting_object, held,
+            "the identity travels with the number it explains"
+        );
+    }
+
+    /// Gate: the whole authority boundary, walked as ONE sequence rather than as
+    /// separate assertions about separate stages.
+    ///
+    /// The claim under test is not any single transition — it is that across a run
+    /// containing a warm-up, a climb, a hazard, a recovery and a replay, the number
+    /// on the wire is ALWAYS the checker's and never perception's. A per-stage test
+    /// can pass while the composition leaks: one path that forgets to stabilize, or
+    /// one that stamps `speed_cap_mps` after the stabilizer ran, would be invisible
+    /// to every test that only looks at its own stage.
+    #[test]
+    fn the_checker_owns_the_served_cap_across_the_whole_sequence() {
+        let mut st = state();
+        let mut now = 0u64;
+        let mut seq = 0u32;
+        let mut ever_below_raw = false;
+        let mut steps = 0usize;
+
+        // Warm-up, climb, a hazard, a recovery — then the last frame served twice.
+        let mut plan: Vec<f64> = Vec::new();
+        plan.extend(std::iter::repeat_n(6.0, 20)); // warm + climb
+        plan.push(0.4); // a hazard arrives
+        plan.extend(std::iter::repeat_n(6.0, 12)); // and clears
+
+        let check = |r: &PerceptionResponse, steps: &mut usize, ever_below_raw: &mut bool| {
+            assert_eq!(
+                r.speed_cap_mps, r.stabilized_speed_cap_mps,
+                "the enforced number must be the stabilized one at every step"
+            );
+            assert!(
+                r.speed_cap_mps <= r.raw_speed_cap_mps + 1e-9,
+                "the checker may only tighten perception's proposal: {} > {}",
+                r.speed_cap_mps,
+                r.raw_speed_cap_mps
+            );
+            assert!(
+                r.cap_reason.is_some(),
+                "every frame the stabilizer authored carries its authorship claim"
+            );
+            *steps += 1;
+            if r.speed_cap_mps < r.raw_speed_cap_mps {
+                *ever_below_raw = true;
+            }
+        };
+
+        let mut last = None;
+        for x in plan {
+            now += 100;
+            seq += 1;
+            let scan = live_scan(seq, x);
+            let r = handle_perception_tracked_at(&scan, &mut st, now);
+            check(&r, &mut steps, &mut ever_below_raw);
+            last = Some(scan);
+        }
+
+        // The replay path is part of the boundary, not a separate feature: a second
+        // consumer asking about a frame already served must get the same answer under
+        // the same authority, not an unstabilized one.
+        let replay = handle_perception_tracked_at(&last.expect("plan ran"), &mut st, now + 10);
+        check(&replay, &mut steps, &mut ever_below_raw);
+        assert_eq!(replay.cap_reason, Some("CAP_REPLAY_HELD"));
+
+        assert_eq!(steps, 34, "the whole sequence ran, including the replay");
+        // Non-vacuity: if the stabilized cap had merely tracked the raw one the whole
+        // way, every assertion above would hold while nothing was being stabilized.
+        assert!(
+            ever_below_raw,
+            "the stabilized cap must actually differ from the raw one somewhere, \
+             or this test proves nothing"
+        );
+    }
+
+    /// Gate: liveness recovery and cap release COMPOSE, and the composite latency is
+    /// bounded rather than open-ended.
+    ///
+    /// Two independent gates stand between a recovered sensor and a moving robot: the
+    /// watchdog's healthy-frame streak, and the stabilizer's clear confirmations plus
+    /// bounded rise. Neither alone is the answer an integrator needs. This pins the
+    /// composite: nothing is served before BOTH are satisfied, and the wait does
+    /// terminate.
+    #[test]
+    fn liveness_recovery_and_cap_release_compose_to_a_bounded_latency() {
+        let mut st = state();
+        let (mut seq, mut now) = warm(&mut st, 0, 0);
+        let earned = handle_perception_tracked_at(&live_scan(seq + 1, 6.0), &mut st, now + 100)
+            .speed_cap_mps;
+        seq += 1;
+        now += 100;
+        assert!(earned > 0.0, "precondition: the robot was moving");
+
+        // A silence long past the watchdog's budget: the sensor stops, then returns.
+        now += 5_000;
+        let faulted = {
+            seq += 1;
+            handle_perception_tracked_at(&live_scan(seq, 6.0), &mut st, now)
+        };
+        assert_eq!(
+            faulted.speed_cap_mps, 0.0,
+            "a liveness fault floors the cap immediately"
+        );
+
+        // Now feed clean frames and find the first that serves motion again.
+        let mut frames_to_move = None;
+        for i in 1..=200 {
+            now += 100;
+            seq += 1;
+            let r = handle_perception_tracked_at(&live_scan(seq, 6.0), &mut st, now);
+            if r.speed_cap_mps > 0.0 {
+                assert_eq!(
+                    r.sensor_liveness, "healthy",
+                    "motion was served while liveness was still {}",
+                    r.sensor_liveness
+                );
+                frames_to_move = Some(i);
+                break;
+            }
+        }
+
+        let frames = frames_to_move.expect("recovery must terminate, not stall forever");
+        // The composite is at least the liveness streak: the cap cannot begin to
+        // climb while the watchdog is still floor-capping every frame.
+        let streak = SensorWatchdogConfig::r2_lidar().recovery_streak;
+        assert!(
+            frames >= streak,
+            "motion returned in {frames} frames, before the {streak}-frame liveness \
+             streak could complete — the two gates are not composing"
+        );
+        // …and it is bounded. Measured at 17 frames — 1.7 s at the 10 Hz this feeds:
+        // roughly 0.5 s of liveness streak, then the stabilizer's confirmations and
+        // its bounded climb off the floor. That figure is what an integrator needs
+        // and neither gate produces on its own. The bound is a regression pin, not a
+        // specification: a change that doubles the wait should be a deliberate one.
+        assert!(
+            frames <= 25,
+            "recovery took {frames} frames (measured 17); if this is intended, move \
+             the bound and say why"
+        );
+    }
+}
+
+#[cfg(test)]
+mod nearest_candidate_tests {
+    //! The nearest-object ordering, tested directly. Driving these cases through a
+    //! synthetic scan is possible but proves less: the scan generator cannot produce
+    //! a NaN distance or two bit-adjacent ones on demand, which are exactly the
+    //! cases where an ordering stops being total.
+
+    use super::nearest_candidate;
+
+    fn pick(items: &[(u64, f64)]) -> Option<(u64, f64)> {
+        nearest_candidate(items.iter().copied())
+    }
+
+    #[test]
+    fn no_candidates_yields_none() {
+        assert_eq!(pick(&[]), None);
+    }
+
+    #[test]
+    fn the_nearest_wins() {
+        assert_eq!(pick(&[(7, 4.0), (3, 1.5), (9, 2.5)]), Some((3, 1.5)));
+    }
+
+    /// A NaN distance must not win, and — the part that matters — must not take the
+    /// other candidates down with it.
+    ///
+    /// The ordering compares `false` in both directions against NaN, so a NaN reaching
+    /// the fold wins every arm. Dropping it afterwards would then report NO nearest
+    /// object, and a real obstacle two metres ahead would be excluded from the clear
+    /// distance entirely. The filter runs first for exactly this reason.
+    #[test]
+    fn a_nan_distance_does_not_mask_a_real_object() {
+        assert_eq!(pick(&[(1, f64::NAN), (2, 2.0)]), Some((2, 2.0)));
+        assert_eq!(pick(&[(2, 2.0), (1, f64::NAN)]), Some((2, 2.0)));
+        assert_eq!(pick(&[(1, f64::NAN)]), None, "nothing usable is None");
+    }
+
+    #[test]
+    fn infinite_distances_are_not_candidates() {
+        assert_eq!(pick(&[(1, f64::INFINITY), (2, 3.0)]), Some((2, 3.0)));
+        assert_eq!(pick(&[(1, f64::NEG_INFINITY), (2, 3.0)]), Some((2, 3.0)));
+    }
+
+    /// Exact ties break on the lower id, whichever order they arrive in. An
+    /// order-dependent tie-break would alternate the reported identity frame to
+    /// frame, which the stabilizer's persistence cannot tell from a dropout.
+    #[test]
+    fn an_exact_tie_breaks_on_the_lower_id_in_either_order() {
+        assert_eq!(pick(&[(9, 2.0), (4, 2.0)]), Some((4, 2.0)));
+        assert_eq!(pick(&[(4, 2.0), (9, 2.0)]), Some((4, 2.0)));
+    }
+
+    /// Distances that differ only in the last bit are two distances, not a tie. The
+    /// nearer wins on its own merit and the id is not consulted — which is what makes
+    /// the ordering total. An epsilon-based "close enough" predicate would call these
+    /// equal, and equality that is not transitive orders a three-element set
+    /// differently depending on which pair is compared first.
+    #[test]
+    fn bit_adjacent_distances_are_ordered_not_tied() {
+        let near = 2.0_f64;
+        let far = f64::from_bits(near.to_bits() + 1);
+        assert!(near < far, "precondition: the two differ");
+        // The HIGHER id is nearer, so an epsilon that swallowed the difference would
+        // hand this to the lower id and the assertion would catch it.
+        assert_eq!(pick(&[(1, far), (9, near)]), Some((9, near)));
+        assert_eq!(pick(&[(9, near), (1, far)]), Some((9, near)));
+    }
+
+    /// A duplicate id is not a contradiction to resolve, it is two readings. The
+    /// nearer one is kept; on an exact tie the first is kept, so a duplicate cannot
+    /// make the result depend on how many times it appears.
+    #[test]
+    fn duplicate_ids_keep_the_nearer_reading() {
+        assert_eq!(pick(&[(5, 3.0), (5, 1.0)]), Some((5, 1.0)));
+        assert_eq!(pick(&[(5, 1.0), (5, 3.0)]), Some((5, 1.0)));
+        assert_eq!(pick(&[(5, 2.0), (5, 2.0)]), Some((5, 2.0)));
+    }
+
+    /// Zero and negative distances are real readings (an object at or behind the
+    /// sensor origin) and must be ordered, not discarded. Discarding them would drop
+    /// the single most urgent case.
+    #[test]
+    fn zero_and_negative_distances_are_ordered_not_dropped() {
+        assert_eq!(pick(&[(1, 1.0), (2, 0.0)]), Some((2, 0.0)));
+        assert_eq!(pick(&[(1, 0.0), (2, -0.5)]), Some((2, -0.5)));
+    }
+
+    /// The ordering is a total order: every permutation of the same set yields the
+    /// same winner. This is the property an epsilon comparison would break, and it is
+    /// invisible in any test that only ever feeds one ordering.
+    #[test]
+    fn every_permutation_of_a_set_yields_the_same_winner() {
+        let base = [(3, 2.0), (1, 2.0), (7, 1.25), (5, f64::NAN), (2, 9.0)];
+        let expected = pick(&base);
+        assert_eq!(expected, Some((7, 1.25)), "precondition");
+
+        let mut items = base;
+        // Every rotation, and every rotation reversed — enough orderings that a
+        // fold-order dependency shows up.
+        for _ in 0..items.len() {
+            items.rotate_left(1);
+            assert_eq!(pick(&items), expected, "rotation {items:?}");
+            let mut rev = items;
+            rev.reverse();
+            assert_eq!(pick(&rev), expected, "reversed {rev:?}");
+        }
     }
 }

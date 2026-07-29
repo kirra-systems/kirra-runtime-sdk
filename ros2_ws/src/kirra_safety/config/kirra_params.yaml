@@ -120,10 +120,12 @@ perception_governor:
     vehicle_width_m: 0.203       # measured R2 body width
     lateral_clearance_m: 0.15    # required clearance on each side
     confidence_floor: 0.5        # below this -> unhealthy -> 0.0 cap
-    cap_rise_rate_mps_per_s: 0.50
-    cap_restriction_epsilon_mps: 0.03
-    cap_clear_confirmations: 5   # 0.5 s confirmation at approximately 10 Hz
-    cap_maximum_dt_ms: 250       # larger processing gap resets to zero
+    # #1212: cap_rise_rate_mps_per_s / cap_restriction_epsilon_mps /
+    # cap_clear_confirmations / cap_maximum_dt_ms are deliberately ABSENT. The
+    # stabilizer they configure moved into the Rust checker
+    # (kirra_trajectory::cap_stabilizer), which is the safety authority. rclpy
+    # silently ignores an override for an undeclared parameter, so leaving them here
+    # would be tuning that appears to apply and does nothing. Tune the checker.
 
 sensor_monitor:
   ros__parameters:
