@@ -296,6 +296,7 @@ def _bind_bound(lib: ctypes.CDLL) -> ctypes.CDLL:
         ctypes.c_char_p,   # vk (32 bytes)
         ctypes.c_char_p,   # expected_profile_digest (32 bytes)
         ctypes.c_uint64,   # maximum_token_lifetime_ms
+        ctypes.c_uint64,   # boot_wall_ms (#1230 Part B: pre-boot tokens refused)
         ctypes.c_uint64,   # control_period_ms
         ctypes.c_uint32,   # missed_periods
         ctypes.c_double,   # stop_decel_mps2
@@ -428,6 +429,7 @@ class BoundKirraConsumer:
         expected_profile_digest: bytes,
         *,
         maximum_token_lifetime_ms: int,
+        boot_wall_ms: int,
         control_period_ms: int,
         missed_periods: int,
         stop_decel_mps2: float,
@@ -458,6 +460,7 @@ class BoundKirraConsumer:
             bytes(governor_vk),
             bytes(expected_profile_digest),
             ctypes.c_uint64(maximum_token_lifetime_ms),
+            ctypes.c_uint64(boot_wall_ms),
             ctypes.c_uint64(control_period_ms),
             ctypes.c_uint32(missed_periods),
             ctypes.c_double(stop_decel_mps2),

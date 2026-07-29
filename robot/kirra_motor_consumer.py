@@ -44,6 +44,13 @@ Config — ALL required, NO defaults (fail-closed; a missing var aborts):
                                be driven under another platform's envelope.
                                Missing/uppercase/non-hex/wrong-length → abort.
     KIRRA_FRESHNESS_WINDOW_MS  MAXIMUM token lifetime (ms) the core will accept.
+                               NOTE (#1230): before Part B this value was ALSO
+                               the post-restart replay window — a pre-restart
+                               token stayed acceptable for its whole remaining
+                               lifetime after a restart cleared the watermarks.
+                               The boot fence (TokenPredatesBoot) removed that
+                               second role; keep it small anyway — it still
+                               bounds in-epoch token lifetime.
                                V2 enforces the signed `expires_at_ms`; this is
                                the upper bound on how long a mint may be valid
                                (a signer cannot hand itself an eternal token).
@@ -496,10 +503,19 @@ def main() -> int:
     topic = os.environ.get("KIRRA_RELEASE_TOPIC", "/kirra/release")
 
     # The evidence-bound V2 verify core (fail-closed: raises on a NULL handle).
+    # #1230 Part B: this process's boot instant, captured ONCE. The verify
+    # core refuses any token MINTED before it (TokenPredatesBoot, code 111) —
+    # a restart is a new trust epoch, so the post-restart replay window no
+    # longer scales with KIRRA_FRESHNESS_WINDOW_MS. Same-host clock domain
+    # per ADR-0033; the structural (clock-independent) epoch binding is
+    # Part A on the issue.
+    boot_wall_ms = int(time.time() * 1000)
+
     consumer = BoundKirraConsumer(
         governor_vk,
         profile_digest,
         maximum_token_lifetime_ms=maximum_token_lifetime_ms,
+        boot_wall_ms=boot_wall_ms,
         control_period_ms=control_period_ms,
         missed_periods=missed_periods,
         stop_decel_mps2=stop_decel_mps2,

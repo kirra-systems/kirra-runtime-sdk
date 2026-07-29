@@ -159,7 +159,7 @@ async fn enforced_200_mints_a_token_that_verifies_over_exactly_the_enforced_byte
     let token = kirra_verifier::governor_release::ReleaseToken::from_bytes(&token_bytes);
 
     // The SAME evidence-bound gate the V2 motor consumer runs.
-    let mut gate = RosBoundCommandGate::new(vk, [0x11; 32], 200);
+    let mut gate = RosBoundCommandGate::new(vk, [0x11; 32], 200, 0);
     let released = gate
         .release(
             &payload_bytes,

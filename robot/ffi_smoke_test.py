@@ -211,8 +211,8 @@ def main() -> int:
 
     def new_bound(vk_bytes=vk, digest=profile_digest, **over):
         kwargs = dict(
-            maximum_token_lifetime_ms=200, control_period_ms=100, missed_periods=3,
-            stop_decel_mps2=1.0, vx_max=VX_MAX, vz_max=VZ_MAX,
+            maximum_token_lifetime_ms=200, boot_wall_ms=0, control_period_ms=100,
+            missed_periods=3, stop_decel_mps2=1.0, vx_max=VX_MAX, vz_max=VZ_MAX,
         )
         kwargs.update(over)
         return BoundKirraConsumer(vk_bytes, digest, **kwargs)

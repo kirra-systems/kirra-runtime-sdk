@@ -178,23 +178,28 @@ after restart, a token is minted against it, startup generation and frame
 identity are nonzero and accepted by the full chain (#1214), and the gate
 enforces its watermarks from the first post-restart release.
 
-**One requirement does not hold.** A pre-restart token is still accepted after a
-restart if it remains inside its own wall-clock lifetime. Nothing refuses it on
-the grounds that a restart happened — the sequence and nonce that would have
-refused it were cleared, and only expiry closes the window.
+**One requirement holds only at the interim tier (#1230 Part B).** The gate now
+carries the consumer's boot instant (`boot_wall_ms`, captured once at process
+start), and any token MINTED before it is refused with the distinct
+`TokenPredatesBoot` (FFI code 111) — regardless of remaining signed lifetime.
+The post-restart replay window therefore no longer scales with the configurable
+`KIRRA_FRESHNESS_WINDOW_MS`: with a correctly recorded boot instant it is zero,
+and the historical coupling (raise the lifetime, widen the replay window by the
+same amount) is severed. The boundary is strict — a token minted at exactly the
+boot instant is the current epoch — and re-establishment stays deadlock-free:
+the first post-boot mint is admitted on the first cycle.
 
-The exposure is exactly `maximum_lifetime_ms` wide: 200 ms as shipped, against a
-real restart that takes far longer. That is a **timing accident, not a designed
-invariant** — it depends on restart duration exceeding a *configurable* lifetime,
-and a backward clock step during the restart widens it further, with the clock
-guard unable to help because its hold died with the process.
-
-Tracked as **#1230**, with a boot/session epoch bound into evidence identity and
-the signed payload as the preferred fix, so pre-restart tokens become
-structurally invalid rather than invalid-by-timeout. Pinned meanwhile by
-`crates/kirra-release-token/tests/restart_trust_epoch.rs`, which asserts the
-undesired behaviour deliberately so that implementing the fix forces an edit
-rather than leaving a stale expectation.
+**The honest remainder, which is why #1230 stays open.** The comparison is
+time-anchored on the shared host clock (sound on the ADR-0033 single-host
+topology, where verifier and consumer share one clock domain). A backward wall
+step DURING the restart can place the recorded boot instant before the mint it
+should fence, restoring the pre-Part-B behaviour — pinned as an
+expected-but-undesired test exactly as the original gap was. The structural fix
+(Part A) binds a per-boot epoch into the SIGNED payload, which no clock step
+can forge: wire revision V3 per ADR-0033, a new consumer-published epoch
+channel attached by the interceptor, refusal `TokenEpochMismatch`. Until it
+lands, `restart_trust_epoch.rs` carries both the flipped assertions and the
+remaining-gap pin.
 
 **Operational consequences.**
 

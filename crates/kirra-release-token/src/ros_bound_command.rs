@@ -283,6 +283,15 @@ pub enum RosBoundCommandRefusal {
         issued_at_ms: u64,
         now_ms: u64,
     },
+    /// #1230 Part B: the token was minted before this consumer process
+    /// booted. A restart is a new trust epoch; pre-boot tokens are refused
+    /// regardless of how much signed lifetime they have left, so the
+    /// post-restart replay window no longer scales with
+    /// `KIRRA_FRESHNESS_WINDOW_MS`.
+    TokenPredatesBoot {
+        issued_at_ms: u64,
+        boot_wall_ms: u64,
+    },
 
     /// The signed command has reached or passed its explicit expiration.
     Expired {
@@ -339,6 +348,16 @@ pub struct RosBoundCommandGate {
     governor_vk: VerifyingKey,
     expected_profile_digest: [u8; 32],
     maximum_lifetime_ms: u64,
+    /// #1230 Part B — the consumer's boot instant (wall ms). Tokens ISSUED
+    /// before this are refused regardless of remaining lifetime: a restart is
+    /// a new trust epoch, and a pre-boot mint belongs to the previous one.
+    /// Interim, deliberately: same-host clock domain on the ADR-0033 topology
+    /// makes the comparison sound in the common case, but a backward wall
+    /// step DURING the restart re-opens the window — the structural fix (a
+    /// boot epoch bound into the signed payload, Part A) is the ADR revision
+    /// tracked on the issue. Strict `<`: a token minted at the boot instant
+    /// is admitted.
+    boot_wall_ms: u64,
 
     last_released_sequence: Option<u64>,
     last_released_nonce: Option<u64>,
@@ -351,11 +370,13 @@ impl RosBoundCommandGate {
         governor_vk: VerifyingKey,
         expected_profile_digest: [u8; 32],
         maximum_lifetime_ms: u64,
+        boot_wall_ms: u64,
     ) -> Self {
         Self {
             governor_vk,
             expected_profile_digest,
             maximum_lifetime_ms,
+            boot_wall_ms,
             last_released_sequence: None,
             last_released_nonce: None,
             latest_perception_frame: None,
@@ -389,6 +410,16 @@ impl RosBoundCommandGate {
             return Err(RosBoundCommandRefusal::FutureIssued {
                 issued_at_ms: payload.issued_at_ms,
                 now_ms,
+            });
+        }
+
+        // #1230 Part B: refuse anything minted before this process booted —
+        // a restart is a new trust epoch, and expiry alone made the replay
+        // window exactly as wide as the configurable token lifetime.
+        if payload.issued_at_ms < self.boot_wall_ms {
+            return Err(RosBoundCommandRefusal::TokenPredatesBoot {
+                issued_at_ms: payload.issued_at_ms,
+                boot_wall_ms: self.boot_wall_ms,
             });
         }
 
@@ -509,7 +540,7 @@ mod tests {
     }
 
     fn gate() -> RosBoundCommandGate {
-        RosBoundCommandGate::new(signing_key().verifying_key(), [0x11; 32], 200)
+        RosBoundCommandGate::new(signing_key().verifying_key(), [0x11; 32], 200, 0)
     }
 
     fn signed(payload: &RosBoundCommandPayload) -> ReleaseToken {
