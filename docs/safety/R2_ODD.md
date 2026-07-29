@@ -276,6 +276,8 @@ there**, not in both places.
 
 ## 6. Cross-references
 
+- `docs/safety/R2_RESIDUAL_RISK.md` (KIRRA-R2-RESIDUAL-001) — what remains after the boundaries
+  above are applied; the ASSUMED rows here are its ODD-derived residuals
 - `docs/safety/OCCY_SOTIF.md` §1 — the urban / robotaxi ODD; structural template
 - `docs/adr/0028-sidewalk-courier-odd.md` — the courier ODD
 - `docs/adr/0001-occy-odd-speed-cap.md`, `docs/adr/0002-condition-dependent-cap-subodds.md` — ODD speed cap + sub-ODD partition (Occy)
