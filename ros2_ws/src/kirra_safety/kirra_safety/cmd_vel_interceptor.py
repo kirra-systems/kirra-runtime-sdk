@@ -47,6 +47,7 @@ from kirra_safety.bound_proposal import parse_bound_proposal
 from kirra_safety.enforcement_decision import (
     decide_enforcement, Forward, wheelbase_consistent, release_frame,
 )
+from kirra_safety.cycle_events import CycleEventWriter, release_event_from_payload_hex
 from kirra_safety.perception_cap import apply_perception_cap, DISABLED
 
 try:
@@ -93,6 +94,14 @@ class CmdVelInterceptor(Node):
         # Ed25519 verify over exactly these bytes, plus its own evidence-
         # identity checks, are the trust path.
         self.declare_parameter('release_topic', '/kirra/release')
+        # #1215 cycle-record emission (OFF by default = byte-identical). This
+        # node witnesses the RELEASE stage: it decodes, read-only, the same
+        # 176-byte payload it already relays verbatim. Fail-soft + latching —
+        # recording can degrade, the relay cannot.
+        self.declare_parameter('cycle_record_path', '')
+        self._cycle_writer = CycleEventWriter(
+            self.get_parameter('cycle_record_path').value,
+            warn=lambda m: self.get_logger().warning(m))
 
         self._kirra_url = self.get_parameter('kirra_url').value
         self._kirra_token = self.get_parameter('kirra_token').value
@@ -333,12 +342,14 @@ class CmdVelInterceptor(Node):
         proposed['release_binding'] = release_binding
 
         try:
+            gw_t0 = time.monotonic()
             resp = requests.post(
                 f'{self._kirra_url}/actuator/motion/command',
                 headers=self._headers(),
                 json=proposed,
                 timeout=self._timeout_s,
             )
+            gw_ms = int((time.monotonic() - gw_t0) * 1000)
 
             if resp.status_code == 200:
                 # Parse defensively — a 200 with a non-JSON body is a fault.
@@ -357,6 +368,13 @@ class CmdVelInterceptor(Node):
                 # signer provisioned) → nothing to check; behavior unchanged.
                 release = parsed.get('release') if isinstance(parsed, dict) else None
                 if isinstance(release, dict):
+                    # Release stage witnessed: decoded read-only from the
+                    # exact payload bytes relayed below; the builder refuses
+                    # anything but 176 valid hex bytes, so a malformed
+                    # payload emits nothing rather than a guess.
+                    self._emit_cycle_event(release_event_from_payload_hex(
+                        release.get('payload_hex'),
+                        int(time.time() * 1000), gw_ms))
                     reported_wb = release.get('wheelbase_m')
                     if not wheelbase_consistent(self._wheelbase_m, reported_wb):
                         self._wheelbase_mismatch = True
@@ -454,6 +472,17 @@ class CmdVelInterceptor(Node):
         else:
             self._publish_stop('CONNECTION_ERROR')
             self._publish_action('CONNECTION_ERROR:STOP')
+
+
+    def _emit_cycle_event(self, event):
+        """#1215 emission chokepoint. A node built without the recorder (the
+        host tests construct via object.__new__, skipping __init__) simply
+        does not record — the missing-attribute case is DISABLED, not an
+        error, because the property is that recording can never alter
+        control behavior."""
+        writer = getattr(self, '_cycle_writer', None)
+        if writer is not None:
+            writer.emit(event)
 
     def _relay_release(self, release):
         """Republish the gateway 200's release object as the 272-byte V2 wire

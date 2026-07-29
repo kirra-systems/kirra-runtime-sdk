@@ -85,6 +85,9 @@ from kirra_safety.camera_detect_core import (
     plan_object_goal_fields,
 )
 from kirra_safety.bound_proposal import build_release_binding, encode_bound_proposal
+from kirra_safety.cycle_events import (
+    CycleEventWriter, perception_event, proposal_event,
+)
 from kirra_safety.async_plan import (
     ANNOUNCE,
     AWAITING_GOAL,
@@ -162,6 +165,15 @@ class OccyDoer(Node):
         # receipt → odom), `hold` clears it. Mick publishes INTENTS, never
         # commands — this bridge is the only consumer.
         self.declare_parameter('mick_url', '')
+        # #1215 cycle-record emission (OFF by default = byte-identical). This
+        # node witnesses the perception and proposal stages; it emits ONLY
+        # facts it holds (the Taj/plan responses + its own POST timings). The
+        # writer is fail-soft and latching: recording can degrade, the plan
+        # loop cannot — see cycle_events.CycleEventWriter.
+        self.declare_parameter('cycle_record_path', '')
+        self._cycle_writer = CycleEventWriter(
+            self.get_parameter('cycle_record_path').value,
+            warn=lambda m: self.get_logger().warning(m))
         self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('goal_topic', '/goal_pose')
         self.declare_parameter('scan_topic', '/scan')
@@ -768,6 +780,17 @@ class OccyDoer(Node):
         ).start()
         return ISSUE
 
+
+    def _emit_cycle_event(self, event):
+        """#1215 emission chokepoint. A node built without the recorder (the
+        host tests construct via object.__new__, skipping __init__) simply
+        does not record — the missing-attribute case is DISABLED, not an
+        error, because the property is that recording can never alter
+        control behavior."""
+        writer = getattr(self, '_cycle_writer', None)
+        if writer is not None:
+            writer.emit(event)
+
     def _run_job(self, request):
         """WORKER THREAD. Computes, deposits, and touches nothing else."""
         result = self._execute_job(request)
@@ -793,9 +816,11 @@ class OccyDoer(Node):
 
         fields = request.plan_fields
         try:
+            taj_t0 = time.monotonic()
             taj = requests.post(
                 f'{request.taj_url}/perception',
                 timeout=request.timeout_s, json=request.perception).json()
+            taj_ms = int((time.monotonic() - taj_t0) * 1000)
             if not isinstance(taj, dict):
                 # Named explicitly rather than left to blow up on `.get` below,
                 # so the operator sees WHICH sidecar answered wrongly.
@@ -819,14 +844,26 @@ class OccyDoer(Node):
             }
             if fields['goal_fields']:
                 plan_req.update(fields['goal_fields'])
+            # Perception stage witnessed (emitted before the plan POST so a
+            # planner fault cannot erase the perception evidence).
+            self._emit_cycle_event(perception_event(
+                taj, request.scan_sequence, int(time.time() * 1000), taj_ms))
+            plan_t0 = time.monotonic()
             plan = requests.post(
                 f'{request.planner_url}/plan',
                 timeout=request.timeout_s, json=plan_req).json()
+            plan_ms = int((time.monotonic() - plan_t0) * 1000)
         except Exception as e:  # noqa: BLE001 — any fault holds (fail-soft)
             return faulted(f'service-error:{type(e).__name__}')
 
         if not isinstance(plan, dict):
             return faulted('planner-response-not-an-object')
+
+        # Proposal + verdict stage witnessed (the scan comes from the
+        # planner's ECHOED frame id inside the builder — the echo is what the
+        # planner actually bound).
+        self._emit_cycle_event(proposal_event(
+            plan, int(time.time() * 1000), plan_ms))
 
         taj_seq, plan_seq = evidence_sequences(taj, plan)
         return JobResult(
