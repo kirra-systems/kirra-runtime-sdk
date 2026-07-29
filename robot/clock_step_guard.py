@@ -48,15 +48,64 @@ After a step the wall clock is at a NEW offset, and the very next sample shows
 the two clocks advancing together again — the step is a one-off event, not a
 persistent condition. Refusing only the frame that detected it would resume
 releasing immediately, while tokens minted before the step are still inside
-their validity window under the OLD offset. Those tokens have genuinely
-ambiguous validity: the consumer cannot tell whether it or the signer was the
-one that moved.
+their validity window under the OLD offset.
 
-So the guard holds for one maximum token lifetime, measured on the MONOTONIC
-clock, which is the one clock the step did not affect. Once that much real time
-has passed, every pre-step token is definitively expired under any offset, and
-releasing is safe again. The hold is exactly as long as the ambiguity lasts —
-no longer, and not arbitrary.
+## The reference model — how long the hold must be
+
+Let `L` be the maximum token lifetime and `δ` the magnitude of a BACKWARD step.
+Take a token minted at signer time `T`, expiring at `T + L`. After the step the
+consumer's wall clock reads `true_time − δ`, so it goes on accepting while:
+
+    true_time − δ  <  T + L        ⟺        true_time  <  T + L + δ
+
+The worst case is a token minted at the instant of the step (`T = t₀`), so the
+last real moment at which a pre-step token can still be accepted is:
+
+    t₀ + L + δ
+
+The hold therefore runs for **`L + δ`**, not `L`. A hold of `L` alone leaves a
+`δ`-wide window in which a stale token is admitted as fresh — the exact failure
+this module exists to prevent, reintroduced at the boundary.
+
+Worth noting why `δ` cannot be dropped as "large steps are caught anyway": a
+large backward step does not prevent acceptance, it *delays* it. Immediately
+after the step the token reads as `FutureIssued`; it becomes acceptable again at
+`t₀ + δ` and stays acceptable for `L`. The acceptance window is shifted, not
+removed, which is why the hold has to span it.
+
+**Origin.** The hold is measured from the monotonic reading of the sample that
+DETECTED the step. The step itself occurred somewhere in the interval since the
+previous sample, so the detecting sample is at or after it — which is the
+correct worst case here, because the quantity being bounded is the LATEST
+possible pre-step mint.
+
+**Direction.** A FORWARD step moves the consumer's clock ahead, so tokens expire
+sooner: fail-closed, no extension possible. `δ` is added only for backward
+steps. The base `L` hold still applies in both directions, since a forward step
+is equally good evidence that the clock is not to be trusted for an interval.
+
+**Clock.** All of this is measured on the MONOTONIC clock, the one the step did
+not affect. Measuring the hold on the clock under suspicion would let a forward
+step end its own hold early.
+
+## Threat model: process restart
+
+The hold lives in memory. A consumer restarted during the ambiguity window
+starts with no baseline, accepts its first sample, and is releasing again
+immediately.
+
+This is deliberately not persisted, because it would be the only part of the
+consumer's replay protection that was. The release gate's sequence watermark,
+nonce watermark and perception-frame watermark are all in-memory too, so a
+restarted consumer already accepts any sequence and any nonce. Persisting the
+clock hold alone would close the narrowest of those windows while leaving the
+wider ones open, and would misrepresent restart as a bounded event when it is a
+full re-establishment of trust.
+
+The honest statement is therefore: **a consumer restart resets all replay
+protection, including this hold.** Restarting a robot's motor consumer while its
+clock is being corrected is an operational hazard, not a defended case. See
+`docs/safety/EVIDENCE_BINDING.md` §5.
 """
 
 from collections import namedtuple
@@ -136,10 +185,16 @@ class ClockStepGuard:
         divergence_ms = wall_delta_ms - monotonic_delta_ms
 
         if abs(divergence_ms) > self._tolerance_ms:
-            # Held from THIS sample's monotonic reading: the step's own arrival
-            # is when the ambiguity starts.
-            self._hold_until_mono_ms = mono_ms + self._hold_ms
-            return ClockVerdict(False, STEP_DETECTED, divergence_ms, self._hold_ms)
+            # A BACKWARD step extends every pre-step token's apparent life by its
+            # own magnitude, so the hold must cover `L + δ` — see the reference
+            # model in the module docstring. A forward step only shortens
+            # validity, so it contributes no extension.
+            backward_ms = max(0, -divergence_ms)
+            hold_ms = self._hold_ms + backward_ms
+            # Measured from THIS sample: the step occurred at or before it, and
+            # the quantity being bounded is the LATEST possible pre-step mint.
+            self._hold_until_mono_ms = mono_ms + hold_ms
+            return ClockVerdict(False, STEP_DETECTED, divergence_ms, hold_ms)
 
         if self._hold_until_mono_ms is not None:
             remaining_ms = self._hold_until_mono_ms - mono_ms
