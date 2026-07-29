@@ -98,6 +98,33 @@ Severity, Exposure, and Controllability are rated per ISO 26262-3:
 
 ---
 
+## 3a. Per-platform disposition, and a known scope limit
+
+The hazard table above is written for the Kirra **software item** across all its
+deployments. A platform's per-hazard disposition — mitigated, inapplicable,
+eliminated, or carrying a residual — lives with that platform, not here.
+
+- **Rosmaster R2:** `R2_RESIDUAL_RISK.md` (KIRRA-R2-RESIDUAL-001) walks all 17
+  hazards to exactly one disposition each and records the residuals.
+
+**Known scope limit — this HARA covers malfunction hazards only.** Every hazard
+above has the shape *Kirra passes X*, *Kirra fails to detect Y*, or *Kirra
+crashes*, which is correct for an ISO 26262 Part 3 analysis of a software item.
+It leaves a class uncovered: hazardous behaviour arising when the software
+functions **exactly as designed** against inputs that are complete, internally
+consistent and wrong — ISO 21448 (SOTIF) territory.
+
+The R2 disposition walk surfaced three of its largest risks in that class
+(driving off a stair invisible to a planar lidar; contact with an unbriefed
+person; operation outside the assumed environment). None maps to a hazard here,
+because in each the software makes no error. They are recorded as ODD-derived
+residuals in KIRRA-R2-RESIDUAL-001 §5.
+
+Extending this document, or adding a per-platform SOTIF triggering-condition
+catalog in the shape of `OCCY_SOTIF.md` §3, is an open safety-review action.
+
+---
+
 ## 4. Safety Goal Summary
 
 See AEGIS-SG-001 for full safety goal definitions.

@@ -13,6 +13,16 @@ WCET bound on S3 (#115). Not a certified analysis.
 
 ## 1. Operational Design Domain
 
+> **Scope note — this is the urban / robotaxi ODD, not the project's only one.**
+> Two other platforms have their own, and neither inherits from this section:
+> the sidewalk courier (ADR-0028) and the Rosmaster R2 bench robot
+> (`R2_ODD.md`, KIRRA-R2-ODD-001). The R2 in particular differs in kind rather
+> than degree — no global localization, no map-anchored behaviour, single-channel
+> 2-D lidar perception, and a supervised indoor operating area — so
+> requirements stated here (`AOU-LOCALIZATION-001`, the sub-ODD partition, the
+> weather derate) do **not** carry over to it. Check the platform before citing
+> a boundary from this document.
+
 Two ODDs must be distinguished — conflating them is a common error:
 
 - **V&V / simulation ODD** — what we *test* against. Deliberately includes

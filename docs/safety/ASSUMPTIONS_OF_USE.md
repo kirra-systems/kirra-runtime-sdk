@@ -61,6 +61,11 @@ the verification passes for the target deployment.
 | AOU-HV-CLOCK-001 | The hypervisor provides the **boundary clock domain** (HVCHAN §5, R-HV-3): one shared, monotonic time source readable identically from the guest and governor partitions, with a **bounded max cross-partition skew** (bound: **VALIDATION-PENDING**, set with the FTTI budget on hypervisor hardware) | Integrator (hypervisor / platform) | **AoU-GAP** — Phase-II hypervisor gate; the concrete QNX primitive + skew figure are #274/#278 target work | every governor deadline/staleness verdict (`validate` `now > deadline`, HVCHAN §3); the §4 `clock skew beyond bound` fail-closed backstop. Distinct from AOU-TIMESYNC-001 (that binds the integrator's *timestamps*; this binds the *clock source*) |
 | AOU-HV-ROMAP-001 | The hypervisor maps the contract region **read-only into the governor partition** (HVCHAN R-HV-1): the governor cannot write it, and no guest action can induce a governor-side write; verified at hypervisor-configuration level | Integrator (hypervisor / platform) | **AoU-GAP** — Phase-II hypervisor gate; the software mirrors (`PosixShmReader` `PROT_READ` + no-`ContractWriter`-impl) are defense-in-depth, **not** the discharge | the one-way trust direction of the whole Clause-2 channel; `HV_FAULT_CAMPAIGN.md` row HV-R1 |
 | AOU-HV-SCHED-001 | The hypervisor grants the governor partition a **CPU scheduling guarantee independent of guest behavior** (HVCHAN R-HV-4): a guest CPU flood or starve-then-burst cannot delay the governor's bounded snapshot→validate→decide path beyond its FTTI allocation | Integrator (hypervisor / platform) | **AoU-GAP** — Phase-II hypervisor gate; tested by the `HV_FAULT_CAMPAIGN.md` HV-S* rows (a flood absorbed only by judge speed is a FINDING, per the #279 attribution rule) | the `publisher silent` liveness row (§4) and the verdict-latency half of FTTI — without it, guest misbehavior converts into governor latency, the interference FFI forbids |
+| AOU-R2-ENVIRONMENT-001 | The R2 operates **indoors only** — enclosed, no weather exposure, no precipitation, no standing water on the operating surface | Operator (R2 deployment) | **AoU-GAP** — nothing in the stack detects that the robot has been carried outdoors | the `R2_ODD_SPEED_CAP_MPS` basis prose; the absence of any weather-derate path on this platform (KIRRA-R2-ODD-001 §2.1) |
+| AOU-R2-SURFACE-001 | The R2 operating area is a **flat hard floor with no drop-offs**, and contains no obstacle that a horizontally-scanning 2-D lidar cannot see (below the chassis, above the scan plane, or a negative obstacle such as a stair edge) | Operator (R2 deployment) | **AoU-GAP** — structurally undetectable by the deployed sensor; operator-fenced | SG2 drivable-space containment on this platform: the corridor reads clear up to a stair edge (KIRRA-R2-ODD-001 §2.2) |
+| AOU-R2-CROWD-001 | Only the supervisor and briefed participants are in the R2's operating area; **no uninstructed persons and no VRU-class agents** (children, pets, persons unable to anticipate the robot) | Operator (R2 deployment) | **AoU-GAP** — the VRU bound exists (`vru_channel::resolve_vru_channel`) but `KIRRA_VRU_CHANNEL_ENABLED` is off on this platform, so persons are an operator obligation rather than a checker input | the omnidirectional pedestrian bound, disarmed here (KIRRA-R2-ODD-001 §2.4) |
+| AOU-R2-SUPERVISION-001 | A supervisor is present, within range, with a **working stop of last resort** for a wedged process — today an SSH session, since the software-independent hardware e-stop is specified but **not built** | Operator (R2 deployment) | **AoU-GAP** — the largest residual risk on the platform; discharged by building `R2_ESTOP_SPEC.md` R1–R7 | every failure mode where software cannot stop software: a wedged consumer, a hung SBC, a lost link (KIRRA-R2-ODD-001 §2.5) |
+| AOU-R2-LIDAR-HEALTH-001 | The deployed TG30's **frame identity actually advances** — it does not wedge and republish its last buffer at the full rate, which every arrival-time freshness check reads as healthy | Integrator (R2 perception) | **AoU-GAP** — the detector exists (`sensor_freshness.py`, #1211) and is **default-off** (`frame_health_enabled: false`) pending bench confirmation of the driver's `header.stamp` behaviour | the `scan_stale_s` freshness budget, which measures ARRIVAL and cannot distinguish a live lidar from a frozen one (KIRRA-R2-ODD-001 §2.6 H4) |
 
 ---
 
@@ -1543,3 +1548,238 @@ deployed configuration is the integrator's obligation.
   `ros2_ws/src/kirra_safety/kirra_safety/perception_cap.py`
   (`resolve_stabilized_cap`).
 - Issue #1212.
+
+---
+
+## R2 platform assumptions (KIRRA-R2-ODD-001)
+
+The five entries below are raised by `docs/safety/R2_ODD.md`, the R2's ODD
+specification. They share a common shape worth naming once rather than five
+times: **the R2 stack is well instrumented to notice that it cannot see, and
+not instrumented at all to notice where it is.** Every enforced boundary on the
+platform is an evidence check — scan freshness, cap staleness, request
+deadline, confidence floor, envelope violation. Every environmental boundary is
+an operator obligation. For a supervised bench robot that is a coherent
+position, but it holds only while AOU-R2-SUPERVISION-001 holds, and that is the
+one with no hardware behind it.
+
+## AOU-R2-ENVIRONMENT-001 — The R2 operates indoors only
+
+### Assumption
+
+The R2's operating area is enclosed. There is no exposure to precipitation, no
+standing water on the operating surface, and ambient temperature stays within
+the Jetson Orin NX and YDLIDAR TG30 operating ranges.
+
+### Why it is load-bearing
+
+This is the assumption the `R2_ODD_SPEED_CAP_MPS` doc comment has always
+asserted ("a small indoor/tethered Ackermann robot") without recording it
+anywhere reviewable. It is load-bearing because **no weather-derate path exists
+on this platform at all.** The Occy stack handles adverse conditions through the
+sub-ODD weather derate (ADR-0002) and the conservative untraversable-water rule
+(SG4); neither is wired for the R2. Outdoors, the R2 has no mechanism that would
+notice or respond.
+
+### Verification status — **AoU-GAP**
+
+Nothing in the stack detects that the robot has been carried outside. Discharge
+is operational (keep it indoors), not technical.
+
+### Consequence if violated
+
+Wet or reflective surfaces degrade TG30 returns in ways the confidence floor may
+or may not catch; the platform has no drainage, no sealing rating on record, and
+no traction model for a wet surface. The failure is not bounded by anything the
+checker does, because the checker's inputs are already wrong.
+
+### Cross-references
+
+- `docs/safety/R2_ODD.md` §2.1 (E1, E2, E4)
+- `src/gateway/contract_profiles.rs` — `R2_ODD_SPEED_CAP_MPS` basis prose
+- Issue #1220
+
+---
+
+## AOU-R2-SURFACE-001 — Flat hard floor, no drop-offs, nothing invisible to the scan plane
+
+### Assumption
+
+The operating area is a flat hard floor (tile, sealed concrete, low-pile
+carpet) with no stairs, edges or level changes, and contains no obstacle that a
+horizontally-scanning 2-D lidar cannot see: nothing below the chassis, nothing
+above the scan plane, and no negative obstacle.
+
+### Why it is load-bearing
+
+**A horizontally-scanning 2-D lidar cannot see a stair.** The corridor reads as
+clear right up to the edge, and it is clear — in the plane the sensor measures.
+This is not a conservatism the checker can recover by tightening: the evidence
+does not exist in the sensor, so no amount of margin, derate or fail-closed
+reasoning downstream reconstructs it.
+
+This distinguishes the assumption from most others in this register. Elsewhere,
+a violated assumption degrades a bound that still exists. Here the bound was
+never computable from the deployed sensor set, and the operator's fencing of the
+area **is** the control.
+
+### Verification status — **AoU-GAP**
+
+Structurally undetectable with the deployed sensor. Discharge requires either
+operator fencing (current) or a sensor that observes the ground plane (a
+downward-facing ToF, a cliff sensor, or a depth camera with a floor-plane
+extraction — none of which is in the stack today).
+
+### Consequence if violated
+
+Driving off a drop-off at up to the class ceiling. The governor admits the
+command because every check it runs passes: the corridor is clear, the envelope
+is respected, perception is fresh and confident.
+
+### Cross-references
+
+- `docs/safety/R2_ODD.md` §2.2 (S1, S2, S3)
+- `docs/hardware/R2_SELF_FILTER_CALIBRATION.md` — the scan-plane geometry
+- Issue #1220; sensor extension is #1217's territory
+
+---
+
+## AOU-R2-CROWD-001 — No uninstructed persons in the operating area
+
+### Assumption
+
+Only the supervisor and briefed participants are present. No children, no pets,
+no persons unable to anticipate the robot's behaviour.
+
+### Why it is load-bearing
+
+The omnidirectional pedestrian bound exists and is tested
+(`vru_channel::resolve_vru_channel`, #789), but `KIRRA_VRU_CHANNEL_ENABLED` is
+**off** on this platform. Arming it without a pedestrian producer publishing at
+rate would MRC-floor the robot permanently — the channel's three-way resolution
+treats armed-but-silent as a fault, which is the correct fail-closed behaviour
+and the reason it cannot be turned on speculatively.
+
+So persons in the R2's operating area are handled by briefing and supervision,
+not by the checker. That is a defensible position for a 0.15–1.0 m/s bench
+robot and it should be recorded as the position it is.
+
+### Verification status — **AoU-GAP**
+
+Discharge requires a pedestrian producer on `~/input/pedestrians` publishing at
+rate (AOU-VRU-RATE-001), after which the channel can be armed and this
+assumption narrows to the residual the bound does not cover.
+
+### Consequence if violated
+
+Contact with a person at up to 1.0 m/s. Impact energy is low by the standards
+this project usually reasons about, which is exactly why the honest framing is
+"low consequence, uncontrolled" rather than "handled".
+
+### Cross-references
+
+- `docs/safety/R2_ODD.md` §2.4 (P1, P2, P3)
+- AOU-VRU-RATE-001 — the producer-rate obligation that gates arming the channel
+- Issue #1220
+
+---
+
+## AOU-R2-SUPERVISION-001 — A supervisor with a working stop of last resort
+
+### Assumption
+
+A human supervisor is present and within range, with a means of stopping the
+robot that works when software cannot: a wedged consumer process, a hung SBC, a
+lost link.
+
+### Why it is load-bearing
+
+This is the assumption the rest of the platform's safety argument leans on, and
+it currently has **no hardware behind it.**
+
+`docs/hardware/R2_ESTOP_SPEC.md` specifies exactly the right thing — R1
+software-independent, R2 energize-to-run, R3 latching, R5 two-part re-arm — and
+states its own status: "design spec (buildable)". It is not built. Today the
+stop of last resort is a human at an SSH session pressing Ctrl-C, which is a
+*software* stop and therefore fails in precisely the case the requirement
+exists for.
+
+The consequence is an operating-range boundary that is easy to miss: the R2 is
+bounded by **SSH reach and line of sight**, not by battery, radio or task. It
+is also the reason `R2_UNTETHERED_BRINGUP.md` lists the hardware e-stop as one
+of the three prerequisites for untethered operation — untethered is not
+currently in the validated ODD.
+
+Note the interaction with N1 (`R2_ODD.md` §2.5). The control loop genuinely does
+not depend on the network — every element is a localhost process on the Orin,
+and cutting wifi mid-drive does not affect actuation. That architectural
+strength must not be read as covering this assumption. It means the robot keeps
+*driving* without the network; it says nothing about *stopping* it.
+
+### Verification status — **AoU-GAP** — the largest residual risk on the platform
+
+Discharge is a build, not a measurement: `R2_ESTOP_SPEC.md` R1–R7.
+
+### Consequence if violated
+
+A wedged process with the motors commanded non-zero, and no way to stop the
+robot except removing power by hand. Every software safe-state in the system —
+SS-002 decel-to-stop, the ADR-0013 e-stop request, the release-token watermark —
+requires software to be running to take effect.
+
+### Cross-references
+
+- `docs/safety/R2_ODD.md` §2.5 (N2), §4
+- `docs/hardware/R2_ESTOP_SPEC.md` — the unbuilt specification
+- `docs/hardware/R2_UNTETHERED_BRINGUP.md` §3
+- `docs/safety/SAFE_STATE_SPECIFICATION.md` SS-002 — the software safe-state this backstops
+- Issue #1220
+
+---
+
+## AOU-R2-LIDAR-HEALTH-001 — The lidar's frame identity actually advances
+
+### Assumption
+
+The deployed YDLIDAR TG30 does not wedge and republish its last buffer at the
+full rate. Its `header.stamp` progresses, and a scan arriving on `/scan`
+describes the world at the moment it arrives.
+
+### Why it is load-bearing
+
+`scan_stale_s` measures **arrival**, not identity. A driver that has wedged and
+is republishing one frozen buffer at 10 Hz is "fresh" by every arrival-time
+check in the stack while the doer plans against a world that stopped updating.
+The freshness budget cannot distinguish the two cases, by construction.
+
+The detector for this exists — `sensor_freshness.py` (#1211) tracks frame
+identity progression and holds on `STAMP_NOT_ADVANCING` — and it is
+**default-off** on this platform. The parameter file states the reason plainly:
+a driver that never populates `header.stamp` would trip the detector immediately
+and hold the robot, so it stays disarmed until the deployed lidar's stamp
+behaviour is confirmed on the bench.
+
+That is a defensible sequencing decision. It is also an open assumption, and the
+two facts are not in tension — the mechanism being built and the mechanism being
+armed are different milestones, and only the second discharges this entry.
+
+### Verification status — **AoU-GAP** — mechanism LANDED, deployment DISARMED
+
+Discharge is a bench observation followed by a config change: confirm the TG30
+driver populates `header.stamp` monotonically, then set
+`frame_health_enabled: true` with a measured `frame_stall_budget`. The Rev A
+hardware session (#1216) is the natural place to take that observation.
+
+### Consequence if violated
+
+The doer proposes motion against a frozen world, and the checker admits it —
+every corridor and object in the stale frame is internally consistent, so
+nothing downstream has a reason to refuse. The robot drives into whatever
+entered the scene after the freeze.
+
+### Cross-references
+
+- `docs/safety/R2_ODD.md` §2.6 (H4), §4
+- `ros2_ws/src/kirra_safety/kirra_safety/sensor_freshness.py` — the detector
+- `ros2_ws/src/kirra_safety/config/kirra_params.yaml` — `frame_health_enabled`, `frame_stall_budget`
+- Issues #1211, #1220; bench observation belongs to #1216
