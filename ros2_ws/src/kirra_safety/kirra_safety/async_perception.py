@@ -49,10 +49,28 @@ counters, no slot state beyond its own deposit. Every publish decision is made
 by the executor thread calling into this module. These functions are pure, so
 they hold no lock and can never be the thing that stalls a callback.
 
-The timer is not an implementation detail that could be dropped by having the
-worker publish directly. It is what makes the DEADLINE enforceable: a worker
-blocked on a socket cannot notice that it is late, so something else has to be
-running in order to floor the cap on time. See `deadline_breached`.
+THE TIMER IS AN INDEPENDENT LIVENESS AUTHORITY, NOT A POLLING LOOP
+------------------------------------------------------------------
+Read this before moving deadline handling anywhere else.
+
+The worker CANNOT be trusted to report that it missed its deadline, because the
+failure mode is precisely that it may never regain execution. Self-reported
+lateness is only available from a thread that is still running, which excludes
+every case the deadline exists for.
+
+So the timer is not an implementation detail that could be dropped by having the
+worker publish on completion. It is the one component that can, without
+depending on transport progress at all:
+
+  - age the last result out of usefulness,
+  - floor the cap when the deadline passes,
+  - report displacement and blockage,
+  - and surface that process-level recovery is needed.
+
+A refactor that moves deadline handling into the worker — "simpler, it already
+knows when it started" — silently removes every one of those, and does so in a
+way that passes every test written against a sidecar that eventually answers.
+The failure only appears against one that never does. See `deadline_breached`.
 
 WHY A DEADLINE IS NOT A SOCKET TIMEOUT
 --------------------------------------
