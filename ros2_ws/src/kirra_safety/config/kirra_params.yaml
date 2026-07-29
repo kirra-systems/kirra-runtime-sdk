@@ -112,7 +112,14 @@ perception_governor:
     scan_topic: "/scan"
     cap_topic: "/kirra/perception_speed_cap"
     health_topic: "/kirra/perception_health"
-    timeout_ms: 40
+    timeout_ms: 40               # PER-SOCKET-OPERATION budget; see deadline_ms
+    # #1218 non-blocking cycle. deadline_ms is NOT a second timeout: `requests`
+    # times out per socket operation, so a sidecar dribbling bytes never trips
+    # timeout_ms. This is the wall-clock budget the NODE enforces, after which
+    # the cap is floored regardless of what the transport is doing.
+    publish_period_ms: 100       # how often the cap is (re)decided and published
+    deadline_ms: 250             # in-flight budget before the cap is floored
+    scan_stale_ms: 500           # max age of the SCAN behind a published cap
     forward_extent_m: 8.0        # Taj geometric horizon (m)
     decel_mps2: 1.5              # assumed comfortable brake for the ACD cap
     margin_m: 0.4                # standoff distance (matches the checker's lateral margin)
