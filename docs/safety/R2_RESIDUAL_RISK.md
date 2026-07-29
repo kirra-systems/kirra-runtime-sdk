@@ -90,10 +90,19 @@ The walk runs from the hazard, not from the ODD. Starting at `R2_ODD.md` and
 asking "what risks should I list" produces a list shaped by what was already
 noticed.
 
-**Assertion A (hazard → disposition):** every one of `HARA.md`'s 17 hazards
-appears exactly once below.
-**Assertion B (residual → hazard):** every residual row in §3 resolves to an
-applicable hazard. **This assertion currently FAILS — see §4.**
+**Assertion A (hazard → disposition):** *every applicable HARA hazard has an
+explicit R2 disposition.* All 17 appear exactly once below.
+
+**Assertion B (residual → source):** *every residual-risk row resolves to either
+an applicable HARA hazard or an explicitly identified ODD/SOTIF limitation, with
+the source and rationale recorded.*
+
+Assertion B is stated in that two-branch form deliberately. Its single-branch
+predecessor — "every residual resolves to an applicable HARA hazard" — **fails
+against this platform**, and the reason it fails is a finding rather than a
+bookkeeping problem. §4 records it. The two-branch form avoids inventing a
+malfunction where the function is behaving exactly as designed, while keeping
+the gap visible instead of absorbing it.
 
 | Hazard | Disposition | Basis |
 |---|---|---|
@@ -230,10 +239,11 @@ because it exists elsewhere.
 
 ---
 
-## 4. Where Assertion B fails — three residuals resolve to no HARA hazard
+## 4. Why Assertion B needs two branches — three residuals resolve to no HARA hazard
 
-Assertion B ("every residual row resolves to an applicable hazard") was meant as
-the non-duplication guard. Running it produces a finding instead.
+The single-branch form of Assertion B ("every residual row resolves to an
+applicable hazard") was meant as the non-duplication guard. Running it produces
+a finding instead.
 
 **`HARA.md`'s 17 hazards are all malfunction hazards.** Every one has the shape
 *Kirra passes X*, *Kirra fails to detect Y*, or *Kirra crashes*. That is correct
@@ -256,19 +266,21 @@ fabricating a malfunction that does not occur; dropping them would remove the
 three residuals a supervisor most needs to know about.
 
 **Resolution taken here:** they are recorded as ODD-derived residuals in §5, in
-the same schema, keyed to their ODD boundary rather than to a hazard, and
-Assertion B is restated as:
+the same schema, keyed to their ODD/SOTIF limitation rather than to a hazard,
+with the source and rationale on each row. Rows of that second kind are flagged
+as evidence of the scope limit below, not filed as though a hazard covered them.
 
-> Every residual row resolves to **either** an applicable HARA hazard **or** a
-> stated ODD boundary in KIRRA-R2-ODD-001 — and rows of the second kind are
-> flagged as evidence that the HARA does not yet cover this platform's SOTIF
-> hazard class.
+**The scope limit, stated precisely.** `HARA.md` is **complete for malfunction
+hazards and not complete for performance limitations or foreseeable misuse
+arising from insufficient sensing.** Both halves of that sentence matter. The
+document is not deficient at what it set out to do; it has a boundary, and this
+platform's dominant risks sit outside it.
 
-**Recommended follow-up (not taken in this issue):** extend `HARA.md`, or add an
-R2 SOTIF analysis in the shape of `OCCY_SOTIF.md` §3's triggering-condition
-catalog, so this class has a home. Filed as a note on #1220 rather than done
-here, because amending the HARA is a safety-review action and not a
-documentation one.
+**Recommended follow-up (deliberately NOT taken in this PR):** extend `HARA.md`,
+or add an R2 SOTIF analysis in the shape of `OCCY_SOTIF.md` §3's
+triggering-condition catalog, so this class has a home. Amending the project
+hazard method is a safety-review decision, not a documentation edit — this
+register's job is to make the boundary visible and let that review decide.
 
 ---
 
@@ -338,10 +350,22 @@ Rev A session (#1216). They are not open-ended.
 
 **The severity profile is not the HARA's.** Every row lands at S1. The HARA's
 S3 ratings describe a road vehicle; a 0.2 m, ~1 kg platform at ≤1 m/s in a
-supervised indoor area does not inherit them. What distinguishes the rows here
-is **controllability** — R2-RS-004 at C3 and R2-RS-007 at C3 are the platform's
-real exposure, and both are cases where a supervisor who notices has no
-effective action left.
+supervised indoor area does not inherit them.
+
+That flattening means severity cannot order this register, and something else
+has to. What distinguishes the rows is **controllability**, which gives the
+platform a sharper prioritization rule than severity alone:
+
+> **On the R2, the highest-priority residuals are those where the supervisor
+> cannot regain control after detection.**
+
+By that rule R2-RS-004 (wedged process / hung SBC, C3) and R2-RS-007 (drop-off,
+C3) are the platform's real exposure, and both are cases where noticing does not
+help — the supervisor either has no action left or has no time to take one. It
+also explains why R2-RS-003 sits above the other BLOCKED rows despite an
+identical S1: the system actively reports health while its world model is
+frozen, so the supervisor is not merely unable to act, they have no cue that
+action is needed.
 
 ---
 
