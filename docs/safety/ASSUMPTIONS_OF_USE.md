@@ -1445,3 +1445,82 @@ producer is byte-identical to prior behaviour.
 - `crates/kirra-trajectory/src/occlusion_channel.rs` (the resolver);
   `crates/kirra-trajectory/src/validation.rs` §D (the RSS Rule 4 gate).
 - `SAFE_STATE_SPECIFICATION.md` (MRC fallback); the review finding S2 / #1025.
+
+---
+
+## AOU-CAP-STABILIZER-001 — The speed-cap stabilizer runs in the checker, and the doer relays it
+
+### Assumption
+
+A deployment using the perception speed-cap derate SHALL run a Taj perception
+sidecar that stabilizes the assured-clear-distance cap — one that serves both
+`stabilized_speed_cap_mps` and a `cap_reason` on every perception response. The
+ROS `perception_governor` node SHALL relay that number and SHALL NOT compute a
+cap of its own.
+
+### Why it is load-bearing
+
+Until #1212 the asymmetric cap policy — restrict immediately, release only after
+N confirmations and a rate-limited climb — lived in the doer-side Python
+(`perception_cap.SpeedCapGovernor`). That placement had a specific defect: the
+policy looked implemented, had passing tests, and held no safety authority. A
+doer can be swapped, misconfigured, or bypassed; when it is, a policy that only
+exists there disappears with it and nothing reports its absence.
+
+The state machine now lives in `kirra_trajectory::cap_stabilizer`, which is the
+checker. The Python copy was **deleted rather than kept as advisory**: an unused
+copy of a safety state machine drifts silently, its tests still green, which is
+the condition that produced the original problem.
+
+That migration creates the obligation stated above. A sidecar that does not
+stabilize still populates `stabilized_speed_cap_mps` — with the RAW cap — so the
+value alone cannot distinguish the two. `cap_reason` is the authorship claim, and
+`resolve_stabilized_cap` refuses a response without one (`CAP_RELAY_UNSTABILIZED`
+→ published cap `0.0`, health `TAJ_UNSTABILIZED`). The failure is deliberately
+loud and immobilizing: relaying an unstabilized cap under a stabilized name would
+silently restore pre-#1212 behaviour on exactly the deployments that had not been
+upgraded, and the number would look entirely reasonable while doing it.
+
+### Consequence for the integrator
+
+- **A pre-#1212 sidecar stops the robot.** This is the intended outcome, not a
+  regression. Upgrade the sidecar; there is no configuration that restores the
+  fallback, because the fallback was the hazard.
+- **The stabilizer's parameters are not ROS parameters.** `cap_rise_rate_mps_per_s`,
+  `cap_restriction_epsilon_mps`, `cap_clear_confirmations` and `cap_maximum_dt_ms`
+  are no longer declared by `perception_governor` and are absent from
+  `kirra_params.yaml`. rclpy silently ignores an override for an undeclared
+  parameter, so leaving them would be tuning that appears to apply and does
+  nothing. Tune the checker.
+- **Recovery latency is composite.** After a sensor-liveness fault, motion returns
+  only once BOTH the watchdog's healthy-frame streak AND the stabilizer's clear
+  confirmations plus bounded climb are satisfied. Measured end-to-end at **17
+  frames — ~1.7 s at 10 Hz** on the R2 lidar profile, against a 5-frame (~0.5 s)
+  liveness streak. Neither gate's own number is the figure to plan around.
+
+### Pairs with
+
+- **AOU-OCCLUSION-RATE-001** / **AOU-VRU-RATE-001** — the same doctrine applied to
+  a channel rather than a filter: an armed input that goes silent must floor the
+  envelope, never read as "clear".
+- **AOU-TIMESYNC-001** — the stabilizer is driven by a monotonic clock. A backwards
+  step is a fault (`CAP_TIME_BACKWARD`) that retains the trusted anchor rather than
+  adopting the regressed one; a gap past the budget begins a new continuity epoch
+  (`CAP_TIME_GAP`). Neither releases the cap.
+
+### Verification status — **DISCHARGED** (checker + relay), **AoU-GAP** (deployment)
+
+The checker side is discharged: `cap_stabilizer` is unit- and mutation-tested, the
+sidecar path is covered end-to-end including the replay case, and the relay's
+fail-closed refusals (`CAP_RELAY_UNSTABILIZED`, `CAP_RELAY_MALFORMED`) are tested
+for every unusable form of the response. Running a stabilizing sidecar in the
+deployed configuration is the integrator's obligation.
+
+### Cited by
+
+- `crates/kirra-trajectory/src/cap_stabilizer.rs` (the state machine);
+  `crates/kirra-sidecars/src/taj.rs` (`apply_cap_stabilization`,
+  `apply_cap_without_observing`);
+  `ros2_ws/src/kirra_safety/kirra_safety/perception_cap.py`
+  (`resolve_stabilized_cap`).
+- Issue #1212.

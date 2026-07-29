@@ -24,6 +24,7 @@ from std_msgs.msg import Float64, String
 
 from kirra_safety.perception_cap import (
     STABILIZED_OK,
+    STABILIZED_UNSTABILIZED,
     resolve_stabilized_cap,
 )
 
@@ -67,23 +68,12 @@ class PerceptionGovernor(Node):
         self.declare_parameter("lateral_clearance_m", 0.15)
         self.declare_parameter("confidence_floor", 0.5)
 
-        # Asymmetric cap-release policy.
-        self.declare_parameter(
-            "cap_rise_rate_mps_per_s",
-            0.50,
-        )
-        self.declare_parameter(
-            "cap_restriction_epsilon_mps",
-            0.03,
-        )
-        self.declare_parameter(
-            "cap_clear_confirmations",
-            5,
-        )
-        self.declare_parameter(
-            "cap_maximum_dt_ms",
-            250,
-        )
+        # #1212: the asymmetric cap-release parameters (rise rate, restriction
+        # epsilon, clear confirmations, maximum dt) are NOT declared here. They
+        # configure the stabilizer, the stabilizer lives in the Rust checker, and a
+        # parameter this node accepts but cannot act on is worse than no parameter:
+        # an operator who tunes it sees the value take effect in `ros2 param get` and
+        # concludes the policy changed. The checker owns them; this node relays.
 
         self._taj_url = str(
             self.get_parameter("taj_url").value
@@ -116,13 +106,6 @@ class PerceptionGovernor(Node):
         self._floor = float(
             self.get_parameter("confidence_floor").value
         )
-
-        self._cap_restriction_epsilon_mps = float(
-            self.get_parameter(
-                "cap_restriction_epsilon_mps"
-            ).value
-        )
-
 
         self._session = (
             requests.Session()
@@ -230,7 +213,15 @@ class PerceptionGovernor(Node):
             effective_raw_cap,
         )
         if relay_reason != STABILIZED_OK:
-            self._publish_fault("TAJ_NO_STABILIZED_CAP")
+            # The two failures are surfaced separately because the operator action
+            # differs: UNSTABILIZED means this sidecar never stabilized anything and
+            # needs upgrading or configuring, MALFORMED means it claimed to and the
+            # value is unusable. Both stop the robot; only one is fixed by a restart.
+            self._publish_fault(
+                "TAJ_UNSTABILIZED"
+                if relay_reason == STABILIZED_UNSTABILIZED
+                else "TAJ_NO_STABILIZED_CAP"
+            )
             return
         cap_reason = data.get("cap_reason") or "NONE"
         cap_streak = data.get("cap_clear_streak")

@@ -38,7 +38,14 @@ PASS = "PERCEPTION_PASS"
 
 # Relay of the checker-owned stabilized cap (#1212).
 STABILIZED_OK = "CAP_RELAY_OK"
-STABILIZED_MISSING = "CAP_RELAY_MISSING"
+# The response carries no evidence that the checker stabilized anything: no
+# `cap_reason`, or one that is not a usable code. Distinct from MALFORMED because the
+# operator action differs — this one means the sidecar is old or not configured to
+# stabilize, and no amount of restarting this node will fix it.
+STABILIZED_UNSTABILIZED = "CAP_RELAY_UNSTABILIZED"
+# A stabilized cap was claimed but the value is unusable (absent, non-numeric,
+# non-finite, negative), or the bound it must be clamped against is unusable.
+STABILIZED_MALFORMED = "CAP_RELAY_MALFORMED"
 
 
 
@@ -83,17 +90,40 @@ def resolve_stabilized_cap(data, effective_raw_cap_mps):
     exactly the deployments that had not been upgraded, which is the worst place for
     it to happen and the hardest to notice.
 
+    Fail closed ALSO when the response carries no `cap_reason`. The value alone
+    cannot be trusted: a sidecar that does not stabilize still populates
+    `stabilized_speed_cap_mps`, with the RAW cap, so accepting the number on its own
+    would relay an unstabilized cap under a stabilized name — the precise failure
+    this function exists to prevent, and one that leaves no trace because the number
+    looks entirely reasonable. `cap_reason` is the authorship claim; without it there
+    is nothing to relay.
+
     The result is additionally clamped by `effective_raw_cap_mps` so an unhealthy
-    frame can never be widened by the relay.
+    frame can never be widened by the relay. An unusable clamp bound is itself a
+    fault — clamping against NaN would pass the stabilized value through untouched.
     """
     if not isinstance(data, dict):
-        return 0.0, STABILIZED_MISSING
+        return 0.0, STABILIZED_MALFORMED
+
+    # Authorship first. A number without a claimed author is not a stabilized cap
+    # whatever its value, so this is checked before the value is even read.
+    reason = data.get("cap_reason")
+    if not isinstance(reason, str) or not reason:
+        return 0.0, STABILIZED_UNSTABILIZED
 
     value = data.get("stabilized_speed_cap_mps")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return 0.0, STABILIZED_MISSING
+        return 0.0, STABILIZED_MALFORMED
     value = float(value)
     if not math.isfinite(value) or value < 0.0:
-        return 0.0, STABILIZED_MISSING
+        return 0.0, STABILIZED_MALFORMED
 
-    return min(value, float(effective_raw_cap_mps)), STABILIZED_OK
+    if isinstance(effective_raw_cap_mps, bool) or not isinstance(
+        effective_raw_cap_mps, (int, float)
+    ):
+        return 0.0, STABILIZED_MALFORMED
+    bound = float(effective_raw_cap_mps)
+    if not math.isfinite(bound) or bound < 0.0:
+        return 0.0, STABILIZED_MALFORMED
+
+    return min(value, bound), STABILIZED_OK

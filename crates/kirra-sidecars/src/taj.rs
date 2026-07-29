@@ -795,8 +795,14 @@ pub struct PerceptionResponse {
     /// it.
     pub stabilized_speed_cap_mps: f64,
     /// Why the stabilizer produced this value (`CAP_RESTRICTED`, `CAP_RISING`,
-    /// `CAP_TIME_GAP`, …), or `None` when stabilization did not run for this
-    /// request (stateless call, diagnostic probe, or a rejected frame).
+    /// `CAP_TIME_GAP`, `CAP_REPLAY_HELD`, …).
+    ///
+    /// `None` means **this sidecar performed no stabilization at all** — a stateless
+    /// call or a build that does not stabilize. It is a statement about the
+    /// authority that produced `speed_cap_mps`, not about the outcome, which is why
+    /// a consumer may treat it as unusable and fail closed. Every path where the
+    /// stabilizer DID author the number carries a code, including a replay of a cap
+    /// it is holding from an earlier frame.
     pub cap_reason: Option<&'static str>,
     /// Consecutive clear frames accumulated toward a release.
     pub cap_clear_streak: u32,
@@ -999,6 +1005,48 @@ fn is_forward_object_candidate(
         && y_m.abs() <= lane_half_m
         && y_m.atan2(x_m).abs() <= MAX_FORWARD_OBJECT_BEARING_RAD
 }
+
+/// Pick the nearest `(id, distance)` candidate, or `None` when none is usable.
+///
+/// Extracted from the perception path so the ordering is testable on its own. It has
+/// two properties the caller depends on and neither is obvious from the call site:
+///
+/// **Non-finite distances are dropped BEFORE the comparison**, not after a winner is
+/// chosen. The ordering below is a total order over finite values only; a NaN reaching
+/// it compares `false` against every candidate and therefore WINS every match arm.
+/// Filtering afterwards would discard that winner and report no nearest object at all
+/// — so one malformed distance would hide every real obstacle in the frame. Today the
+/// caller's inputs are already proven finite (`is_forward_object_candidate` rejects a
+/// non-finite `x`, and the near-edge lookup is finite-filtered), which is exactly why
+/// the guard belongs here: the invariant lives with the code that needs it rather than
+/// depending on two callers upstream continuing to hold it.
+///
+/// **Ties break on the lower id, compared exactly.** Two objects at an identical
+/// distance must not alternate the reported identity frame to frame — to the
+/// stabilizer's limiting-object persistence that alternation is indistinguishable from
+/// a dropout. The comparison is never epsilon-based: an approximate "near enough"
+/// predicate is not transitive, so a three-candidate frame could order inconsistently
+/// depending on iteration order. Two distances differing in the last bit are two
+/// distances, and the nearer one wins.
+#[must_use]
+fn nearest_candidate(candidates: impl Iterator<Item = (u64, f64)>) -> Option<(u64, f64)> {
+    candidates
+        .filter(|(_, d)| d.is_finite())
+        .fold(None::<(u64, f64)>, |acc, (id, d)| match acc {
+            Some((bid, bd)) if bd < d || (bd == d && bid <= id) => Some((bid, bd)),
+            _ => Some((id, d)),
+        })
+}
+
+/// `cap_reason` for a cap served WITHOUT the stabilizer observing the frame — a
+/// duplicate re-post, served the value the stabilizer is currently holding.
+///
+/// Sidecar-local rather than a [`kirra_trajectory::cap_stabilizer::CapReason`]
+/// variant, because it is not a decision the stabilizer made. The stabilizer never
+/// saw this frame; the sidecar chose not to show it one. Putting it in the checker's
+/// enum would oblige every consumer of that enum to reason about a state the state
+/// machine cannot enter.
+const CAP_REPLAY_HELD: &str = "CAP_REPLAY_HELD";
 
 const MAX_TRACKING_GAP_MS: u64 = 500;
 
@@ -1620,29 +1668,32 @@ pub fn handle_perception_tracked_at(
     // lets a cap transition be logged as "held at 0.8 by object 41" instead of an
     // unattributable number, and it is what the stabilizer's limiting-object
     // persistence keys on across a detection dropout.
-    let nearest = perception
-        .objects
-        .iter()
-        .filter(|o| {
-            is_forward_object_candidate(o.pos.x_m, o.pos.y_m, req.forward_extent_m, req.lane_half_m)
-        })
-        .map(|o| {
-            let d = near_edge_of
-                .get(&o.id)
-                .copied()
-                .filter(|edge: &f64| edge.is_finite())
-                .map_or(o.pos.x_m, |edge: f64| edge.min(o.pos.x_m));
-            (o.id, d)
-        })
-        // Deterministic on ties: the lower id wins, so two objects at an identical
-        // distance do not alternate the reported identity frame to frame — which
-        // would look exactly like a dropout to the persistence logic.
-        .fold(None::<(u64, f64)>, |acc, (id, d)| match acc {
-            Some((bid, bd)) if bd < d || (bd == d && bid <= id) => Some((bid, bd)),
-            _ => Some((id, d)),
-        });
+    let nearest = nearest_candidate(
+        perception
+            .objects
+            .iter()
+            .filter(|o| {
+                is_forward_object_candidate(
+                    o.pos.x_m,
+                    o.pos.y_m,
+                    req.forward_extent_m,
+                    req.lane_half_m,
+                )
+            })
+            .map(|o| {
+                let d = near_edge_of
+                    .get(&o.id)
+                    .copied()
+                    .filter(|edge: &f64| edge.is_finite())
+                    .map_or(o.pos.x_m, |edge: f64| edge.min(o.pos.x_m));
+                (o.id, d)
+            }),
+    );
+    // One Option, destructured — the identity and the distance are the same fact and
+    // must not be able to disagree. A `Some` id beside a `None` distance would name an
+    // object bounding a cap that reports nothing bounding it.
     let nearest_object_id = nearest.map(|(id, _)| id);
-    let nearest_object_m = nearest.map(|(_, d)| d).filter(|d| d.is_finite());
+    let nearest_object_m = nearest.map(|(_, d)| d);
 
     // Clear distance = the tighter of the corridor reach and the nearest
     // in-lane object.
@@ -1840,10 +1891,16 @@ fn apply_cap_stabilization(
     now_ms: u64,
 ) {
     // The stabilizer observes the LIVENESS-ADJUSTED cap (zero on a sensor fault),
-    // which is what makes a fault behave like a hazard. `raw_speed_cap_mps` keeps
-    // perception's own number, set when the response was built — three distinct
-    // values matter to an operator (what perception saw, what liveness allowed,
-    // what is enforced) and collapsing the first two would hide which one bound.
+    // which is what makes a fault behave like a hazard.
+    //
+    // Two numbers reach the wire: `raw_speed_cap_mps` — perception's own proposal,
+    // set when the response was built and NOT overwritten here — and the enforced
+    // stabilized cap. The liveness-adjusted value in between is not carried as a
+    // third field; it is recoverable from `sensor_fault` / `sensor_liveness`, which
+    // say whether liveness floored the cap and why. Carrying perception's proposal
+    // is the part that matters: without it a consumer cannot tell a real hazard from
+    // a filter still climbing, which is precisely how the Python version's behaviour
+    // became invisible.
     let observed = response.speed_cap_mps;
     let decision = stabilizer.observe(CapObservation {
         raw_cap_mps: observed,
@@ -1876,8 +1933,21 @@ fn apply_cap_without_observing(response: &mut PerceptionResponse, stabilizer: &C
     let held = stabilizer.stabilized_cap_mps().min(observed);
     response.stabilized_speed_cap_mps = held;
     response.speed_cap_mps = held;
-    response.cap_reason = None;
+    // A replay is still a stabilizer-authored number, so it is stamped as one — with
+    // its own code, because "the stabilizer evaluated this frame and passed it" and
+    // "the stabilizer never saw this frame and is holding" are different facts and a
+    // consumer deciding whether to enforce needs to tell them apart.
+    //
+    // It is NOT left as `None`. A consumer that fail-closes on a missing reason (the
+    // ROS relay does) would floor a duplicate to zero, and a two-node deployment
+    // where the second node re-posts would then stutter between the held cap and
+    // zero on identical perception. Absent-reason must keep meaning "this sidecar
+    // does not stabilize", which is the case the relay exists to refuse.
+    response.cap_reason = Some(CAP_REPLAY_HELD);
     response.cap_clear_streak = stabilizer.clear_streak();
+    // The identity travels with the number. Reporting the held cap while clearing the
+    // limiting object would describe a cap held against nothing.
+    response.cap_limiting_object = stabilizer.limiting_object();
     if held < observed {
         response.healthy = false;
     }
@@ -3884,5 +3954,313 @@ mod cap_authority_tests {
             r.speed_cap_mps, r.raw_speed_cap_mps,
             "the served cap is perception's own, unfiltered"
         );
+    }
+
+    /// A duplicate frame is served the cap the stabilizer is HOLDING, and says so.
+    ///
+    /// The reason is not left absent. A consumer that fail-closes on a missing reason
+    /// — the ROS relay does, deliberately, so an unstabilized sidecar cannot pass its
+    /// raw cap off as stabilized — would floor every duplicate to zero, and a
+    /// two-node deployment where the second node re-posts would stutter between the
+    /// held cap and a stop on identical perception.
+    #[test]
+    fn a_replayed_frame_reports_a_held_cap_as_a_held_cap() {
+        let mut st = state();
+        let (seq, now) = warm(&mut st, 0, 0);
+
+        let scan = live_scan(seq + 1, 6.0);
+        let first = handle_perception_tracked_at(&scan, &mut st, now + 100);
+        assert!(first.speed_cap_mps > 0.0, "precondition: a cap was earned");
+
+        // The same frame again, from a second consumer.
+        let replay = handle_perception_tracked_at(&scan, &mut st, now + 110);
+        assert_eq!(
+            replay.cap_reason,
+            Some("CAP_REPLAY_HELD"),
+            "a replay is stabilizer-authored and must claim authorship"
+        );
+        assert_eq!(
+            replay.speed_cap_mps, replay.stabilized_speed_cap_mps,
+            "the served number is the stabilized one"
+        );
+        assert!(
+            replay.speed_cap_mps <= first.speed_cap_mps,
+            "a replay must never climb: {} > {}",
+            replay.speed_cap_mps,
+            first.speed_cap_mps
+        );
+    }
+
+    /// A replay reports the limiting object along with the cap it is holding.
+    ///
+    /// Serving the held number while clearing the identity describes a cap held
+    /// against nothing — which reads as an open corridor, the opposite of the truth,
+    /// to anything that attributes the restriction.
+    #[test]
+    fn a_replay_carries_the_limiting_identity_with_the_number() {
+        let mut st = state();
+        let (seq, now) = warm(&mut st, 0, 0);
+
+        // A blob close enough to bind the clear distance rather than the corridor.
+        let scan = live_scan(seq + 1, 1.2);
+        let first = handle_perception_tracked_at(&scan, &mut st, now + 100);
+        let held = first.cap_limiting_object;
+        assert!(
+            held.is_some(),
+            "precondition: an object bound the cap, got {held:?}"
+        );
+
+        let replay = handle_perception_tracked_at(&scan, &mut st, now + 110);
+        assert_eq!(
+            replay.cap_limiting_object, held,
+            "the identity travels with the number it explains"
+        );
+    }
+
+    /// Gate: the whole authority boundary, walked as ONE sequence rather than as
+    /// separate assertions about separate stages.
+    ///
+    /// The claim under test is not any single transition — it is that across a run
+    /// containing a warm-up, a climb, a hazard, a recovery and a replay, the number
+    /// on the wire is ALWAYS the checker's and never perception's. A per-stage test
+    /// can pass while the composition leaks: one path that forgets to stabilize, or
+    /// one that stamps `speed_cap_mps` after the stabilizer ran, would be invisible
+    /// to every test that only looks at its own stage.
+    #[test]
+    fn the_checker_owns_the_served_cap_across_the_whole_sequence() {
+        let mut st = state();
+        let mut now = 0u64;
+        let mut seq = 0u32;
+        let mut ever_below_raw = false;
+        let mut steps = 0usize;
+
+        // Warm-up, climb, a hazard, a recovery — then the last frame served twice.
+        let mut plan: Vec<f64> = Vec::new();
+        plan.extend(std::iter::repeat_n(6.0, 20)); // warm + climb
+        plan.push(0.4); // a hazard arrives
+        plan.extend(std::iter::repeat_n(6.0, 12)); // and clears
+
+        let check = |r: &PerceptionResponse, steps: &mut usize, ever_below_raw: &mut bool| {
+            assert_eq!(
+                r.speed_cap_mps, r.stabilized_speed_cap_mps,
+                "the enforced number must be the stabilized one at every step"
+            );
+            assert!(
+                r.speed_cap_mps <= r.raw_speed_cap_mps + 1e-9,
+                "the checker may only tighten perception's proposal: {} > {}",
+                r.speed_cap_mps,
+                r.raw_speed_cap_mps
+            );
+            assert!(
+                r.cap_reason.is_some(),
+                "every frame the stabilizer authored carries its authorship claim"
+            );
+            *steps += 1;
+            if r.speed_cap_mps < r.raw_speed_cap_mps {
+                *ever_below_raw = true;
+            }
+        };
+
+        let mut last = None;
+        for x in plan {
+            now += 100;
+            seq += 1;
+            let scan = live_scan(seq, x);
+            let r = handle_perception_tracked_at(&scan, &mut st, now);
+            check(&r, &mut steps, &mut ever_below_raw);
+            last = Some(scan);
+        }
+
+        // The replay path is part of the boundary, not a separate feature: a second
+        // consumer asking about a frame already served must get the same answer under
+        // the same authority, not an unstabilized one.
+        let replay = handle_perception_tracked_at(&last.expect("plan ran"), &mut st, now + 10);
+        check(&replay, &mut steps, &mut ever_below_raw);
+        assert_eq!(replay.cap_reason, Some("CAP_REPLAY_HELD"));
+
+        assert_eq!(steps, 34, "the whole sequence ran, including the replay");
+        // Non-vacuity: if the stabilized cap had merely tracked the raw one the whole
+        // way, every assertion above would hold while nothing was being stabilized.
+        assert!(
+            ever_below_raw,
+            "the stabilized cap must actually differ from the raw one somewhere, \
+             or this test proves nothing"
+        );
+    }
+
+    /// Gate: liveness recovery and cap release COMPOSE, and the composite latency is
+    /// bounded rather than open-ended.
+    ///
+    /// Two independent gates stand between a recovered sensor and a moving robot: the
+    /// watchdog's healthy-frame streak, and the stabilizer's clear confirmations plus
+    /// bounded rise. Neither alone is the answer an integrator needs. This pins the
+    /// composite: nothing is served before BOTH are satisfied, and the wait does
+    /// terminate.
+    #[test]
+    fn liveness_recovery_and_cap_release_compose_to_a_bounded_latency() {
+        let mut st = state();
+        let (mut seq, mut now) = warm(&mut st, 0, 0);
+        let earned = handle_perception_tracked_at(&live_scan(seq + 1, 6.0), &mut st, now + 100)
+            .speed_cap_mps;
+        seq += 1;
+        now += 100;
+        assert!(earned > 0.0, "precondition: the robot was moving");
+
+        // A silence long past the watchdog's budget: the sensor stops, then returns.
+        now += 5_000;
+        let faulted = {
+            seq += 1;
+            handle_perception_tracked_at(&live_scan(seq, 6.0), &mut st, now)
+        };
+        assert_eq!(
+            faulted.speed_cap_mps, 0.0,
+            "a liveness fault floors the cap immediately"
+        );
+
+        // Now feed clean frames and find the first that serves motion again.
+        let mut frames_to_move = None;
+        for i in 1..=200 {
+            now += 100;
+            seq += 1;
+            let r = handle_perception_tracked_at(&live_scan(seq, 6.0), &mut st, now);
+            if r.speed_cap_mps > 0.0 {
+                assert_eq!(
+                    r.sensor_liveness, "healthy",
+                    "motion was served while liveness was still {}",
+                    r.sensor_liveness
+                );
+                frames_to_move = Some(i);
+                break;
+            }
+        }
+
+        let frames = frames_to_move.expect("recovery must terminate, not stall forever");
+        // The composite is at least the liveness streak: the cap cannot begin to
+        // climb while the watchdog is still floor-capping every frame.
+        let streak = SensorWatchdogConfig::r2_lidar().recovery_streak;
+        assert!(
+            frames >= streak,
+            "motion returned in {frames} frames, before the {streak}-frame liveness \
+             streak could complete — the two gates are not composing"
+        );
+        // …and it is bounded. Measured at 17 frames — 1.7 s at the 10 Hz this feeds:
+        // roughly 0.5 s of liveness streak, then the stabilizer's confirmations and
+        // its bounded climb off the floor. That figure is what an integrator needs
+        // and neither gate produces on its own. The bound is a regression pin, not a
+        // specification: a change that doubles the wait should be a deliberate one.
+        assert!(
+            frames <= 25,
+            "recovery took {frames} frames (measured 17); if this is intended, move \
+             the bound and say why"
+        );
+    }
+}
+
+#[cfg(test)]
+mod nearest_candidate_tests {
+    //! The nearest-object ordering, tested directly. Driving these cases through a
+    //! synthetic scan is possible but proves less: the scan generator cannot produce
+    //! a NaN distance or two bit-adjacent ones on demand, which are exactly the
+    //! cases where an ordering stops being total.
+
+    use super::nearest_candidate;
+
+    fn pick(items: &[(u64, f64)]) -> Option<(u64, f64)> {
+        nearest_candidate(items.iter().copied())
+    }
+
+    #[test]
+    fn no_candidates_yields_none() {
+        assert_eq!(pick(&[]), None);
+    }
+
+    #[test]
+    fn the_nearest_wins() {
+        assert_eq!(pick(&[(7, 4.0), (3, 1.5), (9, 2.5)]), Some((3, 1.5)));
+    }
+
+    /// A NaN distance must not win, and — the part that matters — must not take the
+    /// other candidates down with it.
+    ///
+    /// The ordering compares `false` in both directions against NaN, so a NaN reaching
+    /// the fold wins every arm. Dropping it afterwards would then report NO nearest
+    /// object, and a real obstacle two metres ahead would be excluded from the clear
+    /// distance entirely. The filter runs first for exactly this reason.
+    #[test]
+    fn a_nan_distance_does_not_mask_a_real_object() {
+        assert_eq!(pick(&[(1, f64::NAN), (2, 2.0)]), Some((2, 2.0)));
+        assert_eq!(pick(&[(2, 2.0), (1, f64::NAN)]), Some((2, 2.0)));
+        assert_eq!(pick(&[(1, f64::NAN)]), None, "nothing usable is None");
+    }
+
+    #[test]
+    fn infinite_distances_are_not_candidates() {
+        assert_eq!(pick(&[(1, f64::INFINITY), (2, 3.0)]), Some((2, 3.0)));
+        assert_eq!(pick(&[(1, f64::NEG_INFINITY), (2, 3.0)]), Some((2, 3.0)));
+    }
+
+    /// Exact ties break on the lower id, whichever order they arrive in. An
+    /// order-dependent tie-break would alternate the reported identity frame to
+    /// frame, which the stabilizer's persistence cannot tell from a dropout.
+    #[test]
+    fn an_exact_tie_breaks_on_the_lower_id_in_either_order() {
+        assert_eq!(pick(&[(9, 2.0), (4, 2.0)]), Some((4, 2.0)));
+        assert_eq!(pick(&[(4, 2.0), (9, 2.0)]), Some((4, 2.0)));
+    }
+
+    /// Distances that differ only in the last bit are two distances, not a tie. The
+    /// nearer wins on its own merit and the id is not consulted — which is what makes
+    /// the ordering total. An epsilon-based "close enough" predicate would call these
+    /// equal, and equality that is not transitive orders a three-element set
+    /// differently depending on which pair is compared first.
+    #[test]
+    fn bit_adjacent_distances_are_ordered_not_tied() {
+        let near = 2.0_f64;
+        let far = f64::from_bits(near.to_bits() + 1);
+        assert!(near < far, "precondition: the two differ");
+        // The HIGHER id is nearer, so an epsilon that swallowed the difference would
+        // hand this to the lower id and the assertion would catch it.
+        assert_eq!(pick(&[(1, far), (9, near)]), Some((9, near)));
+        assert_eq!(pick(&[(9, near), (1, far)]), Some((9, near)));
+    }
+
+    /// A duplicate id is not a contradiction to resolve, it is two readings. The
+    /// nearer one is kept; on an exact tie the first is kept, so a duplicate cannot
+    /// make the result depend on how many times it appears.
+    #[test]
+    fn duplicate_ids_keep_the_nearer_reading() {
+        assert_eq!(pick(&[(5, 3.0), (5, 1.0)]), Some((5, 1.0)));
+        assert_eq!(pick(&[(5, 1.0), (5, 3.0)]), Some((5, 1.0)));
+        assert_eq!(pick(&[(5, 2.0), (5, 2.0)]), Some((5, 2.0)));
+    }
+
+    /// Zero and negative distances are real readings (an object at or behind the
+    /// sensor origin) and must be ordered, not discarded. Discarding them would drop
+    /// the single most urgent case.
+    #[test]
+    fn zero_and_negative_distances_are_ordered_not_dropped() {
+        assert_eq!(pick(&[(1, 1.0), (2, 0.0)]), Some((2, 0.0)));
+        assert_eq!(pick(&[(1, 0.0), (2, -0.5)]), Some((2, -0.5)));
+    }
+
+    /// The ordering is a total order: every permutation of the same set yields the
+    /// same winner. This is the property an epsilon comparison would break, and it is
+    /// invisible in any test that only ever feeds one ordering.
+    #[test]
+    fn every_permutation_of_a_set_yields_the_same_winner() {
+        let base = [(3, 2.0), (1, 2.0), (7, 1.25), (5, f64::NAN), (2, 9.0)];
+        let expected = pick(&base);
+        assert_eq!(expected, Some((7, 1.25)), "precondition");
+
+        let mut items = base;
+        // Every rotation, and every rotation reversed — enough orderings that a
+        // fold-order dependency shows up.
+        for _ in 0..items.len() {
+            items.rotate_left(1);
+            assert_eq!(pick(&items), expected, "rotation {items:?}");
+            let mut rev = items;
+            rev.reverse();
+            assert_eq!(pick(&rev), expected, "reversed {rev:?}");
+        }
     }
 }

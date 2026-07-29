@@ -16,7 +16,8 @@ from perception_cap import (  # noqa: E402
     apply_perception_cap,
     resolve_stabilized_cap,
     STABILIZED_OK,
-    STABILIZED_MISSING,
+    STABILIZED_MALFORMED,
+    STABILIZED_UNSTABILIZED,
     DISABLED,
     STALE,
     INVALID,
@@ -74,49 +75,100 @@ def test_zero_cap_holds_the_robot():
 # ---------------------------------------------------------------------------
 
 
+def _stabilized(value, reason="CAP_PASS"):
+    """A well-formed stabilized response: a value AND the authorship claim."""
+    return {"stabilized_speed_cap_mps": value, "cap_reason": reason}
+
+
 def test_stabilized_cap_is_relayed_when_present():
-    cap, reason = resolve_stabilized_cap(
-        {"stabilized_speed_cap_mps": 0.8}, 2.0
-    )
+    cap, reason = resolve_stabilized_cap(_stabilized(0.8), 2.0)
     assert reason == STABILIZED_OK
     assert cap == 0.8
 
 
 def test_relay_is_clamped_by_the_unhealthy_raw_cap():
     # An unhealthy frame zeroes the raw cap upstream; the relay must never widen it.
-    cap, reason = resolve_stabilized_cap(
-        {"stabilized_speed_cap_mps": 0.8}, 0.0
-    )
+    cap, reason = resolve_stabilized_cap(_stabilized(0.8), 0.0)
     assert reason == STABILIZED_OK
     assert cap == 0.0
 
 
-def test_missing_stabilized_cap_fails_closed():
+def test_malformed_stabilized_cap_fails_closed():
     # An older Taj that does not serve the field is NOT a licence to fall back on
     # the raw cap. Falling back would silently restore pre-#1212 behaviour on
     # exactly the deployments that had not been upgraded.
     for payload in (
-        {},
-        {"speed_cap_mps": 1.5},
         None,
         "not a dict",
-        {"stabilized_speed_cap_mps": None},
-        {"stabilized_speed_cap_mps": "0.8"},
-        {"stabilized_speed_cap_mps": True},
-        {"stabilized_speed_cap_mps": float("nan")},
-        {"stabilized_speed_cap_mps": float("inf")},
-        {"stabilized_speed_cap_mps": -0.1},
+        {"cap_reason": "CAP_PASS"},
+        {"speed_cap_mps": 1.5, "cap_reason": "CAP_PASS"},
+        _stabilized(None),
+        _stabilized("0.8"),
+        _stabilized(True),
+        _stabilized(float("nan")),
+        _stabilized(float("inf")),
+        _stabilized(-0.1),
     ):
         cap, reason = resolve_stabilized_cap(payload, 2.0)
-        assert reason == STABILIZED_MISSING, payload
+        assert reason == STABILIZED_MALFORMED, payload
         assert cap == 0.0, payload
+
+
+def test_a_cap_with_no_authorship_claim_is_refused():
+    # The hole this closes: a sidecar that does NOT stabilize still populates
+    # `stabilized_speed_cap_mps` — with the RAW cap. Accepting the number on its own
+    # would relay an unstabilized cap under a stabilized name, on exactly the
+    # deployments that had not been upgraded, and the value would look entirely
+    # reasonable. `cap_reason` is the claim; without it there is nothing to relay.
+    for missing in ({}, {"cap_reason": None}, {"cap_reason": ""}, {"cap_reason": 7}):
+        payload = {"stabilized_speed_cap_mps": 1.9}
+        payload.update(missing)
+        cap, reason = resolve_stabilized_cap(payload, 2.0)
+        assert reason == STABILIZED_UNSTABILIZED, payload
+        assert cap == 0.0, payload
+
+
+def test_a_replayed_held_cap_is_a_valid_relay():
+    # A duplicate frame is served the cap the stabilizer is holding, stamped
+    # CAP_REPLAY_HELD. It is stabilizer-authored, so it relays. Refusing it would
+    # make a two-consumer deployment stutter between the held cap and zero on
+    # identical perception.
+    cap, reason = resolve_stabilized_cap(_stabilized(0.6, "CAP_REPLAY_HELD"), 2.0)
+    assert reason == STABILIZED_OK
+    assert cap == 0.6
+
+
+def test_an_unusable_clamp_bound_fails_closed():
+    # Clamping against NaN passes the stabilized value through untouched, so an
+    # unusable bound is itself a fault rather than a reason to skip the clamp.
+    for bound in (float("nan"), float("inf"), -1.0, None, "2.0", True):
+        cap, reason = resolve_stabilized_cap(_stabilized(1.5), bound)
+        assert reason == STABILIZED_MALFORMED, bound
+        assert cap == 0.0, bound
 
 
 def test_zero_stabilized_cap_is_a_valid_relay_not_a_fault():
     # Zero is what the checker serves while holding the robot. Treating it as
     # missing would report a relay fault every time the cap was legitimately down.
-    cap, reason = resolve_stabilized_cap(
-        {"stabilized_speed_cap_mps": 0.0}, 2.0
-    )
+    cap, reason = resolve_stabilized_cap(_stabilized(0.0), 2.0)
     assert reason == STABILIZED_OK
     assert cap == 0.0
+
+
+def test_no_cap_state_machine_survives_in_this_module():
+    # Gate: prove the Python authority is ABSENT, not merely unused. An advisory
+    # copy of a safety state machine drifts silently — its tests keep passing while
+    # nothing enforces it, which is the condition that made the original placement a
+    # problem. This fails if anyone reintroduces one.
+    import perception_cap
+
+    for gone in (
+        "SpeedCapGovernor",
+        "SpeedCapGovernorConfig",
+        "SpeedCapDecision",
+    ):
+        assert not hasattr(perception_cap, gone), gone
+
+    source = open(perception_cap.__file__, encoding="utf-8").read()
+    for residue in ("rise_rate", "clear_confirmations", "initial_cap", "max_dt"):
+        assert residue not in source, residue

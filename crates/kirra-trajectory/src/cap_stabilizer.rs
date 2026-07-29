@@ -380,6 +380,18 @@ impl CapStabilizer {
         self.clear_streak
     }
 
+    /// The object currently holding the cap down, including one retained through a
+    /// dropout.
+    ///
+    /// Exists so a caller that serves the held cap WITHOUT calling [`Self::observe`]
+    /// (a duplicate frame, a diagnostic probe) can report the identity that belongs
+    /// to the number it is serving. A held cap reported with no limiting object reads
+    /// as an open corridor, which is the opposite of what is true.
+    #[must_use]
+    pub fn limiting_object(&self) -> Option<u64> {
+        self.limiting.map(|(id, _)| id)
+    }
+
     /// Return to the starting state: zero cap, no accumulated evidence, no
     /// continuity, no limiting object.
     ///
@@ -1186,6 +1198,37 @@ mod tests {
         s.reset();
         let d = s.observe(obs(2.0, t + 200));
         assert_eq!(d.limiting_object, None);
+    }
+
+    /// The accessor agrees with the decision it accompanies, including across a
+    /// retained dropout and a fail-closed clear.
+    ///
+    /// It exists for callers that serve the held cap WITHOUT observing a frame — a
+    /// duplicate frame, a diagnostic probe. Such a caller has no `CapDecision` to
+    /// read, and reporting the held cap with no limiting object reads as an open
+    /// corridor: the opposite of what is true. So the two must not be able to
+    /// disagree.
+    #[test]
+    fn the_limiting_object_accessor_tracks_the_decision() {
+        let mut s = stab();
+        assert_eq!(s.limiting_object(), None, "nothing observed yet");
+
+        let t = settle_at(&mut s, 0.5, 0);
+        let d = s.observe(obs_with(0.5, t + 100, Some(41)));
+        assert_eq!(d.limiting_object, Some(41));
+        assert_eq!(s.limiting_object(), Some(41), "and the accessor agrees");
+
+        // A dropout inside the grace window retains the identity; the accessor must
+        // report the retained one, since that is what the held cap is held against.
+        let d = s.observe(obs_with(2.0, t + 200, None));
+        assert_eq!(d.reason, CapReason::LimitingObjectRetained);
+        assert_eq!(d.limiting_object, Some(41));
+        assert_eq!(s.limiting_object(), Some(41));
+
+        // A fault clears it, and so does the accessor.
+        let d = s.observe(obs_with(f64::NAN, t + 300, Some(41)));
+        assert_eq!(d.limiting_object, None);
+        assert_eq!(s.limiting_object(), None);
     }
 
     // ----- limiting-object identity is absent unless something limits -----
