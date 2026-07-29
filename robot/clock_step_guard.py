@@ -103,9 +103,16 @@ wider ones open, and would misrepresent restart as a bounded event when it is a
 full re-establishment of trust.
 
 The honest statement is therefore: **a consumer restart resets all replay
-protection, including this hold.** Restarting a robot's motor consumer while its
-clock is being corrected is an operational hazard, not a defended case. See
-`docs/safety/EVIDENCE_BINDING.md` §5.
+protection, including this hold.** Restart is a new trust epoch, not a bounded
+interruption, and no guard here claims continuity across it.
+
+Note this cuts further than the hold: a pre-restart release token remains
+acceptable after a restart while it is inside its own wall-clock lifetime,
+because the sequence and nonce watermarks that would have refused it were
+cleared too. That is #1230, and it is why persisting this hold alone would have
+been the wrong fix — it would have defended the narrowest window while leaving
+the wider one open and looking closed. See `docs/safety/EVIDENCE_BINDING.md`
+§4.7.
 """
 
 from collections import namedtuple

@@ -151,26 +151,60 @@ That residue is AOU-TIMESYNC-001's, and it stays the integrator's: only a
 disciplined time distribution closes it. The guard converts one silent failure
 into a loud one; it does not discharge the assumption.
 
-### 4.7 All replay protection is in-memory, so a restart resets it
+### 4.7 Restart is a new trust epoch — and pre-restart tokens survive it
 
 The consumer's release gate holds three watermarks — last released `sequence`,
 last released `nonce`, and the newest released `(tracker_generation,
 scan_sequence)` — and the clock-step guard holds its hold deadline. **None of
 these are persisted.**
 
-A restarted consumer therefore accepts any sequence, any nonce, any perception
-frame, and is not holding after a clock step it had detected moments earlier.
-This is a single coherent property rather than four separate gaps: restart is a
-full re-establishment of trust, not a bounded interruption.
+The model to hold, stated once and without qualification:
 
-Persisting the clock hold alone was considered and rejected. It is the narrowest
-of the four windows, and closing it while leaving sequence and nonce volatile
-would buy little while making the restart story *look* defended.
+```
+process restart
+→ all in-memory replay and freshness state is lost
+→ trust is re-established from scratch
+→ no individual guard claims continuity across restart
+```
 
-**Operational consequence.** Restarting the motor consumer while the system
-clock is being corrected, or immediately after a suspected replay, discards
-exactly the state that was defending against it. Treat a consumer restart as an
-event requiring the same care as initial bring-up.
+That is the honest description, and it is the reason the clock-step hold is not
+persisted on its own: doing so would make restart *look* like continuity in the
+one respect that was persisted, while sequence, nonce and frame watermarks
+silently reset. A partial guarantee here is worse than none, because it invites
+exactly the wrong mental model.
+
+Most of what re-establishment requires already holds. Fresh evidence is observed
+after restart, a token is minted against it, startup generation and frame
+identity are nonzero and accepted by the full chain (#1214), and the gate
+enforces its watermarks from the first post-restart release.
+
+**One requirement does not hold.** A pre-restart token is still accepted after a
+restart if it remains inside its own wall-clock lifetime. Nothing refuses it on
+the grounds that a restart happened — the sequence and nonce that would have
+refused it were cleared, and only expiry closes the window.
+
+The exposure is exactly `maximum_lifetime_ms` wide: 200 ms as shipped, against a
+real restart that takes far longer. That is a **timing accident, not a designed
+invariant** — it depends on restart duration exceeding a *configurable* lifetime,
+and a backward clock step during the restart widens it further, with the clock
+guard unable to help because its hold died with the process.
+
+Tracked as **#1230**, with a boot/session epoch bound into evidence identity and
+the signed payload as the preferred fix, so pre-restart tokens become
+structurally invalid rather than invalid-by-timeout. Pinned meanwhile by
+`crates/kirra-release-token/tests/restart_trust_epoch.rs`, which asserts the
+undesired behaviour deliberately so that implementing the fix forces an edit
+rather than leaving a stale expectation.
+
+**Operational consequences.**
+
+- Restarting the motor consumer while the system clock is being corrected, or
+  immediately after a suspected replay, discards exactly the state that was
+  defending against it. Treat a consumer restart with the care of an initial
+  bring-up.
+- `KIRRA_FRESHNESS_WINDOW_MS` is not only a freshness bound. It is also the
+  post-restart replay window, and raising it widens that window by the same
+  amount.
 
 ### 4.6 The bench minter binds nothing real
 
