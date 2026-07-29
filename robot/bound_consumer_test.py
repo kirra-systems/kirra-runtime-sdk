@@ -586,3 +586,123 @@ def _run_all() -> int:
 if __name__ == "__main__":
     print("evidence-bound V2 consumer host tests (pure, no ROS/motor/.so):")
     sys.exit(_run_all())
+
+
+# ---------------------------------------------------------------------------
+# #1214 — wall-clock step guard on the release path.
+#
+# The token's signed `expires_at_ms` is compared against the consumer's wall
+# clock, in a different process from the signer. A step in that clock changes
+# what "expired" means while every check goes on returning confident answers.
+# These pin the handler's response.
+# ---------------------------------------------------------------------------
+
+
+def _clock_driven_handler(core, serial, guard):
+    """A handler whose wall and monotonic clocks the test drives independently."""
+    warn, error = _Log(), _Log()
+    clocks = {"wall_ms": 1_700_000_000_000, "mono_us": 5_000_000}
+
+    handle = make_frame_handler(
+        core,
+        serial,
+        warn=warn,
+        error=error,
+        now_fn=lambda: clocks["wall_ms"],
+        mono_fn=lambda: clocks["mono_us"],
+        clock_guard=guard,
+    )
+    return handle, warn, clocks
+
+
+def test_a_clock_step_refuses_the_frame_and_never_consults_the_core():
+    # The core must not see the frame at all. Letting it judge would advance the
+    # sequence, nonce and perception watermarks on the strength of a timestamp
+    # comparison that is no longer meaningful — and those watermarks are what
+    # refuse a later replay.
+    from clock_step_guard import ClockStepGuard
+
+    core, serial = _FakeCore(), _Serial()
+    handle, warn, clocks = _clock_driven_handler(core, serial, ClockStepGuard(200))
+
+    handle(GOOD_FRAME)  # baseline sample, released normally
+    assert len(core.frames) == 1
+    assert len(serial.writes) == 1
+
+    # Real time advances 100 ms; the wall clock claims 250 ms.
+    clocks["mono_us"] += 100_000
+    clocks["wall_ms"] += 250
+    handle(GOOD_FRAME)
+
+    assert len(core.frames) == 1, "the core must not be consulted on a stepped clock"
+    assert len(serial.writes) == 1, "and nothing may reach the motors"
+    assert any("CLOCK_STEP_DETECTED" in m for m in warn.messages), warn.messages
+
+
+def test_the_step_refusal_names_the_divergence_and_the_hold():
+    # An operator reading one log line should be able to tell which clock moved
+    # and how long the robot will hold, without reproducing the fault.
+    from clock_step_guard import ClockStepGuard
+
+    core, serial = _FakeCore(), _Serial()
+    handle, warn, clocks = _clock_driven_handler(core, serial, ClockStepGuard(200))
+    handle(GOOD_FRAME)
+
+    clocks["mono_us"] += 100_000
+    clocks["wall_ms"] += 250
+    handle(GOOD_FRAME)
+
+    message = next(m for m in warn.messages if "CLOCK_STEP_DETECTED" in m)
+    assert "150 ms" in message, message
+    assert "200 ms" in message, message
+
+
+def test_release_resumes_once_every_pre_step_token_has_expired():
+    # Non-vacuity: the guard must not latch. A detector that never releases is
+    # indistinguishable from a broken robot, and would be "safe" in the useless
+    # sense.
+    from clock_step_guard import ClockStepGuard
+
+    core, serial = _FakeCore(), _Serial()
+    handle, _warn, clocks = _clock_driven_handler(core, serial, ClockStepGuard(200))
+    handle(GOOD_FRAME)
+
+    clocks["mono_us"] += 100_000
+    clocks["wall_ms"] += 250
+    handle(GOOD_FRAME)
+    consulted_at_step = len(core.frames)
+
+    # Both clocks now advance together, past the token lifetime.
+    for _ in range(5):
+        clocks["mono_us"] += 100_000
+        clocks["wall_ms"] += 100
+        handle(GOOD_FRAME)
+
+    assert len(core.frames) > consulted_at_step, (
+        "the hold must end once every pre-step token is expired under any offset"
+    )
+    assert len(serial.writes) > 1
+
+
+def test_a_healthy_clock_is_never_disturbed_by_the_guard():
+    # The guard sits on the release path, so a false positive stops a healthy
+    # robot. Both clocks advancing together must be indistinguishable from the
+    # guard being absent.
+    from clock_step_guard import ClockStepGuard
+
+    guarded_core, guarded_serial = _FakeCore(), _Serial()
+    handle, warn, clocks = _clock_driven_handler(
+        guarded_core, guarded_serial, ClockStepGuard(200))
+    for _ in range(20):
+        clocks["mono_us"] += 100_000
+        clocks["wall_ms"] += 100
+        handle(GOOD_FRAME)
+
+    bare_core, bare_serial = _FakeCore(), _Serial()
+    bare, _w, _e = _handler(bare_core, bare_serial)
+    for _ in range(20):
+        bare(GOOD_FRAME)
+
+    assert len(guarded_core.frames) == len(bare_core.frames)
+    assert len(guarded_serial.writes) == len(bare_serial.writes)
+    assert warn.messages == []
