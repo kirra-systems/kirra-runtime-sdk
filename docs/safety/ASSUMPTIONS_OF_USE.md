@@ -946,6 +946,25 @@ desynchronized but still-plausible timestamp passes every runtime check while
 quietly eroding the deadline margin. Only the integrator's sync discipline closes
 that — the runtime checks are a backstop, **not** a discharge.
 
+**Step detection on the release path (#1214).** `robot/clock_step_guard.py`
+narrows the gap on the one path where a signed `expires_at_ms` crosses a process
+boundary. The motor consumer cross-checks its wall clock against the monotonic
+clock each frame; a divergence beyond tolerance means the wall clock **jumped
+rather than flowed**, and the frame is refused before the release gate sees it,
+for one maximum token lifetime measured on the monotonic clock — long enough that
+every token minted before the step is expired under any offset.
+
+This matters because the gate's own checks only cover steps LARGER than the
+200 ms token lifetime (a big backward step reads as `FutureIssued`, a big forward
+one as `Expired`). A step *smaller* than the lifetime tripped nothing while
+silently extending every token's life.
+
+It remains a **step** detector, not a drift detector: two clocks diverging slowly
+while both advance smoothly produce no divergence signal, because the guard
+compares elapsed intervals rather than absolute offsets. The clause above stands
+unchanged — this converts one silent failure into a loud one and does not
+discharge the assumption.
+
 ### Consequence if violated
 Staleness validation becomes **meaningless**: stale commands are admitted as fresh
 (or fresh ones spuriously rejected). The deadline barrier — one of the channel's

@@ -89,6 +89,7 @@ from collections import namedtuple
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from clock_step_guard import ClockStepGuard  # noqa: E402
 from kirra_ffi import (  # noqa: E402
     BOUND_FRAME_LEN,
     BoundKirraConsumer,
@@ -259,12 +260,28 @@ def format_bound_health(health) -> str:
     return " ".join(parts) if parts else "no refusals recorded"
 
 
-def make_frame_handler(consumer, actuate, warn, error, now_fn=now_ms):
+def make_frame_handler(
+    consumer,
+    actuate,
+    warn,
+    error,
+    now_fn=now_ms,
+    mono_fn=_now_us,
+    clock_guard=None,
+):
     """Build the `/kirra/release` callback.
 
     Factored out of `main` so the release path is testable without ROS, a motor
     board, or a real .so: the caller injects the consumer, the single serial
     chokepoint (`actuate`) and the log sinks.
+
+    `clock_guard` (#1214) is the wall-clock step detector. The token's signed
+    `expires_at_ms` is compared against `now_fn()`, so a step in that clock
+    changes what "expired" means without changing anything observable — the
+    check goes on returning confident answers about a quantity that has stopped
+    meaning what it asserts. When the guard reports a step, the frame is refused
+    and the core is NOT consulted, so no watermark advances and liveness starves
+    into the SS-002 stop exactly as silence does. `None` disables the guard.
 
     Latched logging (the project's existing style, cf. the interceptor's relay
     latch): a refusal logs when the reason CHANGES, not every cycle — releases
@@ -281,7 +298,31 @@ def make_frame_handler(consumer, actuate, warn, error, now_fn=now_ms):
         state["suppressed"] = 0
 
     def handle(data: bytes) -> None:
-        decision = decide_bound_frame(consumer, data, now_fn())
+        wall_ms = now_fn()
+
+        # Clock check FIRST, before the core sees the frame. A token whose
+        # freshness cannot be judged must not reach the gate at all: releasing it
+        # would advance the sequence, nonce and perception watermarks on the
+        # strength of a timestamp comparison that is no longer meaningful.
+        if clock_guard is not None:
+            verdict = clock_guard.observe(wall_ms, mono_fn() // 1000)
+            if not verdict.ok:
+                reason = verdict.reason
+                if reason == state["reason"]:
+                    state["suppressed"] += 1
+                else:
+                    _flush_suppressed()
+                    state["reason"] = reason
+                    warn(
+                        f"REFUSED ({reason}) — no motor write; the wall clock "
+                        f"used for token freshness diverged from the monotonic "
+                        f"clock by {verdict.divergence_ms} ms. Holding for "
+                        f"{verdict.hold_remaining_ms} ms so every token minted "
+                        f"before the step expires under any offset."
+                    )
+                return
+
+        decision = decide_bound_frame(consumer, data, wall_ms)
         # One health snapshot per message: it feeds both the refusal diagnostic
         # and the alarm latch below, and each call is an FFI crossing.
         health = consumer.health()
@@ -756,11 +797,16 @@ def main() -> int:
     # decision path is host-testable without ROS or a motor (see
     # robot/bound_consumer_test.py); `actuate` stays the single serial
     # chokepoint.
+    # #1214: the hold after a detected step is exactly the maximum token
+    # lifetime the core will accept, so it outlasts every token that could have
+    # been minted before the step and is still inside its window. Sharing the
+    # one configured value means the two can never drift apart.
     frame_handler = make_frame_handler(
         consumer,
         actuate,
         warn=node.get_logger().warn,
         error=node.get_logger().error,
+        clock_guard=ClockStepGuard(maximum_token_lifetime_ms),
     )
 
     def on_msg(msg: UInt8MultiArray) -> None:
