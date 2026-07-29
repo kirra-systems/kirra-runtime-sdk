@@ -17,6 +17,36 @@ That is not a defect on its own — it is a design consequence of where the
 signing authority sits — but it means the guarantee is narrower than it looks,
 and a narrow guarantee mistaken for a broad one is worse than no guarantee.
 
+## 1a. Threat boundary — read this before citing the binding as a control
+
+> A compromised or dishonest caller inside the accepted HTTP trust boundary
+> **can choose the evidence identity being signed.**
+>
+> It cannot exceed the independently checked command envelope or actuator
+> scope, but **the signature does not prove that the identity was derived from
+> genuine sensor data.**
+
+What the binding does provide, within that boundary:
+
+- **Attribution** — a command names the evidence frame it claims to rest on, and
+  that claim is in the signed bytes and the audit record.
+- **Replay resistance** — a captured frame cannot be re-presented (nonce burn),
+  reordered (sequence watermark), or paired with older evidence (supersession).
+- **Integrity in transit** — no hop can alter the command or its claimed
+  evidence without invalidating the signature.
+
+What it does not provide:
+
+- **Authentication of perception.** Nothing proves the digest corresponds to a
+  scan Taj actually produced.
+- **Freshness of the evidence itself.** The frame identity is checked for
+  ordering, not for age against the sensor.
+
+Terminology in this repository should follow that split. "Bound", "attributed"
+and "non-replayable" are accurate; "verified sensor evidence", "authenticated
+perception" and "proves the digest corresponds to the frame" are not, and must
+not be used unless a component actually recomputes or attests the digest.
+
 This document records the boundary, so the next audit reads it instead of
 re-deriving it. #1214's own issue text is the evidence that re-derivation is
 expensive: it estimated this area as "partial foundation; major work remains"
@@ -120,6 +150,27 @@ signal, because the guard compares elapsed intervals, not absolute offsets.
 That residue is AOU-TIMESYNC-001's, and it stays the integrator's: only a
 disciplined time distribution closes it. The guard converts one silent failure
 into a loud one; it does not discharge the assumption.
+
+### 4.7 All replay protection is in-memory, so a restart resets it
+
+The consumer's release gate holds three watermarks — last released `sequence`,
+last released `nonce`, and the newest released `(tracker_generation,
+scan_sequence)` — and the clock-step guard holds its hold deadline. **None of
+these are persisted.**
+
+A restarted consumer therefore accepts any sequence, any nonce, any perception
+frame, and is not holding after a clock step it had detected moments earlier.
+This is a single coherent property rather than four separate gaps: restart is a
+full re-establishment of trust, not a bounded interruption.
+
+Persisting the clock hold alone was considered and rejected. It is the narrowest
+of the four windows, and closing it while leaving sequence and nonce volatile
+would buy little while making the restart story *look* defended.
+
+**Operational consequence.** Restarting the motor consumer while the system
+clock is being corrected, or immediately after a suspected replay, discards
+exactly the state that was defending against it. Treat a consumer restart as an
+event requiring the same care as initial bring-up.
 
 ### 4.6 The bench minter binds nothing real
 
