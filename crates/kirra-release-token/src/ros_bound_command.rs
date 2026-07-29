@@ -603,6 +603,79 @@ mod tests {
         assert_eq!(gate.last_released_nonce(), Some(9001));
     }
 
+    /// #1214: the canonical replay — the EXACT same bytes and the EXACT same
+    /// token, presented again.
+    ///
+    /// This is the only replay an attacker who cannot forge the governor's
+    /// signature is able to mount: capture a frame that was legitimately
+    /// released and re-present it verbatim. Every other replay test in this
+    /// module mutates a field, which requires re-signing and therefore assumes a
+    /// capability the attacker does not have.
+    ///
+    /// It also distinguishes a BURNED nonce from a merely CHECKED one. A check
+    /// against a validity rule would pass a second time, because the bytes are
+    /// by construction as valid as they were the first time. Only consuming the
+    /// nonce refuses them — here via the strictly-advancing watermark, which
+    /// gives single-use semantics in constant memory rather than an unbounded
+    /// set of every nonce ever seen.
+    #[test]
+    fn a_verbatim_replay_of_a_released_frame_is_refused() {
+        let mut gate = gate();
+        let payload = payload();
+        let token = signed(&payload);
+        let bytes = payload.encode();
+
+        gate.release(&bytes, Some(&token), 10_050)
+            .expect("the first presentation is honest and releases");
+
+        // Same bytes, same signature, still inside the validity window: nothing
+        // about the frame itself has become invalid.
+        let replayed = gate.release(&bytes, Some(&token), 10_060);
+        assert_eq!(
+            replayed,
+            Err(RosBoundCommandRefusal::SequenceNotAdvanced {
+                presented: 10,
+                last_released: 10,
+            }),
+            "a captured frame must not be releasable twice"
+        );
+
+        // Still inside the window — so the refusal above is replay protection,
+        // not expiry doing the work. Without this the test would pass for the
+        // wrong reason as soon as the fixture's timings drifted.
+        assert!(10_060 < payload.expires_at_ms);
+
+        assert_eq!(gate.last_released_nonce(), Some(9001));
+        assert_eq!(gate.last_released_sequence(), Some(10));
+    }
+
+    /// A refused frame does not consume the identity it presented.
+    ///
+    /// The complement of the burn: if a refusal advanced the watermark, anyone
+    /// able to inject one malformed frame could burn a range of sequence and
+    /// nonce values and lock out the legitimate governor — turning replay
+    /// protection into a denial-of-service primitive.
+    #[test]
+    fn a_refused_frame_does_not_burn_the_identity_it_presented() {
+        let mut gate = gate();
+        let honest = payload();
+
+        // Refused for a bad signature — signed with the wrong key.
+        let impostor = SigningKey::from_bytes(&[7u8; 32]);
+        let forged = issue_ros_bound_command_release(&honest, &impostor);
+        assert!(gate
+            .release(&honest.encode(), Some(&forged), 10_050)
+            .is_err());
+
+        // The same sequence and nonce, honestly signed, must still work.
+        let token = signed(&honest);
+        assert_eq!(
+            gate.release(&honest.encode(), Some(&token), 10_050),
+            Ok(honest),
+            "a rejected impostor must not be able to burn the governor's next nonce"
+        );
+    }
+
     #[test]
     fn gate_rejects_profile_mismatch_without_advancing() {
         let mut gate = gate();
