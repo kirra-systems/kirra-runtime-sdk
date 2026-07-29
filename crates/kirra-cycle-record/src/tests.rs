@@ -50,6 +50,7 @@ fn release(scan: u64, seq: u64) -> ReleaseEvent {
         expires_at_ms: 2_000 + scan,
         t_wall_ms: 1_040 + scan,
         stage_duration_ms: 8,
+        gateway_capture_ref: None,
     }
 }
 
@@ -405,4 +406,227 @@ fn malformed_jsonl_lines_are_reported_with_line_numbers_not_dropped() {
 fn the_stage_tag_discriminates_the_wire_format() {
     let json = serde_json::to_string(&StageEvent::Release(release(1, 10))).unwrap();
     assert!(json.contains("\"stage\":\"release\""), "{json}");
+}
+
+// ---------------------------------------------------------------------------
+// Chain-consistency replay (option 1)
+// ---------------------------------------------------------------------------
+
+mod replay {
+    use super::*;
+    use crate::consistency::{verify_artifact, verify_record, ConsistencyFinding};
+
+    /// The acceptance property: replay reproduces the classification and every
+    /// finding deterministically, without inventing missing stage data.
+    #[test]
+    fn a_clean_artifact_verifies_clean_and_deterministically() {
+        let recs = join_cycles(&full_cycle(7, 100));
+        let s1 = verify_artifact(&recs);
+        let s2 = verify_artifact(&recs);
+        assert_eq!(s1, s2, "replay is deterministic");
+        assert!(s1.is_consistent(), "{:#?}", s1.findings);
+        assert_eq!((s1.records, s1.complete, s1.partial), (1, 1, 0));
+    }
+
+    /// A legitimate partial (refusal → no downstream) verifies CLEAN: absence
+    /// caused by an upstream refusal is the expected chronology, not a finding.
+    #[test]
+    fn a_refusal_partial_is_consistent_not_a_finding() {
+        let mut refused = proposal(9);
+        refused.admitted = false;
+        refused.verdict = "MRCFallback".to_string();
+        let recs = join_cycles(&[
+            StageEvent::Perception(perception(9)),
+            StageEvent::Proposal(refused),
+        ]);
+        assert!(verify_artifact(&recs).is_consistent());
+    }
+
+    /// The single highest-value cross-stage check: the released command must
+    /// respect the stabilized cap perception reported. No single stream can
+    /// see this — it spans three processes.
+    #[test]
+    fn a_release_faster_than_the_stabilized_cap_is_found() {
+        let mut r = release(7, 100);
+        r.linear_mps = 2.0; // cap is 0.8
+        let recs = join_cycles(&[
+            StageEvent::Perception(perception(7)),
+            StageEvent::Proposal(proposal(7)),
+            StageEvent::Release(r),
+        ]);
+        let findings = verify_record(&recs[0]);
+        assert!(
+            findings.iter().any(|f| matches!(
+                f,
+                ConsistencyFinding::ReleasedCommandExceedsStabilizedCap { .. }
+            )),
+            "{findings:#?}"
+        );
+    }
+
+    /// Admission gates release — a release for an unadmitted proposal is the
+    /// chain's core violation.
+    #[test]
+    fn a_release_without_admission_is_found() {
+        let mut refused = proposal(7);
+        refused.admitted = false;
+        refused.verdict = "MRCFallback".to_string();
+        let recs = join_cycles(&[
+            StageEvent::Proposal(refused),
+            StageEvent::Release(release(7, 100)),
+        ]);
+        let findings = verify_record(&recs[0]);
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, ConsistencyFinding::ReleaseWithoutAdmission { .. })),
+            "{findings:#?}"
+        );
+    }
+
+    /// "Actuated what was authorized" admits no epsilon — bit compare.
+    #[test]
+    fn an_actuation_differing_from_the_release_is_found() {
+        let mut a = actuation(100);
+        a.issued_linear_mps = Some(0.4000001);
+        let mut events = full_cycle(7, 100);
+        events.pop();
+        events.push(StageEvent::Actuation(a));
+        let recs = join_cycles(&events);
+        let findings = verify_record(&recs[0]);
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, ConsistencyFinding::ActuationDiffersFromRelease { .. })),
+            "{findings:#?}"
+        );
+    }
+
+    /// A refusal that claims issued_* values has invented data.
+    #[test]
+    fn a_refusal_claiming_an_issued_command_is_found() {
+        let a = ActuationEvent {
+            release_sequence: 100,
+            release_nonce: 700,
+            outcome: ActuationOutcome::Refused {
+                reason: "SIG".to_string(),
+            },
+            issued_linear_mps: Some(0.4),
+            issued_angular_rad_s: None,
+            t_wall_ms: 1_050,
+        };
+        let mut events = full_cycle(7, 100);
+        events.pop();
+        events.push(StageEvent::Actuation(a));
+        let recs = join_cycles(&events);
+        assert!(verify_record(&recs[0])
+            .iter()
+            .any(|f| matches!(f, ConsistencyFinding::RefusalClaimsIssuedCommand)));
+    }
+
+    /// Tamper detection: an artifact whose recorded completeness disagrees
+    /// with its own embedded stages is detected, not trusted.
+    #[test]
+    fn a_hand_edited_completeness_claim_is_detected() {
+        let mut recs = join_cycles(&full_cycle(7, 100));
+        recs[0].completeness = Completeness::Partial {
+            missing: vec![Stage::Release],
+        };
+        let findings = verify_record(&recs[0]);
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, ConsistencyFinding::CompletenessMisstated { .. })),
+            "{findings:#?}"
+        );
+    }
+
+    /// Tamper detection: stripping a derivable chain anomaly from the artifact
+    /// is detected (the recorded set may be larger — join-time-only classes —
+    /// but never smaller than what the embedded stages prove).
+    #[test]
+    fn a_stripped_chain_anomaly_is_detected() {
+        let mut p = perception(4);
+        p.evidence_digest = "11".repeat(32);
+        let mut recs = join_cycles(&[StageEvent::Perception(p), StageEvent::Proposal(proposal(4))]);
+        recs[0].anomalies.clear(); // the hand edit
+        assert!(verify_record(&recs[0])
+            .iter()
+            .any(|f| matches!(f, ConsistencyFinding::AnomalySetMisstated { .. })));
+    }
+
+    /// Downstream without upstream: an actuation with no release on a GENUINE
+    /// scan is a chronology violation; on the sentinel record (liveness ramp)
+    /// it is the expected shape and NOT a finding.
+    #[test]
+    fn downstream_without_upstream_is_found_on_genuine_scans_only() {
+        // Genuine scan: release present, proposal absent.
+        let recs = join_cycles(&[StageEvent::Release(release(7, 100))]);
+        assert!(verify_record(&recs[0])
+            .iter()
+            .any(|f| matches!(f, ConsistencyFinding::DownstreamWithoutUpstream { .. })));
+
+        // Sentinel record: the liveness ramp's orphan actuation verifies clean.
+        let ramp = ActuationEvent {
+            release_sequence: 0,
+            release_nonce: 0,
+            outcome: ActuationOutcome::LivenessRamp,
+            issued_linear_mps: Some(0.1),
+            issued_angular_rad_s: Some(0.0),
+            t_wall_ms: 5_000,
+        };
+        let recs = join_cycles(&[StageEvent::Actuation(ramp)]);
+        assert_eq!(recs[0].scan_sequence, RESERVED_UNBOUND_SCAN);
+        assert!(
+            verify_record(&recs[0]).is_empty(),
+            "the ramp's expected absence is not a finding"
+        );
+    }
+
+    /// The sentinel is RESERVED in the schema: a producer emitting a genuine
+    /// stage event with scan 0 is recorded as an anomaly at join time.
+    #[test]
+    fn a_genuine_event_claiming_the_sentinel_is_an_anomaly() {
+        let recs = join_cycles(&[StageEvent::Perception(perception(0))]);
+        assert!(recs
+            .iter()
+            .any(|r| r.anomalies.iter().any(|a| a.field == "scan_sequence")));
+    }
+
+    /// Option-3 composition, additive: a present ref must bind THIS cycle's
+    /// digest; an absent ref weakens nothing.
+    #[test]
+    fn a_capture_ref_binding_the_wrong_digest_is_found_and_absence_is_clean() {
+        let mut r = release(7, 100);
+        r.gateway_capture_ref = Some(CaptureRecordRef {
+            decision_seq: 42,
+            proposal_digest: "22".repeat(32), // not this cycle's 0xbb
+            source: "captures/session.jsonl".to_string(),
+        });
+        let mut events = full_cycle(7, 100);
+        events[2] = StageEvent::Release(r);
+        let recs = join_cycles(&events);
+        assert!(verify_record(&recs[0])
+            .iter()
+            .any(|f| matches!(f, ConsistencyFinding::CaptureRefDigestMismatch { .. })));
+
+        // Absence: the plain full cycle (no ref) is consistent.
+        let plain = join_cycles(&full_cycle(7, 100));
+        assert!(verify_artifact(&plain).is_consistent());
+    }
+
+    /// An artifact round-trips through JSON with the ref present — the
+    /// additive field does not break older readers' shape.
+    #[test]
+    fn the_capture_ref_is_additive_over_the_wire() {
+        // A pre-ref artifact (no field) parses into the new schema.
+        let old_json = serde_json::to_string(&join_cycles(&full_cycle(7, 100))).unwrap();
+        let back: Vec<JoinedCycleRecord> = serde_json::from_str(&old_json).unwrap();
+        assert!(back[0]
+            .release
+            .as_ref()
+            .unwrap()
+            .gateway_capture_ref
+            .is_none());
+    }
 }

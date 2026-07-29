@@ -2444,6 +2444,7 @@ version = "0.1.0"
 dependencies = [
  "kirra-capture-schema",
  "kirra-core",
+ "kirra-cycle-record",
  "kirra-verifier",
  "serde_json",
 ]

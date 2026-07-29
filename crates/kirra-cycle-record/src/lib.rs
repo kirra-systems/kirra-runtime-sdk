@@ -44,6 +44,16 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// The RESERVED scan sentinel. `scan_sequence = 0` means "not bound to any
+/// scan" and may appear ONLY on joiner-synthesized records (the liveness ramp,
+/// whose causal input is the ABSENCE of a release). A producer must never emit
+/// a genuine stage event carrying 0 — the planner sidecar already refuses a
+/// zero `scan_sequence` fail-closed ("NO MOTION"), and [`join_cycles`] records
+/// an anomaly on any stage event that violates the reservation. A sentinel
+/// that were merely a convention could be shadowed by a real cycle; a reserved
+/// one cannot.
+pub const RESERVED_UNBOUND_SCAN: u64 = 0;
+
 // ---------------------------------------------------------------------------
 // Stage events — what each witness can honestly attest
 // ---------------------------------------------------------------------------
@@ -121,6 +131,32 @@ pub struct ReleaseEvent {
     pub t_wall_ms: u64,
     /// Verifier round trip as the witness measured it (ms).
     pub stage_duration_ms: u64,
+    /// Optional digest-bound reference to the verifier's own capture record
+    /// for this decision (see [`CaptureRecordRef`]). Additive: absent on
+    /// existing artifacts, and absence weakens no consistency check.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub gateway_capture_ref: Option<CaptureRecordRef>,
+}
+
+/// A digest-bound REFERENCE to a verifier gateway capture record — the
+/// additive path to composed replay (option 3), reserved WITHOUT embedding.
+///
+/// The joined cycle record proves chain continuity and operational outcome;
+/// the verifier capture supports bit-identical decision recomputation. They
+/// stay separate artifacts — embedding one in the other would create a second
+/// transport path for capture data and blur two retention/coupling profiles.
+/// This reference lets a replay tool RESOLVE and verify the separate artifact
+/// when present; its absence weakens nothing (the joined-cycle consistency
+/// checks do not depend on it).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaptureRecordRef {
+    /// The verifier capture stream's per-decision sequence.
+    pub decision_seq: u64,
+    /// The proposal digest this reference binds — must equal the carrying
+    /// release's own digest, so a ref cannot point at another cycle's capture.
+    pub proposal_digest: String,
+    /// Where the referenced capture stream lives (a path or bundle id).
+    pub source: String,
 }
 
 /// The actuation stage, witnessed by the motor consumer — the only process
@@ -284,6 +320,26 @@ pub fn join_cycles(events: &[StageEvent]) -> Vec<JoinedCycleRecord> {
     };
 
     for ev in events {
+        // The reservation is enforced at join time, not just documented: a
+        // genuine stage event carrying the sentinel is recorded as an anomaly
+        // on the (sentinel-keyed) record rather than silently blending into
+        // liveness-ramp territory.
+        let claimed_scan = match ev {
+            StageEvent::Perception(p) => Some(p.scan_sequence),
+            StageEvent::Proposal(pr) => Some(pr.scan_sequence),
+            StageEvent::Release(r) => Some(r.scan_sequence),
+            StageEvent::Actuation(_) => None,
+        };
+        if claimed_scan == Some(RESERVED_UNBOUND_SCAN) {
+            entry(&mut by_scan, RESERVED_UNBOUND_SCAN);
+            let rec = by_scan.get_mut(&RESERVED_UNBOUND_SCAN).expect("inserted");
+            rec.anomalies.push(JoinAnomaly {
+                field: "scan_sequence".to_string(),
+                detail: "a stage event claimed the RESERVED sentinel scan 0; \
+                         producers must never emit it for a genuine cycle"
+                    .to_string(),
+            });
+        }
         match ev {
             StageEvent::Perception(p) => {
                 entry(&mut by_scan, p.scan_sequence);
@@ -636,6 +692,8 @@ pub fn parse_events_jsonl(jsonl: &str) -> (Vec<StageEvent>, Vec<(usize, String)>
     }
     (events, errors)
 }
+
+pub mod consistency;
 
 #[cfg(test)]
 mod tests;
