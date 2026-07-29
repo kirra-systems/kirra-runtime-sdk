@@ -182,6 +182,10 @@ hyper = "1"
 hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 
 [dev-dependencies]
+# #1215 consumer-geometry conformance (src/gateway/deployment_geometry): the root
+# crate sees both sides of every cited-copy boundary, so the checks live here.
+kirra-trajectory = { path = "crates/kirra-trajectory" }
+kirra-taj = { path = "crates/kirra-taj" }
 rand = "0.8"
 proptest = "1"
 # ADR-0035 slice 4: enable kirra-persistence's `test-support` feature for the root

@@ -266,6 +266,13 @@ impl VehicleConfig {
     pub fn r2() -> Self {
         Self {
             // MEASURED ~9 in front-to-rear (KIRRA_R2_WHEELBASE_M). (r2.wheelbase)
+            // GEOMETRY IS A CHECKED COPY (#1215): this crate cannot import the
+            // root's `contract_for`, so these values are cited copies — and the
+            // root-crate conformance test
+            // `deployment_geometry::the_checker_r2_config_is_the_contract_plus_its_declared_margin`
+            // asserts each equals the canonical contract plus the DECLARED
+            // margin (`CHECKER_R2_COLLISION_MARGIN`: lateral +0.0005 rounding
+            // headroom, longitudinal none). Edit the contract, not these.
             wheelbase_m: 0.229,
             // VALIDATION-PENDING: wheel track NOT bench-measured; estimate < body width.
             track_width_m: 0.16,

@@ -97,13 +97,15 @@ fn a_region_is_never_smaller_than_the_body_it_bounds() {
 
         assert!(
             region.covers_physical_body(),
-            "{reason}: region {}x{} does not cover the body {}x{}",
-            region.half_length_m,
+            "{reason}: region {}/{}x{} does not cover the body {}x{}",
+            region.front_extent_m,
+            region.rear_extent_m,
             region.half_width_m,
             physical.half_length_m(),
             physical.half_width_m()
         );
-        assert!(region.half_length_m >= physical.half_length_m());
+        assert!(region.front_extent_m >= physical.half_length_m());
+        assert!(region.rear_extent_m >= physical.half_length_m());
         assert!(region.half_width_m >= physical.half_width_m());
     }
 }
@@ -126,7 +128,7 @@ fn the_doer_envelope_is_the_checker_envelope_plus_a_named_margin() {
     );
 
     assert!(
-        doer.half_length_m > checker.half_length_m,
+        doer.front_extent_m > checker.front_extent_m && doer.rear_extent_m > checker.rear_extent_m,
         "the doer envelope must be strictly more conservative longitudinally"
     );
     assert!(
@@ -167,7 +169,8 @@ fn changing_the_contract_changes_every_derived_region_and_preserves_each_margin(
         "the collision region did not follow the contract width"
     );
     assert!(
-        collision_after.half_length_m > collision_before.half_length_m,
+        collision_after.front_extent_m > collision_before.front_extent_m
+            && collision_after.rear_extent_m > collision_before.rear_extent_m,
         "the collision region did not follow the contract length"
     );
     // The MARGIN POLICY is preserved — the region grew by the body's growth, not
@@ -179,8 +182,8 @@ fn changing_the_contract_changes_every_derived_region_and_preserves_each_margin(
         "the declared lateral margin changed when only the body should have"
     );
     assert_eq!(
-        collision_after.half_length_m - after.half_length_m(),
-        collision_before.half_length_m - before.half_length_m(),
+        collision_after.front_extent_m - after.half_length_m(),
+        collision_before.front_extent_m - before.half_length_m(),
         "the declared longitudinal margin changed when only the body should have"
     );
 
@@ -420,4 +423,101 @@ fn the_self_filter_radius_is_the_body_half_diagonal() {
     assert!(region.max_vertex_radius_m > hl);
     assert!(region.max_vertex_radius_m > hw);
     assert!(region.max_vertex_radius_m.is_finite());
+}
+
+// ---------------------------------------------------------------------------
+// Asymmetry: the robotaxi shape, and the rule max-never-average
+// ---------------------------------------------------------------------------
+
+/// The frozen reference class's actual shape: wheelbase 2.8, overhangs 0.9 /
+/// 1.1 — ASYMMETRIC. The class with the most authority is precisely where a
+/// symmetric description under-covers.
+fn robotaxi_like() -> VehicleKinematicsContract {
+    VehicleKinematicsContract {
+        max_speed_mps: 35.0,
+        max_accel_mps2: 2.5,
+        max_brake_mps2: 6.0,
+        max_steering_deg: 35.0,
+        max_steering_rate_deg_s: 45.0,
+        min_follow_distance_m: 5.0,
+        max_lateral_accel_mps2: 3.5,
+        wheelbase_m: 2.8,
+        width_m: 1.9,
+        length_m: 4.8,
+        overhang_front_m: 0.9,
+        overhang_rear_m: 1.1,
+        odd_speed_cap_mps: None,
+    }
+}
+
+/// A symmetric abstraction may exist only as a deliberately conservative
+/// derived bound: `max(front_extent, rear_extent)`, never the average.
+///
+/// For the robotaxi in the rear-axle frame the difference is not subtle —
+/// front extent 3.7, rear extent 1.1. The average (2.4) under-covers the front
+/// by 1.3 m while looking like a plausible half-length (it equals length/2).
+#[test]
+fn the_symmetric_bound_is_the_max_of_the_extents_never_the_average() {
+    let physical = PhysicalFootprint::from_contract(&robotaxi_like());
+    let region = CollisionRegion::rear_axle_origin(physical, Margin::NONE);
+
+    assert_eq!(region.front_extent_m, 2.8 + 0.9);
+    assert_eq!(region.rear_extent_m, 1.1);
+
+    let symmetric = region.conservative_symmetric_half_length_m();
+    assert_eq!(
+        symmetric,
+        region.front_extent_m.max(region.rear_extent_m),
+        "the symmetric bound must be the max of the extents"
+    );
+
+    let average = (region.front_extent_m + region.rear_extent_m) / 2.0;
+    assert!(
+        symmetric > average,
+        "for an asymmetric body the max must exceed the average — if these are \
+         equal the body is symmetric and this test's premise has changed"
+    );
+    // The average is exactly the trap: it equals length/2, which LOOKS right.
+    assert!((average - physical.half_length_m()).abs() < 1e-12);
+    // The max covers both real extents; the average does not cover the front.
+    assert!(symmetric >= region.front_extent_m && symmetric >= region.rear_extent_m);
+    assert!(average < region.front_extent_m);
+}
+
+/// The longer extent is never reduced by taking the symmetric bound — the
+/// robotaxi-specific regression the asymmetry finding called for.
+#[test]
+fn the_robotaxi_longer_extent_survives_the_symmetric_abstraction() {
+    let physical = PhysicalFootprint::from_contract(&robotaxi_like());
+    let region = CollisionRegion::rear_axle_origin(physical, Margin::NONE);
+
+    assert!(
+        region.conservative_symmetric_half_length_m() >= region.front_extent_m,
+        "the symmetric bound reduced the longer (front) extent"
+    );
+    assert!(
+        !physical.centre_origin_is_exact(),
+        "robotaxi's overhangs are asymmetric; if this becomes exact the shape changed"
+    );
+    // And the shortfall a naive symmetric-about-the-axle description would
+    // carry is quantified, not merely flagged.
+    assert!((physical.centre_origin_shortfall_m() - 0.1).abs() < 1e-12);
+}
+
+/// The rear-axle collision region covers the physical body in ITS OWN frame —
+/// the centre-origin cover check would be the wrong comparison here.
+#[test]
+fn the_rear_axle_region_covers_the_asymmetric_body() {
+    let physical = PhysicalFootprint::from_contract(&robotaxi_like());
+    for margin in [
+        Margin::NONE,
+        Margin::new("proposal envelope", 0.05, 0.03).expect("valid"),
+    ] {
+        let region = CollisionRegion::rear_axle_origin(physical, margin);
+        assert!(region.covers_physical_body(), "margin {:?}", margin.reason);
+        // Membership at the true corners, which a symmetric-average region
+        // would reject at the front.
+        assert!(region.contains(physical.forward_extent_from_rear_axle_m(), 0.0));
+        assert!(region.contains(-physical.rearward_extent_from_rear_axle_m(), 0.0));
+    }
 }

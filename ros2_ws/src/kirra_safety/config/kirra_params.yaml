@@ -99,9 +99,16 @@ occy_doer:
     # braking, 2.5x speed ceiling). The explicit numbers below still win for the
     # fields they name; this selects the band for the fields they do not.
     vehicle_class: "r2"                         # doer RSS-band label; numbers below win
-    wheelbase_m: 0.229                          # MEASURED ~9 in (front-to-rear CONFIRM pending)
-    half_length_m: 0.17                         # MEASURED body 13 in=0.330 m -> half 0.165 + margin
-    half_width_m: 0.11                          # MEASURED body 8 in=0.203 m -> half 0.102 + margin
+    # #1215: these three are CHECKED COPIES of the r2 contract. The margin is no
+    # longer anonymous — it is DOER_R2_PROPOSAL_MARGIN (src/gateway/
+    # deployment_geometry.rs): +0.005 m longitudinal, +0.0085 m lateral over the
+    # physical half-extents, so the doer proposes within a larger body than the
+    # checker demands. A root-crate test parses THIS file and fails if these
+    # values stop equalling contract + that margin. Edit the contract (and the
+    # declared margin if the policy changes), not these numbers.
+    wheelbase_m: 0.229                          # MEASURED ~9 in == contract (also the #1219 latch value)
+    half_length_m: 0.17                         # = contract half 0.165 + 0.005 declared margin
+    half_width_m: 0.11                          # = contract half 0.1015 + 0.0085 declared margin
     max_steering_deg: 39.0                      # MEASURED full lock ~39 deg (0.68 rad) @ cmd +/-45 (calib Phase C)
     lateral_clearance_target_m: 0.15            # robot-scale (was courier 0.6)
     rss_lateral_alignment_tolerance_m: 0.15     # robot-scale (was courier 0.6)
@@ -124,7 +131,9 @@ perception_governor:
     decel_mps2: 1.5              # assumed comfortable brake for the ACD cap
     margin_m: 0.4                # standoff distance (matches the checker's lateral margin)
     lane_half_m: 0.26            # scalar forward-object lane gate
-    vehicle_width_m: 0.203       # measured R2 body width
+    vehicle_width_m: 0.203       # FULL contract width (NOT a half-extent — feeds
+                                 # required_corridor_width = width + 2*clearance;
+                                 # checked against the contract by #1215 conformance)
     lateral_clearance_m: 0.15    # required clearance on each side
     confidence_floor: 0.5        # below this -> unhealthy -> 0.0 cap
     # #1212: cap_rise_rate_mps_per_s / cap_restriction_epsilon_mps /

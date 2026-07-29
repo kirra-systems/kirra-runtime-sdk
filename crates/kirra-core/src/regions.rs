@@ -257,7 +257,13 @@ impl From<&PhysicalFootprint> for VehicleFootprint {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CollisionRegion {
     pub frame: Frame,
-    pub half_length_m: f64,
+    /// Forward extent from the frame origin. Kept SEPARATE from the rearward
+    /// extent so an asymmetric body (robotaxi: overhangs 0.9 / 1.1) is never
+    /// silently averaged into a symmetric one — the average under-covers the
+    /// longer end while reporting a plausible number.
+    pub front_extent_m: f64,
+    /// Rearward extent from the frame origin (a positive distance).
+    pub rear_extent_m: f64,
     pub half_width_m: f64,
     pub margin: Margin,
     /// The body this was derived from, retained so the relationship stays
@@ -267,35 +273,82 @@ pub struct CollisionRegion {
 
 impl CollisionRegion {
     /// Build from the canonical footprint plus a named margin, in the
-    /// centre-origin convention.
+    /// centre-origin convention. Front and rear extents are each `length/2`
+    /// BY DEFINITION of the geometric centre — the asymmetry hazard for this
+    /// constructor lives in where the ORIGIN is placed, not in the extents;
+    /// see [`PhysicalFootprint::centre_origin_is_exact`].
     #[must_use]
     pub fn centre_origin(physical: PhysicalFootprint, margin: Margin) -> Self {
         Self {
             frame: Frame::GeometricCentreBody,
-            half_length_m: physical.half_length_m() + margin.longitudinal_m,
+            front_extent_m: physical.half_length_m() + margin.longitudinal_m,
+            rear_extent_m: physical.half_length_m() + margin.longitudinal_m,
             half_width_m: physical.half_width_m() + margin.lateral_m,
             margin,
             physical,
         }
     }
 
+    /// Build in the rear-axle convention, preserving the body's true
+    /// asymmetry: forward is `wheelbase + overhang_front`, rearward is
+    /// `overhang_rear`. The honest description of an asymmetric body, and the
+    /// only correct one for the robotaxi class.
+    #[must_use]
+    pub fn rear_axle_origin(physical: PhysicalFootprint, margin: Margin) -> Self {
+        Self {
+            frame: Frame::RearAxleBody,
+            front_extent_m: physical.forward_extent_from_rear_axle_m() + margin.longitudinal_m,
+            rear_extent_m: physical.rearward_extent_from_rear_axle_m() + margin.longitudinal_m,
+            half_width_m: physical.half_width_m() + margin.lateral_m,
+            margin,
+            physical,
+        }
+    }
+
+    /// The symmetric half-length as a DELIBERATELY CONSERVATIVE derived bound:
+    /// `max(front_extent, rear_extent)`, never the average.
+    ///
+    /// A consumer that structurally requires one symmetric number (the doer's
+    /// `half_length_m` parameter) must take it from here. The average would
+    /// under-cover the longer end of an asymmetric body — for the robotaxi's
+    /// 0.9 / 1.1 overhang split, by a real margin — while reporting a value
+    /// that looks right. `max` over-covers the shorter end instead, which is
+    /// the only acceptable direction for a bound.
+    #[must_use]
+    pub fn conservative_symmetric_half_length_m(&self) -> f64 {
+        self.front_extent_m.max(self.rear_extent_m)
+    }
+
     /// Whether an object at `(x, y)` in this region's frame is a collision
-    /// candidate.
+    /// candidate. `+x` forward, so the rearward test is against
+    /// `-rear_extent_m`.
     #[must_use]
     pub fn contains(&self, x_m: f64, y_m: f64) -> bool {
         x_m.is_finite()
             && y_m.is_finite()
-            && x_m.abs() <= self.half_length_m
+            && x_m <= self.front_extent_m
+            && x_m >= -self.rear_extent_m
             && y_m.abs() <= self.half_width_m
     }
 
-    /// A region must never be smaller than the body it bounds. Holds by
-    /// construction given a validated [`Margin`]; asserted anyway, because
-    /// "holds by construction" is a claim that survives only until someone adds
-    /// a constructor.
+    /// A region must never be smaller than the body it bounds — checked in the
+    /// region's OWN frame, since the extents mean different things in each.
+    /// Holds by construction given a validated [`Margin`]; asserted anyway,
+    /// because "holds by construction" survives only until someone adds a
+    /// constructor.
     #[must_use]
     pub fn covers_physical_body(&self) -> bool {
-        self.half_length_m >= self.physical.half_length_m()
+        let (body_front, body_rear) = match self.frame {
+            Frame::GeometricCentreBody => {
+                (self.physical.half_length_m(), self.physical.half_length_m())
+            }
+            Frame::RearAxleBody | Frame::Sensor => (
+                self.physical.forward_extent_from_rear_axle_m(),
+                self.physical.rearward_extent_from_rear_axle_m(),
+            ),
+        };
+        self.front_extent_m >= body_front
+            && self.rear_extent_m >= body_rear
             && self.half_width_m >= self.physical.half_width_m()
     }
 }
