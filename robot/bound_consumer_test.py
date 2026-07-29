@@ -465,7 +465,7 @@ def test_bound_consumer_refuses_bad_key_and_digest_before_calling_c():
     from kirra_ffi import BoundKirraConsumer
 
     good_kwargs = dict(
-        maximum_token_lifetime_ms=200, control_period_ms=100, missed_periods=3,
+        maximum_token_lifetime_ms=200, boot_wall_ms=0, control_period_ms=100, missed_periods=3,
         stop_decel_mps2=1.0, vx_max=0.15, vz_max=0.4,
         lib_path="/nonexistent/libkirra_consumer_ffi.so",
     )
@@ -516,8 +516,9 @@ def test_bound_consumer_passes_the_pinned_profile_bytes_to_the_constructor():
         digest = bytes.fromhex(PROFILE_HEX)
         consumer = kirra_ffi.BoundKirraConsumer(
             vk, digest,
-            maximum_token_lifetime_ms=200, control_period_ms=100, missed_periods=3,
-            stop_decel_mps2=1.0, vx_max=0.15, vz_max=0.4, lib_path="ignored",
+            maximum_token_lifetime_ms=200, boot_wall_ms=0, control_period_ms=100,
+            missed_periods=3, stop_decel_mps2=1.0, vx_max=0.15, vz_max=0.4,
+            lib_path="ignored",
         )
         assert seen["vk"] == vk
         assert seen["digest"] == digest, "the pinned profile digest must pass through byte-for-byte"
@@ -550,7 +551,7 @@ def test_bound_consumer_treats_null_handle_as_fail_closed():
     try:
         kirra_ffi.BoundKirraConsumer(
             b"\x01" * VK_LEN, b"\x02" * DIGEST_LEN,
-            maximum_token_lifetime_ms=200, control_period_ms=100, missed_periods=3,
+            maximum_token_lifetime_ms=200, boot_wall_ms=0, control_period_ms=100, missed_periods=3,
             stop_decel_mps2=1.0, vx_max=0.15, vz_max=0.4, lib_path="ignored",
         )
     except ValueError as e:

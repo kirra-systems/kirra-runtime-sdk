@@ -1,31 +1,26 @@
-//! #1214 — what a consumer restart does to replay protection.
+//! #1230 — what a consumer restart does to replay protection.
 //!
-//! The intended assertion for this test was:
+//! HISTORY: this file originally pinned the UNDESIRED behaviour — a restarted
+//! consumer accepted any pre-restart token still inside its own wall-clock
+//! lifetime, because all three gate watermarks are in-memory and expiry was
+//! the only refusal left standing. That made the post-restart replay window
+//! exactly `maximum_lifetime_ms` wide, i.e. a function of the CONFIGURABLE
+//! `KIRRA_FRESHNESS_WINDOW_MS` rather than of restart itself.
 //!
-//!     mint a token under epoch A → restart the consumer →
-//!     present the epoch-A token → REJECTED
+//! #1230 Part B closes that coupling: the gate now carries `boot_wall_ms`,
+//! and any token ISSUED before this process booted is refused with the
+//! distinct `TokenPredatesBoot` — regardless of how much signed lifetime it
+//! has left. A restart is a new trust epoch; pre-boot mints belong to the
+//! previous one.
 //!
-//! **The protocol cannot make that assertion true today**, and this file pins
-//! what actually happens instead. Writing the aspirational assertion and marking
-//! it ignored would be worse than useless: it would read as a covered case.
-//!
-//! The gate's three watermarks — `last_released_sequence`, `last_released_nonce`
-//! and `latest_perception_frame` — are in-memory. A restarted consumer therefore
-//! accepts any sequence, any nonce and any perception frame. The ONLY thing that
-//! refuses a pre-restart token is its own wall-clock lifetime, so the exposure
-//! window is exactly `maximum_lifetime_ms` wide and closes by expiry rather than
-//! by any restart-aware rule.
-//!
-//! In the shipped configuration that lifetime is 200 ms
-//! (`ROS_BOUND_RELEASE_LIFETIME_MS`) and a real process restart takes far
-//! longer, so this is not exploitable as configured. That is a **timing
-//! accident, not a designed invariant** — it depends on restart duration
-//! exceeding a configurable token lifetime, and a backward wall-clock step
-//! during the restart widens it further.
-//!
-//! The structural fix (a boot/session epoch bound into evidence identity and
-//! release tokens, so pre-restart tokens are invalid by construction) is
-//! tracked separately. See the issue cited in the tests below.
+//! HONEST SCOPE (why #1230 stays open): this is the INTERIM, not the
+//! structural fix. The comparison is same-clock-domain — sound on the
+//! ADR-0033 single-host topology — but time-anchored, so a backward wall
+//! step DURING the restart re-opens the window; that remainder is pinned
+//! below rather than hidden, exactly as this file once pinned the original
+//! gap. The structural fix (Part A: a boot epoch bound into the SIGNED
+//! payload, wire V3, refusal `TokenEpochMismatch`) is the ADR-0033 revision
+//! tracked on #1230.
 
 use ed25519_dalek::SigningKey;
 use kirra_release_token::ros_bound_command::{
@@ -57,104 +52,61 @@ fn payload() -> RosBoundCommandPayload {
     }
 }
 
-/// A restarted consumer is a NEW gate: same key, same pinned profile, no
-/// watermarks. This is what "restart" means throughout this file.
-fn restarted_consumer() -> RosBoundCommandGate {
-    RosBoundCommandGate::new(key().verifying_key(), PROFILE, MAXIMUM_LIFETIME_MS)
+/// A consumer process with a stated boot instant: same key, same pinned
+/// profile, no watermarks. This is what "restart" means throughout this file —
+/// every in-memory watermark is gone, and only `boot_wall_ms` distinguishes
+/// the new epoch from the old.
+fn consumer_booted_at(boot_wall_ms: u64) -> RosBoundCommandGate {
+    RosBoundCommandGate::new(
+        key().verifying_key(),
+        PROFILE,
+        MAXIMUM_LIFETIME_MS,
+        boot_wall_ms,
+    )
 }
 
-/// Documents the gap: a pre-restart token IS accepted after a restart while it
-/// remains inside its own wall-clock lifetime.
+/// THE FLIP (#1230 acceptance): a pre-restart token is refused after restart
+/// REGARDLESS of its remaining lifetime, with the distinct predates-boot code
+/// — not incidentally by expiry.
 ///
-/// This test asserts behaviour the project does not want. It exists so the gap
-/// is visible in the test suite rather than only in prose, and so that
-/// implementing epoch binding forces a deliberate edit here rather than silently
-/// leaving a stale expectation.
+/// This test previously asserted the opposite, deliberately, so that the fix
+/// would force this edit rather than leave a stale expectation.
 #[test]
-fn a_pre_restart_token_is_still_accepted_after_restart_within_its_lifetime() {
+fn a_pre_restart_token_is_refused_after_restart_despite_remaining_lifetime() {
     let payload = payload();
     let token = issue_ros_bound_command_release(&payload, &key());
     let bytes = payload.encode();
 
-    let mut before = restarted_consumer();
+    // Epoch A: consumer booted before the mint; releases normally.
+    let mut before = consumer_booted_at(9_000);
     before
         .release(&bytes, Some(&token), 10_050)
         .expect("released normally under epoch A");
 
-    // The consumer restarts. Every watermark is gone.
-    let mut after = restarted_consumer();
+    // Restart at 10_055 — AFTER the mint. The token still has ~140 ms of
+    // signed lifetime at now=10_060; that lifetime no longer matters.
+    let mut after = consumer_booted_at(10_055);
     let replayed = after.release(&bytes, Some(&token), 10_060);
 
-    assert!(
-        replayed.is_ok(),
-        "EXPECTED-BUT-UNDESIRED: a pre-restart token is accepted after restart. \
-         If this now fails, epoch binding has been implemented — update this test \
-         and the restart section of docs/safety/EVIDENCE_BINDING.md."
-    );
-}
-
-/// The only thing that closes the window: the token's own expiry.
-#[test]
-fn the_exposure_window_is_closed_by_expiry_not_by_any_restart_rule() {
-    let payload = payload();
-    let token = issue_ros_bound_command_release(&payload, &key());
-    let bytes = payload.encode();
-
-    let mut after = restarted_consumer();
-    let refused = after.release(&bytes, Some(&token), payload.expires_at_ms);
-
     assert_eq!(
-        refused,
-        Err(RosBoundCommandRefusal::Expired {
-            expires_at_ms: payload.expires_at_ms,
-            now_ms: payload.expires_at_ms,
+        replayed,
+        Err(RosBoundCommandRefusal::TokenPredatesBoot {
+            issued_at_ms: 10_000,
+            boot_wall_ms: 10_055,
         }),
-        "expiry is the sole bound on post-restart replay"
+        "a restart is a new trust epoch: pre-boot mints are refused at the \
+         boundary, not by waiting out their expiry"
     );
 }
 
-/// States the exposure numerically: the window is exactly the token lifetime,
-/// and it is a function of a CONFIGURABLE value rather than of restart itself.
-///
-/// This is the assertion that makes the risk legible. A deployment that raises
-/// `KIRRA_FRESHNESS_WINDOW_MS` widens the post-restart replay window by the same
-/// amount, which is not obvious from either the variable's name or its
-/// documentation.
+/// No bootstrap deadlock (#1230 acceptance): the first legitimately fresh
+/// token after a restart — minted at or after the boot instant — is admitted
+/// on the first cycle, and the gate then enforces its watermarks normally
+/// within the new epoch (non-vacuity: the refusals above must not be a gate
+/// that refuses everything).
 #[test]
-fn the_exposure_window_equals_the_token_lifetime() {
-    let payload = payload();
-    let token = issue_ros_bound_command_release(&payload, &key());
-    let bytes = payload.encode();
-
-    // Accepted at the last instant before expiry…
-    let mut just_inside = restarted_consumer();
-    assert!(just_inside
-        .release(&bytes, Some(&token), payload.expires_at_ms - 1)
-        .is_ok());
-
-    // …and refused at expiry. The window is [issued_at, expires_at).
-    let mut just_outside = restarted_consumer();
-    assert!(just_outside
-        .release(&bytes, Some(&token), payload.expires_at_ms)
-        .is_err());
-
-    assert_eq!(
-        payload.expires_at_ms - payload.issued_at_ms,
-        MAXIMUM_LIFETIME_MS,
-        "the exposure window IS the token lifetime, so raising the configured \
-         lifetime widens post-restart replay by the same amount"
-    );
-}
-
-/// The post-restart epoch does re-establish normally: a fresh token under new
-/// evidence is accepted, and the restarted gate then enforces its watermarks
-/// from that point.
-///
-/// Non-vacuity for the tests above — they must not be passing because the
-/// restarted gate accepts everything unconditionally.
-#[test]
-fn a_restarted_consumer_re_establishes_and_then_enforces_normally() {
-    let mut after = restarted_consumer();
+fn a_fresh_post_restart_token_is_admitted_and_the_epoch_then_enforces_normally() {
+    let mut consumer = consumer_booted_at(10_055);
 
     let mut fresh = payload();
     fresh.sequence = 500;
@@ -165,24 +117,102 @@ fn a_restarted_consumer_re_establishes_and_then_enforces_normally() {
     fresh.expires_at_ms = 50_000 + MAXIMUM_LIFETIME_MS;
     let fresh_token = issue_ros_bound_command_release(&fresh, &key());
 
-    after
+    consumer
         .release(&fresh.encode(), Some(&fresh_token), 50_050)
-        .expect("the new epoch's first token is accepted");
+        .expect("the new epoch's first token is accepted — no deadlock");
 
-    // …and the watermark is live again: the same frame replayed is refused.
+    // The watermark is live again: the same frame replayed is refused.
     assert!(
-        after
+        consumer
             .release(&fresh.encode(), Some(&fresh_token), 50_060)
             .is_err(),
         "the restarted gate must enforce replay protection within its own epoch"
     );
+}
 
-    // A pre-restart token from the OLD epoch is now refused too — but by the
-    // sequence watermark the new epoch established, not by anything that knows
-    // a restart happened. Had it arrived first, it would have been accepted.
-    let stale = payload();
-    let stale_token = issue_ros_bound_command_release(&stale, &key());
-    assert!(after
-        .release(&stale.encode(), Some(&stale_token), 50_070)
-        .is_err());
+/// The boundary is strict `<`: a token minted at EXACTLY the boot instant is
+/// admitted. The verifier minting in the same millisecond the consumer comes
+/// up is the current epoch, not the previous one.
+#[test]
+fn a_token_minted_at_the_boot_instant_is_admitted() {
+    let mut consumer = consumer_booted_at(10_000);
+    let p = payload(); // issued_at_ms == 10_000 == boot
+    let token = issue_ros_bound_command_release(&p, &key());
+    consumer
+        .release(&p.encode(), Some(&token), 10_050)
+        .expect("issued_at == boot is the current epoch");
+}
+
+/// A token that is BOTH pre-boot and expired is refused on every path.
+/// Pinned so a future reordering of the gate's checks cannot silently admit
+/// one of the two cases.
+#[test]
+fn a_pre_boot_and_expired_token_is_refused() {
+    let p = payload();
+    let token = issue_ros_bound_command_release(&p, &key());
+    let mut consumer = consumer_booted_at(10_055);
+    let refused = consumer.release(&p.encode(), Some(&token), p.expires_at_ms + 10);
+    assert!(refused.is_err(), "no path admits it: {refused:?}");
+}
+
+/// The exposure statement, updated: the window no longer scales with the
+/// configured token lifetime. Pre-Part-B, "one ms before expiry" was the
+/// just-inside acceptance that made the window equal the lifetime; now the
+/// boot instant refuses it however much lifetime remains — including under a
+/// ten-fold longer configured lifetime.
+#[test]
+fn the_exposure_window_no_longer_scales_with_the_configured_lifetime() {
+    let p = payload();
+    let token = issue_ros_bound_command_release(&p, &key());
+    let mut just_after_boot = consumer_booted_at(p.issued_at_ms + 1);
+    assert!(matches!(
+        just_after_boot.release(&p.encode(), Some(&token), p.expires_at_ms - 1),
+        Err(RosBoundCommandRefusal::TokenPredatesBoot { .. })
+    ));
+
+    let mut long = payload();
+    long.expires_at_ms = long.issued_at_ms + 10 * MAXIMUM_LIFETIME_MS;
+    let long_token = issue_ros_bound_command_release(&long, &key());
+    let mut consumer = RosBoundCommandGate::new(
+        key().verifying_key(),
+        PROFILE,
+        10 * MAXIMUM_LIFETIME_MS,
+        long.issued_at_ms + 1,
+    );
+    assert!(matches!(
+        consumer.release(&long.encode(), Some(&long_token), long.issued_at_ms + 500),
+        Err(RosBoundCommandRefusal::TokenPredatesBoot { .. })
+    ));
+}
+
+/// THE HONEST REMAINDER (Part A's justification, kept visible): a backward
+/// wall-clock step DURING the restart re-opens the window. If the clock steps
+/// back far enough that the consumer's recorded boot instant precedes the
+/// token's mint time, the predates-boot rule is blind by construction and
+/// only expiry is left — the pre-Part-B behaviour, restored by the clock
+/// rather than by any code change.
+///
+/// This test asserts behaviour the project does not want, exactly as this
+/// file's original test did for the un-guarded gate: the gap stays visible in
+/// the suite until Part A (the boot epoch in the SIGNED payload, which no
+/// clock step can forge) closes it. When `TokenEpochMismatch` exists, this
+/// test flips.
+#[test]
+fn a_backward_clock_step_across_restart_reopens_the_window() {
+    let p = payload(); // minted at 10_000
+    let token = issue_ros_bound_command_release(&p, &key());
+
+    // The restart happens after the mint, but the wall clock stepped back:
+    // the consumer records boot at 9_990 — BEFORE the mint it is trying to
+    // fence off.
+    let mut consumer = consumer_booted_at(9_990);
+    let replayed = consumer.release(&p.encode(), Some(&token), 10_050);
+
+    assert!(
+        replayed.is_ok(),
+        "EXPECTED-BUT-UNDESIRED: a backward clock step across the restart \
+         defeats the time-anchored boot fence. If this now fails, Part A \
+         (structural epoch binding) has landed — update this test and \
+         docs/safety/EVIDENCE_BINDING.md §4.7."
+    );
 }

@@ -240,6 +240,11 @@ const BOUND_REF_SEQUENCE_NOT_ADVANCED: i32 = 107;
 const BOUND_REF_NONCE_NOT_ADVANCED: i32 = 108;
 const BOUND_REF_PROFILE_DIGEST_MISMATCH: i32 = 109;
 const BOUND_REF_PERCEPTION_FRAME_SUPERSEDED: i32 = 110;
+/// #1230 Part B: the token was minted before this consumer process booted.
+/// Distinct from EXPIRED (105) because the operator responses differ: 105
+/// means the loop is slow; 111 means a restart happened and pre-boot traffic
+/// is being correctly discarded.
+const BOUND_REF_TOKEN_PREDATES_BOOT: i32 = 111;
 
 fn bound_refusal_code(refusal: &RosBoundCommandRefusal) -> i32 {
     match refusal {
@@ -250,6 +255,7 @@ fn bound_refusal_code(refusal: &RosBoundCommandRefusal) -> i32 {
         }
         RosBoundCommandRefusal::Undecodable(_) => BOUND_REF_UNDECODABLE,
         RosBoundCommandRefusal::FutureIssued { .. } => BOUND_REF_FUTURE_ISSUED,
+        RosBoundCommandRefusal::TokenPredatesBoot { .. } => BOUND_REF_TOKEN_PREDATES_BOOT,
         RosBoundCommandRefusal::Expired { .. } => BOUND_REF_EXPIRED,
         RosBoundCommandRefusal::LifetimeTooLong { .. } => BOUND_REF_LIFETIME_TOO_LONG,
         RosBoundCommandRefusal::SequenceNotAdvanced { .. } => BOUND_REF_SEQUENCE_NOT_ADVANCED,
@@ -334,6 +340,7 @@ pub unsafe extern "C" fn kirra_bound_consumer_new(
     vk: *const u8,
     expected_profile_digest: *const u8,
     maximum_token_lifetime_ms: u64,
+    boot_wall_ms: u64,
     control_period_ms: u64,
     missed_periods: u32,
     stop_decel_mps2: f64,
@@ -388,6 +395,7 @@ pub unsafe extern "C" fn kirra_bound_consumer_new(
         governor_vk,
         profile_digest,
         maximum_token_lifetime_ms,
+        boot_wall_ms,
         cfg,
         serial,
     ) {
@@ -946,6 +954,7 @@ mod tests {
             sk().verifying_key().as_bytes().as_ptr(),
             PROFILE_DIGEST.as_ptr(),
             200,
+            0, // boot epoch 0 admits every test token; predates-boot has its own test
             100,
             3,
             1.0,

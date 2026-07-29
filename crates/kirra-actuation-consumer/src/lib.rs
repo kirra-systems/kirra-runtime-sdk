@@ -238,6 +238,12 @@ pub struct BoundRefusalBreakdown {
     pub signature_invalid: u64,
     pub undecodable: u64,
     pub future_issued: u64,
+    /// #1230 Part B: tokens minted before this process booted (a restart is a
+    /// new trust epoch). Counted separately from `expired` because the two
+    /// answer different operator questions: expired = the loop is slow;
+    /// predates-boot = a restart happened and pre-boot traffic is being
+    /// correctly discarded.
+    pub token_predates_boot: u64,
     pub expired: u64,
     pub lifetime_too_long: u64,
     pub sequence_not_advanced: u64,
@@ -258,6 +264,7 @@ impl BoundRefusalBreakdown {
             }
             RosBoundCommandRefusal::Undecodable(_) => self.undecodable += 1,
             RosBoundCommandRefusal::FutureIssued { .. } => self.future_issued += 1,
+            RosBoundCommandRefusal::TokenPredatesBoot { .. } => self.token_predates_boot += 1,
             RosBoundCommandRefusal::Expired { .. } => self.expired += 1,
             RosBoundCommandRefusal::LifetimeTooLong { .. } => self.lifetime_too_long += 1,
             RosBoundCommandRefusal::SequenceNotAdvanced { .. } => self.sequence_not_advanced += 1,
@@ -539,6 +546,7 @@ impl<S: MotorSerial> BoundMotorConsumer<S> {
         governor_vk: VerifyingKey,
         expected_profile_digest: [u8; 32],
         maximum_token_lifetime_ms: u64,
+        boot_wall_ms: u64,
         cfg: ConsumerConfig,
         serial: S,
     ) -> Result<Self, ConfigError> {
@@ -554,6 +562,7 @@ impl<S: MotorSerial> BoundMotorConsumer<S> {
                 governor_vk,
                 expected_profile_digest,
                 maximum_token_lifetime_ms,
+                boot_wall_ms,
             ),
             serial,
             cfg,
@@ -782,6 +791,10 @@ mod tests {
             sk().verifying_key(),
             TEST_PROFILE_DIGEST,
             200,
+            // Boot epoch 0: admits every test token, so the existing scenario
+            // matrix keeps exercising the checks it was written for. The
+            // predates-boot behavior has its own dedicated tests.
+            0,
             cfg(),
             RecordingSerial::default(),
         )
