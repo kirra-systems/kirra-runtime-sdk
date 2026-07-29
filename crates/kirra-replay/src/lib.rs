@@ -354,6 +354,66 @@ pub fn parse_class(s: &str) -> Result<VehicleClass, String> {
 // EP-19 DoD tests: capture → replay → identical verdicts, in CI. Plus the
 // non-vacuity drill: a tampered record DIVERGES.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// #1215 — joined-cycle replay (the `--joined` mode)
+// ---------------------------------------------------------------------------
+
+/// Replay a JOINED cycle artifact (a JSON array of `JoinedCycleRecord`), plus
+/// optionally the raw stage-event JSONL it was joined from.
+///
+/// The replay boundary, stated once: THIS mode verifies CROSS-PROCESS CHAIN
+/// CONSISTENCY and incident chronology; the session mode above recomputes
+/// verifier decisions bit-identically from complete captured inputs. They are
+/// different artifacts with different retention profiles, correlated through
+/// the release-token identifiers — neither embeds the other.
+///
+/// Two layers, per the #1215 acceptance properties:
+///
+/// 1. Every record's completeness classification and chain findings are
+///    RE-DERIVED from its own embedded stages and compared with what the
+///    artifact claims — a hand-edited artifact is detected, not trusted.
+/// 2. When the raw events are supplied, the artifact is additionally compared
+///    against a fresh deterministic join of them, so an artifact that diverges
+///    from its own source events is detected regardless of which was edited.
+pub fn replay_joined_artifact(
+    artifact_json: &str,
+    raw_events_jsonl: Option<&str>,
+) -> Result<kirra_cycle_record::consistency::JoinedReplaySummary, String> {
+    use kirra_cycle_record::consistency::verify_artifact;
+    use kirra_cycle_record::{join_cycles, parse_events_jsonl, JoinedCycleRecord};
+
+    let records: Vec<JoinedCycleRecord> = serde_json::from_str(artifact_json)
+        .map_err(|e| format!("artifact does not parse as a joined-cycle array: {e}"))?;
+
+    let mut summary = verify_artifact(&records);
+
+    if let Some(jsonl) = raw_events_jsonl {
+        let (events, errors) = parse_events_jsonl(jsonl);
+        if !errors.is_empty() {
+            return Err(format!(
+                "raw event stream has {} malformed line(s), first at line {}: {}",
+                errors.len(),
+                errors[0].0,
+                errors[0].1
+            ));
+        }
+        let rejoined = join_cycles(&events);
+        if rejoined != records {
+            return Err(format!(
+                "artifact diverges from a fresh join of its own source events \
+                 ({} artifact records vs {} rejoined) — one of them was edited",
+                records.len(),
+                rejoined.len()
+            ));
+        }
+        // The rejoin agreeing is itself evidence; note it in the summary shape
+        // by leaving the verified counts as-is (they already describe both).
+        let _ = &mut summary;
+    }
+
+    Ok(summary)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

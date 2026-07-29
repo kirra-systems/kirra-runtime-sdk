@@ -21,6 +21,11 @@ kirra-verifier = { path = "../.." }
 kirra-core = { path = "../kirra-core", features = ["capture"] }
 # The authoritative on-disk capture JSONL shape.
 kirra-capture-schema = { path = "../kirra-capture-schema" }
+# The #1215 joined cycle record + its chain-consistency replay (the --joined
+# mode). Leaf crate, serde-only — the joined-cycle replay boundary is
+# CROSS-STAGE consistency, deliberately distinct from this crate's existing
+# bit-identical decision recomputation; they compose through release-token ids.
+kirra-cycle-record = { path = "../kirra-cycle-record" }
 # `float_roundtrip` is LOAD-BEARING for bit-identical replay: serde_json's
 # DEFAULT float parse is the faster approximate path, which can be one ulp off
 # the nearest double — the emitted `-10.757967088390005` parsed back to a
