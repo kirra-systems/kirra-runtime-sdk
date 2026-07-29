@@ -469,7 +469,9 @@ pub static AUTHORED_PROVENANCE: &[FieldProvenance] = &[
     rec!("r2.overhangs", VehicleClass::R2, Profile::Nominal, [Field::OverhangFront, Field::OverhangRear],
          Provenance::Estimate {
              basis: "(length − wheelbase)/2 assumed split evenly; UNMEASURED. Feeds the swept-footprint \
-                     corner placement in containment.rs — an under-estimated rear overhang under-covers the body",
+                     corner placement in containment.rs — an under-estimated rear overhang under-covers the body. \
+                     Rounding this estimate to 0.05 left the parts 1 mm short of the measured length, placing the \
+                     swept body inside the real one (#1215)",
          }),
     rec!("r2.odd_cap", VehicleClass::R2, Profile::Nominal, [Field::OddSpeedCap],
          vp!("ODD ceiling sign-off (docs/CONTRACT_PROFILES.md r2.odd_cap)")),
