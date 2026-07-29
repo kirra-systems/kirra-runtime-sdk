@@ -44,6 +44,12 @@ pub mod occlusion_channel;
 // ROS; disarmed by default like its sibling channels.
 pub mod sensor_watchdog;
 
+// Speed-cap stabilization (#1212) — the asymmetric raw→stabilized cap state machine,
+// moved INTO the checker from the doer-side Python where it had no safety authority.
+// Down is immediate, up is earned. Perception-path only; never in the per-pose
+// validate_vehicle_command hot path. Pure, no ROS.
+pub mod cap_stabilizer;
+
 // Phase 2A Adversarial Review Hardening
 pub mod redundancy_hardening;
 pub mod validation_hardening;
