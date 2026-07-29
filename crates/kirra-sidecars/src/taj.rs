@@ -496,6 +496,26 @@ pub struct PredictedVruMotionOut {
     pub points: Vec<PredictedVruPointOut>,
 }
 
+/// The generation value reserved for "this is not real evidence" (#1214).
+///
+/// [`PerceptionFrameId::invalid`] is all-zeros, and every downstream consumer
+/// refuses a zero generation on exactly that basis — a default-constructed or
+/// zeroed frame must never pass as a perception result. That reservation only
+/// holds if no REAL frame can also carry zero, so the first live generation is
+/// [`FIRST_TRACKER_GENERATION`], not zero.
+///
+/// This is not cosmetic. Taj's first generation used to be zero, which collided
+/// with the sentinel: a freshly-started sidecar served frames the planner seam
+/// refused as invalid (`INVALID_PERCEPTION_FRAME_ID`), so the evidence-bound
+/// motion path could not work from cold start at all. It failed closed — the
+/// robot held rather than moving on unbound evidence — but the binding was dead
+/// on arrival until a tracker reset happened to advance the counter off zero.
+const RESERVED_INVALID_TRACKER_GENERATION: u64 = 0;
+
+/// The first generation a live tracker may report. See
+/// [`RESERVED_INVALID_TRACKER_GENERATION`].
+const FIRST_TRACKER_GENERATION: u64 = RESERVED_INVALID_TRACKER_GENERATION + 1;
+
 /// Stable identity for one accepted Taj perception result.
 ///
 /// Sequence and generation fields prevent stale or replayed evidence from being
@@ -516,7 +536,7 @@ impl PerceptionFrameId {
         Self {
             scan_sequence: 0,
             camera_sequence: None,
-            tracker_generation: 0,
+            tracker_generation: RESERVED_INVALID_TRACKER_GENERATION,
             profile_digest: String::new(),
             evidence_digest: String::new(),
         }
@@ -1130,7 +1150,10 @@ impl TrackedPerceptionState {
             scan_sequence: 0,
             camera_sequence: 0,
             last_camera_stamp_ms: None,
-            tracker_generation: 0,
+            // Starts at ONE. Zero is the invalid-frame sentinel every consumer
+            // refuses, so a live tracker must never report it — see
+            // `RESERVED_INVALID_TRACKER_GENERATION`.
+            tracker_generation: FIRST_TRACKER_GENERATION,
             watchdog: SensorWatchdog::new(cfg, armed).expect("watchdog config must be valid"),
             stabilizer: CapStabilizer::new(CapStabilizerConfig::default())
                 .expect("the default stabilizer config is valid"),
@@ -4262,5 +4285,111 @@ mod nearest_candidate_tests {
             rev.reverse();
             assert_eq!(pick(&rev), expected, "reversed {rev:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod evidence_frame_identity_tests {
+    //! #1214 — the identity Taj stamps on a frame is the binding target every
+    //! downstream hop carries. These tests pin the properties consumers rely on.
+
+    use super::scan_liveness_tests::live_scan_for_cap as live_scan;
+    use super::*;
+
+    fn state() -> TrackedPerceptionState {
+        TrackedPerceptionState::with_options(SensorWatchdogConfig::r2_lidar(), false, false)
+    }
+
+    /// A freshly-started sidecar must serve evidence a consumer will ACCEPT.
+    ///
+    /// The regression: `tracker_generation` began at zero, which is the value
+    /// `PerceptionFrameId::invalid()` uses and which every consumer refuses as
+    /// "not real evidence". A cold-started Taj therefore served frames the
+    /// planner seam rejected with `INVALID_PERCEPTION_FRAME_ID`, so the
+    /// evidence-bound motion path never worked from a cold start — it only came
+    /// alive if a tracker reset happened to advance the counter off zero.
+    ///
+    /// It failed CLOSED, so nothing unsafe was admitted; the binding was simply
+    /// inert. That is the harder failure to notice, and the reason this is a
+    /// test rather than a comment.
+    #[test]
+    fn a_cold_started_tracker_does_not_report_the_invalid_sentinel() {
+        let mut st = state();
+        let first = handle_perception_tracked_at(&live_scan(1, 6.0), &mut st, 0);
+
+        assert_ne!(
+            first.frame_id.tracker_generation, RESERVED_INVALID_TRACKER_GENERATION,
+            "the first live generation collides with the invalid-frame sentinel, \
+             so every consumer that refuses a zero generation refuses real evidence"
+        );
+        assert!(
+            first.frame_id.scan_sequence > 0,
+            "scan_sequence is stamped after its pre-increment, so the first frame is 1"
+        );
+    }
+
+    /// The sentinel is still refusable — the point of moving the first live
+    /// generation off zero is to KEEP zero meaning "no evidence", not to retire
+    /// it. Without this, the fix above could be "achieved" by making consumers
+    /// accept zero, which would let a default-constructed frame authorize motion.
+    #[test]
+    fn the_invalid_sentinel_remains_distinguishable_from_every_live_frame() {
+        let sentinel = PerceptionFrameId::invalid();
+        assert_eq!(
+            sentinel.tracker_generation,
+            RESERVED_INVALID_TRACKER_GENERATION
+        );
+        assert_eq!(sentinel.scan_sequence, 0);
+        assert!(sentinel.evidence_digest.is_empty());
+
+        let mut st = state();
+        let mut now = 0;
+        for seq in 1..=12 {
+            now += 100;
+            let r = handle_perception_tracked_at(&live_scan(seq, 6.0), &mut st, now);
+            assert_ne!(
+                r.frame_id.tracker_generation, sentinel.tracker_generation,
+                "a live frame must never be mistakable for the sentinel"
+            );
+        }
+
+        // …including after the resets that advance the generation.
+        st.reset();
+        now += 100;
+        let after = handle_perception_tracked_at(&live_scan(99, 6.0), &mut st, now);
+        assert!(after.frame_id.tracker_generation > FIRST_TRACKER_GENERATION);
+    }
+
+    /// Track ids never recycle WITHIN a generation, and every tracker
+    /// replacement advances the generation — so `(tracker_generation, id)` is a
+    /// stable binding target.
+    ///
+    /// This is what makes "a proposal naming track 7" refusable when track 7 has
+    /// been re-established as a different object: the re-establishment can only
+    /// happen through a tracker replacement, and every such replacement lands in
+    /// `reset()`, which bumps the generation the payload binds.
+    #[test]
+    fn a_tracker_reset_advances_the_generation_so_recycled_ids_are_distinguishable() {
+        let mut st = state();
+        let mut now = 0;
+        let mut seq = 0;
+
+        seq += 1;
+        now += 100;
+        let before = handle_perception_tracked_at(&live_scan(seq, 6.0), &mut st, now);
+        let generation_before = before.frame_id.tracker_generation;
+
+        // A reset discards the tracker, so the next scan starts id assignment
+        // over from zero — ids DO repeat across this boundary.
+        st.reset();
+        seq += 1;
+        now += 100;
+        let after = handle_perception_tracked_at(&live_scan(seq, 6.0), &mut st, now);
+
+        assert!(
+            after.frame_id.tracker_generation > generation_before,
+            "ids restart at zero after a reset, so the generation MUST advance — \
+             otherwise two different objects share an identity"
+        );
     }
 }
