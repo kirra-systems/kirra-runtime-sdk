@@ -93,13 +93,26 @@ instead of the one path.
 
 Talisman work, so the bar is higher than a normal fix:
 
-- [ ] direct regression tests for the **speed-cap** path (the currently
-      unprotected branch), asserting the returned pair is in envelope;
+- [x] direct regression tests for the **speed-cap** path (the currently
+      unprotected branch), asserting the returned pair is in envelope —
+      `crates/kirra-core/tests/speed_cap_lateral_envelope.rs`. **Red against
+      today's kernel** and `#[ignore]`d for exactly that reason; removing the
+      `#[ignore]` is the flip that closes this box. Measured today:
+      `ClampLinear(5.225)` executes 24 deg at 5.225 m/s → 4.34 m/s^2 against a
+      3.5 envelope, and it fails on the SMALLEST demand in the sweep
+      (24/28/30/34 deg), so the defect spans the range rather than one angle.
+      The accel-bounded companion in the same file is NOT ignored and passes —
+      the non-vacuity control proving the property is satisfiable and the oracle
+      correct;
 - [ ] caller-level tests where practical — sites 1–3 above;
 - [ ] Kani K1–K5 re-run, extended if the property is expressible there;
 - [ ] intentional talisman **blob-hash re-pin** with the reason recorded in
       `docs/safety/GOVERNOR_INTEGRITY_EVIDENCE.md` §2;
 - [ ] FDIT matrix re-baseline for site 2 if released bytes change.
+
+The regression test uses the simulator's own formula and tolerance
+(`SimState::lateral_accel_mps2` + `FLOAT_TOLERANCE = 1e-6`) rather than a new
+one, so the envelope is measured exactly as the existing harness measures it.
 
 **Ready-made oracle:** `kinematics_sim::run_simulation` already asserts
 `lat_accel <= contract.max_lateral_accel_mps2 + 1e-6` per step and records a
