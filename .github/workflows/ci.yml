@@ -1507,6 +1507,23 @@ jobs:
           # remote (no network, no Gemma, no audio) — so the spoken sentence is
           # proven to come from a real executor outcome.
           python3 robot/repo_command_integration_test.py
+          # Kirra Engineering Assistant — the authoritative tool layer (pure;
+          # temp git repos): run_tool as the SOLE execution path, the allow-list,
+          # the authority ceiling (a registered level-3 tool still REFUSES),
+          # roles, read-only tools that cannot report a mutation, path safety
+          # (traversal / absolute / symlink escape / binary / oversized), and that
+          # retrieved prompt-injection text moves no policy field. Also asserts
+          # every DOMAIN_TERMS symbol really exists in the tree, so the domain map
+          # cannot rot into fiction. See docs/KIRRA_ENGINEERING_ASSISTANT.md.
+          python3 robot/assistant_tools_test.py
+          # Intent classification + grounded speech: tool selection derives from
+          # the operator's words ONLY, ambiguous/unknown/shell requests execute
+          # nothing, and a refusal or failure is never voiced as success.
+          python3 robot/assistant_test.py
+          # ... and the same path end to end against a real throwaway repo:
+          # "where is steering authority enforced?" -> real git grep -> evidence-
+          # backed speech, and "sync to main" -> the LANDED RCL executor.
+          python3 robot/assistant_integration_test.py
           # World Model read projection (pure, no HTTP): TTL freshness incl. the
           # boundary + clock-skew, absent/stale → UNKNOWN (never a stale value),
           # the situation-report matcher's non-overlap, render SAYING unknown for
