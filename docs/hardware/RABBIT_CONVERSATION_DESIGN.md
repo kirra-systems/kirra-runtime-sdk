@@ -328,6 +328,67 @@ fenced backings, missions get richer with no change to this safety story.
 
 ---
 
+## Robot Command Language (opt-in) — repository commands, not the wheels
+
+`KIRRA_REPO_CMD_ENABLED=1` adds two **spoken git workflow commands**:
+
+```
+Hey Parker, sync to main.
+Hey Rabbit, publish my work.
+```
+
+> **Gemma interprets and explains. The deterministic command executor authorizes
+> and acts.**
+
+This is a **third destination**, alongside `FENCE` (motion) and `SPEAK` (Channel
+A): a `REPO_CMD` decision. It touches the git repository and *never* the wheels,
+so it is not a new door to actuation — the single-door invariant is untouched.
+
+The same catalog-not-a-door discipline applies. `robot/skill_registry.py` gains
+kind `REPO` with two entries (`sync_to_main`, `publish_my_work`), and:
+
+- Gemma emits a skill **name**; anything unregistered is `REFUSE`. A reply naming
+  `bash -c '…'` is simply an unknown skill.
+- Repo skills take **no parameters**, and `dispatch` discards `params` — the
+  decision payload is the intent name alone, so no model text can travel with it.
+- `repo_command.run_intent` raises for any intent outside its two-key allow-list,
+  *before* a process starts, and the argv is always the fixed
+  `["bash", <script>, <allow-listed phrase>]` with `shell=False`.
+- `execute_skill_decisions` needs an injected `repo_fn`; a caller that doesn't
+  wire it gets a spoken refusal, never a silent no-op.
+
+A **deterministic matcher runs before the model** (`repo_command.handle`, the same
+shape as `rabbit_ota` / `rabbit_diag` / `rabbit_wake`): the canonical phrases and a
+closed paraphrase set resolve with no inference at all, because a canonical
+command must not depend on the model being up or choosing correctly. Ambiguity
+("sync to main and publish my work") asks which one rather than guessing —
+and deliberately does *not* fall through to Gemma, since falling through would
+hand the model exactly the case the matcher refused to resolve.
+
+Refusals are spoken as refusals. `speak_result` reads the executor's `status`, so
+the success wording is unreachable unless it exited 0 — a dirty tree becomes
+*"I didn't publish the branch because the working tree has uncommitted changes:
+scratch.txt."* Full contract, paraphrase list, audit fields, and the checklist for
+adding a future command: **`docs/ROBOT_COMMAND_LANGUAGE.md`**.
+
+🔴 The confirmation policy does **not** generalize. These two are safe without a
+spoken "are you sure" only because the executor refuses unsafe state and never
+force-pushes — the worst outcome of a mishearing is a refusal. Merge, deploy,
+reset, delete, or any actuator command has no such property.
+
+### Wake phrases carry no authority
+
+"Hey Rabbit" and "Hey Parker" are two **names for the same assistant**. Only the
+`rabbit` forms are default; **"Hey Parker" wakes only when configured** via
+`KIRRA_WAKE_PHRASES`. Inside a turn the transcript parsers strip either name, so
+the second name works in an utterance regardless of what wakes the robot.
+
+The wake trigger's contract is one newline on stdout, which carries no identity —
+so the name used cannot select a different persona, policy, or permission set.
+There is no per-name privilege here to preserve.
+
+---
+
 ## Honest caveats
 
 - **Latency.** A local LLM on the Orin (gemma3:4b) is a few seconds per turn.

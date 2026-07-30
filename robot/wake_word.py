@@ -82,6 +82,12 @@ import rabbit_latency  # noqa: E402 — opt-in stage timing (observability only)
 # Pure logic (host-tested in robot/wake_word_test.py — no audio, no GPIO)
 # ---------------------------------------------------------------------------
 
+# Adding a phrase — here or, more usually, via KIRRA_WAKE_PHRASES — changes what
+# WAKES the robot; it can never change what the robot is then allowed to do. The
+# trigger contract is one newline on stdout, which carries no identity, so every
+# phrase reaches the identical downstream policy and permissions. A second name
+# ("parker") is therefore a name, not a persona, and is configured rather than
+# default — see test_a_configured_parker_phrase_wakes in wake_word_test.py.
 DEFAULT_PHRASES = "hello rabbit,hey rabbit,yo rabbit"
 
 # Whisper decorates non-speech as bracketed/parenthesized annotations

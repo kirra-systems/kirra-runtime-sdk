@@ -1494,6 +1494,19 @@ jobs:
           # and THE single-door invariant — execute_skill_decisions routes motion
           # ONLY through the injected fence sink. See robot/skill_registry.py.
           python3 robot/skill_registry_test.py
+          # Robot Command Language voice bridge (pure; fake executor): the
+          # two-item intent allow-list, the deterministic paraphrase resolver,
+          # ambiguity/unknown executing NOTHING, exit-code → structured result,
+          # and that a refusal/failure is SPOKEN as such (never as success).
+          # Also asserts Gemma cannot reach a shell: the only argvs this module
+          # can produce are two fixed lists, called with shell=False.
+          # See robot/repo_command.py + docs/ROBOT_COMMAND_LANGUAGE.md.
+          python3 robot/repo_command_test.py
+          # ... and the same path across the REAL seams, including the actual
+          # scripts/robot-command.sh against a throwaway repo with a LOCAL BARE
+          # remote (no network, no Gemma, no audio) — so the spoken sentence is
+          # proven to come from a real executor outcome.
+          python3 robot/repo_command_integration_test.py
           # World Model read projection (pure, no HTTP): TTL freshness incl. the
           # boundary + clock-skew, absent/stale → UNKNOWN (never a stale value),
           # the situation-report matcher's non-overlap, render SAYING unknown for
@@ -1666,6 +1679,22 @@ jobs:
         # substitution), and non-skippable safety gates. On-silicon validation
         # per target is hardware-gated and NOT run here.
         run: bash scripts/test-install-parko-backend.sh
+
+  robot-command-language:
+    name: Robot Command Language (shell, local bare remotes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Command self-test
+        # Pure shell + local git. Every case builds a throwaway repo with a LOCAL
+        # BARE remote in a temp dir, so there is no network access and no
+        # dependency on this checkout's state. Asserts exit status AND resulting
+        # repository state for both phrases, their refusals, and the dispatcher —
+        # plus that no prohibited destructive git operation (reset --hard, clean,
+        # stash, force-push, auto-commit) appears in the command source.
+        # See docs/ROBOT_COMMAND_LANGUAGE.md.
+        run: bash scripts/test-robot-command.sh
 
   ros2-adapter-build:
     name: ros2 adapter build (--features ros2)
