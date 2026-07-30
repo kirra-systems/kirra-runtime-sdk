@@ -99,8 +99,16 @@ for name in ("sync_to_main", "publish_my_work"):
     at.REGISTRY[name] = saved_tool._replace(
         fn=lambda a, c, _n=name: tripped.append(_n))
 try:
-    for name in ("sync_to_main", "publish_my_work"):
-        v = ac.validate_selection(sel(tool=name), ctx=CTX)
+    # Each probe supplies the request that genuinely AUTHORIZES its mutation.
+    # That is load-bearing, not decoration: with no utterance the admission
+    # screen rejects a mutating proposal for an unresolved target, the verdict
+    # never reaches `would_execute`, and the tripwire below would pass
+    # VACUOUSLY — proving only that a blocked proposal does not execute. These
+    # utterances drive the proposal all the way to the execution boundary, so
+    # "fn was never called" is still the strong claim it was written to be.
+    for name, utt in (("sync_to_main", "sync to main"),
+                      ("publish_my_work", "publish my work")):
+        v = ac.validate_selection(sel(tool=name), ctx=CTX, utterance=utt)
         assert v.admitted and not v.executed, v
     # And through the full scoring path, over every corpus case.
     corpus = ac.load_cases()

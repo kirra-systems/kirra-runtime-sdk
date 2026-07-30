@@ -116,7 +116,13 @@ v = ac.validate_selection(
 check(v.admitted is False and v.reason == "empty_query",
       "11. the real tool's own argument guard produces the refusal")
 
-v = ac.validate_selection(ac.parse_selection(reply(tool="sync_to_main")), ctx=CTX)
+
+# The utterance is required for the proposal to reach the execution boundary at
+# all: the admission screen rejects a mutating proposal whose request names no
+# target, so without one this would assert that a BLOCKED tool does not run —
+# true, but not the structural-non-execution property under test here.
+v = ac.validate_selection(ac.parse_selection(reply(tool="sync_to_main")), ctx=CTX,
+                          utterance="sync to main")
 check(v.admitted is True and v.reason == ac.WOULD_EXECUTE and v.executed is False,
       "12. a level-2 tool stops at would_execute and is NEVER invoked")
 
