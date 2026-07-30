@@ -18,10 +18,10 @@
 //! still not proved here and must not be claimed as proved; it is discharged by
 //! the concrete grid and the property suites.
 //!
-//! LANE SPLIT: K1–K6 run per-PR in the blocking `kani-proofs` lane. K7 alone is
-//! behind the `deep-proofs` feature (weekly `kani-deep-weekly`) — see its
-//! doc comment for why that demotion is provisional rather than budgeted. Its
-//! per-PR gate is the exhaustive concrete grid in `mirrors`.
+//! LANE SPLIT: K1–K6 and K8 run per-PR in the blocking `kani-proofs` lane. K7
+//! alone is behind the `deep-proofs` feature (weekly `kani-deep-weekly`) — see
+//! its doc comment for why that demotion is provisional rather than budgeted.
+//! Its per-PR gate is the exhaustive concrete grid in `mirrors`.
 //!
 //! Properties (cited from `docs/safety/GOVERNOR_INTEGRITY_EVIDENCE.md` §2):
 //!  * K1 fail-closed NaN/Inf totality (SG9): ANY non-finite field in a command
@@ -29,12 +29,19 @@
 //!    first-priority field maps to its exact forensic code.
 //!  * K2 non-physical time delta (SG3): finite fields with `dt ≤ 0` →
 //!    `DenyBreach(InvalidTimeDelta)`, before any rate arithmetic.
-//!  * K3 the P2 speed ceiling is exact (SG1): a command over the effective max
-//!    clamps to EXACTLY `effective_max × signum` — magnitude equal to the
-//!    ceiling, direction preserved.
+//!  * K3 the P2 speed ceiling (SG1) — RESTATED by #1243. A command over the
+//!    effective max never EXCEEDS the ceiling, and clamps to exactly the
+//!    ceiling with the request's sign precisely when the ceiling is the only
+//!    binding constraint. The former unconditional "exactly the ceiling,
+//!    direction preserved" became false once the rate bound started running on
+//!    this path; both statements are recorded at the harness.
 //!  * K4/K5 Degraded decel-to-stop (issue #70, SS-002): re-initiation from a
 //!    stop and any speed-magnitude increase are DENIED with their specific
 //!    codes, for all finite inputs in those regions.
+//!  * K8 (#1243) the acceleration bound holds on EVERY executable return, not
+//!    just the within-ceiling path, over `|current| ≤ ceiling` — the domain
+//!    restriction being a recorded conflict with invariant 8, not a
+//!    convenience. See the harness.
 
 #[allow(unused_imports)]
 use crate::kinematics_contract::{
@@ -184,21 +191,130 @@ mod proofs {
         //
         // The variant question is a COMPOSITION property and lives in
         // `k3b_composition_reports_both_axes` below, where it belongs.
+        //
+        // #1243 RESTATEMENT — the unconditional form is no longer TRUE, so it
+        // is no longer asserted. Recording both statements, because a proved
+        // property that quietly changes meaning is worse than one that is
+        // dropped:
+        //
+        //   BEFORE  an over-ceiling command clamps to EXACTLY the ceiling,
+        //           direction preserved.
+        //   AFTER   the executed magnitude never EXCEEDS the ceiling; and it is
+        //           exactly the ceiling, with the request's sign, precisely
+        //           when the ceiling is the only binding constraint.
+        //
+        // Both halves of the old statement became false when the rate bound
+        // started running on this path (#1243):
+        //
+        //   * magnitude — the rate bound can be tighter (50.0 from 5.0 over
+        //     0.1 s now returns 5.25, not the 35.0 ceiling);
+        //   * direction — the bound steps `v` from CURRENT toward the request,
+        //     so a +50.0 request from -5.0 returns -4.55. The sign follows the
+        //     vehicle's travel, not the request. Physically right, and a real
+        //     change to what this proof asserted.
+        //
+        // The conditional half is the part worth keeping: it is what stops a
+        // future priority silently returning something arbitrarily BELOW the
+        // ceiling and calling it enforcement. `no_tighter_rate_bound` is the
+        // kernel's own trigger condition, restated here rather than imported,
+        // so the proof states the hypothesis explicitly instead of trusting the
+        // implementation to have used the same one.
         let action = validate_vehicle_command(&cmd, &contract);
         let linear = match action {
             EnforceAction::ClampLinear(v) => v,
             EnforceAction::ClampBoth { linear, .. } => linear,
             other => panic!("over-ceiling must clamp the linear axis, got {other:?}"),
         };
-        assert_eq!(
-            linear.abs(),
-            max,
-            "clamped magnitude is exactly the ceiling"
+
+        assert!(
+            linear.abs() <= max + 1e-9,
+            "the executed magnitude never exceeds the ceiling"
         );
-        assert_eq!(
-            linear.signum(),
-            cmd.linear_velocity_mps.signum(),
-            "direction preserved (reverse stays reverse)"
+
+        let speed_delta = cmd.linear_velocity_mps - cmd.current_velocity_mps;
+        let implied_rate_abs = speed_delta.abs() / cmd.delta_time_s;
+        let from_rest = cmd.current_velocity_mps.abs() <= STOP_EPSILON_MPS;
+        let speeding_up = (from_rest
+            || cmd.linear_velocity_mps.signum() == cmd.current_velocity_mps.signum())
+            && cmd.linear_velocity_mps.abs() > cmd.current_velocity_mps.abs();
+        let applicable_limit = if speeding_up {
+            contract.max_accel_mps2
+        } else {
+            contract.max_brake_mps2
+        };
+        let no_tighter_rate_bound = implied_rate_abs <= applicable_limit + 1e-9;
+
+        if no_tighter_rate_bound {
+            assert_eq!(
+                linear.abs(),
+                max,
+                "with only the ceiling binding, the clamp is EXACTLY the ceiling"
+            );
+            assert_eq!(
+                linear.signum(),
+                cmd.linear_velocity_mps.signum(),
+                "and direction is preserved (reverse stays reverse)"
+            );
+        }
+    }
+
+    /// K8 (#1243) — the acceleration bound holds on EVERY executable return,
+    /// including the over-ceiling path that used to skip it.
+    ///
+    /// This is the property #1243 exists for, and it is the direct analogue of
+    /// K6/P-CAP one axis over: stated across the whole executable class rather
+    /// than per branch, so it closes the defect class instead of the one path.
+    ///
+    /// DOMAIN CAVEAT, and it is load-bearing rather than a convenience: the
+    /// property is asserted only where `|current| <= ceiling`. Outside that
+    /// region the ceiling ITSELF forces a rate breach — a 39.9 m/s request from
+    /// 40.0 m/s is a lawful -1.0 m/s^2, and clamping it to a 35.0 ceiling
+    /// implies -50 m/s^2. No ordering of the two priorities avoids it; the
+    /// vehicle is already outside the envelope and cannot be inside it one tick
+    /// later without exceeding the brake limit. INVARIANT 8 ("envelope cap
+    /// always wins over rate priority") decides it, and K6 independently
+    /// requires the return to respect the ceiling, so the ceiling wins and the
+    /// breach stands. Narrowing the domain here is therefore recording a real
+    /// conflict between two enforced bounds — NOT excluding an inconvenient
+    /// case to make a proof pass. The excluded region is exercised by a
+    /// concrete EXPECTED-BUT-UNDESIRED fixture in
+    /// `crates/kirra-core/tests/over_ceiling_accel_bound.rs`, which fails the
+    /// day the behaviour changes.
+    #[kani::proof]
+    #[kani::stub(f64::powi, super::stub_powi)]
+    #[kani::stub(f64::tan, super::stub_tan)]
+    #[kani::stub(f64::atan, super::stub_atan)]
+    fn k8_executable_return_respects_the_rate_bound() {
+        let cmd = any_command();
+        let contract = any_bounded_contract();
+        kani::assume(cmd.linear_velocity_mps.is_finite());
+        kani::assume(cmd.current_velocity_mps.is_finite());
+        kani::assume(cmd.steering_angle_deg.is_finite());
+        kani::assume(cmd.current_steering_angle_deg.is_finite());
+        kani::assume(cmd.delta_time_s.is_finite() && cmd.delta_time_s > 0.0);
+
+        let max = contract.effective_max_speed_mps();
+        kani::assume(cmd.current_velocity_mps.abs() <= max);
+
+        let action = validate_vehicle_command(&cmd, &contract);
+        let Some((linear, _)) = executed_pair(&cmd, &action) else {
+            return; // DenyBreach executes nothing.
+        };
+
+        let from_rest = cmd.current_velocity_mps.abs() <= STOP_EPSILON_MPS;
+        let speeding_up = (from_rest
+            || cmd.linear_velocity_mps.signum() == cmd.current_velocity_mps.signum())
+            && cmd.linear_velocity_mps.abs() > cmd.current_velocity_mps.abs();
+        let applicable_limit = if speeding_up {
+            contract.max_accel_mps2
+        } else {
+            contract.max_brake_mps2
+        };
+
+        let executed_rate = (linear - cmd.current_velocity_mps).abs() / cmd.delta_time_s;
+        assert!(
+            executed_rate <= applicable_limit + 1e-9,
+            "executed command implies a rate outside the applicable limit"
         );
     }
 
@@ -731,23 +847,62 @@ mod mirrors {
         }
     }
 
+    /// K3 mirror, restated for #1243 in lock step with the harness.
+    ///
+    /// The old form drove every case from `current = 0.0` over `dt = 0.1`,
+    /// which implies a rate in the hundreds of m/s^2 — so once #1243 let the
+    /// rate bound run on this path, EVERY case in it became rate-bound rather
+    /// than ceiling-bound and the "exactly the ceiling" assertion was false
+    /// throughout. That is the mirror doing its job: it went red on the same
+    /// semantic change the harness did.
+    ///
+    /// It now covers both halves of the restated property, because covering
+    /// only the first would leave the interesting case unmirrored.
     #[test]
-    fn k3_mirror_ceiling_exact_both_cap_shapes() {
-        // Cap tighter than physical max; forward and reverse.
+    fn k3_mirror_ceiling_exact_when_only_the_ceiling_binds() {
+        // Cap tighter than physical max; cap absent; cap present but looser.
         for (c, max) in [
             (contract(30.0, Some(22.35)), 22.35),
             (contract(30.0, None), 30.0),
             (contract(10.0, Some(50.0)), 10.0), // cap present but looser
         ] {
-            for sign in [1.0, -1.0] {
-                match validate_vehicle_command(&cmd(sign * (max + 5.0), 0.0, 0.1), &c) {
+            for sign in [1.0_f64, -1.0] {
+                // Approach from just inside the ceiling over a long enough step
+                // that the accel bound (3.0 m/s^2 in `contract`) is NOT the
+                // tighter constraint: 5.1 m/s of delta over 2.0 s is 2.55.
+                let current = sign * (max - 0.1);
+                let request = sign * (max + 5.0);
+                match validate_vehicle_command(&cmd(request, current, 2.0), &c) {
                     EnforceAction::ClampLinear(v) => {
-                        assert_eq!(v.abs(), max);
-                        assert_eq!(v.signum(), sign);
+                        assert_eq!(v.abs(), max, "ceiling is exact when it alone binds");
+                        assert_eq!(v.signum(), sign, "direction preserved");
                     }
                     other => panic!("expected ClampLinear, got {other:?}"),
                 }
             }
+        }
+    }
+
+    /// The other half: when the rate bound is tighter, it wins and the executed
+    /// magnitude is BELOW the ceiling. This is the #1243 defect case — before
+    /// the fix it returned the ceiling and implied 300 m/s^2.
+    #[test]
+    fn k3_mirror_rate_bound_wins_when_it_is_tighter() {
+        let c = contract(35.0, None); // accel 3.0, brake 6.0
+        for sign in [1.0_f64, -1.0] {
+            let action = validate_vehicle_command(&cmd(sign * 50.0, sign * 5.0, 0.1), &c);
+            let EnforceAction::ClampLinear(v) = action else {
+                panic!("expected ClampLinear, got {action:?}")
+            };
+            // 5.0 + 3.0 x 0.1 = 5.3, far below the 35.0 ceiling.
+            assert_eq!(v, sign * 5.3);
+            assert!(v.abs() < c.effective_max_speed_mps());
+            let implied = (v - sign * 5.0).abs() / 0.1;
+            assert!(
+                implied <= c.max_accel_mps2 + 1e-9,
+                "{implied} m/s^2 against a {} limit",
+                c.max_accel_mps2
+            );
         }
     }
 

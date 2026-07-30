@@ -550,8 +550,14 @@ mod kinematics_sim_tests {
             steering_angle_deg: 0.0,
             current_steering_angle_deg: 0.0,
         };
+        // #1243: the accel bound now runs on the over-ceiling path and is the
+        // tighter of the two here (34.0 + 2.5 x 0.1 = 34.25, versus the 35.0
+        // ceiling). What this test is named for — that `apply_enforcement`
+        // puts the SAFE value on the returned command rather than the
+        // requested one — is unchanged, and 34.25 is the safer value.
         let enforced = apply_enforcement(&c, &contract).expect("must clamp, not deny");
-        assert_eq!(enforced.linear_velocity_mps, 35.0);
+        assert_eq!(enforced.linear_velocity_mps, 34.25);
+        assert_ne!(enforced.linear_velocity_mps, c.linear_velocity_mps);
         assert_eq!(enforced.steering_angle_deg, 0.0);
     }
 

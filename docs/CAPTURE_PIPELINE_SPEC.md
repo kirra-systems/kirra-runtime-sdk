@@ -14,8 +14,8 @@ Linux collector joins it with bus telemetry into the full triple.
 > `effective_perception_cap`, then `verdict = validate_trajectory_slow_capped(...)`; the
 > capture emit runs LATER in the tick — after `update_trajectory(...)` and **after the WCET
 > measurement** — so the bounded `try_send` never counts against the slow-loop budget. The §0
-> verdict-path anchor is the reviewed-amended talisman blob `ed00f4da…` (H1/M1; it superseded
-> the historical `997fb7ae…` — see §0).
+> verdict-path anchor is the reviewed-amended talisman blob `851f3f44…` (H1/M1, then #1242 and
+> #1243; it superseded `6a61b74f…`, `ed00f4da…` and the historical `997fb7ae…` — see §0).
 
 ## 0. The non-negotiable constraint
 The verdict path is a FROZEN, reviewed talisman (`validate_vehicle_command`,
@@ -29,9 +29,61 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > BOTH axes instead of dropping the velocity correction) and direction-aware
 > accel/brake selection (M1 — reverse acceleration is bounded by the accel limit,
 > not the brake limit). The talisman re-pins to the amended logic blob
-> `crates/kirra-core/src/kinematics_contract.rs = 6a61b74fceae09a8057b2059e571ea40b059a59a`
-> (superseding `ed00f4da…`, and before it the historical `997fb7ae…`, which
-> predated the Stage-3 relocation and matched no current file).
+> `crates/kirra-core/src/kinematics_contract.rs = 851f3f44bcc23e7020397b01b830c17d510a0917`
+> (superseding `6a61b74f…` (#1243), `ed00f4da…` (#1242), and before them the
+> historical `997fb7ae…`, which predated the Stage-3 relocation and matched no
+> current file).
+>
+> **#1243 re-pin — INTENTIONAL BEHAVIOUR CHANGE, not formatting drift.**
+> `6a61b74f…` → `851f3f44…`.
+>
+> WHAT CHANGED. Priority 3/4 (the implied accel/brake rate bound) carried a
+> `!ceiling_bound` guard, so a command over the speed ceiling was returned at the
+> ceiling magnitude with its implied ACCELERATION never checked. Measured before
+> the fix: an executed 5.0 → 35.0 m/s over 0.1 s implies 300 m/s² against a 2.5
+> limit — 120×. The guard is removed; the returned linear is now the TIGHTER of
+> {ceiling, rate bound}. Same early-exit defect class as #1242, one protected
+> property over.
+>
+> WHAT IT COST — a safety-case amendment, recorded because it is not free. K3
+> read "an over-ceiling command clamps to EXACTLY the ceiling, direction
+> preserved". BOTH halves are now false in general:
+>
+> * magnitude — the rate bound can be tighter, so 50.0 from 5.0 returns 5.25;
+> * direction — the bound steps `v` from CURRENT toward the request, so a +50.0
+>   request from −5.0 returns −4.55. The executed sign follows the vehicle's
+>   travel, not the request. Physically correct (no wheeled vehicle reverses
+>   direction inside one tick) and a real change to what the proof asserted.
+>
+> K3 is restated, with both statements recorded in the harness: the executed
+> magnitude never EXCEEDS the ceiling, and it is exactly the ceiling with the
+> request's sign precisely when the ceiling is the only binding constraint. That
+> conditional half is what still stops a future priority returning something
+> arbitrarily below the ceiling and calling it enforcement.
+>
+> RESIDUAL — NOT CLOSED, and deliberately visible. When `|current| > ceiling` the
+> ceiling itself forces a rate breach: a 39.9 m/s request from 40.0 m/s is a
+> lawful −1.0 m/s², and clamping it to a 35.0 ceiling implies −50 m/s². No
+> ordering of the two priorities avoids it — the vehicle is already outside the
+> envelope and cannot be inside it one tick later within the brake limit.
+> INVARIANT 8 ("clamp to the absolute hard boundary first, then apply
+> rate-of-change limits; envelope cap always wins over rate priority") decides
+> it, and K6 (P-CAP) independently requires the return to respect the ceiling, so
+> the ceiling wins and the breach stands, bounded to that region. This is why
+> K8's domain is `|current| ≤ ceiling`: a recorded conflict between two enforced
+> bounds, not a convenience that makes a proof pass. It is pinned by an
+> EXPECTED-BUT-UNDESIRED fixture
+> (`crates/kirra-core/tests/over_ceiling_accel_bound.rs`) that fails the day the
+> resolution changes.
+>
+> EVIDENCE. `crates/kirra-core/tests/over_ceiling_accel_bound.rs` (reproducer +
+> non-vacuity control + the residual; the reproducer and the reversal case were
+> RED before the fix, the control and the residual green throughout, which is the
+> signature of a branch-specific defect rather than a broken oracle); Kani K8 —
+> the acceleration bound over every executable return — plus the restated K3 and
+> its two-part mirror; K1–K7 re-run.
+>
+> Independent approval: see `docs/safety/TALISMAN_AMENDMENT_POLICY.md`.
 >
 > **#1242 re-pin — INTENTIONAL BEHAVIOUR CHANGE, not formatting drift.**
 > `ed00f4da…` → `6a61b74f…`.
@@ -50,7 +102,10 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > `ClampBoth { linear, steering }` where they previously returned `ClampLinear`.
 > The `linear` MAGNITUDE IS UNCHANGED — it is still exactly the ceiling.
 >
-> WHAT WAS DELIBERATELY NOT CHANGED. P3/4 (the accel/brake bound) remains skipped
+> WHAT WAS DELIBERATELY NOT CHANGED **AT THE TIME — SUPERSEDED BY #1243, which
+> removed this guard. The paragraph is kept as the record of what #1242 decided
+> and why, not as a description of current behaviour.** P3/4 (the accel/brake
+> bound) remained skipped
 > when the ceiling binds — implemented as `!ceiling_bound` on the two assignment
 > conditions rather than a wrapper around the block, so the frozen-file diff this
 > pin certifies stays small (2 changed lines, not 25 re-indented). Letting it run would return the tighter of {ceiling,

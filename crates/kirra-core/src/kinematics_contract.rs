@@ -593,22 +593,43 @@ pub fn validate_vehicle_command(
     // (e.g. +0.01 → -20) as a cross-zero reversal and bound the reverse LAUNCH by
     // the larger brake limit — the M1 unsafe direction, reintroduced under noise.
     // Anything within the stop band is a launch: acceleration in either gear.
-    // #1242 (option B) — `!ceiling_bound` on the two ASSIGNMENT conditions below.
+    // #1243 — the rate bound now runs on the OVER-CEILING path too.
     //
-    // The speed ceiling has already fixed `v` to EXACTLY the ceiling magnitude,
-    // which K3 pins. Re-deriving `v` from the accel/brake bound would return the
-    // tighter of the two and change that magnitude — a safety-case amendment,
-    // not a lateral-envelope fix.
+    // #1242 carried a `!ceiling_bound` guard on the two assignment conditions
+    // below, so a command over the speed ceiling was returned at the ceiling
+    // magnitude with its implied ACCELERATION never checked. Measured: an
+    // executed 5.0 -> 35.0 m/s over 0.1 s implies 300 m/s^2 against a 2.5
+    // limit — 120x. That was the same early-exit defect class #1242 fixed for
+    // the lateral envelope, one protected property over, and it is now closed:
+    // the returned linear is the TIGHTER of {ceiling, rate bound}.
     //
-    // Guarding the two conditions rather than wrapping the whole block is
-    // deliberate: wrapping re-indents ~25 lines, which pulls semantically
-    // UNCHANGED accel arithmetic into `cargo-mutants --in-diff` and inflates the
-    // diff surface the blob re-pin has to certify. Same semantics, 2 lines.
+    // WHAT THIS COST. It is a safety-case amendment, not a free fix. K3
+    // previously read "an over-ceiling command clamps to EXACTLY the ceiling,
+    // direction preserved". Both halves are now false in general:
     //
-    // That the accel limit is therefore not applied to over-ceiling commands is a
-    // real pre-existing gap (an EXECUTED 5.0 -> 35.0 m/s over 0.1 s implies
-    // 300 m/s^2 against a 2.5 limit), tracked as #1243 with its own evidence.
-    // What #1242 fixes is that P5a/P5b/P6 below now ALWAYS run.
+    //   * magnitude — the rate bound can be tighter, so 50.0 from 5.0 now
+    //     returns 5.25, not 35.0;
+    //   * direction — the bound moves `v` from CURRENT toward the request by at
+    //     most one step, so a +50.0 request from -5.0 returns -4.55. The sign
+    //     follows the vehicle's actual travel, not the request. That is
+    //     physically right (a wheeled vehicle cannot reverse direction inside
+    //     one tick) and it is a genuine change to what K3 asserted.
+    //
+    // K3 is restated accordingly, and the ceiling's exactness is retained where
+    // it is still true: when the ceiling binds and NO rate bound is tighter,
+    // `|v|` is exactly the ceiling with the request's sign.
+    //
+    // RESIDUAL, DELIBERATELY NOT FIXED HERE. When `|current| > ceiling` the
+    // ceiling itself forces a rate breach: a 39.9 m/s request from 40.0 m/s is
+    // a lawful -1.0 m/s^2, and clamping it to a 35.0 ceiling implies -50 m/s^2.
+    // No ordering of these two priorities avoids that — the vehicle is already
+    // outside the envelope and cannot be inside it one tick later without
+    // exceeding the brake limit. INVARIANT 8 ("clamp to the absolute hard
+    // boundary first, then apply rate-of-change limits; envelope cap always
+    // wins") decides it, and K6 (P-CAP) independently requires the return to
+    // respect the ceiling. So the ceiling wins and the breach stands, bounded
+    // to that region. The `.clamp()` on both branches below is what enforces
+    // it. See #1243 and the re-pin note for the full statement.
     let speed_delta = cmd.linear_velocity_mps - cmd.current_velocity_mps;
     let implied_rate_abs = speed_delta.abs() / cmd.delta_time_s;
     let from_rest = cmd.current_velocity_mps.abs() <= STOP_EPSILON_MPS;
@@ -618,13 +639,13 @@ pub fn validate_vehicle_command(
         && cmd.linear_velocity_mps.abs() > cmd.current_velocity_mps.abs();
 
     if speeding_up {
-        if !ceiling_bound && implied_rate_abs > contract.max_accel_mps2 + 1e-9 {
+        if implied_rate_abs > contract.max_accel_mps2 + 1e-9 {
             v = (cmd.current_velocity_mps
                 + contract.max_accel_mps2 * cmd.delta_time_s * speed_delta.signum())
             .clamp(-effective_max_speed, effective_max_speed);
             v_clamped = true;
         }
-    } else if !ceiling_bound && implied_rate_abs > contract.max_brake_mps2 + 1e-9 {
+    } else if implied_rate_abs > contract.max_brake_mps2 + 1e-9 {
         // Decreasing speed magnitude → braking. Asymmetric from acceleration:
         // the braking limit is typically higher.
         v = (cmd.current_velocity_mps
@@ -816,6 +837,12 @@ mod kinematics_contract_tests {
         );
     }
 
+    /// The property this test is named for — REVERSE stays reverse — is
+    /// unchanged by #1243. The expected magnitude is not: the accel bound now
+    /// runs on the over-ceiling path and is tighter than the ceiling here
+    /// (-20.0 m/s + 2.5 m/s^2 x 0.5 s of reverse acceleration = -21.25, versus
+    /// the -35.0 ceiling). A sign regression would still fail this test, which
+    /// is what it exists to catch.
     #[test]
     fn test_reverse_speed_above_ceiling_clamps_with_correct_sign() {
         let contract = VehicleKinematicsContract::nominal_reference_profile();
@@ -826,9 +853,15 @@ mod kinematics_contract_tests {
             steering_angle_deg: 0.0,
             current_steering_angle_deg: 0.0,
         };
-        assert_eq!(
-            validate_vehicle_command(&cmd, &contract),
-            EnforceAction::ClampLinear(-35.0)
+        let action = validate_vehicle_command(&cmd, &contract);
+        assert_eq!(action, EnforceAction::ClampLinear(-21.25));
+        let EnforceAction::ClampLinear(v) = action else {
+            unreachable!()
+        };
+        assert!(v < 0.0, "reverse must stay reverse");
+        assert!(
+            v.abs() <= contract.effective_max_speed_mps(),
+            "and must still respect the ceiling"
         );
     }
 
@@ -1110,8 +1143,21 @@ mod kinematics_contract_tests {
         );
     }
 
+    /// #1243 — this test previously asserted the DEFECT.
+    ///
+    /// It was `test_speed_check_fires_before_accel_check`, and it pinned
+    /// `ClampLinear(35.0)` for this exact command: the speed ceiling firing and
+    /// the acceleration check never running. That is a legal speed and an
+    /// illegal transition — 5.0 -> 35.0 in 0.1 s implies 300 m/s^2 against a
+    /// 2.5 limit. The old name described the implementation's ordering rather
+    /// than a safety property, which is how it read as intended behaviour for
+    /// as long as it did.
+    ///
+    /// The bound is now the TIGHTER of the two, so this is the same command
+    /// with the opposite expectation, and it is stated as the property rather
+    /// than as a number: whatever executes must satisfy BOTH limits.
     #[test]
-    fn test_speed_check_fires_before_accel_check() {
+    fn test_over_ceiling_command_is_bounded_by_the_accel_limit_too() {
         let contract = VehicleKinematicsContract::nominal_reference_profile();
         let cmd = ProposedVehicleCommand {
             linear_velocity_mps: 50.0,
@@ -1120,9 +1166,22 @@ mod kinematics_contract_tests {
             steering_angle_deg: 0.0,
             current_steering_angle_deg: 0.0,
         };
-        assert_eq!(
-            validate_vehicle_command(&cmd, &contract),
-            EnforceAction::ClampLinear(35.0)
+        let action = validate_vehicle_command(&cmd, &contract);
+        assert_eq!(action, EnforceAction::ClampLinear(5.25));
+
+        let EnforceAction::ClampLinear(v) = action else {
+            unreachable!()
+        };
+        assert!(
+            v.abs() <= contract.effective_max_speed_mps() + 1e-9,
+            "the speed ceiling still binds"
+        );
+        let implied = (v - cmd.current_velocity_mps).abs() / cmd.delta_time_s;
+        assert!(
+            implied <= contract.max_accel_mps2 + 1e-9,
+            "and the acceleration limit now binds too: {implied} m/s^2 against \
+             a {} limit",
+            contract.max_accel_mps2
         );
     }
 
