@@ -107,7 +107,15 @@ _QUESTION_RE = re.compile(
 _EXEC_RUNNER_RE = re.compile(
     r"\b(?:run|execute|exec|shell(?:\s+out)?|spawn|invoke|kick off)\b[^.?!]*"
     r"\b(?:cargo|colcon|pytest|ros2|docker|npm|make|the tests?|the test suite|"
-    r"the build)\b",
+    r"the build)\b"
+    # Executing a SCRIPT BY PATH is the same class of request, and it is how a
+    # typed capability would be bypassed: "run python3 robot/kirra_doctor.py"
+    # asks for arbitrary execution that happens to name a repository file, not
+    # for the bounded `run_robot_diagnostics` capability. Question-gated with
+    # the rest of this regex, so "where do we run kirra_doctor.py?" stays a
+    # search rather than becoming a refusal.
+    r"|\b(?:run|execute|exec|invoke|spawn)\b[^.?!]*\S*\.(?:py|sh|bash|zsh|pl|js)\b"
+    r"|\b(?:bash|sh|zsh|python3?|perl|node)\b\s+\S+\.(?:py|sh|bash|pl|js)\b",
     re.IGNORECASE)
 
 # ── the closed classifier vocabulary ─────────────────────────────────────────
@@ -158,6 +166,33 @@ _RUNTIME_PATTERNS = (
     r"\bcpu (?:usage|load)\b", r"\bmemory usage\b", r"\bis .* service running\b",
     r"\bmission state\b", r"\bcurrent posture\b",
 )
+
+
+# An explicit COMMAND to run the bounded diagnostics suite. Deliberately narrow
+# and anchored: this must select a typed capability without swallowing the broad
+# runtime questions below, which remain honestly unanswerable.
+#
+# Anchored at the start (after a small closed set of politeness fillers) so a
+# deliberative mention — "should we run diagnostics before the demo?" — is NOT a
+# command. Command-shaped verbs only; no interrogative subject reaches these.
+#
+# NOTE the ordering dependency: `_RUNTIME_PATTERNS` contains `\brobot health\b`,
+# which would otherwise claim "check the robot health" as unanswerable. These are
+# tested FIRST in `classify`, and `assistant_diagnostics_test.py` pins that order.
+_DOCTOR_LEAD = r"^(?:please |can you |could you |would you |now |go ahead and )*"
+_DOCTOR_RUN_PATTERNS = (
+    _DOCTOR_LEAD + r"run (?:the |a |full |another )*(?:robot |r2 |system |full )*"
+                   r"diagnostics\b",
+    _DOCTOR_LEAD + r"run (?:the |a )*(?:robot |r2 )*doctor\b",
+    _DOCTOR_LEAD + r"(?:perform|run|do) (?:a |the )*(?:full )*health check\b",
+    _DOCTOR_LEAD + r"(?:check|report) (?:the )*(?:robot|r2|system) health\b",
+    _DOCTOR_LEAD + r"diagnose the (?:robot|r2|system)\b",
+)
+#: Text that must never ride along with a diagnostics command. The suite takes no
+#: operator-supplied options, so a flag, a path or a chained command means the
+#: operator asked for something this capability does not offer — refused out loud
+#: rather than silently downgraded to the default run.
+_DOCTOR_ARGISH_RE = re.compile(r"--|\.\./|/|\bmodule\b|&&|;|\|")
 
 
 def _any(patterns, text):
@@ -222,7 +257,21 @@ def classify(utterance, *, role=None):
         return ({"role": at.OPERATOR, "tool": rcl_intent,
                  "arguments": {"transcript": utterance}}, MATCHED)
 
-    # 3. Runtime questions: honestly out of scope for this slice.
+    # 3. An explicit command to run the bounded diagnostics suite. MUST precede
+    #    the runtime-question refusal below: `_RUNTIME_PATTERNS` matches
+    #    "robot health", so the honest-refusal rule would otherwise intercept
+    #    "check the robot health" before any typed capability could be selected.
+    #    That interception was the reported defect.
+    if _any(_DOCTOR_RUN_PATTERNS, norm):
+        if _DOCTOR_ARGISH_RE.search(raw):
+            # "run diagnostics --module ../../etc/passwd" is not this command.
+            return None, REFUSED_SHELL
+        return ({"role": at.OPERATOR, "tool": "run_robot_diagnostics",
+                 "arguments": {}}, MATCHED)
+
+    # 4. Runtime QUESTIONS: still honestly out of scope. Running the suite is a
+    #    command; "is the motor overheating?" is a question no tool answers, and
+    #    it must not be coerced into a diagnostics run.
     if _any(_RUNTIME_PATTERNS, norm):
         return None, "runtime_unavailable"
 
@@ -402,6 +451,10 @@ def speak_result(result):
         if missing:
             tail = (" I could not establish " + ", ".join(str(m) for m in missing[:2])
                     + ".")
+        if tool == "run_robot_diagnostics":
+            # A WARN or FAIL finding is not a failed invocation: the suite RAN.
+            # Say so, and keep the same observability caveat as the success path.
+            tail += " The suite ran; that's observability only, not a safety check."
         return _trim(f"{summary}{tail}")
 
     # ── success ──
@@ -421,6 +474,13 @@ def speak_result(result):
         else:
             line += " You're ready to continue."
         return _trim(line)
+
+    if tool == "run_robot_diagnostics":
+        # `summary` already carries the deterministic bounded counts, built in
+        # the tool so PARTIAL and SUCCESS say the same true thing. All that is
+        # added here is the observability caveat — diagnostics passing is NOT a
+        # safety statement, and the sentence must never imply one.
+        return _trim(f"{summary} That's observability only, not a safety check.")
 
     if tool == "search_repository":
         matches = ev.get("matches") or []

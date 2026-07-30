@@ -165,6 +165,18 @@ Every tool returns a `ToolResult`. `run_tool` is the only execution path.
 | `summarize_test_failure` | 1 | yes | supplied bounded text + repo evidence |
 | `sync_to_main` | 2 | no | **the landed RCL** (`repo_command.handle_intent`) |
 | `publish_my_work` | 2 | no | **the landed RCL** |
+| `run_robot_diagnostics` | 1 | yes | `kirra_doctor.collect()` in-process — read-only R2 doctor |
+
+`run_robot_diagnostics` is **production-only**: the deterministic classifier
+selects it, and it is deliberately absent from `CONTRACT_TOOL_NAMES`, so it is
+never advertised to Gemma and the measured prompt digest is unaffected. It takes
+no arguments — the doctor's CLI flags are not exposed to natural language — and
+"run diagnostics" is matched BEFORE the runtime-question refusal, which
+previously intercepted it. Broad runtime questions still get the honest refusal.
+Diagnostics are observability, never a safety authority; hardware-dependent
+results are meaningful on the R2/Orin, not in a container. The voice/audio stack
+has a separate diagnostic (`robot/kirra_voice_doctor.sh`). See
+`docs/diagnostics.md`.
 
 The two level-2 tools **delegate**; no git logic is duplicated, and their
 existing safety contracts and refusal behaviour are unchanged.
@@ -218,7 +230,7 @@ kind and must not present one as another:
 | Kind | Meaning | Source |
 |---|---|---|
 | `repository_fact` | What the tree says right now | tool evidence |
-| `runtime_fact` | What the running robot reports | *no runtime tool exists yet* — see §10 |
+| `runtime_fact` | What the running robot reports | `run_robot_diagnostics` — the read-only doctor suite; nothing else |
 | `design_intent` | What the docs say was intended | Markdown hits, labelled as documentation |
 | `model_inference` | Gemma's reasoning over retrieved evidence | explicitly hedged |
 | `uncertainty` | What could not be established | stated aloud |
