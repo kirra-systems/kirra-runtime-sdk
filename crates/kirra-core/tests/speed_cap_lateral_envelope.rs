@@ -164,3 +164,97 @@ fn an_accel_bounded_command_honours_the_lateral_envelope_today() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// #1242 — the two over-ceiling boundary cases.
+//
+// Together they demonstrate that narrowing the Priority-2 guard to the two
+// assignment conditions (rather than wrapping the accel block) changed DIFF
+// SHAPE, not semantics: the ceiling magnitude and direction are identical in
+// both, and only the reported variant differs with the steering demand.
+//
+// They also pin the split the Kani properties now make explicit — K3 owns the
+// longitudinal invariant, K3b owns which variant reports it.
+// ---------------------------------------------------------------------------
+
+/// Over the ceiling, steering INSIDE every steering bound.
+///
+/// The longitudinal axis alone is corrected, so the action stays `ClampLinear`
+/// and the steering demand passes through untouched. 5 deg at the capped
+/// 5.225 m/s is well inside P6 (~19.75 deg there) and inside the 35 deg rack,
+/// so no steering priority fires.
+#[test]
+fn over_ceiling_with_admissible_steering_reports_clamp_linear() {
+    let c = speed_capped_contract();
+    let cmd = ProposedVehicleCommand {
+        linear_velocity_mps: 5.4, // above the 5.225 ceiling
+        current_velocity_mps: 5.4,
+        delta_time_s: 0.1,
+        steering_angle_deg: 5.0,
+        current_steering_angle_deg: 5.0,
+    };
+    match validate_vehicle_command(&cmd, &c) {
+        EnforceAction::ClampLinear(v) => {
+            assert_eq!(v, 5.225, "magnitude is exactly the ceiling");
+            assert_eq!(v.signum(), cmd.linear_velocity_mps.signum(), "direction");
+        }
+        other => panic!("expected ClampLinear, got {other:?}"),
+    }
+    // And the steering really is untouched on this path.
+    let enforced = apply_enforce_action(&cmd, &validate_vehicle_command(&cmd, &c)).unwrap();
+    assert_eq!(enforced.steering_angle_deg, 5.0, "steering unchanged");
+}
+
+/// Over the ceiling, steering BEYOND the rack limit.
+///
+/// Both axes are corrected, so the action becomes `ClampBoth` — but the linear
+/// component is bit-identical to the `ClampLinear` case above. That identity is
+/// the point: composing a steering correction must not perturb the longitudinal
+/// result, which is exactly what the restated K3 asserts.
+#[test]
+fn over_ceiling_with_inadmissible_steering_reports_clamp_both() {
+    let c = speed_capped_contract();
+    let cmd = ProposedVehicleCommand {
+        linear_velocity_mps: 5.4,
+        current_velocity_mps: 5.4,
+        delta_time_s: 0.1,
+        steering_angle_deg: 50.0, // beyond the 35 deg rack
+        current_steering_angle_deg: 50.0,
+    };
+    match validate_vehicle_command(&cmd, &c) {
+        EnforceAction::ClampBoth { linear, steering } => {
+            assert_eq!(linear, 5.225, "magnitude is STILL exactly the ceiling");
+            assert_eq!(
+                linear.signum(),
+                cmd.linear_velocity_mps.signum(),
+                "direction"
+            );
+            assert!(
+                steering.abs() < 50.0 && steering.abs() <= c.max_steering_deg,
+                "steering clamped into the rack, got {steering}"
+            );
+        }
+        other => panic!("expected ClampBoth, got {other:?}"),
+    }
+}
+
+/// Reverse direction over the ceiling, with a steering correction: the sign of
+/// the longitudinal result must survive the composition. Reverse is the case a
+/// magnitude-only assertion would miss.
+#[test]
+fn over_ceiling_in_reverse_preserves_direction_through_composition() {
+    let c = speed_capped_contract();
+    let cmd = ProposedVehicleCommand {
+        linear_velocity_mps: -5.4,
+        current_velocity_mps: -5.4,
+        delta_time_s: 0.1,
+        steering_angle_deg: 50.0,
+        current_steering_angle_deg: 50.0,
+    };
+    match validate_vehicle_command(&cmd, &c) {
+        EnforceAction::ClampBoth { linear, .. } => {
+            assert_eq!(linear, -5.225, "reverse stays reverse, at the ceiling");
+        }
+        other => panic!("expected ClampBoth, got {other:?}"),
+    }
+}

@@ -146,16 +146,74 @@ mod proofs {
         }
         kani::assume(cmd.linear_velocity_mps.abs() > max);
 
-        match validate_vehicle_command(&cmd, &contract) {
-            EnforceAction::ClampLinear(v) => {
-                assert_eq!(v.abs(), max, "clamped magnitude is exactly the ceiling");
-                assert_eq!(
-                    v.signum(),
-                    cmd.linear_velocity_mps.signum(),
-                    "direction preserved (reverse stays reverse)"
+        // #1242 RESTATEMENT — K3 asserts the LONGITUDINAL INVARIANT, not the
+        // top-level action variant.
+        //
+        // It previously required `ClampLinear` specifically. That coupled a
+        // longitudinal property to the enumeration used to REPORT composed
+        // enforcement, and #1242 made the coupling false: once the steering
+        // priorities always run, an over-ceiling command whose steering also
+        // needs correcting reports `ClampBoth` while carrying the identical
+        // linear value.
+        //
+        // This is NOT a weakening. Both substantive claims are unchanged and
+        // still asserted below — magnitude is exactly the ceiling, direction is
+        // preserved. What is removed is an accidental dependence on which
+        // variant carries them. The input domain is deliberately NOT narrowed to
+        // exclude commands with a steering demand: doing so would delete the
+        // newly-exposed composition case from the proof rather than state the
+        // invariant correctly.
+        //
+        // The variant question is a COMPOSITION property and lives in
+        // `k3b_composition_reports_both_axes` below, where it belongs.
+        let action = validate_vehicle_command(&cmd, &contract);
+        let linear = match action {
+            EnforceAction::ClampLinear(v) => v,
+            EnforceAction::ClampBoth { linear, .. } => linear,
+            other => panic!("over-ceiling must clamp the linear axis, got {other:?}"),
+        };
+        assert_eq!(
+            linear.abs(),
+            max,
+            "clamped magnitude is exactly the ceiling"
+        );
+        assert_eq!(
+            linear.signum(),
+            cmd.linear_velocity_mps.signum(),
+            "direction preserved (reverse stays reverse)"
+        );
+    }
+
+    /// K3b (#1242) — COMPOSITION semantics, split out of K3.
+    ///
+    /// K3 owns the longitudinal invariant; this owns which variant reports it.
+    /// Keeping them apart means a future change to how composed enforcement is
+    /// REPORTED cannot silently look like a change to what the longitudinal
+    /// bound IS.
+    ///
+    /// If both axes were corrected, the action must say so — dropping either
+    /// correction from the report is how a consumer ends up applying one bound
+    /// and not the other.
+    #[kani::proof]
+    fn k3b_composition_reports_both_axes() {
+        let cmd = any_command();
+        let contract = any_bounded_contract();
+        kani::assume(cmd.linear_velocity_mps.is_finite());
+        kani::assume(cmd.current_velocity_mps.is_finite());
+        kani::assume(cmd.steering_angle_deg.is_finite());
+        kani::assume(cmd.current_steering_angle_deg.is_finite());
+        kani::assume(cmd.delta_time_s.is_finite() && cmd.delta_time_s > 0.0);
+
+        let action = validate_vehicle_command(&cmd, &contract);
+        if let Some((linear, steering)) = executed_pair(&cmd, &action) {
+            let linear_corrected = linear != cmd.linear_velocity_mps;
+            let steering_corrected = steering != cmd.steering_angle_deg;
+            if linear_corrected && steering_corrected {
+                assert!(
+                    matches!(action, EnforceAction::ClampBoth { .. }),
+                    "both axes corrected must report ClampBoth"
                 );
             }
-            other => panic!("over-ceiling must ClampLinear, got {other:?}"),
         }
     }
 

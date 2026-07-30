@@ -593,43 +593,44 @@ pub fn validate_vehicle_command(
     // (e.g. +0.01 → -20) as a cross-zero reversal and bound the reverse LAUNCH by
     // the larger brake limit — the M1 unsafe direction, reintroduced under noise.
     // Anything within the stop band is a launch: acceleration in either gear.
-    // #1242 (option B) — SKIPPED when the effective-speed ceiling bound.
+    // #1242 (option B) — `!ceiling_bound` on the two ASSIGNMENT conditions below.
     //
-    // The ceiling has already fixed `v` to EXACTLY the ceiling magnitude, which
-    // Kani K3 pins ("SG1 P2 speed-ceiling clamp exact"). Re-deriving `v` from the
-    // accel/brake bound here would return the tighter of the two and make K3
-    // false by construction — a safety-case property amendment, which does not
-    // belong inside a lateral-envelope fix.
+    // The speed ceiling has already fixed `v` to EXACTLY the ceiling magnitude,
+    // which K3 pins. Re-deriving `v` from the accel/brake bound would return the
+    // tighter of the two and change that magnitude — a safety-case amendment,
+    // not a lateral-envelope fix.
     //
-    // That the accel limit is therefore NOT applied to over-ceiling commands is a
-    // real, pre-existing gap: 5.0 -> 35.0 m/s in 0.1 s is an EXECUTED command
-    // implying 300 m/s^2 against a 2.5 limit. Same early-return omission class as
-    // the steering one, tracked as #1243 with its own evidence rather than bundled
-    // here. What #1242 fixes is that P5a/P5b/P6 below now ALWAYS run.
-    if !ceiling_bound {
-        let speed_delta = cmd.linear_velocity_mps - cmd.current_velocity_mps;
-        let implied_rate_abs = speed_delta.abs() / cmd.delta_time_s;
-        let from_rest = cmd.current_velocity_mps.abs() <= STOP_EPSILON_MPS;
-        let same_direction_or_from_rest = from_rest
-            || cmd.linear_velocity_mps.signum() == cmd.current_velocity_mps.signum();
-        let speeding_up = same_direction_or_from_rest
-            && cmd.linear_velocity_mps.abs() > cmd.current_velocity_mps.abs();
+    // Guarding the two conditions rather than wrapping the whole block is
+    // deliberate: wrapping re-indents ~25 lines, which pulls semantically
+    // UNCHANGED accel arithmetic into `cargo-mutants --in-diff` and inflates the
+    // diff surface the blob re-pin has to certify. Same semantics, 2 lines.
+    //
+    // That the accel limit is therefore not applied to over-ceiling commands is a
+    // real pre-existing gap (an EXECUTED 5.0 -> 35.0 m/s over 0.1 s implies
+    // 300 m/s^2 against a 2.5 limit), tracked as #1243 with its own evidence.
+    // What #1242 fixes is that P5a/P5b/P6 below now ALWAYS run.
+    let speed_delta = cmd.linear_velocity_mps - cmd.current_velocity_mps;
+    let implied_rate_abs = speed_delta.abs() / cmd.delta_time_s;
+    let from_rest = cmd.current_velocity_mps.abs() <= STOP_EPSILON_MPS;
+    let same_direction_or_from_rest = from_rest
+        || cmd.linear_velocity_mps.signum() == cmd.current_velocity_mps.signum();
+    let speeding_up = same_direction_or_from_rest
+        && cmd.linear_velocity_mps.abs() > cmd.current_velocity_mps.abs();
 
-        if speeding_up {
-            if implied_rate_abs > contract.max_accel_mps2 + 1e-9 {
-                v = (cmd.current_velocity_mps
-                    + contract.max_accel_mps2 * cmd.delta_time_s * speed_delta.signum())
-                .clamp(-effective_max_speed, effective_max_speed);
-                v_clamped = true;
-            }
-        } else if implied_rate_abs > contract.max_brake_mps2 + 1e-9 {
-            // Decreasing speed magnitude → braking. Asymmetric from acceleration:
-            // the braking limit is typically higher.
+    if speeding_up {
+        if !ceiling_bound && implied_rate_abs > contract.max_accel_mps2 + 1e-9 {
             v = (cmd.current_velocity_mps
-                + contract.max_brake_mps2 * cmd.delta_time_s * speed_delta.signum())
+                + contract.max_accel_mps2 * cmd.delta_time_s * speed_delta.signum())
             .clamp(-effective_max_speed, effective_max_speed);
             v_clamped = true;
         }
+    } else if !ceiling_bound && implied_rate_abs > contract.max_brake_mps2 + 1e-9 {
+        // Decreasing speed magnitude → braking. Asymmetric from acceleration:
+        // the braking limit is typically higher.
+        v = (cmd.current_velocity_mps
+            + contract.max_brake_mps2 * cmd.delta_time_s * speed_delta.signum())
+        .clamp(-effective_max_speed, effective_max_speed);
+        v_clamped = true;
     }
 
     // SAFETY: SG3 | REQ: steering-hard-limit | TEST: test_high_speed_lateral_acceleration_forces_steering_clamp,prop_clamp_steering_value_is_finite

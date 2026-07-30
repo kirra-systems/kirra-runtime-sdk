@@ -29,12 +29,12 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > BOTH axes instead of dropping the velocity correction) and direction-aware
 > accel/brake selection (M1 — reverse acceleration is bounded by the accel limit,
 > not the brake limit). The talisman re-pins to the amended logic blob
-> `crates/kirra-core/src/kinematics_contract.rs = bbfe014b15dec951bd4107eedc3d5e8e52171f6f`
+> `crates/kirra-core/src/kinematics_contract.rs = 6a61b74fceae09a8057b2059e571ea40b059a59a`
 > (superseding `ed00f4da…`, and before it the historical `997fb7ae…`, which
 > predated the Stage-3 relocation and matched no current file).
 >
 > **#1242 re-pin — INTENTIONAL BEHAVIOUR CHANGE, not formatting drift.**
-> `ed00f4da…` → `bbfe014b…`.
+> `ed00f4da…` → `6a61b74f…`.
 >
 > WHAT CHANGED. Priority 2 (the effective-speed ceiling) previously `return`ed
 > `ClampLinear` directly, which skipped P5a (rack limit), P5b (slew) and P6
@@ -51,7 +51,9 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > The `linear` MAGNITUDE IS UNCHANGED — it is still exactly the ceiling.
 >
 > WHAT WAS DELIBERATELY NOT CHANGED. P3/4 (the accel/brake bound) remains skipped
-> when the ceiling binds. Letting it run would return the tighter of {ceiling,
+> when the ceiling binds — implemented as `!ceiling_bound` on the two assignment
+> conditions rather than a wrapper around the block, so the frozen-file diff this
+> pin certifies stays small (2 changed lines, not 25 re-indented). Letting it run would return the tighter of {ceiling,
 > accel bound} and make **Kani K3** false — "SG1 P2 speed-ceiling clamp exact
 > (magnitude = ceiling, direction preserved, ODD-cap min honored)" is one of the
 > twelve machine-checked properties this safety case cites as proved. Amending a
