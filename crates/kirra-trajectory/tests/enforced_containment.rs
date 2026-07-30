@@ -514,8 +514,13 @@ fn p6_velocities() -> Vec<f64> {
 /// Purpose-built rather than stretched out of `arc_poses`, which is fixed at one
 /// speed and so cannot enter the P6-binding regime at all.
 fn p6_ramped_arc() -> Vec<TrajectoryPoint> {
-    let vs = p6_velocities();
-    let tan_d = P6_DEMAND_DEG.to_radians().tan();
+    arc_with_velocities(P6_DEMAND_DEG, &p6_velocities())
+}
+
+/// The same exact-bicycle construction over an ARBITRARY per-pose velocity
+/// profile, so a fixture can choose where the accel limit binds.
+fn arc_with_velocities(steering_deg: f64, vs: &[f64]) -> Vec<TrajectoryPoint> {
+    let tan_d = steering_deg.to_radians().tan();
     let mut pts = vec![TrajectoryPoint {
         pose: Pose {
             x_m: 0.0,
@@ -525,7 +530,7 @@ fn p6_ramped_arc() -> Vec<TrajectoryPoint> {
         velocity_mps: vs[0],
         time_from_start_s: 0.0,
     }];
-    for k in 0..P6_SEGMENTS {
+    for k in 0..vs.len() - 1 {
         let prev = pts[k].pose;
         let arc = 0.5 * (vs[k] + vs[k + 1]) * P6_DT;
         let dh = arc * tan_d / P6_L;
@@ -717,5 +722,183 @@ fn the_fast_loop_refuses_a_command_above_the_real_p6_ceiling() {
         check_command_conforms(&cmd, &unbound, &EgoOdom::default(), &cfg, now),
         ConformanceVerdict::Accept,
         "non-vacuity: without the ceiling the pre-existing bounds all pass it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #1213 — ClampBoth propagation.
+//
+// The kernel returns `ClampBoth { linear, steering }` when the ACCEL/BRAKE
+// limit binds AND P6 also binds at the accel-bounded speed; its `steering` is
+// the lateral-envelope angle back-solved for the ENFORCED linear. That is an
+// independently PERMANENT P6 restriction, so it must propagate exactly as a
+// `ClampSteering` does — a simultaneous clamp on the other axis is not a reason
+// to hand the fast loop a looser bound.
+//
+// The rule is unchanged and still governs both mechanisms: arm when, and only
+// when, the steering component includes a permanent P5a/P6 clamp. A ClampBoth
+// carrying only a transient P5b slew restriction stays excluded — the probe
+// zeroes the rate demand, so P5b cannot reach this path at all.
+// ---------------------------------------------------------------------------
+
+/// Velocity profile whose 1st and 4th segments demand more than `max_accel·dt`
+/// (0.5 m/s here) and so are accel-bounded; the rest step gently and are not.
+/// That places ClampBoth at poses 1 and 4, each with ClampSteering neighbours.
+///
+/// Pose 1 is deliberately early: the fast-loop test needs a ClampBoth pose
+/// INSIDE `DEFAULT_MAX_AGE_MS` (200 ms), or staleness refuses the command before
+/// any steering bound is consulted and the control arm proves nothing.
+const CB_VS: [f64; 7] = [5.0, 6.2, 6.4, 6.6, 7.6, 7.8, 8.0];
+const CB_MAX_ACCEL: f64 = 5.0;
+const CB_DEMAND_DEG: f64 = 30.0;
+
+fn cb_config() -> VehicleConfig {
+    let mut cfg = p6_config();
+    cfg.max_accel_mps2 = CB_MAX_ACCEL;
+    cfg.max_speed_mps = 50.0; // keep the SPEED CAP out of it
+    cfg
+}
+
+/// Expected ceiling, derived independently: pose 0 keeps the rack limit; every
+/// other pose is P6 solved at the velocity the kernel will actually ENFORCE for
+/// that segment — the planner's own end velocity when the accel limit does not
+/// bind, and the accel-bounded value when it does.
+fn cb_expected_ceiling() -> Vec<f64> {
+    let cfg = cb_config();
+    let c = cfg.to_posture_kinematics_contract(FleetPosture::Nominal);
+    let (rack, a_max, l) = (
+        c.max_steering_deg.to_radians(),
+        c.max_lateral_accel_mps2,
+        c.wheelbase_m,
+    );
+    let dt = P6_DT;
+    (0..CB_VS.len())
+        .map(|k| {
+            if k == 0 {
+                return rack;
+            }
+            let (cur, want) = (CB_VS[k - 1], CB_VS[k]);
+            let enforced = want.min(cur + CB_MAX_ACCEL * dt);
+            rack.min((a_max * l / (enforced * enforced)).atan())
+        })
+        .collect()
+}
+
+/// Which poses the accel limit binds at — i.e. which are ClampBoth.
+fn cb_is_both(k: usize) -> bool {
+    k > 0 && CB_VS[k] > CB_VS[k - 1] + CB_MAX_ACCEL * P6_DT
+}
+
+fn cb_outcome() -> (Vec<TrajectoryPoint>, SlowLoopOutcome) {
+    let path = arc_with_velocities(CB_DEMAND_DEG, &CB_VS);
+    let corridor = corridor_around(&path, P6_W, 15.0);
+    let out = validate_trajectory_slow_detailed(
+        &path,
+        &corridor,
+        &[],
+        &cb_config(),
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        None,
+        None,
+        FrameTrust::Trusted,
+    );
+    (path, out)
+}
+
+/// A ClampBoth pose carries its P6 ceiling, NOT the rack seed — and its
+/// ClampSteering neighbours are untouched by it.
+///
+/// The exact vector is what makes deleting the ClampBoth propagation arm
+/// visible: without it, poses 3 and 4 fall back to the 35 deg seed while their
+/// neighbours keep their own P6 values, so the vector changes at exactly those
+/// indices and nowhere else.
+#[test]
+fn a_clampboth_pose_carries_its_p6_ceiling_not_the_rack_seed() {
+    let (path, out) = cb_outcome();
+    assert_eq!(
+        out.verdict,
+        TrajectoryVerdict::Clamp,
+        "precondition: released, reason={:?}",
+        out.reason
+    );
+    assert!(
+        out.velocity_ceiling.is_some(),
+        "precondition: the accel limit must actually bind somewhere"
+    );
+    let got = out
+        .steering_ceiling_rad
+        .expect("a ClampBoth pose must publish a steering ceiling");
+    let want = cb_expected_ceiling();
+    assert_eq!(got.len(), path.len());
+    let rack = p6_bounds().0;
+    // Precondition on the FIXTURE: it must actually contain both kinds.
+    let both: Vec<usize> = (0..CB_VS.len()).filter(|&k| cb_is_both(k)).collect();
+    assert_eq!(both, vec![1, 4], "fixture must place ClampBoth at 1 and 4");
+    for (k, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+        assert!(
+            (g - w).abs() < 1e-9,
+            "pose {k} ({}): {:.4} deg, expected {:.4} deg",
+            if cb_is_both(k) {
+                "ClampBoth"
+            } else {
+                "ClampSteering"
+            },
+            g.to_degrees(),
+            w.to_degrees()
+        );
+    }
+    // The ClampBoth entries are strictly tighter than the seed AND strictly
+    // tighter than their ClampSteering neighbours — so a fallback to either
+    // would be caught, not merely a fallback to the rack.
+    for &k in &both {
+        assert!(got[k] < rack - 1e-6, "pose {k} must not be the rack seed");
+        assert!(
+            got[k] < got[k - 1] - 1e-6,
+            "pose {k} must be tighter than its neighbour"
+        );
+    }
+}
+
+/// END-TO-END at a ClampBoth index: a command above that pose's P6 ceiling but
+/// inside the rack limit is refused, and the identical command is admitted once
+/// the ceiling is removed.
+#[test]
+fn the_fast_loop_refuses_a_command_above_a_clampboth_pose_ceiling() {
+    let (path, out) = cb_outcome();
+    let ceiling = out.steering_ceiling_rad.clone().expect("ceiling");
+    let cfg = cb_config();
+    let (rack, _) = p6_bounds();
+    // Land the fast loop's nearest-pose search on a ClampBoth index.
+    let idx = 1_usize;
+    let promoted = 100_000_u64;
+    let now = promoted + (path[idx].time_from_start_s * 1000.0) as u64;
+    let env =
+        LateralEnvelope::from_contract(&cfg.to_posture_kinematics_contract(FleetPosture::Nominal));
+    let bound = AcceptedTrajectory::with_verdict("av_01", 1, path.clone(), out.verdict, promoted)
+        .with_lateral_envelope(Some(env))
+        .with_steering_ceiling(Some(ceiling.clone()));
+
+    // Above the ClampBoth pose's ceiling, still well inside the rack.
+    let steer = ceiling[idx] + 4.0_f64.to_radians();
+    assert!(steer < rack, "must stay inside the rack limit");
+    let cmd = IncomingControl {
+        velocity_mps: 2.0,
+        steering_rad: steer,
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&cmd, &bound, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::MRCFallback,
+        "a command above a ClampBoth pose's P6 ceiling must MRC"
+    );
+    let mut unbound = bound.clone();
+    unbound.effective_steering_ceiling_rad = None;
+    assert_eq!(
+        check_command_conforms(&cmd, &unbound, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::Accept,
+        "non-vacuity: without the ceiling the pre-existing bounds admit it"
     );
 }
