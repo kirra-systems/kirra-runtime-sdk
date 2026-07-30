@@ -24,14 +24,14 @@ use serde::{Deserialize, Serialize};
 /// safety contract (`EnforceAction` / `DenyCode` / `VehicleKinematicsContract` /
 /// `validate_vehicle_command`). Relocated here verbatim (de-monolith Stage 3); re-exported
 /// by `kirra_verifier::gateway::kinematics_contract` so every existing path holds.
-/// `rustfmt::skip`: the file is pinned by git blob hash (`ed00f4da…` — the safety-case
+/// `rustfmt::skip`: the file is pinned by git blob hash (`742dc54a…` — the safety-case
 /// talisman gate + the Kani proof pin); a reformat would silently break both pins.
 #[rustfmt::skip]
 pub mod kinematics_contract;
 
 /// #793 F6 — non-frozen extensions to `DenyCode` (`ALL` / `index`) used by the
 /// `/metrics` actuator-denial family. Kept OUT of the byte-frozen
-/// `kinematics_contract` talisman (blob `ed00f4da…`) so the pin holds; see the
+/// `kinematics_contract` talisman (blob `742dc54a…`) so the pin holds; see the
 /// module doc. PRIVATE `mod` (not `pub`): it only carries an inherent
 /// `impl DenyCode` — the methods are public via the (public) type, callable
 /// cross-crate as `DenyCode::ALL` / `.index()` without exposing a module path,

@@ -1534,9 +1534,18 @@ mod actuator_middleware_tests {
             EnforceAction::ClampSteering(a) => assert!(a < 20.0 && a > 0.0),
             other => panic!("nominal: expected ClampSteering, got {other:?}"),
         }
+        // #1242: the MRC ceiling binds AND 20 deg is outside the lateral envelope
+        // at the enforced 5.0 m/s, so both axes are corrected. Before #1242 the
+        // steering demand was executed unchecked; the ceiling is unchanged.
         match validate_vehicle_command(&cmd, &mrc) {
-            EnforceAction::ClampLinear(v) => assert_eq!(v, 5.0),
-            other => panic!("mrc: expected ClampLinear, got {other:?}"),
+            EnforceAction::ClampBoth { linear, steering } => {
+                assert_eq!(linear, 5.0, "the ceiling magnitude is unchanged");
+                assert!(
+                    steering < 20.0 && steering > 0.0,
+                    "steering is bounded for the ENFORCED speed, got {steering}"
+                );
+            }
+            other => panic!("mrc: expected ClampBoth, got {other:?}"),
         }
     }
 
@@ -1613,9 +1622,13 @@ mod actuator_middleware_tests {
             planner_unsafe, teleop_unsafe,
             "SG7 source-based relaxation: an unsafe command verdict must NOT depend on ingress path"
         );
+        // #1242: over-cap AND outside the lateral envelope at the enforced speed,
+        // so both axes are corrected. SG7's subject is the parity asserted above,
+        // which is variant-independent. Note what the envelope permits here: at
+        // the 35 m/s ceiling, ~0.46 deg — and before #1242 any demand passed.
         assert!(
-            matches!(planner_unsafe, EnforceAction::ClampLinear(_)),
-            "expected ClampLinear for over-cap unsafe input, got {planner_unsafe:?}"
+            matches!(planner_unsafe, EnforceAction::ClampBoth { .. }),
+            "expected ClampBoth for over-cap unsafe input, got {planner_unsafe:?}"
         );
     }
 }

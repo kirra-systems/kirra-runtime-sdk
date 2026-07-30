@@ -546,12 +546,7 @@ mod kinematics_sim_tests {
         let c = ProposedVehicleCommand {
             linear_velocity_mps: 40.0,
             current_velocity_mps: 34.0,
-            // FIXTURE (#1242): long enough that the ACCEL bound does not bind
-            // (6.0 / 5.0 = 1.2 m/s^2, inside the 2.5 limit), so the SPEED
-            // CEILING is the value being substituted. Before #1242 the ceiling
-            // short-circuited the accel check and any dt reached it; now the
-            // tighter bound wins, and this test is about the ceiling.
-            delta_time_s: 5.0,
+            delta_time_s: DT,
             steering_angle_deg: 0.0,
             current_steering_angle_deg: 0.0,
         };
