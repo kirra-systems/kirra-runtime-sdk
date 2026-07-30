@@ -389,7 +389,11 @@ The re-pin is a deliberate act and must read as one. Record, in
   restated so the scope stays honest;
 - **regression results**, including the before/after of the previously-ignored
   test;
-- **reviewer approval**, named;
+- **approval**, per `docs/safety/TALISMAN_AMENDMENT_POLICY.md` — either a named
+  second-principal approval recorded BEFORE merge (§2.1), or a formally recorded
+  **exception** carrying all five mandatory fields (§2.2). "Named reviewer" alone
+  is no longer sufficient wording: it does not distinguish the two, and this
+  amendment is the case that showed why — it took the exception path;
 - an explicit statement that this re-pin acknowledges an **intentional kernel
   behaviour change** — commands on the speed-cap branch that previously returned
   `ClampLinear` now return `ClampBoth` — and is **not** formatting drift or an

@@ -139,7 +139,14 @@ Talisman work, so the bar is higher than a normal fix:
       (4) the `rustfmt gate` workflow step, which HARDCODED the old prefix in its
       grep and so failed with an empty `pinned ` on the first legitimate re-pin —
       now anchored on the path instead of the value, matching (2)'s convention.
-      Reviewer approval remains **PENDING**;
+      Independent approval **NOT OBTAINED** — this amendment proceeded under a
+      **recorded exception** to the separation-of-duties control
+      (`docs/safety/TALISMAN_AMENDMENT_POLICY.md` §2.2), accepted by
+      `justinlooney` (repository owner) on 2026-07-30, and recorded after the
+      merge rather than before it. The five mandatory exception fields — author,
+      why no independent reviewer existed, who accepted, what was independently
+      machine-checked, and the residual risk — are in the re-pin note itself
+      (`docs/CAPTURE_PIPELINE_SPEC.md`) so they travel with the record;
 - [ ] FDIT matrix re-baseline for site 2 if released bytes change.
 
 The regression test uses the simulator's own formula and tolerance
