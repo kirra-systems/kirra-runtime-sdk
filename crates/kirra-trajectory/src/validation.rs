@@ -317,23 +317,38 @@ pub fn validate_trajectory_slow_explained(
     (verdict, reason)
 }
 
-/// As [`validate_trajectory_slow_explained`], additionally returning the
-/// **effective per-pose velocity ceiling** the checker computed (B1 fix).
+/// Everything the slow loop learned while validating a trajectory, including
+/// the two per-pose ceilings the fast loop must be bound to.
 ///
-/// On a `Clamp` verdict the checker derated at least one pose's commanded
-/// velocity (a per-pose `EnforceAction::ClampLinear`/`ClampBoth`, or the
-/// composed perception cap). The third element is `Some(ceilings)` — a
-/// `Vec<f64>` aligned index-for-index with `trajectory`, where `ceilings[k]`
-/// is the maximum velocity permissible at pose `k` (the derated value where a
-/// clamp fired, the planner's own velocity elsewhere). The ROS fast-loop
-/// `check_command_conforms` gates against THIS envelope, so a command at the
-/// planner's original (unclamped) speed on a `Clamp` verdict now fails
-/// conformance → MRC, instead of passing (the finding).
-///
-/// `None` on every other verdict (`Accept` needs no derate; a refusal drives
-/// the MRC directly), so the `Accept` fast path is byte-identical to before.
-/// The verdict enum stays one byte — the envelope rides here on the slow-loop
-/// return, never on `TrajectoryVerdict` (the #893 side-channel discipline).
+/// Returned by [`validate_trajectory_slow_detailed`]. The older
+/// [`validate_trajectory_slow_with_envelope`] delegates here and drops
+/// `steering_ceiling_rad`, so existing callers are unaffected.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlowLoopOutcome {
+    pub verdict: TrajectoryVerdict,
+    pub reason: Option<TrajectoryRefusalReason>,
+    /// B1 — per-pose velocity ceiling, aligned index-for-index with the
+    /// trajectory. `Some` only when a velocity clamp fired.
+    pub velocity_ceiling: Option<Vec<f64>>,
+    /// #1213 — per-pose ENFORCED STEERING ceiling in RADIANS, aligned
+    /// index-for-index with the trajectory.
+    ///
+    /// This is the magnitude the checker actually validated containment
+    /// against at each pose. `Some` only when a PERMANENT (P5a rack-limit /
+    /// P6 lateral-envelope) clamp fired somewhere; transient P5b slew clamps
+    /// do not populate it, for the same reason they do not arm the
+    /// enforced-geometry re-check.
+    ///
+    /// Poses with no permanent clamp carry the posture-composed rack limit —
+    /// i.e. no bound tighter than what the fast loop already applies — so the
+    /// vector is meaningful at every index rather than sparse.
+    pub steering_ceiling_rad: Option<Vec<f64>>,
+}
+
+/// Back-compat shim over [`validate_trajectory_slow_detailed`] for the callers
+/// that predate the steering ceiling. Prefer the detailed form in new code:
+/// dropping `steering_ceiling_rad` leaves the fast loop bound only by the
+/// static rack limit at poses the slow loop clamped.
 #[allow(clippy::too_many_arguments)]
 pub fn validate_trajectory_slow_with_envelope(
     trajectory: &[TrajectoryPoint],
@@ -352,6 +367,53 @@ pub fn validate_trajectory_slow_with_envelope(
     Option<TrajectoryRefusalReason>,
     Option<Vec<f64>>,
 ) {
+    let o = validate_trajectory_slow_detailed(
+        trajectory,
+        corridor,
+        objects,
+        config,
+        latest_odom,
+        posture,
+        effective_perception_cap,
+        visibility_range_m,
+        predicted_modes,
+        pedestrians,
+        frame_trust,
+    );
+    (o.verdict, o.reason, o.velocity_ceiling)
+}
+
+/// As [`validate_trajectory_slow_explained`], additionally returning the
+/// **effective per-pose velocity ceiling** the checker computed (B1 fix).
+///
+/// On a `Clamp` verdict the checker derated at least one pose's commanded
+/// velocity (a per-pose `EnforceAction::ClampLinear`/`ClampBoth`, or the
+/// composed perception cap). The third element is `Some(ceilings)` — a
+/// `Vec<f64>` aligned index-for-index with `trajectory`, where `ceilings[k]`
+/// is the maximum velocity permissible at pose `k` (the derated value where a
+/// clamp fired, the planner's own velocity elsewhere). The ROS fast-loop
+/// `check_command_conforms` gates against THIS envelope, so a command at the
+/// planner's original (unclamped) speed on a `Clamp` verdict now fails
+/// conformance → MRC, instead of passing (the finding).
+///
+/// `None` on every other verdict (`Accept` needs no derate; a refusal drives
+/// the MRC directly), so the `Accept` fast path is byte-identical to before.
+/// The verdict enum stays one byte — the envelope rides here on the slow-loop
+/// return, never on `TrajectoryVerdict` (the #893 side-channel discipline).
+#[allow(clippy::too_many_arguments)]
+pub fn validate_trajectory_slow_detailed(
+    trajectory: &[TrajectoryPoint],
+    corridor: &dyn CorridorSource,
+    objects: &[PerceivedObject],
+    config: &VehicleConfig,
+    latest_odom: Option<&EgoOdom>,
+    posture: FleetPosture,
+    effective_perception_cap: Option<f64>,
+    visibility_range_m: Option<f64>,
+    predicted_modes: Option<&[PredictedMode<'_>]>,
+    pedestrians: Option<&crate::vru::PedestrianScene<'_>>,
+    frame_trust: FrameTrust,
+) -> SlowLoopOutcome {
     // ----- Posture short-circuit (M1) ----------------------------------
     //
     // A LockedOut fleet must not be commanded — the safe response is to
@@ -361,21 +423,23 @@ pub fn validate_trajectory_slow_with_envelope(
     // an integrator inspecting verdicts in a LockedOut state always sees
     // `MRCFallback` regardless of the trajectory shape.
     if posture == FleetPosture::LockedOut {
-        return (
-            TrajectoryVerdict::MRCFallback,
-            Some(TrajectoryRefusalReason::PostureLockedOut),
-            None,
-        );
+        return SlowLoopOutcome {
+            verdict: TrajectoryVerdict::MRCFallback,
+            reason: Some(TrajectoryRefusalReason::PostureLockedOut),
+            velocity_ceiling: None,
+            steering_ceiling_rad: None,
+        };
     }
 
     // Reject empty / single-point trajectories outright (the per-pose
     // loop needs ≥ 2 points to compute deltas). Conservative MRC.
     if trajectory.len() < 2 {
-        return (
-            TrajectoryVerdict::MRCFallback,
-            Some(TrajectoryRefusalReason::TooFewPoints),
-            None,
-        );
+        return SlowLoopOutcome {
+            verdict: TrajectoryVerdict::MRCFallback,
+            reason: Some(TrajectoryRefusalReason::TooFewPoints),
+            velocity_ceiling: None,
+            steering_ceiling_rad: None,
+        };
     }
 
     // ----- Object-cardinality cap (F9 / #1096) -------------------------
@@ -390,11 +454,12 @@ pub fn validate_trajectory_slow_with_envelope(
     // (`PerceptionObjectOverflow`) surfaces the overflow through the existing
     // verdict-reason emission (the checker's observability channel).
     if objects.len() > MAX_RSS_OBJECTS {
-        return (
-            TrajectoryVerdict::MRCFallback,
-            Some(TrajectoryRefusalReason::PerceptionObjectOverflow),
-            None,
-        );
+        return SlowLoopOutcome {
+            verdict: TrajectoryVerdict::MRCFallback,
+            reason: Some(TrajectoryRefusalReason::PerceptionObjectOverflow),
+            velocity_ceiling: None,
+            steering_ceiling_rad: None,
+        };
     }
 
     // ----- A) Containment (SG2) ----------------------------------------
@@ -440,11 +505,12 @@ pub fn validate_trajectory_slow_with_envelope(
         frame_trust,
     );
     if !matches!(containment_verdict, EnforceAction::Allow) {
-        return (
-            TrajectoryVerdict::MRCFallback,
-            Some(TrajectoryRefusalReason::ContainmentBreach),
-            None,
-        );
+        return SlowLoopOutcome {
+            verdict: TrajectoryVerdict::MRCFallback,
+            reason: Some(TrajectoryRefusalReason::ContainmentBreach),
+            velocity_ceiling: None,
+            steering_ceiling_rad: None,
+        };
     }
 
     // ----- B) Per-pose kinematics (P0–P6) ------------------------------
@@ -495,6 +561,12 @@ pub fn validate_trajectory_slow_with_envelope(
     // on the segment ENDING at pose `k` lowers `ceilings[k]` to the checker's
     // own enforced value.
     let mut ceilings: Option<Vec<f64>> = None;
+    // #1213 — the per-pose ENFORCED STEERING ceiling (radians), same lazy
+    // discipline and same `[i + 1]` alignment as `ceilings` above: the command
+    // built from segment (i → i+1) bounds pose `i + 1`. Seeded from the
+    // posture-composed rack limit so an unclamped pose imposes nothing the fast
+    // loop was not already applying; only a PERMANENT clamp lowers an entry.
+    let mut steering_ceilings: Option<Vec<f64>> = None;
     // #1213 — the ENFORCED geometry, captured from the first steering clamp
     // onward. `steering_clamp_from` is the index of the segment on which the
     // checker first overrode the planner's steering; from there the arc the
@@ -594,6 +666,13 @@ pub fn validate_trajectory_slow_with_envelope(
         } else {
             None
         };
+        if let Some(pd) = permanent_steering_deg {
+            let sc = steering_ceilings.get_or_insert_with(|| {
+                vec![kinematics.max_steering_deg.to_radians(); trajectory.len()]
+            });
+            // Bounds |δ|, and takes the TIGHTER of any repeated write.
+            sc[i + 1] = sc[i + 1].min(pd.abs().to_radians());
+        }
         let clamp_is_known = permanent_steering_deg.is_some();
         if steering_clamp_from.is_none() && clamp_is_known {
             steering_clamp_from = Some(i);
@@ -627,11 +706,12 @@ pub fn validate_trajectory_slow_with_envelope(
                 clamp_seen = true;
             }
             EnforceAction::DenyBreach(code) => {
-                return (
-                    TrajectoryVerdict::MRCFallback,
-                    Some(TrajectoryRefusalReason::KinematicsDenied(code)),
-                    None,
-                );
+                return SlowLoopOutcome {
+                    verdict: TrajectoryVerdict::MRCFallback,
+                    reason: Some(TrajectoryRefusalReason::KinematicsDenied(code)),
+                    velocity_ceiling: None,
+                    steering_ceiling_rad: steering_ceilings,
+                };
             }
         }
 
@@ -662,11 +742,12 @@ pub fn validate_trajectory_slow_with_envelope(
                 let v_seg = a.velocity_mps.abs().max(b.velocity_mps.abs());
                 let posture_factor = if degraded { ab.mrc_posture_factor } else { 1.0 };
                 if !omega.is_finite() || omega.abs() > ab.omega_max(v_seg, posture_factor) {
-                    return (
-                        TrajectoryVerdict::MRCFallback,
-                        Some(TrajectoryRefusalReason::AngularRateBreach),
-                        None,
-                    );
+                    return SlowLoopOutcome {
+                        verdict: TrajectoryVerdict::MRCFallback,
+                        reason: Some(TrajectoryRefusalReason::AngularRateBreach),
+                        velocity_ceiling: None,
+                        steering_ceiling_rad: steering_ceilings,
+                    };
                 }
                 // Issue #70 / ADR-0029 — Degraded converge-to-stop-and-HOLD on
                 // the ANGULAR channel. The magnitude bound above only caps |ω|;
@@ -682,11 +763,12 @@ pub fn validate_trajectory_slow_with_envelope(
                 // SAFETY: SG8 | REQ: courier-angular-degraded-stop-and-hold | TEST: courier_degraded_angular_reinitiation_from_stop_mrcs,courier_degraded_angular_speed_increase_mrcs,courier_degraded_angular_converging_to_stop_is_admitted,courier_degraded_angular_gate_is_degraded_only,ackermann_degraded_has_no_angular_stop_gate
                 if degraded && degraded_angular_violation(prev_omega, omega, ab.stop_epsilon_rad_s)
                 {
-                    return (
-                        TrajectoryVerdict::MRCFallback,
-                        Some(TrajectoryRefusalReason::DegradedAngularHoldBreach),
-                        None,
-                    );
+                    return SlowLoopOutcome {
+                        verdict: TrajectoryVerdict::MRCFallback,
+                        reason: Some(TrajectoryRefusalReason::DegradedAngularHoldBreach),
+                        velocity_ceiling: None,
+                        steering_ceiling_rad: steering_ceilings,
+                    };
                 }
                 prev_omega = omega;
             }
@@ -738,22 +820,24 @@ pub fn validate_trajectory_slow_with_envelope(
                     frame_trust,
                 );
                 if !matches!(enforced_verdict, EnforceAction::Allow) {
-                    return (
-                        TrajectoryVerdict::MRCFallback,
-                        Some(TrajectoryRefusalReason::EnforcedContainmentBreach),
-                        None,
-                    );
+                    return SlowLoopOutcome {
+                        verdict: TrajectoryVerdict::MRCFallback,
+                        reason: Some(TrajectoryRefusalReason::EnforcedContainmentBreach),
+                        velocity_ceiling: None,
+                        steering_ceiling_rad: steering_ceilings,
+                    };
                 }
             }
             // Unavailable, not benign: the enforced arc exists and will be
             // driven whether or not we can model it. Refusing is the only
             // outcome that keeps the property true.
             None => {
-                return (
-                    TrajectoryVerdict::MRCFallback,
-                    Some(TrajectoryRefusalReason::EnforcedGeometryUnreconstructable),
-                    None,
-                );
+                return SlowLoopOutcome {
+                    verdict: TrajectoryVerdict::MRCFallback,
+                    reason: Some(TrajectoryRefusalReason::EnforcedGeometryUnreconstructable),
+                    velocity_ceiling: None,
+                    steering_ceiling_rad: steering_ceilings,
+                };
             }
         }
     }
@@ -788,11 +872,12 @@ pub fn validate_trajectory_slow_with_envelope(
         // itself is already finiteness-guaranteed by the per-pose loop above,
         // which rejects any NaN-derived command; objects are the unguarded seam.)
         if !object_fields_finite(obj) {
-            return (
-                TrajectoryVerdict::MRCFallback,
-                Some(TrajectoryRefusalReason::NonFinitePerceptionObject),
-                None,
-            );
+            return SlowLoopOutcome {
+                verdict: TrajectoryVerdict::MRCFallback,
+                reason: Some(TrajectoryRefusalReason::NonFinitePerceptionObject),
+                velocity_ceiling: None,
+                steering_ceiling_rad: steering_ceilings,
+            };
         }
         for traj_point in trajectory {
             // EP-08: measure the pair in the lane's frame. Curved corridor →
@@ -879,11 +964,12 @@ pub fn validate_trajectory_slow_with_envelope(
             // was why a car centered in the ego lane could not be overtaken.
             // EP-08: per-class footprint-overlap gate (was the global 2.5 m).
             if dy_ego.abs() < config.rss_longitudinal_overlap_m && lon_unsafe {
-                return (
-                    TrajectoryVerdict::MRCFallback,
-                    Some(TrajectoryRefusalReason::RssLongitudinalBreach),
-                    None,
-                );
+                return SlowLoopOutcome {
+                    verdict: TrajectoryVerdict::MRCFallback,
+                    reason: Some(TrajectoryRefusalReason::RssLongitudinalBreach),
+                    velocity_ceiling: None,
+                    steering_ceiling_rad: steering_ceilings,
+                };
             }
 
             // Lateral RSS — required side gap. A side collision needs the footprints ABREAST
@@ -956,11 +1042,12 @@ pub fn validate_trajectory_slow_with_envelope(
                     )
                 };
                 if dy_ego.abs() < lat_required {
-                    return (
-                        TrajectoryVerdict::MRCFallback,
-                        Some(TrajectoryRefusalReason::RssLateralBreach),
-                        None,
-                    );
+                    return SlowLoopOutcome {
+                        verdict: TrajectoryVerdict::MRCFallback,
+                        reason: Some(TrajectoryRefusalReason::RssLateralBreach),
+                        velocity_ceiling: None,
+                        steering_ceiling_rad: steering_ceilings,
+                    };
                 }
             }
         }
@@ -993,11 +1080,12 @@ pub fn validate_trajectory_slow_with_envelope(
                 || validate_trajectory_time_spacing(trajectory, MAX_PREDICTIVE_POSE_SPACING_S)
                     .is_some())
         {
-            return (
-                TrajectoryVerdict::MRCFallback,
-                Some(TrajectoryRefusalReason::PredictiveRssBreach),
-                None,
-            );
+            return SlowLoopOutcome {
+                verdict: TrajectoryVerdict::MRCFallback,
+                reason: Some(TrajectoryRefusalReason::PredictiveRssBreach),
+                velocity_ceiling: None,
+                steering_ceiling_rad: steering_ceilings,
+            };
         }
         // Pass the SAME (posture-/perception-capped) lateral-accel budget the
         // snapshot lateral branch uses, so both passes agree on the side gap.
@@ -1009,11 +1097,12 @@ pub fn validate_trajectory_slow_with_envelope(
             kinematics.max_brake_mps2,
             kinematics.max_accel_mps2,
         ) {
-            return (
-                TrajectoryVerdict::MRCFallback,
-                Some(TrajectoryRefusalReason::PredictiveRssBreach),
-                None,
-            );
+            return SlowLoopOutcome {
+                verdict: TrajectoryVerdict::MRCFallback,
+                reason: Some(TrajectoryRefusalReason::PredictiveRssBreach),
+                velocity_ceiling: None,
+                steering_ceiling_rad: steering_ceilings,
+            };
         }
     }
 
@@ -1030,11 +1119,12 @@ pub fn validate_trajectory_slow_with_envelope(
         // the Nominal 4.5 would permit a marginally-too-high speed for the visible
         // distance (same fail-open direction as S3). Matches the longitudinal/VRU brakes.
         if outruns_assured_clear_distance(trajectory, vis, kinematics.max_brake_mps2) {
-            return (
-                TrajectoryVerdict::MRCFallback,
-                Some(TrajectoryRefusalReason::OcclusionOutrunsVisibility),
-                None,
-            );
+            return SlowLoopOutcome {
+                verdict: TrajectoryVerdict::MRCFallback,
+                reason: Some(TrajectoryRefusalReason::OcclusionOutrunsVisibility),
+                velocity_ceiling: None,
+                steering_ceiling_rad: steering_ceilings,
+            };
         }
     }
 
@@ -1076,26 +1166,39 @@ pub fn validate_trajectory_slow_with_envelope(
             config.max_accel_mps2,     // #779 F2 (RSS response-phase term)
             ego_reach_m,               // #779 F1
         ) {
-            return (
-                TrajectoryVerdict::MRCFallback,
-                Some(TrajectoryRefusalReason::VruReachableSetBreach),
-                None,
-            );
+            return SlowLoopOutcome {
+                verdict: TrajectoryVerdict::MRCFallback,
+                reason: Some(TrajectoryRefusalReason::VruReachableSetBreach),
+                velocity_ceiling: None,
+                steering_ceiling_rad: steering_ceilings,
+            };
         }
     }
 
     // ----- E) Aggregate ------------------------------------------------
     if clamp_seen {
-        // Carry the derated velocity envelope to the fast loop (B1). `ceilings`
-        // is `Some` iff a VELOCITY clamp fired; a pure `ClampSteering` (no
-        // velocity derate) leaves it `None`, and conformance then gates against
-        // the planner velocity — which is correct, since the velocity axis was
-        // not derated (the steering derate is bounded separately by the fast
-        // loop's hard-steering-limit check, unchanged). Either way the verdict
-        // is `Clamp`.
-        (TrajectoryVerdict::Clamp, None, ceilings)
+        // Carry both derated envelopes to the fast loop. `ceilings` is `Some`
+        // iff a VELOCITY clamp fired; a pure `ClampSteering` (no velocity
+        // derate) leaves it `None`, and conformance then gates against the
+        // planner velocity — correct, since the velocity axis was not derated.
+        //
+        // #1213: the steering axis is no longer left to the fast loop's static
+        // hard-limit check. `steering_ceilings` carries the angle whose geometry
+        // was actually containment-checked, so a permanent clamp binds the
+        // command as well as the plan. Either way the verdict is `Clamp`.
+        SlowLoopOutcome {
+            verdict: TrajectoryVerdict::Clamp,
+            reason: None,
+            velocity_ceiling: ceilings,
+            steering_ceiling_rad: steering_ceilings,
+        }
     } else {
-        (TrajectoryVerdict::Accept, None, None)
+        SlowLoopOutcome {
+            verdict: TrajectoryVerdict::Accept,
+            reason: None,
+            velocity_ceiling: None,
+            steering_ceiling_rad: None,
+        }
     }
 }
 
@@ -1502,6 +1605,14 @@ pub enum ConformanceVerdict {
 /// disagree on the boundary.
 pub const VELOCITY_TOLERANCE_MPS: f64 = 0.5;
 
+/// Steering-bound tolerance for the per-pose enforced-steering ceiling
+/// (radians), #1213. ~1.15 deg — tracking slack for a controller following the
+/// validated arc, small enough that it cannot absorb a real clamp (the observed
+/// permanent clamps cut 40-55 deg demands down to 14-21 deg, tens of degrees
+/// wide). Deliberately NOT scaled from `VELOCITY_TOLERANCE_MPS`: the two bound
+/// different physical quantities and share no calibration.
+pub const STEERING_TOLERANCE_RAD: f64 = 0.02;
+
 /// Fast-loop lateral-acceleration conformance tolerance (m/s²), S1 fix (#1024).
 /// A small slack — the lateral analogue of [`VELOCITY_TOLERANCE_MPS`] — so a
 /// controller tracking legitimately at the lateral envelope does not chatter into
@@ -1674,6 +1785,35 @@ pub fn check_command_conforms(
             if cmd.steering_rad.abs() > config.max_steering_rad {
                 return ConformanceVerdict::MRCFallback;
             }
+        }
+    }
+
+    // E. Per-pose ENFORCED STEERING ceiling (#1213) — bind the command to the
+    // angle whose geometry was actually containment-checked.
+    //
+    // FINDING: D1/D2 are not sufficient. D1 is the posture-composed RACK limit
+    // (constant across poses) and D2 re-solves P6 at the COMMAND's own velocity.
+    // Bound C only requires the command to be no FASTER than the pose, and P6
+    // is LOOSER at lower speed — so at a pose the slow loop clamped to 21 deg
+    // because the pose ran at 5.05 m/s, a 3 m/s command could steer well past
+    // 21 deg and satisfy both D1 and D2. #1213 made the slow loop re-check
+    // containment on the 21 deg arc; without this bound the fast loop could
+    // still emit an angle whose geometry nobody checked, which is the same
+    // defect one layer down.
+    //
+    // Steering MORE than validated is not self-evidently safe just because it
+    // is not a rollover risk: a tighter arc cuts the inside of the corridor,
+    // the mirror of the wider-arc departure #1213 closed on the slow loop.
+    if let Some(ceilings) = trajectory.effective_steering_ceiling_rad.as_ref() {
+        // A `Some`-but-missing entry FAILS CLOSED, exactly as the velocity
+        // ceiling does: a dropped ceiling must never silently widen back to the
+        // rack limit.
+        let ceiling = match ceilings.get(nearest_idx) {
+            Some(&c) => c,
+            None => return ConformanceVerdict::MRCFallback,
+        };
+        if !ceiling.is_finite() || cmd.steering_rad.abs() > ceiling + STEERING_TOLERANCE_RAD {
+            return ConformanceVerdict::MRCFallback;
         }
     }
 

@@ -698,3 +698,183 @@ fn b1_accept_path_is_byte_identical_no_envelope() {
         ConformanceVerdict::Accept,
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1213 — bound E: the per-pose ENFORCED STEERING ceiling.
+// ---------------------------------------------------------------------------
+
+/// Build a trajectory whose poses run at `pose_v`, with the slow loop's
+/// enforced steering ceiling pinned to `ceiling_rad` at every pose.
+fn with_steering_ceiling(
+    promoted_at_ms: u64,
+    pose_v: f64,
+    n: usize,
+    ceiling_rad: f64,
+) -> AcceptedTrajectory {
+    let pts = straight_pts(n, pose_v, 0.1);
+    let env = LateralEnvelope::from_contract(
+        &VehicleConfig::default_urban().to_posture_kinematics_contract(FleetPosture::Nominal),
+    );
+    AcceptedTrajectory::with_verdict("av_01", 1, pts, TrajectoryVerdict::Clamp, promoted_at_ms)
+        .with_lateral_envelope(Some(env))
+        .with_steering_ceiling(Some(vec![ceiling_rad; n]))
+}
+
+/// THE GAP #1213 CLOSES AT THE FAST LOOP, and the reason D1/D2 were not enough.
+///
+/// The slow loop clamped this pose to 21 deg and re-checked containment on THAT
+/// arc. The fast loop then receives a command that is SLOWER than the pose —
+/// which bound C happily allows — asking for 30 deg.
+///
+/// It passes every pre-existing bound:
+///   C  (velocity)      3.0 <= 5.05
+///   D1 (rack limit)    30 deg < the ~35 deg posture-composed rack limit
+///   D2 (lateral accel) P6 re-solved at the COMMAND's 3.0 m/s, not the pose's
+///                      5.05 m/s — and P6 is LOOSER at lower speed, so 30 deg
+///                      is comfortably inside the envelope there.
+///
+/// So without bound E the vehicle drives 30 deg of steer at a pose whose
+/// geometry was only ever checked at 21 deg. That is the slow-loop defect
+/// #1213 fixed, reappearing one layer down.
+///
+/// The control arm is what makes this non-vacuous: the IDENTICAL command on the
+/// IDENTICAL trajectory is ACCEPTED once the ceiling is removed. The refusal is
+/// caused by bound E and by nothing else.
+#[test]
+fn a_slower_command_may_not_exceed_the_steering_the_checker_validated() {
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let pose_v = 5.05;
+    let validated_rad = 21.0_f64.to_radians();
+    let cmd = IncomingControl {
+        velocity_mps: 3.0,
+        steering_rad: 30.0_f64.to_radians(),
+        stamp_ms: now,
+    };
+    let odom = EgoOdom::default();
+    let config = VehicleConfig::default_urban();
+
+    let bound = with_steering_ceiling(promoted, pose_v, 10, validated_rad);
+    assert_eq!(
+        check_command_conforms(&cmd, &bound, &odom, &config, now),
+        ConformanceVerdict::MRCFallback,
+        "a command exceeding the validated steering angle must MRC"
+    );
+
+    // CONTROL — same command, same trajectory, ceiling removed.
+    let mut unbound = bound.clone();
+    unbound.effective_steering_ceiling_rad = None;
+    assert_eq!(
+        check_command_conforms(&cmd, &unbound, &odom, &config, now),
+        ConformanceVerdict::Accept,
+        "non-vacuity: without the ceiling this same command sails through C/D1/D2 \
+         — which is exactly the gap"
+    );
+}
+
+/// The command AT the validated angle is still admitted: bound E bounds the
+/// command, it does not forbid steering.
+#[test]
+fn a_command_at_the_validated_steering_angle_is_admitted() {
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let validated_rad = 21.0_f64.to_radians();
+    let traj = with_steering_ceiling(promoted, 5.05, 10, validated_rad);
+    let cmd = IncomingControl {
+        velocity_mps: 3.0,
+        steering_rad: validated_rad,
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(
+            &cmd,
+            &traj,
+            &EgoOdom::default(),
+            &VehicleConfig::default_urban(),
+            now
+        ),
+        ConformanceVerdict::Accept
+    );
+}
+
+/// Sign symmetry — the ceiling bounds |delta|, so the mirrored command is
+/// refused identically. A ceiling that only caught one turn direction would
+/// leave half the corridor unguarded.
+#[test]
+fn the_steering_ceiling_bounds_magnitude_in_both_directions() {
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let traj = with_steering_ceiling(promoted, 5.05, 10, 21.0_f64.to_radians());
+    for sign in [1.0_f64, -1.0] {
+        let cmd = IncomingControl {
+            velocity_mps: 3.0,
+            steering_rad: sign * 30.0_f64.to_radians(),
+            stamp_ms: now,
+        };
+        assert_eq!(
+            check_command_conforms(
+                &cmd,
+                &traj,
+                &EgoOdom::default(),
+                &VehicleConfig::default_urban(),
+                now
+            ),
+            ConformanceVerdict::MRCFallback,
+            "sign {sign} must be bounded the same"
+        );
+    }
+}
+
+/// FAIL CLOSED on a short ceiling vector, exactly as the velocity ceiling does.
+/// A dropped entry must never silently widen the bound back to the rack limit —
+/// that would reintroduce the defect precisely where the data went missing.
+#[test]
+fn a_missing_steering_ceiling_entry_fails_closed() {
+    let promoted = 100_000;
+    let now = promoted + 500; // lands late in the trajectory
+    let mut traj = with_steering_ceiling(promoted, 5.05, 10, 21.0_f64.to_radians());
+    // Present, but shorter than `points`.
+    traj.effective_steering_ceiling_rad = Some(vec![21.0_f64.to_radians(); 2]);
+    let cmd = IncomingControl {
+        velocity_mps: 3.0,
+        // Well within every other bound — only the missing entry can refuse it.
+        steering_rad: 5.0_f64.to_radians(),
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(
+            &cmd,
+            &traj,
+            &EgoOdom::default(),
+            &VehicleConfig::default_urban(),
+            now
+        ),
+        ConformanceVerdict::MRCFallback,
+        "a Some-but-short ceiling must fail closed, not fall back to the rack limit"
+    );
+}
+
+/// A non-finite ceiling entry cannot open the gate. NaN compares false against
+/// every bound, so an unguarded `>` would ACCEPT here.
+#[test]
+fn a_non_finite_steering_ceiling_fails_closed() {
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let mut traj = with_steering_ceiling(promoted, 5.05, 10, 21.0_f64.to_radians());
+    traj.effective_steering_ceiling_rad = Some(vec![f64::NAN; 10]);
+    let cmd = IncomingControl {
+        velocity_mps: 3.0,
+        steering_rad: 5.0_f64.to_radians(),
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(
+            &cmd,
+            &traj,
+            &EgoOdom::default(),
+            &VehicleConfig::default_urban(),
+            now
+        ),
+        ConformanceVerdict::MRCFallback
+    );
+}

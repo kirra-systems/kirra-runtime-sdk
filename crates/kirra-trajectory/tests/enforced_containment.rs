@@ -20,7 +20,8 @@ use kirra_core::trajectory::Pose;
 use kirra_core::FleetPosture;
 use kirra_trajectory::state::{TrajectoryPoint, TrajectoryVerdict};
 use kirra_trajectory::validation::{
-    validate_trajectory_slow_with_envelope, TrajectoryRefusalReason,
+    validate_trajectory_slow_detailed, validate_trajectory_slow_with_envelope, SlowLoopOutcome,
+    TrajectoryRefusalReason,
 };
 use kirra_trajectory::MockCorridorSource;
 use kirra_trajectory::VehicleConfig;
@@ -300,4 +301,113 @@ fn an_unclamped_trajectory_is_unaffected() {
     let (verdict, reason) = run(&straight, &corridor_around(&straight, 3.0, 3.0));
     assert_eq!(reason, None);
     assert_eq!(verdict, TrajectoryVerdict::Accept);
+}
+
+// ---------------------------------------------------------------------------
+// #1213 — the per-pose enforced steering ceiling handed to the fast loop.
+// ---------------------------------------------------------------------------
+
+fn detailed(path: &[TrajectoryPoint], corridor: &MockCorridorSource) -> SlowLoopOutcome {
+    validate_trajectory_slow_detailed(
+        path,
+        corridor,
+        &[],
+        &rack_limited_config(),
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        None,
+        None,
+        FrameTrust::Trusted,
+    )
+}
+
+/// The ceiling carries the angle the checker VALIDATED, not the angle the
+/// planner asked for — and it is the same clamp that armed the re-check, so the
+/// two halves of #1213 cannot disagree about what geometry was checked.
+///
+/// The wide corridor is deliberate: it makes the enforced arc CONTAINED, so the
+/// trajectory is released rather than refused. A ceiling only matters on a
+/// released trajectory — a refused one never reaches the fast loop.
+#[test]
+fn a_released_clamped_trajectory_hands_the_validated_angle_to_the_fast_loop() {
+    let path = arc_poses(PROPOSED_STEERING_DEG, SEGMENTS);
+    let corridor = corridor_around(&path, WIDE_CORRIDOR_HALF_WIDTH_M, 3.0);
+    let out = detailed(&path, &corridor);
+    assert_eq!(
+        out.verdict,
+        TrajectoryVerdict::Clamp,
+        "the wide corridor must RELEASE the clamped arc, else the ceiling is moot"
+    );
+    let ceiling = out
+        .steering_ceiling_rad
+        .expect("a permanent clamp must publish a ceiling");
+    assert_eq!(
+        ceiling.len(),
+        path.len(),
+        "aligned index-for-index with poses"
+    );
+
+    let rack = MAX_STEERING_DEG.to_radians();
+    // Every entry is at or under the rack limit, and the clamped poses carry the
+    // ENFORCED angle — not the 30 deg the planner proposed.
+    for (k, &c) in ceiling.iter().enumerate() {
+        assert!(
+            c <= rack + 1e-12,
+            "pose {k}: ceiling {c} exceeds the rack limit {rack}"
+        );
+    }
+    assert!(
+        ceiling[1..]
+            .iter()
+            .all(|&c| c < PROPOSED_STEERING_DEG.to_radians()),
+        "the ceiling must bind BELOW the proposed angle, else it bounds nothing"
+    );
+}
+
+/// A clean trajectory publishes NO ceiling, so the fast loop's D1/D2 path stays
+/// byte-identical for every trajectory that was never clamped.
+#[test]
+fn an_unclamped_trajectory_publishes_no_steering_ceiling() {
+    // Steering well inside the rack limit — nothing to clamp.
+    let path = arc_poses(MAX_STEERING_DEG / 2.0, SEGMENTS);
+    let corridor = corridor_around(&path, WIDE_CORRIDOR_HALF_WIDTH_M, 3.0);
+    let out = detailed(&path, &corridor);
+    assert_eq!(out.verdict, TrajectoryVerdict::Accept);
+    assert!(
+        out.steering_ceiling_rad.is_none(),
+        "no clamp ⇒ no ceiling ⇒ the fast loop is unchanged"
+    );
+}
+
+/// The ceiling and the re-check are armed by the SAME rule. A transient P5b
+/// slew clamp populates neither: if it published a ceiling it would bind the
+/// fast loop to an angle the rack reaches a tick later, re-introducing on the
+/// command path exactly the over-conservatism the re-check avoids on the plan.
+#[test]
+fn a_transient_rate_clamp_publishes_no_steering_ceiling() {
+    let mut cfg = rack_limited_config();
+    // Generous rack + lateral envelope so only the SLEW ceiling can bite.
+    cfg.max_steering_rad = 45.0_f64.to_radians();
+    let path = arc_poses(30.0, SEGMENTS);
+    let corridor = corridor_around(&path, WIDE_CORRIDOR_HALF_WIDTH_M, 3.0);
+    let out = validate_trajectory_slow_detailed(
+        &path,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        None,
+        None,
+        FrameTrust::Trusted,
+    );
+    assert!(
+        out.steering_ceiling_rad.is_none(),
+        "a transient slew clamp must not bind the fast loop; got {:?}",
+        out.steering_ceiling_rad
+    );
 }

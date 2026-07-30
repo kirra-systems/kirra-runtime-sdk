@@ -54,8 +54,7 @@ use crate::state::{
     AdaptorState, TrajectoryPoint, TrajectoryVerdict, SUBSCRIPTION_STALENESS_TIMEOUT_MS,
 };
 use crate::validation::{
-    check_command_conforms, validate_trajectory_slow_with_envelope, ConformanceVerdict,
-    IncomingControl,
+    check_command_conforms, validate_trajectory_slow_detailed, ConformanceVerdict, IncomingControl,
 };
 use crate::vru_channel::{resolve_vru_channel, VRU_CHANNEL_ENABLED_ENV};
 use kirra_trajectory::vru::{PedestrianScene, VruRssParams};
@@ -901,7 +900,10 @@ pub async fn run_adapter(
             // B1 fix: take the effective per-pose velocity envelope alongside
             // the verdict. On a `Clamp` it carries the checker's derated
             // ceiling to the fast loop's conformance gate; `None` on Accept.
-            let (verdict, _reason, effective_ceiling) = validate_trajectory_slow_with_envelope(
+            // #1213: the DETAILED form additionally carries the per-pose enforced
+            // steering ceiling, so a permanent clamp binds the outgoing command and
+            // not just the plan.
+            let outcome = validate_trajectory_slow_detailed(
                 &traj.points,
                 slow_corridor.as_ref(),
                 &objects,
@@ -939,6 +941,9 @@ pub async fn run_adapter(
                 // and a sustained fault also escalates fleet posture → LockedOut (S-FI1d).
                 slow_state.snapshot_frame_trust(now_mono),
             );
+            let verdict = outcome.verdict;
+            let effective_ceiling = outcome.velocity_ceiling;
+            let steering_ceiling_rad = outcome.steering_ceiling_rad;
             // B4: the trajectory's `promoted_at_ms` (the fast loop's `is_stale`
             // anchor) uses the MONOTONIC freshness clock — the SAME `now_mono` the
             // slow-loop freshness checks use and the same clock the fast loop's
@@ -962,6 +967,7 @@ pub async fn run_adapter(
                 verdict,
                 effective_ceiling,
                 Some(lateral_envelope),
+                steering_ceiling_rad,
                 now_mono,
             );
             let elapsed_us = start.elapsed().as_micros();

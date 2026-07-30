@@ -660,6 +660,8 @@ impl AdaptorState {
         verdict: TrajectoryVerdict,
         effective_ceiling: Option<Vec<f64>>,
         lateral_envelope: Option<LateralEnvelope>,
+        // #1213 — the per-pose enforced steering ceiling (radians).
+        steering_ceiling_rad: Option<Vec<f64>>,
         now_ms: u64,
     ) {
         let asset_id = asset_id.into();
@@ -673,6 +675,7 @@ impl AdaptorState {
                     now_ms,
                 )
                 .with_effective_ceiling(effective_ceiling)
+                .with_steering_ceiling(steering_ceiling_rad)
                 .with_lateral_envelope(lateral_envelope);
                 self.install(record);
             }
