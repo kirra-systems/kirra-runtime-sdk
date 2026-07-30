@@ -29,12 +29,12 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > BOTH axes instead of dropping the velocity correction) and direction-aware
 > accel/brake selection (M1 — reverse acceleration is bounded by the accel limit,
 > not the brake limit). The talisman re-pins to the amended logic blob
-> `crates/kirra-core/src/kinematics_contract.rs = 918a22c61761bb736b9e532dd77f1c277b9cd323`
+> `crates/kirra-core/src/kinematics_contract.rs = 4fec5a971ef376bfa2d39b6c5f1e12a51f4e1799`
 > (superseding `ed00f4da…`, and before it the historical `997fb7ae…`, which
 > predated the Stage-3 relocation and matched no current file).
 >
 > **#1242 re-pin — INTENTIONAL BEHAVIOUR CHANGE, not formatting drift.**
-> `ed00f4da…` → `918a22c6…`. Priority 2 (the effective-speed ceiling) previously
+> `ed00f4da…` → `4fec5a97…`. Priority 2 (the effective-speed ceiling) previously
 > returned `ClampLinear` DIRECTLY, which skipped P5a (rack limit), P5b (slew) and
 > P6 (lateral envelope) entirely: a command over the speed ceiling had its
 > steering demand executed unchecked, up to physically unachievable angles

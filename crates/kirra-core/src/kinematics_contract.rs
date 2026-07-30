@@ -508,7 +508,7 @@ pub fn validate_vehicle_command(
     }
 
     // ------------------------------------------------------------------
-    // SAFETY: SG1 SG3 | REQ: velocity-hard-ceiling,odd-speed-cap-enforcement | TEST: test_speed_above_ceiling_triggers_clamp_linear,test_reverse_speed_above_ceiling_clamps_with_correct_sign,prop_clamp_linear_value_within_speed_contract,prop_allow_result_satisfies_speed_contract,test_command_above_odd_cap_below_vehicle_max_clamps_to_odd_cap,test_command_above_both_clamps_to_odd_cap,test_command_below_odd_cap_passes,test_no_odd_cap_falls_back_to_vehicle_max
+    // SAFETY: SG1 SG3 | REQ: velocity-hard-ceiling,odd-speed-cap-enforcement | TEST: test_speed_above_ceiling_triggers_clamp_linear,test_reverse_speed_above_ceiling_clamps_with_correct_sign,test_speed_ceiling_and_accel_bound_compose_tighter_wins,prop_clamp_linear_value_within_speed_contract,prop_allow_result_satisfies_speed_contract,test_command_above_odd_cap_below_vehicle_max_clamps_to_odd_cap,test_command_above_both_clamps_to_odd_cap,test_command_below_odd_cap_passes,test_no_odd_cap_falls_back_to_vehicle_max
     // (≅ AEGIS SG-001.)
     // Priority 2: Linear velocity hard ceiling
     // Checked before acceleration rate — a velocity-over-limit command
@@ -802,10 +802,21 @@ mod kinematics_contract_tests {
     #[test]
     fn test_reverse_speed_above_ceiling_clamps_with_correct_sign() {
         let contract = VehicleKinematicsContract::nominal_reference_profile();
+        // FIXTURE (#1242): `current` and `delta_time_s` are chosen so the ACCEL
+        // bound does not bind (implied rate = 6.0 / 5.0 = 1.2 m/s^2, inside the
+        // 2.5 limit), leaving the SPEED CEILING as the binding longitudinal
+        // bound. That keeps this test on its stated subject — ceiling magnitude
+        // with sign preserved.
+        //
+        // Before #1242 the ceiling short-circuited the accel check, so any
+        // fixture reached it. Now every priority is evaluated and the TIGHTER
+        // bound wins, so a fixture that also violates the accel limit would be
+        // testing the accel bound instead. `test_speed_ceiling_and_accel_bound_
+        // compose_tighter_wins` covers that interaction deliberately.
         let cmd = ProposedVehicleCommand {
             linear_velocity_mps: -40.0,
-            current_velocity_mps: -20.0,
-            delta_time_s: 0.5,
+            current_velocity_mps: -34.0,
+            delta_time_s: 5.0,
             steering_angle_deg: 0.0,
             current_steering_angle_deg: 0.0,
         };
@@ -1093,20 +1104,37 @@ mod kinematics_contract_tests {
         );
     }
 
+    /// #1242 — REPLACES `test_speed_check_fires_before_accel_check`, whose
+    /// subject (the speed ceiling SHORT-CIRCUITING the accel check) was removed
+    /// deliberately.
+    ///
+    /// The old assertion was `ClampLinear(35.0)`: the ceiling returned early and
+    /// the accel limit was never evaluated. That hid a second breach — reaching
+    /// 35.0 m/s from 5.0 m/s in 0.1 s implies 450 m/s^2, about 180x the
+    /// contract's own 2.5 m/s^2 accel limit. The kernel was emitting a command
+    /// that violated a bound it is responsible for enforcing.
+    ///
+    /// Now both longitudinal bounds are evaluated and the TIGHTER wins: 5.25 m/s
+    /// is exactly `current + max_accel * dt`, the fastest the contract permits
+    /// from this state, and it is inside the ceiling. Ordering is still
+    /// observable — the ceiling is applied first — it simply no longer finalizes.
     #[test]
-    fn test_speed_check_fires_before_accel_check() {
+    fn test_speed_ceiling_and_accel_bound_compose_tighter_wins() {
         let contract = VehicleKinematicsContract::nominal_reference_profile();
         let cmd = ProposedVehicleCommand {
-            linear_velocity_mps: 50.0,
-            current_velocity_mps: 5.0,
+            linear_velocity_mps: 50.0, // above the 35.0 ceiling
+            current_velocity_mps: 5.0, // and unreachable within the accel limit
             delta_time_s: 0.1,
             steering_angle_deg: 0.0,
             current_steering_angle_deg: 0.0,
         };
+        let expected = 5.0 + contract.max_accel_mps2 * 0.1;
         assert_eq!(
             validate_vehicle_command(&cmd, &contract),
-            EnforceAction::ClampLinear(35.0)
+            EnforceAction::ClampLinear(expected)
         );
+        // Both bounds are respected, which is the property that matters.
+        assert!(expected < contract.effective_max_speed_mps());
     }
 
     // --- NaN/Inf guard (Priority 0) ----------------------------------------
