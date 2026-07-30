@@ -54,6 +54,7 @@ import barge_in  # noqa: E402 — interruptible reply speech (opt-in; Channel A,
 import turn_state  # noqa: E402 — cross-process "turn in progress" signal (Slice R re-arm)
 import skill_registry  # noqa: E402 — opt-in named-skill router (motion → the SAME /intent fence)
 import repo_command  # noqa: E402 — Robot Command Language bridge (allow-listed intents, no shell)
+import assistant  # noqa: E402 — Kirra Engineering Assistant (typed read-only tools + the RCL)
 import world_model  # noqa: E402 — opt-in situation report (read-only TTL'd projection)
 import mission  # noqa: E402 — opt-in multi-step Executive (each step → the SAME /intent fence)
 import rabbit_stream  # noqa: E402 — opt-in first-clause streaming of the reply to TTS
@@ -438,6 +439,22 @@ def handle_turn(history, utterance):
         _speak_reply(repo_reply)
         history.append({"role": "user", "content": utterance})
         history.append({"role": "assistant", "content": repo_reply})
+        del history[: max(0, len(history) - 2 * MAX_TURNS)]
+        return
+
+    # KIRRA ENGINEERING ASSISTANT — grounded repository questions (opt-in,
+    # KIRRA_ASSIST_ENABLED). "Where is steering authority enforced?" / "is the
+    # workspace clean?" are answered from TYPED, READ-ONLY tools (git plumbing,
+    # git grep, bounded file reads) — never from model memory. Gemma interprets
+    # and explains; the tools retrieve facts and enforce policy. Authority is
+    # capped at level 2 (the two approved git workflows); levels 3-4 are defined
+    # and refused. Placed AFTER repo_command so the RCL keeps first claim on its
+    # own two phrases. Off, or not an engineering request → None → the LLM.
+    assist_reply = assistant.handle(utterance)
+    if assist_reply is not None:
+        _speak_reply(assist_reply)
+        history.append({"role": "user", "content": utterance})
+        history.append({"role": "assistant", "content": assist_reply})
         del history[: max(0, len(history) - 2 * MAX_TURNS)]
         return
 
