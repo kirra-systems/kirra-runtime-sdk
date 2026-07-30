@@ -200,11 +200,144 @@ mod proofs {
 }
 
 // ---------------------------------------------------------------------------
+// #1242 — executable-output bounds. See docs/safety/TALISMAN_CHANGE_PLAN_1242.md.
+//
+// HONEST SCOPE. The governing invariant is "no intermediate priority may
+// finalize an executable command". That is a statement about CONTROL FLOW, and
+// Kani cannot assert which `return` executed — so P-COMPOSE is not directly
+// expressible. What IS expressible is its observable SHADOW: every executable
+// return must satisfy every bound the pipeline is supposed to have applied. Any
+// priority that finalizes early skips some of those bounds and is caught here.
+//
+// Both properties below are deliberately `tan`-free, so neither inherits the
+// transcendental exclusion recorded in GOVERNOR_INTEGRITY_EVIDENCE.md §2. The
+// numeric lateral-envelope property is NOT proved here and must not be claimed
+// as proved; it is discharged by concrete grid instead.
+//
+// RED against the pre-fix kernel: the Priority-2 speed-cap branch returns
+// `ClampLinear` without ever reaching P5a or P6, so it violates K7 outright
+// (measured: a 200 deg demand passes through a 35 deg rack untouched).
+// ---------------------------------------------------------------------------
+
+#[cfg(any(kani, test))]
+fn executed_pair(cmd: &ProposedVehicleCommand, action: &EnforceAction) -> Option<(f64, f64)> {
+    // The apply mapping, inlined rather than imported: this crate `#[path]`-
+    // includes only the contract source, and duplicating three lines here is
+    // preferable to pulling the whole sim module into the proof tree.
+    match action {
+        EnforceAction::Allow => Some((cmd.linear_velocity_mps, cmd.steering_angle_deg)),
+        EnforceAction::ClampLinear(v) => Some((*v, cmd.steering_angle_deg)),
+        EnforceAction::ClampSteering(d) => Some((cmd.linear_velocity_mps, *d)),
+        EnforceAction::ClampBoth { linear, steering } => Some((*linear, *steering)),
+        // Nothing is executed.
+        EnforceAction::DenyBreach(_) => None,
+    }
+}
+
+/// K6 (P-CAP) — every executable return respects the effective speed ceiling.
+///
+/// Guards against the fix shape that trades one breach for another: routing the
+/// speed cap through the pipeline without making it a persistent magnitude
+/// ceiling lets the accel priority overwrite it UPWARD from the raw command.
+#[cfg(kani)]
+#[kani::proof]
+fn k6_executable_return_respects_the_speed_ceiling() {
+    let contract = any_bounded_contract();
+    let cmd = any_command();
+    let action = validate_vehicle_command(&cmd, &contract);
+    if let Some((linear, _)) = executed_pair(&cmd, &action) {
+        // Finite by construction: Priority 0 denies every non-finite input, so
+        // an executable return cannot carry one.
+        assert!(linear.is_finite());
+        assert!(linear.abs() <= contract.effective_max_speed_mps() + 1e-9);
+    }
+}
+
+/// K7 (P-RACK) — every executable return respects the absolute steering limit.
+///
+/// This is the sharpest tan-free consequence of the #1242 defect: the speed-cap
+/// branch returns before P5a, so the RAW steering demand is executed. Unlike the
+/// lateral envelope, the rack limit is a physical hard stop — a demand beyond it
+/// is not merely aggressive, it is unachievable by the mechanism.
+#[cfg(kani)]
+#[kani::proof]
+fn k7_executable_return_respects_the_rack_limit() {
+    let contract = any_bounded_contract();
+    let cmd = any_command();
+    let action = validate_vehicle_command(&cmd, &contract);
+    if let Some((_, steering)) = executed_pair(&cmd, &action) {
+        assert!(steering.is_finite());
+        assert!(steering.abs() <= contract.max_steering_deg + 1e-9);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Concrete mirrors under plain `cargo test`.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod mirrors {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // #1242 mirrors — RED against today's kernel, and ignored for that reason.
+    //
+    // The `mirrors` module is a BLOCKING CI lane, so a permanently failing test
+    // here would make a red lane routine — the failure mode this repo's
+    // CI-honesty doctrine exists to prevent. The reason string prints on every
+    // run instead, and un-ignoring is listed closure evidence in
+    // docs/safety/TALISMAN_CHANGE_PLAN_1242.md §5.
+    // -----------------------------------------------------------------------
+
+    /// Concrete instance of K7 (P-RACK). The speed-cap branch returns before
+    /// P5a, so the raw steering demand is what gets executed.
+    #[test]
+    #[ignore = "#1242: RED by design - the Priority-2 speed-cap branch returns \
+                before P5a/P6. Un-ignoring is closure evidence."]
+    fn k7_mirror_rack_limit_holds_on_the_speed_cap_branch() {
+        let c = contract(5.225, None);
+        for steer in [50.0_f64, 80.0, 200.0] {
+            let cmd = ProposedVehicleCommand {
+                linear_velocity_mps: 5.4,
+                current_velocity_mps: 5.4,
+                delta_time_s: 0.1,
+                steering_angle_deg: steer,
+                current_steering_angle_deg: steer,
+            };
+            let action = validate_vehicle_command(&cmd, &c);
+            if let Some((_, steering)) = executed_pair(&cmd, &action) {
+                assert!(
+                    steering.abs() <= c.max_steering_deg + 1e-9,
+                    "demand {steer} deg executed as {steering} deg against a {} deg rack; action was {action:?}",
+                    c.max_steering_deg
+                );
+            }
+        }
+    }
+
+    /// Concrete instance of K6 (P-CAP) on the shape the NAIVE fix would break:
+    /// apply the cap once, then let the accel priority overwrite `v` from the raw
+    /// command and the executed speed exceeds the ceiling. Passes today (the
+    /// early return makes the cap final) and must keep passing after the fix — it
+    /// guards the FIX SHAPE, not the current defect.
+    #[test]
+    fn k6_mirror_speed_ceiling_survives_the_accel_priority() {
+        let c = contract(5.225, None);
+        let cmd = ProposedVehicleCommand {
+            linear_velocity_mps: 20.0,
+            current_velocity_mps: 5.0,
+            delta_time_s: 0.1,
+            steering_angle_deg: 5.0,
+            current_steering_angle_deg: 5.0,
+        };
+        let action = validate_vehicle_command(&cmd, &c);
+        if let Some((linear, _)) = executed_pair(&cmd, &action) {
+            assert!(
+                linear.abs() <= c.effective_max_speed_mps() + 1e-9,
+                "executed {linear} m/s against a {} m/s ceiling; action was {action:?} - the accel priority must not raise the capped speed",
+                c.effective_max_speed_mps()
+            );
+        }
+    }
 
     fn contract(max_speed: f64, cap: Option<f64>) -> VehicleKinematicsContract {
         VehicleKinematicsContract {

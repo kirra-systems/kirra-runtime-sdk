@@ -72,12 +72,43 @@ transcendental computes. And it fails today: the Priority-2 early return is a
 second executable exit. Proving it would have caught this defect, and would
 catch any future priority added with the same shortcut.
 
-A companion, also `tan`-free:
+Two companions, also `tan`-free:
 
 > **P-CAP.** For every executable return, `|linear| <= effective_max_speed_mps()`
 > within tolerance.
 
+> **P-RACK.** For every executable return, `|steering| <= max_steering_deg`
+> within tolerance.
+
 P-CAP matters for a specific reason given in Step 3: the naive fix violates it.
+
+**P-RACK is the sharpest tan-free consequence of the defect, and it was found
+while writing the harnesses rather than while writing the plan.** The Priority-2
+early return skips P5a as well as P6, so the RAW steering demand is executed.
+Measured against today's kernel:
+
+```
+demand  50 deg -> ClampLinear(5.225), executed steering  50 deg  (rack 35)
+demand  80 deg -> ClampLinear(5.225), executed steering  80 deg
+demand 200 deg -> ClampLinear(5.225), executed steering 200 deg
+```
+
+This is worse than the lateral-envelope case and easier to prove. The lateral
+envelope is a dynamic bound — exceeding it is aggressive. The rack limit is a
+**physical hard stop**: a 200 deg demand is not achievable by the mechanism at
+all. And because it is a pure magnitude comparison, it carries none of the
+transcendental baggage that keeps the numeric property out of Kani.
+
+### P-COMPOSE is not directly expressible — state its shadow instead
+
+Correcting this plan's own earlier wording: Kani cannot assert *which* `return`
+executed, so P-COMPOSE cannot be written as a harness. What is expressible is
+its observable **shadow** — every executable return must satisfy every bound the
+pipeline should have applied (P-CAP, P-RACK, and the numeric envelope). A
+priority that finalizes early necessarily skips some of those bounds, so the
+conjunction detects the violation even though no assertion mentions control flow.
+P-CAP and P-RACK together already falsify the current control flow; that is the
+form the proof takes.
 
 ### What the numeric property gets instead
 
@@ -126,8 +157,9 @@ Discharge split, per Step 0:
 
 | Property | Form | Discharged by |
 |---|---|---|
-| P-COMPOSE | structural, `tan`-free | Kani harness (new) |
-| P-CAP | structural, `tan`-free | Kani harness (new) |
+| P-COMPOSE | not directly expressible | its shadow: K6 ∧ K7 ∧ the numeric grid |
+| P-CAP | structural, `tan`-free | Kani harness K6 (new) |
+| P-RACK | structural, `tan`-free | Kani harness K7 (new) |
 | numeric envelope | transcendental | exhaustive concrete grid + the existing regression test |
 
 ## Step 2 — Domain Kani can soundly cover
