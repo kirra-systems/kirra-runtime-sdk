@@ -106,8 +106,16 @@ Talisman work, so the bar is higher than a normal fix:
       correct;
 - [ ] caller-level tests where practical — sites 1–3 above;
 - [ ] Kani K1–K5 re-run, extended if the property is expressible there;
-- [ ] intentional talisman **blob-hash re-pin** with the reason recorded in
-      `docs/safety/GOVERNOR_INTEGRITY_EVIDENCE.md` §2;
+- [x] intentional talisman **blob-hash re-pin** — `ed00f4da` → `bbfe014b`, with
+      the reason recorded in `docs/CAPTURE_PIPELINE_SPEC.md` (the authoritative
+      pin). **FOUR locations must agree**, discovered one at a time and worth
+      listing so the next re-pin is a checklist rather than an excavation:
+      (1) the spec doc; (2) `ci/build_safety_case.py`'s `talisman_gate`, which
+      greps the doc; (3) the `gateway::provenance` manifest/sidecar tests; and
+      (4) the `rustfmt gate` workflow step, which HARDCODED the old prefix in its
+      grep and so failed with an empty `pinned ` on the first legitimate re-pin —
+      now anchored on the path instead of the value, matching (2)'s convention.
+      Reviewer approval remains **PENDING**;
 - [ ] FDIT matrix re-baseline for site 2 if released bytes change.
 
 The regression test uses the simulator's own formula and tolerance

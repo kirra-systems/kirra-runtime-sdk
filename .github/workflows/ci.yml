@@ -262,7 +262,14 @@ jobs:
           cargo fmt --check --manifest-path tools/iceoryx2-spike/Cargo.toml
       - name: frozen-talisman blob pin survives formatting
         run: |
-          pin=$(grep -oE '\bed00f4da[0-9a-f]{32}\b' docs/CAPTURE_PIPELINE_SPEC.md | head -1)
+          # Anchored on the PATH, not on the hash value (#1242). This grep used
+          # to hardcode the then-current prefix, so the first legitimate re-pin
+          # made it match nothing and the step failed with an empty "pinned "
+          # — a confusing failure for a correct change. Same extraction shape as
+          # ci/build_safety_case.py, so there is ONE convention for reading the
+          # authoritative pin out of the reviewed doc.
+          pin=$(grep -oE 'kinematics_contract\.rs = [0-9a-f]{40}' docs/CAPTURE_PIPELINE_SPEC.md \
+                | grep -oE '[0-9a-f]{40}' | head -1)
           actual=$(git hash-object crates/kirra-core/src/kinematics_contract.rs)
           test -n "$pin" && test "$actual" = "$pin" \
             || { echo "talisman blob $actual != pinned $pin"; exit 1; }
