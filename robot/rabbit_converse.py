@@ -53,6 +53,7 @@ import rabbit_wake  # noqa: E402 — deterministic wake-listener controls (state
 import barge_in  # noqa: E402 — interruptible reply speech (opt-in; Channel A, cosmetic)
 import turn_state  # noqa: E402 — cross-process "turn in progress" signal (Slice R re-arm)
 import skill_registry  # noqa: E402 — opt-in named-skill router (motion → the SAME /intent fence)
+import repo_command  # noqa: E402 — Robot Command Language bridge (allow-listed intents, no shell)
 import world_model  # noqa: E402 — opt-in situation report (read-only TTL'd projection)
 import mission  # noqa: E402 — opt-in multi-step Executive (each step → the SAME /intent fence)
 import rabbit_stream  # noqa: E402 — opt-in first-clause streaming of the reply to TTS
@@ -273,6 +274,20 @@ def offer_to_door(directive_text):
         return "error"
 
 
+def _repo_sink(intent):
+    """The Robot Command Language sink for a REPO_CMD skill decision.
+
+    Receives an ALLOW-LISTED intent name and nothing else — no arguments, no
+    model text — and returns the sentence derived from the executor's structured
+    result. `repo_command.handle_intent` rejects any name outside its two-item
+    allow-list, so a hallucinated command name reports an error rather than
+    running. Kept as a named function (not a lambda) so the single seam between
+    the voice layer and the repository executor is greppable.
+    """
+    _result, spoken = repo_command.handle_intent(intent)
+    return spoken
+
+
 def _speak_reply(text):
     """Speak a CONVERSATIONAL reply (P3 info-speech). Interruptible (barge-in)
     when KIRRA_BARGE_IN_ENABLED=1 — a PTT press / raised signal cuts it so Rabbit
@@ -410,6 +425,22 @@ def handle_turn(history, utterance):
         del history[: max(0, len(history) - 2 * MAX_TURNS)]
         return
 
+    # ROBOT COMMAND LANGUAGE — deterministic repository commands (opt-in,
+    # KIRRA_REPO_CMD_ENABLED). "Sync to main" / "Publish my work" and a closed set
+    # of paraphrases resolve WITHOUT the model, because a canonical phrase must not
+    # depend on inference being available or on the model choosing correctly. The
+    # deterministic executor (scripts/robot-command.sh) authorizes and acts; this
+    # only names an allow-listed intent and speaks the structured result — a
+    # refusal is voiced as a refusal, never as success. No shell, no /intent, no
+    # motion. Off, or not a repository command → None → falls through to the LLM.
+    repo_reply = repo_command.handle(utterance)
+    if repo_reply is not None:
+        _speak_reply(repo_reply)
+        history.append({"role": "user", "content": utterance})
+        history.append({"role": "assistant", "content": repo_reply})
+        del history[: max(0, len(history) - 2 * MAX_TURNS)]
+        return
+
     context = context_for(utterance)
 
     # MISSION MODE (opt-in, KIRRA_MISSIONS_ENABLED; takes precedence over skills):
@@ -456,7 +487,12 @@ def handle_turn(history, utterance):
             _speak_reply(say)
         elif not decisions:
             _speak_reply(f"I didn't quite catch that{name_slot()}.")
-        skill_registry.execute_skill_decisions(decisions, offer_to_door, _speak_reply)
+        # `_repo_sink` is the ONLY way a REPO_CMD decision executes. It receives
+        # the intent NAME (allow-listed) and returns the sentence derived from the
+        # executor's structured result. Not injecting it would make repo commands
+        # refuse — never silently succeed.
+        skill_registry.execute_skill_decisions(
+            decisions, offer_to_door, _speak_reply, repo_fn=_repo_sink)
         history.append({"role": "user", "content": utterance})
         history.append({"role": "assistant", "content": say or "(skill request)"})
         del history[: max(0, len(history) - 2 * MAX_TURNS)]

@@ -40,6 +40,21 @@ def test_default_phrases_parse() -> None:
     assert PHRASES == [["hello", "rabbit"], ["hey", "rabbit"], ["yo", "rabbit"]]
 
 
+def test_every_default_greeting_wakes() -> None:
+    """All three default greetings fire; a bare name or a nameless greeting does not.
+
+    The second name ("parker") is deliberately NOT here: it is configured, not
+    default, and `test_a_configured_parker_phrase_wakes` below owns that case.
+    That both names denote the SAME assistant is a property of what happens
+    AFTER the wake, so it is asserted where it is observable — case 3c in
+    repo_command_test.py, where either name resolves to the same typed intent.
+    """
+    for greeting in ("hey", "hello", "yo"):
+        assert _hit(f"{greeting} rabbit"), f"{greeting} rabbit should wake"
+    assert _hit("rabbit") is None
+    assert _hit("hey there") is None
+
+
 def test_phrase_parsing_drops_empty_entries() -> None:
     assert parse_phrases(" hello rabbit ,, ,hey rabbit") == [
         ["hello", "rabbit"], ["hey", "rabbit"]]

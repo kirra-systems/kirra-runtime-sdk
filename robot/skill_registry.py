@@ -29,6 +29,7 @@ from collections import namedtuple
 # ── skill kinds ──────────────────────────────────────────────────────────────
 MOTION = "motion"            # compiles to a directive → the /intent fence
 READONLY = "readonly"        # Channel-A, no actuation (e.g. speak)
+REPO = "repo"                # a Robot Command Language repository command
 UNIMPLEMENTED = "unimplemented"  # cataloged for the future → always REFUSED today
 
 Skill = namedtuple("Skill", [
@@ -39,6 +40,7 @@ Skill = namedtuple("Skill", [
 # Decision kinds — the ONLY three things a dispatched skill can become.
 FENCE = "fence"      # payload = directive text for offer_to_door (the sole motion path)
 SPEAK = "speak"      # payload = text to speak (Channel A)
+REPO_CMD = "repo_cmd"  # payload = an ALLOW-LISTED intent NAME, never a command string
 REFUSE = "refuse"    # payload = reason; NO motion, NO speech-of-content
 Decision = namedtuple("Decision", ["kind", "payload"])
 
@@ -63,6 +65,24 @@ REGISTRY = {
     # ── READONLY — Channel A, cannot actuate ──
     "speak": Skill("speak", READONLY, "Say something to the operator.",
                    "none", True, 3.0, [], []),
+    # ── REPO — the Robot Command Language (docs/ROBOT_COMMAND_LANGUAGE.md).
+    #    These touch the git repository, never the wheels. They take NO
+    #    parameters, which is the safety property: there is no field through
+    #    which model text could reach the executor. The deterministic executor
+    #    (`scripts/robot-command.sh`) enforces every precondition and refuses
+    #    unsafe state on its own — Gemma only names the intent. ──
+    "sync_to_main": Skill(
+        "sync_to_main", REPO,
+        "Synchronize the local main branch with origin/main.",
+        "repo", False, 15.0,
+        ["clean working tree", "origin reachable", "main fast-forwardable"],
+        ["dirty tree", "diverged main", "fetch failed"]),
+    "publish_my_work": Skill(
+        "publish_my_work", REPO,
+        "Push the current feature branch to origin and verify it.",
+        "repo", False, 20.0,
+        ["clean working tree", "on a feature branch", "at least one commit"],
+        ["dirty tree", "on main", "detached HEAD", "non-fast-forward push"]),
     # ── UNIMPLEMENTED — cataloged with metadata, REFUSED until a real, fenced
     #    backing exists. NEVER faked (that would be a fabricated capability). ──
     "dock": Skill("dock", UNIMPLEMENTED, "Dock at a charging/parking station.",
@@ -132,6 +152,11 @@ def dispatch(name, params):
     if skill.kind == READONLY:
         text = str((params or {}).get("text", "")).strip() if isinstance(params, dict) else ""
         return Decision(SPEAK, text) if text else Decision(REFUSE, "nothing to say")
+    if skill.kind == REPO:
+        # The payload is the registry KEY — an allow-listed token — and `params`
+        # is discarded entirely. A repo command takes no arguments, so nothing
+        # the model wrote can travel with the decision.
+        return Decision(REPO_CMD, name)
     # MOTION
     directive = to_directive(name, params)
     if directive is None:
@@ -164,12 +189,18 @@ def plan_skills(llm_json):
     return say, decisions
 
 
-def execute_skill_decisions(decisions, fence_fn, speak_fn):
+def execute_skill_decisions(decisions, fence_fn, speak_fn, repo_fn=None):
     """Execute planned decisions with INJECTED sinks. Motion flows ONLY through
     `fence_fn` (the real offer_to_door → /intent → checker); nothing here builds
     a command. Returns counts. Host-testable: fence_fn is never called for a
-    REFUSE/SPEAK decision (the single-door invariant, as an assertion point)."""
-    counts = {FENCE: 0, SPEAK: 0, REFUSE: 0}
+    REFUSE/SPEAK decision (the single-door invariant, as an assertion point).
+
+    `repo_fn` is the Robot Command Language sink (`repo_command.handle_intent`).
+    It is OPTIONAL and fail-closed: a caller that does not inject it cannot run a
+    repo command at all — the decision degrades to a spoken refusal rather than
+    silently doing nothing or, worse, finding some other way to execute.
+    """
+    counts = {FENCE: 0, SPEAK: 0, REPO_CMD: 0, REFUSE: 0}
     for d in decisions:
         counts[d.kind] = counts.get(d.kind, 0) + 1
         if d.kind == FENCE:
@@ -178,6 +209,14 @@ def execute_skill_decisions(decisions, fence_fn, speak_fn):
                 speak_fn("I heard that, but the governor wouldn't clear it, so I'm holding.")
         elif d.kind == SPEAK:
             speak_fn(d.payload)
+        elif d.kind == REPO_CMD:
+            if repo_fn is None:
+                speak_fn("I can't run repository commands right now.")
+                continue
+            # `repo_fn` receives the intent NAME only. It returns the sentence to
+            # speak, which is derived from the executor's structured result — so
+            # a refusal or failure is voiced as such, never as success.
+            speak_fn(repo_fn(d.payload))
         else:  # REFUSE
             speak_fn(f"I can't do that yet — {d.payload}.")
     return counts
@@ -201,6 +240,14 @@ def skills_prompt_fragment():
         f"Allowed skills: {names}.\n"
         "  navigate{target} · cruise{speed_mps} · turn{direction:left|right|straight} · "
         "pull_over{} · stop{} · speak{text}.\n"
+        "  sync_to_main{} · publish_my_work{} — repository commands; they take NO "
+        "parameters. `sync_to_main` puts the workspace on a clean main matching "
+        "origin; `publish_my_work` pushes the current feature branch to origin. "
+        "Emit one ONLY when the operator clearly asks for that repository action. "
+        "If they could mean either, emit NO skill and ask which one in `say`. You "
+        "cannot run git yourself and you must never claim a repository command "
+        "succeeded — the executor reports the real outcome and it will be spoken "
+        "for you.\n"
         "Use `speak` (or an empty skills list) for chat/questions. Emit a motion "
         "skill ONLY when the operator clearly asks to move; copy any place/number "
         "they gave into parameters VERBATIM, and NEVER invent a destination or "
