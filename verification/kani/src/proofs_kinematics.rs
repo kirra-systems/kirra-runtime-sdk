@@ -18,10 +18,12 @@
 //! still not proved here and must not be claimed as proved; it is discharged by
 //! the concrete grid and the property suites.
 //!
-//! LANE SPLIT: K1–K6 and K8 run per-PR in the blocking `kani-proofs` lane. K7
-//! alone is behind the `deep-proofs` feature (weekly `kani-deep-weekly`) — see
-//! its doc comment for why that demotion is provisional rather than budgeted.
-//! Its per-PR gate is the exhaustive concrete grid in `mirrors`.
+//! LANE SPLIT: K1–K6 run per-PR in the blocking `kani-proofs` lane. K7 and K8
+//! are behind the `deep-proofs` feature (weekly `kani-deep-weekly`), each with
+//! an exhaustive concrete grid in `mirrors` as its BLOCKING per-PR gate. Both
+//! demotions are provisional rather than budgeted — neither has produced a
+//! verdict under any budget tried. See K8's doc comment for the pattern that
+//! predicts which harnesses land here.
 //!
 //! Properties (cited from `docs/safety/GOVERNOR_INTEGRITY_EVIDENCE.md` §2):
 //!  * K1 fail-closed NaN/Inf totality (SG9): ANY non-finite field in a command
@@ -280,6 +282,33 @@ mod proofs {
     /// concrete EXPECTED-BUT-UNDESIRED fixture in
     /// `crates/kirra-core/tests/over_ceiling_accel_bound.rs`, which fails the
     /// day the behaviour changes.
+    /// LANE: `deep-proofs` (weekly), for the same reason as K7 and with the
+    /// same honesty about it — measured, not assumed. The quotient form failed
+    /// in 186 s (SAT is fast); proving the velocity form has no counterexample
+    /// is the UNSAT direction, and it was stopped without a verdict at 25 min
+    /// and again at 55 min. Two budgets, no answer.
+    ///
+    /// A PATTERN, worth naming so the next relational harness does not
+    /// rediscover it the slow way. Under the same solver model and the same
+    /// symbolic contract:
+    ///
+    ///   K3  22 s | K6  45 s — assertion compares a returned value against a
+    ///                          CONTRACT FIELD (`effective_max_speed_mps`).
+    ///   K7  >23 min | K8 >55 min — assertion is RELATIONAL ARITHMETIC over two
+    ///                          command fields (`atan` vs the rack; the step vs
+    ///                          `limit x dt`). No verdict within any budget
+    ///                          tried.
+    ///
+    /// The per-PR budget accommodates the first shape and not the second. If
+    /// the weekly lane does not converge either, the honest response is the one
+    /// recorded for K7: demote out of the proof tier rather than leave a
+    /// harness that never finishes and reads as coverage.
+    ///
+    /// Its blocking per-PR gate is
+    /// `k8_mirror_acceleration_bound_on_the_physical_dt_grid` — 2,880 points,
+    /// and in the ACCELERATION space this proof had to abandon, so the two
+    /// tiers are complementary rather than one being a weaker copy.
+    #[cfg(feature = "deep-proofs")]
     #[kani::proof]
     #[kani::stub(f64::powi, super::stub_powi)]
     #[kani::stub(f64::tan, super::stub_tan)]

@@ -368,6 +368,9 @@ mod tests {
             unreachable!()
         };
         assert!(v < fast.linear_velocity_mps, "the request must be clamped");
-        assert!(v <= 0.5, "and must still respect the industrial speed limit");
+        assert!(
+            v <= 0.5,
+            "and must still respect the industrial speed limit"
+        );
     }
 }
