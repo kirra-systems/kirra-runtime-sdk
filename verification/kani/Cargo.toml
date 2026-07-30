@@ -41,12 +41,27 @@ edition = "2021"
 
 [workspace]
 
+# `-Z stubbing` is required by the #1242 transcendental model (the `tan`/`atan`
+# and `powi` stubs in `proofs_kinematics.rs`). Declaring it here rather than on
+# the command line means every invocation gets it — `cargo kani`, the per-PR
+# lane, and the weekly deep lane alike — so a proof cannot silently fall back
+# to the unmodelled foreign calls because a flag was forgotten.
+[package.metadata.kani]
+unstable = { stubbing = true }
+
 [features]
 # Proof harnesses whose solver cost exceeds the per-PR CI budget. Compiled (and
 # run) only by the weekly `kani-deep-weekly` lane via
 # `cargo kani --features deep-proofs`. Gating is opt-IN per harness: a new
 # harness is per-PR-blocking by default unless it is explicitly demoted here,
 # so the deep lane can never silently absorb the whole proof set.
+#
+# Members: R2 (RSS full-lattice monotonicity) and, since #1242, K7 (P-RACK).
+# The two are NOT in the same evidential position and the difference should not
+# be flattened: R2 was measured to exceed the budget and is expected to close
+# with more time, while K7 was stopped at 23 minutes without a verdict, so it is
+# not yet known that any budget suffices. Both keep a BLOCKING per-PR concrete
+# mirror; K7's is the 306,180-point exhaustive grid.
 deep-proofs = []
 
 [lints.rust]

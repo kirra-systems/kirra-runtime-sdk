@@ -44,11 +44,11 @@ pub mod standby_monitor {
 pub mod lease;
 
 /// The FROZEN kinematics-contract talisman — `kirra-core`'s file (git blob
-/// `ed00f4da…`; amended only under explicit review + re-pin, which is WHY its
+/// `6a61b74f…`; amended only under explicit review + re-pin, which is WHY its
 /// proofs live here instead of inline).
 #[path = "../../../crates/kirra-core/src/kinematics_contract.rs"]
 #[allow(clippy::doc_overindented_list_items)] // pre-existing in the frozen file
-#[rustfmt::skip] // blob-pinned (`ed00f4da…`) — a reformat here breaks the pin
+#[rustfmt::skip] // blob-pinned (`6a61b74f…`) — a reformat here breaks the pin
 pub mod kinematics_contract;
 
 /// The parko RSS primitives — `parko-core`'s file (its own workspace).

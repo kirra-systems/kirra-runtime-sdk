@@ -678,12 +678,14 @@ jobs:
   # (which need no Kani) have already run BLOCKING as this lane's first step,
   # so a property regression still fails CI even on an install-flake day.
   #
-  # LANE SPLIT: harnesses behind the kani crate's `deep-proofs` feature (today:
-  # R2 full-lattice monotonicity, whose exact-IEEE relational instance blew
-  # this job's 45-min budget on both CaDiCaL and kissat) do NOT run here — the
-  # default `cargo kani` below compiles them out. They run weekly with a
-  # multi-hour budget in kani-deep-weekly.yml; their concrete mirrors still
-  # run BLOCKING in this lane's first step.
+  # LANE SPLIT: harnesses behind the kani crate's `deep-proofs` feature do NOT
+  # run here — the default `cargo kani` below compiles them out. They run weekly
+  # with a multi-hour budget in kani-deep-weekly.yml; their concrete mirrors
+  # still run BLOCKING in this lane's first step. Today that is R2 (full-lattice
+  # monotonicity, whose exact-IEEE relational instance blew this job's 45-min
+  # budget on both CaDiCaL and kissat) and, since #1242, K7 (P-RACK — stopped at
+  # 23 min of CBMC time with no verdict; see the harness doc comment, its
+  # demotion is provisional rather than budgeted).
   kani-proofs:
     name: Kani proofs (EP-15, blocking; install-flake tolerated)
     runs-on: ubuntu-latest

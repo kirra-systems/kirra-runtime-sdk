@@ -105,8 +105,23 @@ Talisman work, so the bar is higher than a normal fix:
       the non-vacuity control proving the property is satisfiable and the oracle
       correct;
 - [ ] caller-level tests where practical — sites 1–3 above;
-- [ ] Kani K1–K5 re-run, extended if the property is expressible there;
-- [x] intentional talisman **blob-hash re-pin** — `ed00f4da` → `bbfe014b`, with
+- [x] Kani K1–K5 re-run, extended if the property is expressible there —
+      **both halves done, and the re-run was not a formality.** Extended:
+      K3b (composition reports both axes), K6 (P-CAP) and K7 (P-RACK) are new
+      harnesses for the structural half of the acceptance property. Re-run:
+      K3, which had passed for the life of the proof set, FAILED — not on its
+      assertion but on `call to foreign "C" function 'tan' is not currently
+      supported`, because making Priority 2 accumulate put the P6 bicycle model
+      on paths K3 quantifies over. Resolved by MODELLING the transcendentals in
+      the proof crate (nondeterministic stubs constrained to theorems about the
+      real functions) rather than narrowing the harnesses; the talisman is not
+      touched for the prover. K1–K6 verify per-PR (K3 22 s, K3b 32 s, K6 45 s);
+      K7 is provisionally behind `deep-proofs` with a 306,180-point exhaustive
+      grid as its blocking per-PR gate. Full account: Step 0 addendum in
+      `TALISMAN_CHANGE_PLAN_1242.md`;
+- [x] intentional talisman **blob-hash re-pin** — `ed00f4da` → `6a61b74f`
+      (an intermediate `bbfe014b` was superseded when the Priority-3/4 guard was
+      reshaped from a wrapped block to two guarded conditions), with
       the reason recorded in `docs/CAPTURE_PIPELINE_SPEC.md` (the authoritative
       pin). **FOUR locations must agree**, discovered one at a time and worth
       listing so the next re-pin is a checklist rather than an excavation:

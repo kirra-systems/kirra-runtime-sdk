@@ -142,6 +142,82 @@ Presenting either as sufficient alone would misdescribe the evidence, and the
 undetected for as long as it did because nobody sampled the speed-cap branch
 with a steering demand attached.
 
+### Step 0 addendum — the exclusion was not free, and it is now a model
+
+Written after the harnesses were built and run, because the plan above got one
+thing wrong in a way worth recording rather than editing away.
+
+Step 0 said the `tan`/`atan` exclusion "costs nothing here" because the new
+properties are `tan`-free. That was true of the *assertions* and false of the
+*paths*. Kani fails a harness whenever an unsupported foreign call is
+**reachable**, regardless of whether any assertion depends on its value. K1–K5
+were written when Priority 2 RETURNED, so over-ceiling commands never reached
+P6 and the exclusion cost nothing. Making P2 accumulate — the entire point of
+this change — puts P6 on those paths. The result was four failing harnesses,
+including **K3, which had been passing for the whole life of the proof set**:
+
+```
+Failed Checks: call to foreign "C" function `tan` is not currently supported
+  File: .../library/std/src/sys/cmath.rs, line 20, in std::f64::<impl f64>::tan
+  Location: crates/kirra-core/src/kinematics_contract.rs:681:52
+VERIFICATION:- FAILED
+```
+
+No assertion was violated. This is a tooling boundary moving under a scope
+change, and it is a general lesson for the talisman: **a change that widens
+which paths are reachable can break an unrelated existing proof**, so "does the
+new property reach a construct CBMC cannot model?" is the wrong question. The
+right one is "does the change put such a construct on any path an existing
+harness quantifies over?"
+
+There is a second, subtler obstruction on the same paths. `v.powi(2)` lowers to
+`llvm.powi.f64`, which CBMC models as the **uninterpreted** builtin
+`__builtin_powi`. `v2` therefore becomes an arbitrary double, the P6 entry guard
+`v2 > 1e-6` becomes undecidable, and `tan` is reachable even where the enforced
+speed is orders of magnitude below the threshold. This one cost real time: a
+diagnostic harness that pinned the ceiling at 0.0005 m/s (`v2 = 2.5e-7`,
+two and a half orders below the guard) was built specifically to test the
+reachability explanation, and it FAILED — which read as a refutation and led to
+the reachability diagnosis being discarded. It was a broken instrument. Once
+`powi` was modelled it passed, and the original diagnosis was correct all along.
+
+**Resolution.** The transcendentals are now MODELLED rather than avoided, in the
+proof crate only:
+
+| Call | Model | Kind |
+|---|---|---|
+| `f64::tan` | nondet, `assume` finite (A1) | over-approximation |
+| `f64::atan` | nondet, `assume` finite ∧ `|r| <= pi/2` (A2), plus A3 against the recorded `tan` pair | over-approximation |
+| `f64::powi` | `x * x`, with an `assert!` that the exponent is 2 | exact |
+
+A1/A2/A3 are stated as individual theorems about the real functions in
+`proofs_kinematics.rs` so a reviewer can check them one at a time; A3 —
+`|y| <= |tan(x)| ∧ |x| <= pi/2 ⟹ |atan(y)| <= |x|` — is the one P-RACK needs,
+and it relates the two calls, so the model is a matched PAIR rather than two
+independent nondet functions. Because the stubs are nondeterministic, a proof
+that discharges under them holds for **every** implementation satisfying the
+postconditions — strictly stronger than a proof about one libm.
+
+Three consequences worth stating plainly:
+
+1. **The talisman is not modified for the prover.** Everything above lives in
+   `verification/kani/`. `powi` in particular could have been "fixed" by
+   respelling it `v * v` in the kernel — that also works, and was measured to
+   work — but it would have put a tooling-driven line into the frozen blob. The
+   `powi(2) == v * v` bit-identity it relies on is measured instead, by
+   `crates/kirra-core/tests/powi_square_bit_identity.rs`, across subnormals, the
+   exponent extremes, the overflow and flush-to-zero boundaries, and the
+   operating speed range.
+2. **The residual exclusion is narrower and still real.** The P6 numeric
+   lateral-envelope VALUE is still not proved. Under the model the proofs never
+   evaluate a real `tan`, so they cannot see whether the P6 arithmetic is
+   numerically right. That property keeps its concrete-grid discharge, and the
+   two must not be presented as covering each other.
+3. **`-Z stubbing` is declared in `verification/kani/Cargo.toml`**, not on the
+   command line, so `cargo kani`, the per-PR lane and the weekly deep lane all
+   get it. A proof cannot silently fall back to the unmodelled foreign calls
+   because a flag was forgotten in one invocation.
+
 ## Step 1 — Property statement (for the record)
 
 The acceptance property, unchanged from #1242:
