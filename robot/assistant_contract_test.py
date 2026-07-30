@@ -296,13 +296,19 @@ check(_ident["prompt_contract_version"] == at.PROMPT_CONTRACT_VERSION
       "34. prompt_identity pins version + sha256 + length "
       f"({_ident['prompt_digest_sha256'][:12]}…)")
 
+# The OFFERED set is `CONTRACT_TOOL_NAMES`, not the registry: a tool may be
+# registered (granted authority) without being advertised to the model, which is
+# how `report_assistant_contract` ships without moving the pinned digest. This
+# check drops an advertised tool, so it still asserts exactly what it always
+# did — the digest tracks the tools the model is actually shown.
 _before = at.prompt_digest()
-_saved_reg = at.REGISTRY.pop("repository_status")
+_saved_offered = at.CONTRACT_TOOL_NAMES
 try:
+    at.CONTRACT_TOOL_NAMES = tuple(n for n in _saved_offered
+                                   if n != "repository_status")
     _after = at.prompt_digest()
 finally:
-    at.REGISTRY["repository_status"] = _saved_reg
-    at.REGISTRY = dict(sorted(at.REGISTRY.items(), key=lambda kv: kv[0]))
+    at.CONTRACT_TOOL_NAMES = _saved_offered
 check(_before != _after and at.prompt_digest() == _before,
       "35. the digest tracks the real prompt — changing the offered tools moves "
       "it, and restoring them moves it back")

@@ -100,8 +100,15 @@ check(a == b, "both wake names produce an identical typed request")
 # ── seam 2: the registry offers the assistant tools ──────────────────────────
 print("== registry seam ==")
 frag = at.assist_prompt_fragment()
-for name in at.registered_tool_names():
+# Offered ≠ registered. Registration grants AUTHORITY; the prompt asks the MODEL
+# to propose. `report_assistant_contract` is reached only through deterministic
+# classification, so it is registered but deliberately not advertised — keeping
+# the pinned prompt digest, and the measurements taken against it, valid.
+for name in at.CONTRACT_TOOL_NAMES:
     check(name in frag, f"{name} is offered to the model")
+check("report_assistant_contract" in at.REGISTRY
+      and "report_assistant_contract" not in frag,
+      "the stored-report reader is registered but NOT offered to the model")
 check("CANNOT run shell commands" in frag and "no terminal" in frag,
       "the prompt tells the model it has no shell")
 check("NEVER claim a tool succeeded" in frag,

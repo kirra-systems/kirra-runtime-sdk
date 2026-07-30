@@ -861,6 +861,50 @@ def tool_publish_my_work(args, ctx):
     return _rcl(repo_command.PUBLISH_MY_WORK, "publish_my_work", args, ctx)
 
 
+def tool_report_assistant_contract(args, ctx):
+    """Read a STORED contract artifact. Runs nothing, mutates nothing.
+
+    The artifact is produced by `assistant_contract.contract_report()` after a
+    live run; this only reads one back. Verdicts inside it belong to the harness
+    and to deterministic policy — never to the model — so nothing here
+    recomputes readiness, acceptance, safety or any accuracy figure, and a
+    missing value is reported as unavailable rather than defaulted to a
+    comfortable one.
+
+    The caller chooses a SECTION, never a path: the search space is fixed by
+    `KIRRA_ASSIST_REPORT_DIR`, so a proposal cannot name a file to read.
+    """
+    import assistant_report as ar
+
+    section = args.get("section") or "summary"
+    scope = args.get("scope") or "full"
+    case_id = args.get("case_id")
+    if not isinstance(section, str) or not isinstance(scope, str):
+        return make_result("report_assistant_contract", REFUSED,
+                           reason="bad_arguments",
+                           summary="I need a section name I recognize.")
+    if case_id is not None and not isinstance(case_id, str):
+        return make_result("report_assistant_contract", REFUSED,
+                           reason="bad_arguments",
+                           summary="A case id has to be exact text.")
+
+    result = ar.read_section(section=section, case_id=case_id, scope=scope)
+    spoken = ar.render_spoken(result)
+    if not result.get("ok"):
+        return make_result("report_assistant_contract", REFUSED,
+                           reason=result.get("reason", "unavailable"),
+                           summary=spoken,
+                           evidence={"section": section, "scope": scope,
+                                     "detail": result.get("detail")})
+    return make_result(
+        "report_assistant_contract", SUCCESS,
+        summary=spoken,
+        evidence={"section": result["section"], "scope": result["scope"],
+                  "artifact": result["artifact"], "data": result["data"],
+                  # Diagnostic only — `render_spoken` never speaks it.
+                  "source_path": result.get("source_path")})
+
+
 # ── registry ─────────────────────────────────────────────────────────────────
 
 OPERATOR, ENGINEER, ARCHITECT, SAFETY = "operator", "engineer", "architect", "safety"
@@ -890,6 +934,11 @@ REGISTRY = {
         "summarize_test_failure", L1_READ_ONLY, READ_ROLES, True,
         "Failing test, failure class, likely owner with evidence, next steps.",
         tool_summarize_test_failure),
+    "report_assistant_contract": Tool(
+        "report_assistant_contract", L1_READ_ONLY, READ_ROLES, True,
+        "Read a STORED assistant contract report: safety gates, selection "
+        "accuracy, readiness, policy corrections, one case. Runs nothing.",
+        tool_report_assistant_contract),
     "sync_to_main": Tool(
         "sync_to_main", L2_BOUNDED_EXEC, (OPERATOR,), False,
         "Robot Command Language: synchronize local main with origin/main.",
@@ -903,6 +952,31 @@ REGISTRY = {
 
 def registered_tool_names():
     return sorted(REGISTRY)
+
+
+#: The tools the MODEL is shown in the selection contract — deliberately NOT
+#: `registered_tool_names()`.
+#:
+#: Registration grants a tool AUTHORITY (a level, roles, argument guards).
+#: Appearing in the prompt asks the MODEL to propose it. Those are different
+#: questions, and conflating them has a specific cost here: the prompt's SHA-256
+#: is pinned evidence for every measured assist-N run, so adding any registry
+#: entry would silently invalidate measurements taken against a prompt that no
+#: longer exists — the exact "measure one prompt, ship another" failure the
+#: digest exists to prevent.
+#:
+#: `report_assistant_contract` is reached ONLY through the deterministic
+#: classifier, never by model proposal, so it is registered but not advertised.
+#: A tool belongs here only if the contract corpus actually measures it.
+CONTRACT_TOOL_NAMES = (
+    "inspect_component",
+    "publish_my_work",
+    "read_repository_source",
+    "repository_status",
+    "search_repository",
+    "summarize_test_failure",
+    "sync_to_main",
+)
 
 
 def tools_for_role(role):
@@ -1011,7 +1085,7 @@ def assist_prompt_fragment():
     example block, not in a prose rule underneath it — assist-3 proved a rule
     naming the exact failing phrases is simply ignored.
     """
-    lines = [f"  {n} — {REGISTRY[n].description}" for n in registered_tool_names()]
+    lines = [f"  {n} — {REGISTRY[n].description}" for n in CONTRACT_TOOL_NAMES]
     return (
         f"ASSISTANT CONTRACT {PROMPT_CONTRACT_VERSION}\n"
         "You are also a grounded engineering assistant for this repository.\n"

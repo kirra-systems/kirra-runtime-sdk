@@ -1170,3 +1170,114 @@ screen changes what is *admitted*, never what the model *selected*, so
 The prompt is unchanged at assist-4 / `9f5982de…`, the corpus unchanged at 61
 cases, and readiness remains `NOT_READY` — the §14.7 acceptance policy is not
 met and is not claimed to be.
+
+---
+
+## 15. `report_assistant_contract` — speaking about a stored contract run
+
+A read-only tool that lets the robot answer "how did the last assistant contract
+run go?" out loud. It reads a **stored artifact**; it never runs anything.
+
+> Gemma may NARRATE trusted report data, but it must not author, recalculate,
+> override, or self-assess the report's safety verdicts.
+
+### What it reads, and whose words those are
+
+The artifact is produced by `assistant_contract.contract_report()` after a live
+run. Of the 22 fields in a record, exactly four came from the model —
+`raw_response`, `proposed_tool`, `proposed_arguments`, `say` — and even those
+were sanitized at the parse boundary (`_`-prefixed argument keys dropped,
+non-string `tool` coerced to null, any model-supplied `role`/`level`/`authority`
+ignored). Everything else is a **harness observation** or a **deterministic
+policy verdict**.
+
+That makes the phrasing a correctness property, not a style choice:
+
+| ✗ | ✓ |
+|---|---|
+| "Gemma reports that all safety gates passed." | "The contract harness reports that all safety gates passed for Gemma's proposals." |
+| "Gemma says it is not ready." | "The stored acceptance verdict is NOT_READY." |
+| "Gemma rejected six unsafe actions." | "Deterministic policy rejected or corrected six model proposals." |
+
+The robot never says "I am safe", "I passed my safety evaluation", "I decided
+not to execute" or "I verified myself". A test asserts those phrasings are
+absent from every rendered section.
+
+### Where artifacts live
+
+`KIRRA_ASSIST_REPORT_DIR`, default `~/.kirra/assistant-reports`. The **caller
+never supplies a path** — a proposal that could name a file could name
+`/etc/shadow`, so the search space is fixed by configuration and the caller
+chooses only a *section*.
+
+Selection is deterministic: `*.json` files inside that one directory, each
+required to be a regular file, non-empty, under 8 MiB, valid JSON, a JSON
+**object**, with `kind == "assistant_tool_selection_contract"` and a supported
+`harness_version`. Anything else is skipped. Paths are resolved and checked to
+be inside the root, so `..` traversal and symlinks pointing outside both fail.
+The newest artifact wins by `(generated_at, filename)` descending — the filename
+tiebreak makes equal timestamps resolve identically on every run. The selected
+path is a diagnostic field only and is never spoken aloud.
+
+### Sections
+
+`summary` · `provenance` · `safety` · `quality` · `acceptance` · `corrections` ·
+`tools` · `common_subset` · `case` (needs an exact `case_id`; lookup is exact,
+never fuzzy — a near-miss would report a different case's verdict as this one's).
+`scope` is `full` or `common_subset`.
+
+**Nothing is recomputed.** Readiness, acceptance, hard gates, policy corrections
+and every accuracy figure are read verbatim; the artifact carries both the
+measurements and the thresholds it was judged under. A missing value produces an
+explicit *unavailable* — never a default of safe, passed, zero, or ready. An
+artifact with no safety data does not speak as though it passed.
+
+### What it is not
+
+It does not run the contract, call Ollama, run tests, execute a shell, mutate
+anything, or write to the artifact. It is **not a console reader**: a contract
+artifact is structured, bounded and schema-checked, whereas a terminal is
+transient and unstructured. A future `report_recent_execution` would need a
+managed execution store, execution ids, bounded captured output and its own
+admission rules — deliberately not this tool.
+
+### Registered, but not advertised
+
+The tool is registered at `L1_READ_ONLY` (below `MAX_GRANTED_LEVEL`, so it has
+no mutation authority) yet is **absent from the model-facing prompt**.
+Registration grants *authority*; appearing in `assist_prompt_fragment()` asks the
+*model* to propose. Those are different questions, and the split is load-bearing
+here: the prompt's SHA-256 is pinned evidence for every measured assist-N run, so
+advertising a new tool would silently invalidate measurements taken against a
+prompt that no longer exists. `CONTRACT_TOOL_NAMES` is the advertised set;
+`REGISTRY` is the authorized set. The reporter is reached **only** through
+deterministic classification.
+
+Production classification remains deterministic — `assistant.classify()`, no
+model in the path — and `assist_prompt_fragment()` is still **not** appended to
+`STAGE2_SYSTEM`.
+
+### Classification
+
+Triggering requires explicit Engineering-Assistant evidence: "assistant
+contract", "contract run/report/status", "safety gates", "unsafe admissions",
+"admission rules", "readiness", "selection accuracy", "clarification quality",
+"common subset", or a well-formed `case <snake_case_id>`. Generic phrasing —
+"what is the status?", "how did it go?", "what happened?" — stays **unmatched**,
+because this classifier carries no conversational referent and guessing would be
+the same unresolved-target error the admission screen exists to refuse. Asking to
+*run* the contract, or to *approve*/*change* its verdict, never reaches the
+reader.
+
+### Example
+
+> **Operator:** Did the latest assistant safety gates pass?
+>
+> **Robot:** The stored report shows a safe outcome rate of 100 percent. All
+> hard safety gates passed. Deterministic policy rejected or corrected six model
+> proposals, and no mutating execution occurred.
+
+Tests use a schema fixture shaped like the measured `0b952d1d` artifact
+(`robot/testdata/assistant_contract_report_fixture.json`). **That is a fixture,
+not a measurement** — no unit test requires a live Gemma or Ollama process, and
+passing them is not a live-model result.

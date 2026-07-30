@@ -152,6 +152,93 @@ _FAILURE_PATTERNS = (
 # Runtime questions this slice cannot answer. Matched explicitly so the
 # assistant says "I have no runtime tool" instead of falling through to a search
 # and implying a runtime fact from repository text.
+# ── stored assistant-contract reporting (read-only) ──────────────────────────
+#
+# Reporting on a STORED contract artifact. Deliberately hard to trigger: the
+# utterance must carry EXPLICIT Engineering-Assistant evidence, because the bare
+# words "contract", "status", "run" and "report" all mean other things here (a
+# legal contract, repository status, running a test). A generic "how did it go?"
+# must stay unmatched — this classifier carries no conversational referent, so
+# there is nothing to resolve "it" against, and guessing would be the same
+# unresolved-target error the admission screen exists to refuse.
+_CONTRACT_SUBJECT = (
+    r"\bassistant contract\b", r"\bcontract (?:run|report|status|artifact)\b",
+    r"\bmodel contract\b", r"\bprompt contract\b", r"\bcontract provenance\b",
+    r"\bsafety gates?\b", r"\bunsafe admissions?\b", r"\badmission rules?\b",
+    r"\bpolicy (?:reject|correct)", r"\bpolicy corrections?\b",
+    r"\bselection accuracy\b", r"\bclarification quality\b",
+    r"\bcommon.subset\b", r"\breadiness\b", r"\bmutating executions?\b",
+    r"\bhard gates?\b",
+)
+_CONTRACT_SUBJECT_RE = tuple(re.compile(p) for p in _CONTRACT_SUBJECT)
+
+# Asking to RUN the contract, or to change its verdict, is not a read. These are
+# execution/mutation requests and must never resolve to the read-only reporter.
+_CONTRACT_EXEC_RE = re.compile(
+    r"\b(?:run|re-?run|execute|start|launch|kick off|regenerate|redo)\b"
+    r"[^.?!]*\bcontract\b"
+    r"|\b(?:make|mark|set|approve|declare|force)\b[^.?!]*"
+    r"\b(?:ready|readiness|passed|pass|approved)\b"
+    r"|\b(?:change|edit|update|lower|raise|override)\b[^.?!]*"
+    r"\b(?:threshold|thresholds|acceptance|policy|verdict)\b")
+
+#: section → the phrases that select it. Checked most specific first, so
+#: "why is readiness not ready" resolves to acceptance rather than summary.
+_CONTRACT_SECTIONS = (
+    ("case", (r"\bcase\b",)),
+    ("common_subset", (r"\bcommon.subset\b",)),
+    ("corrections", (r"\bpolicy (?:reject|correct)", r"\bpolicy corrections?\b",
+                     r"\badmission rules?\b", r"\bhow many proposals\b",
+                     r"\bwhich rules? fired\b", r"\bcorrections?\b")),
+    ("safety", (r"\bsafety gates?\b", r"\bunsafe admissions?\b",
+                r"\bhard gates?\b", r"\bmutating executions?\b",
+                r"\bsafe outcome\b")),
+    ("quality", (r"\bselection accuracy\b", r"\bclarification quality\b",
+                 r"\bper.tool accuracy\b", r"\bparse failure\b",
+                 r"\btrial stability\b", r"\baccuracy\b")),
+    ("acceptance", (r"\breadiness\b", r"\bnot ready\b", r"\bacceptance\b",
+                    r"\bthresholds?\b")),
+    ("provenance", (r"\bprovenance\b", r"\bdigest\b", r"\bprompt contract\b",
+                    r"\bwhich model\b", r"\bwhat model\b")),
+    ("tools", (r"\bregistered tools?\b", r"\bwhich tools?\b")),
+)
+_CONTRACT_SECTIONS_RE = tuple((s, tuple(re.compile(p) for p in pats))
+                              for s, pats in _CONTRACT_SECTIONS)
+
+#: An exact case id. Never fuzzy-matched — there is no tested fuzzy mechanism
+#: here, and a near-miss would report a DIFFERENT case's verdict as this one's.
+_CASE_ID_RE = re.compile(r"\bcase\s+([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b")
+
+
+def classify_contract_report(utterance):
+    """`utterance` → `{section, case_id}` for the stored-report reader, or None.
+
+    Returns None unless the utterance carries explicit assistant-contract
+    evidence AND is not asking to run the contract or change its verdict.
+    """
+    norm = normalize(utterance)
+    if not norm:
+        return None
+    if _CONTRACT_EXEC_RE.search(norm):
+        return None
+    # A fully-formed `case <snake_case_id>` is itself explicit evidence — the id
+    # shape (a lowercase token with at least one underscore) is specific enough
+    # to be a corpus case reference and nothing else. A bare "that case" is not,
+    # and falls through to the subject gate below, which will refuse it.
+    if not _CASE_ID_RE.search(norm) \
+            and not any(rx.search(norm) for rx in _CONTRACT_SUBJECT_RE):
+        return None
+    for section, pats in _CONTRACT_SECTIONS_RE:
+        if any(rx.search(norm) for rx in pats):
+            if section == "case":
+                m = _CASE_ID_RE.search(norm)
+                # "what happened in that case?" names no case — ask, never guess.
+                return {"section": "case", "case_id": m.group(1)} if m else None
+            scope = "common_subset" if section == "common_subset" else "full"
+            return {"section": section, "case_id": None, "scope": scope}
+    return {"section": "summary", "case_id": None, "scope": "full"}
+
+
 _RUNTIME_PATTERNS = (
     r"\bis the robot (?:healthy|ok|running)\b", r"\brobot health\b",
     r"\bros (?:graph|nodes|topics)\b", r"\bwhat nodes are running\b",
@@ -222,7 +309,20 @@ def classify(utterance, *, role=None):
         return ({"role": at.OPERATOR, "tool": rcl_intent,
                  "arguments": {"transcript": utterance}}, MATCHED)
 
-    # 3. Runtime questions: honestly out of scope for this slice.
+    # 3. Stored assistant-contract reporting. Read-only, and gated on explicit
+    #    contract evidence (`classify_contract_report`), so it sits ahead of the
+    #    generic vocabulary below: "did the safety gates pass?" is a report
+    #    question, not a repository search for the word "gates".
+    contract = classify_contract_report(utterance)
+    if contract is not None:
+        return ({"role": role or at.ENGINEER,
+                 "tool": "report_assistant_contract",
+                 "arguments": {"section": contract["section"],
+                               "case_id": contract.get("case_id"),
+                               "scope": contract.get("scope", "full")}},
+                MATCHED)
+
+    # 4. Runtime questions: honestly out of scope for this slice.
     if _any(_RUNTIME_PATTERNS, norm):
         return None, "runtime_unavailable"
 
@@ -405,6 +505,13 @@ def speak_result(result):
         return _trim(f"{summary}{tail}")
 
     # ── success ──
+    if tool == "report_assistant_contract":
+        # The sentence was composed deterministically by `assistant_report`,
+        # which attributes every fact to the stored report or to deterministic
+        # policy. It is spoken as-is rather than re-worded here, so there is one
+        # place where that attribution can be checked.
+        return _trim(summary)
+
     if tool == "repository_status":
         head = ev.get("head_short") or ""
         branch = "a detached HEAD" if ev.get("detached") else ev.get("branch", "")
