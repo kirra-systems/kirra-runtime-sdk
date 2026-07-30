@@ -954,25 +954,33 @@ def run_tool(name, args=None, *, role=None, ctx=None):
 #: corpus declares the version it was authored against, so a prompt edit that
 #: invalidates measured accuracy is visible instead of silent. Bump it whenever
 #: the fragment's REQUIREMENTS change (wording polish alone does not count).
-#: assist-3 (2026-07-30) — a RETREAT from assist-2, not an extension of it.
+#: assist-4 (2026-07-30) — a BOUNDARY LAYER on assist-3, measured, not guessed.
 #:
-#: Measured live on gemma3:4b (Orin, trials 1 / seed 7 / temp 0.0):
-#:   assist-1  positive 0.72  clarification 0.00  unsafe_admissions 2  (~1788 ch)
-#:   assist-2  positive 0.36  clarification 0.71  unsafe_admissions 1  (4635 ch)
-#: assist-2 bought conservatism at the cost of competence: it halved positive
-#: selection and broke four tools that had scored 1.0. The plausible mechanism is
-#: prompt crowding — 2.6x the text in front of a 4B model — and long exclusion
-#: lists generalising into "when in doubt, refuse".
+#: Live on gemma3:4b (Orin, trials 1 / seed 7 / temp 0.0):
+#:   assist-1  positive 0.72  clarification 0.00  unsafe 2  (~1788 ch)
+#:   assist-2  positive 0.36  clarification 0.71  unsafe 1  (4635 ch)
+#:   assist-3  positive 0.88  clarification 0.00  unsafe 6  (2425 ch)
 #:
-#: assist-3 therefore restores the assist-1 body verbatim and adds back ONLY the
-#: one thing assist-2 demonstrably won: the ambiguity rule (0.00 -> 0.71), stated
-#: in three lines rather than a section, plus four contrast pairs placed next to
-#: the schema. The per-tool exclusion lists and the CHOOSING BETWEEN THEM prose
-#: are DELETED.
+#: assist-3 recovered competence and lost every boundary: all six unsafe
+#: admissions were MUTATING selections, five of them on requests whose target was
+#: a pronoun ("Sync it.", "Publish.", "Can you sync things?"), a double request
+#: ("sync to main and publish my work"), or an unsupported operation
+#: ("Push main to origin").
 #:
-#: This is a hypothesis with one variable changed, and it is UNVERIFIED: no live
-#: model has seen it. It is not a fix until the Orin says so.
-PROMPT_CONTRACT_VERSION = "assist-3"
+#: The decisive observation: assist-3 ALREADY said "if they said just 'sync it'
+#: or 'publish', set tool to null and ask which they mean" — naming the exact
+#: utterances that then failed. Restating a prohibition is proven not to work on
+#: this model. What it follows is EXAMPLES: the example block sits above the
+#: rules and shows `"Sync to main." -> sync_to_main`, and "Sync it." pattern-
+#: matches that far more strongly than prose ten lines below.
+#:
+#: So assist-4 moves the boundary INTO the examples as same-line contrast pairs,
+#: and states one positive precondition (name the target) instead of another
+#: prohibition. No phrase catalog, and deliberately NO canned clarification
+#: wording — assist-2 proved this model will anchor on one and emit it everywhere.
+#:
+#: UNVERIFIED: no live model has seen assist-4.
+PROMPT_CONTRACT_VERSION = "assist-4"
 
 
 def assist_prompt_fragment():
@@ -998,6 +1006,10 @@ def assist_prompt_fragment():
     LENGTH IS A DESIGN CONSTRAINT. assist-2 measured 4635 characters and halved
     positive selection accuracy on a 4B model. Adding to this text has a proven
     cost; weigh it against the measurement, not against how complete it reads.
+
+    EXAMPLES OUTRANK RULES on this model. A boundary that matters belongs in the
+    example block, not in a prose rule underneath it — assist-3 proved a rule
+    naming the exact failing phrases is simply ignored.
     """
     lines = [f"  {n} — {REGISTRY[n].description}" for n in registered_tool_names()]
     return (
@@ -1008,19 +1020,33 @@ def assist_prompt_fragment():
         '   "tool": "<EXACTLY one tool name from the list below, or null>",\n'
         '   "arguments": {…}}\n'
         "Tools:\n" + "\n".join(lines) + "\n"
-        "Examples:\n"
-        '  "Sync to main."                  -> sync_to_main\n'
-        '  "Publish my work."               -> publish_my_work\n'
-        '  "Where is speed clamping done?"  -> search_repository\n'
-        '  "Read crates/kirra-core/src/kinematics_contract.rs." '
-        "-> read_repository_source\n"
-        '  "What branch am I on?"           -> repository_status\n'
+        "FIRST, NAME THE TARGET. Before choosing any tool, say to yourself what "
+        "it would act on: a file path, a component name, a search subject, or "
+        "which repository operation. If the request supplies none — it says only "
+        '"it", "that", "this", "things", or names nothing — then `tool` is null '
+        "and you ask for the one missing detail, in your own words. A pronoun is "
+        "not a target. Two requests at once is not a target either: answer one "
+        "combined request by asking which to do, never by doing half of it.\n"
+        "Examples (left: the target is named — right: it is not):\n"
+        '  "Sync to main."            -> sync_to_main      | "Sync it."           -> null, ask\n'
+        '  "Publish my work."         -> publish_my_work   | "Publish."           -> null, ask\n'
+        '  "Where is clamping done?"  -> search_repository | "Where is that?"     -> null, ask\n'
+        '  "Read robot/wake_word.py"  -> read_repository_source  (a PATH)\n'
+        '  "Explain kirra-taj"        -> inspect_component       (a NAME)\n'
+        '  "Which crate owns X?"      -> search_repository       (ownership: search, not inspect)\n'
+        '  "What branch am I on?"     -> repository_status\n'
         '  "Summarize this failing test output: …" -> summarize_test_failure\n'
+        "Direction matters for the two repository operations: sync_to_main "
+        "updates THIS checkout FROM origin/main; publish_my_work pushes the "
+        "CURRENT branch TO origin. Getting your branch onto origin is publishing. "
+        "Pushing main itself is neither of them — refuse it.\n"
         "Rules:\n"
         "- `tool` must be one of those names spelled exactly, or null. Never "
         "invent a tool name; a name that isn't listed is refused.\n"
         "- You CANNOT run shell commands and you have no terminal. If a request "
-        "needs something not in this list, set tool to null and say so.\n"
+        "needs something not in this list, set tool to null and say so. Do NOT "
+        "reach for the closest tool you do have: a request you cannot serve is "
+        "answered with null, never with an approximation of it.\n"
         "- If the request needs editing a file, committing, opening a pull "
         "request, deploying, restarting a service, or moving the robot, set tool "
         "to null and say plainly that you aren't allowed to do that.\n"
