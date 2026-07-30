@@ -315,3 +315,49 @@ the fixtures could not observe the operator:
   ceiling equals the value the vector is seeded with, so it is numerically
   invisible; only a P6-binding (higher-speed) fixture exercises it at all.
 
+
+## 8. #1242 talisman diff — three killed on the boundary, one accepted
+
+The #1242 Priority-2 change (the speed ceiling accumulates instead of
+returning) put 20 mutants in the gate's `--in-diff` scope. Four survived the
+whole existing suite. Three of them were **killed by new tests**, and it is
+worth saying why they had survived: not because the branch was untested, but
+because the tolerance boundary had never been landed on. The suite drives
+implied rates comfortably inside or outside `max_rate ± 1e-9`, and each mutant
+changes behaviour only for an input whose rate sits exactly at the threshold.
+
+| Mutant | Killed by |
+|---|---|
+| `:621` `>` → `>=` (accel) | implied rate EXACTLY `max_accel + 1e-9` |
+| `:627` `>` → `>=` (brake) | implied rate EXACTLY `max_brake + 1e-9` |
+| `:627` `+` → `-` (the epsilon's sign) | implied rate EXACTLY `max_brake` — inside `+1e-9`, outside `−1e-9`, so it separates the two spellings where the boundary test above cannot (there both agree) |
+
+All three live in `crates/kirra-core/tests/rate_limit_epsilon_boundary.rs`. The
+enabling trick is `delta_time_s = 1.0`, which makes `speed_delta.abs() / dt` an
+exact identity so the implied rate is a value the test controls bit for bit;
+with any other `dt` the rounding step puts the boundary out of reach. Each test
+carries a one-ULP-further-out companion, so it pins a boundary rather than a
+region where nothing fires.
+
+One genuine equivalence remains, excluded in `.cargo/mutants.toml`:
+
+| Mutant class | Location | Why equivalent |
+|---|---|---|
+| `replace * with /` | `validate_vehicle_command` `:544:33` — the ceiling's `effective_max_speed * cmd.linear_velocity_mps.signum()` | Priority 0 has already denied every non-finite field, so `signum` returns only `±1.0` here, and `x * ±1.0` and `x / ±1.0` are exact IEEE results — bit-identical on every input. TRULY equivalent, not measure-zero. |
+
+That exclusion is the first in this repo **anchored on `line:col`**, and the
+reason is a limitation worth recording for the next one:
+`validate_vehicle_command` has ELEVEN `*` sites and cargo-mutants gives them all
+the same description, so the usual function+operator pattern would have
+excluded 22 mutants — including ones the suite kills today. Anchoring is brittle
+to line movement, which is the *safe* direction: a shifted line makes the
+pattern stop matching, the mutant reappears, and the gate reds until someone
+re-earns the exclusion. Prefer a description-only pattern whenever the function
+has exactly one site of that operator; reach for an anchor only when it does
+not, and say so in the entry.
+
+Both premises of that equivalence argument — that `signum` returns only `±1.0`
+on this path, and that the identity holds bitwise — are asserted by
+`the_ceiling_sign_flip_is_multiplication_division_invariant`, so the
+justification is machine-checked rather than prose. The `+` twin at the same
+site is NOT excluded: it changes the value, and it dies.

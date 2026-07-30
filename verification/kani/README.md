@@ -8,15 +8,39 @@ proof harnesses for the actuation-path checker cores:
 | Module | Source under proof (`#[path]`-included VERBATIM) | Properties |
 |---|---|---|
 | `proofs_lease` | `src/lease.rs` (root crate) | L1 `from_ttl` totality + split-brain invariant, all u64 · L2 promotion only after holder expiry + positive guard margin · L3 clock-skew fails safe · L4 on-cadence renewal never expires |
-| `proofs_kinematics` | `crates/kirra-core/src/kinematics_contract.rs` — the FROZEN talisman (git blob `ed00f4da…`), proved **unmodified** | K1 NaN/Inf fail-closed totality (every f64 bit pattern, every field) · K2 non-positive dt denied · K3 P2 speed-ceiling clamp exact · K4/K5 Degraded re-initiation / speed-increase denials (#70) |
+| `proofs_kinematics` | `crates/kirra-core/src/kinematics_contract.rs` — the FROZEN talisman (git blob `6a61b74f…`), proved **unmodified** | K1 NaN/Inf fail-closed totality (every f64 bit pattern, every field) · K2 non-positive dt denied · K3 P2 speed-ceiling clamp exact · K3b composed enforcement reports both axes · K4/K5 Degraded re-initiation / speed-increase denials (#70) · K6 (P-CAP) every executable return respects the speed ceiling · K7 (P-RACK) every executable return respects the rack limit (`deep-proofs`) |
 | `proofs_rss` | `parko/crates/parko-core/src/rss.rs` | R1 `longitudinal_safe_distance` totality (finite ∧ ≥ 0) over the FULL f64 domain · R2 closing-speed monotonicity on the integer-scaled grid (the `occlusion_limited_speed` bisection precondition) · R3 invalid brake → exactly `RSS_FAILSAFE_DISTANCE_M` |
 
-**Honest scope** (per the EP-15 plan): the P6 bicycle-model path uses
-`tan`/`atan` — transcendentals CBMC cannot decide — so the kinematics proofs
-cover the decidable prefix (P0/P1/P2 + the Degraded gates); P6 stays covered by
-the MC/DC + property-test suites. RSS monotonicity is quantified over
-integer-scaled operational grids (0.01 m/s speed steps, 0.1-unit parameter
-steps), not the full real line.
+**Honest scope** (per the EP-15 plan). The P6 bicycle-model path uses
+`tan`/`atan`, which CBMC cannot execute. Until #1242 the kinematics proofs
+simply never reached it — Priority 2 returned early, so the exclusion was free.
+Making P2 accumulate put P6 on those paths and broke four harnesses, K3 among
+them, with `call to foreign "C" function 'tan' is not currently supported`
+rather than any counterexample.
+
+The transcendentals are now **modelled** rather than avoided, in this crate
+only: `f64::tan` and `f64::atan` become nondeterministic values constrained to
+postconditions that are theorems about the real functions (finiteness, the
+principal-branch range, and the inverse-monotone relation that couples them),
+and `f64::powi` — which CBMC treats as an uninterpreted builtin, enough on its
+own to make the P6 entry guard undecidable — becomes exact squaring. A proof
+discharged under nondeterministic stubs holds for every implementation meeting
+those postconditions, so this is stronger than a proof about one libm, not
+weaker. `-Z stubbing` is declared in `Cargo.toml`, so plain `cargo kani` picks
+it up. Details and the axiom list: the "Solver model" block in
+`src/proofs_kinematics.rs`.
+
+What is still excluded is narrower and worth stating exactly: the **numeric
+value** the P6 bicycle model computes is not proved here. Under the model the
+proofs never evaluate a real `tan`, so they cannot see whether that arithmetic
+is right; it stays discharged by the concrete grid
+(`k6_k7_mirror_exhaustive_grid_over_the_executable_return`, 306,180 points) and
+the MC/DC + property-test suites. The grid and the proofs fail in opposite
+directions — the grid can miss an unsampled branch, the proofs cannot see the
+arithmetic — so neither substitutes for the other.
+
+RSS monotonicity is quantified over integer-scaled operational grids
+(0.01 m/s speed steps, 0.1-unit parameter steps), not the full real line.
 
 ## Running
 

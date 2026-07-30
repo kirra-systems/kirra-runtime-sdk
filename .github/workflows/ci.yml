@@ -262,7 +262,14 @@ jobs:
           cargo fmt --check --manifest-path tools/iceoryx2-spike/Cargo.toml
       - name: frozen-talisman blob pin survives formatting
         run: |
-          pin=$(grep -oE '\bed00f4da[0-9a-f]{32}\b' docs/CAPTURE_PIPELINE_SPEC.md | head -1)
+          # Anchored on the PATH, not on the hash value (#1242). This grep used
+          # to hardcode the then-current prefix, so the first legitimate re-pin
+          # made it match nothing and the step failed with an empty "pinned "
+          # — a confusing failure for a correct change. Same extraction shape as
+          # ci/build_safety_case.py, so there is ONE convention for reading the
+          # authoritative pin out of the reviewed doc.
+          pin=$(grep -oE 'kinematics_contract\.rs = [0-9a-f]{40}' docs/CAPTURE_PIPELINE_SPEC.md \
+                | grep -oE '[0-9a-f]{40}' | head -1)
           actual=$(git hash-object crates/kirra-core/src/kinematics_contract.rs)
           test -n "$pin" && test "$actual" = "$pin" \
             || { echo "talisman blob $actual != pinned $pin"; exit 1; }
@@ -671,12 +678,14 @@ jobs:
   # (which need no Kani) have already run BLOCKING as this lane's first step,
   # so a property regression still fails CI even on an install-flake day.
   #
-  # LANE SPLIT: harnesses behind the kani crate's `deep-proofs` feature (today:
-  # R2 full-lattice monotonicity, whose exact-IEEE relational instance blew
-  # this job's 45-min budget on both CaDiCaL and kissat) do NOT run here — the
-  # default `cargo kani` below compiles them out. They run weekly with a
-  # multi-hour budget in kani-deep-weekly.yml; their concrete mirrors still
-  # run BLOCKING in this lane's first step.
+  # LANE SPLIT: harnesses behind the kani crate's `deep-proofs` feature do NOT
+  # run here — the default `cargo kani` below compiles them out. They run weekly
+  # with a multi-hour budget in kani-deep-weekly.yml; their concrete mirrors
+  # still run BLOCKING in this lane's first step. Today that is R2 (full-lattice
+  # monotonicity, whose exact-IEEE relational instance blew this job's 45-min
+  # budget on both CaDiCaL and kissat) and, since #1242, K7 (P-RACK — stopped at
+  # 23 min of CBMC time with no verdict; see the harness doc comment, its
+  # demotion is provisional rather than budgeted).
   kani-proofs:
     name: Kani proofs (EP-15, blocking; install-flake tolerated)
     runs-on: ubuntu-latest

@@ -521,9 +521,28 @@ pub fn validate_vehicle_command(
     // the urban Occy ODD value (22.35 m/s per ADR-0001).
     // ------------------------------------------------------------------
     let effective_max_speed = contract.effective_max_speed_mps();
-    if cmd.linear_velocity_mps.abs() > effective_max_speed {
-        let clamped = effective_max_speed * cmd.linear_velocity_mps.signum();
-        return EnforceAction::ClampLinear(clamped);
+
+    // #1242 — the correction accumulators are declared HERE, ABOVE Priority 2,
+    // so the speed ceiling can RECORD its correction instead of finalizing the
+    // verdict. Priority 2 previously returned `ClampLinear` directly, which
+    // skipped P5a (rack limit), P5b (slew) and P6 (lateral envelope) entirely:
+    // a command over the speed ceiling had its steering demand executed
+    // UNCHECKED, up to and including physically unachievable angles (measured:
+    // 200 deg through a 35 deg rack).
+    //
+    // The governing invariant is now explicit: priority decisions may
+    // ACCUMULATE restrictions, but no intermediate priority may FINALIZE an
+    // executable command. The single terminal `match (v_clamped, delta_clamped)`
+    // is the only executable exit.
+    let mut v = cmd.linear_velocity_mps;
+    let mut v_clamped = false;
+    let mut delta = cmd.steering_angle_deg;
+    let mut delta_clamped = false;
+
+    let ceiling_bound = cmd.linear_velocity_mps.abs() > effective_max_speed;
+    if ceiling_bound {
+        v = effective_max_speed * cmd.linear_velocity_mps.signum();
+        v_clamped = true;
     }
 
     // ------------------------------------------------------------------
@@ -548,11 +567,6 @@ pub fn validate_vehicle_command(
     // ClampBoth (never dropping the velocity correction just because steering
     // was also clamped); neither → Allow.
     // ------------------------------------------------------------------
-    let mut v = cmd.linear_velocity_mps;
-    let mut v_clamped = false;
-    let mut delta = cmd.steering_angle_deg;
-    let mut delta_clamped = false;
-
     // SAFETY: SG3 | REQ: accel-ceiling | TEST: test_excessive_acceleration_triggers_linear_clamping,test_reverse_acceleration_bounded_by_accel_limit,prop_clamp_linear_value_within_speed_contract
     // Priority 3/4: Implied longitudinal acceleration ceiling.
     //
@@ -579,6 +593,22 @@ pub fn validate_vehicle_command(
     // (e.g. +0.01 → -20) as a cross-zero reversal and bound the reverse LAUNCH by
     // the larger brake limit — the M1 unsafe direction, reintroduced under noise.
     // Anything within the stop band is a launch: acceleration in either gear.
+    // #1242 (option B) — `!ceiling_bound` on the two ASSIGNMENT conditions below.
+    //
+    // The speed ceiling has already fixed `v` to EXACTLY the ceiling magnitude,
+    // which K3 pins. Re-deriving `v` from the accel/brake bound would return the
+    // tighter of the two and change that magnitude — a safety-case amendment,
+    // not a lateral-envelope fix.
+    //
+    // Guarding the two conditions rather than wrapping the whole block is
+    // deliberate: wrapping re-indents ~25 lines, which pulls semantically
+    // UNCHANGED accel arithmetic into `cargo-mutants --in-diff` and inflates the
+    // diff surface the blob re-pin has to certify. Same semantics, 2 lines.
+    //
+    // That the accel limit is therefore not applied to over-ceiling commands is a
+    // real pre-existing gap (an EXECUTED 5.0 -> 35.0 m/s over 0.1 s implies
+    // 300 m/s^2 against a 2.5 limit), tracked as #1243 with its own evidence.
+    // What #1242 fixes is that P5a/P5b/P6 below now ALWAYS run.
     let speed_delta = cmd.linear_velocity_mps - cmd.current_velocity_mps;
     let implied_rate_abs = speed_delta.abs() / cmd.delta_time_s;
     let from_rest = cmd.current_velocity_mps.abs() <= STOP_EPSILON_MPS;
@@ -588,13 +618,13 @@ pub fn validate_vehicle_command(
         && cmd.linear_velocity_mps.abs() > cmd.current_velocity_mps.abs();
 
     if speeding_up {
-        if implied_rate_abs > contract.max_accel_mps2 + 1e-9 {
+        if !ceiling_bound && implied_rate_abs > contract.max_accel_mps2 + 1e-9 {
             v = (cmd.current_velocity_mps
                 + contract.max_accel_mps2 * cmd.delta_time_s * speed_delta.signum())
             .clamp(-effective_max_speed, effective_max_speed);
             v_clamped = true;
         }
-    } else if implied_rate_abs > contract.max_brake_mps2 + 1e-9 {
+    } else if !ceiling_bound && implied_rate_abs > contract.max_brake_mps2 + 1e-9 {
         // Decreasing speed magnitude → braking. Asymmetric from acceleration:
         // the braking limit is typically higher.
         v = (cmd.current_velocity_mps

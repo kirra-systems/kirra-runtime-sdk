@@ -1,12 +1,27 @@
 //! EP-15 proofs — the FROZEN kinematics-contract talisman
-//! (`crates/kirra-core/src/kinematics_contract.rs`, git blob `ed00f4da…`).
+//! (`crates/kirra-core/src/kinematics_contract.rs`, git blob `6a61b74f…`).
 //!
 //! Scope is the DECIDABLE prefix of the pipeline, per the EP-15 plan ("bounded
 //! floats via `f64::is_finite` case-split; scope to provable forms honestly"):
-//! the Priority-0/1 fail-closed guards, the Priority-2 speed-ceiling early
-//! return, and the Degraded decel-to-stop denial gates — none of which reach
-//! the P6 bicycle-model `tan`/`atan` (transcendentals CBMC cannot decide;
-//! those stay covered by the property/MC-DC test suites).
+//! the Priority-0/1 fail-closed guards, the Priority-2 speed ceiling, and the
+//! Degraded decel-to-stop denial gates.
+//!
+//! #1242 changed what "decidable prefix" means here. K1–K5 were written when
+//! Priority 2 RETURNED, so an over-ceiling command never reached the P6 bicycle
+//! model and the `tan`/`atan` exclusion cost nothing. Making P2 accumulate puts
+//! P6 on those paths. Rather than narrow the harnesses back to the shape the
+//! solver liked — which would delete the newly-reachable composition cases from
+//! the proofs — the transcendentals are MODELLED, in this crate, by
+//! nondeterministic stubs constrained to postconditions that are theorems about
+//! the real functions (see "Solver model" below). The exclusion that remains is
+//! narrower and stated where it bites: the P6 numeric lateral-envelope VALUE is
+//! still not proved here and must not be claimed as proved; it is discharged by
+//! the concrete grid and the property suites.
+//!
+//! LANE SPLIT: K1–K6 run per-PR in the blocking `kani-proofs` lane. K7 alone is
+//! behind the `deep-proofs` feature (weekly `kani-deep-weekly`) — see its
+//! doc comment for why that demotion is provisional rather than budgeted. Its
+//! per-PR gate is the exhaustive concrete grid in `mirrors`.
 //!
 //! Properties (cited from `docs/safety/GOVERNOR_INTEGRITY_EVIDENCE.md` §2):
 //!  * K1 fail-closed NaN/Inf totality (SG9): ANY non-finite field in a command
@@ -128,6 +143,9 @@ mod proofs {
     /// the ceiling with direction preserved, and the effective ceiling is
     /// `min(max_speed, odd_cap)` whenever the cap is present and tighter.
     #[kani::proof]
+    #[kani::stub(f64::powi, super::stub_powi)]
+    #[kani::stub(f64::tan, super::stub_tan)]
+    #[kani::stub(f64::atan, super::stub_atan)]
     fn k3_speed_ceiling_clamp_exact() {
         let cmd = any_command();
         let contract = any_bounded_contract();
@@ -146,16 +164,77 @@ mod proofs {
         }
         kani::assume(cmd.linear_velocity_mps.abs() > max);
 
-        match validate_vehicle_command(&cmd, &contract) {
-            EnforceAction::ClampLinear(v) => {
-                assert_eq!(v.abs(), max, "clamped magnitude is exactly the ceiling");
-                assert_eq!(
-                    v.signum(),
-                    cmd.linear_velocity_mps.signum(),
-                    "direction preserved (reverse stays reverse)"
+        // #1242 RESTATEMENT — K3 asserts the LONGITUDINAL INVARIANT, not the
+        // top-level action variant.
+        //
+        // It previously required `ClampLinear` specifically. That coupled a
+        // longitudinal property to the enumeration used to REPORT composed
+        // enforcement, and #1242 made the coupling false: once the steering
+        // priorities always run, an over-ceiling command whose steering also
+        // needs correcting reports `ClampBoth` while carrying the identical
+        // linear value.
+        //
+        // This is NOT a weakening. Both substantive claims are unchanged and
+        // still asserted below — magnitude is exactly the ceiling, direction is
+        // preserved. What is removed is an accidental dependence on which
+        // variant carries them. The input domain is deliberately NOT narrowed to
+        // exclude commands with a steering demand: doing so would delete the
+        // newly-exposed composition case from the proof rather than state the
+        // invariant correctly.
+        //
+        // The variant question is a COMPOSITION property and lives in
+        // `k3b_composition_reports_both_axes` below, where it belongs.
+        let action = validate_vehicle_command(&cmd, &contract);
+        let linear = match action {
+            EnforceAction::ClampLinear(v) => v,
+            EnforceAction::ClampBoth { linear, .. } => linear,
+            other => panic!("over-ceiling must clamp the linear axis, got {other:?}"),
+        };
+        assert_eq!(
+            linear.abs(),
+            max,
+            "clamped magnitude is exactly the ceiling"
+        );
+        assert_eq!(
+            linear.signum(),
+            cmd.linear_velocity_mps.signum(),
+            "direction preserved (reverse stays reverse)"
+        );
+    }
+
+    /// K3b (#1242) — COMPOSITION semantics, split out of K3.
+    ///
+    /// K3 owns the longitudinal invariant; this owns which variant reports it.
+    /// Keeping them apart means a future change to how composed enforcement is
+    /// REPORTED cannot silently look like a change to what the longitudinal
+    /// bound IS.
+    ///
+    /// If both axes were corrected, the action must say so — dropping either
+    /// correction from the report is how a consumer ends up applying one bound
+    /// and not the other.
+    #[kani::proof]
+    #[kani::stub(f64::powi, super::stub_powi)]
+    #[kani::stub(f64::tan, super::stub_tan)]
+    #[kani::stub(f64::atan, super::stub_atan)]
+    fn k3b_composition_reports_both_axes() {
+        let cmd = any_command();
+        let contract = any_bounded_contract();
+        kani::assume(cmd.linear_velocity_mps.is_finite());
+        kani::assume(cmd.current_velocity_mps.is_finite());
+        kani::assume(cmd.steering_angle_deg.is_finite());
+        kani::assume(cmd.current_steering_angle_deg.is_finite());
+        kani::assume(cmd.delta_time_s.is_finite() && cmd.delta_time_s > 0.0);
+
+        let action = validate_vehicle_command(&cmd, &contract);
+        if let Some((linear, steering)) = executed_pair(&cmd, &action) {
+            let linear_corrected = linear != cmd.linear_velocity_mps;
+            let steering_corrected = steering != cmd.steering_angle_deg;
+            if linear_corrected && steering_corrected {
+                assert!(
+                    matches!(action, EnforceAction::ClampBoth { .. }),
+                    "both axes corrected must report ClampBoth"
                 );
             }
-            other => panic!("over-ceiling must ClampLinear, got {other:?}"),
         }
     }
 
@@ -200,11 +279,361 @@ mod proofs {
 }
 
 // ---------------------------------------------------------------------------
+// #1242 — executable-output bounds. See docs/safety/TALISMAN_CHANGE_PLAN_1242.md.
+//
+// HONEST SCOPE. The governing invariant is "no intermediate priority may
+// finalize an executable command". That is a statement about CONTROL FLOW, and
+// Kani cannot assert which `return` executed — so P-COMPOSE is not directly
+// expressible. What IS expressible is its observable SHADOW: every executable
+// return must satisfy every bound the pipeline is supposed to have applied. Any
+// priority that finalizes early skips some of those bounds and is caught here.
+//
+// Both properties below are deliberately `tan`-free, so neither inherits the
+// transcendental exclusion recorded in GOVERNOR_INTEGRITY_EVIDENCE.md §2. The
+// numeric lateral-envelope property is NOT proved here and must not be claimed
+// as proved; it is discharged by concrete grid instead.
+//
+// RED against the pre-fix kernel: the Priority-2 speed-cap branch returns
+// `ClampLinear` without ever reaching P5a or P6, so it violates K7 outright
+// (measured: a 200 deg demand passes through a 35 deg rack untouched).
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Solver model (#1242) — `powi`, and `tan`/`atan` as an over-approximating pair.
+//
+// Everything below lives in the PROOF crate. The talisman is not modified for
+// the benefit of the prover: no `#[cfg(kani)]` appears in it, and the only
+// kernel change #1242 makes is the Priority-2 accumulate fix itself.
+//
+// WHY THIS EXISTS. `f64::tan` and `f64::atan` are foreign C calls; CBMC cannot
+// execute them, and Kani fails any harness in which one is *reachable*. Before
+// #1242 the Priority-2 speed ceiling returned early, so the over-ceiling
+// commands K3 quantifies over never reached the P6 bicycle model and the
+// question never arose. Making P2 accumulate — the whole point of the fix —
+// puts P6 on those paths, and K3/K3b/K6/K7 all began failing with
+// `call to foreign "C" function 'tan' is not currently supported`. That is a
+// TOOLING boundary, not a counterexample: no assertion was violated.
+//
+// WHAT THIS IS. Not an implementation of tan/atan. Each stub returns a
+// NONDETERMINISTIC value constrained only by postconditions that are theorems
+// about the real functions. The proofs are therefore discharged for EVERY
+// implementation satisfying them — strictly stronger than a proof about one
+// libm, and independent of the solver's inability to reason about
+// transcendentals.
+//
+// THE AXIOMS. Each is a fact about the real functions. Nothing here is assumed
+// for convenience; if any were false the proofs would be void, so they are
+// stated individually to be checked by review:
+//
+//   A1  tan(x) is finite for every finite x. (No finite double is exactly
+//       pi/2, so the pole is unreachable in f64.)
+//   A2  |atan(y)| <= pi/2 for every y — the principal branch's range.
+//   A3  atan inverts tan and both are increasing on (-pi/2, pi/2), so
+//         |y| <= |tan(x)|  and  |x| <= pi/2   imply   |atan(y)| <= |x|.
+//
+// A3 is the one K7 needs, and it relates the two calls, so the model must be a
+// PAIR rather than two independent nondet functions: P6 asks tan for the
+// current angle, then asks atan for the back-solved bound, and the rack limit
+// survives only because the second answer is no larger than the first
+// question. `LAST_TAN` carries that link. CBMC runs one harness per process
+// with statics at their initializers, so the recording is deterministic; the
+// hypothesis is CHECKED before A3 is applied, so a call that does not match the
+// recorded pair falls back to A2 alone and the model stays sound.
+//
+// AND `powi`. `v.powi(2)` lowers to the `llvm.powi.f64` intrinsic, which CBMC
+// models as the UNINTERPRETED builtin `__builtin_powi`: `v2` becomes an
+// arbitrary double, including NaN. One opaque value is enough to make the P6
+// entry guard `v2 > 1e-6` undecidable, so `tan` is reachable even on paths
+// where the enforced speed is orders of magnitude below the threshold. That
+// was measured, on a throwaway harness pinning the ceiling at 0.0005 m/s so
+// `v2 = 2.5e-7`, two and a half orders below the guard: it still failed the
+// `tan` check, and passed the moment `powi` was modelled. Worth recording
+// because the same harness, read without that explanation, looks like evidence
+// AGAINST the reachability diagnosis — it was a broken instrument, not a
+// refutation. `stub_powi` is an EXACT model, not an over-approximation: squaring
+// by multiplication. That it agrees with `powi(2)` bit-for-bit is measured, not
+// asserted — `crates/kirra-core/tests/powi_square_bit_identity.rs` walks
+// subnormals, the exponent extremes, the overflow/flush-to-zero boundaries and
+// the operating speed range, and a toolchain that broke the identity would red
+// that test rather than silently weaken these proofs. The `assert!` keeps the
+// model honest about its scope: any exponent other than 2 fails the proof
+// instead of being modelled wrongly.
+// ---------------------------------------------------------------------------
+
+#[cfg(kani)]
+pub(crate) fn stub_powi(x: f64, n: i32) -> f64 {
+    assert!(n == 2, "the powi model covers exponent 2 only");
+    x * x
+}
+
+/// `(|x|, |tan(x)|)` from the most recent [`stub_tan`] call, for axiom A3.
+#[cfg(kani)]
+static mut LAST_TAN: Option<(f64, f64)> = None;
+
+#[cfg(kani)]
+pub(crate) fn stub_tan(x: f64) -> f64 {
+    let r: f64 = kani::any();
+    kani::assume(r.is_finite()); // A1
+    if x.is_finite() {
+        unsafe { LAST_TAN = Some((x.abs(), r.abs())) };
+    }
+    r
+}
+
+#[cfg(kani)]
+pub(crate) fn stub_atan(y: f64) -> f64 {
+    let r: f64 = kani::any();
+    kani::assume(r.is_finite() && r.abs() <= core::f64::consts::FRAC_PI_2); // A2
+
+    // A3, applied only when its hypothesis is discharged by the recorded pair.
+    if let Some((x_abs, tan_abs)) = unsafe { LAST_TAN } {
+        if x_abs <= core::f64::consts::FRAC_PI_2 && y.abs() <= tan_abs {
+            kani::assume(r.abs() <= x_abs);
+        }
+    }
+    r
+}
+
+#[cfg(any(kani, test))]
+fn executed_pair(cmd: &ProposedVehicleCommand, action: &EnforceAction) -> Option<(f64, f64)> {
+    // The apply mapping, inlined rather than imported: this crate `#[path]`-
+    // includes only the contract source, and duplicating three lines here is
+    // preferable to pulling the whole sim module into the proof tree.
+    match action {
+        EnforceAction::Allow => Some((cmd.linear_velocity_mps, cmd.steering_angle_deg)),
+        EnforceAction::ClampLinear(v) => Some((*v, cmd.steering_angle_deg)),
+        EnforceAction::ClampSteering(d) => Some((cmd.linear_velocity_mps, *d)),
+        EnforceAction::ClampBoth { linear, steering } => Some((*linear, *steering)),
+        // Nothing is executed.
+        EnforceAction::DenyBreach(_) => None,
+    }
+}
+
+/// K6 (P-CAP) — every executable return respects the effective speed ceiling.
+///
+/// Guards against the fix shape that trades one breach for another: routing the
+/// speed cap through the pipeline without making it a persistent magnitude
+/// ceiling lets the accel priority overwrite it UPWARD from the raw command.
+#[cfg(kani)]
+#[kani::proof]
+#[kani::stub(f64::powi, stub_powi)]
+#[kani::stub(f64::tan, stub_tan)]
+#[kani::stub(f64::atan, stub_atan)]
+fn k6_executable_return_respects_the_speed_ceiling() {
+    let contract = any_bounded_contract();
+    let cmd = any_command();
+    let action = validate_vehicle_command(&cmd, &contract);
+    if let Some((linear, _)) = executed_pair(&cmd, &action) {
+        // Finite by construction: Priority 0 denies every non-finite input, so
+        // an executable return cannot carry one.
+        assert!(linear.is_finite());
+        assert!(linear.abs() <= contract.effective_max_speed_mps() + 1e-9);
+    }
+}
+
+/// K7 (P-RACK) — every executable return respects the absolute steering limit.
+///
+/// This is the sharpest tan-free consequence of the #1242 defect: the speed-cap
+/// branch returns before P5a, so the RAW steering demand is executed. Unlike the
+/// lateral envelope, the rack limit is a physical hard stop — a demand beyond it
+/// is not merely aggressive, it is unachievable by the mechanism.
+///
+/// LANE: `deep-proofs` (weekly), and unlike R2 this demotion is **provisional**
+/// — say so rather than imply a budget was measured and merely exceeded. K3,
+/// K3b and K6 discharge in 22 s, 32 s and 45 s; K7 was still solving after 23
+/// minutes of CBMC time and was stopped, so what is known is that it does not
+/// fit the per-PR budget, NOT that a multi-hour budget suffices. It is the only
+/// one of the four whose property needs axiom A3, the constraint that couples
+/// the `atan` answer to the `tan` question, and that coupling is the obvious
+/// suspect. If the weekly lane does not converge either, the honest move is to
+/// demote K7 out of the proof tier entirely rather than leave a harness that
+/// never finishes and reads as coverage.
+///
+/// Its per-PR gate meanwhile is not the three-value mirror below but
+/// `k6_k7_mirror_exhaustive_grid_over_the_executable_return` — 306,180 points
+/// swept along ceiling × ODD cap × commanded speed × current speed × steering
+/// demand × current steering × wheelbase × lateral cap, asserting this exact
+/// bound. That is the R2 pattern, and the grid is red against the pre-fix
+/// kernel on the 200 deg demand.
+#[cfg(all(kani, feature = "deep-proofs"))]
+#[kani::proof]
+#[kani::stub(f64::powi, stub_powi)]
+#[kani::stub(f64::tan, stub_tan)]
+#[kani::stub(f64::atan, stub_atan)]
+fn k7_executable_return_respects_the_rack_limit() {
+    let contract = any_bounded_contract();
+    let cmd = any_command();
+    let action = validate_vehicle_command(&cmd, &contract);
+    if let Some((_, steering)) = executed_pair(&cmd, &action) {
+        assert!(steering.is_finite());
+        assert!(steering.abs() <= contract.max_steering_deg + 1e-9);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Concrete mirrors under plain `cargo test`.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod mirrors {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // #1242 mirrors — GREEN as of the talisman fix. K7 was red and `#[ignore]`d
+    // until Priority 2 stopped finalizing; the un-ignore is closure evidence.
+    // -----------------------------------------------------------------------
+
+    /// Concrete instance of K7 (P-RACK). The speed-cap branch returns before
+    /// P5a, so the raw steering demand is what gets executed.
+    #[test]
+    fn k7_mirror_rack_limit_holds_on_the_speed_cap_branch() {
+        let c = contract(5.225, None);
+        for steer in [50.0_f64, 80.0, 200.0] {
+            let cmd = ProposedVehicleCommand {
+                linear_velocity_mps: 5.4,
+                current_velocity_mps: 5.4,
+                delta_time_s: 0.1,
+                steering_angle_deg: steer,
+                current_steering_angle_deg: steer,
+            };
+            let action = validate_vehicle_command(&cmd, &c);
+            if let Some((_, steering)) = executed_pair(&cmd, &action) {
+                assert!(
+                    steering.abs() <= c.max_steering_deg + 1e-9,
+                    "demand {steer} deg executed as {steering} deg against a {} deg rack; action was {action:?}",
+                    c.max_steering_deg
+                );
+            }
+        }
+    }
+
+    /// Concrete instance of K6 (P-CAP) on the shape the NAIVE fix would break:
+    /// apply the cap once, then let the accel priority overwrite `v` from the raw
+    /// command and the executed speed exceeds the ceiling. Passes today (the
+    /// early return makes the cap final) and must keep passing after the fix — it
+    /// guards the FIX SHAPE, not the current defect.
+    #[test]
+    fn k6_mirror_speed_ceiling_survives_the_accel_priority() {
+        let c = contract(5.225, None);
+        let cmd = ProposedVehicleCommand {
+            linear_velocity_mps: 20.0,
+            current_velocity_mps: 5.0,
+            delta_time_s: 0.1,
+            steering_angle_deg: 5.0,
+            current_steering_angle_deg: 5.0,
+        };
+        let action = validate_vehicle_command(&cmd, &c);
+        if let Some((linear, _)) = executed_pair(&cmd, &action) {
+            assert!(
+                linear.abs() <= c.effective_max_speed_mps() + 1e-9,
+                "executed {linear} m/s against a {} m/s ceiling; action was {action:?} - the accel priority must not raise the capped speed",
+                c.effective_max_speed_mps()
+            );
+        }
+    }
+
+    /// EXHAUSTIVE grid mirror of K6 (P-CAP) and K7 (P-RACK) — the R2 pattern.
+    ///
+    /// The symbolic K6/K7 harnesses quantify over a bounded contract and five
+    /// symbolic doubles; this walks a concrete grid swept along every axis the
+    /// two properties can depend on and asserts the SAME two bounds on the
+    /// executable pair. It exists for two reasons:
+    ///
+    ///   1. It is the per-PR gate for whichever of K6/K7 is too expensive for
+    ///      the per-PR solver budget — the established repo pattern (R2's
+    ///      full-lattice monotonicity is gated exactly this way).
+    ///   2. It is blind in the opposite direction from the proofs. The grid can
+    ///      miss a branch nobody sampled; the proofs cannot see whether the P6
+    ///      arithmetic is numerically right, because under the #1242 solver
+    ///      model they never evaluate a real `tan`. Neither substitutes for the
+    ///      other, and this comment exists so that is not quietly forgotten.
+    ///
+    /// Axes: effective ceiling (max_speed × ODD cap, so the `min` selection is
+    /// exercised both ways) × commanded speed relative to that ceiling ×
+    /// current speed (accelerating, braking, from rest, reversing) × steering
+    /// demand from inside the rack to far beyond it × steering rate demand ×
+    /// wheelbase × lateral-accel cap. The last two move where P6 binds relative
+    /// to P5a, which is the interaction the four-angle regression could not see.
+    #[test]
+    fn k6_k7_mirror_exhaustive_grid_over_the_executable_return() {
+        let speeds = [0.5_f64, 2.0, 5.225, 13.4, 35.0];
+        let caps = [None, Some(0.4_f64), Some(3.0), Some(100.0)];
+        let commanded = [-40.0_f64, -5.0, -0.4, 0.0, 0.3, 1.0, 5.3, 14.0, 40.0];
+        let currents = [-20.0_f64, -0.01, 0.0, 0.02, 4.9, 12.0, 36.0];
+        let steers = [0.0_f64, 1.0, 12.0, 34.9, 35.0, 35.1, 50.0, 89.0, 200.0];
+        let cur_steers = [-35.0_f64, 0.0, 34.0];
+        let wheelbases = [0.5_f64, 2.8, 6.0];
+        let lat_caps = [0.5_f64, 3.0, 12.0];
+
+        let mut checked = 0u64;
+        let mut executed = 0u64;
+        for &max_speed in &speeds {
+            for &cap in &caps {
+                for &wheelbase_m in &wheelbases {
+                    for &max_lateral_accel_mps2 in &lat_caps {
+                        let c = VehicleKinematicsContract {
+                            wheelbase_m,
+                            max_lateral_accel_mps2,
+                            ..contract(max_speed, cap)
+                        };
+                        let ceiling = c.effective_max_speed_mps();
+                        for &linear_velocity_mps in &commanded {
+                            for &current_velocity_mps in &currents {
+                                for &steering_angle_deg in &steers {
+                                    for &current_steering_angle_deg in &cur_steers {
+                                        let command = ProposedVehicleCommand {
+                                            linear_velocity_mps,
+                                            current_velocity_mps,
+                                            delta_time_s: 0.1,
+                                            steering_angle_deg,
+                                            current_steering_angle_deg,
+                                        };
+                                        let action = validate_vehicle_command(&command, &c);
+                                        checked += 1;
+                                        let Some((linear, steering)) =
+                                            executed_pair(&command, &action)
+                                        else {
+                                            continue;
+                                        };
+                                        executed += 1;
+                                        assert!(
+                                            linear.is_finite() && steering.is_finite(),
+                                            "non-finite executable pair ({linear}, {steering}) \
+                                             for {command:?} under {c:?}; action {action:?}"
+                                        );
+                                        // P-CAP.
+                                        assert!(
+                                            linear.abs() <= ceiling + 1e-9,
+                                            "executed {linear} m/s against a {ceiling} m/s \
+                                             ceiling for {command:?}; action {action:?}"
+                                        );
+                                        // P-RACK.
+                                        assert!(
+                                            steering.abs() <= c.max_steering_deg + 1e-9,
+                                            "executed {steering} deg against a {} deg rack \
+                                             for {command:?}; action {action:?}",
+                                            c.max_steering_deg
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Non-vacuity: the grid must actually reach executable returns, and in
+        // bulk. A future guard that denied everything would otherwise turn this
+        // exhaustive sweep into an exhaustive sweep of nothing.
+        assert_eq!(
+            checked, 306_180,
+            "grid size changed; update the expectation"
+        );
+        assert!(
+            executed > checked / 2,
+            "only {executed} of {checked} grid points returned an executable pair"
+        );
+    }
 
     fn contract(max_speed: f64, cap: Option<f64>) -> VehicleKinematicsContract {
         VehicleKinematicsContract {
