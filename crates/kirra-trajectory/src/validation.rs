@@ -486,6 +486,21 @@ pub fn validate_trajectory_slow_with_envelope(
         effective_perception_cap,
     );
     let initial_steering_deg = current_steering_deg_from_odom(latest_odom, config);
+    // #1213 — is segment 0's "current steering" a MEASUREMENT or an ASSUMPTION?
+    // Without odom (and at near-zero speed, where the inverse bicycle model is
+    // undetermined) `current_steering_deg_from_odom` returns a neutral 0.0. The
+    // rate ceiling then reads the first segment as a full slew from centre and
+    // clamps it — even when the rack is already turned and no slew is needed.
+    //
+    // That clamp is an artifact of the unknown initial condition, so it must not
+    // by itself drive an enforced-geometry refusal: the divergence it implies is
+    // not divergence the checker KNOWS will happen. Later segments are unaffected
+    // — they measure against the previous segment's own commanded steering, which
+    // is known. Recorded as AOU-STEERING-ORIGIN-001; a rack-position sensor
+    // retires the exception and is the proper fix.
+    let steering_origin_measured = latest_odom
+        .map(|o| o.linear_x_mps.abs() > 0.1)
+        .unwrap_or(false);
     let mut clamp_seen = false;
     // B1 fix — the effective per-pose velocity ceiling, aligned index-for-index
     // with `trajectory`. LAZILY materialized: stays `None` (zero heap) until a
@@ -495,6 +510,20 @@ pub fn validate_trajectory_slow_with_envelope(
     // on the segment ENDING at pose `k` lowers `ceilings[k]` to the checker's
     // own enforced value.
     let mut ceilings: Option<Vec<f64>> = None;
+    // #1213 — the ENFORCED geometry, captured from the first steering clamp
+    // onward. `steering_clamp_from` is the index of the segment on which the
+    // checker first overrode the planner's steering; from there the arc the
+    // vehicle will follow is NOT the arc pass-A containment validated, so the
+    // enforced poses are reconstructed and re-checked after this loop.
+    //
+    // Segments BEFORE that index keep the planner's geometry and stay covered by
+    // pass A: an earlier LINEAR clamp only shortens the traversal along the same
+    // arcs (same steering ⇒ same curvature; less distance ⇒ a swept subset), so
+    // it cannot move the body outside a region already checked. A STEERING clamp
+    // changes the curvature itself, which is a different region in an unbounded
+    // direction — hence the re-check rather than an inclusion argument.
+    let mut steering_clamp_from: Option<usize> = None;
+    let mut enforced_segments: Vec<EnforcedSegment> = Vec::new();
     let mut prev_steering_deg = initial_steering_deg;
     // ADR-0029: the angular channel's "current" yaw rate for the Degraded
     // converge-to-stop-and-HOLD gate. Seeded from odometry (the vehicle's
@@ -523,6 +552,40 @@ pub fn validate_trajectory_slow_with_envelope(
         } else {
             validate_vehicle_command(&cmd, &kinematics)
         };
+        // #1213 — the pair the actuator will apply on this segment. Captured
+        // BEFORE the match's own bookkeeping so every arm contributes, and so a
+        // future arm cannot silently drop the steering axis the way
+        // `ClampSteering(_) => { clamp_seen = true; }` did.
+        let enforced_steering_deg = match verdict {
+            EnforceAction::ClampSteering(d) => d,
+            EnforceAction::ClampBoth { steering, .. } => steering,
+            EnforceAction::Allow | EnforceAction::ClampLinear(_) => cmd.steering_angle_deg,
+            // Refuses below; the value is never read.
+            EnforceAction::DenyBreach(_) => cmd.steering_angle_deg,
+        };
+        let enforced_end_velocity_mps = match verdict {
+            EnforceAction::ClampLinear(v) | EnforceAction::ClampBoth { linear: v, .. } => v,
+            _ => trajectory[i + 1].velocity_mps,
+        };
+        // A clamp on segment 0 whose only basis is the ASSUMED neutral rack does
+        // not arm the re-check (see `steering_origin_measured`). Every other
+        // clamp does.
+        let clamp_is_known = matches!(
+            verdict,
+            EnforceAction::ClampSteering(_) | EnforceAction::ClampBoth { .. }
+        ) && (i > 0 || steering_origin_measured);
+        if steering_clamp_from.is_none() && clamp_is_known {
+            steering_clamp_from = Some(i);
+        }
+        if steering_clamp_from.is_some() {
+            enforced_segments.push(EnforcedSegment {
+                end_velocity_mps: enforced_end_velocity_mps,
+                steering_deg: enforced_steering_deg,
+                delta_time_s: cmd.delta_time_s,
+                steering_clamped: clamp_is_known,
+            });
+        }
+
         match verdict {
             EnforceAction::Allow => {}
             // B1 fix: capture the checker's own enforced velocity — do NOT
@@ -605,6 +668,71 @@ pub fn validate_trajectory_slow_with_envelope(
                     );
                 }
                 prev_omega = omega;
+            }
+        }
+    }
+
+    // ----- B2) Re-containment on the ENFORCED geometry (#1213) ---------
+    //
+    // THE PROPERTY: every released trajectory is containment-checked using the
+    // steering angle that will actually be executed.
+    //
+    // Pass A checked the arc the PLANNER proposed. When the per-pose gate
+    // overrode the steering (P5a hard limit / P5b rate ceiling / P6 lateral
+    // envelope), the vehicle will follow a DIFFERENT arc, and pass A's verdict
+    // does not transfer to it. Before this block the clamped value was discarded
+    // (`ClampSteering(_) => { clamp_seen = true; }`) and the trajectory was still
+    // admitted — every consumer treats `Clamp` as admitted — so the executed arc
+    // was released un-checked.
+    //
+    // A straighter arc is NOT automatically safer: a clamped path leaves the
+    // corridor on the OUTSIDE of a turn, and depending on obstacle placement can
+    // depart a corridor the tighter proposed arc stayed inside. So the enforced
+    // geometry is re-checked outright — the pass-A result is never reused for it.
+    //
+    // Three outcomes, all explicit:
+    //   * reconstructed + re-check passes  → release the clamped command;
+    //   * reconstructed + re-check fails   → containment refusal;
+    //   * cannot reconstruct exactly       → refusal (fail closed).
+    if let Some(from) = steering_clamp_from {
+        // Seed at the enforced velocity for the seed pose: an earlier LINEAR
+        // clamp already lowered it, and reconstructing from the planner's
+        // unclamped speed would model an arc length the actuator will not travel.
+        let seed_velocity_mps = ceilings
+            .as_ref()
+            .and_then(|c| c.get(from).copied())
+            .unwrap_or_else(|| trajectory[from].velocity_mps);
+        match reconstruct_enforced_poses(
+            trajectory,
+            from,
+            seed_velocity_mps,
+            &enforced_segments,
+            config.wheelbase_m,
+        ) {
+            Some(enforced_poses) => {
+                let enforced_verdict = containment::validate_trajectory_containment(
+                    &enforced_poses,
+                    &kernel_corridor,
+                    &footprint,
+                    frame_trust,
+                );
+                if !matches!(enforced_verdict, EnforceAction::Allow) {
+                    return (
+                        TrajectoryVerdict::MRCFallback,
+                        Some(TrajectoryRefusalReason::EnforcedContainmentBreach),
+                        None,
+                    );
+                }
+            }
+            // Unavailable, not benign: the enforced arc exists and will be
+            // driven whether or not we can model it. Refusing is the only
+            // outcome that keeps the property true.
+            None => {
+                return (
+                    TrajectoryVerdict::MRCFallback,
+                    Some(TrajectoryRefusalReason::EnforcedGeometryUnreconstructable),
+                    None,
+                );
             }
         }
     }
@@ -1566,6 +1694,175 @@ fn adapter_to_kernel_pose(p: &Pose) -> KernelPose {
 /// The bicycle-model approximation matches the kernel's P6 (lateral-accel)
 /// model and is the canonical pose-pair → steering-angle conversion.
 /// Field names match `ProposedVehicleCommand` exactly (Step 0).
+/// One segment as the checker ENFORCED it — the `(velocity, steering)` pair the
+/// actuator will actually apply, not the pair the planner proposed.
+///
+/// `steering_deg` is the post-clamp angle (P5a hard limit / P5b rate ceiling /
+/// P6 lateral envelope); `end_velocity_mps` is the post-clamp speed at the
+/// segment's end pose. On an unclamped segment both equal the planner's values.
+#[derive(Debug, Clone, Copy)]
+struct EnforcedSegment {
+    end_velocity_mps: f64,
+    steering_deg: f64,
+    delta_time_s: f64,
+    /// Whether the checker actually overrode this segment's steering. Unclamped
+    /// segments are replayed as the planner's own motion (see
+    /// [`reconstruct_enforced_poses`]) rather than re-integrated, so that
+    /// planner-model mismatch cannot masquerade as enforcement divergence.
+    steering_clamped: bool,
+}
+
+/// Produce the geometry the vehicle will actually sweep once the checker's own
+/// steering clamps are applied (#1213).
+///
+/// ## Why this is a DIVERGENCE model, not a re-simulation
+///
+/// The obvious implementation — forward-integrate every segment from the
+/// enforced `(v, δ)` — is wrong in a way that fails in the *unsafe-looking*
+/// direction for availability: it silently folds PLANNER-MODEL MISMATCH into the
+/// result. [`pose_pair_to_command`] derives `δ` from a pose pair's heading
+/// change alone; it never requires the pair's POSITIONS to lie on the arc that
+/// heading change implies. A planner whose positions and headings are not
+/// perfectly bicycle-consistent would therefore "diverge" from a re-simulation
+/// even with no clamp anywhere, and the re-check would refuse trajectories the
+/// enforcement path never altered.
+///
+/// So only CLAMPED segments are re-integrated. An unclamped segment replays the
+/// planner's own motion, carried in whatever frame the accumulated divergence
+/// has put the vehicle in — the planner's local step, rotated by the heading
+/// error the clamps have opened up. The consequences:
+///
+///   * no clamped segment ⇒ the reconstruction is the planner's path exactly,
+///     so the re-check can never disagree with pass A for model reasons;
+///   * a clamped segment ⇒ the divergence it causes is real, and it propagates
+///     forward through every later segment (the vehicle is somewhere else and
+///     pointing somewhere else when the next planned step is applied).
+///
+/// The clamped-segment integration is the exact forward inverse of
+/// [`pose_pair_to_command`]: that function solves
+/// `tan(δ) = Δheading · L / (v_avg · Δt)` for `δ`; this solves it for `Δheading`.
+///
+/// Seeded at `planner[from_segment]` — the last pose whose geometry the pass-A
+/// containment check already validated — and carried forward from there.
+///
+/// Returns `None` when the enforced trajectory cannot be reconstructed EXACTLY:
+/// a non-finite input, a non-positive `Δt`, a non-finite wheelbase, or a
+/// resulting pose that is not finite. The caller must treat `None` as a refusal
+/// (the "recheck unavailable" arm) — a best-effort reconstruction would be
+/// checked geometry that nothing will execute.
+fn reconstruct_enforced_poses(
+    planner: &[TrajectoryPoint],
+    from_segment: usize,
+    seed_velocity_mps: f64,
+    enforced: &[EnforcedSegment],
+    wheelbase_m: f64,
+) -> Option<Vec<KernelPose>> {
+    if !wheelbase_m.is_finite() || wheelbase_m <= 0.0 {
+        return None;
+    }
+    let seed = planner.get(from_segment)?;
+    if !seed_velocity_mps.is_finite() {
+        return None;
+    }
+    let mut out: Vec<KernelPose> = Vec::with_capacity(enforced.len() + 1);
+    let mut cur = adapter_to_kernel_pose(&seed.pose);
+    if !cur.x_m.is_finite() || !cur.y_m.is_finite() || !cur.heading_rad.is_finite() {
+        return None;
+    }
+    out.push(cur);
+
+    // Heading error opened up by the clamps so far: `enforced − planner`. Zero
+    // until the first clamped segment, which is what makes an unclamped
+    // trajectory reconstruct to itself.
+    let mut heading_error = 0.0_f64;
+    let mut v_prev = seed_velocity_mps;
+    for (k, seg) in enforced.iter().enumerate() {
+        if !seg.end_velocity_mps.is_finite()
+            || !seg.steering_deg.is_finite()
+            || !seg.delta_time_s.is_finite()
+            || seg.delta_time_s <= 0.0
+        {
+            return None;
+        }
+        // At |δ| ≥ 90° the road wheel is perpendicular to travel: curvature is
+        // infinite and the bicycle model has no solution. `tan` does NOT report
+        // this — π/2 is not representable, so `(90.0).to_radians().tan()` is a
+        // huge FINITE number (~1.6e16) that would sail past an `is_finite`
+        // guard and produce a plausible-looking arc from meaningless geometry.
+        // Unreachable through the enforced path (P5a clamps to the rack limit
+        // first), so this is a structural guard, not a live case.
+        if seg.steering_deg.abs() >= 90.0 {
+            return None;
+        }
+        // The planner's own step for this segment, needed by both branches.
+        let from_pose = planner.get(from_segment + k)?;
+        let to_pose = planner.get(from_segment + k + 1)?;
+        let finite = |p: &Pose| p.x_m.is_finite() && p.y_m.is_finite() && p.heading_rad.is_finite();
+        if !finite(&from_pose.pose) || !finite(&to_pose.pose) {
+            return None;
+        }
+
+        cur = if seg.steering_clamped {
+            // Same averaging convention as `pose_pair_to_command`, so the arc is
+            // the one the enforced command actually implies.
+            let v_avg = 0.5 * (v_prev + seg.end_velocity_mps);
+            let arc_len = v_avg * seg.delta_time_s;
+            let tan_delta = seg.steering_deg.to_radians().tan();
+            if !tan_delta.is_finite() || !arc_len.is_finite() {
+                return None;
+            }
+            // Δheading = arc_len · tan(δ) / L — the relation
+            // `pose_pair_to_command` inverts.
+            let d_heading = arc_len * tan_delta / wheelbase_m;
+            if !d_heading.is_finite() {
+                return None;
+            }
+            let h0 = cur.heading_rad;
+            let h1 = h0 + d_heading;
+            // Exact circular-arc integration. The straight-line branch is the
+            // removable singularity at Δheading → 0 (radius → ∞), not an
+            // approximation of a curve.
+            let (dx, dy) = if d_heading.abs() < 1e-9 {
+                (arc_len * h0.cos(), arc_len * h0.sin())
+            } else {
+                let radius = arc_len / d_heading;
+                (
+                    radius * (h1.sin() - h0.sin()),
+                    radius * (h0.cos() - h1.cos()),
+                )
+            };
+            // Re-derive the error against where the plan expected to be.
+            heading_error = h1 - to_pose.pose.heading_rad;
+            KernelPose {
+                x_m: cur.x_m + dx,
+                y_m: cur.y_m + dy,
+                heading_rad: h1,
+            }
+        } else {
+            // Unclamped: replay the planner's own step, rotated into the frame
+            // the accumulated divergence has left the vehicle in. With no prior
+            // clamp `heading_error` is 0 and this is the identity — the
+            // reconstruction IS the planner's pose, bit for bit.
+            let (dx_p, dy_p) = (
+                to_pose.pose.x_m - from_pose.pose.x_m,
+                to_pose.pose.y_m - from_pose.pose.y_m,
+            );
+            let (c, s) = (heading_error.cos(), heading_error.sin());
+            KernelPose {
+                x_m: cur.x_m + c * dx_p - s * dy_p,
+                y_m: cur.y_m + s * dx_p + c * dy_p,
+                heading_rad: to_pose.pose.heading_rad + heading_error,
+            }
+        };
+        if !cur.x_m.is_finite() || !cur.y_m.is_finite() || !cur.heading_rad.is_finite() {
+            return None;
+        }
+        out.push(cur);
+        v_prev = seg.end_velocity_mps;
+    }
+    Some(out)
+}
+
 fn pose_pair_to_command(
     a: &TrajectoryPoint,
     b: &TrajectoryPoint,
@@ -2151,6 +2448,17 @@ pub enum TrajectoryRefusalReason {
     /// dense/faulty-perception overload that would blow the RSS-pass WCET. The
     /// scene is refused wholesale (MRC), never partially processed.
     PerceptionObjectOverflow,
+    /// #1213: the per-pose gate overrode the planner's steering, and the arc the
+    /// vehicle will ACTUALLY follow under that enforced angle leaves the
+    /// corridor — even though the proposed arc did not. Distinct from
+    /// [`Self::ContainmentBreach`] so an operator can tell "the planner asked to
+    /// leave the corridor" from "our own clamp put it there".
+    EnforcedContainmentBreach,
+    /// #1213: a steering clamp fired but the enforced geometry could not be
+    /// reconstructed exactly (non-finite state, non-positive Δt, unusable
+    /// wheelbase). The enforced arc will be driven regardless, so an
+    /// un-modellable one is refused rather than released on pass A's verdict.
+    EnforcedGeometryUnreconstructable,
 }
 
 impl TrajectoryRefusalReason {
@@ -2174,6 +2482,8 @@ impl TrajectoryRefusalReason {
             Self::OcclusionOutrunsVisibility => "TRAJECTORY_OCCLUSION_OUTRUN",
             Self::VruReachableSetBreach => "TRAJECTORY_VRU_BREACH",
             Self::PerceptionObjectOverflow => "TRAJECTORY_PERCEPTION_OVERLOAD",
+            Self::EnforcedContainmentBreach => "TRAJECTORY_ENFORCED_CONTAINMENT_BREACH",
+            Self::EnforcedGeometryUnreconstructable => "TRAJECTORY_ENFORCED_GEOMETRY_UNKNOWN",
         }
     }
 
@@ -2256,7 +2566,205 @@ impl TrajectoryRefusalReason {
                  processed — a bounded checker never trades safety for a scene it cannot fully \
                  evaluate in time (F9, #1096)."
             }
+            Self::EnforcedContainmentBreach => {
+                "The checker clamped this trajectory's steering (rack limit, slew-rate ceiling \
+                 or lateral-acceleration envelope), and the arc the vehicle would actually \
+                 follow under that enforced angle leaves the drivable corridor — even though \
+                 the arc the planner proposed did not. A clamped path runs WIDER through a \
+                 turn, so a reduction in steering authority is not automatically safer. Refused \
+                 on the enforced geometry, not the proposed geometry (#1213)."
+            }
+            Self::EnforcedGeometryUnreconstructable => {
+                "The checker clamped this trajectory's steering, but the resulting geometry \
+                 could not be reconstructed exactly (non-finite state, a non-positive time \
+                 step, or an unusable wheelbase), so the arc that would actually be driven \
+                 could not be containment-checked. The vehicle would follow that arc whether \
+                 or not the checker can model it, so the trajectory is refused rather than \
+                 released on the proposed arc's verdict (#1213)."
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod enforced_reconstruction_tests {
+    use super::*;
+
+    fn pt(x: f64, y: f64, h: f64, v: f64, t: f64) -> TrajectoryPoint {
+        TrajectoryPoint {
+            pose: Pose {
+                x_m: x,
+                y_m: y,
+                heading_rad: h,
+            },
+            velocity_mps: v,
+            time_from_start_s: t,
+        }
+    }
+
+    fn seg(steering_deg: f64, v: f64, dt: f64) -> EnforcedSegment {
+        EnforcedSegment {
+            end_velocity_mps: v,
+            steering_deg,
+            delta_time_s: dt,
+            steering_clamped: true,
+        }
+    }
+
+    fn unclamped(steering_deg: f64, v: f64, dt: f64) -> EnforcedSegment {
+        EnforcedSegment {
+            steering_clamped: false,
+            ..seg(steering_deg, v, dt)
+        }
+    }
+
+    /// The straight branch is the removable singularity at Δheading → 0, so it
+    /// must land exactly where a constant-heading translation lands — not
+    /// somewhere a large-radius arc approximation would put it.
+    #[test]
+    fn zero_steering_reconstructs_a_straight_line() {
+        let planner = vec![pt(0.0, 0.0, 0.0, 2.0, 0.0), pt(1.0, 0.0, 0.0, 2.0, 0.5)];
+        let out =
+            reconstruct_enforced_poses(&planner, 0, 2.0, &[seg(0.0, 2.0, 0.5)], 2.0).unwrap();
+        assert_eq!(out.len(), 2);
+        assert!((out[1].x_m - 1.0).abs() < 1e-12, "x = v·dt");
+        assert!(out[1].y_m.abs() < 1e-12, "no lateral motion at zero steering");
+        assert!(out[1].heading_rad.abs() < 1e-12);
+    }
+
+    /// The reconstruction is the exact forward inverse of
+    /// `pose_pair_to_command`: feeding back the steering that function derives
+    /// from a pose pair must reproduce that pose pair. If these two ever drift,
+    /// the re-check would be validating geometry the enforcement path never
+    /// implied — so this is the load-bearing agreement test.
+    #[test]
+    fn reconstruction_inverts_the_command_derivation() {
+        let config = VehicleConfig::default_urban();
+        let a = pt(0.0, 0.0, 0.0, 3.0, 0.0);
+        // A pose pair with a genuine heading change, built to be reachable.
+        let b = pt(0.9, 0.06, 0.13, 3.0, 0.3);
+        let cmd = pose_pair_to_command(&a, &b, &config, 0.0);
+        let out = reconstruct_enforced_poses(
+            &[a, b],
+            0,
+            a.velocity_mps,
+            &[seg(cmd.steering_angle_deg, b.velocity_mps, cmd.delta_time_s)],
+            config.wheelbase_m,
+        )
+        .unwrap();
+        assert!(
+            (out[1].heading_rad - b.pose.heading_rad).abs() < 1e-9,
+            "heading must round-trip: got {}, want {}",
+            out[1].heading_rad,
+            b.pose.heading_rad
+        );
+    }
+
+    /// THE IDENTITY PROPERTY, and the reason this is a divergence model rather
+    /// than a re-simulation: over segments the checker did NOT clamp, the
+    /// reconstruction reproduces the planner's poses exactly — even when those
+    /// poses are NOT bicycle-consistent (here the positions deliberately do not
+    /// lie on the arc their heading changes imply, as a real planner's output
+    /// need not).
+    ///
+    /// A naive re-integration would drift from this path and the re-check could
+    /// refuse trajectories the enforcement path never touched. That is an
+    /// availability failure caused entirely by the checker's own model, and this
+    /// test is what forbids it.
+    #[test]
+    fn unclamped_segments_reconstruct_to_the_planner_path_exactly() {
+        let planner = vec![
+            pt(0.0, 0.0, 0.0, 2.0, 0.0),
+            // Positions and headings intentionally inconsistent with a pure arc.
+            pt(1.0, 0.3, 0.20, 2.0, 0.5),
+            pt(2.2, 0.4, 0.05, 2.0, 1.0),
+            pt(3.0, 1.1, 0.55, 2.0, 1.5),
+        ];
+        let segs: Vec<_> = (0..3).map(|_| unclamped(7.0, 2.0, 0.5)).collect();
+        let out = reconstruct_enforced_poses(&planner, 0, 2.0, &segs, 2.0).unwrap();
+        assert_eq!(out.len(), planner.len());
+        for (got, want) in out.iter().zip(planner.iter()) {
+            assert!(
+                (got.x_m - want.pose.x_m).abs() < 1e-12
+                    && (got.y_m - want.pose.y_m).abs() < 1e-12
+                    && (got.heading_rad - want.pose.heading_rad).abs() < 1e-12,
+                "unclamped reconstruction must be the identity: got ({}, {}, {}), \
+                 want ({}, {}, {})",
+                got.x_m,
+                got.y_m,
+                got.heading_rad,
+                want.pose.x_m,
+                want.pose.y_m,
+                want.pose.heading_rad
+            );
+        }
+    }
+
+    /// The converse, so the identity above is not the whole behaviour: one
+    /// clamped segment moves the path, and the divergence PERSISTS through the
+    /// unclamped segments that follow it — the vehicle is somewhere else and
+    /// pointing somewhere else when the next planned step is applied.
+    #[test]
+    fn a_single_clamp_diverges_and_the_divergence_persists() {
+        let planner = vec![
+            pt(0.0, 0.0, 0.0, 2.0, 0.0),
+            pt(1.0, 0.0, 0.20, 2.0, 0.5),
+            pt(2.0, 0.2, 0.20, 2.0, 1.0),
+            pt(3.0, 0.4, 0.20, 2.0, 1.5),
+        ];
+        let segs = vec![
+            // Clamped to straight where the plan wanted a turn.
+            seg(0.0, 2.0, 0.5),
+            unclamped(0.0, 2.0, 0.5),
+            unclamped(0.0, 2.0, 0.5),
+        ];
+        let out = reconstruct_enforced_poses(&planner, 0, 2.0, &segs, 2.0).unwrap();
+        assert!(
+            (out[1].heading_rad - planner[1].pose.heading_rad).abs() > 0.1,
+            "the clamped segment must not reproduce the planned heading"
+        );
+        let final_gap = (out[3].y_m - planner[3].pose.y_m).abs();
+        let first_gap = (out[1].y_m - planner[1].pose.y_m).abs();
+        assert!(
+            final_gap > first_gap,
+            "divergence must grow across the following unclamped segments, \
+             not be absorbed: first={first_gap}, final={final_gap}"
+        );
+    }
+
+    /// FAIL-CLOSED (the "recheck unavailable" arm). Each of these makes the
+    /// enforced arc unmodellable; the vehicle would drive it regardless, so the
+    /// only sound answer is `None` → refusal. A best-effort pose here would be
+    /// checked geometry that nothing executes.
+    #[test]
+    fn unmodellable_inputs_reconstruct_to_nothing() {
+        let planner = vec![pt(0.0, 0.0, 0.0, 2.0, 0.0), pt(1.0, 0.0, 0.0, 2.0, 0.5)];
+        let ok = seg(5.0, 2.0, 0.5);
+        for (label, wheelbase, s, seed) in [
+            ("zero wheelbase", 0.0, ok, 2.0),
+            ("negative wheelbase", -2.0, ok, 2.0),
+            ("non-finite wheelbase", f64::NAN, ok, 2.0),
+            ("non-finite seed velocity", 2.0, ok, f64::NAN),
+            ("non-positive dt", 2.0, seg(5.0, 2.0, 0.0), 2.0),
+            ("non-finite dt", 2.0, seg(5.0, 2.0, f64::INFINITY), 2.0),
+            ("non-finite steering", 2.0, seg(f64::NAN, 2.0, 0.5), 2.0),
+            ("non-finite velocity", 2.0, seg(5.0, f64::INFINITY, 0.5), 2.0),
+            // tan(90°) is not finite — a rack angle at the singularity.
+            ("steering at the tan singularity", 2.0, seg(90.0, 2.0, 0.5), 2.0),
+        ] {
+            assert!(
+                reconstruct_enforced_poses(&planner, 0, seed, &[s], wheelbase).is_none(),
+                "{label} must refuse to reconstruct"
+            );
+        }
+    }
+
+    /// A seed index past the end of the planner slice is a caller bug, not a
+    /// reason to invent a pose.
+    #[test]
+    fn an_out_of_range_seed_index_reconstructs_to_nothing() {
+        let planner = vec![pt(0.0, 0.0, 0.0, 2.0, 0.0)];
+        assert!(reconstruct_enforced_poses(&planner, 5, 2.0, &[seg(5.0, 2.0, 0.5)], 2.0).is_none());
     }
 }
 

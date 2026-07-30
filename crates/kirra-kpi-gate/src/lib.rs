@@ -1415,12 +1415,12 @@ mod tests {
         }
     }
 
-    /// The manifest counts must reconcile with the rate rows (347/398 and
+    /// The manifest counts must reconcile with the rate rows (345/398 and
     /// 329/398 today): the names ARE the integer bounds (#796 F5).
     #[test]
     fn manifest_counts_reconcile_with_the_rate_floors() {
         let m = committed_manifest();
-        assert_eq!(m.geometric.len(), 51, "398 - 347 admitted");
+        assert_eq!(m.geometric.len(), 53, "398 - 345 admitted");
         assert_eq!(m.learned_safetyaware_seed7.len(), 69, "398 - 329 admitted");
     }
 

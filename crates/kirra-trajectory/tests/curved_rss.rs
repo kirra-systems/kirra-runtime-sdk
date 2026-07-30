@@ -212,7 +212,19 @@ fn in_lane_object_around_a_bend_is_rejected_not_missed() {
 /// bends away from it.
 #[test]
 fn out_of_lane_object_on_the_tangent_line_is_not_spuriously_rejected() {
-    let r = 25.0;
+    // r WIDENED 25 → 70 m by #1213. At r = 25 this control was driving a
+    // trajectory the vehicle cannot physically follow: a_lat = v²/r = 15²/25 =
+    // 9 m/s², nearly 3× the 3.5 m/s² envelope, so P6 clamped the steering to a
+    // ~64 m arc and the car would have understeered clean out of a 5 m lane.
+    // The checker used to ADMIT that (the clamped angle was discarded and
+    // containment had already passed on the proposed arc); it now refuses it as
+    // an `EnforcedContainmentBreach`. This test is an RSS over-rejection
+    // control, so its ego must be independently admissible — at r = 70,
+    // a_lat = 3.2 m/s² is inside the envelope and no steering clamp fires.
+    // The scenario it was written to test is unchanged: the object still sits
+    // ~6.4 m off the lane in Frenet coordinates, well outside the 4 m band, and
+    // the ego speed that made it longitudinally unsafe is untouched.
+    let r = 70.0;
     let corridor = arc_corridor(r, 5.0, arc_len(r), 60);
     // Dead ahead on the START POSE's tangent line, 30 m out: the lane bends
     // away, so in LANE coordinates the point is far outside the corridor —
