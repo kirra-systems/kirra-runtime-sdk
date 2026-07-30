@@ -18,9 +18,12 @@ use kirra_core::corridor::Point;
 use kirra_core::frame_integrity::FrameTrust;
 use kirra_core::trajectory::Pose;
 use kirra_core::FleetPosture;
-use kirra_trajectory::state::{TrajectoryPoint, TrajectoryVerdict};
+use kirra_trajectory::state::{
+    AcceptedTrajectory, EgoOdom, LateralEnvelope, TrajectoryPoint, TrajectoryVerdict,
+};
 use kirra_trajectory::validation::{
-    validate_trajectory_slow_detailed, validate_trajectory_slow_with_envelope, SlowLoopOutcome,
+    check_command_conforms, validate_trajectory_slow_detailed,
+    validate_trajectory_slow_with_envelope, ConformanceVerdict, IncomingControl, SlowLoopOutcome,
     TrajectoryRefusalReason,
 };
 use kirra_trajectory::MockCorridorSource;
@@ -446,5 +449,273 @@ fn the_velocity_ceiling_is_indexed_to_the_segment_end_pose() {
         v[v.len() - 1] <= SPEED_MPS / 2.0 + 1e-9,
         "the last pose is derated, got {}",
         v[v.len() - 1]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #1213 — the P6-BINDING regime, where the ceiling has its safety value.
+//
+// A rack-limit (P5a) clamp pins the ceiling to the rack limit, which is the
+// value the vector is seeded with and the bound the fast loop's D1 already
+// applies — so in that regime the ceiling is numerically invisible and proves
+// nothing. The ceiling MATTERS only when P6 (the lateral-acceleration
+// envelope) is TIGHTER than the rack, which is the real b20 shape: ~35 deg of
+// rack against a 14-21 deg P6 ceiling.
+//
+// P6 solves `a_lat = v²·tan(δ)/L <= a_max` for δ, and `pose_pair_to_command`
+// sets the command velocity to the segment's END pose (`b.velocity_mps`) — so
+// the ceiling at pose k is governed by pose k's OWN speed. A speed RAMP
+// therefore produces a ceiling that differs at every index, which is what
+// makes a misindexed or dropped P6 result observable at all.
+// ---------------------------------------------------------------------------
+
+const P6_RACK_DEG: f64 = 35.0;
+const P6_L: f64 = 2.8;
+const P6_DT: f64 = 0.1;
+const P6_V0: f64 = 5.05;
+const P6_V1: f64 = 5.4;
+const P6_DEMAND_DEG: f64 = 24.0;
+const P6_SEGMENTS: usize = 6;
+/// Corridor half-width. Comfortably clears the footprint; the lateral figure is
+/// not what this fixture is probing.
+const P6_W: f64 = 4.0;
+/// Corridor extension PAST each end of the trajectory. Large deliberately: at
+/// these speeds containment needs the corridor to reach beyond the last pose by
+/// roughly the stopping distance, so a short corridor breaches pass A no matter
+/// how WIDE it is (measured: width alone never fixes it). Nothing to do with
+/// lateral clearance.
+const P6_PAD: f64 = 10.0;
+
+fn p6_config() -> VehicleConfig {
+    let mut cfg = VehicleConfig::default_urban();
+    cfg.wheelbase_m = P6_L;
+    cfg.half_length_m = 0.5;
+    cfg.half_width_m = 0.4;
+    cfg.max_steering_rad = P6_RACK_DEG.to_radians();
+    cfg.odd_speed_cap_mps = None;
+    cfg.max_speed_mps = 20.0;
+    cfg.max_accel_mps2 = 5.0;
+    cfg.max_decel_mps2 = 8.0;
+    cfg
+}
+
+/// Velocities of the ramped fixture, pose by pose. Kept separate so the test
+/// oracle and the trajectory builder cannot disagree about them.
+fn p6_velocities() -> Vec<f64> {
+    (0..=P6_SEGMENTS)
+        .map(|k| P6_V0 + (P6_V1 - P6_V0) * (k as f64) / (P6_SEGMENTS as f64))
+        .collect()
+}
+
+/// A constant-steering arc at RAMPING speed, forward-integrated with the exact
+/// bicycle model `pose_pair_to_command` inverts — so the checker recovers
+/// `P6_DEMAND_DEG` from every pose pair and the P6 clamp fires deterministically.
+///
+/// Purpose-built rather than stretched out of `arc_poses`, which is fixed at one
+/// speed and so cannot enter the P6-binding regime at all.
+fn p6_ramped_arc() -> Vec<TrajectoryPoint> {
+    let vs = p6_velocities();
+    let tan_d = P6_DEMAND_DEG.to_radians().tan();
+    let mut pts = vec![TrajectoryPoint {
+        pose: Pose {
+            x_m: 0.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        },
+        velocity_mps: vs[0],
+        time_from_start_s: 0.0,
+    }];
+    for k in 0..P6_SEGMENTS {
+        let prev = pts[k].pose;
+        let arc = 0.5 * (vs[k] + vs[k + 1]) * P6_DT;
+        let dh = arc * tan_d / P6_L;
+        let (h0, h1) = (prev.heading_rad, prev.heading_rad + dh);
+        let radius = arc / dh;
+        pts.push(TrajectoryPoint {
+            pose: Pose {
+                x_m: prev.x_m + radius * (h1.sin() - h0.sin()),
+                y_m: prev.y_m + radius * (h0.cos() - h1.cos()),
+                heading_rad: h1,
+            },
+            velocity_mps: vs[k + 1],
+            time_from_start_s: (k as f64 + 1.0) * P6_DT,
+        });
+    }
+    pts
+}
+
+/// The rack limit and lateral-accel ceiling the checker will actually enforce,
+/// read from the SAME posture-composed contract the slow loop uses. Taken from
+/// the contract rather than hard-coded so the oracle tests the P6 FORMULA and
+/// the indexing, not a guessed constant.
+fn p6_bounds() -> (f64, f64) {
+    let c = p6_config().to_posture_kinematics_contract(FleetPosture::Nominal);
+    (c.max_steering_deg.to_radians(), c.max_lateral_accel_mps2)
+}
+
+/// The P6 ceiling this fixture must produce at each pose, derived independently
+/// of the implementation: pose 0 is the end of no segment and keeps the rack
+/// limit; pose k is bounded by P6 solved at pose k's own speed
+/// (`a_lat = v²·tan δ / L <= a_max`  =>  `δ <= atan(a_max·L / v²)`).
+fn p6_expected_ceiling() -> Vec<f64> {
+    let vs = p6_velocities();
+    let (rack, a_max) = p6_bounds();
+    (0..vs.len())
+        .map(|k| {
+            if k == 0 {
+                rack
+            } else {
+                rack.min((a_max * P6_L / (vs[k] * vs[k])).atan())
+            }
+        })
+        .collect()
+}
+
+fn p6_outcome() -> (Vec<TrajectoryPoint>, SlowLoopOutcome) {
+    let path = p6_ramped_arc();
+    // Half-width must stay well INSIDE the arc's radius of curvature (~6.3 m
+    // here): a wide offset on a tightly-curving path pushes the inner boundary
+    // past the centre of curvature and degenerates the polygon.
+    let corridor = corridor_around(&path, P6_W, P6_PAD);
+    let out = validate_trajectory_slow_detailed(
+        &path,
+        &corridor,
+        &[],
+        &p6_config(),
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        None,
+        None,
+        FrameTrust::Trusted,
+    );
+    (path, out)
+}
+
+/// (1) The slow-loop outcome carries the TIGHTER P6 ceiling, at the right pose
+/// index, for every pose — asserted as an EXACT vector against an independent
+/// oracle.
+///
+/// This is the assertion the P5a fixture could not make. The expected values
+/// DIFFER at every index (the speed ramps), so writing the ceiling to a
+/// neighbouring index, dropping an entry, or computing the P6 bound any other
+/// way changes the vector and fails here.
+#[test]
+fn the_p6_ceiling_is_exact_and_correctly_indexed() {
+    let (path, out) = p6_outcome();
+    assert_eq!(
+        out.verdict,
+        TrajectoryVerdict::Clamp,
+        "precondition: the enforced arc must be RELEASED, else no ceiling reaches the fast loop; reason={:?} ceiling={:?}",
+        out.reason,
+        out.steering_ceiling_rad.as_ref().map(|c| c.iter().map(|x| (x.to_degrees()*10.0).round()/10.0).collect::<Vec<_>>())
+    );
+    let got = out
+        .steering_ceiling_rad
+        .expect("a P6 clamp must publish a ceiling");
+    let want = p6_expected_ceiling();
+    assert_eq!(got.len(), path.len());
+    for (k, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+        assert!(
+            (g - w).abs() < 1e-9,
+            "pose {k}: ceiling {:.4} deg, expected {:.4} deg",
+            g.to_degrees(),
+            w.to_degrees()
+        );
+    }
+    // NON-VACUITY: the regime is genuinely P6-bound, not rack-bound — every
+    // clamped pose sits strictly below the rack limit AND strictly below the
+    // planner's demand. Without both, this test would be asserting the seed.
+    let (rack, _) = p6_bounds();
+    let demand = P6_DEMAND_DEG.to_radians();
+    for (k, &g) in got.iter().enumerate().skip(1) {
+        assert!(
+            g < rack - 1e-6,
+            "pose {k}: P6 must be tighter than the rack"
+        );
+        assert!(
+            g < demand - 1e-6,
+            "pose {k}: the ceiling must bind the demand"
+        );
+    }
+    // And the ceiling VARIES with speed — which is what makes an index error
+    // observable. A constant vector could not distinguish index k from k+1.
+    assert!(
+        got[1] > got[got.len() - 1] + 1e-6,
+        "the ramp must make the ceiling vary: {:.4} vs {:.4} deg",
+        got[1].to_degrees(),
+        got[got.len() - 1].to_degrees()
+    );
+}
+
+/// (2) Shifting the ceiling by one index is CAUGHT. Stated as its own test so
+/// the exact-vector assertion above is demonstrably sensitive to placement
+/// rather than merely sensitive to magnitude.
+#[test]
+fn a_ceiling_shifted_by_one_index_is_detectable() {
+    let (_, out) = p6_outcome();
+    let got = out.steering_ceiling_rad.expect("ceiling");
+    let want = p6_expected_ceiling();
+    let shifted: Vec<f64> = std::iter::once(want[0])
+        .chain(want.iter().take(want.len() - 1).copied())
+        .collect();
+    assert!(
+        shifted
+            .iter()
+            .zip(want.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-9),
+        "the oracle must not be shift-invariant, or (1) proves nothing about indexing"
+    );
+    assert!(
+        got.iter()
+            .zip(shifted.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-9),
+        "the real ceiling must differ from its one-index shift"
+    );
+}
+
+/// (3) END-TO-END through the fast loop, on the REAL slow-loop ceiling rather
+/// than a hand-written one: a command below the pose speed and below the rack
+/// limit, but above the P6 ceiling, is REFUSED — and the identical command is
+/// ACCEPTED once the ceiling is removed.
+///
+/// This is the whole point of the propagation. Every pre-existing bound admits
+/// this command: it is slower than the pose (C), inside the rack limit (D1),
+/// and inside P6 re-solved at its OWN lower speed (D2, which is looser there).
+#[test]
+fn the_fast_loop_refuses_a_command_above_the_real_p6_ceiling() {
+    let (path, out) = p6_outcome();
+    let ceiling = out.steering_ceiling_rad.clone().expect("ceiling");
+    let promoted = 100_000_u64;
+    let now = promoted + 10; // lands on an early pose
+    let cfg = p6_config();
+    let env =
+        LateralEnvelope::from_contract(&cfg.to_posture_kinematics_contract(FleetPosture::Nominal));
+    let bound = AcceptedTrajectory::with_verdict("av_01", 1, path.clone(), out.verdict, promoted)
+        .with_lateral_envelope(Some(env))
+        .with_steering_ceiling(Some(ceiling.clone()));
+
+    // Above every P6 ceiling in the vector, still inside the rack limit.
+    let steer = P6_DEMAND_DEG.to_radians();
+    assert!(steer < p6_bounds().0, "must stay inside the rack");
+    let cmd = IncomingControl {
+        velocity_mps: 3.0,
+        steering_rad: steer,
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(&cmd, &bound, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::MRCFallback,
+        "a command above the validated P6 ceiling must MRC"
+    );
+
+    // CONTROL: identical command, ceiling removed → admitted by C/D1/D2.
+    let mut unbound = bound.clone();
+    unbound.effective_steering_ceiling_rad = None;
+    assert_eq!(
+        check_command_conforms(&cmd, &unbound, &EgoOdom::default(), &cfg, now),
+        ConformanceVerdict::Accept,
+        "non-vacuity: without the ceiling the pre-existing bounds all pass it"
     );
 }
