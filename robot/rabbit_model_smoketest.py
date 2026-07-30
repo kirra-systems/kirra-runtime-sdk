@@ -38,7 +38,7 @@ SECOND MODE — `--assistant-contract` (the Kirra Engineering Assistant):
   The same bench idea applied to the ASSISTANT's tool selection. It fires the
   versioned corpus (`robot/testdata/assistant_tool_selection_cases.json`) at the
   live model through the REAL model-facing contract
-  (`assistant_tools.assist_prompt_fragment()`), then hands every reply to
+  (`assistant_contract.production_prompt()`), then hands every reply to
   `assistant_contract` for FAIL-CLOSED parsing, deterministic validation and
   scoring.
 
@@ -276,11 +276,13 @@ def _probe_model(model):
 def assist_chat(model, utterance, *, seed, temperature, show_raw=False):
     """One assistant-contract turn through the REAL model-facing fragment.
 
-    The system prompt is `assist_prompt_fragment()` verbatim — measuring any
-    other text would be measuring a fiction. Returns the RAW content, or None.
+    The system prompt is `ac.production_prompt()` — the ONE owner, verbatim.
+    Measuring any other text would be measuring a fiction, and would reintroduce
+    exactly the "measure one prompt, ship another" failure docs §14.11 forbids.
+    Returns the RAW content, or None.
     """
     messages = [
-        {"role": "system", "content": at.assist_prompt_fragment()},
+        {"role": "system", "content": ac.production_prompt()},
         {"role": "user", "content": f"Operator says: {utterance}"},
     ]
     options = {"temperature": float(temperature)}
