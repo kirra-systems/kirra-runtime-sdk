@@ -233,8 +233,33 @@ mod proofs {
             "the executed magnitude never exceeds the ceiling"
         );
 
-        let speed_delta = cmd.linear_velocity_mps - cmd.current_velocity_mps;
-        let implied_rate_abs = speed_delta.abs() / cmd.delta_time_s;
+        // NO DIVISION — and that is the second correction #1243 forced here.
+        //
+        // The first restatement expressed the hypothesis by reconstructing the
+        // kernel's trigger, `|speed_delta| / dt <= limit + 1e-9`. That is the
+        // relational-arithmetic-over-two-command-fields shape that puts a
+        // harness in the deep lane: K3 went from 22 s to no verdict at 15 min.
+        // Reconstructing a float trigger is also fragile in its own right — a
+        // hypothesis even slightly WEAKER than the kernel's real condition
+        // makes the conditional conclusion unsound, and one made stronger to be
+        // safe silently shrinks the region the theorem covers.
+        //
+        // Both problems dissolve by stating K3 as a DISJUNCTION with no
+        // hypothesis to reconstruct. "v is the tighter of {ceiling, rate
+        // bound}" is exactly:
+        //
+        //     |v| == ceiling   OR   v is one rate-step from current
+        //
+        // which is unconditional, division-free, and says the thing K3 exists
+        // to say: nothing OTHER than those two bounds may move `v`. A future
+        // priority returning something arbitrarily below the ceiling satisfies
+        // neither arm and fails the proof, which was the whole point of the
+        // conditional half.
+        //
+        // Slack terms are float-representation bounds, as in K8: `fl(a+b)` is
+        // within half an ulp, `limit x dt` is a rounded product, and the
+        // smallest subnormal covers the denormal corner. The `1e-9 x dt` term
+        // is the kernel's own tolerance carried into velocity space.
         let from_rest = cmd.current_velocity_mps.abs() <= STOP_EPSILON_MPS;
         let speeding_up = (from_rest
             || cmd.linear_velocity_mps.signum() == cmd.current_velocity_mps.signum())
@@ -244,20 +269,20 @@ mod proofs {
         } else {
             contract.max_brake_mps2
         };
-        let no_tighter_rate_bound = implied_rate_abs <= applicable_limit + 1e-9;
 
-        if no_tighter_rate_bound {
-            assert_eq!(
-                linear.abs(),
-                max,
-                "with only the ceiling binding, the clamp is EXACTLY the ceiling"
-            );
-            assert_eq!(
-                linear.signum(),
-                cmd.linear_velocity_mps.signum(),
-                "and direction is preserved (reverse stays reverse)"
-            );
-        }
+        let ceiling_is_exact = linear.abs() == max;
+
+        let step = applicable_limit * cmd.delta_time_s;
+        let float_slack =
+            (cmd.current_velocity_mps.abs() + step.abs()) * f64::EPSILON + f64::from_bits(1);
+        let within_one_rate_step = (linear - cmd.current_velocity_mps).abs()
+            <= step + 1e-9 * cmd.delta_time_s + float_slack;
+
+        assert!(
+            ceiling_is_exact || within_one_rate_step,
+            "an over-ceiling command must return the ceiling exactly or a value \
+             the rate bound explains — anything else means a priority lowered it"
+        );
     }
 
     /// K8 (#1243) — the acceleration bound holds on EVERY executable return,
