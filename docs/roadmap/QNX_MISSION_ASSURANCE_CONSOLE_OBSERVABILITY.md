@@ -646,8 +646,126 @@ data model*, *status classification*.
   authority impact is stable. The visual graph is not designed before the
   underlying typed evidence model exists.
 - **Slice 4 — Exact replay** (MAR-20, with MAR-18/19 contracts hardened):
-  recorded QNX assurance events fed through the same presentation contract,
-  visibly marked as replay, never impersonating a live system.
+  recorded QNX assurance events fed through the **same card semantics in an
+  explicitly offline replay mode** — visibly marked, never impersonating a
+  live system.
 
 MAR-18 and MAR-19 are cross-cutting: their *contracts* are drafted in Slice
 1 and versioned forward, so later slices extend rather than fork them.
+
+---
+
+## 4. Mapping into the mission-runtime phases (KIRRA-MAR-PLAN-001 §9)
+
+These epics do not add phases; they attach to the existing MAR Phase 2–5
+rows (the plan's phase table carries the reverse pointers):
+
+| MAR Phase | Console-observability work attached |
+|---|---|
+| **Phase 2 — QNX-native runtime** | QNX health event normalization (MAR-13); HAM event integration (MAR-13, on the MAR-11 seam); APS telemetry collection (MAR-15 backend half); service identity + process-instance identity (MAR-13 identity model, on MAR-10's per-service identities); bounded assurance event stream contract (MAR-18) |
+| **Phase 3 — Physical safety boundary** | Authority consequence correlation + safety-plane response correlation (MAR-17); restart and epoch semantics binding (MAR-13 epoch fields on the MAR-06 epoch design); fault-containment evidence (MAR-16) |
+| **Phase 4 — Production supervision** | Kirra Mission Console recovery feed (MAR-14); APS budget cards (MAR-15 presentation half); operational fault-containment views (MAR-16 console concepts); operator-facing evidence links (MAR-19); offline operation of the evidence path; production authorization for console access (MAR-18 authorization requirement) |
+| **Phase 5 — Replay and assurance productization** | Exact replay of QNX assurance events + deterministic console reconstruction (MAR-20); recovery-duration reports; containment reports; deadline/partition evidence correlation reports; incident export |
+
+## 5. Dependency matrix to the runtime epics (MAR-01…MAR-12)
+
+The initial twelve epics are unchanged; MAR-13…MAR-20 are follow-on epics of
+the same roadmap under the "Assurance observability & console" workstream:
+
+| Console epic | Depends on runtime epics | Why |
+|---|---|---|
+| MAR-13 normalization | MAR-08 (recorder), MAR-10 (QNX service model), MAR-11 (HAM integration), MAR-06 (epoch design), MAR-05 (capability contracts — "capability health restored" is defined by the capability's contracts, not by the adapter) | The observations, the durable sink, and the meanings all live there |
+| MAR-14 recovery feed | MAR-13; MAR-04 (mission executor — mission-consequence fields), MAR-05 | Cards render classifications those epics own |
+| MAR-15 APS telemetry | MAR-10; MAR-08; the §9 declared-budget model | APS data only exists on the QNX runtime; deadline evidence comes from §9 observation |
+| MAR-16 containment | MAR-13, MAR-17; MAR-04, MAR-06, MAR-12 (safety-plane responses are the physical controller's own records) | The ten-way classification consumes all of them |
+| MAR-17 correlation | MAR-04 (mission executor), MAR-05 (capability contracts), MAR-06 (authority kernel), MAR-07/MAR-12 (simulated → physical safety gateway), MAR-13 | The essential epic — it joins OS facts to the mission/authority/safety records those epics own |
+| MAR-18 stream contract | MAR-08 (recorder stays authoritative), MAR-13, MAR-06 | The stream mirrors the recorder; epochs anchor resync |
+| MAR-19 card semantics | MAR-14/15/16/17 (card data), MAR-18, MAR-20 (replay-behavior column) | Contracts over the delivered data |
+| MAR-20 console replay | MAR-09 (exact replay core), MAR-08, MAR-13…MAR-17 (recorded types), MAR-18/19 (contracts) | Extends the EP-19/MAR-09 doctrine to the observability surface |
+
+## 6. Consolidated risk register
+
+Each risk is owned by the epic(s) whose acceptance properties defeat it; the
+mitigation column names the defeating property.
+
+| # | Risk | Owning epic(s) | Defeating property |
+|---|---|---|---|
+| R1 | Process status confused with capability health | MAR-13/14 | Seven-stage distinction; runnable ≠ healthy |
+| R2 | Process restart confused with mission recovery | MAR-13/17 | Stages 3 vs 7 recorded separately |
+| R3 | Log parsing used as authority | MAR-13 | slog2 confined to the untrusted tier; never the sole recovery mechanism |
+| R4 | PID reuse causing false continuity | MAR-13 | Process-instance identity; PID auxiliary only |
+| R5 | Missing boot-epoch binding | MAR-13 (on MAR-06) | Epoch field mandatory; cross-epoch correlation refused |
+| R6 | APS budgets misrepresented as hard caps | MAR-15 | Six-way budget-semantics glossary; enforcement shown only where supported |
+| R7 | CPU usage interpreted as deadline proof | MAR-15 | Deadline evidence only from §9 observation; negative test required |
+| R8 | Stale telemetry shown as current | MAR-15/19 | Freshness deadline + mandatory stale rendering |
+| R9 | Console disconnection affecting runtime paths | MAR-18 | Non-interference invariant; bounded ring, drop-and-report |
+| R10 | Frontend-only health classification | MAR-19 (§0.2) | Cards render Kirra-owned classifications; conformance suite |
+| R11 | Absence of evidence shown as green | MAR-16/19 | Absent → unknown, never `safe` |
+| R12 | Fault isolation claimed without positive evidence | MAR-16 | unaffected-by-positive-evidence ≠ not-observed-to-fail |
+| R13 | Mission state confused with safety state | MAR-16/19 (§1.2) | Never one variable; no card collapses them |
+| R14 | Timestamps used as sole correlation identity | MAR-17 | Typed identities + `event_seq` mandatory |
+| R15 | High-rate telemetry causing unbounded queue growth | MAR-18 (+ §7.3 profile) | Declared bounds + typed drop events |
+| R16 | Console schemas drifting from recorder schemas | MAR-18 | One schema source (the recorder's), versioned; mismatch fails visibly |
+| R17 | Replay presentation mistaken for live state | MAR-20 | Mandatory mode marker; unmarked replay feed refused |
+| R18 | Sensitive process/scheduler data exposed without authorization | MAR-18 | Stream authorization requirement (the auditor-tier RBAC precedent); no unauthenticated assurance stream |
+
+## 7. Required test strategy (issue-ready, for the future implementation)
+
+**Unit tests:** event normalization (all seven stages, unknown kinds
+refused); health-state transitions; stale-data behavior; boot-epoch
+separation; process-instance generation; recovery-duration calculations
+(defined pairs, incomplete-duration state); card classification reason
+codes; APS terminology and state mapping (six-way glossary); dropped-event
+handling; deterministic tie-breaking under equal timestamps.
+
+**Integration tests:** HAM restart event through recorder and console
+stream; process restarted but service not healthy; service healthy but
+mission still degraded; capability restored but authority **not**
+automatically restored; APS saturation while a protected deadline remains
+healthy; APS bankruptcy correlated with mission evidence; IPC generation
+change after process restart; console disconnect with no runtime
+consequence; reconnect and deterministic resynchronization; exact replay
+reproducing the live timeline.
+
+**Fault-injection tests:** process crash; repeated restart failure (→
+Recovery exhausted); stale heartbeat; delayed HAM observation; PID reuse;
+process restart across a boot epoch; APS telemetry loss; corrupted
+diagnostic log line (stays at the untrusted tier, poisons nothing);
+event-stream overflow (typed drop event emitted); reordered transport
+frames (sequence ordering wins); safety-plane refusal during process
+recovery (refusal recorded, mission consequence follows policy).
+
+**Non-vacuity requirement (every epic):** safety-relevant tests must
+demonstrate that they **fail when the protected defect is introduced** —
+control arms where practical. Required control arms include: treating
+process spawn as capability recovery fails a test; removing boot-epoch
+separation causes a test failure; showing stale APS data as current causes
+a test failure; dropping an authority consequence changes the expected
+console result; a disconnected console demonstrably does not affect mission
+execution (and the demonstration detects it if it does).
+
+## 8. Explicit non-goals of this workstream
+
+This work does **not** initially provide: a replacement for QNX System
+Profiler; a replacement for HAM; a replacement for APS tooling; a general
+QNX administration console; remote shell access; arbitrary process control
+from the browser; actuator control from Kirra Mission Console; safety-state
+ownership in the frontend; a complete distributed tracing system; a
+general-purpose log-search product; proof of physical safety from CPU and
+process telemetry; a fleet-cloud monitoring platform; a universal
+fault-tree engine; or automatic mission recovery based solely on UI state.
+
+## 9. Engineering principles
+
+The KIRRA-MAR-PLAN-001 §6 principles apply in full. Console-specific
+restatements carried through every epic here: one authoritative owner per
+fact; fail closed; typed identities instead of PID or timestamp
+conventions; explicit boot and restart epochs; explicit stale and unknown
+states; deterministic event ordering; bounded queues; the recorder remains
+authoritative; console transport is non-interfering; mission state and
+safety state remain distinct; process recovery and mission recovery remain
+distinct; operating-system evidence and mission meaning remain distinct; no
+silent compatibility fallback; no green state from missing data;
+documentation describes deployed behavior; issues close against verified
+capability, not merged intent; an inactive duplicate classifier is removed,
+not retained; tests must detect the defect they claim to protect against.
