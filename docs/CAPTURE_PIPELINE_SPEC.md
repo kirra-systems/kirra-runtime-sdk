@@ -29,12 +29,12 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > BOTH axes instead of dropping the velocity correction) and direction-aware
 > accel/brake selection (M1 — reverse acceleration is bounded by the accel limit,
 > not the brake limit). The talisman re-pins to the amended logic blob
-> `crates/kirra-core/src/kinematics_contract.rs = 742dc54a92305e837140e1d623173e8a41062516`
+> `crates/kirra-core/src/kinematics_contract.rs = bbfe014b15dec951bd4107eedc3d5e8e52171f6f`
 > (superseding `ed00f4da…`, and before it the historical `997fb7ae…`, which
 > predated the Stage-3 relocation and matched no current file).
 >
 > **#1242 re-pin — INTENTIONAL BEHAVIOUR CHANGE, not formatting drift.**
-> `ed00f4da…` → `742dc54a…`.
+> `ed00f4da…` → `bbfe014b…`.
 >
 > WHAT CHANGED. Priority 2 (the effective-speed ceiling) previously `return`ed
 > `ClampLinear` directly, which skipped P5a (rack limit), P5b (slew) and P6
@@ -56,9 +56,11 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > (magnitude = ceiling, direction preserved, ODD-cap min honored)" is one of the
 > twelve machine-checked properties this safety case cites as proved. Amending a
 > proved property does not belong inside a lateral-envelope fix. The consequence —
-> that the accel limit is not applied to over-ceiling commands (5.0 → 35.0 m/s in
-> 0.1 s implies ~450 m/s² against a 2.5 limit) — is a REAL pre-existing gap of the
-> same early-return class, tracked as its own issue with its own evidence.
+> that the accel limit is not applied to over-ceiling commands — is a REAL
+> pre-existing gap of the same early-return class, tracked as **#1243** with its
+> own evidence. Figure corrected there: the EXECUTED command implies 300 m/s²
+> against a 2.5 limit (120x); the ~450 m/s² quoted earlier was the raw REQUEST's
+> implied acceleration, which is never emitted.
 >
 > EVIDENCE. `docs/safety/TALISMAN_CHANGE_PLAN_1242.md`,
 > `docs/safety/CLAMP_APPLICATION_INVENTORY.md`, Kani K6/K7 + their mirrors,

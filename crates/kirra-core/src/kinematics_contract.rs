@@ -602,9 +602,9 @@ pub fn validate_vehicle_command(
     // belong inside a lateral-envelope fix.
     //
     // That the accel limit is therefore NOT applied to over-ceiling commands is a
-    // real, pre-existing gap (5.0 -> 35.0 m/s in 0.1 s implies ~450 m/s^2 against
-    // a 2.5 limit). It is the same early-return omission as the steering one, and
-    // it is tracked as its own issue with its own evidence rather than bundled
+    // real, pre-existing gap: 5.0 -> 35.0 m/s in 0.1 s is an EXECUTED command
+    // implying 300 m/s^2 against a 2.5 limit. Same early-return omission class as
+    // the steering one, tracked as #1243 with its own evidence rather than bundled
     // here. What #1242 fixes is that P5a/P5b/P6 below now ALWAYS run.
     if !ceiling_bound {
         let speed_delta = cmd.linear_velocity_mps - cmd.current_velocity_mps;
