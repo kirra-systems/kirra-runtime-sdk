@@ -617,10 +617,10 @@ pub fn validate_trajectory_slow_detailed(
         // permanent ceiling (filled in below); otherwise the planner's own
         // commanded angle, which a transient rate clamp only delays reaching.
         let enforced_steering_deg = cmd.steering_angle_deg;
-        let enforced_end_velocity_mps = match verdict {
-            EnforceAction::ClampLinear(v) | EnforceAction::ClampBoth { linear: v, .. } => v,
-            _ => trajectory[i + 1].velocity_mps,
-        };
+        // `cmd.linear_velocity_mps` IS `trajectory[i + 1].velocity_mps` by
+        // construction in `pose_pair_to_command`; using it directly removes a
+        // duplicate index expression rather than leaving one to be tested.
+        let enforced_end_velocity_mps = enforced_end_velocity(&verdict, cmd.linear_velocity_mps);
         // #1213 — PERMANENT vs TRANSIENT divergence. The three steering clamps
         // do not mean the same thing for the arc the vehicle will sweep:
         //
@@ -1911,6 +1911,24 @@ struct EnforcedSegment {
 /// resulting pose that is not finite. The caller must treat `None` as a refusal
 /// (the "recheck unavailable" arm) — a best-effort reconstruction would be
 /// checked geometry that nothing will execute.
+/// The velocity the actuator will actually apply for a segment: the kernel's
+/// clamped value whenever the longitudinal axis was derated, otherwise the
+/// planner's own end-of-segment velocity.
+///
+/// Extracted as a pure function so the mapping is directly testable. Inline, it
+/// was only observable through the reconstructed arc length, which needs a
+/// containment-boundary fixture to discriminate — a fragile test that would
+/// break on unrelated tuning.
+#[inline]
+fn enforced_end_velocity(verdict: &EnforceAction, planner_end_velocity_mps: f64) -> f64 {
+    match *verdict {
+        EnforceAction::ClampLinear(v) | EnforceAction::ClampBoth { linear: v, .. } => v,
+        EnforceAction::Allow | EnforceAction::ClampSteering(_) | EnforceAction::DenyBreach(_) => {
+            planner_end_velocity_mps
+        }
+    }
+}
+
 fn reconstruct_enforced_poses(
     planner: &[TrajectoryPoint],
     from_segment: usize,
@@ -1969,11 +1987,14 @@ fn reconstruct_enforced_poses(
             let v_avg = 0.5 * (v_prev + seg.end_velocity_mps);
             let arc_len = v_avg * seg.delta_time_s;
             let tan_delta = seg.steering_deg.to_radians().tan();
-            if !tan_delta.is_finite() || !arc_len.is_finite() {
-                return None;
-            }
             // Δheading = arc_len · tan(δ) / L — the relation
             // `pose_pair_to_command` inverts.
+            //
+            // One finiteness check, not three: if `arc_len` or `tan_delta` is
+            // non-finite then so is this product — including the `inf · 0` case,
+            // which yields NaN. Separate guards on the operands were strictly
+            // subsumed by this one, so they could never change the outcome and
+            // no test could distinguish them from their own mutations.
             let d_heading = arc_len * tan_delta / wheelbase_m;
             if !d_heading.is_finite() {
                 return None;
@@ -2827,6 +2848,47 @@ mod enforced_reconstruction_tests {
         );
     }
 
+    /// The velocity the reconstruction integrates comes from the KERNEL whenever
+    /// the longitudinal axis was derated, and from the planner otherwise.
+    ///
+    /// Both clamping arms are checked, because they are the ones that matter: if
+    /// either fell through to the planner's velocity the reconstruction would
+    /// sweep an arc longer than the vehicle will actually travel, and judge
+    /// containment on geometry the derate rules out.
+    #[test]
+    fn the_enforced_end_velocity_prefers_the_kernels_derate() {
+        let planner = 9.0_f64;
+        assert_eq!(
+            enforced_end_velocity(&EnforceAction::ClampLinear(4.0), planner),
+            4.0,
+            "a linear clamp must win over the planner velocity"
+        );
+        assert_eq!(
+            enforced_end_velocity(
+                &EnforceAction::ClampBoth {
+                    linear: 3.0,
+                    steering: 12.0,
+                },
+                planner
+            ),
+            3.0,
+            "a both-axes clamp must also yield its linear component"
+        );
+        // The non-longitudinal outcomes leave the planner velocity alone — a
+        // steering-only clamp does not derate speed.
+        for v in [
+            EnforceAction::Allow,
+            EnforceAction::ClampSteering(11.0),
+            EnforceAction::DenyBreach(kirra_core::kinematics_contract::DenyCode::AssetLockedOut),
+        ] {
+            assert_eq!(
+                enforced_end_velocity(&v, planner),
+                planner,
+                "{v:?} must not alter the velocity"
+            );
+        }
+    }
+
     /// THE IDENTITY PROPERTY, and the reason this is a divergence model rather
     /// than a re-simulation: over segments the checker did NOT clamp, the
     /// reconstruction reproduces the planner's poses exactly — even when those
@@ -2958,8 +3020,11 @@ mod enforced_reconstruction_tests {
             pt(0.0, 0.0, 0.0, v, 0.0),
             // Plan turns to +45 deg; the clamp holds straight ⇒ error = -45 deg.
             pt(1.0, 0.0, FRAC_PI_4, v, dt),
-            // Planner step of (2, 1) — distinct, and neither component is 1... x is 2.
-            pt(3.0, 1.0, FRAC_PI_4, v, 2.0 * dt),
+            // Planner step of (3, 2.5). BOTH components must differ from 1 and
+            // from each other: with dy_p == 1 the `s * dy_p` term is identical
+            // to `s / dy_p`, so a swapped operator there survives unseen (that
+            // exact fixture bug let a mutant through).
+            pt(4.0, 2.5, FRAC_PI_4, v, 2.0 * dt),
         ];
         let segs = vec![seg(0.0, v, dt), unclamped(0.0, v, dt)];
         let out = reconstruct_enforced_poses(&planner, 0, v, &segs, l).unwrap();
@@ -2969,7 +3034,7 @@ mod enforced_reconstruction_tests {
         assert!((out[1].y_m - 0.0).abs() < 1e-12);
         let err = -FRAC_PI_4;
         let (c, sn) = (err.cos(), err.sin());
-        let (dx_p, dy_p) = (3.0 - 1.0, 1.0 - 0.0);
+        let (dx_p, dy_p) = (4.0 - 1.0, 2.5 - 0.0);
         let ex = 1.0 + c * dx_p - sn * dy_p;
         let ey = 0.0 + sn * dx_p + c * dy_p;
         let eh = FRAC_PI_4 + err;
@@ -3043,6 +3108,135 @@ mod enforced_reconstruction_tests {
         assert!(
             reconstruct_enforced_poses(&ok_planner, 0, f64::NAN, &[seg(5.0, v, dt)], l).is_none()
         );
+    }
+
+    /// The SEED-pose guard, proved one component at a time.
+    ///
+    /// Why an EMPTY segment slice: with any segment present, a non-finite seed
+    /// propagates into the arc arithmetic and the FINAL per-step finiteness
+    /// check refuses anyway — so weakening this guard is invisible. With no
+    /// segments the loop never runs and the later check is never reached, which
+    /// makes this guard the only thing that can refuse. That is what makes the
+    /// three components separable.
+    #[test]
+    fn each_seed_pose_component_refuses_independently() {
+        let v = 2.0_f64;
+        for (why, seed) in [
+            ("x", pt(f64::NAN, 0.0, 0.0, v, 0.0)),
+            ("y", pt(0.0, f64::NAN, 0.0, v, 0.0)),
+            ("heading", pt(0.0, 0.0, f64::NAN, v, 0.0)),
+        ] {
+            assert!(
+                reconstruct_enforced_poses(&[seed], 0, v, &[], 2.0).is_none(),
+                "a non-finite seed {why} alone must refuse"
+            );
+        }
+        // Non-vacuity: the same call with a FINITE seed and no segments does
+        // return a reconstruction, so the refusals above are caused by the
+        // component and not by the empty slice.
+        let ok = reconstruct_enforced_poses(&[pt(1.0, 2.0, 0.3, v, 0.0)], 0, v, &[], 2.0);
+        assert_eq!(ok.map(|o| o.len()), Some(1));
+    }
+
+    /// The SEGMENT-field guards for velocity and steering, proved on the
+    /// UNCLAMPED branch.
+    ///
+    /// Same masking problem, different escape: on the clamped branch a NaN
+    /// velocity reaches `arc_len` and a NaN steering reaches `tan_delta`, and
+    /// both are refused by later checks regardless of this guard. The unclamped
+    /// branch reads NEITHER field — it replays the planner's own step — so here
+    /// the guard is the only thing standing between a NaN input and a returned
+    /// pose.
+    #[test]
+    fn segment_velocity_and_steering_refuse_even_when_unused() {
+        let (v, dt, l) = (2.0_f64, 0.5_f64, 2.0_f64);
+        let planner = vec![pt(0.0, 0.0, 0.0, v, 0.0), pt(1.0, 0.0, 0.0, v, dt)];
+        for (why, bad) in [
+            ("velocity", unclamped(5.0, f64::NAN, dt)),
+            ("steering", unclamped(f64::NAN, v, dt)),
+            ("delta_time", unclamped(5.0, v, f64::NAN)),
+            ("zero delta_time", unclamped(5.0, v, 0.0)),
+        ] {
+            assert!(
+                reconstruct_enforced_poses(&planner, 0, v, &[bad], l).is_none(),
+                "{why} must refuse on the unclamped branch, where it is unused"
+            );
+        }
+        // Non-vacuity: the same unclamped segment with all fields sound returns
+        // the planner's own pose.
+        let ok = reconstruct_enforced_poses(&planner, 0, v, &[unclamped(5.0, v, dt)], l).unwrap();
+        assert!((ok[1].x_m - 1.0).abs() < 1e-12);
+    }
+
+    /// The FINAL per-step finiteness guard, one component at a time.
+    ///
+    /// Reaching it with exactly ONE component non-finite takes deliberate
+    /// construction: every earlier guard has already rejected non-finite INPUTS,
+    /// so the only way in is arithmetic that overflows in one axis and not the
+    /// other. A rotation applied near the top of the f64 range does that — the
+    /// x and y projections of the same step have different magnitudes, so one
+    /// can pass 1.8e308 while the other stays finite.
+    ///
+    /// Without this, weakening the guard to a conjunction is invisible: every
+    /// naturally-occurring failure makes ALL components non-finite at once.
+    #[test]
+    fn each_reconstructed_component_refuses_independently() {
+        use std::f64::consts::FRAC_PI_4;
+        let (v, l) = (2.0_f64, 2.0_f64);
+        let big = 1.5e308_f64;
+        // A near-zero clamped first segment: leaves the position where the seed
+        // put it while opening a +45 deg heading error, so the rotation below
+        // has non-degenerate cos AND sin.
+        let lead = seg(0.0, v, 1e-6);
+
+        // x overflows; y and heading stay finite.
+        let planner_x = vec![
+            pt(1e308, 0.0, 0.0, v, 0.0),
+            pt(0.0, 0.0, -FRAC_PI_4, v, 1e-6),
+            pt(big, 0.0, -FRAC_PI_4, v, 2e-6),
+        ];
+        assert!(
+            reconstruct_enforced_poses(&planner_x, 0, v, &[lead, unclamped(0.0, v, 1e-6)], l)
+                .is_none(),
+            "a non-finite reconstructed x alone must refuse"
+        );
+
+        // y overflows; x and heading stay finite (the two rotation terms cancel
+        // in x and add in y).
+        let planner_y = vec![
+            pt(0.0, 1e308, 0.0, v, 0.0),
+            pt(0.0, 0.0, -FRAC_PI_4, v, 1e-6),
+            pt(big, big, -FRAC_PI_4, v, 2e-6),
+        ];
+        assert!(
+            reconstruct_enforced_poses(&planner_y, 0, v, &[lead, unclamped(0.0, v, 1e-6)], l)
+                .is_none(),
+            "a non-finite reconstructed y alone must refuse"
+        );
+
+        // NON-VACUITY: the SAME fixtures with a step small enough not to
+        // overflow reconstruct fine. So both refusals above are caused by the
+        // overflow — not by some other part of the fixture being unsound, which
+        // would leave every component non-finite and prove nothing about which
+        // component the guard examines.
+        for planner in [&planner_x, &planner_y] {
+            let small: Vec<_> = planner
+                .iter()
+                .enumerate()
+                .map(|(k, p)| {
+                    if k == 2 {
+                        pt(1.0, 1.0, p.pose.heading_rad, v, p.time_from_start_s)
+                    } else {
+                        *p
+                    }
+                })
+                .collect();
+            assert!(
+                reconstruct_enforced_poses(&small, 0, v, &[lead, unclamped(0.0, v, 1e-6)], l)
+                    .is_some(),
+                "without the overflow the same fixture must reconstruct"
+            );
+        }
     }
 
     /// FAIL-CLOSED (the "recheck unavailable" arm). Each of these makes the

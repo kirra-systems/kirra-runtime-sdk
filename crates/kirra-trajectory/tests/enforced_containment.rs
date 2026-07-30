@@ -902,3 +902,73 @@ fn the_fast_loop_refuses_a_command_above_a_clampboth_pose_ceiling() {
         "non-vacuity: without the ceiling the pre-existing bounds admit it"
     );
 }
+
+/// A DECELERATING ramp, which the accelerating fixture cannot substitute for.
+///
+/// The ceiling write is `sc[i + 1] = sc[i + 1].min(...)`. When speed RISES the
+/// ceiling falls monotonically, so reading the neighbouring slot on the
+/// right-hand side still yields the same minimum and the index is invisible.
+/// Decelerating makes the ceiling RISE, so taking the minimum against the
+/// previous (tighter) slot would pin every later pose to an earlier, wrongly
+/// tight value — visible as soon as the vector is asserted exactly.
+const CD_VS: [f64; 7] = [6.0, 5.8, 5.6, 5.4, 5.2, 5.0, 4.8];
+const CD_DEMAND_DEG: f64 = 26.0;
+
+#[test]
+fn a_decelerating_ramp_raises_the_ceiling_and_pins_the_read_index() {
+    let cfg = p6_config();
+    let path = arc_with_velocities(CD_DEMAND_DEG, &CD_VS);
+    let corridor = corridor_around(&path, P6_W, 15.0);
+    let out = validate_trajectory_slow_detailed(
+        &path,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        None,
+        None,
+        FrameTrust::Trusted,
+    );
+    assert_eq!(
+        out.verdict,
+        TrajectoryVerdict::Clamp,
+        "precondition: released, reason={:?}",
+        out.reason
+    );
+    let got = out
+        .steering_ceiling_rad
+        .expect("P6 clamp publishes a ceiling");
+    let c = cfg.to_posture_kinematics_contract(FleetPosture::Nominal);
+    let (rack, a_max, l) = (
+        c.max_steering_deg.to_radians(),
+        c.max_lateral_accel_mps2,
+        c.wheelbase_m,
+    );
+    for (k, &g) in got.iter().enumerate() {
+        let want = if k == 0 {
+            rack
+        } else {
+            rack.min((a_max * l / (CD_VS[k] * CD_VS[k])).atan())
+        };
+        assert!(
+            (g - want).abs() < 1e-9,
+            "pose {k}: {:.4} deg, expected {:.4} deg",
+            g.to_degrees(),
+            want.to_degrees()
+        );
+    }
+    // The property this fixture exists for: the ceiling RISES with index, so a
+    // minimum taken against the previous slot would be detectably too tight.
+    for k in 2..got.len() {
+        assert!(
+            got[k] > got[k - 1] + 1e-9,
+            "pose {k} must be looser than {}: {:.4} vs {:.4} deg",
+            k - 1,
+            got[k].to_degrees(),
+            got[k - 1].to_degrees()
+        );
+    }
+}

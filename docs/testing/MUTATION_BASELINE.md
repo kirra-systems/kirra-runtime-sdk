@@ -261,3 +261,57 @@ length → `None`); the length normalization in `total_heading_change_rad` (the
 and the duplicated Err-branch `.min(len - 2)` segment-index clamp in
 `sample_at_fraction` / `tangent_at` (unified to one reachable site). These
 simplifications delete the equivalent mutants instead of masking them.
+
+## 7. Accepted EQUIVALENT mutant — #1213 enforced-geometry reconstruction
+
+#1213 added `reconstruct_enforced_poses` (the divergence model behind the
+enforced-geometry containment re-check) and the per-pose steering ceiling.
+Its arithmetic is pinned by exact-value oracles in
+`validation.rs::enforced_reconstruction_tests` — both integration branches, the
+divergence rotation, the unclamped identity, and every finiteness disjunct
+individually — plus the slow-loop ceiling vectors in
+`tests/enforced_containment.rs`. Those mutants die.
+
+Two of the originally-missed mutants were resolved by changing the CODE rather
+than excluding them, which is preferable where possible:
+
+- the redundant finiteness guards on `arc_len`/`tan_delta` were **folded into**
+  the single `d_heading` check that strictly subsumed them (if either operand is
+  non-finite so is the product, `inf · 0` included) — one branch fewer and the
+  unkillable mutant is gone rather than suppressed;
+- `trajectory[i + 1].velocity_mps` was replaced by `cmd.linear_velocity_mps`,
+  which is the same value by construction in `pose_pair_to_command`, removing a
+  duplicate index expression; and the verdict→velocity mapping was extracted
+  into the pure `enforced_end_velocity` so it is directly unit-testable instead
+  of observable only through a containment-boundary fixture.
+
+One genuine equivalence remains, excluded in `.cargo/mutants.toml`:
+
+| Mutant class | Location | Why equivalent |
+|---|---|---|
+| `replace < with <=` | `reconstruct_enforced_poses` — the straight/arc branch threshold `d_heading.abs() < 1e-9` | The two arms are the same curve: the straight arm is the removable singularity of the arc arm as the radius → ∞. They are selected differently only when the computed `arc_len · tan(δ) / L` equals `1e-9` **to the bit**, and at that measure-zero point the arms agree to ~5e-10 relative — orders of magnitude below any containment margin. Precise by construction: this is the ONLY `<` in the function. |
+
+### A fixture lesson worth remembering
+
+Several of these mutants survived not because the code was untested but because
+the fixtures could not observe the operator:
+
+- **downstream guards mask upstream ones.** A single NaN input still returned
+  `None` via a later check, so weakening an early disjunct to a conjunction was
+  invisible. The escapes were an EMPTY segment slice (the loop never runs, so
+  only the seed guard can refuse) and the UNCLAMPED branch (which reads neither
+  velocity nor steering, so a NaN in those fields cannot propagate).
+- **an identity fixture kills nothing in a rotation.** At `heading_error == 0`,
+  `cos = 1` and `sin = 0`, so every cross term vanishes and a swapped operator
+  still yields the right pose. A deliberate −45° error was needed.
+- **unit operands hide `*` vs `/`.** The rotation fixture used `dy_p == 1`,
+  where `s * dy_p` and `s / dy_p` are identical. Both step components must
+  differ from 1 **and** from each other.
+- **a monotone fixture hides an index.** `sc[i + 1] = sc[i + 1].min(..)` reads a
+  neighbouring slot; on an ACCELERATING ramp the ceiling falls monotonically so
+  the wrong slot yields the same minimum. A DECELERATING ramp, where the ceiling
+  rises, is what makes the read index observable.
+- **a rack-limited fixture cannot test a P6 ceiling.** Where P5a binds, the
+  ceiling equals the value the vector is seeded with, so it is numerically
+  invisible; only a P6-binding (higher-speed) fixture exercises it at all.
+
