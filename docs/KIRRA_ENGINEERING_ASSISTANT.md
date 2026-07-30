@@ -380,6 +380,11 @@ changes; vehicle control or motion. Retrieved text may never alter policy.
 > **Live-model accuracy is a measured quality property. Execution safety remains
 > enforced independently by deterministic validation and authority policy.**
 
+> **Branch note.** The current tip is `974d92e3`; the assist-2 measurement is
+> pinned to `c3b04ee5`, which must not be rewritten. Commit-signing status and
+> the `%G?` trap that burned two SHAs are documented in
+> [`docs/COMMIT_SIGNING.md`](COMMIT_SIGNING.md).
+
 🔴 **The assistant is NOT ready.** The one live measurement taken (§14.9) returned
 `readiness: NOT_READY`. It must not be described as ready until the acceptance
 policy in §14.7 passes on the Orin.
