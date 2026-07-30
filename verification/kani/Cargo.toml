@@ -53,8 +53,15 @@ unstable = { stubbing = true }
 # harness is per-PR-blocking by default unless it is explicitly demoted here,
 # so the deep lane can never silently absorb the whole proof set.
 #
-# Members: R2 (RSS full-lattice monotonicity), K7 (P-RACK, #1242) and K8 (the
-# rate bound, #1243). They are NOT in the same evidential position and the
+# Members: R2 (RSS full-lattice monotonicity), K7 (P-RACK, #1242), K8 (the
+# rate bound, #1243) and K3 (SG1, demoted by #1243).
+#
+# K3 IS NOT ROUTINE LANE MANAGEMENT. It is an ASSURANCE CHANGE: SG1 lost its
+# per-PR symbolic proof because #1243 made the true property relational, and
+# every true formulation measured (conditional, disjunctive) failed to
+# converge at 15 min where the old — now FALSE — form took 22 s. The property
+# was deliberately NOT weakened to regain runtime. Anything summarising this
+# lane must say SG1 is affected rather than folding K3 in with the others. They are NOT in the same evidential position and the
 # difference should not be flattened: R2 was measured to exceed the budget and
 # is expected to close with more time, whereas K7 (stopped at 23 min) and K8
 # (stopped at 25 min and again at 55 min) have produced NO verdict under any

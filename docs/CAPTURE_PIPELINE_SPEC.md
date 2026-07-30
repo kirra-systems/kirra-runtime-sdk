@@ -103,7 +103,18 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > the acceleration bound over every executable return — plus the restated K3 and
 > its two-part mirror; K1–K7 re-run.
 >
-> Independent approval: see `docs/safety/TALISMAN_AMENDMENT_POLICY.md`.
+> ASSURANCE CHANGE — this re-pin is not only a behaviour change. #1243 pushes
+> SG1's true property beyond the per-PR Kani budget, so K3 moves to the weekly
+> deep lane and a concrete mirror becomes its standing per-PR gate. That is an
+> explicit REDUCTION IN PER-PR SYMBOLIC COVERAGE for a cited safety property,
+> and it requires approval on those terms, not merely as proof maintenance.
+> Measured: the pre-#1243 form took 22 s and is now false; the conditional and
+> disjunctive true forms each produced no verdict at 15 minutes. The property
+> was deliberately not weakened to recover the runtime.
+>
+> Independent approval: see `docs/safety/TALISMAN_AMENDMENT_POLICY.md`. The
+> approver is being asked to accept the assurance reduction above as well as
+> the kernel change.
 >
 > **#1242 re-pin — INTENTIONAL BEHAVIOUR CHANGE, not formatting drift.**
 > `ed00f4da…` → `6a61b74f…`.

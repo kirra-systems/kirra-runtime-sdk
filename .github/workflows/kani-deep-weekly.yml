@@ -2,6 +2,13 @@
 # ci.yml runs the default harness set (fast, BLOCKING). Harnesses behind the
 # `deep-proofs` feature of `verification/kani` run here instead:
 #
+#   * K3 (#1243) — SG1, the P2 speed ceiling. THIS ONE IS AN ASSURANCE CHANGE,
+#     not lane management: SG1 no longer has a per-PR symbolic proof. #1243
+#     made the true property relational (the return is the TIGHTER of the
+#     ceiling and the rate bound), and every true formulation measured failed
+#     to converge at 15 min where the old — now false — form took 22 s. The
+#     property was deliberately not weakened to regain runtime. Per-PR gate:
+#     the two-part concrete mirror covering both arms of the disjunction.
 #   * R2 — closing-speed monotonicity of `longitudinal_safe_distance` on the
 #     full integer-scaled parameter lattice. Its exact-IEEE relational instance
 #     blew the per-PR 45-minute job budget on BOTH default CaDiCaL and kissat;

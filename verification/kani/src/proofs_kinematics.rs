@@ -18,12 +18,16 @@
 //! still not proved here and must not be claimed as proved; it is discharged by
 //! the concrete grid and the property suites.
 //!
-//! LANE SPLIT: K1–K6 run per-PR in the blocking `kani-proofs` lane. K7 and K8
-//! are behind the `deep-proofs` feature (weekly `kani-deep-weekly`), each with
-//! an exhaustive concrete grid in `mirrors` as its BLOCKING per-PR gate. Both
-//! demotions are provisional rather than budgeted — neither has produced a
-//! verdict under any budget tried. See K8's doc comment for the pattern that
-//! predicts which harnesses land here.
+//! LANE SPLIT: K1, K2, K4, K5, K3b and K6 run per-PR in the blocking
+//! `kani-proofs` lane. K3, K7 and K8 are behind the `deep-proofs` feature
+//! (weekly `kani-deep-weekly`), each with a BLOCKING concrete mirror as its
+//! per-PR gate. None has produced a verdict under any budget tried, so all
+//! three demotions are provisional rather than budgeted. See K8's doc comment
+//! for the cost pattern that predicts which harnesses land here.
+//!
+//! K3's demotion is NOT routine lane management: it is an ASSURANCE CHANGE
+//! introduced by #1243, and SG1 no longer has a per-PR symbolic proof. Its
+//! harness records the timings and the reasoning.
 //!
 //! Properties (cited from `docs/safety/GOVERNOR_INTEGRITY_EVIDENCE.md` §2):
 //!  * K1 fail-closed NaN/Inf totality (SG9): ANY non-finite field in a command
@@ -148,9 +152,44 @@ mod proofs {
         );
     }
 
-    /// K3 — SG1: a finite command over the effective ceiling clamps to EXACTLY
-    /// the ceiling with direction preserved, and the effective ceiling is
-    /// `min(max_speed, odd_cap)` whenever the cap is present and tighter.
+    /// K3 — SG1. An over-ceiling command returns the ceiling exactly, or a
+    /// value the rate bound explains; nothing else may move it.
+    ///
+    /// LANE: `deep-proofs` (weekly) as of #1243, and this demotion is an
+    /// ASSURANCE CHANGE, not proof maintenance. SG1 has lost its per-PR
+    /// symbolic proof. Say that plainly wherever this is summarised.
+    ///
+    /// THE EVIDENCE (timings; these are the facts):
+    ///
+    ///   `|v| == ceiling`, unconditional        22 s — but FALSE after #1243
+    ///   conditional on a reconstructed trigger  no verdict at 15 min
+    ///   disjunctive, division-free              no verdict at 15 min
+    ///
+    /// Every formulation that is TRUE after #1243 is per-PR intractable. The
+    /// only tractable shape measured on this kernel is a comparison against a
+    /// CONTRACT FIELD, and no true statement of SG1 has that shape any more,
+    /// because the property is now a relation between the return and two
+    /// command fields.
+    ///
+    /// ENGINEERING JUDGEMENT, labelled as such and carrying less weight than
+    /// the timings above: I do not believe a cheap true formulation exists. The
+    /// content of the property is "the returned value is the tighter of two
+    /// bounds", which is irreducibly relational, and the relational shape is
+    /// the one that does not converge. Two earlier diagnoses of mine about this
+    /// harness were wrong — first that a variant assertion was the problem,
+    /// then that the division was — so treat this as a prior, not a finding.
+    ///
+    /// WHAT WAS DELIBERATELY NOT DONE. The property is not weakened to regain
+    /// runtime. A cheaper K3 was available — assert only `|v| <= ceiling` — and
+    /// it was rejected twice over: it is literally K6, so it would add nothing
+    /// per-PR, and adopting it would let the safety case read as though nothing
+    /// had changed. The assurance loss is recorded instead of engineered away.
+    ///
+    /// PER-PR GATE: the two-part concrete mirror, written in lock step with
+    /// this harness — `k3_mirror_ceiling_exact_when_only_the_ceiling_binds` and
+    /// `k3_mirror_rate_bound_wins_when_it_is_tighter`. Mandatory, blocking, and
+    /// covering both arms of the disjunction.
+    #[cfg(feature = "deep-proofs")]
     #[kani::proof]
     #[kani::stub(f64::powi, super::stub_powi)]
     #[kani::stub(f64::tan, super::stub_tan)]
