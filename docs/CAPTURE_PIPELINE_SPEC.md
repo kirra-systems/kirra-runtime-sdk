@@ -89,30 +89,54 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > property reach a construct CBMC cannot model?" but "does this change put such
 > a construct on any path an EXISTING harness quantifies over?"
 >
-> Reviewer approval: **RECORDED RETROSPECTIVELY — `justinlooney` (repository
-> owner), 2026-07-30.** Two qualifications belong in the record rather than in
-> the conversation that produced it:
+> Independent approval: **NOT OBTAINED. This amendment proceeded under a
+> RECORDED EXCEPTION** to the separation-of-duties control, per
+> `docs/safety/TALISMAN_AMENDMENT_POLICY.md` §2.2. It is deliberately NOT
+> written as "approval with a caveat": a control that any caveat can satisfy is
+> not a control, and the author's own acknowledgement is not second-principal
+> approval. The five mandatory fields follow.
 >
-> 1. **Retrospective, not pre-merge.** This note required the approval to be
->    written here *before* merge. It was not: the amendment merged in PR #1244
->    with all 32 CI lanes green and this line still reading PENDING. The gate was
->    passed over and then closed after the fact. The change is not thereby
->    unreviewed, but the sequencing control did not hold, and a future audit
->    should read it as "approved late" rather than "approved on schedule".
-> 2. **Not independent of the author.** The requirement names an *independent*
->    reviewer. PR #1244 was authored under the same account that approves it
->    here, so author and approver are the same principal. That is a legitimate
->    call for the accountable owner of a single-maintainer repository to make —
->    it is not a substitute for a second pair of eyes, and it should not be cited
->    as one in a certification context.
+> 1. **Author of the change.** `justinlooney` (via Claude Code operating on that
+>    account) — commits on `claude/ros-bound-proposal-migration-nso5d2`, merged
+>    as PR #1244.
+> 2. **Why no eligible independent reviewer was available.** Structural: this is
+>    a single-maintainer repository with no second human principal holding
+>    review rights. No escalation path existed to attempt, which is itself the
+>    finding — the constraint is standing, not incidental to this change.
+> 3. **Who accepted the exception.** `justinlooney` (repository owner),
+>    2026-07-30, as the accountable authority owning the residual risk.
+> 4. **Evidence independently machine-checked.** This is what substitutes for
+>    the missing human, so it is named specifically rather than as "CI green":
+>    13/13 per-PR Kani harnesses discharged under the transcendental model
+>    (K1–K6 symbolic; K7 deferred, see the residual risk below); the 306,180-point
+>    exhaustive P-CAP/P-RACK grid; the mutation gate at 19 mutants / 18 caught /
+>    1 unviable / 0 missed, with the three tolerance-boundary kills verified by
+>    hand-applying each mutation; K3b non-vacuity proven by two `kani::cover!`
+>    properties; the `powi(2) == v * v` bit-identity measured across subnormals,
+>    exponent extremes and the operating range; and the four-location blob pin
+>    gate re-run against `6a61b74f`.
+> 5. **Residual risk from the absent human independence.** Machine checks
+>    establish that the stated properties hold; they cannot establish that they
+>    are the RIGHT properties, and nobody independent examined the judgement
+>    calls. Concretely: **axiom A3** — the inverse-monotone relation coupling
+>    the `tan`/`atan` model — is assumed, not proved, and the deferred K7 P-RACK
+>    result rests on it; a malformed A3 would not be caught by any gate here.
+>    K7's demotion to the weekly lane is provisional with no measured budget, so
+>    "deferred" could in principle become "never discharged" without anyone
+>    noticing. And the scope boundary below (that #1243 is excluded) is an
+>    author's judgement that no second party tested.
 >
-> What the approval covers: the Priority-2 accumulate change and its blob re-pin
-> `ed00f4da…` → `6a61b74f…`; the proof-crate transcendental model and its axioms
-> A1/A2/A3 (A3 being the load-bearing one — it is the assumption the deferred K7
-> P-RACK result rests on); K7's provisional, unbudgeted deferral to the weekly
-> lane; and the accepted `:544` equivalent mutant. It does NOT cover #1243, the
-> acceleration-enforcement gap, which is tracked separately with its own
-> evidence.
+> **Sequencing also failed, separately.** This note required the approval to be
+> written here BEFORE merge. It was not: #1244 merged with all 32 lanes green
+> and this line still reading PENDING; the exception was recorded afterwards. A
+> future audit should read this as "merged, then documented" — not "approved on
+> schedule".
+>
+> What the exception covers: the Priority-2 accumulate change and its blob
+> re-pin `ed00f4da…` → `6a61b74f…`; the proof-crate transcendental model and its
+> axioms A1/A2/A3; K7's provisional, unbudgeted deferral; and the accepted
+> `:544` equivalent mutant. It does NOT cover #1243, the acceleration-enforcement
+> gap, which is tracked separately with its own evidence.
 >
 > Any FURTHER change re-pins again + re-runs the
 > WCET/MC-DC/proptest gates.
