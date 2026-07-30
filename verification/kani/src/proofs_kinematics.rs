@@ -311,10 +311,51 @@ mod proofs {
             contract.max_brake_mps2
         };
 
-        let executed_rate = (linear - cmd.current_velocity_mps).abs() / cmd.delta_time_s;
+        // STATED IN VELOCITY SPACE, NOT ACCELERATION SPACE — and that is a
+        // correction forced by a counterexample, not a stylistic choice.
+        //
+        // The obvious form, `|v - current| / dt <= limit + 1e-9`, FAILS, and
+        // Kani found why in 186 s. The counterexample is denormal:
+        //
+        //   current = -3.204150e-306    dt = 5.928788e-323 (subnormal)
+        //   brake x dt = 3.557e-322  <  ulp(current) = 7.115e-322
+        //
+        // The kernel's intended step is SMALLER THAN ONE ULP of `current`, so
+        // `fl(current + step)` lands a whole ulp away: |v - current| is
+        // 6.324e-322, about 1.78x the intended step. Dividing by a subnormal
+        // `dt` turns that sub-ulp rounding into an apparent 10.67 m/s^2 against
+        // a 6.0 limit. The executed SPEED is 3.2e-306 m/s — physically zero.
+        //
+        // So the quotient form asserts something the implementation never
+        // computes. The kernel divides only to DECIDE whether to clamp; the
+        // value it returns is `current + limit x dt`, a subtraction away from
+        // the quantity actually bounded. Dividing re-introduces an error
+        // amplification (~ulp(current)/dt) that exists nowhere in the code.
+        //
+        // The velocity form is exact in the same arithmetic the kernel uses,
+        // and it is EQUIVALENT for every dt where the division is
+        // well-conditioned. Note what was NOT done: the dt domain is NOT
+        // narrowed. Constraining dt to a physical grid would also make this
+        // pass, and would have buried a real fact about the contract's
+        // numerics instead of recording it. The acceleration-space form is
+        // kept — as the concrete grid mirror over physical dt, where it is the
+        // meaningful statement.
+        //
+        // The slack terms are float-representation bounds, not safety margin:
+        // `fl(a+b)` is within half an ulp of the true sum and `limit x dt` is
+        // itself a rounded product, so both operands contribute a relative
+        // EPSILON; the smallest subnormal covers the denormal corner where
+        // relative bounds degenerate. The `1e-9 x dt` term is the kernel's own
+        // acceleration-space tolerance carried into velocity space — a command
+        // whose implied rate is within tolerance does not trigger the clamp at
+        // all, so the executed step can legitimately reach it.
+        let step = applicable_limit * cmd.delta_time_s;
+        let tolerance = 1e-9 * cmd.delta_time_s;
+        let float_slack =
+            (cmd.current_velocity_mps.abs() + step.abs()) * f64::EPSILON + f64::from_bits(1);
         assert!(
-            executed_rate <= applicable_limit + 1e-9,
-            "executed command implies a rate outside the applicable limit"
+            (linear - cmd.current_velocity_mps).abs() <= step + tolerance + float_slack,
+            "executed command steps further than the applicable rate limit allows"
         );
     }
 
