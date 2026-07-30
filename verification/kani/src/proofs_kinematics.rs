@@ -184,6 +184,64 @@ mod proofs {
         );
     }
 
+    /// K3-DIAG (#1242) — **DIAGNOSTIC, NOT A PROPOSED PROOF.** Delete once the
+    /// question it answers is settled.
+    ///
+    /// K3 still fails after its variant assertion was removed, so the assertion
+    /// is not the cause. The leading hypothesis is PATH REACHABILITY: removing
+    /// the Priority-2 early return means over-ceiling commands now reach P6,
+    /// whose `tan` is outside the proof domain recorded in
+    /// GOVERNOR_INTEGRITY_EVIDENCE.md §2. Every kinematics harness that passes
+    /// today exits before P6 (K1 at P0, K2 at P1, K4/K5 at the Degraded denials,
+    /// and K3 itself used to exit at P2); all four that now fail reach it.
+    ///
+    /// THE ISOLATION: identical assertions to K3, identical command class
+    /// (over-ceiling, steering unconstrained), and ONE added precondition that
+    /// makes P6 unreachable. P6 is guarded by `if v2 > 1e-6`, so a ceiling below
+    /// ~0.001 m/s means the enforced speed cannot enter it — `tan` is never
+    /// evaluated, while P5a/P5b still run and composition still happens.
+    ///
+    /// If this PASSES while K3 fails, the difference is reachability of the
+    /// transcendental, not the restated magnitude/direction property. If it
+    /// FAILS TOO, the hypothesis is wrong and the cause is something else in the
+    /// restatement — in which case do NOT proceed with the scope change.
+    #[kani::proof]
+    fn k3_diag_ceiling_below_p6_entry_threshold() {
+        let cmd = any_command();
+        // Ceiling deliberately below the P6 entry guard (v2 > 1e-6).
+        let contract = VehicleKinematicsContract {
+            max_speed_mps: 0.0005,
+            odd_speed_cap_mps: None,
+            ..VehicleKinematicsContract::nominal_reference_profile()
+        };
+        kani::assume(cmd.linear_velocity_mps.is_finite());
+        kani::assume(cmd.current_velocity_mps.is_finite());
+        kani::assume(cmd.steering_angle_deg.is_finite());
+        kani::assume(cmd.current_steering_angle_deg.is_finite());
+        kani::assume(cmd.delta_time_s.is_finite() && cmd.delta_time_s > 0.0);
+
+        let max = contract.effective_max_speed_mps();
+        kani::assume(cmd.linear_velocity_mps.abs() > max);
+
+        // Exactly K3's assertions, unchanged.
+        let action = validate_vehicle_command(&cmd, &contract);
+        let linear = match action {
+            EnforceAction::ClampLinear(v) => v,
+            EnforceAction::ClampBoth { linear, .. } => linear,
+            other => panic!("over-ceiling must clamp the linear axis, got {other:?}"),
+        };
+        assert_eq!(
+            linear.abs(),
+            max,
+            "clamped magnitude is exactly the ceiling"
+        );
+        assert_eq!(
+            linear.signum(),
+            cmd.linear_velocity_mps.signum(),
+            "direction preserved (reverse stays reverse)"
+        );
+    }
+
     /// K3b (#1242) — COMPOSITION semantics, split out of K3.
     ///
     /// K3 owns the longitudinal invariant; this owns which variant reports it.
