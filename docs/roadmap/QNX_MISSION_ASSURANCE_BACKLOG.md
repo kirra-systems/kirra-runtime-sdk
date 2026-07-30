@@ -7,6 +7,7 @@
 | Date | 2026-07-29 |
 | Parent | `QNX_MISSION_ASSURANCE_RUNTIME.md` (KIRRA-MAR-PLAN-001) · Architecture: `QNX_MISSION_ASSURANCE_ARCHITECTURE.md` (KIRRA-MAR-ARCH-001) |
 | Namespace | `MAR-*`, declared in KIRRA-MAR-PLAN-001 §0 (avoids the existing `WS-*` / `EP-*` / `WP-*` / `PARK-NNN` namespaces) |
+| Extension | **MAR-13…MAR-20** (QNX assurance observability in Kirra Mission Console — health-event normalization, liveness/recovery cards, APS telemetry, containment evidence, consequence correlation, stream contract, card semantics, console replay) live in `QNX_MISSION_ASSURANCE_CONSOLE_OBSERVABILITY.md` (KIRRA-MAR-CONSOLE-001) — same namespace, same roadmap, not a parallel one |
 
 Conventions: each epic follows the house closure rule — **an epic closes
 against verified capability, not merged intent**. Acceptance criteria are

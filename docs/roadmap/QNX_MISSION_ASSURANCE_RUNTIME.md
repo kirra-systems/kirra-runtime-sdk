@@ -5,7 +5,7 @@
 | Doc ID | KIRRA-MAR-PLAN-001 |
 | Status | **Proposed (planning baseline)** — a future product direction. **Nothing in this document describes current deployed capability** unless a row is explicitly labeled *Existing foundation*. |
 | Date | 2026-07-29 |
-| Companions | `QNX_MISSION_ASSURANCE_ARCHITECTURE.md` (KIRRA-MAR-ARCH-001 — planes, mission/capability/authority models, QNX integration), `QNX_MISSION_ASSURANCE_BACKLOG.md` (KIRRA-MAR-BACKLOG-001 — issue-ready epics MAR-01…MAR-12) |
+| Companions | `QNX_MISSION_ASSURANCE_ARCHITECTURE.md` (KIRRA-MAR-ARCH-001 — planes, mission/capability/authority models, QNX integration), `QNX_MISSION_ASSURANCE_BACKLOG.md` (KIRRA-MAR-BACKLOG-001 — issue-ready epics MAR-01…MAR-12), `QNX_MISSION_ASSURANCE_CONSOLE_OBSERVABILITY.md` (KIRRA-MAR-CONSOLE-001 — QNX assurance observability epics MAR-13…MAR-20) |
 | Existing foundation anchors | `PRODUCT_EXECUTION_PLAN.md` (P1/P2/P3 ladder, GATE A–E), `docs/analysis/ENGINEERING_EXECUTION_PROGRAM.md` (EP-xx), EPIC #270 (QNX lane), `docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md` (HVCHAN), ADR-0031/0033 (release token), `docs/REPLAY_INCIDENT_RECONSTRUCTION.md` (EP-19), `docs/safety/ASSUMPTIONS_OF_USE.md` (AoU register) |
 
 > **Governing rule (borrowed from `docs/ARCHITECTURE_STACK.md`): where a decision
@@ -217,6 +217,7 @@ Each workstream maps 1:1 onto backlog epics (KIRRA-MAR-BACKLOG-001):
 | QNX runtime | MAR-10, MAR-11 | Service model port to QNX; QNX HAM integration |
 | Physical safety boundary | MAR-12 | Physical independent-controller integration |
 | Boundary freeze | MAR-01 | Mission/safety ownership freeze (the Gate MA-A input) |
+| Assurance observability & console | MAR-13…MAR-20 | QNX health-event normalization → typed evidence → Kirra Mission Console cards (presentation only, never an authority); see KIRRA-MAR-CONSOLE-001 |
 
 ## 9. Phased implementation plan
 
