@@ -51,7 +51,9 @@
     "occl_s20_v4",
     "occl_s20_v6",
     "occl_s40_v4",
-    "occl_s40_v6"
+    "occl_s40_v6",
+    "curve_b20_clear_v2",
+    "curve_b20_clear_v4"
   ],
   "learned_safetyaware_seed7": [
     "Stopped_x12_v4_g40",

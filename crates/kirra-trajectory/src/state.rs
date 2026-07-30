@@ -89,6 +89,26 @@ pub struct AcceptedTrajectory {
     /// `None` on a legacy record → the fast loop falls back to the static
     /// `config.max_steering_rad` only (byte-identical to before this field).
     pub effective_lateral_envelope: Option<LateralEnvelope>,
+    /// #1213 — the per-pose ENFORCED STEERING ceiling in RADIANS, aligned
+    /// index-for-index with `points`: the steering magnitude whose geometry the
+    /// slow loop actually containment-checked at each pose.
+    ///
+    /// `Some` only when a PERMANENT (P5a rack-limit / P6 lateral-envelope) clamp
+    /// fired; transient P5b slew clamps do not populate it. Unclamped poses
+    /// carry the posture-composed rack limit, so no entry is tighter than what
+    /// the fast loop already applied.
+    ///
+    /// WHY THIS IS NOT REDUNDANT with `effective_lateral_envelope`: that bound
+    /// re-solves P6 at the COMMAND's own velocity, and the command may be slower
+    /// than the pose. P6 is looser at lower speed, so at a pose the slow loop
+    /// clamped to (say) 21 deg, a slower command could steer far beyond 21 deg
+    /// and still satisfy D1+D2 — driving geometry containment never checked.
+    /// This ceiling is what closes that gap.
+    ///
+    /// Rides HERE, on the heap-backed slow-loop record — never on
+    /// `TrajectoryVerdict`, which stays a pinned one byte (#893 side-channel
+    /// discipline).
+    pub effective_steering_ceiling_rad: Option<Vec<f64>>,
     /// Wall-clock ms when this trajectory was promoted into the slot. The
     /// fast loop computes age against `now_ms` for staleness.
     pub promoted_at_ms: u64,
@@ -121,6 +141,7 @@ impl AcceptedTrajectory {
             verdict: TrajectoryVerdict::Accept,
             effective_velocity_ceiling: None,
             effective_lateral_envelope: None,
+            effective_steering_ceiling_rad: None,
             promoted_at_ms,
             max_age_ms: DEFAULT_MAX_AGE_MS,
         }
@@ -144,6 +165,7 @@ impl AcceptedTrajectory {
             verdict,
             effective_velocity_ceiling: None,
             effective_lateral_envelope: None,
+            effective_steering_ceiling_rad: None,
             promoted_at_ms,
             max_age_ms: DEFAULT_MAX_AGE_MS,
         }
@@ -170,6 +192,17 @@ impl AcceptedTrajectory {
     /// steering hard-limit + lateral acceleration against it. Chainable off
     /// [`with_verdict`](Self::with_verdict) / [`with_effective_ceiling`]. A
     /// `None` argument is a no-op (leaves the static-limit fallback path).
+    /// Attach the checker's per-pose enforced steering ceiling (#1213). The
+    /// slow loop calls this with `SlowLoopOutcome::steering_ceiling_rad`; the
+    /// fast loop's `check_command_conforms` then bounds the outgoing command's
+    /// steering against the angle actually validated at the nearest pose. A
+    /// `None` argument is a no-op, leaving the D1/D2-only path byte-identical.
+    #[must_use]
+    pub fn with_steering_ceiling(mut self, ceiling: Option<Vec<f64>>) -> Self {
+        self.effective_steering_ceiling_rad = ceiling;
+        self
+    }
+
     #[must_use]
     pub fn with_lateral_envelope(mut self, envelope: Option<LateralEnvelope>) -> Self {
         self.effective_lateral_envelope = envelope;

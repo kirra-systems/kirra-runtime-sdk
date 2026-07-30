@@ -317,23 +317,38 @@ pub fn validate_trajectory_slow_explained(
     (verdict, reason)
 }
 
-/// As [`validate_trajectory_slow_explained`], additionally returning the
-/// **effective per-pose velocity ceiling** the checker computed (B1 fix).
+/// Everything the slow loop learned while validating a trajectory, including
+/// the two per-pose ceilings the fast loop must be bound to.
 ///
-/// On a `Clamp` verdict the checker derated at least one pose's commanded
-/// velocity (a per-pose `EnforceAction::ClampLinear`/`ClampBoth`, or the
-/// composed perception cap). The third element is `Some(ceilings)` — a
-/// `Vec<f64>` aligned index-for-index with `trajectory`, where `ceilings[k]`
-/// is the maximum velocity permissible at pose `k` (the derated value where a
-/// clamp fired, the planner's own velocity elsewhere). The ROS fast-loop
-/// `check_command_conforms` gates against THIS envelope, so a command at the
-/// planner's original (unclamped) speed on a `Clamp` verdict now fails
-/// conformance → MRC, instead of passing (the finding).
-///
-/// `None` on every other verdict (`Accept` needs no derate; a refusal drives
-/// the MRC directly), so the `Accept` fast path is byte-identical to before.
-/// The verdict enum stays one byte — the envelope rides here on the slow-loop
-/// return, never on `TrajectoryVerdict` (the #893 side-channel discipline).
+/// Returned by [`validate_trajectory_slow_detailed`]. The older
+/// [`validate_trajectory_slow_with_envelope`] delegates here and drops
+/// `steering_ceiling_rad`, so existing callers are unaffected.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlowLoopOutcome {
+    pub verdict: TrajectoryVerdict,
+    pub reason: Option<TrajectoryRefusalReason>,
+    /// B1 — per-pose velocity ceiling, aligned index-for-index with the
+    /// trajectory. `Some` only when a velocity clamp fired.
+    pub velocity_ceiling: Option<Vec<f64>>,
+    /// #1213 — per-pose ENFORCED STEERING ceiling in RADIANS, aligned
+    /// index-for-index with the trajectory.
+    ///
+    /// This is the magnitude the checker actually validated containment
+    /// against at each pose. `Some` only when a PERMANENT (P5a rack-limit /
+    /// P6 lateral-envelope) clamp fired somewhere; transient P5b slew clamps
+    /// do not populate it, for the same reason they do not arm the
+    /// enforced-geometry re-check.
+    ///
+    /// Poses with no permanent clamp carry the posture-composed rack limit —
+    /// i.e. no bound tighter than what the fast loop already applies — so the
+    /// vector is meaningful at every index rather than sparse.
+    pub steering_ceiling_rad: Option<Vec<f64>>,
+}
+
+/// Back-compat shim over [`validate_trajectory_slow_detailed`] for the callers
+/// that predate the steering ceiling. Prefer the detailed form in new code:
+/// dropping `steering_ceiling_rad` leaves the fast loop bound only by the
+/// static rack limit at poses the slow loop clamped.
 #[allow(clippy::too_many_arguments)]
 pub fn validate_trajectory_slow_with_envelope(
     trajectory: &[TrajectoryPoint],
@@ -352,6 +367,53 @@ pub fn validate_trajectory_slow_with_envelope(
     Option<TrajectoryRefusalReason>,
     Option<Vec<f64>>,
 ) {
+    let o = validate_trajectory_slow_detailed(
+        trajectory,
+        corridor,
+        objects,
+        config,
+        latest_odom,
+        posture,
+        effective_perception_cap,
+        visibility_range_m,
+        predicted_modes,
+        pedestrians,
+        frame_trust,
+    );
+    (o.verdict, o.reason, o.velocity_ceiling)
+}
+
+/// As [`validate_trajectory_slow_explained`], additionally returning the
+/// **effective per-pose velocity ceiling** the checker computed (B1 fix).
+///
+/// On a `Clamp` verdict the checker derated at least one pose's commanded
+/// velocity (a per-pose `EnforceAction::ClampLinear`/`ClampBoth`, or the
+/// composed perception cap). The third element is `Some(ceilings)` — a
+/// `Vec<f64>` aligned index-for-index with `trajectory`, where `ceilings[k]`
+/// is the maximum velocity permissible at pose `k` (the derated value where a
+/// clamp fired, the planner's own velocity elsewhere). The ROS fast-loop
+/// `check_command_conforms` gates against THIS envelope, so a command at the
+/// planner's original (unclamped) speed on a `Clamp` verdict now fails
+/// conformance → MRC, instead of passing (the finding).
+///
+/// `None` on every other verdict (`Accept` needs no derate; a refusal drives
+/// the MRC directly), so the `Accept` fast path is byte-identical to before.
+/// The verdict enum stays one byte — the envelope rides here on the slow-loop
+/// return, never on `TrajectoryVerdict` (the #893 side-channel discipline).
+#[allow(clippy::too_many_arguments)]
+pub fn validate_trajectory_slow_detailed(
+    trajectory: &[TrajectoryPoint],
+    corridor: &dyn CorridorSource,
+    objects: &[PerceivedObject],
+    config: &VehicleConfig,
+    latest_odom: Option<&EgoOdom>,
+    posture: FleetPosture,
+    effective_perception_cap: Option<f64>,
+    visibility_range_m: Option<f64>,
+    predicted_modes: Option<&[PredictedMode<'_>]>,
+    pedestrians: Option<&crate::vru::PedestrianScene<'_>>,
+    frame_trust: FrameTrust,
+) -> SlowLoopOutcome {
     // ----- Posture short-circuit (M1) ----------------------------------
     //
     // A LockedOut fleet must not be commanded — the safe response is to
@@ -361,21 +423,23 @@ pub fn validate_trajectory_slow_with_envelope(
     // an integrator inspecting verdicts in a LockedOut state always sees
     // `MRCFallback` regardless of the trajectory shape.
     if posture == FleetPosture::LockedOut {
-        return (
-            TrajectoryVerdict::MRCFallback,
-            Some(TrajectoryRefusalReason::PostureLockedOut),
-            None,
-        );
+        return SlowLoopOutcome {
+            verdict: TrajectoryVerdict::MRCFallback,
+            reason: Some(TrajectoryRefusalReason::PostureLockedOut),
+            velocity_ceiling: None,
+            steering_ceiling_rad: None,
+        };
     }
 
     // Reject empty / single-point trajectories outright (the per-pose
     // loop needs ≥ 2 points to compute deltas). Conservative MRC.
     if trajectory.len() < 2 {
-        return (
-            TrajectoryVerdict::MRCFallback,
-            Some(TrajectoryRefusalReason::TooFewPoints),
-            None,
-        );
+        return SlowLoopOutcome {
+            verdict: TrajectoryVerdict::MRCFallback,
+            reason: Some(TrajectoryRefusalReason::TooFewPoints),
+            velocity_ceiling: None,
+            steering_ceiling_rad: None,
+        };
     }
 
     // ----- Object-cardinality cap (F9 / #1096) -------------------------
@@ -390,11 +454,12 @@ pub fn validate_trajectory_slow_with_envelope(
     // (`PerceptionObjectOverflow`) surfaces the overflow through the existing
     // verdict-reason emission (the checker's observability channel).
     if objects.len() > MAX_RSS_OBJECTS {
-        return (
-            TrajectoryVerdict::MRCFallback,
-            Some(TrajectoryRefusalReason::PerceptionObjectOverflow),
-            None,
-        );
+        return SlowLoopOutcome {
+            verdict: TrajectoryVerdict::MRCFallback,
+            reason: Some(TrajectoryRefusalReason::PerceptionObjectOverflow),
+            velocity_ceiling: None,
+            steering_ceiling_rad: None,
+        };
     }
 
     // ----- A) Containment (SG2) ----------------------------------------
@@ -440,11 +505,12 @@ pub fn validate_trajectory_slow_with_envelope(
         frame_trust,
     );
     if !matches!(containment_verdict, EnforceAction::Allow) {
-        return (
-            TrajectoryVerdict::MRCFallback,
-            Some(TrajectoryRefusalReason::ContainmentBreach),
-            None,
-        );
+        return SlowLoopOutcome {
+            verdict: TrajectoryVerdict::MRCFallback,
+            reason: Some(TrajectoryRefusalReason::ContainmentBreach),
+            velocity_ceiling: None,
+            steering_ceiling_rad: None,
+        };
     }
 
     // ----- B) Per-pose kinematics (P0–P6) ------------------------------
@@ -495,6 +561,26 @@ pub fn validate_trajectory_slow_with_envelope(
     // on the segment ENDING at pose `k` lowers `ceilings[k]` to the checker's
     // own enforced value.
     let mut ceilings: Option<Vec<f64>> = None;
+    // #1213 — the per-pose ENFORCED STEERING ceiling (radians), same lazy
+    // discipline and same `[i + 1]` alignment as `ceilings` above: the command
+    // built from segment (i → i+1) bounds pose `i + 1`. Seeded from the
+    // posture-composed rack limit so an unclamped pose imposes nothing the fast
+    // loop was not already applying; only a PERMANENT clamp lowers an entry.
+    let mut steering_ceilings: Option<Vec<f64>> = None;
+    // #1213 — the ENFORCED geometry, captured from the first steering clamp
+    // onward. `steering_clamp_from` is the index of the segment on which the
+    // checker first overrode the planner's steering; from there the arc the
+    // vehicle will follow is NOT the arc pass-A containment validated, so the
+    // enforced poses are reconstructed and re-checked after this loop.
+    //
+    // Segments BEFORE that index keep the planner's geometry and stay covered by
+    // pass A: an earlier LINEAR clamp only shortens the traversal along the same
+    // arcs (same steering ⇒ same curvature; less distance ⇒ a swept subset), so
+    // it cannot move the body outside a region already checked. A STEERING clamp
+    // changes the curvature itself, which is a different region in an unbounded
+    // direction — hence the re-check rather than an inclusion argument.
+    let mut steering_clamp_from: Option<usize> = None;
+    let mut enforced_segments: Vec<EnforcedSegment> = Vec::new();
     let mut prev_steering_deg = initial_steering_deg;
     // ADR-0029: the angular channel's "current" yaw rate for the Degraded
     // converge-to-stop-and-HOLD gate. Seeded from odometry (the vehicle's
@@ -523,6 +609,83 @@ pub fn validate_trajectory_slow_with_envelope(
         } else {
             validate_vehicle_command(&cmd, &kinematics)
         };
+        // #1213 — the pair the actuator will apply on this segment. Captured
+        // BEFORE the match's own bookkeeping so every arm contributes, and so a
+        // future arm cannot silently drop the steering axis the way
+        // `ClampSteering(_) => { clamp_seen = true; }` did.
+        // The angle the rack SETTLES at. For a permanent clamp that is the
+        // permanent ceiling (filled in below); otherwise the planner's own
+        // commanded angle, which a transient rate clamp only delays reaching.
+        let enforced_steering_deg = cmd.steering_angle_deg;
+        // `cmd.linear_velocity_mps` IS `trajectory[i + 1].velocity_mps` by
+        // construction in `pose_pair_to_command`; using it directly removes a
+        // duplicate index expression rather than leaving one to be tested.
+        let enforced_end_velocity_mps = enforced_end_velocity(&verdict, cmd.linear_velocity_mps);
+        // #1213 — PERMANENT vs TRANSIENT divergence. The three steering clamps
+        // do not mean the same thing for the arc the vehicle will sweep:
+        //
+        //   P5a rack limit      — the angle is UNREACHABLE. Permanent.
+        //   P6 lateral envelope — unreachable AT THIS SPEED. Permanent while it holds.
+        //   P5b rate ceiling    — reachable, just not this tick. TRANSIENT: the
+        //                         rack keeps slewing and closes the gap.
+        //
+        // Only the permanent kinds are re-checked. Treating a rate clamp as a
+        // permanent heading offset would refuse trajectories the vehicle can
+        // actually follow — the lag it opens is bounded and recovers, and its
+        // residual is recorded rather than modelled here.
+        //
+        // Classified by re-asking the KERNEL with the rate demand zeroed
+        // (`current_steering == commanded`), so P5b cannot fire and whatever
+        // still clamps is the permanent ceiling. Reusing the real enforcement
+        // path means this cannot drift from it. Runs only on a segment that
+        // already clamped, so the Nominal path is untouched.
+        //
+        // This also subsumes the assumed-rack problem: P5b is the ONLY priority
+        // that reads `current_steering_angle_deg`, so a clamp derived from the
+        // no-odom neutral assumption is never armed in the first place.
+        let permanent_steering_deg = if matches!(
+            verdict,
+            EnforceAction::ClampSteering(_) | EnforceAction::ClampBoth { .. }
+        ) {
+            let probe = ProposedVehicleCommand {
+                current_steering_angle_deg: cmd.steering_angle_deg,
+                ..cmd
+            };
+            let probe_verdict = if degraded {
+                enforce_degraded_decel_to_stop(&probe, &kinematics)
+            } else {
+                validate_vehicle_command(&probe, &kinematics)
+            };
+            match probe_verdict {
+                EnforceAction::ClampSteering(d) => Some(d),
+                EnforceAction::ClampBoth { steering, .. } => Some(steering),
+                // Nothing clamps once the rate demand is removed ⇒ the original
+                // clamp was purely the slew ceiling ⇒ transient.
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(pd) = permanent_steering_deg {
+            let sc = steering_ceilings.get_or_insert_with(|| {
+                vec![kinematics.max_steering_deg.to_radians(); trajectory.len()]
+            });
+            // Bounds |δ|, and takes the TIGHTER of any repeated write.
+            sc[i + 1] = sc[i + 1].min(pd.abs().to_radians());
+        }
+        let clamp_is_known = permanent_steering_deg.is_some();
+        if steering_clamp_from.is_none() && clamp_is_known {
+            steering_clamp_from = Some(i);
+        }
+        if steering_clamp_from.is_some() {
+            enforced_segments.push(EnforcedSegment {
+                end_velocity_mps: enforced_end_velocity_mps,
+                steering_deg: permanent_steering_deg.unwrap_or(enforced_steering_deg),
+                delta_time_s: cmd.delta_time_s,
+                steering_clamped: clamp_is_known,
+            });
+        }
+
         match verdict {
             EnforceAction::Allow => {}
             // B1 fix: capture the checker's own enforced velocity — do NOT
@@ -543,11 +706,12 @@ pub fn validate_trajectory_slow_with_envelope(
                 clamp_seen = true;
             }
             EnforceAction::DenyBreach(code) => {
-                return (
-                    TrajectoryVerdict::MRCFallback,
-                    Some(TrajectoryRefusalReason::KinematicsDenied(code)),
-                    None,
-                );
+                return SlowLoopOutcome {
+                    verdict: TrajectoryVerdict::MRCFallback,
+                    reason: Some(TrajectoryRefusalReason::KinematicsDenied(code)),
+                    velocity_ceiling: None,
+                    steering_ceiling_rad: steering_ceilings,
+                };
             }
         }
 
@@ -578,11 +742,12 @@ pub fn validate_trajectory_slow_with_envelope(
                 let v_seg = a.velocity_mps.abs().max(b.velocity_mps.abs());
                 let posture_factor = if degraded { ab.mrc_posture_factor } else { 1.0 };
                 if !omega.is_finite() || omega.abs() > ab.omega_max(v_seg, posture_factor) {
-                    return (
-                        TrajectoryVerdict::MRCFallback,
-                        Some(TrajectoryRefusalReason::AngularRateBreach),
-                        None,
-                    );
+                    return SlowLoopOutcome {
+                        verdict: TrajectoryVerdict::MRCFallback,
+                        reason: Some(TrajectoryRefusalReason::AngularRateBreach),
+                        velocity_ceiling: None,
+                        steering_ceiling_rad: steering_ceilings,
+                    };
                 }
                 // Issue #70 / ADR-0029 — Degraded converge-to-stop-and-HOLD on
                 // the ANGULAR channel. The magnitude bound above only caps |ω|;
@@ -598,13 +763,81 @@ pub fn validate_trajectory_slow_with_envelope(
                 // SAFETY: SG8 | REQ: courier-angular-degraded-stop-and-hold | TEST: courier_degraded_angular_reinitiation_from_stop_mrcs,courier_degraded_angular_speed_increase_mrcs,courier_degraded_angular_converging_to_stop_is_admitted,courier_degraded_angular_gate_is_degraded_only,ackermann_degraded_has_no_angular_stop_gate
                 if degraded && degraded_angular_violation(prev_omega, omega, ab.stop_epsilon_rad_s)
                 {
-                    return (
-                        TrajectoryVerdict::MRCFallback,
-                        Some(TrajectoryRefusalReason::DegradedAngularHoldBreach),
-                        None,
-                    );
+                    return SlowLoopOutcome {
+                        verdict: TrajectoryVerdict::MRCFallback,
+                        reason: Some(TrajectoryRefusalReason::DegradedAngularHoldBreach),
+                        velocity_ceiling: None,
+                        steering_ceiling_rad: steering_ceilings,
+                    };
                 }
                 prev_omega = omega;
+            }
+        }
+    }
+
+    // ----- B2) Re-containment on the ENFORCED geometry (#1213) ---------
+    //
+    // THE PROPERTY: every released trajectory is containment-checked using the
+    // steering angle that will actually be executed.
+    //
+    // Pass A checked the arc the PLANNER proposed. When the per-pose gate
+    // overrode the steering (P5a hard limit / P5b rate ceiling / P6 lateral
+    // envelope), the vehicle will follow a DIFFERENT arc, and pass A's verdict
+    // does not transfer to it. Before this block the clamped value was discarded
+    // (`ClampSteering(_) => { clamp_seen = true; }`) and the trajectory was still
+    // admitted — every consumer treats `Clamp` as admitted — so the executed arc
+    // was released un-checked.
+    //
+    // A straighter arc is NOT automatically safer: a clamped path leaves the
+    // corridor on the OUTSIDE of a turn, and depending on obstacle placement can
+    // depart a corridor the tighter proposed arc stayed inside. So the enforced
+    // geometry is re-checked outright — the pass-A result is never reused for it.
+    //
+    // Three outcomes, all explicit:
+    //   * reconstructed + re-check passes  → release the clamped command;
+    //   * reconstructed + re-check fails   → containment refusal;
+    //   * cannot reconstruct exactly       → refusal (fail closed).
+    if let Some(from) = steering_clamp_from {
+        // Seed at the enforced velocity for the seed pose: an earlier LINEAR
+        // clamp already lowered it, and reconstructing from the planner's
+        // unclamped speed would model an arc length the actuator will not travel.
+        let seed_velocity_mps = ceilings
+            .as_ref()
+            .and_then(|c| c.get(from).copied())
+            .unwrap_or_else(|| trajectory[from].velocity_mps);
+        match reconstruct_enforced_poses(
+            trajectory,
+            from,
+            seed_velocity_mps,
+            &enforced_segments,
+            config.wheelbase_m,
+        ) {
+            Some(enforced_poses) => {
+                let enforced_verdict = containment::validate_trajectory_containment(
+                    &enforced_poses,
+                    &kernel_corridor,
+                    &footprint,
+                    frame_trust,
+                );
+                if !matches!(enforced_verdict, EnforceAction::Allow) {
+                    return SlowLoopOutcome {
+                        verdict: TrajectoryVerdict::MRCFallback,
+                        reason: Some(TrajectoryRefusalReason::EnforcedContainmentBreach),
+                        velocity_ceiling: None,
+                        steering_ceiling_rad: steering_ceilings,
+                    };
+                }
+            }
+            // Unavailable, not benign: the enforced arc exists and will be
+            // driven whether or not we can model it. Refusing is the only
+            // outcome that keeps the property true.
+            None => {
+                return SlowLoopOutcome {
+                    verdict: TrajectoryVerdict::MRCFallback,
+                    reason: Some(TrajectoryRefusalReason::EnforcedGeometryUnreconstructable),
+                    velocity_ceiling: None,
+                    steering_ceiling_rad: steering_ceilings,
+                };
             }
         }
     }
@@ -639,11 +872,12 @@ pub fn validate_trajectory_slow_with_envelope(
         // itself is already finiteness-guaranteed by the per-pose loop above,
         // which rejects any NaN-derived command; objects are the unguarded seam.)
         if !object_fields_finite(obj) {
-            return (
-                TrajectoryVerdict::MRCFallback,
-                Some(TrajectoryRefusalReason::NonFinitePerceptionObject),
-                None,
-            );
+            return SlowLoopOutcome {
+                verdict: TrajectoryVerdict::MRCFallback,
+                reason: Some(TrajectoryRefusalReason::NonFinitePerceptionObject),
+                velocity_ceiling: None,
+                steering_ceiling_rad: steering_ceilings,
+            };
         }
         for traj_point in trajectory {
             // EP-08: measure the pair in the lane's frame. Curved corridor →
@@ -730,11 +964,12 @@ pub fn validate_trajectory_slow_with_envelope(
             // was why a car centered in the ego lane could not be overtaken.
             // EP-08: per-class footprint-overlap gate (was the global 2.5 m).
             if dy_ego.abs() < config.rss_longitudinal_overlap_m && lon_unsafe {
-                return (
-                    TrajectoryVerdict::MRCFallback,
-                    Some(TrajectoryRefusalReason::RssLongitudinalBreach),
-                    None,
-                );
+                return SlowLoopOutcome {
+                    verdict: TrajectoryVerdict::MRCFallback,
+                    reason: Some(TrajectoryRefusalReason::RssLongitudinalBreach),
+                    velocity_ceiling: None,
+                    steering_ceiling_rad: steering_ceilings,
+                };
             }
 
             // Lateral RSS — required side gap. A side collision needs the footprints ABREAST
@@ -807,11 +1042,12 @@ pub fn validate_trajectory_slow_with_envelope(
                     )
                 };
                 if dy_ego.abs() < lat_required {
-                    return (
-                        TrajectoryVerdict::MRCFallback,
-                        Some(TrajectoryRefusalReason::RssLateralBreach),
-                        None,
-                    );
+                    return SlowLoopOutcome {
+                        verdict: TrajectoryVerdict::MRCFallback,
+                        reason: Some(TrajectoryRefusalReason::RssLateralBreach),
+                        velocity_ceiling: None,
+                        steering_ceiling_rad: steering_ceilings,
+                    };
                 }
             }
         }
@@ -844,11 +1080,12 @@ pub fn validate_trajectory_slow_with_envelope(
                 || validate_trajectory_time_spacing(trajectory, MAX_PREDICTIVE_POSE_SPACING_S)
                     .is_some())
         {
-            return (
-                TrajectoryVerdict::MRCFallback,
-                Some(TrajectoryRefusalReason::PredictiveRssBreach),
-                None,
-            );
+            return SlowLoopOutcome {
+                verdict: TrajectoryVerdict::MRCFallback,
+                reason: Some(TrajectoryRefusalReason::PredictiveRssBreach),
+                velocity_ceiling: None,
+                steering_ceiling_rad: steering_ceilings,
+            };
         }
         // Pass the SAME (posture-/perception-capped) lateral-accel budget the
         // snapshot lateral branch uses, so both passes agree on the side gap.
@@ -860,11 +1097,12 @@ pub fn validate_trajectory_slow_with_envelope(
             kinematics.max_brake_mps2,
             kinematics.max_accel_mps2,
         ) {
-            return (
-                TrajectoryVerdict::MRCFallback,
-                Some(TrajectoryRefusalReason::PredictiveRssBreach),
-                None,
-            );
+            return SlowLoopOutcome {
+                verdict: TrajectoryVerdict::MRCFallback,
+                reason: Some(TrajectoryRefusalReason::PredictiveRssBreach),
+                velocity_ceiling: None,
+                steering_ceiling_rad: steering_ceilings,
+            };
         }
     }
 
@@ -881,11 +1119,12 @@ pub fn validate_trajectory_slow_with_envelope(
         // the Nominal 4.5 would permit a marginally-too-high speed for the visible
         // distance (same fail-open direction as S3). Matches the longitudinal/VRU brakes.
         if outruns_assured_clear_distance(trajectory, vis, kinematics.max_brake_mps2) {
-            return (
-                TrajectoryVerdict::MRCFallback,
-                Some(TrajectoryRefusalReason::OcclusionOutrunsVisibility),
-                None,
-            );
+            return SlowLoopOutcome {
+                verdict: TrajectoryVerdict::MRCFallback,
+                reason: Some(TrajectoryRefusalReason::OcclusionOutrunsVisibility),
+                velocity_ceiling: None,
+                steering_ceiling_rad: steering_ceilings,
+            };
         }
     }
 
@@ -927,26 +1166,39 @@ pub fn validate_trajectory_slow_with_envelope(
             config.max_accel_mps2,     // #779 F2 (RSS response-phase term)
             ego_reach_m,               // #779 F1
         ) {
-            return (
-                TrajectoryVerdict::MRCFallback,
-                Some(TrajectoryRefusalReason::VruReachableSetBreach),
-                None,
-            );
+            return SlowLoopOutcome {
+                verdict: TrajectoryVerdict::MRCFallback,
+                reason: Some(TrajectoryRefusalReason::VruReachableSetBreach),
+                velocity_ceiling: None,
+                steering_ceiling_rad: steering_ceilings,
+            };
         }
     }
 
     // ----- E) Aggregate ------------------------------------------------
     if clamp_seen {
-        // Carry the derated velocity envelope to the fast loop (B1). `ceilings`
-        // is `Some` iff a VELOCITY clamp fired; a pure `ClampSteering` (no
-        // velocity derate) leaves it `None`, and conformance then gates against
-        // the planner velocity — which is correct, since the velocity axis was
-        // not derated (the steering derate is bounded separately by the fast
-        // loop's hard-steering-limit check, unchanged). Either way the verdict
-        // is `Clamp`.
-        (TrajectoryVerdict::Clamp, None, ceilings)
+        // Carry both derated envelopes to the fast loop. `ceilings` is `Some`
+        // iff a VELOCITY clamp fired; a pure `ClampSteering` (no velocity
+        // derate) leaves it `None`, and conformance then gates against the
+        // planner velocity — correct, since the velocity axis was not derated.
+        //
+        // #1213: the steering axis is no longer left to the fast loop's static
+        // hard-limit check. `steering_ceilings` carries the angle whose geometry
+        // was actually containment-checked, so a permanent clamp binds the
+        // command as well as the plan. Either way the verdict is `Clamp`.
+        SlowLoopOutcome {
+            verdict: TrajectoryVerdict::Clamp,
+            reason: None,
+            velocity_ceiling: ceilings,
+            steering_ceiling_rad: steering_ceilings,
+        }
     } else {
-        (TrajectoryVerdict::Accept, None, None)
+        SlowLoopOutcome {
+            verdict: TrajectoryVerdict::Accept,
+            reason: None,
+            velocity_ceiling: None,
+            steering_ceiling_rad: None,
+        }
     }
 }
 
@@ -1353,6 +1605,14 @@ pub enum ConformanceVerdict {
 /// disagree on the boundary.
 pub const VELOCITY_TOLERANCE_MPS: f64 = 0.5;
 
+/// Steering-bound tolerance for the per-pose enforced-steering ceiling
+/// (radians), #1213. ~1.15 deg — tracking slack for a controller following the
+/// validated arc, small enough that it cannot absorb a real clamp (the observed
+/// permanent clamps cut 40-55 deg demands down to 14-21 deg, tens of degrees
+/// wide). Deliberately NOT scaled from `VELOCITY_TOLERANCE_MPS`: the two bound
+/// different physical quantities and share no calibration.
+pub const STEERING_TOLERANCE_RAD: f64 = 0.02;
+
 /// Fast-loop lateral-acceleration conformance tolerance (m/s²), S1 fix (#1024).
 /// A small slack — the lateral analogue of [`VELOCITY_TOLERANCE_MPS`] — so a
 /// controller tracking legitimately at the lateral envelope does not chatter into
@@ -1528,6 +1788,35 @@ pub fn check_command_conforms(
         }
     }
 
+    // E. Per-pose ENFORCED STEERING ceiling (#1213) — bind the command to the
+    // angle whose geometry was actually containment-checked.
+    //
+    // FINDING: D1/D2 are not sufficient. D1 is the posture-composed RACK limit
+    // (constant across poses) and D2 re-solves P6 at the COMMAND's own velocity.
+    // Bound C only requires the command to be no FASTER than the pose, and P6
+    // is LOOSER at lower speed — so at a pose the slow loop clamped to 21 deg
+    // because the pose ran at 5.05 m/s, a 3 m/s command could steer well past
+    // 21 deg and satisfy both D1 and D2. #1213 made the slow loop re-check
+    // containment on the 21 deg arc; without this bound the fast loop could
+    // still emit an angle whose geometry nobody checked, which is the same
+    // defect one layer down.
+    //
+    // Steering MORE than validated is not self-evidently safe just because it
+    // is not a rollover risk: a tighter arc cuts the inside of the corridor,
+    // the mirror of the wider-arc departure #1213 closed on the slow loop.
+    if let Some(ceilings) = trajectory.effective_steering_ceiling_rad.as_ref() {
+        // A `Some`-but-missing entry FAILS CLOSED, exactly as the velocity
+        // ceiling does: a dropped ceiling must never silently widen back to the
+        // rack limit.
+        let ceiling = match ceilings.get(nearest_idx) {
+            Some(&c) => c,
+            None => return ConformanceVerdict::MRCFallback,
+        };
+        if !ceiling.is_finite() || cmd.steering_rad.abs() > ceiling + STEERING_TOLERANCE_RAD {
+            return ConformanceVerdict::MRCFallback;
+        }
+    }
+
     ConformanceVerdict::Accept
 }
 
@@ -1566,6 +1855,196 @@ fn adapter_to_kernel_pose(p: &Pose) -> KernelPose {
 /// The bicycle-model approximation matches the kernel's P6 (lateral-accel)
 /// model and is the canonical pose-pair → steering-angle conversion.
 /// Field names match `ProposedVehicleCommand` exactly (Step 0).
+/// One segment as the checker ENFORCED it — the `(velocity, steering)` pair the
+/// actuator will actually apply, not the pair the planner proposed.
+///
+/// `steering_deg` is the post-clamp angle (P5a hard limit / P5b rate ceiling /
+/// P6 lateral envelope); `end_velocity_mps` is the post-clamp speed at the
+/// segment's end pose. On an unclamped segment both equal the planner's values.
+#[derive(Debug, Clone, Copy)]
+struct EnforcedSegment {
+    end_velocity_mps: f64,
+    steering_deg: f64,
+    delta_time_s: f64,
+    /// Whether the checker actually overrode this segment's steering. Unclamped
+    /// segments are replayed as the planner's own motion (see
+    /// [`reconstruct_enforced_poses`]) rather than re-integrated, so that
+    /// planner-model mismatch cannot masquerade as enforcement divergence.
+    steering_clamped: bool,
+}
+
+/// Produce the geometry the vehicle will actually sweep once the checker's own
+/// steering clamps are applied (#1213).
+///
+/// ## Why this is a DIVERGENCE model, not a re-simulation
+///
+/// The obvious implementation — forward-integrate every segment from the
+/// enforced `(v, δ)` — is wrong in a way that fails in the *unsafe-looking*
+/// direction for availability: it silently folds PLANNER-MODEL MISMATCH into the
+/// result. [`pose_pair_to_command`] derives `δ` from a pose pair's heading
+/// change alone; it never requires the pair's POSITIONS to lie on the arc that
+/// heading change implies. A planner whose positions and headings are not
+/// perfectly bicycle-consistent would therefore "diverge" from a re-simulation
+/// even with no clamp anywhere, and the re-check would refuse trajectories the
+/// enforcement path never altered.
+///
+/// So only CLAMPED segments are re-integrated. An unclamped segment replays the
+/// planner's own motion, carried in whatever frame the accumulated divergence
+/// has put the vehicle in — the planner's local step, rotated by the heading
+/// error the clamps have opened up. The consequences:
+///
+///   * no clamped segment ⇒ the reconstruction is the planner's path exactly,
+///     so the re-check can never disagree with pass A for model reasons;
+///   * a clamped segment ⇒ the divergence it causes is real, and it propagates
+///     forward through every later segment (the vehicle is somewhere else and
+///     pointing somewhere else when the next planned step is applied).
+///
+/// The clamped-segment integration is the exact forward inverse of
+/// [`pose_pair_to_command`]: that function solves
+/// `tan(δ) = Δheading · L / (v_avg · Δt)` for `δ`; this solves it for `Δheading`.
+///
+/// Seeded at `planner[from_segment]` — the last pose whose geometry the pass-A
+/// containment check already validated — and carried forward from there.
+///
+/// Returns `None` when the enforced trajectory cannot be reconstructed EXACTLY:
+/// a non-finite input, a non-positive `Δt`, a non-finite wheelbase, or a
+/// resulting pose that is not finite. The caller must treat `None` as a refusal
+/// (the "recheck unavailable" arm) — a best-effort reconstruction would be
+/// checked geometry that nothing will execute.
+/// The velocity the actuator will actually apply for a segment: the kernel's
+/// clamped value whenever the longitudinal axis was derated, otherwise the
+/// planner's own end-of-segment velocity.
+///
+/// Extracted as a pure function so the mapping is directly testable. Inline, it
+/// was only observable through the reconstructed arc length, which needs a
+/// containment-boundary fixture to discriminate — a fragile test that would
+/// break on unrelated tuning.
+#[inline]
+fn enforced_end_velocity(verdict: &EnforceAction, planner_end_velocity_mps: f64) -> f64 {
+    match *verdict {
+        EnforceAction::ClampLinear(v) | EnforceAction::ClampBoth { linear: v, .. } => v,
+        EnforceAction::Allow | EnforceAction::ClampSteering(_) | EnforceAction::DenyBreach(_) => {
+            planner_end_velocity_mps
+        }
+    }
+}
+
+fn reconstruct_enforced_poses(
+    planner: &[TrajectoryPoint],
+    from_segment: usize,
+    seed_velocity_mps: f64,
+    enforced: &[EnforcedSegment],
+    wheelbase_m: f64,
+) -> Option<Vec<KernelPose>> {
+    if !wheelbase_m.is_finite() || wheelbase_m <= 0.0 {
+        return None;
+    }
+    let seed = planner.get(from_segment)?;
+    if !seed_velocity_mps.is_finite() {
+        return None;
+    }
+    let mut out: Vec<KernelPose> = Vec::with_capacity(enforced.len() + 1);
+    let mut cur = adapter_to_kernel_pose(&seed.pose);
+    if !cur.x_m.is_finite() || !cur.y_m.is_finite() || !cur.heading_rad.is_finite() {
+        return None;
+    }
+    out.push(cur);
+
+    // Heading error opened up by the clamps so far: `enforced − planner`. Zero
+    // until the first clamped segment, which is what makes an unclamped
+    // trajectory reconstruct to itself.
+    let mut heading_error = 0.0_f64;
+    let mut v_prev = seed_velocity_mps;
+    for (k, seg) in enforced.iter().enumerate() {
+        if !seg.end_velocity_mps.is_finite()
+            || !seg.steering_deg.is_finite()
+            || !seg.delta_time_s.is_finite()
+            || seg.delta_time_s <= 0.0
+        {
+            return None;
+        }
+        // At |δ| ≥ 90° the road wheel is perpendicular to travel: curvature is
+        // infinite and the bicycle model has no solution. `tan` does NOT report
+        // this — π/2 is not representable, so `(90.0).to_radians().tan()` is a
+        // huge FINITE number (~1.6e16) that would sail past an `is_finite`
+        // guard and produce a plausible-looking arc from meaningless geometry.
+        // Unreachable through the enforced path (P5a clamps to the rack limit
+        // first), so this is a structural guard, not a live case.
+        if seg.steering_deg.abs() >= 90.0 {
+            return None;
+        }
+        // The planner's own step for this segment, needed by both branches.
+        let from_pose = planner.get(from_segment + k)?;
+        let to_pose = planner.get(from_segment + k + 1)?;
+        let finite = |p: &Pose| p.x_m.is_finite() && p.y_m.is_finite() && p.heading_rad.is_finite();
+        if !finite(&from_pose.pose) || !finite(&to_pose.pose) {
+            return None;
+        }
+
+        cur = if seg.steering_clamped {
+            // Same averaging convention as `pose_pair_to_command`, so the arc is
+            // the one the enforced command actually implies.
+            let v_avg = 0.5 * (v_prev + seg.end_velocity_mps);
+            let arc_len = v_avg * seg.delta_time_s;
+            let tan_delta = seg.steering_deg.to_radians().tan();
+            // Δheading = arc_len · tan(δ) / L — the relation
+            // `pose_pair_to_command` inverts.
+            //
+            // One finiteness check, not three: if `arc_len` or `tan_delta` is
+            // non-finite then so is this product — including the `inf · 0` case,
+            // which yields NaN. Separate guards on the operands were strictly
+            // subsumed by this one, so they could never change the outcome and
+            // no test could distinguish them from their own mutations.
+            let d_heading = arc_len * tan_delta / wheelbase_m;
+            if !d_heading.is_finite() {
+                return None;
+            }
+            let h0 = cur.heading_rad;
+            let h1 = h0 + d_heading;
+            // Exact circular-arc integration. The straight-line branch is the
+            // removable singularity at Δheading → 0 (radius → ∞), not an
+            // approximation of a curve.
+            let (dx, dy) = if d_heading.abs() < 1e-9 {
+                (arc_len * h0.cos(), arc_len * h0.sin())
+            } else {
+                let radius = arc_len / d_heading;
+                (
+                    radius * (h1.sin() - h0.sin()),
+                    radius * (h0.cos() - h1.cos()),
+                )
+            };
+            // Re-derive the error against where the plan expected to be.
+            heading_error = h1 - to_pose.pose.heading_rad;
+            KernelPose {
+                x_m: cur.x_m + dx,
+                y_m: cur.y_m + dy,
+                heading_rad: h1,
+            }
+        } else {
+            // Unclamped: replay the planner's own step, rotated into the frame
+            // the accumulated divergence has left the vehicle in. With no prior
+            // clamp `heading_error` is 0 and this is the identity — the
+            // reconstruction IS the planner's pose, bit for bit.
+            let (dx_p, dy_p) = (
+                to_pose.pose.x_m - from_pose.pose.x_m,
+                to_pose.pose.y_m - from_pose.pose.y_m,
+            );
+            let (c, s) = (heading_error.cos(), heading_error.sin());
+            KernelPose {
+                x_m: cur.x_m + c * dx_p - s * dy_p,
+                y_m: cur.y_m + s * dx_p + c * dy_p,
+                heading_rad: to_pose.pose.heading_rad + heading_error,
+            }
+        };
+        if !cur.x_m.is_finite() || !cur.y_m.is_finite() || !cur.heading_rad.is_finite() {
+            return None;
+        }
+        out.push(cur);
+        v_prev = seg.end_velocity_mps;
+    }
+    Some(out)
+}
+
 fn pose_pair_to_command(
     a: &TrajectoryPoint,
     b: &TrajectoryPoint,
@@ -2151,6 +2630,17 @@ pub enum TrajectoryRefusalReason {
     /// dense/faulty-perception overload that would blow the RSS-pass WCET. The
     /// scene is refused wholesale (MRC), never partially processed.
     PerceptionObjectOverflow,
+    /// #1213: the per-pose gate overrode the planner's steering, and the arc the
+    /// vehicle will ACTUALLY follow under that enforced angle leaves the
+    /// corridor — even though the proposed arc did not. Distinct from
+    /// [`Self::ContainmentBreach`] so an operator can tell "the planner asked to
+    /// leave the corridor" from "our own clamp put it there".
+    EnforcedContainmentBreach,
+    /// #1213: a steering clamp fired but the enforced geometry could not be
+    /// reconstructed exactly (non-finite state, non-positive Δt, unusable
+    /// wheelbase). The enforced arc will be driven regardless, so an
+    /// un-modellable one is refused rather than released on pass A's verdict.
+    EnforcedGeometryUnreconstructable,
 }
 
 impl TrajectoryRefusalReason {
@@ -2174,6 +2664,8 @@ impl TrajectoryRefusalReason {
             Self::OcclusionOutrunsVisibility => "TRAJECTORY_OCCLUSION_OUTRUN",
             Self::VruReachableSetBreach => "TRAJECTORY_VRU_BREACH",
             Self::PerceptionObjectOverflow => "TRAJECTORY_PERCEPTION_OVERLOAD",
+            Self::EnforcedContainmentBreach => "TRAJECTORY_ENFORCED_CONTAINMENT_BREACH",
+            Self::EnforcedGeometryUnreconstructable => "TRAJECTORY_ENFORCED_GEOMETRY_UNKNOWN",
         }
     }
 
@@ -2256,7 +2748,540 @@ impl TrajectoryRefusalReason {
                  processed — a bounded checker never trades safety for a scene it cannot fully \
                  evaluate in time (F9, #1096)."
             }
+            Self::EnforcedContainmentBreach => {
+                "The checker clamped this trajectory's steering (rack limit, slew-rate ceiling \
+                 or lateral-acceleration envelope), and the arc the vehicle would actually \
+                 follow under that enforced angle leaves the drivable corridor — even though \
+                 the arc the planner proposed did not. A clamped path runs WIDER through a \
+                 turn, so a reduction in steering authority is not automatically safer. Refused \
+                 on the enforced geometry, not the proposed geometry (#1213)."
+            }
+            Self::EnforcedGeometryUnreconstructable => {
+                "The checker clamped this trajectory's steering, but the resulting geometry \
+                 could not be reconstructed exactly (non-finite state, a non-positive time \
+                 step, or an unusable wheelbase), so the arc that would actually be driven \
+                 could not be containment-checked. The vehicle would follow that arc whether \
+                 or not the checker can model it, so the trajectory is refused rather than \
+                 released on the proposed arc's verdict (#1213)."
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod enforced_reconstruction_tests {
+    use super::*;
+
+    fn pt(x: f64, y: f64, h: f64, v: f64, t: f64) -> TrajectoryPoint {
+        TrajectoryPoint {
+            pose: Pose {
+                x_m: x,
+                y_m: y,
+                heading_rad: h,
+            },
+            velocity_mps: v,
+            time_from_start_s: t,
+        }
+    }
+
+    fn seg(steering_deg: f64, v: f64, dt: f64) -> EnforcedSegment {
+        EnforcedSegment {
+            end_velocity_mps: v,
+            steering_deg,
+            delta_time_s: dt,
+            steering_clamped: true,
+        }
+    }
+
+    fn unclamped(steering_deg: f64, v: f64, dt: f64) -> EnforcedSegment {
+        EnforcedSegment {
+            steering_clamped: false,
+            ..seg(steering_deg, v, dt)
+        }
+    }
+
+    /// The straight branch is the removable singularity at Δheading → 0, so it
+    /// must land exactly where a constant-heading translation lands — not
+    /// somewhere a large-radius arc approximation would put it.
+    #[test]
+    fn zero_steering_reconstructs_a_straight_line() {
+        let planner = vec![pt(0.0, 0.0, 0.0, 2.0, 0.0), pt(1.0, 0.0, 0.0, 2.0, 0.5)];
+        let out = reconstruct_enforced_poses(&planner, 0, 2.0, &[seg(0.0, 2.0, 0.5)], 2.0).unwrap();
+        assert_eq!(out.len(), 2);
+        assert!((out[1].x_m - 1.0).abs() < 1e-12, "x = v·dt");
+        assert!(
+            out[1].y_m.abs() < 1e-12,
+            "no lateral motion at zero steering"
+        );
+        assert!(out[1].heading_rad.abs() < 1e-12);
+    }
+
+    /// The reconstruction is the exact forward inverse of
+    /// `pose_pair_to_command`: feeding back the steering that function derives
+    /// from a pose pair must reproduce that pose pair. If these two ever drift,
+    /// the re-check would be validating geometry the enforcement path never
+    /// implied — so this is the load-bearing agreement test.
+    #[test]
+    fn reconstruction_inverts_the_command_derivation() {
+        let config = VehicleConfig::default_urban();
+        let a = pt(0.0, 0.0, 0.0, 3.0, 0.0);
+        // A pose pair with a genuine heading change, built to be reachable.
+        let b = pt(0.9, 0.06, 0.13, 3.0, 0.3);
+        let cmd = pose_pair_to_command(&a, &b, &config, 0.0);
+        let out = reconstruct_enforced_poses(
+            &[a, b],
+            0,
+            a.velocity_mps,
+            &[seg(
+                cmd.steering_angle_deg,
+                b.velocity_mps,
+                cmd.delta_time_s,
+            )],
+            config.wheelbase_m,
+        )
+        .unwrap();
+        assert!(
+            (out[1].heading_rad - b.pose.heading_rad).abs() < 1e-9,
+            "heading must round-trip: got {}, want {}",
+            out[1].heading_rad,
+            b.pose.heading_rad
+        );
+    }
+
+    /// The velocity the reconstruction integrates comes from the KERNEL whenever
+    /// the longitudinal axis was derated, and from the planner otherwise.
+    ///
+    /// Both clamping arms are checked, because they are the ones that matter: if
+    /// either fell through to the planner's velocity the reconstruction would
+    /// sweep an arc longer than the vehicle will actually travel, and judge
+    /// containment on geometry the derate rules out.
+    #[test]
+    fn the_enforced_end_velocity_prefers_the_kernels_derate() {
+        let planner = 9.0_f64;
+        assert_eq!(
+            enforced_end_velocity(&EnforceAction::ClampLinear(4.0), planner),
+            4.0,
+            "a linear clamp must win over the planner velocity"
+        );
+        assert_eq!(
+            enforced_end_velocity(
+                &EnforceAction::ClampBoth {
+                    linear: 3.0,
+                    steering: 12.0,
+                },
+                planner
+            ),
+            3.0,
+            "a both-axes clamp must also yield its linear component"
+        );
+        // The non-longitudinal outcomes leave the planner velocity alone — a
+        // steering-only clamp does not derate speed.
+        for v in [
+            EnforceAction::Allow,
+            EnforceAction::ClampSteering(11.0),
+            EnforceAction::DenyBreach(kirra_core::kinematics_contract::DenyCode::AssetLockedOut),
+        ] {
+            assert_eq!(
+                enforced_end_velocity(&v, planner),
+                planner,
+                "{v:?} must not alter the velocity"
+            );
+        }
+    }
+
+    /// THE IDENTITY PROPERTY, and the reason this is a divergence model rather
+    /// than a re-simulation: over segments the checker did NOT clamp, the
+    /// reconstruction reproduces the planner's poses exactly — even when those
+    /// poses are NOT bicycle-consistent (here the positions deliberately do not
+    /// lie on the arc their heading changes imply, as a real planner's output
+    /// need not).
+    ///
+    /// A naive re-integration would drift from this path and the re-check could
+    /// refuse trajectories the enforcement path never touched. That is an
+    /// availability failure caused entirely by the checker's own model, and this
+    /// test is what forbids it.
+    #[test]
+    fn unclamped_segments_reconstruct_to_the_planner_path_exactly() {
+        let planner = vec![
+            pt(0.0, 0.0, 0.0, 2.0, 0.0),
+            // Positions and headings intentionally inconsistent with a pure arc.
+            pt(1.0, 0.3, 0.20, 2.0, 0.5),
+            pt(2.2, 0.4, 0.05, 2.0, 1.0),
+            pt(3.0, 1.1, 0.55, 2.0, 1.5),
+        ];
+        let segs: Vec<_> = (0..3).map(|_| unclamped(7.0, 2.0, 0.5)).collect();
+        let out = reconstruct_enforced_poses(&planner, 0, 2.0, &segs, 2.0).unwrap();
+        assert_eq!(out.len(), planner.len());
+        for (got, want) in out.iter().zip(planner.iter()) {
+            assert!(
+                (got.x_m - want.pose.x_m).abs() < 1e-12
+                    && (got.y_m - want.pose.y_m).abs() < 1e-12
+                    && (got.heading_rad - want.pose.heading_rad).abs() < 1e-12,
+                "unclamped reconstruction must be the identity: got ({}, {}, {}), \
+                 want ({}, {}, {})",
+                got.x_m,
+                got.y_m,
+                got.heading_rad,
+                want.pose.x_m,
+                want.pose.y_m,
+                want.pose.heading_rad
+            );
+        }
+    }
+
+    /// The converse, so the identity above is not the whole behaviour: one
+    /// clamped segment moves the path, and the divergence PERSISTS through the
+    /// unclamped segments that follow it — the vehicle is somewhere else and
+    /// pointing somewhere else when the next planned step is applied.
+    #[test]
+    fn a_single_clamp_diverges_and_the_divergence_persists() {
+        let planner = vec![
+            pt(0.0, 0.0, 0.0, 2.0, 0.0),
+            pt(1.0, 0.0, 0.20, 2.0, 0.5),
+            pt(2.0, 0.2, 0.20, 2.0, 1.0),
+            pt(3.0, 0.4, 0.20, 2.0, 1.5),
+        ];
+        let segs = vec![
+            // Clamped to straight where the plan wanted a turn.
+            seg(0.0, 2.0, 0.5),
+            unclamped(0.0, 2.0, 0.5),
+            unclamped(0.0, 2.0, 0.5),
+        ];
+        let out = reconstruct_enforced_poses(&planner, 0, 2.0, &segs, 2.0).unwrap();
+        assert!(
+            (out[1].heading_rad - planner[1].pose.heading_rad).abs() > 0.1,
+            "the clamped segment must not reproduce the planned heading"
+        );
+        let final_gap = (out[3].y_m - planner[3].pose.y_m).abs();
+        let first_gap = (out[1].y_m - planner[1].pose.y_m).abs();
+        assert!(
+            final_gap > first_gap,
+            "divergence must grow across the following unclamped segments, \
+             not be absorbed: first={first_gap}, final={final_gap}"
+        );
+    }
+
+    /// EXACT arithmetic of the clamped STRAIGHT branch (the removable
+    /// singularity at Δheading → 0). Deliberately uses a non-zero seed heading
+    /// and an arc length != 1, so a perturbed operator cannot coincide with the
+    /// correct answer the way it would at heading 0 or unit arc length.
+    #[test]
+    fn a_clamped_straight_segment_integrates_exactly() {
+        let h0 = 0.6_f64;
+        let (v, dt, l) = (3.0_f64, 0.4_f64, 2.0_f64);
+        let planner = vec![
+            pt(1.0, 2.0, h0, v, 0.0),
+            // Where the plan wanted to go; the clamp overrides it.
+            pt(9.0, 9.0, h0 + 0.5, v, dt),
+        ];
+        let out = reconstruct_enforced_poses(&planner, 0, v, &[seg(0.0, v, dt)], l).unwrap();
+        // Independently written oracle: zero steering ⇒ straight, arc = v·dt.
+        let arc = v * dt;
+        let (ex, ey) = (1.0 + arc * h0.cos(), 2.0 + arc * h0.sin());
+        assert!((out[1].x_m - ex).abs() < 1e-12, "x: {} vs {ex}", out[1].x_m);
+        assert!((out[1].y_m - ey).abs() < 1e-12, "y: {} vs {ey}", out[1].y_m);
+        assert!(
+            (out[1].heading_rad - h0).abs() < 1e-12,
+            "straight keeps heading"
+        );
+    }
+
+    /// EXACT arithmetic of the clamped CURVED branch (the circular-arc
+    /// integration), with every input distinct so no operator swap is a no-op.
+    #[test]
+    fn a_clamped_curved_segment_integrates_exactly() {
+        let h0 = 0.3_f64;
+        let (v, dt, l, steer) = (4.0_f64, 0.5_f64, 2.5_f64, 12.0_f64);
+        let planner = vec![pt(1.0, -2.0, h0, v, 0.0), pt(9.0, 9.0, h0 + 0.9, v, dt)];
+        let out = reconstruct_enforced_poses(&planner, 0, v, &[seg(steer, v, dt)], l).unwrap();
+        // Oracle, written out independently of the implementation.
+        let arc = v * dt;
+        let d_heading = arc * steer.to_radians().tan() / l;
+        let h1 = h0 + d_heading;
+        let radius = arc / d_heading;
+        let ex = 1.0 + radius * (h1.sin() - h0.sin());
+        let ey = -2.0 + radius * (h0.cos() - h1.cos());
+        assert!((out[1].x_m - ex).abs() < 1e-12, "x: {} vs {ex}", out[1].x_m);
+        assert!((out[1].y_m - ey).abs() < 1e-12, "y: {} vs {ey}", out[1].y_m);
+        assert!((out[1].heading_rad - h1).abs() < 1e-12);
+    }
+
+    /// EXACT arithmetic of the divergence ROTATION — the part the identity test
+    /// cannot reach. At `heading_error == 0` the rotation is `cos 0 = 1`,
+    /// `sin 0 = 0`, so every cross term vanishes and a swapped operator still
+    /// produces the right answer. Here a clamped first segment opens a
+    /// deliberate -45 deg error, making both `cos` and `sin` non-degenerate, and
+    /// the planner's own step has `dx != dy` and neither equal to 1.
+    #[test]
+    fn the_divergence_rotation_is_exact() {
+        use std::f64::consts::FRAC_PI_4;
+        let (v, dt, l) = (2.0_f64, 0.5_f64, 2.0_f64);
+        let planner = vec![
+            pt(0.0, 0.0, 0.0, v, 0.0),
+            // Plan turns to +45 deg; the clamp holds straight ⇒ error = -45 deg.
+            pt(1.0, 0.0, FRAC_PI_4, v, dt),
+            // Planner step of (3, 2.5). BOTH components must differ from 1 and
+            // from each other: with dy_p == 1 the `s * dy_p` term is identical
+            // to `s / dy_p`, so a swapped operator there survives unseen (that
+            // exact fixture bug let a mutant through).
+            pt(4.0, 2.5, FRAC_PI_4, v, 2.0 * dt),
+        ];
+        let segs = vec![seg(0.0, v, dt), unclamped(0.0, v, dt)];
+        let out = reconstruct_enforced_poses(&planner, 0, v, &segs, l).unwrap();
+
+        // After the clamped straight segment: (1, 0, 0), error = -pi/4.
+        assert!((out[1].x_m - 1.0).abs() < 1e-12);
+        assert!((out[1].y_m - 0.0).abs() < 1e-12);
+        let err = -FRAC_PI_4;
+        let (c, sn) = (err.cos(), err.sin());
+        let (dx_p, dy_p) = (4.0 - 1.0, 2.5 - 0.0);
+        let ex = 1.0 + c * dx_p - sn * dy_p;
+        let ey = 0.0 + sn * dx_p + c * dy_p;
+        let eh = FRAC_PI_4 + err;
+        assert!((out[2].x_m - ex).abs() < 1e-12, "x: {} vs {ex}", out[2].x_m);
+        assert!((out[2].y_m - ey).abs() < 1e-12, "y: {} vs {ey}", out[2].y_m);
+        assert!(
+            (out[2].heading_rad - eh).abs() < 1e-12,
+            "heading carries the error"
+        );
+    }
+
+    /// Each finiteness disjunct refuses ON ITS OWN. A conjunction in place of
+    /// any one of them would let the other fields mask it, so they are proved
+    /// one at a time with everything else valid.
+    #[test]
+    fn each_unmodellable_field_refuses_independently() {
+        let (v, dt, l) = (2.0_f64, 0.5_f64, 2.0_f64);
+        let ok_planner = vec![pt(0.0, 0.0, 0.0, v, 0.0), pt(1.0, 0.0, 0.0, v, dt)];
+        let bad_segs = [
+            ("velocity", seg(5.0, f64::NAN, dt)),
+            ("steering", seg(f64::NAN, v, dt)),
+            ("dt", seg(5.0, v, f64::NAN)),
+            ("dt<=0", seg(5.0, v, 0.0)),
+            ("dt negative", seg(5.0, v, -dt)),
+            ("tan singularity", seg(90.0, v, dt)),
+        ];
+        for (why, bad) in bad_segs {
+            assert!(
+                reconstruct_enforced_poses(&ok_planner, 0, v, &[bad], l).is_none(),
+                "{why} alone must refuse"
+            );
+        }
+        // And each POSE field, one at a time, on an otherwise-valid segment.
+        for (why, bad_planner) in [
+            (
+                "from.x",
+                vec![pt(f64::NAN, 0.0, 0.0, v, 0.0), pt(1.0, 0.0, 0.0, v, dt)],
+            ),
+            (
+                "from.y",
+                vec![pt(0.0, f64::NAN, 0.0, v, 0.0), pt(1.0, 0.0, 0.0, v, dt)],
+            ),
+            (
+                "from.heading",
+                vec![pt(0.0, 0.0, f64::NAN, v, 0.0), pt(1.0, 0.0, 0.0, v, dt)],
+            ),
+            (
+                "to.x",
+                vec![pt(0.0, 0.0, 0.0, v, 0.0), pt(f64::NAN, 0.0, 0.0, v, dt)],
+            ),
+            (
+                "to.y",
+                vec![pt(0.0, 0.0, 0.0, v, 0.0), pt(1.0, f64::NAN, 0.0, v, dt)],
+            ),
+            (
+                "to.heading",
+                vec![pt(0.0, 0.0, 0.0, v, 0.0), pt(1.0, 0.0, f64::NAN, v, dt)],
+            ),
+        ] {
+            assert!(
+                reconstruct_enforced_poses(&bad_planner, 0, v, &[seg(5.0, v, dt)], l).is_none(),
+                "{why} alone must refuse"
+            );
+            assert!(
+                reconstruct_enforced_poses(&bad_planner, 0, v, &[unclamped(5.0, v, dt)], l)
+                    .is_none(),
+                "{why} alone must refuse on the unclamped branch too"
+            );
+        }
+        // A non-finite SEED velocity refuses before any segment is walked.
+        assert!(
+            reconstruct_enforced_poses(&ok_planner, 0, f64::NAN, &[seg(5.0, v, dt)], l).is_none()
+        );
+    }
+
+    /// The SEED-pose guard, proved one component at a time.
+    ///
+    /// Why an EMPTY segment slice: with any segment present, a non-finite seed
+    /// propagates into the arc arithmetic and the FINAL per-step finiteness
+    /// check refuses anyway — so weakening this guard is invisible. With no
+    /// segments the loop never runs and the later check is never reached, which
+    /// makes this guard the only thing that can refuse. That is what makes the
+    /// three components separable.
+    #[test]
+    fn each_seed_pose_component_refuses_independently() {
+        let v = 2.0_f64;
+        for (why, seed) in [
+            ("x", pt(f64::NAN, 0.0, 0.0, v, 0.0)),
+            ("y", pt(0.0, f64::NAN, 0.0, v, 0.0)),
+            ("heading", pt(0.0, 0.0, f64::NAN, v, 0.0)),
+        ] {
+            assert!(
+                reconstruct_enforced_poses(&[seed], 0, v, &[], 2.0).is_none(),
+                "a non-finite seed {why} alone must refuse"
+            );
+        }
+        // Non-vacuity: the same call with a FINITE seed and no segments does
+        // return a reconstruction, so the refusals above are caused by the
+        // component and not by the empty slice.
+        let ok = reconstruct_enforced_poses(&[pt(1.0, 2.0, 0.3, v, 0.0)], 0, v, &[], 2.0);
+        assert_eq!(ok.map(|o| o.len()), Some(1));
+    }
+
+    /// The SEGMENT-field guards for velocity and steering, proved on the
+    /// UNCLAMPED branch.
+    ///
+    /// Same masking problem, different escape: on the clamped branch a NaN
+    /// velocity reaches `arc_len` and a NaN steering reaches `tan_delta`, and
+    /// both are refused by later checks regardless of this guard. The unclamped
+    /// branch reads NEITHER field — it replays the planner's own step — so here
+    /// the guard is the only thing standing between a NaN input and a returned
+    /// pose.
+    #[test]
+    fn segment_velocity_and_steering_refuse_even_when_unused() {
+        let (v, dt, l) = (2.0_f64, 0.5_f64, 2.0_f64);
+        let planner = vec![pt(0.0, 0.0, 0.0, v, 0.0), pt(1.0, 0.0, 0.0, v, dt)];
+        for (why, bad) in [
+            ("velocity", unclamped(5.0, f64::NAN, dt)),
+            ("steering", unclamped(f64::NAN, v, dt)),
+            ("delta_time", unclamped(5.0, v, f64::NAN)),
+            ("zero delta_time", unclamped(5.0, v, 0.0)),
+        ] {
+            assert!(
+                reconstruct_enforced_poses(&planner, 0, v, &[bad], l).is_none(),
+                "{why} must refuse on the unclamped branch, where it is unused"
+            );
+        }
+        // Non-vacuity: the same unclamped segment with all fields sound returns
+        // the planner's own pose.
+        let ok = reconstruct_enforced_poses(&planner, 0, v, &[unclamped(5.0, v, dt)], l).unwrap();
+        assert!((ok[1].x_m - 1.0).abs() < 1e-12);
+    }
+
+    /// The FINAL per-step finiteness guard, one component at a time.
+    ///
+    /// Reaching it with exactly ONE component non-finite takes deliberate
+    /// construction: every earlier guard has already rejected non-finite INPUTS,
+    /// so the only way in is arithmetic that overflows in one axis and not the
+    /// other. A rotation applied near the top of the f64 range does that — the
+    /// x and y projections of the same step have different magnitudes, so one
+    /// can pass 1.8e308 while the other stays finite.
+    ///
+    /// Without this, weakening the guard to a conjunction is invisible: every
+    /// naturally-occurring failure makes ALL components non-finite at once.
+    #[test]
+    fn each_reconstructed_component_refuses_independently() {
+        use std::f64::consts::FRAC_PI_4;
+        let (v, l) = (2.0_f64, 2.0_f64);
+        let big = 1.5e308_f64;
+        // A near-zero clamped first segment: leaves the position where the seed
+        // put it while opening a +45 deg heading error, so the rotation below
+        // has non-degenerate cos AND sin.
+        let lead = seg(0.0, v, 1e-6);
+
+        // x overflows; y and heading stay finite.
+        let planner_x = vec![
+            pt(1e308, 0.0, 0.0, v, 0.0),
+            pt(0.0, 0.0, -FRAC_PI_4, v, 1e-6),
+            pt(big, 0.0, -FRAC_PI_4, v, 2e-6),
+        ];
+        assert!(
+            reconstruct_enforced_poses(&planner_x, 0, v, &[lead, unclamped(0.0, v, 1e-6)], l)
+                .is_none(),
+            "a non-finite reconstructed x alone must refuse"
+        );
+
+        // y overflows; x and heading stay finite (the two rotation terms cancel
+        // in x and add in y).
+        let planner_y = vec![
+            pt(0.0, 1e308, 0.0, v, 0.0),
+            pt(0.0, 0.0, -FRAC_PI_4, v, 1e-6),
+            pt(big, big, -FRAC_PI_4, v, 2e-6),
+        ];
+        assert!(
+            reconstruct_enforced_poses(&planner_y, 0, v, &[lead, unclamped(0.0, v, 1e-6)], l)
+                .is_none(),
+            "a non-finite reconstructed y alone must refuse"
+        );
+
+        // NON-VACUITY: the SAME fixtures with a step small enough not to
+        // overflow reconstruct fine. So both refusals above are caused by the
+        // overflow — not by some other part of the fixture being unsound, which
+        // would leave every component non-finite and prove nothing about which
+        // component the guard examines.
+        for planner in [&planner_x, &planner_y] {
+            let small: Vec<_> = planner
+                .iter()
+                .enumerate()
+                .map(|(k, p)| {
+                    if k == 2 {
+                        pt(1.0, 1.0, p.pose.heading_rad, v, p.time_from_start_s)
+                    } else {
+                        *p
+                    }
+                })
+                .collect();
+            assert!(
+                reconstruct_enforced_poses(&small, 0, v, &[lead, unclamped(0.0, v, 1e-6)], l)
+                    .is_some(),
+                "without the overflow the same fixture must reconstruct"
+            );
+        }
+    }
+
+    /// FAIL-CLOSED (the "recheck unavailable" arm). Each of these makes the
+    /// enforced arc unmodellable; the vehicle would drive it regardless, so the
+    /// only sound answer is `None` → refusal. A best-effort pose here would be
+    /// checked geometry that nothing executes.
+    #[test]
+    fn unmodellable_inputs_reconstruct_to_nothing() {
+        let planner = vec![pt(0.0, 0.0, 0.0, 2.0, 0.0), pt(1.0, 0.0, 0.0, 2.0, 0.5)];
+        let ok = seg(5.0, 2.0, 0.5);
+        for (label, wheelbase, s, seed) in [
+            ("zero wheelbase", 0.0, ok, 2.0),
+            ("negative wheelbase", -2.0, ok, 2.0),
+            ("non-finite wheelbase", f64::NAN, ok, 2.0),
+            ("non-finite seed velocity", 2.0, ok, f64::NAN),
+            ("non-positive dt", 2.0, seg(5.0, 2.0, 0.0), 2.0),
+            ("non-finite dt", 2.0, seg(5.0, 2.0, f64::INFINITY), 2.0),
+            ("non-finite steering", 2.0, seg(f64::NAN, 2.0, 0.5), 2.0),
+            (
+                "non-finite velocity",
+                2.0,
+                seg(5.0, f64::INFINITY, 0.5),
+                2.0,
+            ),
+            // tan(90°) is not finite — a rack angle at the singularity.
+            (
+                "steering at the tan singularity",
+                2.0,
+                seg(90.0, 2.0, 0.5),
+                2.0,
+            ),
+        ] {
+            assert!(
+                reconstruct_enforced_poses(&planner, 0, seed, &[s], wheelbase).is_none(),
+                "{label} must refuse to reconstruct"
+            );
+        }
+    }
+
+    /// A seed index past the end of the planner slice is a caller bug, not a
+    /// reason to invent a pose.
+    #[test]
+    fn an_out_of_range_seed_index_reconstructs_to_nothing() {
+        let planner = vec![pt(0.0, 0.0, 0.0, 2.0, 0.0)];
+        assert!(reconstruct_enforced_poses(&planner, 5, 2.0, &[seg(5.0, 2.0, 0.5)], 2.0).is_none());
     }
 }
 

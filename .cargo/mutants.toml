@@ -158,4 +158,16 @@ exclude_re = [
     # so the method distinguishes "equivalent" from "not yet killed" rather than
     # excusing both.
     "replace > with >= in chord_clears_corridor",
+    # #1213 enforced-geometry reconstruction: the straight/arc branch threshold
+    # `d_heading.abs() < 1e-9` vs `<=`. The two branches are the SAME curve —
+    # the straight arm is the removable singularity of the arc arm as the radius
+    # goes to infinity — and they are selected differently only when the
+    # computed product `arc_len · tan(δ) / L` equals 1e-9 to the bit. At that
+    # measure-zero point the two arms agree to ~5e-10 relative, orders of
+    # magnitude below any containment margin, so no test can distinguish them.
+    # Precise by construction: this is the ONLY `<` in the function (the segment
+    # guard uses `<=`, and every other operator there — the arc arithmetic, the
+    # rotation terms, and each finiteness disjunct — IS killed by the
+    # `enforced_reconstruction_tests` battery).
+    "replace < with <= in reconstruct_enforced_poses",
 ]
