@@ -11,10 +11,10 @@
 // Stated over the returned PAIR rather than per-branch, so it closes the class
 // instead of one path.
 //
-// STATUS: the speed-cap case is RED against today's kernel and is `#[ignore]`d
-// for that reason — see the attribute comment on the test itself. The
-// accel-bounded case is GREEN and is NOT ignored: it proves the property is
-// satisfiable and that the oracle is right, so the red case is a real defect
+// STATUS: both cases GREEN as of the #1242 talisman fix. The speed-cap case was
+// red and `#[ignore]`d before it; the accel-bounded case was green throughout and
+// is the non-vacuity control — it proves the property is satisfiable and the
+// oracle correct, so the speed-cap failure was a real branch-specific defect
 // rather than an impossible assertion.
 //
 // Deliberately an integration test, not a module inside
@@ -80,9 +80,9 @@ fn speed_capped_contract() -> VehicleKinematicsContract {
     }
 }
 
-/// #1242 — RED against today's kernel.
+/// #1242 — the defect this slice fixes.
 ///
-/// The kernel returns `ClampLinear(5.225)` alone: the speed is derated but the
+/// BEFORE the fix the kernel returned `ClampLinear(5.225)` alone: the speed was derated but the
 /// steering demand passes through untouched, even though at the ENFORCED speed
 /// it implies a lateral acceleration far outside the envelope. P6 permits only
 /// ~19.75 deg at 5.225 m/s; 34 deg implies ~6.58 m/s^2 against a 3.5 limit.
@@ -92,16 +92,12 @@ fn speed_capped_contract() -> VehicleKinematicsContract {
 /// resulting `(linear, steering)` pair honors BOTH the longitudinal ceiling and
 /// the lateral-accel envelope."
 ///
-/// IGNORED, not deleted and not weakened to match current behaviour: the fix is
-/// inside the frozen kinematics talisman (blob pinned by git hash), so it needs
-/// the formal re-verification path rather than a drive-by change. Leaving it
-/// permanently failing would make the suite's red state routine, which is worse
-/// than a documented gap. Removing this `#[ignore]` is listed closure evidence
-/// for #1242 — see `docs/safety/CLAMP_APPLICATION_INVENTORY.md` §6.
+/// GREEN as of the #1242 talisman fix: Priority 2 now accumulates its
+/// correction instead of finalizing, so a speed-capped command reaches P5a/P5b/P6
+/// and returns `ClampBoth` with the steering back-solved for the enforced linear.
+/// This test was `#[ignore]`d and red before that change; the un-ignore is the
+/// recorded closure evidence.
 #[test]
-#[ignore = "#1242: RED by design — the kernel drops the P6 steering restriction \
-            on the speed-cap branch. Fix requires a talisman re-pin; \
-            un-ignoring this test is closure evidence."]
 fn a_speed_capped_command_still_honours_the_lateral_envelope() {
     let c = speed_capped_contract();
     // Sweep the whole demand range that is inside the rack but outside P6 at
@@ -132,7 +128,7 @@ fn a_speed_capped_command_still_honours_the_lateral_envelope() {
 /// correctly today: it returns `ClampBoth { linear, steering }` with the
 /// steering back-solved for the enforced linear.
 ///
-/// This is the non-vacuity control for the ignored test above. It proves the
+/// This is the non-vacuity control for the test above. It proves the
 /// property is SATISFIABLE and the oracle is correct, so the speed-cap failure
 /// is a genuine branch-specific defect rather than a property no command could
 /// meet. If this ever goes red, the oracle is wrong and the #1242 diagnosis

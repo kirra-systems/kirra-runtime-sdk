@@ -229,21 +229,24 @@ So the answers to Step 3's questions:
   restriction. See the next paragraph. This is the reason the fix is not a
   one-line deletion.
 
-### The naive fix introduces a NEW defect
+### CORRECTION — the naive fix does NOT breach the cap
 
-Simply replacing the early return with `v = clamped; v_clamped = true;` and
-falling through is **wrong**. Priority 3/4 reads the **raw command**, not the
-running `v`, and overwrites `v` when the accel bound binds:
+An earlier revision of this plan claimed that falling through would let Priority
+3/4 overwrite `v` above the ceiling, with a worked example ending
+`v = 5.0 + 5.0*0.1 = 5.5`. **That was wrong.** Both P3/4 branches already
+terminate in `.clamp(-effective_max_speed, effective_max_speed)`, so the worked
+expression evaluates to `5.5.clamp(…) = 5.225` and the cap holds. The `.clamp()`
+sat on a continuation line that the grep used to survey the function elided —
+a reading error, not a code defect.
 
-```
-cmd.linear = 20.0, current = 5.0, dt = 0.1, cap = 5.225, max_accel = 5.0
-  P2 (fall-through)  → v = 5.225
-  P3/4 speeding_up   → v = 5.0 + 5.0*0.1 = 5.5      ← overwrites, EXCEEDS the cap
-```
+Consequence: **the fix is the simple shape after all.** Priority 2 records its
+correction and falls through; no additional persistent ceiling is required,
+because the accel bound is already ceiling-clamped and can never exceed the
+value Priority 2 would have set (which IS the ceiling, the maximum possible).
 
-The result would satisfy the accel bound and violate the speed cap — trading one
-envelope breach for another. This is precisely what P-CAP is for, and why it
-belongs in the proof set alongside P-COMPOSE.
+P-CAP stays in the proof set regardless. It is no longer guarding against this
+fix shape, but it pins the `.clamp()` calls that make the shape safe — if a
+future change drops one, K6 fails.
 
 Also worth noting for review: no priority between 2 and 6 returns `DenyBreach`
 (P3/4, P5a, P5b and P6 all clamp), so routing the speed cap through the pipeline
@@ -257,9 +260,9 @@ outcome through the one composition block:
 1. hoist the `v` / `delta` / `v_clamped` / `delta_clamped` declarations above
    Priority 2;
 2. make Priority 2 set `v` and `v_clamped` instead of returning;
-3. enforce the cap as a **magnitude ceiling on the final `v`**, not a one-shot
-   assignment, so P3/4 cannot overwrite it upward — the two longitudinal bounds
-   compose as a minimum in magnitude, sign preserved;
+3. ~~enforce the cap as a magnitude ceiling on the final `v`~~ — **not needed**,
+   see the correction above: P3/4's own `.clamp(-effective_max_speed, …)` already
+   guarantees it;
 4. leave P5a, P5b, P6 and the terminal `match` untouched.
 
 Result: a speed-capped command that also violates P6 returns

@@ -521,9 +521,27 @@ pub fn validate_vehicle_command(
     // the urban Occy ODD value (22.35 m/s per ADR-0001).
     // ------------------------------------------------------------------
     let effective_max_speed = contract.effective_max_speed_mps();
+
+    // #1242 — the correction accumulators are declared HERE, ABOVE Priority 2,
+    // so the speed ceiling can RECORD its correction instead of finalizing the
+    // verdict. Priority 2 previously returned `ClampLinear` directly, which
+    // skipped P5a (rack limit), P5b (slew) and P6 (lateral envelope) entirely:
+    // a command over the speed ceiling had its steering demand executed
+    // UNCHECKED, up to and including physically unachievable angles (measured:
+    // 200 deg through a 35 deg rack).
+    //
+    // The governing invariant is now explicit: priority decisions may
+    // ACCUMULATE restrictions, but no intermediate priority may FINALIZE an
+    // executable command. The single terminal `match (v_clamped, delta_clamped)`
+    // is the only executable exit.
+    let mut v = cmd.linear_velocity_mps;
+    let mut v_clamped = false;
+    let mut delta = cmd.steering_angle_deg;
+    let mut delta_clamped = false;
+
     if cmd.linear_velocity_mps.abs() > effective_max_speed {
-        let clamped = effective_max_speed * cmd.linear_velocity_mps.signum();
-        return EnforceAction::ClampLinear(clamped);
+        v = effective_max_speed * cmd.linear_velocity_mps.signum();
+        v_clamped = true;
     }
 
     // ------------------------------------------------------------------
@@ -548,11 +566,6 @@ pub fn validate_vehicle_command(
     // ClampBoth (never dropping the velocity correction just because steering
     // was also clamped); neither → Allow.
     // ------------------------------------------------------------------
-    let mut v = cmd.linear_velocity_mps;
-    let mut v_clamped = false;
-    let mut delta = cmd.steering_angle_deg;
-    let mut delta_clamped = false;
-
     // SAFETY: SG3 | REQ: accel-ceiling | TEST: test_excessive_acceleration_triggers_linear_clamping,test_reverse_acceleration_bounded_by_accel_limit,prop_clamp_linear_value_within_speed_contract
     // Priority 3/4: Implied longitudinal acceleration ceiling.
     //

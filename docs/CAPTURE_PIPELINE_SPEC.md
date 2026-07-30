@@ -29,9 +29,27 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > BOTH axes instead of dropping the velocity correction) and direction-aware
 > accel/brake selection (M1 — reverse acceleration is bounded by the accel limit,
 > not the brake limit). The talisman re-pins to the amended logic blob
-> `crates/kirra-core/src/kinematics_contract.rs = ed00f4da30afe8f3f83ff10a0d31103737526622`
-> (superseding the historical `997fb7ae…`, which predated the Stage-3 relocation
-> and matched no current file). Any FURTHER change re-pins again + re-runs the
+> `crates/kirra-core/src/kinematics_contract.rs = 918a22c61761bb736b9e532dd77f1c277b9cd323`
+> (superseding `ed00f4da…`, and before it the historical `997fb7ae…`, which
+> predated the Stage-3 relocation and matched no current file).
+>
+> **#1242 re-pin — INTENTIONAL BEHAVIOUR CHANGE, not formatting drift.**
+> `ed00f4da…` → `918a22c6…`. Priority 2 (the effective-speed ceiling) previously
+> returned `ClampLinear` DIRECTLY, which skipped P5a (rack limit), P5b (slew) and
+> P6 (lateral envelope) entirely: a command over the speed ceiling had its
+> steering demand executed unchecked, up to physically unachievable angles
+> (measured: 200 deg through a 35 deg rack; and 24 deg at the capped 5.225 m/s
+> implying 4.34 m/s² against a 3.5 envelope). Priority 2 now ACCUMULATES its
+> correction into `v`/`v_clamped` like every other priority, so the single
+> terminal `match (v_clamped, delta_clamped)` is the only executable exit.
+> Observable change: such commands now return `ClampBoth { linear, steering }`
+> where they previously returned `ClampLinear`. Evidence:
+> `docs/safety/TALISMAN_CHANGE_PLAN_1242.md`,
+> `docs/safety/CLAMP_APPLICATION_INVENTORY.md`, Kani K6/K7 +
+> `crates/kirra-core/tests/speed_cap_lateral_envelope.rs`. Reviewer approval:
+> **PENDING — must be recorded here before merge.**
+>
+> Any FURTHER change re-pins again + re-runs the
 > WCET/MC-DC/proptest gates.
 
 Capture is

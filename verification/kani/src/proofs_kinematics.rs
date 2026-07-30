@@ -279,20 +279,13 @@ mod mirrors {
     use super::*;
 
     // -----------------------------------------------------------------------
-    // #1242 mirrors — RED against today's kernel, and ignored for that reason.
-    //
-    // The `mirrors` module is a BLOCKING CI lane, so a permanently failing test
-    // here would make a red lane routine — the failure mode this repo's
-    // CI-honesty doctrine exists to prevent. The reason string prints on every
-    // run instead, and un-ignoring is listed closure evidence in
-    // docs/safety/TALISMAN_CHANGE_PLAN_1242.md §5.
+    // #1242 mirrors — GREEN as of the talisman fix. K7 was red and `#[ignore]`d
+    // until Priority 2 stopped finalizing; the un-ignore is closure evidence.
     // -----------------------------------------------------------------------
 
     /// Concrete instance of K7 (P-RACK). The speed-cap branch returns before
     /// P5a, so the raw steering demand is what gets executed.
     #[test]
-    #[ignore = "#1242: RED by design - the Priority-2 speed-cap branch returns \
-                before P5a/P6. Un-ignoring is closure evidence."]
     fn k7_mirror_rack_limit_holds_on_the_speed_cap_branch() {
         let c = contract(5.225, None);
         for steer in [50.0_f64, 80.0, 200.0] {
