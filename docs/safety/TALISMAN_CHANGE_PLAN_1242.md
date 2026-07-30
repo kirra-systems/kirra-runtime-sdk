@@ -14,6 +14,17 @@ Compiled against `6a93c964`.
 
 ---
 
+## The governing invariant
+
+> Priority decisions may accumulate restrictions, but **no intermediate priority
+> may finalize an executable command**. The final action must be composed once
+> from values constrained by every applicable permanent bound.
+
+This is the general statement of what #1242 violates, and it is worth keeping
+above the specific defect: the speed-cap branch finalizes. Any future priority
+added with an early `return` breaks the same invariant, which is why the proof
+below is stated over *all* executable exits rather than over that one branch.
+
 ## Step 0 — Can the safety property be expressed in Kani?
 
 **Partly. Not in its numeric form. Yes in a structural form that catches this
@@ -82,6 +93,23 @@ executable return branch* for the structural properties, plus an exhaustive
 concrete grid for the numeric one. That already dominates the four-angle sweep
 and can expose branches nobody has thought to probe. It is not "all f64", and it
 should not be described that way.
+
+### The grid and P-COMPOSE are not substitutes
+
+To be stated explicitly in the PR, because the temptation is to present whichever
+is cheaper as covering the other:
+
+| | Proves | Blind to |
+|---|---|---|
+| concrete numeric grid | the returned values satisfy the envelope **at sampled valid points** | a branch nobody sampled; an unsampled parameter combination |
+| P-COMPOSE | **no branch can bypass** the common enforcement composition, over the whole bounded valid-input domain | whether the composed arithmetic is numerically right — it never evaluates `tan` |
+
+They fail in opposite directions. A grid can pass while a new early-return
+branch goes unsampled; P-COMPOSE can pass while the P6 arithmetic is wrong.
+Presenting either as sufficient alone would misdescribe the evidence, and the
+#1242 defect is exactly a case the grid alone could have missed — it went
+undetected for as long as it did because nobody sampled the speed-cap branch
+with a steering demand attached.
 
 ## Step 1 — Property statement (for the record)
 
