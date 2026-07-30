@@ -229,6 +229,37 @@ mod proofs {
         if let Some((linear, steering)) = executed_pair(&cmd, &action) {
             let linear_corrected = linear != cmd.linear_velocity_mps;
             let steering_corrected = steering != cmd.steering_angle_deg;
+
+            // NON-VACUITY. The assertion below is an IMPLICATION, so it holds
+            // trivially wherever its antecedent is unsatisfiable — and the
+            // antecedent is value-dependent, which under the #1242 solver model
+            // makes it a live concern rather than a theoretical one: `steering`
+            // comes from a nondeterministic `atan` restricted by axiom A3, and
+            // an A3 that over-restricted could collapse `steering_corrected` to
+            // false and turn this proof into a proof of nothing. It does not
+            // (both covers below are SATISFIED), but that is a measurement of
+            // today's model, not a property of the harness — a later change to
+            // A3, to `any_bounded_contract`, or to the kernel could remove it
+            // silently. Kani reports an unsatisfiable cover as a FAILURE, so
+            // these two lines are what make that silent.
+            //
+            // The SECOND cover is the load-bearing one, and it is not implied
+            // by the first: the antecedent could be reachable only on paths
+            // where the conclusion is forced for some unrelated reason, which
+            // would satisfy cover 1 while still exercising nothing about the
+            // composition rule. Requiring the antecedent to be reachable
+            // TOGETHER WITH `ClampBoth` pins the case the property is about.
+            kani::cover!(
+                linear_corrected && steering_corrected,
+                "K3b antecedent is satisfiable"
+            );
+            kani::cover!(
+                linear_corrected
+                    && steering_corrected
+                    && matches!(action, EnforceAction::ClampBoth { .. }),
+                "K3b antecedent is reachable together with the ClampBoth conclusion"
+            );
+
             if linear_corrected && steering_corrected {
                 assert!(
                     matches!(action, EnforceAction::ClampBoth { .. }),

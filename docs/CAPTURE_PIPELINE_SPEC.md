@@ -65,10 +65,36 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > implied acceleration, which is never emitted.
 >
 > EVIDENCE. `docs/safety/TALISMAN_CHANGE_PLAN_1242.md`,
-> `docs/safety/CLAMP_APPLICATION_INVENTORY.md`, Kani K6/K7 + their mirrors,
-> `crates/kirra-core/tests/speed_cap_lateral_envelope.rs`. K1–K5 mirrors green
-> (K3 intact by construction). Reviewer approval: **PENDING — must be recorded
-> here before merge.**
+> `docs/safety/CLAMP_APPLICATION_INVENTORY.md`, `MUTATION_BASELINE.md` §8,
+> Kani K3/K3b/K6 + K7's exhaustive grid mirror,
+> `crates/kirra-core/tests/speed_cap_lateral_envelope.rs`,
+> `crates/kirra-core/tests/rate_limit_epsilon_boundary.rs`.
+>
+> CORRECTION (post-merge). This note previously read "K1–K5 mirrors green (K3
+> intact by construction)". **K3 was NOT intact.** Widening which paths are
+> reachable put the P6 `tan` on the paths K3 quantifies over, and Kani fails a
+> harness whenever an unsupported foreign call is REACHABLE, whether or not an
+> assertion depends on its value — K3, K3b, K6 and K7 all failed with
+> `call to foreign "C" function 'tan' is not currently supported`, with no
+> assertion violated. Resolved by MODELLING `tan`/`atan`/`powi` in the proof
+> crate (axioms A1/A2/A3; the talisman is not modified for the prover), after
+> which 13/13 per-PR harnesses discharge. K7 is deferred to the weekly
+> `deep-proofs` lane WITHOUT a measured budget — it was stopped at 23 min of
+> CBMC time with no verdict — so its per-PR gate is a 306,180-point exhaustive
+> grid, not a proof. The residual honest exclusion is narrower than before: the
+> P6 numeric envelope VALUE is still not proved, because under the model the
+> proofs never evaluate a real `tan`.
+>
+> The generalizable lesson for the NEXT talisman amendment: ask not "does my new
+> property reach a construct CBMC cannot model?" but "does this change put such
+> a construct on any path an EXISTING harness quantifies over?"
+>
+> Reviewer approval: **NOT RECORDED. Still outstanding.** The amendment was
+> merged in PR #1244 with all 32 CI lanes green, but the named-reviewer approval
+> this note requires was never written here — so the gate was passed over, not
+> satisfied. Recording it retrospectively is the approver's action, not the
+> author's; this line is left open deliberately rather than closed to make the
+> record tidy.
 >
 > Any FURTHER change re-pins again + re-runs the
 > WCET/MC-DC/proptest gates.
