@@ -1667,6 +1667,22 @@ jobs:
         # per target is hardware-gated and NOT run here.
         run: bash scripts/test-install-parko-backend.sh
 
+  robot-command-language:
+    name: Robot Command Language (shell, local bare remotes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Command self-test
+        # Pure shell + local git. Every case builds a throwaway repo with a LOCAL
+        # BARE remote in a temp dir, so there is no network access and no
+        # dependency on this checkout's state. Asserts exit status AND resulting
+        # repository state for both phrases, their refusals, and the dispatcher —
+        # plus that no prohibited destructive git operation (reset --hard, clean,
+        # stash, force-push, auto-commit) appears in the command source.
+        # See docs/ROBOT_COMMAND_LANGUAGE.md.
+        run: bash scripts/test-robot-command.sh
+
   ros2-adapter-build:
     name: ros2 adapter build (--features ros2)
     # DURABLE fix for the flaky ros2 build: run INSIDE the prebuilt
