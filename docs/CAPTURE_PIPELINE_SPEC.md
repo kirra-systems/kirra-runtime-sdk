@@ -76,6 +76,26 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > (`crates/kirra-core/tests/over_ceiling_accel_bound.rs`) that fails the day the
 > resolution changes.
 >
+> BLAST RADIUS — the apply-site inventory was NOT sufficient, and that is a
+> method finding worth carrying forward. `CLAMP_APPLICATION_INVENTORY.md`
+> enumerates consumers of `EnforceAction`; all four were mechanical and needed
+> no change, exactly as it predicted. But `parko-kirra`'s DIVERSE governor is
+> not a consumer — it is a second, independent implementation of the contract,
+> cross-checked against the primary by `GovernorComparator`. It had mirrored
+> this defect deliberately, its own comment noting that "the primary
+> early-returns on it before computing acceleration", so the comparator went on
+> agreeing while both governors returned a command implying 300 m/s². Diversity
+> buys independent derivation, not independent requirements: two
+> implementations of the same wrong rule agree perfectly. Both were fixed, the
+> diverse one keeping its interval formulation. A kernel-semantics change must
+> sweep re-implementations as well as apply sites.
+>
+> Three further consumers pinned the OLD value in their expectations and were
+> updated with the reasoning inline, not just the number: the fabric industrial
+> profile, the `prop_clamp_linear_preserves_direction` proptest (which #1243
+> forecast by name as the casualty), and the actuator response-schema
+> integration test.
+>
 > EVIDENCE. `crates/kirra-core/tests/over_ceiling_accel_bound.rs` (reproducer +
 > non-vacuity control + the residual; the reproducer and the reversal case were
 > RED before the fix, the control and the residual green throughout, which is the

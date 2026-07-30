@@ -359,13 +359,36 @@ proptest! {
         };
         match validate_vehicle_command(&cmd, &contract) {
             EnforceAction::ClampLinear(clamped) => {
+                // The property this test is NAMED for, unchanged by #1243. The
+                // command starts at sign*30.0 and is pushed further in the same
+                // direction, so the rate bound steps toward the request and the
+                // sign is preserved. (Direction is NOT preserved in general —
+                // a reversal request across zero returns the current side —
+                // which is why that case is pinned separately in
+                // crates/kirra-core/tests/over_ceiling_accel_bound.rs rather
+                // than being folded in here.)
                 prop_assert_eq!(
                     clamped.signum(), v.signum(),
                     "ClampLinear must preserve direction: v={}, clamped={}", v, clamped
                 );
-                prop_assert_eq!(
-                    clamped.abs(), contract.max_speed_mps,
-                    "ClampLinear must clamp to exactly max_speed: got {}", clamped.abs()
+                // #1243 RESTATEMENT. This previously asserted
+                // `clamped.abs() == max_speed` — "ClampLinear must clamp to
+                // exactly max_speed". That is now false: the accel bound runs
+                // on the over-ceiling path and is tighter here (30.0 + 2.5 x
+                // 1.0 = 32.5, below the 35.0 ceiling). The issue forecast this
+                // exact test as the casualty of the fix.
+                //
+                // The bound that survives is the one that was always the safety
+                // claim: the executed magnitude never EXCEEDS the ceiling.
+                prop_assert!(
+                    clamped.abs() <= contract.max_speed_mps + 1e-9,
+                    "ClampLinear must never exceed max_speed: got {}", clamped.abs()
+                );
+                // And it must satisfy the rate bound it is now subject to.
+                let implied = (clamped - cmd.current_velocity_mps).abs() / cmd.delta_time_s;
+                prop_assert!(
+                    implied <= contract.max_accel_mps2 + 1e-9,
+                    "implied {} m/s^2 against a {} limit", implied, contract.max_accel_mps2
                 );
             }
             other => { let _ = other; }
