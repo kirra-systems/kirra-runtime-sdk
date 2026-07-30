@@ -1524,6 +1524,21 @@ jobs:
           # "where is steering authority enforced?" -> real git grep -> evidence-
           # backed speech, and "sync to main" -> the LANDED RCL executor.
           python3 robot/assistant_integration_test.py
+          # Live-model tool-selection CONTRACT harness (pure; a MOCKED model):
+          # fail-closed parsing of a model reply, deterministic validation of the
+          # proposed selection against the REAL registry/ceiling/argument guards,
+          # per-case scoring, and the acceptance policy — including that a perfect
+          # model is only ever "ready_for_review" and that zero records is
+          # UNVERIFIED, never a pass. The live half runs at the bench
+          # (`rabbit_model_smoketest.py --assistant-contract`), not here.
+          python3 robot/assistant_contract_test.py
+          # ... and the 17 security invariants that hold whatever the model emits:
+          # no name outside the registry is admitted, the authority ceiling is read
+          # LIVE (a level-3/4 tool is refused), a mutating tool function is NEVER
+          # invoked by the harness (proven with a tripwire), the harness names no
+          # push/force/reset, model-supplied role/level/_runner fields change
+          # nothing, and injected text moves no policy field.
+          python3 robot/assistant_contract_security_test.py
           # World Model read projection (pure, no HTTP): TTL freshness incl. the
           # boundary + clock-skew, absent/stale → UNKNOWN (never a stale value),
           # the situation-report matcher's non-overlap, render SAYING unknown for

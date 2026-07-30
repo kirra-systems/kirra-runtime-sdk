@@ -52,3 +52,10 @@ occy_standards.sh
 # nothing). Large, regenerated per run, and never evidence on its own.
 mutants.out/
 mutants.out.old/
+
+# Assistant tool-selection contract reports (bench evidence generated on demand
+# by `rabbit_model_smoketest.py --assistant-contract --json-report`). The
+# repository tracks the CORPUS and the harness, never a measured run: a report
+# describes one model on one machine at one moment.
+robot/contract_reports/
+*.assistant-contract.json

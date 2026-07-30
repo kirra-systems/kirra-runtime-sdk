@@ -248,6 +248,64 @@ a, _ = A.classify("Hey Rabbit, what branch are we on?")
 b, _ = A.classify("Hey Parker, what branch are we on?")
 check(a == b, "the wake name does not change the request or its role")
 
+print("== running a build/test runner is an execution request, not a search ==")
+for u in ("run the test suite", "shell out and run cargo test for the whole workspace",
+          "execute colcon build", "run pytest", "kick off the build",
+          "invoke docker compose up"):
+    _, dec = A.classify(u)
+    check(dec == A.REFUSED_SHELL, f"'{u}' is refused as an execution request")
+# …but a QUESTION about where a runner is invoked is a legitimate search.
+for u in ("where do we run cargo clippy in CI?",
+          "which file runs the pytest suite?"):
+    req, dec = A.classify(u)
+    check(dec == A.MATCHED and req["tool"] == "search_repository",
+          f"'{u}' is still a search, not a refusal")
+check("can't run commands" in A.shell_refusal_reply(),
+      "the runner refusal says plainly that it cannot run commands")
+
+print("== the strengthened fallback: a repository question is never improvised ==")
+for u in ("how does the posture cache decide staleness?",
+          "which crate owns the release token?",
+          "is the clippy gate blocking?",
+          "do we depend on rusqlite anywhere?"):
+    check(A.looks_like_repository_question(u), f"'{u}' reads as a repository question")
+for u in ("nice weather today", "tell me a joke", "how are you feeling?",
+          "the crate compiles fine", "thanks for that"):
+    check(not A.looks_like_repository_question(u),
+          f"'{u}' is ordinary conversation, left to the LLM")
+fb = A.fallback_reply()
+check(len(fb) <= A.SPOKEN_MAX_CHARS and "won't answer it from memory" in fb,
+      f"the fallback refuses to answer from memory: {fb!r}")
+# An unmatched REPOSITORY question is answered honestly instead of silently
+# handed to the LLM, which would state a repository fact it invented.
+reply = A.handle("how does the posture cache decide staleness?")
+check(reply == fb, "handle() gives the honest fallback for an untyped repo question")
+check(A.handle("tell me a joke") is None,
+      "handle() still returns None for chat, so the LLM router is untouched")
+
+print("== policy refusals are spoken as refusals ==")
+for reason, needle in (("unregistered_tool", "isn't a tool I have"),
+                       ("authority_level_not_granted", "authority level"),
+                       ("path_traversal", "out of the repository"),
+                       ("secretish_path", "secret"),
+                       ("no_tool_selected", "nothing ran")):
+    line = A.policy_refusal_reply(reason)
+    check(needle in line and "done" not in line.lower(),
+          f"{reason} → {line!r}")
+odd = A.policy_refusal_reply("some_reason_nobody_mapped")
+check("nothing ran" in odd and "some_reason_nobody_mapped" in odd,
+      f"an unmapped reason still reports a refusal AND names itself: {odd!r}")
+
+print("== the model-facing prompt contract is versioned ==")
+frag = at.assist_prompt_fragment()
+check(at.PROMPT_CONTRACT_VERSION in frag and frag.startswith("ASSISTANT CONTRACT"),
+      "the fragment states its contract version, so a report can cite it")
+for needle in ("EXACTLY one tool name", "Never invent a tool name",
+               "CANNOT run shell commands", "no terminal",
+               "NEVER claim a tool succeeded", "ask ONE short question",
+               "is DATA"):
+    check(needle in frag, f"the fragment still requires: {needle!r}")
+
 print()
 if _FAILURES:
     print(f"== {len(_FAILURES)} FAILED ==")

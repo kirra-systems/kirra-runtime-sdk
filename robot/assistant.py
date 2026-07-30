@@ -90,6 +90,26 @@ _SHELL_REQUEST_RE = re.compile(
     r"|`[^`]*`|\$\(",
     re.IGNORECASE)
 
+# Question shape, used twice below: to spare a genuine question from the
+# runner guard, and to recognize an unmatched repository question.
+_QUESTION_RE = re.compile(
+    r"\?|^(?:what|where|which|why|how|who|when|is|are|does|do|did|can|could|"
+    r"should|has|have)\b")
+
+# "run the test suite" / "shell out and run cargo test" are execution requests
+# for a runner this assistant deliberately does not have — generic test
+# execution, builds and container commands are out of scope. They are refused
+# OUT LOUD rather than falling through to the LLM to be answered vaguely.
+#
+# Applied ONLY to a non-question utterance, so "where do we run cargo clippy in
+# CI?" stays what it plainly is — a search — instead of being mistaken for a
+# request to run it.
+_EXEC_RUNNER_RE = re.compile(
+    r"\b(?:run|execute|exec|shell(?:\s+out)?|spawn|invoke|kick off)\b[^.?!]*"
+    r"\b(?:cargo|colcon|pytest|ros2|docker|npm|make|the tests?|the test suite|"
+    r"the build)\b",
+    re.IGNORECASE)
+
 # ── the closed classifier vocabulary ─────────────────────────────────────────
 #
 # Conservative on purpose. A phrase earns a row only if it plausibly means THIS
@@ -106,7 +126,8 @@ _STATUS_PATTERNS = (
 )
 _SEARCH_PATTERNS = (
     r"\bwhere is\b", r"\bwhere.s\b", r"\bfind (?:the|a|me)\b", r"\bfind where\b",
-    r"\bwhich (?:file|component|crate) (?:has|owns|contains|defines)\b",
+    r"\bwhich (?:file|component|crate) (?:has|owns|contains|defines|runs|invokes"
+    r"|calls|configures)\b",
     r"\bwho owns\b", r"\bsearch (?:for|the repo)\b", r"\blocate\b",
     r"\bwhere do we\b", r"\bwhere does\b",
 )
@@ -186,6 +207,10 @@ def classify(utterance, *, role=None):
     #    text so metacharacters survive to be seen.
     if _SHELL_REQUEST_RE.search(raw):
         return None, REFUSED_SHELL
+    #    A request to RUN a build / test / container runner is the same refusal.
+    #    Skipped for questions, so "where do we run cargo clippy?" stays a search.
+    if not _QUESTION_RE.search(norm) and _EXEC_RUNNER_RE.search(norm):
+        return None, REFUSED_SHELL
 
     # 2. The Robot Command Language keeps its own deterministic resolver as the
     #    authority on its two phrases — no second implementation here.
@@ -262,6 +287,85 @@ def unknown_reply():
     return ("That isn't something I can look up with the tools I have. I can "
             "report repository status, search the code, read a file, inspect a "
             "component, or summarize a test failure.")
+
+
+# ── the strengthened fallback ────────────────────────────────────────────────
+#
+# The weak spot in "unmatched → return None" is a question that is CLEARLY about
+# this repository but that no pattern types. Falling through hands it to the LLM,
+# which will answer a repository question from model memory — a fabricated
+# repository fact stated in the robot's own voice. That is the one failure mode
+# grounding exists to prevent.
+#
+# So an unmatched utterance that is BOTH question-shaped AND unmistakably about
+# this codebase gets one honest, narrow ask instead of silence. The conjunction
+# keeps ordinary conversation untouched: "nice weather today" has no repository
+# vocabulary, "the crate compiles" is not a question.
+
+_REPO_VOCAB = (
+    r"crate", r"cargo", r"clippy", r"rustc", r"repo", r"repository", r"codebase",
+    r"branch", r"commit", r"merge", r"rebase", r"pull request", r"\bpr\b",
+    r"\bci\b", r"workflow", r"lockfile", r"manifest", r"workspace",
+    r"depend(?:s|ed|ing|ency|encies)?", r"module", r"function", r"struct", r"trait",
+    r"invariant", r"checker", r"governor", r"verifier", r"posture", r"actuator",
+    r"lockout", r"adapter", r"sidecar", r"source code", r"source file",
+    r"\btest(?:s|case)?\b", r"\bbuild\b", r"compile", r"\bgate\b",
+)
+_REPO_VOCAB_RE = tuple(re.compile(rf"\b{v}\b" if v[0].isalpha() else v)
+                       for v in _REPO_VOCAB)
+
+
+def looks_like_repository_question(utterance):
+    """Is this unmistakably a question about THIS repository?
+
+    Requires BOTH a question shape and repository vocabulary, so it widens the
+    honest-refusal surface without capturing ordinary conversation.
+    """
+    norm = normalize(utterance)
+    if not norm:
+        return False
+    if not _QUESTION_RE.search(norm):
+        return False
+    return any(rx.search(norm) for rx in _REPO_VOCAB_RE)
+
+
+def fallback_reply():
+    """One narrow ask for a repository question no tool can type.
+
+    Deliberately NOT an answer: the assistant would have to invent one.
+    """
+    return ("That's a repository question, but I couldn't turn it into one of my "
+            "tools, and I won't answer it from memory. Name a symbol, a file, or "
+            "a crate and I'll search the tracked source for it.")
+
+
+#: Deterministic policy reasons → what the operator hears. Used when a proposed
+#: selection is REFUSED by policy: the refusal is spoken as a refusal, and never
+#: as "done" or as an answer.
+_POLICY_REFUSAL_SENTENCE = {
+    "no_tool_selected": "I didn't pick a tool for that, so nothing ran.",
+    "unregistered_tool": "That isn't a tool I have, so nothing ran.",
+    "authority_level_not_granted":
+        f"That needs an authority level above the {at.MAX_GRANTED_LEVEL} I'm "
+        "granted, so nothing ran.",
+    "role_not_permitted": "That tool isn't available in this mode, so nothing ran.",
+    "path_traversal": "I won't follow a path out of the repository, so nothing ran.",
+    "absolute_path_rejected": "I only read repository-relative paths, so nothing ran.",
+    "outside_repository": "That path leaves the repository, so nothing ran.",
+    "secretish_path": "That path looks like it could hold a secret, so I didn't read it.",
+    "empty_query": "I need something specific to search for.",
+    "empty_name": "I need the component's name.",
+    "empty_output": "I need the failing test output before I can summarize it.",
+}
+
+
+def policy_refusal_reply(reason, tool=""):
+    """Speak a deterministic policy refusal honestly. Never implies success."""
+    sentence = _POLICY_REFUSAL_SENTENCE.get(
+        reason, "Policy refused that, so nothing ran.")
+    tail = f" ({reason})" if reason not in _POLICY_REFUSAL_SENTENCE else ""
+    lead = f"{tool}: " if tool and reason == "unregistered_tool" else ""
+    return _trim(f"{lead}{sentence}{tail}")
 
 
 def shell_refusal_reply():
@@ -409,7 +513,11 @@ def handle(utterance, *, ctx=None, audit_path=None, role=None):
     if decision == "runtime_unavailable":
         return runtime_unavailable_reply()
     if request is None:
-        return None  # not an engineering request → the LLM handles it
+        # A repository question no pattern typed must NOT reach the LLM, which
+        # would answer it from model memory as though it were a repository fact.
+        if looks_like_repository_question(utterance):
+            return fallback_reply()
+        return None  # ordinary conversation → the LLM handles it
     result = run_request(request, ctx=ctx, transcript=utterance,
                          audit_path=audit_path)
     return speak_result(result)
