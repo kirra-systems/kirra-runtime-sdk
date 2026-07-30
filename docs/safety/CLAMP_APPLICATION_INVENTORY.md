@@ -104,6 +104,15 @@ Talisman work, so the bar is higher than a normal fix:
       The accel-bounded companion in the same file is NOT ignored and passes —
       the non-vacuity control proving the property is satisfiable and the oracle
       correct;
+- [x] **mutation gate on the talisman diff** — 19 in-diff mutants, 18 caught,
+      1 unviable, 0 missed. Four survived the pre-existing suite: three were
+      killed by new exact-boundary tests
+      (`crates/kirra-core/tests/rate_limit_epsilon_boundary.rs` — they had
+      survived because no test had ever landed ON the `± 1e-9` tolerance, not
+      because the branch was untested), and one is a TRUE equivalence
+      (`effective_max * signum` → `/`, where signum is only `±1.0` so both
+      spellings are bit-identical) excluded with its premises pinned by a test
+      rather than argued in prose. Recorded in `MUTATION_BASELINE.md` §8;
 - [ ] caller-level tests where practical — sites 1–3 above;
 - [x] Kani K1–K5 re-run, extended if the property is expressible there —
       **both halves done, and the re-run was not a formality.** Extended:

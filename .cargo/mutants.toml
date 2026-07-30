@@ -170,4 +170,28 @@ exclude_re = [
     # rotation terms, and each finiteness disjunct — IS killed by the
     # `enforced_reconstruction_tests` battery).
     "replace < with <= in reconstruct_enforced_poses",
+    # #1242 Priority-2 ceiling sign flip, `effective_max_speed *
+    # cmd.linear_velocity_mps.signum()` -> `/`. TRULY equivalent, and provably
+    # so rather than measure-zero: Priority 0 has already denied every
+    # non-finite field, so `signum` here returns only `±1.0`, and for every
+    # double `x`, `x * 1.0`, `x / 1.0`, `x * -1.0` and `x / -1.0` are exact
+    # IEEE results — the two spellings produce bit-identical values on every
+    # input, so no test can distinguish them.
+    #
+    # ANCHORED ON line:col, unlike every other entry above, and deliberately.
+    # `validate_vehicle_command` contains ELEVEN `*` sites and cargo-mutants
+    # gives them all the same description, so the usual function+operator
+    # pattern would exclude 22 mutants (both the `/` and `+` variants at all
+    # eleven) — including ones the suite kills today. Anchoring is the only way
+    # to be precise. It is brittle to line movement, and that is the safe
+    # direction: a shifted line makes this stop matching, the mutant reappears,
+    # and the gate reds until someone re-earns the exclusion. Silent
+    # over-exclusion is the failure mode this config already has a scar from.
+    #
+    # The `+` twin at the same site is NOT excluded — it changes the value and
+    # is killed. The equivalence PREMISE (signum's range on this path, and the
+    # identity itself) is pinned by
+    # `the_ceiling_sign_flip_is_multiplication_division_invariant` in
+    # `crates/kirra-core/tests/rate_limit_epsilon_boundary.rs`.
+    "kinematics_contract\\.rs:544:33: replace \\* with / in validate_vehicle_command",
 ]
