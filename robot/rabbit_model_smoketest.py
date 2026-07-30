@@ -34,15 +34,39 @@ verified when") as the vetted pin (`~/.kirra_rabbit_model.pin`, override
 pin and warns (Channel A) on a mismatch — so a "no version bump" stealth update
 (same tag, different weights) is caught instead of passing silently.
 
+SECOND MODE — `--assistant-contract` (the Kirra Engineering Assistant):
+  The same bench idea applied to the ASSISTANT's tool selection. It fires the
+  versioned corpus (`robot/testdata/assistant_tool_selection_cases.json`) at the
+  live model through the REAL model-facing contract
+  (`assistant_tools.assist_prompt_fragment()`), then hands every reply to
+  `assistant_contract` for FAIL-CLOSED parsing, deterministic validation and
+  scoring.
+
+  🔴 Gemma may propose a registered tool selection, but deterministic policy
+     validates the tool name, authority level, arguments, and execution.
+
+  Live-model accuracy is a measured QUALITY property. Execution safety remains
+  enforced independently by deterministic validation and authority policy — so
+  this mode measures the model without granting it anything. It never invokes a
+  mutating tool (level 2 stops at `would_execute`), so it can never synchronize
+  or push a branch, and it never writes the Rabbit voice pin.
+
 Usage:
   python3 robot/rabbit_model_smoketest.py                 # test KIRRA_RABBIT_MODEL + pin on pass
   python3 robot/rabbit_model_smoketest.py gemma4:8b       # test a CANDIDATE first
   python3 robot/rabbit_model_smoketest.py --note "hf re-pull 2026-07-16"  # provenance note in the pin
   python3 robot/rabbit_model_smoketest.py --no-pin        # test without recording a pin
   python3 robot/rabbit_model_smoketest.py --pin-check     # ONLY compare running digest vs pin (no LLM)
+  python3 robot/rabbit_model_smoketest.py --assistant-contract
+  python3 robot/rabbit_model_smoketest.py --assistant-contract --trials 3 --seed 7 \
+      --temperature 0.0 --json-report /tmp/contract.json --require-model
 Env: KIRRA_OLLAMA_URL (default http://localhost:11434), KIRRA_RABBIT_MODEL,
-     KIRRA_RABBIT_MODEL_PIN_FILE (default ~/.kirra_rabbit_model.pin).
-Exit 0 = the model honours the contract; 1 = it doesn't / digest changed.
+     KIRRA_RABBIT_MODEL_PIN_FILE (default ~/.kirra_rabbit_model.pin),
+     KIRRA_ASSIST_CASES (override the corpus path).
+Exit 0 = the model honours the contract; 1 = it doesn't / digest changed;
+     3 = `--assistant-contract` could not run because the model is unavailable
+         (the live contract is UNVERIFIED, not failed — `--require-model`
+         upgrades that to 1).
 """
 from __future__ import annotations
 
@@ -70,6 +94,11 @@ from rabbit_persona import (  # noqa: E402
 # The pure, host-tested persona/tone scorer — the "does it sound like Rabbit?"
 # half of the swap gate (rabbit_tone.py; stdlib-only, no LLM).
 from rabbit_tone import score_replies  # noqa: E402
+# The engineering-assistant tool-selection contract. Every judgement about the
+# model's proposal lives in `assistant_contract` (pure, CI-tested with a mocked
+# model); this file only supplies the live model.
+import assistant_contract as ac  # noqa: E402
+import assistant_tools as at  # noqa: E402
 
 # A fixed, self-contained telemetry block (the shape context_for builds). The
 # grounding cases below assert the model answers ONLY from this.
@@ -217,6 +246,145 @@ def _pin_check(model):
     return 0
 
 
+# ══ assistant tool-selection contract (mode 2) ═══════════════════════════════
+
+#: Declared sampling for the contract measurement. The assistant selection is a
+#: classification, so it is measured at temperature 0 with a fixed seed —
+#: reproducible by default. (The Rabbit ROUTER runs at 0.1; that is a different
+#: contract, measured by mode 1 above.)
+CONTRACT_TEMPERATURE = 0.0
+CONTRACT_SEED = 7
+
+#: Exit code for "the harness ran, the model did not" — distinct from a failure.
+EXIT_UNVERIFIED = 3
+
+
+def _probe_model(model):
+    """`(available, digest, why)`. Never exits — the contract mode REPORTS."""
+    try:
+        r = requests.get(f"{OLLAMA}/api/tags", timeout=5.0)
+        models = r.json().get("models", [])
+    except Exception as e:  # noqa: BLE001
+        return False, "", f"cannot reach Ollama at {OLLAMA} ({e})"
+    match = _match_model(models, model)
+    if match is None:
+        have = ", ".join(m.get("name", "") for m in models) or "none"
+        return False, "", f"model {model!r} is not pulled (have: {have})"
+    return True, match.get("digest") or "", ""
+
+
+def assist_chat(model, utterance, *, seed, temperature, show_raw=False):
+    """One assistant-contract turn through the REAL model-facing fragment.
+
+    The system prompt is `assist_prompt_fragment()` verbatim — measuring any
+    other text would be measuring a fiction. Returns the RAW content, or None.
+    """
+    messages = [
+        {"role": "system", "content": at.assist_prompt_fragment()},
+        {"role": "user", "content": f"Operator says: {utterance}"},
+    ]
+    options = {"temperature": float(temperature)}
+    if seed is not None:
+        options["seed"] = int(seed)
+    try:
+        r = requests.post(f"{OLLAMA}/api/chat", timeout=90.0,
+                          json={"model": model, "stream": False, "messages": messages,
+                                "keep_alive": KEEP_ALIVE, "options": options})
+        if r.status_code != 200:
+            return None
+        raw = (r.json().get("message", {}).get("content") or "").strip()
+    except Exception as e:  # noqa: BLE001
+        print(f"    (assist chat error: {e})", file=sys.stderr)
+        return None
+    if show_raw:
+        print(f"    · raw: {raw[:300]!r}", file=sys.stderr)
+    return raw
+
+
+def run_assistant_contract(model, *, trials, seed, temperature, json_report,
+                           require_model, cases_path, show_raw=False):
+    """Mode 2. Returns the process exit code.
+
+    The deterministic pass ALWAYS runs (no model needed), so the suite produces
+    evidence even at a bench with no Ollama. The live pass runs only if the real
+    model is actually there — and if it isn't, the report says UNVERIFIED rather
+    than implying a result nobody measured.
+    """
+    corpus = ac.load_cases(cases_path)
+    cases = corpus["cases"]
+    print(f"Kirra Engineering Assistant tool-selection contract — model={model!r} @ {OLLAMA}")
+    print(f"corpus: {len(cases)} cases, v{corpus['version']} "
+          f"(prompt contract {corpus['prompt_contract_version']}; "
+          f"code ships {at.PROMPT_CONTRACT_VERSION})")
+    if not ac.corpus_contract_matches(corpus):
+        print("WARNING: the corpus was authored against a DIFFERENT prompt "
+              "contract version — measured accuracy may not describe the "
+              "shipping prompt.", file=sys.stderr)
+
+    # Read-only context, resolved from git — never from model output.
+    ctx = at.ToolContext()
+    deterministic = ac.run_deterministic_pass(cases, ctx=ctx)
+
+    available, digest, why = _probe_model(model)
+    records = []
+    if available:
+        def ask(utterance, trial):
+            return assist_chat(model, utterance,
+                               seed=(None if seed is None else seed + trial),
+                               temperature=temperature, show_raw=show_raw)
+
+        print(f"running digest: {digest or 'unavailable'}")
+        print(f"asking the live model {len(cases)} × {trials} …\n")
+        records = ac.run_live_pass(cases, ask, trials=trials, ctx=ctx)
+    else:
+        print(f"\nLIVE MODEL UNAVAILABLE: {why}", file=sys.stderr)
+        print("The harness is implemented and the deterministic pass ran; the "
+              "LIVE CONTRACT IS UNVERIFIED. No accuracy number is reported, "
+              "because none was measured.", file=sys.stderr)
+
+    report = ac.contract_report(
+        corpus=corpus, records=records, deterministic=deterministic, model=model,
+        model_digest=digest, trials=trials, seed=seed, temperature=temperature,
+        live_model_available=available)
+    print()
+    for line in ac.render_report(report):
+        print(line)
+    if json_report:
+        print(f"\nreport written: {ac.write_report(report, json_report)}")
+
+    if not available:
+        return 1 if require_model else EXIT_UNVERIFIED
+    if report["acceptance"]["passed"]:
+        print("\nThe model meets the PROPOSED acceptance policy. That makes the "
+              "numbers ready for REVIEW — it does not enable any model-proposal "
+              "path, which stays a separate, deliberate change.")
+        return 0
+    print("\nThe model does NOT meet the proposed acceptance policy. Nothing "
+          "unsafe follows from that: every proposal above was validated by "
+          "deterministic policy before it could mean anything.", file=sys.stderr)
+    return 1
+
+
+def _take_int(argv, flag, default):
+    raw, argv = _take_opt(argv, flag)
+    if raw is None:
+        return default, argv
+    try:
+        return int(raw), argv
+    except (TypeError, ValueError):
+        sys.exit(f"{flag}: expected an integer, got {raw!r}")
+
+
+def _take_float(argv, flag, default):
+    raw, argv = _take_opt(argv, flag)
+    if raw is None:
+        return default, argv
+    try:
+        return float(raw), argv
+    except (TypeError, ValueError):
+        sys.exit(f"{flag}: expected a number, got {raw!r}")
+
+
 def _take_opt(argv, flag):
     """Pull `--flag VALUE` out of argv; return (value|None, remaining argv)."""
     if flag in argv:
@@ -229,6 +397,11 @@ def _take_opt(argv, flag):
 def main():
     argv = sys.argv[1:]
     note, argv = _take_opt(argv, "--note")
+    trials, argv = _take_int(argv, "--trials", 1)
+    seed, argv = _take_int(argv, "--seed", CONTRACT_SEED)
+    temperature, argv = _take_float(argv, "--temperature", CONTRACT_TEMPERATURE)
+    json_report, argv = _take_opt(argv, "--json-report")
+    cases_path, argv = _take_opt(argv, "--cases")
     no_pin = "--no-pin" in argv
     show_raw = "--show-raw" in argv    # print each model reply verbatim (diagnostic)
     positional = [a for a in argv if not a.startswith("-")]
@@ -236,6 +409,15 @@ def main():
 
     if "--pin-check" in argv:
         return _pin_check(model)
+
+    if "--assistant-contract" in argv:
+        if trials < 1:
+            sys.exit("--trials must be at least 1")
+        return run_assistant_contract(
+            model, trials=trials, seed=seed, temperature=temperature,
+            json_report=json_report, require_model=("--require-model" in argv),
+            cases_path=cases_path or os.environ.get("KIRRA_ASSIST_CASES") or None,
+            show_raw=show_raw)
 
     print(f"Rabbit model doer-contract smoketest — model={model!r} @ {OLLAMA}")
     print("(doer-quality only; the checker/fence are model-agnostic and unaffected)")
