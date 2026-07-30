@@ -1,3 +1,12 @@
+# shellcheck shell=bash
+#
+# The directive above is how a SOURCED FRAGMENT declares its dialect. It is not a
+# shebang and does not make this file executable: the file has no shebang, is not
+# +x, and is only ever `source`d (see the two consumers below). Without it
+# ShellCheck cannot know the target shell and reports SC2148 at error level —
+# adding a shebang instead would assert this file can be run on its own, which is
+# false, and would invite someone to run it.
+#
 # judge_build_flags.sh — the SINGLE SOURCE for the QNX governor-judge codegen
 # flags (#790 F6). This file is `source`d by BOTH judge-build recipes:
 #   - scripts/build_qnx_judge_artifact.sh — the shipped-artifact cargo/build-std recipe
@@ -11,6 +20,8 @@
 # Treat it as a safety change — re-run the FDIT/RTM matrix (QNX_MAPPING.md).
 #
 # Not executable and has no shebang on purpose: it only assigns shell variables.
+# Its dialect is declared by the `# shellcheck shell=bash` directive at the top —
+# the array assignment below is bash, not POSIX sh.
 
 # Canonical scalar values (the ONE place these numbers live).
 KIRRA_JUDGE_EDITION=2021

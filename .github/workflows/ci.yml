@@ -1573,11 +1573,46 @@ jobs:
             -A clippy::module_name_repetitions \
             -A clippy::must_use_candidate \
             2>&1 | tee clippy-report.txt
+      - name: ShellCheck gate self-test (the gate must be able to go red)
+        # Proves the step below actually GATES, rather than asserting it. Drives
+        # the same pipeline shape over a deliberately-bad throwaway script and
+        # requires a non-zero status; also requires a clean script to pass, an
+        # empty file list to FAIL rather than pass vacuously, and the report to
+        # still arrive intact through `tee`. Nothing in the tracked tree is
+        # modified. See scripts/test-shellcheck-gate.sh.
+        run: bash scripts/test-shellcheck-gate.sh
       - name: ShellCheck (shellcheck is preinstalled on the runner)
         # -S error: gate on real bugs, not style. The whole tracked script set is
         # error-clean today; a new error-level finding fails CI.
+        #
+        # GATING — three defects fixed together, because the first hid the others:
+        #
+        # 1. `set -o pipefail`. Without it the `| tee` pipeline returns TEE's
+        #    status and shellcheck's non-zero exit is discarded, so this step
+        #    could never go red. Measured on the pre-fix form: exit 0 on a tree
+        #    that had a real error-level finding. Same defect the #687 `cargo
+        #    audit` fix addressed; it was not applied here at the time.
+        # 2. One `shellcheck` invocation over the whole file list (`mapfile`, not
+        #    `xargs`), so the pipeline's status IS shellcheck's own — `xargs`
+        #    reports a generic 123 for "some child failed", which is red but
+        #    tells you nothing. An empty list is a hard failure, not a vacuous
+        #    pass: no tracked scripts means the glob or the checkout is wrong.
+        # 3. `LC_ALL=C.UTF-8`. shellcheck emits UTF-8; under a C/POSIX locale it
+        #    fails to write non-ASCII source lines to the pipe, TRUNCATING the
+        #    report and exiting 2. Observed in a `LANG=` environment. Pinning the
+        #    locale keeps the artifact readable wherever this runs.
+        #
+        # The report still goes through `tee` for the `if: always()` upload below.
         run: |
-          git ls-files -z -- '*.sh' | xargs -0 -r shellcheck -S error 2>&1 | tee shellcheck-report.txt
+          set -o pipefail
+          export LC_ALL=C.UTF-8
+          mapfile -d '' -t sh_files < <(git ls-files -z -- '*.sh')
+          if [ "${#sh_files[@]}" -eq 0 ]; then
+            echo "no tracked *.sh found — refusing to pass vacuously" >&2
+            exit 1
+          fi
+          echo "shellcheck -S error over ${#sh_files[@]} tracked script(s)"
+          shellcheck -S error "${sh_files[@]}" 2>&1 | tee shellcheck-report.txt
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: Lint the Helm chart
