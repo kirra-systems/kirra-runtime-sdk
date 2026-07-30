@@ -111,6 +111,36 @@ not enforce.
 Both live commits carry `gpgsig` headers. Both report `%G?` = `N`. Both facts are
 correct and not in tension.
 
+## Why verification cannot succeed in this container
+
+`ssh-keygen` is not installed. Git verifies SSH signatures by shelling out to
+it, and here that call is routed through a shim that reports:
+
+```
+Error: unsupported code-sign operation: currently only SSH-style signing
+(-Y sign) is supported
+```
+
+**Signing works; verifying does not.** So `%G?` can never be `G` in this
+environment — with an allowed-signers file configured it returns `B`, without
+one it returns `N`. Neither says anything about the commit. Any check that
+blocks on verification status is unsatisfiable here by construction, which is
+why the stop hook now reports it and does not block.
+
+## The stop hook, as patched
+
+`/root/.claude/stop-hook-git-check.sh` (harness config, not repository code;
+backup at `.bak`) now separates three states:
+
+| state | detection | blocks? |
+|---|---|---|
+| signature absent | no `gpgsig` header in the commit object | **yes** — actionable |
+| wrong committer email | `%ce` mismatch | **yes** — actionable |
+| signed, not locally verifiable | `gpgsig` present, `%G?` ≠ `G` | **no** — one informational line |
+
+The informational line names the *measured* cause — unset allowed-signers file,
+or missing `ssh-keygen` — rather than asserting one.
+
 ## Open policy question — needs a human owner
 
 `gpg.ssh.allowedSignersFile` is unset, so **no commit in this environment can be
