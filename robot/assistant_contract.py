@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 from collections import namedtuple
 from datetime import datetime, timezone
@@ -162,6 +163,43 @@ def load_cases(path=None):
 def corpus_contract_matches(doc):
     """Does the corpus target the prompt contract the code currently ships?"""
     return doc.get("prompt_contract_version") == at.PROMPT_CONTRACT_VERSION
+
+
+# ══ prompt identity ══════════════════════════════════════════════════════════
+
+def production_prompt():
+    """THE model-facing prompt, for both production and measurement.
+
+    One accessor, so a live run and a shipped assistant cannot drift onto
+    different text. `rabbit_model_smoketest.py --assistant-contract` sends
+    exactly this and nothing else; §14.11's "measure one prompt, ship another"
+    failure mode is prevented structurally rather than by discipline.
+
+    `assistant_contract_test.py` asserts this is byte-identical to
+    `assistant_tools.assist_prompt_fragment()` and that the harness does not
+    build a system prompt of its own.
+    """
+    return at.assist_prompt_fragment()
+
+
+def prompt_identity():
+    """The provenance triple pinned into every report."""
+    return {
+        "prompt_contract_version": at.PROMPT_CONTRACT_VERSION,
+        "prompt_digest_sha256": at.prompt_digest(),
+        "prompt_chars": len(production_prompt()),
+    }
+
+
+def code_commit():
+    """Short HEAD sha, or '' when it cannot be determined. Never raises."""
+    try:
+        p = subprocess.run(["git", "rev-parse", "--short", "HEAD"],  # noqa: S603
+                           shell=False, capture_output=True, text=True, timeout=10,
+                           cwd=str(Path(__file__).resolve().parent))
+        return p.stdout.strip() if p.returncode == 0 else ""
+    except Exception:  # noqa: BLE001 — provenance is best-effort, never fatal
+        return ""
 
 
 # ══ the model boundary: fail-closed parsing ══════════════════════════════════
@@ -326,20 +364,63 @@ def score_case(case, sel, verdict):
     return WRONG_TOOL, True
 
 
-def record_for(case, sel, verdict, *, source, trial=0):
-    """One flat, JSON-native row per (case, trial). The report's unit of evidence."""
+#: How much of a raw model reply a report keeps. Enough to diagnose a bad
+#: selection; bounded so one pathological reply cannot bloat the artifact.
+MAX_RECORDED_RAW_CHARS = 2000
+
+#: The five dispositions the task-level report speaks in, derived from `outcome`
+#: so the two can never disagree.
+CLASS_CORRECT_SELECTION = "correct_selection"
+CLASS_UNSAFE_ADMISSION = "unsafe_admission"
+CLASS_SAFE_CORRECTION = "safe_correction"      # proposed wrongly; policy caught it
+CLASS_CLARIFICATION_SUCCESS = "clarification_success"
+CLASS_PARSE_FAILURE = "parse_failure"
+CLASS_OTHER = "other"                          # missed / declined / no response
+
+_OUTCOME_CLASS = {
+    OK_TOOL: CLASS_CORRECT_SELECTION,
+    OK_REFUSED: CLASS_CORRECT_SELECTION,
+    OK_NO_TOOL: CLASS_CORRECT_SELECTION,
+    OK_CLARIFIED: CLASS_CLARIFICATION_SUCCESS,
+    UNSAFE_ADMISSION: CLASS_UNSAFE_ADMISSION,
+    WRONG_TOOL: CLASS_SAFE_CORRECTION,
+    PARSE_FAILURE: CLASS_PARSE_FAILURE,
+    MISSED_SELECTION: CLASS_OTHER,
+    NO_CLARIFICATION: CLASS_OTHER,
+    NO_RESPONSE: CLASS_OTHER,
+}
+
+
+def outcome_class(outcome):
+    """`outcome` → one of the five report dispositions (or `other`)."""
+    return _OUTCOME_CLASS.get(outcome, CLASS_OTHER)
+
+
+def record_for(case, sel, verdict, *, source, trial=0, raw=None):
+    """One flat, JSON-native row per (case, trial). The report's unit of evidence.
+
+    Carries the UTTERANCE, the RAW model reply and the PROPOSED ARGUMENTS, because
+    the first live Orin run was undiagnosable without them: aggregate metrics told
+    us `search_repository` scored 1/5 but not which four utterances failed or what
+    the model actually said. Everything here is the case text or the model's own
+    output — no environment, no tokens, no repository content beyond what the
+    model itself quoted.
+    """
     exp = case["expect"]
     return {
         "case_id": case["id"],
         "category": case["category"],
+        "utterance": case["utterance"],
         "expect_kind": exp["kind"],
         "expected_tool": exp.get("tool"),
         "source": source,
         "trial": trial,
+        "raw_response": None if raw is None else str(raw)[:MAX_RECORDED_RAW_CHARS],
         "proposed_tool": None if sel is None else sel.tool,
+        "proposed_arguments": {} if sel is None else dict(sel.arguments),
         "parsed": bool(sel is not None and sel.parsed),
         "parse_note": "" if sel is None else sel.note,
-        "say": "" if sel is None else sel.say[:200],
+        "say": "" if sel is None else sel.say[:400],
         "admitted": bool(verdict.admitted),
         "mutating": is_mutating(verdict),
         "executed": bool(verdict.executed),
@@ -419,8 +500,9 @@ def run_live_pass(cases, ask, *, trials=1, ctx=None, role=None):
                 sel = parse_selection(raw)
                 verdict = validate_selection(sel, role=role, ctx=ctx)
             outcome, safe = score_case(c, sel, verdict)
-            row = record_for(c, sel, verdict, source=LIVE_MODEL, trial=t)
+            row = record_for(c, sel, verdict, source=LIVE_MODEL, trial=t, raw=raw)
             row["outcome"] = outcome
+            row["outcome_class"] = outcome_class(outcome)
             row["safe"] = safe
             records.append(row)
     return records
@@ -606,7 +688,8 @@ def contract_report(*, corpus, records, deterministic=None, model="",
     return {
         "kind": "assistant_tool_selection_contract",
         "harness_version": HARNESS_VERSION,
-        "prompt_contract_version": at.PROMPT_CONTRACT_VERSION,
+        **prompt_identity(),
+        "code_commit": code_commit(),
         "corpus_version": corpus.get("version"),
         "corpus_prompt_contract_version": corpus.get("prompt_contract_version"),
         "corpus_contract_matches": corpus_contract_matches(corpus),

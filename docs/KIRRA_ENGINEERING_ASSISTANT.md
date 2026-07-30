@@ -380,6 +380,10 @@ changes; vehicle control or motion. Retrieved text may never alter policy.
 > **Live-model accuracy is a measured quality property. Execution safety remains
 > enforced independently by deterministic validation and authority policy.**
 
+🔴 **The assistant is NOT ready.** The one live measurement taken (§14.9) returned
+`readiness: NOT_READY`. It must not be described as ready until the acceptance
+policy in §14.7 passes on the Orin.
+
 Those two sentences are the whole design. The first says where the model's
 authority ends. The second says what a number from this suite does and does not
 buy you: it tells you whether the model is *useful*, never whether the system is
@@ -529,25 +533,124 @@ upgrades that to `1`). The deterministic pass runs either way, so the suite stil
 produces evidence at a bench with no model. This mode never writes the Rabbit
 voice pin — that pin certifies the *router* contract (§ mode 1), not this one.
 
+**Rerunning on the Orin** (the only place the live half can be measured):
+
+```
+cd ~/kirra-runtime-sdk && git pull
+python3 robot/rabbit_model_smoketest.py --assistant-contract \
+    --trials 3 --seed 7 --temperature 0.0 \
+    --json-report ~/contract-$(date +%Y%m%d-%H%M).json --require-model
+```
+
+`--require-model` turns "model unavailable" into a hard failure instead of exit
+3, which is what you want on the bench. `--trials 3` exposes instability that a
+single trial hides.
+
+**The evidence artifact.** Every report now carries, per model-mediated case:
+`case_id`, `utterance`, `category`, `expect_kind`, `expected_tool`,
+`raw_response`, `proposed_tool`, `proposed_arguments`, `parsed`, `parse_note`,
+`say`, `admitted`, `mutating`, `executed`, `reason`, `outcome`, `outcome_class`
+(one of correct_selection / unsafe_admission / safe_correction /
+clarification_success / parse_failure), `safe` and `trial`. The header carries
+`model`, `model_digest`, `trials`, `seed`, `temperature`, `corpus_version`,
+`prompt_contract_version`, `prompt_digest_sha256`, `prompt_chars` and
+`code_commit`.
+
+That list exists because the first live run (§14.9) had none of the first three
+and was therefore undiagnosable. Raw replies are truncated at
+`MAX_RECORDED_RAW_CHARS`; no environment, token or unrestricted repository
+content is written.
+
 Reports are bench evidence, not repository state: `robot/contract_reports/` and
 `*.assistant-contract.json` are git-ignored. The **corpus** and the **harness**
 are tracked; a measured run describes one model on one machine at one moment.
 
-### 14.9 Verification status of this work
+### 14.9 First live measurement — Orin, 2026-07-30
 
-- Harness, corpus, scoring, acceptance policy, 17 security invariants, and the
-  production hardening below: **implemented and passing** (`assistant_contract_test.py`
-  33 checks, `assistant_contract_security_test.py` 17 invariants, plus every
-  pre-existing suite still green).
-- Deterministic pass over the corpus: **measured**, 49/55 (§14.6).
-- **The live contract is UNVERIFIED.** Ollama is not running in the environment
-  this was authored in and `gemma3:4b` is not pulled there
+The harness ran on the Orin against the resident model. **Live verification
+SUCCEEDED; readiness FAILED.** Those are different things, and the distinction is
+the whole point of the design.
+
+| | |
+|---|---|
+| model / digest | `gemma3:4b` @ `a2af6cc3eb7fa8be8504abaf9b04e88f17a119ec3f04a3addf55f92841195f5a` |
+| endpoint | `http://localhost:11434` |
+| corpus / prompt / harness | v1 · `assist-1` · `contract-1` |
+| trials · seed · temperature | 1 · 7 · 0.0 |
+| live contract verified | **YES** |
+| readiness | **NOT_READY** |
+
+```
+positive selection accuracy : 0.72   (18/25)
+safe outcome rate           : 0.9636
+unsafe proposal rate        : 0.2727
+parse failure rate          : 0.0
+clarification quality       : 0.0    (0/3)
+trial stability             : 1.0
+
+per-tool   inspect_component 1.0 (4/4)   read_repository_source 1.0 (3/3)
+           repository_status 1.0 (4/4)   summarize_test_failure 1.0 (3/3)
+           sync_to_main   0.6667 (2/3)   publish_my_work     0.3333 (1/3)
+           search_repository  0.2 (1/5)
+
+hard gates unsafe_admissions 2 · shell 0 · unregistered 0 · over_authority 0
+           path_escape 0 · injection 0 · mutating_executions 0
+```
+
+**The deterministic architecture held completely.** No shell proposal, no
+unregistered tool, no over-authority proposal, no path escape and no
+prompt-injection proposal was admitted; no mutating tool executed; every reply
+parsed. The model was mediocre at *choosing*; it was never able to *act*.
+
+#### What could and could not be diagnosed
+
+The run reported aggregates only. Per-tool counts make the **shape** of the
+failure exact — `search_repository` 1/5, `publish_my_work` 1/3, `sync_to_main`
+2/3, clarification 0/3 — but **which** utterances failed, and what the model
+actually replied, are **not recoverable**: the report carried no `utterance`, no
+`raw_response` and no `proposed_arguments`. That gap is fixed (§14.12); it is not
+reconstructed, because reconstructing it would mean inventing model output.
+
+Two things *are* derivable and are stated as such:
+
+- The 2 unsafe admissions did **not** come from the shell, path-attack or
+  injection categories — those gates read 0. They therefore came from a case
+  where a *registered, in-ceiling* tool was admitted where the corpus says none
+  should be: an ambiguity case, a `no_tool` case, an L3/L4 or unregistered-intent
+  refusal case answered with a real tool, or a positive case answered with the
+  wrong *mutating* tool. `clarification_quality 0.0` with two mutating tools in
+  play makes "silently picked one of sync/publish" the leading hypothesis.
+- `unsafe_proposal_rate 0.2727` over 55 records = 15 proposals policy had to
+  refuse or correct, of which 13 were safe corrections and 2 were admissions.
+
+**No specific failing case is named here, because the evidence to name one does
+not exist.** The next run will name every one of them.
+
+### 14.10 Verification status of this work
+
+- Harness, corpus, scoring, acceptance policy, 20 security invariants, and the
+  production hardening below: **implemented and passing**
+  (`assistant_contract_test.py` 44 checks including the §14.12 prompt-identity
+  and evidence-completeness ones, `assistant_contract_security_test.py` 20
+  invariants, plus every pre-existing suite still green).
+- Deterministic pass over the corpus: **measured**, now 51/61 after the assist-2
+  corpus additions (was 49/55 at `assist-1`; §14.6).
+
+  🔴 **The deterministic count is NOT a proxy for live-model accuracy.** It
+  measures the shipping classifier with no model in the loop. The live model
+  scored 0.72 positive selection accuracy on the same corpus (§14.9) — a
+  different number, of a different thing. Quoting 51/61 as "the assistant's
+  accuracy" would be exactly the confusion this document exists to prevent.
+- **The live contract WAS verified once, on the Orin** — see §14.9: verified
+  YES, readiness NOT_READY. It remains UNVERIFIED for `assist-2`, which has not
+  been measured on any live model. Ollama is not running in the environment this
+  was authored in and `gemma3:4b` is not pulled there
   (`/api/tags` → connection refused on `127.0.0.1:11434`). No accuracy number
   for the real model is claimed anywhere, and the harness prints
   `live contract verified: NO` rather than implying one. Run §14.8 on the Orin,
   where the model is resident, to obtain it.
 
-### 14.10 What this work changed in production behaviour
+### 14.11 What this work changed in production behaviour
 
 All four are hardening, and all four are inside the existing opt-in
 (`KIRRA_ASSIST_ENABLED`, default off → the router is still byte-identical):
@@ -574,7 +677,47 @@ The versioned prompt contract itself (`assistant_tools.PROMPT_CONTRACT_VERSION`,
 `assist-1`) is emitted in the fragment and recorded in every report, so a prompt
 edit that invalidates a measured number is visible instead of silent.
 
-### 14.11 Agreed next sequence — do NOT collapse these steps
+### 14.12 One prompt owner, one schema, one parser (assist-2)
+
+The `assist-1` measurement above is what §14.13 step 3 is for: deciding whether
+the misses are a prompt problem or a deterministic-vocabulary problem. They read
+as a prompt problem — `assist-1` *named* the tools but never taught the
+boundaries between them, and its ambiguity rule was one clause among six.
+
+**Production prompt owner: `assistant_tools.assist_prompt_fragment()`.** It is
+the only model-facing text in the repository that offers the tool vocabulary, and
+its tool list is generated from `REGISTRY`, so a tool cannot be offered without
+being registered.
+
+| | |
+|---|---|
+| owner | `assistant_tools.assist_prompt_fragment()` |
+| accessor | `assistant_contract.production_prompt()` — returns exactly that string |
+| schema | `{"say", "tool", "arguments"}` — **unchanged** by assist-2 |
+| parser | `assistant_contract.parse_selection` (fail-closed) |
+| validator | `assistant_contract.validate_selection` → `assistant_tools.run_tool` |
+| identity | `assistant_tools.prompt_digest()`, SHA-256, pinned in every report |
+
+`assist-2` adds per-tool *use / do not use* guidance and promotes clarification
+to a first-class reply shape — **using the existing schema**: `tool: null` plus
+one question in `say`. No second schema was introduced, and none may be.
+
+**On not wiring this into the live router.** `assist_prompt_fragment()` is still
+not appended to `STAGE2_SYSTEM`. That is deliberate and it is *not* a gap in the
+single-owner property: there is exactly one tool-selection prompt, and the
+harness measures it. Appending it to the Channel-B router would install a
+**second output schema** (`{say, directive}` alongside `{say, tool, arguments}`)
+in front of a 4B model — a protocol change with its own regression surface, which
+is §14.13 step 4 and needs voice regression testing of its own. Production tool
+selection remains deterministic (`assistant.classify`); the model proposes
+nothing in production today.
+
+The identity is machine-checked, not asserted: `assistant_contract_test.py`
+checks 30-35 fail if `production_prompt()` ever diverges from the owner, if the
+harness reaches past the accessor, or if any system prompt is inlined in the
+harness.
+
+### 14.13 Agreed next sequence — do NOT collapse these steps
 
 Production prompt integration and default-on enablement are **out of scope** of
 the harness, and deliberately so. `assist_prompt_fragment()` is not wired into
@@ -598,3 +741,9 @@ The order matters, because each step's evidence is the next step's input:
    is even discussed.
 
 Skipping to step 4 would mean measuring one prompt and shipping another.
+
+**A prompt change must be INSTALLED before it is measured.** Edit
+`assist_prompt_fragment()` — the owner — and the harness picks it up through
+`production_prompt()` automatically; the report's `prompt_digest_sha256` then
+identifies exactly the text that produced the numbers. A measurement whose digest
+does not match the shipped prompt describes nothing.

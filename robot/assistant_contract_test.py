@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Host tests for `assistant_contract.py` — the tool-selection contract harness.
 
-25 numbered checks over a MOCKED model, so the scoring rules CI gates are the
-same rules the bench applies to the live one. No Ollama, no network, no audio.
+Numbered checks over a MOCKED model, so the scoring rules CI gates are the same
+rules the bench applies to the live one. No Ollama, no network, no audio.
+
+Checks 30-35 pin the §14.11 property that the harness measures the PRODUCTION
+prompt; 36-44 pin the per-case evidence the first live Orin run lacked.
 
 The mock is a plain `utterance -> raw reply` function handed to
 `assistant_contract.run_live_pass`, which is the identical seam the live
@@ -13,6 +16,7 @@ Runs standalone (`python3 robot/assistant_contract_test.py`); also under pytest.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -256,6 +260,91 @@ check(unrun["live_contract_verified"] is False
       and any("UNVERIFIED" in ln or "did not run" in ln
               for ln in ac.render_report(unrun)),
       "29. an unrun report says UNVERIFIED out loud and reports no accuracy")
+
+# ── 30-35: ONE prompt owner, and the harness measures it ─────────────────────
+print("== prompt identity (§14.11: measure the prompt you ship) ==")
+
+check(ac.production_prompt() == at.assist_prompt_fragment(),
+      "30. production_prompt() is byte-identical to the registry's fragment")
+
+_smoke = (Path(__file__).resolve().parent / "rabbit_model_smoketest.py").read_text(
+    encoding="utf-8")
+_sys_prompts = re.findall(r'"role":\s*"system",\s*"content":\s*([^\n}]+)', _smoke)
+_assist_sys = [s for s in _sys_prompts if "production_prompt" in s]
+check(len(_assist_sys) == 1,
+      f"31. the harness sends exactly ONE assistant system prompt, and it is the "
+      f"shared accessor ({_sys_prompts})")
+check("assist_prompt_fragment" not in _smoke,
+      "32. the harness does not reach past the accessor to rebuild the prompt")
+# Every system prompt must be a NAMED reference, never an inline literal. Mode 1
+# legitimately sends a different contract (STAGE2_SYSTEM, the Rabbit router), so
+# the rule is not "one system prompt" — it is "no prompt is written here".
+_inline = [s for s in _sys_prompts if '"' in s or "'" in s]
+check(_inline == [],
+      f"33. every system prompt is a named reference, never inlined here ({_inline})")
+
+_ident = ac.prompt_identity()
+check(_ident["prompt_contract_version"] == at.PROMPT_CONTRACT_VERSION
+      and len(_ident["prompt_digest_sha256"]) == 64
+      and _ident["prompt_chars"] == len(at.assist_prompt_fragment()),
+      "34. prompt_identity pins version + sha256 + length "
+      f"({_ident['prompt_digest_sha256'][:12]}…)")
+
+_before = at.prompt_digest()
+_saved_reg = at.REGISTRY.pop("repository_status")
+try:
+    _after = at.prompt_digest()
+finally:
+    at.REGISTRY["repository_status"] = _saved_reg
+    at.REGISTRY = dict(sorted(at.REGISTRY.items(), key=lambda kv: kv[0]))
+check(_before != _after and at.prompt_digest() == _before,
+      "35. the digest tracks the real prompt — changing the offered tools moves "
+      "it, and restoring them moves it back")
+
+# ── 36-40: the report must make the NEXT Orin run diagnosable ────────────────
+print("== per-case evidence (the first live run was undiagnosable without it) ==")
+
+_recs = ac.run_live_pass(
+    [CASES["pos_search_steering"], CASES["amb_sync_and_publish"]],
+    lambda u, t: reply(say="Looking.", tool="repository_status",
+                       arguments={"unexpected": u}),
+    ctx=CTX)
+_r = _recs[0]
+for field in ("case_id", "utterance", "expect_kind", "expected_tool",
+              "raw_response", "proposed_tool", "proposed_arguments", "parsed",
+              "reason", "outcome", "outcome_class", "safe", "trial", "say"):
+    check(field in _r, f"36. the record carries `{field}`")
+check(_r["utterance"] == CASES["pos_search_steering"]["utterance"]
+      and "repository_status" in _r["raw_response"],
+      "37. the utterance and the RAW model reply are both recoverable")
+check(_r["proposed_arguments"] == {"unexpected": _r["utterance"]},
+      "38. the model's proposed ARGUMENTS are recorded, not just the name")
+
+check(ac.outcome_class(ac.OK_TOOL) == ac.CLASS_CORRECT_SELECTION
+      and ac.outcome_class(ac.UNSAFE_ADMISSION) == ac.CLASS_UNSAFE_ADMISSION
+      and ac.outcome_class(ac.WRONG_TOOL) == ac.CLASS_SAFE_CORRECTION
+      and ac.outcome_class(ac.OK_CLARIFIED) == ac.CLASS_CLARIFICATION_SUCCESS
+      and ac.outcome_class(ac.PARSE_FAILURE) == ac.CLASS_PARSE_FAILURE,
+      "39. every outcome maps to exactly one of the five report dispositions")
+check(all(r["outcome_class"] == ac.outcome_class(r["outcome"]) for r in _recs),
+      "40. outcome_class is DERIVED from outcome, so the two cannot disagree")
+
+_long = ac.run_live_pass([CASES["chat_joke"]],
+                         lambda u, t: "x" * 50_000, ctx=CTX)[0]
+check(len(_long["raw_response"]) <= ac.MAX_RECORDED_RAW_CHARS,
+      "41. a pathological reply is truncated, so one case cannot bloat a report")
+
+_rep = ac.contract_report(corpus=CORPUS, records=_recs, model="mock")
+for field in ("prompt_contract_version", "prompt_digest_sha256", "prompt_chars",
+              "code_commit", "corpus_version", "model", "trials", "seed",
+              "temperature"):
+    check(field in _rep, f"42. the report header carries `{field}`")
+check(_rep["prompt_digest_sha256"] == at.prompt_digest(),
+      "43. the report pins the digest of the prompt actually used")
+_blob = json.dumps(_rep)
+check("KIRRA_ADMIN_TOKEN" not in _blob and "KIRRA_WAKE" not in _blob
+      and "os.environ" not in _blob,
+      "44. no environment or token material reaches the report")
 
 print()
 if _FAILURES:
