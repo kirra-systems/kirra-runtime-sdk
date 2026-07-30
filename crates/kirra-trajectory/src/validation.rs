@@ -2899,6 +2899,152 @@ mod enforced_reconstruction_tests {
         );
     }
 
+    /// EXACT arithmetic of the clamped STRAIGHT branch (the removable
+    /// singularity at Δheading → 0). Deliberately uses a non-zero seed heading
+    /// and an arc length != 1, so a perturbed operator cannot coincide with the
+    /// correct answer the way it would at heading 0 or unit arc length.
+    #[test]
+    fn a_clamped_straight_segment_integrates_exactly() {
+        let h0 = 0.6_f64;
+        let (v, dt, l) = (3.0_f64, 0.4_f64, 2.0_f64);
+        let planner = vec![
+            pt(1.0, 2.0, h0, v, 0.0),
+            // Where the plan wanted to go; the clamp overrides it.
+            pt(9.0, 9.0, h0 + 0.5, v, dt),
+        ];
+        let out = reconstruct_enforced_poses(&planner, 0, v, &[seg(0.0, v, dt)], l).unwrap();
+        // Independently written oracle: zero steering ⇒ straight, arc = v·dt.
+        let arc = v * dt;
+        let (ex, ey) = (1.0 + arc * h0.cos(), 2.0 + arc * h0.sin());
+        assert!((out[1].x_m - ex).abs() < 1e-12, "x: {} vs {ex}", out[1].x_m);
+        assert!((out[1].y_m - ey).abs() < 1e-12, "y: {} vs {ey}", out[1].y_m);
+        assert!(
+            (out[1].heading_rad - h0).abs() < 1e-12,
+            "straight keeps heading"
+        );
+    }
+
+    /// EXACT arithmetic of the clamped CURVED branch (the circular-arc
+    /// integration), with every input distinct so no operator swap is a no-op.
+    #[test]
+    fn a_clamped_curved_segment_integrates_exactly() {
+        let h0 = 0.3_f64;
+        let (v, dt, l, steer) = (4.0_f64, 0.5_f64, 2.5_f64, 12.0_f64);
+        let planner = vec![pt(1.0, -2.0, h0, v, 0.0), pt(9.0, 9.0, h0 + 0.9, v, dt)];
+        let out = reconstruct_enforced_poses(&planner, 0, v, &[seg(steer, v, dt)], l).unwrap();
+        // Oracle, written out independently of the implementation.
+        let arc = v * dt;
+        let d_heading = arc * steer.to_radians().tan() / l;
+        let h1 = h0 + d_heading;
+        let radius = arc / d_heading;
+        let ex = 1.0 + radius * (h1.sin() - h0.sin());
+        let ey = -2.0 + radius * (h0.cos() - h1.cos());
+        assert!((out[1].x_m - ex).abs() < 1e-12, "x: {} vs {ex}", out[1].x_m);
+        assert!((out[1].y_m - ey).abs() < 1e-12, "y: {} vs {ey}", out[1].y_m);
+        assert!((out[1].heading_rad - h1).abs() < 1e-12);
+    }
+
+    /// EXACT arithmetic of the divergence ROTATION — the part the identity test
+    /// cannot reach. At `heading_error == 0` the rotation is `cos 0 = 1`,
+    /// `sin 0 = 0`, so every cross term vanishes and a swapped operator still
+    /// produces the right answer. Here a clamped first segment opens a
+    /// deliberate -45 deg error, making both `cos` and `sin` non-degenerate, and
+    /// the planner's own step has `dx != dy` and neither equal to 1.
+    #[test]
+    fn the_divergence_rotation_is_exact() {
+        use std::f64::consts::FRAC_PI_4;
+        let (v, dt, l) = (2.0_f64, 0.5_f64, 2.0_f64);
+        let planner = vec![
+            pt(0.0, 0.0, 0.0, v, 0.0),
+            // Plan turns to +45 deg; the clamp holds straight ⇒ error = -45 deg.
+            pt(1.0, 0.0, FRAC_PI_4, v, dt),
+            // Planner step of (2, 1) — distinct, and neither component is 1... x is 2.
+            pt(3.0, 1.0, FRAC_PI_4, v, 2.0 * dt),
+        ];
+        let segs = vec![seg(0.0, v, dt), unclamped(0.0, v, dt)];
+        let out = reconstruct_enforced_poses(&planner, 0, v, &segs, l).unwrap();
+
+        // After the clamped straight segment: (1, 0, 0), error = -pi/4.
+        assert!((out[1].x_m - 1.0).abs() < 1e-12);
+        assert!((out[1].y_m - 0.0).abs() < 1e-12);
+        let err = -FRAC_PI_4;
+        let (c, sn) = (err.cos(), err.sin());
+        let (dx_p, dy_p) = (3.0 - 1.0, 1.0 - 0.0);
+        let ex = 1.0 + c * dx_p - sn * dy_p;
+        let ey = 0.0 + sn * dx_p + c * dy_p;
+        let eh = FRAC_PI_4 + err;
+        assert!((out[2].x_m - ex).abs() < 1e-12, "x: {} vs {ex}", out[2].x_m);
+        assert!((out[2].y_m - ey).abs() < 1e-12, "y: {} vs {ey}", out[2].y_m);
+        assert!(
+            (out[2].heading_rad - eh).abs() < 1e-12,
+            "heading carries the error"
+        );
+    }
+
+    /// Each finiteness disjunct refuses ON ITS OWN. A conjunction in place of
+    /// any one of them would let the other fields mask it, so they are proved
+    /// one at a time with everything else valid.
+    #[test]
+    fn each_unmodellable_field_refuses_independently() {
+        let (v, dt, l) = (2.0_f64, 0.5_f64, 2.0_f64);
+        let ok_planner = vec![pt(0.0, 0.0, 0.0, v, 0.0), pt(1.0, 0.0, 0.0, v, dt)];
+        let bad_segs = [
+            ("velocity", seg(5.0, f64::NAN, dt)),
+            ("steering", seg(f64::NAN, v, dt)),
+            ("dt", seg(5.0, v, f64::NAN)),
+            ("dt<=0", seg(5.0, v, 0.0)),
+            ("dt negative", seg(5.0, v, -dt)),
+            ("tan singularity", seg(90.0, v, dt)),
+        ];
+        for (why, bad) in bad_segs {
+            assert!(
+                reconstruct_enforced_poses(&ok_planner, 0, v, &[bad], l).is_none(),
+                "{why} alone must refuse"
+            );
+        }
+        // And each POSE field, one at a time, on an otherwise-valid segment.
+        for (why, bad_planner) in [
+            (
+                "from.x",
+                vec![pt(f64::NAN, 0.0, 0.0, v, 0.0), pt(1.0, 0.0, 0.0, v, dt)],
+            ),
+            (
+                "from.y",
+                vec![pt(0.0, f64::NAN, 0.0, v, 0.0), pt(1.0, 0.0, 0.0, v, dt)],
+            ),
+            (
+                "from.heading",
+                vec![pt(0.0, 0.0, f64::NAN, v, 0.0), pt(1.0, 0.0, 0.0, v, dt)],
+            ),
+            (
+                "to.x",
+                vec![pt(0.0, 0.0, 0.0, v, 0.0), pt(f64::NAN, 0.0, 0.0, v, dt)],
+            ),
+            (
+                "to.y",
+                vec![pt(0.0, 0.0, 0.0, v, 0.0), pt(1.0, f64::NAN, 0.0, v, dt)],
+            ),
+            (
+                "to.heading",
+                vec![pt(0.0, 0.0, 0.0, v, 0.0), pt(1.0, 0.0, f64::NAN, v, dt)],
+            ),
+        ] {
+            assert!(
+                reconstruct_enforced_poses(&bad_planner, 0, v, &[seg(5.0, v, dt)], l).is_none(),
+                "{why} alone must refuse"
+            );
+            assert!(
+                reconstruct_enforced_poses(&bad_planner, 0, v, &[unclamped(5.0, v, dt)], l)
+                    .is_none(),
+                "{why} alone must refuse on the unclamped branch too"
+            );
+        }
+        // A non-finite SEED velocity refuses before any segment is walked.
+        assert!(
+            reconstruct_enforced_poses(&ok_planner, 0, f64::NAN, &[seg(5.0, v, dt)], l).is_none()
+        );
+    }
+
     /// FAIL-CLOSED (the "recheck unavailable" arm). Each of these makes the
     /// enforced arc unmodellable; the vehicle would drive it regardless, so the
     /// only sound answer is `None` → refusal. A best-effort pose here would be

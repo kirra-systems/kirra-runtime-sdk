@@ -763,6 +763,9 @@ pub async fn run_adapter(
                         // No lateral envelope on the removal path — the MRC arm
                         // removes the slot and ignores it (S1, #1024).
                         None,
+                        // Likewise no steering ceiling (#1213): there is no
+                        // released trajectory to bound.
+                        None,
                         now_ms_fresh(),
                     );
                     continue;

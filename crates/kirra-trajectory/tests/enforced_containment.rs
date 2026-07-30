@@ -411,3 +411,40 @@ fn a_transient_rate_clamp_publishes_no_steering_ceiling() {
         out.steering_ceiling_rad
     );
 }
+
+/// The velocity ceiling is indexed the same way, and the two are independent:
+/// a speed-capped arc lowers pose `i + 1`'s velocity while pose 0 keeps the
+/// planner's own.
+#[test]
+fn the_velocity_ceiling_is_indexed_to_the_segment_end_pose() {
+    let mut cfg = rack_limited_config();
+    cfg.max_speed_mps = SPEED_MPS / 2.0;
+    let path = arc_poses(0.0, SEGMENTS);
+    let corridor = corridor_around(&path, WIDE_CORRIDOR_HALF_WIDTH_M, 3.0);
+    let out = validate_trajectory_slow_detailed(
+        &path,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        None,
+        None,
+        FrameTrust::Trusted,
+    );
+    let v = out
+        .velocity_ceiling
+        .expect("a speed cap publishes a velocity ceiling");
+    assert!(
+        (v[0] - SPEED_MPS).abs() < 1e-12,
+        "pose 0 keeps the planner velocity, got {}",
+        v[0]
+    );
+    assert!(
+        v[v.len() - 1] <= SPEED_MPS / 2.0 + 1e-9,
+        "the last pose is derated, got {}",
+        v[v.len() - 1]
+    );
+}

@@ -14,7 +14,8 @@ use kirra_trajectory::{
         AcceptedTrajectory, EgoOdom, Pose, TrajectoryPoint, TrajectoryVerdict, DEFAULT_MAX_AGE_MS,
     },
     validation::{
-        check_command_conforms, ConformanceVerdict, IncomingControl, VELOCITY_TOLERANCE_MPS,
+        check_command_conforms, ConformanceVerdict, IncomingControl, STEERING_TOLERANCE_RAD,
+        VELOCITY_TOLERANCE_MPS,
     },
 };
 
@@ -876,5 +877,48 @@ fn a_non_finite_steering_ceiling_fails_closed() {
             now
         ),
         ConformanceVerdict::MRCFallback
+    );
+}
+
+/// BOUNDARY of bound E. The gate is `>` (strictly exceeding the ceiling plus
+/// tolerance), so the command exactly AT `ceiling + tolerance` must be
+/// admitted and anything past it refused. A `>=` here would refuse the
+/// boundary — availability lost at the exact angle the checker validated.
+#[test]
+fn bound_e_admits_exactly_at_the_tolerance_and_refuses_past_it() {
+    let promoted = 100_000;
+    let now = promoted + 50;
+    let ceiling = 21.0_f64.to_radians();
+    let traj = with_steering_ceiling(promoted, 5.05, 10, ceiling);
+    let at = IncomingControl {
+        velocity_mps: 3.0,
+        steering_rad: ceiling + STEERING_TOLERANCE_RAD,
+        stamp_ms: now,
+    };
+    assert_eq!(
+        check_command_conforms(
+            &at,
+            &traj,
+            &EgoOdom::default(),
+            &VehicleConfig::default_urban(),
+            now
+        ),
+        ConformanceVerdict::Accept,
+        "exactly at ceiling+tolerance must be admitted (the bound is strict `>`)"
+    );
+    let past = IncomingControl {
+        steering_rad: ceiling + STEERING_TOLERANCE_RAD * 1.5,
+        ..at
+    };
+    assert_eq!(
+        check_command_conforms(
+            &past,
+            &traj,
+            &EgoOdom::default(),
+            &VehicleConfig::default_urban(),
+            now
+        ),
+        ConformanceVerdict::MRCFallback,
+        "past the tolerance must refuse"
     );
 }
