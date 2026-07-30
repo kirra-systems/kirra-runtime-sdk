@@ -823,6 +823,88 @@ mod mirrors {
         );
     }
 
+    /// K8's ACCELERATION-SPACE form, on the concrete grid over physical dt.
+    ///
+    /// The symbolic K8 is stated in velocity space, because the quotient form
+    /// is corrupted at subnormal `dt` by an error amplification the kernel
+    /// never performs (see the harness). That correction is right, but it
+    /// leaves the property people actually care about — "the executed command
+    /// does not imply an acceleration outside the limit" — unasserted in the
+    /// form it is written in. This closes that gap where the division is
+    /// well-conditioned: a physical tick range, from 1 ms to 1 s.
+    ///
+    /// The two are blind in opposite directions, which is the point of keeping
+    /// both. The symbolic proof covers every `dt` including the absurd ones but
+    /// bounds a step rather than a rate; the grid bounds the rate directly but
+    /// only where it was sampled.
+    #[test]
+    fn k8_mirror_acceleration_bound_on_the_physical_dt_grid() {
+        let mut checked = 0u64;
+        let mut executed = 0u64;
+        for (max_speed, cap) in [
+            (35.0_f64, None),
+            (35.0, Some(22.35)),
+            (5.225, None),
+            (0.5, None),
+        ] {
+            let c = contract(max_speed, cap);
+            let ceiling = c.effective_max_speed_mps();
+            for dt_ms in [1_u32, 2, 5, 10, 20, 50, 100, 200, 500, 1000] {
+                let dt = f64::from(dt_ms) / 1000.0;
+                for cur_pct in [-100_i32, -60, -5, 0, 1, 5, 60, 100] {
+                    // Only the K8 domain: |current| <= ceiling. Above it the
+                    // ceiling forces a breach by design (invariant 8).
+                    let current = ceiling * f64::from(cur_pct) / 100.0;
+                    for req in [
+                        -1000.0_f64,
+                        -50.0,
+                        -1.0,
+                        -0.01,
+                        0.0,
+                        0.01,
+                        1.0,
+                        50.0,
+                        1000.0,
+                    ] {
+                        let cmd = ProposedVehicleCommand {
+                            linear_velocity_mps: req,
+                            current_velocity_mps: current,
+                            delta_time_s: dt,
+                            steering_angle_deg: 0.0,
+                            current_steering_angle_deg: 0.0,
+                        };
+                        let action = validate_vehicle_command(&cmd, &c);
+                        checked += 1;
+                        let Some((linear, _)) = executed_pair(&cmd, &action) else {
+                            continue;
+                        };
+                        executed += 1;
+
+                        let from_rest = current.abs() <= STOP_EPSILON_MPS;
+                        let speeding_up = (from_rest || req.signum() == current.signum())
+                            && req.abs() > current.abs();
+                        let limit = if speeding_up {
+                            c.max_accel_mps2
+                        } else {
+                            c.max_brake_mps2
+                        };
+                        let implied = (linear - current).abs() / dt;
+                        assert!(
+                            implied <= limit + 1e-9,
+                            "executed {linear} from {current} over {dt} s implies \
+                             {implied} m/s^2 against a {limit} limit; action {action:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 2_880, "grid size changed; update the expectation");
+        assert!(
+            executed > checked / 2,
+            "only {executed} of {checked} grid points returned an executable pair"
+        );
+    }
+
     fn contract(max_speed: f64, cap: Option<f64>) -> VehicleKinematicsContract {
         VehicleKinematicsContract {
             max_speed_mps: max_speed,
