@@ -89,12 +89,30 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > property reach a construct CBMC cannot model?" but "does this change put such
 > a construct on any path an EXISTING harness quantifies over?"
 >
-> Reviewer approval: **NOT RECORDED. Still outstanding.** The amendment was
-> merged in PR #1244 with all 32 CI lanes green, but the named-reviewer approval
-> this note requires was never written here — so the gate was passed over, not
-> satisfied. Recording it retrospectively is the approver's action, not the
-> author's; this line is left open deliberately rather than closed to make the
-> record tidy.
+> Reviewer approval: **RECORDED RETROSPECTIVELY — `justinlooney` (repository
+> owner), 2026-07-30.** Two qualifications belong in the record rather than in
+> the conversation that produced it:
+>
+> 1. **Retrospective, not pre-merge.** This note required the approval to be
+>    written here *before* merge. It was not: the amendment merged in PR #1244
+>    with all 32 CI lanes green and this line still reading PENDING. The gate was
+>    passed over and then closed after the fact. The change is not thereby
+>    unreviewed, but the sequencing control did not hold, and a future audit
+>    should read it as "approved late" rather than "approved on schedule".
+> 2. **Not independent of the author.** The requirement names an *independent*
+>    reviewer. PR #1244 was authored under the same account that approves it
+>    here, so author and approver are the same principal. That is a legitimate
+>    call for the accountable owner of a single-maintainer repository to make —
+>    it is not a substitute for a second pair of eyes, and it should not be cited
+>    as one in a certification context.
+>
+> What the approval covers: the Priority-2 accumulate change and its blob re-pin
+> `ed00f4da…` → `6a61b74f…`; the proof-crate transcendental model and its axioms
+> A1/A2/A3 (A3 being the load-bearing one — it is the assumption the deferred K7
+> P-RACK result rests on); K7's provisional, unbudgeted deferral to the weekly
+> lane; and the accepted `:544` equivalent mutant. It does NOT cover #1243, the
+> acceleration-enforcement gap, which is tracked separately with its own
+> evidence.
 >
 > Any FURTHER change re-pins again + re-runs the
 > WCET/MC-DC/proptest gates.
