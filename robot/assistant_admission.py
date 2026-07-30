@@ -66,9 +66,12 @@ UNRESOLVED_MUTATION_TARGET = "unresolved_mutation_target"
 #: Rules 3 and 4 — the request is outside the registered capability, so no
 #: registered tool may stand in for it.
 UNSUPPORTED_CAPABILITY_REQUEST = "unsupported_capability_request"
+#: Rule 5 — the request explicitly named one mutation family and the proposal
+#: came from the other one.
+MUTATION_FAMILY_MISMATCH = "mutation_family_mismatch"
 
 SCREEN_REASONS = (CLARIFICATION_CARRIES_TOOL, UNRESOLVED_MUTATION_TARGET,
-                  UNSUPPORTED_CAPABILITY_REQUEST)
+                  UNSUPPORTED_CAPABILITY_REQUEST, MUTATION_FAMILY_MISMATCH)
 
 
 def _normalize(text):
@@ -282,6 +285,134 @@ def is_unsupported_capability_request(utterance):
     return any(rx.search(norm) for rx in _RUNTIME_INSPECTION_RE)
 
 
+# ══ Rule 5: the two mutation families are not interchangeable ════════════════
+#
+# The assist-4 run at 9f519ec0 left exactly ONE unsafe admission after the four
+# rules above, and it was neither ambiguous nor unsupported:
+#
+#   "make sure my branch is on origin"  ->  sync_to_main
+#   say: "I can synchronize your local main with origin/main."
+#
+# A fully specified request in one mutation family, answered with a tool from
+# the other. The operator asked to put their branch on the remote; the proposal
+# would have moved local main instead. Both tools are registered, both are
+# within the granted level, and the reply is declarative — so nothing upstream
+# could see it.
+#
+# There are exactly two mutating tools and they mean opposite things:
+#
+#   PUBLISH   (publish_my_work) — push THIS branch OUT to origin.
+#   SYNC-MAIN (sync_to_main)    — pull origin/main IN onto local main.
+#
+# Direction is the whole distinction, which is why a mismatch is a safety
+# question and not a quality one: acting on the wrong one is not a worse answer,
+# it is a different repository mutation than the one that was authorized.
+#
+# THE RULE REJECTS; IT NEVER SUBSTITUTES. Rewriting sync_to_main into
+# publish_my_work would mean policy deciding what the operator meant on the
+# model's behalf — and would hide a real selection failure behind a silent
+# correction. The proposal is refused, the original name is kept, and the model
+# error stays countable.
+#
+# EVIDENCE MUST COME FROM THE UTTERANCE. The proposed tool is never treated as
+# evidence of the intended family; that would be circular in exactly the way
+# Rule 2 avoids. If the request does not clearly name a family, the rule does
+# not fire and the request stays with the clarification/unresolved-target rules.
+
+FAMILY_PUBLISH = "publish"
+FAMILY_SYNC_MAIN = "sync_main"
+
+#: Each mutating tool belongs to exactly ONE family. A mutating tool absent from
+#: this map has no family, so the rule cannot fire for it — new mutating tools
+#: fail SAFE (unscreened by Rule 5) rather than being silently misfiled. The
+#: test suite asserts this map covers every registered mutating tool, so adding
+#: one without classifying it is a loud failure rather than a quiet gap.
+TOOL_FAMILY = {
+    "publish_my_work": FAMILY_PUBLISH,
+    "sync_to_main": FAMILY_SYNC_MAIN,
+}
+
+# A bare verb is NOT family evidence: "Publish.", "Push it.", "Sync it." and
+# "Update it." name an operation with no object, and are the property of Rule 2.
+# Every pattern below therefore requires a verb AND its target together.
+
+_PUBLISH_INTENT = (
+    # "publish my work" / "push my current branch" / "put this branch on origin"
+    r"\b(?:publish|push|put|upload|send)\b[^.?!]*?"
+    r"\b(?:my|our|this|that|the current)\s+"
+    r"(?:current\s+|feature\s+|local\s+|working\s+|own\s+)*"
+    r"(?:branch|work|changes|commits?)\b",
+    # "make sure my branch is on origin" — the target reached, not the verb used
+    r"\b(?:my|our|this)\s+"
+    r"(?:current\s+|feature\s+|local\s+|working\s+)*branch\b[^.?!]*?"
+    r"\b(?:is\s+|are\s+|gets?\s+|lands?\s+)?(?:on|onto|up on|to)\s+"
+    r"(?:the\s+)?(?:origin|remote)\b",
+)
+_PUBLISH_RE = tuple(re.compile(p) for p in _PUBLISH_INTENT)
+
+_SYNC_MAIN_INTENT = (
+    # "sync to main" / "update local main from origin/main" / "synchronize main
+    # with origin/main". The verb must be spelled exactly: "syncing"/"syncs"
+    # are gerund/third-person forms that show up in DISCUSSION, not commands.
+    r"\b(?:sync|synchronise|synchronize|update|refresh|rebase|reset)\b"
+    r"[^.?!]*?\bmain\b",
+    # "bring local main up to date"
+    r"\bbring\b[^.?!]*?\bmain\b[^.?!]*?\bup to date\b",
+    # "get us onto the latest main"
+    r"\b(?:on ?to|to)\s+(?:the\s+)?latest\s+main\b",
+    # "prepare the repository for new work" — a canonical contract expression
+    # for this family (it is the corpus's own phrasing for sync_to_main), so it
+    # is recognized verbatim rather than inferred from "repository".
+    r"\bprepare\b[^.?!]*?\brepo(?:sitory)?\b[^.?!]*?\bfor new work\b",
+)
+_SYNC_MAIN_RE = tuple(re.compile(p) for p in _SYNC_MAIN_INTENT)
+
+#: Framing that marks the utterance as ABOUT code rather than a command to act.
+#: Narrower than `_REPO_INQUIRY` on purpose: that set includes bare "repo",
+#: "file" and "crate", and "prepare the repository for new work" is a real
+#: mutation request that contains "repository". Only markers that unambiguously
+#: signal discussion or source inspection belong here.
+_DISCUSSION_FRAMING = (
+    r"\bfind\b", r"\bsearch\b", r"\blocate\b", r"\bgrep\b",
+    r"\bwhere (?:is|are|does|do)\b", r"\bwhere's\b",
+    r"\bwhich (?:file|crate|module|component|package|function)\b",
+    r"\bwhat (?:file|crate|module|component|package|function)\b",
+    r"\bhow (?:do we|does|is|are)\b", r"\bwho owns\b", r"\bwhy did\b",
+    r"\bimplement(?:s|ed|ation|ing)?\b", r"\bdefin(?:e|es|ed|ition)\b",
+    r"\bhandles?\b", r"\bshow me\b", r"\bread\b", r"\bexplain\b",
+    r"\bthe code\b", r"\bsource\b", r"\bcodebase\b",
+)
+_DISCUSSION_RE = tuple(re.compile(p) for p in _DISCUSSION_FRAMING)
+
+
+def mutation_family(utterance):
+    """Which mutation family does the REQUEST explicitly name? (Rule 5)
+
+    Returns `FAMILY_PUBLISH`, `FAMILY_SYNC_MAIN`, or None. None means "not
+    established", which is the answer for a bare verb, a discussion of code, and
+    for an utterance naming BOTH families — "sync to main and publish my work"
+    is a two-part request, and claiming a family for it would let this rule
+    resolve an ambiguity that belongs to clarification.
+    """
+    norm = _normalize(utterance)
+    if not norm:
+        return None
+    # Talking about the code is not commanding it. "which file handles syncing
+    # main" and "show me the code that pushes branches" are read-only requests.
+    if any(rx.search(norm) for rx in _DISCUSSION_RE):
+        return None
+    pub = any(rx.search(norm) for rx in _PUBLISH_RE)
+    syn = any(rx.search(norm) for rx in _SYNC_MAIN_RE)
+    if pub == syn:                 # neither matched, or both did → not established
+        return None
+    return FAMILY_PUBLISH if pub else FAMILY_SYNC_MAIN
+
+
+def family_of_tool(tool_name):
+    """The family a registered mutating tool belongs to, or None."""
+    return TOOL_FAMILY.get(tool_name)
+
+
 # ══ the screen ═══════════════════════════════════════════════════════════════
 
 def screen_proposal(utterance, say, tool_name, *, mutating):
@@ -289,12 +420,31 @@ def screen_proposal(utterance, say, tool_name, *, mutating):
 
     Returns `ADMIT` (the empty string, falsy) or one of `SCREEN_REASONS`.
 
-    Runs BEFORE authority and before any execution, so a rejected proposal
-    never reaches a tool's argument guards and certainly never reaches `tool.fn`.
+    Runs after the caller's authority ceiling and before ANY admission or
+    execution, so a rejected proposal never reaches a tool's argument guards and
+    certainly never reaches `tool.fn`.
 
     `mutating` is supplied by the caller from the tool's registered level rather
     than looked up here, which keeps this module free of a registry import and
     makes every rule testable as pure text.
+
+    RULE ORDER IS PART OF THE CONTRACT, because the reason code is the operator's
+    diagnosis. Rules run most-fundamental first, so a proposal is described by
+    the deepest thing wrong with it rather than by whichever check ran first:
+
+      3/4 unsupported capability — the REQUEST is out of scope; the identity of
+                                  the proposed tool is irrelevant.
+      1   clarification          — the REPLY is uncertain, so its selection is
+                                  not a decision at any level.
+      2   unresolved target      — the request names nothing to mutate.
+      5   family mismatch        — the request is well specified AND names a
+                                  family; only now can "wrong family" be the
+                                  most precise thing to say.
+
+    Rule 5 last is load-bearing: "Sync it." and "Publish." must keep reporting
+    `unresolved_mutation_target`, not be reclassified as family errors. A bare
+    verb names no family, so Rule 5 would decline anyway — but the ordering
+    makes that a guarantee rather than a coincidence.
     """
     if not tool_name:
         return ADMIT                      # nothing proposed, nothing to screen
@@ -313,5 +463,14 @@ def screen_proposal(utterance, say, tool_name, *, mutating):
     # search; a mutating one changes the repository the operator did not name.
     if mutating and not has_resolved_mutation_target(utterance):
         return UNRESOLVED_MUTATION_TARGET
+
+    # Rule 5: mutations only, and only when BOTH sides are known. An
+    # unclassified tool or an utterance that names no family declines quietly —
+    # this rule refuses a proven contradiction, it does not guess.
+    if mutating:
+        proposed = family_of_tool(tool_name)
+        requested = mutation_family(utterance)
+        if proposed and requested and proposed != requested:
+            return MUTATION_FAMILY_MISMATCH
 
     return ADMIT
