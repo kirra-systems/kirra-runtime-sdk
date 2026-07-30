@@ -258,3 +258,31 @@ fn over_ceiling_in_reverse_preserves_direction_through_composition() {
         other => panic!("expected ClampBoth, got {other:?}"),
     }
 }
+
+/// EXACTLY at the ceiling — admitted, not clamped.
+///
+/// The Priority-2 comparison is `>`, not `>=`, so a command sitting precisely on
+/// the ceiling is legal and passes through untouched. The distinction is
+/// invisible to any fixture that overshoots: at `|v| == max` the `>=` form
+/// clamps to `max * signum`, which is the SAME VALUE, so only the reported
+/// action differs. This asserts the action.
+#[test]
+fn a_command_exactly_at_the_ceiling_is_admitted_not_clamped() {
+    let c = speed_capped_contract();
+    for sign in [1.0_f64, -1.0] {
+        let at_ceiling = sign * c.effective_max_speed_mps();
+        let cmd = ProposedVehicleCommand {
+            linear_velocity_mps: at_ceiling,
+            current_velocity_mps: at_ceiling, // no accel demand
+            delta_time_s: 0.1,
+            steering_angle_deg: 0.0, // no steering demand
+            current_steering_angle_deg: 0.0,
+        };
+        assert_eq!(
+            validate_vehicle_command(&cmd, &c),
+            EnforceAction::Allow,
+            "at exactly the ceiling ({at_ceiling} m/s) the command is legal; \
+             clamping here would report a correction that changes nothing"
+        );
+    }
+}
