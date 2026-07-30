@@ -678,6 +678,44 @@ def evaluate_acceptance(metrics, policy=None):
 
 # ══ report ═══════════════════════════════════════════════════════════════════
 
+#: Case ids added in corpus v2 (assist-2). Excluding them reconstructs the exact
+#: v1 case set, so an assist-N run stays comparable with the assist-1 baseline
+#: even though the corpus grew. This list is DATA, not a rule: it is asserted
+#: against the corpus by `assert_common_subset_intact` so it cannot silently rot.
+CORPUS_V2_ADDITIONS = (
+    "amb_sync_it", "amb_publish_bare", "amb_where_is_that", "amb_sync_things",
+    "neg_open_pr", "neg_push_main",
+)
+
+#: The size of the v1 corpus, i.e. what the common subset must come to.
+COMMON_SUBSET_SIZE = 55
+
+
+def common_subset(records):
+    """Records for the original v1 case set only — the regression comparator.
+
+    The FULL corpus stays authoritative for readiness; this exists solely so
+    "did assist-N improve or damage what assist-1 already measured?" is a
+    like-for-like question rather than an arithmetic argument about denominators.
+    """
+    return [r for r in records if r.get("case_id") not in CORPUS_V2_ADDITIONS]
+
+
+def assert_common_subset_intact(corpus):
+    """The additions list must actually describe the corpus. Fail-closed."""
+    ids = {c["id"] for c in corpus["cases"]}
+    missing = [c for c in CORPUS_V2_ADDITIONS if c not in ids]
+    if missing:
+        raise ValueError(f"CORPUS_V2_ADDITIONS names absent cases: {missing}")
+    remaining = len(ids) - len(CORPUS_V2_ADDITIONS)
+    if remaining != COMMON_SUBSET_SIZE:
+        raise ValueError(
+            f"common subset is {remaining} cases, expected {COMMON_SUBSET_SIZE}; "
+            "a corpus change needs CORPUS_V2_ADDITIONS/COMMON_SUBSET_SIZE updated "
+            "or the comparison to assist-1 is no longer like-for-like")
+    return True
+
+
 def contract_report(*, corpus, records, deterministic=None, model="",
                     model_digest="", trials=1, seed=None, temperature=None,
                     live_model_available=True, now=None):
@@ -704,6 +742,16 @@ def contract_report(*, corpus, records, deterministic=None, model="",
         "max_granted_level": at.MAX_GRANTED_LEVEL,
         "registered_tools": at.registered_tool_names(),
         "metrics": metrics,
+        # Readiness is judged on the FULL corpus; this block exists only so an
+        # assist-N run is comparable with the assist-1 baseline measured on v1.
+        "common_subset": {
+            "case_ids_excluded": list(CORPUS_V2_ADDITIONS),
+            "expected_size": COMMON_SUBSET_SIZE,
+            "records": len(common_subset(records)),
+            "metrics": summarize(common_subset(records)) if records else {},
+            "note": "Regression comparator against the assist-1 v1 baseline. "
+                    "NOT authoritative for readiness — the full corpus is.",
+        },
         "acceptance": acceptance,
         "deterministic_pass": deterministic or [],
         "records": records,
@@ -722,7 +770,16 @@ def render_report(report):
     out = [
         f"assistant tool-selection contract — {report['harness_version']} / "
         f"prompt {report['prompt_contract_version']}",
-        f"  model={report['model'] or '(none)'}  digest={report['model_digest'] or '-'}",
+        # Both digests are labelled by WHAT THEY HASH. An unqualified "digest="
+        # here previously showed only the MODEL digest, which is correctly
+        # identical across runs of the same weights — so two runs of DIFFERENT
+        # prompts printed the same "digest=" line and read as a prompt that had
+        # not changed. The prompt digest was in the JSON but never on screen.
+        f"  model={report['model'] or '(none)'}  "
+        f"model_digest={report['model_digest'] or '-'}",
+        f"  prompt {report['prompt_contract_version']}  "
+        f"prompt_digest={report['prompt_digest_sha256']}  "
+        f"({report['prompt_chars']} chars)",
         f"  corpus v{report['corpus_version']} "
         f"(authored for {report['corpus_prompt_contract_version']}"
         f"{'' if report['corpus_contract_matches'] else ' — MISMATCH'})",
@@ -758,6 +815,22 @@ def render_report(report):
         for name in HARD_GATES:
             v = (m.get("hard_gates") or {}).get(name, 0)
             out.append(f"    {'ok  ' if not v else 'FAIL'} {name:28} {v}")
+    cs = report.get("common_subset") or {}
+    csm = cs.get("metrics") or {}
+    if report["live_contract_verified"] and csm.get("total_records"):
+        out += [
+            f"  common subset ({cs['records']} of the original "
+            f"{cs['expected_size']} v1 cases) — regression comparator only:",
+            f"    positive selection accuracy : {csm['positive_selection_accuracy']}",
+            f"    safe outcome rate           : {csm['safe_outcome_rate']}",
+            f"    unsafe proposal rate        : {csm['unsafe_proposal_rate']}",
+            f"    clarification quality       : {csm['clarification_quality']}",
+            f"    unsafe admissions           : "
+            f"{(csm.get('hard_gates') or {}).get('unsafe_admissions', 0)}",
+        ]
+        for name, row in sorted((csm.get("per_tool_accuracy") or {}).items()):
+            out.append(f"    {name:24} {row['accuracy']} "
+                       f"({row['correct']}/{row['expected']})")
     out.append(f"  acceptance policy: {acc['policy']['status']} — "
                f"readiness={acc['readiness'].upper()}")
     for f in acc["hard_gate_failures"]:

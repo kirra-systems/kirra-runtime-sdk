@@ -346,6 +346,75 @@ check("KIRRA_ADMIN_TOKEN" not in _blob and "KIRRA_WAKE" not in _blob
       and "os.environ" not in _blob,
       "44. no environment or token material reaches the report")
 
+# ── 45-50: prompt-digest integrity (the assist-2 anomaly) ────────────────────
+#
+# An operator comparing two live runs read the same `digest=` on both and
+# concluded the prompt had not changed. It had: the rendered line showed the
+# MODEL digest (correctly identical — same weights) and never showed the PROMPT
+# digest at all. These pin both halves so the confusion cannot recur.
+print("== prompt-digest integrity ==")
+
+import hashlib  # noqa: E402 — local to this section, independent of the module
+
+_a = "PROMPT A\nchoose a tool.\n"
+_b = "PROMPT B\nchoose a tool.\n"
+check(hashlib.sha256(_a.encode()).hexdigest()
+      != hashlib.sha256(_b.encode()).hexdigest(),
+      "45. different prompt BYTES produce different digests")
+check(hashlib.sha256(_a.encode()).hexdigest()
+      == hashlib.sha256(_a.encode()).hexdigest(),
+      "46. identical bytes produce an identical digest (no salt, no nonce)")
+
+# The bytes actually sent, hashed independently of the module under test.
+_sent = ac.production_prompt()
+check(hashlib.sha256(_sent.encode("utf-8")).hexdigest() == at.prompt_digest(),
+      "47. the digest is SHA-256 of the exact bytes production_prompt() returns "
+      "— computed here without calling prompt_digest()")
+
+# The digest must track the prompt, not the version label.
+_saved_ver = at.PROMPT_CONTRACT_VERSION
+try:
+    at.PROMPT_CONTRACT_VERSION = "assist-999"
+    _relabelled = at.prompt_digest()
+finally:
+    at.PROMPT_CONTRACT_VERSION = _saved_ver
+check(_relabelled != at.prompt_digest(),
+      "48. relabelling the version changes the digest — because the label is IN "
+      "the prompt text, so a relabel is a real byte change")
+
+# Model digest and prompt digest are distinct report fields, distinctly named.
+_rep2 = ac.contract_report(corpus=CORPUS, records=[], model="m",
+                           model_digest="deadbeef")
+check(_rep2["model_digest"] == "deadbeef"
+      and _rep2["prompt_digest_sha256"] == at.prompt_digest()
+      and _rep2["model_digest"] != _rep2["prompt_digest_sha256"],
+      "49. model_digest and prompt_digest_sha256 are separate fields")
+_lines = "\n".join(ac.render_report(_rep2))
+check("model_digest=" in _lines and "prompt_digest=" in _lines,
+      "50. BOTH digests are rendered, each labelled by what it hashes")
+
+# ── 51-54: common-subset comparator ──────────────────────────────────────────
+print("== common subset (assist-1 regression comparator) ==")
+
+check(ac.assert_common_subset_intact(CORPUS),
+      "51. CORPUS_V2_ADDITIONS describes the real corpus, and the remainder is "
+      f"exactly {ac.COMMON_SUBSET_SIZE} cases")
+
+_all = ac.run_live_pass(CORPUS["cases"], perfect, ctx=CTX)
+_sub = ac.common_subset(_all)
+check(len(_all) == len(CORPUS["cases"]) and len(_sub) == ac.COMMON_SUBSET_SIZE,
+      f"52. the subset drops exactly the v2 additions ({len(_all)} → {len(_sub)})")
+check(all(r["case_id"] not in ac.CORPUS_V2_ADDITIONS for r in _sub),
+      "53. no v2-added case survives into the comparator")
+
+_rep3 = ac.contract_report(corpus=CORPUS, records=_all, model="mock")
+_cs = _rep3["common_subset"]
+check(_cs["records"] == ac.COMMON_SUBSET_SIZE
+      and _cs["metrics"]["total_records"] == ac.COMMON_SUBSET_SIZE
+      and _rep3["metrics"]["total_records"] == len(CORPUS["cases"])
+      and "NOT authoritative" in _cs["note"],
+      "54. the report carries BOTH scopes, with readiness still on the full corpus")
+
 print()
 if _FAILURES:
     print(f"== {len(_FAILURES)} FAILED ==")

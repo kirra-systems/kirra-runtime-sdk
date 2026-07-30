@@ -626,6 +626,72 @@ Two things *are* derivable and are stated as such:
 **No specific failing case is named here, because the evidence to name one does
 not exist.** The next run will name every one of them.
 
+### 14.9a Second live measurement — assist-2 on the Orin, and its regression
+
+Same bench, same model, same seed. **assist-2 is not a fix. It is a measured
+regression**, and it is recorded here as one.
+
+| metric | assist-1 (v1, 55) | assist-2 (v2, 61) | |
+|---|---|---|---|
+| positive selection accuracy | 0.72 (18/25) | **0.36 (9/25)** | ▼ halved |
+| clarification quality | 0.00 (0/3) | **0.7143 (5/7)** | ▲ |
+| unsafe proposal rate | 0.2727 | **0.1148** | ▲ |
+| unsafe admissions | 2 | **1** | ▲ |
+| safe outcome rate | 0.9636 | 0.9836 | ▲ |
+| parse failure rate | 0.0 | 0.0 | = |
+| trial stability | 1.0 | 1.0 | = |
+| prompt length | ~1788 ch | 4635 ch | 2.6× |
+
+Per-tool, assist-1 → assist-2: `inspect_component` 1.0 → 0.5,
+`repository_status` 1.0 → 0.5, `summarize_test_failure` 1.0 → **0.0**,
+`sync_to_main` 0.667 → **0.0**, `publish_my_work` 0.333 → **0.0**,
+`search_repository` 0.2 → 0.4, `read_repository_source` 1.0 → 1.0.
+
+All other hard gates stayed 0, and `mutating_executions` stayed 0. **The
+deterministic boundary held under both prompts.** assist-2 made the model more
+cautious and less competent: it broke three tools that had been perfect and
+zeroed both mutating tools, while genuinely winning clarification.
+
+The leading hypothesis is **prompt crowding plus exclusion-list
+overgeneralization** — 2.6× the text in front of a 4B model, with long
+"do not use it for…" lists that plausibly generalized into "when in doubt,
+refuse". *This is a hypothesis.* The per-case report (`--json-report`) is what
+would confirm it; see §14.9b.
+
+### 14.9b The prompt-digest anomaly — resolved, and it was a reporting defect
+
+The assist-2 run appeared to report the same prompt digest as assist-1
+(`a2af6cc3…`), which would mean the prompt text had not changed. Investigated
+rather than assumed. **It was not a hashing bug, and not a collision.**
+
+1. The real assist-2 prompt digest is `0925b726…`, computed independently of
+   `prompt_digest()` (test 47 recomputes SHA-256 over the exact bytes).
+2. `a2af6cc3…` is the **Ollama model content digest** for `gemma3:4b` — the same
+   weights in both runs, so its being identical is correct.
+3. `prompt_digest()` **did not exist** at `fab3ac61`, the commit assist-1 ran on.
+   There was no prompt digest in the assist-1 report to collide with.
+
+The actual defect was **presentation**: `render_report` printed
+`model=… digest=…`, unqualified, showing only the model digest — and never
+printed the prompt digest at all, though it was in the JSON. Two runs of
+*different* prompts therefore displayed the same `digest=` line.
+
+Fixed: both are now rendered, each labelled by what it hashes
+(`model_digest=` / `prompt_digest=`), and tests 45-50 pin the whole chain —
+different bytes ⇒ different digest, identical bytes ⇒ identical digest, the
+digest is SHA-256 of exactly what `production_prompt()` returns, and the two
+fields are distinct in both the JSON and the rendered output.
+
+### 14.9c Common-subset comparison (55 of 61)
+
+Corpus v2 added six cases, so raw aggregates are no longer comparable with the
+assist-1 baseline. Every report now carries **both scopes**: the full corpus,
+which remains authoritative for readiness, and the original 55-case v1 subset,
+which exists only to answer "did this prompt improve or damage what assist-1
+already measured?". `CORPUS_V2_ADDITIONS` names the excluded ids and
+`assert_common_subset_intact` fails if that list stops describing the corpus, so
+the comparator cannot silently rot.
+
 ### 14.10 Verification status of this work
 
 - Harness, corpus, scoring, acceptance policy, 20 security invariants, and the
@@ -716,6 +782,45 @@ The identity is machine-checked, not asserted: `assistant_contract_test.py`
 checks 30-35 fail if `production_prompt()` ever diverges from the owner, if the
 harness reaches past the accessor, or if any system prompt is inlined in the
 harness.
+
+### 14.12a assist-3 — the next hypothesis, UNVERIFIED
+
+assist-3 **retreats to assist-1** and adds back only what assist-2 demonstrably
+won. One variable changed, not twelve.
+
+| | assist-1 | assist-2 | assist-3 |
+|---|---|---|---|
+| length | ~1788 ch | 4635 ch | **2425 ch** |
+| tool list | concise | concise + prose section | concise |
+| per-tool exclusion lists | none | long | **none** |
+| ambiguity rule | one clause | a section | **three lines** |
+| contrast examples | none | none | **six one-line pairs** |
+
+Kept from assist-2: the ambiguity rule (the only measured win, 0.00 → 0.71),
+compressed to three lines and stated once. Deleted: the entire
+"CHOOSING BETWEEN THEM" section and every "do not use it for…" list — the
+suspected cause of the collapse in `summarize_test_failure`, `sync_to_main` and
+`publish_my_work` to 0.0. Added: six single-line contrast pairs placed next to
+the schema, which is cheap in tokens and puts the distinction where the model
+reads the output format.
+
+🔴 **assist-3 is UNVERIFIED.** No live model has seen it. It may score worse than
+either predecessor. It is a smaller, testable hypothesis — not a fix — and the
+only thing that can change that is an Orin run.
+
+Rerun with:
+
+```
+git fetch origin && git checkout <SHORT_SHA>
+python3 robot/rabbit_model_smoketest.py --assistant-contract \
+    --trials 1 --seed 7 --temperature 0.0 \
+    --json-report /tmp/gemma-assist-3-<SHORT_SHA>.json
+```
+
+The header must read `corpus: 61 cases, v2 (prompt contract assist-3; code ships
+assist-3)` and the prompt digest must differ from both `0925b726…` (assist-2) and
+whatever assist-1 hashed to. `--trials 1 / --seed 7 / --temperature 0.0` matches
+both prior runs exactly, so the comparison stays like-for-like.
 
 ### 14.13 Agreed next sequence — do NOT collapse these steps
 

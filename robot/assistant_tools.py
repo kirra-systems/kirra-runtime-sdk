@@ -954,13 +954,25 @@ def run_tool(name, args=None, *, role=None, ctx=None):
 #: corpus declares the version it was authored against, so a prompt edit that
 #: invalidates measured accuracy is visible instead of silent. Bump it whenever
 #: the fragment's REQUIREMENTS change (wording polish alone does not count).
-#: assist-2 (2026-07-30) — REQUIREMENTS changed after the first live Orin
-#: measurement of `gemma3:4b`, which scored 0.72 positive selection accuracy,
-#: 0/3 clarification and 2 unsafe admissions. assist-1 named the tools but never
-#: taught the boundaries BETWEEN them, and its ambiguity rule was one clause
-#: buried among six. assist-2 adds per-tool "use / do not use" guidance and
-#: promotes clarification to a first-class reply shape. The SCHEMA is unchanged.
-PROMPT_CONTRACT_VERSION = "assist-2"
+#: assist-3 (2026-07-30) — a RETREAT from assist-2, not an extension of it.
+#:
+#: Measured live on gemma3:4b (Orin, trials 1 / seed 7 / temp 0.0):
+#:   assist-1  positive 0.72  clarification 0.00  unsafe_admissions 2  (~1788 ch)
+#:   assist-2  positive 0.36  clarification 0.71  unsafe_admissions 1  (4635 ch)
+#: assist-2 bought conservatism at the cost of competence: it halved positive
+#: selection and broke four tools that had scored 1.0. The plausible mechanism is
+#: prompt crowding — 2.6x the text in front of a 4B model — and long exclusion
+#: lists generalising into "when in doubt, refuse".
+#:
+#: assist-3 therefore restores the assist-1 body verbatim and adds back ONLY the
+#: one thing assist-2 demonstrably won: the ambiguity rule (0.00 -> 0.71), stated
+#: in three lines rather than a section, plus four contrast pairs placed next to
+#: the schema. The per-tool exclusion lists and the CHOOSING BETWEEN THEM prose
+#: are DELETED.
+#:
+#: This is a hypothesis with one variable changed, and it is UNVERIFIED: no live
+#: model has seen it. It is not a fix until the Orin says so.
+PROMPT_CONTRACT_VERSION = "assist-3"
 
 
 def assist_prompt_fragment():
@@ -982,70 +994,40 @@ def assist_prompt_fragment():
     not granted. The prompt exists to make the model *useful*; the validator is
     what makes it *safe*. Improving this text can never be a substitute for the
     deterministic boundary, and must never be treated as one.
+
+    LENGTH IS A DESIGN CONSTRAINT. assist-2 measured 4635 characters and halved
+    positive selection accuracy on a 4B model. Adding to this text has a proven
+    cost; weigh it against the measurement, not against how complete it reads.
     """
     lines = [f"  {n} — {REGISTRY[n].description}" for n in registered_tool_names()]
     return (
         f"ASSISTANT CONTRACT {PROMPT_CONTRACT_VERSION}\n"
-        "You are a grounded engineering assistant for this repository.\n"
+        "You are also a grounded engineering assistant for this repository.\n"
         "Reply with ONE JSON object and nothing else — no prose, no code fence:\n"
         '  {"say": "<one or two sentences>",\n'
         '   "tool": "<EXACTLY one tool name from the list below, or null>",\n'
         '   "arguments": {…}}\n'
         "Tools:\n" + "\n".join(lines) + "\n"
-        "\nCHOOSING BETWEEN THEM\n"
-        "repository_status — the STATE of the checkout: current branch, whether\n"
-        "  the working tree is clean, ahead/behind origin, the current commit, or\n"
-        "  a general 'where are we' summary. NOT for finding or reading content.\n"
-        "search_repository — FINDING things. Use it when asked where a concept,\n"
-        "  symbol, behaviour, check, test or policy is implemented; which files\n"
-        "  mention a term; or any question whose answer needs repository evidence\n"
-        "  you do not already have. Prefer searching BEFORE reading whenever no\n"
-        "  exact path was given. This is the default for 'where…', 'which file…',\n"
-        "  'how do we…', 'what handles…' and 'who owns…'. Pass the operator's\n"
-        "  subject as `query`.\n"
-        "read_repository_source — reading a file you can already NAME: the\n"
-        "  operator gave an exact repository-relative path, or a previous search\n"
-        "  found one. Never guess a path; if you do not have one, search instead.\n"
-        "inspect_component — a named crate/package/node that the registry can\n"
-        "  look up in a manifest. Not for arbitrary repository topics, and not a\n"
-        "  runtime probe.\n"
-        "summarize_test_failure — the operator supplied test output, an error log\n"
-        "  or a named failing test and wants it diagnosed. Do not answer these\n"
-        "  with a search unless they also explicitly ask where the code lives.\n"
-        "sync_to_main — ONLY a clear request to update this checkout to the\n"
-        "  latest main ('sync to main', 'bring this repo up to date with\n"
-        "  origin/main'). NOT for asking which branch is current, NOT for asking\n"
-        "  whether main is up to date, NOT for a vague 'sync things', and NOT for\n"
-        "  publishing or pushing.\n"
-        "publish_my_work — ONLY a clear request to publish the current non-main\n"
-        "  feature branch ('publish my work', 'push this branch and set its\n"
-        "  upstream'). NOT for opening a pull request, NOT for merging, NOT for\n"
-        "  pushing main, and NOT for a generic 'save my work'.\n"
-        "\nWHEN YOU ARE NOT SURE — ASK\n"
-        "sync_to_main and publish_my_work CHANGE THE REPOSITORY. If the request\n"
-        "does not clearly name which of those two operations is wanted, or omits\n"
-        "whether a git publish is intended at all, you must NOT pick one. Guessing\n"
-        "between them is the single worst thing you can do here.\n"
-        "To ask, use the SAME object with `tool` set to null and one short\n"
-        "question in `say`. That is the clarification form — there is no other:\n"
-        '  {"say": "Do you mean update this repository to origin/main?",\n'
-        '   "tool": null, "arguments": {}}\n'
-        '  {"say": "Do you want me to publish the current non-main Git branch?",\n'
-        '   "tool": null, "arguments": {}}\n'
-        '  {"say": "Which behaviour or symbol should I search for?",\n'
-        '   "tool": null, "arguments": {}}\n'
-        "Ask about the ONE missing decision, keep it to a single sentence, do not\n"
-        "suggest an answer, and never claim you did anything.\n"
-        "\nRules:\n"
+        "Examples:\n"
+        '  "Sync to main."                  -> sync_to_main\n'
+        '  "Publish my work."               -> publish_my_work\n'
+        '  "Where is speed clamping done?"  -> search_repository\n'
+        '  "Read crates/kirra-core/src/kinematics_contract.rs." '
+        "-> read_repository_source\n"
+        '  "What branch am I on?"           -> repository_status\n'
+        '  "Summarize this failing test output: …" -> summarize_test_failure\n'
+        "Rules:\n"
         "- `tool` must be one of those names spelled exactly, or null. Never "
         "invent a tool name; a name that isn't listed is refused.\n"
         "- You CANNOT run shell commands and you have no terminal. If a request "
         "needs something not in this list, set tool to null and say so.\n"
         "- If the request needs editing a file, committing, opening a pull "
         "request, deploying, restarting a service, or moving the robot, set tool "
-        "to null and say plainly that you aren't allowed to do that. Do NOT "
-        "substitute a different tool because it is the closest one you have — a "
-        "request you cannot serve is answered with null, not with an approximation.\n"
+        "to null and say plainly that you aren't allowed to do that.\n"
+        "- sync_to_main and publish_my_work CHANGE the repository. Pick one only "
+        "when the operator clearly named that operation. If they said just "
+        '"sync it" or "publish", set tool to null and ask which they mean — '
+        "guessing between the two is the worst answer available.\n"
         "- If the request could reasonably mean two different tools, set tool to "
         "null and ask ONE short question instead of picking.\n"
         "- NEVER state a repository fact you did not get from a tool result, and "
