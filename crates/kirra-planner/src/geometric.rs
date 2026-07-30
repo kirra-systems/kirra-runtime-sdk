@@ -2187,12 +2187,27 @@ mod tests {
             None,
             FleetPosture::Nominal,
         );
-        assert!(
-            matches!(
-                verdict,
-                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
-            ),
-            "curvature-aware turn is admissible, got {verdict:?}"
+        // #1213 EXPECTED-BUT-UNDESIRED — a DOER gap, pinned so it stays visible.
+        //
+        // The checker refuses this bend. Its implied per-segment steering runs
+        // 40-55 deg against a 35 deg rack, and once the rack limit and the
+        // lateral-accel envelope bind, the permanent ceiling is 14-21 deg. The
+        // arc the vehicle would actually drive therefore runs wide and leaves
+        // the corridor.
+        //
+        // The checker ALWAYS computed that clamp; before #1213 it discarded the
+        // value and admitted the plan anyway, which is why this assertion used
+        // to read `Accept | Clamp`. Nothing about the checker got more
+        // conservative here - it stopped releasing an arc it had never checked.
+        //
+        // The fix belongs in the planner: limit proposed path curvature to the
+        // rack, not only to lateral comfort (`comfort_lateral_accel_mps2` = 2.0
+        // shapes SPEED, and does not stop a discretized corner implying 55 deg
+        // of steer). When it does, this assertion flips back.
+        assert_eq!(
+            verdict,
+            TrajectoryVerdict::MRCFallback,
+            "the curvature-aware bend is not steerable by this rack; got {verdict:?}"
         );
     }
 
@@ -2331,7 +2346,7 @@ mod tests {
     }
 
     #[test]
-    fn steering_rate_cap_slows_a_sharp_transition_and_kirra_admits() {
+    fn steering_rate_cap_slows_a_sharp_transition_and_kirra_refuses_the_unsteerable_bend() {
         // Isolate the steering-rate cap from the lateral-accel cap (disable the latter): on the
         // kink's sharp curvature TRANSITION the steering-rate cap slows the ego where the κ-only cap
         // would not (κ is still small at the entry, but dκ/ds is large).
@@ -2371,12 +2386,27 @@ mod tests {
             None,
             FleetPosture::Nominal,
         );
-        assert!(
-            matches!(
-                verdict,
-                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
-            ),
-            "the steering-rate-capped turn is admissible, got {verdict:?}"
+        // #1213 EXPECTED-BUT-UNDESIRED — a DOER gap, pinned so it stays visible.
+        //
+        // The checker refuses this bend. Its implied per-segment steering runs
+        // 40-55 deg against a 35 deg rack, and once the rack limit and the
+        // lateral-accel envelope bind, the permanent ceiling is 14-21 deg. The
+        // arc the vehicle would actually drive therefore runs wide and leaves
+        // the corridor.
+        //
+        // The checker ALWAYS computed that clamp; before #1213 it discarded the
+        // value and admitted the plan anyway, which is why this assertion used
+        // to read `Accept | Clamp`. Nothing about the checker got more
+        // conservative here - it stopped releasing an arc it had never checked.
+        //
+        // The fix belongs in the planner: limit proposed path curvature to the
+        // rack, not only to lateral comfort (`comfort_lateral_accel_mps2` = 2.0
+        // shapes SPEED, and does not stop a discretized corner implying 55 deg
+        // of steer). When it does, this assertion flips back.
+        assert_eq!(
+            verdict,
+            TrajectoryVerdict::MRCFallback,
+            "the steering-rate-capped bend is not steerable by this rack; got {verdict:?}"
         );
     }
 
@@ -2404,7 +2434,7 @@ mod tests {
     }
 
     #[test]
-    fn joint_optimizer_finds_a_faster_line_through_a_bend_and_kirra_admits() {
+    fn joint_optimizer_finds_a_faster_line_through_a_bend_and_kirra_refuses_it() {
         // A wide (±9 m) corridor with a sharp ~52° bend, taken through the production CHAIKIN-SMOOTHED
         // guide. The curvature-proportional APEX offset cuts the corner (shortens the path across the
         // apex) where a constant parallel shift bought nothing, and the oriented-footprint containment
@@ -2513,12 +2543,27 @@ mod tests {
             None,
             FleetPosture::Nominal,
         );
-        assert!(
-            matches!(
-                verdict,
-                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
-            ),
-            "KIRRA admits the joint-optimized line, got {verdict:?}"
+        // #1213 EXPECTED-BUT-UNDESIRED — a DOER gap, pinned so it stays visible.
+        //
+        // The checker refuses this bend. Its implied per-segment steering runs
+        // 40-55 deg against a 35 deg rack, and once the rack limit and the
+        // lateral-accel envelope bind, the permanent ceiling is 14-21 deg. The
+        // arc the vehicle would actually drive therefore runs wide and leaves
+        // the corridor.
+        //
+        // The checker ALWAYS computed that clamp; before #1213 it discarded the
+        // value and admitted the plan anyway, which is why this assertion used
+        // to read `Accept | Clamp`. Nothing about the checker got more
+        // conservative here - it stopped releasing an arc it had never checked.
+        //
+        // The fix belongs in the planner: limit proposed path curvature to the
+        // rack, not only to lateral comfort (`comfort_lateral_accel_mps2` = 2.0
+        // shapes SPEED, and does not stop a discretized corner implying 55 deg
+        // of steer). When it does, this assertion flips back.
+        assert_eq!(
+            verdict,
+            TrajectoryVerdict::MRCFallback,
+            "the joint-optimized bend is not steerable by this rack; got {verdict:?}"
         );
     }
 

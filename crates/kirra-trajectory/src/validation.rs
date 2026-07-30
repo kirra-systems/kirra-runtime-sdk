@@ -486,21 +486,6 @@ pub fn validate_trajectory_slow_with_envelope(
         effective_perception_cap,
     );
     let initial_steering_deg = current_steering_deg_from_odom(latest_odom, config);
-    // #1213 — is segment 0's "current steering" a MEASUREMENT or an ASSUMPTION?
-    // Without odom (and at near-zero speed, where the inverse bicycle model is
-    // undetermined) `current_steering_deg_from_odom` returns a neutral 0.0. The
-    // rate ceiling then reads the first segment as a full slew from centre and
-    // clamps it — even when the rack is already turned and no slew is needed.
-    //
-    // That clamp is an artifact of the unknown initial condition, so it must not
-    // by itself drive an enforced-geometry refusal: the divergence it implies is
-    // not divergence the checker KNOWS will happen. Later segments are unaffected
-    // — they measure against the previous segment's own commanded steering, which
-    // is known. Recorded as AOU-STEERING-ORIGIN-001; a rack-position sensor
-    // retires the exception and is the proper fix.
-    let steering_origin_measured = latest_odom
-        .map(|o| o.linear_x_mps.abs() > 0.1)
-        .unwrap_or(false);
     let mut clamp_seen = false;
     // B1 fix — the effective per-pose velocity ceiling, aligned index-for-index
     // with `trajectory`. LAZILY materialized: stays `None` (zero heap) until a
@@ -556,31 +541,67 @@ pub fn validate_trajectory_slow_with_envelope(
         // BEFORE the match's own bookkeeping so every arm contributes, and so a
         // future arm cannot silently drop the steering axis the way
         // `ClampSteering(_) => { clamp_seen = true; }` did.
-        let enforced_steering_deg = match verdict {
-            EnforceAction::ClampSteering(d) => d,
-            EnforceAction::ClampBoth { steering, .. } => steering,
-            EnforceAction::Allow | EnforceAction::ClampLinear(_) => cmd.steering_angle_deg,
-            // Refuses below; the value is never read.
-            EnforceAction::DenyBreach(_) => cmd.steering_angle_deg,
-        };
+        // The angle the rack SETTLES at. For a permanent clamp that is the
+        // permanent ceiling (filled in below); otherwise the planner's own
+        // commanded angle, which a transient rate clamp only delays reaching.
+        let enforced_steering_deg = cmd.steering_angle_deg;
         let enforced_end_velocity_mps = match verdict {
             EnforceAction::ClampLinear(v) | EnforceAction::ClampBoth { linear: v, .. } => v,
             _ => trajectory[i + 1].velocity_mps,
         };
-        // A clamp on segment 0 whose only basis is the ASSUMED neutral rack does
-        // not arm the re-check (see `steering_origin_measured`). Every other
-        // clamp does.
-        let clamp_is_known = matches!(
+        // #1213 — PERMANENT vs TRANSIENT divergence. The three steering clamps
+        // do not mean the same thing for the arc the vehicle will sweep:
+        //
+        //   P5a rack limit      — the angle is UNREACHABLE. Permanent.
+        //   P6 lateral envelope — unreachable AT THIS SPEED. Permanent while it holds.
+        //   P5b rate ceiling    — reachable, just not this tick. TRANSIENT: the
+        //                         rack keeps slewing and closes the gap.
+        //
+        // Only the permanent kinds are re-checked. Treating a rate clamp as a
+        // permanent heading offset would refuse trajectories the vehicle can
+        // actually follow — the lag it opens is bounded and recovers, and its
+        // residual is recorded rather than modelled here.
+        //
+        // Classified by re-asking the KERNEL with the rate demand zeroed
+        // (`current_steering == commanded`), so P5b cannot fire and whatever
+        // still clamps is the permanent ceiling. Reusing the real enforcement
+        // path means this cannot drift from it. Runs only on a segment that
+        // already clamped, so the Nominal path is untouched.
+        //
+        // This also subsumes the assumed-rack problem: P5b is the ONLY priority
+        // that reads `current_steering_angle_deg`, so a clamp derived from the
+        // no-odom neutral assumption is never armed in the first place.
+        let permanent_steering_deg = if matches!(
             verdict,
             EnforceAction::ClampSteering(_) | EnforceAction::ClampBoth { .. }
-        ) && (i > 0 || steering_origin_measured);
+        ) {
+            let probe = ProposedVehicleCommand {
+                current_steering_angle_deg: cmd.steering_angle_deg,
+                ..cmd
+            };
+            let probe_verdict = if degraded {
+                enforce_degraded_decel_to_stop(&probe, &kinematics)
+            } else {
+                validate_vehicle_command(&probe, &kinematics)
+            };
+            match probe_verdict {
+                EnforceAction::ClampSteering(d) => Some(d),
+                EnforceAction::ClampBoth { steering, .. } => Some(steering),
+                // Nothing clamps once the rate demand is removed ⇒ the original
+                // clamp was purely the slew ceiling ⇒ transient.
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let clamp_is_known = permanent_steering_deg.is_some();
         if steering_clamp_from.is_none() && clamp_is_known {
             steering_clamp_from = Some(i);
         }
         if steering_clamp_from.is_some() {
             enforced_segments.push(EnforcedSegment {
                 end_velocity_mps: enforced_end_velocity_mps,
-                steering_deg: enforced_steering_deg,
+                steering_deg: permanent_steering_deg.unwrap_or(enforced_steering_deg),
                 delta_time_s: cmd.delta_time_s,
                 steering_clamped: clamp_is_known,
             });
@@ -2624,11 +2645,13 @@ mod enforced_reconstruction_tests {
     #[test]
     fn zero_steering_reconstructs_a_straight_line() {
         let planner = vec![pt(0.0, 0.0, 0.0, 2.0, 0.0), pt(1.0, 0.0, 0.0, 2.0, 0.5)];
-        let out =
-            reconstruct_enforced_poses(&planner, 0, 2.0, &[seg(0.0, 2.0, 0.5)], 2.0).unwrap();
+        let out = reconstruct_enforced_poses(&planner, 0, 2.0, &[seg(0.0, 2.0, 0.5)], 2.0).unwrap();
         assert_eq!(out.len(), 2);
         assert!((out[1].x_m - 1.0).abs() < 1e-12, "x = v·dt");
-        assert!(out[1].y_m.abs() < 1e-12, "no lateral motion at zero steering");
+        assert!(
+            out[1].y_m.abs() < 1e-12,
+            "no lateral motion at zero steering"
+        );
         assert!(out[1].heading_rad.abs() < 1e-12);
     }
 
@@ -2648,7 +2671,11 @@ mod enforced_reconstruction_tests {
             &[a, b],
             0,
             a.velocity_mps,
-            &[seg(cmd.steering_angle_deg, b.velocity_mps, cmd.delta_time_s)],
+            &[seg(
+                cmd.steering_angle_deg,
+                b.velocity_mps,
+                cmd.delta_time_s,
+            )],
             config.wheelbase_m,
         )
         .unwrap();
@@ -2748,9 +2775,19 @@ mod enforced_reconstruction_tests {
             ("non-positive dt", 2.0, seg(5.0, 2.0, 0.0), 2.0),
             ("non-finite dt", 2.0, seg(5.0, 2.0, f64::INFINITY), 2.0),
             ("non-finite steering", 2.0, seg(f64::NAN, 2.0, 0.5), 2.0),
-            ("non-finite velocity", 2.0, seg(5.0, f64::INFINITY, 0.5), 2.0),
+            (
+                "non-finite velocity",
+                2.0,
+                seg(5.0, f64::INFINITY, 0.5),
+                2.0,
+            ),
             // tan(90°) is not finite — a rack angle at the singularity.
-            ("steering at the tan singularity", 2.0, seg(90.0, 2.0, 0.5), 2.0),
+            (
+                "steering at the tan singularity",
+                2.0,
+                seg(90.0, 2.0, 0.5),
+                2.0,
+            ),
         ] {
             assert!(
                 reconstruct_enforced_poses(&planner, 0, seed, &[s], wheelbase).is_none(),

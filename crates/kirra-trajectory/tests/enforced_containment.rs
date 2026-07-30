@@ -16,12 +16,14 @@
 
 use kirra_core::corridor::Point;
 use kirra_core::frame_integrity::FrameTrust;
+use kirra_core::trajectory::Pose;
 use kirra_core::FleetPosture;
 use kirra_trajectory::state::{TrajectoryPoint, TrajectoryVerdict};
-use kirra_trajectory::VehicleConfig;
-use kirra_trajectory::validation::{validate_trajectory_slow_with_envelope, TrajectoryRefusalReason};
+use kirra_trajectory::validation::{
+    validate_trajectory_slow_with_envelope, TrajectoryRefusalReason,
+};
 use kirra_trajectory::MockCorridorSource;
-use kirra_core::trajectory::Pose;
+use kirra_trajectory::VehicleConfig;
 
 const DT: f64 = 0.2;
 const SPEED_MPS: f64 = 2.0;
@@ -65,7 +67,11 @@ fn arc_poses(steering_deg: f64, n: usize) -> Vec<TrajectoryPoint> {
     let (mut x, mut y, mut h) = (0.0_f64, 0.0_f64, 0.0_f64);
     let mut out = Vec::with_capacity(n + 1);
     out.push(TrajectoryPoint {
-        pose: Pose { x_m: x, y_m: y, heading_rad: h },
+        pose: Pose {
+            x_m: x,
+            y_m: y,
+            heading_rad: h,
+        },
         velocity_mps: SPEED_MPS,
         time_from_start_s: 0.0,
     });
@@ -81,7 +87,11 @@ fn arc_poses(steering_deg: f64, n: usize) -> Vec<TrajectoryPoint> {
         }
         h = h1;
         out.push(TrajectoryPoint {
-            pose: Pose { x_m: x, y_m: y, heading_rad: h },
+            pose: Pose {
+                x_m: x,
+                y_m: y,
+                heading_rad: h,
+            },
             velocity_mps: SPEED_MPS,
             time_from_start_s: ((i + 1) as f64) * DT,
         });
@@ -102,8 +112,14 @@ fn corridor_around(path: &[TrajectoryPoint], w: f64, pad: f64) -> MockCorridorSo
     };
     let push = |pose: Pose, left: &mut Vec<Point>, right: &mut Vec<Point>| {
         let (nx, ny) = (-pose.heading_rad.sin(), pose.heading_rad.cos());
-        left.push(Point { x_m: pose.x_m + w * nx, y_m: pose.y_m + w * ny });
-        right.push(Point { x_m: pose.x_m - w * nx, y_m: pose.y_m - w * ny });
+        left.push(Point {
+            x_m: pose.x_m + w * nx,
+            y_m: pose.y_m + w * ny,
+        });
+        right.push(Point {
+            x_m: pose.x_m - w * nx,
+            y_m: pose.y_m - w * ny,
+        });
     };
     push(extend(&path[0], -pad), &mut left, &mut right);
     for p in path {
@@ -180,7 +196,10 @@ fn the_same_clamp_is_admitted_when_the_enforced_arc_stays_inside() {
 
     let (verdict, reason) = run(&proposed, &corridor);
 
-    assert_eq!(reason, None, "a containable clamp carries no refusal reason");
+    assert_eq!(
+        reason, None,
+        "a containable clamp carries no refusal reason"
+    );
     assert_eq!(
         verdict,
         TrajectoryVerdict::Clamp,
@@ -195,13 +214,19 @@ fn the_same_clamp_is_admitted_when_the_enforced_arc_stays_inside() {
 #[test]
 fn the_scenario_actually_provokes_a_steering_clamp() {
     let proposed = arc_poses(PROPOSED_STEERING_DEG, SEGMENTS);
-    let (verdict, _) = run(&proposed, &corridor_around(&proposed, WIDE_CORRIDOR_HALF_WIDTH_M, 3.0));
+    let (verdict, _) = run(
+        &proposed,
+        &corridor_around(&proposed, WIDE_CORRIDOR_HALF_WIDTH_M, 3.0),
+    );
     assert_eq!(verdict, TrajectoryVerdict::Clamp);
 
     // And the same geometry WITHIN the rack limit is a clean Accept — so the
     // Clamp above is attributable to the steering angle, not to the arc shape.
     let within_limit = arc_poses(MAX_STEERING_DEG - 2.0, SEGMENTS);
-    let (verdict, reason) = run(&within_limit, &corridor_around(&within_limit, WIDE_CORRIDOR_HALF_WIDTH_M, 3.0));
+    let (verdict, reason) = run(
+        &within_limit,
+        &corridor_around(&within_limit, WIDE_CORRIDOR_HALF_WIDTH_M, 3.0),
+    );
     assert_eq!(reason, None);
     assert_eq!(
         verdict,
@@ -210,13 +235,23 @@ fn the_scenario_actually_provokes_a_steering_clamp() {
     );
 }
 
-/// STRAIGHTER IS NOT SAFER, stated as its own property rather than left implicit
-/// in the headline test: the refusal above is caused by the arc that turns LESS.
+/// STRAIGHTER IS NOT SAFER — and, in the same pair, PERMANENT IS NOT TRANSIENT.
 ///
-/// Proved by construction — the corridor is built around the proposed arc, and
-/// the only path that can leave it is the one that fails to follow the bend.
-/// A checker that assumed reduced steering authority was inherently conservative
-/// would admit this trajectory.
+/// Identical geometry and identical corridor; the only difference between the
+/// two arms is how much steering authority the vehicle has. That makes this the
+/// discriminator for both properties the gate rests on:
+///
+///   * the arc that DEPARTS is the one that turns LESS, so a checker treating
+///     reduced steering authority as inherently conservative would admit it;
+///   * the permissive arm still CLAMPS — segment 0 ramps from the assumed-
+///     neutral rack and trips the slew ceiling — but that clamp is TRANSIENT
+///     (the rack reaches the angle, just a tick later), so it does not arm the
+///     re-check and the trajectory is admitted. The rack-limited arm's clamp is
+///     PERMANENT (35 deg of demand against a 10 deg rack is never reachable),
+///     so it does arm, and the enforced arc is refused.
+///
+/// Collapsing those two clamp kinds together would refuse the permissive arm as
+/// well — a trajectory the vehicle can actually follow.
 #[test]
 fn the_departing_arc_is_the_one_with_less_steering() {
     let proposed = arc_poses(PROPOSED_STEERING_DEG, SEGMENTS);
@@ -266,4 +301,3 @@ fn an_unclamped_trajectory_is_unaffected() {
     assert_eq!(reason, None);
     assert_eq!(verdict, TrajectoryVerdict::Accept);
 }
-
