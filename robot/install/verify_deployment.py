@@ -33,7 +33,17 @@ import os
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Both the repo layout and the installed one. In the repo this file sits at
+# robot/install/, so its GRANDparent (robot/) holds consumer_config_contract;
+# installed it sits flat in /opt/kirra/robot/ beside its imports, so its OWN
+# directory is the one that matters. Inserting both makes the same file run
+# unmodified from either location — which is the point of deploying it: a
+# verifier that only runs from a checkout reports whatever that checkout
+# believes, and on 2026-07-31 a stale one reported a stale verdict against a
+# correctly-deployed robot.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))
+sys.path.insert(0, _HERE)
 import consumer_config_contract as contract  # noqa: E402
 
 OPT = os.environ.get("KIRRA_OPT_DIR", "/opt/kirra")
@@ -52,6 +62,11 @@ EXPECTED_ARTIFACTS = [
     (f"{OPT}/robot/kirra_motor_consumer.py", True),
     (f"{OPT}/robot/serial_exclusivity.py", False),
     (f"{OPT}/robot/motor_authority.py", False),
+    # The verifier verifies its own deployment. A robot carrying no copy of this
+    # tool can only be checked from a checkout, and a stale checkout reports a
+    # stale verdict — the failure mode that made the first post-fix run read as
+    # a deployment fault when the deployment was already correct.
+    (f"{OPT}/robot/verify_deployment.py", True),
     (INSTALLED_CONSUMER_LIB, False),
     (f"{OPT}/taj_service", True),
     (f"{OPT}/mick_service", True),

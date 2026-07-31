@@ -841,6 +841,40 @@ def test_the_verifier_fails_when_a_governed_artifact_is_absent():
               f"a missing serial_exclusivity.py must FAIL; failing rows: {failed}")
 
 
+def test_the_verifier_ships_with_the_modules_it_imports():
+    """A verifier that only runs from a checkout reports what that CHECKOUT
+    believes, not what the robot is.
+
+    On 2026-07-31 the first post-fix run came from a stale checkout and reported
+    a FAIL against a correctly-deployed robot — the expectation was old, the
+    machine was fine, and the verdict described neither. Installing the tool
+    beside its imports means it can be run on a robot with no repo at all, and
+    the manifest digests it like every other artifact so its own version is
+    pinned.
+    """
+    src = (HERE / "install_kirra.sh").read_text()
+    for needed in ("verify_deployment.py", "consumer_config_contract.py",
+                   "preflight_consumer_env.py"):
+        check(f'"${{OPT}}/robot/{needed}"' in src,
+              f"install_kirra.sh must install {needed} to ${{OPT}}/robot — the "
+              f"verifier cannot run on the robot without it")
+    check(any(p.endswith("/robot/verify_deployment.py")
+              for p, _ in vd.EXPECTED_ARTIFACTS),
+          "the verifier must verify its own deployment")
+
+
+def test_the_verifier_runs_from_either_layout():
+    """Repo layout puts it in robot/install/ with its imports one level up;
+    the installed layout puts it flat in /opt/kirra/robot/ beside them. Both
+    directories must be on sys.path or the installed copy cannot import."""
+    src = (HERE / "verify_deployment.py").read_text()
+    head = src.split("import consumer_config_contract", 1)[0]
+    check("sys.path.insert(0, _HERE)" in head,
+          "its own directory must be on sys.path (installed, flat layout)")
+    check("sys.path.insert(0, os.path.dirname(_HERE))" in head,
+          "its parent must be on sys.path (repo layout)")
+
+
 def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print("deployment_verify_test:")
