@@ -84,12 +84,23 @@ out = subprocess.run([sys.executable, str(CI / "deep_harnesses.py")],
 check(out.returncode == 0, f"script exits 0 (got {out.returncode}: {out.stderr.strip()[:120]})")
 names = out.stdout.strip()
 for expected in ("k3_speed_ceiling_clamp_exact",
-                 "k7_executable_return_respects_the_rack_limit",
                  "k8_executable_return_respects_the_rate_bound",
                  "r2_longitudinal_monotone_in_closing_speed_on_grid"):
     check(expected in names, f"{expected} is in the matrix")
 for helper_name in ("grid_speed", "grid_param"):
     check(helper_name not in names, f"helper {helper_name} is NOT in the matrix")
+
+# K7 was DEMOTED OUT OF THE PROOF TIER (#1268) and lives behind
+# `outside-proof-envelope`, which no lane enables. Pinned by name rather than
+# left to the gate spelling, because re-adding it would silently reintroduce a
+# harness that cannot finish — it stalls in propositional conversion in
+# multi-property mode AND is solver-hard when isolated to its two assertions.
+# Its per-PR enforcement is the 306,180-point grid, which is unaffected.
+check("k7_executable_return_respects_the_rack_limit" not in names,
+      "K7 is NOT in the weekly matrix — demoted out of the proof tier (#1268)")
+check("outside-proof-envelope" in (CI.parent / "verification" / "kani"
+                                   / "Cargo.toml").read_text(encoding="utf-8"),
+      "the outside-proof-envelope feature still exists to hold K7's source")
 
 print("== 6. fail-closed on an empty deep tier ==")
 # A vacuous lane passes while proving nothing. Point the script at a tree with

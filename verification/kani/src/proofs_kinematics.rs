@@ -719,24 +719,45 @@ fn k6_executable_return_respects_the_speed_ceiling() {
 /// lateral envelope, the rack limit is a physical hard stop — a demand beyond it
 /// is not merely aggressive, it is unachievable by the mechanism.
 ///
-/// LANE: `deep-proofs` (weekly), and unlike R2 this demotion is **provisional**
-/// — say so rather than imply a budget was measured and merely exceeded. K3,
-/// K3b and K6 discharge in 22 s, 32 s and 45 s; K7 was still solving after 23
-/// minutes of CBMC time and was stopped, so what is known is that it does not
-/// fit the per-PR budget, NOT that a multi-hour budget suffices. It is the only
-/// one of the four whose property needs axiom A3, the constraint that couples
-/// the `atan` answer to the `tan` question, and that coupling is the obvious
-/// suspect. If the weekly lane does not converge either, the honest move is to
-/// demote K7 out of the proof tier entirely rather than leave a harness that
-/// never finishes and reads as coverage.
+/// 🔴 LANE: NONE. **K7 IS DEMOTED OUT OF THE PROOF TIER** (#1268). It is behind
+/// `outside-proof-envelope`, a feature NO CI lane enables — not per-PR, not the
+/// weekly deep lane. `ci/deep_harnesses.py` matches only `deep-proofs`, so this
+/// harness cannot re-enter the weekly matrix by accident, and
+/// `ci/test_deep_harnesses.py` pins that it does not.
 ///
-/// Its per-PR gate meanwhile is not the three-value mirror below but
+/// The earlier text here said the demotion was provisional and that a bigger
+/// budget might suffice. **That was wrong, and the measurement that refuted it
+/// is worth keeping.** Isolating K7's two real assertions with CBMC `--property`
+/// — discarding 368 of its 370 properties — shrank the formula by 0.5%
+/// (738,811 → 735,393 clauses). The 318 pointer-dereference checks are not the
+/// cost; the *program* encoding is. And in that isolated configuration CBMC does
+/// reach the solver and still returns nothing after 30 minutes. So K7 fails two
+/// ways at once: multi-property mode stalls in propositional conversion before a
+/// solver is invoked, and the underlying instance is solver-hard regardless.
+/// Fixing the first would only expose the second.
+///
+/// ~735k clauses for an 8.8k-step program expression is IEEE-754 bit-blasting.
+/// K7 relates two separately bit-blasted f64 computation chains, which is
+/// precisely the shape already recorded as never finishing. Additional runtime
+/// budget is therefore not a credible remediation, and this harness must not be
+/// re-enabled on the theory that a larger runner will do it.
+///
+/// The source is retained ONLY as the starting point for a future redesign,
+/// which is a modelling task and not CI tuning. Useful directions: prove over a
+/// reduced mathematical model; introduce analytically justified bounds around
+/// the floating-point operations; restructure P-RACK so it does not directly
+/// compare two bit-blasted f64 chains. Any such attempt must preserve the ACTUAL
+/// safety claim — #1243 refused to weaken K3 to a cheaper `|v| <= ceiling`
+/// precisely because that duplicates K6 and would let the safety case read as
+/// though nothing had changed. Same discipline applies here.
+///
+/// NO COVERAGE IS LOST BY THIS DEMOTION. P-RACK's enforcement is, and remains,
 /// `k6_k7_mirror_exhaustive_grid_over_the_executable_return` — 306,180 points
 /// swept along ceiling × ODD cap × commanded speed × current speed × steering
 /// demand × current steering × wheelbase × lateral cap, asserting this exact
-/// bound. That is the R2 pattern, and the grid is red against the pre-fix
-/// kernel on the 200 deg demand.
-#[cfg(all(kani, feature = "deep-proofs"))]
+/// bound, BLOCKING on every PR, and red against the pre-fix kernel on the
+/// 200 deg demand. Only the symbolic tier for P-RACK is gone.
+#[cfg(all(kani, feature = "outside-proof-envelope"))]
 #[kani::proof]
 #[kani::stub(f64::powi, stub_powi)]
 #[kani::stub(f64::tan, stub_tan)]
