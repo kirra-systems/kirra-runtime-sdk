@@ -66,6 +66,13 @@ Config — ALL required, NO defaults (fail-closed; a missing var aborts):
 Optional:
     KIRRA_RELEASE_TOPIC        (default /kirra/release)
     KIRRA_CONSUMER_LIB         explicit path to libkirra_consumer_ffi.so
+    KIRRA_ALLOW_ROOT           "1" acknowledges running as uid 0. Default:
+                               REFUSED. Root breaks DDS shared-memory delivery
+                               silently (the reader's /dev/shm segment is
+                               root-owned; a robot-user publisher cannot write
+                               into it) while discovery and timers still look
+                               healthy, and it bypasses the #887 serial owner
+                               check. Recovery/manufacturing only.
     KIRRA_ALLOW_SHARED_SERIAL  "1" acknowledges a bring-up run on a port that
                                FAILS the ADR-0033 Tier-3 exclusivity sentinel
                                (wrong owner / loose mode / another holder).
@@ -382,7 +389,71 @@ def make_tick_handler(consumer, actuate, now_fn=now_ms, trace=None):
     return on_tick
 
 
+ROOT_ACK_ENV = "KIRRA_ALLOW_ROOT"
+
+
+def root_startup_verdict(euid: int, acknowledged: bool) -> tuple[str, str]:
+    """Refuse to run the consumer as uid 0 unless deliberately acknowledged.
+
+    Running as root breaks DDS delivery SILENTLY. Fast DDS carries discovery
+    over UDP multicast but same-host data over /dev/shm segments owned by their
+    creating participant at 0644, and a writer must write into the reader's
+    segment. A root-owned reader therefore cannot be fed by a robot-user
+    publisher — while `ros2 topic info --verbose` still shows a matched
+    reliable/volatile pair and local timers keep firing. On 2026-07-31 that
+    combination produced a node that serviced its liveness clock, never its
+    release subscription, and looked correct from every graph-level query.
+
+    Root ALSO bypasses the 0600 owner check on the motor port, so the #887
+    exclusivity sentinel passes for the wrong reason and reports nothing.
+
+    Pure decision over (euid, acknowledged) so it is host-testable without
+    being root. Mirrors serial_exclusivity.startup_verdict deliberately: same
+    three outcomes, same shape, one idiom to learn.
+
+    🔴 The override exists because recovery and manufacturing workflows may
+    genuinely need it, but it is the same shape as KIRRA_ALLOW_SHARED_SERIAL —
+    which silently disarmed a real guard for hours. It is therefore reported
+    LOUDLY every run and names what it is giving up.
+    """
+    if euid != 0:
+        return "ok", f"running as uid {euid} (not root) — DDS shared memory is exchangeable"
+    if acknowledged:
+        return "acknowledged", (
+            f"RUNNING AS ROOT (acknowledged via {ROOT_ACK_ENV}=1). DDS "
+            f"shared-memory delivery from a non-root publisher WILL FAIL "
+            f"silently: discovery still matches and timers still fire, so the "
+            f"node looks healthy while no release is ever received. The #887 "
+            f"serial sentinel is also bypassed — root ignores the 0600 owner "
+            f"check, so its OK carries no authority claim this run."
+        )
+    return "refuse", (
+        f"REFUSING to run as root (uid 0). Fast DDS creates this reader's "
+        f"/dev/shm segment root-owned at 0644, so a robot-user publisher "
+        f"cannot write into it and release frames are never delivered — while "
+        f"discovery still matches and the liveness timer still fires, which "
+        f"looks like a working node. Run as the robot user instead: "
+        f"kirra-consumer.service already sets User=<robot user>, and "
+        f"install_kirra.sh renders it from SUDO_USER. If a recovery or "
+        f"manufacturing workflow genuinely requires root, set {ROOT_ACK_ENV}=1 "
+        f"to acknowledge that releases may never arrive."
+    )
+
+
 def main() -> int:
+    # FIRST, before ROS, the vendor library or the serial port: a root consumer
+    # cannot receive releases over shared memory, and every downstream signal
+    # would still look healthy. Fail here, loudly, rather than three minutes
+    # later as a silent absence of motion.
+    _root_verdict, _root_msg = root_startup_verdict(
+        os.geteuid(), (os.environ.get(ROOT_ACK_ENV) or "").strip() in ("1", "true", "yes", "on")
+    )
+    if _root_verdict == "refuse":
+        print(f"FATAL: {_root_msg}", file=sys.stderr)
+        return 2
+    if _root_verdict == "acknowledged":
+        print(f"WARNING: {_root_msg}", file=sys.stderr)
+
     # ROS + vendor lib imported inside main so the file parses/syntax-checks on a
     # host without them (CI py_compile); they are required on the robot.
     import rclpy

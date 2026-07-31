@@ -328,6 +328,13 @@ def main() -> int:
         # run would. The sentinel's own logic is host-tested in
         # serial_exclusivity_test.py; THIS harness tests teardown paths.
         "KIRRA_ALLOW_SHARED_SERIAL": "1",
+        # Likewise the uid-0 refusal: a CI runner or dev container may well BE
+        # root, and this harness exercises TEARDOWN against a stub serial with
+        # no DDS participant at all — the delivery failure the refusal exists to
+        # prevent cannot occur here. The refusal's own logic is host-tested in
+        # bound_consumer_test.py; acknowledging it keeps this harness testing
+        # what it is for. On a robot the default (refuse) still applies.
+        "KIRRA_ALLOW_ROOT": "1",
     })
     ctx.spin_downs_context = True  # our handler already shut it down...
     ctx.spin_raises = ExternalShutdownException()  # ...and spin surfaces it

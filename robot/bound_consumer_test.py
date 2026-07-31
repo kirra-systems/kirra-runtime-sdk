@@ -34,6 +34,7 @@ from kirra_ffi import (  # noqa: E402
     split_bound_frame,
     split_frame,
 )
+import kirra_motor_consumer as kmc  # noqa: E402
 from kirra_motor_consumer import (  # noqa: E402
     decide_bound_frame,
     format_bound_health,
@@ -407,6 +408,52 @@ def test_format_bound_health_names_the_diagnostic_counters():
                      "key_mismatch_alarm=1"):
         assert expected in line, (expected, line)
     assert format_bound_health(_Health()) == "no refusals recorded"
+
+
+# ---------------------------------------------------------------------------
+# Root refusal (uid 0)
+# ---------------------------------------------------------------------------
+
+def test_a_non_root_consumer_is_admitted():
+    verdict, msg = kmc.root_startup_verdict(1000, acknowledged=False)
+    assert verdict == "ok", msg
+
+
+def test_root_is_refused_by_default():
+    """Root breaks DDS shared-memory delivery while every other signal still
+    looks healthy — discovery matches, timers fire, the serial sentinel passes
+    because root bypasses its owner check. Refusing at startup turns a silent
+    absence of motion into one line on stderr."""
+    verdict, msg = kmc.root_startup_verdict(0, acknowledged=False)
+    assert verdict == "refuse", verdict
+    assert "shm" in msg or "/dev/shm" in msg, msg
+    assert kmc.ROOT_ACK_ENV in msg, "the refusal must name its own override"
+    assert "User=" in msg, "…and point at the supported way to run"
+
+
+def test_root_with_the_acknowledgement_runs_but_says_what_it_costs():
+    """The override exists for recovery and manufacturing. It is the same shape
+    as KIRRA_ALLOW_SHARED_SERIAL, which disarmed a real guard for hours, so it
+    must never be quiet."""
+    verdict, msg = kmc.root_startup_verdict(0, acknowledged=True)
+    assert verdict == "acknowledged", verdict
+    assert "WILL FAIL" in msg, "the cost must be stated, not implied"
+    assert "sentinel" in msg, "…including the serial check it also bypasses"
+
+
+def test_the_root_check_runs_before_ros_and_the_serial_port():
+    """Ordering is the point: a root consumer must fail BEFORE it opens the
+    motor port or joins the graph, not three minutes later as missing motion."""
+    import ast
+    src = (Path(__file__).resolve().parent / "kirra_motor_consumer.py").read_text()
+    main_fn = next(n for n in ast.walk(ast.parse(src))
+                   if isinstance(n, ast.FunctionDef) and n.name == "main")
+    body = ast.unparse(main_fn)
+    root_at = body.index("root_startup_verdict")
+    for later in ("import rclpy", "serial_exclusivity", "Rosmaster("):
+        if later in body:
+            assert root_at < body.index(later), \
+                f"the root check must precede {later!r}"
 
 
 # ---------------------------------------------------------------------------
