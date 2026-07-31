@@ -167,6 +167,20 @@ for f in kirra_ffi.py kirra_release_publisher.py r2_drive.py motor_authority.py 
          serial_exclusivity.py clock_step_guard.py kirra_r2cp.py; do
   sudo install -m 0644 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
 done
+
+# The VERIFIER itself, plus the two modules it imports. Without this it runs
+# only from a checkout, so its verdict describes whatever that checkout
+# believes rather than the robot: on 2026-07-31 a stale checkout reported a
+# stale expectation against a correctly-deployed machine, and the FAIL was an
+# artefact of where the tool was read from. Installed here it lands beside its
+# imports, is digested by the manifest below like every other artifact, and can
+# be run on a robot with no repo at all.
+sudo install -m 0755 "${REPO}/robot/install/verify_deployment.py" \
+                     "${OPT}/robot/verify_deployment.py"
+sudo install -m 0644 "${REPO}/robot/consumer_config_contract.py" \
+                     "${OPT}/robot/consumer_config_contract.py"
+sudo install -m 0644 "${REPO}/robot/install/preflight_consumer_env.py" \
+                     "${OPT}/robot/preflight_consumer_env.py"
 for f in first_run_elevated.sh live_loop_elevated.sh steering_bench_elevated.sh; do
   sudo install -m 0755 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
 done
