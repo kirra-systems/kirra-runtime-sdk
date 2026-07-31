@@ -396,6 +396,71 @@ def test_the_installer_prints_the_deployment_identity():
         check(needle in src, f"install_kirra.sh must print {needle!r}")
 
 
+def test_an_edited_deployed_file_is_reported_loudly():
+    """THE unguarded failure mode from 2026-07-31: a deployed .py hand-patched
+    in place. It kept running, kept passing every health check, and silently
+    stopped matching its source."""
+    rep = vd.Report()
+    vd.check_installed_artifacts_unchanged(
+        rep,
+        recorded={"/opt/kirra/robot/kirra_motor_consumer.py": "a" * 64},
+        current={"/opt/kirra/robot/kirra_motor_consumer.py": "b" * 64},
+    )
+    rows = [r for r in rep.rows if r["status"] == vd.WARN]
+    check(rows, "an edited artifact must be reported, not silent")
+    d = rows[0]["detail"]
+    check("kirra_motor_consumer.py" in d, f"the exact path must appear: {d}")
+    check("aaaaaaaaaaaa" in d and "bbbbbbbbbbbb" in d,
+          f"both hashes must appear so the operator can act: {d}")
+    check(rows[0]["fix"], "…and it must say what to do")
+    check(rep.failed == 0,
+          "drift WARNs — editing a deployed file during bring-up is legitimate, "
+          "doing it invisibly is not")
+
+
+def test_a_missing_deployed_file_is_reported():
+    rep = vd.Report()
+    vd.check_installed_artifacts_unchanged(
+        rep, recorded={"/opt/kirra/robot/serial_exclusivity.py": "c" * 64}, current={})
+    check([r for r in rep.rows if r["status"] == vd.WARN],
+          "an artifact that vanished after install must be reported")
+
+
+def test_an_unchanged_deployment_passes_without_noise():
+    rep = vd.Report()
+    same = {"/opt/kirra/robot/kirra_motor_consumer.py": "d" * 64}
+    vd.check_installed_artifacts_unchanged(rep, recorded=same, current=dict(same))
+    check(all(r["status"] == vd.PASS for r in rep.rows),
+          f"a clean deployment must not warn: {[r['status'] for r in rep.rows]}")
+
+
+def test_an_absent_manifest_warns_rather_than_failing():
+    """A robot installed before manifests existed is not broken — but it IS
+    undetectable, and that has to be said out loud."""
+    rep = vd.Report()
+    vd.check_installed_artifacts_unchanged(rep, recorded={}, current={})
+    check(rep.rows and rep.rows[0]["status"] == vd.WARN,
+          "a missing manifest must WARN")
+    check(rep.failed == 0, "…and must not fail an otherwise healthy robot")
+
+
+def test_the_manifest_parser_survives_junk():
+    parsed = vd.parse_manifest(
+        "e" * 64 + "  /opt/kirra/robot/a.py\n"
+        "not a manifest line\n"
+        "\n"
+        "f" * 64 + " *–/opt/kirra/robot/b.py\n"
+    )
+    check("/opt/kirra/robot/a.py" in parsed, f"normal lines must parse: {parsed}")
+    check(len(parsed) >= 1, "junk must be skipped, not raise")
+
+
+def test_the_installer_records_a_manifest():
+    src = (HERE / "install_kirra.sh").read_text()
+    check("installed.sha256" in src, "install_kirra.sh must record installed digests")
+    check("sha256sum" in src, "…by hashing the artifacts it installed")
+
+
 def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print("deployment_verify_test:")

@@ -41,6 +41,10 @@ OPT = os.environ.get("KIRRA_OPT_DIR", "/opt/kirra")
 # must resolve here; a robot.env left on the pre-lib/ layout silently pins an
 # older core that every subsequent rebuild fails to replace.
 INSTALLED_CONSUMER_LIB = f"{OPT}/lib/libkirra_consumer_ffi.so"
+# Digests recorded by install_kirra.sh for everything it installs. Re-hashing
+# against this is the only way to see a file that was edited AFTER install —
+# the shape that put a hand-patched consumer into production for a day.
+INSTALLED_MANIFEST = f"{OPT}/installed.sha256"
 ROBOT_ENV = os.environ.get("KIRRA_ROBOT_ENV", "/etc/kirra/robot.env")
 
 # (path, must_be_executable) — the artifacts a governed robot actually runs.
@@ -183,6 +187,63 @@ def check_deployment_identity(rep: Report, env: dict, unit_user: str,
                 f"{lib} does not exist", fix="build + install the cdylib")
     else:
         rep.add("deployment identity: consumer library", PASS, f"{lib} present")
+
+
+def parse_manifest(text: str) -> dict:
+    """`sha256sum` output → {path: digest}. Unparseable lines are skipped.
+
+    Tolerant on purpose: a manifest that cannot be read must not fail the whole
+    verification, because it is an observability aid, not a gate.
+    """
+    out = {}
+    for line in text.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and len(parts[0]) == 64:
+            out[parts[1].strip().lstrip("*")] = parts[0].strip()
+    return out
+
+
+def check_installed_artifacts_unchanged(rep: Report, recorded: dict,
+                                        current: dict) -> None:
+    """Has anything been edited since the installer put it there?
+
+    WARN, never FAIL. Editing a deployed file is legitimate during bring-up;
+    what is NOT legitimate is doing it invisibly. On 2026-07-31 a consumer was
+    hand-patched in place while diagnosing, the deployed file silently stopped
+    matching its source, and later reasoning was done against a file that was no
+    longer the one running. Nothing reported it because nothing recorded what
+    had been installed.
+
+    Pure decision over two digest maps so it is host-testable — the caller
+    hashes, this compares.
+    """
+    if not recorded:
+        rep.add("installed artifacts unchanged", WARN,
+                f"no manifest at {INSTALLED_MANIFEST}",
+                fix="re-run install_kirra.sh to record installed digests; "
+                    "without it, post-install edits are undetectable")
+        return
+
+    changed, missing = [], []
+    for path, digest in sorted(recorded.items()):
+        now = current.get(path)
+        if now is None:
+            missing.append(path)
+        elif now != digest:
+            changed.append((path, digest, now))
+
+    for path in missing:
+        rep.add("installed artifacts unchanged", WARN, f"{path} is gone",
+                fix="re-run the installer")
+    for path, was, now in changed:
+        rep.add("installed artifacts unchanged", WARN,
+                f"{path} EDITED since install: recorded {was[:12]}… now {now[:12]}…",
+                fix=f"re-install from source, or re-run install_kirra.sh to "
+                    f"re-record if the edit is intended: sudo install -m 0755 "
+                    f"<repo>/robot/{os.path.basename(path)} {path}")
+    if not changed and not missing:
+        rep.add("installed artifacts unchanged", PASS,
+                f"{len(recorded)} artifact(s) match their recorded digests")
 
 
 def probe_ffi(rep: Report, env: dict) -> None:

@@ -217,6 +217,27 @@ rm -f "${TMP_UNIT}"
 sudo systemctl daemon-reload
 warn "kirra-consumer.service staged but NOT enabled: the consumer-as-a-service path has NOT been hardware-validated (the validated mode is a terminal run). Enable deliberately after an elevated re-test: sudo systemctl enable --now kirra-consumer"
 
+# ---- 6a. record what was installed ------------------------------------------
+# Digest every artifact this installer places, so a later edit to a DEPLOYED
+# file is detectable. On 2026-07-31 a consumer was hand-patched in place while
+# diagnosing; the deployed file silently stopped matching its source, and hours
+# of later reasoning were done against a file that was no longer the one
+# running. Nothing reported it because nothing had recorded what was installed.
+#
+# Observability only — verify_deployment.py WARNs on a mismatch, nothing is
+# gated on this file, and a bring-up edit stays legitimate. What it stops being
+# is invisible.
+MANIFEST="${OPT}/installed.sha256"
+{
+  for _m in "${OPT}"/robot/*.py "${OPT}"/robot/*.sh \
+            "${OPT}/lib/libkirra_consumer_ffi.so" \
+            "${OPT}/bin/kirra_ros_release_mint"; do
+    [[ -f "${_m}" ]] && sha256sum "${_m}"
+  done
+} | sudo tee "${MANIFEST}" >/dev/null
+sudo chmod 0644 "${MANIFEST}"
+ok "recorded $(wc -l < "${MANIFEST}") installed artifact digests -> ${MANIFEST}"
+
 # ---- 6b. deployment identity ------------------------------------------------
 # Print the four facts that must agree, and FAIL LOUDLY when they do not.
 #
