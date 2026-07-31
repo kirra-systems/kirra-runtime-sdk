@@ -359,15 +359,23 @@ def make_frame_handler(
     return handle
 
 
-def make_tick_handler(consumer, actuate, now_fn=now_ms):
+def make_tick_handler(consumer, actuate, now_fn=now_ms, trace=None):
     """Build the liveness-clock callback (SS-002 decel-to-zero ramp).
 
     A refusal does NOT feed liveness — the core's watermark only advances on a
     release — so a refusal flood starves into the same stop as silence.
+
+    `trace`, when given, is handed (now_ms, tick) after every call — the ONLY
+    place the core's raw liveness verdict is observable. It is diagnostic and
+    read-only: it cannot change whether `actuate` runs. Default `None` keeps the
+    handler byte-identical.
     """
 
     def on_tick() -> None:
-        tick = consumer.on_tick(now_fn())
+        now = now_fn()
+        tick = consumer.on_tick(now)
+        if trace is not None:
+            trace(now, tick)
         if tick.write == 1:
             actuate(tick.linear, tick.angular)
 
@@ -465,6 +473,17 @@ def main() -> int:
     r2_cl_debug = (
         r2_matcher is not None
         and (os.environ.get("KIRRA_R2_CLOSED_LOOP_DEBUG") or "").strip().lower() in ("1", "true", "yes", "on")
+    )
+
+    # Release-path tracing — OPT-IN, log-only, no actuation change. Answers the
+    # one question a field bring-up keeps asking: did the frame ARRIVE (DDS
+    # delivered it), was it RELEASED (the core said yes), and what reached the
+    # motors. Previously this was hand-patched into the deployed file each time,
+    # which is how /opt/kirra drifted from this source; gated here so the
+    # question can be answered without editing the file that drives the wheels.
+    # Off by default → byte-identical to the untraced path.
+    rx_debug = (os.environ.get("KIRRA_CONSUMER_RX_DEBUG") or "").strip().lower() in (
+        "1", "true", "yes", "on"
     )
 
     # R2 wheel-odometry — OPT-IN (default OFF → byte-identical, no /odom publish).
@@ -728,6 +747,12 @@ def main() -> int:
 
     def actuate(linear: float, angular: float) -> None:
         nonlocal cl_debug_ctr, last_delta_rad
+        if rx_debug:
+            # Reaching here means the core RELEASED — a refusal never calls
+            # actuate. This is the release boundary, not a decision point.
+            node.get_logger().info(
+                f"ACTUATE linear={linear:.3f} angular={angular:.3f}"
+            )
         if drive_mode == DRIVE_MODE_R2CP:
             # 🔴 TRANSPORT ONLY. `linear`/`angular` are what the verify core
             # already released; nothing here decides, clamps or authorizes.
@@ -766,6 +791,12 @@ def main() -> int:
             # this actuation applied (0.0 for a stop/MRC). Latched for the odom timer.
             last_delta_rad = act.delta_rad
             if r2_matcher is None:
+                if rx_debug:
+                    node.get_logger().info(
+                        f"R2 WRITE steer={act.steer_cmd} "
+                        f"motor=({act.pwm_left},0,0,{act.pwm_right}) "
+                        f"reason={act.reason} mrc={act.is_mrc}"
+                    )
                 apply_actuation(bot, act)  # open-loop equal-PWM (default)
                 return
             # §9 closed loop: translate() stays the safety front (non-finite /
@@ -773,6 +804,12 @@ def main() -> int:
             # zeros). Only when translate says "ok" do we KEEP its steer command
             # and REPLACE the two drive PWMs with the per-wheel speed-matched ones.
             if act.is_mrc or act.reason == "stopped":
+                if rx_debug:
+                    node.get_logger().info(
+                        f"R2 WRITE steer={act.steer_cmd} "
+                        f"motor=({act.pwm_left},0,0,{act.pwm_right}) "
+                        f"reason={act.reason} mrc={act.is_mrc}"
+                    )
                 apply_actuation(bot, act)  # zeros → stop; drop the loop's history
                 r2_matcher.reset()
                 return
@@ -826,6 +863,11 @@ def main() -> int:
     )
 
     def on_msg(msg: UInt8MultiArray) -> None:
+        if rx_debug:
+            # Arrival only — says nothing about whether the frame is admissible.
+            # Length is the useful field: a 272-byte frame is a candidate V2
+            # release, anything else never reaches the core.
+            node.get_logger().info(f"RX bytes={len(msg.data)}")
         frame_handler(bytes(msg.data))
 
     node.create_subscription(UInt8MultiArray, topic, on_msg, 10)
@@ -833,7 +875,33 @@ def main() -> int:
     # Liveness clock: on_tick every control period drives the SS-002 decel-to-zero
     # ramp when releases stop arriving (never hold-last). A refusal does NOT feed
     # liveness — a flood starves into the stop exactly as silence does.
-    node.create_timer(control_period_ms / 1000.0, make_tick_handler(consumer, actuate))
+    if rx_debug:
+        # The core's raw liveness verdict, ~1 Hz. The heartbeat already proved
+        # the timer fires; what it could not show is what on_tick RETURNS. A
+        # field robot kept its last PWM latched through ~100 ticks while the
+        # core's own tests ramp to zero under every sequence (single release,
+        # sustained train, train interleaved with ticks), so the disagreement
+        # is between the core's verdict and what reaches the wheels — and this
+        # is the only place that verdict is observable.
+        #
+        # Throttled to every 10th tick so the instrument cannot perturb the
+        # control rate it measures, and read-only: `trace` cannot change
+        # whether actuate runs.
+        _tick_n = {"n": 0}
+
+        def _trace_tick(now, tick) -> None:
+            _tick_n["n"] += 1
+            if _tick_n["n"] % 10 == 0:
+                node.get_logger().info(
+                    f"TICK n={_tick_n['n']} now={now} "
+                    f"write={tick.write} linear={tick.linear:.3f} "
+                    f"angular={tick.angular:.3f}"
+                )
+
+        _tick_handler = make_tick_handler(consumer, actuate, trace=_trace_tick)
+    else:
+        _tick_handler = make_tick_handler(consumer, actuate)
+    node.create_timer(control_period_ms / 1000.0, _tick_handler)
 
     # R2 wheel-odometry publisher (opt-in). Reads the rear-wheel encoders each
     # period and publishes an Ackermann dead-reckoning pose so the planner sees
