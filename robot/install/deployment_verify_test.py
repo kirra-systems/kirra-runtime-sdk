@@ -6,6 +6,7 @@ checkout and everything LOOKED fine: units active, /health ok, consumer started.
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -545,6 +546,299 @@ def test_the_lidar_check_does_not_gate_the_deployment_steps():
     deferred = first_line_containing('if [[ "${LIDAR_MISSING}" -eq 1 ]]; then')
     check(deferred > max(unit_render, manifest, identity),
           "the deferred lidar verdict must come AFTER the deployment steps")
+
+
+# ── the installer/verifier artifact contract ─────────────────────────────────
+#
+# THE DRIFT THIS CATCHES. `verify_deployment.py` declares what a governed robot
+# must have installed and whether each artifact is executable. `install_kirra.sh`
+# is what puts those files there. Nothing has ever checked that the two agree,
+# so they silently diverged: the consumer shipped 0644 while the verifier
+# required it executable, and motor_authority.py was expected but installed by
+# nobody. Both were found by running the verifier on a real robot AFTER a
+# deployment — the slowest possible feedback loop for a static, decidable fact.
+#
+# SCOPE. Only artifacts under `${OPT}/robot/`, which is the directory
+# install_kirra.sh creates and populates. `${OPT}/taj_service`, `${OPT}/mick_service`
+# and the cdylib live elsewhere and are produced by other steps, so pulling them
+# in would make this test assert something install_kirra.sh is not responsible
+# for. install_robot_units.sh is deliberately NOT part of the comparison: it
+# stages the Rabbit/voice set, and no current expectation names a file it owns.
+# If that changes, widen this deliberately rather than by accident.
+
+#: Artifacts under `${OPT}/robot/` this contract governs. Pinned explicitly so
+#: that DELETING an entry from EXPECTED_ARTIFACTS is a loud failure rather than
+#: a silently smaller comparison — a verifier that stops checking something is
+#: exactly as much of a drift as an installer that stops installing it.
+GOVERNED_ROBOT_ARTIFACTS = (
+    "kirra_motor_consumer.py",
+    "motor_authority.py",
+    "serial_exclusivity.py",
+)
+
+#: One `sudo install -m MODE SRC DST` invocation. Intentionally narrow: it
+#: matches the exact shape install_kirra.sh uses and nothing cleverer. If the
+#: installer is rewritten into some other form, this stops matching and the
+#: "found no install invocations" check below fails LOUDLY rather than silently
+#: comparing against an empty set — a vacuous pass is the one outcome a contract
+#: test must never produce.
+_INSTALL_RE = re.compile(
+    r"^\s*sudo\s+install\s+-m\s+(?P<mode>[0-7]{3,4})\s+"
+    r"(?P<src>\S+)\s+\\?\s*(?P<dst>\S+)\s*$")
+#: `for f in a.py b.py c.py; do` — the loop whose body installs `${f}`.
+_FOR_RE = re.compile(r"^\s*for\s+f\s+in\s+(?P<items>.+?);\s*do\s*$")
+
+
+def _parse_installer(path: Path):
+    """`install_kirra.sh` → {basename: mode} for files landing in ${OPT}/robot.
+
+    Handles the two shapes the script actually uses: a direct install, and an
+    install inside a `for f in …` loop where the destination is `${f}`. A
+    line-continuation is joined first so the split invocation still matches.
+    """
+    text = path.read_text(encoding="utf-8")
+    text = re.sub(r"\\\n\s*", " ", text)          # join continuations
+    modes: dict[str, str] = {}
+    loop_items: list[str] = []
+    for line in text.splitlines():
+        m = _FOR_RE.match(line)
+        if m:
+            loop_items = m.group("items").split()
+            continue
+        if line.strip() == "done":
+            loop_items = []
+            continue
+        m = _INSTALL_RE.match(line)
+        if not m:
+            continue
+        dst, mode = m.group("dst").strip('"'), m.group("mode")
+        if "${OPT}/robot/" not in dst:
+            continue                              # not this installer's robot dir
+        leaf = dst.rsplit("/", 1)[-1]
+        if leaf == "${f}":
+            for item in loop_items:
+                modes[item] = mode
+        else:
+            modes[leaf] = mode
+    return modes
+
+
+def _expected_robot_artifacts():
+    """`EXPECTED_ARTIFACTS` → {basename: must_be_executable} for ${OPT}/robot.
+
+    Read with `ast` rather than grepped: the list is real Python, and a regex
+    over source would quietly miss a reformatted entry.
+    """
+    tree = ast.parse((HERE / "verify_deployment.py").read_text(encoding="utf-8"))
+    node = next((n.value for n in ast.walk(tree)
+                 if isinstance(n, ast.Assign)
+                 and any(getattr(t, "id", "") == "EXPECTED_ARTIFACTS"
+                         for t in n.targets)), None)
+    if node is None:
+        return None                                # signalled as a failure below
+    out = {}
+    for elt in node.elts:
+        path_node, exec_node = elt.elts
+        # f"{OPT}/robot/name.py" → the literal tail after the last '/'
+        parts = [v.value for v in getattr(path_node, "values", [])
+                 if isinstance(v, ast.Constant)]
+        literal = "".join(parts)
+        if "/robot/" not in literal:
+            continue
+        out[literal.rsplit("/", 1)[-1]] = bool(exec_node.value)
+    return out
+
+
+def test_installer_installs_every_expected_robot_artifact():
+    """Every governed artifact the verifier expects is actually installed."""
+    installed = _parse_installer(HERE / "install_kirra.sh")
+    expected = _expected_robot_artifacts()
+    check(expected is not None, "EXPECTED_ARTIFACTS must be parseable from source")
+    missing = sorted(n for n in (expected or {}) if n not in installed)
+    check(not missing,
+          f"install_kirra.sh does not install expected artifact(s): {missing}")
+
+
+def test_installed_mode_matches_must_be_executable():
+    """0755 for what the verifier requires executable, 0644 for what it does not.
+
+    The consumer is exec'd by kirra-consumer.service; the others are imported
+    modules. Installing an imported module 0755 is not a security hole, but it
+    IS a statement the verifier will not agree with, so it fails here too.
+    """
+    installed = _parse_installer(HERE / "install_kirra.sh")
+    expected = _expected_robot_artifacts() or {}
+    wrong = []
+    for name, must_exec in sorted(expected.items()):
+        mode = installed.get(name)
+        if mode is None:
+            continue                               # absence is the test above
+        is_exec = bool(int(mode, 8) & 0o111)
+        if is_exec != must_exec:
+            wrong.append(f"{name}: installed {mode}, verifier wants "
+                         f"{'executable' if must_exec else 'non-executable'}")
+    check(not wrong, f"installed mode disagrees with the verifier: {wrong}")
+
+
+def test_governed_artifacts_are_still_expected():
+    """A verifier that stops checking something has drifted too.
+
+    Without this, deleting a line from EXPECTED_ARTIFACTS would make the two
+    tests above pass by checking less — the failure mode where a contract test
+    is defeated by shrinking the contract.
+    """
+    expected = _expected_robot_artifacts() or {}
+    dropped = sorted(n for n in GOVERNED_ROBOT_ARTIFACTS if n not in expected)
+    check(not dropped,
+          f"artifact(s) removed from EXPECTED_ARTIFACTS without updating "
+          f"GOVERNED_ROBOT_ARTIFACTS: {dropped}")
+
+
+def test_the_parsers_actually_found_something():
+    """Fail loudly rather than vacuously.
+
+    Both halves are parsed out of source, so a refactor on either side could
+    yield an empty set and turn every assertion above into a tautology. That
+    would be worse than no test: it would report PASS while checking nothing.
+    """
+    installed = _parse_installer(HERE / "install_kirra.sh")
+    check(installed, "found no `sudo install -m` invocations targeting "
+                     "${OPT}/robot in install_kirra.sh — the shell parser has "
+                     "stopped matching")
+    expected = _expected_robot_artifacts()
+    check(expected, "found no ${OPT}/robot entries in EXPECTED_ARTIFACTS — the "
+                    "ast parser has stopped matching")
+    check(len(GOVERNED_ROBOT_ARTIFACTS) > 0, "the governed set must not be empty")
+
+
+# ── a FRESH install must produce a working consumer ──────────────────────────
+#
+# The three tests below are the closure for the fresh-install break: current
+# main did not install clock_step_guard.py (module scope), serial_exclusivity.py
+# or kirra_r2cp.py, so a robot built from scratch died at
+# `ModuleNotFoundError: No module named 'clock_step_guard'`. Every existing
+# robot survived on untracked copies left by earlier manual steps, so the
+# machines that would have failed were the ones nobody had built yet.
+
+def _installer_robot_payload() -> set[str]:
+    """The robot/*.py basenames install_kirra.sh copies into ${OPT}/robot."""
+    src = (HERE / "install_kirra.sh").read_text()
+    names: set[str] = set()
+    # `sudo install -m MODE ${REPO}/robot/<f> ${OPT}/robot/<f>`
+    for m in re.finditer(r'\$\{REPO\}/robot/([A-Za-z0-9_]+\.py)', src):
+        names.add(m.group(1))
+    # `for f in a.py b.py …; do sudo install … ${REPO}/robot/${f} …`
+    for m in re.finditer(r'^for f in ((?:[^;]|\\\n)+?); do$', src, re.M):
+        block = m.group(1).replace("\\\n", " ")
+        names.update(t for t in block.split() if t.endswith(".py"))
+    return names
+
+
+def test_the_installer_ships_serial_exclusivity():
+    """The #887 boot sentinel. The consumer imports it and refuses to start
+    without exclusive ownership of the motor port; no installer shipped it."""
+    check("serial_exclusivity.py" in _installer_robot_payload(),
+          "install_kirra.sh must install serial_exclusivity.py")
+
+
+def test_a_fresh_install_can_import_the_consumer():
+    """THE proof, and it runs from an EMPTY destination.
+
+    Copies exactly what the installer places into a temp dir and imports the
+    consumer with ONLY that dir on sys.path. An untracked leftover under
+    /opt/kirra — which is what masked this on every existing robot — cannot
+    satisfy it, and neither can the repo checkout.
+    """
+    payload = _installer_robot_payload()
+    check(payload, "the installer payload parser found nothing")
+    with tempfile.TemporaryDirectory() as fresh:
+        staged = []
+        for name in sorted(payload):
+            src = HERE.parent / name
+            if src.is_file():
+                (Path(fresh) / name).write_bytes(src.read_bytes())
+                staged.append(name)
+        check(staged, "nothing was staged into the fresh destination")
+        d = subprocess.run(
+            [sys.executable, "-c", "import kirra_motor_consumer"],
+            cwd=fresh, capture_output=True, text=True, timeout=60,
+            env={"PATH": "/usr/bin:/bin", "PYTHONPATH": fresh,
+                 "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        missing = ""
+        if d.returncode != 0:
+            tail = (d.stderr or "").strip().splitlines()[-1:] or [""]
+            missing = tail[0]
+        check(d.returncode == 0,
+              f"a fresh install must import cleanly; got {missing!r}. The "
+              f"installer stages {sorted(staged)} — a module the consumer "
+              f"imports is not among them")
+
+
+def test_the_installer_ships_every_module_the_consumer_can_import():
+    """The static companion to the fresh-install import test.
+
+    That test executes `import kirra_motor_consumer`, so it can only catch
+    modules imported at IMPORT time. kirra_r2cp is imported inside the r2cp
+    drive-mode branch and serial_exclusivity inside main(), so a fresh install
+    missing either imports fine and dies later — on a robot, mid-startup, with
+    the motors already claimed.
+
+    Walking the AST catches every local import at any scope and any depth,
+    which is what the conditional ones need.
+    """
+    import ast as _ast
+    robot = HERE.parent
+    shipped = _installer_robot_payload()
+
+    needed, seen = set(), set()
+
+    def walk(mod: str) -> None:
+        if mod in seen:
+            return
+        seen.add(mod)
+        src = robot / f"{mod}.py"
+        if not src.is_file():
+            return
+        for node in _ast.walk(_ast.parse(src.read_text())):
+            if isinstance(node, (_ast.Import, _ast.ImportFrom)):
+                names = ([node.module] if isinstance(node, _ast.ImportFrom) and node.module
+                         else [a.name for a in node.names])
+                for nm in names:
+                    if nm and (robot / f"{nm}.py").is_file():
+                        needed.add(f"{nm}.py")
+                        walk(nm)
+
+    walk("kirra_motor_consumer")
+    check(needed, "the import walker found nothing — it stopped matching")
+    absent = sorted(needed - shipped)
+    check(not absent,
+          f"the consumer imports {absent} but install_kirra.sh does not ship "
+          f"them; a fresh install fails at whichever branch reaches the import "
+          f"first — possibly mid-startup with the motor port already claimed")
+
+
+def test_the_verifier_fails_when_a_governed_artifact_is_absent():
+    """An EMPTY install destination must FAIL, not pass quietly — otherwise a
+    fresh machine reads as verified when nothing is deployed."""
+    import os
+    with tempfile.TemporaryDirectory() as empty:
+        d = subprocess.run(
+            [sys.executable, str(HERE / "verify_deployment.py"), "--json"],
+            capture_output=True, text=True, timeout=60,
+            env={**os.environ, "KIRRA_OPT_DIR": empty,
+                 "KIRRA_ROBOT_ENV": str(Path(empty) / "absent.env")},
+        )
+        check(d.returncode != 0,
+              "an empty install destination must exit non-zero")
+        try:
+            rows = json.loads(d.stdout)["rows"]
+        except Exception:  # noqa: BLE001
+            rows = []
+            check(False, f"--json must stay parseable, got {d.stdout[:120]!r}")
+        failed = [r["check"] for r in rows if r["status"] == vd.FAIL]
+        check(any("serial_exclusivity" in c for c in failed),
+              f"a missing serial_exclusivity.py must FAIL; failing rows: {failed}")
 
 
 def _run_all() -> int:
