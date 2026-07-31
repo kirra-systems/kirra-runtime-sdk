@@ -711,6 +711,136 @@ def test_the_parsers_actually_found_something():
     check(len(GOVERNED_ROBOT_ARTIFACTS) > 0, "the governed set must not be empty")
 
 
+# ── a FRESH install must produce a working consumer ──────────────────────────
+#
+# The three tests below are the closure for the fresh-install break: current
+# main did not install clock_step_guard.py (module scope), serial_exclusivity.py
+# or kirra_r2cp.py, so a robot built from scratch died at
+# `ModuleNotFoundError: No module named 'clock_step_guard'`. Every existing
+# robot survived on untracked copies left by earlier manual steps, so the
+# machines that would have failed were the ones nobody had built yet.
+
+def _installer_robot_payload() -> set[str]:
+    """The robot/*.py basenames install_kirra.sh copies into ${OPT}/robot."""
+    src = (HERE / "install_kirra.sh").read_text()
+    names: set[str] = set()
+    # `sudo install -m MODE ${REPO}/robot/<f> ${OPT}/robot/<f>`
+    for m in re.finditer(r'\$\{REPO\}/robot/([A-Za-z0-9_]+\.py)', src):
+        names.add(m.group(1))
+    # `for f in a.py b.py …; do sudo install … ${REPO}/robot/${f} …`
+    for m in re.finditer(r'^for f in ((?:[^;]|\\\n)+?); do$', src, re.M):
+        block = m.group(1).replace("\\\n", " ")
+        names.update(t for t in block.split() if t.endswith(".py"))
+    return names
+
+
+def test_the_installer_ships_serial_exclusivity():
+    """The #887 boot sentinel. The consumer imports it and refuses to start
+    without exclusive ownership of the motor port; no installer shipped it."""
+    check("serial_exclusivity.py" in _installer_robot_payload(),
+          "install_kirra.sh must install serial_exclusivity.py")
+
+
+def test_a_fresh_install_can_import_the_consumer():
+    """THE proof, and it runs from an EMPTY destination.
+
+    Copies exactly what the installer places into a temp dir and imports the
+    consumer with ONLY that dir on sys.path. An untracked leftover under
+    /opt/kirra — which is what masked this on every existing robot — cannot
+    satisfy it, and neither can the repo checkout.
+    """
+    payload = _installer_robot_payload()
+    check(payload, "the installer payload parser found nothing")
+    with tempfile.TemporaryDirectory() as fresh:
+        staged = []
+        for name in sorted(payload):
+            src = HERE.parent / name
+            if src.is_file():
+                (Path(fresh) / name).write_bytes(src.read_bytes())
+                staged.append(name)
+        check(staged, "nothing was staged into the fresh destination")
+        d = subprocess.run(
+            [sys.executable, "-c", "import kirra_motor_consumer"],
+            cwd=fresh, capture_output=True, text=True, timeout=60,
+            env={"PATH": "/usr/bin:/bin", "PYTHONPATH": fresh,
+                 "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        missing = ""
+        if d.returncode != 0:
+            tail = (d.stderr or "").strip().splitlines()[-1:] or [""]
+            missing = tail[0]
+        check(d.returncode == 0,
+              f"a fresh install must import cleanly; got {missing!r}. The "
+              f"installer stages {sorted(staged)} — a module the consumer "
+              f"imports is not among them")
+
+
+def test_the_installer_ships_every_module_the_consumer_can_import():
+    """The static companion to the fresh-install import test.
+
+    That test executes `import kirra_motor_consumer`, so it can only catch
+    modules imported at IMPORT time. kirra_r2cp is imported inside the r2cp
+    drive-mode branch and serial_exclusivity inside main(), so a fresh install
+    missing either imports fine and dies later — on a robot, mid-startup, with
+    the motors already claimed.
+
+    Walking the AST catches every local import at any scope and any depth,
+    which is what the conditional ones need.
+    """
+    import ast as _ast
+    robot = HERE.parent
+    shipped = _installer_robot_payload()
+
+    needed, seen = set(), set()
+
+    def walk(mod: str) -> None:
+        if mod in seen:
+            return
+        seen.add(mod)
+        src = robot / f"{mod}.py"
+        if not src.is_file():
+            return
+        for node in _ast.walk(_ast.parse(src.read_text())):
+            if isinstance(node, (_ast.Import, _ast.ImportFrom)):
+                names = ([node.module] if isinstance(node, _ast.ImportFrom) and node.module
+                         else [a.name for a in node.names])
+                for nm in names:
+                    if nm and (robot / f"{nm}.py").is_file():
+                        needed.add(f"{nm}.py")
+                        walk(nm)
+
+    walk("kirra_motor_consumer")
+    check(needed, "the import walker found nothing — it stopped matching")
+    absent = sorted(needed - shipped)
+    check(not absent,
+          f"the consumer imports {absent} but install_kirra.sh does not ship "
+          f"them; a fresh install fails at whichever branch reaches the import "
+          f"first — possibly mid-startup with the motor port already claimed")
+
+
+def test_the_verifier_fails_when_a_governed_artifact_is_absent():
+    """An EMPTY install destination must FAIL, not pass quietly — otherwise a
+    fresh machine reads as verified when nothing is deployed."""
+    import os
+    with tempfile.TemporaryDirectory() as empty:
+        d = subprocess.run(
+            [sys.executable, str(HERE / "verify_deployment.py"), "--json"],
+            capture_output=True, text=True, timeout=60,
+            env={**os.environ, "KIRRA_OPT_DIR": empty,
+                 "KIRRA_ROBOT_ENV": str(Path(empty) / "absent.env")},
+        )
+        check(d.returncode != 0,
+              "an empty install destination must exit non-zero")
+        try:
+            rows = json.loads(d.stdout)["rows"]
+        except Exception:  # noqa: BLE001
+            rows = []
+            check(False, f"--json must stay parseable, got {d.stdout[:120]!r}")
+        failed = [r["check"] for r in rows if r["status"] == vd.FAIL]
+        check(any("serial_exclusivity" in c for c in failed),
+              f"a missing serial_exclusivity.py must FAIL; failing rows: {failed}")
+
+
 def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print("deployment_verify_test:")

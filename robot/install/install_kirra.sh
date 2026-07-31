@@ -147,13 +147,24 @@ sudo install -m 0755 "${REPO}/robot/kirra_motor_consumer.py" \
 # Imported modules, never exec'd, so 0644 is correct for these.
 # motor_authority.py was missing entirely: robot/doctor/modules/devices.py
 # imports it at runtime, so a deployed robot needs it beside the consumer.
-# serial_exclusivity.py is the #887 Tier-3 boot sentinel: kirra_motor_consumer.py
-# imports it and REFUSES to start unless it exclusively owns the motor port. No
-# installer shipped it, so a fresh install produced a consumer that fails at
-# import — it survived only because deployed robots had it from some untracked
-# copy. verify_deployment.py has expected it all along.
+# EVERY module the consumer imports, at any depth. Three were missing and a
+# fresh install could not start:
+#
+#   clock_step_guard.py   imported at MODULE SCOPE (line 99) — this one fails
+#                         FIRST, with ModuleNotFoundError, before the process
+#                         reaches anything else
+#   serial_exclusivity.py the #887 Tier-3 boot sentinel, imported in main()
+#   kirra_r2cp.py         the R2CP last hop, imported under that drive mode
+#
+# Every deployed robot survived only because it already carried untracked copies
+# from some earlier manual step, which is why this never surfaced: the machines
+# that would have failed were the ones nobody had built yet.
+#
+# The closure is asserted by test_a_fresh_install_can_import_the_consumer, which
+# copies exactly what these lines install into an EMPTY directory and imports the
+# consumer there — an untracked leftover in /opt/kirra cannot satisfy it.
 for f in kirra_ffi.py kirra_release_publisher.py r2_drive.py motor_authority.py \
-         serial_exclusivity.py; do
+         serial_exclusivity.py clock_step_guard.py kirra_r2cp.py; do
   sudo install -m 0644 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
 done
 for f in first_run_elevated.sh live_loop_elevated.sh steering_bench_elevated.sh; do
