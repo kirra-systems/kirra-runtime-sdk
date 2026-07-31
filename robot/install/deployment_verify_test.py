@@ -124,6 +124,72 @@ def test_verification_is_read_only():
     check(not mutating, f"verification must be read-only, found: {mutating}")
 
 
+# ── the voice layer is actually deployed ─────────────────────────────────────
+#
+# The defect these guard against: `assistant.classify()` returned a correct
+# typed request, `assistant.handle()` returned None, and the code was fine —
+# `KIRRA_ASSIST_ENABLED` was simply absent from the file the units load. It was
+# documented in `rabbit.env.example`, which the installer never renders, so no
+# fresh install ever had it and nothing reported its absence.
+
+def test_env_template_enables_the_assistant():
+    """`env.template` is what becomes /etc/kirra/robot.env. If the flag is not
+    there — or is there but commented out — a fresh install ships the assistant
+    silently disabled, which reads as a code fault rather than a config gap."""
+    lines = (HERE / "env.template").read_text().splitlines()
+    active = [ln for ln in lines
+              if ln.strip().startswith("KIRRA_ASSIST_ENABLED=")]
+    check(active, "env.template must set KIRRA_ASSIST_ENABLED (uncommented)")
+    check(any(ln.split("=", 1)[1].strip() in ("1", "true", "yes", "on")
+              for ln in active),
+          f"KIRRA_ASSIST_ENABLED must be truthy in env.template, got {active}")
+
+
+def test_the_units_load_the_file_the_template_renders():
+    """The chain has to close: template -> robot.env -> EnvironmentFile. A unit
+    reading some OTHER env file would make the template edit useless."""
+    unit = (HERE / "systemd" / "kirra-rabbit-voice.service").read_text()
+    check("EnvironmentFile=/etc/kirra/robot.env" in unit,
+          "kirra-rabbit-voice must load /etc/kirra/robot.env")
+
+
+def test_enablement_is_deployment_not_code():
+    """`assistant.enabled()` must stay fail-closed. Turning the assistant on is
+    a deployment decision; a code default would make every environment — tests,
+    CI, a developer's laptop — silently authoritative."""
+    src = (HERE.parent / "assistant.py").read_text()
+    body = src.split("def enabled():", 1)[1].split("\n\n", 1)[0]
+    check("KIRRA_ASSIST_ENABLED" in body,
+          "enabled() must read the env var")
+    for default in ('or "1"', "or '1'", 'or "true"', "return True"):
+        check(default not in body,
+              f"enabled() must not default-enable ({default!r})")
+
+
+def test_verification_reports_a_disabled_assistant():
+    """An absent flag must be REPORTED, not silent — that is the whole reason
+    this went unnoticed. WARN, not FAIL: a robot without the voice layer is a
+    valid deployment."""
+    rep = vd.Report()
+    vd.check_voice_env(rep, {})
+    check(rep.rows, "an empty env must produce a row, not silence")
+    check(rep.rows[0]["status"] == vd.WARN,
+          f"absent flag should WARN, got {rep.rows[0]['status']}")
+    check(rep.rows[0]["fix"], "…and must tell the operator how to fix it")
+    check(rep.failed == 0, "a missing OPT-IN flag must not FAIL the deployment")
+
+    rep = vd.Report()
+    vd.check_voice_env(rep, {"KIRRA_ASSIST_ENABLED": "1"})
+    check(rep.rows[0]["status"] == vd.PASS, "an enabled assistant passes")
+
+    # The exact trap that makes this fail-closed: a value that LOOKS set but is
+    # not truthy leaves the feature off, so it must not report as enabled.
+    rep = vd.Report()
+    vd.check_voice_env(rep, {"KIRRA_ASSIST_ENABLED": "0"})
+    check(rep.rows[0]["status"] == vd.WARN,
+          "a non-truthy value must not report as enabled")
+
+
 # ── the migration report ─────────────────────────────────────────────────────
 
 def test_the_report_never_prints_a_secret():
