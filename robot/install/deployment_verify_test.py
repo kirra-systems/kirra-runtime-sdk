@@ -6,6 +6,7 @@ checkout and everything LOOKED fine: units active, /health ok, consumer started.
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -545,6 +546,169 @@ def test_the_lidar_check_does_not_gate_the_deployment_steps():
     deferred = first_line_containing('if [[ "${LIDAR_MISSING}" -eq 1 ]]; then')
     check(deferred > max(unit_render, manifest, identity),
           "the deferred lidar verdict must come AFTER the deployment steps")
+
+
+# ── the installer/verifier artifact contract ─────────────────────────────────
+#
+# THE DRIFT THIS CATCHES. `verify_deployment.py` declares what a governed robot
+# must have installed and whether each artifact is executable. `install_kirra.sh`
+# is what puts those files there. Nothing has ever checked that the two agree,
+# so they silently diverged: the consumer shipped 0644 while the verifier
+# required it executable, and motor_authority.py was expected but installed by
+# nobody. Both were found by running the verifier on a real robot AFTER a
+# deployment — the slowest possible feedback loop for a static, decidable fact.
+#
+# SCOPE. Only artifacts under `${OPT}/robot/`, which is the directory
+# install_kirra.sh creates and populates. `${OPT}/taj_service`, `${OPT}/mick_service`
+# and the cdylib live elsewhere and are produced by other steps, so pulling them
+# in would make this test assert something install_kirra.sh is not responsible
+# for. install_robot_units.sh is deliberately NOT part of the comparison: it
+# stages the Rabbit/voice set, and no current expectation names a file it owns.
+# If that changes, widen this deliberately rather than by accident.
+
+#: Artifacts under `${OPT}/robot/` this contract governs. Pinned explicitly so
+#: that DELETING an entry from EXPECTED_ARTIFACTS is a loud failure rather than
+#: a silently smaller comparison — a verifier that stops checking something is
+#: exactly as much of a drift as an installer that stops installing it.
+GOVERNED_ROBOT_ARTIFACTS = (
+    "kirra_motor_consumer.py",
+    "motor_authority.py",
+    "serial_exclusivity.py",
+)
+
+#: One `sudo install -m MODE SRC DST` invocation. Intentionally narrow: it
+#: matches the exact shape install_kirra.sh uses and nothing cleverer. If the
+#: installer is rewritten into some other form, this stops matching and the
+#: "found no install invocations" check below fails LOUDLY rather than silently
+#: comparing against an empty set — a vacuous pass is the one outcome a contract
+#: test must never produce.
+_INSTALL_RE = re.compile(
+    r"^\s*sudo\s+install\s+-m\s+(?P<mode>[0-7]{3,4})\s+"
+    r"(?P<src>\S+)\s+\\?\s*(?P<dst>\S+)\s*$")
+#: `for f in a.py b.py c.py; do` — the loop whose body installs `${f}`.
+_FOR_RE = re.compile(r"^\s*for\s+f\s+in\s+(?P<items>.+?);\s*do\s*$")
+
+
+def _parse_installer(path: Path):
+    """`install_kirra.sh` → {basename: mode} for files landing in ${OPT}/robot.
+
+    Handles the two shapes the script actually uses: a direct install, and an
+    install inside a `for f in …` loop where the destination is `${f}`. A
+    line-continuation is joined first so the split invocation still matches.
+    """
+    text = path.read_text(encoding="utf-8")
+    text = re.sub(r"\\\n\s*", " ", text)          # join continuations
+    modes: dict[str, str] = {}
+    loop_items: list[str] = []
+    for line in text.splitlines():
+        m = _FOR_RE.match(line)
+        if m:
+            loop_items = m.group("items").split()
+            continue
+        if line.strip() == "done":
+            loop_items = []
+            continue
+        m = _INSTALL_RE.match(line)
+        if not m:
+            continue
+        dst, mode = m.group("dst").strip('"'), m.group("mode")
+        if "${OPT}/robot/" not in dst:
+            continue                              # not this installer's robot dir
+        leaf = dst.rsplit("/", 1)[-1]
+        if leaf == "${f}":
+            for item in loop_items:
+                modes[item] = mode
+        else:
+            modes[leaf] = mode
+    return modes
+
+
+def _expected_robot_artifacts():
+    """`EXPECTED_ARTIFACTS` → {basename: must_be_executable} for ${OPT}/robot.
+
+    Read with `ast` rather than grepped: the list is real Python, and a regex
+    over source would quietly miss a reformatted entry.
+    """
+    tree = ast.parse((HERE / "verify_deployment.py").read_text(encoding="utf-8"))
+    node = next((n.value for n in ast.walk(tree)
+                 if isinstance(n, ast.Assign)
+                 and any(getattr(t, "id", "") == "EXPECTED_ARTIFACTS"
+                         for t in n.targets)), None)
+    if node is None:
+        return None                                # signalled as a failure below
+    out = {}
+    for elt in node.elts:
+        path_node, exec_node = elt.elts
+        # f"{OPT}/robot/name.py" → the literal tail after the last '/'
+        parts = [v.value for v in getattr(path_node, "values", [])
+                 if isinstance(v, ast.Constant)]
+        literal = "".join(parts)
+        if "/robot/" not in literal:
+            continue
+        out[literal.rsplit("/", 1)[-1]] = bool(exec_node.value)
+    return out
+
+
+def test_installer_installs_every_expected_robot_artifact():
+    """Every governed artifact the verifier expects is actually installed."""
+    installed = _parse_installer(HERE / "install_kirra.sh")
+    expected = _expected_robot_artifacts()
+    check(expected is not None, "EXPECTED_ARTIFACTS must be parseable from source")
+    missing = sorted(n for n in (expected or {}) if n not in installed)
+    check(not missing,
+          f"install_kirra.sh does not install expected artifact(s): {missing}")
+
+
+def test_installed_mode_matches_must_be_executable():
+    """0755 for what the verifier requires executable, 0644 for what it does not.
+
+    The consumer is exec'd by kirra-consumer.service; the others are imported
+    modules. Installing an imported module 0755 is not a security hole, but it
+    IS a statement the verifier will not agree with, so it fails here too.
+    """
+    installed = _parse_installer(HERE / "install_kirra.sh")
+    expected = _expected_robot_artifacts() or {}
+    wrong = []
+    for name, must_exec in sorted(expected.items()):
+        mode = installed.get(name)
+        if mode is None:
+            continue                               # absence is the test above
+        is_exec = bool(int(mode, 8) & 0o111)
+        if is_exec != must_exec:
+            wrong.append(f"{name}: installed {mode}, verifier wants "
+                         f"{'executable' if must_exec else 'non-executable'}")
+    check(not wrong, f"installed mode disagrees with the verifier: {wrong}")
+
+
+def test_governed_artifacts_are_still_expected():
+    """A verifier that stops checking something has drifted too.
+
+    Without this, deleting a line from EXPECTED_ARTIFACTS would make the two
+    tests above pass by checking less — the failure mode where a contract test
+    is defeated by shrinking the contract.
+    """
+    expected = _expected_robot_artifacts() or {}
+    dropped = sorted(n for n in GOVERNED_ROBOT_ARTIFACTS if n not in expected)
+    check(not dropped,
+          f"artifact(s) removed from EXPECTED_ARTIFACTS without updating "
+          f"GOVERNED_ROBOT_ARTIFACTS: {dropped}")
+
+
+def test_the_parsers_actually_found_something():
+    """Fail loudly rather than vacuously.
+
+    Both halves are parsed out of source, so a refactor on either side could
+    yield an empty set and turn every assertion above into a tautology. That
+    would be worse than no test: it would report PASS while checking nothing.
+    """
+    installed = _parse_installer(HERE / "install_kirra.sh")
+    check(installed, "found no `sudo install -m` invocations targeting "
+                     "${OPT}/robot in install_kirra.sh — the shell parser has "
+                     "stopped matching")
+    expected = _expected_robot_artifacts()
+    check(expected, "found no ${OPT}/robot entries in EXPECTED_ARTIFACTS — the "
+                    "ast parser has stopped matching")
+    check(len(GOVERNED_ROBOT_ARTIFACTS) > 0, "the governed set must not be empty")
 
 
 def _run_all() -> int:
