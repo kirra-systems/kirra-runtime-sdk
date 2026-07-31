@@ -75,3 +75,11 @@ echo "    sudo systemctl start kirra-ros-stack   && journalctl -u kirra-ros-stac
 echo "    sudo systemctl start kirra-rabbit-watch  && journalctl -u kirra-rabbit-watch -f"
 echo "    sudo systemctl start kirra-rabbit-voice  && journalctl -u kirra-rabbit-voice -f"
 echo "      (wake word is OPT-IN: also set KIRRA_WAKE_ENABLED=1 + KIRRA_WAKE_STT_CMD in robot.env)"
+echo
+echo "  the Engineering Assistant is enabled by env.template on a FRESH install."
+echo "  An EXISTING /etc/kirra/robot.env is never overwritten (it holds measured"
+echo "  calibration), so upgrading robots need the line appended once:"
+echo "    grep -q '^KIRRA_ASSIST_ENABLED=' /etc/kirra/robot.env \\"
+echo "      || echo 'KIRRA_ASSIST_ENABLED=1' | sudo tee -a /etc/kirra/robot.env"
+echo "    sudo systemctl restart kirra-rabbit-voice"
+echo "  Check it with: robot/install/verify_deployment.py"

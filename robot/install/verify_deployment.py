@@ -215,6 +215,41 @@ def check_env(rep: Report, env: dict) -> None:
                 f"all {r['required_count']} required key(s) set for mode {r['mode']}")
 
 
+#: Voice-layer flags that are OPT-IN in code and enabled by DEPLOYMENT. Reported
+#: because their failure mode is silence: the assistant answers nothing, and
+#: `classify()` still returns a correct typed request, so the box looks like a
+#: code fault when it is a missing line in robot.env. WARN, never FAIL — a robot
+#: installed without the voice layer is a valid deployment, it just should not be
+#: mistaken for a broken one.
+VOICE_FLAGS = (
+    ("KIRRA_ASSIST_ENABLED", "Engineering Assistant",
+     "docs/KIRRA_ENGINEERING_ASSISTANT.md"),
+)
+
+
+def check_voice_env(rep: Report, env: dict) -> None:
+    """Is the voice layer actually switched on in the file the units load?"""
+    for key, label, doc in VOICE_FLAGS:
+        raw = (env.get(key) or "").strip()
+        if raw.lower() in ("1", "true", "yes", "on"):
+            rep.add(f"{label} enabled", PASS, f"{key}={raw}")
+        elif raw:
+            rep.add(f"{label} enabled", WARN,
+                    f"{key}={raw!r} is not a truthy value, so it stays OFF "
+                    "(fail-closed)",
+                    fix=f"set {key}=1 in {ROBOT_ENV}, then restart the unit")
+        else:
+            rep.add(f"{label} enabled", WARN,
+                    f"{key} is not set in {ROBOT_ENV} — the feature is OFF and "
+                    "will answer nothing (see " + doc + ")",
+                    # Phrased without the literal service-control command: a
+                    # sibling test forbids that string anywhere in this file, so
+                    # verification can never be edited into starting something
+                    # to prove a point. The operator still gets both steps.
+                    fix=f"append {key}=1 to {ROBOT_ENV}, then restart "
+                        "kirra-rabbit-voice (see install_robot_units.sh)")
+
+
 def run() -> Report:
     rep = Report()
     from preflight_consumer_env import parse_env_file
@@ -223,6 +258,7 @@ def run() -> Report:
         rep.add("robot.env readable", FAIL, f"{ROBOT_ENV} missing or empty")
     check_artifacts(rep)
     check_env(rep, env)
+    check_voice_env(rep, env)
     probe_ffi(rep, env)
     check_units(rep)
     check_services(rep)
