@@ -1350,6 +1350,18 @@ jobs:
         run: |
           python3 ci/check_reexport_shims.py --self-test
           python3 ci/check_reexport_shims.py
+      - name: Deep-harness matrix source (the weekly lane's coverage list)
+        # The weekly `kani-deep-weekly` lane derives its per-harness matrix from
+        # ci/deep_harnesses.py rather than a hardcoded list, so a newly-demoted
+        # harness joins the campaign with no workflow edit. That makes this
+        # script decide WHICH PROPERTIES GET PROVED: if it under-reports, the
+        # lane goes green having verified less than it claims. The tests pin the
+        # two hazards that were live during #1260 — both `deep-proofs` gate
+        # spellings are recognised (K7 uses `cfg(all(kani, feature = ...))`,
+        # which a grep for the plain spelling drops), and gated HELPERS that are
+        # not `#[kani::proof]` are excluded. Also asserts the script fails closed
+        # on an empty deep tier instead of emitting a vacuous empty matrix.
+        run: python3 ci/test_deep_harnesses.py
       - name: Mick actuation fence (no path from the intent layer to the motors)
         # The doer-checker thesis, structurally: kirra-mick and the sidecar
         # binaries must have NO dependency route to the release-token mint,

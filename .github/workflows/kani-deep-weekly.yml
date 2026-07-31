@@ -37,13 +37,37 @@
 # an assertion that is RELATIONAL ARITHMETIC over two command fields does not
 # finish (K7, K8). Expect the second shape to land in this lane.
 #
-# This lane gives the solver the same scheduled multi-hour budget the EP-22
-# deep-fuzz campaign uses. Every deep property keeps a BLOCKING per-PR concrete
-# mirror in the kani crate's `cargo test` — for R2 the full speed-grid walk
-# swept along all four parameter axes, for K7 the 306,180-point exhaustive grid
-# over the executable return, for K8 the 2,880-point physical-dt grid — so
-# demotion here never leaves a property with zero per-PR coverage. Kept in its OWN workflow so the `schedule` trigger does
-# not fan the whole ci.yml job graph out weekly.
+# ⚠️ HISTORY, because the numbers above were written against a lane that did
+# not work (#1260). Between 12 July and 31 July 2026 this lane completed FOUR
+# runs' worth of wall-clock and produced ZERO verdicts. Every run was killed at
+# the GitHub-hosted SIX-HOUR per-job ceiling and reported `cancelled` — grey,
+# not red — so nothing surfaced it. Two distinct causes, both now fixed here:
+#
+#   * `timeout-minutes: 480` was INERT. A hosted job cannot exceed 360 minutes;
+#     declaring more does not buy more, it just means the PLATFORM decides the
+#     outcome, and the platform's word for "out of time" is `cancelled`.
+#   * ONE JOB, HARNESSES IN SERIES. The first non-terminating harness consumed
+#     everything behind it. On 2026-07-26 R2 spent 5 h 59 m inside a single
+#     kissat solve; on run 30629178939 K7 hung in CBMC's propositional
+#     reduction 17 s in and K3, K8 and R2 were never even started. Which
+#     property received any budget at all was decided by scheduling order.
+#
+# That run also split the two remaining unknowns apart, and the distinction is
+# load-bearing for what to do next. R2's orphan process was `kissat` — it is
+# solver-bound, a real budget question. K7's orphan was `cbmc` and no solver
+# was ever invoked — it is ENCODER non-termination, so "give it more hours" may
+# simply be the wrong diagnosis. K3 and K8 remain entirely unmeasured under a
+# multi-hour budget; the matrix below is what will finally measure them.
+#
+# Every deep property keeps a BLOCKING per-PR concrete mirror in the kani
+# crate's `cargo test` — for R2 the full speed-grid walk swept along all four
+# parameter axes, for K7 the 306,180-point exhaustive grid over the executable
+# return, for K8 the 2,880-point physical-dt grid. That rule is the only reason
+# four weeks of a dead lane was a coverage REDUCTION and not a coverage HOLE.
+# Treat it as load-bearing, not as belt-and-braces.
+#
+# Kept in its OWN workflow so the `schedule` trigger does not fan the whole
+# ci.yml job graph out weekly.
 name: Kani deep proofs (weekly)
 
 on:
@@ -61,12 +85,48 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  kani-deep:
-    name: Kani deep proofs (deep-proofs feature, multi-hour solver budget)
+  # The matrix is DERIVED from the source, never hand-maintained (#1260). The
+  # single `cargo kani --features deep-proofs` this lane used to run had one
+  # genuinely good property — a newly-demoted harness joined the campaign with
+  # no workflow edit — and a hardcoded list would have silently thrown it away.
+  # `ci/deep_harnesses.py` keeps it, and fails closed on an empty deep tier so
+  # the lane can never pass while proving nothing.
+  discover:
+    name: Enumerate deep harnesses
     runs-on: ubuntu-latest
-    # The whole point of this lane is budget: the R2 UNSAT solve is known to
-    # exceed 45 min and its true cost is unmeasured — give it the full window.
-    timeout-minutes: 480
+    timeout-minutes: 5
+    outputs:
+      harnesses: ${{ steps.list.outputs.harnesses }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - id: list
+        run: |
+          set -euo pipefail
+          harnesses="$(python3 ci/deep_harnesses.py)"
+          echo "deep harnesses: $harnesses"
+          echo "harnesses=$harnesses" >> "$GITHUB_OUTPUT"
+
+  kani-deep:
+    name: "Kani deep proof: ${{ matrix.harness }}"
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      # One harness per job. Before #1260 every harness shared a single job, so
+      # the first non-terminating one consumed the whole lane and everything
+      # behind it got ZERO solver time — K7 starved K3/K8/R2 on run
+      # 30629178939, and R2 starved everything on 2026-07-26. Which property
+      # got any budget at all was decided by scheduling order.
+      fail-fast: false
+      matrix:
+        harness: ${{ fromJSON(needs.discover.outputs.harnesses) }}
+    # MUST stay below the GitHub-hosted 6 h (360 min) per-job ceiling, and that
+    # is the entire point of the number. The old `timeout-minutes: 480` was
+    # INERT: the platform killed the job at 360 min and reported `cancelled`,
+    # which renders grey rather than red, so four consecutive runs produced no
+    # verdict and nothing surfaced it. A timeout we own fires FIRST and fails
+    # the job. Do not raise this to or above 360 — that hands the decision back
+    # to the platform and restores the silent-grey failure.
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
@@ -74,9 +134,11 @@ jobs:
         # No install-flake tolerance here (unlike the per-PR lane): this lane
         # exists ONLY to run the proofs, so a skipped run must read as red.
         run: cargo install kani-verifier --locked && cargo kani setup
-      - name: Run ALL Kani proofs with deep harnesses enabled (BLOCKING)
-        # `--features deep-proofs` compiles the deep harnesses IN ADDITION to
-        # the default set (re-running the fast set costs minutes against an
-        # 8 h budget and means a new deep harness joins this campaign with no
-        # workflow edit — the no-silent-caps rule).
-        run: cd verification/kani && cargo kani --features deep-proofs
+      - name: "Prove ${{ matrix.harness }} (BLOCKING)"
+        # Step timeout under the job timeout under the platform ceiling, so a
+        # non-terminating harness surfaces as a FAILED step naming itself,
+        # rather than a cancelled job naming nothing.
+        timeout-minutes: 300
+        run: |
+          cd verification/kani
+          cargo kani --features deep-proofs --harness '${{ matrix.harness }}'
