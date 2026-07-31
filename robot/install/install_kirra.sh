@@ -193,7 +193,16 @@ echo "  capture_from_robot.sh + README.md 'Config capture'."
 echo "== 6. systemd unit (optional; staged, not enabled) =="
 # Render the unit's User= to the invoking user (review #906: never hard-code
 # an image-specific username). Serial access needs dialout membership.
-ROBOT_USER="$(id -un)"
+# Must match KIRRA_USER above (the udev rule's OWNER). `id -un` is WRONG here:
+# this installer is documented to run under sudo, so it returns root, and the
+# unit was rendered User=root. Root then bypasses the 0600 owner check on
+# /dev/myserial, so serial kept working and nothing surfaced — but Fast DDS
+# shared memory does NOT bypass: the reader's /dev/shm port segment is created
+# root:root 0644, the robot-user publisher cannot write into it, and release
+# frames are never delivered. Discovery still matches (UDP multicast) and timers
+# still fire (local), which is exactly the "timer runs, subscription never does"
+# fault. Derive it the same way as line 97 or the two drift apart again.
+ROBOT_USER="${SUDO_USER:-${USER}}"
 if id -nG "${ROBOT_USER}" | tr ' ' '\n' | grep -qx dialout; then
   ok "user '${ROBOT_USER}' is in dialout (serial access)"
 else
@@ -207,6 +216,47 @@ sudo install -m 0644 "${TMP_UNIT}" /etc/systemd/system/kirra-consumer.service
 rm -f "${TMP_UNIT}"
 sudo systemctl daemon-reload
 warn "kirra-consumer.service staged but NOT enabled: the consumer-as-a-service path has NOT been hardware-validated (the validated mode is a terminal run). Enable deliberately after an elevated re-test: sudo systemctl enable --now kirra-consumer"
+
+# ---- 6b. deployment identity ------------------------------------------------
+# Print the four facts that must agree, and FAIL LOUDLY when they do not.
+#
+# Both faults in the 2026-07-31 incident were invisible mismatches between these
+# lines. The unit ran as root while the udev rule owned the port to the robot
+# user, so Fast DDS shared-memory segments were unwritable by the publisher and
+# release frames were never delivered. Separately, KIRRA_CONSUMER_LIB pointed at
+# a path the installer does not write, so the consumer loaded an old verify core
+# and every rebuild changed nothing. Every individual component reported healthy
+# throughout; nothing printed them side by side.
+echo
+echo "== deployment identity (these four must agree) =="
+_id_unit="$(sed -n 's/^User=//p' /etc/systemd/system/kirra-consumer.service 2>/dev/null || true)"
+_id_port="$(stat -c '%U' -L /dev/myserial 2>/dev/null || echo '<absent>')"
+_id_lib="$(sed -n 's/^KIRRA_CONSUMER_LIB=//p' /etc/kirra/robot.env 2>/dev/null || true)"
+_id_lib_installed="${OPT}/lib/libkirra_consumer_ffi.so"
+[[ -n "${_id_lib}" ]] || _id_lib="<unset — defaults to ${_id_lib_installed}>"
+
+printf '  configured robot user : %s\n' "${ROBOT_USER}"
+printf '  systemd User=         : %s\n' "${_id_unit:-<unset>}"
+printf '  /dev/myserial owner   : %s\n' "${_id_port}"
+printf '  KIRRA_CONSUMER_LIB    : %s\n' "${_id_lib}"
+printf '  library exists        : %s\n' \
+  "$([[ -f "${_id_lib_installed}" ]] && echo yes || echo NO)"
+
+_id_bad=0
+[[ "${_id_unit}" == "${ROBOT_USER}" ]] || {
+  warn "systemd User='${_id_unit:-<unset>}' != robot user '${ROBOT_USER}' — a consumer running as another user cannot exchange DDS shared-memory data with same-host publishers, while discovery still matches and timers still fire"
+  _id_bad=1
+}
+# The port is absent until the board is plugged in; that is not a mismatch.
+if [[ "${_id_port}" != "<absent>" && "${_id_port}" != "${ROBOT_USER}" ]]; then
+  warn "/dev/myserial is owned by '${_id_port}', not '${ROBOT_USER}' — replug the board or re-trigger udev; the consumer's boot sentinel will refuse to start"
+  _id_bad=1
+fi
+if [[ "${_id_lib}" != "<unset"* && "${_id_lib}" != "${_id_lib_installed}" ]]; then
+  warn "KIRRA_CONSUMER_LIB='${_id_lib}' is not where this installer writes the cdylib (${_id_lib_installed}) — the consumer would load a library no rebuild replaces"
+  _id_bad=1
+fi
+[[ "${_id_bad}" -eq 0 ]] && ok "deployment identity consistent"
 
 # ---- 7. verification checklist ----------------------------------------------
 echo

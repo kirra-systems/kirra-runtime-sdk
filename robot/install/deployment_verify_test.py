@@ -7,6 +7,7 @@ checkout and everything LOOKED fine: units active, /health ok, consumer started.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -260,6 +261,139 @@ def test_the_report_never_writes():
               "the env file was MODIFIED by a read-only report")
     finally:
         Path(p).unlink()
+
+
+def test_the_installer_derives_one_robot_user_everywhere():
+    """The unit's User= and the udev rule's OWNER must name the SAME account.
+
+    install_kirra.sh is documented to run under sudo. `id -un` therefore returns
+    root, while `${SUDO_USER:-${USER}}` returns the real robot user — so mixing
+    the two idioms rendered `User=root` into kirra-consumer.service while the
+    udev rule kept OWNER=<robot user>. Root bypasses the 0600 owner check on
+    /dev/myserial, so serial kept working and the split stayed invisible; Fast
+    DDS shared memory does not bypass, so release frames stopped being delivered
+    to a root-owned reader and the consumer serviced its timer but never its
+    subscription.
+
+    Asserting the two derivations agree is what makes that split impossible to
+    reintroduce silently.
+    """
+    src = (HERE / "install_kirra.sh").read_text()
+    assignments = re.findall(
+        r"^(?:KIRRA_USER|ROBOT_USER)=(.+)$", src, flags=re.MULTILINE
+    )
+    check(len(assignments) >= 2,
+          f"expected both KIRRA_USER and ROBOT_USER assignments, found {assignments}")
+    for rhs in assignments:
+        check("id -un" not in rhs,
+              f"robot-user derivation uses `id -un`, which is root under sudo: {rhs.strip()}")
+        check("SUDO_USER" in rhs,
+              f"robot-user derivation must honour SUDO_USER: {rhs.strip()}")
+    check(len(set(a.strip() for a in assignments)) == 1,
+          f"the robot user is derived inconsistently across the installer: {assignments}")
+
+
+def test_the_consumer_unit_never_ships_a_hardcoded_root_user():
+    """A rendered `User=root` is the failure this whole class produces."""
+    unit = (HERE / "systemd" / "kirra-consumer.service").read_text()
+    check("User=__KIRRA_ROBOT_USER__" in unit,
+          "the consumer unit template must keep the __KIRRA_ROBOT_USER__ placeholder")
+    check("User=root" not in unit,
+          "the consumer unit must never hardcode User=root — root-owned DDS "
+          "shared-memory segments are unwritable by the robot-user publisher")
+
+
+def test_the_installer_writes_the_consumer_lib_where_the_verifier_expects_it():
+    """The .so path in EXPECTED_ARTIFACTS must be a path install_kirra.sh writes.
+
+    A live robot ran an OLD verify core for hours: robot.env pinned
+    KIRRA_CONSUMER_LIB to the pre-lib/ layout, so every rebuild landed in
+    /opt/kirra/lib/ while the consumer dlopen'd a stale file one directory up.
+    Both files existed and both loaded, so nothing failed — the SS-002 stop ramp
+    simply never ran and the wheels kept turning after releases stopped.
+
+    The artifact-contract test above only pairs robot/-relative files, which is
+    exactly why this one slipped through it.
+    """
+    installer = (HERE / "install_kirra.sh").read_text()
+    # The destinations the installer writes the cdylib to, ${OPT} expanded.
+    installed = [
+        ln.split()[-1].strip('"').replace("${OPT}", "/opt/kirra")
+        for ln in installer.splitlines()
+        if "libkirra_consumer_ffi.so" in ln and ln.strip().startswith("sudo install")
+    ]
+    check(installed, "install_kirra.sh must install the consumer cdylib")
+    check(any(d == vd.INSTALLED_CONSUMER_LIB for d in installed),
+          f"the installer writes {installed}, the verifier expects "
+          f"{vd.INSTALLED_CONSUMER_LIB}")
+    expected = [p for p, _ in vd.EXPECTED_ARTIFACTS if p.endswith("libkirra_consumer_ffi.so")]
+    check(expected, "EXPECTED_ARTIFACTS must name the consumer cdylib")
+    for p in expected:
+        check(p == vd.INSTALLED_CONSUMER_LIB,
+              f"the verifier expects {p}, the installer writes "
+              f"{vd.INSTALLED_CONSUMER_LIB} — a robot pinned to the other one "
+              f"runs a core no rebuild can replace")
+
+
+def test_the_env_template_points_at_the_installed_consumer_lib():
+    """robot.env is rendered from env.template; if it names the other path the
+    consumer loads a library the installer never updates."""
+    tmpl = (HERE / "env.template").read_text()
+    vals = [ln.split("=", 1)[1].strip() for ln in tmpl.splitlines()
+            if ln.strip().startswith("KIRRA_CONSUMER_LIB=")]
+    check(vals, "env.template must set KIRRA_CONSUMER_LIB")
+    for v in vals:
+        check(v == vd.INSTALLED_CONSUMER_LIB,
+              f"env.template points KIRRA_CONSUMER_LIB at {v}, installer writes "
+              f"{vd.INSTALLED_CONSUMER_LIB}")
+
+
+def test_deployment_identity_flags_a_user_mismatch():
+    """The 2026-07-31 fault-1 shape: unit runs as root, port owned by the robot
+    user. Every component healthy, no message ever delivered."""
+    rep = vd.Report()
+    vd.check_deployment_identity(rep, {"KIRRA_CONSUMER_LIB": vd.INSTALLED_CONSUMER_LIB},
+                                 unit_user="root", port_owner="jetson",
+                                 configured_user="jetson")
+    bad = [r for r in rep.rows if r["status"] == vd.FAIL]
+    check(bad, "a root unit against a robot-user port must FAIL, not pass quietly")
+    check(any("unit user" in r["check"] for r in bad),
+          f"the unit-user row must be the failing one, got {[r['check'] for r in bad]}")
+    check(all(r["fix"] for r in bad), "a failure must tell the operator what to do")
+
+
+def test_deployment_identity_flags_a_library_pointing_elsewhere():
+    """Fault-2 shape: the consumer loads a library the installer never writes,
+    so it dlopen's fine and no rebuild ever reaches it."""
+    rep = vd.Report()
+    vd.check_deployment_identity(rep, {"KIRRA_CONSUMER_LIB": "/opt/kirra/libkirra_consumer_ffi.so"},
+                                 unit_user="jetson", port_owner="jetson",
+                                 configured_user="jetson")
+    bad = [r for r in rep.rows if r["status"] == vd.FAIL]
+    check(any("consumer library" in r["check"] for r in bad),
+          f"a library outside the installer's destination must FAIL, got "
+          f"{[(r['check'], r['status']) for r in rep.rows]}")
+
+
+def test_deployment_identity_accepts_a_consistent_deployment():
+    """…and must not cry wolf on a correct one, including an unplugged board."""
+    rep = vd.Report()
+    vd.check_deployment_identity(rep, {"KIRRA_CONSUMER_LIB": vd.INSTALLED_CONSUMER_LIB},
+                                 unit_user="jetson", port_owner="<absent>",
+                                 configured_user="jetson")
+    lib_rows = [r for r in rep.rows if "consumer library" in r["check"]]
+    check(not [r for r in rep.rows if r["status"] == vd.FAIL and "library" not in r["check"]],
+          "a consistent deployment with the board unplugged must not FAIL on user/owner")
+    check(lib_rows, "the library row must always be reported")
+
+
+def test_the_installer_prints_the_deployment_identity():
+    """The four lines must actually be emitted at install time — that is the
+    whole point: making the state explicit rather than inferable."""
+    src = (HERE / "install_kirra.sh").read_text()
+    for needle in ("configured robot user", "systemd User=",
+                   "/dev/myserial owner", "KIRRA_CONSUMER_LIB"):
+        check(needle in src, f"install_kirra.sh must print {needle!r}")
 
 
 def _run_all() -> int:
