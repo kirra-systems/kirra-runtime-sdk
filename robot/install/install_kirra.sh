@@ -147,7 +147,13 @@ sudo install -m 0755 "${REPO}/robot/kirra_motor_consumer.py" \
 # Imported modules, never exec'd, so 0644 is correct for these.
 # motor_authority.py was missing entirely: robot/doctor/modules/devices.py
 # imports it at runtime, so a deployed robot needs it beside the consumer.
-for f in kirra_ffi.py kirra_release_publisher.py r2_drive.py motor_authority.py; do
+# serial_exclusivity.py is the #887 Tier-3 boot sentinel: kirra_motor_consumer.py
+# imports it and REFUSES to start unless it exclusively owns the motor port. No
+# installer shipped it, so a fresh install produced a consumer that fails at
+# import — it survived only because deployed robots had it from some untracked
+# copy. verify_deployment.py has expected it all along.
+for f in kirra_ffi.py kirra_release_publisher.py r2_drive.py motor_authority.py \
+         serial_exclusivity.py; do
   sudo install -m 0644 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
 done
 for f in first_run_elevated.sh live_loop_elevated.sh steering_bench_elevated.sh; do
