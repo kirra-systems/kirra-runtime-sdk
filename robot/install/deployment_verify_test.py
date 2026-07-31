@@ -461,6 +461,39 @@ def test_the_installer_records_a_manifest():
     check("sha256sum" in src, "…by hashing the artifacts it installed")
 
 
+def test_every_check_is_actually_wired_into_the_report():
+    """A guard that is defined, tested, and never CALLED is not a guard.
+
+    check_deployment_identity and check_installed_artifacts_unchanged shipped
+    exactly that way: both had passing unit tests that invoked them directly,
+    and neither appeared in run(). On the robot the verifier printed
+    "deployment verified" without ever evaluating them — the same shape as the
+    incident they exist to catch, where every component reported healthy and
+    nothing compared them.
+
+    Parsed from run()'s AST rather than grepped, so a mention in a comment or a
+    docstring cannot satisfy it.
+    """
+    import ast
+    src = (HERE / "verify_deployment.py").read_text()
+    tree = ast.parse(src)
+
+    defined = {n.name for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name.startswith("check_")}
+    run_fn = next((n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name == "run"), None)
+    check(run_fn is not None, "verify_deployment must define run()")
+    if run_fn is None:
+        return
+    called = {ast.unparse(n.func) for n in ast.walk(run_fn) if isinstance(n, ast.Call)}
+
+    unwired = sorted(defined - called)
+    check(not unwired,
+          f"check_* functions defined but never called from run(): {unwired} — "
+          f"a guard that does not run is worse than no guard, because the "
+          f"report still says 'verified'")
+
+
 def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print("deployment_verify_test:")

@@ -387,9 +387,61 @@ def run() -> Report:
     check_env(rep, env)
     check_voice_env(rep, env)
     probe_ffi(rep, env)
+    check_deployment_identity(
+        rep, env,
+        unit_user=read_unit_user(),
+        port_owner=read_port_owner(env.get("KIRRA_MOTOR_PORT") or "/dev/myserial"),
+        configured_user=configured_robot_user(),
+    )
+    check_installed_artifacts_unchanged(
+        rep, *read_installed_manifest())
     check_units(rep)
     check_services(rep)
     return rep
+
+
+def configured_robot_user() -> str:
+    """The account the deployment is meant to run as.
+
+    The unit is the authority: install_kirra.sh renders User= from the invoking
+    (sudo) user, so the unit records the decision that was actually made. Falling
+    back to the calling user would make this check compare a value against
+    itself whenever an operator ran the verifier from a different account.
+    """
+    return read_unit_user() or ""
+
+
+def read_unit_user() -> str:
+    try:
+        d = subprocess.run(
+            ["systemctl", "show", "kirra-consumer.service", "-p", "User", "--value"],
+            capture_output=True, text=True, timeout=10)
+        return d.stdout.strip()
+    except Exception:  # noqa: BLE001 — an absent systemd is not a mismatch
+        return ""
+
+
+def read_port_owner(port: str) -> str:
+    """Owner of the REAL device, following the symlink.
+
+    /dev/myserial is a symlink and symlinks are always lrwxrwxrwx, so stat'ing
+    it without -L reports nothing useful — a distinction that cost real time
+    during the 2026-07-31 diagnosis.
+    """
+    try:
+        import pwd
+        return pwd.getpwuid(os.stat(port).st_uid).pw_name
+    except Exception:  # noqa: BLE001 — unplugged board, not a mismatch
+        return "<absent>"
+
+
+def read_installed_manifest():
+    """(recorded, current) digest maps for the manifest comparison."""
+    try:
+        recorded = parse_manifest(open(INSTALLED_MANIFEST).read())
+    except OSError:
+        return {}, {}
+    return recorded, {p: sha256_file(p) for p in recorded}
 
 
 def main(argv) -> int:
