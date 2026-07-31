@@ -10,6 +10,19 @@
 # set_car_type — the steering/R2 platform layer is BLOCKED on the vendor R2
 # base image and is documented (not implemented) in PLATFORM_R2_PENDING.md.
 #
+# OVERLAY: run this with the workspace that provides ydlidar_ros2_driver already
+# sourced. sudo does not inherit it, and the vendor driver lives OUTSIDE this
+# repo (the validated unit had it under ~/yahboomcar_ros2_ws), so a plain
+# `sudo install_kirra.sh` reports the driver missing even when it is installed:
+#
+#   sudo env "PATH=$HOME/.cargo/bin:$PATH" bash -c '
+#     source /opt/ros/humble/setup.bash
+#     source "$HOME/yahboomcar_ros2_ws/software/library_ws/install/setup.bash"
+#     exec robot/install/install_kirra.sh'
+#
+# The lidar check is non-fatal in place and reported at the end, so a missing
+# driver no longer prevents the unit, manifest and identity steps from running.
+#
 # What it does (idempotent; loud on missing prereqs):
 #   1. preflight checks (ROS 2 Humble, Rosmaster_Lib, cargo, device symlinks)
 #   2. builds the verify-core cdylib + the dev mint binary (--skip-build to reuse)
@@ -179,10 +192,21 @@ set +u
 # shellcheck disable=SC1091
 source "${ROS_SETUP}"
 set -u
+# DEFERRED failure. A missing lidar driver still fails the install, but the
+# verdict is reported at the END rather than aborting here — see the exit at the
+# bottom. Aborting at this point skipped the systemd unit render, the installed-
+# artifact manifest and the deployment-identity block, all of which come later
+# and none of which have anything to do with the lidar. On 2026-07-31 that
+# ordering meant a robot whose unit carried the wrong User= could not have it
+# corrected by re-running the installer: every attempt died here first. A robot
+# that cannot render its unit is a worse failure than one that cannot find its
+# lidar, so the deployment work now completes either way.
+LIDAR_MISSING=0
 if ros2 pkg prefix ydlidar_ros2_driver >/dev/null 2>&1; then
   ok "ydlidar_ros2_driver present ($(ros2 pkg prefix ydlidar_ros2_driver))"
 else
-  fail "ydlidar_ros2_driver NOT found. The validated unit had it vendor-preinstalled; a from-source build is documented (but NOT hardware-validated) in README.md. The lidar is required for the live loop."
+  LIDAR_MISSING=1
+  warn "ydlidar_ros2_driver NOT found — the install will CONTINUE and then fail at the end. The validated unit had it vendor-preinstalled; a from-source build is documented (but NOT hardware-validated) in README.md. The lidar is required for the live loop. If the driver lives in an overlay workspace (the validated unit had it under ~/yahboomcar_ros2_ws), source that overlay before running this installer — see the usage note at the top of this script."
 fi
 echo "  validated launch (installer/platform_map.toml:31-37 — TG30, 512000 baud):"
 echo "    ros2 launch ydlidar_ros2_driver ydlidar_launch.py"
@@ -294,3 +318,12 @@ cat <<'EOF'
        ros2 topic echo /scan --once   # finite room-plausible ranges
   3. First governed motion: robot/first_run_elevated.sh — 🔴 WHEELS ELEVATED.
 EOF
+
+# ---- 8. deferred verdict ----------------------------------------------------
+# Everything above ran. If the lidar driver was missing, the install is still a
+# FAILURE and exits non-zero — the exit-code contract is unchanged, only its
+# position moved, so the deployment steps that come after step 5 are no longer
+# hostage to an unrelated driver check.
+if [[ "${LIDAR_MISSING}" -eq 1 ]]; then
+  fail "ydlidar_ros2_driver NOT found (reported at step 5). The deployment steps above COMPLETED — unit, manifest and identity are installed — but the live loop cannot run without the lidar. Install the driver, or source the overlay that provides it, and re-run."
+fi
