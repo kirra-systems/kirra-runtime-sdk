@@ -131,12 +131,14 @@ _leaked = sorted(n for n in (_registered - _advertised) if n in frag)
 check(not _leaked,
       f"the fragment advertises exactly CONTRACT_TOOL_NAMES (leaked: {_leaked})")
 
-# The concrete pair this split exists for, asserted separately from the
+# The concrete production-only tools, asserted by name and separately from the
 # relation above so a regression names the tool rather than a set difference.
-check("run_robot_diagnostics" in _registered,
-      "run_robot_diagnostics is registered for deterministic production use")
-check("run_robot_diagnostics" not in _advertised,
-      "run_robot_diagnostics is not model-advertised")
+# Both are reached ONLY through deterministic classification, which is what keeps
+# the pinned prompt digest — and the measurements taken against it — valid.
+for name in ("run_robot_diagnostics", "report_assistant_contract"):
+    check(name in _registered, f"{name} is registered for deterministic use")
+    check(name not in _advertised, f"{name} is not model-advertised")
+    check(name not in frag, f"{name} does not reach the prompt fragment")
 check("CANNOT run shell commands" in frag and "no terminal" in frag,
       "the prompt tells the model it has no shell")
 check("NEVER claim a tool succeeded" in frag,

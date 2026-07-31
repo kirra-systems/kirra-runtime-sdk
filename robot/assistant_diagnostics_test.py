@@ -229,21 +229,24 @@ check(tool.level <= at.MAX_GRANTED_LEVEL, "the tool is within the granted author
 check(tool.level == at.L1_READ_ONLY, "the tool is level 1, not bounded-exec")
 
 # ── 7. the pinned prompt: THIS checkout's contract, not another branch's ─────
-print("== 7. the assist-1 prompt is pinned and unchanged ==")
+print("== 7. the assist-4 prompt is pinned and unchanged ==")
 #
-# PROVENANCE, stated so nobody reads this pin as evidence it is not.
+# PROVENANCE, stated so nobody reads this pin as more than it is.
 #
-# This checkout ships PROMPT_CONTRACT_VERSION "assist-1". It does NOT contain
-# the "assist-4" contract, the digest 9f5982de…, or the v2/61-case corpus those
-# were measured against — none of that exists on this branch. `CONTRACT_TOOL_NAMES`
-# did not exist here either; this change INTRODUCES the production-versus-
-# model-visible split.
+# This pin was FIRST written against assist-1 / b0d0575a…, because that is what
+# the branch shipped when the diagnostics tool was written; `CONTRACT_TOOL_NAMES`
+# did not exist here at all. The assist-4 contract, the digest below and the
+# v2/61-case corpus arrived from main in the merge, and the pin was updated to
+# the merged truth rather than left asserting a fragment this tree no longer has.
 #
-# The digest below is therefore the real, locally shipped assist-1 fragment,
-# recomputed from source. It pins what this branch actually has. It is not, and
-# must not be described as, preservation of the assist-4 evidence.
-LOCAL_PROMPT_CONTRACT_VERSION = "assist-1"
-PROMPT_FRAGMENT_DIGEST = "b0d0575aec7ad7afba4bc245fb56eac7f420d95cf8fc66b1b968951e94247481"
+# What the pin therefore demonstrates — and the ONLY thing it demonstrates — is
+# that adding `run_robot_diagnostics` to the REGISTRY left the model-facing
+# fragment byte-identical to main's measured artifact. It is evidence that the
+# production-versus-advertised split holds. It is NOT a re-measurement, and it
+# says nothing about how any model scores against assist-4; those numbers belong
+# to the runs recorded in docs/KIRRA_ENGINEERING_ASSISTANT.md, not to this file.
+LOCAL_PROMPT_CONTRACT_VERSION = "assist-4"
+PROMPT_FRAGMENT_DIGEST = "9f5982de2e551ff3fbe57f9d7ebf10201fc59565f6682630c3e086a0f0e66f54"
 
 check(at.PROMPT_CONTRACT_VERSION == LOCAL_PROMPT_CONTRACT_VERSION,
       f"this checkout ships {LOCAL_PROMPT_CONTRACT_VERSION} "
