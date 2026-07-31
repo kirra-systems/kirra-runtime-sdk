@@ -988,6 +988,313 @@ mod tests {
         (payload.encode(), token.to_bytes())
     }
 
+    /// Every starve test above builds the consumer with boot epoch 0 — the
+    /// stub that "admits every test token". The field passes a REAL boot
+    /// instant (#1230 Part B: `int(time.time() * 1000)`, ~1.78e12) and real
+    /// epoch-millisecond timestamps. That is the last unexercised difference
+    /// between the passing tests and a robot whose wheels never stopped.
+    #[test]
+    fn stop_ramp_survives_a_real_boot_epoch_and_epoch_scale_timestamps() {
+        unsafe {
+            // A plausible field boot instant, and a consumer built the way the
+            // deployed one is.
+            let boot: u64 = 1_785_523_100_000;
+            let h = kirra_bound_consumer_new(
+                sk().verifying_key().as_bytes().as_ptr(),
+                PROFILE_DIGEST.as_ptr(),
+                200,
+                boot,
+                100,
+                3,
+                // The robot's measured values, not the test's round numbers:
+                // KIRRA_STOP_DECEL_MPS2=0.5 gives a 0.05 m/s step per 100 ms
+                // period, so 0.15 m/s takes three ticks to reach zero.
+                0.5,
+                0.15,
+                0.4,
+            );
+            assert!(!h.is_null());
+
+            // Liveness clock already running before any publisher, as in the field.
+            for k in 0..20u64 {
+                let mut tk = std::mem::zeroed::<KirraTickResult>();
+                kirra_bound_consumer_on_tick(h, boot + 1_000 + k * 100, &mut tk);
+            }
+
+            let mut t = boot + 4_000;
+            for i in 1..=3u64 {
+                let (payload, token) = bound_frame(i, 1000 + i, t, 70 + i);
+                let mut out = std::mem::zeroed::<KirraBoundFrameResult>();
+                kirra_bound_consumer_on_frame(
+                    h,
+                    payload.as_ptr(),
+                    token.as_ptr(),
+                    KIRRA_TOKEN_LEN,
+                    t,
+                    &mut out,
+                );
+                assert_eq!(
+                    out.write, 1,
+                    "release {i} must be admitted at epoch scale (refusal {})",
+                    out.refusal_code
+                );
+                t += 100;
+            }
+
+            let mut saw_ramp = false;
+            let mut reached_zero = false;
+            let mut last = f64::INFINITY;
+            for k in 1..=30u64 {
+                let mut tk = std::mem::zeroed::<KirraTickResult>();
+                kirra_bound_consumer_on_tick(h, t + k * 100, &mut tk);
+                if tk.write == 1 {
+                    saw_ramp = true;
+                    assert!(tk.linear.abs() <= last + 1e-12, "ramp must not increase");
+                    last = tk.linear.abs();
+                    if tk.linear == 0.0 {
+                        reached_zero = true;
+                    }
+                }
+            }
+            assert!(
+                saw_ramp,
+                "the stop ramp must arm under a real boot epoch — at epoch scale \
+                 the field consumer returned write=0 on every tick while the \
+                 wheels kept turning"
+            );
+            assert!(reached_zero, "the ramp must reach zero");
+            kirra_bound_consumer_free(h);
+        }
+    }
+
+    /// The field ordering no test had: the liveness clock ticks BEFORE the first
+    /// release ever arrives. A robot logged `TICK write=0` twice, then released,
+    /// then `write=0` for another eight seconds while the wheels kept turning —
+    /// so the question is whether ticking an as-yet-unreleased consumer latches
+    /// a state that a later release cannot re-arm.
+    #[test]
+    fn ticks_before_the_first_release_do_not_disarm_the_stop_ramp() {
+        unsafe {
+            let h = new_bound_consumer();
+
+            // The liveness clock is already running when the node comes up, with
+            // no publisher yet. Nothing to write — but it must not latch.
+            for k in 0..20u64 {
+                let mut tk = std::mem::zeroed::<KirraTickResult>();
+                kirra_bound_consumer_on_tick(h, 9_000 + k * 100, &mut tk);
+                assert_eq!(tk.write, 0, "nothing has been released yet");
+            }
+
+            // Now the publisher appears.
+            let mut t = 11_000u64;
+            for i in 1..=3u64 {
+                let (payload, token) = bound_frame(i, 1000 + i, t, 70 + i);
+                let mut out = std::mem::zeroed::<KirraBoundFrameResult>();
+                kirra_bound_consumer_on_frame(
+                    h,
+                    payload.as_ptr(),
+                    token.as_ptr(),
+                    KIRRA_TOKEN_LEN,
+                    t,
+                    &mut out,
+                );
+                assert_eq!(out.write, 1, "release {i} must be admitted");
+                t += 100;
+            }
+
+            // …and disappears again.
+            let mut saw_ramp = false;
+            let mut reached_zero = false;
+            let mut last = f64::INFINITY;
+            for k in 1..=30u64 {
+                let mut tk = std::mem::zeroed::<KirraTickResult>();
+                kirra_bound_consumer_on_tick(h, t + k * 100, &mut tk);
+                if tk.write == 1 {
+                    saw_ramp = true;
+                    assert!(tk.linear.abs() <= last + 1e-12, "ramp must not increase");
+                    last = tk.linear.abs();
+                    if tk.linear == 0.0 {
+                        reached_zero = true;
+                    }
+                }
+            }
+            assert!(
+                saw_ramp,
+                "a consumer ticked before its first release must STILL ramp when \
+                 releases stop — otherwise the last PWM stays latched forever"
+            );
+            assert!(reached_zero, "the ramp must reach zero");
+            kirra_bound_consumer_free(h);
+        }
+    }
+
+    /// The field runs the liveness clock CONCURRENTLY with the release train —
+    /// on_frame and on_tick alternate at 10 Hz — whereas both tests above only
+    /// tick after the train ends. That interleaving is the last structural
+    /// difference between the passing tests and the robot that kept driving.
+    #[test]
+    fn bound_starvation_after_an_interleaved_train_still_ramps_to_zero() {
+        unsafe {
+            let h = new_bound_consumer();
+
+            let mut t = 10_000u64;
+            for i in 1..=40u64 {
+                let (payload, token) = bound_frame(i, 1000 + i, t, 70 + i);
+                let mut out = std::mem::zeroed::<KirraBoundFrameResult>();
+                kirra_bound_consumer_on_frame(
+                    h,
+                    payload.as_ptr(),
+                    token.as_ptr(),
+                    KIRRA_TOKEN_LEN,
+                    t,
+                    &mut out,
+                );
+                assert_eq!(out.write, 1, "release {i} must be admitted");
+
+                // …and the liveness clock ticks in the same period, as it does
+                // on the robot.
+                let mut tk = std::mem::zeroed::<KirraTickResult>();
+                kirra_bound_consumer_on_tick(h, t + 50, &mut tk);
+
+                t += 100;
+            }
+
+            let mut saw_ramp = false;
+            let mut reached_zero = false;
+            let mut last = f64::INFINITY;
+            for k in 1..=30u64 {
+                let mut tk = std::mem::zeroed::<KirraTickResult>();
+                kirra_bound_consumer_on_tick(h, t + k * 100, &mut tk);
+                if tk.write == 1 {
+                    saw_ramp = true;
+                    assert!(tk.linear.abs() <= last + 1e-12, "ramp must not increase");
+                    last = tk.linear.abs();
+                    if tk.linear == 0.0 {
+                        reached_zero = true;
+                    }
+                }
+            }
+            assert!(
+                saw_ramp,
+                "starvation after an INTERLEAVED train must still ramp — this is \
+                 the field pattern that left the last PWM latched"
+            );
+            assert!(reached_zero, "the ramp must reach zero");
+            kirra_bound_consumer_free(h);
+        }
+    }
+
+    /// Field reproduction: the single-frame ramp test passes, yet a robot that
+    /// received a SUSTAINED release train and then lost its publisher kept the
+    /// last PWM latched — ~100 liveness ticks produced no motor write and the
+    /// wheels kept turning. The only structural difference between that and the
+    /// passing test is the length of the release history, so this seeds a real
+    /// 10 Hz train before starving it.
+    #[test]
+    fn bound_starvation_after_a_sustained_release_train_still_ramps_to_zero() {
+        unsafe {
+            let h = new_bound_consumer();
+
+            // 40 releases at the 100 ms control period, exactly as the field
+            // publisher emits them.
+            let mut t = 10_000u64;
+            for i in 1..=40u64 {
+                let (payload, token) = bound_frame(i, 1000 + i, t, 70 + i);
+                let mut out = std::mem::zeroed::<KirraBoundFrameResult>();
+                kirra_bound_consumer_on_frame(
+                    h,
+                    payload.as_ptr(),
+                    token.as_ptr(),
+                    KIRRA_TOKEN_LEN,
+                    t,
+                    &mut out,
+                );
+                assert_eq!(out.write, 1, "release {i} of the train must be admitted");
+                t += 100;
+            }
+
+            // Publisher gone. Tick past the deadline for 3 s of wall time.
+            let mut saw_ramp = false;
+            let mut reached_zero = false;
+            let mut last = f64::INFINITY;
+            for k in 1..=30u64 {
+                let mut tk = std::mem::zeroed::<KirraTickResult>();
+                kirra_bound_consumer_on_tick(h, t + k * 100, &mut tk);
+                if tk.write == 1 {
+                    saw_ramp = true;
+                    assert!(tk.linear.abs() <= last + 1e-12, "ramp must not increase");
+                    last = tk.linear.abs();
+                    if tk.linear == 0.0 {
+                        reached_zero = true;
+                    }
+                }
+            }
+            assert!(
+                saw_ramp,
+                "starvation after a sustained train must still ramp — otherwise the \
+                 last commanded PWM stays latched and the platform keeps driving"
+            );
+            assert!(reached_zero, "the ramp must reach zero");
+            kirra_bound_consumer_free(h);
+        }
+    }
+
+    /// The V2 starve path had NO coverage: `kirra_bound_consumer_on_tick` was
+    /// defined and never called by a test, while the V1 twin has had a ramp
+    /// test since it shipped. The deployed consumer is evidence-bound V2 only,
+    /// so the ONE path that stops the wheels when releases stop arriving was
+    /// the untested one.
+    ///
+    /// This mirrors the V1 test exactly: release once, then tick past the
+    /// deadline and require a strictly non-increasing ramp that REACHES zero.
+    /// A V2 core that returns write=0 forever leaves the last commanded PWM
+    /// latched on the motor board — hold-last, which SS-002 forbids.
+    #[test]
+    fn bound_starvation_produces_an_active_stop_ramp_to_zero() {
+        unsafe {
+            let h = new_bound_consumer();
+            let (payload, token) = bound_frame(1, 1001, 10_000, 77);
+            let mut out = std::mem::zeroed::<KirraBoundFrameResult>();
+            kirra_bound_consumer_on_frame(
+                h,
+                payload.as_ptr(),
+                token.as_ptr(),
+                KIRRA_TOKEN_LEN,
+                10_000,
+                &mut out,
+            );
+            assert_eq!(out.write, 1, "the seeding release must be admitted");
+
+            let mut saw_ramp = false;
+            let mut reached_zero = false;
+            let mut last = f64::INFINITY;
+            for k in 1..=20u64 {
+                let mut tk = std::mem::zeroed::<KirraTickResult>();
+                kirra_bound_consumer_on_tick(h, 10_000 + 300 + k * 100, &mut tk);
+                if tk.write == 1 {
+                    saw_ramp = true;
+                    assert!(
+                        tk.linear.abs() <= last + 1e-12,
+                        "ramp must not increase: {} after {}",
+                        tk.linear,
+                        last
+                    );
+                    last = tk.linear.abs();
+                    if tk.linear == 0.0 {
+                        reached_zero = true;
+                    }
+                }
+            }
+            assert!(
+                saw_ramp,
+                "V2 starvation must produce an active stop ramp — without a write \
+                 the last commanded PWM stays latched on the motor board"
+            );
+            assert!(reached_zero, "the V2 ramp must reach zero");
+            kirra_bound_consumer_free(h);
+        }
+    }
+
     #[test]
     fn bound_ffi_valid_frame_returns_exact_clamped_motor_decision() {
         unsafe {
