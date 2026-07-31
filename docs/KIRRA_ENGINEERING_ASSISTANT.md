@@ -1281,3 +1281,90 @@ Tests use a schema fixture shaped like the measured `0b952d1d` artifact
 (`robot/testdata/assistant_contract_report_fixture.json`). **That is a fixture,
 not a measurement** — no unit test requires a live Gemma or Ollama process, and
 passing them is not a live-model result.
+
+---
+
+## 16. Deterministic ambiguity — asking instead of giving up
+
+### The three-way contract
+
+`assistant.classify()` had two outcomes where it needed three:
+
+```
+recognized operation + resolved target    -> MATCHED
+recognized operation + UNRESOLVED target  -> AMBIGUOUS   (ask which)   ← was missing
+unrecognized operation                    -> NO_MATCH    (say so honestly)
+```
+
+"Sync it." and "Publish." fell to `NO_MATCH`, so the robot answered *"I don't
+have a tool for that"* when the honest answer is *"sync **what**?"*. That was
+always **safe** — no tool was selected — but it was the wrong thing to say, and
+it was wrong on the deterministic path, which is the path that actually ships.
+
+Measured before and after, on the same 61-case corpus with no model involved:
+
+| | before | after |
+|---|---:|---:|
+| clarification cases handled | 1/7 | **7/7** |
+| deterministic pass overall | 51/61 | **57/61** |
+
+The four remaining misses are the pre-existing `gap_*` cases; the failing set
+went from ten to exactly its four-element subset, so nothing regressed.
+
+### Why this was chosen over a fifth prompt revision
+
+The four remaining *selection* misses — `gap_search_responsible`,
+`gap_search_how_do_we`, `gap_status_summary`, `gap_component_about`, and the
+four positive-selection misses in the assist-4 run — are **already resolved
+correctly by `classify()`**. Production never routes them to the model. Tuning a
+prompt against them would improve a benchmark path that does not ship while
+leaving the operator-facing problem untouched. Ambiguity was the opposite: it
+failed on *both* paths.
+
+### Target resolution is shared, not copied
+
+The mutation half of the rule calls
+`assistant_admission.has_resolved_mutation_target()` — the same predicate the
+admission screen applies to a *model proposal*, on the same normalized text.
+Restating its vocabulary inside `assistant.py` would let the two drift: a
+request could be refused as target-less by the classifier and admitted as
+targeted by the screen. Three invariants make that contradiction impossible
+rather than merely unlikely — no request is both target-ambiguous and admitted
+as targeted, the converse, and raw vs classifier-normalized text resolving
+identically.
+
+Scope is narrow by construction: the mutation verb must be in **command
+position** (so "what is the publish policy?" is not a request to publish), the
+vague-inspection rule needs a **bare pronoun** object (so "have a look at
+robot/wake_word.py" is untouched), and only an **empty** subject promotes a
+family — a subject that is merely unparseable ("have you read the docs?") stays
+`NO_MATCH`, because the operator named something and "which one do you mean?"
+would be the wrong question.
+
+`check the state of the steering code` is ambiguous for a different reason — the
+target is clear, the *operation* is not — so it is expressed with the existing
+two-distinct-hits rule rather than the target detector.
+
+### Two named evaluations
+
+A report now carries both, and they answer different questions:
+
+| evaluation | scope | question |
+|---|---|---|
+| **Full contract** | all 61 cases | Can the model satisfy the advertised contract if asked to perform selection? |
+| **Shipping-path residual** | cases the router leaves to the model | Is the model adequate for the requests production actually sends it? |
+
+A case reaches the model only on `NO_MATCH`: a resolved tool runs
+deterministically, and an AMBIGUOUS verdict asks the operator — neither consults
+the model for selection. Cases the router resolves are listed as **not
+production-exposed** so a model miss on them stays visible without being read as
+production risk.
+
+🔴 **Readiness is still judged on the full 61 cases, and remains `NOT_READY`.**
+Swapping the gate onto the residual *after* seeing which cases failed would make
+it easier by excluding the failures — the measurement would then describe a
+corpus chosen to flatter it. Whether readiness should eventually be a
+full-contract gate, a residual gate, or a conjunction of both is a deliberate
+**acceptance-policy version**, not something to settle by re-slicing existing
+evidence. §14.13 steps 4–5 remain blocked: fixing deterministic clarification
+does not justify wiring model tool selection into Channel B.

@@ -496,6 +496,10 @@ def run_deterministic_pass(cases, *, role=None, ctx=None):
             "decision": decision,
             "tool": (request or {}).get("tool"),
             "resolved": request is not None,
+            # Production exposure. A case the router resolves — or answers with
+            # a clarifying question — never reaches the model, so a model miss
+            # on it is a contract-quality fact, not a production risk.
+            "reaches_model": decision == A.NO_MATCH,
             "refused_by_tool": refused_by_tool,
             "correct": _deterministic_correct(c, request, decision, refused_by_tool),
         })
@@ -749,6 +753,44 @@ def common_subset(records):
     return [r for r in records if r.get("case_id") not in CORPUS_V2_ADDITIONS]
 
 
+# ── the two named evaluations ────────────────────────────────────────────────
+#
+# They answer DIFFERENT questions and must never be collapsed into one number:
+#
+#   FULL CONTRACT      — all 61 cases. "Could the model satisfy the advertised
+#                        contract if it were asked to perform selection?"
+#                        Authoritative for readiness, and historically
+#                        comparable back to assist-1.
+#   SHIPPING RESIDUAL  — only the cases the production router does not resolve
+#                        itself. "Is the model adequate for the requests
+#                        production actually sends it?"
+#
+# The residual is reported ALONGSIDE the full score, never instead of it.
+# Swapping readiness onto the residual after seeing which cases failed would
+# make the gate easier by excluding the failures — the measurement would then be
+# describing a corpus chosen to flatter it. Whether readiness should eventually
+# be a full gate, a residual gate, or a conjunction of both is a deliberate
+# ACCEPTANCE-POLICY VERSION, not something to decide by re-slicing old evidence.
+
+
+def reaches_model(deterministic_row):
+    """Does this case fall through the production router to the model?
+
+    Only `NO_MATCH` does. A resolved tool runs deterministically, and an
+    AMBIGUOUS verdict asks the operator a question — neither consults the model
+    for selection, so neither is production exposure.
+    """
+    return deterministic_row.get("decision") == A.NO_MATCH
+
+
+def shipping_residual(records, deterministic):
+    """Live records for cases the production router leaves to the model."""
+    if not deterministic:
+        return []
+    exposed = {d["case_id"] for d in deterministic if reaches_model(d)}
+    return [r for r in records if r.get("case_id") in exposed]
+
+
 def assert_common_subset_intact(corpus):
     """The additions list must actually describe the corpus. Fail-closed."""
     ids = {c["id"] for c in corpus["cases"]}
@@ -799,6 +841,20 @@ def contract_report(*, corpus, records, deterministic=None, model="",
             "metrics": summarize(common_subset(records)) if records else {},
             "note": "Regression comparator against the assist-1 v1 baseline. "
                     "NOT authoritative for readiness — the full corpus is.",
+        },
+        # The SECOND named evaluation. Reported beside the full contract score,
+        # never in place of it; readiness above is still judged on all 61 cases.
+        "shipping_residual": {
+            "case_ids": sorted({r["case_id"]
+                                for r in shipping_residual(records, deterministic)}),
+            "records": len(shipping_residual(records, deterministic)),
+            "metrics": (summarize(shipping_residual(records, deterministic))
+                        if records and deterministic else {}),
+            "note": "Cases the production router does not resolve itself, so the "
+                    "model is actually consulted. Measures production exposure. "
+                    "NOT authoritative for readiness — the full corpus is, and "
+                    "narrowing the gate after seeing which cases failed would "
+                    "flatter it.",
         },
         "acceptance": acceptance,
         "deterministic_pass": deterministic or [],
@@ -871,6 +927,28 @@ def render_report(report):
         for name in HARD_GATES:
             v = (m.get("hard_gates") or {}).get(name, 0)
             out.append(f"    {'ok  ' if not v else 'FAIL'} {name:28} {v}")
+    # The two named evaluations, side by side and labelled by the question each
+    # answers — so nobody reads one number as the other.
+    sr = report.get("shipping_residual") or {}
+    srm = sr.get("metrics") or {}
+    if report["live_contract_verified"] and srm.get("total_records"):
+        det_rows = report.get("deterministic_pass") or []
+        shielded = sorted(d["case_id"] for d in det_rows
+                          if not d.get("reaches_model") and not d.get("correct"))
+        out += [
+            f"  shipping-path residual ({sr['records']} record(s) over "
+            f"{len(sr.get('case_ids') or [])} case(s)) — production exposure only:",
+            f"    positive selection accuracy : {srm['positive_selection_accuracy']}",
+            f"    safe outcome rate           : {srm['safe_outcome_rate']}",
+            f"    clarification quality       : {srm['clarification_quality']}",
+            f"    unsafe admissions           : "
+            f"{(srm.get('hard_gates') or {}).get('unsafe_admissions', 0)}",
+            "    NOTE: readiness above is judged on the FULL corpus, not this "
+            "subset.",
+        ]
+        if shielded:
+            out.append(f"    not production-exposed (router resolves them): "
+                       f"{', '.join(shielded)}")
     cs = report.get("common_subset") or {}
     csm = cs.get("metrics") or {}
     if report["live_contract_verified"] and csm.get("total_records"):

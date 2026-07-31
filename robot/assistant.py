@@ -35,6 +35,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import assistant_admission as adm  # noqa: E402 — the shared target-resolution test
 import assistant_tools as at  # noqa: E402
 
 # ── roles: policy + context profiles, NOT personas ───────────────────────────
@@ -123,6 +124,12 @@ _STATUS_PATTERNS = (
     r"\bare we ahead\b", r"\bahead of origin\b", r"\bbehind origin\b",
     r"\brepo(?:sitory)? status\b", r"\bshow me the repo(?:sitory)? status\b",
     r"\bgit status\b", r"\bwhere are we\b",
+    # Deliberately ALSO in `_SEARCH_PATTERNS`. "check the state of the steering
+    # code" could mean repository state or a code search, and the existing
+    # two-distinct-hits rule is how this classifier already says "ask, never
+    # pick". This is operation ambiguity, not target ambiguity — the target is
+    # perfectly clear, it is the operation that is not.
+    r"\bcheck the state of\b",
 )
 _SEARCH_PATTERNS = (
     r"\bwhere is\b", r"\bwhere.s\b", r"\bfind (?:the|a|me)\b", r"\bfind where\b",
@@ -130,6 +137,7 @@ _SEARCH_PATTERNS = (
     r"|calls|configures)\b",
     r"\bwho owns\b", r"\bsearch (?:for|the repo)\b", r"\blocate\b",
     r"\bwhere do we\b", r"\bwhere does\b",
+    r"\bcheck the state of\b",   # see the note in `_STATUS_PATTERNS`
 )
 _READ_PATTERNS = (
     r"\bread\b", r"\bshow me (?:the )?(?:file|source|code)\b", r"\bopen the file\b",
@@ -274,6 +282,68 @@ def _extract_quoted_or_tail(text, keywords):
 #: A subject that is just a stop-word carries no query.
 _EMPTY_SUBJECTS = {"", "it", "this", "that", "there", "here", "them"}
 
+
+# ── recognized operation, unresolved target ──────────────────────────────────
+#
+# Three outcomes, and the middle one was missing:
+#
+#   recognized operation + resolved target    -> MATCHED
+#   recognized operation + UNRESOLVED target  -> AMBIGUOUS   (ask which)
+#   unrecognized operation                    -> NO_MATCH    (say so honestly)
+#
+# "Sync it." and "Publish." used to fall to NO_MATCH, so the robot answered "I
+# don't have a tool for that" when the honest answer is "sync WHAT?". That was
+# safe — no tool was selected — but it was the wrong thing to say, and it failed
+# for the operator whether or not a model is in the path at all.
+#
+# TARGET RESOLUTION FOR MUTATIONS IS NOT RE-IMPLEMENTED HERE. It is
+# `assistant_admission.has_resolved_mutation_target`, the same predicate the
+# admission screen applies to a model proposal, called on the same normalized
+# text. Copying its vocabulary would let classification and admission drift
+# apart silently: a request could be refused as target-less by one and admitted
+# as targeted by the other. A test asserts they cannot disagree.
+
+#: A mutation asked for in COMMAND position — "Sync it.", "Publish.", "Can you
+#: sync things?". Anchored at the start (after optional politeness) so the same
+#: verb inside a question about the codebase ("what is the publish policy?",
+#: "where is publishing implemented?") is not mistaken for a request to act.
+_MUTATION_REQUEST_RE = re.compile(
+    r"^(?:please\s+|now\s+|just\s+)*"
+    r"(?:(?:can|could|will|would)\s+you\s+(?:please\s+)?)?"
+    r"(?:go\s+ahead\s+and\s+)?"
+    r"(?:sync|synchronise|synchronize|publish|push|update)\b")
+
+#: A vague inspection — a looking verb whose object is a bare pronoun. The
+#: pronoun is required: "have a look at robot/assistant.py" names a target and
+#: is left exactly as it was.
+_VAGUE_LOOK_RE = re.compile(
+    r"\b(?:have|take)\s+a\s+look\s+at\s+(?:it|this|that|these|those|them)\b"
+    r"|\blook\s+at\s+(?:it|this|that|these|those|them)\b"
+    r"|\bcheck\s+(?:it|this|that|them)\b")
+
+MUTATION_TARGET_UNRESOLVED = "mutation"
+INSPECTION_TARGET_UNRESOLVED = "inspection"
+
+
+def unresolved_operation(utterance):
+    """Did the operator name an operation but not what to apply it to?
+
+    Returns `MUTATION_TARGET_UNRESOLVED`, `INSPECTION_TARGET_UNRESOLVED`, or
+    None. Pure — selects nothing, executes nothing.
+    """
+    norm = normalize(utterance)
+    if not norm:
+        return None
+    # `has_resolved_mutation_target` normalizes internally, so handing it the
+    # wake-stripped text yields the same answer as the raw utterance. Pinned by
+    # test, because that equivalence is what makes the shared predicate shared.
+    if _MUTATION_REQUEST_RE.search(norm) \
+            and not adm.has_resolved_mutation_target(norm):
+        return MUTATION_TARGET_UNRESOLVED
+    if _VAGUE_LOOK_RE.search(norm):
+        return INSPECTION_TARGET_UNRESOLVED
+    return None
+
 Request = None  # (documented shape below; a plain dict keeps it JSON-native)
 
 
@@ -327,6 +397,15 @@ def classify(utterance, *, role=None):
         return None, "runtime_unavailable"
 
     hits = []
+    # Families whose PATTERN matched but whose target came back as a bare
+    # pronoun or nothing at all. Previously these were dropped and the whole
+    # utterance fell to NO_MATCH, which is why "Where is that handled?" — an
+    # unmistakable search request — was answered with "I have no tool for that".
+    #
+    # Only an EMPTY subject promotes. A subject that is merely unparseable
+    # ("have you read the docs?") stays NO_MATCH: the operator named something,
+    # so asking "which one do you mean?" would be the wrong question.
+    unresolved = []
     if _any(_STATUS_PATTERNS, norm):
         hits.append(("repository_status", {}, at.OPERATOR))
     if _any(_FAILURE_PATTERNS, norm):
@@ -340,6 +419,8 @@ def classify(utterance, *, role=None):
                       "", name).strip()
         if name not in _EMPTY_SUBJECTS:
             hits.append(("inspect_component", {"name": name}, at.ARCHITECT))
+        elif name in _EMPTY_SUBJECTS:
+            unresolved.append("inspect_component")
     if _any(_READ_PATTERNS, norm):
         subject = _extract_quoted_or_tail(
             norm, ("read the file", "read", "show me the file", "show me the source",
@@ -347,6 +428,8 @@ def classify(utterance, *, role=None):
         # A read needs something path-shaped; otherwise it is not a read request.
         if "/" in subject or re.search(r"\.\w{1,6}$", subject):
             hits.append(("read_repository_source", {"path": subject}, at.ENGINEER))
+        elif subject in _EMPTY_SUBJECTS:
+            unresolved.append("read_repository_source")
     if _any(_SEARCH_PATTERNS, norm):
         q = _extract_quoted_or_tail(
             norm, ("where is the", "where is", "where's", "find the", "find me the",
@@ -354,8 +437,15 @@ def classify(utterance, *, role=None):
                    "search for", "who owns", "where does", "where do we"))
         if q not in _EMPTY_SUBJECTS:
             hits.append(("search_repository", {"query": q}, at.ENGINEER))
+        else:
+            unresolved.append("search_repository")
 
     if not hits:
+        # A recognized operation with nothing to apply it to is a question for
+        # the operator, not a dead end. Genuinely unknown utterances still say
+        # so honestly. Nothing is selected on either path.
+        if unresolved or unresolved_operation(utterance):
+            return None, AMBIGUOUS
         return None, NO_MATCH
     # De-duplicate by tool, preserving order.
     uniq = list(dict.fromkeys(h[0] for h in hits))
