@@ -494,6 +494,59 @@ def test_every_check_is_actually_wired_into_the_report():
           f"report still says 'verified'")
 
 
+def test_the_lidar_check_does_not_gate_the_deployment_steps():
+    """An unrelated hardware-driver check must not abort before the steps that
+    record and verify the deployment.
+
+    install_kirra.sh used to `fail` (exit 1) on a missing ydlidar driver at
+    step 5, ahead of the systemd unit render, the installed-artifact manifest
+    and the deployment-identity block. A robot whose unit carried the wrong
+    User= therefore could not have it corrected by re-running the installer:
+    every attempt died at the lidar first. A robot that cannot render its unit
+    is a worse failure than one that cannot find its lidar.
+
+    The exit-code contract is unchanged — a missing driver still fails the
+    install — only the position of the verdict moved.
+    """
+    src = (HERE / "install_kirra.sh").read_text()
+    lines = src.splitlines()
+
+    def first_line_containing(needle):
+        return next((i for i, ln in enumerate(lines) if needle in ln), -1)
+
+    lidar_probe = first_line_containing("ros2 pkg prefix ydlidar_ros2_driver")
+    unit_render = first_line_containing("systemd unit (optional; staged, not enabled)")
+    manifest = first_line_containing("installed.sha256")
+    identity = first_line_containing("deployment identity (these four must agree)")
+
+    check(lidar_probe >= 0, "the lidar probe must still exist")
+    for name, idx in (("unit render", unit_render), ("manifest", manifest),
+                      ("identity block", identity)):
+        check(idx >= 0, f"the {name} step must exist")
+
+    # The probe may precede them; an ABORT must not. Matched as a CALL at the
+    # start of a statement, not as text: the warning string legitimately
+    # contains the words "then fail at the end", and a substring search on it
+    # would red this test for saying what it does.
+    aborts = [
+        (i + 1, ln.strip())
+        for i, ln in enumerate(lines[lidar_probe:max(unit_render, manifest, identity)],
+                               start=lidar_probe)
+        if ln.strip().startswith("fail ") or ln.strip() == "exit 1"
+    ]
+    check(not aborts,
+          f"no abort between the lidar probe and the deployment steps, found "
+          f"{aborts} — that ordering made the installer unable to repair its "
+          f"own unit")
+
+    # …and the failure must still happen, just later.
+    check("LIDAR_MISSING" in src,
+          "a missing lidar must still fail the install, deferred to the end")
+    deferred = first_line_containing('if [[ "${LIDAR_MISSING}" -eq 1 ]]; then')
+    check(deferred > max(unit_render, manifest, identity),
+          "the deferred lidar verdict must come AFTER the deployment steps")
+
+
 def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print("deployment_verify_test:")
