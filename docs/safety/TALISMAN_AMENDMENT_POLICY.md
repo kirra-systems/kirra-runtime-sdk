@@ -94,7 +94,7 @@ Every exception is a debt against the safety case. Two consequences:
 
 | Amendment | Blob | Path taken | Where recorded |
 |---|---|---|---|
-| #1243 — Priority 3/4 rate bound runs on the over-ceiling path. **Also an ASSURANCE re-pin: SG1 loses its per-PR symbolic proof** (K3 → weekly deep lane, concrete mirror becomes the standing per-PR gate) | `6a61b74f…` → `851f3f44…` | **Exception** (§2.2) — single-maintainer repository, author and accepting authority the same principal; all five fields recorded, and recorded **before** merge. The acceptance covers the assurance reduction as well as the behaviour change | `docs/CAPTURE_PIPELINE_SPEC.md`, re-pin note |
+| #1243 — Priority 3/4 rate bound runs on the over-ceiling path. **Also an ASSURANCE re-pin: SG1 loses its per-PR symbolic proof** (K3 → weekly deep lane, concrete mirror becomes the standing per-PR gate). ⚠️ **Amended same day:** the destination lane has never completed a run (#1260), so SG1's symbolic proof is SUSPENDED, not relocated — the concrete mirror is currently the only tier | `6a61b74f…` → `851f3f44…` | **Exception** (§2.2) — single-maintainer repository, author and accepting authority the same principal; all five fields recorded, and recorded **before** merge. The acceptance covers the assurance reduction as well as the behaviour change | `docs/CAPTURE_PIPELINE_SPEC.md`, re-pin note + its CORRECTION |
 | #1242 — Priority 2 accumulates past the speed ceiling | `ed00f4da…` → `6a61b74f…` | **Exception** (§2.2) — single-maintainer repository, author and accepting authority the same principal; additionally recorded *after* merge rather than before | `docs/CAPTURE_PIPELINE_SPEC.md`, re-pin note |
 
 This table is the audit entry point. Any future amendment taking the fallback

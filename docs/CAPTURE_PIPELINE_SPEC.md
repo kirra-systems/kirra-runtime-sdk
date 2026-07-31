@@ -112,6 +112,31 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > disjunctive true forms each produced no verdict at 15 minutes. The property
 > was deliberately not weakened to recover the runtime.
 >
+> **CORRECTION (2026-07-31, same day, before the weekly lane ever ran with K3
+> in it) — the paragraph above overstates what "moves to the weekly deep lane"
+> currently buys, and the overstatement is load-bearing enough to fix rather
+> than footnote.** The `kani-deep-weekly` lane has NEVER COMPLETED A RUN. Its
+> three scheduled runs (12, 19, 26 July) were each killed at the GitHub-hosted
+> SIX-HOUR per-job ceiling and reported `cancelled`; the workflow's
+> `timeout-minutes: 480` cannot raise that ceiling and has no effect. All
+> harnesses run serially in one job, and R2 alone consumed 5 h 59 m in a single
+> kissat solve, so anything sequenced behind it receives no solver time at all.
+> K7's demotion under #1242 therefore delivered ZERO effective coverage, not
+> reduced coverage, and K3 and K8 inherit exactly that position.
+>
+> The honest statement of this re-pin's assurance effect is therefore STRONGER
+> than the paragraph above: SG1's symbolic proof is not relocated to a slower
+> tier, it is **suspended**, and the concrete two-part mirror is not a backstop
+> beneath a working symbolic tier — for now it is the ONLY tier. That the
+> property still has per-PR coverage at all is due to the standing rule that
+> every deep harness keeps a BLOCKING concrete mirror; without it this would be
+> a coverage hole rather than a coverage reduction.
+>
+> Tracked as #1260. This correction stands until the lane is fixed AND has
+> completed a successful run — a merged workflow change is not sufficient
+> evidence, since what failed here was believing a budget that was never
+> delivered. Do not restore the "multi-hour budget" wording before then.
+>
 > Independent approval: **NOT OBTAINED. This amendment proceeded under a
 > RECORDED EXCEPTION** to the separation-of-duties control, per
 > `docs/safety/TALISMAN_AMENDMENT_POLICY.md` §2.2. The five mandatory fields
@@ -160,6 +185,13 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 >    no cheap true K3 exists is engineering judgement; the timings are the
 >    evidence. K8 is in the same position (no verdict at 25 or 55 min), and
 >    unlike R2 neither was measured to merely exceed a known budget.
+>    **This field was written believing the destination lane worked.** It does
+>    not (see the CORRECTION above, #1260), so the risk accepted here is larger
+>    than the field as first written describes: not "K3 proved more slowly" but
+>    "K3 not proved at all, pending #1260". The acceptance is not withdrawn —
+>    the concrete mirrors are real, blocking, and were the reason this did not
+>    become a coverage hole — but a reader must not take field (b) as evidence
+>    that a symbolic proof of SG1 is being run somewhere.
 >    **(c) Axiom A3** — the inverse-monotone relation coupling the `tan`/`atan`
 >    model — remains assumed, not proved, and carries over from #1242 unchanged.
 >
