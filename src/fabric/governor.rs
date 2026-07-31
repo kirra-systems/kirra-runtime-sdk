@@ -357,7 +357,20 @@ mod tests {
             steering_angle_deg: 0.0,
             current_steering_angle_deg: 0.0,
         };
+        // #1243: the accel bound now runs on the over-ceiling path and is the
+        // tighter of the two here — 0.3 m/s^2 x 1.0 s from rest is 0.3 m/s,
+        // below the 0.5 m/s speed limit. What this test is named for (an
+        // over-limit industrial command is clamped, not passed through) is
+        // unchanged, and 0.3 is the safer value.
         let result = g.evaluate_command(&fast, &FleetPosture::Nominal, None);
-        assert_eq!(result, EnforceAction::ClampLinear(0.5));
+        assert_eq!(result, EnforceAction::ClampLinear(0.3));
+        let EnforceAction::ClampLinear(v) = result else {
+            unreachable!()
+        };
+        assert!(v < fast.linear_velocity_mps, "the request must be clamped");
+        assert!(
+            v <= 0.5,
+            "and must still respect the industrial speed limit"
+        );
     }
 }

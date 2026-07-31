@@ -1,7 +1,7 @@
 //! Non-frozen extensions to [`DenyCode`] (#793 F6).
 //!
 //! `DenyCode` is DEFINED in the byte-frozen kinematics-contract talisman
-//! (`kinematics_contract.rs`, git blob `6a61b74f…`), which must never change —
+//! (`kinematics_contract.rs`, git blob `851f3f44…`), which must never change —
 //! it is pinned by the safety-case talisman gate and the Kani proof. These
 //! auxiliary items — a bounded [`ALL`](DenyCode::ALL) array and an
 //! [`index`](DenyCode::index) slot map, used only by the `/metrics`

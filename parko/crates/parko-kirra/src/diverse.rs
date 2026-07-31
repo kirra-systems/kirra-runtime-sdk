@@ -352,19 +352,37 @@ impl DiverseKirraGovernor {
 
     /// DIFFERENCE #2 — the linear envelope as an admissible-velocity interval.
     ///
-    /// Returns `(safe_linear, clamped)`. Priority, matching the primary:
-    ///   1. the absolute ODD ceiling dominates the rate limit (the primary
-    ///      early-returns on it before computing acceleration);
-    ///   2. otherwise clamp into `[current - brake·dt, current + accel·dt]`,
-    ///      itself clipped to `±ceiling`.
+    /// Returns `(safe_linear, clamped)`. Both bounds apply, matching the
+    /// primary: the admissible interval is
+    /// `[current - brake·dt, current + accel·dt]` CLIPPED to `±ceiling`, and
+    /// the command is clamped into it. Whichever bound is tighter wins, which
+    /// is the interval form of the primary's sequential "ceiling, then rate".
+    ///
+    /// #1243 — THIS MIRRORED THE PRIMARY'S DEFECT, deliberately, and had to be
+    /// fixed with it. The code here used to read:
+    ///
+    /// ```text
+    ///   // Priority 1: absolute ceiling ...
+    ///   if v.abs() > ceiling { return (copysign(ceiling, v), true); }
+    /// ```
+    ///
+    /// with a comment noting that "the primary early-returns on it before
+    /// computing acceleration". That is exactly right as a description, and it
+    /// is why the comparator kept AGREEING while both governors returned a
+    /// command implying 300 m/s^2 against a 2.5 limit. Diversity buys
+    /// independent derivation, not independent requirements: two
+    /// implementations of the same wrong rule agree perfectly.
+    ///
+    /// Worth recording for the blast-radius method, because the #1243 inventory
+    /// did not catch this. That inventory enumerated APPLY SITES — consumers of
+    /// `EnforceAction` — and this is not one. It is a second implementation of
+    /// the contract itself. A kernel-semantics change has to sweep both.
+    ///
+    /// The interval formulation is retained (DIFFERENCE #2): the clip is
+    /// applied to the interval BEFORE the membership test, so an over-ceiling
+    /// command inside the raw rate interval is still caught.
     fn diverse_linear_envelope(&self, v: f64, current: f64, dt: f64) -> (f64, bool) {
         let ceiling = self.effective_ceiling();
-
-        // Priority 1: absolute ceiling. Same comparison form as the primary
-        // so the boundary decision is identical.
-        if v.abs() > ceiling {
-            return (f64::copysign(ceiling, v), true);
-        }
 
         // Priority 2: rate envelope as an interval, DIRECTION-AWARE (review M1).
         // The accel limit bounds a speed-magnitude INCREASE in the current
@@ -402,10 +420,20 @@ impl DiverseKirraGovernor {
         let band = ACCEL_EPSILON * dt;
         let clip = |x: f64| x.max(-ceiling).min(ceiling);
 
+        // Clip the INTERVAL first. Testing membership against the raw rate
+        // interval and clipping only the result would let an over-ceiling
+        // command that happens to sit inside the rate band pass through
+        // unclamped — the #1243 defect in a different disguise.
+        let (max_up, max_down) = (clip(max_up), clip(max_down));
+
         if v - max_up > band {
-            (clip(max_up), true)
+            (max_up, true)
         } else if max_down - v > band {
-            (clip(max_down), true)
+            (max_down, true)
+        } else if v.abs() > ceiling {
+            // Inside the (clipped) rate interval within tolerance, but still
+            // over the ceiling: the ceiling binds on its own.
+            (f64::copysign(ceiling, v), true)
         } else {
             (v, false)
         }

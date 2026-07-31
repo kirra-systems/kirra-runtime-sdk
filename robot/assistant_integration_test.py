@@ -97,18 +97,48 @@ a, _ = A.classify("Hey Rabbit, what branch are we on?")
 b, _ = A.classify("Hey Parker, what branch are we on?")
 check(a == b, "both wake names produce an identical typed request")
 
-# ── seam 2: the registry offers the assistant tools ──────────────────────────
+# ── seam 2: the registry and the model-advertised vocabulary ─────────────────
+#
+# This seam used to assert registry == advertised, i.e. "every registered tool
+# must also be offered to the model". That is incompatible with a deterministic
+# PRODUCTION-ONLY capability — one the classifier selects directly and the model
+# is never asked to choose — so it had to change.
+#
+# It is expressed as a SET RELATION rather than reversed into "production tools
+# must not be advertised". Both categories are permitted, and neither is
+# required to be non-empty: the registry may be all-advertised, all-production,
+# or any mix. What is asserted is containment plus fragment integrity.
 print("== registry seam ==")
 frag = at.assist_prompt_fragment()
-# Offered ≠ registered. Registration grants AUTHORITY; the prompt asks the MODEL
-# to propose. `report_assistant_contract` is reached only through deterministic
-# classification, so it is registered but deliberately not advertised — keeping
-# the pinned prompt digest, and the measurements taken against it, valid.
-for name in at.CONTRACT_TOOL_NAMES:
-    check(name in frag, f"{name} is offered to the model")
-check("report_assistant_contract" in at.REGISTRY
-      and "report_assistant_contract" not in frag,
-      "the stored-report reader is registered but NOT offered to the model")
+_registered = set(at.registered_tool_names())
+_advertised = set(at.CONTRACT_TOOL_NAMES)
+
+# THE invariant: the advertised vocabulary is contained in the registry, so the
+# model can never be offered a name that does not resolve to a real tool.
+check(_advertised <= _registered,
+      f"CONTRACT_TOOL_NAMES ⊆ registered_tool_names "
+      f"(unregistered: {sorted(_advertised - _registered)})")
+
+# Each advertised name individually resolves AND actually reaches the prompt.
+for name in at.contract_tool_names():
+    check(name in at.REGISTRY, f"advertised {name} resolves to a registered tool")
+    check(name in frag, f"advertised {name} reaches the prompt fragment")
+
+# Fragment integrity: the prompt advertises EXACTLY the contract set. This is a
+# statement about the fragment, not about which category a tool belongs to — a
+# registry entry must not leak into the measured prompt by accident.
+_leaked = sorted(n for n in (_registered - _advertised) if n in frag)
+check(not _leaked,
+      f"the fragment advertises exactly CONTRACT_TOOL_NAMES (leaked: {_leaked})")
+
+# The concrete production-only tools, asserted by name and separately from the
+# relation above so a regression names the tool rather than a set difference.
+# Both are reached ONLY through deterministic classification, which is what keeps
+# the pinned prompt digest — and the measurements taken against it — valid.
+for name in ("run_robot_diagnostics", "report_assistant_contract"):
+    check(name in _registered, f"{name} is registered for deterministic use")
+    check(name not in _advertised, f"{name} is not model-advertised")
+    check(name not in frag, f"{name} does not reach the prompt fragment")
 check("CANNOT run shell commands" in frag and "no terminal" in frag,
       "the prompt tells the model it has no shell")
 check("NEVER claim a tool succeeded" in frag,

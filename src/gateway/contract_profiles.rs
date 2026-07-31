@@ -11,9 +11,11 @@
 // `kirra_core::kinematics_contract` (re-exported via
 // `src/gateway/kinematics_contract.rs`) is NOT touched by the PROFILE work here.
 // (The contract itself received ONE deliberate, reviewed amendment under stop-gate
-// review H1/M1 — ClampBoth + direction-aware accel/brake — re-pinned to logic blob
-// 6a61b74fceae09a8057b2059e571ea40b059a59a, superseding the historical
-// 997fb7ae…; see docs/CAPTURE_PIPELINE_SPEC.md §0.) Profiles are SIBLINGS:
+// review H1/M1 — ClampBoth + direction-aware accel/brake — and TWO since: #1242
+// (Priority 2 accumulates past the speed ceiling) and #1243 (the rate bound runs
+// on that path too). Currently pinned to logic blob
+// 851f3f44bcc23e7020397b01b830c17d510a0917, superseding 6a61b74f… , ed00f4da…
+// and the historical 997fb7ae…; see docs/CAPTURE_PIPELINE_SPEC.md §0.) Profiles are SIBLINGS:
 // new constructors here that return the existing public `VehicleKinematicsContract`
 // struct, exactly the idiom `nominal_reference_profile` / `mrc_fallback_profile`
 // already establish. The robotaxi class member IS the frozen instance (delegated

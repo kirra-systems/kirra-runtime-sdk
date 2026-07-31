@@ -140,6 +140,46 @@ are you". Reply = `speech_summary`: counts + at most three plain issue
 sentences (module + failing check), never paths/details — voice lines G1–G3
 in `RABBIT_VOICE_LINES.md`.
 
+### The assistant path (`run_robot_diagnostics`)
+
+The Kirra Engineering Assistant has its own typed capability for the same
+suite. **Both paths exist deliberately and do not compete:** in
+`rabbit_converse.handle_turn` the `rabbit_diag` matcher runs FIRST (line ~397)
+and `assistant.handle` only later (~453), so in the live voice loop
+`rabbit_diag` still answers "run diagnostics" exactly as before. The assistant
+capability covers the assistant used directly — where an explicit command was
+previously intercepted by the classifier's honest "I have no runtime tool"
+refusal, because `_RUNTIME_PATTERNS` matches `robot health`.
+
+* `assistant.classify` matches a narrow, anchored set of COMMANDS ("run
+  diagnostics", "run the doctor", "perform a health check", "check the robot
+  health") **before** that runtime refusal, and emits
+  `{"tool": "run_robot_diagnostics", "arguments": {}}`.
+* Broad runtime QUESTIONS — "is the motor overheating?", "what is the battery
+  voltage?" — keep the refusal. A command runs the suite; a question the
+  assistant cannot ground stays unanswered.
+* `assistant_tools.tool_run_robot_diagnostics` calls `kirra_doctor.collect()`
+  **in process**. No shell, no subprocess, no `shell=True`, no operator text
+  reaching the runner, and no CLI flags exposed to natural language — the
+  default module set only. `run diagnostics --module ../../etc/passwd` is
+  refused as a shell request rather than silently downgraded.
+* Status is honest about what happened: `SUCCESS` when everything passed,
+  `PARTIAL` when the suite RAN and something warned or failed (a WARN finding
+  is **not** a failed invocation), `ERROR` only when the suite could not run.
+* The tool is registered for deterministic production use and is deliberately
+  **not** in `CONTRACT_TOOL_NAMES`, so Gemma is never offered it and the
+  measured prompt digest is unchanged.
+
+Speech is bounded: counts, at most three module names, and the standing caveat
+that this is **observability, not a safety check**. Diagnostics passing never
+means the robot is safe — see the security model above.
+
+Hardware-dependent modules (devices, governor, voice, storage, services) are
+meaningful **on the R2/Orin**. In a generic container or CI they report FAIL or
+WARN because the hardware and `/etc/kirra` are absent, which says nothing about
+any robot. The voice/audio stack additionally has its own separate diagnostic,
+`robot/kirra_voice_doctor.sh` — do not conflate it with the general doctor.
+
 ## Boot
 
 `rabbit_boot._maybe_warn_misconfigured` runs the default set after the

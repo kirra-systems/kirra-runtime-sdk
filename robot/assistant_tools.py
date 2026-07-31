@@ -61,7 +61,8 @@ STATUSES = (SUCCESS, REFUSED, ERROR, PARTIAL)
 
 # Claim kinds. The assistant must never present one as another.
 REPOSITORY_FACT = "repository_fact"
-RUNTIME_FACT = "runtime_fact"        # no runtime tool exists in this slice
+RUNTIME_FACT = "runtime_fact"        # read-only observation of the live robot;
+                                     # `run_robot_diagnostics` is the only source
 DESIGN_INTENT = "design_intent"
 MODEL_INFERENCE = "model_inference"
 UNCERTAINTY = "uncertainty"
@@ -861,6 +862,92 @@ def tool_publish_my_work(args, ctx):
     return _rcl(repo_command.PUBLISH_MY_WORK, "publish_my_work", args, ctx)
 
 
+# ── runtime diagnostics (read-only observability) ────────────────────────────
+#
+# 🔴 Diagnostics are OBSERVABILITY, never a safety authority — the security model
+# stated in `robot/doctor/__init__.py`. A verdict here never gates the planner,
+# the governor, RSS, the checker or the fence; those fail closed independently.
+# Passing diagnostics do NOT mean the robot is safe, and no wording below says so.
+
+#: Bound on how many module names reach speech. Diagnostics must never dump
+#: unbounded console output into a spoken sentence.
+_DIAG_NAME_LIMIT = 3
+
+
+def _diag_sentence(passed, warned, failed, fail_names, warn_names):
+    """Deterministic bounded summary. States what RAN, never that the robot is safe."""
+    head = (f"Diagnostics complete. {passed} "
+            f"{'module' if passed == 1 else 'modules'} passed, "
+            f"{warned if warned else 'none'} warned, and "
+            f"{failed if failed else 'none'} failed.")
+    named = fail_names[:_DIAG_NAME_LIMIT] or warn_names[:_DIAG_NAME_LIMIT]
+    if named:
+        label = "Failing" if fail_names else "Warning"
+        more = len(fail_names or warn_names) - len(named)
+        tail = f" {label}: {', '.join(named)}"
+        tail += f" and {more} more." if more > 0 else "."
+        head += tail
+    return head
+
+
+def tool_run_robot_diagnostics(args, ctx):
+    """Run the existing read-only R2 doctor suite. No arguments, no shell.
+
+    Calls `kirra_doctor.collect()` in-process — the orchestrator's own
+    programmatic entry point, already used by rabbit_boot/rabbit_diag — so there
+    is no second copy of the orchestration logic, no subprocess, no shell, and
+    no path or module name derived from operator text. The default module set
+    runs; CLI flags are deliberately NOT exposed to natural language here.
+    """
+    if args:
+        # Defence in depth: the classifier always sends {}. A caller that
+        # invents arguments is refused rather than having them silently dropped.
+        return make_result(
+            "run_robot_diagnostics", REFUSED, reason="arguments_not_accepted",
+            summary="I run the standard diagnostics suite with no options.",
+            claim=RUNTIME_FACT,
+            evidence={"rejected_arguments": sorted(str(k) for k in args)})
+
+    _here = os.path.dirname(os.path.abspath(__file__))
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
+    try:
+        import kirra_doctor  # the repository-owned entry point, fixed by import
+        report = kirra_doctor.collect()
+    except Exception as e:  # noqa: BLE001 — an unavailable doctor is an honest error
+        return make_result(
+            "run_robot_diagnostics", ERROR, reason="diagnostics_unavailable",
+            summary="I could not run the diagnostics suite.",
+            claim=RUNTIME_FACT,
+            warnings=[f"{type(e).__name__}: {e}"[:200]])
+
+    counts = report.get("summary") or {}
+    passed = int(counts.get("PASS", 0))
+    warned = int(counts.get("WARN", 0)) + int(counts.get("UNKNOWN", 0))
+    failed = int(counts.get("FAIL", 0))
+    mods = report.get("modules") or []
+    fail_names = sorted(m.get("name", "?") for m in mods if m.get("status") == "FAIL")
+    warn_names = sorted(m.get("name", "?") for m in mods
+                        if m.get("status") in ("WARN", "UNKNOWN"))
+
+    # A WARN or FAIL FINDING is not a failed INVOCATION. The run completed, so
+    # the status describes the evidence, not the execution: SUCCESS only when
+    # everything passed, PARTIAL when the suite ran and something is unproven.
+    # ERROR is reserved for the suite not completing at all (handled above).
+    status = SUCCESS if (warned == 0 and failed == 0) else PARTIAL
+    return make_result(
+        "run_robot_diagnostics", status, reason="ok",
+        summary=_diag_sentence(passed, warned, failed, fail_names, warn_names),
+        claim=RUNTIME_FACT,
+        evidence={
+            "passed": passed, "warned": warned, "failed": failed,
+            "failing_modules": fail_names[:_DIAG_NAME_LIMIT],
+            "warning_modules": warn_names[:_DIAG_NAME_LIMIT],
+            "overall": report.get("status"),
+            "schema_version": report.get("schema_version"),
+        })
+
+
 def tool_report_assistant_contract(args, ctx):
     """Read a STORED contract artifact. Runs nothing, mutates nothing.
 
@@ -947,6 +1034,10 @@ REGISTRY = {
         "publish_my_work", L2_BOUNDED_EXEC, (OPERATOR,), False,
         "Robot Command Language: push the current feature branch to origin.",
         tool_publish_my_work),
+    "run_robot_diagnostics": Tool(
+        "run_robot_diagnostics", L1_READ_ONLY, READ_ROLES, True,
+        "Run the read-only R2 doctor suite; report modules passed/warned/failed.",
+        tool_run_robot_diagnostics),
 }
 
 
@@ -965,9 +1056,10 @@ def registered_tool_names():
 #: longer exists — the exact "measure one prompt, ship another" failure the
 #: digest exists to prevent.
 #:
-#: `report_assistant_contract` is reached ONLY through the deterministic
-#: classifier, never by model proposal, so it is registered but not advertised.
-#: A tool belongs here only if the contract corpus actually measures it.
+#: `report_assistant_contract` and `run_robot_diagnostics` are reached ONLY
+#: through the deterministic classifier, never by model proposal, so they are
+#: registered but not advertised. A tool belongs here only if the contract corpus
+#: actually measures it — adding one is a prompt change and must be measured.
 CONTRACT_TOOL_NAMES = (
     "inspect_component",
     "publish_my_work",
@@ -1055,6 +1147,14 @@ def run_tool(name, args=None, *, role=None, ctx=None):
 #:
 #: UNVERIFIED: no live model has seen assist-4.
 PROMPT_CONTRACT_VERSION = "assist-4"
+
+
+def contract_tool_names():
+    """The advertised subset, validated against the registry (fail-closed)."""
+    missing = [n for n in CONTRACT_TOOL_NAMES if n not in REGISTRY]
+    if missing:
+        raise KeyError(f"CONTRACT_TOOL_NAMES names unregistered tool(s): {missing}")
+    return sorted(CONTRACT_TOOL_NAMES)
 
 
 def assist_prompt_fragment():

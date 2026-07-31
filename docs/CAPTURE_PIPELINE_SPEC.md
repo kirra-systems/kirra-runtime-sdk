@@ -14,8 +14,8 @@ Linux collector joins it with bus telemetry into the full triple.
 > `effective_perception_cap`, then `verdict = validate_trajectory_slow_capped(...)`; the
 > capture emit runs LATER in the tick — after `update_trajectory(...)` and **after the WCET
 > measurement** — so the bounded `try_send` never counts against the slow-loop budget. The §0
-> verdict-path anchor is the reviewed-amended talisman blob `ed00f4da…` (H1/M1; it superseded
-> the historical `997fb7ae…` — see §0).
+> verdict-path anchor is the reviewed-amended talisman blob `851f3f44…` (H1/M1, then #1242 and
+> #1243; it superseded `6a61b74f…`, `ed00f4da…` and the historical `997fb7ae…` — see §0).
 
 ## 0. The non-negotiable constraint
 The verdict path is a FROZEN, reviewed talisman (`validate_vehicle_command`,
@@ -29,9 +29,149 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > BOTH axes instead of dropping the velocity correction) and direction-aware
 > accel/brake selection (M1 — reverse acceleration is bounded by the accel limit,
 > not the brake limit). The talisman re-pins to the amended logic blob
-> `crates/kirra-core/src/kinematics_contract.rs = 6a61b74fceae09a8057b2059e571ea40b059a59a`
-> (superseding `ed00f4da…`, and before it the historical `997fb7ae…`, which
-> predated the Stage-3 relocation and matched no current file).
+> `crates/kirra-core/src/kinematics_contract.rs = 851f3f44bcc23e7020397b01b830c17d510a0917`
+> (superseding `6a61b74f…` (#1243), `ed00f4da…` (#1242), and before them the
+> historical `997fb7ae…`, which predated the Stage-3 relocation and matched no
+> current file).
+>
+> **#1243 re-pin — INTENTIONAL BEHAVIOUR CHANGE, not formatting drift.**
+> `6a61b74f…` → `851f3f44…`.
+>
+> WHAT CHANGED. Priority 3/4 (the implied accel/brake rate bound) carried a
+> `!ceiling_bound` guard, so a command over the speed ceiling was returned at the
+> ceiling magnitude with its implied ACCELERATION never checked. Measured before
+> the fix: an executed 5.0 → 35.0 m/s over 0.1 s implies 300 m/s² against a 2.5
+> limit — 120×. The guard is removed; the returned linear is now the TIGHTER of
+> {ceiling, rate bound}. Same early-exit defect class as #1242, one protected
+> property over.
+>
+> WHAT IT COST — a safety-case amendment, recorded because it is not free. K3
+> read "an over-ceiling command clamps to EXACTLY the ceiling, direction
+> preserved". BOTH halves are now false in general:
+>
+> * magnitude — the rate bound can be tighter, so 50.0 from 5.0 returns 5.25;
+> * direction — the bound steps `v` from CURRENT toward the request, so a +50.0
+>   request from −5.0 returns −4.55. The executed sign follows the vehicle's
+>   travel, not the request. Physically correct (no wheeled vehicle reverses
+>   direction inside one tick) and a real change to what the proof asserted.
+>
+> K3 is restated, with both statements recorded in the harness: the executed
+> magnitude never EXCEEDS the ceiling, and it is exactly the ceiling with the
+> request's sign precisely when the ceiling is the only binding constraint. That
+> conditional half is what still stops a future priority returning something
+> arbitrarily below the ceiling and calling it enforcement.
+>
+> RESIDUAL — NOT CLOSED, and deliberately visible. When `|current| > ceiling` the
+> ceiling itself forces a rate breach: a 39.9 m/s request from 40.0 m/s is a
+> lawful −1.0 m/s², and clamping it to a 35.0 ceiling implies −50 m/s². No
+> ordering of the two priorities avoids it — the vehicle is already outside the
+> envelope and cannot be inside it one tick later within the brake limit.
+> INVARIANT 8 ("clamp to the absolute hard boundary first, then apply
+> rate-of-change limits; envelope cap always wins over rate priority") decides
+> it, and K6 (P-CAP) independently requires the return to respect the ceiling, so
+> the ceiling wins and the breach stands, bounded to that region. This is why
+> K8's domain is `|current| ≤ ceiling`: a recorded conflict between two enforced
+> bounds, not a convenience that makes a proof pass. It is pinned by an
+> EXPECTED-BUT-UNDESIRED fixture
+> (`crates/kirra-core/tests/over_ceiling_accel_bound.rs`) that fails the day the
+> resolution changes.
+>
+> BLAST RADIUS — the apply-site inventory was NOT sufficient, and that is a
+> method finding worth carrying forward. `CLAMP_APPLICATION_INVENTORY.md`
+> enumerates consumers of `EnforceAction`; all four were mechanical and needed
+> no change, exactly as it predicted. But `parko-kirra`'s DIVERSE governor is
+> not a consumer — it is a second, independent implementation of the contract,
+> cross-checked against the primary by `GovernorComparator`. It had mirrored
+> this defect deliberately, its own comment noting that "the primary
+> early-returns on it before computing acceleration", so the comparator went on
+> agreeing while both governors returned a command implying 300 m/s². Diversity
+> buys independent derivation, not independent requirements: two
+> implementations of the same wrong rule agree perfectly. Both were fixed, the
+> diverse one keeping its interval formulation. A kernel-semantics change must
+> sweep re-implementations as well as apply sites.
+>
+> Three further consumers pinned the OLD value in their expectations and were
+> updated with the reasoning inline, not just the number: the fabric industrial
+> profile, the `prop_clamp_linear_preserves_direction` proptest (which #1243
+> forecast by name as the casualty), and the actuator response-schema
+> integration test.
+>
+> EVIDENCE. `crates/kirra-core/tests/over_ceiling_accel_bound.rs` (reproducer +
+> non-vacuity control + the residual; the reproducer and the reversal case were
+> RED before the fix, the control and the residual green throughout, which is the
+> signature of a branch-specific defect rather than a broken oracle); Kani K8 —
+> the acceleration bound over every executable return — plus the restated K3 and
+> its two-part mirror; K1–K7 re-run.
+>
+> ASSURANCE CHANGE — this re-pin is not only a behaviour change. #1243 pushes
+> SG1's true property beyond the per-PR Kani budget, so K3 moves to the weekly
+> deep lane and a concrete mirror becomes its standing per-PR gate. That is an
+> explicit REDUCTION IN PER-PR SYMBOLIC COVERAGE for a cited safety property,
+> and it requires approval on those terms, not merely as proof maintenance.
+> Measured: the pre-#1243 form took 22 s and is now false; the conditional and
+> disjunctive true forms each produced no verdict at 15 minutes. The property
+> was deliberately not weakened to recover the runtime.
+>
+> Independent approval: **NOT OBTAINED. This amendment proceeded under a
+> RECORDED EXCEPTION** to the separation-of-duties control, per
+> `docs/safety/TALISMAN_AMENDMENT_POLICY.md` §2.2. The five mandatory fields
+> follow. What is being accepted here is BOTH the kernel change AND the
+> assurance reduction above — they are one decision, and an approval covering
+> only the behaviour change would not satisfy this control.
+>
+> 1. **Author of the change.** `justinlooney` (via Claude Code operating on that
+>    account) — commits on `claude/ros-bound-proposal-migration-nso5d2`,
+>    PR #1254.
+> 2. **Why no eligible independent reviewer was available.** Structural and
+>    unchanged since #1242: a single-maintainer repository with no second human
+>    principal holding review rights. No escalation path existed to attempt.
+>    This is now the SECOND consecutive talisman amendment to take the fallback
+>    path, which §2.3 says should be read as a standing gap in separation of
+>    duties rather than as two isolated exceptions.
+> 3. **Who accepted the exception.** `justinlooney` (repository owner),
+>    2026-07-31, as the accountable authority owning the residual risk.
+> 4. **Evidence independently machine-checked.** Named specifically, because
+>    this is what substitutes for the missing human: 33/33 CI checks green on
+>    `ddc06564`, of which the load-bearing ones are the per-PR Kani lane
+>    (12/12 harnesses, 0 failures, including BOTH arms of K3's two-part
+>    concrete mirror and K8's 2,880-point physical-dt grid); the mutation gate
+>    at 11 mutants / 10 caught / 1 unviable / 0 missed, with its own
+>    anti-vacuity check reporting 385 mutable containment mutants under the
+>    active config (so the gate was not passing on an over-matching
+>    `exclude_re`); the safety-constants provenance gate; and the four-location
+>    blob pin gate re-run against
+>    `851f3f44`. Separately, the regression suite was verified RED before the
+>    fix — reproducer and reversal case red, control and residual green
+>    throughout, which is the signature of a branch-specific defect rather than
+>    a broken oracle — and the guard-restoration mutant, which cargo-mutants
+>    cannot generate, was checked by hand-application.
+> 5. **Residual risk from the absent human independence.** Three judgement
+>    calls carry this change and no gate tests any of them.
+>    **(a) Is the bounded property the right property?** The acceptance
+>    criterion as originally written is unachievable: above the ceiling, the
+>    ceiling itself forces a rate breach. Invariant 8 and K6 jointly decide the
+>    ceiling wins, so K8's domain is bounded to `|current| ≤ ceiling` and the
+>    excluded region is pinned by an EXPECTED-BUT-UNDESIRED fixture. That the
+>    exclusion is a recorded conflict between two enforced bounds, rather than a
+>    convenience that makes a proof pass, is an author's judgement.
+>    **(b) Is the K3 demotion acceptable as a STANDING reduction?** No budget is
+>    known to suffice for any true formulation — the measured evidence is
+>    non-convergence at 15 minutes for both, not a measured cost. The view that
+>    no cheap true K3 exists is engineering judgement; the timings are the
+>    evidence. K8 is in the same position (no verdict at 25 or 55 min), and
+>    unlike R2 neither was measured to merely exceed a known budget.
+>    **(c) Axiom A3** — the inverse-monotone relation coupling the `tan`/`atan`
+>    model — remains assumed, not proved, and carries over from #1242 unchanged.
+>
+> **Sequencing: satisfied.** Unlike #1242, this record was written BEFORE merge,
+> with CI already green and the merge deliberately held for it. That is the
+> control working as intended on its second application.
+>
+> What the exception covers: the Priority-3/4 over-ceiling rate-bound change and
+> its blob re-pin `6a61b74f…` → `851f3f44…`; the parallel fix to the parko
+> diverse governor; the bounded acceptance property and its recorded residual;
+> and the demotion of K3 and K8 to the weekly deep lane with their concrete
+> mirrors as the standing per-PR gates.
 >
 > **#1242 re-pin — INTENTIONAL BEHAVIOUR CHANGE, not formatting drift.**
 > `ed00f4da…` → `6a61b74f…`.
@@ -50,7 +190,10 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > `ClampBoth { linear, steering }` where they previously returned `ClampLinear`.
 > The `linear` MAGNITUDE IS UNCHANGED — it is still exactly the ceiling.
 >
-> WHAT WAS DELIBERATELY NOT CHANGED. P3/4 (the accel/brake bound) remains skipped
+> WHAT WAS DELIBERATELY NOT CHANGED **AT THE TIME — SUPERSEDED BY #1243, which
+> removed this guard. The paragraph is kept as the record of what #1242 decided
+> and why, not as a description of current behaviour.** P3/4 (the accel/brake
+> bound) remained skipped
 > when the ceiling binds — implemented as `!ceiling_bound` on the two assignment
 > conditions rather than a wrapper around the block, so the frozen-file diff this
 > pin certifies stays small (2 changed lines, not 25 re-indented). Letting it run would return the tighter of {ceiling,

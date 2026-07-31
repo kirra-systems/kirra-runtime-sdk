@@ -301,16 +301,28 @@ async fn test_response_schema_clamp_linear_is_visible_to_interceptor() {
     assert_eq!(status, StatusCode::OK, "over-speed is clamped, not denied");
     assert_eq!(v["action"], "ClampLinear", "response must report the clamp");
 
-    // The interceptor key MUST be present and carry the clamped value (Nominal
-    // ceiling 35.0) — not the original 100.0 it would otherwise forward.
+    // The interceptor key MUST be present and carry the clamped value — not the
+    // original 100.0 it would otherwise forward. That is what this test is
+    // for, and it is unchanged.
+    //
+    // #1243 changed the VALUE. The accel bound now runs on the over-ceiling
+    // path and is the tighter of the two here: 30.0 m/s + 2.5 m/s^2 x 0.1 s =
+    // 30.25, rather than the 35.0 ceiling. Asserted as the properties plus the
+    // exact figure, so a future change has to restate the reasoning rather than
+    // just move a number.
     let enforced = v["enforced_linear_velocity_mps"]
         .as_f64()
         .expect("key present");
     assert!(
-        (enforced - 35.0).abs() < 0.01,
-        "clamped to 35.0, got {enforced}"
+        (enforced - 30.25).abs() < 0.01,
+        "clamped to 30.25 (rate bound tighter than the 35.0 ceiling), got {enforced}"
     );
-    assert!(enforced < 100.0);
+    assert!(enforced < 100.0, "the original must not be forwarded");
+    assert!(enforced <= 35.0, "the speed ceiling still binds");
+    assert!(
+        (enforced - 30.0).abs() / 0.1 <= 2.5 + 1e-9,
+        "and the accel limit binds: {enforced} from 30.0 over 0.1 s"
+    );
     // Legacy value key carries the same enforced value (internal consistency).
     assert_eq!(v["linear_velocity_mps"], v["enforced_linear_velocity_mps"]);
     // Original preserved for observability.
