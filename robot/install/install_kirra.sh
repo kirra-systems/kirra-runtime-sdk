@@ -126,7 +126,15 @@ echo "== 3. install -> ${OPT} =="
 sudo install -d -m 0755 "${OPT}/lib" "${OPT}/bin" "${OPT}/robot"
 sudo install -m 0644 "${SO}"   "${OPT}/lib/libkirra_consumer_ffi.so"
 sudo install -m 0755 "${MINT}" "${OPT}/bin/kirra_ros_release_mint"
-for f in kirra_motor_consumer.py kirra_ffi.py kirra_release_publisher.py r2_drive.py; do
+# The consumer is what kirra-consumer.service execs, so it must be EXECUTABLE —
+# installing it 0644 with the rest left the unit pointing at a non-executable
+# file and verify_deployment.py reporting it as such.
+sudo install -m 0755 "${REPO}/robot/kirra_motor_consumer.py" \
+                     "${OPT}/robot/kirra_motor_consumer.py"
+# Imported modules, never exec'd, so 0644 is correct for these.
+# motor_authority.py was missing entirely: robot/doctor/modules/devices.py
+# imports it at runtime, so a deployed robot needs it beside the consumer.
+for f in kirra_ffi.py kirra_release_publisher.py r2_drive.py motor_authority.py; do
   sudo install -m 0644 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
 done
 for f in first_run_elevated.sh live_loop_elevated.sh steering_bench_elevated.sh; do
