@@ -20,16 +20,20 @@
 #     produced no verdict at 25 min or at 55 min. Per-PR gate: the 2,880-point
 #     physical-dt grid, which asserts the ACCELERATION form this proof had to
 #     abandon, so the two tiers are complementary rather than duplicative.
-#   * K7 (#1242) — P-RACK, every executable return of the kinematics kernel
-#     respects the absolute steering limit. Under the #1242 transcendental
-#     model its sibling harnesses discharge in 22–45 SECONDS; K7 alone was
-#     stopped at 23 minutes of CBMC time with no verdict. It is the only one
-#     needing axiom A3, the constraint coupling the `atan` answer to the `tan`
-#     question. Note the difference from R2 and do not flatten it: R2 was
-#     measured to exceed a budget, K7 has no measured budget at all, so if this
-#     lane does not converge either, the right response is to demote K7 out of
-#     the proof tier rather than leave a harness that never finishes. The same
-#     applies to K8.
+#   * K7 (#1242) — P-RACK. 🔴 NO LONGER IN THIS LANE. It was demoted OUT of the
+#     proof tier by #1268 and now sits behind `outside-proof-envelope`, a
+#     feature no lane enables. The previous text here said its demotion was
+#     provisional and a multi-hour budget might suffice; that was TESTED AND
+#     REFUTED. Isolating K7's two real assertions — discarding 368 of its 370
+#     properties — shrank the CNF by 0.5% (738,811 → 735,393 clauses), so the
+#     property set is not the cost, and in that configuration CBMC reaches the
+#     solver and still returns nothing at 30 min. K7 stalls in propositional
+#     conversion in multi-property mode AND is solver-hard when isolated;
+#     fixing the first only exposes the second. ~735k clauses for an 8.8k-step
+#     program expression is IEEE-754 bit-blasting of two separately encoded f64
+#     chains. Do not re-add it here expecting a bigger runner to finish it.
+#     P-RACK stays enforced per-PR by its 306,180-point grid, so no coverage
+#     was lost — only the symbolic tier.
 #
 # A PATTERN worth knowing before adding a harness, measured under one solver
 # model and one symbolic contract: an assertion comparing a returned value
@@ -61,10 +65,13 @@
 #
 # Every deep property keeps a BLOCKING per-PR concrete mirror in the kani
 # crate's `cargo test` — for R2 the full speed-grid walk swept along all four
-# parameter axes, for K7 the 306,180-point exhaustive grid over the executable
-# return, for K8 the 2,880-point physical-dt grid. That rule is the only reason
-# four weeks of a dead lane was a coverage REDUCTION and not a coverage HOLE.
-# Treat it as load-bearing, not as belt-and-braces.
+# parameter axes, for K8 the 2,880-point physical-dt grid, and for K7 (now
+# demoted entirely) the 306,180-point exhaustive grid over the executable
+# return, which is unaffected by that demotion and remains its enforcement.
+# That rule is the only reason four weeks of a dead lane was a coverage
+# REDUCTION and not a coverage HOLE, and it is why K7 could be dropped from the
+# proof tier at zero cost to what is actually checked. Treat it as
+# load-bearing, not as belt-and-braces.
 #
 # Kept in its OWN workflow so the `schedule` trigger does not fan the whole
 # ci.yml job graph out weekly.

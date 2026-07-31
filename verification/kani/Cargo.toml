@@ -53,8 +53,9 @@ unstable = { stubbing = true }
 # harness is per-PR-blocking by default unless it is explicitly demoted here,
 # so the deep lane can never silently absorb the whole proof set.
 #
-# Members: R2 (RSS full-lattice monotonicity), K7 (P-RACK, #1242), K8 (the
-# rate bound, #1243) and K3 (SG1, demoted by #1243).
+# Members: R2 (RSS full-lattice monotonicity), K8 (the rate bound, #1243) and
+# K3 (SG1, demoted by #1243). K7 WAS a member and is no longer — see the
+# `outside-proof-envelope` feature below.
 #
 # K3 IS NOT ROUTINE LANE MANAGEMENT. It is an ASSURANCE CHANGE: SG1 lost its
 # per-PR symbolic proof because #1243 made the true property relational, and
@@ -75,6 +76,29 @@ unstable = { stubbing = true }
 # assertion is RELATIONAL ARITHMETIC over two command fields does not finish
 # (K7, K8). Worth knowing before writing the next one.
 deep-proofs = []
+
+# 🔴 NOT A LANE. Harnesses whose formulation is outside the practical proof
+# envelope of the present toolchain (#1268). NO CI job enables this feature —
+# not the per-PR `kani-proofs` lane, not the weekly `kani-deep-weekly` lane.
+# `ci/deep_harnesses.py` matches only `deep-proofs`, so nothing here can reach
+# the weekly matrix, and `ci/test_deep_harnesses.py` pins that.
+#
+# Member: K7 (P-RACK). Do not re-add it to `deep-proofs` on the theory that a
+# larger runner or a longer timeout would finish it. That theory was tested and
+# refuted: isolating K7's two real assertions (discarding 368 of 370 properties)
+# shrank the CNF by 0.5% — 738,811 → 735,393 clauses — proving the property set
+# is not the cost, and in that configuration CBMC reaches the solver and still
+# returns nothing at 30 minutes. K7 stalls in propositional conversion in
+# multi-property mode AND is solver-hard when isolated; fixing the first only
+# exposes the second. ~735k clauses for an 8.8k-step program expression is
+# IEEE-754 bit-blasting of two separately encoded f64 chains.
+#
+# Regaining a symbolic proof of P-RACK is a MODELLING redesign, not CI tuning,
+# and it must preserve the actual safety claim rather than substitute an easier
+# neighbouring property. Meanwhile P-RACK is enforced per-PR and BLOCKING by
+# `k6_k7_mirror_exhaustive_grid_over_the_executable_return` (306,180 points), so
+# this demotion costs no coverage — only the symbolic tier.
+outside-proof-envelope = []
 
 [lints.rust]
 # `--cfg kani` is set by the cargo-kani driver, not by any Cargo feature.
