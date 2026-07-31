@@ -112,9 +112,66 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > disjunctive true forms each produced no verdict at 15 minutes. The property
 > was deliberately not weakened to recover the runtime.
 >
-> Independent approval: see `docs/safety/TALISMAN_AMENDMENT_POLICY.md`. The
-> approver is being asked to accept the assurance reduction above as well as
-> the kernel change.
+> Independent approval: **NOT OBTAINED. This amendment proceeded under a
+> RECORDED EXCEPTION** to the separation-of-duties control, per
+> `docs/safety/TALISMAN_AMENDMENT_POLICY.md` §2.2. The five mandatory fields
+> follow. What is being accepted here is BOTH the kernel change AND the
+> assurance reduction above — they are one decision, and an approval covering
+> only the behaviour change would not satisfy this control.
+>
+> 1. **Author of the change.** `justinlooney` (via Claude Code operating on that
+>    account) — commits on `claude/ros-bound-proposal-migration-nso5d2`,
+>    PR #1254.
+> 2. **Why no eligible independent reviewer was available.** Structural and
+>    unchanged since #1242: a single-maintainer repository with no second human
+>    principal holding review rights. No escalation path existed to attempt.
+>    This is now the SECOND consecutive talisman amendment to take the fallback
+>    path, which §2.3 says should be read as a standing gap in separation of
+>    duties rather than as two isolated exceptions.
+> 3. **Who accepted the exception.** `justinlooney` (repository owner),
+>    2026-07-31, as the accountable authority owning the residual risk.
+> 4. **Evidence independently machine-checked.** Named specifically, because
+>    this is what substitutes for the missing human: 33/33 CI checks green on
+>    `ddc06564`, of which the load-bearing ones are the per-PR Kani lane
+>    (12/12 harnesses, 0 failures, including BOTH arms of K3's two-part
+>    concrete mirror and K8's 2,880-point physical-dt grid); the mutation gate
+>    at 11 mutants / 10 caught / 1 unviable / 0 missed, with its own
+>    anti-vacuity check reporting 385 mutable containment mutants under the
+>    active config (so the gate was not passing on an over-matching
+>    `exclude_re`); the safety-constants provenance gate; and the four-location
+>    blob pin gate re-run against
+>    `851f3f44`. Separately, the regression suite was verified RED before the
+>    fix — reproducer and reversal case red, control and residual green
+>    throughout, which is the signature of a branch-specific defect rather than
+>    a broken oracle — and the guard-restoration mutant, which cargo-mutants
+>    cannot generate, was checked by hand-application.
+> 5. **Residual risk from the absent human independence.** Three judgement
+>    calls carry this change and no gate tests any of them.
+>    **(a) Is the bounded property the right property?** The acceptance
+>    criterion as originally written is unachievable: above the ceiling, the
+>    ceiling itself forces a rate breach. Invariant 8 and K6 jointly decide the
+>    ceiling wins, so K8's domain is bounded to `|current| ≤ ceiling` and the
+>    excluded region is pinned by an EXPECTED-BUT-UNDESIRED fixture. That the
+>    exclusion is a recorded conflict between two enforced bounds, rather than a
+>    convenience that makes a proof pass, is an author's judgement.
+>    **(b) Is the K3 demotion acceptable as a STANDING reduction?** No budget is
+>    known to suffice for any true formulation — the measured evidence is
+>    non-convergence at 15 minutes for both, not a measured cost. The view that
+>    no cheap true K3 exists is engineering judgement; the timings are the
+>    evidence. K8 is in the same position (no verdict at 25 or 55 min), and
+>    unlike R2 neither was measured to merely exceed a known budget.
+>    **(c) Axiom A3** — the inverse-monotone relation coupling the `tan`/`atan`
+>    model — remains assumed, not proved, and carries over from #1242 unchanged.
+>
+> **Sequencing: satisfied.** Unlike #1242, this record was written BEFORE merge,
+> with CI already green and the merge deliberately held for it. That is the
+> control working as intended on its second application.
+>
+> What the exception covers: the Priority-3/4 over-ceiling rate-bound change and
+> its blob re-pin `6a61b74f…` → `851f3f44…`; the parallel fix to the parko
+> diverse governor; the bounded acceptance property and its recorded residual;
+> and the demotion of K3 and K8 to the weekly deep lane with their concrete
+> mirrors as the standing per-PR gates.
 >
 > **#1242 re-pin — INTENTIONAL BEHAVIOUR CHANGE, not formatting drift.**
 > `ed00f4da…` → `6a61b74f…`.
