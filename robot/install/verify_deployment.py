@@ -37,6 +37,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import consumer_config_contract as contract  # noqa: E402
 
 OPT = os.environ.get("KIRRA_OPT_DIR", "/opt/kirra")
+# The path install_kirra.sh actually writes the cdylib to. KIRRA_CONSUMER_LIB
+# must resolve here; a robot.env left on the pre-lib/ layout silently pins an
+# older core that every subsequent rebuild fails to replace.
+INSTALLED_CONSUMER_LIB = f"{OPT}/lib/libkirra_consumer_ffi.so"
 ROBOT_ENV = os.environ.get("KIRRA_ROBOT_ENV", "/etc/kirra/robot.env")
 
 # (path, must_be_executable) — the artifacts a governed robot actually runs.
@@ -44,7 +48,7 @@ EXPECTED_ARTIFACTS = [
     (f"{OPT}/robot/kirra_motor_consumer.py", True),
     (f"{OPT}/robot/serial_exclusivity.py", False),
     (f"{OPT}/robot/motor_authority.py", False),
-    (f"{OPT}/libkirra_consumer_ffi.so", False),
+    (INSTALLED_CONSUMER_LIB, False),
     (f"{OPT}/taj_service", True),
     (f"{OPT}/mick_service", True),
 ]
@@ -132,6 +136,55 @@ def check_artifacts(rep: Report) -> dict:
     return digests
 
 
+def check_deployment_identity(rep: Report, env: dict, unit_user: str,
+                             port_owner: str, configured_user: str) -> None:
+    """The four facts that must name the same account / the same library.
+
+    Both 2026-07-31 faults were invisible disagreements between these values,
+    and every component reported healthy in isolation. A consumer running as a
+    different user than the publisher cannot exchange Fast DDS shared-memory
+    data — discovery still matches over UDP and local timers still fire, so the
+    node looks alive while no message is ever delivered. A KIRRA_CONSUMER_LIB
+    pointing anywhere but the installer's destination loads a core that no
+    rebuild replaces, and it dlopen's perfectly.
+
+    Pure decision over already-collected values so it is host-testable: the
+    caller does the reading, this decides.
+    """
+    lib = (env.get("KIRRA_CONSUMER_LIB") or "").strip() or INSTALLED_CONSUMER_LIB
+
+    if unit_user and configured_user and unit_user != configured_user:
+        rep.add("deployment identity: unit user", FAIL,
+                f"systemd User={unit_user}, robot user is {configured_user}",
+                fix=f"set User={configured_user} in kirra-consumer.service; a "
+                    f"mismatched user breaks DDS shared-memory delivery while "
+                    f"discovery and timers still look healthy")
+    else:
+        rep.add("deployment identity: unit user", PASS,
+                f"systemd User={unit_user or '<unset>'}")
+
+    # An absent port just means the board is unplugged — not a mismatch.
+    if port_owner and port_owner != "<absent>" and port_owner != configured_user:
+        rep.add("deployment identity: serial owner", FAIL,
+                f"/dev/myserial owned by {port_owner}, robot user is {configured_user}",
+                fix="re-trigger udev or replug the board; the consumer's boot "
+                    "sentinel refuses to start on an owner mismatch")
+    else:
+        rep.add("deployment identity: serial owner", PASS,
+                f"/dev/myserial owner={port_owner or '<absent>'}")
+
+    if os.path.realpath(lib) != os.path.realpath(INSTALLED_CONSUMER_LIB):
+        rep.add("deployment identity: consumer library", FAIL,
+                f"KIRRA_CONSUMER_LIB={lib}, installer writes {INSTALLED_CONSUMER_LIB}",
+                fix=f"point KIRRA_CONSUMER_LIB at {INSTALLED_CONSUMER_LIB} and "
+                    f"remove the stale copy — otherwise rebuilds never take effect")
+    elif not os.path.exists(lib):
+        rep.add("deployment identity: consumer library", FAIL,
+                f"{lib} does not exist", fix="build + install the cdylib")
+    else:
+        rep.add("deployment identity: consumer library", PASS, f"{lib} present")
+
+
 def probe_ffi(rep: Report, env: dict) -> None:
     """Load the consumer FFI EXPLICITLY.
 
@@ -140,11 +193,24 @@ def probe_ffi(rep: Report, env: dict) -> None:
     one restart, which is exactly how the live FFI failure hid inside a restart
     loop. A dlopen either works or names its own error.
     """
-    lib = (env.get("KIRRA_CONSUMER_LIB") or "").strip() or f"{OPT}/libkirra_consumer_ffi.so"
+    lib = (env.get("KIRRA_CONSUMER_LIB") or "").strip() or INSTALLED_CONSUMER_LIB
     if not os.path.exists(lib):
         rep.add("consumer FFI loads", FAIL, f"{lib} missing",
                 fix="build + install libkirra_consumer_ffi.so")
         return
+    # A live robot ran an OLD core for hours because robot.env still pointed at
+    # the pre-lib/ layout: every rebuild landed in INSTALLED_CONSUMER_LIB while
+    # the consumer dlopen'd a stale file one directory up. Both existed, both
+    # loaded, and nothing compared them — so the fix "worked" and changed
+    # nothing. Loading the wrong core is not a load failure, so this is its own
+    # row rather than part of the dlopen check.
+    if os.path.realpath(lib) != os.path.realpath(INSTALLED_CONSUMER_LIB):
+        rep.add(
+            "consumer FFI is the installed one", WARN,
+            f"loads {lib}, installer writes {INSTALLED_CONSUMER_LIB}",
+            fix=f"point KIRRA_CONSUMER_LIB at {INSTALLED_CONSUMER_LIB} in "
+                f"/etc/kirra/robot.env, then remove the stale copy",
+        )
     code = ("import ctypes,sys\n"
             "try:\n"
             "    ctypes.CDLL(sys.argv[1])\n"
