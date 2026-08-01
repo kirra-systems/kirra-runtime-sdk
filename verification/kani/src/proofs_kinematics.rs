@@ -393,9 +393,11 @@ mod proofs {
     /// solver and stays there. That is a PHASE difference, not a size one —
     /// R2's CNF is in fact LARGER (1,221,711 clauses vs K8's 848,226), so the
     /// tempting "R2 is the small one" argument is false and is not why it
-    /// stays. It stays because its solver demonstrably progresses (~70
-    /// conflicts/s sustained, irredundant clauses 135k -> 73k), making it a
-    /// budget question. R2 is deliberately NOT demoted with K8.
+    /// stays. It stays because its solver search is ALIVE — 120,888 conflicts
+    /// over a 43-minute solve, accumulating throughout — even though instance
+    /// reduction decelerates sharply after the first six minutes. That mix
+    /// keeps it a budget/solver question. R2 is deliberately NOT demoted with
+    /// K8, and equally is NOT known to finish given more time.
     ///
     /// NO COVERAGE IS LOST. Its blocking per-PR gate is
     /// `k8_mirror_acceleration_bound_on_the_physical_dt_grid` — 2,880 points,

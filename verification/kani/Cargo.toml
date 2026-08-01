@@ -107,12 +107,20 @@ deep-proofs = []
 # 848,226. So "R2 is the small one" is wrong about the thing the solver
 # actually consumes, and must not be used as an argument for keeping it.
 #
-# What DOES keep it here is measured solver progress. With kissat's own
-# telemetry captured (CBMC's --verbosity does not reach an external solver),
-# R2's UNSAT solve sustains ~70 conflicts/s with no collapse, and inprocessing
-# shrinks the instance monotonically — irredundant clauses 135k -> 73k and
-# "remaining" 54% -> 29% over the first 376 s. That is a live search, so R2 is
-# a budget/solver question, not a modelling one.
+# What keeps it here is measured solver behaviour, and it is MIXED. With
+# kissat's own telemetry captured (CBMC's --verbosity does not reach an
+# external solver), across a full 43-minute solve:
+#
+#   0 -> 376 s     26,000 conflicts (70/s), "remaining" 97% -> 29%
+#   376 -> 2604 s  94,659 conflicts (42/s), "remaining" 29% -> 26%
+#   total          120,888 conflicts, no verdict
+#
+# The search NEVER STALLS — conflicts accumulate throughout and inprocessing
+# stays active — but instance reduction DECELERATES sharply, nearly all of it
+# landing in the first six minutes. R2 sits between "progressing" and
+# "plateaued". That keeps it a budget/solver question rather than a modelling
+# one; it does NOT show any particular budget suffices, and must not be
+# summarised as "more time will finish it".
 #
 # Do not re-add either to `deep-proofs` on the theory that a
 # larger runner or a longer timeout would finish it. That theory was tested and
