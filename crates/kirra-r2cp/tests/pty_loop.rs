@@ -14,7 +14,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use kirra_r2cp::command_ack::AckResult;
-use kirra_r2cp::pty::SimulatedMcuPty;
+use kirra_r2cp::pty::{Handled, SimulatedMcuPty};
 use kirra_r2cp::sim::{MotionCommand, Outcome, SafetyState, SimulatedMcu, MODE_TRACK};
 use kirra_r2cp::{decode, encode, Frame, FrameReader, MessageType, MAX_ENCODED_FRAME};
 
@@ -104,6 +104,44 @@ fn motion(seq: u32, t_us: u64, v: f32) -> Frame {
     Frame::new(MessageType::MotionCommand, seq, t_us).with_payload(&cmd.encode())
 }
 
+/// How long a test will wait for bytes it has already written to come back as a
+/// handled frame. Generous on purpose: it bounds a hang, it is not a timing
+/// assertion, and no passing run spends it.
+const PUMP_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Pump until at least one frame is handled, or `deadline` elapses.
+///
+/// [`SimulatedMcuPty::pump`] is deliberately single-shot — one poll, one read —
+/// because the reader it models must HOLD a partial frame rather than block
+/// waiting for the rest of one. That is the right contract for the reader and
+/// the wrong one for a test that has written a whole frame and wants the verdict
+/// on it: the kernel may split those bytes across reads, and under CI load it
+/// does (#1247). The wait belongs here, in the test, rather than in `pump` —
+/// widening `pump`'s timeout would make the flake rarer without making it
+/// impossible, and loosening its single-read semantics would erase the very
+/// hold-a-partial-frame property the suite exists to prove.
+///
+/// Returns the first non-empty batch, so a caller asserting "exactly one frame"
+/// still asserts it; an empty vec on deadline, so a caller asserting silence
+/// still fails rather than hangs.
+fn pump_until_handled(
+    pty: &mut SimulatedMcuPty,
+    mcu: &mut SimulatedMcu,
+    now_us: u64,
+    deadline: Duration,
+) -> Vec<Handled> {
+    let start = Instant::now();
+    loop {
+        let handled = pty.pump(mcu, now_us, 50).expect("pump");
+        if !handled.is_empty() {
+            return handled;
+        }
+        if start.elapsed() >= deadline {
+            return Vec::new();
+        }
+    }
+}
+
 /// Drive the pair to Active over the wire, asserting each ACK.
 fn arm_and_activate(pty: &mut SimulatedMcuPty, mcu: &mut SimulatedMcu, bridge: &mut BridgeEnd) {
     for (seq, ty, expect_state) in [
@@ -111,7 +149,7 @@ fn arm_and_activate(pty: &mut SimulatedMcuPty, mcu: &mut SimulatedMcu, bridge: &
         (2, MessageType::Activate, SafetyState::Active),
     ] {
         bridge.send(&Frame::new(ty, seq, 0));
-        let handled = pty.pump(mcu, 0, 200).expect("pump");
+        let handled = pump_until_handled(pty, mcu, 0, PUMP_DEADLINE);
         assert_eq!(
             handled.len(),
             1,
@@ -136,7 +174,7 @@ fn a_bridge_opening_the_device_path_is_acknowledged_over_the_wire() {
     arm_and_activate(&mut pty, &mut mcu, &mut bridge);
 
     bridge.send(&motion(3, 0, 0.4));
-    let handled = pty.pump(&mut mcu, 0, 200).expect("pump");
+    let handled = pump_until_handled(&mut pty, &mut mcu, 0, PUMP_DEADLINE);
     assert!(matches!(handled[0].outcome, Ok(Outcome::Accepted { .. })));
     let (recv, result, state) = ack_fields(&bridge.read_frames(200)[0]);
     assert_eq!(
@@ -158,7 +196,7 @@ fn a_refusal_comes_back_as_a_result_code_rather_than_silence() {
     let mut bridge = BridgeEnd::open(pty.device_path());
 
     bridge.send(&motion(1, 0, 0.4));
-    let handled = pty.pump(&mut mcu, 0, 200).expect("pump");
+    let handled = pump_until_handled(&mut pty, &mut mcu, 0, PUMP_DEADLINE);
     assert!(handled[0].acknowledged, "a refusal is still acknowledged");
     let (recv, result, state) = ack_fields(&bridge.read_frames(200)[0]);
     assert_eq!(recv, 1);
@@ -168,10 +206,10 @@ fn a_refusal_comes_back_as_a_result_code_rather_than_silence() {
     // A replay of the same frame answers REPLAY, so the two refusals are
     // distinguishable on the wire and not merged into one "no".
     bridge.send(&Frame::new(MessageType::Arm, 5, 0));
-    pty.pump(&mut mcu, 0, 200).expect("pump");
+    pump_until_handled(&mut pty, &mut mcu, 0, PUMP_DEADLINE);
     let _ = bridge.read_frames(200);
     bridge.send(&Frame::new(MessageType::Arm, 5, 0));
-    pty.pump(&mut mcu, 0, 200).expect("pump");
+    pump_until_handled(&mut pty, &mut mcu, 0, PUMP_DEADLINE);
     let (_, result, _) = ack_fields(&bridge.read_frames(200)[0]);
     assert_eq!(result, AckResult::Replay.as_u16());
 }
@@ -199,7 +237,7 @@ fn a_frame_split_across_writes_is_held_until_it_is_whole() {
     assert_eq!(mcu.accepted_commands, 0);
 
     bridge.write_bytes(c);
-    let handled = pty.pump(&mut mcu, 0, 200).expect("pump");
+    let handled = pump_until_handled(&mut pty, &mut mcu, 0, PUMP_DEADLINE);
     assert_eq!(
         handled.len(),
         1,
@@ -207,6 +245,67 @@ fn a_frame_split_across_writes_is_held_until_it_is_whole() {
     );
     assert!(matches!(handled[0].outcome, Ok(Outcome::Accepted { .. })));
     assert_eq!(mcu.accepted_commands, 1);
+}
+
+#[test]
+fn a_frame_the_kernel_delivers_in_pieces_is_still_recovered_by_the_wait() {
+    // Regression for #1247. `pump` is single-shot by design — one poll, one
+    // read — because the reader it models must HOLD a partial frame rather than
+    // block for the rest of one. The consequence is that a test which writes a
+    // whole frame and then pumps ONCE is asserting on a race: when the tty hands
+    // those bytes over across two reads, which it does intermittently and did on
+    // CI, that one pump comes back empty and the test fails on timing rather
+    // than on behaviour. Waiting is the test's job, so it lives in the helper.
+    //
+    // The split is FORCED here rather than waited for, so this pins the property
+    // instead of sampling it.
+    let mut pty = SimulatedMcuPty::open().expect("allocate a pty");
+    let mut mcu = SimulatedMcu::new();
+    // Held for its side effect as much as its fd: the pty master reports EIO
+    // once the last slave holder closes.
+    let bridge = BridgeEnd::open(pty.device_path());
+
+    let wire = encode(&Frame::new(MessageType::Hello, 1, 0).with_payload(&[1, 2, 3])).unwrap();
+    let (head, tail) = wire.split_at(wire.len() - 2);
+    let (head, tail) = (head.to_vec(), tail.to_vec());
+
+    // A writer that delivers the frame in two pieces, the second far enough
+    // behind the first that no single read can span them. The delays are
+    // ROBUSTNESS margins, not the property: the assertions below hold for any
+    // schedule in which the head lands before the tail.
+    let mut split_port = bridge.port.try_clone().expect("clone the bridge fd");
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        split_port.write_all(&head).expect("write the head");
+        split_port.flush().expect("flush the head");
+        std::thread::sleep(Duration::from_millis(900));
+        split_port.write_all(&tail).expect("write the tail");
+        split_port.flush().expect("flush the tail");
+    });
+
+    // Non-vacuity, and the failure #1247 actually reports: ONE pump wakes on the
+    // head, reads it, finds no whole frame, and returns empty — even though a
+    // frame is in flight and will complete. A test that pumps once here calls
+    // that a failure. This is the single-shot contract working as intended.
+    assert!(
+        pty.pump(&mut mcu, 0, 300).expect("pump").is_empty(),
+        "one pump cannot complete a frame whose bytes have not all arrived"
+    );
+
+    // The wait, by contrast, keeps reading until the frame is whole.
+    let handled = pump_until_handled(&mut pty, &mut mcu, 0, PUMP_DEADLINE);
+    writer.join().expect("the split writer finishes");
+
+    assert_eq!(
+        handled.len(),
+        1,
+        "the wait must recover the frame the split delivery deferred"
+    );
+    assert!(
+        matches!(handled[0].outcome, Ok(Outcome::Ignored)),
+        "and recover it INTACT — a split must not become a torn frame: {:?}",
+        handled[0].outcome
+    );
 }
 
 #[test]
@@ -223,7 +322,7 @@ fn several_frames_in_one_write_are_all_handled_in_order() {
     bridge.write_bytes(&batch);
 
     let mut handled = Vec::new();
-    let deadline = Instant::now() + Duration::from_millis(500);
+    let deadline = Instant::now() + PUMP_DEADLINE;
     while handled.len() < 5 && Instant::now() < deadline {
         handled.extend(pty.pump(&mut mcu, 0, 100).expect("pump"));
     }
@@ -258,7 +357,7 @@ fn raw_mode_carries_bytes_the_line_discipline_would_otherwise_rewrite() {
     let mut bridge = BridgeEnd::open(pty.device_path());
 
     bridge.write_bytes(&wire);
-    let handled = pty.pump(&mut mcu, 0, 200).expect("pump");
+    let handled = pump_until_handled(&mut pty, &mut mcu, 0, PUMP_DEADLINE);
     assert_eq!(handled.len(), 1);
     assert!(
         matches!(handled[0].outcome, Ok(Outcome::Ignored)),
@@ -289,7 +388,7 @@ fn without_raw_mode_the_same_frame_is_corrupted() {
     tcsetattr(fd, SetArg::TCSANOW, &attrs).expect("tcsetattr");
 
     bridge.write_bytes(&wire);
-    let handled = pty.pump(&mut mcu, 0, 200).expect("pump");
+    let handled = pump_until_handled(&mut pty, &mut mcu, 0, PUMP_DEADLINE);
 
     // ONLCR inserts a 0x0D before each 0x0A, so more bytes arrive than were
     // sent and the COBS run lengths no longer describe them. The observed
@@ -326,7 +425,7 @@ fn an_undelimited_flood_is_discarded_and_the_link_resynchronises() {
 
     let flood = vec![0x42u8; MAX_ENCODED_FRAME * 3];
     bridge.write_bytes(&flood);
-    let deadline = Instant::now() + Duration::from_millis(500);
+    let deadline = Instant::now() + PUMP_DEADLINE;
     while pty.discarded_runs() == 0 && Instant::now() < deadline {
         let handled = pty.pump(&mut mcu, 0, 100).expect("pump");
         assert!(handled.is_empty(), "undelimited garbage is not a frame");
@@ -342,11 +441,11 @@ fn an_undelimited_flood_is_discarded_and_the_link_resynchronises() {
     bridge.send(&motion(3, 0, 0.4));
 
     let mut handled = Vec::new();
-    let deadline = Instant::now() + Duration::from_millis(500);
+    let deadline = Instant::now() + PUMP_DEADLINE;
     while Instant::now() < deadline
         && !handled
             .iter()
-            .any(|h: &kirra_r2cp::pty::Handled| matches!(h.outcome, Ok(Outcome::Accepted { .. })))
+            .any(|h: &Handled| matches!(h.outcome, Ok(Outcome::Accepted { .. })))
     {
         handled.extend(pty.pump(&mut mcu, 0, 100).expect("pump"));
     }
@@ -382,7 +481,7 @@ fn the_watchdog_announces_its_controlled_stop_on_the_wire() {
     arm_and_activate(&mut pty, &mut mcu, &mut bridge);
 
     bridge.send(&motion(3, 0, 0.4));
-    pty.pump(&mut mcu, 0, 200).expect("pump");
+    pump_until_handled(&mut pty, &mut mcu, 0, PUMP_DEADLINE);
     let _ = bridge.read_frames(200);
 
     // Inside the window: nothing to announce.
