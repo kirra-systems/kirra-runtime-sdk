@@ -1514,6 +1514,17 @@ jobs:
           # unknown user / missing tools, that lint --fix preserves ACLs, and
           # the verifier classifier never PASSes an unverified state.
           python3 robot/install/voice_env_access_test.py
+          # Hybrid voice router (host, pure + stub HTTP servers — no Ollama,
+          # no robot): the deterministic transcript classifier (motion /
+          # conversation / ambiguous, wake-prefix stripping, the substring
+          # traps), endpoint ISOLATION (conversation only ever contacts the
+          # chat sidecar, explicit motion only the governed /intent door,
+          # ambiguous contacts NEITHER; failures never cross-fall-back and
+          # never retry), admission-only acks, transcript-free logs, the
+          # voice-router actuation fence, and the two voice units' mutual
+          # Conflicts= exclusion (one mic owner).
+          python3 robot/voice_route_test.py
+          python3 robot/voice_turn_router_test.py
           # mick_chat.py terminal client (host, stub HTTP server — no Ollama):
           # success/malformed/timeout/4xx-5xx/EOF paths, the service error
           # token surfaced, and the SEPARATION proofs — only /chat is ever

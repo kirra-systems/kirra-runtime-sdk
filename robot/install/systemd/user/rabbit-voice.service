@@ -29,6 +29,12 @@
 [Unit]
 Description=KIRRA Rabbit voice listener (user session; wake word -> bounded turn -> fenced intent door)
 Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+# 🔴 MUTUAL EXCLUSION with the hybrid router frontend: exactly one voice
+# service may own the microphone. Reciprocal of the Conflicts= in
+# mick-voice-router.service — starting either stops the other. A Conflicts=
+# on a unit that is not installed is harmless (systemd ignores it), so this
+# is safe on robots that never stage the router.
+Conflicts=mick-voice-router.service
 
 [Service]
 Type=simple
