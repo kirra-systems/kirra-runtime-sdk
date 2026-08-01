@@ -28,7 +28,34 @@
 //!   - `hello rabbit, drive forward one meter` carries an explicit command, so
 //!     it is not an exact match either and continues to the model.
 //!
-//! Anything not on the list goes to the model exactly as before. The fence can
+//! **Compositional prefixes, by bounded grammar — not substrings.** Observed
+//! live: `Hello Mr. Parker, how are you?` normalizes to
+//! `hello mr parker how are you`, which is no exact entry, fell through to the
+//! motion-only schema, and came back as `{"intent":"cruise","target_speed_mps":10}`.
+//! The fix is a second, equally deterministic pass with a tiny fixed grammar:
+//!
+//! ```text
+//! utterance := [greeting-head] [address] remainder
+//!              (at most ONE of each, in that order, at least one present)
+//! ```
+//!
+//! where `greeting-head` and `address` come from closed vocabularies below and
+//! the REMAINDER must be, in its entirety, an existing `GREETINGS` /
+//! `STATUS_QUESTIONS` entry (or empty → a bare wake). Every comparison is a
+//! whole-token-sequence match at the start of the utterance — never a
+//! substring, never repeated stripping. That is why the false-positive
+//! resistance survives:
+//!
+//!   - `hello mr parker, pull over` strips its prefix but the remainder
+//!     `pull over` is on no non-motion list → the model sees it;
+//!   - `turn toward parker street` starts with no head/address token → the
+//!     grammar never engages;
+//!   - `how are you going to reach the dock` engages no prefix and is not,
+//!     as a whole, a known clause → the model sees it;
+//!   - the grammar consumes at most one head and one address, so it can never
+//!     erase arbitrary leading text in front of a command.
+//!
+//! Anything not recognised goes to the model exactly as before. The fence can
 //! only ever REMOVE motion, never create or alter it.
 
 /// Why an utterance was fenced. Telemetry only — every kind has the same
@@ -83,6 +110,32 @@ const GREETINGS: &[&str] = &[
     "thank you",
     "how are you",
     "are you there",
+];
+
+/// Conversational GREETING-HEADS the bounded grammar may strip — the words an
+/// operator opens with before addressing the robot. Closed vocabulary, matched
+/// as a whole leading token sequence, consumed AT MOST ONCE.
+const GREETING_HEADS: &[&str] = &[
+    "hello",
+    "hey",
+    "hi",
+    "yo",
+    "good morning",
+    "good afternoon",
+    "good evening",
+];
+
+/// ADDRESS forms the bounded grammar may strip — the robot's names and their
+/// honorific variants (`Mr.` normalizes to `mr`). Closed vocabulary, matched
+/// as a whole leading token sequence, consumed AT MOST ONCE, longest first so
+/// `mister parker` is never half-consumed as a bare name.
+const ADDRESS_FORMS: &[&str] = &[
+    "mister parker",
+    "mister rabbit",
+    "mr parker",
+    "mr rabbit",
+    "rabbit",
+    "parker",
 ];
 
 /// Read-only perception / status questions.
@@ -140,12 +193,73 @@ pub fn normalize(text: &str) -> String {
     out
 }
 
+/// Strip `phrase` off the front of `s` at a TOKEN boundary: either `s` is
+/// exactly `phrase`, or `s` continues with a space after it. Normalized input
+/// guarantees single-space separation, so this is a whole-token-sequence
+/// comparison — `parker` never matches the front of `parkersburg`.
+fn strip_leading_phrase<'a>(s: &'a str, phrase: &str) -> Option<&'a str> {
+    let rest = s.strip_prefix(phrase)?;
+    if rest.is_empty() {
+        Some(rest)
+    } else {
+        rest.strip_prefix(' ')
+    }
+}
+
+/// Strip ONE conversational prefix — `[greeting-head] [address]`, each from
+/// its closed vocabulary, each consumed at most once, in that order — and
+/// return the remainder (possibly empty). `None` when no prefix unit matched
+/// at all.
+///
+/// Bounded by construction: two lookups against fixed lists, no repetition,
+/// no arbitrary-token skipping — so the grammar can never erase meaningful
+/// command text. What it CANNOT do is as load-bearing as what it can:
+/// `drive`, `turn`, `stop`, `go` are in neither vocabulary, so a command-led
+/// utterance never engages this path, and a command REMAINDER survives intact
+/// for the caller to (fail to) match against the non-motion clause lists.
+#[must_use]
+pub fn strip_conversational_prefix(normalized: &str) -> Option<&str> {
+    let mut rest = normalized;
+    let mut consumed = false;
+    if let Some(r) = GREETING_HEADS
+        .iter()
+        .find_map(|head| strip_leading_phrase(rest, head))
+    {
+        rest = r;
+        consumed = true;
+    }
+    // ADDRESS_FORMS is ordered longest-first, so `mr parker` wins over any
+    // shorter overlap before a bare name is tried.
+    if let Some(r) = ADDRESS_FORMS
+        .iter()
+        .find_map(|addr| strip_leading_phrase(rest, addr))
+    {
+        rest = r;
+        consumed = true;
+    }
+    consumed.then_some(rest)
+}
+
 /// Classify an utterance as deterministically non-motion, or `None` to let the
 /// model decide.
 ///
 /// Pure: no model call, no network, no I/O, no clock. `None` is the default for
 /// everything unrecognised — the fence narrows what reaches the model, it never
 /// widens what is accepted.
+///
+/// Two passes, both deterministic:
+///  1. the original EXACT whole-utterance match against the three lists;
+///  2. the bounded-grammar pass: strip one conversational prefix
+///     ([`strip_conversational_prefix`]) and require the ENTIRE remainder to
+///     be a known `GREETINGS` / `STATUS_QUESTIONS` clause. An empty remainder
+///     is a bare wake (`good morning parker`, `mr parker`). Any other
+///     remainder — `pull over`, `drive forward one meter`, anything — falls
+///     through to the model.
+///
+/// The reported [`NonMotionKind`] follows the semantic REMAINDER when one
+/// exists (`hello mr parker how are you` → `Greeting`;
+/// `hey rabbit what do you see` → `StatusQuestion`); a bare prefix reports
+/// `WakePhrase`, matching the existing telemetry for `hello rabbit`.
 #[must_use]
 pub fn classify_non_motion(text: &str) -> Option<NonMotionKind> {
     let normalized = normalize(text);
@@ -162,6 +276,19 @@ pub fn classify_non_motion(text: &str) -> Option<NonMotionKind> {
     }
     if STATUS_QUESTIONS.contains(&normalized.as_str()) {
         return Some(NonMotionKind::StatusQuestion);
+    }
+    // Bounded-grammar pass: one optional greeting-head, one optional address,
+    // then the WHOLE remainder must already be a known non-motion clause.
+    if let Some(rest) = strip_conversational_prefix(&normalized) {
+        if rest.is_empty() {
+            return Some(NonMotionKind::WakePhrase);
+        }
+        if GREETINGS.contains(&rest) {
+            return Some(NonMotionKind::Greeting);
+        }
+        if STATUS_QUESTIONS.contains(&rest) {
+            return Some(NonMotionKind::StatusQuestion);
+        }
     }
     None
 }
@@ -304,6 +431,221 @@ mod tests {
                 "duplicate allowlist entry: {entry:?}"
             );
             seen.push(entry);
+        }
+    }
+
+    // --- the compositional live regression (2026-08, observed on the R2) ----
+
+    #[test]
+    fn the_live_compositional_greeting_is_fenced_verbatim() {
+        // This exact utterance fell through the exact-match fence and gemma
+        // answered {"intent":"cruise","target_speed_mps":10}.
+        assert_eq!(
+            classify_non_motion("Hello Mr. Parker, how are you?"),
+            Some(NonMotionKind::Greeting)
+        );
+    }
+
+    #[test]
+    fn required_compositional_non_motion_utterances_classify_by_remainder() {
+        for (text, kind) in [
+            ("Hello Mr. Parker, how are you?", NonMotionKind::Greeting),
+            (
+                "Hello Parker, how are your systems?",
+                NonMotionKind::StatusQuestion,
+            ),
+            (
+                "Hey Rabbit, what do you see?",
+                NonMotionKind::StatusQuestion,
+            ),
+            ("Mr. Parker, are you there?", NonMotionKind::Greeting),
+            (
+                "Rabbit, what is your status?",
+                NonMotionKind::StatusQuestion,
+            ),
+            ("Good morning Parker, how are you?", NonMotionKind::Greeting),
+        ] {
+            assert_eq!(classify_non_motion(text), Some(kind), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn bare_prefix_combinations_report_wake_phrase() {
+        // A head + address (or address alone) with NOTHING after it is the
+        // operator getting the robot's attention — same telemetry kind as the
+        // existing exact entries ("hello rabbit" → WakePhrase).
+        for text in [
+            "Hello Mr. Parker",
+            "Good morning, Parker!",
+            "Mr. Parker",
+            "Mister Rabbit?",
+            "hey mister parker",
+        ] {
+            assert_eq!(
+                classify_non_motion(text),
+                Some(NonMotionKind::WakePhrase),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn punctuation_and_casing_variants_of_the_live_phrase_all_fence() {
+        for text in [
+            "HELLO, MR. PARKER \u{2014} HOW ARE YOU?",
+            "hello mr parker how are you",
+            "Hi, Parker! What is your status?",
+        ] {
+            assert!(classify_non_motion(text).is_some(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn required_motion_utterances_still_reach_the_model() {
+        // The spec's negative set: every one must return None — a prefix plus
+        // a COMMAND remainder, a command containing conversational words, or a
+        // question that is actually about motion.
+        for text in [
+            "Hello Parker, drive forward one meter",
+            "Hey Rabbit, turn left",
+            "Rabbit, stop",
+            "Mr. Parker, stop",
+            "Drive to the hello sign",
+            "Turn toward Parker Street",
+            "How are you going to reach the dock",
+            "Are we okay to proceed to the ramp",
+            "What do you see on the left, then go there",
+            "Good morning, drive to the loading dock",
+            "Hello Mr. Parker, pull over",
+        ] {
+            assert_eq!(classify_non_motion(text), None, "{text:?}");
+        }
+    }
+
+    // --- systematic product coverage ----------------------------------------
+
+    /// prefix (head, address, both) × every known non-motion clause → fenced,
+    /// with the kind following the clause's own list.
+    #[test]
+    fn every_prefix_times_every_known_clause_is_fenced_with_the_clause_kind() {
+        let mut checked = 0usize;
+        for head in GREETING_HEADS.iter().map(Some).chain([None]) {
+            for addr in ADDRESS_FORMS.iter().map(Some).chain([None]) {
+                if head.is_none() && addr.is_none() {
+                    continue; // no prefix at all — pass-1 territory, not ours
+                }
+                let prefix = [head, addr]
+                    .iter()
+                    .flatten()
+                    .cloned()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                for (clause, want) in GREETINGS
+                    .iter()
+                    .map(|c| (*c, NonMotionKind::Greeting))
+                    .chain(
+                        STATUS_QUESTIONS
+                            .iter()
+                            .map(|c| (*c, NonMotionKind::StatusQuestion)),
+                    )
+                {
+                    let utterance = format!("{prefix} {clause}");
+                    assert_eq!(classify_non_motion(&utterance), Some(want), "{utterance:?}");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 300, "product coverage collapsed: {checked}");
+    }
+
+    /// prefix (head, address, both) × explicit MOTION clauses → never fenced.
+    #[test]
+    fn every_prefix_times_every_motion_clause_reaches_the_model() {
+        const MOTION_CLAUSES: &[&str] = &[
+            "drive forward one meter",
+            "turn left",
+            "stop",
+            "pull over",
+            "go to the dock",
+            "proceed to the ramp",
+            "take me to the loading dock",
+            "reverse half a meter",
+            "cruise at two meters per second",
+            "follow the corridor",
+        ];
+        for head in GREETING_HEADS.iter().map(Some).chain([None]) {
+            for addr in ADDRESS_FORMS.iter().map(Some).chain([None]) {
+                let prefix = [head, addr]
+                    .iter()
+                    .flatten()
+                    .cloned()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                for clause in MOTION_CLAUSES {
+                    let utterance = if prefix.is_empty() {
+                        (*clause).to_string()
+                    } else {
+                        format!("{prefix} {clause}")
+                    };
+                    assert_eq!(
+                        classify_non_motion(&utterance),
+                        None,
+                        "{utterance:?} must reach the model"
+                    );
+                }
+            }
+        }
+    }
+
+    // --- the grammar's bounds -----------------------------------------------
+
+    #[test]
+    fn the_prefix_grammar_is_bounded_and_token_anchored() {
+        // At most one head + one address, in that order — a doubled head or a
+        // reversed order does not parse, so nothing unexpected is consumed.
+        assert_eq!(classify_non_motion("hello hello rabbit"), None);
+        assert_eq!(classify_non_motion("parker good morning how are you"), None);
+        // Token-anchored: names embedded in longer words never match.
+        assert_eq!(classify_non_motion("parkersburg how are you"), None);
+        assert_eq!(strip_leading_phrase("parkersburg ahead", "parker"), None);
+        // The stripper itself: both units, one unit, no unit.
+        assert_eq!(
+            strip_conversational_prefix("hello mr parker how are you"),
+            Some("how are you")
+        );
+        assert_eq!(strip_conversational_prefix("rabbit stop"), Some("stop"));
+        assert_eq!(strip_conversational_prefix("good morning"), Some(""));
+        assert_eq!(strip_conversational_prefix("drive forward"), None);
+        assert_eq!(strip_conversational_prefix(""), None);
+    }
+
+    #[test]
+    fn prefix_vocabularies_are_normalized_and_free_of_command_words() {
+        for entry in GREETING_HEADS.iter().chain(ADDRESS_FORMS) {
+            assert_eq!(&normalize(entry), entry, "non-normalized vocab entry");
+            for tok in entry.split(' ') {
+                assert!(
+                    ![
+                        "drive", "go", "turn", "stop", "cruise", "reverse", "pull", "proceed",
+                        "follow", "take"
+                    ]
+                    .contains(&tok),
+                    "command word in the prefix vocabulary: {entry:?}"
+                );
+            }
+        }
+        // Longest-first ordering of ADDRESS_FORMS is load-bearing (the doc on
+        // the const): a shorter entry must never precede a longer one it
+        // token-prefixes, or the longer form could be half-consumed.
+        for (i, a) in ADDRESS_FORMS.iter().enumerate() {
+            for b in &ADDRESS_FORMS[i + 1..] {
+                assert!(
+                    !b.starts_with(&format!("{a} ")),
+                    "{a:?} precedes longer {b:?} it prefixes — ordering broken"
+                );
+            }
         }
     }
 

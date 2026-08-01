@@ -203,9 +203,13 @@ mod tests {
 
     #[test]
     fn the_minimum_never_exceeds_what_this_build_advertises() {
-        assert!(
-            TAJ_MIN_SUPPORTED_CONTRACT <= TAJ_CONTRACT,
-            "this build could not satisfy its own requirement"
-        );
+        // Both sides are consts, so evaluate at compile time (and keep newer
+        // clippy's assertions_on_constants happy without weakening the check).
+        const {
+            assert!(
+                TAJ_MIN_SUPPORTED_CONTRACT <= TAJ_CONTRACT,
+                "this build could not satisfy its own requirement"
+            );
+        }
     }
 }

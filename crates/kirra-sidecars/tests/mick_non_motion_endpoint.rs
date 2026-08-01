@@ -141,6 +141,76 @@ fn a_command_after_a_greeting_still_advances_the_sequence() {
     );
 }
 
+// --- the compositional live regression (2026-08) -----------------------------
+
+/// The reply the deployed model actually produced for the live phrase — a
+/// deliberately dangerous, schema-valid cruise. If the compositional fence
+/// ever regresses, these tests latch it and fail loudly.
+const LIVE_DANGEROUS_REPLY: &str = r#"{"intent":"cruise","target_speed_mps":10}"#;
+
+#[test]
+fn the_live_compositional_greeting_returns_no_intent_and_calls_no_model() {
+    let (mut svc, calls) = service(LIVE_DANGEROUS_REPLY);
+    let (post, last) = post_and_last(&mut svc, "Hello Mr. Parker, how are you?", 10_000);
+    assert_eq!(post, NON_MOTION_BODY);
+    assert_eq!(last, r#"{"intent":null}"#, "nothing may latch");
+    assert_eq!(calls.get(), 0, "the live phrase reached the LLM");
+    assert_eq!(
+        svc.non_motion_fenced(),
+        1,
+        "the fence counter must record it"
+    );
+}
+
+#[test]
+fn compositional_non_motion_phrases_never_reach_the_model_even_after_a_command() {
+    // Latch a real command first, then hold the line: every compositional
+    // conversational phrase must leave the wire byte-identical (payload AND
+    // seq) with zero further model calls.
+    let (mut svc, calls) = service(r#"{"intent":"go_to","x_m":12.0,"y_m":-2.0}"#);
+    let (_, after_command) = post_and_last(&mut svc, "take me to the dock", 10_000);
+    assert!(after_command.contains(r#""seq":1"#));
+    assert_eq!(calls.get(), 1);
+
+    for (i, phrase) in [
+        "Hello Mr. Parker, how are you?",
+        "Hello Parker, how are your systems?",
+        "Hey Rabbit, what do you see?",
+        "Mr. Parker, are you there?",
+        "Rabbit, what is your status?",
+        "Good morning Parker, how are you?",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (post, last) = post_and_last(&mut svc, phrase, 12_000 + i as u64 * 2_000);
+        assert_eq!(post, NON_MOTION_BODY, "{phrase:?}");
+        assert_eq!(last, after_command, "{phrase:?} altered GET /intent/last");
+    }
+    assert_eq!(calls.get(), 1, "a compositional phrase reached the LLM");
+    assert_eq!(svc.non_motion_fenced(), 6);
+}
+
+#[test]
+fn prefixed_motion_requests_each_call_the_model_exactly_once() {
+    for phrase in [
+        "Hello Parker, drive forward one meter",
+        "Hey Rabbit, turn left",
+        "Rabbit, stop",
+        "Hello Mr. Parker, pull over",
+        "Good morning, drive to the loading dock",
+        "How are you going to reach the dock",
+        "Are we okay to proceed to the ramp",
+        "What do you see on the left, then go there",
+    ] {
+        let (mut svc, calls) = service(r#"{"intent":"hold"}"#);
+        let (post, _) = post_and_last(&mut svc, phrase, 10_000);
+        assert!(post.contains(r#""ok":true"#), "{phrase:?}: {post}");
+        assert!(post.contains("hold"), "{phrase:?} did not reach the model");
+        assert_eq!(calls.get(), 1, "{phrase:?}");
+    }
+}
+
 #[test]
 fn a_wake_prefix_carrying_a_command_reaches_the_model() {
     // "hello rabbit" alone is fenced; the same prefix followed by an explicit
