@@ -149,9 +149,20 @@ print("# Provenance for each var lives in robot/install/env.template.")
 for k in order:
     print(f"{k}={last[k]}")
 PY
-# Preserve mode/owner of the original, then swap in.
+# Preserve mode/owner AND ACLs of the original, then swap in. The mv replaces
+# the inode, which silently drops POSIX ACL entries — and the user voice unit
+# depends on a u:<user>:r-- entry on this file (ensure_voice_env_access.sh),
+# so a --fix that lost it would kill rabbit-voice.service on its next start
+# with Result=resources. getfacl|setfacl round-trips the full ACL (base bits
+# included); the chmod/chown fallback covers systems without the acl tools.
 chmod --reference="$FILE" "${FILE}.tmp" 2>/dev/null || true
 chown --reference="$FILE" "${FILE}.tmp" 2>/dev/null || true
+if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then
+  getfacl --absolute-names -p "$FILE" 2>/dev/null | setfacl --set-file=- "${FILE}.tmp" 2>/dev/null \
+    || echo "  ⚠ could not copy ACLs to the rewritten file — if the user voice unit loses access, re-run: sudo robot/install/ensure_voice_env_access.sh"
+else
+  echo "  ⚠ acl tools not installed — any voice-unit ACL on $FILE is NOT preserved by --fix (sudo apt-get install acl, then re-run robot/install/ensure_voice_env_access.sh)"
+fi
 mv "${FILE}.tmp" "$FILE"
 echo "  ✔ normalized $FILE ($(grep -cE '^[A-Za-z_]' "$FILE") keys). Original at $BACKUP."
 echo "  restart the consumer to pick it up: sudo systemctl restart kirra-consumer"

@@ -90,6 +90,34 @@ sudo install -m 0644 "${UNITS}/user/rabbit-voice.service" "${USER_UNIT_DIR}/rabb
 sudo chown "${ROBOT_USER}:" "${USER_UNIT_DIR}/rabbit-voice.service"
 echo "  installed ${USER_UNIT_DIR}/rabbit-voice.service (user unit — Pulse-capable)"
 
+# Stage the access helper next to the doctor so its repair hints work on a
+# robot WITHOUT a repo checkout (the doctor and verifier are run from
+# /opt/kirra/robot and point at this staged copy).
+sudo install -m 0755 "${HERE}/ensure_voice_env_access.sh" "${OPT}/robot/ensure_voice_env_access.sh"
+echo "  installed ${OPT}/robot/ensure_voice_env_access.sh"
+
+# The user unit's EnvironmentFile= is opened by ${ROBOT_USER}'s own user
+# manager, NOT by PID 1 — so unlike every system unit above, it needs real
+# filesystem access to /etc/kirra/robot.env. /etc/kirra is deliberately tight
+# (0750 kirra:kirra protects the governor secrets in kirra.env, and
+# deploy/systemd/install.sh RE-applies that mode on every run), so grant the
+# narrow ACL here, every install (idempotent): traverse-only on the dir,
+# read-only on robot.env. Without this the unit dies before ExecStart with
+# Result=resources and NO log — found live on the R2. A helper failure
+# (missing acl package, unsupported fs) is a LOUD warning, not an abort:
+# the voice unit is optional, the rest of the staging must still land, and
+# verify_deployment.py FAILs until access is actually granted.
+if [[ -f /etc/kirra/robot.env ]]; then
+  if ! sudo "${HERE}/ensure_voice_env_access.sh" --user "${ROBOT_USER}"; then
+    echo "  ⚠ voice-env access grant FAILED — the user voice unit cannot start until this is fixed:"
+    echo "      sudo ${OPT}/robot/ensure_voice_env_access.sh --user ${ROBOT_USER}"
+    echo "    (verify_deployment.py will keep failing this check until it succeeds)"
+  fi
+else
+  echo "  ⚠ /etc/kirra/robot.env not present yet — after install_kirra.sh renders it, run:"
+  echo "      sudo ${OPT}/robot/ensure_voice_env_access.sh --user ${ROBOT_USER}"
+fi
+
 # ---- 3. reload -------------------------------------------------------------
 sudo systemctl daemon-reload
 echo "== done — STAGED, not enabled =="

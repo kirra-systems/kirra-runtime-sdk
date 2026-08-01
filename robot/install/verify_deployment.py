@@ -392,6 +392,116 @@ def check_voice_env(rep: Report, env: dict) -> None:
                         "kirra-rabbit-voice (see install_robot_units.sh)")
 
 
+def diagnose_env_access(probes: dict) -> tuple:
+    """Pure classifier for the user-unit EnvironmentFile access states.
+
+    The user voice unit (rabbit-voice.service) is the one unit whose
+    EnvironmentFile= is opened by the OPERATOR's user manager, not PID 1 —
+    root opens the system units' copy and bypasses permissions entirely, so
+    every other check here can pass while the user unit dies before ExecStart
+    with Result=resources, pid=0 and no service log (live R2 incident:
+    /etc/kirra re-tightened to 0750 kirra:kirra by deploy/systemd/install.sh).
+
+    `probes` keys (all set by probe_env_access, injected in tests):
+      unit_user        str  — account the deployment runs as ('' if unknown)
+      verified_as_user bool — the checks below were run AS unit_user
+      dir_traversable  bool
+      file_exists      bool
+      file_readable    bool
+    Returns (status, detail, fix) for Report.add.
+    """
+    user = probes.get("unit_user") or ""
+    helper = f"sudo {acl_helper_path()}"
+    if not user:
+        return (WARN, "cannot determine the deployment user (unit User= "
+                "unreadable) — user-unit env access not verified",
+                f"{helper} --check --user <robot-user>")
+    fix = f"{helper} --user {user}"
+    if not probes.get("verified_as_user"):
+        return (WARN, f"cannot verify as '{user}' from this account — run the "
+                "verifier as root or as the deployment user",
+                f"{helper} --check --user {user}")
+    if not probes.get("dir_traversable"):
+        return (FAIL, f"'{user}' cannot traverse {os.path.dirname(ROBOT_ENV)} "
+                "— the user voice unit fails before ExecStart "
+                "(Result=resources, no log)", fix)
+    if not probes.get("file_exists"):
+        return (FAIL, f"{ROBOT_ENV} does not exist for '{user}'",
+                "robot/install/install_kirra.sh renders robot.env if absent, "
+                f"then {fix}")
+    if not probes.get("file_readable"):
+        return (FAIL, f"'{user}' can traverse the directory but cannot READ "
+                f"{ROBOT_ENV} (file mode/ACL)", fix)
+    return (PASS, f"'{user}' can read {ROBOT_ENV} (traverse + read verified "
+            "as that user)", None)
+
+
+def acl_helper_path() -> str:
+    """The repair helper's path FROM WHERE THIS VERIFIER RUNS.
+
+    The verifier runs from the installed /opt/kirra/robot tree on a robot
+    with no checkout — a repo-relative hint would be a dead end there. The
+    helper is a sibling in the staged tree and lives in this same directory
+    in a checkout; fall back to the repo-relative form only when neither
+    copy is present (fresh clone before install).
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (os.path.join(here, "ensure_voice_env_access.sh"),
+                 "/opt/kirra/robot/ensure_voice_env_access.sh"):
+        if os.access(cand, os.X_OK):
+            return cand
+    return "robot/install/ensure_voice_env_access.sh"
+
+
+def probe_env_access(user: str) -> dict:
+    """Live probes for diagnose_env_access, dropping privileges honestly.
+
+    As root: run `test` AS the unit user (runuser) — the only proof that
+    counts. As the unit user: direct os.access. As anyone else: report
+    unverified rather than guessing (root's own os.access always says yes).
+    """
+    probes = {"unit_user": user, "verified_as_user": False,
+              "dir_traversable": False, "file_exists": False,
+              "file_readable": False}
+    if not user:
+        return probes
+    d = os.path.dirname(ROBOT_ENV)
+
+    def as_user(flag: str, path: str) -> bool:
+        r = subprocess.run(["runuser", "-u", user, "--", "test", flag, path],
+                           capture_output=True, timeout=10)
+        return r.returncode == 0
+
+    try:
+        if os.geteuid() == 0:
+            probes["verified_as_user"] = True
+            probes["dir_traversable"] = as_user("-x", d)
+            probes["file_exists"] = as_user("-e", ROBOT_ENV)
+            probes["file_readable"] = as_user("-r", ROBOT_ENV)
+        elif pwd_name_of_euid() == user:
+            probes["verified_as_user"] = True
+            probes["dir_traversable"] = os.access(d, os.X_OK)
+            probes["file_exists"] = os.path.exists(ROBOT_ENV)
+            probes["file_readable"] = os.access(ROBOT_ENV, os.R_OK)
+    except Exception:  # noqa: BLE001 — a broken probe is "unverified", not a crash
+        probes["verified_as_user"] = False
+    return probes
+
+
+def pwd_name_of_euid() -> str:
+    import pwd
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        return ""
+
+
+def check_user_env_access(rep: Report) -> None:
+    user = configured_robot_user()
+    status, detail, fix = diagnose_env_access(probe_env_access(user))
+    rep.add("user voice unit can read robot.env", status, detail, fix=fix)
+
+
 def run() -> Report:
     rep = Report()
     from preflight_consumer_env import parse_env_file
@@ -401,6 +511,7 @@ def run() -> Report:
     check_artifacts(rep)
     check_env(rep, env)
     check_voice_env(rep, env)
+    check_user_env_access(rep)
     probe_ffi(rep, env)
     check_deployment_identity(
         rep, env,

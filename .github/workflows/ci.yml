@@ -1505,6 +1505,15 @@ jobs:
           # `$KIRRA_RECORD_CMD "$wav"` contract, and gates the linter's new
           # unquoted-multi-word check + --fix requoting.
           python3 robot/install/env_quoting_test.py
+          # User voice unit EnvironmentFile access (host, tmpdir ACL fixtures):
+          # the USER unit's env file is opened by the operator's user manager,
+          # not PID 1, so the 0750 /etc/kirra that protects governor secrets
+          # kills it before ExecStart (Result=resources, no log — live R2
+          # failure). Proves the ACL helper grants traverse-only + read-only,
+          # is idempotent, restores after inode replacement, fails closed on
+          # unknown user / missing tools, that lint --fix preserves ACLs, and
+          # the verifier classifier never PASSes an unverified state.
+          python3 robot/install/voice_env_access_test.py
           # mick_chat.py terminal client (host, stub HTTP server — no Ollama):
           # success/malformed/timeout/4xx-5xx/EOF paths, the service error
           # token surfaced, and the SEPARATION proofs — only /chat is ever
