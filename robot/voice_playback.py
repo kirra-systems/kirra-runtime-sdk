@@ -180,8 +180,13 @@ class PlaybackGuard:
         if cls._depth == 0 and cls._fd is not None:
             try:
                 # The cooldown lives INSIDE the lock: the speaker tail decays
-                # while the listener is still suppressed.
-                if self.cooldown_ms > 0 and exc_type is not KeyboardInterrupt:
+                # while the listener is still suppressed. Held on EVERY exit,
+                # cancellation included — an interrupted reply still leaves
+                # tail audio in the room, and releasing early would re-admit
+                # the listener into it (the exact class this module fixes).
+                # Bounded: cooldown_ms is validated to <= 3000, so shutdown
+                # is delayed at most 3 s and 500 ms by default.
+                if self.cooldown_ms > 0:
                     time.sleep(self.cooldown_ms / 1000.0)
             finally:
                 try:

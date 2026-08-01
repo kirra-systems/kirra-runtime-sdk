@@ -151,19 +151,24 @@ def test_two_owners_cannot_hold_simultaneously():
 
 
 def test_bad_paths_fail_safe_both_sides():
-    bad = "/proc/definitely/not/writable/kirra-vp"
-    check(vp.playback_active(bad) is False,
-          "unusable probe path → listening allowed (fail-open), not a crash")
-    err = io.StringIO()
-    real = sys.stderr
+    # Distinct paths for the two halves: the warn-once dedup is keyed by
+    # path, and each side must be seen to log its OWN actionable line.
+    bad_probe = "/proc/definitely/not/writable/kirra-vp-probe"
+    bad_guard = "/proc/definitely/not/writable/kirra-vp-guard"
+    err, real = io.StringIO(), sys.stderr
     sys.stderr = err
     try:
-        with vp.PlaybackGuard(bad, cooldown_ms=0):
+        check(vp.playback_active(bad_probe) is False,
+              "unusable probe path → listening allowed (fail-open), not a crash")
+        with vp.PlaybackGuard(bad_guard, cooldown_ms=0):
             pass   # speaking must proceed even when the lock cannot be held
     finally:
         sys.stderr = real
-    check("KIRRA_VOICE_PLAYBACK_STATE" in err.getvalue() or True,
-          "guard on a bad path logs actionably")   # message best-effort
+    logs = err.getvalue()
+    check("KIRRA_VOICE_PLAYBACK_STATE" in logs,
+          f"a bad path must be logged actionably (got: {logs!r})")
+    check(bad_guard in logs,
+          "the guard's log must name the unusable path it could not hold")
 
 
 def test_state_path_resolution_prefers_runtime_dir():
