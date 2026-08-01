@@ -48,7 +48,7 @@ and not a guarantee for other units. Measured with the merged instrumentation
 over a fixed 3 s WAV fixture for the staged voice path — record time excluded by
 construction, so add your record window / VAD time on top).
 
-Configuration: whisper.cpp **CUDA** build (`build/bin/whisper-cli`, `base.en`,
+Configuration: whisper.cpp **CUDA** build (`~/whisper.cpp/build/bin/whisper-cli`, `base.en`,
 `-t 6`), chat sidecar `mick_chat_service` on **`phi3:3.8b`** (48-token cap,
 temperature 0.2, model resident via keep-alive, warmed), piper
 `en_US-lessac-medium` via the raw-stream seam (`KIRRA_TTS_STREAM_CMD` +
@@ -56,7 +56,7 @@ temperature 0.2, model resident via keep-alive, warmed), piper
 
 | Stage | Measured | Notes |
 |---|---|---|
-| STT (whisper `base.en`, CUDA, `-t 6`) | **~515 ms** | same clip took 5 528 ms on the CPU build (3 913 ms with `-t 6`) — the CUDA build is ~7× |
+| STT (whisper `base.en`, CUDA, `-t 6`) | **~515 ms** | same clip took 5528 ms on the CPU build (3913 ms with `-t 6`) — the CUDA build is ~7.6× |
 | Chat TTFT (`phi3:3.8b`, via sidecar) | **~95 ms** | `gemma3:4b` measured ~910 ms on the same rig — its prefill is the outlier, not the sidecar (~30 ms overhead) |
 | Chat first sentence | **~990 ms** | transcript → first complete sentence handed to TTS |
 | Piper synth to first audio | **~785 ms** | first raw PCM bytes out for that sentence |
@@ -87,10 +87,13 @@ KIRRA_STT_CMD="whisper-cli -m models/ggml-base.en.bin -np -nt -f"
 House convention (all engines): the **WAV path is appended as the last argument**;
 STT prints the transcript to stdout. `-np -nt` = no-prints / no-timestamps so only
 the text comes back. Build with CUDA on the Orin if you can — it moves STT from the
-"seconds" column to the "sub-second" column (measured: 3 913 ms → 515 ms on the
+"seconds" column to the "sub-second" column (measured: 3913 ms → 515 ms on the
 same 3 s clip, `base.en` `-t 6`; see the baseline table above). The CUDA binary
-lands in `build/bin/whisper-cli` — point `KIRRA_STT_CMD` at that path in the env
-files, or the services keep running the old CPU binary from `$PATH`.
+lands in `build/bin/` inside the whisper.cpp checkout — point `KIRRA_STT_CMD` at
+it by **absolute path** (e.g. `/home/<user>/whisper.cpp/build/bin/whisper-cli`),
+or install/symlink it over the old binary; a bare `whisper-cli` keeps resolving
+to the old CPU build on `$PATH`, and a relative path fails under systemd (the
+robot scripts exec the command verbatim, from the service's own working dir).
 
 **Recording** is a *bounded* clip — never an open mic:
 ```bash
