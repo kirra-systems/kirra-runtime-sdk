@@ -196,7 +196,7 @@ case "$turn_prog" in
     elif [ "$vsto" -gt "$vmax" ]; then
       bad "KIRRA_VAD_START_TIMEOUT_MS=$vsto exceeds KIRRA_VAD_MAX_MS=$vmax (it could never fire)"; fix "set the start timeout below the ceiling"
     else
-      ok "VAD bounds sane: max ${vmax}ms, start timeout ${vsto}ms, silence ${KIRRA_VAD_SILENCE_MS:-800}ms"
+      ok "VAD bounds sane: max ${vmax}ms, start timeout ${vsto}ms, silence ${KIRRA_VAD_SILENCE_MS:-600}ms"
     fi
     ;;
   arecord)

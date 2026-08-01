@@ -116,11 +116,27 @@ KIRRA_RECORD_CMD="python3 /opt/kirra/robot/vad_record.py"
 KIRRA_VAD_CAPTURE_CMD="/opt/kirra/robot/pulse_capture.sh"   # + KIRRA_PULSE_SOURCE
 # headless/no-session ALSA-direct variant instead:
 #KIRRA_VAD_DEVICE="plughw:CARD=<YOUR_CARD>,DEV=0"   # REQUIRED then — `arecord -l`
-KIRRA_VAD_SILENCE_MS=650      # trailing silence that ends the utterance
+KIRRA_VAD_SILENCE_MS=600      # trailing silence that ends the utterance
 KIRRA_VAD_MIN_SPEECH_MS=250   # min ACTUAL speech before an endpoint is honored
 KIRRA_VAD_MAX_MS=6000         # HARD ceiling
 KIRRA_VAD_START_TIMEOUT_MS=3000
 ```
+
+**Endpoint defaults are Jetson-calibrated (2026-08).** `vad_record.py` ships
+`KIRRA_VAD_RMS_FLOOR=350` and `KIRRA_VAD_SILENCE_MS=600` as its built-in
+defaults, changed from the original `300` / `800 ms` on hardware evidence:
+
+| | RMS floor | trailing silence | observed on the Orin NX |
+|---|---|---|---|
+| before | 300 | 800 ms | ambient room noise intermittently crossed the 300 floor, so the endpointer kept "hearing speech" and frequent turns ran to `stopped: max (8000 ms)` — the worst case is SLOWER than the old fixed 4 s window |
+| after | **350** | **600 ms** | endpointed reliably; three consecutive successful captures; no clipping of final words; STT transcripts remained correct |
+
+The two knobs move together: the higher floor stops ambient noise from holding
+the clip open (the max-duration failure), and once endpointing is reliable the
+shorter silence tail returns ~200 ms per turn without cutting anyone off. If
+YOUR room differs, the same tuning rule stands: raise `KIRRA_VAD_RMS_FLOOR`
+when captures run to the cap, raise `KIRRA_VAD_SILENCE_MS` if final words get
+clipped — `robot/kirra_voice_doctor.sh` reports the effective settings.
 
 **The microphone is always explicit.** On the ALSA-direct variant
 `KIRRA_VAD_DEVICE` is required with deliberately no default: ALSA's default is
@@ -133,13 +149,13 @@ fallback). This is the same rule the wake listener already enforces on
 `KIRRA_WAKE_RECORD_CMD`, and for the same reason; the wake and turn recorders
 remain separate variables and separate contracts.
 
-What the ~2.6 s saving looks like on a short command ("how are you?", ~690 ms of
+What the ~2.7 s saving looks like on a short command ("how are you?", ~690 ms of
 speech):
 
 | | capture | note |
 |---|---|---|
 | `arecord -d 4` | **4000 ms** | every turn, however short |
-| VAD (`silence 650`) | **~1340 ms** | 690 ms speech + 650 ms trailing silence |
+| VAD (`silence 600`) | **~1290 ms** | 690 ms speech + 600 ms trailing silence |
 
 It stays a **bounded** mic, not an open one, and there are now three bounds, not
 one:

@@ -45,10 +45,14 @@ Env:
                            is left alone — it has its own device convention and
                            this module has no business guessing it.
   KIRRA_VAD_BACKEND        'energy' (default); other → refuse
-  KIRRA_VAD_RMS_FLOOR      speech energy threshold (default 300; 16-bit FS=32767)
+  KIRRA_VAD_RMS_FLOOR      speech energy threshold (default 350; 16-bit FS=32767;
+                           Jetson-measured 2026-08: 300 let ambient noise hold
+                           the clip open to the max_ms cap)
   KIRRA_VAD_FRAME_MS       analysis frame (default 30 ms)
   KIRRA_VAD_MIN_SPEECH_MS  min speech before an endpoint is honored (default 300)
-  KIRRA_VAD_SILENCE_MS     trailing silence that ends the utterance (default 800)
+  KIRRA_VAD_SILENCE_MS     trailing silence that ends the utterance (default 600;
+                           Jetson-measured 2026-08: 600 endpoints reliably with
+                           no clipping of final words)
   KIRRA_VAD_MAX_MS         HARD ceiling — always stop by here (default 8000;
                            must be positive and <= VAD_ABSOLUTE_MAX_MS)
   KIRRA_VAD_START_TIMEOUT_MS  if speech never starts, give up (default 3000)
@@ -304,9 +308,9 @@ def main(argv):
 
     sample_rate = _env_int("KIRRA_VAD_SAMPLE_RATE", 16000)
     frame_ms = _env_int("KIRRA_VAD_FRAME_MS", 30)
-    floor = _env_int("KIRRA_VAD_RMS_FLOOR", 300)
+    floor = _env_int("KIRRA_VAD_RMS_FLOOR", 350)
     min_speech_ms = _env_int("KIRRA_VAD_MIN_SPEECH_MS", 300)
-    silence_ms = _env_int("KIRRA_VAD_SILENCE_MS", 800)
+    silence_ms = _env_int("KIRRA_VAD_SILENCE_MS", 600)
     max_ms = _env_int("KIRRA_VAD_MAX_MS", 8000)
     start_timeout_ms = _env_int("KIRRA_VAD_START_TIMEOUT_MS", 3000)
 
