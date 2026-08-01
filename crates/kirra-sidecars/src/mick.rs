@@ -397,6 +397,39 @@ mod tests {
         }
     }
 
+    /// The compositional live regression (2026-08): `Hello Mr. Parker, how are
+    /// you?` fell through the exact-match fence, and the model answered with a
+    /// dangerous, schema-valid cruise. Five facts, each asserted: the outcome
+    /// is `NonMotion`, zero model calls, nothing latched, `seq` does not
+    /// advance, and `non_motion_fenced` increments.
+    #[test]
+    fn the_live_compositional_greeting_is_fenced_with_no_state_change() {
+        // Fresh service: fenced, no call, no latch, counter moves.
+        let (mut svc, calls) = counting_service(r#"{"intent":"cruise","target_speed_mps":10}"#);
+        let out = svc
+            .handle_text(&req("Hello Mr. Parker, how are you?"), 10_000)
+            .unwrap();
+        assert!(matches!(out, IntentOutcome::NonMotion(_)), "got {out:?}");
+        assert_eq!(calls.get(), 0, "the live phrase reached the LLM");
+        assert!(svc.last().is_none(), "the live phrase latched an intent");
+        assert_eq!(svc.non_motion_fenced(), 1);
+
+        // With a prior motion intent latched: seq must NOT advance.
+        let (mut svc, calls) = counting_service(r#"{"intent":"go_to","x_m":1.0,"y_m":0.0}"#);
+        svc.handle_text(&req("drive forward one meter"), 10_000)
+            .unwrap();
+        let before = svc.last().cloned();
+        assert_eq!(before.as_ref().unwrap().seq, 1);
+        let out = svc
+            .handle_text(&req("Hello Mr. Parker, how are you?"), 12_000)
+            .unwrap();
+        assert!(matches!(out, IntentOutcome::NonMotion(_)));
+        assert_eq!(svc.last().cloned(), before, "latch changed on a greeting");
+        assert_eq!(svc.last().unwrap().seq, 1, "seq advanced on a greeting");
+        assert_eq!(calls.get(), 1, "only the real command called the model");
+        assert_eq!(svc.non_motion_fenced(), 1);
+    }
+
     #[test]
     fn a_real_motion_request_still_takes_the_model_path() {
         let (mut svc, calls) = counting_service(r#"{"intent":"go_to","x_m":1.0,"y_m":0.0}"#);
