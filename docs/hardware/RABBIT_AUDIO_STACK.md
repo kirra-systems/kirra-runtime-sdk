@@ -40,6 +40,34 @@ recipe below). The two dominant terms are the **fixed record window** and the
 > straight to piper. That's why the safety-/reliability-relevant speech is
 > instant and the conversational speech is the only thing that waits.
 
+### Measured baseline — Jetson Orin NX, 2026-08-01
+
+One robot, one day — a **baseline for regression comparison**, not a WCET claim
+and not a guarantee for other units. Measured with the merged instrumentation
+(`robot/mick_chat_benchmark.py` for the text path, `robot/mick_voice_benchmark.py`
+over a fixed 3 s WAV fixture for the staged voice path — record time excluded by
+construction, so add your record window / VAD time on top).
+
+Configuration: whisper.cpp **CUDA** build (`build/bin/whisper-cli`, `base.en`,
+`-t 6`), chat sidecar `mick_chat_service` on **`phi3:3.8b`** (48-token cap,
+temperature 0.2, model resident via keep-alive, warmed), piper
+`en_US-lessac-medium` via the raw-stream seam (`KIRRA_TTS_STREAM_CMD` +
+`--output-raw`). Two consecutive runs agreed within 20 ms.
+
+| Stage | Measured | Notes |
+|---|---|---|
+| STT (whisper `base.en`, CUDA, `-t 6`) | **~515 ms** | same clip took 5 528 ms on the CPU build (3 913 ms with `-t 6`) — the CUDA build is ~7× |
+| Chat TTFT (`phi3:3.8b`, via sidecar) | **~95 ms** | `gemma3:4b` measured ~910 ms on the same rig — its prefill is the outlier, not the sidecar (~30 ms overhead) |
+| Chat first sentence | **~990 ms** | transcript → first complete sentence handed to TTS |
+| Piper synth to first audio | **~785 ms** | first raw PCM bytes out for that sentence |
+| **End of utterance → speech starts** | **~1.8 s** | `voice_to_first_audio_ms`; was ~7–8 s before the CUDA build + model swap |
+
+Notes from the same session: `voice_total_ms` is dominated by *playback duration*
+of the full reply (not latency — don't tune it); the deterministic fast routes
+(greetings, motion refusals) measure `ttft=0 ms` end-to-end as designed; and the
+model-comparison sweep (`mick_chat_benchmark.py --compare-models`) is the tool
+that located the gemma3 prefill outlier — re-run it before blaming the stack.
+
 ---
 
 ## 1. STT — whisper.cpp (`whisper-cli`)
@@ -59,7 +87,10 @@ KIRRA_STT_CMD="whisper-cli -m models/ggml-base.en.bin -np -nt -f"
 House convention (all engines): the **WAV path is appended as the last argument**;
 STT prints the transcript to stdout. `-np -nt` = no-prints / no-timestamps so only
 the text comes back. Build with CUDA on the Orin if you can — it moves STT from the
-"seconds" column to the "sub-second" column.
+"seconds" column to the "sub-second" column (measured: 3 913 ms → 515 ms on the
+same 3 s clip, `base.en` `-t 6`; see the baseline table above). The CUDA binary
+lands in `build/bin/whisper-cli` — point `KIRRA_STT_CMD` at that path in the env
+files, or the services keep running the old CPU binary from `$PATH`.
 
 **Recording** is a *bounded* clip — never an open mic:
 ```bash
