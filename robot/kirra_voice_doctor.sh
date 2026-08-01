@@ -72,13 +72,28 @@ pulse_backend_check() {  # $1 = label
 
 [ "$QUIET" = 1 ] || echo "== R2 voice/audio doctor =="
 
-# 1. env file present + loadable
+# 1. env file present + loadable. Distinguish the three failure shapes — they
+# have different fixes, and the parent-traverse one is exactly how the user
+# voice unit (rabbit-voice.service) dies with Result=resources and no log:
+# /etc/kirra is deliberately 0750 (governor secrets), so THIS account needs
+# the narrow ACL from ensure_voice_env_access.sh, not a chmod. Read-only:
+# this doctor never modifies permissions.
 if [ -r "$RENV" ]; then
-  ok "robot.env readable ($RENV)"
+  ok "robot.env readable ($RENV) — the user voice unit can load its EnvironmentFile"
   # shellcheck disable=SC1090
   set -a; . "$RENV"; set +a
 else
-  bad "robot.env not readable ($RENV)"; fix "create it / check perms — R2_VOICE_AUDIO_SETUP.md §4"
+  RDIR="$(dirname "$RENV")"
+  if [ ! -x "$RDIR" ]; then
+    bad "$(id -un) cannot traverse $RDIR — the user voice unit fails before ExecStart (Result=resources)"
+    fix "sudo robot/install/ensure_voice_env_access.sh --user $(id -un)   # traverse-only ACL, no chmod"
+  elif [ ! -e "$RENV" ]; then
+    bad "robot.env missing ($RENV)"
+    fix "robot/install/install_kirra.sh renders it if absent — R2_VOICE_AUDIO_SETUP.md §4"
+  else
+    bad "robot.env exists but $(id -un) cannot READ it ($RENV)"
+    fix "sudo robot/install/ensure_voice_env_access.sh --user $(id -un)   # read-only file ACL"
+  fi
 fi
 
 # 2. STT engine + model
