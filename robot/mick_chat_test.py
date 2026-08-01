@@ -147,10 +147,18 @@ def test_eof_exits_the_loop_cleanly() -> None:
 
 
 def test_only_the_chat_endpoint_is_ever_contacted() -> None:
-    # The separation proof, from the server's perspective: across everything
-    # this suite drove, the client hit /chat and NOTHING else.
-    assert SEEN_PATHS, "the stub saw no requests — suite wiring broken?"
-    assert set(SEEN_PATHS) == {"/chat"}, f"unexpected endpoints contacted: {set(SEEN_PATHS)}"
+    # The separation proof, from the server's perspective — SELF-CONTAINED
+    # (no reliance on test order): one known call, then assert the stub saw
+    # exactly /chat and nothing else.
+    srv, url = _serve()
+    try:
+        StubHandler.mode = "ok"
+        SEEN_PATHS.clear()
+        reply, err = mick_chat.post_chat(url, "separation probe")
+        assert err is None and reply == "echo: separation probe"
+        assert SEEN_PATHS == ["/chat"], f"unexpected endpoints contacted: {SEEN_PATHS}"
+    finally:
+        srv.shutdown()
 
 
 def test_client_source_has_no_motion_endpoint_fallback() -> None:

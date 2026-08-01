@@ -39,8 +39,8 @@ ExecStart=/opt/kirra/mick_chat_service
 # prompt-eval latency), short capped replies for spoken interaction, low
 # temperature, and the model held RESIDENT between requests. On start the
 # service runs a one-shot warm-up; GET /health reports warming/ready/degraded
-# honestly (the listener being up is not readiness).
-Environment=KIRRA_MICK_CHAT_ADDR=127.0.0.1:8103
+# honestly (the listener being up is not readiness). The bind address is NOT
+# here — it is pinned AFTER the env file below, so kirra.env cannot widen it.
 Environment=KIRRA_MICK_CHAT_MODEL=gemma3:4b
 Environment=KIRRA_MICK_CHAT_MAX_OUTPUT_TOKENS=48
 Environment=KIRRA_MICK_CHAT_KEEP_ALIVE=30m
@@ -49,6 +49,12 @@ Environment=KIRRA_MICK_CHAT_TEMPERATURE=0.2
 # Ollama endpoint (default http://localhost:11434) and any overrides come from
 # the shared env file. '-' makes it non-fatal if absent.
 EnvironmentFile=-/etc/kirra/kirra.env
+# Bind address AFTER the env file so the unit's loopback default WINS — a
+# stray addr line in kirra.env cannot silently widen the bind (systemd takes
+# the last assignment). Changing it requires a deliberate drop-in, and the
+# binary's bind policy still refuses non-loopback without
+# KIRRA_SIDECAR_ALLOW_NONLOCAL=1.
+Environment=KIRRA_MICK_CHAT_ADDR=127.0.0.1:8103
 Restart=always
 RestartSec=3
 # Least privilege (the sidecar convention).

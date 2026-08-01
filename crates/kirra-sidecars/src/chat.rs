@@ -114,8 +114,15 @@ impl Default for ChatConfig {
     }
 }
 
+/// Hard ceiling on the configurable input-text bound, so a misconfiguration
+/// cannot defeat the "bounded" guarantee (an out-of-range value ABORTS
+/// startup, the same fail-closed posture as a malformed one). History has its
+/// own, tighter hard cap: [`CHAT_MAX_HISTORY_TURNS`].
+pub const CHAT_MAX_INPUT_CHARS_CEILING: usize = 8_192;
+
 impl ChatConfig {
-    /// Read from the environment, fail-closed on malformed values.
+    /// Read from the environment, fail-closed: present-but-malformed OR
+    /// out-of-range values are an `Err` for the binary to abort on.
     pub fn from_env() -> Result<Self, String> {
         let mut cfg = Self::default();
         if let Ok(v) = std::env::var("KIRRA_MICK_CHAT_MAX_INPUT_CHARS") {
@@ -123,8 +130,13 @@ impl ChatConfig {
                 .trim()
                 .parse::<usize>()
                 .ok()
-                .filter(|n| *n > 0)
-                .ok_or_else(|| format!("KIRRA_MICK_CHAT_MAX_INPUT_CHARS malformed: {v:?}"))?;
+                .filter(|n| *n > 0 && *n <= CHAT_MAX_INPUT_CHARS_CEILING)
+                .ok_or_else(|| {
+                    format!(
+                        "KIRRA_MICK_CHAT_MAX_INPUT_CHARS malformed or out of range \
+                         (1..={CHAT_MAX_INPUT_CHARS_CEILING}): {v:?}"
+                    )
+                })?;
         }
         if let Ok(v) = std::env::var("KIRRA_MICK_CHAT_HISTORY_TURNS") {
             let n = v

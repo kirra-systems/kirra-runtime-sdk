@@ -97,7 +97,7 @@ cat > "$dropin/10-kirra-target.conf" <<'EOF'
 [Unit]
 PartOf=kirra.target
 EOF
-echo "  installed 5 units + PartOf drop-in"
+echo "  installed unit files + PartOf drop-in"
 
 echo "== 5. enable + start =="
 systemctl daemon-reload
