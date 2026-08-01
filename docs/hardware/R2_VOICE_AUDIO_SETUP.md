@@ -125,7 +125,7 @@ a short command vs a flat 4 s window) and pulls its raw stream through the same
 Pulse backend, so no ALSA device var is needed. Tunables if the room needs them:
 
 ```bash
-KIRRA_VAD_SILENCE_MS=650
+KIRRA_VAD_SILENCE_MS=600
 KIRRA_VAD_MIN_SPEECH_MS=250
 KIRRA_VAD_MAX_MS=6000
 KIRRA_VAD_START_TIMEOUT_MS=3000

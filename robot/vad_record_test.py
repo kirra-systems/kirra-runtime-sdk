@@ -170,26 +170,41 @@ def test_a_short_command_endpoints_well_before_the_old_fixed_window():
     (30 ms), so this is the recorder's own timing model, not wall clock.
     """
     OLD_FIXED_MS = 4000
-    ep = Endpointer(min_speech_ms=250, silence_ms=650, max_ms=6000,
+    ep = Endpointer(min_speech_ms=250, silence_ms=600, max_ms=6000,
                     start_timeout_ms=3000)     # the deployed settings
     speech_frames = 23                          # ~690 ms of speech
     reason, t = _run(ep, [True] * speech_frames + [False] * 100)
     check(reason == STOP_ENDPOINTED, f"a normal short command must endpoint, got {reason}")
     check(t < OLD_FIXED_MS,
           f"VAD took {t} ms — no better than the fixed {OLD_FIXED_MS} ms window")
-    # Speech ends at 690 ms; +650 ms silence ⇒ ~1340 ms, a ~2.6 s saving.
-    check(1300 <= t <= 1400, f"expected ~1340 ms, got {t}")
+    # Speech ends at 690 ms; +600 ms silence ⇒ ~1290 ms, a ~2.7 s saving.
+    check(1250 <= t <= 1350, f"expected ~1290 ms, got {t}")
     check(OLD_FIXED_MS - t > 2000, f"saving only {OLD_FIXED_MS - t} ms; expected > 2 s")
 
 
 def test_a_long_utterance_still_gets_its_time_up_to_the_cap():
     # The flip side: VAD must not truncate someone speaking a full sentence.
-    ep = Endpointer(min_speech_ms=250, silence_ms=650, max_ms=6000,
+    ep = Endpointer(min_speech_ms=250, silence_ms=600, max_ms=6000,
                     start_timeout_ms=3000)
     reason, t = _run(ep, [True] * 150 + [False] * 40)   # 4.5 s of speech
     check(reason == STOP_ENDPOINTED, f"expected endpoint, got {reason}")
     check(t > 4500, f"a 4.5 s utterance was cut at {t} ms")
     check(t <= 6000, f"must never exceed the hard cap, got {t} ms")
+
+
+def test_shipped_endpoint_defaults_are_the_jetson_calibrated_values():
+    """The 2026-08 Orin calibration: RMS floor 350 (300 let ambient noise
+    hold the clip open to the max_ms cap — 'stopped: max (8000 ms)') and
+    trailing silence 600 ms (endpointed reliably, no clipping of final
+    words, STT accuracy preserved across three consecutive captures). A
+    silent revert of either default reintroduces the max-duration failure,
+    so the shipped literals are pinned here."""
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parent / "vad_record.py").read_text()
+    check('_env_int("KIRRA_VAD_RMS_FLOOR", 350)' in src,
+          "shipped RMS floor default must be the calibrated 350")
+    check('_env_int("KIRRA_VAD_SILENCE_MS", 600)' in src,
+          "shipped trailing-silence default must be the calibrated 600 ms")
 
 
 # ── explicit capture device required (fail-closed, before any mic opens) ─────
