@@ -214,14 +214,21 @@ def test_the_default_clock_is_monotonic_not_wall_clock():
 # ── wiring: opt-in, observability-only, no new authority ─────────────────────
 
 def test_the_wiring_is_opt_in_everywhere():
+    # The recorder-stage wiring lives in voice_transcribe.sh — the ONE shared
+    # trigger→record→STT producer (extracted verbatim from rabbit_voice.sh),
+    # piped by BOTH voice frontends (rabbit_voice.sh and mick_voice_router.sh)
+    # so each gets identical opt-in staging.
     here = Path(__file__).resolve().parent
-    for name in ("rabbit_voice.sh", "rabbit_converse.py", "wake_word.py"):
+    for name in ("voice_transcribe.sh", "rabbit_converse.py", "wake_word.py"):
         text = (here / name).read_text()
         check(rl.ENV_FLAG in text or "rabbit_latency" in text,
               f"{name} should participate in staging")
     # The shell gate defaults to 0 (off) rather than on.
-    voice = (here / "rabbit_voice.sh").read_text()
+    voice = (here / "voice_transcribe.sh").read_text()
     check("LATENCY=0" in voice, "the shell timing gate must default OFF")
+    for pipeline in ("rabbit_voice.sh", "mick_voice_router.sh"):
+        check("voice_transcribe.sh" in (here / pipeline).read_text(),
+              f"{pipeline} must pipe through the shared staged producer")
 
 
 def test_timing_calls_cannot_affect_routing_or_actuation():
