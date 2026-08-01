@@ -189,14 +189,25 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > vs stalls before it) is what separates R2 from K7/K8; size does not, and the
 > smaller-formula argument must not be repeated.
 >
-> **The open question is now answered: the solver is progressing.** kissat's own
-> telemetry — captured through a wrapper, since CBMC's `--verbosity` does not
-> reach an external solver — shows ~70 conflicts/s sustained with no systematic
-> collapse, and inprocessing shrinking the instance monotonically (irredundant
-> clauses 135k → 73k, "remaining" 54% → 29% over 376 s). That is a live search,
-> so R2 is a budget/solver question and keeps its place. It does NOT show that
-> any particular budget suffices — ~70 conflicts/s is slow, and progress is not
-> a termination guarantee.
+> **The open question is now measured, and the answer is mixed rather than
+> clean.** kissat's own telemetry — captured through a pass-through wrapper on
+> `--external-sat-solver`, since CBMC's `--verbosity` does not reach an external
+> solver — over a full 43-minute solve:
+>
+> * 0 → 376 s: 26,000 conflicts (70/s), "remaining" 97% → 29%
+> * 376 → 2,604 s: 94,659 conflicts (42/s), "remaining" 29% → 26%
+> * total 120,888 conflicts, no verdict
+>
+> **The search never stalls** — conflicts accumulate throughout, restarts and
+> reductions advance, and backbone probing, vivification and substitution stay
+> active. **But instance reduction decelerates sharply**: almost all of it lands
+> in the first six minutes, and the next thirty-seven buy three percentage
+> points. R2 therefore sits BETWEEN "progressing" and "plateaued", not in either.
+>
+> That is enough to keep it a budget/solver question — the search is alive and
+> solver choice or a portfolio has a plausible path — and NOT enough to claim any
+> particular budget suffices. The deceleration is real and progress is not a
+> termination guarantee. Do not upgrade this into "more time will finish it".
 >
 > Independent approval: **NOT OBTAINED. This amendment proceeded under a
 > RECORDED EXCEPTION** to the separation-of-duties control, per
