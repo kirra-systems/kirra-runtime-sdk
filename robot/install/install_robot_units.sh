@@ -33,11 +33,22 @@ echo "== robot-side unit install — user: ${ROBOT_USER} =="
 # ship the whole Rabbit/voice set so the interactive tools are staged too.
 echo "== 1. Rabbit scripts -> ${OPT}/robot =="
 sudo install -d -m 0755 "${OPT}/robot"
+# 🔴 STAGING COMPLETENESS: every LOCAL module a staged script imports
+# (transitively) must itself be in this list — the deployed scripts run from
+# /opt/kirra/robot with no repo checkout on sys.path, so a missing module is a
+# ModuleNotFoundError crash-loop AT THE SERVICE, not at install time (found the
+# hard way on the R2: wake_word.py imported rabbit_latency, which was never
+# staged; the old repo-checkout unit had masked it). Enforced by
+# robot/install/staging_completeness_test.py — extend THIS list when a robot
+# script grows a new local import.
 for f in rabbit_persona.py rabbit_watch.py rabbit_ask.py rabbit_converse.py rabbit_boot.py \
          rabbit_voice.sh ptt_button.py run_voice_ptt.sh inspect_corridor.py rabbit_ota.py \
          ros_env.sh kirra_voice_doctor.sh kirra_doctor.py rabbit_diag.py \
          wake_word.py rabbit_wake.py turn_state.py vad_record.py pulse_capture.sh \
-         barge_in.py skill_registry.py world_model.py mission.py; do
+         barge_in.py skill_registry.py world_model.py mission.py \
+         rabbit_latency.py rabbit_stream.py rabbit_tone.py repo_command.py \
+         rabbit_model_smoketest.py assistant.py assistant_admission.py \
+         assistant_contract.py assistant_report.py assistant_tools.py; do
   [[ -f "${REPO}/robot/${f}" ]] || { echo "  ⚠ missing ${REPO}/robot/${f} — skipped"; continue; }
   sudo install -m 0755 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
   echo "  installed ${OPT}/robot/${f}"
