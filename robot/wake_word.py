@@ -42,16 +42,22 @@ Env (robot/install/rabbit.env.example has the annotated set):
   KIRRA_WAKE_STT_CMD      REQUIRED when enabled — whisper-cli + a TINY model;
                           wav path appended as the last arg (house convention)
   KIRRA_WAKE_PHRASES      comma-separated, default "hello rabbit,hey rabbit,yo rabbit"
-  KIRRA_WAKE_RECORD_CMD   REQUIRED when enabled — raw-stream capture, and it must
-                          name an ALSA device explicitly, e.g.
-                          "arecord -D plughw:CARD=Device,DEV=0 -f S16_LE -r 16000 -c 1 -t raw".
-                          There is deliberately NO default: ALSA's default device
-                          is whichever card the kernel enumerated first, which on
-                          the R2 is not the microphone, and the listener would sit
-                          on the wrong input hearing nothing. NOT derived from
+  KIRRA_WAKE_RECORD_CMD   raw-stream capture OVERRIDE. If set, it is used
+                          verbatim — except `arecord`, which must name an ALSA
+                          device explicitly, e.g.
+                          "arecord -D plughw:CARD=Device,DEV=0 -f S16_LE -r 16000 -c 1 -t raw"
+                          (ALSA's default device is whichever card the kernel
+                          enumerated first — on the R2 not the microphone — and
+                          the listener would sit on the wrong input hearing
+                          nothing). Unset → robot/pulse_capture.sh: capture
+                          through the SESSION SOUND SERVER, which on the desktop
+                          image OWNS the mic (direct plughw: opens fail EBUSY);
+                          requires KIRRA_PULSE_SOURCE. NOT derived from
                           KIRRA_RECORD_CMD — that one is a BOUNDED WAV-file
                           recorder (-d N, writes a file); this is an UNBOUNDED raw
                           stream. Different contracts, separate variables.
+  KIRRA_PULSE_SOURCE      exact PulseAudio source name for the default backend
+                          (`pactl list short sources`); no default-mic fallback
   KIRRA_WAKE_RMS_FLOOR    energy gate (default 300; 16-bit full scale = 32767)
   KIRRA_WAKE_COOLDOWN_S   refractory period between wakes (default 2)
   KIRRA_WAKE_HOLDOFF_S    mic released this long after a trigger (default 10;
@@ -449,6 +455,41 @@ def wake_record_device(argv: list[str]) -> str:
     return ""
 
 
+PULSE_CAPTURE_BASENAME = "pulse_capture.sh"
+
+
+def resolve_record_cmd(record_cmd_env: str | None, pulse_source_env: str | None,
+                       script_dir: str) -> tuple[list[str] | None, str | None]:
+    """Resolve the wake capture backend → (argv, None) or (None, fatal reason).
+
+    Pure (host-tested in wake_capture_test.py). Layers the PulseAudio default on
+    top of `validate_record_cmd` (whose rules are unchanged):
+
+      * KIRRA_WAKE_RECORD_CMD set → `validate_record_cmd` verbatim — bare
+        `arecord` with no -D/--device stays REFUSED (wrong-mic silence, plus a
+        direct ALSA open under a session sound server fails "Device or resource
+        busy" and the listener sits deaf in its retry loop). An explicit-but-
+        invalid command is an ERROR, never silently swapped for the default.
+      * unset → robot/pulse_capture.sh beside this script — capture through the
+        session sound server, which on the desktop image OWNS the mic. It
+        REQUIRES an explicit KIRRA_PULSE_SOURCE, checked here so the
+        misconfiguration is a startup FATAL in THIS log, not a silent death in
+        a DEVNULL'd child. NEVER a guessed/default microphone: a wrong mic is
+        worse than a visible failure.
+    """
+    raw = (record_cmd_env or "").strip()
+    if raw:
+        argv, why = validate_record_cmd(raw)
+        return argv, (why or None)
+    if not (pulse_source_env or "").strip():
+        return None, (
+            "no capture backend configured: set KIRRA_PULSE_SOURCE to the exact "
+            "PulseAudio source name (pactl list short sources) for the default "
+            "backend (robot/pulse_capture.sh), or set KIRRA_WAKE_RECORD_CMD to "
+            "an explicit capture command. Refusing to guess a microphone.")
+    return [os.path.join(script_dir, PULSE_CAPTURE_BASENAME)], None
+
+
 def main() -> int:
     if not _truthy(os.environ.get("KIRRA_WAKE_ENABLED")):
         _log("KIRRA_WAKE_ENABLED not set — wake word off (exit 0; PTT/Enter still work)")
@@ -471,12 +512,36 @@ def main() -> int:
     # Fail closed on the microphone BEFORE anything is opened or spawned. An
     # enabled listener on the wrong input is worse than a disabled one: the unit
     # looks healthy, the logs look healthy, and nobody is heard.
-    record_cmd, why = validate_record_cmd(os.environ.get("KIRRA_WAKE_RECORD_CMD", ""))
+    record_cmd, why = resolve_record_cmd(
+        os.environ.get("KIRRA_WAKE_RECORD_CMD"),
+        os.environ.get("KIRRA_PULSE_SOURCE"),
+        os.path.dirname(os.path.abspath(__file__)))
     if record_cmd is None:
         _log(f"FATAL: KIRRA_WAKE_ENABLED is on but {why}")
         return 1
-    device = wake_record_device(record_cmd)
-    _log(f"wake microphone: {device or os.path.basename(record_cmd[0]) + ' (custom backend)'}")
+    if os.path.basename(record_cmd[0]) == PULSE_CAPTURE_BASENAME:
+        # One-shot fail-closed preflight: the runtime capture spawns with its
+        # stderr DEVNULL'd, so surface the wrapper's diagnostics (missing
+        # parec / missing or renamed source / no session) HERE, at startup,
+        # instead of dying silently into the 2 s retry loop. A backend that
+        # breaks LATER (mic unplugged) still lands in that bounded retry loop —
+        # an unavailable capture backend is never classified as healthy.
+        try:
+            chk = subprocess.run(record_cmd + ["--check"], capture_output=True,
+                                 text=True, timeout=15.0)
+        except Exception as e:  # noqa: BLE001
+            _log(f"FATAL: capture preflight could not run ({type(e).__name__}: {e})")
+            return 1
+        if chk.returncode != 0:
+            for line in (chk.stderr or "").strip().splitlines():
+                _log(line)
+            _log("FATAL: PulseAudio capture preflight failed (see above)")
+            return 1
+        _log("wake microphone: PulseAudio source "
+             f"{os.environ.get('KIRRA_PULSE_SOURCE', '')} (via pulse_capture.sh)")
+    else:
+        device = wake_record_device(record_cmd)
+        _log(f"wake microphone: {device or os.path.basename(record_cmd[0]) + ' (custom backend)'}")
     rms_floor = float(os.environ.get("KIRRA_WAKE_RMS_FLOOR", "300"))
     cooldown_s = float(os.environ.get("KIRRA_WAKE_COOLDOWN_S", "2"))
     holdoff_s = float(os.environ.get("KIRRA_WAKE_HOLDOFF_S", "10"))

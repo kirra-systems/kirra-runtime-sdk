@@ -78,20 +78,26 @@ gets its time — up to a hard ceiling. It writes the appended WAV path (the sam
 
 ```bash
 KIRRA_RECORD_CMD="python3 /opt/kirra/robot/vad_record.py"
-KIRRA_VAD_DEVICE="plughw:CARD=<YOUR_CARD>,DEV=0"   # REQUIRED — `arecord -l`
+# desktop image (session sound server owns the mic — §4): capture through it
+KIRRA_VAD_CAPTURE_CMD="/opt/kirra/robot/pulse_capture.sh"   # + KIRRA_PULSE_SOURCE
+# headless/no-session ALSA-direct variant instead:
+#KIRRA_VAD_DEVICE="plughw:CARD=<YOUR_CARD>,DEV=0"   # REQUIRED then — `arecord -l`
 KIRRA_VAD_SILENCE_MS=650      # trailing silence that ends the utterance
 KIRRA_VAD_MIN_SPEECH_MS=250   # min ACTUAL speech before an endpoint is honored
 KIRRA_VAD_MAX_MS=6000         # HARD ceiling
 KIRRA_VAD_START_TIMEOUT_MS=3000
 ```
 
-**The device is required.** There is deliberately no default: ALSA's default is
+**The microphone is always explicit.** On the ALSA-direct variant
+`KIRRA_VAD_DEVICE` is required with deliberately no default: ALSA's default is
 whichever card the kernel enumerated first, which on the R2 is not the
 microphone, and the failure is *silent* — near-silence arrives, every turn
 endpoints as "no speech", and the robot simply appears not to hear you. Unset →
-`vad_record.py` refuses at startup, **before opening anything**. This is the same
-rule the wake listener already enforces on `KIRRA_WAKE_RECORD_CMD`, and for the
-same reason; the two remain separate variables and separate contracts.
+`vad_record.py` refuses at startup, **before opening anything**. On the Pulse
+backend the same rule holds via `KIRRA_PULSE_SOURCE` (no default-source
+fallback). This is the same rule the wake listener already enforces on
+`KIRRA_WAKE_RECORD_CMD`, and for the same reason; the wake and turn recorders
+remain separate variables and separate contracts.
 
 What the ~2.6 s saving looks like on a short command ("how are you?", ~690 ms of
 speech):
@@ -346,7 +352,22 @@ So:
 - `aplay -l` / `arecord -l` numbering (`hw:0`) is **not stable** and the USB
   audio device is frequently **not** card 0.
 
-**The fix (recommended): bypass PulseAudio — talk to ALSA directly.**
+**Pick the backend by TOPOLOGY (2026-07 hardening finding):**
+
+- **No user session** (headless image, system service): bypass PulseAudio —
+  talk to ALSA directly (the fix below). There is no server to capture through.
+- **An active user audio session** (desktop image — the R2's current config):
+  the session sound server **owns the mic**, and a direct
+  `arecord -D plughw:…` open fails **`Device or resource busy`** even while
+  `/proc/asound/…/status` reads `closed` and no process holds the PCM (D-Bus
+  device reservation). ALSA-direct is not fixable there — capture **through**
+  the server with `robot/pulse_capture.sh` (parec, **explicit**
+  `KIRRA_PULSE_SOURCE`, fail-closed — no default-mic fallback) and run the
+  voice listener as a **user unit**
+  (`robot/install/systemd/user/rabbit-voice.service`) so parec can reach the
+  per-user Pulse socket. See `docs/hardware/R2_VOICE_AUDIO_SETUP.md` §4.
+
+**The fix for the no-session case: bypass PulseAudio — talk to ALSA directly.**
 
 1. **Name the exact device.** `aplay -l` and `arecord -l` → find your USB codec's
    card/device, e.g. `card 1: Device …`. Use `hw:1,0` (or `plughw:1,0` if you need
@@ -419,6 +440,7 @@ Sum = PTT-release → spoken reply. If it's too slow: shorten `-d`, drop to
 | Symptom | Cause | Fix |
 |---|---|---|
 | Works by hand, silent as a service | no session / Pulse socket unreachable | §4: ALSA-direct `-D plughw:X,0`; user in `audio` |
+| `arecord: … Device or resource busy` (PCM shows `closed`, no holder) | the session sound server owns the card (device reservation) | §4: capture through the server — `pulse_capture.sh` + `KIRRA_PULSE_SOURCE`, run as a user unit |
 | `aplay: ... No such file or directory` | wrong `hw:` card number | `aplay -l`; the USB codec is often not card 0 |
 | Chipmunk / slow-mo voice | `aplay -r` ≠ voice sample rate | match `-r` to the piper voice (medium = 22050) |
 | Records silence/garbage from a service | wrong `arecord -D` / not in `audio` | name the capture device; `usermod -aG audio` |

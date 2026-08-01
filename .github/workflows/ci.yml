@@ -1427,6 +1427,14 @@ jobs:
           # rabbit_wake control matcher incl. non-overlap with the OTA/diag/
           # drive matchers. See docs/hardware/RABBIT_AUDIO_STACK.md §3b.
           python3 robot/wake_word_test.py
+          # Mic capture-backend selection (host, no audio/PulseAudio): the
+          # fail-closed resolver (default = pulse_capture.sh over an EXPLICIT
+          # KIRRA_PULSE_SOURCE; bare no-device arecord REFUSED — unpinned mic +
+          # session-sound-server EBUSY; explicit backends verbatim), the
+          # wrapper's --check/--print-cmd contract under stub pactl/parec, and
+          # the deployment sources actually emitting the Pulse config. See
+          # docs/hardware/R2_VOICE_AUDIO_SETUP.md §4.
+          python3 robot/wake_capture_test.py
           # Shipped systemd units, structurally. ORDERING IS NOT A DEPENDENCY:
           # mick and the Rabbit voice listener are ordered AFTER ollama (and mick),
           # but must never Requires=/BindsTo= them — a hard dep would mean that

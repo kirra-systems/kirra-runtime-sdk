@@ -31,6 +31,7 @@ warn() { [ "$QUIET" = 1 ] || echo "  ⚠ $*"; WARN=$((WARN + 1)); }
 fix()  { [ "$QUIET" = 1 ] || echo "       ↳ fix: $*"; }
 
 RENV="${KIRRA_ROBOT_ENV:-/etc/kirra/robot.env}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # first token of a command string (the binary/script it invokes)
 first_tok() { set -- $1; printf '%s' "${1:-}"; }
@@ -55,6 +56,18 @@ card_present() {
     num)  "$tool" -l 2>/dev/null | grep -qE "^card ${val}:" ;;
     name) "$tool" -l 2>/dev/null | grep -qE "^card [0-9]+: ${val} " ;;
   esac
+}
+# PulseAudio mic-backend probe: delegates to pulse_capture.sh --check (the ONE
+# validation implementation — parec present, KIRRA_PULSE_SOURCE set, source in
+# `pactl list short sources`; explicit source, no default-mic fallback).
+pulse_backend_check() {  # $1 = label
+  local out
+  if out="$("$HERE/pulse_capture.sh" --check 2>&1)"; then
+    ok "$1 (PulseAudio): source present — ${KIRRA_PULSE_SOURCE:-?}"
+  else
+    bad "$1 (PulseAudio) check failed: $(printf '%s\n' "$out" | head -1)"
+    fix "robot/pulse_capture.sh --check for the full reason — set KIRRA_PULSE_SOURCE from \`pactl list short sources\` (needs the user session)"
+  fi
 }
 
 [ "$QUIET" = 1 ] || echo "== R2 voice/audio doctor =="
@@ -126,6 +139,11 @@ case "$turn_prog" in
         else
           ok "VAD capture command pins its device: -D $vdev"
         fi
+      elif [ "$vcp" = "pulse_capture.sh" ] || [ "$vcp" = "parec" ]; then
+        # The session-sound-server backend (the desktop image, where PulseAudio
+        # OWNS the mic and direct plughw: opens fail EBUSY): validate the
+        # explicit source instead of applying any ALSA rule.
+        pulse_backend_check "VAD mic capture"
       else
         ok "VAD uses a custom capture backend ($vcp) — no ALSA rule applied"
       fi
@@ -292,7 +310,10 @@ sys.exit(0 if parse_phrases(os.environ.get('KIRRA_WAKE_PHRASES', DEFAULT_PHRASES
     # SILENT: the stream opens, delivers near-silence, and nobody is heard.
     # So this is a FAIL, not a warning.
     if [ -z "${KIRRA_WAKE_RECORD_CMD:-}" ]; then
-      bad "KIRRA_WAKE_ENABLED is on but KIRRA_WAKE_RECORD_CMD unset"; fix 'set it with an EXPLICIT device, e.g. "arecord -D plughw:CARD=Device,DEV=0 -f S16_LE -r 16000 -c 1 -t raw" (arecord -l for the card name) — §0'
+      # Unset = the DEFAULT backend: pulse_capture.sh through the session sound
+      # server, which needs an explicit KIRRA_PULSE_SOURCE (wake_word.py's
+      # resolver refuses to guess a microphone — mirror that here).
+      pulse_backend_check "wake mic"
     else
       wrb="$(first_tok "$KIRRA_WAKE_RECORD_CMD")"
       if [ -z "$wrb" ]; then
@@ -314,6 +335,10 @@ sys.exit(0 if parse_phrases(os.environ.get('KIRRA_WAKE_PHRASES', DEFAULT_PHRASES
                 bad "wake mic device NOT in arecord -l (card drifted?): -D $wmic"; fix "arecord -l → update KIRRA_WAKE_RECORD_CMD -D plughw:CARD=<name>,DEV=0 — §0"
               fi
             fi
+            ;;
+          pulse_capture.sh|parec)
+            # The session-sound-server backend: validate the explicit source.
+            pulse_backend_check "wake mic"
             ;;
           *)
             # A custom capture backend has its own device convention; imposing
