@@ -34,12 +34,17 @@ After=ollama.service
 [Service]
 Type=simple
 ExecStart=/opt/kirra/mick_chat_service
-Environment=KIRRA_MICK_CHAT_ADDR=127.0.0.1:8103
 # Ollama endpoint (default http://localhost:11434) plus the chat-specific
 # knobs (KIRRA_MICK_CHAT_MODEL default gemma3:4b, KIRRA_MICK_CHAT_HISTORY_TURNS
 # default 6, KIRRA_MICK_CHAT_MAX_CHARS default 1000) come from the shared env
 # file. '-' makes it non-fatal if absent.
 EnvironmentFile=-/etc/kirra/kirra.env
+# Bind address AFTER the env file so the unit's loopback default WINS — a
+# stray addr line in kirra.env cannot silently widen the bind (systemd takes
+# the last assignment). Changing it requires a deliberate drop-in, and the
+# binary's bind policy still refuses non-loopback without
+# KIRRA_SIDECAR_ALLOW_NONLOCAL=1.
+Environment=KIRRA_MICK_CHAT_ADDR=127.0.0.1:8103
 Restart=always
 RestartSec=3
 # Least privilege (the sidecar convention).

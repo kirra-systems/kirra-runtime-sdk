@@ -80,12 +80,18 @@ fn chat_sources_never_reference_intent_or_actuation_machinery() {
 fn chat_binary_does_not_mention_the_intent_routes() {
     // The chat binary must not even name the motion endpoints, so a future
     // "convenient" fallback from chat to /intent shows up as a fence break.
+    // Only PURE comment lines are skipped — splitting on "//" would also
+    // strip string literals like "http://…/intent" and let a fallback URL
+    // slip past the fence (review: Copilot on #1283).
     let bin = include_str!("../src/bin/mick_chat_service.rs");
     for line in bin.lines() {
-        let code = line.split("//").next().unwrap_or("");
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue; // doc/comment line — commentary may explain the fence
+        }
         assert!(
-            !code.contains("/intent"),
-            "chat binary carries an /intent route outside comments: {line:?}"
+            !line.contains("/intent"),
+            "chat binary carries an /intent reference in code: {line:?}"
         );
     }
 }

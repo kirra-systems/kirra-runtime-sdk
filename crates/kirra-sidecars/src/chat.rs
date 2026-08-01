@@ -109,9 +109,15 @@ impl Default for ChatConfig {
     }
 }
 
+/// Hard ceilings on the configurable bounds, so a misconfiguration cannot
+/// defeat the "bounded" guarantees (out-of-range values ABORT startup, the
+/// same fail-closed posture as malformed ones).
+pub const CHAT_MAX_INPUT_CHARS_CEILING: usize = 8_192;
+pub const CHAT_HISTORY_TURNS_CEILING: usize = 32;
+
 impl ChatConfig {
-    /// Read from the environment, fail-closed: present-but-malformed values
-    /// are an `Err` for the binary to abort on.
+    /// Read from the environment, fail-closed: present-but-malformed OR
+    /// out-of-range values are an `Err` for the binary to abort on.
     pub fn from_env() -> Result<Self, String> {
         let mut cfg = Self::default();
         if let Ok(v) = std::env::var("KIRRA_MICK_CHAT_MAX_CHARS") {
@@ -119,14 +125,26 @@ impl ChatConfig {
                 .trim()
                 .parse::<usize>()
                 .ok()
-                .filter(|n| *n > 0)
-                .ok_or_else(|| format!("KIRRA_MICK_CHAT_MAX_CHARS malformed: {v:?}"))?;
+                .filter(|n| *n > 0 && *n <= CHAT_MAX_INPUT_CHARS_CEILING)
+                .ok_or_else(|| {
+                    format!(
+                        "KIRRA_MICK_CHAT_MAX_CHARS malformed or out of range \
+                         (1..={CHAT_MAX_INPUT_CHARS_CEILING}): {v:?}"
+                    )
+                })?;
         }
         if let Ok(v) = std::env::var("KIRRA_MICK_CHAT_HISTORY_TURNS") {
             cfg.history_turns = v
                 .trim()
                 .parse::<usize>()
-                .map_err(|_| format!("KIRRA_MICK_CHAT_HISTORY_TURNS malformed: {v:?}"))?;
+                .ok()
+                .filter(|n| *n <= CHAT_HISTORY_TURNS_CEILING)
+                .ok_or_else(|| {
+                    format!(
+                        "KIRRA_MICK_CHAT_HISTORY_TURNS malformed or out of range \
+                         (0..={CHAT_HISTORY_TURNS_CEILING}): {v:?}"
+                    )
+                })?;
         }
         Ok(cfg)
     }
