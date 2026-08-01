@@ -411,7 +411,7 @@ def diagnose_env_access(probes: dict) -> tuple:
     Returns (status, detail, fix) for Report.add.
     """
     user = probes.get("unit_user") or ""
-    helper = "sudo robot/install/ensure_voice_env_access.sh"
+    helper = f"sudo {acl_helper_path()}"
     if not user:
         return (WARN, "cannot determine the deployment user (unit User= "
                 "unreadable) — user-unit env access not verified",
@@ -434,6 +434,23 @@ def diagnose_env_access(probes: dict) -> tuple:
                 f"{ROBOT_ENV} (file mode/ACL)", fix)
     return (PASS, f"'{user}' can read {ROBOT_ENV} (traverse + read verified "
             "as that user)", None)
+
+
+def acl_helper_path() -> str:
+    """The repair helper's path FROM WHERE THIS VERIFIER RUNS.
+
+    The verifier runs from the installed /opt/kirra/robot tree on a robot
+    with no checkout — a repo-relative hint would be a dead end there. The
+    helper is a sibling in the staged tree and lives in this same directory
+    in a checkout; fall back to the repo-relative form only when neither
+    copy is present (fresh clone before install).
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (os.path.join(here, "ensure_voice_env_access.sh"),
+                 "/opt/kirra/robot/ensure_voice_env_access.sh"):
+        if os.access(cand, os.X_OK):
+            return cand
+    return "robot/install/ensure_voice_env_access.sh"
 
 
 def probe_env_access(user: str) -> dict:

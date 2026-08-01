@@ -84,15 +84,25 @@ if [ -r "$RENV" ]; then
   set -a; . "$RENV"; set +a
 else
   RDIR="$(dirname "$RENV")"
+  # The repair helper lives beside this doctor when STAGED (/opt/kirra/robot),
+  # under install/ in a repo checkout — name the copy that actually exists so
+  # the hint is runnable from either context.
+  if [ -x "$HERE/ensure_voice_env_access.sh" ]; then
+    ACL_HELPER="$HERE/ensure_voice_env_access.sh"
+  elif [ -x "$HERE/install/ensure_voice_env_access.sh" ]; then
+    ACL_HELPER="$HERE/install/ensure_voice_env_access.sh"
+  else
+    ACL_HELPER="robot/install/ensure_voice_env_access.sh (from a repo checkout)"
+  fi
   if [ ! -x "$RDIR" ]; then
     bad "$(id -un) cannot traverse $RDIR — the user voice unit fails before ExecStart (Result=resources)"
-    fix "sudo robot/install/ensure_voice_env_access.sh --user $(id -un)   # traverse-only ACL, no chmod"
+    fix "sudo $ACL_HELPER --user $(id -un)   # traverse-only ACL, no chmod"
   elif [ ! -e "$RENV" ]; then
     bad "robot.env missing ($RENV)"
     fix "robot/install/install_kirra.sh renders it if absent — R2_VOICE_AUDIO_SETUP.md §4"
   else
     bad "robot.env exists but $(id -un) cannot READ it ($RENV)"
-    fix "sudo robot/install/ensure_voice_env_access.sh --user $(id -un)   # read-only file ACL"
+    fix "sudo $ACL_HELPER --user $(id -un)   # read-only file ACL"
   fi
 fi
 

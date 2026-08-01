@@ -59,6 +59,22 @@ fail() { echo "❌ $*" >&2; exit 1; }
 id -u "$TARGET_USER" >/dev/null 2>&1 \
   || fail "service user '$TARGET_USER' does not exist — refusing to grant access to a phantom account"
 
+# Guardrails on the grant TARGET (this runs under sudo — a typo'd --file must
+# not quietly grant read on a secret like kirra.env): the file must be named
+# robot.env, and it must live directly inside --dir. Pure bash expansions
+# (no basename/dirname) so the missing-acl-tools error path stays reachable
+# even on a minimal PATH.
+_file_name="${FILE##*/}"
+_file_parent="${FILE%/*}"; [[ "$_file_parent" == "$FILE" ]] && _file_parent="."
+[[ "$_file_name" == "robot.env" ]] \
+  || fail "refusing --file '$FILE': this helper grants access to robot.env ONLY (never another file — kirra.env holds governor secrets)"
+if [[ -d "$DIR" && -d "$_file_parent" ]]; then
+  _dir_real="$(cd "$DIR" && pwd)"
+  _file_dir_real="$(cd "$_file_parent" && pwd)"
+  [[ "$_file_dir_real" == "$_dir_real" ]] \
+    || fail "refusing: --file '$FILE' is not directly inside --dir '$DIR' (traverse grant and read grant must target the same directory)"
+fi
+
 # Diagnosis helper: can TARGET_USER actually read FILE? Runs the check AS the
 # target user when we are root (the honest test); as ourselves when we ARE the
 # target; otherwise reports that it cannot prove it either way.

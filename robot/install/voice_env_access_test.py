@@ -200,11 +200,27 @@ def test_fail_closed_paths():
         check("zz_no_such_user_9" in r.stderr + r.stdout,
               "unknown-user error must name the account")
 
-        missing = d / "nope.env"
-        r = _run_helper(d, missing)
+        empty = Path(t) / "empty-kirra"
+        empty.mkdir()
+        r = _run_helper(empty, empty / "robot.env")
         check(r.returncode != 0, "missing env file must fail closed")
         check("install_kirra.sh" in r.stderr + r.stdout,
               "missing-file error must say what renders it")
+
+        # Guardrails (the helper runs under sudo — a typo must not grant
+        # access to a secret): only a file NAMED robot.env, directly under
+        # the granted directory, is ever a valid target.
+        r = _run_helper(d, d / "kirra.env")
+        check(r.returncode != 0, "a non-robot.env target must be refused")
+        check("robot.env ONLY" in r.stderr + r.stdout,
+              f"secret-target refusal must state the rule: {r.stderr}")
+        outside = Path(t) / "robot.env"
+        outside.write_text("X=1\n")
+        r = _run_helper(d, outside)
+        check(r.returncode != 0,
+              "a robot.env OUTSIDE the granted directory must be refused")
+        check("not directly inside" in r.stderr + r.stdout,
+              f"mismatched-parent refusal must say so: {r.stderr}")
 
         # setfacl absent: a stub PATH with the tools the script needs BEFORE
         # the acl check (id), but no setfacl/getfacl.
@@ -269,6 +285,12 @@ def test_installer_wires_the_helper():
     check("ensure_voice_env_access.sh" in src,
           "install_robot_units.sh must grant user-unit env access when staging "
           "the user unit")
+    check("/opt/kirra" in src.split("ensure_voice_env_access.sh")[1][:200]
+          or "${OPT}/robot/ensure_voice_env_access.sh" in src,
+          "the helper must be STAGED so repair hints work without a checkout")
+    check("if ! sudo" in src,
+          "a helper failure must be a loud warning, not abort the whole "
+          "staging (set -e)")
     check("chmod 755 /etc/kirra" not in src and "chmod -R" not in src,
           "the installer must not broaden /etc/kirra")
     helper_src = HELPER.read_text()
