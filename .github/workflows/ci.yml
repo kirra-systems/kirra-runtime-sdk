@@ -1505,6 +1505,12 @@ jobs:
           # `$KIRRA_RECORD_CMD "$wav"` contract, and gates the linter's new
           # unquoted-multi-word check + --fix requoting.
           python3 robot/install/env_quoting_test.py
+          # mick_chat.py terminal client (host, stub HTTP server — no Ollama):
+          # success/malformed/timeout/4xx-5xx/EOF paths, the service error
+          # token surfaced, and the SEPARATION proofs — only /chat is ever
+          # contacted and the motion endpoint is unreferenced in the client
+          # source (no fallback to the motion door can exist).
+          python3 robot/mick_chat_test.py
           # Turn-state re-arm gate (Slice R, pure, no audio): the cross-process
           # "turn in progress" signal (fail-safe parse, active/done round-trip,
           # seq monotonicity) and the bounded rearm_decision that fixes the wake

@@ -11,11 +11,37 @@ typed-intent** sidecar (`:8102`).
 | `kirra-planner.service` | `planner_service` (Occy `POST /plan`) | 8100 | no |
 | `kirra-taj.service` | `taj_service` (Taj `POST /perception` — the cmd_vel cap) | 8101 | no |
 | `kirra-mick.service` | `mick_service` (Mick `POST /intent` — typed text → typed intent; never a command) | 8102 | optional (narrator auditor token) |
+| `kirra-mick-chat.service` | `mick_chat_service` (Mick `POST /chat` — conversation only, NO motion authority) | 8103 | no |
 | `kirra.target` | groups the stack for one-command lifecycle | — | — |
 
-The three sidecar binaries ship from the `kirra-sidecars` crate and are FENCED:
+The sidecar binaries ship from the `kirra-sidecars` crate and are FENCED:
 `ci/check_mick_actuation_fence.py` fails the build if any of them gains a
 dependency route to actuation (release-token mint, serial consumer, ROS/DDS).
+
+### `/chat` vs `/intent` — the two Mick doors
+
+```
+/chat   (:8103)  conversation only — plain text out, no motion authority,
+                 no intent state; a motion-shaped model reply is replaced
+                 with a routing explanation, never passed through
+/intent (:8102)  motion-intent classification only — typed, fail-closed,
+                 governed downstream (Occy grounds, KIRRA bounds, the
+                 verifying consumer enforces)
+```
+
+Casual conversation goes to `/chat`; it structurally cannot produce an
+intent (`crates/kirra-sidecars/tests/mick_chat_separation.rs` is the fence).
+Chat has **no live robot state** — posture/sensors/diagnostics are known only
+if the caller pastes them into the request text; the prompt forbids inventing
+nominal status. Terminal use:
+
+```bash
+python3 robot/mick_chat.py            # interactive: You: … / Mick: …
+# or one shot:
+curl -sS -X POST http://127.0.0.1:8103/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"How are you?"}' | python3 -m json.tool
+```
 
 ## Install
 

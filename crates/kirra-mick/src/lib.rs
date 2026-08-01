@@ -150,6 +150,125 @@ impl ModelClient for OllamaClient {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Conversational transport — deliberately SEPARATE from the motion path.
+// ---------------------------------------------------------------------------
+
+/// Default model id for the conversational endpoint (override with
+/// `KIRRA_MICK_CHAT_MODEL`). Deliberately its own variable: the chat model can
+/// be swapped without touching the motion model pin, and vice versa.
+pub const DEFAULT_CHAT_MODEL: &str = "gemma3:4b";
+
+/// One message in an Ollama `/api/chat` conversation.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatWireMessage {
+    /// `system` | `user` | `assistant`.
+    pub role: &'static str,
+    pub content: String,
+}
+
+/// Ollama `/api/chat` request (non-streaming).
+#[derive(Serialize)]
+struct ChatRequestWire<'a> {
+    model: &'a str,
+    stream: bool,
+    messages: &'a [ChatWireMessage],
+}
+
+#[derive(Deserialize)]
+struct ChatResponseWire {
+    message: ChatResponseMessage,
+}
+
+#[derive(Deserialize)]
+struct ChatResponseMessage {
+    content: String,
+}
+
+/// Plain conversational Ollama transport for the `mick_chat_service` sidecar.
+///
+/// **NOT a [`ModelClient`], on purpose.** The motion transport
+/// ([`OllamaClient`]) schema-constrains decoding to the typed-intent grammar —
+/// exactly what a conversational reply must NOT be constrained to. Rather than
+/// weaken or overload that abstraction, chat gets its own type and its own
+/// wire shape (`/api/chat`, a messages array, **no `format` field**): free
+/// text out, nothing downstream to parse it into an intent.
+///
+/// Same fail-closed posture as the motion transport: connection refused /
+/// timeout / non-200 / undecodable / empty all collapse to a stable error
+/// token, and the caller returns a chat error — never a fabricated reply.
+pub struct OllamaChatClient {
+    base_url: String,
+    model: String,
+    http: reqwest::blocking::Client,
+}
+
+impl OllamaChatClient {
+    /// Construct from the environment: `KIRRA_OLLAMA_URL` (default
+    /// [`DEFAULT_OLLAMA_URL`] — shared with the motion transport, one Ollama)
+    /// and `KIRRA_MICK_CHAT_MODEL` (default [`DEFAULT_CHAT_MODEL`]).
+    #[must_use]
+    pub fn new() -> Self {
+        let base_url =
+            std::env::var("KIRRA_OLLAMA_URL").unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
+        let model = std::env::var("KIRRA_MICK_CHAT_MODEL")
+            .unwrap_or_else(|_| DEFAULT_CHAT_MODEL.to_string());
+        Self::with(base_url, model)
+    }
+
+    /// Construct with an explicit base URL + model id.
+    #[must_use]
+    pub fn with(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        let http = reqwest::blocking::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        Self {
+            base_url: base_url.into(),
+            model: model.into(),
+            http,
+        }
+    }
+
+    /// The configured model id.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// One non-streaming conversational completion over the supplied message
+    /// list (system prompt + bounded history + the user turn — composed by the
+    /// caller; this transport adds nothing and constrains nothing).
+    pub fn chat_completion(&self, messages: &[ChatWireMessage]) -> Result<String, &'static str> {
+        let url = format!("{}/api/chat", self.base_url);
+        let body = ChatRequestWire {
+            model: &self.model,
+            stream: false,
+            messages,
+        };
+        let resp = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .map_err(|_| "MICK_CHAT_OLLAMA_REQUEST_FAILED")?;
+        if !resp.status().is_success() {
+            return Err("MICK_CHAT_OLLAMA_HTTP_STATUS");
+        }
+        let parsed: ChatResponseWire = resp.json().map_err(|_| "MICK_CHAT_OLLAMA_DECODE_FAILED")?;
+        if parsed.message.content.trim().is_empty() {
+            return Err("MICK_CHAT_OLLAMA_EMPTY_COMPLETION");
+        }
+        Ok(parsed.message.content)
+    }
+}
+
+impl Default for OllamaChatClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +334,55 @@ mod tests {
             tags.iter().any(|t| t == "pull_over") && tags.iter().any(|t| t == "go_to"),
             "the constrained tag set is carried on the wire"
         );
+    }
+
+    // --- the conversational transport ---------------------------------------
+
+    /// CI-safe: an unreachable Ollama fails the chat transport closed with a
+    /// stable token — never a fabricated reply.
+    #[test]
+    fn unreachable_ollama_fails_chat_closed() {
+        let client = OllamaChatClient::with("http://127.0.0.1:1", DEFAULT_CHAT_MODEL);
+        let messages = [ChatWireMessage {
+            role: "user",
+            content: "hello".to_string(),
+        }];
+        assert_eq!(
+            client.chat_completion(&messages),
+            Err("MICK_CHAT_OLLAMA_REQUEST_FAILED")
+        );
+    }
+
+    /// The chat wire shape is `/api/chat` messages with NO `format` field —
+    /// the motion path's schema-constrained decoding must never leak into the
+    /// conversational path (a chat grammar-locked to intent JSON would be the
+    /// exact live failure this service exists to end). CI-safe: serializes the
+    /// body and inspects the wire, no network.
+    #[test]
+    fn chat_request_carries_messages_and_no_format_constraint() {
+        let messages = [
+            ChatWireMessage {
+                role: "system",
+                content: "you are conversational".to_string(),
+            },
+            ChatWireMessage {
+                role: "user",
+                content: "hi".to_string(),
+            },
+        ];
+        let body = ChatRequestWire {
+            model: "gemma3:4b",
+            stream: false,
+            messages: &messages,
+        };
+        let wire: serde_json::Value = serde_json::to_value(&body).expect("body serializes");
+        assert!(
+            wire.get("format").is_none(),
+            "chat must NOT schema-constrain decoding: {wire}"
+        );
+        assert_eq!(wire["stream"], false);
+        assert_eq!(wire["messages"][0]["role"], "system");
+        assert_eq!(wire["messages"][1]["role"], "user");
     }
 
     /// Live round-trip — requires `ollama pull gemma3:4b` and a running server. Ignored in
