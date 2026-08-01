@@ -1,0 +1,58 @@
+# deploy/systemd/kirra-mick-chat.service
+#
+# systemd unit for the Mick CONVERSATIONAL sidecar (the kirra-sidecars
+# `mick_chat_service` binary): plain text in (POST /chat), plain conversational
+# text out. NO motion authority — no intents, no latch, no downstream
+# consumer; a motion-shaped model reply is replaced with a routing explanation
+# server-side. The separation:
+#
+#   /chat    (this unit, :8103)      conversation only, no motion authority
+#   /intent  (kirra-mick.service, :8102)  motion-intent classification only,
+#                                          governed downstream
+#
+# FENCED with the other Mick binaries: no dependency route to actuation
+# (ci/check_mick_actuation_fence.py + the finer chat source fence in
+# crates/kirra-sidecars/tests/mick_chat_separation.rs). Chat has NO live robot
+# state — posture/sensors/diagnostics are only known if the caller includes
+# them in the request text. Requires a local Ollama; without one every request
+# fails closed (502 MICK_CHAT_MODEL_ERROR, never a fabricated reply).
+#
+# Companion to kirra-mick; install/enable via deploy/systemd/install.sh.
+
+[Unit]
+Description=Kirra Mick chat sidecar (POST /chat — conversation only, no motion authority)
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+After=network-online.target
+Wants=network-online.target
+PartOf=kirra.target
+# Same Wants+After (never Requires/BindsTo) rationale as kirra-mick.service:
+# ordering is not readiness, and a briefly-away Ollama must degrade to
+# fail-closed chat errors, not take the service down.
+Wants=ollama.service
+After=ollama.service
+
+[Service]
+Type=simple
+ExecStart=/opt/kirra/mick_chat_service
+Environment=KIRRA_MICK_CHAT_ADDR=127.0.0.1:8103
+# Ollama endpoint (default http://localhost:11434) plus the chat-specific
+# knobs (KIRRA_MICK_CHAT_MODEL default gemma3:4b, KIRRA_MICK_CHAT_HISTORY_TURNS
+# default 6, KIRRA_MICK_CHAT_MAX_CHARS default 1000) come from the shared env
+# file. '-' makes it non-fatal if absent.
+EnvironmentFile=-/etc/kirra/kirra.env
+Restart=always
+RestartSec=3
+# Least privilege (the sidecar convention).
+User=kirra
+Group=kirra
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

@@ -43,6 +43,7 @@ declare -A SRC=(
   [planner_service]="$REL/planner_service"
   [taj_service]="$REL/taj_service"
   [mick_service]="$REL/mick_service"
+  [mick_chat_service]="$REL/mick_chat_service"
 )
 for name in "${!SRC[@]}"; do
   [[ -x "${SRC[$name]}" ]] || {
@@ -87,6 +88,7 @@ install -m 0644 "$UNITS/kirra-verifier.service" /etc/systemd/system/kirra-verifi
 install -m 0644 "$UNITS/kirra-planner.service"  /etc/systemd/system/kirra-planner.service
 install -m 0644 "$UNITS/kirra-taj.service"      /etc/systemd/system/kirra-taj.service
 install -m 0644 "$UNITS/kirra-mick.service"     /etc/systemd/system/kirra-mick.service
+install -m 0644 "$UNITS/kirra-mick-chat.service" /etc/systemd/system/kirra-mick-chat.service
 install -m 0644 "$UNITS/kirra.target"           /etc/systemd/system/kirra.target
 # Make kirra.target own the verifier too, without editing the committed unit.
 dropin=/etc/systemd/system/kirra-verifier.service.d
@@ -99,10 +101,10 @@ echo "  installed 5 units + PartOf drop-in"
 
 echo "== 5. enable + start =="
 systemctl daemon-reload
-systemctl enable kirra.target kirra-verifier.service kirra-planner.service kirra-taj.service kirra-mick.service >/dev/null
+systemctl enable kirra.target kirra-verifier.service kirra-planner.service kirra-taj.service kirra-mick.service kirra-mick-chat.service >/dev/null
 systemctl restart kirra.target
 echo
 echo "done — the Kirra stack is enabled on boot."
-echo "  status:  systemctl status kirra.target kirra-verifier kirra-planner kirra-taj kirra-mick"
+echo "  status:  systemctl status kirra.target kirra-verifier kirra-planner kirra-taj kirra-mick kirra-mick-chat"
 echo "  logs:    journalctl -u kirra-verifier -f"
-echo "  stack:   verifier :8090  ·  planner :8100  ·  taj :8101  ·  mick :8102"
+echo "  stack:   verifier :8090  ·  planner :8100  ·  taj :8101  ·  mick :8102  ·  chat :8103"

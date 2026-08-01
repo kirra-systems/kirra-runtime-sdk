@@ -10,10 +10,12 @@ set -euo pipefail
 PURGE=0
 [[ "${1:-}" == "--purge" ]] && PURGE=1
 
-systemctl disable --now kirra.target kirra-verifier.service kirra-planner.service kirra-taj.service 2>/dev/null || true
+systemctl disable --now kirra.target kirra-verifier.service kirra-planner.service kirra-taj.service kirra-mick.service kirra-mick-chat.service 2>/dev/null || true
 rm -f /etc/systemd/system/kirra-verifier.service \
       /etc/systemd/system/kirra-planner.service \
       /etc/systemd/system/kirra-taj.service \
+      /etc/systemd/system/kirra-mick.service \
+      /etc/systemd/system/kirra-mick-chat.service \
       /etc/systemd/system/kirra.target
 rm -rf /etc/systemd/system/kirra-verifier.service.d
 rm -rf /opt/kirra
