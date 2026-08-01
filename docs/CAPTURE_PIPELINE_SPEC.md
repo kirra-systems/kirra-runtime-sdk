@@ -163,15 +163,28 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > proof — 67 min exceeds the 45-min per-PR budget — so the reduction this re-pin
 > records is real, just far smaller than the suspension above described.
 >
-> **STILL SUSPENDED — K8 and R2 only.** Both timed out at the full isolated
-> 300-minute budget in that same run, with no competition for the job. That is
-> much stronger evidence than the earlier shared-lane observations, because the
-> old explanation (starvation) is now excluded. It is NOT a finding of
-> intractability, and must not be written up as one until each has been profiled
-> to show where the time goes — symbolic execution, propositional conversion, or
-> the solver. K3 is precisely why that bar exists. K7, by contrast, WAS profiled
-> and IS demoted (#1268): it stalls in conversion in multi-property mode and is
-> solver-hard when isolated, so more budget is not a credible remedy for it.
+> **K8 — PROFILED AND DEMOTED (#1260).** It met the bar this note set: not the
+> 300-minute timeout, but a phase diagnosis. The full harness completes three
+> solves (101 s) then enters a fourth propositional conversion that never
+> reaches a solver — 43 of 45 minutes. Isolated to its ONE real assertion, with
+> 373 of 374 properties discarded, the CNF moves 0.54% (848,226 → 843,634), so
+> the property set is not the cost; conversion then completes in 1.0 s, the
+> solver IS reached, and returns nothing at 40 minutes. That is K7's signature
+> exactly — conversion-pathological in multi-property mode AND solver-hard
+> underneath — so more budget is not a credible remedy. Its 2,880-point
+> physical-dt grid is unchanged and still blocking, and it asserts the
+> ACCELERATION-space form the proof abandoned, so no coverage was lost.
+>
+> **R2 — STILL RESTRICTED, and deliberately NOT demoted with K8.** It is the one
+> harness that never stalls in conversion: it reaches the solver and stays
+> there, on a formula 4× smaller (2,227 program-expression steps and 74 VCCs,
+> against ~8,900 and ~400). Its expensive solve is the SECOND — the UNSAT
+> direction, after a cheap 36 s SAT — which is the ordinary shape of a hard but
+> not impossible instance. That makes it a solver question, not a modelling one,
+> and it has a live answer. Whether the solver is progressing or plateauing is
+> not currently observable (CBMC's `--verbosity` does not reach an external
+> solver), so the question is open rather than assumed, and R2 keeps its place
+> until it is answered.
 >
 > Independent approval: **NOT OBTAINED. This amendment proceeded under a
 > RECORDED EXCEPTION** to the separation-of-duties control, per

@@ -84,7 +84,6 @@ out = subprocess.run([sys.executable, str(CI / "deep_harnesses.py")],
 check(out.returncode == 0, f"script exits 0 (got {out.returncode}: {out.stderr.strip()[:120]})")
 names = out.stdout.strip()
 for expected in ("k3_speed_ceiling_clamp_exact",
-                 "k8_executable_return_respects_the_rate_bound",
                  "r2_longitudinal_monotone_in_closing_speed_on_grid"):
     check(expected in names, f"{expected} is in the matrix")
 for helper_name in ("grid_speed", "grid_param"):
@@ -98,6 +97,14 @@ for helper_name in ("grid_speed", "grid_param"):
 # Its per-PR enforcement is the 306,180-point grid, which is unaffected.
 check("k7_executable_return_respects_the_rack_limit" not in names,
       "K7 is NOT in the weekly matrix — demoted out of the proof tier (#1268)")
+check("k8_executable_return_respects_the_rate_bound" not in names,
+      "K8 is NOT in the weekly matrix — demoted out of the proof tier (#1260)")
+# R2 must STAY. It is the one harness that fails purely solver-side (it reaches
+# the solver rather than stalling in conversion) on a formula 4x smaller, so it
+# is a budget/solver question with a live answer — not a modelling one. Pinned
+# positively so a future sweep cannot demote it alongside its neighbours.
+check("r2_longitudinal_monotone_in_closing_speed_on_grid" in names,
+      "R2 REMAINS in the weekly matrix — solver-bound, not diagnosed intractable")
 check("outside-proof-envelope" in (CI.parent / "verification" / "kani"
                                    / "Cargo.toml").read_text(encoding="utf-8"),
       "the outside-proof-envelope feature still exists to hold K7's source")

@@ -53,9 +53,15 @@ unstable = { stubbing = true }
 # harness is per-PR-blocking by default unless it is explicitly demoted here,
 # so the deep lane can never silently absorb the whole proof set.
 #
-# Members: R2 (RSS full-lattice monotonicity), K8 (the rate bound, #1243) and
-# K3 (SG1, demoted by #1243). K7 WAS a member and is no longer — see the
-# `outside-proof-envelope` feature below.
+# Members: R2 (RSS full-lattice monotonicity) and K3 (SG1). K7 and K8 WERE
+# members and are no longer — both demoted out of the proof tier on phase
+# diagnoses; see the `outside-proof-envelope` feature below.
+#
+# K3 is here because it EARNED its place, not because it is slow: it discharges
+# in 67 m 13 s (`0 of 310 failed`), which exceeds the 45-min per-PR budget but
+# is a genuine weekly proof. It was briefly demoted on a 15-minute non-result
+# and that inference was wrong — the standing lesson is that a timeout is a
+# lower bound on cost, never evidence of intractability.
 #
 # K3 IS NOT ROUTINE LANE MANAGEMENT. It is an ASSURANCE CHANGE: SG1 lost its
 # per-PR symbolic proof because #1243 made the true property relational, and
@@ -83,7 +89,20 @@ deep-proofs = []
 # `ci/deep_harnesses.py` matches only `deep-proofs`, so nothing here can reach
 # the weekly matrix, and `ci/test_deep_harnesses.py` pins that.
 #
-# Member: K7 (P-RACK). Do not re-add it to `deep-proofs` on the theory that a
+# Members: K7 (P-RACK) and K8 (the rate bound). Both were diagnosed by the same
+# two-part experiment and fail the same two ways: the full harness stalls in
+# CBMC's propositional conversion without reaching a solver, and when isolated
+# to its real assertion(s) the harness converts fine but the SOLVER returns
+# nothing. Dropping ~99.5% of the properties moves the CNF by under 1% in both
+# (K7 738,811 -> 735,393; K8 848,226 -> 843,634), so the pointer-dereference
+# checks are not the cost — the program encoding is.
+#
+# R2 is deliberately NOT here. It never stalls in conversion; it reaches the
+# solver and stays there, on a formula 4x smaller (2,227 program-expression
+# steps vs ~8,900). That is a solver question with a live answer, not a
+# modelling one.
+#
+# Do not re-add either to `deep-proofs` on the theory that a
 # larger runner or a longer timeout would finish it. That theory was tested and
 # refuted: isolating K7's two real assertions (discarding 368 of 370 properties)
 # shrank the CNF by 0.5% — 738,811 → 735,393 clauses — proving the property set
