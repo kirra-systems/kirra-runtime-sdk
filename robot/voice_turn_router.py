@@ -51,6 +51,8 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mick_voice_chat  # noqa: E402 — the shared streaming chat turn runner
+import turn_state  # noqa: E402 — Slice R "turn in progress" signal for the wake re-arm
+import voice_playback  # noqa: E402 — wake-listener suppression while speaking
 from voice_route import RouteKind, classify_transcript  # noqa: E402
 
 DEFAULT_INTENT_URL = "http://127.0.0.1:8102"
@@ -92,14 +94,20 @@ def timeout_s() -> float:
 
 
 def speak_line(line: str, tts_cmd: str | None) -> None:
-    """One fixed sentence through ONE bounded TTS process. Also printed, so
-    a speakerless bench run still shows the outcome."""
+    """One fixed sentence through ONE bounded TTS process, under the playback
+    guard (start → drain → process wait → cooldown), so a motion ack, an
+    ambiguity clarification or an error line can never be heard by the wake
+    listener as operator speech. Also printed, so a speakerless bench run
+    still shows the outcome. Barge-in is intentionally NOT wired here: RMS
+    alone cannot tell the operator from the speaker, so during robot speech
+    user audio is ignored for turn creation (documented limitation)."""
     print(f"Mick: {line}")
     if not tts_cmd:
         return
-    tts = mick_voice_chat.TtsPipe(tts_cmd)
-    tts.say(line)
-    tts.close()
+    with voice_playback.PlaybackGuard():
+        tts = mick_voice_chat.TtsPipe(tts_cmd)
+        tts.say(line)
+        tts.close()
 
 
 def post_intent(text: str, turn: int) -> tuple[str, float]:
@@ -183,10 +191,23 @@ def main() -> int:
             continue
         turn += 1  # per-turn monotonic local id; transcripts are DISCARDED
         t0 = time.monotonic() * 1000.0
-        handle_turn(text, turn, tts_cmd)
-        log_event(turn, "turn_total_ms", time.monotonic() * 1000.0 - t0)
+        # Slice R for the hybrid path: mark the turn ACTIVE so the wake
+        # listener's re-arm waits for the turn instead of timing out its
+        # grace window mid-reply (the missing signal that let the mic
+        # reopen during playback). mark_done in finally — a crashed turn
+        # must not wedge the listener (its wait is bounded anyway).
+        turn_state.mark_active()
+        try:
+            handle_turn(text, turn, tts_cmd)
+        finally:
+            turn_state.mark_done()
+            log_event(turn, "turn_total_ms", time.monotonic() * 1000.0 - t0)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("voice_turn_router: interrupted", file=sys.stderr)
+        sys.exit(130)

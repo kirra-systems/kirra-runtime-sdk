@@ -122,6 +122,61 @@ KIRRA_VAD_MAX_MS=6000         # HARD ceiling
 KIRRA_VAD_START_TIMEOUT_MS=3000
 ```
 
+### 1b. Playback self-echo suppression — the robot must not hear itself
+
+**The failure this prevents (observed live on the R2, 2026-08):** the hybrid
+router spoke a reply, the wake listener's follow-up mode reopened the mic
+mid-playback, Piper's own output crossed the RMS floor, and
+
+```
+wake_word: follow-up: speech onset — firing without a wake word
+```
+
+repeated during playback — the robot recorded ITSELF (captures ran to the
+VAD ceiling because playback kept energy high), transcribed itself, routed
+the transcript to chat, answered aloud, and re-heard the answer: an
+unbounded self-conversation loop. **RMS-only filtering cannot fix this** —
+the speaker's output at the mic is ordinary loud audio, indistinguishable
+from operator speech by energy alone.
+
+**The mechanism** (`robot/voice_playback.py`): every spoken output — the
+streamed conversational reply, the motion admission ack, error lines, the
+ambiguity clarification, the ack tone — runs under a `PlaybackGuard`: an
+advisory `flock` on `KIRRA_VOICE_PLAYBACK_STATE` (the user unit points it at
+`/run/user/<uid>/kirra-voice-playback`) held for the WHOLE playback
+lifetime: TTS start → all sentence chunks → audio drain → process wait →
+cooldown. `wake_word.py` probes the lock non-blockingly on every audio hop:
+while held, frames are **drained but discarded** — no wake STT, no
+follow-up onset accumulation, no trigger emission, nothing queued for
+later. On release the listener resets its ring/energy accumulators so no
+speaker tail survives the boundary. Because it is a kernel lock, a crashed
+or SIGKILLed TTS process releases it automatically — **suppression can
+never become stale** and permanently deafen the robot.
+
+Tuning:
+
+```bash
+KIRRA_VOICE_PLAYBACK_COOLDOWN_MS=500   # speaker-tail discard after playback (0..3000; invalid → 500)
+KIRRA_VOICE_MAX_FOLLOWUP_TURNS=3       # wake-free follow-ups per episode (0..10; invalid → 3; NO unlimited)
+```
+
+Raise the cooldown if a reverberant room still self-triggers on the tail;
+lower it toward 0 in a dead room for snappier follow-ups. The follow-up cap
+is defense in depth behind the lock: one explicit wake starts an episode,
+at most N wake-free real-operator turns follow (playback consumes nothing),
+then `wake_word: follow-up cap reached; wake required`.
+
+**Barge-in is intentionally DISABLED on this path**: while the robot
+speaks, operator speech is ignored for turn creation, because without
+acoustic echo cancellation there is no reliable way to tell the operator
+from the speaker. Interrupting requires waiting for the reply (or the
+physical e-stop for an emergency — which was never the mic's job). AEC or
+a hardware-loopback reference is future work, deliberately out of scope.
+
+Rollback: `systemctl --user stop mick-voice-router.service && systemctl
+--user start rabbit-voice.service` (the legacy pipeline; the new env keys
+are inert there and need no cleanup).
+
 **Endpoint defaults are Jetson-calibrated (2026-08).** `vad_record.py` ships
 `KIRRA_VAD_RMS_FLOOR=350` and `KIRRA_VAD_SILENCE_MS=600` as its built-in
 defaults, changed from the original `300` / `800 ms` on hardware evidence:

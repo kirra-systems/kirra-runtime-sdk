@@ -39,6 +39,13 @@ Conflicts=rabbit-voice.service
 
 [Service]
 Type=simple
+# Self-echo suppression state (voice_playback.py): the flock the TTS side
+# holds while the robot speaks, probed by wake_word.py so playback can never
+# fire a wake/follow-up trigger. %t = the per-user runtime dir
+# (/run/user/<uid>) — tmpfs, user-writable, wiped at session end; the env
+# file below may override. The kernel drops the lock on process death, so a
+# crash can never leave listening suppressed.
+Environment=KIRRA_VOICE_PLAYBACK_STATE=%t/kirra-voice-playback
 EnvironmentFile=/etc/kirra/robot.env
 WorkingDirectory=/opt/kirra/robot
 # The pipeline script (absolute path) runs wake -> transcribe -> route with

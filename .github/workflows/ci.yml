@@ -1525,6 +1525,16 @@ jobs:
           # Conflicts= exclusion (one mic owner).
           python3 robot/voice_route_test.py
           python3 robot/voice_turn_router_test.py
+          # Playback self-echo suppression (host, flock + subprocess + stub
+          # HTTP — no audio): the robot must not hear its own Piper output
+          # (live R2 failure: follow-up "speech onset" fired on playback →
+          # unbounded self-conversation). Pins the lock lifecycle (crash
+          # auto-release, single owner, reentrancy, cooldown INSIDE the
+          # hold), the pure no-trigger-during-playback invariant + episode
+          # cap, the self-echo regression (one turn → one request → no
+          # second trigger), guard coverage of every spoken router path,
+          # the barge-in fence, and content-free logs.
+          python3 robot/voice_playback_test.py
           # mick_chat.py terminal client (host, stub HTTP server — no Ollama):
           # success/malformed/timeout/4xx-5xx/EOF paths, the service error
           # token surfaced, and the SEPARATION proofs — only /chat is ever
