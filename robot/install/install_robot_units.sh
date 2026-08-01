@@ -49,7 +49,8 @@ for f in rabbit_persona.py rabbit_watch.py rabbit_ask.py rabbit_converse.py rabb
          rabbit_latency.py rabbit_stream.py rabbit_tone.py repo_command.py \
          rabbit_model_smoketest.py assistant.py assistant_admission.py \
          assistant_contract.py assistant_report.py assistant_tools.py \
-         mick_chat.py; do
+         mick_chat.py mick_voice_chat.py mick_chat_benchmark.py \
+         mick_voice_benchmark.py; do
   [[ -f "${REPO}/robot/${f}" ]] || { echo "  ⚠ missing ${REPO}/robot/${f} — skipped"; continue; }
   sudo install -m 0755 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
   echo "  installed ${OPT}/robot/${f}"

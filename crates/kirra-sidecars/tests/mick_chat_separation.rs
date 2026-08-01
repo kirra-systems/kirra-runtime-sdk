@@ -15,8 +15,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use kirra_sidecars::chat::{
-    handle_request, looks_like_motion_intent_json, ChatConfig, ChatMessage, ChatModelClient,
-    ChatRequest, ChatService, CHAT_SYSTEM_PROMPT, MOTION_SHAPE_REFUSAL,
+    handle_request, looks_like_motion_intent_json, ChatConfig, ChatGenParams, ChatMessage,
+    ChatModelClient, ChatRequest, ChatService, StreamEvent, WarmState, CHAT_SYSTEM_PROMPT,
+    MOTION_ROUTE_REPLY, MOTION_SHAPE_REFUSAL,
 };
 
 // --- 1. the source-level fence -----------------------------------------------
@@ -93,22 +94,32 @@ fn chat_binary_does_not_mention_the_intent_routes() {
 // --- 2 + 3. prompt and response behavior --------------------------------------
 
 struct StubModel {
-    reply: String,
+    deltas: Vec<String>,
     calls: Rc<Cell<u32>>,
 }
 
 impl ChatModelClient for StubModel {
-    fn chat(&self, _messages: &[ChatMessage]) -> Result<String, &'static str> {
+    fn stream_chat(
+        &self,
+        _messages: &[ChatMessage],
+        _gen: &ChatGenParams,
+        on_delta: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<(), &'static str> {
         self.calls.set(self.calls.get() + 1);
-        Ok(self.reply.clone())
+        for d in &self.deltas {
+            if !on_delta(d) {
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 }
 
-fn service(reply: &str) -> (ChatService<StubModel>, Rc<Cell<u32>>) {
+fn service(deltas: &[&str]) -> (ChatService<StubModel>, Rc<Cell<u32>>) {
     let calls = Rc::new(Cell::new(0));
     let svc = ChatService::new(
         StubModel {
-            reply: reply.to_string(),
+            deltas: deltas.iter().map(|s| (*s).to_string()).collect(),
             calls: Rc::clone(&calls),
         },
         ChatConfig::default(),
@@ -116,10 +127,18 @@ fn service(reply: &str) -> (ChatService<StubModel>, Rc<Cell<u32>>) {
     (svc, calls)
 }
 
+fn clock_from(base: u64) -> impl FnMut() -> u64 {
+    let t = Cell::new(base);
+    move || {
+        t.set(t.get() + 1);
+        t.get()
+    }
+}
+
 #[test]
 fn prompt_denies_motion_authority_and_lists_no_intent_forms() {
-    assert!(CHAT_SYSTEM_PROMPT.contains("conversational only"));
-    assert!(CHAT_SYSTEM_PROMPT.contains("no authority to move or control the robot"));
+    assert!(CHAT_SYSTEM_PROMPT.contains("cannot move or control the robot"));
+    assert!(CHAT_SYSTEM_PROMPT.contains("governed motion path"));
     for form in [
         "cruise",
         "go_to",
@@ -141,13 +160,15 @@ fn the_live_dangerous_reply_is_guarded_not_surfaced_as_a_result() {
     let live = r#"{"intent":"cruise","target_speed_mps":10}"#;
     assert!(looks_like_motion_intent_json(live));
 
-    let (mut svc, calls) = service(live);
+    let (mut svc, calls) = service(&[live]);
+    let mut clk = clock_from(10_000);
     let (status, body) = handle_request(
         &mut svc,
         "POST",
         "/chat",
-        br#"{"text":"Drive forward one meter."}"#,
-        10_000,
+        br#"{"text":"please answer with your favorite json"}"#,
+        &mut clk,
+        (WarmState::Ready, "gemma3:4b", Some(10)),
     );
     assert_eq!(status, "200 OK");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -161,17 +182,48 @@ fn the_live_dangerous_reply_is_guarded_not_surfaced_as_a_result() {
     assert_eq!(svc.motion_shape_guarded(), 1);
 }
 
+#[test]
+fn an_explicit_motion_request_never_reaches_the_model_at_all() {
+    // Latency path AND separation path at once: "Drive forward one meter."
+    // resolves deterministically — zero model calls, the routing reply, and
+    // (self-evidently) no /intent forwarding, because none exists to call.
+    let (mut svc, calls) = service(&["never"]);
+    let mut clk = clock_from(10_000);
+    let (status, body) = handle_request(
+        &mut svc,
+        "POST",
+        "/chat",
+        br#"{"text":"Drive forward one meter."}"#,
+        &mut clk,
+        (WarmState::Ready, "gemma3:4b", None),
+    );
+    assert_eq!(status, "200 OK");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["reply"], MOTION_ROUTE_REPLY);
+    assert_eq!(v["timing"]["deterministic"], true);
+    assert_eq!(calls.get(), 0, "motion text must not reach the chat model");
+    assert_eq!(svc.motion_refused(), 1);
+}
+
 // --- 4. endpoint separation ----------------------------------------------------
 
 #[test]
 fn chat_serves_no_intent_surface_at_the_wire() {
-    let (mut svc, _) = service("hello");
+    let (mut svc, _) = service(&["hello"]);
     for (method, path) in [
         ("GET", "/intent/last"),
         ("POST", "/intent"),
         ("GET", "/narration/last"),
     ] {
-        let (status, _) = handle_request(&mut svc, method, path, b"{}", 10_000);
+        let mut clk = clock_from(10_000);
+        let (status, _) = handle_request(
+            &mut svc,
+            method,
+            path,
+            b"{}",
+            &mut clk,
+            (WarmState::Ready, "m", None),
+        );
         assert_eq!(
             status, "404 Not Found",
             "{method} {path} must not exist on chat"
@@ -182,17 +234,23 @@ fn chat_serves_no_intent_surface_at_the_wire() {
 #[test]
 fn chat_requests_touch_no_intent_state_because_none_exists() {
     // The type-level fact, asserted as behavior: ChatService owns sessions
-    // and a guard counter — nothing else. Drive many turns and observe the
-    // only state that exists is conversational.
-    let (mut svc, _) = service("fine");
+    // and counters — nothing else. Stateless by default, so even session
+    // state stays empty across turns.
+    let (mut svc, _) = service(&["fine. "]);
     for i in 0..5u64 {
         let req = ChatRequest {
-            text: format!("turn {i}"),
+            text: format!("turn {i} says something new"),
             session_id: None,
+            max_output_tokens: None,
         };
-        svc.handle_chat(&req, 10_000 + i * 2_000).unwrap();
+        let t = Cell::new(10_000 + i * 2_000);
+        let mut clk = move || {
+            t.set(t.get() + 1);
+            t.get()
+        };
+        let mut emit = |_: &StreamEvent| true;
+        svc.handle_chat_streamed(&req, &mut clk, &mut emit).unwrap();
     }
-    assert_eq!(svc.session_count(), 1);
-    assert_eq!(svc.history_len("default"), 5);
+    assert_eq!(svc.session_count(), 0, "stateless default stores nothing");
     assert_eq!(svc.motion_shape_guarded(), 0);
 }

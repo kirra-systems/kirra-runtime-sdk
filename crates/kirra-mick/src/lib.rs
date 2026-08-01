@@ -167,17 +167,44 @@ pub struct ChatWireMessage {
     pub content: String,
 }
 
-/// Ollama `/api/chat` request (non-streaming).
+/// Latency-bearing generation knobs, carried on every chat request.
+///
+/// - `keep_alive` holds the model RESIDENT between requests (Ollama's default
+///   is ~5 minutes → the next turn pays a multi-second cold reload; the same
+///   lever as the Rabbit path's `KIRRA_RABBIT_KEEP_ALIVE`).
+/// - `num_predict` caps output tokens — a spoken reply should be one or two
+///   short sentences, and every un-generated token is latency not spent.
+/// - `temperature` low for consistent, terse conversational replies.
+#[derive(Clone, Debug)]
+pub struct ChatGenOptions {
+    pub keep_alive: String,
+    pub num_predict: u32,
+    pub temperature: f64,
+}
+
+/// Ollama `/api/chat` request.
 #[derive(Serialize)]
 struct ChatRequestWire<'a> {
     model: &'a str,
     stream: bool,
+    keep_alive: &'a str,
+    options: ChatOptionsWire,
     messages: &'a [ChatWireMessage],
 }
 
+#[derive(Serialize)]
+struct ChatOptionsWire {
+    num_predict: u32,
+    temperature: f64,
+}
+
+/// One NDJSON line of a streaming `/api/chat` response.
 #[derive(Deserialize)]
-struct ChatResponseWire {
-    message: ChatResponseMessage,
+struct ChatStreamLine {
+    #[serde(default)]
+    message: Option<ChatResponseMessage>,
+    #[serde(default)]
+    done: bool,
 }
 
 #[derive(Deserialize)]
@@ -236,14 +263,31 @@ impl OllamaChatClient {
         &self.model
     }
 
-    /// One non-streaming conversational completion over the supplied message
-    /// list (system prompt + bounded history + the user turn — composed by the
-    /// caller; this transport adds nothing and constrains nothing).
-    pub fn chat_completion(&self, messages: &[ChatWireMessage]) -> Result<String, &'static str> {
+    /// One STREAMING conversational completion. `on_delta` receives each
+    /// incremental content fragment as it arrives off the wire (NDJSON lines);
+    /// returning `false` CANCELS the generation — the response body is
+    /// dropped, the connection closes, and Ollama aborts the remaining
+    /// decode. Time-to-first-token is whenever the caller's first delta
+    /// lands; this transport adds no buffering of its own.
+    ///
+    /// A completion that streams NOTHING before `done` is an error (an empty
+    /// reply is never fabricated into a turn).
+    pub fn stream_chat(
+        &self,
+        messages: &[ChatWireMessage],
+        gen: &ChatGenOptions,
+        on_delta: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<(), &'static str> {
+        use std::io::{BufRead, BufReader};
         let url = format!("{}/api/chat", self.base_url);
         let body = ChatRequestWire {
             model: &self.model,
-            stream: false,
+            stream: true,
+            keep_alive: &gen.keep_alive,
+            options: ChatOptionsWire {
+                num_predict: gen.num_predict,
+                temperature: gen.temperature,
+            },
             messages,
         };
         let resp = self
@@ -255,11 +299,38 @@ impl OllamaChatClient {
         if !resp.status().is_success() {
             return Err("MICK_CHAT_OLLAMA_HTTP_STATUS");
         }
-        let parsed: ChatResponseWire = resp.json().map_err(|_| "MICK_CHAT_OLLAMA_DECODE_FAILED")?;
-        if parsed.message.content.trim().is_empty() {
-            return Err("MICK_CHAT_OLLAMA_EMPTY_COMPLETION");
+        let mut lines = BufReader::new(resp);
+        let mut line = String::new();
+        let mut streamed_any = false;
+        loop {
+            line.clear();
+            match lines.read_line(&mut line) {
+                Ok(0) => break, // EOF
+                Ok(_) => {}
+                Err(_) => return Err("MICK_CHAT_OLLAMA_STREAM_FAILED"),
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+            let parsed: ChatStreamLine =
+                serde_json::from_str(line.trim()).map_err(|_| "MICK_CHAT_OLLAMA_DECODE_FAILED")?;
+            if let Some(m) = &parsed.message {
+                if !m.content.is_empty() {
+                    streamed_any = true;
+                    if !on_delta(&m.content) {
+                        return Ok(()); // caller cancelled; drop aborts Ollama
+                    }
+                }
+            }
+            if parsed.done {
+                if !streamed_any {
+                    return Err("MICK_CHAT_OLLAMA_EMPTY_COMPLETION");
+                }
+                return Ok(());
+            }
         }
-        Ok(parsed.message.content)
+        // EOF before a `done` line: the stream was cut mid-generation.
+        Err("MICK_CHAT_OLLAMA_STREAM_TRUNCATED")
     }
 }
 
@@ -338,6 +409,14 @@ mod tests {
 
     // --- the conversational transport ---------------------------------------
 
+    fn gen_opts() -> ChatGenOptions {
+        ChatGenOptions {
+            keep_alive: "30m".to_string(),
+            num_predict: 48,
+            temperature: 0.2,
+        }
+    }
+
     /// CI-safe: an unreachable Ollama fails the chat transport closed with a
     /// stable token — never a fabricated reply.
     #[test]
@@ -347,19 +426,20 @@ mod tests {
             role: "user",
             content: "hello".to_string(),
         }];
+        let mut sink = |_: &str| true;
         assert_eq!(
-            client.chat_completion(&messages),
+            client.stream_chat(&messages, &gen_opts(), &mut sink),
             Err("MICK_CHAT_OLLAMA_REQUEST_FAILED")
         );
     }
 
-    /// The chat wire shape is `/api/chat` messages with NO `format` field —
-    /// the motion path's schema-constrained decoding must never leak into the
-    /// conversational path (a chat grammar-locked to intent JSON would be the
-    /// exact live failure this service exists to end). CI-safe: serializes the
-    /// body and inspects the wire, no network.
+    /// The chat wire shape: `/api/chat` messages, STREAMING, with the latency
+    /// levers (keep_alive residency, num_predict output cap, temperature) and
+    /// NO `format` field — the motion path's schema-constrained decoding must
+    /// never leak into the conversational path. CI-safe: serializes the body
+    /// and inspects the wire, no network.
     #[test]
-    fn chat_request_carries_messages_and_no_format_constraint() {
+    fn chat_request_carries_latency_levers_and_no_format_constraint() {
         let messages = [
             ChatWireMessage {
                 role: "system",
@@ -370,9 +450,15 @@ mod tests {
                 content: "hi".to_string(),
             },
         ];
+        let opts = gen_opts();
         let body = ChatRequestWire {
             model: "gemma3:4b",
-            stream: false,
+            stream: true,
+            keep_alive: &opts.keep_alive,
+            options: ChatOptionsWire {
+                num_predict: opts.num_predict,
+                temperature: opts.temperature,
+            },
             messages: &messages,
         };
         let wire: serde_json::Value = serde_json::to_value(&body).expect("body serializes");
@@ -380,9 +466,74 @@ mod tests {
             wire.get("format").is_none(),
             "chat must NOT schema-constrain decoding: {wire}"
         );
-        assert_eq!(wire["stream"], false);
+        assert_eq!(wire["stream"], true);
+        assert_eq!(wire["keep_alive"], "30m", "model residency lever missing");
+        assert_eq!(wire["options"]["num_predict"], 48, "output cap missing");
+        assert_eq!(wire["options"]["temperature"], 0.2);
         assert_eq!(wire["messages"][0]["role"], "system");
         assert_eq!(wire["messages"][1]["role"], "user");
+    }
+
+    /// Streaming parse over a canned NDJSON body, via a loopback TCP stub —
+    /// deltas arrive incrementally, `done` ends cleanly, and cancellation
+    /// (on_delta → false) stops consumption early. No Ollama needed.
+    #[test]
+    fn stream_chat_parses_ndjson_deltas_and_honours_cancellation() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = concat!(
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"Hel\"},\"done\":false}\n",
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"lo. \"},\"done\":false}\n",
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"More.\"},\"done\":false}\n",
+            "{\"done\":true}\n"
+        );
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut s, _) = listener.accept().unwrap();
+                // Drain the request head + body enough to reply.
+                let _ = {
+                    use std::io::Read;
+                    let mut buf = [0u8; 4096];
+                    s.read(&mut buf)
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        let client = OllamaChatClient::with(format!("http://{addr}"), "m");
+        let messages = [ChatWireMessage {
+            role: "user",
+            content: "hi".to_string(),
+        }];
+
+        // Full consumption: all three deltas, clean end.
+        let mut got = Vec::new();
+        let mut sink = |d: &str| {
+            got.push(d.to_string());
+            true
+        };
+        client
+            .stream_chat(&messages, &gen_opts(), &mut sink)
+            .unwrap();
+        assert_eq!(got, vec!["Hel", "lo. ", "More."]);
+
+        // Cancellation after the first delta: consumption stops early, Ok.
+        let mut seen = 0u32;
+        let mut cancel_after_one = |_: &str| {
+            seen += 1;
+            false
+        };
+        client
+            .stream_chat(&messages, &gen_opts(), &mut cancel_after_one)
+            .unwrap();
+        assert_eq!(seen, 1, "cancellation must stop consumption immediately");
+        handle.join().unwrap();
     }
 
     /// Live round-trip — requires `ollama pull gemma3:4b` and a running server. Ignored in

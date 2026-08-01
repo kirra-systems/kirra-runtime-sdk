@@ -33,6 +33,8 @@ import urllib.error
 import urllib.request
 
 DEFAULT_URL = "http://127.0.0.1:8103"
+# Last turn's server-reported timing (numbers only; module-level for display).
+LAST_TIMING: dict = {}
 # Bounded: a local 4B model can take a while on a busy Orin, but a hung
 # service must hand the terminal back.
 REQUEST_TIMEOUT_S = 90.0
@@ -71,6 +73,9 @@ def post_chat(base_url: str, text: str, timeout_s: float = REQUEST_TIMEOUT_S):
         return None, "malformed response from the chat service"
     if parsed.get("ok") is not True or not isinstance(parsed.get("reply"), str):
         return None, f"unexpected response shape: {sorted(parsed.keys())}"
+    LAST_TIMING.clear()
+    if isinstance(parsed.get("timing"), dict):
+        LAST_TIMING.update(parsed["timing"])
     return parsed["reply"], None
 
 
@@ -94,6 +99,14 @@ def main() -> int:
             print(f"mick_chat: {err}", file=sys.stderr)
             continue
         print(f"Mick: {reply}")
+        # Server-reported stage timings (numbers only, no content).
+        if isinstance(LAST_TIMING.get("ttft_ms"), int):
+            print(
+                "mick_chat: timing "
+                f"ttft={LAST_TIMING.get('ttft_ms')}ms "
+                f"total={LAST_TIMING.get('total_ms')}ms",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":
