@@ -1,0 +1,56 @@
+# mick-voice-router.service (USER unit) — the HYBRID wake-driven voice
+# frontend: wake phrase → bounded follow-up recording → STT → deterministic
+# route → conversation (mick_chat_service /chat/stream + piper) OR explicit
+# motion (TEXT to mick_service POST /intent → the unchanged governed path:
+# Mick typed parse → Occy → checker → release → consumer).
+#
+# WHY A USER UNIT: same reason as rabbit-voice.service — on a unit with an
+# active user audio session the session sound server OWNS the USB mic, so
+# capture must go through the per-user Pulse socket that only a unit inside
+# the user's systemd manager can reach (pulse_capture.sh → parec).
+#
+# 🔴 MUTUAL EXCLUSION: exactly ONE voice frontend may own the microphone.
+# This unit Conflicts= with the legacy rabbit-voice.service (and vice
+# versa), so starting either stops the other — they can never compete for
+# capture. Rollback = stop this, start rabbit-voice.
+#
+# 🔴 SAFETY: the router holds ZERO motion authority — motion is transcript
+# TEXT handed to the one fail-closed /intent door, identical to a human
+# typing. Ambiguity ("go ahead", "do it") fails closed to a spoken
+# clarification with NO endpoint contacted. Voice "stop" becomes Mick's
+# typed governed hold intent — NOT a motor cutoff; the physical e-stop is
+# separate hardware. Acceptance is spoken as ADMISSION only.
+#
+# OPT-IN: wake_word.py exits 0 immediately unless KIRRA_WAKE_ENABLED=1 in
+# /etc/kirra/robot.env; the default Pulse capture needs KIRRA_PULSE_SOURCE
+# set there. The conversation leg needs mick_chat_service (:8103), the
+# motion leg mick_service (:8102) — each failure is spoken, never retried.
+#
+# Install (install_robot_units.sh stages this into ~/.config/systemd/user/):
+#   systemctl --user daemon-reload
+#   systemctl --user stop rabbit-voice.service     # hand over the mic
+#   systemctl --user start mick-voice-router.service
+#   loginctl enable-linger <user>   # start the user manager at boot (headless)
+
+[Unit]
+Description=KIRRA Mick voice router (user session; wake word -> deterministic route -> chat stream | governed /intent)
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+Conflicts=rabbit-voice.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/kirra/robot.env
+WorkingDirectory=/opt/kirra/robot
+# The pipeline script (absolute path) runs wake -> transcribe -> route with
+# pipefail; systemd's default control-group kill tears all stages down
+# together on stop. No ROS is sourced — the router has no perception
+# grounding (see mick_voice_router.sh).
+ExecStart=/opt/kirra/robot/mick_voice_router.sh
+# on-failure (NOT always): a disabled listener (KIRRA_WAKE_ENABLED unset)
+# exits 0 and the unit rests inactive; a capture-preflight FATAL exits 1 and
+# retries at RestartSec pace — visible in the journal, never a tight loop.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

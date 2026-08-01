@@ -50,7 +50,9 @@ for f in rabbit_persona.py rabbit_watch.py rabbit_ask.py rabbit_converse.py rabb
          rabbit_model_smoketest.py assistant.py assistant_admission.py \
          assistant_contract.py assistant_report.py assistant_tools.py \
          mick_chat.py mick_voice_chat.py mick_chat_benchmark.py \
-         mick_voice_benchmark.py; do
+         mick_voice_benchmark.py \
+         voice_route.py voice_turn_router.py voice_transcribe.sh \
+         mick_voice_router.sh; do
   [[ -f "${REPO}/robot/${f}" ]] || { echo "  ⚠ missing ${REPO}/robot/${f} — skipped"; continue; }
   sudo install -m 0755 "${REPO}/robot/${f}" "${OPT}/robot/${f}"
   echo "  installed ${OPT}/robot/${f}"
@@ -86,9 +88,13 @@ echo "== 2b. user unit -> ~${ROBOT_USER}/.config/systemd/user =="
 USER_HOME="$(getent passwd "${ROBOT_USER}" | cut -d: -f6)"
 USER_UNIT_DIR="${USER_HOME}/.config/systemd/user"
 sudo -u "${ROBOT_USER}" mkdir -p "${USER_UNIT_DIR}"
-sudo install -m 0644 "${UNITS}/user/rabbit-voice.service" "${USER_UNIT_DIR}/rabbit-voice.service"
-sudo chown "${ROBOT_USER}:" "${USER_UNIT_DIR}/rabbit-voice.service"
-echo "  installed ${USER_UNIT_DIR}/rabbit-voice.service (user unit — Pulse-capable)"
+for uu in rabbit-voice.service mick-voice-router.service; do
+  sudo install -m 0644 "${UNITS}/user/${uu}" "${USER_UNIT_DIR}/${uu}"
+  sudo chown "${ROBOT_USER}:" "${USER_UNIT_DIR}/${uu}"
+  echo "  installed ${USER_UNIT_DIR}/${uu} (user unit — Pulse-capable)"
+done
+echo "  (rabbit-voice and mick-voice-router are MUTUALLY EXCLUSIVE — starting"
+echo "   either stops the other; exactly one voice frontend owns the mic)"
 
 # Stage the access helper next to the doctor so its repair hints work on a
 # robot WITHOUT a repo checkout (the doctor and verifier are run from
