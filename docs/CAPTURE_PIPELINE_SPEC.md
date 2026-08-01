@@ -177,14 +177,26 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 >
 > **R2 — STILL RESTRICTED, and deliberately NOT demoted with K8.** It is the one
 > harness that never stalls in conversion: it reaches the solver and stays
-> there, on a formula 4× smaller (2,227 program-expression steps and 74 VCCs,
-> against ~8,900 and ~400). Its expensive solve is the SECOND — the UNSAT
-> direction, after a cheap 36 s SAT — which is the ordinary shape of a hard but
-> not impossible instance. That makes it a solver question, not a modelling one,
-> and it has a live answer. Whether the solver is progressing or plateauing is
-> not currently observable (CBMC's `--verbosity` does not reach an external
-> solver), so the question is open rather than assumed, and R2 keeps its place
-> until it is answered.
+> there. Its expensive solve is the SECOND — the UNSAT direction, after a cheap
+> 36 s SAT — the ordinary shape of a hard but not impossible instance.
+>
+> **A size claim recorded here earlier was wrong and is corrected.** R2 was
+> described as having a formula 4× smaller. Its PRE-SOLVER metrics are indeed
+> smaller (2,227 program-expression steps and 74 VCCs, against ~8,900 and ~400),
+> but its **CNF is LARGER** — 1,221,711 clauses over 251,960 variables, against
+> K7's 738,811 and K8's 848,226. The two measures point opposite ways, and only
+> the CNF is what the solver works on. The phase distinction (reaches the solver
+> vs stalls before it) is what separates R2 from K7/K8; size does not, and the
+> smaller-formula argument must not be repeated.
+>
+> **The open question is now answered: the solver is progressing.** kissat's own
+> telemetry — captured through a wrapper, since CBMC's `--verbosity` does not
+> reach an external solver — shows ~70 conflicts/s sustained with no systematic
+> collapse, and inprocessing shrinking the instance monotonically (irredundant
+> clauses 135k → 73k, "remaining" 54% → 29% over 376 s). That is a live search,
+> so R2 is a budget/solver question and keeps its place. It does NOT show that
+> any particular budget suffices — ~70 conflicts/s is slow, and progress is not
+> a termination guarantee.
 >
 > Independent approval: **NOT OBTAINED. This amendment proceeded under a
 > RECORDED EXCEPTION** to the separation-of-duties control, per
