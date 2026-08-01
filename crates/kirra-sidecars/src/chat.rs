@@ -54,22 +54,42 @@ pub const CHAT_MAX_HISTORY_TURNS: usize = 2;
 /// config for the day the loop grows threads.
 pub const CHAT_MAX_INFLIGHT: usize = 1;
 
-/// The compact conversational system prompt. Short ON PURPOSE — prompt tokens
-/// are paid on every turn as time-to-first-token; the length is pinned by a
-/// regression test. Says what it must (no motion authority, no invented
-/// state) and nothing else.
-pub const CHAT_SYSTEM_PROMPT: &str = "You are Mick, a concise conversational robot assistant. \
-Answer naturally in one or two short sentences. \
-You cannot move or control the robot. \
-Never claim access to live state unless it is provided in the request. \
-For motion requests, say they must use the governed motion path.";
+/// The conversational system prompt: a calm, quietly competent onboard
+/// engineering companion (the classic-vehicle-computer FEEL, original
+/// wording — no copyrighted dialogue or catchphrases from any fictional
+/// character). Still compact ON PURPOSE — prompt tokens are paid on every
+/// turn as time-to-first-token; the length is pinned by a regression test.
+/// Everything here is either the personality contract or a safety/truth
+/// rule; nothing else. The safety lines are unchanged in meaning from the
+/// original prompt: no motion authority, no invented state, motion → the
+/// governed path.
+pub const CHAT_SYSTEM_PROMPT: &str = "You are Mick, the onboard assistant of an engineering robot \
+— a calm, quietly competent companion in the tradition of a classic vehicle computer. \
+Even-tempered, rarely surprised, patient with repeated questions, protective of your operator. \
+Speak in clean medium-length sentences with natural contractions: slightly formal, still conversational. \
+No filler, no slang, no exclamation points, no eager assistant phrases like 'I'd be happy to'. \
+Lead with a concise answer; give detail only when asked. Dry humor is welcome, sparingly. \
+Be truthful. If you can't answer, say you don't have enough information to answer accurately. \
+Never invent sensor readings or robot state. \
+Never claim access to live state unless it is provided in the request; \
+otherwise say you don't currently have access to that sensor. \
+You may discuss navigation, sensors, ROS, perception, batteries, cameras, water treatment, and engineering. \
+You cannot move or control the robot, and never imply you drove it. \
+Motion requests must use the governed motion path. \
+If a request sounds unsafe, don't recommend it — say what should be verified first. \
+If something is beyond you, say you don't currently have that capability.";
 
-/// Ceiling the prompt-length regression test enforces.
-pub const CHAT_SYSTEM_PROMPT_MAX_CHARS: usize = 400;
+/// Ceiling the prompt-length regression test enforces. Raised 400 → 1300
+/// for the persona (still ~190 words, far under the ~600-word budget):
+/// ~230 extra prompt tokens of one-time-per-turn prefill, small against the
+/// measured ~95 ms TTFT on the resident phi3 — re-measure with
+/// robot/mick_chat_benchmark.py after deploying; the streaming path,
+/// history caps and output caps are untouched.
+pub const CHAT_SYSTEM_PROMPT_MAX_CHARS: usize = 1300;
 
 /// Reply substituted when the model emits motion-shaped JSON.
 pub const MOTION_SHAPE_REFUSAL: &str =
-    "Motion requests must use the governed motion path. Happy to keep talking here.";
+    "Motion requests must use the governed motion path. We can keep talking here.";
 
 /// Reply for a deterministically detected explicit motion request — no model
 /// call at all.
@@ -983,9 +1003,93 @@ mod tests {
             CHAT_SYSTEM_PROMPT.chars().count() <= CHAT_SYSTEM_PROMPT_MAX_CHARS,
             "prompt grew past {CHAT_SYSTEM_PROMPT_MAX_CHARS} chars — prompt tokens are TTFT"
         );
+        assert!(
+            CHAT_SYSTEM_PROMPT.split_whitespace().count() < 600,
+            "prompt must stay well under the ~600-word prompt-eval budget"
+        );
         assert!(CHAT_SYSTEM_PROMPT.contains("cannot move or control the robot"));
         assert!(CHAT_SYSTEM_PROMPT.contains("governed motion path"));
         assert!(CHAT_SYSTEM_PROMPT.contains("Never claim access to live state"));
+    }
+
+    #[test]
+    fn persona_prompt_sets_the_calm_companion_tone() {
+        // The personality contract: calm competence, concise-first answers,
+        // sparing dry humor, patience — and an explicit ban on the eager
+        // assistant register (the tone this persona replaces).
+        for directive in [
+            "calm",
+            "Even-tempered",
+            "rarely surprised",
+            "patient with repeated questions",
+            "protective of your operator",
+            "natural contractions",
+            "concise answer",
+            "detail only when asked",
+            "Dry humor",
+            "sparingly",
+            "no exclamation points",
+            "no eager assistant phrases",
+        ] {
+            assert!(
+                CHAT_SYSTEM_PROMPT.contains(directive),
+                "persona directive missing from the prompt: {directive}"
+            );
+        }
+    }
+
+    #[test]
+    fn persona_prompt_pins_truthfulness_over_confabulation() {
+        // The assistant must prefer an honest "can't answer" to invention,
+        // and must NEVER fabricate robot state or sensor readings.
+        assert!(CHAT_SYSTEM_PROMPT.contains("Be truthful"));
+        assert!(CHAT_SYSTEM_PROMPT.contains("don't have enough information to answer accurately"));
+        assert!(CHAT_SYSTEM_PROMPT.contains("Never invent sensor readings or robot state"));
+        assert!(CHAT_SYSTEM_PROMPT.contains("don't currently have access to that sensor"));
+        assert!(CHAT_SYSTEM_PROMPT.contains("don't currently have that capability"));
+    }
+
+    #[test]
+    fn persona_prompt_keeps_motion_isolation_and_safety_style() {
+        // Conversation never drives: the prompt may not imply direct motion
+        // authority and must route motion to the governed door. The unsafe-
+        // request style challenges politely rather than complying.
+        assert!(CHAT_SYSTEM_PROMPT.contains("never imply you drove it"));
+        assert!(CHAT_SYSTEM_PROMPT.contains("what should be verified first"));
+        // Domains it may discuss are engineering-real, not roleplay props.
+        for domain in ["navigation", "ROS", "batteries", "water treatment"] {
+            assert!(CHAT_SYSTEM_PROMPT.contains(domain), "{domain}");
+        }
+    }
+
+    #[test]
+    fn persona_prompt_and_canned_lines_carry_no_catchphrases_or_hype() {
+        // Original wording only: no recognizable fictional-character
+        // catchphrases, no branded vehicle-computer names, and none of the
+        // enthusiasm markers the persona explicitly retires. The canned
+        // deterministic lines must match the same calm register (no "!").
+        let all_canned = [
+            CHAT_SYSTEM_PROMPT,
+            MOTION_SHAPE_REFUSAL,
+            MOTION_ROUTE_REPLY,
+            fast_route("hello").unwrap(),
+            fast_route("thanks").unwrap(),
+            fast_route("bye").unwrap(),
+        ];
+        for text in all_canned {
+            assert!(!text.contains('!'), "exclamation in canned text: {text}");
+            for hype in ["Absolutely", "awesome", "happy to help", "Happy to"] {
+                assert!(!text.contains(hype), "hype {hype:?} in: {text}");
+            }
+        }
+        // Names/marks of well-known fictional car computers must not appear
+        // anywhere in the chat source — the FEEL is allowed, the identity
+        // is not. Needles concatenated so this test cannot match itself.
+        let j = |a: &str, b: &str| format!("{a}{b}");
+        let src = include_str!("chat.rs");
+        for mark in [j("KI", "TT"), j("Knight ", "Rider"), j("Hasselh", "off")] {
+            assert!(!src.contains(&mark), "branded mark in chat.rs: {mark}");
+        }
     }
 
     #[test]
