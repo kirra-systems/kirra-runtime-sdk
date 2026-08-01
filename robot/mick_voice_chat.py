@@ -57,6 +57,9 @@ import time
 import urllib.error
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import voice_playback  # noqa: E402 — wake-listener suppression while speaking
+
 DEFAULT_URL = "http://127.0.0.1:8103"
 REQUEST_TIMEOUT_S = 90.0
 
@@ -144,7 +147,21 @@ class TtsPipe:
 
 
 def run_turn(base_url: str, text: str, tts_cmd: str | None) -> bool:
-    """One spoken turn. Returns False on transport failure (caller decides)."""
+    """One spoken turn. Returns False on transport failure (caller decides).
+
+    The WHOLE turn — ack tone, streamed sentences, TTS drain, process wait,
+    cooldown — runs under the playback guard (voice_playback.PlaybackGuard),
+    so the wake listener cannot hear the robot's own reply as operator
+    speech (the live self-conversation loop). The guard is re-entrant: a
+    caller that already holds it (voice_turn_router) nests without
+    deadlock. It releases in ALL exits, KeyboardInterrupt included — the
+    kernel drops the flock even on a hard kill, so suppression can never
+    stick after a crash."""
+    with voice_playback.PlaybackGuard():
+        return _run_turn_guarded(base_url, text, tts_cmd)
+
+
+def _run_turn_guarded(base_url: str, text: str, tts_cmd: str | None) -> bool:
     t0 = time.monotonic() * 1000.0
     ack_tone()
     body = json.dumps({"text": text}).encode("utf-8")
@@ -248,4 +265,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        # A clean operator interrupt, not a fault: the guard/TtsPipe finally
+        # blocks have already run by the time this propagates here.
+        print("mick_voice_chat: interrupted", file=sys.stderr)
+        sys.exit(130)

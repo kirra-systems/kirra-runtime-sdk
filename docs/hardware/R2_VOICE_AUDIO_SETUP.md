@@ -137,6 +137,18 @@ is bounded by a wall clock. (Only the headless ALSA-direct variant uses
 before opening anything rather than falling back to ALSA's default — not the
 mic, and it fails silently.) Details + tuning: `RABBIT_AUDIO_STACK.md` §1a.
 
+**Robot playback is suppressed from wake/follow-up detection** (§1b of
+`RABBIT_AUDIO_STACK.md`): while the robot speaks, the TTS side holds an
+flock (`KIRRA_VOICE_PLAYBACK_STATE`, per-user runtime dir) that the wake
+listener probes — the robot's own Piper output can never fire
+`wake_word: follow-up: speech onset` and start a self-conversation loop
+(the live 2026-08 failure). A post-playback cooldown
+(`KIRRA_VOICE_PLAYBACK_COOLDOWN_MS`, default 500) discards the speaker
+tail, and `KIRRA_VOICE_MAX_FOLLOWUP_TURNS` (default 3) caps wake-free
+follow-ups per episode. Barge-in is intentionally disabled on this path
+(no AEC — RMS cannot tell the operator from the speaker). Rollback:
+`systemctl --user start rabbit-voice.service`.
+
 ## 5. PTT button (GPIO) — the Orin gotchas
 ```bash
 # JetPack 6.2 "Super": stock Jetson.GPIO 2.1.7 fails ("Could not determine Jetson

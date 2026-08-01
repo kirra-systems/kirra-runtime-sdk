@@ -83,6 +83,7 @@ import wave
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import turn_state  # noqa: E402 — cross-process "turn in progress" signal (Slice R)
 import rabbit_latency  # noqa: E402 — opt-in stage timing (observability only)
+import voice_playback  # noqa: E402 — "the robot is SPEAKING" suppression (self-echo fix)
 
 # ---------------------------------------------------------------------------
 # Pure logic (host-tested in robot/wake_word_test.py — no audio, no GPIO)
@@ -359,8 +360,24 @@ def _read_state(path: str) -> str | None:
         return None
 
 
+class _SuppressionLogger:
+    """Log playback-suppression TRANSITIONS once each, never per frame."""
+
+    def __init__(self, cooldown_ms: int):
+        self.engaged = False
+        self.cooldown_ms = cooldown_ms
+
+    def update(self, active: bool) -> None:
+        if active and not self.engaged:
+            _log("playback suppression engaged")
+        elif self.engaged and not active:
+            _log(f"playback suppression released; cooldown={self.cooldown_ms}ms")
+        self.engaged = active
+
+
 def _listen_for_speech_onset(record_cmd, rms_floor, window_s, onset_hops,
-                             hop_bytes, led, state_file) -> bool:
+                             hop_bytes, led, state_file,
+                             playback_path=None) -> bool:
     """Follow-up mode (Slice F): open the mic and wait up to window_s for the
     operator to START speaking (onset_hops consecutive energy hops above the
     floor). Returns True on onset — with the mic already CLOSED so the turn
@@ -380,6 +397,8 @@ def _listen_for_speech_onset(record_cmd, rms_floor, window_s, onset_hops,
     loud = 0
     onset = False
     t0 = time.monotonic()
+    supp = _SuppressionLogger(voice_playback.parse_cooldown_ms(
+        os.environ.get("KIRRA_VOICE_PLAYBACK_COOLDOWN_MS")))
     try:
         while True:
             elapsed = time.monotonic() - t0
@@ -392,6 +411,21 @@ def _listen_for_speech_onset(record_cmd, rms_floor, window_s, onset_hops,
             chunk = cap.stdout.read(hop_bytes)
             if not chunk:
                 break  # recorder died → treat as no onset
+            # 🔴 Self-echo suppression: while the robot is SPEAKING (playback
+            # lock held, cooldown included), the frame is DRAINED but its
+            # energy is DISCARDED — Piper's own voice can never count as
+            # operator onset, and the window clock keeps running so a reply
+            # spent entirely under playback simply expires back to wake-word
+            # listening. On release the accumulator resets, so a speaker
+            # tail buffered across the boundary cannot fire either.
+            if voice_playback.playback_active(playback_path):
+                supp.update(True)
+                loud = 0
+                continue
+            if supp.engaged:
+                supp.update(False)
+                loud = 0
+                continue   # first post-release frame: drop any straddling hop
             loud = loud + 1 if rms(chunk) >= rms_floor else 0
             if loud >= onset_hops:
                 onset = True   # next iteration's decision → 'trigger' → break
@@ -560,6 +594,14 @@ def main() -> int:
     followup_enabled = _truthy(os.environ.get("KIRRA_WAKE_FOLLOWUP_ENABLED"))
     followup_window_s = float(os.environ.get("KIRRA_WAKE_FOLLOWUP_S", "6"))
     followup_onset_hops = max(1, int(os.environ.get("KIRRA_WAKE_FOLLOWUP_ONSET_HOPS", "2")))
+    # Self-echo fix: the playback lock the TTS side holds while the robot
+    # speaks (voice_playback.py), plus the per-episode wake-free follow-up
+    # cap — defense in depth behind the suppression, never unlimited.
+    playback_state_path = voice_playback.state_path()
+    playback_cooldown_ms = voice_playback.parse_cooldown_ms(
+        os.environ.get("KIRRA_VOICE_PLAYBACK_COOLDOWN_MS"))
+    max_followups = voice_playback.parse_max_followups(
+        os.environ.get("KIRRA_VOICE_MAX_FOLLOWUP_TURNS"))
     ack_cmd = os.environ.get("KIRRA_WAKE_ACK_CMD")
     tts_cmd = os.environ.get("KIRRA_TTS_CMD")
     tmp_dir = "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir()
@@ -586,6 +628,7 @@ def main() -> int:
             last_stt = 0.0
             last_state_poll = 0.0
             hit = None
+            supp = _SuppressionLogger(playback_cooldown_ms)
             try:
                 while True:
                     chunk = cap.stdout.read(hop_bytes)
@@ -593,6 +636,21 @@ def main() -> int:
                         _log("capture stream ended (recorder died?) — retrying in 2 s")
                         time.sleep(2.0)
                         break
+
+                    # 🔴 Self-echo suppression (before anything accumulates):
+                    # while the robot is speaking, frames are DRAINED (no pipe
+                    # backpressure) but the ring is emptied and no STT runs —
+                    # the robot's own voice cannot match a wake phrase. On
+                    # release the ring starts fresh: no speaker tail survives.
+                    if voice_playback.playback_active(playback_state_path):
+                        supp.update(True)
+                        ring = b""
+                        continue
+                    if supp.engaged:
+                        supp.update(False)
+                        ring = b""
+                        continue
+
                     ring = (ring + chunk)[-window_bytes:]
 
                     now = time.monotonic()
@@ -624,6 +682,14 @@ def main() -> int:
                     cap.kill()
 
             if hit:
+                # PIPELINE INVARIANT: no trigger while the playback lock is
+                # held or during its cooldown. Suppressed frames mean a hit
+                # cannot normally form during playback; this is the belt at
+                # the emission point itself (a hit formed JUST before the
+                # robot started speaking is dropped, not queued).
+                if voice_playback.playback_active(playback_state_path):
+                    _log("wake hit during playback — suppressed, not queued")
+                    continue
                 # Release-before-trigger: the mic is already closed (above), so
                 # rabbit_voice.sh's bounded recorder can claim the device. The
                 # ack ("Yes?") fires once, on the WAKE — not on each follow-up.
@@ -637,12 +703,33 @@ def main() -> int:
                 # for the operator to just start talking (no wake word). Each
                 # onset fires another turn and reopens the window; a silent
                 # window (or nap/mute) closes it → back to wake-word listening.
+                # An explicit wake started this episode; wake-free follow-ups
+                # are capped at max_followups (playback can consume NOTHING —
+                # suppressed frames never reach the onset counter).
+                episode_followups = 0
                 while followup_enabled and wake_allowed(
                         _read_state(state_file), int(time.time() * 1000)):
+                    if not voice_playback.should_emit_trigger(
+                            playback=False,
+                            episode_followups=episode_followups,
+                            max_followups=max_followups):
+                        _log("follow-up cap reached; wake required")
+                        break
                     if not _listen_for_speech_onset(
                             record_cmd, rms_floor, followup_window_s,
-                            followup_onset_hops, hop_bytes, led, state_file):
+                            followup_onset_hops, hop_bytes, led, state_file,
+                            playback_path=playback_state_path):
                         break
+                    # The invariant again, at the emission point: an onset
+                    # that raced the start of playback is dropped, not queued.
+                    if not voice_playback.should_emit_trigger(
+                            playback=voice_playback.playback_active(
+                                playback_state_path),
+                            episode_followups=episode_followups,
+                            max_followups=max_followups):
+                        _log("follow-up onset during playback — suppressed, not queued")
+                        continue
+                    episode_followups += 1
                     _log("follow-up: speech onset — firing without a wake word")
                     _fire_trigger_and_wait(
                         turn_state_file, rearm_mode, holdoff_s, rearm_grace_s,
