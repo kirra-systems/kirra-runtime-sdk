@@ -1511,6 +1511,14 @@ jobs:
           # contacted and the motion endpoint is unreferenced in the client
           # source (no fallback to the motion door can exist).
           python3 robot/mick_chat_test.py
+          # mick_voice_chat.py streaming voice client (host, stub SSE server +
+          # timestamping fake TTS — no Ollama, no audio): PROVES the first
+          # sentence reaches TTS before the stream completes (the low-latency
+          # claim), one TTS process per reply, soft failure on timeout/
+          # malformed streams, only /chat/stream ever contacted, and timing
+          # logs free of transcript text. Benchmarks are compile-gated.
+          python3 robot/mick_voice_chat_test.py
+          python3 -m py_compile robot/mick_chat_benchmark.py robot/mick_voice_benchmark.py
           # Turn-state re-arm gate (Slice R, pure, no audio): the cross-process
           # "turn in progress" signal (fail-safe parse, active/done round-trip,
           # seq monotonicity) and the bounded rearm_decision that fixes the wake
