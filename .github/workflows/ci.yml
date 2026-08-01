@@ -1495,6 +1495,16 @@ jobs:
           # wake_word imported rabbit_latency, never staged; the old
           # repo-checkout unit masked it). Also: every listed payload exists.
           python3 robot/install/staging_completeness_test.py
+          # robot.env value-quoting semantics (host, real bash): the env file
+          # is parsed by BOTH bash `source` and systemd EnvironmentFile, which
+          # DISAGREE on an unquoted multi-word value — bash executes the tail
+          # as a command and leaves the var empty (live R2 failure: startup
+          # vad_record FATAL + "Permission denied" running the WAV path).
+          # Proves the shipped example round-trips through a real `source`,
+          # reproduces the bug with a sentinel stub, pins the word-split
+          # `$KIRRA_RECORD_CMD "$wav"` contract, and gates the linter's new
+          # unquoted-multi-word check + --fix requoting.
+          python3 robot/install/env_quoting_test.py
           # Turn-state re-arm gate (Slice R, pure, no audio): the cross-process
           # "turn in progress" signal (fail-safe parse, active/done round-trip,
           # seq monotonicity) and the bounded rearm_decision that fixes the wake
