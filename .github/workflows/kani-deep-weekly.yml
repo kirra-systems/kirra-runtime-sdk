@@ -13,13 +13,19 @@
 #     full integer-scaled parameter lattice. Its exact-IEEE relational instance
 #     blew the per-PR 45-minute job budget on BOTH default CaDiCaL and kissat;
 #     the final UNSAT solve alone ran 43+ minutes without returning (PR #888).
-#   * K8 (#1243) — the accel/brake rate bound over every executable return, in
-#     VELOCITY space. Its acceleration-space form failed in 186 s on a denormal
-#     counterexample (a step smaller than one ulp of `current`, divided by a
-#     subnormal dt); restated in the space the kernel actually computes in, it
-#     produced no verdict at 25 min or at 55 min. Per-PR gate: the 2,880-point
-#     physical-dt grid, which asserts the ACCELERATION form this proof had to
-#     abandon, so the two tiers are complementary rather than duplicative.
+#   * K8 (#1243) — the accel/brake rate bound. 🔴 NO LONGER IN THIS LANE.
+#     Demoted OUT of the proof tier by #1260, on the same phase diagnosis and
+#     the same rule as K7, and now behind `outside-proof-envelope`. Measured:
+#     the full harness runs symex in 0.34 s, converts in 1.43 s, completes
+#     THREE solves totalling 101 s, then enters a fourth propositional
+#     conversion that never reaches a solver — 43 of 45 minutes go there.
+#     Isolated to its ONE real assertion (373 of 374 properties dropped) the
+#     CNF shrinks only 0.54% (848,226 -> 843,634), conversion completes in
+#     1.0 s, the solver IS reached, and it returns nothing in 40 minutes. Two
+#     failures at once; fixing the conversion stall only exposes the hard
+#     instance. Per-PR gate unchanged: the 2,880-point physical-dt grid, which
+#     asserts the ACCELERATION form the proof had to abandon — so the grid is
+#     not a weaker copy of the proof and no coverage was lost.
 #   * K7 (#1242) — P-RACK. 🔴 NO LONGER IN THIS LANE. It was demoted OUT of the
 #     proof tier by #1268 and now sits behind `outside-proof-envelope`, a
 #     feature no lane enables. The previous text here said its demotion was

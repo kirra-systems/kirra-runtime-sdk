@@ -363,16 +363,45 @@ mod proofs {
     ///                          `limit x dt`). No verdict within any budget
     ///                          tried.
     ///
-    /// The per-PR budget accommodates the first shape and not the second. If
-    /// the weekly lane does not converge either, the honest response is the one
-    /// recorded for K7: demote out of the proof tier rather than leave a
-    /// harness that never finishes and reads as coverage.
+    /// The per-PR budget accommodates the first shape and not the second.
     ///
-    /// Its blocking per-PR gate is
+    /// 🔴 LANE: NONE. **K8 IS DEMOTED OUT OF THE PROOF TIER** (#1260), by the
+    /// same rule and on the same diagnosed grounds as K7. It sits behind
+    /// `outside-proof-envelope`, which NO lane enables; `ci/deep_harnesses.py`
+    /// matches only `deep-proofs`, and `ci/test_deep_harnesses.py` pins that
+    /// this harness stays out of the weekly matrix.
+    ///
+    /// The demotion is on a PHASE DIAGNOSIS, not on the timeouts above — K3
+    /// proved that elapsed time alone justifies nothing (it was demoted on a
+    /// 15-minute non-result and then discharged in 67 minutes). What was
+    /// measured for K8, each phase separately:
+    ///
+    ///   * full harness — symex 0.34 s, 404 -> 36 VCCs, conversion 1.43 s,
+    ///     THREE solves totalling 101 s, then a fourth propositional
+    ///     conversion that never reaches a solver. 43 of 45 minutes vanish
+    ///     there. Identical signature to K7.
+    ///   * isolated to its ONE real assertion (373 of 374 properties dropped)
+    ///     — the CNF shrinks by 0.54% (848,226 -> 843,634 clauses), so the 312
+    ///     pointer-dereference checks are not the cost, the program encoding
+    ///     is. Conversion then completes in 1.0 s, CBMC REACHES the solver,
+    ///     and the solver returns nothing in 40 minutes.
+    ///
+    /// So K8 fails two ways at once — conversion-pathological in
+    /// multi-property mode, and solver-hard underneath — and fixing the first
+    /// only exposes the second. Additional budget is not a credible remedy.
+    /// Contrast R2, which never stalls in conversion at all: it reaches the
+    /// solver and stays there, on a formula 4x smaller. That is a solver
+    /// question and R2 is deliberately NOT demoted with K8.
+    ///
+    /// NO COVERAGE IS LOST. Its blocking per-PR gate is
     /// `k8_mirror_acceleration_bound_on_the_physical_dt_grid` — 2,880 points,
-    /// and in the ACCELERATION space this proof had to abandon, so the two
-    /// tiers are complementary rather than one being a weaker copy.
-    #[cfg(feature = "deep-proofs")]
+    /// and in the ACCELERATION space this proof had to abandon, so the grid is
+    /// not a weaker copy of the proof; it asserts something the proof could
+    /// not. Only the symbolic tier is gone.
+    ///
+    /// Regaining it is a MODELLING redesign, not CI tuning, and must preserve
+    /// the actual safety claim rather than substitute an easier neighbour.
+    #[cfg(feature = "outside-proof-envelope")]
     #[kani::proof]
     #[kani::stub(f64::powi, super::stub_powi)]
     #[kani::stub(f64::tan, super::stub_tan)]
