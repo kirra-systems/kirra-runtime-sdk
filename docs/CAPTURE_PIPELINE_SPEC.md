@@ -137,6 +137,42 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > evidence, since what failed here was believing a budget that was never
 > delivered. Do not restore the "multi-hour budget" wording before then.
 >
+> **RESOLVED FOR K3 (2026-08-01) — SG1's symbolic proof is RESTORED, and the
+> reason it was ever lost is worse than this note first recorded.** The lane was
+> repaired (#1262: per-harness matrix, and a timeout that fails red instead of
+> reporting grey `cancelled`), and its first completing run
+> [30667373086](https://github.com/kirra-systems/kirra-runtime-sdk/actions/runs/30667373086)
+> discharged K3 in **67 m 13 s** — `0 of 310 failed`, `VERIFICATION:- SUCCESSFUL`,
+> `Verification Time: 4022.678s`. That is the evidence this correction demanded:
+> the lane completed, and it proved the property.
+>
+> **The inference recorded above was wrong, and it is worth being exact about
+> how.** The measurement — no verdict at 15 minutes — was accurate. What was
+> inferred from it, that the property is beyond a practical budget, was not: K3
+> needed 67 minutes and was never given them, because the lane it was demoted
+> INTO had been dead since 12 July. A 15-minute observation cannot distinguish
+> "intractable" from "needs 67 minutes", and the old shared-lane design could
+> never have revealed the difference, since R2 or K7 consumed the whole job
+> before K3 was reached. The assurance loss for SG1 was therefore larger than
+> recorded AND avoidable. **The standing lesson: a timeout is a lower bound on
+> cost, never evidence of intractability.**
+>
+> SG1 now has a genuine symbolic proof again, weekly, at ~67 min. K3 stays in
+> `deep-proofs`; the two-part concrete mirror stays BLOCKING per-PR, so SG1 now
+> holds both tiers rather than one. What is NOT restored is a per-PR symbolic
+> proof — 67 min exceeds the 45-min per-PR budget — so the reduction this re-pin
+> records is real, just far smaller than the suspension above described.
+>
+> **STILL SUSPENDED — K8 and R2 only.** Both timed out at the full isolated
+> 300-minute budget in that same run, with no competition for the job. That is
+> much stronger evidence than the earlier shared-lane observations, because the
+> old explanation (starvation) is now excluded. It is NOT a finding of
+> intractability, and must not be written up as one until each has been profiled
+> to show where the time goes — symbolic execution, propositional conversion, or
+> the solver. K3 is precisely why that bar exists. K7, by contrast, WAS profiled
+> and IS demoted (#1268): it stalls in conversion in multi-property mode and is
+> solver-hard when isolated, so more budget is not a credible remedy for it.
+>
 > Independent approval: **NOT OBTAINED. This amendment proceeded under a
 > RECORDED EXCEPTION** to the separation-of-duties control, per
 > `docs/safety/TALISMAN_AMENDMENT_POLICY.md` §2.2. The five mandatory fields
@@ -185,13 +221,17 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 >    no cheap true K3 exists is engineering judgement; the timings are the
 >    evidence. K8 is in the same position (no verdict at 25 or 55 min), and
 >    unlike R2 neither was measured to merely exceed a known budget.
->    **This field was written believing the destination lane worked.** It does
->    not (see the CORRECTION above, #1260), so the risk accepted here is larger
->    than the field as first written describes: not "K3 proved more slowly" but
->    "K3 not proved at all, pending #1260". The acceptance is not withdrawn —
->    the concrete mirrors are real, blocking, and were the reason this did not
->    become a coverage hole — but a reader must not take field (b) as evidence
->    that a symbolic proof of SG1 is being run somewhere.
+>    **This field was written believing the destination lane worked.** It did
+>    not (see the CORRECTION above, #1260), so for a time the risk accepted here
+>    was larger than the field as first written describes: not "K3 proved more
+>    slowly" but "K3 not proved at all". **Resolved 2026-08-01: K3 discharges in
+>    67 m 13 s and SG1's symbolic proof is restored** — so the risk this field
+>    describes has SHRUNK to its originally-intended size (a slower tier), not
+>    grown. The judgement that was actually wrong is the one this field asserts:
+>    "no budget is known to suffice" was an inference from a 15-minute
+>    non-result, and 67 minutes sufficed. The acceptance stands; the reasoning
+>    behind it does not, and a reader should weigh the field accordingly.
+>    K8 and R2 remain unproven and are NOT covered by this resolution.
 >    **(c) Axiom A3** — the inverse-monotone relation coupling the `tan`/`atan`
 >    model — remains assumed, not proved, and carries over from #1242 unchanged.
 >
