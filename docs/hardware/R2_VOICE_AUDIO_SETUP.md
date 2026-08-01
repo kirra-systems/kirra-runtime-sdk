@@ -86,34 +86,56 @@ sudo chmod +x /opt/kirra/robot/speak.sh
 > `KIRRA_TTS_CMD` at that path (§4).
 
 ## 4. Env — `/etc/kirra/robot.env` (the single source every Rabbit script sources)
+
+> **🎤 Mic capture goes through the SESSION SOUND SERVER, not direct ALSA
+> (2026-07 hardening finding).** With the desktop session's PulseAudio active,
+> the server owns the C-Media mic: `arecord -D plughw:CARD=Device,DEV=0 …`
+> fails **`Device or resource busy`** even while
+> `/proc/asound/card*/pcm0c/sub0/status` reads `closed` and no process holds
+> the PCM (D-Bus device reservation) — the recorder dies instantly and the
+> wake listener loops "capture stream ended". Capture with `parec` against an
+> **explicit** source via `robot/pulse_capture.sh` (fail-closed: missing
+> parec/source is a visible refusal, never a default-mic fallback). Derive the
+> source name once — it is stable across reboots, unlike ALSA card numbers:
+> ```bash
+> pactl list short sources        # → alsa_input.usb-…USB_PnP_Sound_Device-00.analog-mono
+> ```
+
 ```bash
 KIRRA_STT_CMD="whisper-cli -m /home/jetson/whisper.cpp/models/ggml-base.en.bin -np -nt -f"
 KIRRA_TTS_CMD="/opt/kirra/robot/speak.sh"                                   # git-safe path (§3)
-KIRRA_RECORD_CMD="arecord -D plughw:CARD=Device,DEV=0 -d 4 -f S16_LE -r 16000 -c 1"  # -D = the MIC (name, not number)
+# Mic — through the session sound server (see the note above). Explicit source:
+KIRRA_PULSE_SOURCE="alsa_input.usb-C-Media_Electronics_Inc._USB_PnP_Sound_Device-00.analog-mono"
+KIRRA_RECORD_CMD="python3 /opt/kirra/robot/vad_record.py"      # bounded turn recorder (VAD endpointed)
+KIRRA_VAD_CAPTURE_CMD="/opt/kirra/robot/pulse_capture.sh"      # its raw stream, via parec
+# (KIRRA_WAKE_RECORD_CMD stays UNSET — the wake listener defaults to
+#  pulse_capture.sh over KIRRA_PULSE_SOURCE; bare no-device arecord is refused.)
+# ALSA-direct alternative, ONLY for a headless/no-session install (RABBIT_AUDIO_STACK.md §4):
+# KIRRA_RECORD_CMD="arecord -D plughw:CARD=Device,DEV=0 -d 4 -f S16_LE -r 16000 -c 1"
 # (optional) let rabbit_converse ground perception ("what do you see?") — see §7:
 # KIRRA_ROS_SETUP="/opt/ros/humble/setup.bash"
 # (optional) verdict-narration voice — an AUDITOR-role token, never the admin token:
 # KIRRA_MICK_AUDITOR_TOKEN="<auditor principal token>"
 ```
-Only the two `-D plughw:CARD=…` values and the real paths differ from
-`robot/install/rabbit.env.example`. `-d 4` is the record window — but prefer
-**VAD endpointing**, which stops on trailing silence instead of always waiting
-the full window (~1.3 s for a short command vs a flat 4 s):
+Only the `KIRRA_PULSE_SOURCE` / speaker `-D plughw:CARD=…` values and the real
+paths differ from `robot/install/rabbit.env.example`.
+
+The turn recorder is **VAD-endpointed** (stops on trailing silence — ~1.3 s for
+a short command vs a flat 4 s window) and pulls its raw stream through the same
+Pulse backend, so no ALSA device var is needed. Tunables if the room needs them:
 
 ```bash
-KIRRA_RECORD_CMD="python3 /opt/kirra/robot/vad_record.py"
-KIRRA_VAD_DEVICE="plughw:CARD=Device,DEV=0"   # REQUIRED — there is NO default
 KIRRA_VAD_SILENCE_MS=650
 KIRRA_VAD_MIN_SPEECH_MS=250
 KIRRA_VAD_MAX_MS=6000
 KIRRA_VAD_START_TIMEOUT_MS=3000
 ```
 
-The device moves from the `arecord -D` flag to `KIRRA_VAD_DEVICE`, and it is
-**required**: unset, `vad_record.py` refuses before opening anything rather than
-falling back to ALSA's default (which is not the mic, and fails silently). Still
-a bounded mic — `KIRRA_VAD_MAX_MS` is a hard ceiling and a wedged device is
-bounded by a wall clock. Details + tuning: `RABBIT_AUDIO_STACK.md` §1a.
+Still a bounded mic — `KIRRA_VAD_MAX_MS` is a hard ceiling and a wedged device
+is bounded by a wall clock. (Only the headless ALSA-direct variant uses
+`KIRRA_VAD_DEVICE`, which is then **required**: unset, `vad_record.py` refuses
+before opening anything rather than falling back to ALSA's default — not the
+mic, and it fails silently.) Details + tuning: `RABBIT_AUDIO_STACK.md` §1a.
 
 ## 5. PTT button (GPIO) — the Orin gotchas
 ```bash
@@ -210,6 +232,9 @@ publish a `/goal_pose` directly instead of going through STT→LLM (see
 
 # 1. engines standalone:
 echo "rabbit online" | ~/kirra-runtime-sdk/speak.sh                 # hear the speaker
+# mic through the sound server (5 s of raw s16le/16k/mono ≈ 160,000 bytes):
+set -a; . /etc/kirra/robot.env; set +a
+timeout 5 /opt/kirra/robot/pulse_capture.sh >/tmp/kirra-mic.raw; ls -l /tmp/kirra-mic.raw
 whisper-cli -m ~/whisper.cpp/models/ggml-base.en.bin -np -nt -f /tmp/t.wav   # prints your words
 
 # 2. the governed door over TEXT (no mic/button needed — remote-friendly):
@@ -228,6 +253,7 @@ unset KIRRA_TTS_CMD                              # print-only when you can't hea
 ```
 
 ## Reconfigure checklist
-Changed a device / reflashed? Re-derive card numbers (§0), update the two
-`plughw:X,0` values in `speak.sh` (speaker) and `KIRRA_RECORD_CMD` (mic), and
-re-run the §Verify steps. Nothing else moves.
+Changed a device / reflashed? Re-derive the speaker card (§0) for `speak.sh`'s
+`plughw:CARD=…` and the mic's PulseAudio source name
+(`pactl list short sources`) for `KIRRA_PULSE_SOURCE` (§4), then re-run the
+§Verify steps. Nothing else moves.

@@ -23,6 +23,11 @@
 # ⚠ AUDIO-FROM-A-SYSTEM-SERVICE caveat (same as kirra-rabbit-watch): use
 # ALSA-DIRECT record/STT/TTS commands and put the rendered User in the
 # `audio` group; a Pulse/PipeWire-based command may have no session sink.
+# ⚠ THE INVERSE TRAP: when the unit HAS an active user audio session (desktop
+# image), the session sound server owns the mic and ALSA-DIRECT capture fails
+# "Device or resource busy" (even with the PCM closed — device reservation).
+# In that topology run the USER unit variant instead, which captures through
+# the server: robot/install/systemd/user/rabbit-voice.service.
 #
 # ⚠ NOT YET HARDWARE-VALIDATED as a service. Enable deliberately:
 # `sudo systemctl enable --now kirra-rabbit-voice`. See R2_AUTOSTART_CHECKLIST.md.

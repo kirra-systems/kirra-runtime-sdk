@@ -1,0 +1,48 @@
+# rabbit-voice.service (USER unit) — the Rabbit voice listener inside the
+# operator's login session: the PulseAudio-capable variant of
+# kirra-rabbit-voice.service.
+#
+# WHY A USER UNIT: on a unit with an active user audio session the session
+# sound server (PulseAudio/PipeWire) OWNS the USB mic — a direct
+# `arecord -D plughw:…` open from ANY service fails "Device or resource busy"
+# even while /proc/asound shows the PCM closed (device reservation). Capture
+# must go THROUGH the server (robot/pulse_capture.sh → parec), and parec needs
+# the per-user socket under /run/user/<uid> — which only a unit running INSIDE
+# that user's systemd manager has. Hence: user unit. A headless / no-session
+# install keeps the SYSTEM unit + ALSA-direct capture (RABBIT_AUDIO_STACK.md §4).
+#
+# 🔴 SAFETY: identical to the system unit — the wake word is a MICROPHONE
+# trigger with zero actuation authority; a (false) wake records ONE bounded
+# clip whose transcript enters the loop only through the fenced mick /intent
+# door (no intent, no motion on a mishear). It is NOT the e-stop.
+#
+# OPT-IN: wake_word.py exits 0 immediately unless KIRRA_WAKE_ENABLED=1 in
+# /etc/kirra/robot.env. The default capture backend needs KIRRA_PULSE_SOURCE
+# set there (explicit source; a missing/renamed source is a startup FATAL in
+# the journal, never a silent wrong-mic capture).
+#
+# Install (install_robot_units.sh stages this into ~/.config/systemd/user/):
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now rabbit-voice.service
+#   loginctl enable-linger <user>   # start the user manager at boot (headless)
+
+[Unit]
+Description=KIRRA Rabbit voice listener (user session; wake word -> bounded turn -> fenced intent door)
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/kirra/robot.env
+WorkingDirectory=/opt/kirra/robot
+# pipefail so a dead listener fails the pipeline (and vice versa); exec'd bash
+# stays the main PID and SIGTERM tears both halves down (pulse_capture.sh execs
+# parec, so the recorder terminates cleanly with its parent).
+ExecStart=/bin/bash -o pipefail -c 'python3 /opt/kirra/robot/wake_word.py | /opt/kirra/robot/rabbit_voice.sh'
+# on-failure (NOT always): a disabled listener (KIRRA_WAKE_ENABLED unset) exits
+# 0 and the unit rests inactive; a capture-preflight FATAL exits 1 and retries
+# at RestartSec pace — visible in the journal, never a tight restart loop.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
