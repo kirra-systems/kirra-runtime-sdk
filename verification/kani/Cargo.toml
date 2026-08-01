@@ -97,10 +97,22 @@ deep-proofs = []
 # (K7 738,811 -> 735,393; K8 848,226 -> 843,634), so the pointer-dereference
 # checks are not the cost — the program encoding is.
 #
-# R2 is deliberately NOT here. It never stalls in conversion; it reaches the
-# solver and stays there, on a formula 4x smaller (2,227 program-expression
-# steps vs ~8,900). That is a solver question with a live answer, not a
-# modelling one.
+# R2 is deliberately NOT here, and the distinction is a PHASE fact, not a size
+# fact. It never stalls in conversion: it reaches the solver and stays there.
+#
+# Note the sizes point OPPOSITE ways and only one of them is the solver's
+# problem. R2's pre-solver metrics are far smaller (2,227 program-expression
+# steps and 74 VCCs, against ~8,900 and ~400), but its CNF is LARGER —
+# 1,221,711 clauses over 251,960 variables, against K7's 738,811 and K8's
+# 848,226. So "R2 is the small one" is wrong about the thing the solver
+# actually consumes, and must not be used as an argument for keeping it.
+#
+# What DOES keep it here is measured solver progress. With kissat's own
+# telemetry captured (CBMC's --verbosity does not reach an external solver),
+# R2's UNSAT solve sustains ~70 conflicts/s with no collapse, and inprocessing
+# shrinks the instance monotonically — irredundant clauses 135k -> 73k and
+# "remaining" 54% -> 29% over the first 376 s. That is a live search, so R2 is
+# a budget/solver question, not a modelling one.
 #
 # Do not re-add either to `deep-proofs` on the theory that a
 # larger runner or a longer timeout would finish it. That theory was tested and

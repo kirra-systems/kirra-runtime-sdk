@@ -1,0 +1,13 @@
+t=     0.5s conflicts=0         d_conf=0        rate=0/s
+t=    25.5s conflicts=13        d_conf=13       rate=25/s
+t=    50.5s conflicts=26        d_conf=13       rate=25/s
+t=    76.2s conflicts=32        d_conf=6        rate=26/s
+t=   104.6s conflicts=42        d_conf=10       rate=28/s
+t=   132.4s conflicts=46        d_conf=4        rate=28/s
+t=   157.8s conflicts=49        d_conf=3        rate=25/s
+t=   201.3s conflicts=55        d_conf=6        rate=44/s
+t=   238.1s conflicts=62        d_conf=7        rate=37/s
+t=   263.1s conflicts=68        d_conf=6        rate=25/s
+t=   290.2s conflicts=75        d_conf=7        rate=27/s
+t=   318.0s conflicts=80        d_conf=5        rate=28/s
+t=   363.6s conflicts=87        d_conf=7        rate=46/s
