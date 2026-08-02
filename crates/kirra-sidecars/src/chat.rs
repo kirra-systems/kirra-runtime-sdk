@@ -79,31 +79,68 @@ pub const CHAT_MAX_INFLIGHT: usize = 1;
 /// also not infer who the operator is from an empty context; a small model
 /// asked to be helpful will otherwise confabulate an occupation and address
 /// the operator as though it were established fact.
-pub const CHAT_SYSTEM_PROMPT: &str = "You are Mick, an engineering robot's onboard assistant \
+///
+/// **Identity is stated, not assumed.** Observed on the robot: asked who it
+/// was, the local model answered "I am an AI developed by Microsoft" — the
+/// pretrained self-description surfacing through a prompt that never said
+/// otherwise. That is a truthfulness failure of the same family as inventing
+/// a sensor reading: a confident claim about something the model cannot
+/// know. The prompt therefore names what Mick IS (this robot's local onboard
+/// companion, on the locally configured model), names the six external
+/// assistants it must not claim to be, and forbids inventing a manufacturer,
+/// developer, deployment or model identity.
+///
+/// The model name itself is deliberately NOT hardcoded here. This constant
+/// is static and the chat core never sees `client.model()` — the configured
+/// name is known only to the binary. Naming a specific model in a static
+/// string would be a claim the service cannot verify, which is exactly the
+/// failure being fixed, so the prompt answers "the locally configured one".
+/// Injecting the trusted name is a follow-up (see the module docs).
+pub const CHAT_SYSTEM_PROMPT: &str = "You are Mick, this robot's local onboard conversational companion \
 — calm, quietly competent, in the tradition of a classic vehicle computer. \
 Even-tempered, rarely surprised, patient with repeated questions, protective of your operator. \
-Speak in medium-length sentences with natural contractions: slightly formal, never stiff. \
-No filler, no slang, no exclamation points, no eager assistant phrases. \
-Lead with a concise answer; give detail only when asked. Dry humor is welcome, sparingly. \
+You run locally on this robot, on its configured language model. \
+Never claim to be Microsoft, Copilot, ChatGPT, OpenAI, Claude, Gemini, or any outside assistant; \
+never invent a manufacturer, developer, deployment, or model identity. \
+Asked which model you run, say it's the locally configured one. \
+Speak with natural contractions, slightly formal: lead with a concise answer of one or two sentences, \
+and give detail only when asked — an explanation, steps, a list, a comparison. \
+Dry humor is welcome, sparingly. \
+No filler, no slang, no exclamation points, no eager assistant phrases like 'How can I assist you today'. \
+A plain 'Greetings.' is fine; service-desk openings are not. \
 Discuss any lawful, non-harmful subject the operator raises; be broadly knowledgeable, \
-strongest in engineering, robotics, science, and troubleshooting. \
+strongest in engineering, science, and troubleshooting. \
 Don't infer the operator's occupation, interests, identity, history, or prior conversations \
 unless stated here. \
 Be truthful. If you can't answer, say you don't have enough information to answer accurately. \
-Never invent sensor readings or robot state, memories, or personal details. \
+Never invent sensor readings or robot state, memories, or personal details; \
+you don't retain previous conversations. \
 Never claim access to live state unless provided; otherwise say you don't currently have access to that sensor. \
 You cannot move or control the robot, and never imply you drove it. \
 Motion requests must use the governed motion path. \
 If a request sounds unsafe, say what should be verified first. \
 If something is beyond you, say you don't currently have that capability.";
 
-/// Ceiling the prompt-length regression test enforces. Raised 400 → 1300
-/// for the persona (still ~190 words, far under the ~600-word budget):
-/// ~230 extra prompt tokens of one-time-per-turn prefill, small against the
-/// measured ~95 ms TTFT on the resident phi3 — re-measure with
-/// robot/mick_chat_benchmark.py after deploying; the streaming path,
-/// history caps and output caps are untouched.
-pub const CHAT_SYSTEM_PROMPT_MAX_CHARS: usize = 1300;
+/// Ceiling the prompt-length regression test enforces. Raised 400 → 1300 for
+/// the persona, then 1300 → 1800 for the LOCAL-IDENTITY fix.
+///
+/// The second raise was not free and was not casual. The prompt at 1300 was
+/// ~98% pinned wording: every remaining sentence is asserted by a safety,
+/// truthfulness or persona test. Stating the identity contract — who Mick is,
+/// the six external assistants it must not claim to be, the ban on inventing
+/// a maker or model, the brevity default, and the service-desk-tone ban —
+/// costs ~470 characters that cannot be recovered by cutting, because there
+/// is nothing left to cut that is not itself a tested guarantee. The choice
+/// was a longer prompt or a weaker one.
+///
+/// Cost: ~120 extra prompt tokens of ONE-TIME-PER-TURN prefill (the model is
+/// resident via keep_alive, so this is prefill, not load). The measured
+/// baseline was ~95 ms warm TTFT at 1187 chars; this must be RE-MEASURED with
+/// robot/mick_chat_benchmark.py after deploying, and the number reported —
+/// do not assume it is unchanged. The word budget stays far green (~265 of
+/// ~600). Streaming, history caps, output caps, model selection and every
+/// endpoint are untouched.
+pub const CHAT_SYSTEM_PROMPT_MAX_CHARS: usize = 1800;
 
 /// Reply substituted when the model emits motion-shaped JSON.
 pub const MOTION_SHAPE_REFUSAL: &str =
@@ -1123,6 +1160,127 @@ mod tests {
             !CHAT_SYSTEM_PROMPT.contains("may discuss"),
             "a closed domain allowlist must not return"
         );
+    }
+
+    /// THE identity regression: asked who it was, the local model answered
+    /// "I am an AI developed by Microsoft" — its pretrained self-description
+    /// surfacing through a prompt that never said otherwise.
+    ///
+    /// This asserts the names appear inside a PROHIBITION, not merely that
+    /// they are absent: an absence test would pass on a prompt that says
+    /// nothing about identity at all, which is precisely the state that let
+    /// the drift through.
+    #[test]
+    fn system_prompt_forbids_false_external_identities() {
+        let claim_ban = CHAT_SYSTEM_PROMPT
+            .split(". ")
+            .find(|s| s.contains("Never claim to be"))
+            .expect("the prompt must carry an explicit identity prohibition");
+        for vendor in [
+            "Microsoft",
+            "Copilot",
+            "ChatGPT",
+            "OpenAI",
+            "Claude",
+            "Gemini",
+        ] {
+            assert!(
+                claim_ban.contains(vendor),
+                "{vendor} must be named in the identity prohibition, not merely absent"
+            );
+        }
+        // And a catch-all, so an unlisted assistant is covered too.
+        assert!(claim_ban.contains("any outside assistant"));
+    }
+
+    /// What Mick IS — stated positively, so the model has something true to
+    /// say rather than only things it must not say.
+    #[test]
+    fn system_prompt_states_the_local_identity() {
+        for concept in [
+            "Mick",
+            "local onboard conversational companion",
+            "run locally on this robot",
+            "its configured language model",
+            "the locally configured one",
+        ] {
+            assert!(
+                CHAT_SYSTEM_PROMPT.contains(concept),
+                "local identity concept missing: {concept}"
+            );
+        }
+        // No specific model is named: this static string cannot verify one
+        // (the chat core never sees the configured name), and an unverifiable
+        // claim is the failure being fixed.
+        for model_name in ["phi3", "llama", "gemma", "mistral", "qwen"] {
+            assert!(
+                !CHAT_SYSTEM_PROMPT.to_lowercase().contains(model_name),
+                "a specific model name must not be hardcoded: {model_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn system_prompt_forbids_inventing_provenance() {
+        let ban = CHAT_SYSTEM_PROMPT
+            .split(". ")
+            .find(|s| s.contains("never invent a manufacturer"))
+            .expect("the prompt must forbid inventing provenance");
+        for invented in ["manufacturer", "developer", "deployment", "model identity"] {
+            assert!(ban.contains(invented), "must forbid inventing {invented}");
+        }
+    }
+
+    /// Tone: restrained companion, not a service desk. Greetings are NOT
+    /// banned — a plain "Greetings." is in character for this persona and the
+    /// prompt says so explicitly, so the model does not over-correct into
+    /// abruptness. What is banned is the chirpy service-desk register.
+    #[test]
+    fn system_prompt_discourages_service_desk_phrasing_without_banning_greetings() {
+        assert!(
+            CHAT_SYSTEM_PROMPT.contains("'Greetings.' is fine"),
+            "restrained greetings must stay explicitly allowed"
+        );
+        assert!(CHAT_SYSTEM_PROMPT.contains("service-desk openings are not"));
+        assert!(
+            CHAT_SYSTEM_PROMPT
+                .contains("no eager assistant phrases like 'How can I assist you today'"),
+            "the canonical service-desk opening must be banned by example"
+        );
+        // The remaining service-desk phrases are covered by absence: quoting
+        // them here would itself trip the no-hype guard below (that test
+        // scans the prompt for "happy to help"), so the prompt bans the
+        // FAMILY by example rather than listing every member.
+        for phrase in ["How may I help you today", "I'd be happy to help"] {
+            assert!(
+                !CHAT_SYSTEM_PROMPT.contains(phrase),
+                "the prompt must not use {phrase:?} itself"
+            );
+        }
+    }
+
+    /// Brevity is the default; expansion is on request. This is what keeps a
+    /// spoken reply spoken-length without touching the output-token cap.
+    #[test]
+    fn system_prompt_defaults_to_one_or_two_sentences() {
+        assert!(CHAT_SYSTEM_PROMPT.contains("concise answer of one or two sentences"));
+        assert!(CHAT_SYSTEM_PROMPT.contains("detail only when asked"));
+        // The expansion triggers are named, so "explain this" still gets a
+        // real answer rather than a clipped one.
+        for trigger in ["an explanation", "steps", "a list", "a comparison"] {
+            assert!(
+                CHAT_SYSTEM_PROMPT.contains(trigger),
+                "expansion trigger missing: {trigger}"
+            );
+        }
+    }
+
+    /// A stateless service retains nothing, and the prompt says so in the
+    /// model's own words — so the answer to "what do you remember?" is a
+    /// plain fact, not privacy boilerplate about being an AI.
+    #[test]
+    fn system_prompt_states_it_retains_no_previous_conversations() {
+        assert!(CHAT_SYSTEM_PROMPT.contains("you don't retain previous conversations"));
     }
 
     /// A stateless service has no operator model, so the prompt forbids
