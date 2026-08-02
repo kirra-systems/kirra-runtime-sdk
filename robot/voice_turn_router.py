@@ -7,12 +7,22 @@ per stdin line → deterministic route → EXACTLY ONE endpoint (or none).
     motion       → POST /intent (mick_service) — TEXT ONLY; Mick's typed
                    parse, Occy, the checker, release and the consumer are
                    unchanged downstream
+    destination  → POST /destination (mick_service) — a TYPED DestinationRef
+                   (kind + the operator's words, NEVER coordinates); the
+                   trusted resolver grounds it against the calibrated
+                   registries / live tracks, or refuses
     ambiguous    → a FIXED local clarification; NO endpoint is contacted
 
 🔴 SEPARATION (all host-tested):
-  * this process knows exactly two HTTP endpoints — the chat sidecar and the
-    intent door. No planner, ROS, verifier, release-token, serial, or motor
-    API is imported or addressed, and the actuation-fence test pins that;
+  * this process knows exactly two HTTP HOSTS — the chat sidecar and the Mick
+    sidecar (its intent and destination doors). No planner, ROS, verifier,
+    release-token, serial, or motor API is imported or addressed, and the
+    actuation-fence test pins that;
+  * 🔴 THE ROUTER NEVER CREATES A COORDINATE. It names a destination; the
+    trusted resolver behind /destination is the only thing that turns a name
+    into a pose, and the acceptance body it returns carries none — so there
+    is nothing here to speak, log, or leak. A destination that does not
+    resolve produces NO planner request at all;
   * a transcript goes to AT MOST one endpoint, never both;
   * NO automatic retry anywhere on the motion path (a retry could duplicate
     an accepted intent); every failure is spoken and the turn ends;
@@ -63,6 +73,40 @@ LINE_INTENT_RATE = "Please wait a moment before giving another motion request."
 LINE_INTENT_DOWN = "The governed motion service is unavailable."
 LINE_ROUTE_DISAGREE = ("That didn't register as a motion request. "
                        "Please say exactly where or how you want me to move.")
+
+# --- typed destination lines --------------------------------------------------
+#
+# Admission only, and deliberately free of WHERE: the router never receives a
+# pose (the success body carries none), so it cannot speak, log, or leak one.
+LINE_DEST_ACCEPTED = "Destination accepted for governed navigation."
+# Phase 1 saved routes ground ONLY the first waypoint. The wording must never
+# imply the whole route is under way.
+LINE_DEST_ACCEPTED_FIRST_WAYPOINT = (
+    "Destination accepted for governed navigation, first waypoint only.")
+LINE_DEST_NOT_FOUND = "I don't have a configured location matching that request."
+LINE_DEST_AMBIGUOUS = "That destination is ambiguous. Please be more specific."
+LINE_DEST_STALE = "I no longer have a fresh position for that object."
+LINE_DEST_UNSUPPORTED = "Address routing isn't configured on this robot."
+LINE_DEST_DOWN = "The destination service is unavailable."
+LINE_DEST_INVALID = "I couldn't validate that destination."
+LINE_DEST_RATE = "Please wait a moment before asking for another destination."
+
+# Stable resolver code → fixed spoken line. An UNKNOWN code maps to the
+# validation line, never to a guess and never to a fallback route.
+DEST_LINES = {
+    "DEST_NOT_FOUND": LINE_DEST_NOT_FOUND,
+    "DEST_NO_REGISTRY": LINE_DEST_NOT_FOUND,
+    "DEST_NOT_SEEN": LINE_DEST_NOT_FOUND,
+    "DEST_LOW_CONFIDENCE": LINE_DEST_STALE,
+    "DEST_BEHIND_EGO": LINE_DEST_NOT_FOUND,
+    "DEST_NON_FINITE": LINE_DEST_INVALID,
+    "DEST_AMBIGUOUS": LINE_DEST_AMBIGUOUS,
+    "DEST_STALE": LINE_DEST_STALE,
+    "DEST_UNSUPPORTED_ADDRESS": LINE_DEST_UNSUPPORTED,
+    "DEST_RATE_LIMITED": LINE_DEST_RATE,
+}
+# The Phase-1 marker the resolver returns for a saved route.
+ROUTE_FIRST_WAYPOINT_ONLY = "first_waypoint_only"
 
 
 def _log_enabled() -> bool:
@@ -152,6 +196,60 @@ def post_intent(text: str, turn: int) -> tuple[str, float]:
     return LINE_INTENT_INVALID, ms
 
 
+def post_destination(dest, turn: int) -> tuple[str, float]:
+    """POST ONE typed destination to the trusted resolver door. ONE request,
+    NO retry, NO fallback to /intent or /chat on any outcome.
+
+    🔴 The body carries the typed request ONLY — a kind and the operator's
+    words. This process never sends, receives, or speaks a coordinate: the
+    success body is admission metadata, and the grounded pose stays on the
+    doer-facing latch inside the service.
+
+    Returns (spoken line, http_ms)."""
+    body = json.dumps({"destination": dest.to_wire()}).encode("utf-8")
+    req = urllib.request.Request(
+        intent_url() + "/destination", data=body,
+        headers={"Content-Type": "application/json"}, method="POST")
+    t0 = time.monotonic() * 1000.0
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s()) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as e:
+        ms = time.monotonic() * 1000.0 - t0
+        # A refusal body carries the stable code; read it for the LINE only.
+        code = ""
+        try:
+            code = str(json.loads(e.read() or b"{}").get("error") or "")
+        except (json.JSONDecodeError, OSError, ValueError):
+            code = ""
+        if code in DEST_LINES:
+            log_event(turn, f"resolve_outcome={code.lower()}", ms)
+            return DEST_LINES[code], ms
+        log_event(turn, f"resolve_refused_{e.code}", ms)
+        return LINE_DEST_INVALID, ms
+    except (urllib.error.URLError, TimeoutError, OSError):
+        ms = time.monotonic() * 1000.0 - t0
+        log_event(turn, "resolve_unreachable", ms)
+        return LINE_DEST_DOWN, ms
+    ms = time.monotonic() * 1000.0 - t0
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        log_event(turn, "resolve_malformed_response", ms)
+        return LINE_DEST_INVALID, ms
+    if not (isinstance(payload, dict) and payload.get("ok")
+            and payload.get("outcome") == "resolved"):
+        # A 200 that does not clearly say "resolved" is not an acceptance.
+        log_event(turn, "resolve_malformed_response", ms)
+        return LINE_DEST_INVALID, ms
+    log_event(turn, "resolve_outcome=resolved", ms)
+    if payload.get("route_resolution") == ROUTE_FIRST_WAYPOINT_ONLY:
+        # Say the limitation out loud — never imply a whole route started.
+        log_event(turn, f"route_resolution={ROUTE_FIRST_WAYPOINT_ONLY}")
+        return LINE_DEST_ACCEPTED_FIRST_WAYPOINT, ms
+    return LINE_DEST_ACCEPTED, ms
+
+
 def handle_turn(text: str, turn: int, tts_cmd: str | None) -> None:
     t0 = time.monotonic() * 1000.0
     decision = classify_transcript(text)
@@ -168,6 +266,14 @@ def handle_turn(text: str, turn: int, tts_cmd: str | None) -> None:
     if decision.kind is RouteKind.MOTION:
         line, http_ms = post_intent(text, turn)
         log_event(turn, "intent_http_ms", http_ms)
+        speak_line(line, tts_cmd)
+        return
+    if decision.kind is RouteKind.DESTINATION and decision.destination is not None:
+        # The typed destination door — the ONLY endpoint this branch touches.
+        # A refusal is spoken and the turn ENDS: no /intent, no chat, no retry.
+        log_event(turn, f"destination_kind={decision.destination.kind}")
+        line, http_ms = post_destination(decision.destination, turn)
+        log_event(turn, "resolve_http_ms", http_ms)
         speak_line(line, tts_cmd)
         return
     # AMBIGUOUS — no endpoint is contacted at all; a fixed local reply.

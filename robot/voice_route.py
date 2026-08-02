@@ -36,13 +36,42 @@ from enum import Enum
 class RouteKind(Enum):
     CONVERSATION = "conversation"
     MOTION = "motion"
+    DESTINATION = "destination"
     AMBIGUOUS = "ambiguous"
+
+
+@dataclass(frozen=True)
+class DestinationRequest:
+    """A TYPED destination request — a kind plus the operator's words.
+
+    🔴 There is no coordinate field, and there is no code path in this module
+    that could produce one: naming a destination is all language is allowed to
+    do. The trusted resolver (`kirra-sidecars/src/destination.rs`, behind
+    `POST /destination`) is the ONLY thing that turns a name into a pose.
+
+    `class_`/`color` are set ONLY for `tracked_object`, from a deliberately
+    small closed vocabulary; every other kind carries `query` alone.
+    """
+    kind: str                      # named_place | saved_route | tracked_object | address
+    query: str | None = None
+    class_: str | None = None
+    color: str | None = None
+
+    def to_wire(self) -> dict:
+        """The exact `destination` object POSTed to the resolver."""
+        if self.kind == "tracked_object" and self.class_:
+            wire = {"kind": self.kind, "class": self.class_}
+            if self.color:
+                wire["color"] = self.color
+            return wire
+        return {"kind": self.kind, "query": self.query or ""}
 
 
 @dataclass(frozen=True)
 class RouteDecision:
     kind: RouteKind
     reason: str
+    destination: DestinationRequest | None = None
 
 
 # Wake phrases (mirrors wake_word.py's set) plus bare honorifics. Stripped
@@ -84,6 +113,45 @@ _PRONOUN_DESTS = frozenset({"there", "here", "it", "that", "them", "away"})
 
 _WS = re.compile(r"\s+")
 _PUNCT = re.compile(r"[^a-z0-9 ]+")
+# The same punctuation strip WITHOUT lowercasing, so a destination query can
+# keep the operator's capitalization ("125 Main Street") while every routing
+# decision is still made on the lowercase form. Token counts match exactly.
+_PUNCT_CASED = re.compile(r"[^a-zA-Z0-9 ]+")
+
+# --- typed destination grammar (deliberately small and closed) ---------------
+#
+# 🔴 This grammar chooses a destination KIND and repeats the operator's words.
+# It never produces a coordinate — see DestinationRequest. Anything it does
+# not recognise stays conversation or fails closed as ambiguous; the resolver
+# then refuses anything it cannot ground.
+
+# Verbs that can carry a destination complement.
+_DEST_VERBS = frozenset({"drive", "go", "head", "navigate", "move", "proceed"})
+# Prepositions that introduce the destination itself.
+_DEST_PREPOSITIONS = frozenset({"to", "near", "toward", "towards"})
+# Verbs that can start a SAVED ROUTE request ("run route A").
+_ROUTE_VERBS = frozenset({"run", "follow", "start", "take", "resume"})
+_ARTICLES = frozenset({"the", "a", "an", "my", "our"})
+
+# The closed tracked-object vocabulary. Small on purpose: a bigger list would
+# start swallowing named places ("front door", "garage"), and free-form scene
+# description is explicitly out of scope — an unrecognised thing simply routes
+# as a named place and the registry refuses it.
+_OBJECT_CLASSES = frozenset({
+    "cup", "chair", "person", "box", "bottle", "ball", "bag", "book", "cone",
+    "mug", "can",
+})
+_OBJECT_COLORS = frozenset({
+    "red", "blue", "green", "yellow", "black", "white", "orange", "purple",
+    "grey", "gray", "brown", "pink",
+})
+
+# Street suffixes that, together with a leading house number, mark an address.
+_STREET_SUFFIXES = frozenset({
+    "street", "st", "avenue", "ave", "road", "rd", "lane", "ln", "drive",
+    "boulevard", "blvd", "way", "court", "ct", "place", "pl", "terrace",
+    "circle", "crescent", "parade", "highway", "hwy",
+})
 
 # Bounded distance expressions — the ONLY complement (besides a direction or
 # destination) that makes a bare "drive" an explicit motion order. Narrow on
@@ -133,6 +201,88 @@ def strip_wake_prefixes(norm: str) -> str:
     return norm
 
 
+def _split_cased(text: str) -> list[str]:
+    """Tokens with case PRESERVED, through the same punctuation/whitespace
+    pipeline as `normalize` — so the two token lists align index-for-index."""
+    cased = _WS.sub(" ", _PUNCT_CASED.sub(" ", text)).strip()
+    return cased.split(" ") if cased else []
+
+
+def _strip_articles(lower: list[str], cased: list[str]) -> tuple[list[str], list[str]]:
+    """Drop leading articles from an aligned (lowercase, cased) token pair."""
+    i = 0
+    while i < len(lower) and lower[i] in _ARTICLES:
+        i += 1
+    return lower[i:], cased[i:]
+
+
+def _is_address(lower: list[str]) -> bool:
+    """A leading house number PLUS a street suffix. Both are required: "125"
+    alone is not an address, and "main street" without a number is more
+    plausibly a named place the operator registered."""
+    return (
+        len(lower) >= 2
+        and lower[0].isdigit()
+        and any(tok in _STREET_SUFFIXES for tok in lower[1:])
+    )
+
+
+def _as_object(lower: list[str]) -> DestinationRequest | None:
+    """`<class>` or `<color> <class>` from the closed vocabulary, else None."""
+    if len(lower) == 1 and lower[0] in _OBJECT_CLASSES:
+        return DestinationRequest(kind="tracked_object", class_=lower[0])
+    if (
+        len(lower) == 2
+        and lower[0] in _OBJECT_COLORS
+        and lower[1] in _OBJECT_CLASSES
+    ):
+        return DestinationRequest(
+            kind="tracked_object", class_=lower[1], color=lower[0]
+        )
+    return None
+
+
+def _destination_decision(lower: list[str], cased: list[str]) -> RouteDecision:
+    """Classify the tokens AFTER a destination preposition into a typed
+    request — or fail closed as ambiguous when they name nothing resolvable.
+
+    Order is deliberate: address (a house number is unmistakable) → tracked
+    object (closed vocabulary) → named place (everything else the operator
+    may have registered). A pronoun names nothing and never moves the robot.
+    """
+    lower, cased = _strip_articles(lower, cased)
+    if not lower:
+        return RouteDecision(RouteKind.AMBIGUOUS, "motion_without_destination")
+    if all(tok in _PRONOUN_DESTS for tok in lower):
+        return RouteDecision(RouteKind.AMBIGUOUS, "pronoun_destination")
+    if _is_address(lower):
+        return RouteDecision(
+            RouteKind.DESTINATION, "destination_address",
+            DestinationRequest(kind="address", query=" ".join(cased)))
+    obj = _as_object(lower)
+    if obj is not None:
+        return RouteDecision(RouteKind.DESTINATION, "destination_tracked_object", obj)
+    # A route named with a preposition ("go to route a") is still a route.
+    if "route" in lower:
+        return RouteDecision(
+            RouteKind.DESTINATION, "destination_saved_route",
+            DestinationRequest(kind="saved_route", query=" ".join(lower)))
+    return RouteDecision(
+        RouteKind.DESTINATION, "destination_named_place",
+        DestinationRequest(kind="named_place", query=" ".join(cased)))
+
+
+def _route_decision(lower: list[str]) -> RouteDecision:
+    """A saved-route request: `run route A`, `follow the perimeter route`."""
+    lower, _ = _strip_articles(lower, list(lower))
+    if not lower or all(tok in _PRONOUN_DESTS for tok in lower):
+        # "run it" / "follow that" name no route — never guess which one.
+        return RouteDecision(RouteKind.AMBIGUOUS, "pronoun_destination")
+    return RouteDecision(
+        RouteKind.DESTINATION, "destination_saved_route",
+        DestinationRequest(kind="saved_route", query=" ".join(lower)))
+
+
 def _dest_after_to(tokens: list[str], to_idx: int) -> str | None:
     """The destination tokens after a 'to', or None if absent/pronoun-only.
 
@@ -155,6 +305,11 @@ def classify_transcript(text: str) -> RouteDecision:
     if not norm:
         return RouteDecision(RouteKind.AMBIGUOUS, "empty_after_normalization")
     tokens = norm.split(" ")
+    # The case-preserving twin of `tokens`, aligned by dropping exactly the
+    # tokens wake/courtesy stripping removed — so a destination query can
+    # carry "125 Main Street" while routing stays lowercase.
+    all_cased = _split_cased(text)
+    cased = all_cased[len(all_cased) - len(tokens):] if len(all_cased) >= len(tokens) else tokens
 
     if norm in _HOLD_FORMS:
         return RouteDecision(RouteKind.MOTION, "explicit_hold")
@@ -175,21 +330,26 @@ def classify_transcript(text: str) -> RouteDecision:
         # duration/purpose/prose complement stay conversation.
         if rest[0] == "for" and _is_bounded_distance(rest[1:]):
             return RouteDecision(RouteKind.MOTION, "explicit_motion_verb")
-    if verb in ("drive", "move", "head") and rest:
+    # A DESTINATION verb plus a preposition names a PLACE, not a maneuver:
+    # it routes to the typed destination door, where a trusted resolver — not
+    # this process and not a model — supplies the coordinates. A direction
+    # word after the same verb is still ordinary motion and is checked first,
+    # so "drive forward" and "go straight" are unchanged.
+    if verb in _DEST_VERBS and rest:
         if rest[0] in _DIR_WORDS:
             return RouteDecision(RouteKind.MOTION, "explicit_motion_verb")
-        if rest[0] == "to":
-            if _dest_after_to(tokens, 1):
-                return RouteDecision(RouteKind.MOTION, "explicit_destination")
-            return RouteDecision(RouteKind.AMBIGUOUS, "motion_without_destination")
-    if verb == "go" and rest:
-        if rest[0] in _DIR_WORDS:
-            return RouteDecision(RouteKind.MOTION, "explicit_motion_verb")
-        if rest[0] == "to":
-            if _dest_after_to(tokens, 1):
-                return RouteDecision(RouteKind.MOTION, "explicit_destination")
-            return RouteDecision(RouteKind.AMBIGUOUS, "motion_without_destination")
+        if rest[0] in _DEST_PREPOSITIONS:
+            return _destination_decision(rest[1:], cased[2:])
+        # "go there", "head over" — a destination verb aimed at a pronoun
+        # names nothing. Fail closed rather than guess where "there" is.
+        if all(tok in _PRONOUN_DESTS for tok in rest):
+            return RouteDecision(RouteKind.AMBIGUOUS, "pronoun_destination")
         # "go over that again", "go on" … → conversation (default below)
+    if verb in _ROUTE_VERBS and rest and verb != "take":
+        if "route" in rest:
+            return _route_decision(rest)
+        if all(tok in _PRONOUN_DESTS for tok in rest):
+            return RouteDecision(RouteKind.AMBIGUOUS, "pronoun_destination")
     if verb == "turn" and rest and rest[0] in ("left", "right", "around"):
         return RouteDecision(RouteKind.MOTION, "explicit_motion_verb")
     if verb == "back" and rest and rest[0] == "up":
@@ -204,9 +364,13 @@ def classify_transcript(text: str) -> RouteDecision:
         return RouteDecision(RouteKind.MOTION, "explicit_motion_verb")
     if norm.startswith("lane change"):
         return RouteDecision(RouteKind.MOTION, "explicit_motion_verb")
-    if verb == "take" and rest and rest[0] == "me":
-        if len(rest) >= 2 and rest[1] == "to" and _dest_after_to(tokens, 2):
-            return RouteDecision(RouteKind.MOTION, "explicit_destination")
-        return RouteDecision(RouteKind.AMBIGUOUS, "motion_without_destination")
+    if verb == "take" and rest:
+        if rest[0] == "me":
+            if len(rest) >= 2 and rest[1] in _DEST_PREPOSITIONS:
+                return _destination_decision(rest[2:], cased[3:])
+            return RouteDecision(RouteKind.AMBIGUOUS, "motion_without_destination")
+        # "take route A" — a saved route, not a passenger request.
+        if "route" in rest:
+            return _route_decision(rest)
 
     return RouteDecision(RouteKind.CONVERSATION, "default_conversation")

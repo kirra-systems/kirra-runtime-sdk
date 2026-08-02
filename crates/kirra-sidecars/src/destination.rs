@@ -124,6 +124,59 @@ const COORDINATE_KEYS: &[&str] = &[
     "waypoints",
 ];
 
+/// The tracked-object attribute keys. Admitted ONLY on `tracked_object`, and
+/// only in place of `query` — never alongside it (two spellings of the same
+/// field is an ambiguity, not a merge).
+const OBJECT_ATTRIBUTE_KEYS: &[&str] = &["class", "color"];
+
+/// Compose `{"class":"cup","color":"red"}` into the query `"red cup"`.
+///
+/// Returns `Ok(None)` when the object carries no attribute keys (the ordinary
+/// `query` form). Fail-closed on every misuse: attributes on a non-object
+/// kind, attributes alongside `query`, a missing/blank `class`, or a
+/// non-string attribute.
+fn compose_object_query(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    kind: &str,
+) -> Result<Option<String>, &'static str> {
+    let has_attrs = OBJECT_ATTRIBUTE_KEYS.iter().any(|k| obj.contains_key(*k));
+    if !has_attrs {
+        return Ok(None);
+    }
+    if kind != "tracked_object" {
+        // A place/route/address does not have a class or a colour. Refusing
+        // keeps each kind's wire shape exactly one thing.
+        return Err("DEST_JSON_PARSE_ERROR");
+    }
+    if obj.contains_key("query") {
+        return Err("DEST_JSON_PARSE_ERROR");
+    }
+    // The attribute form bypasses serde's `deny_unknown_fields`, so it
+    // enforces the same closed key set itself — nothing may ride alongside.
+    if obj
+        .keys()
+        .any(|k| k != "kind" && !OBJECT_ATTRIBUTE_KEYS.contains(&k.as_str()))
+    {
+        return Err("DEST_JSON_PARSE_ERROR");
+    }
+    let attr = |key: &str| -> Result<Option<&str>, &'static str> {
+        match obj.get(key) {
+            None => Ok(None),
+            Some(serde_json::Value::String(s)) => Ok(Some(s.trim())),
+            Some(_) => Err("DEST_JSON_PARSE_ERROR"),
+        }
+    };
+    let class = attr("class")?.unwrap_or("");
+    if class.is_empty() {
+        // A colour alone ("the red one") names no thing to resolve.
+        return Err("DEST_EMPTY_QUERY");
+    }
+    Ok(Some(match attr("color")? {
+        Some(color) if !color.is_empty() => format!("{color} {class}"),
+        _ => class.to_string(),
+    }))
+}
+
 impl DestinationRef {
     /// Parse destination JSON — THE one fail-closed parser for the typed
     /// destination wire form. Tolerant of LLM framing (fences/preamble) via
@@ -141,8 +194,23 @@ impl DestinationRef {
         if obj.keys().any(|k| COORDINATE_KEYS.contains(&k.as_str())) {
             return Err("DEST_COORDINATES_FORBIDDEN");
         }
-        let parsed: DestinationJson =
-            serde_json::from_str(json).map_err(|_| "DEST_JSON_PARSE_ERROR")?;
+        // The tracked-object ATTRIBUTE form (`class` + optional `color`) is a
+        // second accepted spelling of the SAME typed request, for the voice
+        // router's deliberately small object grammar. It composes into the
+        // one `query` the resolver already matches — there is no second
+        // resolution path, and no other kind may carry these keys.
+        let kind = obj
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .ok_or("DEST_JSON_PARSE_ERROR")?;
+        let composed = compose_object_query(obj, kind)?;
+        let parsed: DestinationJson = match composed {
+            Some(query) => DestinationJson {
+                kind: kind.to_string(),
+                query,
+            },
+            None => serde_json::from_str(json).map_err(|_| "DEST_JSON_PARSE_ERROR")?,
+        };
         let query = parsed.query.trim();
         if query.is_empty() {
             return Err("DEST_EMPTY_QUERY");
@@ -867,6 +935,81 @@ impl DestinationResolver {
 }
 
 // ---------------------------------------------------------------------------
+// Boot configuration — ONE config path, shared by every binary that resolves.
+// ---------------------------------------------------------------------------
+
+/// Read one env var, parsed by `parse`, defaulting when absent/empty.
+/// Malformed → `Err` (the caller aborts startup) — never a silent default.
+fn env_parsed<T>(
+    key: &str,
+    default: T,
+    parse: impl FnOnce(&str) -> Option<T>,
+) -> Result<T, String> {
+    match std::env::var(key) {
+        Ok(raw) if !raw.trim().is_empty() => {
+            parse(raw.trim()).ok_or_else(|| format!("{key}: malformed value {raw:?}"))
+        }
+        _ => Ok(default),
+    }
+}
+
+fn registry_from_env<T>(
+    key: &str,
+    empty: T,
+    parse: impl FnOnce(&str) -> Result<T, String>,
+) -> Result<T, String> {
+    match std::env::var(key) {
+        Ok(path) if !path.trim().is_empty() => {
+            let path = path.trim();
+            let raw = std::fs::read_to_string(path).map_err(|e| format!("{key} {path:?}: {e}"))?;
+            parse(&raw).map_err(|e| format!("{key} {path:?}: {e}"))
+        }
+        _ => Ok(empty),
+    }
+}
+
+/// Build the trusted destination resolver from the environment at boot.
+///
+/// Shared by EVERY binary that resolves destinations (`planner_service`,
+/// `mick_service`) so a fleet cannot end up with two processes disagreeing
+/// about what "the kitchen" means. Fail-closed throughout: a configured
+/// registry path that is unreadable or fails validation, or a malformed
+/// policy knob, is an `Err` the caller turns into a startup abort — a service
+/// with a half-loaded registry must not come up looking healthy.
+pub fn resolver_from_env() -> Result<DestinationResolver, String> {
+    let places = registry_from_env(
+        "KIRRA_DEST_PLACES_PATH",
+        PlaceRegistry::empty(),
+        PlaceRegistry::from_json_str,
+    )?;
+    let routes = registry_from_env(
+        "KIRRA_DEST_ROUTES_PATH",
+        RouteRegistry::empty(),
+        RouteRegistry::from_json_str,
+    )?;
+    let max_age_ms = env_parsed(
+        "KIRRA_DEST_OBJECT_MAX_AGE_MS",
+        DEFAULT_OBJECT_MAX_AGE_MS,
+        |s| s.parse::<u64>().ok(),
+    )?;
+    let min_confidence = env_parsed(
+        "KIRRA_DEST_OBJECT_MIN_CONFIDENCE",
+        DEFAULT_OBJECT_MIN_CONFIDENCE,
+        |s| s.parse::<f32>().ok(),
+    )?;
+    let standoff_m = env_parsed(
+        "KIRRA_DEST_OBJECT_STANDOFF_M",
+        DEFAULT_OBJECT_STANDOFF_M,
+        |s| s.parse::<f64>().ok(),
+    )?;
+    Ok(DestinationResolver {
+        places,
+        routes,
+        object_policy: ObjectPolicy::validated(max_age_ms, min_confidence, standoff_m)?,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // The LLM seam — schema + prompt. The model can choose a KIND and repeat the
 // operator's words; it structurally cannot emit a coordinate.
 // ---------------------------------------------------------------------------
@@ -1049,6 +1192,70 @@ mod tests {
                 "{smuggle}"
             );
         }
+    }
+
+    /// The voice router's small object grammar sends attributes rather than a
+    /// free-text phrase; they compose into the ONE query the resolver already
+    /// matches, so there is no second resolution path.
+    #[test]
+    fn the_tracked_object_attribute_form_composes_one_query() {
+        let (dref, _) =
+            DestinationRef::parse_json(r#"{"kind":"tracked_object","class":"cup","color":"red"}"#)
+                .expect("attribute form parses");
+        assert_eq!(
+            dref,
+            DestinationRef::TrackedObject {
+                query: "red cup".into()
+            },
+            "colour + class compose in the order the detector labels them"
+        );
+        // Class alone is a generic request.
+        assert_eq!(
+            DestinationRef::from_json(r#"{"kind":"tracked_object","class":"person"}"#).unwrap(),
+            DestinationRef::TrackedObject {
+                query: "person".into()
+            }
+        );
+        // And it resolves exactly like the query form against real targets.
+        let r = resolver();
+        let targets = [target("red cup", 3.0, 0.0, 0.9)];
+        assert!(matches!(
+            r.resolve(&dref, &view(&targets, Some(1_000)), ego_origin(), 1_000),
+            ResolveOutcome::Resolved(_)
+        ));
+    }
+
+    #[test]
+    fn the_attribute_form_is_closed_and_object_only() {
+        // Attributes on a kind that has no class/colour.
+        for bad in [
+            r#"{"kind":"named_place","class":"cup"}"#,
+            r#"{"kind":"saved_route","color":"red"}"#,
+            r#"{"kind":"address","class":"cup"}"#,
+            // Two spellings of the same field is an ambiguity, not a merge.
+            r#"{"kind":"tracked_object","query":"cup","class":"cup"}"#,
+            // Nothing may ride alongside the attributes.
+            r#"{"kind":"tracked_object","class":"cup","bogus":1}"#,
+            // A non-string attribute.
+            r#"{"kind":"tracked_object","class":7}"#,
+        ] {
+            assert_eq!(
+                DestinationRef::parse_json(bad).unwrap_err(),
+                "DEST_JSON_PARSE_ERROR",
+                "{bad}"
+            );
+        }
+        // A colour with no class names no thing at all.
+        assert_eq!(
+            DestinationRef::parse_json(r#"{"kind":"tracked_object","color":"red"}"#).unwrap_err(),
+            "DEST_EMPTY_QUERY"
+        );
+        // A coordinate still outranks everything, even in the attribute form.
+        assert_eq!(
+            DestinationRef::parse_json(r#"{"kind":"tracked_object","class":"cup","x_m":1.0}"#)
+                .unwrap_err(),
+            "DEST_COORDINATES_FORBIDDEN"
+        );
     }
 
     #[test]

@@ -25,10 +25,7 @@
 
 use std::net::{TcpListener, TcpStream};
 
-use kirra_sidecars::destination::{
-    DestinationResolver, ObjectPolicy, PlaceRegistry, RouteRegistry, DEFAULT_OBJECT_MAX_AGE_MS,
-    DEFAULT_OBJECT_MIN_CONFIDENCE, DEFAULT_OBJECT_STANDOFF_M,
-};
+use kirra_sidecars::destination::{resolver_from_env, DestinationResolver};
 use kirra_sidecars::http::{read_request, respond, respond_error};
 use kirra_sidecars::net::{allow_nonlocal_from_env, enforce_bind_policy, now_ms, RateLimiter};
 use kirra_sidecars::planner::{handle_plan_with_destinations, PlanRequest};
@@ -37,67 +34,6 @@ use kirra_sidecars::planner::{handle_plan_with_destinations, PlanRequest};
 /// plan + slow-loop check; the doer bridge plans at ≤ 20 Hz.
 const PLAN_RATE_BURST: f64 = 40.0;
 const PLAN_RATE_PER_S: f64 = 20.0;
-
-/// Read one env var, parsed by `parse`, defaulting when absent/empty.
-/// Malformed → `Err` (the caller aborts startup) — never a silent default.
-fn env_parsed<T>(
-    key: &str,
-    default: T,
-    parse: impl FnOnce(&str) -> Option<T>,
-) -> Result<T, String> {
-    match std::env::var(key) {
-        Ok(raw) if !raw.trim().is_empty() => {
-            parse(raw.trim()).ok_or_else(|| format!("{key}: malformed value {raw:?}"))
-        }
-        _ => Ok(default),
-    }
-}
-
-/// Build the trusted destination resolver from env at boot. Fail-closed
-/// throughout: a configured registry path that is unreadable or fails
-/// validation, or a malformed policy knob, ABORTS startup — a planner with a
-/// half-loaded registry must not come up looking healthy.
-fn resolver_from_env() -> Result<DestinationResolver, String> {
-    let places = match std::env::var("KIRRA_DEST_PLACES_PATH") {
-        Ok(path) if !path.trim().is_empty() => {
-            let raw = std::fs::read_to_string(path.trim())
-                .map_err(|e| format!("KIRRA_DEST_PLACES_PATH {path:?}: {e}"))?;
-            PlaceRegistry::from_json_str(&raw)
-                .map_err(|e| format!("KIRRA_DEST_PLACES_PATH {path:?}: {e}"))?
-        }
-        _ => PlaceRegistry::empty(),
-    };
-    let routes = match std::env::var("KIRRA_DEST_ROUTES_PATH") {
-        Ok(path) if !path.trim().is_empty() => {
-            let raw = std::fs::read_to_string(path.trim())
-                .map_err(|e| format!("KIRRA_DEST_ROUTES_PATH {path:?}: {e}"))?;
-            RouteRegistry::from_json_str(&raw)
-                .map_err(|e| format!("KIRRA_DEST_ROUTES_PATH {path:?}: {e}"))?
-        }
-        _ => RouteRegistry::empty(),
-    };
-    let max_age_ms = env_parsed(
-        "KIRRA_DEST_OBJECT_MAX_AGE_MS",
-        DEFAULT_OBJECT_MAX_AGE_MS,
-        |s| s.parse::<u64>().ok(),
-    )?;
-    let min_confidence = env_parsed(
-        "KIRRA_DEST_OBJECT_MIN_CONFIDENCE",
-        DEFAULT_OBJECT_MIN_CONFIDENCE,
-        |s| s.parse::<f32>().ok(),
-    )?;
-    let standoff_m = env_parsed(
-        "KIRRA_DEST_OBJECT_STANDOFF_M",
-        DEFAULT_OBJECT_STANDOFF_M,
-        |s| s.parse::<f64>().ok(),
-    )?;
-    let object_policy = ObjectPolicy::validated(max_age_ms, min_confidence, standoff_m)?;
-    Ok(DestinationResolver {
-        places,
-        routes,
-        object_policy,
-    })
-}
 
 fn serve(mut stream: TcpStream, limiter: &mut RateLimiter, resolver: &DestinationResolver) {
     let req = match read_request(&mut stream) {
