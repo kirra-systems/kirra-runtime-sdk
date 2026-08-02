@@ -413,14 +413,39 @@ The model is behind an HTTP seam, so a swap is **config-only** — no rebuild, a
 **no safety re-review** (the checker, the fence, and the intent parse are
 model-agnostic; a swap changes only the doer's proposals, never its authority):
 
+**Swap ALL THREE roles together.** `KIRRA_RABBIT_MODEL` (speech),
+`KIRRA_MICK_CHAT_MODEL` (chat sidecar) and `KIRRA_MICK_MODEL` (intent sidecar)
+default to the same id deliberately: Ollama runs with
+`OLLAMA_MAX_LOADED_MODELS=1`, so pointing two roles at different models makes
+them evict each other and every alternation pays a cold reload. Leaving one
+behind is the easy mistake — it is invisible except in `GET /health` and the
+intent service's startup log.
+
 ```bash
 ollama pull <new-model>
-# gate the candidate against the router contract BEFORE flipping the env:
-python3 robot/rabbit_model_smoketest.py <new-model>     # JSON contract + directive vs chat + no fabrication
+# gate the candidate BEFORE flipping any env — two contracts, two gates:
+python3 robot/rabbit_model_smoketest.py <new-model>     # router: JSON + directive vs chat + no fabrication
 # then in /etc/kirra/robot.env:
 KIRRA_RABBIT_MODEL="<new-model>"
-sudo systemctl restart kirra-rabbit-watch               # + the converse/voice front-end
+# and in /etc/kirra/kirra.env (BOTH sidecars):
+KIRRA_MICK_CHAT_MODEL=<new-model>
+KIRRA_MICK_MODEL=<new-model>
+sudo systemctl restart kirra-rabbit-watch kirra-mick kirra-mick-chat
+# the chat gate runs against the RESTARTED sidecar (it reads /health for the
+# model that actually resolved, so it cannot vet the wrong one):
+python3 robot/mick_chat_model_smoketest.py              # prose not JSON + no invented telemetry + complete sentences
+
+# confirm all three landed:
+curl -s localhost:8103/health                           # chat: names its model
+journalctl -u kirra-mick -n 5 | grep -i persona         # intent: names its model
+KIRRA_RABBIT_MODEL=<new-model> python3 robot/rabbit_model_smoketest.py --pin-check
 ```
+
+The two gates cover different contracts and neither substitutes for the other:
+the Rabbit one asks "can it still route drive-vs-chat?", the chat one asks "can
+it still hold a conversation without inventing robot state or stopping
+mid-word?". Both write the same per-model pin file, so one record answers
+"which weights, verified when" for every role.
 
 `rabbit_model_smoketest.py` is a **doer-quality** gate (not a safety gate, not a CI
 test — it needs a live Ollama). A model that fails it is still *safe* to run — an
