@@ -254,10 +254,15 @@ this process now puts Kirra 2-3 years ahead of a competitor who waits.
 | Multi-asset fleet governance | ❌ | ❌ | ✅ | ✅ | ✅ |
 
 > **Reading the two assessment rows.** They record whether an **independent
-> third party has assessed and certified the product** — not whether work
-> toward that has been done. **Kirra has no such assessment in any column**,
-> now or at any planned milestone; `assessment work planned` means the
-> activity is scheduled, not that an outcome exists. Kirra's actual position:
+> third party has assessed the product** — not whether work toward that has
+> been done. Assessment and certification are distinct: assessment is the
+> examination, certification is a certificate issued on its outcome, and a
+> product can have neither, the first, or both. These rows track the
+> **first**, because it is the gate — nothing is certified without it.
+> **Kirra has no independent assessment in any column**, now or at any
+> planned milestone, and therefore no certification either; `assessment work
+> planned` means the activity is scheduled, not that an outcome exists.
+> Kirra's actual position:
 > **Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508 SIL 3 requirements. Independent third-party assessment has not yet been performed.** The supporting evidence is indexed in
 > [`safety/SAFETY_CASE_INDEX.md`](safety/SAFETY_CASE_INDEX.md), and every
 > foundation document there is **Draft**.
