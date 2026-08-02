@@ -71,7 +71,7 @@ ${pageHero({
             </tbody>
           </table>
         </div>
-        ${evRow("src/metrics.rs", "src/health.rs")}
+        ${evRow("src/metrics.rs", "src/gateway/policy_layer.rs")}
       </div>
     </section>
 

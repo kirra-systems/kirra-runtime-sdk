@@ -64,7 +64,7 @@ ${pageHero({
           </div>
           <div class="diagram-frame flow-anim" data-reveal>${wireSvg}</div>
         </div>
-        ${evRow("docs/protocol_adapters.md", "src/protocol_adapter.rs", "crates/kirra-industrial")}
+        ${evRow("docs/protocol_adapters.md", "crates/kirra-industrial/src/protocol_adapter.rs", "crates/kirra-industrial")}
       </div>
     </section>
 
@@ -166,7 +166,7 @@ ${pageHero({
             <p>The safety case maps to IEC 61508 SIL 3 and the run-time-assurance patterns OT regulators
             recognize — drafted in the open, versioned with the code. Independent assessment has not yet been
             performed, and we say so.</p>
-            ${evRow("docs/safety/IEC_61508_SIL3_MAPPING.md", "certification.html")}
+            <p class="evidence-row">${ev("docs/safety/IEC_61508_SIL3_MAPPING.md")}<a class="evidence" href="certification.html">Certification status</a></p>
           </div>
         </div>
       </div>

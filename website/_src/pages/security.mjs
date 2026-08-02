@@ -109,7 +109,7 @@ ${pageHero({
             <p>Cross-controller trust reports are Ed25519-signed, freshness-windowed (5 s), and replay-proof — nonces
             burn atomically with the report commit. Generation ordering reconciles conflicting reports
             deterministically.</p>
-            ${evRow("src/federation.rs", "src/federation_reconciliation.rs")}
+            ${evRow("crates/kirra-fleet-types/src/federation.rs", "crates/kirra-fleet-types/src/federation_reconciliation.rs")}
           </div>
           <div class="card" data-reveal>
             <h3>Release tokens</h3>

@@ -179,7 +179,7 @@
         <p class="diagram-caption">
           <span>Lease-based failover (≤5 s, EP-03) is opt-in behind <code>KIRRA_HA_LEASE_ENABLED</code>; the epoch CAS remains the sole takeover authority either way.</span>
         </p>
-        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/tests/ha_failover.rs" target="_blank" rel="noopener">tests/ha_failover.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/tests/ha_two_process_drill.rs" target="_blank" rel="noopener">tests/ha_two_process_drill.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/lease.rs" target="_blank" rel="noopener">src/lease.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/standby_monitor.rs" target="_blank" rel="noopener">src/standby_monitor.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/verification/kani/src/proofs_lease.rs" target="_blank" rel="noopener">verification/kani/src/proofs_lease.rs</a></p>
+        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/tests/ha_failover.rs" target="_blank" rel="noopener">tests/ha_failover.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/tests/ha_two_process_drill.rs" target="_blank" rel="noopener">tests/ha_two_process_drill.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/lease.rs" target="_blank" rel="noopener">src/lease.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/standby_monitor" target="_blank" rel="noopener">src/standby_monitor</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/verification/kani/src/proofs_lease.rs" target="_blank" rel="noopener">verification/kani/src/proofs_lease.rs</a></p>
         <div class="compare-note" data-reveal style="margin-top:24px">
           The lease timing algebra — renew at half-life, promote only after holder expiry, clock-skew fails safe —
           is machine-checked by Kani proofs L1–L4 over <em>all</em> 64-bit inputs, not sampled ones.
@@ -210,7 +210,7 @@
             <p>Storage is a family of traits — epoch fence, node store, federation, posture state, OTA campaigns —
             and the <em>same</em> conformance suites run against SQLite, in-memory, and a live Postgres 16 service
             container in CI. Corrupt rows decode fail-closed on every backend.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-verifier-pg" target="_blank" rel="noopener">crates/kirra-verifier-pg</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L503" target="_blank" rel="noopener">.github/workflows/ci.yml:503</a></p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-persistence/src/postgres" target="_blank" rel="noopener">crates/kirra-persistence/src/postgres</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L503" target="_blank" rel="noopener">.github/workflows/ci.yml:503</a></p>
           </div>
           <div class="card" data-reveal>
             <h3>Config that fails at boot</h3>

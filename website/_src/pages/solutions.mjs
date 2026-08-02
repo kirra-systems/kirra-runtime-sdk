@@ -164,7 +164,7 @@ ${useCase({
   does: [
     ["Native protocol awareness",
      "Modbus and OPC-UA event mapping, DNP3 Analog Output (g41) magnitude envelopes, per-target typed CANopen SDO bounds, CIP Set_Attribute_Single bounds — each with a strict mode that denies writes to any target without a configured bound.",
-     evRow("docs/protocol_adapters.md", "crates/kirra-industrial", "src/protocol_adapter.rs")],
+     evRow("docs/protocol_adapters.md", "crates/kirra-industrial", "crates/kirra-industrial/src/protocol_adapter.rs")],
     ["Posture across the plant",
      "Assets form a dependency fabric: a faulted upstream asset degrades what depends on it, and industrial events feed the same fleet-posture engine that gates every command class.",
      evRow("docs/multi_asset_fabric.md")],

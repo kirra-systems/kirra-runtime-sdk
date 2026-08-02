@@ -1350,6 +1350,23 @@ jobs:
         run: |
           python3 ci/check_reexport_shims.py --self-test
           python3 ci/check_reexport_shims.py
+      - name: Website evidence-citation path gate (Tier 0)
+        # The marketing site backs each claim with an "evidence chip" that
+        # deep-links into this repo. Nothing connected the two, so a rename here
+        # silently turned a public "here is the code that proves it" link into a
+        # 404 — nine were already dead when this gate landed, broken by the
+        # v2.0.0 de-monolith and by #1030 folding kirra-verifier-pg into
+        # kirra-persistence. This asserts every cited PATH resolves.
+        #
+        # Line drift (`file.rs:206` still pointing at the intended line) is NOT
+        # covered — a citation records a coordinate, not a claim, so there is
+        # nothing written down to check it against. That needs an anchored
+        # citation format and is the Tier 2 follow-up.
+        #
+        # Self-test first: a gate that cannot be made to fail proves nothing.
+        run: |
+          python3 ci/check_website_citations.py --self-test
+          python3 ci/check_website_citations.py
       - name: Deep-harness matrix source (the weekly lane's coverage list)
         # The weekly `kani-deep-weekly` lane derives its per-harness matrix from
         # ci/deep_harnesses.py rather than a hardcoded list, so a newly-demoted

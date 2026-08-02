@@ -147,7 +147,7 @@ ${pageHero({
             <h3>Storage seams</h3>
             <p>Persistence is a set of storage traits (epoch fence, node store, federation, posture state, OTA) with
             SQLite, in-memory, and live-Postgres backends all running the <em>same</em> conformance suites in CI.</p>
-            ${evRow("crates/kirra-persistence", "crates/kirra-verifier-pg", ".github/workflows/ci.yml:503")}
+            ${evRow("crates/kirra-persistence", "crates/kirra-persistence/src/postgres", ".github/workflows/ci.yml:503")}
           </div>
         </div>
       </div>
