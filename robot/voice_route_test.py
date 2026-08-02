@@ -149,6 +149,69 @@ def test_pronoun_destinations_stay_ambiguous():
               f"pronoun destination must be AMBIGUOUS: {t!r} → {d.kind.value}")
 
 
+def test_whisper_drive_distance_variants_route_to_motion():
+    # Whisper renders "drive forward one meter" as "drive one meter" or
+    # "drive for one meter" (the known "forward"→"for" substitution). Both
+    # are explicit motion orders; the grammar admits drive + bounded
+    # distance and drive + "for" + bounded distance, nothing wider.
+    positives = [
+        "drive one meter",
+        "drive for one meter",
+        "drive two meters",
+        "drive for two meters",
+        "drive 1 meter",
+        "drive for 1 meter",
+        "please drive one meter",
+        "please drive for two meters",
+        "hey parker drive one meter",
+        "hello rabbit drive for one meter",
+        # normalization: punctuation/case must not change the route
+        "Drive one meter.",
+        "DRIVE FOR ONE METER",
+        "drive, one meter",
+        "hey parker, drive for one meter",
+    ]
+    for t in positives:
+        d = classify_transcript(t)
+        check(d.kind is RouteKind.MOTION,
+              f"drive-distance variant must be MOTION, got {d.kind.value} "
+              f"({d.reason}): {t!r}")
+        check(d.reason == "explicit_motion_verb",
+              f"variant keeps the stable reason token: {t!r} → {d.reason}")
+
+
+def test_broad_drive_phrases_stay_conversation():
+    # The "for" substitution is admitted ONLY before a bounded distance —
+    # durations, purposes, idioms and prose about drives never move a robot.
+    negatives = [
+        "how does a motor drive work",
+        "explain a hard drive",
+        "drive me crazy",
+        "drive for one hour",
+        "drive for better performance",
+        "drive the discussion forward",
+        "drive innovation",
+        "the drive is one meter long",
+        "what is a drive",
+        "can you explain drive-by-wire",
+        # numeric literals are bounded to the word list's 1..10 range: a
+        # zero is a no-op and an out-of-range figure is more plausibly a
+        # mis-transcription than a real order (review: Copilot on #1292)
+        "drive 0 meters",
+        "drive 11 meters",
+        "drive 9999 meters",
+        "drive for 0 meters",
+        "drive for 9999 meters",
+    ]
+    for t in negatives:
+        d = classify_transcript(t)
+        check(d.kind is RouteKind.CONVERSATION,
+              f"must stay CONVERSATION, got {d.kind.value} ({d.reason}): {t!r}")
+    d = classify_transcript("drive 10 meters")
+    check(d.kind is RouteKind.MOTION,
+          "the numeric bound is inclusive: 'drive 10 meters' is motion")
+
+
 def test_hold_forms_are_exact_not_prefix():
     # "stop talking" is not a robot-motion order; only enumerated hold
     # forms qualify.
