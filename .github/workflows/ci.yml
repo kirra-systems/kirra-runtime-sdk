@@ -1575,6 +1575,13 @@ jobs:
           # and THE single-door invariant — execute_skill_decisions routes motion
           # ONLY through the injected fence sink. See robot/skill_registry.py.
           python3 robot/skill_registry_test.py
+          # Typed-destination registry CLI (pure, read-only): normalization
+          # mirrors the Rust resolver, validation catches every defect class
+          # the resolver refuses (version/map_id/duplicate-key/non-finite/
+          # empty-waypoints), lookup is exact-key-only, and the shipped
+          # example registries are valid AND self-identify as uncalibrated.
+          # See robot/location_registry.py + docs/hardware/R2_DESTINATIONS.md.
+          python3 robot/location_registry_test.py
           # Robot Command Language voice bridge (pure; fake executor): the
           # two-item intent allow-list, the deterministic paraphrase resolver,
           # ambiguity/unknown executing NOTHING, exit-code → structured result,

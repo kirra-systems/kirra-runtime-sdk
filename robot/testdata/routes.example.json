@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "map_id": "example-uncalibrated",
+  "routes": [
+    {
+      "id": "route-a",
+      "name": "Route A",
+      "aliases": ["route alpha"],
+      "waypoints": [
+        { "x_m": 0.0, "y_m": 0.0, "heading_rad": 0.0 },
+        { "x_m": 0.0, "y_m": 0.0, "heading_rad": 0.0 }
+      ]
+    }
+  ]
+}

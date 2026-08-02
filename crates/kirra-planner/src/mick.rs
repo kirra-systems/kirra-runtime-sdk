@@ -258,7 +258,11 @@ impl MickIntent {
 ///
 /// All structural bytes (`{` `}` `"` `\`) are ASCII, so the byte offsets used for
 /// slicing always fall on `char` boundaries even when the prose is multi-byte UTF-8.
-fn extract_first_json_object(raw: &str) -> Option<&str> {
+///
+/// Public so every OTHER fail-closed LLM-JSON parser (the sidecars' typed
+/// destination parse) recovers an object from model framing with THE SAME
+/// tolerant extraction — one extractor, no drift in what counts as "an object".
+pub fn extract_first_json_object(raw: &str) -> Option<&str> {
     let bytes = raw.as_bytes();
     let start = raw.find('{')?;
     let mut depth = 0usize;

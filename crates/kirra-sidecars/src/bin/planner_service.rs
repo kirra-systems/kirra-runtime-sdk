@@ -12,19 +12,94 @@
 //! Config (boot-validated, fail-closed on malformed — the env_config
 //! convention): `KIRRA_PLANNER_ADDR` (default 127.0.0.1:8100);
 //! `KIRRA_SIDECAR_ALLOW_NONLOCAL=1` to permit a routable bind.
+//!
+//! Typed destinations (all optional; a malformed value ABORTS startup —
+//! never a silent default):
+//!   `KIRRA_DEST_PLACES_PATH` / `KIRRA_DEST_ROUTES_PATH` — the operator-
+//!     calibrated registry JSON files (fail-closed load; absent → the
+//!     matching destination kinds refuse `DEST_NO_REGISTRY`);
+//!   `KIRRA_DEST_OBJECT_MAX_AGE_MS` (default 2000),
+//!   `KIRRA_DEST_OBJECT_MIN_CONFIDENCE` (default 0.70),
+//!   `KIRRA_DEST_OBJECT_STANDOFF_M` (default 0.75) — the tracked-object
+//!     resolution policy (bounds-checked by `ObjectPolicy::validated`).
 
 use std::net::{TcpListener, TcpStream};
 
+use kirra_sidecars::destination::{
+    DestinationResolver, ObjectPolicy, PlaceRegistry, RouteRegistry, DEFAULT_OBJECT_MAX_AGE_MS,
+    DEFAULT_OBJECT_MIN_CONFIDENCE, DEFAULT_OBJECT_STANDOFF_M,
+};
 use kirra_sidecars::http::{read_request, respond, respond_error};
 use kirra_sidecars::net::{allow_nonlocal_from_env, enforce_bind_policy, now_ms, RateLimiter};
-use kirra_sidecars::planner::{handle_plan, PlanRequest};
+use kirra_sidecars::planner::{handle_plan_with_destinations, PlanRequest};
 
 /// /plan rate bound (burst / per-second). Plumbing: each request runs a full
 /// plan + slow-loop check; the doer bridge plans at ≤ 20 Hz.
 const PLAN_RATE_BURST: f64 = 40.0;
 const PLAN_RATE_PER_S: f64 = 20.0;
 
-fn serve(mut stream: TcpStream, limiter: &mut RateLimiter) {
+/// Read one env var, parsed by `parse`, defaulting when absent/empty.
+/// Malformed → `Err` (the caller aborts startup) — never a silent default.
+fn env_parsed<T>(
+    key: &str,
+    default: T,
+    parse: impl FnOnce(&str) -> Option<T>,
+) -> Result<T, String> {
+    match std::env::var(key) {
+        Ok(raw) if !raw.trim().is_empty() => {
+            parse(raw.trim()).ok_or_else(|| format!("{key}: malformed value {raw:?}"))
+        }
+        _ => Ok(default),
+    }
+}
+
+/// Build the trusted destination resolver from env at boot. Fail-closed
+/// throughout: a configured registry path that is unreadable or fails
+/// validation, or a malformed policy knob, ABORTS startup — a planner with a
+/// half-loaded registry must not come up looking healthy.
+fn resolver_from_env() -> Result<DestinationResolver, String> {
+    let places = match std::env::var("KIRRA_DEST_PLACES_PATH") {
+        Ok(path) if !path.trim().is_empty() => {
+            let raw = std::fs::read_to_string(path.trim())
+                .map_err(|e| format!("KIRRA_DEST_PLACES_PATH {path:?}: {e}"))?;
+            PlaceRegistry::from_json_str(&raw)
+                .map_err(|e| format!("KIRRA_DEST_PLACES_PATH {path:?}: {e}"))?
+        }
+        _ => PlaceRegistry::empty(),
+    };
+    let routes = match std::env::var("KIRRA_DEST_ROUTES_PATH") {
+        Ok(path) if !path.trim().is_empty() => {
+            let raw = std::fs::read_to_string(path.trim())
+                .map_err(|e| format!("KIRRA_DEST_ROUTES_PATH {path:?}: {e}"))?;
+            RouteRegistry::from_json_str(&raw)
+                .map_err(|e| format!("KIRRA_DEST_ROUTES_PATH {path:?}: {e}"))?
+        }
+        _ => RouteRegistry::empty(),
+    };
+    let max_age_ms = env_parsed(
+        "KIRRA_DEST_OBJECT_MAX_AGE_MS",
+        DEFAULT_OBJECT_MAX_AGE_MS,
+        |s| s.parse::<u64>().ok(),
+    )?;
+    let min_confidence = env_parsed(
+        "KIRRA_DEST_OBJECT_MIN_CONFIDENCE",
+        DEFAULT_OBJECT_MIN_CONFIDENCE,
+        |s| s.parse::<f32>().ok(),
+    )?;
+    let standoff_m = env_parsed(
+        "KIRRA_DEST_OBJECT_STANDOFF_M",
+        DEFAULT_OBJECT_STANDOFF_M,
+        |s| s.parse::<f64>().ok(),
+    )?;
+    let object_policy = ObjectPolicy::validated(max_age_ms, min_confidence, standoff_m)?;
+    Ok(DestinationResolver {
+        places,
+        routes,
+        object_policy,
+    })
+}
+
+fn serve(mut stream: TcpStream, limiter: &mut RateLimiter, resolver: &DestinationResolver) {
     let req = match read_request(&mut stream) {
         Ok(r) => r,
         Err(status) => return respond_error(&mut stream, status),
@@ -40,7 +115,7 @@ fn serve(mut stream: TcpStream, limiter: &mut RateLimiter) {
                 );
             }
             match serde_json::from_slice::<PlanRequest>(&req.body) {
-                Ok(plan_req) => match handle_plan(&plan_req) {
+                Ok(plan_req) => match handle_plan_with_destinations(&plan_req, resolver) {
                     Ok(resp) => respond(
                         &mut stream,
                         "200 OK",
@@ -71,6 +146,10 @@ fn main() {
         eprintln!("planner_service: {e}");
         std::process::exit(1);
     }
+    let resolver = resolver_from_env().unwrap_or_else(|e| {
+        eprintln!("planner_service: destination config: {e}");
+        std::process::exit(1);
+    });
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| {
         eprintln!("planner_service: bind {addr}: {e}");
         std::process::exit(1);
@@ -79,7 +158,7 @@ fn main() {
     let mut limiter = RateLimiter::new(PLAN_RATE_BURST, PLAN_RATE_PER_S);
     for stream in listener.incoming() {
         match stream {
-            Ok(s) => serve(s, &mut limiter),
+            Ok(s) => serve(s, &mut limiter, &resolver),
             Err(e) => eprintln!("planner_service: accept error: {e}"),
         }
     }

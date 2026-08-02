@@ -23,6 +23,7 @@
 
 pub mod capabilities;
 pub mod chat;
+pub mod destination;
 pub mod http;
 pub mod mick;
 pub mod mick_fence;
