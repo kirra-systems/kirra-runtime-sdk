@@ -74,14 +74,20 @@ Usage:
   python3 robot/mick_chat_model_smoketest.py --note "re-pull 2026-08-02"
 
 Exit codes:
-  0  the model honours the chat contract (and was pinned, unless --no-pin)
-  1  MODEL-CONTRACT failure — the model was asked and answered badly
-  2  NO MODEL VERDICT was produced. Either the invocation was wrong (argparse
-     usage error) or the service could not be exercised: unreachable, rate
-     limited, or a transport/backend error. These are deliberately the same
-     code because they mean the same thing to a caller — nothing was learned
-     about the model. They are never conflated in the OUTPUT, which always
-     says which one happened.
+  0  PASS — the model honours the chat contract (and was pinned, unless
+     --no-pin), or under --pin-check its running digest matches the vetted one.
+  1  NEGATIVE VERDICT about this model. Either it was asked and answered badly
+     (a contract failure), or --pin-check found its weights CHANGED under the
+     same tag, or it is UNPINNED — never vetted. All three are answers about
+     the model's standing, and all three are fixed by a human deciding
+     something, not by retrying.
+  2  NO VERDICT was produced. The invocation was wrong (argparse usage error),
+     a dependency is missing, or the service could not be exercised:
+     unreachable, rate limited, a transport/backend error, or Ollama down so
+     no running digest exists. These share a code because they mean the same
+     thing to a caller — nothing was learned about the model, and a retry may
+     well succeed. They are never conflated in the OUTPUT, which always says
+     which one happened.
 """
 from __future__ import annotations
 
@@ -91,10 +97,21 @@ import sys
 import time
 from datetime import datetime, timezone
 
+EXIT_OK = 0
+EXIT_MODEL_CONTRACT = 1
+EXIT_NO_VERDICT = 2
+
 try:
     import requests
 except ImportError:
-    sys.exit("mick_chat_model_smoketest: python3-requests missing (pip3 install requests)")
+    # EXIT_NO_VERDICT, not the bare sys.exit(<string>) that would exit 1: a
+    # missing dependency means the model was never asked, which is the same
+    # thing to a caller as an unreachable service. Exiting 1 here would put a
+    # tooling problem in the same bucket as "this model answers badly" — the
+    # exact conflation this script exists to avoid (review: Copilot on #1301).
+    print("mick_chat_model_smoketest: python3-requests missing (pip3 install requests)",
+          file=sys.stderr)
+    sys.exit(EXIT_NO_VERDICT)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mick_chat_contract import judge, names_a_vendor  # noqa: E402
@@ -127,10 +144,6 @@ MAX_TIMEOUT_SECONDS = 300
 OK = "ok"
 RATE_LIMITED = "rate_limited"
 TRANSPORT_ERROR = "transport_error"
-
-EXIT_OK = 0
-EXIT_MODEL_CONTRACT = 1
-EXIT_NO_VERDICT = 2
 
 #: Seam for tests — patched to record pacing without actually waiting.
 _sleep = time.sleep
@@ -350,6 +363,15 @@ def report_infrastructure(outcome, name, detail, delay_seconds):
 
 
 def run_pin_check(model):
+    """Compare the running digest against the vetted pin.
+
+    `changed` and `unpinned` are NEGATIVE VERDICTS about the model (exit 1):
+    each is a real answer about its standing, resolved by a human re-vetting,
+    not by retrying. `unavailable` is NOT — it means Ollama gave no running
+    digest, so there was nothing to compare and nothing was learned. Returning
+    1 there would report an infrastructure outage as a judgement against the
+    model, which is the conflation this whole script exists to avoid
+    (review: Copilot on #1301)."""
     running = model_digest(model)
     pinned = read_model_pin(model)
     status = classify_model_pin(running, pinned)
@@ -358,6 +380,8 @@ def run_pin_check(model):
     rec = read_model_pin_record(model)
     if rec:
         print(f"  vetted_at={rec[1] or '-'}  note={rec[2] or '-'}")
+    if status == "ok":
+        return EXIT_OK
     if status == "changed":
         print("\nDIGEST CHANGED — same tag, different weights. Re-vet before trusting it:",
               file=sys.stderr)
@@ -368,7 +392,12 @@ def run_pin_check(model):
         print("\nUNPINNED — this model has never been vetted for the chat contract.",
               file=sys.stderr)
         return EXIT_MODEL_CONTRACT
-    return EXIT_OK if status == "ok" else EXIT_MODEL_CONTRACT
+    # 'unavailable' — no running digest to compare against.
+    print("\nNO RUNNING DIGEST — Ollama did not report one, so the pin could not be",
+          file=sys.stderr)
+    print("  checked. This is NOT a judgement about the model; nothing was compared.",
+          file=sys.stderr)
+    return EXIT_NO_VERDICT
 
 
 def main(argv=None):

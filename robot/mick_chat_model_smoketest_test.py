@@ -443,6 +443,81 @@ def test_a_custom_url_is_actually_used():
           f"the trailing slash must be normalised away: {urls}")
 
 
+# ── 7. exit codes mean what the docstring says ───────────────────────────────
+
+def _pin_check(digest, pinned):
+    """Run --pin-check with the digest lookup and pin stubbed → (code, text)."""
+    saved = (sm.requests, sm.model_digest, sm.read_model_pin, sm.read_model_pin_record)
+    sm.requests = FakeHttp([], [])
+    sm.model_digest = lambda _m: digest
+    sm.read_model_pin = lambda _m, *a, **k: pinned
+    sm.read_model_pin_record = lambda _m, *a, **k: None
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = sm.main(["--pin-check"])
+    finally:
+        (sm.requests, sm.model_digest, sm.read_model_pin,
+         sm.read_model_pin_record) = saved
+    return code, out.getvalue() + err.getvalue()
+
+
+def test_pin_check_ok_exits_zero():
+    code, _ = _pin_check("sha256:abc", "sha256:abc")
+    check(code == 0, f"a matching pin must exit 0, got {code}")
+
+
+def test_pin_check_changed_and_unpinned_are_negative_verdicts():
+    """Both are real answers about the model's standing, resolved by a human
+    re-vetting rather than by retrying — so exit 1, as the docstring says."""
+    code, text = _pin_check("sha256:new", "sha256:old")
+    check(code == 1, f"a changed digest must exit 1, got {code}")
+    check("DIGEST CHANGED" in text, f"must say what happened:\n{text}")
+
+    code, text = _pin_check("sha256:abc", None)
+    check(code == 1, f"an unpinned model must exit 1, got {code}")
+    check("UNPINNED" in text, f"must say what happened:\n{text}")
+
+
+def test_pin_check_with_no_running_digest_is_no_verdict_not_a_failure():
+    """Ollama down means nothing was COMPARED. Exiting 1 would report an
+    infrastructure outage as a judgement against the model — the same
+    conflation the 429 handling fixes (review: Copilot on #1301)."""
+    code, text = _pin_check(None, "sha256:abc")
+    check(code == 2, f"an unavailable digest must exit 2, got {code}")
+    check("NO RUNNING DIGEST" in text, f"must say nothing was compared:\n{text}")
+    check("UNPINNED" not in text, f"must not claim the model is unvetted:\n{text}")
+
+
+def test_a_missing_requests_dependency_exits_no_verdict():
+    """A missing dependency means the model was never asked — the same thing to
+    a caller as an unreachable service. The previous `sys.exit(<string>)` gave
+    exit 1, putting a tooling problem in the model-failure bucket."""
+    import subprocess
+    here = Path(__file__).resolve().parent
+    program = (
+        "import sys, importlib.abc\n"
+        "class Block(importlib.abc.MetaPathFinder):\n"
+        "    def find_spec(self, name, path, target=None):\n"
+        "        if name == 'requests':\n"
+        "            raise ImportError('blocked by the test')\n"
+        "sys.meta_path.insert(0, Block())\n"
+        f"sys.path.insert(0, {str(here)!r})\n"
+        "import mick_chat_model_smoketest\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", program],
+                          capture_output=True, text=True)
+    check(proc.returncode == 2,
+          f"missing requests must exit 2, got {proc.returncode}: {proc.stderr[-300:]}")
+    check("python3-requests missing" in proc.stderr,
+          f"must say which dependency:\n{proc.stderr[-300:]}")
+
+
+def test_the_exit_code_constants_are_distinct():
+    codes = {sm.EXIT_OK, sm.EXIT_MODEL_CONTRACT, sm.EXIT_NO_VERDICT}
+    check(codes == {0, 1, 2}, f"exit codes must be 0/1/2, got {codes}")
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
