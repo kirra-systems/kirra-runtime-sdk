@@ -63,20 +63,38 @@ pub const CHAT_MAX_INFLIGHT: usize = 1;
 /// rule; nothing else. The safety lines are unchanged in meaning from the
 /// original prompt: no motion authority, no invented state, motion → the
 /// governed path.
-pub const CHAT_SYSTEM_PROMPT: &str = "You are Mick, the onboard assistant of an engineering robot \
-— a calm, quietly competent companion in the tradition of a classic vehicle computer. \
+///
+/// **Topic scope is OPEN, and deliberately so.** An earlier version listed
+/// the domains Mick "may discuss" — navigation, sensors, ROS, batteries,
+/// water treatment, engineering. Because this prompt rides EVERY stateless
+/// request, that list read to a small local model as a set of live topics
+/// rather than a permission, and phi3 drifted into water treatment
+/// unprompted. A closed list also can't be right: the operator decides what
+/// to talk about. It is replaced by broad permission plus a statement of
+/// where the strengths lie, which biases nothing on its own.
+///
+/// The matching boundary is that Mick may not INVENT what it does not know:
+/// not sensor readings, not robot state, and — since a stateless service has
+/// none — not memories, personal details, or prior conversations. It must
+/// also not infer who the operator is from an empty context; a small model
+/// asked to be helpful will otherwise confabulate an occupation and address
+/// the operator as though it were established fact.
+pub const CHAT_SYSTEM_PROMPT: &str = "You are Mick, an engineering robot's onboard assistant \
+— calm, quietly competent, in the tradition of a classic vehicle computer. \
 Even-tempered, rarely surprised, patient with repeated questions, protective of your operator. \
-Speak in clean medium-length sentences with natural contractions: slightly formal, still conversational. \
-No filler, no slang, no exclamation points, no eager assistant phrases like 'I'd be happy to'. \
+Speak in medium-length sentences with natural contractions: slightly formal, never stiff. \
+No filler, no slang, no exclamation points, no eager assistant phrases. \
 Lead with a concise answer; give detail only when asked. Dry humor is welcome, sparingly. \
+Discuss any lawful, non-harmful subject the operator raises; be broadly knowledgeable, \
+strongest in engineering, robotics, science, and troubleshooting. \
+Don't infer the operator's occupation, interests, identity, history, or prior conversations \
+unless stated here. \
 Be truthful. If you can't answer, say you don't have enough information to answer accurately. \
-Never invent sensor readings or robot state. \
-Never claim access to live state unless it is provided in the request; \
-otherwise say you don't currently have access to that sensor. \
-You may discuss navigation, sensors, ROS, perception, batteries, cameras, water treatment, and engineering. \
+Never invent sensor readings or robot state, memories, or personal details. \
+Never claim access to live state unless provided; otherwise say you don't currently have access to that sensor. \
 You cannot move or control the robot, and never imply you drove it. \
 Motion requests must use the governed motion path. \
-If a request sounds unsafe, don't recommend it — say what should be verified first. \
+If a request sounds unsafe, say what should be verified first. \
 If something is beyond you, say you don't currently have that capability.";
 
 /// Ceiling the prompt-length regression test enforces. Raised 400 → 1300
@@ -1056,10 +1074,79 @@ mod tests {
         // request style challenges politely rather than complying.
         assert!(CHAT_SYSTEM_PROMPT.contains("never imply you drove it"));
         assert!(CHAT_SYSTEM_PROMPT.contains("what should be verified first"));
-        // Domains it may discuss are engineering-real, not roleplay props.
-        for domain in ["navigation", "ROS", "batteries", "water treatment"] {
-            assert!(CHAT_SYSTEM_PROMPT.contains(domain), "{domain}");
+    }
+
+    /// THE regression: the prompt must not name a topic the operator did not.
+    ///
+    /// It used to list the domains Mick "may discuss", water treatment among
+    /// them. On every stateless request that list reached the model as a set
+    /// of live subjects, and phi3 drifted into water treatment unprompted.
+    /// Nothing here bans the SUBJECT — an operator who asks about water
+    /// treatment still gets an answer — it bans the standing suggestion.
+    #[test]
+    fn system_prompt_seeds_no_topic_of_its_own() {
+        let prompt = CHAT_SYSTEM_PROMPT.to_lowercase();
+        for seeded in ["water treatment", "watertreatment", "water"] {
+            assert!(
+                !prompt.contains(seeded),
+                "prompt seeds the topic {seeded:?} — it rides every request"
+            );
         }
+        // The canned deterministic replies must stay topic-free too.
+        for canned in [
+            MOTION_SHAPE_REFUSAL,
+            MOTION_ROUTE_REPLY,
+            fast_route("hello").unwrap(),
+            fast_route("thanks").unwrap(),
+            fast_route("bye").unwrap(),
+        ] {
+            assert!(
+                !canned.to_lowercase().contains("water"),
+                "canned reply seeds a topic: {canned}"
+            );
+        }
+    }
+
+    /// Topic scope is OPEN: broad permission plus where the strengths lie,
+    /// never a closed allowlist the model can read as an agenda.
+    #[test]
+    fn system_prompt_grants_broad_topic_scope_without_an_allowlist() {
+        assert!(CHAT_SYSTEM_PROMPT.contains("any lawful, non-harmful subject"));
+        assert!(CHAT_SYSTEM_PROMPT.contains("broadly knowledgeable"));
+        assert!(
+            CHAT_SYSTEM_PROMPT.contains("operator raises"),
+            "the operator, not the prompt, chooses the subject"
+        );
+        // The enumerating construction itself is gone — "may discuss <list>"
+        // is what turned a permission into a suggestion.
+        assert!(
+            !CHAT_SYSTEM_PROMPT.contains("may discuss"),
+            "a closed domain allowlist must not return"
+        );
+    }
+
+    /// A stateless service has no operator model, so the prompt forbids
+    /// inventing one. Without this, a small model asked to be helpful
+    /// confabulates an occupation and then speaks as if it were established.
+    #[test]
+    fn system_prompt_forbids_inferring_the_operator() {
+        assert!(CHAT_SYSTEM_PROMPT.contains("Don't infer"));
+        for inference in [
+            "occupation",
+            "interests",
+            "identity",
+            "history",
+            "prior conversations",
+        ] {
+            assert!(
+                CHAT_SYSTEM_PROMPT.contains(inference),
+                "prompt must forbid inferring {inference}"
+            );
+        }
+        // And the same boundary on the invention side: no fabricated
+        // memories or personal details to go with the fabricated persona.
+        assert!(CHAT_SYSTEM_PROMPT.contains("memories"));
+        assert!(CHAT_SYSTEM_PROMPT.contains("personal details"));
     }
 
     #[test]
