@@ -99,10 +99,18 @@ _DISTANCE_UNITS = frozenset({"meter", "meters"})
 
 
 def _is_bounded_distance(tokens: list[str]) -> bool:
-    """Exactly `<number> <meter unit>` — nothing more, nothing less."""
-    return (len(tokens) == 2
-            and (tokens[0] in _NUMBER_WORDS or tokens[0].isdigit())
-            and tokens[1] in _DISTANCE_UNITS)
+    """Exactly `<number> <meter unit>` — nothing more, nothing less.
+
+    Numeric literals are bounded to the SAME 1..10 range as the word list:
+    "0 meters" is a no-op nobody dictates, and an out-of-range figure
+    ("9999 meters") is more plausibly a mis-transcription than a real order
+    — either way, admission stays narrow and the utterance falls through to
+    conversation rather than the motion door."""
+    if len(tokens) != 2 or tokens[1] not in _DISTANCE_UNITS:
+        return False
+    if tokens[0] in _NUMBER_WORDS:
+        return True
+    return tokens[0].isdigit() and 1 <= int(tokens[0]) <= 10
 
 
 def normalize(text: str) -> str:

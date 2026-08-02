@@ -194,11 +194,22 @@ def test_broad_drive_phrases_stay_conversation():
         "the drive is one meter long",
         "what is a drive",
         "can you explain drive-by-wire",
+        # numeric literals are bounded to the word list's 1..10 range: a
+        # zero is a no-op and an out-of-range figure is more plausibly a
+        # mis-transcription than a real order (review: Copilot on #1292)
+        "drive 0 meters",
+        "drive 11 meters",
+        "drive 9999 meters",
+        "drive for 0 meters",
+        "drive for 9999 meters",
     ]
     for t in negatives:
         d = classify_transcript(t)
         check(d.kind is RouteKind.CONVERSATION,
               f"must stay CONVERSATION, got {d.kind.value} ({d.reason}): {t!r}")
+    d = classify_transcript("drive 10 meters")
+    check(d.kind is RouteKind.MOTION,
+          "the numeric bound is inclusive: 'drive 10 meters' is motion")
 
 
 def test_hold_forms_are_exact_not_prefix():
