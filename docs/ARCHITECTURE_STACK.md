@@ -37,7 +37,7 @@ partition-transport decision (ADR-0006).
 ### Safety partition (QNX host)
 Every dependency must **justify itself into the trusted computing base**: frozen
 `#[repr(C)]` contracts, zero-alloc hot paths, read-only mappings, minimal TCB.
-**Members:** the kernel governor / gateway — with `src/gateway/kinematics_contract.rs`
+**Members:** the kernel governor / gateway — with `crates/kirra-core/src/kinematics_contract.rs`
 as the **frozen-ABI precedent** (the "talisman": layout stability *is* the safety
 claim, `HYPERVISOR_CONTRACT_CHANNEL.md` §2.4); the actuator-release authority
 (HVCHAN §3 steps 6–7); and the boundary consumer (HVCHAN §3 snapshot/validate).
@@ -83,7 +83,7 @@ this digest, and release is cryptographically bound to that approval." It is
 **layered**: a guest-side checker (the parko `SafetyGovernor` layer) plus the
 host-side final authority; the host authority is what the safety claim rests on.
 **Anchors:** `HYPERVISOR_CONTRACT_CHANNEL.md` §3 (the 7-step normative trust chain);
-`src/attestation.rs` (the existing Ed25519 `verify_strict` + single-use
+`crates/kirra-safety-authority/src/attestation.rs` (the existing Ed25519 `verify_strict` + single-use
 `consume_challenge` verify-then-consume pattern the release token reuses — no new
 crypto); the SG detection layer in `parko/crates/parko-kirra` (the guest-side
 checker).
@@ -169,7 +169,7 @@ distribution gate); **#300** (the Qualcomm/Ride vendor engagement).
 | Technology | Status | Anchors |
 |---|---|---|
 | QNX Hypervisor | **DECIDED-PENDING-HARDWARE** — requirements specced; on-target unverified | HVCHAN §5; #274, #278, #279, #36 |
-| KIRRA Governor | **DECIDED-AND-BUILT** (host judge + verifier/attestation); **boundary form PENDING-HARDWARE** | HVCHAN §3; `src/attestation.rs`; #271/#272 (harness), #278 |
+| KIRRA Governor | **DECIDED-AND-BUILT** (host judge + verifier/attestation); **boundary form PENDING-HARDWARE** | HVCHAN §3; `crates/kirra-safety-authority/src/attestation.rs`; #271/#272 (harness), #278 |
 | iceoryx2 | **DECIDED** (ADR-0006) + **host spike BUILT** (#273); QNX cross-compile **PENDING-HARDWARE** | ADR-0006; iceoryx2-spike README; #274 |
 | PTP / two clock domains | **DECIDED** (model + non-mixing rule); concrete clock primitive **PENDING-HARDWARE** | HVCHAN §5 R-HV-3; AOU-TIMESYNC-001; #274 |
 | Zenoh | **FILED-FUTURE** (not scheduled) | #296; ADR-0006 C2 |

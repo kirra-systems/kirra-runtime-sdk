@@ -170,7 +170,8 @@ Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508 
 The **cert-target platform** decision and its prototype bring-up plan live under
 [`docs/adr/`](docs/adr/): `0032-governor-deployment-platform.md` (KIRRA
 governor on QNX Hypervisor 8.0 for Safety; the Autoware/ROS 2 doer as an isolated
-guest VM; a Ferrocene `no_std` verdict core as the certified artifact), with
+guest VM; a Ferrocene `no_std` verdict core as the artifact *intended* to carry
+the eventual certification claim — no such claim exists today), with
 companions `KIRRA_PLATFORM_DEPLOYMENT_STRATEGY.md`, `KIRRA_BRINGUP_RUNBOOK.md`,
 and `KIRRA_QNX_CROSSCOMPILE.md`. (That file's `ADR-0001` prefix is independent of
 the numbered ODD-cap ADRs in the table above — a known naming overlap.)
@@ -182,7 +183,8 @@ records the Occy-vs-Autoware gap analysis and the decision for the Ubuntu
 perception), **isolate it as the only component on Humble** in its own container,
 and move the rest of the stack (ros2 adapter, checker, Occy/Taj) to Jazzy now —
 meeting only on 5 curated, hash-verified boundary topics. The safety spine is
-`no_std`/ROS-agnostic, so this is a doer-side migration with no re-certification.
+`no_std`/ROS-agnostic, so this is a doer-side migration that leaves the safety
+argument and its evidence untouched.
 Isolation scaffold: [`deploy/autoware-isolation/`](deploy/autoware-isolation/).
 
 ### Governor transport / QNX partition lane (EPIC #270)
@@ -202,7 +204,9 @@ Test-evidence tooling: [`tools/qnx-rtm-harness/`](tools/qnx-rtm-harness/) — a 
 shim (driver) → Rust judge (checker) FDIT/RTM fault-injection harness, every row
 traced to the kernel RTM (#271 / #272); [`tools/iceoryx2-spike/`](tools/iceoryx2-spike/)
 — the host-side iceoryx2 feature-subset spike (#273). **Host timing is indicative
-only; certified WCET is measured on the QNX target under FIFO scheduling (#274).**
+only. A WCET figure usable as safety evidence must be measured on the QNX
+target under FIFO scheduling (#274); no such measurement has been taken, so no
+WCET claim is currently supported.**
 
 See [docs/safety/](docs/safety/) for the complete safety case foundation,
 [docs/safety/SAFETY_CASE_INDEX.md](docs/safety/SAFETY_CASE_INDEX.md) for the

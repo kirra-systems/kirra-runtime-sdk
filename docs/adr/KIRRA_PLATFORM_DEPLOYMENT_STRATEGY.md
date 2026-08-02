@@ -8,7 +8,7 @@
 
 ## Executive summary
 
-The KIRRA governor will run as the safety-domain payload **directly on QNX Hypervisor 8.0 for Safety**, with the Autoware / ROS 2 Jazzy / Occy stack (the *doer*) running **unmodified as an isolated Ubuntu guest VM** on the same SoC. The certified VMM supplies the ASIL-D freedom-from-interference boundary that makes the runtime-assurance decomposition creditable. The governor is written in **Rust** — today built with upstream `rustc`, and **Ferrocene-ready** for the ASIL-D build (Ferrocene is qualified for QNX Neutrino; productization is tracked in #132) — and the **certified artifact is the minimal `no_std` verdict core**, not the whole process.
+The KIRRA governor will run as the safety-domain payload **directly on QNX Hypervisor 8.0 for Safety**, with the Autoware / ROS 2 Jazzy / Occy stack (the *doer*) running **unmodified as an isolated Ubuntu guest VM** on the same SoC. The certified VMM supplies the ASIL-D freedom-from-interference boundary that makes the runtime-assurance decomposition creditable. The governor is written in **Rust** — today built with upstream `rustc`, and **Ferrocene-ready** for the ASIL-D build (Ferrocene is qualified for QNX Neutrino; productization is tracked in #132) — and the artifact **intended to carry the eventual certification claim is the minimal `no_std` verdict core**, not the whole process. No certification exists today.
 
 QNX is chosen over PikeOS and INTEGRITY for one decisive reason on top of parity: it is the only one of the three with a qualified ASIL-D Rust toolchain target, so the governor stays in Rust without a bespoke toolchain qualification. PikeOS and INTEGRITY remain roadmap-only, activated by a named customer already certified on them.
 
@@ -36,6 +36,15 @@ This is a feature, not a compromise: the doer ports to the target platform "for 
 ## 3. Substrate comparison — QNX vs PikeOS vs INTEGRITY
 
 All three are credible certified separation kernels and all three are supported targets for Apex.Grace (the certified ROS 2 fork), per Apex.AI's own statements. The decision criteria that matter to KIRRA:
+
+> **These are THIRD-PARTY substrate certifications, not Kirra's.** Every
+> "certified" entry in the table below describes QNX, PikeOS, INTEGRITY or
+> their toolchains — products certified by their own vendors and assessors.
+> **Running on a certified substrate does not confer certification on the
+> software running atop it.** Kirra itself has no independent assessment:
+> **Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508 SIL 3 requirements. Independent third-party assessment has not yet been performed.** Evidence index:
+> [`../safety/SAFETY_CASE_INDEX.md`](../safety/SAFETY_CASE_INDEX.md). Do not
+> quote a cell from this table as a Kirra certification claim.
 
 | Criterion | QNX | PikeOS | INTEGRITY |
 |---|---|---|---|
