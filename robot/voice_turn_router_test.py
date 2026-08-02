@@ -200,6 +200,35 @@ def test_ambiguous_contacts_neither_endpoint():
         is_.shutdown()
 
 
+def test_whisper_drive_variants_contact_only_intent():
+    # The two known Whisper renderings of "drive forward one meter" must
+    # reach the governed door exactly once each — never chat, never a
+    # retry — and the spoken line stays the admission-only ack.
+    cs, cu = serve(ChatStub)
+    is_, iu = serve(IntentStub)
+    try:
+        StubState.intent_mode = "accept"
+        for text in ("drive one meter", "drive for one meter"):
+            t = Turn(cu, iu, text)
+            check(t.intent == ["/intent"],
+                  f"{text!r} must hit /intent exactly once: {t.intent}")
+            check(t.chat == [],
+                  f"{text!r} must NEVER touch chat: {t.chat}")
+            check("Request accepted." in t.out,
+                  f"{text!r}: admission-only ack spoken")
+            for banned in ("moving", "moved", "executing", "complete"):
+                check(banned not in t.out,
+                      f"{text!r}: ack must not claim execution ({banned!r})")
+        # And a broad drive phrase goes ONLY to chat (never /intent).
+        t = Turn(cu, iu, "how does a motor drive work")
+        check(t.chat == ["/chat/stream"] and t.intent == [],
+              f"broad drive prose must go to chat only: "
+              f"chat={t.chat} intent={t.intent}")
+    finally:
+        cs.shutdown()
+        is_.shutdown()
+
+
 def test_one_transcript_one_request_and_no_replay():
     cs, cu = serve(ChatStub)
     is_, iu = serve(IntentStub)

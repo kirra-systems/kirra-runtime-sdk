@@ -85,6 +85,25 @@ _PRONOUN_DESTS = frozenset({"there", "here", "it", "that", "them", "away"})
 _WS = re.compile(r"\s+")
 _PUNCT = re.compile(r"[^a-z0-9 ]+")
 
+# Bounded distance expressions — the ONLY complement (besides a direction or
+# destination) that makes a bare "drive" an explicit motion order. Narrow on
+# purpose: a small-number word or a plain numeric literal, followed by a
+# meter unit (the router is meters-only today; no other unit is admitted and
+# no conversion logic exists). "one hour", "better performance", "me crazy"
+# and every prose complement fail this shape and stay conversation.
+_NUMBER_WORDS = frozenset({
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    "ten",
+})
+_DISTANCE_UNITS = frozenset({"meter", "meters"})
+
+
+def _is_bounded_distance(tokens: list[str]) -> bool:
+    """Exactly `<number> <meter unit>` — nothing more, nothing less."""
+    return (len(tokens) == 2
+            and (tokens[0] in _NUMBER_WORDS or tokens[0].isdigit())
+            and tokens[1] in _DISTANCE_UNITS)
+
 
 def normalize(text: str) -> str:
     """Lowercase, strip punctuation to spaces, collapse whitespace."""
@@ -137,6 +156,17 @@ def classify_transcript(text: str) -> RouteDecision:
     verb, rest = tokens[0], tokens[1:]
 
     # Enumerated multi-word motion forms (verb-first, bounded complements).
+    if verb == "drive" and rest:
+        # "drive one meter" — Whisper commonly drops the direction word from
+        # "drive forward one meter"; a bounded distance IS the complement.
+        if _is_bounded_distance(rest):
+            return RouteDecision(RouteKind.MOTION, "explicit_motion_verb")
+        # "drive for one meter" — the known STT substitution of "forward" →
+        # "for". Admitted ONLY when the remainder is a bounded distance:
+        # "drive for one hour" / "drive for better performance" and every
+        # duration/purpose/prose complement stay conversation.
+        if rest[0] == "for" and _is_bounded_distance(rest[1:]):
+            return RouteDecision(RouteKind.MOTION, "explicit_motion_verb")
     if verb in ("drive", "move", "head") and rest:
         if rest[0] in _DIR_WORDS:
             return RouteDecision(RouteKind.MOTION, "explicit_motion_verb")
