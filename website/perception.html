@@ -127,7 +127,7 @@
             <h3>Plausibility guard</h3>
             <p>Before objects reach the checker, a kinematic-plausibility contract bounds them — teleporting or
             physically impossible tracks are rejected, with the guard's worst case under its own WCET CI gate.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-core/src/perception_monitor.rs" target="_blank" rel="noopener">crates/kirra-core/src/perception_monitor.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/wcet_gate.rs#L139" target="_blank" rel="noopener">src/wcet_gate.rs:139</a></p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-core/src/perception_monitor.rs" target="_blank" rel="noopener">crates/kirra-core/src/perception_monitor.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/wcet_gate.rs#L197" target="_blank" rel="noopener">src/wcet_gate.rs:197</a></p>
           </div>
         </div>
       </div>
@@ -176,7 +176,7 @@
     <text class="dg-sub" x="722" y="212">MRC floor via apply_perception_cap</text>
   </g>
 </svg></div>
-        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/perception_redundancy.rs#L224" target="_blank" rel="noopener">crates/kirra-trajectory/src/perception_redundancy.rs:224</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-core/src/perception_monitor.rs" target="_blank" rel="noopener">crates/kirra-core/src/perception_monitor.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/adr/0018-perception-divergence-monitor.md" target="_blank" rel="noopener">docs/adr/0018-perception-divergence-monitor.md</a></p>
+        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/perception_redundancy.rs#L237" target="_blank" rel="noopener">crates/kirra-trajectory/src/perception_redundancy.rs:237</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-core/src/perception_monitor.rs" target="_blank" rel="noopener">crates/kirra-core/src/perception_monitor.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/adr/0018-perception-divergence-monitor.md" target="_blank" rel="noopener">docs/adr/0018-perception-divergence-monitor.md</a></p>
         <div class="compare-note" data-reveal style="margin-top:24px">
           <strong>Derate-only composition:</strong> every predictive perception bound — redundancy, occlusion, VRU —
           is fail-closed and derate-only. Absent input is a no-op (the Nominal hot path is byte-identical);

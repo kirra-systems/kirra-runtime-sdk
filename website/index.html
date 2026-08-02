@@ -159,7 +159,7 @@
           <span>An un-bypassable checker between untrusted intent and the actuator bus. If trust can't be proven, nothing moves.</span>
           <span class="mono" style="color:var(--accent)">≈65&nbsp;µs p50 · ≈116&nbsp;µs p99.9 measured (host)</span>
         </p>
-        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/validation.rs" target="_blank" rel="noopener">crates/kirra-trajectory/src/validation.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/wcet_gate.rs#L92" target="_blank" rel="noopener">src/wcet_gate.rs:92</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-release-token/src/lib.rs" target="_blank" rel="noopener">crates/kirra-release-token/src/lib.rs</a></p>
+        <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/validation.rs" target="_blank" rel="noopener">crates/kirra-trajectory/src/validation.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/wcet_gate.rs#L119" target="_blank" rel="noopener">src/wcet_gate.rs:119</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-release-token/src/lib.rs" target="_blank" rel="noopener">crates/kirra-release-token/src/lib.rs</a></p>
       </div>
     </section>
 
@@ -344,13 +344,13 @@
             <h3>One safety authority</h3>
             <p><code>validate_trajectory_slow</code> composes containment, per-pose kinematics, and RSS into a single
             verdict: <code>Accept</code>, <code>Clamp</code>, or <code>MRCFallback</code>. First rejection wins.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/validation.rs#L206" target="_blank" rel="noopener">crates/kirra-trajectory/src/validation.rs:206</a></p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/validation.rs#L235" target="_blank" rel="noopener">crates/kirra-trajectory/src/validation.rs:235</a></p>
           </div>
           <div class="card" data-reveal>
             <h3>Frozen where it matters</h3>
             <p>The kinematics checker core is pinned by git blob hash <code>ed00f4da…</code> — CI asserts the exact
             bytes survive every change, and the Kani proofs run against the shipped source verbatim.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/verification/kani/" target="_blank" rel="noopener">verification/kani/</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L182" target="_blank" rel="noopener">.github/workflows/ci.yml:182</a></p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/verification/kani/" target="_blank" rel="noopener">verification/kani/</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L263" target="_blank" rel="noopener">.github/workflows/ci.yml:263</a></p>
           </div>
         </div>
       </div>
@@ -476,13 +476,13 @@
               <p class="timeline__step">04 · Envelope</p>
               <h3>Hard boundary first</h3>
               <p><code>validate_vehicle_command</code> clamps to the absolute kinematic boundary before any rate limit — the envelope cap always wins. NaN or Inf anywhere is an immediate deny, proved for all 2⁶⁴ bit patterns.</p>
-              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-core/src/kinematics_contract.rs" target="_blank" rel="noopener">crates/kirra-core/src/kinematics_contract.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/verification/kani/src/proofs_kinematics.rs#L84" target="_blank" rel="noopener">verification/kani/src/proofs_kinematics.rs:84</a></p>
+              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-core/src/kinematics_contract.rs" target="_blank" rel="noopener">crates/kirra-core/src/kinematics_contract.rs</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/verification/kani/src/proofs_kinematics.rs#L112" target="_blank" rel="noopener">verification/kani/src/proofs_kinematics.rs:112</a></p>
             </li>
             <li class="timeline__item" data-reveal>
               <p class="timeline__step">05 · RSS</p>
               <h3>Formal distance keeping</h3>
               <p>Longitudinal <em>and</em> lateral safety evaluated as a conjunction, extended with occlusion-aware speed bounds at blind junctions and multi-modal prediction rolled forward in time.</p>
-              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/parko/crates/parko-core/src/rss.rs#L317" target="_blank" rel="noopener">parko/crates/parko-core/src/rss.rs:317</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/validation.rs#L999" target="_blank" rel="noopener">crates/kirra-trajectory/src/validation.rs:999</a></p>
+              <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/parko/crates/parko-core/src/rss.rs#L317" target="_blank" rel="noopener">parko/crates/parko-core/src/rss.rs:317</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-trajectory/src/validation.rs#L1002" target="_blank" rel="noopener">crates/kirra-trajectory/src/validation.rs:1002</a></p>
             </li>
             <li class="timeline__item" data-reveal>
               <p class="timeline__step">06 · Verdict</p>
@@ -571,7 +571,7 @@
           </div>
           <p class="evidence-note">Certified WCET is defined as QNX-target-under-FIFO measurement and has not been produced yet —
           the repository says so explicitly, and so do we. Host numbers are regression tripwires, not claims.</p>
-          <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/wcet_gate.rs#L92" target="_blank" rel="noopener">src/wcet_gate.rs:92</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-inline-governor/README.md" target="_blank" rel="noopener">crates/kirra-inline-governor/README.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/safety/WCET_MEASUREMENT_METHODOLOGY.md" target="_blank" rel="noopener">docs/safety/WCET_MEASUREMENT_METHODOLOGY.md</a></p>
+          <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/src/wcet_gate.rs#L119" target="_blank" rel="noopener">src/wcet_gate.rs:119</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/crates/kirra-inline-governor/README.md" target="_blank" rel="noopener">crates/kirra-inline-governor/README.md</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/docs/safety/WCET_MEASUREMENT_METHODOLOGY.md" target="_blank" rel="noopener">docs/safety/WCET_MEASUREMENT_METHODOLOGY.md</a></p>
         </div>
       </div>
     </section>
@@ -591,7 +591,7 @@
           <div class="stat">
             <p class="stat__value"><span data-count="3305">0</span></p>
             <p class="stat__label">test functions across 330 files, run on every push</p>
-            <p class="stat__evidence"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L231" target="_blank" rel="noopener">ci.yml · Test</a></p>
+            <p class="stat__evidence"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L298" target="_blank" rel="noopener">ci.yml · Test</a></p>
           </div>
           <div class="stat">
             <p class="stat__value"><span data-count="12">0</span></p>
@@ -614,13 +614,13 @@
             <h3>Adversarial by default</h3>
             <p>4 fuzz targets run on every push and 90 minutes each, weekly. PR diffs to the checker face
             mutation testing: if a mutant survives your tests, the gate fails.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/fuzz/fuzz_targets/" target="_blank" rel="noopener">fuzz/fuzz_targets/</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L636" target="_blank" rel="noopener">.github/workflows/ci.yml:636</a></p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/fuzz/fuzz_targets/" target="_blank" rel="noopener">fuzz/fuzz_targets/</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L779" target="_blank" rel="noopener">.github/workflows/ci.yml:779</a></p>
           </div>
           <div class="card" data-reveal>
             <h3>Coverage that can't regress</h3>
             <p>Gated decision-coverage floors on the checker crates (77–79%, measured ≈80%) plus a Codecov
             ratchet: any PR dropping workspace coverage by &gt;0.5% fails.</p>
-            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L379" target="_blank" rel="noopener">.github/workflows/ci.yml:379</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/codecov.yml" target="_blank" rel="noopener">codecov.yml</a></p>
+            <p class="evidence-row"><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/.github/workflows/ci.yml#L470" target="_blank" rel="noopener">.github/workflows/ci.yml:470</a><a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/codecov.yml" target="_blank" rel="noopener">codecov.yml</a></p>
           </div>
           <div class="card" data-reveal>
             <h3>Supply chain, pinned</h3>

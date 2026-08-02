@@ -37,7 +37,7 @@ ${pageHero({
               <span class="k"><span class="swatch" style="background:var(--surface-3);border:1px solid var(--line-strong)"></span> 1,000 µs CI ceiling</span>
             </div>
           </div>
-          ${evRow("src/wcet_gate.rs:92", "crates/kirra-inline-governor/README.md")}
+          ${evRow("src/wcet_gate.rs:119#pub const GOVERNOR_VERDICT_WCET_TARGET_MICROS", "crates/kirra-inline-governor/README.md")}
         </div>
         <div class="grid grid--3" style="margin-top:20px">
           <div class="card" data-reveal>
@@ -45,7 +45,7 @@ ${pageHero({
             <p>The verdict path carries an O(1) structural argument, not just measurements: no allocation, no
             unbounded loops, worst cases enumerated — containment's worst case is exactly 50 × 256 × 4 = 51,200
             polygon-edge tests, gated at 10 ms.</p>
-            ${evRow("src/wcet_gate.rs:121")}
+            ${evRow("src/wcet_gate.rs:179#pub const GOVERNOR_CONTAINMENT_WCET_CI_THRESHOLD_MICROS")}
           </div>
           <div class="card" data-reveal>
             <h3>A timing substrate built for the target</h3>
@@ -114,7 +114,7 @@ ${pageHero({
           no target-cpu — because a reproducible artifact beats a fast one where it counts. And CI double-builds
           the QNX judge and byte-compares the results.</p>
         </div>
-        ${evRow("docs/PERFORMANCE_BUILD_TUNING.md", ".github/workflows/ci.yml:122")}
+        ${evRow("docs/PERFORMANCE_BUILD_TUNING.md", ".github/workflows/ci.yml:199#- name: Reproducibility (double-build cmp of the staticlibs)")}
       </div>
     </section>
 

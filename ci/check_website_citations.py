@@ -37,21 +37,40 @@ Three assertions, therefore:
 (3) is deliberately one-directional: HTML legitimately contains repo links that
 no page `ev()` call produces, so the reverse containment would false-positive.
 
-SCOPE — this gate checks that every cited PATH EXISTS. Deliberately not in
-scope:
+ANCHORED CITATIONS (Tier 2). A bare `file.rs:206` records a COORDINATE, not a
+claim -- the repo never wrote down what line 206 was supposed to contain, so
+nothing could tell when it stopped containing it. Line numbers drifted silently
+and badly: the homepage's "NaN or Inf anywhere is an immediate deny, proved for
+all 2**64 bit patterns" pointed at `overhang_rear_m: 0.9,`, a fixture field.
 
-  * whether a `:line` suffix still points at the intended line (line drift).
-    A citation records a coordinate, not a claim; the repo never wrote down what
-    the cited line was supposed to contain, so nothing can verify it. Catching
-    that needs an anchored citation format and is the Tier 2 follow-up.
-  * whether the cited file actually supports the claim in the surrounding prose.
-    That is a human review judgement and always will be.
+A line citation therefore carries the text that must be AT that line:
 
-So: a green run means every evidence link resolves, NOT that every evidence link
-is apposite.
+    "crates/kirra-trajectory/src/validation.rs:235#pub fn validate_trajectory_slow("
+
+which turns three previously-indistinguishable situations into three outcomes:
+
+  * anchor is at the cited line          -> pass
+  * anchor is elsewhere in the file      -> MOVED; `--fix` rewrites the number
+  * anchor is gone from the file         -> MISSING; a human must repoint it,
+                                            because the claim may no longer hold
+  * anchor matches several lines         -> AMBIGUOUS; unfixable by construction,
+                                            lengthen it until unique
+
+Only the second is mechanical, and that is the common case -- which is what keeps
+this sustainable on a file like ci.yml (46 commits in six months, 13 citations).
+
+The anchor is authoring-time metadata: `ev()` strips it, so it never reaches the
+rendered URL.
+
+SCOPE — this gate checks that citations RESOLVE: the path exists, and the line
+holds what the citation says it holds. Deliberately NOT in scope: whether the
+cited code actually supports the claim in the surrounding prose. That is a human
+review judgement and always will be. A green run means every evidence link
+resolves to the named thing, NOT that every evidence link is apposite.
 
 Usage:
-    python3 ci/check_website_citations.py            # gate (exit 1 on a dead path)
+    python3 ci/check_website_citations.py            # gate (exit 1 on a violation)
+    python3 ci/check_website_citations.py --fix      # repoint drifted line numbers
     python3 ci/check_website_citations.py --self-test  # non-vacuity of the parser
     python3 ci/check_website_citations.py --list     # dump every resolved citation
 """
@@ -73,8 +92,10 @@ SITE_DIR = "website"
 CALL_RE = re.compile(r"(?<![A-Za-z0-9_$.])(ev|evRow)\s*\(")
 
 # A repo deep-link in the generated HTML. `#` is excluded from the path class so
-# an `#L92` line fragment can never be captured as part of the path.
-BLOB_RE = re.compile(r'href="https://github\.com/[^/"]+/[^/"]+/blob/[^/"]+/([^"#]+)(?:#L\d+)?"')
+# an `#L92` line fragment can never be captured as part of the path; the fragment
+# is captured separately because a stale LINE NUMBER in the deployed HTML is just
+# as wrong as a stale path, and only comparing paths would miss it.
+BLOB_RE = re.compile(r'href="https://github\.com/[^/"]+/[^/"]+/blob/[^/"]+/([^"#]+)(?:#L(\d+))?"')
 
 # `generate.mjs` writes each page to `${mod.meta.slug}.html`, so the slug is what
 # maps a page source to the HTML a visitor actually receives.
@@ -87,12 +108,20 @@ EXIT_USAGE = 2
 
 @dataclass(frozen=True)
 class Citation:
-    """One repo path cited by one evidence chip."""
+    """One repo path cited by one evidence chip.
+
+    A citation is authored as `path[:line[#anchor]]`. The anchor is the Tier 2
+    addition: a literal substring that must appear on the cited line. Without it
+    a line number is a bare coordinate that nothing can check -- see the module
+    docstring.
+    """
 
     page: str  # page file, repo-relative
     line: int  # line within the page source
-    raw: str  # the citation as authored, e.g. "src/wcet_gate.rs:92"
-    path: str  # the repo path alone, ":line" stripped
+    raw: str  # the citation as authored, e.g. "src/wcet_gate.rs:119#GOVERNOR_..."
+    path: str  # the repo path alone, ":line" and "#anchor" stripped
+    target_line: int | None = None  # the cited line within `path`
+    anchor: str | None = None  # text required at that line
 
 
 def _split_args(src: str, start: int) -> tuple[list[str], int]:
@@ -188,15 +217,29 @@ def scan_source(page: str, src: str) -> tuple[list[Citation], list[tuple[int, st
             if raw is None:
                 unresolvable.append((line, f"{kind}({arg.strip()[:60]}) — not a string literal"))
                 continue
-            # Strip a trailing ":<line>"; a colon elsewhere is part of the path.
-            path = raw
-            if ":" in raw:
-                head, _, tail = raw.rpartition(":")
-                if head and tail.isdigit():
-                    path = head
-            citations.append(Citation(page=page, line=line, raw=raw, path=path))
+            path, target_line, anchor = parse_citation(raw)
+            citations.append(
+                Citation(page=page, line=line, raw=raw, path=path, target_line=target_line, anchor=anchor)
+            )
 
     return citations, unresolvable
+
+
+def parse_citation(raw: str) -> tuple[str, int | None, str | None]:
+    """Split `path[:line[#anchor]]` into its parts.
+
+    The anchor is taken as everything after the FIRST '#', so an anchor may
+    itself contain '#' (a YAML comment, a Rust attribute). A '#' before the
+    ':line' is treated as part of the path -- no repo path in this tree has one,
+    and reading it as an anchor would silently drop a real directory name.
+    """
+    spec, sep, anchor = raw.partition("#")
+    head, _, tail = spec.rpartition(":")
+    if head and tail.isdigit():
+        return head, int(tail), (anchor if sep else None)
+    # No line number: an anchor would have nothing to anchor TO, so keep the
+    # whole string as the path rather than inventing a target.
+    return raw, None, None
 
 
 def collect(root: str) -> tuple[list[Citation], list[tuple[str, int, str]], dict[str, str | None]]:
@@ -227,8 +270,9 @@ def scan_html(page: str, src: str) -> list[Citation]:
     links: list[Citation] = []
     for m in BLOB_RE.finditer(src):
         path = m.group(1)
+        target = int(m.group(2)) if m.group(2) else None
         line = src.count("\n", 0, m.start()) + 1
-        links.append(Citation(page=page, line=line, raw=path, path=path))
+        links.append(Citation(page=page, line=line, raw=path, path=path, target_line=target))
     return links
 
 
@@ -247,6 +291,66 @@ def collect_html(root: str) -> list[Citation]:
     return links
 
 
+@dataclass(frozen=True)
+class AnchorIssue:
+    """An anchored citation whose anchor is not where the citation says."""
+
+    cite: Citation
+    kind: str  # "moved" | "missing" | "ambiguous" | "unanchored"
+    found_line: int | None = None  # where the anchor actually is (kind="moved")
+    occurrences: int = 0  # how many times it appears (kind="ambiguous")
+
+    @property
+    def fixable(self) -> bool:
+        return self.kind == "moved" and self.found_line is not None
+
+
+def classify_anchor(lines: list[str], target_line: int, anchor: str) -> tuple[str, int | None, int]:
+    """Pure core of the anchor check: (kind, found_line, occurrences).
+
+    Split out from file IO so the self-test can exercise every branch against
+    in-memory content. Testing it against this script's own source instead was
+    self-referential -- the probe strings appeared in the test literals, turning
+    a "unique" anchor into an ambiguous one.
+    """
+    hits = [i + 1 for i, text in enumerate(lines) if anchor in text]
+    if not hits:
+        return "missing", None, 0
+    if len(hits) > 1:
+        # Ambiguous even when the cited line is currently ONE of the matches.
+        # Uniqueness is checked at authoring time deliberately: a non-unique
+        # anchor is unfixable-in-waiting -- it looks fine until the file shifts,
+        # and then nothing can say which occurrence was meant. Failing now, while
+        # the author still remembers what they meant, beats failing later.
+        return "ambiguous", None, len(hits)
+    if target_line == hits[0]:
+        return "ok", target_line, 1
+    return "moved", hits[0], 1
+
+
+def check_anchor(root: str, cite: Citation) -> AnchorIssue | None:
+    """Verify one citation's anchor. Returns None when it is exactly right."""
+    if cite.target_line is None:
+        return None
+    if not cite.anchor:
+        # A line number with nothing to check it against is the Tier 1 status quo
+        # this gate exists to end. Every line citation in the tree is anchored, so
+        # this fails -- keeping the count at zero and stopping a new bare
+        # coordinate from being introduced.
+        return AnchorIssue(cite=cite, kind="unanchored")
+
+    try:
+        with open(os.path.join(root, cite.path), encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().split("\n")
+    except OSError:
+        return None  # a dead path is already reported by the existence check
+
+    kind, found, count = classify_anchor(lines, cite.target_line, cite.anchor)
+    if kind == "ok":
+        return None
+    return AnchorIssue(cite=cite, kind=kind, found_line=found, occurrences=count)
+
+
 @dataclass
 class Result:
     citations: list[Citation]  # from website/_src/pages/*.mjs
@@ -256,10 +360,11 @@ class Result:
     stale: list[tuple[str, str, str]]  # (page source, output html, path)
     unresolvable: list[tuple[str, int, str]]
     slugless: list[str]  # page sources whose output slug could not be read
+    anchors: list[AnchorIssue]
 
     @property
     def failed(self) -> bool:
-        return bool(self.dead_src or self.dead_html or self.stale or self.slugless)
+        return bool(self.dead_src or self.dead_html or self.stale or self.slugless or self.anchors)
 
 
 def check(root: str) -> Result:
@@ -272,9 +377,12 @@ def check(root: str) -> Result:
     # Per-page HTML link sets. Comparing globally would let a stale page slip
     # through whenever its new citation happens to appear on some OTHER page --
     # the staleness is per-document, so the comparison has to be too.
-    by_html: dict[str, set[str]] = {}
+    # Compared as (path, line), not path alone: after `--fix` repoints a drifted
+    # line number, the source is right while the committed HTML still deep-links
+    # to the OLD line. Comparing paths only would call that in sync.
+    by_html: dict[str, set[tuple[str, int | None]]] = {}
     for link in html_links:
-        by_html.setdefault(link.page, set()).add(link.path)
+        by_html.setdefault(link.page, set()).add((link.path, link.target_line))
 
     stale: list[tuple[str, str, str]] = []
     slugless: list[str] = []
@@ -284,13 +392,18 @@ def check(root: str) -> Result:
             continue
         out = os.path.join(SITE_DIR, f"{slug}.html")
         rendered = by_html.get(out)
-        cited = {c.path for c in citations if c.page == page}
+        cited = {(c.path, c.target_line) for c in citations if c.page == page}
+
+        def label(item: tuple[str, int | None]) -> str:
+            path, line = item
+            return f"{path}:{line}" if line else path
+
         if rendered is None:
             # The page source exists but its HTML does not; every citation on it
             # is unreachable to a visitor.
-            stale.extend((page, out, p) for p in sorted(cited))
+            stale.extend((page, out, label(i)) for i in sorted(cited, key=label))
             continue
-        stale.extend((page, out, p) for p in sorted(cited - rendered))
+        stale.extend((page, out, label(i)) for i in sorted(cited - rendered, key=label))
 
     return Result(
         citations=citations,
@@ -302,7 +415,42 @@ def check(root: str) -> Result:
         stale=stale,
         unresolvable=unresolvable,
         slugless=slugless,
+        anchors=[i for i in (check_anchor(root, c) for c in citations) if i is not None],
     )
+
+
+def apply_fixes(root: str, issues: list[AnchorIssue]) -> tuple[int, list[AnchorIssue]]:
+    """Rewrite drifted line numbers in place. Returns (fixed count, unfixable)."""
+    fixable = [i for i in issues if i.fixable]
+    unfixable = [i for i in issues if not i.fixable]
+
+    # Group by page so each file is read and written once.
+    by_page: dict[str, list[AnchorIssue]] = {}
+    for issue in fixable:
+        by_page.setdefault(issue.cite.page, []).append(issue)
+
+    fixed = 0
+    for page, page_issues in by_page.items():
+        full = os.path.join(root, page)
+        with open(full, encoding="utf-8") as fh:
+            src = fh.read()
+        for issue in page_issues:
+            cite = issue.cite
+            new_raw = f"{cite.path}:{issue.found_line}"
+            if cite.anchor:
+                new_raw += f"#{cite.anchor}"
+            # Replace the quoted literal so a bare substring match cannot clip a
+            # longer path that happens to share this prefix.
+            old, new = f'"{cite.raw}"', f'"{new_raw}"'
+            if old in src:
+                src = src.replace(old, new)
+                fixed += 1
+            else:
+                unfixable.append(issue)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(src)
+
+    return fixed, unfixable
 
 
 # --------------------------------------------------------------------------
@@ -393,6 +541,54 @@ def self_test(root: str) -> int:
     if SLUG_RE.search("export const meta = { title: 'x' };") is not None:
         failures.append("slug: a page with no slug should yield no match")
 
+    # --- anchored-citation parsing (Tier 2) ---
+    for raw, want in [
+        ("a/b.rs", ("a/b.rs", None, None)),
+        ("a/b.rs:12", ("a/b.rs", 12, None)),
+        ("a/b.rs:12#pub fn x(", ("a/b.rs", 12, "pub fn x(")),
+        # An anchor may itself contain '#' (a YAML comment, a Rust attribute):
+        # only the FIRST '#' separates.
+        ("ci.yml:5#- name: x # trailing", ("ci.yml", 5, "- name: x # trailing")),
+        # No line number => nothing to anchor to; keep the whole string as path
+        # rather than inventing a target.
+        ("docs/a#b", ("docs/a#b", None, None)),
+    ]:
+        got = parse_citation(raw)
+        if got != want:
+            failures.append(f"parse_citation({raw!r}): expected {want}, got {got}")
+
+    # --- anchor classification, over in-memory content ---
+    #  1 fn alpha(
+    #  2 body
+    #  3 duplicated
+    #  4 fn beta(
+    #  5 duplicated
+    probe_lines = ["fn alpha(", "body", "duplicated", "fn beta(", "duplicated"]
+    for target, anchor, want in [
+        (1, "fn alpha(", ("ok", 1)),  # exactly right
+        (4, "fn alpha(", ("moved", 1)),  # drifted: unique elsewhere -> fixable
+        (2, "fn gamma(", ("missing", None)),  # the evidence itself is gone
+        (1, "duplicated", ("ambiguous", None)),  # cannot know which was meant
+    ]:
+        kind, found, _n = classify_anchor(probe_lines, target, anchor)
+        if (kind, found) != want:
+            failures.append(f"classify_anchor({target}, {anchor!r}): expected {want}, got {(kind, found)}")
+
+    # Only "moved" may be repaired automatically; the other two need a human.
+    for kind, should_fix in [("moved", True), ("missing", False), ("ambiguous", False), ("unanchored", False)]:
+        got = AnchorIssue(
+            cite=Citation("f.mjs", 1, "a:1#x", "a", 1, "x"),
+            kind=kind,
+            found_line=2 if kind == "moved" else None,
+        ).fixable
+        if got != should_fix:
+            failures.append(f"fixable: kind={kind} should be {should_fix}, got {got}")
+
+    # A bare line citation must be flagged, not silently accepted.
+    bare = check_anchor(root, Citation("f.mjs", 1, "README.md:1", "README.md", 1, None))
+    if not bare or bare.kind != "unanchored":
+        failures.append(f"anchor: a bare line citation should be kind=unanchored, got {bare}")
+
     if failures:
         print("SELF-TEST FAILED", file=sys.stderr)
         for f in failures:
@@ -403,7 +599,9 @@ def self_test(root: str) -> int:
     print("chips, reports unresolvable arguments, and detects planted dead paths;")
     print("HTML scanner extracts blob links without their #L fragment, ignores")
     print("same-site and non-blob URLs, detects a planted dead link, and reports a")
-    print("source citation absent from the HTML as stale.")
+    print("source citation absent from the HTML as stale; anchor parsing splits on")
+    print("the first '#' only, and anchor checking separates correct from moved")
+    print("(fixable) / missing / ambiguous / unanchored (all not fixable).")
     return EXIT_OK
 
 
@@ -411,6 +609,7 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--self-test", action="store_true", help="prove the detector is non-vacuous, then exit")
     ap.add_argument("--list", action="store_true", help="print every resolved citation")
+    ap.add_argument("--fix", action="store_true", help="rewrite drifted line numbers whose anchor moved")
     ap.add_argument("--root", default=REPO_ROOT, help="repository root (default: this script's repo)")
     args = ap.parse_args(argv)
 
@@ -418,6 +617,19 @@ def main(argv: list[str]) -> int:
         return self_test(args.root)
 
     r = check(args.root)
+
+    if args.fix:
+        fixed, left = apply_fixes(args.root, r.anchors)
+        print(f"--fix: repointed {fixed} drifted citation(s).")
+        if fixed:
+            print("Regenerate the site so the HTML carries the new line numbers:")
+            print("  node website/_src/generate.mjs")
+        if left:
+            print(f"\n{len(left)} issue(s) need a human decision:")
+            for issue in left:
+                print(f"  {issue.cite.page}:{issue.cite.line}  {issue.cite.raw}  [{issue.kind}]")
+            return EXIT_VIOLATION
+        return EXIT_OK
 
     if args.list:
         for c in sorted(r.citations, key=lambda c: (c.page, c.line)):
@@ -479,6 +691,55 @@ def main(argv: list[str]) -> int:
             "in _src is NOT what visitors get. Regenerate and commit the result:\n"
             "  node website/_src/generate.mjs"
         )
+
+    if r.anchors:
+        moved = [a for a in r.anchors if a.kind == "moved"]
+        missing = [a for a in r.anchors if a.kind == "missing"]
+        ambiguous = [a for a in r.anchors if a.kind == "ambiguous"]
+        unanchored = [a for a in r.anchors if a.kind == "unanchored"]
+
+        if moved:
+            print(f"\nFAIL — {len(moved)} citation(s) whose anchor has MOVED:\n")
+            for a in moved:
+                print(f"  {a.cite.page}:{a.cite.line}")
+                print(f"      cites: {a.cite.path}:{a.cite.target_line}  (anchor now at line {a.found_line})")
+                print(f"      anchor: {a.cite.anchor}")
+            print("\nThis is mechanical — the evidence did not move, only its line number:")
+            print("  python3 ci/check_website_citations.py --fix && node website/_src/generate.mjs")
+
+        if missing:
+            print(f"\nFAIL — {len(missing)} citation(s) whose anchor is GONE from the file:\n")
+            for a in missing:
+                print(f"  {a.cite.page}:{a.cite.line}")
+                print(f"      cites:  {a.cite.path}:{a.cite.target_line}")
+                print(f"      anchor: {a.cite.anchor}")
+            print(
+                "\nNot mechanical. The thing the site points at was renamed or deleted, so\n"
+                "the claim beside the chip may no longer be backed by anything. Re-read the\n"
+                "claim, find what now supports it, and repoint -- do not just delete the\n"
+                "citation to get to green."
+            )
+
+        if ambiguous:
+            print(f"\nFAIL — {len(ambiguous)} anchor(s) that are not unique in their file:\n")
+            for a in ambiguous:
+                print(f"  {a.cite.page}:{a.cite.line}")
+                print(f"      cites:  {a.cite.path}:{a.cite.target_line}")
+                print(f"      anchor: {a.cite.anchor}  ({a.occurrences} occurrences)")
+            print(
+                "\nAn anchor that matches several lines cannot be repaired automatically --\n"
+                "nothing says which one was meant. Lengthen it until it is unique."
+            )
+
+        if unanchored:
+            print(f"\nFAIL — {len(unanchored)} line citation(s) with no anchor:\n")
+            for a in unanchored:
+                print(f"  {a.cite.page}:{a.cite.line}  cites {a.cite.raw}")
+            print(
+                "\nA bare `path:line` records a coordinate, not a claim: when the line moves\n"
+                "nothing can tell. Add the text that must be on that line:\n"
+                "  \"crates/kirra-trajectory/src/validation.rs:235#pub fn validate_trajectory_slow(\""
+            )
 
     if r.failed:
         return EXIT_VIOLATION

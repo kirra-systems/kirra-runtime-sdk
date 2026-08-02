@@ -11,11 +11,19 @@ export const SITE = {
   version: "v1.1.2",
 };
 
-/** Evidence chip linking to the exact file (and line) in the repository. */
+/**
+ * Evidence chip linking to the exact file (and line) in the repository.
+ *
+ * Citations are authored as `path[:line[#anchor]]`. The optional `#anchor` is
+ * the text that must be AT that line — authoring-time metadata that lets
+ * ci/check_website_citations.py detect (and mechanically repair) line drift.
+ * It is stripped here, so it never reaches the URL or the chip's label.
+ */
 export const ev = (path, label) => {
-  const [file, line] = path.split(":");
+  const spec = path.split("#")[0];
+  const [file, line] = spec.split(":");
   const url = `${SITE.repo}/blob/main/${file}${line ? `#L${line}` : ""}`;
-  return `<a class="evidence" href="${url}" target="_blank" rel="noopener">${label || path}</a>`;
+  return `<a class="evidence" href="${url}" target="_blank" rel="noopener">${label || spec}</a>`;
 };
 export const evRow = (...paths) =>
   `<p class="evidence-row">${paths.map((p) => ev(p)).join("")}</p>`;

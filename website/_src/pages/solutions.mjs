@@ -61,7 +61,7 @@ ${pageHero({
             as non-drivable (depth-from-one-sensor is explicitly declared unsolved rather than guessed), and
             semantic fusion is only allowed to <em>shrink</em> the drivable corridor — a fusion result that loosens
             it is a hard zero in CI.</p>
-            ${evRow("crates/kirra-taj/src/lib.rs:189", "crates/kirra-kpi-gate")}
+            ${evRow("crates/kirra-taj/src/lib.rs:246#pub enum SemanticClass {", "crates/kirra-kpi-gate")}
           </div>
           <div class="card" data-reveal>
             <p class="eyebrow" style="font-size:0.68rem;margin-bottom:12px">San Francisco · 2023</p>
@@ -71,7 +71,7 @@ ${pageHero({
             against this incident by name: after a fault, only commands that converge to a stop are admissible,
             the vehicle holds at zero, and the governor never authors re-acceleration. The no-re-initiation rule
             is machine-checked by proof, not just tested.</p>
-            ${evRow("crates/kirra-core/src/kinematics_contract.rs", "verification/kani/src/proofs_kinematics.rs:166")}
+            ${evRow("crates/kirra-core/src/kinematics_contract.rs", "verification/kani/src/proofs_kinematics.rs:561#fn k4_degraded_reinitiation_denied()")}
             <p style="margin-top:12px"><a class="card__more" href="#av">The full AV story <span aria-hidden="true">→</span></a></p>
           </div>
           <div class="card" data-reveal>
@@ -83,7 +83,7 @@ ${pageHero({
             its floor faults the node and degrades posture; two perception channels that disagree cap speed to
             zero; an unevaluable prediction resolves to minimum-risk. Unknown never maps to proceed — that rule
             holds in every posture, including Nominal.</p>
-            ${evRow("src/recovery_hysteresis.rs", "crates/kirra-trajectory/src/perception_redundancy.rs:224")}
+            ${evRow("src/recovery_hysteresis.rs", "crates/kirra-trajectory/src/perception_redundancy.rs:123#pub fn resolve_redundancy_cap(")}
           </div>
           <div class="card" data-reveal>
             <p class="eyebrow" style="font-size:0.68rem;margin-bottom:12px">Oldsmar, Florida · 2021</p>

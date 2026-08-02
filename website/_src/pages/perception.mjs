@@ -74,7 +74,7 @@ ${pageHero({
             <h3>Plausibility guard</h3>
             <p>Before objects reach the checker, a kinematic-plausibility contract bounds them — teleporting or
             physically impossible tracks are rejected, with the guard's worst case under its own WCET CI gate.</p>
-            ${evRow("crates/kirra-core/src/perception_monitor.rs", "src/wcet_gate.rs:139")}
+            ${evRow("crates/kirra-core/src/perception_monitor.rs", "src/wcet_gate.rs:197#pub const GOVERNOR_PERCEPTION_GUARD_WCET_CI_THRESHOLD_MICROS")}
           </div>
         </div>
       </div>
@@ -92,7 +92,7 @@ ${pageHero({
           to a zero-speed minimum-risk cap. Losing redundancy is itself a fault.</p>
         </div>
         <div class="diagram-frame flow-anim" data-reveal>${redunSvg}</div>
-        ${evRow("crates/kirra-trajectory/src/perception_redundancy.rs:224", "crates/kirra-core/src/perception_monitor.rs", "docs/adr/0018-perception-divergence-monitor.md")}
+        ${evRow("crates/kirra-trajectory/src/perception_redundancy.rs:237#pub fn cross_check(", "crates/kirra-core/src/perception_monitor.rs", "docs/adr/0018-perception-divergence-monitor.md")}
         <div class="compare-note" data-reveal style="margin-top:24px">
           <strong>Derate-only composition:</strong> every predictive perception bound — redundancy, occlusion, VRU —
           is fail-closed and derate-only. Absent input is a no-op (the Nominal hot path is byte-identical);
@@ -127,7 +127,7 @@ ${pageHero({
             <p>Every subscription carries a staleness budget (<code>KIRRA_SUBSCRIPTION_STALENESS_MS</code>). Feeds
             degrade explicitly — a stale tracker yaw quietly downgrades prediction to constant-velocity rather than
             trusting old rotation data.</p>
-            ${evRow("crates/kirra-trajectory/src/prediction.rs:199")}
+            ${evRow("crates/kirra-trajectory/src/prediction.rs:199#pub fn predicted_modes_from_objects(")}
           </div>
         </div>
       </div>

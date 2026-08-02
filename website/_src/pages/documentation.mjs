@@ -54,7 +54,7 @@ ${pageHero({
           ${docLink("docs/CONSOLE_RUNBOOK.md", "Operator console", "Running the fleet console, clearance flows, and the air-gapped fallback console.")}
         </div>
         <p class="evidence-note" style="margin-top:24px">API reference: <code>cargo doc --open</code> builds the full rustdoc locally — CI enforces
-        deny-warnings on it, so it's always current. ${ev(".github/workflows/ci.yml:323", "docs-and-sdk lane")}</p>
+        deny-warnings on it, so it's always current. ${ev(".github/workflows/ci.yml:414#docs-and-sdk:", "docs-and-sdk lane")}</p>
       </div>
     </section>
 

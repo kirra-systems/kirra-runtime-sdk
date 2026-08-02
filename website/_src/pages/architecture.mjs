@@ -112,7 +112,7 @@ ${pageHero({
         </div>
         <div class="diagram-frame flow-anim" data-reveal>${topologySvg}</div>
         <p class="diagram-caption"><span>${GATED}</span><span>QNX-target execution is the recorded remainder: cross-builds are reproducible in CI today; certified timing awaits target hardware.</span></p>
-        ${evRow("docs/adr/0032-governor-deployment-platform.md", "docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md", "crates/kirra-contract-channel/src/lib.rs", ".github/workflows/ci.yml:122")}
+        ${evRow("docs/adr/0032-governor-deployment-platform.md", "docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md", "crates/kirra-contract-channel/src/lib.rs", ".github/workflows/ci.yml:178#qnx-governor-artifact:")}
       </div>
     </section>
 
@@ -147,7 +147,7 @@ ${pageHero({
             <h3>Storage seams</h3>
             <p>Persistence is a set of storage traits (epoch fence, node store, federation, posture state, OTA) with
             SQLite, in-memory, and live-Postgres backends all running the <em>same</em> conformance suites in CI.</p>
-            ${evRow("crates/kirra-persistence", "crates/kirra-persistence/src/postgres", ".github/workflows/ci.yml:503")}
+            ${evRow("crates/kirra-persistence", "crates/kirra-persistence/src/postgres", ".github/workflows/ci.yml:599#postgres-conformance:")}
           </div>
         </div>
       </div>

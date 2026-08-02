@@ -206,7 +206,7 @@ export const body = `
           <span>An un-bypassable checker between untrusted intent and the actuator bus. If trust can't be proven, nothing moves.</span>
           <span class="mono" style="color:var(--accent)">≈65&nbsp;µs p50 · ≈116&nbsp;µs p99.9 measured (host)</span>
         </p>
-        ${evRow("crates/kirra-trajectory/src/validation.rs", "src/wcet_gate.rs:92", "crates/kirra-release-token/src/lib.rs")}
+        ${evRow("crates/kirra-trajectory/src/validation.rs", "src/wcet_gate.rs:119#pub const GOVERNOR_VERDICT_WCET_TARGET_MICROS", "crates/kirra-release-token/src/lib.rs")}
       </div>
     </section>
 
@@ -333,13 +333,13 @@ export const body = `
             <h3>One safety authority</h3>
             <p><code>validate_trajectory_slow</code> composes containment, per-pose kinematics, and RSS into a single
             verdict: <code>Accept</code>, <code>Clamp</code>, or <code>MRCFallback</code>. First rejection wins.</p>
-            ${evRow("crates/kirra-trajectory/src/validation.rs:206")}
+            ${evRow("crates/kirra-trajectory/src/validation.rs:235#pub fn validate_trajectory_slow(")}
           </div>
           <div class="card" data-reveal>
             <h3>Frozen where it matters</h3>
             <p>The kinematics checker core is pinned by git blob hash <code>ed00f4da…</code> — CI asserts the exact
             bytes survive every change, and the Kani proofs run against the shipped source verbatim.</p>
-            ${evRow("verification/kani/", ".github/workflows/ci.yml:182")}
+            ${evRow("verification/kani/", ".github/workflows/ci.yml:263#- name: frozen-talisman blob pin survives formatting")}
           </div>
         </div>
       </div>
@@ -431,13 +431,13 @@ export const body = `
               <p class="timeline__step">04 · Envelope</p>
               <h3>Hard boundary first</h3>
               <p><code>validate_vehicle_command</code> clamps to the absolute kinematic boundary before any rate limit — the envelope cap always wins. NaN or Inf anywhere is an immediate deny, proved for all 2⁶⁴ bit patterns.</p>
-              ${evRow("crates/kirra-core/src/kinematics_contract.rs", "verification/kani/src/proofs_kinematics.rs:84")}
+              ${evRow("crates/kirra-core/src/kinematics_contract.rs", "verification/kani/src/proofs_kinematics.rs:112#fn k1_nonfinite_input_always_denied()")}
             </li>
             <li class="timeline__item" data-reveal>
               <p class="timeline__step">05 · RSS</p>
               <h3>Formal distance keeping</h3>
               <p>Longitudinal <em>and</em> lateral safety evaluated as a conjunction, extended with occlusion-aware speed bounds at blind junctions and multi-modal prediction rolled forward in time.</p>
-              ${evRow("parko/crates/parko-core/src/rss.rs:317", "crates/kirra-trajectory/src/validation.rs:999")}
+              ${evRow("parko/crates/parko-core/src/rss.rs:317#pub fn longitudinal_safe_distance(", "crates/kirra-trajectory/src/validation.rs:1002#// over-reject: the `(lon_unsafe || lateral_cut_in)` precondition plus a")}
             </li>
             <li class="timeline__item" data-reveal>
               <p class="timeline__step">06 · Verdict</p>
@@ -526,7 +526,7 @@ export const body = `
           </div>
           <p class="evidence-note">Certified WCET is defined as QNX-target-under-FIFO measurement and has not been produced yet —
           the repository says so explicitly, and so do we. Host numbers are regression tripwires, not claims.</p>
-          ${evRow("src/wcet_gate.rs:92", "crates/kirra-inline-governor/README.md", "docs/safety/WCET_MEASUREMENT_METHODOLOGY.md")}
+          ${evRow("src/wcet_gate.rs:119#pub const GOVERNOR_VERDICT_WCET_TARGET_MICROS", "crates/kirra-inline-governor/README.md", "docs/safety/WCET_MEASUREMENT_METHODOLOGY.md")}
         </div>
       </div>
     </section>
@@ -546,7 +546,7 @@ export const body = `
           <div class="stat">
             <p class="stat__value"><span data-count="3305">0</span></p>
             <p class="stat__label">test functions across 330 files, run on every push</p>
-            <p class="stat__evidence">${ev(".github/workflows/ci.yml:231", "ci.yml · Test")}</p>
+            <p class="stat__evidence">${ev(".github/workflows/ci.yml:298#name: Test", "ci.yml · Test")}</p>
           </div>
           <div class="stat">
             <p class="stat__value"><span data-count="12">0</span></p>
@@ -569,13 +569,13 @@ export const body = `
             <h3>Adversarial by default</h3>
             <p>4 fuzz targets run on every push and 90 minutes each, weekly. PR diffs to the checker face
             mutation testing: if a mutant survives your tests, the gate fails.</p>
-            ${evRow("fuzz/fuzz_targets/", ".github/workflows/ci.yml:636")}
+            ${evRow("fuzz/fuzz_targets/", ".github/workflows/ci.yml:779#mutation-gate:")}
           </div>
           <div class="card" data-reveal>
             <h3>Coverage that can't regress</h3>
             <p>Gated decision-coverage floors on the checker crates (77–79%, measured ≈80%) plus a Codecov
             ratchet: any PR dropping workspace coverage by &gt;0.5% fails.</p>
-            ${evRow(".github/workflows/ci.yml:379", "codecov.yml")}
+            ${evRow(".github/workflows/ci.yml:470#checker-coverage:", "codecov.yml")}
           </div>
           <div class="card" data-reveal>
             <h3>Supply chain, pinned</h3>
