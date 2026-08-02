@@ -228,18 +228,23 @@ def scan_source(page: str, src: str) -> tuple[list[Citation], list[tuple[int, st
 def parse_citation(raw: str) -> tuple[str, int | None, str | None]:
     """Split `path[:line[#anchor]]` into its parts.
 
-    The anchor is taken as everything after the FIRST '#', so an anchor may
-    itself contain '#' (a YAML comment, a Rust attribute). A '#' before the
-    ':line' is treated as part of the path -- no repo path in this tree has one,
-    and reading it as an anchor would silently drop a real directory name.
+    Must agree EXACTLY with `ev()` in website/_src/template.mjs, which renders
+    the link a visitor actually clicks. Where the two disagree, the gate would
+    be validating a different string than the site publishes -- attesting to a
+    path nobody links.
+
+    So, mirroring `ev()`: everything after the FIRST '#' is the anchor (an anchor
+    may itself contain '#' -- a YAML comment, a Rust attribute), and only a FINAL
+    ':digits' is a line number.
     """
     spec, sep, anchor = raw.partition("#")
     head, _, tail = spec.rpartition(":")
     if head and tail.isdigit():
         return head, int(tail), (anchor if sep else None)
-    # No line number: an anchor would have nothing to anchor TO, so keep the
-    # whole string as the path rather than inventing a target.
-    return raw, None, None
+    # No line number. `ev()` still drops everything from '#' on, so the path is
+    # the part before it -- and a dangling anchor (nothing to anchor to) is
+    # reported by check_anchor rather than silently ignored.
+    return spec, None, (anchor if sep else None)
 
 
 def collect(root: str) -> tuple[list[Citation], list[tuple[str, int, str]], dict[str, str | None]]:
@@ -331,6 +336,11 @@ def classify_anchor(lines: list[str], target_line: int, anchor: str) -> tuple[st
 def check_anchor(root: str, cite: Citation) -> AnchorIssue | None:
     """Verify one citation's anchor. Returns None when it is exactly right."""
     if cite.target_line is None:
+        if cite.anchor is not None:
+            # An anchor with no line number has nothing to anchor TO. `ev()`
+            # silently drops it, so the site would render a whole-file link while
+            # the citation claims to pin a spot in it.
+            return AnchorIssue(cite=cite, kind="dangling")
         return None
     if not cite.anchor:
         # A line number with nothing to check it against is the Tier 1 status quo
@@ -549,9 +559,12 @@ def self_test(root: str) -> int:
         # An anchor may itself contain '#' (a YAML comment, a Rust attribute):
         # only the FIRST '#' separates.
         ("ci.yml:5#- name: x # trailing", ("ci.yml", 5, "- name: x # trailing")),
-        # No line number => nothing to anchor to; keep the whole string as path
-        # rather than inventing a target.
-        ("docs/a#b", ("docs/a#b", None, None)),
+        # Only a FINAL ':digits' is a line number -- a colon elsewhere is path.
+        ("weird:path/f.rs:9#x", ("weird:path/f.rs", 9, "x")),
+        ("x:notdigits", ("x:notdigits", None, None)),
+        # No line number: the path is still the part before '#', because that is
+        # what ev() links. The dangling anchor is reported, not silently dropped.
+        ("docs/a#b", ("docs/a", None, "b")),
     ]:
         got = parse_citation(raw)
         if got != want:
@@ -729,6 +742,17 @@ def main(argv: list[str]) -> int:
             print(
                 "\nAn anchor that matches several lines cannot be repaired automatically --\n"
                 "nothing says which one was meant. Lengthen it until it is unique."
+            )
+
+        dangling = [a for a in r.anchors if a.kind == "dangling"]
+        if dangling:
+            print(f"\nFAIL — {len(dangling)} anchor(s) with no line number to anchor to:\n")
+            for a in dangling:
+                print(f"  {a.cite.page}:{a.cite.line}  cites {a.cite.raw}")
+            print(
+                "\nev() drops everything from '#' on, so the site renders a whole-file\n"
+                "link while the citation claims to pin a spot in it. Add the line\n"
+                "number, or drop the anchor."
             )
 
         if unanchored:

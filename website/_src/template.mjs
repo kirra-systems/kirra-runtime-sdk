@@ -21,7 +21,13 @@ export const SITE = {
  */
 export const ev = (path, label) => {
   const spec = path.split("#")[0];
-  const [file, line] = spec.split(":");
+  // Only a FINAL ":digits" is a line number, mirroring the gate's rpartition +
+  // isdigit test. Splitting on the first colon instead would make the generator
+  // and the gate disagree about any path containing one — the generator would
+  // render a broken link while the gate validated a different reading of it.
+  const m = spec.match(/^(.+):(\d+)$/);
+  const file = m ? m[1] : spec;
+  const line = m ? m[2] : "";
   const url = `${SITE.repo}/blob/main/${file}${line ? `#L${line}` : ""}`;
   return `<a class="evidence" href="${url}" target="_blank" rel="noopener">${label || spec}</a>`;
 };
