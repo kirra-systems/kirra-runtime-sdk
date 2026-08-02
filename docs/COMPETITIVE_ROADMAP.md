@@ -246,12 +246,26 @@ this process now puts Kirra 2-3 years ahead of a competitor who waits.
 | QNX deployment | ✅ | ❌ | 🔄 | ✅ | ✅ |
 | TensorRT backend | ✅ | ❌ | stub | ✅ | ✅ |
 | Multi-silicon | ❌ | ❌ | arch only | partial | ✅ |
-| ISO 26262 ASIL-D certified | ✅ | ✅ | docs only | docs only | in progress |
-| ISO 21434 certified | ✅ | ✅ | ❌ | ❌ | in progress |
+| ISO 26262 ASIL-D — independent assessment | ✅ | ✅ | none — draft evidence only | none — draft evidence only | assessment work planned |
+| ISO 21434 — independent assessment | ✅ | ✅ | none | none | assessment work planned |
 | Hardware demo | ✅ | ✅ | ❌ | ✅ | ✅ |
 | Open source | ❌ | ❌ | private | public | public |
 | Audit log (tamper-evident) | partial | ❌ | ✅ | ✅ | ✅ |
 | Multi-asset fleet governance | ❌ | ❌ | ✅ | ✅ | ✅ |
+
+> **Reading the two assessment rows.** They record whether an **independent
+> third party has assessed and certified the product** — not whether work
+> toward that has been done. **Kirra has no such assessment in any column**,
+> now or at any planned milestone; `assessment work planned` means the
+> activity is scheduled, not that an outcome exists. Kirra's actual position:
+> **Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508 SIL 3 requirements. Independent third-party assessment has not yet been performed.** The supporting evidence is indexed in
+> [`safety/SAFETY_CASE_INDEX.md`](safety/SAFETY_CASE_INDEX.md), and every
+> foundation document there is **Draft**.
+>
+> The competitor cells in this table are **unsourced** — they reflect vendor
+> marketing as understood at the time of writing and have not been verified
+> against certificates. Do not quote any cell in this table as a Kirra claim
+> or as a verified competitor claim.
 
 ---
 
