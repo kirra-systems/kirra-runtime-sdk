@@ -1125,6 +1125,16 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("collides"), "{e}");
+        // Two DISTINCT entries sharing the same id collide (uniqueness is by
+        // entry position — the parity the Python CLI mirrors).
+        let e = PlaceRegistry::from_json_str(
+            r#"{"version": 1, "map_id": "m", "places": [
+                {"id":"kitchen","name":"Kitchen","x_m":1.0,"y_m":0.0},
+                {"id":"kitchen","name":"Kitchen Two","x_m":2.0,"y_m":0.0}
+            ]}"#,
+        )
+        .unwrap_err();
+        assert!(e.contains("collides"), "{e}");
         // Unknown field — a typo'd registry must not half-load.
         let e = PlaceRegistry::from_json_str(
             r#"{"version": 1, "map_id": "m", "places":

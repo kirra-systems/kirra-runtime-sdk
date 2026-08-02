@@ -81,6 +81,21 @@ def test_validation_catches_each_defect_class():
     d["places"][1]["aliases"] = ["kitchen"]  # collides with entry 0's id
     check(any("collides" in e for e in validate_places(d)), "duplicate key")
 
+    # Two DISTINCT entries sharing the same id must collide — uniqueness is
+    # tracked by entry position, not id-string equality, so a copy-pasted
+    # entry cannot pass the CLI while the Rust resolver refuses it
+    # (review: Copilot on #1293).
+    d = places_doc()
+    d["places"][1]["id"] = "kitchen"
+    check(any("collides" in e for e in validate_places(d)),
+          "duplicate id across distinct entries")
+
+    # Within ONE entry, name == id is legitimately the same key, not a defect.
+    d = places_doc()
+    d["places"][0]["name"] = "kitchen"
+    check(not any("collides" in e for e in validate_places(d)),
+          "an entry may repeat its own key")
+
     d = places_doc()
     d["places"][0]["x_m"] = float("nan")
     check(any("finite" in e for e in validate_places(d)), "NaN coordinate")

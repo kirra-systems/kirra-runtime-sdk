@@ -1113,9 +1113,14 @@ fn effective_intent(req: &PlanRequest) -> Result<MickIntent, SeamRejection> {
 
 /// Handle one plan request with NO destination context configured — the
 /// pre-destination behaviour, byte-identical for every request that carries
-/// no `destination`. A request that DOES carry one refuses fail-closed
-/// against the empty default resolver (`DEST_NO_REGISTRY` / policy defaults)
-/// rather than being silently ignored.
+/// no `destination`. A request that DOES carry one runs against the empty
+/// default resolver rather than being silently ignored: `named_place` /
+/// `saved_route` refuse fail-closed (`DEST_NO_REGISTRY` — no registries are
+/// loaded), `address` refuses as always (`DEST_UNSUPPORTED_ADDRESS`), and
+/// `tracked_object` still resolves from the request's own `targets` under
+/// the DEFAULT object policy (it needs no registry). Callers wanting
+/// registry-backed kinds or a tuned policy use
+/// [`handle_plan_with_destinations`].
 pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
     handle_plan_with_destinations(req, &DestinationResolver::default())
 }

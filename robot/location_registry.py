@@ -70,7 +70,15 @@ def _check_header(doc: dict, what: str, errors: list[str]) -> None:
         errors.append(f"{what}: map_id is required and must be non-empty")
 
 
-def _check_keys(entry: dict, keys: dict[str, str], what: str, errors: list[str]) -> None:
+def _check_keys(entry: dict, idx: int, keys: dict[str, tuple[int, str]],
+                what: str, errors: list[str]) -> None:
+    """Index one entry's id/name/aliases into the shared key space.
+
+    Uniqueness is tracked by ENTRY POSITION (`idx`), not by id string — two
+    distinct entries that share an id must collide, exactly as in the Rust
+    resolver's `index_entry_keys` (review: Copilot on #1293). Within one
+    entry, repeating its own key (name == id) is fine.
+    """
     entry_id = entry.get("id", "?")
     aliases = entry.get("aliases", [])
     if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):
@@ -83,13 +91,13 @@ def _check_keys(entry: dict, keys: dict[str, str], what: str, errors: list[str])
         key = normalize(raw)
         if not key:
             errors.append(f"{what} {entry_id!r}: key {raw!r} is empty after normalization")
-        elif key in keys and keys[key] != str(entry_id):
+        elif key in keys and keys[key][0] != idx:
             errors.append(
-                f"{what} {entry_id!r}: key {raw!r} collides with entry {keys[key]!r} — "
+                f"{what} {entry_id!r}: key {raw!r} collides with entry {keys[key][1]!r} — "
                 "ids, names and aliases must be unique across the registry"
             )
         else:
-            keys[key] = str(entry_id)
+            keys[key] = (idx, str(entry_id))
 
 
 def validate_places(doc: dict) -> list[str]:
@@ -100,12 +108,12 @@ def validate_places(doc: dict) -> list[str]:
     if not isinstance(places, list):
         errors.append("place registry: places must be a list")
         return errors
-    keys: dict[str, str] = {}
-    for e in places:
+    keys: dict[str, tuple[int, str]] = {}
+    for idx, e in enumerate(places):
         if not isinstance(e, dict):
             errors.append("place registry: every place must be an object")
             continue
-        _check_keys(e, keys, "place", errors)
+        _check_keys(e, idx, keys, "place", errors)
         for field in ("x_m", "y_m"):
             if not _is_finite_number(e.get(field)):
                 errors.append(f"place {e.get('id', '?')!r}: {field} must be a finite number")
@@ -122,12 +130,12 @@ def validate_routes(doc: dict) -> list[str]:
     if not isinstance(routes, list):
         errors.append("route registry: routes must be a list")
         return errors
-    keys: dict[str, str] = {}
-    for e in routes:
+    keys: dict[str, tuple[int, str]] = {}
+    for idx, e in enumerate(routes):
         if not isinstance(e, dict):
             errors.append("route registry: every route must be an object")
             continue
-        _check_keys(e, keys, "route", errors)
+        _check_keys(e, idx, keys, "route", errors)
         waypoints = e.get("waypoints")
         if not isinstance(waypoints, list) or not waypoints:
             errors.append(f"route {e.get('id', '?')!r}: waypoints must be a non-empty list")
