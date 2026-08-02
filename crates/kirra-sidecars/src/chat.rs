@@ -354,17 +354,29 @@ const REPLY_NOT_EXTERNAL: &str =
 /// model is configured (the chat core never sees it), and an unverifiable
 /// claim is the failure being fixed.
 const REPLY_WHICH_MODEL: &str = "I'm running the locally configured language model for this robot.";
-/// Memory. A stateless service retains nothing; this is a fact, not privacy
+/// Memory, with history DISABLED (`history_turns == 0`, the deployed
+/// configuration): the service retains nothing. A fact, not privacy
 /// boilerplate about being an AI.
 const REPLY_NO_MEMORY: &str = "I don't retain previous conversations.";
+/// Memory, with bounded history ENABLED (`history_turns > 0`). The reply must
+/// track the configuration: with history on, "I don't retain previous
+/// conversations" would be a FALSE statement baked into a fixed table, which
+/// is worse than a model saying it — a constant cannot self-correct. So the
+/// answer states exactly what is kept and what is not (review: Copilot on
+/// #1297).
+const REPLY_BOUNDED_MEMORY: &str =
+    "I keep only the last couple of turns of this session, and nothing from earlier ones.";
 
-/// Every fixed identity/memory reply, for the tests that sweep them.
+/// Every fixed identity/memory reply, for the tests that sweep them and for
+/// the crate-boundary separation suite (`tests/mick_chat_separation.rs`),
+/// which asserts the chat surface can never name an external assistant.
 pub const IDENTITY_REPLIES: &[&str] = &[
     REPLY_WHO_ARE_YOU,
     REPLY_WHO_MADE_YOU,
     REPLY_NOT_EXTERNAL,
     REPLY_WHICH_MODEL,
     REPLY_NO_MEMORY,
+    REPLY_BOUNDED_MEMORY,
 ];
 
 /// External assistants/vendors an operator might name in "are you …?". Used
@@ -447,18 +459,76 @@ const MEMORY_FORMS: &[&str] = &[
     "have we spoken before",
 ];
 
-/// Is this an "are you <external assistant>?" challenge?
+/// Words that may appear around a vendor name in an identity CHALLENGE
+/// without changing what is being asked: "are you **an ai developed by**
+/// microsoft", "you're claude, **right**".
+const CHALLENGE_FILLER: &[&str] = &[
+    "a",
+    "an",
+    "the",
+    "ai",
+    "model",
+    "language",
+    "llm",
+    "assistant",
+    "chatbot",
+    "bot",
+    "developed",
+    "made",
+    "built",
+    "created",
+    "written",
+    "by",
+    "from",
+    "based",
+    "on",
+    "powered",
+    "running",
+    "really",
+    "actually",
+    "just",
+    "secretly",
+    "right",
+    "then",
+    "or",
+    "and",
+];
+
+/// Is this an "are you `<external assistant>`?" challenge?
 ///
-/// Requires BOTH the interrogative opening and a named assistant, so "what is
-/// ChatGPT" (a legitimate question, answered by the model) is untouched while
-/// "are you ChatGPT" is not.
+/// Requires the interrogative opening AND that everything after it is *only*
+/// vendor names plus recognized filler. The earlier rule was "opening +
+/// contains a vendor anywhere", which false-positived on capability questions
+/// — "are you OpenAI compatible", "are you Copilot ready" — turning a real
+/// question into a fixed "No, I'm Mick" with no model behind it to recover
+/// (review: Copilot on #1297). Those now fall through to the model, while
+/// "are you chatgpt", "are you an ai developed by microsoft" and "you're
+/// claude, right" still match.
 fn is_external_identity_challenge(norm: &str) -> bool {
-    let asks = norm.starts_with("are you")
-        || norm.starts_with("aren't you")
-        || norm.starts_with("arent you")
-        || norm.starts_with("you are")
-        || norm.starts_with("you're");
-    asks && EXTERNAL_ASSISTANTS.iter().any(|v| norm.contains(v))
+    const OPENINGS: &[&str] = &["are you", "aren't you", "arent you", "you are", "you're"];
+    let Some(rest) = OPENINGS
+        .iter()
+        .find_map(|open| norm.strip_prefix(open))
+        .map(str::trim)
+    else {
+        return false;
+    };
+    // Spoken/typed forms split a vendor across two words; fold them back so
+    // the scan below is purely word-wise.
+    let rest = rest
+        .replace("chat gpt", "chatgpt")
+        .replace("open ai", "openai");
+    let mut named_a_vendor = false;
+    for word in rest.split_whitespace() {
+        if EXTERNAL_ASSISTANTS.contains(&word) {
+            named_a_vendor = true;
+        } else if !CHALLENGE_FILLER.contains(&word) {
+            // Anything else ("compatible", "ready", "better") means this is a
+            // question ABOUT the vendor, not a claim to BE it.
+            return false;
+        }
+    }
+    named_a_vendor
 }
 
 /// Fixed answer for an identity or memory question — or `None` to let the
@@ -467,8 +537,12 @@ fn is_external_identity_challenge(norm: &str) -> bool {
 /// 🔴 Zero model calls on a hit. The reply is a constant, so it cannot drift,
 /// cannot name an external vendor, and cannot claim a model this service
 /// hasn't verified.
+/// `retains_history` is the service's OWN configuration
+/// (`ChatConfig::history_turns > 0`), not anything the caller asserts: the
+/// memory answer must describe what this service actually keeps, or the fixed
+/// table states a falsehood it can never correct.
 #[must_use]
-pub fn identity_route(text: &str) -> Option<&'static str> {
+pub fn identity_route(text: &str, retains_history: bool) -> Option<&'static str> {
     let n = light_normalize(text);
     if n.is_empty() {
         return None;
@@ -487,7 +561,11 @@ pub fn identity_route(text: &str) -> Option<&'static str> {
         return Some(REPLY_WHICH_MODEL);
     }
     if in_set(MEMORY_FORMS) {
-        return Some(REPLY_NO_MEMORY);
+        return Some(if retains_history {
+            REPLY_BOUNDED_MEMORY
+        } else {
+            REPLY_NO_MEMORY
+        });
     }
     None
 }
@@ -794,7 +872,7 @@ impl<M: ChatModelClient> ChatService<M> {
         let deterministic_reply = if let Some(fixed) = fast_route(text) {
             self.fast_routed += 1;
             Some(fixed)
-        } else if let Some(fixed) = identity_route(text) {
+        } else if let Some(fixed) = identity_route(text, self.cfg.history_turns > 0) {
             // Identity and memory are answered from the fixed table, never by
             // the model — see the identity-route section for why.
             self.fast_routed += 1;
@@ -1383,7 +1461,7 @@ mod tests {
         ];
         for (question, expected) in cases {
             assert_eq!(
-                identity_route(question),
+                identity_route(question, false),
                 Some(expected),
                 "identity question not fixed-routed: {question:?}"
             );
@@ -1420,6 +1498,98 @@ mod tests {
         }
     }
 
+    /// The memory answer must track the SERVICE'S OWN configuration. With
+    /// bounded history enabled, "I don't retain previous conversations" would
+    /// be a falsehood baked into a constant — worse than a model saying it,
+    /// because a constant cannot self-correct (review: Copilot on #1297).
+    #[test]
+    fn the_memory_answer_matches_the_history_configuration() {
+        for question in [
+            "do you remember me",
+            "what do you remember about previous conversations",
+        ] {
+            assert_eq!(
+                identity_route(question, false),
+                Some(REPLY_NO_MEMORY),
+                "history off: the service truly retains nothing"
+            );
+            assert_eq!(
+                identity_route(question, true),
+                Some(REPLY_BOUNDED_MEMORY),
+                "history on: the answer must say what IS kept"
+            );
+        }
+        // Both are truthful about scope, and neither claims more than it can.
+        assert!(REPLY_BOUNDED_MEMORY.contains("this session"));
+        assert!(REPLY_BOUNDED_MEMORY.contains("nothing from earlier"));
+    }
+
+    /// And the wiring: the reply follows `ChatConfig::history_turns`, not a
+    /// caller-supplied flag.
+    #[test]
+    fn the_service_selects_the_memory_answer_from_its_own_config() {
+        let mut off = harness(&["unused"]);
+        let (_, r) = run(&mut off, "do you remember me");
+        r.expect("answers");
+        assert_eq!(off.calls.get(), 0);
+
+        let cfg = ChatConfig {
+            history_turns: 1,
+            ..ChatConfig::default()
+        };
+        let mut on = harness_with(&["unused"], cfg);
+        let (events, r) = run(&mut on, "do you remember me");
+        r.expect("answers");
+        assert_eq!(on.calls.get(), 0, "still no model call");
+        let done = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::Done { reply, .. } => Some(reply.clone()),
+                _ => None,
+            })
+            .expect("Done carries the reply");
+        assert_eq!(done, REPLY_BOUNDED_MEMORY);
+    }
+
+    /// A vendor NAMED in a capability question is not a claim to BE it.
+    /// "are you OpenAI compatible" is a real question and must reach the
+    /// model; a fixed "No, I'm Mick" there would be a wrong answer with
+    /// nothing behind it to recover (review: Copilot on #1297).
+    #[test]
+    fn vendor_capability_questions_are_not_identity_challenges() {
+        for capability in [
+            "are you openai compatible",
+            "are you copilot ready",
+            "are you gemini capable",
+            "are you claude compatible with this api",
+            "are you better than chatgpt",
+        ] {
+            assert_eq!(
+                identity_route(capability, false),
+                None,
+                "capability question captured as an identity challenge: {capability:?}"
+            );
+        }
+        // Non-vacuity: the genuine challenges in the same grammar still fire,
+        // including the split-word spoken forms.
+        for challenge in [
+            "are you chatgpt",
+            "are you chat gpt",
+            "are you open ai",
+            "are you microsoft copilot",
+            "are you an ai developed by microsoft",
+            "you're claude right",
+            "aren't you gemini",
+            "are you based on gpt",
+        ] {
+            assert_eq!(
+                identity_route(challenge, false),
+                Some(REPLY_NOT_EXTERNAL),
+                "genuine identity challenge missed: {challenge:?}"
+            );
+        }
+    }
+
     /// The matcher is CONSERVATIVE: a false hit is a wrong answer with no
     /// model behind it to recover, so ordinary questions that merely mention
     /// a vendor or the word "model" must fall through.
@@ -1438,7 +1608,7 @@ mod tests {
             "who is the operator",
         ] {
             assert_eq!(
-                identity_route(passthrough),
+                identity_route(passthrough, false),
                 None,
                 "ordinary question was captured: {passthrough:?}"
             );

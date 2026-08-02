@@ -15,9 +15,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use kirra_sidecars::chat::{
-    handle_request, looks_like_motion_intent_json, ChatConfig, ChatGenParams, ChatMessage,
-    ChatModelClient, ChatRequest, ChatService, StreamEvent, WarmState, CHAT_SYSTEM_PROMPT,
-    MOTION_ROUTE_REPLY, MOTION_SHAPE_REFUSAL,
+    handle_request, identity_route, looks_like_motion_intent_json, ChatConfig, ChatGenParams,
+    ChatMessage, ChatModelClient, ChatRequest, ChatService, StreamEvent, WarmState,
+    CHAT_SYSTEM_PROMPT, IDENTITY_REPLIES, MOTION_ROUTE_REPLY, MOTION_SHAPE_REFUSAL,
 };
 
 // --- 1. the source-level fence -----------------------------------------------
@@ -138,6 +138,67 @@ fn clock_from(base: u64) -> impl FnMut() -> u64 {
     move || {
         t.set(t.get() + 1);
         t.get()
+    }
+}
+
+/// **The identity boundary, asserted from OUTSIDE the crate.**
+///
+/// The chat surface must never tell an operator it is an external assistant.
+/// That is a separation property of the same family as "chat never drives":
+/// what the sidecar claims to BE is part of what it is allowed to say, so it
+/// belongs here at the public boundary rather than only in unit tests. This
+/// is also why `identity_route` / `IDENTITY_REPLIES` are public — they have a
+/// caller across the crate line (review: Copilot on #1297).
+#[test]
+fn the_chat_surface_never_claims_an_external_identity() {
+    // Built by concatenation so this file's own text cannot satisfy the scan.
+    let j = |a: &str, b: &str| format!("{a}{b}");
+    let vendors = [
+        j("Micro", "soft"),
+        j("Co", "pilot"),
+        j("Chat", "GPT"),
+        j("Open", "AI"),
+        j("Clau", "de"),
+        j("Gem", "ini"),
+    ];
+
+    // 1. No fixed reply names a vendor — not even to deny being one.
+    for reply in IDENTITY_REPLIES {
+        let lower = reply.to_lowercase();
+        for v in &vendors {
+            assert!(
+                !lower.contains(&v.to_lowercase()),
+                "fixed identity reply names {v}: {reply}"
+            );
+        }
+    }
+
+    // 2. Every identity/provenance/model question resolves WITHOUT the model,
+    //    to one of those fixed replies.
+    for question in [
+        "who are you",
+        "who developed you",
+        "who made you",
+        "what model are you running",
+        "do you remember me",
+        "what do you remember about previous conversations",
+    ] {
+        let answer = identity_route(question, false)
+            .unwrap_or_else(|| panic!("identity question not fixed-routed: {question}"));
+        assert!(IDENTITY_REPLIES.contains(&answer));
+    }
+
+    // 3. The live drift phrasing specifically: an "are you <vendor>" challenge
+    //    is answered from the table, so the pretrained self-description has no
+    //    opportunity to surface.
+    for challenge in [
+        "are you microsoft copilot",
+        "are you an ai developed by microsoft",
+    ] {
+        assert!(
+            identity_route(challenge, false).is_some(),
+            "vendor challenge must be fixed-routed: {challenge}"
+        );
     }
 }
 
