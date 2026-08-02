@@ -7,7 +7,7 @@
 //! (infrequent) decisions while the trajectory keeps tracking live perception.
 //!
 //! Run it:
-//!   ollama pull gemma3:4b           # one-time
+//!   ollama pull phi3:3.8b           # one-time
 //!   cargo run -p kirra-mick --example mick_chauffeur
 //!
 //! No Ollama running? The driver fails closed — you'll see HOLD throughout, exactly the

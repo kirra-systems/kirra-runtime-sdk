@@ -23,7 +23,7 @@
 //!
 //! Config (boot-validated, fail-closed): `KIRRA_MICK_CHAT_ADDR`
 //! (default 127.0.0.1:8103, loopback-gated); `KIRRA_OLLAMA_URL` +
-//! `KIRRA_MICK_CHAT_MODEL` (default gemma3:4b);
+//! `KIRRA_MICK_CHAT_MODEL` (default phi3:3.8b);
 //! `KIRRA_MICK_CHAT_MAX_INPUT_CHARS` (500);
 //! `KIRRA_MICK_CHAT_MAX_OUTPUT_TOKENS` (48);
 //! `KIRRA_MICK_CHAT_TEMPERATURE` (0.2); `KIRRA_MICK_CHAT_KEEP_ALIVE` (30m);

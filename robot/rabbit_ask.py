@@ -29,7 +29,7 @@ Env (all optional; sensible localhost defaults):
   KIRRA_MICK_URL      http://localhost:8102   (GET /narration/last — the #893 reason)
   KIRRA_TAJ_URL       http://localhost:8101   (perception snapshot)
   KIRRA_OLLAMA_URL    http://localhost:11434  (the local LLM)
-  KIRRA_RABBIT_MODEL    gemma3:4b               (persona model)
+  KIRRA_RABBIT_MODEL    phi3:3.8b               (persona model)
   KIRRA_TTS_CMD       (unset → print only; e.g. "./speak.sh" to speak the answer)
 """
 import math
@@ -50,7 +50,7 @@ VERIFIER = os.environ.get("KIRRA_VERIFIER_URL", "http://localhost:8090").rstrip(
 MICK = os.environ.get("KIRRA_MICK_URL", "http://localhost:8102").rstrip("/")
 TAJ = os.environ.get("KIRRA_TAJ_URL", "http://localhost:8101").rstrip("/")
 OLLAMA = os.environ.get("KIRRA_OLLAMA_URL", "http://localhost:11434").rstrip("/")
-MODEL = os.environ.get("KIRRA_RABBIT_MODEL", "gemma3:4b")
+MODEL = os.environ.get("KIRRA_RABBIT_MODEL", "phi3:3.8b")
 FORWARD_CONE_RAD = math.radians(15.0)
 # Speed (Slice S): keep the model RESIDENT between turns so a follow-up doesn't
 # pay the cold-reload stall (the single biggest per-turn latency on the Orin).

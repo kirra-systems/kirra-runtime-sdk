@@ -31,7 +31,7 @@ recipe below). The two dominant terms are the **fixed record window** and the
 | record (`arecord -d 4`) | **4.0 s fixed** | it waits the whole window, however short the command |
 | record (`vad_record.py`) | **~1.3 s** for a short command | stops on trailing silence; §1a — the biggest lever |
 | STT (whisper `base.en`) | ~0.5–2 s | for a 4 s clip; shorter clip → less STT too; CUDA build << CPU build |
-| LLM (`gemma3:4b`) | ~2–5 s | the conversational cost; local, no cloud |
+| LLM (`gemma3:4b`, pre-consolidation) | ~2–5 s | the conversational cost; local, no cloud. Kept as the MEASURED figure it was — the doer is now `phi3:3.8b` fleet-wide, whose measured TTFT is in §1b below and is dramatically lower. Re-measure rather than scaling this number |
 | TTS (piper `medium`) | ~0.3–1 s | faster than real-time for a sentence |
 
 > **The deterministic lines skip both dominant terms.** The boot greeting

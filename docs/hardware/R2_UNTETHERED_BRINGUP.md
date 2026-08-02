@@ -13,7 +13,7 @@ Cut the wifi mid-drive and the robot does not notice. The whole governed loop is
 on-box:
 
 ```
-  voice / goal ─► mick_service (LLM: Ollama gemma3:4b, LOCAL) ─► /intent/last ┐
+  voice / goal ─► mick_service (LLM: Ollama phi3:3.8b, LOCAL) ─► /intent/last ┐
   lidar /scan ─► taj_service (corridor) ─────────────────────┼─► planner_service
                                                               │    (Occy plan, KIRRA
                                                               ▼     slow-loop checker)

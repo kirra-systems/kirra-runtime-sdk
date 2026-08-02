@@ -1,7 +1,7 @@
 //! **kirra-mick** — the live LLM transport for Mick.
 //!
-//! [`OllamaClient`] is a [`kirra_planner::ModelClient`] that drives a LOCAL model (Gemma
-//! by default) served by [Ollama](https://ollama.com) over HTTP. Drop it into
+//! [`OllamaClient`] is a [`kirra_planner::ModelClient`] that drives a LOCAL model
+//! ([`DEFAULT_MODEL`] by default) served by [Ollama](https://ollama.com) over HTTP. Drop it into
 //! `kirra_planner::LlmBrain` and Mick is driven by a real model:
 //!
 //! ```no_run
@@ -30,14 +30,21 @@ use std::time::Duration;
 
 /// Default Ollama base URL (override with `KIRRA_OLLAMA_URL`).
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
-/// Default model id (override with `KIRRA_MICK_MODEL`). A 4B-class instruct model is a
-/// good fit for the tight typed-intent vocabulary; pull it with `ollama pull gemma3:4b`.
-pub const DEFAULT_MODEL: &str = "gemma3:4b";
+/// Default model id (override with `KIRRA_MICK_MODEL`). A ~4B-class instruct model is a
+/// good fit for the tight typed-intent vocabulary; pull it with `ollama pull phi3:3.8b`.
+///
+/// This is the SAME model the chat sidecar and the Rabbit speech layer default to:
+/// one set of weights serves all three doer roles, so Ollama's
+/// `OLLAMA_MAX_LOADED_MODELS=1` (see `robot/install/kirra-ollama-tuning.conf`) never
+/// has to evict one role's model to serve another's. Vetted by
+/// `robot/rabbit_model_smoketest.py`, which pins the weights' content digest.
+pub const DEFAULT_MODEL: &str = "phi3:3.8b";
 /// Per-request timeout. Mick is the slow System-2 loop, but a hung backend must NOT wedge
 /// the planning tick — on timeout we fail closed and HOLD.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// A [`ModelClient`] backed by a local Ollama server running Gemma (or any Ollama model).
+/// A [`ModelClient`] backed by a local Ollama server running [`DEFAULT_MODEL`] (or any
+/// Ollama model).
 pub struct OllamaClient {
     base_url: String,
     model: String,
@@ -106,7 +113,7 @@ struct GenerateRequest<'a> {
     prompt: &'a str,
     stream: bool,
     /// Schema-constrained decoding: Ollama grammar-constrains the output to this JSON
-    /// **schema** (`kirra_planner::intent_schema`), so Gemma can ONLY emit a JSON object
+    /// **schema** (`kirra_planner::intent_schema`), so the model can ONLY emit a JSON object
     /// whose `intent` is a known tag — no prose, no code fence, no hallucinated tag. This
     /// is strictly tighter than the previous `"json"` (any-JSON) form. `from_llm_json`
     /// still validates the per-variant fields + finiteness on top (a schema cannot express
@@ -157,7 +164,12 @@ impl ModelClient for OllamaClient {
 /// Default model id for the conversational endpoint (override with
 /// `KIRRA_MICK_CHAT_MODEL`). Deliberately its own variable: the chat model can
 /// be swapped without touching the motion model pin, and vice versa.
-pub const DEFAULT_CHAT_MODEL: &str = "gemma3:4b";
+///
+/// The DEFAULT is the same id as [`DEFAULT_MODEL`] — one model across all three
+/// doer roles — but the separate variable is the point: an experiment on the
+/// conversational surface must not silently become an experiment on the surface
+/// that produces typed intents.
+pub const DEFAULT_CHAT_MODEL: &str = "phi3:3.8b";
 
 /// One message in an Ollama `/api/chat` conversation.
 #[derive(Clone, Debug, Serialize)]
@@ -536,7 +548,7 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// Live round-trip — requires `ollama pull gemma3:4b` and a running server. Ignored in
+    /// Live round-trip — requires `ollama pull phi3:3.8b` and a running server. Ignored in
     /// CI; run locally with `cargo test -p kirra-mick -- --ignored`.
     #[test]
     #[ignore = "requires a local Ollama serving the configured model"]
@@ -546,6 +558,6 @@ mod tests {
             .decide(&ctx())
             .expect("a running Ollama should yield a typed intent");
         // Any of the typed intents is acceptable — we only assert it parsed to one.
-        println!("live Gemma chose: {intent:?}");
+        println!("live model chose: {intent:?}");
     }
 }

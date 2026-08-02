@@ -161,9 +161,14 @@ Other detector tiers, when the classical one is not enough:
   `parko-onnx --features cuda` / `parko-tensorrt`. General labels — this is the
   tier that can verify the noun; needs the CUDA path (see
   `docs/hardware/JETSON_CUDA_SETUP.md`) and a model.
-- **VLM (`gemma3:4b` is multimodal).** Good for *conversation* ("what do you
+- **VLM (needs a MULTIMODAL model).** Good for *conversation* ("what do you
   see?") — Channel A. **Not** for the control loop: seconds-scale latency, not
-  per-tick safe, and never a drivability authority.
+  per-tick safe, and never a drivability authority. Note the doer default
+  (`phi3:3.8b`) is TEXT-ONLY, so this tier needs a second model pulled
+  explicitly — `llava-phi3:3.8b` is the natural pairing. That is a real cost,
+  not a footnote: Ollama is tuned with `OLLAMA_MAX_LOADED_MODELS=1`, so a
+  resident VLM evicts the doer and every alternation pays a cold reload. Decide
+  it deliberately, and re-vet the doer afterwards.
 
 ## The consumer hop (`occy_doer`)
 
@@ -199,8 +204,9 @@ Object-goal flow, all fail-closed:
 
 ## What is NOT wired yet
 
-- Camera frames into rabbit/mick for conversation (Channel A; `gemma3:4b` accepts
-  images via Ollama, so this is a doer-side UX addition with no safety surface).
+- Camera frames into rabbit/mick for conversation (Channel A). Still a doer-side
+  UX addition with no safety surface, but it now requires pulling a multimodal
+  model alongside the text-only doer default — see the VLM tier above.
 - A launch file wiring `camera_detect` into the R2 stack (run it standalone for
   bring-up; the vendor camera node comes up separately either way).
 

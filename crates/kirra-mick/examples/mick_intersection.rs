@@ -23,7 +23,7 @@
 //! the model's (infrequent) decisions.
 //!
 //! Run it:
-//!   ollama pull gemma3:4b           # one-time
+//!   ollama pull phi3:3.8b           # one-time
 //!   cargo run -p kirra-mick --example mick_intersection
 //!
 //! No Ollama? The driver fails closed — HOLD throughout, the safe default. The model can
