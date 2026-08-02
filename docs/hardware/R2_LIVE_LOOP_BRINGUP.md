@@ -108,7 +108,7 @@ integration check while remote.
 1. **Ollama + model** (the LLM):
    ```bash
    ollama serve &                 # if not already running
-   ollama pull phi3:3.8b          # once; matches KIRRA_MICK_MODEL default class
+   ollama pull phi3:3.8b          # once; matches the KIRRA_MICK_MODEL default
    ```
 2. **mick_service** (text → intent):
    ```bash

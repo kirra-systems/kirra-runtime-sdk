@@ -164,7 +164,7 @@ systemctl list-dependencies --reverse ollama.service    # who would follow it do
 systemctl cat kirra-rabbit-voice | grep -c '^ExecStart' # exactly 1, no stale drop-in
 ```
 
-## 5c. Model residency — pin Gemma on a dedicated robot
+## 5c. Model residency — pin the doer model on a dedicated robot
 
 Without residency Ollama unloads `phi3:3.8b` after ~5 minutes idle and the next
 turn pays a multi-second cold reload — the single worst "why is it slow *this*
