@@ -2,7 +2,7 @@
 """The configured model residency actually reaches Ollama — on EVERY path.
 
 `KIRRA_RABBIT_KEEP_ALIVE` is the biggest per-turn latency lever on the Orin:
-without it Ollama unloads gemma3:4b after ~5 minutes idle and the next turn pays
+without it Ollama unloads phi3:3.8b after ~5 minutes idle and the next turn pays
 a multi-second cold reload. On a dedicated robot the recommended value is `-1`
 (pin indefinitely).
 
@@ -213,11 +213,17 @@ def test_every_ollama_caller_in_the_rabbit_path_sends_keep_alive():
 
 
 def test_the_model_is_unchanged():
-    """Residency work must not become a model swap. gemma3:4b is the vetted
-    router model (rabbit_model_smoketest.py gates it)."""
+    """Residency work must not become a model swap. phi3:3.8b is the vetted
+    router model (rabbit_model_smoketest.py gates it).
+
+    This constant is a RATCHET, not a preference: it exists so a latency or
+    residency change cannot quietly swap the doer's weights. Updating it is
+    therefore a deliberate act that must be paid for with a smoketest run —
+    phi3:3.8b passed the doer contract 8/8 and its digest is pinned. Do not
+    edit this line to make a failing test pass; re-vet the candidate first."""
     ask, _, prev = _reload_with("-1")
     try:
-        check(ask.MODEL == "gemma3:4b", f"model default changed to {ask.MODEL!r}")
+        check(ask.MODEL == "phi3:3.8b", f"model default changed to {ask.MODEL!r}")
     finally:
         _restore(prev)
 

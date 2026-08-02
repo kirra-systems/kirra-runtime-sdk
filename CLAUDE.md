@@ -720,7 +720,9 @@ Two output channels, only one reaches the wheels:
 - `rabbit_persona.py` — shared stdlib-only helpers: the `{name}` slot
   (`operator_name`/`name_slot`), `speak()`, and the LLM model pin
   (`read/write_model_pin`, `classify_model_pin`).
-- The doer LLM is local Ollama (`KIRRA_RABBIT_MODEL`, default `gemma3:4b`);
+- The doer LLM is local Ollama (`KIRRA_RABBIT_MODEL`, default `phi3:3.8b` —
+  the same id the chat and intent sidecars default to, one model for all three
+  doer roles);
   STT = whisper.cpp, TTS = piper (`docs/hardware/RABBIT_AUDIO_STACK.md`, incl. the
   systemd-audio caveat). Deterministic (NON-LLM) speech — OTA (`rabbit_ota.py`),
   proactive (`rabbit_watch.py`), boot (`rabbit_boot.py`) — are templates fired by real

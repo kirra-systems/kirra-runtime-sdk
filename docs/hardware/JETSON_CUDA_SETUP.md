@@ -15,7 +15,7 @@ robot/kirra_doctor.py --module gpu --verbose
 
 | Component | GPU? | Why |
 |---|---|---|
-| **rabbit** | ✅ big win | Its doer LLM is Ollama (`gemma3:4b`). GPU offload is the fix for slow spoken responses. Whisper.cpp STT can use CUDA too. |
+| **rabbit** | ✅ big win | Its doer LLM is Ollama (`phi3:3.8b`). GPU offload is the fix for slow spoken responses. Whisper.cpp STT can use CUDA too. |
 | **mick** | ✅ (same path) | `mick_service` calls the same Ollama; mick itself is Rust/CPU. |
 | **parko inference** | ✅ real code path | `parko-onnx` `cuda` feature (ORT CUDA EP) + `parko-tensorrt`. **Fail-closed**: a missing GPU/driver makes the CUDA EP registration error, never a silent CPU run. |
 | **Taj** | ⚪ little today | Shipped Taj is geometric lidar (CPU). Benefits only with learned perception. |

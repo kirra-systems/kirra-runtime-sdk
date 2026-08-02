@@ -47,7 +47,9 @@
   - whisper.cpp — build `whisper-cli`, fetch a model (`ggml-base.en.bin`).
   - Piper — fetch a voice (`en_US-lessac-medium.onnx`), wrap playback in
     `speak.sh` (text on stdin → `piper … --output-raw | aplay -r 22050 -f S16_LE -t raw -`).
-- **LLM:** Ollama running + the model pulled: `ollama pull gemma3:4b`.
+- **LLM:** Ollama running + the model pulled: `ollama pull phi3:3.8b`. The same
+  model serves the chat and intent sidecars — see "One model, three roles" in
+  `robot/install/rabbit.env.example`.
 - **Built binaries:** `cargo build -p kirra-sidecars --release`
   (mick_service, planner_service, taj_service, speech_shell) and the verifier.
 - **Python:** `pip3 install requests`; for the PTT button `pip3 install Jetson.GPIO`
@@ -162,9 +164,9 @@ systemctl list-dependencies --reverse ollama.service    # who would follow it do
 systemctl cat kirra-rabbit-voice | grep -c '^ExecStart' # exactly 1, no stale drop-in
 ```
 
-## 5c. Model residency — pin Gemma on a dedicated robot
+## 5c. Model residency — pin the doer model on a dedicated robot
 
-Without residency Ollama unloads `gemma3:4b` after ~5 minutes idle and the next
+Without residency Ollama unloads `phi3:3.8b` after ~5 minutes idle and the next
 turn pays a multi-second cold reload — the single worst "why is it slow *this*
 time" effect. `KIRRA_RABBIT_KEEP_ALIVE` is sent as `keep_alive` on **every**
 Rabbit request (normal and streaming); it is residency only and cannot change
@@ -191,12 +193,12 @@ timeout 5 tegrastats
 # 2. trigger ONE Rabbit turn (say "Hello Rabbit", then "How are you?")
 
 # 3. after ~10 minutes idle — well past the old ~5 min unload:
-curl -s http://127.0.0.1:11434/api/ps | python3 -m json.tool   # gemma3:4b STILL listed?
+curl -s http://127.0.0.1:11434/api/ps | python3 -m json.tool   # phi3:3.8b STILL listed?
 free -h                                                        # headroom still comfortable?
 timeout 5 tegrastats
 ```
 
-`gemma3:4b` still listed after the idle gap = pinned and working. If `free -h`
+`phi3:3.8b` still listed after the idle gap = pinned and working. If `free -h`
 shows the box under memory pressure, **revert to a finite value** (`30m`) and
 restart the Rabbit units — a resident model is a latency optimization, never
 worth swapping.
@@ -475,8 +477,8 @@ kirra-rabbit-watch kirra-rabbit-greet kirra-rabbit-voice`.
 **A — re-pull the same tag** (stealth in-place update, e.g. the Gemma-4 case):
 ```bash
 cd ~/kirra-runtime-sdk
-ollama pull gemma3:4b                                              # new weights, same tag
-python3 robot/rabbit_model_smoketest.py gemma3:4b --note "re-pull $(date -I)"   # RE-VET + re-pin
+ollama pull phi3:3.8b                                              # new weights, same tag
+python3 robot/rabbit_model_smoketest.py phi3:3.8b --note "re-pull $(date -I)"   # RE-VET + re-pin
 sudo systemctl restart kirra-rabbit-watch kirra-rabbit-greet          # load them
 ```
 No `robot.env` edit — the tag is unchanged. Boot speaks warning A5 if a re-pull
@@ -507,7 +509,7 @@ a governed *software* update (`kirra-ota-ctl pull`); it never touches LLM weight
 | Symptom | Cause | Fix |
 |---|---|---|
 | Rabbit prints but never speaks | `KIRRA_TTS_CMD` unset / speak.sh broken | set it; test `echo hi \| ./speak.sh` |
-| "my voice module is offline" | Ollama down / model not pulled | `ollama serve`; `ollama pull gemma3:4b` |
+| "my voice module is offline" | Ollama down / model not pulled | `ollama serve`; `ollama pull phi3:3.8b` |
 | "why did we stop" → "unavailable" | mick has no auditor token | set `KIRRA_MICK_AUDITOR_TOKEN`, restart mick |
 | "what do you see" → "perception unavailable" | no ROS / no `/scan` | source ROS; bring up the lidar |
 | voice records silence / garbage | wrong ALSA device / gain | check `arecord -l`; set the card in `KIRRA_RECORD_CMD` |

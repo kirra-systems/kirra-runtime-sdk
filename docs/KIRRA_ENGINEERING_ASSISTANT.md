@@ -22,8 +22,8 @@ Verified by inspection before any code was written. Every path below is real.
 |---|---|---|
 | 1 | Wake phrases detected | `robot/wake_word.py` — RMS energy pre-gate → whisper.cpp tiny → a **pure token matcher** over `KIRRA_WAKE_PHRASES`. Both names are defaults. |
 | 2 | Audio → text | `wake_word.py` for the trigger window; `robot/rabbit_voice.sh` for the command clip (`KIRRA_RECORD_CMD` → whisper.cpp). |
-| 3 | Prompts → Gemma | `robot/rabbit_converse.py` → `POST {KIRRA_OLLAMA_URL}/api/chat`. |
-| 4 | Gemma runtime | **Ollama**, local. `KIRRA_RABBIT_MODEL`, default `gemma3:4b`. `keep_alive` holds it resident; `ROUTER_LLM_OPTIONS` is near-deterministic. |
+| 3 | Prompts → the doer LLM | `robot/rabbit_converse.py` → `POST {KIRRA_OLLAMA_URL}/api/chat`. |
+| 4 | Doer-LLM runtime | **Ollama**, local. `KIRRA_RABBIT_MODEL`, default `phi3:3.8b`. `keep_alive` holds it resident; `ROUTER_LLM_OPTIONS` is near-deterministic. |
 | 5 | Prompt construction | `RABBIT_SYSTEM` persona + `STAGE2_SYSTEM` router contract + a gathered read-only telemetry block + bounded history. |
 | 6 | Structured output / tool calling | **Yes — already present.** `robot/skill_registry.py`: the LLM emits `{say, skills:[{name, parameters}]}`, parsed fail-closed into `Decision(kind, payload)`. This is the integration point. |
 | 7 | Output → TTS | `_speak_reply` → `rabbit_persona.speak` → `KIRRA_TTS_CMD` (piper). Barge-in optional. |
@@ -55,8 +55,8 @@ Inspected before `assistant_contract.py` was written. Findings, not intentions.
 | # | Question | Finding |
 |---|---|---|
 | 1 | `rabbit_model_smoketest.py` today | 295 lines. A **doer-quality gate, not a safety gate**, for the *Rabbit router* contract: 5 directive cases + 2 grounding cases + a persona-tone gate, fired through the REAL `rabbit_converse.STAGE2_SYSTEM` + `parse_reply`. Explicitly "NOT a CI test: it needs a live Ollama". |
-| 2 | How Gemma is invoked | `POST {KIRRA_OLLAMA_URL}/api/chat`, `stream:false`, `keep_alive` for residency, `options=ROUTER_LLM_OPTIONS` (`temperature 0.1`, optional `num_predict`/`num_ctx`). One HTTP call per turn; 60 s timeout. |
-| 3 | Where the model name comes from | `rabbit_ask.MODEL` ← `KIRRA_RABBIT_MODEL`, default `gemma3:4b`. The smoketest also takes a positional candidate model. |
+| 2 | How the doer LLM is invoked | `POST {KIRRA_OLLAMA_URL}/api/chat`, `stream:false`, `keep_alive` for residency, `options=ROUTER_LLM_OPTIONS` (`temperature 0.1`, optional `num_predict`/`num_ctx`). One HTTP call per turn; 60 s timeout. |
+| 3 | Where the model name comes from | `rabbit_ask.MODEL` ← `KIRRA_RABBIT_MODEL`, default `phi3:3.8b`. The smoketest also takes a positional candidate model. |
 | 4 | Model identity / stealth-update guard | `/api/tags` digest → `~/.kirra_rabbit_model.pin` (`write_model_pin`/`classify_model_pin`), with a `--pin-check` mode and a boot warning on drift. |
 | 5 | Is the assistant prompt fragment WIRED into the live prompt? | **No.** `assist_prompt_fragment()` is declared in `assistant_tools.py` and referenced only by tests. Production dispatch is `assistant.classify()` — deterministic — so **the model is never asked to select a tool today.** The fragment is the *declared* contract; this work measures it without installing it. |
 | 6 | How a tool is selected in production | `assistant.classify()`: a closed pattern set over the operator's normalized words. No model in the path, which is why retrieved file content cannot reach a dispatch decision. |

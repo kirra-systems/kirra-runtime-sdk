@@ -41,7 +41,10 @@ ExecStart=/opt/kirra/mick_chat_service
 # service runs a one-shot warm-up; GET /health reports warming/ready/degraded
 # honestly (the listener being up is not readiness). The bind address is NOT
 # here — it is pinned AFTER the env file below, so kirra.env cannot widen it.
-Environment=KIRRA_MICK_CHAT_MODEL=gemma3:4b
+# The model DEFAULT only — /etc/kirra/kirra.env is read below and wins, so a
+# deployment can pin a different one without editing this unit. `GET /health`
+# reports the name that actually resolved; trust it over this literal.
+Environment=KIRRA_MICK_CHAT_MODEL=phi3:3.8b
 Environment=KIRRA_MICK_CHAT_MAX_OUTPUT_TOKENS=48
 Environment=KIRRA_MICK_CHAT_KEEP_ALIVE=30m
 Environment=KIRRA_MICK_CHAT_HISTORY_TURNS=0

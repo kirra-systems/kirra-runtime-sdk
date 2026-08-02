@@ -54,7 +54,7 @@ has zero actuation authority.** The checker doesn't care how eloquent the doer i
 | Voice in (STT) → text | ✅ built | `speech_shell` + `speech.rs` (whisper.cpp) |
 | Text → **one** typed driving intent, fail-closed | ✅ built | `mick_service` `POST /intent` → `MickIntent::parse_llm_json` |
 | Speaks the reason it stopped (narration) | ✅ built | #893 side-channel: verifier `GET /system/verdicts/last` → mick `GET /narration/last` → TTS |
-| A named persona | ✅ partial | mick persona (chauffeur, gemma3:4b) — a label + system prompt, not yet a character |
+| A named persona | ✅ partial | mick persona (chauffeur, phi3:3.8b) — a label + system prompt, not yet a character |
 | The fence that makes it all safe | ✅ built | `ci/check_mick_actuation_fence.py` |
 
 So today's R2 is a **single-turn command taker that can explain a refusal**. Rabbit
@@ -391,7 +391,7 @@ There is no per-name privilege here to preserve.
 
 ## Honest caveats
 
-- **Latency.** A local LLM on the Orin (gemma3:4b) is a few seconds per turn.
+- **Latency.** A local LLM on the Orin (phi3:3.8b) is seconds per turn.
   Fine for "take me to the kitchen"; a snappier model or a smaller router model
   for the chat/directive split helps the conversational feel.
 - **The persona has no authority.** Say it in every prompt and every review: Rabbit

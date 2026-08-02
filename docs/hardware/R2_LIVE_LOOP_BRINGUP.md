@@ -108,7 +108,7 @@ integration check while remote.
 1. **Ollama + model** (the LLM):
    ```bash
    ollama serve &                 # if not already running
-   ollama pull gemma3:4b          # once; matches KIRRA_MICK_MODEL default class
+   ollama pull phi3:3.8b          # once; matches the KIRRA_MICK_MODEL default
    ```
 2. **mick_service** (text → intent):
    ```bash
@@ -195,7 +195,7 @@ curl -s localhost:11434/api/tags # ollama (model list)
 | Interceptor latches every command to stop | `wheelbase_m` param ≠ verifier class contract wheelbase | set `wheelbase_m: 0.5` (courier) in `kirra_params.yaml` |
 | Consumer starves → decel-to-stop, no releases | verifier not minting (no signing-key source) OR interceptor got 401 | set the signing source; ensure `KIRRA_ADMIN_TOKEN` matches on verifier + interceptor |
 | `/cmd_vel_raw` always ~0 | no goal, or stale `/scan`, or Taj unhealthy (cap 0) | publish a goal/intent; check the lidar; `curl localhost:8101/health` |
-| mick `/intent` returns 422 | Ollama not up / model not pulled | `ollama serve` + `ollama pull gemma3:4b` |
+| mick `/intent` returns 422 | Ollama not up / model not pulled | `ollama serve` + `ollama pull phi3:3.8b` |
 | `/kirra/release` and `/cmd_vel` don't cross | ROS_DOMAIN_ID mismatch | force **28** everywhere (consumer already does) |
 
 ## References
