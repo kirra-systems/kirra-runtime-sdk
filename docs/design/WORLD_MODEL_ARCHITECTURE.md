@@ -5,6 +5,7 @@
 | Document ID | KIRRA-WM-ARCH-001 |
 | Status | **Draft — design proposal.** Decides nothing until the ADRs in §23 are ratified. |
 | Scope | The trusted knowledge subsystem of Kirra OS. Design only; no implementation. |
+| Standing | **Records a proposed architecture. Does NOT authorize implementation.** The ADRs in §23 ratify the actual decisions. **No World Model capability described here is shipped, built, or claimed as available.** |
 | Cross-refs | [`docs/ARCHITECTURE_STACK.md`](../ARCHITECTURE_STACK.md) · [`robot/world_model.py`](../../robot/world_model.py) · [`crates/kirra-sidecars/src/destination.rs`](../../crates/kirra-sidecars/src/destination.rs) · [`src/audit_chain.rs`](../../src/audit_chain.rs) · [`docs/safety/SAFETY_CASE_INDEX.md`](../safety/SAFETY_CASE_INDEX.md) |
 | Forward refs | `ARCHITECTURE.md`, `CONSTITUTION.md` and `SAFETY.md` are introduced by the Kirra OS foundation PR (#1302) and are referenced here by name, without links, until it lands. |
 
@@ -1015,6 +1016,26 @@ Named so they are not mistaken for solved:
 | **WM-8** | Compaction-with-citation retention policy | The one place P2 is knowingly bounded |
 | **WM-9** | Operator teaching protocol — robot supplies pose, operator supplies meaning | Product-defining |
 | **WM-10** | Federation exchanges signed observations; ledgers stay local | Sets the fleet trajectory |
+
+### 23.1 Ratification order
+
+The order is not arbitrary. It runs from *hardest to reverse* to *easiest*.
+
+| # | ADR | Why here |
+|---|---|---|
+| 1 | **WM-6** — Governor independence and dependency fences | **First, because delay is architectural debt.** Once the checker depends on semantic knowledge, removing that dependency is expensive and may *expand the safety evidence burden* — a knowledge layer inside the safety envelope inherits the full qualification treatment. A fence established before there is anything to be tempted by is a constraint; established afterwards it is a refactor with safety-case consequences. |
+| 2 | **WM-1** — Ownership and subsystem boundary | Settles what the World Model *is* and who owns it, so subsequent decisions have a subject. |
+| 3 | **WM-2** — Event-log and projection persistence | Important but **reversible** relative to the fence: a storage substrate can be migrated behind the query API; a safety dependency cannot be un-taken cheaply. |
+| 4 | WM-5, WM-4, WM-3, WM-8 | Identity adjudication, bitemporal time, trust axes, compaction. |
+| 5 | *First implementation PR* — **domain types only** | No storage, no service. Types can be reviewed against the ADRs before anything persists. |
+
+**WM-2 must be decided on measurement, not on abstract graph-database
+advantages.** The comparison it owes: observed query shapes, expected graph
+size at realistic entity counts, restart and warm-up behaviour, migration
+story, determinism under replay, embedded resource use on the target board,
+and operational complexity. A graph database that wins on query expressiveness
+and loses on all seven is the wrong answer, and the ADR should be able to show
+that rather than assert it.
 
 ---
 
