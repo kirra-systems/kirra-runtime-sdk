@@ -66,11 +66,16 @@ pub struct DestinationRequest {
     pub targets: Vec<TargetReq>,
     /// Producer stamp of the frame `targets` came from. Absent while a
     /// tracked object is requested → STALE, never "not seen".
+    ///
+    /// 🔴 There is deliberately NO companion "now" field: freshness is always
+    /// judged against the SERVICE clock. A caller-supplied clock would let a
+    /// client make a stale (or future-stamped) sighting look fresh, which is
+    /// a fail-OPEN on the one gate that decides whether a sighting is a
+    /// present location (review: Copilot on #1294). The stateless
+    /// `/plan` seam can take a caller clock because it grounds nothing on its
+    /// own; this endpoint latches a target for a consumer to act on.
     #[serde(default)]
     pub targets_stamp_ms: Option<u64>,
-    /// Consumer clock for the freshness check. Absent → the service clock.
-    #[serde(default)]
-    pub now_ms: Option<u64>,
     /// Ego pose the object sighting is lifted through. Absent → the identity
     /// pose, which makes an object result EGO-FRAME.
     #[serde(default)]
@@ -83,11 +88,14 @@ pub struct TargetReq {
     pub label: String,
     pub x: f64,
     pub y: f64,
-    #[serde(default = "default_confidence")]
+    /// Detector confidence in `[0, 1]`.
+    ///
+    /// 🔴 Defaults to ZERO, not one: an omitted confidence is "the producer
+    /// told us nothing", and treating that as maximum confidence would let an
+    /// unlabelled target walk straight through the `min_confidence` gate. A
+    /// producer that means "certain" must say so (review: Copilot on #1294).
+    #[serde(default)]
     pub confidence: f32,
-}
-fn default_confidence() -> f32 {
-    1.0
 }
 
 /// The caller's ego pose (world frame).
@@ -304,7 +312,9 @@ impl DestinationService {
             y: 0.0,
             heading: 0.0,
         });
-        let now = req.now_ms.unwrap_or(now_ms);
+        // Freshness is judged against the SERVICE clock, never a caller's —
+        // see `DestinationRequest::targets_stamp_ms`.
+        let now = now_ms;
 
         let outcome = self.resolver.resolve(
             &dref,
@@ -516,7 +526,6 @@ mod tests {
                 confidence: 0.9,
             }],
             targets_stamp_ms: Some(1_000),
-            now_ms: Some(1_000),
             ego: None,
         };
         let a = svc.handle(&r, 1_000).unwrap();
@@ -627,6 +636,73 @@ mod tests {
             }
         }
         assert!(shed >= 6, "the burst bound must shed a flood: {shed}");
+    }
+
+    /// Freshness is judged on the SERVICE clock. A caller cannot supply a
+    /// "now" that makes an old sighting look present — the fail-open a
+    /// caller-controlled clock would have opened (review: Copilot on #1294).
+    #[test]
+    fn a_caller_cannot_make_a_stale_sighting_look_fresh() {
+        let object = |stamp: u64| DestinationRequest {
+            destination: serde_json::json!({"kind":"tracked_object","class":"cup"}),
+            targets: vec![TargetReq {
+                label: "cup".into(),
+                x: 3.0,
+                y: 0.0,
+                confidence: 0.9,
+            }],
+            targets_stamp_ms: Some(stamp),
+            ego: None,
+        };
+        // The sighting is 60 s old against the service clock → STALE, and no
+        // field on the request can change that verdict.
+        let mut svc = service();
+        assert_eq!(
+            svc.handle(&object(1_000), 61_000)
+                .expect_err("must refuse")
+                .code,
+            "DEST_STALE"
+        );
+        assert!(svc.last().is_none());
+        // Non-vacuity: the SAME sighting inside the budget resolves.
+        let mut svc = service();
+        assert!(svc.handle(&object(1_000), 1_500).is_ok());
+        // A FUTURE-stamped frame (a non-monotonic producer clock) is stale too.
+        let mut svc = service();
+        assert_eq!(
+            svc.handle(&object(90_000), 1_000)
+                .expect_err("must refuse")
+                .code,
+            "DEST_STALE"
+        );
+    }
+
+    /// An omitted confidence is not "certain". A target whose producer said
+    /// nothing must not clear the confidence floor.
+    #[test]
+    fn an_omitted_confidence_fails_closed_rather_than_counting_as_certain() {
+        let mut svc = service();
+        let req: DestinationRequest = serde_json::from_str(
+            r#"{"destination":{"kind":"tracked_object","class":"cup"},
+                "targets":[{"label":"cup","x":3.0,"y":0.0}],
+                "targets_stamp_ms":1000}"#,
+        )
+        .expect("the wire form parses without a confidence");
+        assert_eq!(req.targets[0].confidence, 0.0, "omitted confidence is ZERO");
+        assert_eq!(
+            svc.handle(&req, 1_500).expect_err("must refuse").code,
+            "DEST_LOW_CONFIDENCE"
+        );
+        assert!(svc.last().is_none());
+        // Non-vacuity: the same target WITH a stated confidence resolves.
+        let mut svc = service();
+        let req: DestinationRequest = serde_json::from_str(
+            r#"{"destination":{"kind":"tracked_object","class":"cup"},
+                "targets":[{"label":"cup","x":3.0,"y":0.0,"confidence":0.9}],
+                "targets_stamp_ms":1000}"#,
+        )
+        .unwrap();
+        assert!(svc.handle(&req, 1_500).is_ok());
     }
 
     #[test]

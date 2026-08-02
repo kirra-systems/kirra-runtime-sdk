@@ -249,11 +249,16 @@ pub struct TargetReq {
     pub label: String,
     pub x: f64,
     pub y: f64,
-    #[serde(default = "default_target_confidence")]
+    /// Detector confidence in `[0, 1]`.
+    ///
+    /// 🔴 Defaults to ZERO, not one: an omitted confidence means the producer
+    /// told us nothing, and treating that as maximum confidence would let an
+    /// unlabelled target walk straight through the `min_confidence` gate. A
+    /// producer that means "certain" must say so. (Review: Copilot on #1294
+    /// raised this on the destination endpoint's identical field; the same
+    /// fail-open lived here, feeding the same gate.)
+    #[serde(default)]
     pub confidence: f32,
-}
-fn default_target_confidence() -> f32 {
-    1.0
 }
 fn default_cruise() -> f64 {
     10.0

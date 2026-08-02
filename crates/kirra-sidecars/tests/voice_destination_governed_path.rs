@@ -192,7 +192,6 @@ fn a_tracked_object_from_a_perception_aware_caller_grounds_with_a_standoff() {
             confidence: 0.9,
         }],
         targets_stamp_ms: Some(1_000),
-        now_ms: Some(1_000),
         ego: None,
     };
     let accepted = svc.handle(&req, 1_000).expect("a fresh sighting resolves");
