@@ -46,7 +46,7 @@ ${pageHero({
           hypothesis can never mask another's unevaluable one.</p>
         </div>
         <div class="diagram-frame flow-anim" data-reveal>${predSvg}</div>
-        ${evRow("crates/kirra-trajectory/src/prediction.rs:199", "crates/kirra-trajectory/src/validation.rs:999", "docs/adr/0017-multi-modal-predictive-rss.md")}
+        ${evRow("crates/kirra-trajectory/src/prediction.rs:199#pub fn predicted_modes_from_objects(", "crates/kirra-trajectory/src/validation.rs:1398#fn predictive_rss_breach(", "docs/adr/0017-multi-modal-predictive-rss.md")}
       </div>
     </section>
 
@@ -68,7 +68,7 @@ ${pageHero({
             <p><code>longitudinal_safe_distance</code>, split lateral distances, opposite-direction terms, and
             occlusion-limited speed — the formal RSS repertoire implemented in plain Rust, with the §4 conjunction
             carrying its own written proof note.</p>
-            ${evRow("parko/crates/parko-core/src/rss.rs:317", "docs/safety/RFC_2846_SECTION_4_PROOF.md")}
+            ${evRow("parko/crates/parko-core/src/rss.rs:317#pub fn longitudinal_safe_distance(", "docs/safety/RFC_2846_SECTION_4_PROOF.md")}
           </div>
           <div class="card" data-reveal>
             <h3>Machine-checked properties</h3>
@@ -81,7 +81,7 @@ ${pageHero({
             <h3>Occlusion is Rule 4</h3>
             <p>What you cannot see is modeled as the worst thing it could be: approach speed at blind junctions is
             capped to the assured-clear-distance bound for that lane's sight distance, carried on the map itself.</p>
-            ${evRow("parko/crates/parko-core/src/rss.rs:454", "docs/adr/0016-occlusion-aware-junction-speed-bound.md")}
+            ${evRow("parko/crates/parko-core/src/rss.rs:454#pub fn occlusion_limited_speed(", "docs/adr/0016-occlusion-aware-junction-speed-bound.md")}
           </div>
         </div>
       </div>

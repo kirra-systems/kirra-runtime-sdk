@@ -88,7 +88,7 @@ ${pageHero({
             <h3>Machine-checked</h3>
             <p>Kani proofs K4 and K5 verify — over exhaustive <code>f64</code> case splits — that Degraded re-initiation
             and speed increases are denied. Not tested on samples: proved on the domain.</p>
-            ${evRow("verification/kani/src/proofs_kinematics.rs:166")}
+            ${evRow("verification/kani/src/proofs_kinematics.rs:561#fn k4_degraded_reinitiation_denied()")}
           </div>
         </div>
         <div class="compare-note" data-reveal style="margin-top:24px">

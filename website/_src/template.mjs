@@ -11,11 +11,25 @@ export const SITE = {
   version: "v1.1.2",
 };
 
-/** Evidence chip linking to the exact file (and line) in the repository. */
+/**
+ * Evidence chip linking to the exact file (and line) in the repository.
+ *
+ * Citations are authored as `path[:line[#anchor]]`. The optional `#anchor` is
+ * the text that must be AT that line — authoring-time metadata that lets
+ * ci/check_website_citations.py detect (and mechanically repair) line drift.
+ * It is stripped here, so it never reaches the URL or the chip's label.
+ */
 export const ev = (path, label) => {
-  const [file, line] = path.split(":");
+  const spec = path.split("#")[0];
+  // Only a FINAL ":digits" is a line number, mirroring the gate's rpartition +
+  // isdigit test. Splitting on the first colon instead would make the generator
+  // and the gate disagree about any path containing one — the generator would
+  // render a broken link while the gate validated a different reading of it.
+  const m = spec.match(/^(.+):(\d+)$/);
+  const file = m ? m[1] : spec;
+  const line = m ? m[2] : "";
   const url = `${SITE.repo}/blob/main/${file}${line ? `#L${line}` : ""}`;
-  return `<a class="evidence" href="${url}" target="_blank" rel="noopener">${label || path}</a>`;
+  return `<a class="evidence" href="${url}" target="_blank" rel="noopener">${label || spec}</a>`;
 };
 export const evRow = (...paths) =>
   `<p class="evidence-row">${paths.map((p) => ev(p)).join("")}</p>`;

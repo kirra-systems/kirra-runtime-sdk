@@ -1350,7 +1350,7 @@ jobs:
         run: |
           python3 ci/check_reexport_shims.py --self-test
           python3 ci/check_reexport_shims.py
-      - name: Website evidence-citation path gate (Tier 0)
+      - name: Website evidence-citation gate (path + anchored line)
         # The marketing site backs each claim with an "evidence chip" that
         # deep-links into this repo. Nothing connected the two, so a rename here
         # silently turned a public "here is the code that proves it" link into a
@@ -1366,10 +1366,19 @@ jobs:
         # hand-written outside the ev() helper) and asserts, per page, that what
         # the source cites actually reached the HTML a visitor receives.
         #
-        # Line drift (`file.rs:206` still pointing at the intended line) is NOT
-        # covered — a citation records a coordinate, not a claim, so there is
-        # nothing written down to check it against. That needs an anchored
-        # citation format and is the Tier 2 follow-up.
+        # Line drift IS now covered. A citation carries the text that must be AT
+        # the cited line (`validation.rs:235#pub fn validate_trajectory_slow(`),
+        # so a moved line is mechanically repairable (`--fix`) while a vanished
+        # anchor fails loudly for a human to repoint. Anchors must be unique in
+        # their file: a non-unique one is unfixable-in-waiting, so it fails at
+        # authoring time rather than the first time the file shifts. Line numbers
+        # had drifted badly before this — the homepage's "NaN or Inf anywhere is
+        # an immediate deny, proved for all 2**64 bit patterns" pointed at
+        # `overhang_rear_m: 0.9,`, a fixture field.
+        #
+        # Still NOT covered, and never will be: whether the cited code actually
+        # SUPPORTS the claim in the surrounding prose. That is a human review
+        # judgement.
         #
         # Self-test first: a gate that cannot be made to fail proves nothing.
         run: |
