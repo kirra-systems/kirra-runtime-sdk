@@ -79,6 +79,7 @@ fn plan_request_from(response: &PerceptionResponse) -> PlanRequest {
         vehicle: None,
         intent: None,
         object_goal: None,
+        destination: None,
         targets: vec![],
         targets_stamp_ms: None,
         now_ms: None,

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "map_id": "example-uncalibrated",
+  "places": [
+    {
+      "id": "kitchen",
+      "name": "Kitchen",
+      "aliases": ["the kitchen"],
+      "x_m": 0.0,
+      "y_m": 0.0,
+      "heading_rad": 0.0
+    },
+    {
+      "id": "charging-dock",
+      "name": "Charging Dock",
+      "aliases": ["the dock", "charger", "charging station"],
+      "x_m": 0.0,
+      "y_m": 0.0,
+      "heading_rad": 0.0
+    }
+  ]
+}

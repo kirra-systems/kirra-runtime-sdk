@@ -23,6 +23,9 @@
 //! * rate limiting and the loopback bind policy live in the binary
 //!   (`net::RateLimiter` / `net::enforce_bind_policy`).
 
+use crate::destination::{
+    DestinationRef, DestinationResolver, EgoView, GroundedDestination, ResolveOutcome, TargetView,
+};
 use kirra_core::frame_integrity::FrameTrust;
 use kirra_planner::{
     behavior::{
@@ -205,6 +208,17 @@ pub struct PlanRequest {
     /// behavior, byte-identical).
     #[serde(default)]
     pub intent: Option<serde_json::Value>,
+    /// **Typed destination** (OPT-IN) — a [`DestinationRef`] JSON object
+    /// (`{"kind":"named_place","query":"kitchen"}`) or that object as a JSON
+    /// string. Parsed by the ONE fail-closed destination parse and grounded
+    /// by the TRUSTED [`DestinationResolver`] (registries + live targets) —
+    /// language chooses the destination type; the resolver chooses the
+    /// coordinates. Any non-Resolved outcome → 422 + NO MOTION, carrying the
+    /// outcome's stable `DEST_*` code. Supplying this alongside `intent` or
+    /// `object_goal` is a rejected ambiguity (two goal sources), never a
+    /// silent precedence rule. Absent → byte-identical prior behaviour.
+    #[serde(default)]
+    pub destination: Option<serde_json::Value>,
     /// **Object goal** (OPT-IN) — the operator's requested thing, e.g. `"red cup"`.
     /// Resolved against `targets` into a plain `GoTo`, so it is a DESTINATION and
     /// asserts nothing about drivability (`kirra_taj::object_goal`). Absent →
@@ -304,6 +318,50 @@ pub struct PlanResponse {
     /// #893 narration: the operator sentence for the refusal, else null.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Typed-destination echo: WHICH trusted grounding produced the goal,
+    /// when the request carried a `destination`. Observability only — the
+    /// grounded goal already shaped the planned trajectory above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<DestinationWire>,
+}
+
+/// The grounded-destination echo on the wire — identity + provenance, plus
+/// the full waypoint list for a saved route (sequencing past the first
+/// waypoint is the mission layer's job).
+#[derive(Debug, Serialize)]
+pub struct DestinationWire {
+    pub destination_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub map_id: Option<String>,
+    pub source: String,
+    pub resolved_at_ms: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub route_waypoints: Vec<WaypointWire>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaypointWire {
+    pub x: f64,
+    pub y: f64,
+    pub heading: f64,
+}
+
+fn destination_wire(g: &GroundedDestination) -> DestinationWire {
+    DestinationWire {
+        destination_id: g.destination_id.clone(),
+        map_id: g.map_id.clone(),
+        source: g.source.as_str().to_string(),
+        resolved_at_ms: g.resolved_at_ms,
+        route_waypoints: g
+            .route_waypoints
+            .iter()
+            .map(|w| WaypointWire {
+                x: w.x_m,
+                y: w.y_m,
+                heading: w.heading_rad,
+            })
+            .collect(),
+    }
 }
 
 /// A seam rejection: the request never reached the planner. Fail-closed to NO
@@ -953,6 +1011,81 @@ fn object_goal_intent(req: &PlanRequest, label: &str) -> Result<MickIntent, Seam
     Ok(MickIntent::GoTo { x_m, y_m })
 }
 
+/// Resolve a typed `destination` request into a grounded plain `GoTo`.
+///
+/// 🔴 Language chose only the destination TYPE + the operator's words; the
+/// coordinates come from the TRUSTED resolver (registries / live targets) —
+/// never from the request's language channel, whose parse rejects any
+/// coordinate-shaped key outright (`DEST_COORDINATES_FORBIDDEN`). Like the
+/// `object_goal` channel, the grounded point is a DESTINATION ONLY: it makes
+/// no drivability claim, and emitting an ordinary `GoTo` keeps everything
+/// downstream (Occy, the checker) unable to tell where the goal came from.
+///
+/// Every non-Resolved outcome is fail-closed → [`SeamRejection`] → NO MOTION,
+/// carrying the outcome's stable `DEST_*` code plus the operator sentence.
+fn destination_intent(
+    req: &PlanRequest,
+    resolver: &DestinationResolver,
+    value: &serde_json::Value,
+) -> Result<(MickIntent, GroundedDestination), SeamRejection> {
+    if req.intent.is_some() || req.object_goal.is_some() {
+        return Err(SeamRejection {
+            code: "PLAN_AMBIGUOUS_GOAL_SOURCE",
+            detail: "`destination` was supplied alongside `intent` or `object_goal` — \
+                     refusing rather than silently preferring one; NO MOTION"
+                .to_string(),
+        });
+    }
+    // Accept the object form or that object embedded as a JSON string —
+    // both land in the ONE fail-closed destination parse.
+    let raw = match value.as_str() {
+        Some(s) => s.to_string(),
+        None => value.to_string(),
+    };
+    let (dref, _slice) = DestinationRef::parse_json(&raw).map_err(|code| SeamRejection {
+        code,
+        detail: "typed destination failed the fail-closed parse; NO MOTION".to_string(),
+    })?;
+    let targets: Vec<LabeledTarget> = req
+        .targets
+        .iter()
+        .map(|t| LabeledTarget {
+            label: t.label.clone(),
+            x_m: t.x,
+            y_m: t.y,
+            confidence: t.confidence,
+        })
+        .collect();
+    // Stateless freshness, same convention as the object-goal channel.
+    let now = req.now_ms.or(req.targets_stamp_ms).unwrap_or(0);
+    let outcome = resolver.resolve(
+        &dref,
+        &TargetView {
+            targets: &targets,
+            stamp_ms: req.targets_stamp_ms,
+        },
+        EgoView {
+            x_m: req.ego.x,
+            y_m: req.ego.y,
+            heading_rad: req.ego.heading,
+        },
+        now,
+    );
+    match outcome {
+        ResolveOutcome::Resolved(grounded) => Ok((
+            MickIntent::GoTo {
+                x_m: grounded.goal_pose.x_m,
+                y_m: grounded.goal_pose.y_m,
+            },
+            grounded,
+        )),
+        refused => Err(SeamRejection {
+            code: refused.code(),
+            detail: refused.sentence(dref.query()),
+        }),
+    }
+}
+
 fn effective_intent(req: &PlanRequest) -> Result<MickIntent, SeamRejection> {
     if let Some(label) = req.object_goal.as_deref() {
         return object_goal_intent(req, label);
@@ -978,13 +1111,32 @@ fn effective_intent(req: &PlanRequest) -> Result<MickIntent, SeamRejection> {
     }
 }
 
-/// Handle one plan request: seam validation → Occy grounds the intent →
-/// the KIRRA slow-loop checker bounds it and narrates a refusal.
+/// Handle one plan request with NO destination context configured — the
+/// pre-destination behaviour, byte-identical for every request that carries
+/// no `destination`. A request that DOES carry one refuses fail-closed
+/// against the empty default resolver (`DEST_NO_REGISTRY` / policy defaults)
+/// rather than being silently ignored.
 pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
+    handle_plan_with_destinations(req, &DestinationResolver::default())
+}
+
+/// Handle one plan request: seam validation → (optional) trusted destination
+/// resolution → Occy grounds the intent → the KIRRA slow-loop checker bounds
+/// it and narrates a refusal.
+pub fn handle_plan_with_destinations(
+    req: &PlanRequest,
+    resolver: &DestinationResolver,
+) -> Result<PlanResponse, SeamRejection> {
     validate_finite(req)?;
     validate_predicted_vrus(req)?;
     validate_perception_frame_id(req)?;
-    let intent = effective_intent(req)?;
+    let (intent, grounded) = match &req.destination {
+        Some(value) => {
+            let (intent, grounded) = destination_intent(req, resolver, value)?;
+            (intent, Some(grounded))
+        }
+        None => (effective_intent(req)?, None),
+    };
     let target = intent_target(&intent).unwrap_or((req.goal.x, req.goal.y));
     validate_in_map(req, target)?;
 
@@ -1252,6 +1404,7 @@ pub fn handle_plan(req: &PlanRequest) -> Result<PlanResponse, SeamRejection> {
         },
         reason_code: reason.map(|r| r.code().to_string()),
         reason: reason.map(|r| r.explain().to_string()),
+        destination: grounded.as_ref().map(destination_wire),
     })
 }
 
@@ -1281,9 +1434,10 @@ mod tests {
             predicted_vrus: vec![],
             vehicle: None,
             intent: None,
-            // Object-goal channel off by default, so every pre-existing
-            // assertion still describes the plain-goal path.
+            // Object-goal + destination channels off by default, so every
+            // pre-existing assertion still describes the plain-goal path.
             object_goal: None,
+            destination: None,
             targets: vec![],
             targets_stamp_ms: None,
             now_ms: None,
@@ -1464,6 +1618,221 @@ mod tests {
         let req = base_request();
         assert!(req.object_goal.is_none() && req.targets.is_empty());
         handle_plan(&req).expect("the plain-goal path still plans");
+    }
+
+    // ---- typed destination: "drive to the kitchen" -------------------------
+
+    use crate::destination::{DestinationResolver, PlaceRegistry, RouteRegistry};
+
+    fn lab_resolver() -> DestinationResolver {
+        DestinationResolver {
+            places: PlaceRegistry::from_json_str(
+                r#"{"version": 1, "map_id": "r2-lab-01", "places": [
+                    {"id": "kitchen", "name": "Kitchen", "aliases": ["the kitchen"],
+                     "x_m": 40.0, "y_m": 0.0, "heading_rad": 0.0}
+                ]}"#,
+            )
+            .unwrap(),
+            routes: RouteRegistry::from_json_str(
+                r#"{"version": 1, "map_id": "r2-lab-01", "routes": [
+                    {"id": "route-a", "name": "Route A",
+                     "waypoints": [
+                        {"x_m": 20.0, "y_m": 0.0, "heading_rad": 0.0},
+                        {"x_m": 40.0, "y_m": 2.0, "heading_rad": 0.0}
+                     ]}
+                ]}"#,
+            )
+            .unwrap(),
+            object_policy: Default::default(),
+        }
+    }
+
+    /// The end-to-end shape of "drive to the kitchen": the language channel
+    /// carries only a kind + the operator's words; the TRUSTED registry
+    /// supplies the coordinates; the plan grounds as an ordinary `GoTo` and
+    /// is planned + checked like any other goal, with provenance echoed.
+    #[test]
+    fn named_place_destination_grounds_through_the_registry() {
+        let mut req = base_request();
+        req.destination = Some(serde_json::json!({"kind":"named_place","query":"the kitchen"}));
+        let resp =
+            handle_plan_with_destinations(&req, &lab_resolver()).expect("a registered place plans");
+        assert!(!resp.trajectory.is_empty());
+        let echo = resp.destination.expect("provenance is echoed");
+        assert_eq!(echo.destination_id, "kitchen");
+        assert_eq!(echo.map_id.as_deref(), Some("r2-lab-01"));
+        assert_eq!(echo.source, "place_registry");
+
+        // The string-embedded form (a relay shape) parses identically.
+        let mut req = base_request();
+        req.destination = Some(serde_json::json!(
+            r#"{"kind":"named_place","query":"kitchen"}"#
+        ));
+        handle_plan_with_destinations(&req, &lab_resolver())
+            .expect("string-embedded destination plans");
+    }
+
+    #[test]
+    fn saved_route_destination_grounds_to_its_first_waypoint_with_the_full_list() {
+        let mut req = base_request();
+        req.destination = Some(serde_json::json!({"kind":"saved_route","query":"route a"}));
+        let resp =
+            handle_plan_with_destinations(&req, &lab_resolver()).expect("a saved route plans");
+        let echo = resp.destination.expect("provenance is echoed");
+        assert_eq!(echo.destination_id, "route-a");
+        assert_eq!(echo.source, "route_registry");
+        assert_eq!(
+            echo.route_waypoints.len(),
+            2,
+            "the mission layer gets the whole route"
+        );
+    }
+
+    #[test]
+    fn tracked_object_destination_grounds_with_the_standoff() {
+        let mut req = base_request();
+        req.destination = Some(serde_json::json!({"kind":"tracked_object","query":"red cup"}));
+        req.targets = vec![target("red cup", 30.0, 0.0)];
+        req.targets_stamp_ms = Some(1_000);
+        req.now_ms = Some(1_000);
+        let resp =
+            handle_plan_with_destinations(&req, &lab_resolver()).expect("a seen, fresh cup plans");
+        let echo = resp.destination.expect("provenance is echoed");
+        assert_eq!(echo.source, "object_track");
+        assert!(
+            echo.map_id.is_none(),
+            "a live sighting carries no map identity"
+        );
+    }
+
+    /// Every non-Resolved outcome is fail-closed at the seam: 422 + NO
+    /// MOTION carrying the stable `DEST_*` code — never a silent fallback to
+    /// the request goal.
+    #[test]
+    fn destination_refusals_fail_closed_to_no_motion() {
+        // Unknown place.
+        let mut req = base_request();
+        req.destination = Some(serde_json::json!({"kind":"named_place","query":"garage"}));
+        let rej = handle_plan_with_destinations(&req, &lab_resolver())
+            .expect_err("an unknown place must refuse");
+        assert_eq!(rej.code, "DEST_NOT_FOUND");
+        let wire: serde_json::Value = serde_json::from_str(&rej.to_json()).unwrap();
+        assert_eq!(wire["kind"], "SafeStop");
+        assert_eq!(wire["trajectory"].as_array().map(Vec::len), Some(0));
+
+        // Address: typed, honest, unsupported — never a fabricated lat/long.
+        let mut req = base_request();
+        req.destination = Some(serde_json::json!({"kind":"address","query":"125 Main Street"}));
+        assert_eq!(
+            handle_plan_with_destinations(&req, &lab_resolver())
+                .expect_err("an address must refuse")
+                .code,
+            "DEST_UNSUPPORTED_ADDRESS"
+        );
+
+        // Stale object sighting.
+        let mut req = base_request();
+        req.destination = Some(serde_json::json!({"kind":"tracked_object","query":"red cup"}));
+        req.targets = vec![target("red cup", 30.0, 0.0)];
+        req.targets_stamp_ms = Some(1_000);
+        req.now_ms = Some(60_000);
+        assert_eq!(
+            handle_plan_with_destinations(&req, &lab_resolver())
+                .expect_err("a stale sighting must refuse")
+                .code,
+            "DEST_STALE"
+        );
+
+        // No context configured (the plain handle_plan wrapper): a
+        // destination request refuses rather than being ignored.
+        let mut req = base_request();
+        req.destination = Some(serde_json::json!({"kind":"named_place","query":"kitchen"}));
+        assert_eq!(
+            handle_plan(&req).expect_err("no registry must refuse").code,
+            "DEST_NO_REGISTRY"
+        );
+    }
+
+    /// The core rule made mechanical at the seam: coordinates in the
+    /// language channel are a LOUD, distinct refusal.
+    #[test]
+    fn destination_with_smuggled_coordinates_is_refused_loudly() {
+        let mut req = base_request();
+        req.destination = Some(serde_json::json!(
+            {"kind":"named_place","query":"kitchen","x_m": 40.0, "y_m": 0.0}
+        ));
+        assert_eq!(
+            handle_plan_with_destinations(&req, &lab_resolver())
+                .expect_err("smuggled coordinates must refuse")
+                .code,
+            "DEST_COORDINATES_FORBIDDEN"
+        );
+    }
+
+    /// Three goal channels, one request → refused ambiguity, same rule as
+    /// `intent` + `object_goal`.
+    #[test]
+    fn destination_plus_another_goal_source_is_a_refused_ambiguity() {
+        let mut req = base_request();
+        req.destination = Some(serde_json::json!({"kind":"named_place","query":"kitchen"}));
+        req.intent = Some(serde_json::json!({"intent":"go_to","x_m":40.0,"y_m":0.0}));
+        assert_eq!(
+            handle_plan_with_destinations(&req, &lab_resolver())
+                .expect_err("destination + intent must refuse")
+                .code,
+            "PLAN_AMBIGUOUS_GOAL_SOURCE"
+        );
+
+        let mut req = base_request();
+        req.destination = Some(serde_json::json!({"kind":"named_place","query":"kitchen"}));
+        req.object_goal = Some("red cup".into());
+        assert_eq!(
+            handle_plan_with_destinations(&req, &lab_resolver())
+                .expect_err("destination + object_goal must refuse")
+                .code,
+            "PLAN_AMBIGUOUS_GOAL_SOURCE"
+        );
+    }
+
+    /// A registered place OUTSIDE the supplied corridor (+margin) is refused
+    /// by the in-map bound exactly like any other goal — a trusted registry
+    /// does not bypass the seam's hallucination bound.
+    #[test]
+    fn a_grounded_destination_is_still_bounded_by_the_in_map_check() {
+        let far = DestinationResolver {
+            places: PlaceRegistry::from_json_str(
+                r#"{"version": 1, "map_id": "r2-lab-01", "places": [
+                    {"id": "warehouse", "name": "Warehouse",
+                     "x_m": 9000.0, "y_m": 0.0, "heading_rad": 0.0}
+                ]}"#,
+            )
+            .unwrap(),
+            routes: RouteRegistry::empty(),
+            object_policy: Default::default(),
+        };
+        let mut req = base_request();
+        req.destination = Some(serde_json::json!({"kind":"named_place","query":"warehouse"}));
+        assert_eq!(
+            handle_plan_with_destinations(&req, &far)
+                .expect_err("an out-of-map registry pose must refuse")
+                .code,
+            "INTENT_GOAL_OUT_OF_MAP"
+        );
+    }
+
+    /// Absent `destination` leaves the endpoint byte-identical to its prior
+    /// form, whatever context is configured.
+    #[test]
+    fn no_destination_is_unchanged_behaviour() {
+        let req = base_request();
+        assert!(req.destination.is_none());
+        let a = handle_plan(&req).expect("plain path plans");
+        let b = handle_plan_with_destinations(&req, &lab_resolver()).expect("same");
+        assert_eq!(a.proposal_digest, b.proposal_digest);
+        assert!(
+            b.destination.is_none(),
+            "no echo without a destination request"
+        );
     }
 
     #[test]

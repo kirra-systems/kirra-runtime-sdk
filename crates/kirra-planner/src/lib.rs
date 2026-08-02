@@ -60,8 +60,8 @@ pub use lanelet2::{parse_lanelet2_osm, Lanelet2ParseError};
 
 pub mod mick;
 pub use mick::{
-    mick_drive_once, plan_for_intent, MickBrain, MickDriver, MickError, MickIntent, ObjectView,
-    ScriptedBrain, TurnDirection, WorldContext, DEFAULT_DECIDE_INTERVAL_MS,
+    extract_first_json_object, mick_drive_once, plan_for_intent, MickBrain, MickDriver, MickError,
+    MickIntent, ObjectView, ScriptedBrain, TurnDirection, WorldContext, DEFAULT_DECIDE_INTERVAL_MS,
     DEFAULT_INTENT_STALENESS_MS, MICK_MAX_OBJECTS,
 };
 
