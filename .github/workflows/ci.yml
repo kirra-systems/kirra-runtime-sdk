@@ -1358,6 +1358,14 @@ jobs:
         # v2.0.0 de-monolith and by #1030 folding kirra-verifier-pg into
         # kirra-persistence. This asserts every cited PATH resolves.
         #
+        # Both sides are scanned. website/_src/pages/*.mjs is the authored
+        # source, but the Pages deploy publishes website/*.html as-is with no
+        # build step, so a fix to _src that was never regenerated would leave the
+        # DEPLOYED site still serving the dead link. The gate therefore also
+        # checks the generated HTML (which additionally reaches repo links
+        # hand-written outside the ev() helper) and asserts, per page, that what
+        # the source cites actually reached the HTML a visitor receives.
+        #
         # Line drift (`file.rs:206` still pointing at the intended line) is NOT
         # covered — a citation records a coordinate, not a claim, so there is
         # nothing written down to check it against. That needs an anchored

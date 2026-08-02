@@ -19,6 +19,24 @@ de-monolith (`src/federation.rs` -> `kirra-fleet-types`, `src/protocol_adapter.r
 -> `kirra-industrial`) and by #1030 folding `crates/kirra-verifier-pg` into
 `kirra-persistence`.
 
+BOTH SIDES ARE SCANNED, because they can disagree. `website/_src/pages/*.mjs`
+is the authored source, but the Pages deploy publishes `website/*.html` as-is
+with no build step — so an author who fixes `_src` and forgets to regenerate
+would leave the DEPLOYED site still serving the dead link while a source-only
+gate went green. Scanning the HTML also reaches repo links written by hand
+outside the `ev()` helper (the shared template's footer chips), which the source
+scan cannot see at all.
+
+Three assertions, therefore:
+
+  1. every path cited in `_src` exists;
+  2. every repo deep-link in the generated HTML exists;
+  3. every path cited in `_src` appears in the generated HTML — i.e. the HTML is
+     not stale with respect to the source.
+
+(3) is deliberately one-directional: HTML legitimately contains repo links that
+no page `ev()` call produces, so the reverse containment would false-positive.
+
 SCOPE — this gate checks that every cited PATH EXISTS. Deliberately not in
 scope:
 
@@ -48,10 +66,19 @@ from dataclasses import dataclass
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PAGES_DIR = os.path.join("website", "_src", "pages")
+SITE_DIR = "website"
 
 # `ev(` / `evRow(` as a standalone identifier. The negative lookbehind keeps
 # this from firing inside a longer name (`prev(`, `retrieve(`, `obj.ev(`).
 CALL_RE = re.compile(r"(?<![A-Za-z0-9_$.])(ev|evRow)\s*\(")
+
+# A repo deep-link in the generated HTML. `#` is excluded from the path class so
+# an `#L92` line fragment can never be captured as part of the path.
+BLOB_RE = re.compile(r'href="https://github\.com/[^/"]+/[^/"]+/blob/[^/"]+/([^"#]+)(?:#L\d+)?"')
+
+# `generate.mjs` writes each page to `${mod.meta.slug}.html`, so the slug is what
+# maps a page source to the HTML a visitor actually receives.
+SLUG_RE = re.compile(r"""\bslug\s*:\s*["']([A-Za-z0-9_-]+)["']""")
 
 EXIT_OK = 0
 EXIT_VIOLATION = 1
@@ -172,13 +199,15 @@ def scan_source(page: str, src: str) -> tuple[list[Citation], list[tuple[int, st
     return citations, unresolvable
 
 
-def collect(root: str) -> tuple[list[Citation], list[tuple[str, int, str]]]:
+def collect(root: str) -> tuple[list[Citation], list[tuple[str, int, str]], dict[str, str | None]]:
+    """Scan every page source. Also returns each page's output slug."""
     pages_dir = os.path.join(root, PAGES_DIR)
     if not os.path.isdir(pages_dir):
         raise SystemExit(f"{PAGES_DIR} not found under {root}")
 
     citations: list[Citation] = []
     unresolvable: list[tuple[str, int, str]] = []
+    slugs: dict[str, str | None] = {}
     for name in sorted(os.listdir(pages_dir)):
         if not name.endswith(".mjs"):
             continue
@@ -188,14 +217,92 @@ def collect(root: str) -> tuple[list[Citation], list[tuple[str, int, str]]]:
         page_cites, page_unres = scan_source(rel, src)
         citations.extend(page_cites)
         unresolvable.extend((rel, ln, why) for ln, why in page_unres)
-    return citations, unresolvable
+        m = SLUG_RE.search(src)
+        slugs[rel] = m.group(1) if m else None
+    return citations, unresolvable, slugs
 
 
-def check(root: str) -> tuple[list[Citation], list[Citation], list[tuple[str, int, str]]]:
-    """Return (all citations, dead ones, unresolvable call sites)."""
-    citations, unresolvable = collect(root)
-    dead = [c for c in citations if not os.path.exists(os.path.join(root, c.path))]
-    return citations, dead, unresolvable
+def scan_html(page: str, src: str) -> list[Citation]:
+    """Extract repo deep-links from one generated HTML page."""
+    links: list[Citation] = []
+    for m in BLOB_RE.finditer(src):
+        path = m.group(1)
+        line = src.count("\n", 0, m.start()) + 1
+        links.append(Citation(page=page, line=line, raw=path, path=path))
+    return links
+
+
+def collect_html(root: str) -> list[Citation]:
+    site_dir = os.path.join(root, SITE_DIR)
+    if not os.path.isdir(site_dir):
+        raise SystemExit(f"{SITE_DIR} not found under {root}")
+
+    links: list[Citation] = []
+    for name in sorted(os.listdir(site_dir)):
+        if not name.endswith(".html"):
+            continue
+        rel = os.path.join(SITE_DIR, name)
+        with open(os.path.join(site_dir, name), encoding="utf-8") as fh:
+            links.extend(scan_html(rel, fh.read()))
+    return links
+
+
+@dataclass
+class Result:
+    citations: list[Citation]  # from website/_src/pages/*.mjs
+    html_links: list[Citation]  # from website/*.html
+    dead_src: list[Citation]
+    dead_html: list[Citation]
+    stale: list[tuple[str, str, str]]  # (page source, output html, path)
+    unresolvable: list[tuple[str, int, str]]
+    slugless: list[str]  # page sources whose output slug could not be read
+
+    @property
+    def failed(self) -> bool:
+        return bool(self.dead_src or self.dead_html or self.stale or self.slugless)
+
+
+def check(root: str) -> Result:
+    citations, unresolvable, slugs = collect(root)
+    html_links = collect_html(root)
+
+    def exists(p: str) -> bool:
+        return os.path.exists(os.path.join(root, p))
+
+    # Per-page HTML link sets. Comparing globally would let a stale page slip
+    # through whenever its new citation happens to appear on some OTHER page --
+    # the staleness is per-document, so the comparison has to be too.
+    by_html: dict[str, set[str]] = {}
+    for link in html_links:
+        by_html.setdefault(link.page, set()).add(link.path)
+
+    stale: list[tuple[str, str, str]] = []
+    slugless: list[str] = []
+    for page, slug in sorted(slugs.items()):
+        if slug is None:
+            slugless.append(page)
+            continue
+        out = os.path.join(SITE_DIR, f"{slug}.html")
+        rendered = by_html.get(out)
+        cited = {c.path for c in citations if c.page == page}
+        if rendered is None:
+            # The page source exists but its HTML does not; every citation on it
+            # is unreachable to a visitor.
+            stale.extend((page, out, p) for p in sorted(cited))
+            continue
+        stale.extend((page, out, p) for p in sorted(cited - rendered))
+
+    return Result(
+        citations=citations,
+        html_links=html_links,
+        dead_src=[c for c in citations if not exists(c.path)],
+        # Dedupe by path: one moved file otherwise reports once per page that
+        # links it, burying the distinct failures.
+        dead_html=list({link.path: link for link in html_links if not exists(link.path)}.values()),
+        stale=stale,
+        unresolvable=unresolvable,
+        slugless=slugless,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -212,6 +319,17 @@ export const page = () => `
   ${evRow("docs/adr", "also/missing")}
 `;
 '''
+
+
+_FIXTURE_HTML = """
+<p class="evidence-row">
+  <a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/README.md">README.md</a>
+  <a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/Cargo.toml#L12">Cargo.toml:12</a>
+  <a class="evidence" href="https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/gone/from/tree.rs">gone</a>
+  <a class="evidence" href="certification.html">a same-site link, not a citation</a>
+  <a href="https://github.com/kirra-systems/kirra-runtime-sdk/issues/1">an issue, not a blob</a>
+</p>
+"""
 
 
 def self_test(root: str) -> int:
@@ -242,14 +360,50 @@ def self_test(root: str) -> int:
     if dead != {"no/such/file.rs", "also/missing"}:
         failures.append(f"detection: expected the two planted dead paths, got {sorted(dead)}")
 
+    # --- generated-HTML side ---
+    html = scan_html("fixture.html", _FIXTURE_HTML)
+    html_got = sorted(link.path for link in html)
+    html_want = sorted(["README.md", "Cargo.toml", "gone/from/tree.rs"])
+    if html_got != html_want:
+        failures.append(f"html extraction: expected {html_want}, got {html_got}")
+
+    # An `#L12` fragment must not bleed into the path, and a same-site link or a
+    # non-blob GitHub URL must not be mistaken for a citation.
+    if any("#" in link.path for link in html):
+        failures.append("html: a #L line fragment leaked into the extracted path")
+    if any("certification.html" in link.path or "issues" in link.path for link in html):
+        failures.append("html false positive: a non-blob href was treated as a citation")
+
+    html_dead = {link.path for link in html if not os.path.exists(os.path.join(root, link.path))}
+    if html_dead != {"gone/from/tree.rs"}:
+        failures.append(f"html detection: expected the planted dead link, got {sorted(html_dead)}")
+
+    # --- staleness (this page's HTML does not carry what this page cites) ---
+    html_paths = {link.path for link in html}
+    stale = sorted({c.path for c in cites} - html_paths)
+    if "docs/adr" not in stale:
+        failures.append("staleness: a source citation missing from the HTML should be reported stale")
+    if "README.md" in stale:
+        failures.append("staleness false positive: a path present in the HTML was reported stale")
+
+    # The slug is what maps a page source to the HTML a visitor receives; a page
+    # that does not declare one must be reported, not silently skipped.
+    if SLUG_RE.search('export const meta = { slug: "runtime", title: "x" };') is None:
+        failures.append("slug: a literal slug declaration was not recognised")
+    if SLUG_RE.search("export const meta = { title: 'x' };") is not None:
+        failures.append("slug: a page with no slug should yield no match")
+
     if failures:
         print("SELF-TEST FAILED", file=sys.stderr)
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
         return EXIT_VIOLATION
 
-    print("self-test OK — parser extracts, strips line suffixes, ignores href chips,")
-    print("reports unresolvable arguments, and detects planted dead paths.")
+    print("self-test OK — source parser extracts, strips line suffixes, ignores href")
+    print("chips, reports unresolvable arguments, and detects planted dead paths;")
+    print("HTML scanner extracts blob links without their #L fragment, ignores")
+    print("same-site and non-blob URLs, detects a planted dead link, and reports a")
+    print("source citation absent from the HTML as stale.")
     return EXIT_OK
 
 
@@ -263,24 +417,27 @@ def main(argv: list[str]) -> int:
     if args.self_test:
         return self_test(args.root)
 
-    citations, dead, unresolvable = check(args.root)
+    r = check(args.root)
 
     if args.list:
-        for c in sorted(citations, key=lambda c: (c.page, c.line)):
+        for c in sorted(r.citations, key=lambda c: (c.page, c.line)):
             print(f"{c.page}:{c.line}\t{c.raw}")
 
-    pages = len({c.page for c in citations})
-    paths = len({c.path for c in citations})
-    print(f"website citations: {len(citations)} targets, {paths} distinct paths, across {pages} pages")
+    pages = len({c.page for c in r.citations})
+    paths = len({c.path for c in r.citations})
+    html_pages = len({link.page for link in r.html_links})
+    html_paths = len({link.path for link in r.html_links})
+    print(f"source citations: {len(r.citations)} targets, {paths} distinct paths, across {pages} pages")
+    print(f"generated HTML:   {len(r.html_links)} repo links, {html_paths} distinct paths, across {html_pages} pages")
 
-    if unresolvable:
-        print(f"\n{len(unresolvable)} citation argument(s) could not be resolved statically (not gated):")
-        for page, line, why in unresolvable:
+    if r.unresolvable:
+        print(f"\n{len(r.unresolvable)} citation argument(s) could not be resolved statically (NOT checked):")
+        for page, line, why in r.unresolvable:
             print(f"  {page}:{line}  {why}")
 
-    if dead:
-        print(f"\nFAIL — {len(dead)} cited path(s) do not exist; these are 404s on the live site:\n")
-        for c in sorted(dead, key=lambda c: (c.page, c.line)):
+    if r.dead_src:
+        print(f"\nFAIL — {len(r.dead_src)} cited path(s) do not exist; these are 404s on the live site:\n")
+        for c in sorted(r.dead_src, key=lambda c: (c.page, c.line)):
             print(f"  {c.page}:{c.line}")
             print(f"      cites: {c.raw}")
         print(
@@ -289,9 +446,52 @@ def main(argv: list[str]) -> int:
             "Do not delete a citation to silence this gate — a claim on the site\n"
             "without evidence behind it is the thing the chips exist to prevent."
         )
+
+    if r.dead_html:
+        print(f"\nFAIL — {len(r.dead_html)} repo link(s) in the DEPLOYED HTML do not exist:\n")
+        for link in sorted(r.dead_html, key=lambda c: c.path):
+            print(f"  {link.page}:{link.line}")
+            print(f"      links: {link.path}")
+        print(
+            "\nThese ship to visitors as-is. If the link is written by hand in\n"
+            "website/_src/template.mjs rather than via ev(), fix it there."
+        )
+
+    if r.slugless:
+        print(f"\nFAIL — {len(r.slugless)} page source(s) with no readable output slug:\n")
+        for page in r.slugless:
+            print(f"  {page}")
+        print(
+            "\nWithout the slug this gate cannot tell which HTML file the page\n"
+            "renders to, so it cannot check that page's citations reached the\n"
+            "deployed site. Declare `slug: \"<name>\"` in the page's meta."
+        )
+
+    if r.stale:
+        pages = len({page for page, _out, _p in r.stale})
+        print(f"\nFAIL — {len(r.stale)} citation(s) on {pages} page(s) never reached the deployed HTML:\n")
+        for page, out, path in r.stale:
+            print(f"  {page}  ->  {out}")
+            print(f"      cites: {path}")
+        print(
+            "\nThe committed HTML is stale with respect to the page sources, and the\n"
+            "Pages deploy publishes website/ as-is with no build step — so the fix\n"
+            "in _src is NOT what visitors get. Regenerate and commit the result:\n"
+            "  node website/_src/generate.mjs"
+        )
+
+    if r.failed:
         return EXIT_VIOLATION
 
-    print("OK — every cited path resolves.")
+    if r.unresolvable:
+        # Never claim more than was actually checked.
+        print(
+            f"\nOK — every statically-resolvable path resolves, but {len(r.unresolvable)} citation"
+            "\nargument(s) above were not checked. This is NOT a clean bill of health."
+        )
+        return EXIT_OK
+
+    print("\nOK — every cited path resolves, in the sources and in the deployed HTML.")
     return EXIT_OK
 
 
