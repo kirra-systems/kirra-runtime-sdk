@@ -95,7 +95,7 @@ ${pageHero({
         <p class="diagram-caption">
           <span>Lease-based failover (≤5 s, EP-03) is opt-in behind <code>KIRRA_HA_LEASE_ENABLED</code>; the epoch CAS remains the sole takeover authority either way.</span>
         </p>
-        ${evRow("tests/ha_failover.rs", "tests/ha_two_process_drill.rs", "src/lease.rs", "src/standby_monitor.rs", "verification/kani/src/proofs_lease.rs")}
+        ${evRow("tests/ha_failover.rs", "tests/ha_two_process_drill.rs", "src/lease.rs", "src/standby_monitor", "verification/kani/src/proofs_lease.rs")}
         <div class="compare-note" data-reveal style="margin-top:24px">
           The lease timing algebra — renew at half-life, promote only after holder expiry, clock-skew fails safe —
           is machine-checked by Kani proofs L1–L4 over <em>all</em> 64-bit inputs, not sampled ones.
@@ -126,7 +126,7 @@ ${pageHero({
             <p>Storage is a family of traits — epoch fence, node store, federation, posture state, OTA campaigns —
             and the <em>same</em> conformance suites run against SQLite, in-memory, and a live Postgres 16 service
             container in CI. Corrupt rows decode fail-closed on every backend.</p>
-            ${evRow("crates/kirra-verifier-pg", ".github/workflows/ci.yml:503")}
+            ${evRow("crates/kirra-persistence/src/postgres", ".github/workflows/ci.yml:503")}
           </div>
           <div class="card" data-reveal>
             <h3>Config that fails at boot</h3>
