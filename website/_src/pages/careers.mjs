@@ -30,9 +30,9 @@ ${pageHero({
           <div class="card" data-reveal>
             <h3>Evidence over assertion</h3>
             <p>“It works” means a test, a proof, a drill, or a measurement — with its scope stated. Draft artifacts
-            say Draft. Host benchmarks say host. The README's certification claim includes the sentence most
+            say Draft. Host benchmarks say host. The certification claim includes the sentence most
             companies leave out.</p>
-            ${evRow("README.md:117")}
+            ${evRow("SAFETY.md")}
           </div>
           <div class="card" data-reveal>
             <h3>Proofs where they pay</h3>
