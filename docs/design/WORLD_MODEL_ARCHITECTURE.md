@@ -1028,7 +1028,17 @@ each ADR's title for cross-reference.
 | **WM-6** | [`0039`](../adr/0039-world-model-bidirectional-governor-fence.md) | Preserve bidirectional independence between the World Model and the Governor | **Proposed — not ratified on merge** |
 | **WM-1** | [`0040`](../adr/0040-world-model-ownership-and-boundary.md) | Establish `kirra-world` as the owner of semantic world evidence | **Proposed — not ratified on merge** |
 | **WM-2** | [`0041`](../adr/0041-world-model-persistence-architecture.md) | Use a SQLite event log with deterministic projections | **Proposed — measurement-gated** |
+| **WM-6a** | [`0042`](../adr/0042-world-model-terminology-and-safety-boundary-scope.md) | Clarify World Model terminology and safety-boundary scope | **Proposed — not ratified on merge** |
 | WM-3, WM-4, WM-5, WM-7, WM-8, WM-9, WM-10 | — | — | Not yet drafted |
+
+> **[ADR-0042](../adr/0042-world-model-terminology-and-safety-boundary-scope.md)
+> resolves five blockers found reviewing the first three**: the canonical name
+> is **Kirra World** (distinct from an *independent perception channel*); the
+> semantic map is separated from the checker-owned safety corridor, with hidden
+> trait adapters prohibited; Fence B is **transitive** over a measured 12-crate
+> closure including `kirra-core`; the fence is **language-independent**; and the
+> assurance-scope determination is **PENDING an explicit safety-assurance
+> ruling** — the earlier out-of-scope claim is withdrawn.
 
 > These three ADRs deliberately depart from the repository's usual
 > *"Proposed (design note) — ratified on merge"* convention. Their ratification

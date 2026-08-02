@@ -7,6 +7,7 @@
 | Blueprint | `KIRRA-WM-ARCH-001` §7, §10, §11, §13 (WM-2) — [`docs/design/WORLD_MODEL_ARCHITECTURE.md`](../design/WORLD_MODEL_ARCHITECTURE.md) |
 | Deciders | World Model owner · architecture owner · deployment owner |
 | Depends on | [`ADR-0039`](0039-world-model-bidirectional-governor-fence.md) (WM-6) · [`ADR-0040`](0040-world-model-ownership-and-boundary.md) (WM-1) |
+| **Clarified by** | **[ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md)** — canonical terminology (Decision 1). The persistence recommendation is unchanged. |
 | Cross-refs | [`crates/kirra-persistence`](../../crates/kirra-persistence/) (migrations, WAL, durability tiers) · [`crates/kirra-audit-hash`](../../crates/kirra-audit-hash/) (shared chain primitives) · [`src/audit_chain.rs`](../../src/audit_chain.rs) · [`ADR-0038`](0038-postgres-shared-state-hybrid.md) (hybrid backend precedent) · [`ADR-0037`](0037-epoch-fenced-generation-ordering.md) |
 
 > **Convention deviation** — as ADR-0039/0040: *not* ratified on merge. This one
@@ -287,9 +288,13 @@ fact" rule exists to prevent.
 
 ## Assurance impact
 
-**None to the existing safety case.** The World Model store is outside the
-safety scope because ADR-0039 Fence B holds. This ADR makes no safety claim and
-inherits no ASIL allocation.
+**No new safety claim is made here, and no scope determination is asserted.**
+
+The *intent* is that the Kirra World store remains outside the safety scope if
+Fence A and Fence B hold. **That determination is PENDING an explicit
+safety-assurance ruling**
+([ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md)
+Decision 5). This ADR makes no safety claim and inherits no ASIL allocation.
 
 Explicitly: the World Model's hash chain provides **tamper evidence for
 knowledge**, not safety evidence. It must not be cited as a safety-case artifact
