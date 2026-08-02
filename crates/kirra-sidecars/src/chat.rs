@@ -570,6 +570,106 @@ pub fn identity_route(text: &str, retains_history: bool) -> Option<&'static str>
     None
 }
 
+// ---------------------------------------------------------------------------
+// Sentence-safe termination
+// ---------------------------------------------------------------------------
+//
+// Observed on the robot: every reply ended mid-word — "…primarily composed of
+// nitro", "…based solely on the locally configured language". The output cap
+// (`num_predict`, 48 tokens) stops generation wherever it lands, and what the
+// operator HEARS is a sentence that simply stops. Spoken aloud that is worse
+// than on screen: there is no visual cue that the text was cut, so the robot
+// sounds like it lost its train of thought.
+//
+// The fix is to end at the last COMPLETE sentence rather than at the last
+// token. Deliberately NOT a bigger cap: a larger budget buys longer rambling
+// and the same ragged edge one sentence later.
+
+/// Terminal punctuation that ends a spoken sentence. `;` and `:` are chunk
+/// boundaries for streaming (see [`SentenceChunker`]) but do NOT end a
+/// sentence — a reply stopping at "however;" is still unfinished.
+const SENTENCE_TERMINALS: [char; 3] = ['.', '?', '!'];
+/// Closers that may legitimately follow terminal punctuation: `He said "go."`
+const TRAILING_CLOSERS: [char; 5] = ['"', '\'', ')', ']', '}'];
+
+/// Does this text already end with a complete sentence? A natural model stop
+/// does; a cap-truncated one almost never does. This is what keeps trimming
+/// off the naturally-finished path, where cutting could only lose content.
+#[must_use]
+pub fn ends_with_complete_sentence(text: &str) -> bool {
+    let t = text.trim_end().trim_end_matches(TRAILING_CLOSERS);
+    t.chars()
+        .last()
+        .is_some_and(|c| SENTENCE_TERMINALS.contains(&c))
+}
+
+/// Byte index of the last real sentence terminal, or `None`.
+///
+/// A `.` BETWEEN digits is a decimal point, not a boundary ("3.5" must never
+/// split) — the same guard [`SentenceChunker`] already applies, kept
+/// consistent so streaming chunks and the final reply agree about where
+/// sentences end.
+fn last_sentence_terminal(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut found = None;
+    for (i, c) in text.char_indices() {
+        if !SENTENCE_TERMINALS.contains(&c) {
+            continue;
+        }
+        if c == '.' {
+            let prev_digit = i > 0 && bytes[i - 1].is_ascii_digit();
+            let next_digit = bytes.get(i + 1).is_some_and(u8::is_ascii_digit);
+            if prev_digit && next_digit {
+                continue; // decimal point
+            }
+        }
+        found = Some(i);
+    }
+    found
+}
+
+/// Trim a possibly cap-truncated reply so it ends cleanly.
+///
+/// The rules, in order:
+/// 1. already ends with a complete sentence → returned unchanged (a natural
+///    stop is never trimmed; there is nothing to gain and content to lose);
+/// 2. otherwise cut back to the last complete sentence;
+/// 3. no sentence boundary at all → drop the partial word and add a period,
+///    so a single long clause still ends cleanly rather than mid-word;
+/// 4. if that would leave NOTHING (one very long token, no whitespace) →
+///    return the text unchanged. A truncated answer beats no answer, and
+///    silently emitting an empty reply would look like a service fault.
+///
+/// Pure and total: no allocation-free guarantees, but no panics and no
+/// dependence on how the text was produced.
+#[must_use]
+pub fn sentence_safe(text: &str) -> String {
+    let t = text.trim_end();
+    if t.is_empty() || ends_with_complete_sentence(t) {
+        return t.to_string();
+    }
+    if let Some(idx) = last_sentence_terminal(t) {
+        // Keep the terminal itself, plus any closer that follows it.
+        let end = t[idx..]
+            .char_indices()
+            .take_while(|(n, c)| *n == 0 || TRAILING_CLOSERS.contains(c))
+            .last()
+            .map_or(idx, |(n, c)| idx + n + c.len_utf8());
+        return t[..end].trim_end().to_string();
+    }
+    // No boundary: drop the trailing partial word.
+    if let Some(sp) = t.rfind(char::is_whitespace) {
+        let head = t[..sp]
+            .trim_end()
+            .trim_end_matches([',', ';', ':', '-', '—']);
+        if !head.is_empty() {
+            return format!("{head}.");
+        }
+    }
+    // A single token with no boundary and no whitespace — keep it.
+    t.to_string()
+}
+
 /// Leading motion verbs/phrases → the utterance is an explicit motion request
 /// and chat refuses deterministically (no model call, no forwarding — chat
 /// NEVER invokes the motion door). Conservative: only a LEADING match counts
@@ -782,6 +882,7 @@ pub struct ChatService<M: ChatModelClient> {
     fast_routed: u64,
     identity_routed: u64,
     motion_refused: u64,
+    sentence_trimmed: u64,
 }
 
 impl<M: ChatModelClient> ChatService<M> {
@@ -797,12 +898,21 @@ impl<M: ChatModelClient> ChatService<M> {
             fast_routed: 0,
             identity_routed: 0,
             motion_refused: 0,
+            sentence_trimmed: 0,
         }
     }
 
     #[must_use]
     pub fn motion_shape_guarded(&self) -> u64 {
         self.motion_shape_guarded
+    }
+
+    /// How many replies were cut back to their last complete sentence — i.e.
+    /// how often the output cap actually truncated generation. A rising count
+    /// is the signal that the cap is too tight for the questions being asked.
+    #[must_use]
+    pub fn sentence_trimmed(&self) -> u64 {
+        self.sentence_trimmed
     }
 
     /// How many identity/memory questions were answered from the fixed table
@@ -1001,11 +1111,20 @@ impl<M: ChatModelClient> ChatService<M> {
             } else {
                 // Held back but harmless (e.g. fenced non-intent JSON): emit
                 // it now as one late sentence rather than dribbling stale
-                // deltas.
+                // deltas. NOT sentence-trimmed — this text is structured
+                // output, and cutting it at a period would corrupt it.
                 full.clone()
             }
         } else {
-            full.clone()
+            // Sentence-safe termination: the output cap stops generation
+            // wherever it lands, so a reply that does not already end in
+            // terminal punctuation is cut back to its last complete sentence.
+            // A naturally-finished reply is returned untouched.
+            let safe = sentence_safe(&full);
+            if safe.len() != full.trim_end().len() {
+                self.sentence_trimmed += 1;
+            }
+            safe
         };
         // A guarded/held-back reply surfaces as a single sentence event here.
         if hold_back == Some(true) || looks_like_motion_intent_json(&full) {
@@ -1018,11 +1137,19 @@ impl<M: ChatModelClient> ChatService<M> {
                 return Err("MICK_CHAT_CANCELLED");
             }
         } else if let Some(tail) = chunker.finish() {
-            if first_sentence_ms.is_none() {
-                first_sentence_ms = Some(clock().saturating_sub(t0));
-            }
-            if !emit(&StreamEvent::Sentence { text: tail }) {
-                return Err("MICK_CHAT_CANCELLED");
+            // The tail is the fragment the cap left behind, so it gets the
+            // SAME trimming as the final reply — otherwise the spoken stream
+            // (which follows Sentence events) would say the partial word the
+            // reply no longer contains. An empty result means the fragment
+            // held nothing complete: emit nothing rather than a stub.
+            let tail = sentence_safe(&tail);
+            if !tail.is_empty() {
+                if first_sentence_ms.is_none() {
+                    first_sentence_ms = Some(clock().saturating_sub(t0));
+                }
+                if !emit(&StreamEvent::Sentence { text: tail }) {
+                    return Err("MICK_CHAT_CANCELLED");
+                }
             }
         }
 
@@ -1426,6 +1553,166 @@ mod tests {
             !CHAT_SYSTEM_PROMPT.contains("may discuss"),
             "a closed domain allowlist must not return"
         );
+    }
+
+    // --- sentence-safe termination -------------------------------------------
+
+    /// Rule 1: a naturally-finished reply is returned UNTOUCHED. Trimming it
+    /// could only lose content, and a natural stop is already well-formed.
+    #[test]
+    fn a_complete_reply_is_never_trimmed() {
+        for complete in [
+            "Saturn has rings.",
+            "Which one did you mean?",
+            "Stand by!",
+            "He said \"go.\"",
+            "Check the coolant (it runs hot).",
+            "The gap is 3.5 metres.",
+        ] {
+            assert_eq!(
+                sentence_safe(complete),
+                complete,
+                "trimmed a complete reply"
+            );
+            assert!(ends_with_complete_sentence(complete));
+        }
+    }
+
+    /// Rule 2 — THE live defect: "…primarily composed of nitro" ends at the
+    /// last complete sentence instead of mid-word.
+    #[test]
+    fn a_cap_truncated_reply_falls_back_to_its_last_complete_sentence() {
+        let live = "Saturn has over 80 moons orbiting it. The largest of these are Titan and \
+                    Enceladus which both exhibit fascinating characteristics, such as Titan's \
+                    thick atmosphere primarily composed of nitro";
+        assert_eq!(sentence_safe(live), "Saturn has over 80 moons orbiting it.");
+        assert!(ends_with_complete_sentence(&sentence_safe(live)));
+    }
+
+    /// Rule 3: no boundary anywhere → drop the partial word, add a period.
+    /// The result is a clean clause, never a fragment ending mid-word.
+    #[test]
+    fn a_reply_with_no_sentence_boundary_ends_at_the_last_whole_word() {
+        assert_eq!(
+            sentence_safe("I'm running the locally configured langu"),
+            "I'm running the locally configured."
+        );
+        // Trailing connectives are dropped rather than left dangling.
+        assert_eq!(
+            sentence_safe("check the pump, the valve, and"),
+            "check the pump, the valve."
+        );
+        assert_eq!(
+            sentence_safe("first the pump; then the val"),
+            "first the pump; then the."
+        );
+    }
+
+    /// Rule 4: trimming must never produce an empty reply. A single long
+    /// token with no boundary and no whitespace is kept as-is — a truncated
+    /// answer beats no answer, and an empty reply reads as a service fault.
+    #[test]
+    fn trimming_never_empties_a_reply() {
+        for pathological in ["supercalifragilistic", "x", "…"] {
+            let out = sentence_safe(pathological);
+            assert!(!out.is_empty(), "trimming emptied {pathological:?}");
+        }
+        // Genuinely empty input stays empty (there was nothing to say).
+        assert_eq!(sentence_safe(""), "");
+        assert_eq!(sentence_safe("   "), "");
+    }
+
+    /// A decimal point is not a sentence end — the same guard the streaming
+    /// chunker applies, so chunks and the final reply agree.
+    #[test]
+    fn a_decimal_point_is_not_a_sentence_boundary() {
+        // Neither decimal point counts as a boundary, so rule 3 applies: the
+        // partial word "kilo" is dropped and the complete "12.75" is kept.
+        assert_eq!(
+            sentence_safe("The clearance is 3.5 metres and the load is 12.75 kilo"),
+            "The clearance is 3.5 metres and the load is 12.75."
+        );
+        assert_eq!(last_sentence_terminal("3.5"), None);
+        // But a decimal in a sentence that DOES end normally is untouched,
+        // and a real terminal after a decimal is still found.
+        assert_eq!(
+            sentence_safe("The gap is 3.5 metres. Now check the val"),
+            "The gap is 3.5 metres."
+        );
+    }
+
+    /// The wiring: a cap-truncated stream ends cleanly in BOTH the final
+    /// reply and the spoken Sentence events, and the counter records it.
+    #[test]
+    fn a_truncated_stream_is_trimmed_in_the_reply_and_the_spoken_tail() {
+        let mut h = harness(&[
+            "Saturn has rings. ",
+            "Titan has a thick atmosphere primarily composed of nitro",
+        ]);
+        let (events, r) = run(&mut h, "tell me one fact about saturn");
+        r.expect("streams");
+        let done = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::Done { reply, .. } => Some(reply.clone()),
+                _ => None,
+            })
+            .expect("Done carries the reply");
+        assert_eq!(done, "Saturn has rings.");
+        assert!(ends_with_complete_sentence(&done));
+        assert!(!done.contains("nitro"), "the partial word survived: {done}");
+        // Every spoken chunk is a complete sentence too — the voice path
+        // follows Sentence events, so trimming only the reply would leave the
+        // robot SAYING the fragment the transcript no longer shows.
+        for ev in &events {
+            if let StreamEvent::Sentence { text } = ev {
+                assert!(
+                    ends_with_complete_sentence(text),
+                    "spoken chunk is not a complete sentence: {text:?}"
+                );
+            }
+        }
+        assert_eq!(h.svc.sentence_trimmed(), 1);
+    }
+
+    /// Non-vacuity + the TTFT guarantee: a naturally-finished stream is
+    /// unchanged, still streams its deltas, and still stamps a first-token
+    /// time strictly before completion. Trimming happens at TERMINATION, so
+    /// it cannot touch time-to-first-token.
+    #[test]
+    fn a_complete_stream_is_untouched_and_ttft_is_unaffected() {
+        let mut h = harness(&["Rings", ". ", "Saturn has many moons", "."]);
+        let (events, r) = run(&mut h, "tell me one fact about saturn");
+        let timing = r.expect("streams");
+        assert_eq!(h.svc.sentence_trimmed(), 0, "a complete reply was trimmed");
+        assert!(
+            timing.ttft_ms > 0 && timing.ttft_ms < timing.total_ms,
+            "ttft must still precede completion"
+        );
+        let done = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::Done { reply, .. } => Some(reply.clone()),
+                _ => None,
+            })
+            .expect("Done");
+        assert_eq!(done, "Rings. Saturn has many moons.");
+    }
+
+    /// Held-back structured output is NOT sentence-trimmed: cutting JSON at a
+    /// period would corrupt it, and the motion guard already replaces it.
+    #[test]
+    fn guarded_output_is_not_sentence_trimmed() {
+        let live = r#"{"intent":"cruise","target_speed_mps":10}"#;
+        let mut h = harness(&[live]);
+        let (_, r) = run(&mut h, "how fast can you go");
+        r.expect("streams");
+        assert_eq!(
+            h.svc.sentence_trimmed(),
+            0,
+            "the guard path must not report a sentence trim"
+        );
+        assert!(h.svc.motion_shape_guarded() >= 1);
     }
 
     // --- deterministic identity + memory routes ------------------------------
