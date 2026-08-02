@@ -736,7 +736,18 @@ On PASS it pins the model's Ollama **digest + vetted-at timestamp**
 (`~/.kirra_rabbit_model.pin`) — the "no version bump" stealth-update guard;
 `--pin-check` compares, boot warns (voice line A5) on drift. Commands:
 `RABBIT_BRINGUP_RUNBOOK.md` → "Swapping the LLM". Pure logic host-tested in
-`rabbit_voice_test.py`.
+`rabbit_voice_test.py`. The SECOND gate, for the chat sidecar
+(`KIRRA_MICK_CHAT_MODEL`, which had none): `mick_chat_model_smoketest.py` drives
+the DEPLOYED sidecar (`KIRRA_MICK_CHAT_URL`, `GET /health` names the model that
+actually resolved — the unit's `Environment=` is only a default `kirra.env` may
+override) and asserts the deterministic fast routes still fire with no model
+call, that an ordinary question is answered in PROSE, that robot state the
+request never supplied is DECLINED rather than invented, and that every reply
+ends on a complete sentence. Its judgements are pure and CI-run
+(`mick_chat_contract.py` + `mick_chat_contract_test.py`); the live half is
+bench-only. Both gates write the SAME per-model pin map, so one file records
+which weights were vetted when — load-bearing now that all three doer roles
+default to ONE model, where a single stealth update lands on all of them.
 
 **OTA voice check** (`rabbit_ota.py` + `kirra-ota-check.timer`): "stage and ask" —
 `kirra-ota-ctl pull` stages only; applying is a deliberate health-gated `probe`
