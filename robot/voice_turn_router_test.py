@@ -57,6 +57,11 @@ class StubState:
     intent_paths: list[str] = []
     intent_mode = "accept"
     intent_bodies: list[dict] = []
+    # The typed-destination door lives on the SAME sidecar as /intent, so the
+    # intent stub serves both paths and one list records every request — that
+    # is what makes "exactly one endpoint per transcript" checkable.
+    dest_mode = "resolved"
+    dest_bodies: list[dict] = []
 
 
 def _sse(handler, events):
@@ -84,12 +89,27 @@ class ChatStub(BaseHTTPRequestHandler):
         pass
 
 
+DEST_REFUSALS = {
+    "not_found": ("DEST_NOT_FOUND", 422),
+    "no_registry": ("DEST_NO_REGISTRY", 422),
+    "ambiguous": ("DEST_AMBIGUOUS", 422),
+    "stale": ("DEST_STALE", 422),
+    "unsupported": ("DEST_UNSUPPORTED_ADDRESS", 422),
+    "low_confidence": ("DEST_LOW_CONFIDENCE", 422),
+    "rate": ("DEST_RATE_LIMITED", 429),
+    "coords": ("DEST_COORDINATES_FORBIDDEN", 422),
+}
+
+
 class IntentStub(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         StubState.intent_paths.append(self.path)
         length = int(self.headers.get("Content-Length", 0))
-        StubState.intent_bodies.append(
-            json.loads(self.rfile.read(length) or b"{}"))
+        body = json.loads(self.rfile.read(length) or b"{}")
+        if self.path == "/destination":
+            StubState.dest_bodies.append(body)
+            return self._destination()
+        StubState.intent_bodies.append(body)
         mode = StubState.intent_mode
         if mode == "accept":
             body, code = {"ok": True, "seq": 12, "at_ms": 1,
@@ -107,6 +127,38 @@ class IntentStub(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
+        else:  # pragma: no cover
+            raise AssertionError(mode)
+        payload = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _destination(self):
+        mode = StubState.dest_mode
+        if mode == "resolved":
+            body, code = {"ok": True, "seq": 4, "at_ms": 1, "outcome": "resolved",
+                          "kind": "named_place", "source": "place_registry",
+                          "route_resolution": "none"}, 200
+        elif mode == "resolved_route":
+            body, code = {"ok": True, "seq": 5, "at_ms": 1, "outcome": "resolved",
+                          "kind": "saved_route", "source": "route_registry",
+                          "route_resolution": "first_waypoint_only"}, 200
+        elif mode == "garbage":
+            payload = b"not json"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        elif mode == "ok_without_outcome":
+            # A 200 that never says "resolved" is NOT an acceptance.
+            body, code = {"ok": True, "seq": 9}, 200
+        elif mode in DEST_REFUSALS:
+            err, code = DEST_REFUSALS[mode]
+            body = {"ok": False, "error": err, "detail": "refused"}
         else:  # pragma: no cover
             raise AssertionError(mode)
         payload = json.dumps(body).encode()
@@ -136,6 +188,7 @@ class Turn:
         StubState.chat_paths.clear()
         StubState.intent_paths.clear()
         StubState.intent_bodies.clear()
+        StubState.dest_bodies.clear()
         out, err = io.StringIO(), io.StringIO()
         real_out, real_err = sys.stdout, sys.stderr
         sys.stdout, sys.stderr = out, err
@@ -147,7 +200,12 @@ class Turn:
                 os.environ.pop(k, None)
         self.out, self.err = out.getvalue(), err.getvalue()
         self.chat = list(StubState.chat_paths)
-        self.intent = list(StubState.intent_paths)
+        # Every request to the Mick sidecar, by path — so a test can assert
+        # BOTH which door was used and that no second door was touched.
+        self.mick = list(StubState.intent_paths)
+        self.intent = [p for p in StubState.intent_paths if p == "/intent"]
+        self.dest = [p for p in StubState.intent_paths if p == "/destination"]
+        self.dest_bodies = list(StubState.dest_bodies)
 
 
 # --- endpoint isolation -------------------------------------------------------
@@ -239,6 +297,227 @@ def test_one_transcript_one_request_and_no_replay():
         check(len(t1.intent) == 1 and len(t2.intent) == 1,
               "each spoken turn maps to exactly ONE request — the router "
               "itself never replays or retries")
+    finally:
+        cs.shutdown()
+        is_.shutdown()
+
+
+# --- typed destinations -------------------------------------------------------
+
+def test_destination_contacts_only_the_resolver_door():
+    cs, cu = serve(ChatStub)
+    is_, iu = serve(IntentStub)
+    try:
+        StubState.dest_mode = "resolved"
+        t = Turn(cu, iu, "drive to the kitchen")
+        check(t.dest == ["/destination"],
+              f"a destination must hit /destination exactly once: {t.mick}")
+        check(t.intent == [], f"a destination must NEVER touch /intent: {t.mick}")
+        check(t.chat == [], f"a destination must NEVER touch chat: {t.chat}")
+        check(t.dest_bodies == [{"destination": {"kind": "named_place",
+                                                 "query": "kitchen"}}],
+              f"the typed request is the ONLY payload: {t.dest_bodies}")
+        check(router.LINE_DEST_ACCEPTED in t.out,
+              f"the admission line is spoken: {t.out!r}")
+    finally:
+        cs.shutdown()
+        is_.shutdown()
+
+
+def test_the_admission_ack_claims_no_movement_and_speaks_no_geometry():
+    cs, cu = serve(ChatStub)
+    is_, iu = serve(IntentStub)
+    try:
+        StubState.dest_mode = "resolved"
+        t = Turn(cu, iu, "drive to the kitchen")
+        for banned in ("moving", "moved", "driving", "arrived", "arrival",
+                       "executing", "complete", "started", "x_m", "y_m",
+                       "metre", "meters", "coordinates", "map"):
+            check(banned not in t.out.lower(),
+                  f"the ack must be admission-only, found {banned!r}: {t.out!r}")
+    finally:
+        cs.shutdown()
+        is_.shutdown()
+
+
+def test_every_refusal_outcome_speaks_its_fixed_line_with_no_fallback():
+    cs, cu = serve(ChatStub)
+    is_, iu = serve(IntentStub)
+    try:
+        cases = [
+            ("not_found", "drive to the kitchen", router.LINE_DEST_NOT_FOUND),
+            ("no_registry", "drive to the kitchen", router.LINE_DEST_NOT_FOUND),
+            ("ambiguous", "drive to the red cup", router.LINE_DEST_AMBIGUOUS),
+            ("stale", "drive to the red cup", router.LINE_DEST_STALE),
+            ("low_confidence", "drive to the red cup", router.LINE_DEST_STALE),
+            ("unsupported", "drive to 125 Main Street",
+             router.LINE_DEST_UNSUPPORTED),
+            ("rate", "drive to the kitchen", router.LINE_DEST_RATE),
+            ("coords", "drive to the kitchen", router.LINE_DEST_INVALID),
+            ("garbage", "drive to the kitchen", router.LINE_DEST_INVALID),
+            ("ok_without_outcome", "drive to the kitchen",
+             router.LINE_DEST_INVALID),
+        ]
+        for mode, text, line in cases:
+            StubState.dest_mode = mode
+            t = Turn(cu, iu, text)
+            check(len(t.dest) == 1,
+                  f"{mode}: exactly one attempt, NO retry: {t.mick}")
+            check(t.intent == [],
+                  f"{mode}: a destination failure must NEVER fall back to /intent")
+            check(t.chat == [],
+                  f"{mode}: a destination failure must NEVER fall back to chat")
+            check(line in t.out, f"{mode}: must speak {line!r}, got {t.out!r}")
+        StubState.dest_mode = "resolved"
+    finally:
+        cs.shutdown()
+        is_.shutdown()
+
+
+def test_saved_route_admission_says_first_waypoint_only():
+    cs, cu = serve(ChatStub)
+    is_, iu = serve(IntentStub)
+    try:
+        StubState.dest_mode = "resolved_route"
+        t = Turn(cu, iu, "run route A")
+        check(t.dest_bodies == [{"destination": {"kind": "saved_route",
+                                                 "query": "route a"}}],
+              f"the typed route request: {t.dest_bodies}")
+        check(router.LINE_DEST_ACCEPTED_FIRST_WAYPOINT in t.out,
+              f"Phase 1 must be spoken, not implied: {t.out!r}")
+        # It must never sound like the whole route is under way.
+        for banned in ("route started", "following the route", "en route"):
+            check(banned not in t.out.lower(),
+                  f"must not imply full route execution ({banned!r}): {t.out!r}")
+        check("first_waypoint_only" in t.err,
+              "the Phase-1 marker must be in the stage log")
+        StubState.dest_mode = "resolved"
+    finally:
+        cs.shutdown()
+        is_.shutdown()
+
+
+def test_unreachable_resolver_fails_safe_without_any_fallback():
+    cs, cu = serve(ChatStub)
+    try:
+        t = Turn(cu, "http://127.0.0.1:1", "drive to the kitchen")
+        check(router.LINE_DEST_DOWN in t.out,
+              f"an unreachable resolver speaks the outage line: {t.out!r}")
+        check(t.chat == [], "a resolver outage must not reroute to chat")
+    finally:
+        cs.shutdown()
+
+
+def test_one_destination_transcript_makes_exactly_one_request():
+    cs, cu = serve(ChatStub)
+    is_, iu = serve(IntentStub)
+    try:
+        StubState.dest_mode = "resolved"
+        t1 = Turn(cu, iu, "drive to the kitchen", turn=1)
+        t2 = Turn(cu, iu, "drive to the kitchen", turn=2)
+        check(len(t1.dest) == 1 and len(t2.dest) == 1,
+              "each spoken turn maps to exactly ONE resolver request — the "
+              "router never replays or retries a grounded destination")
+        # A fresh process (the module is stateless) cannot replay either: the
+        # statelessness test pins that no transcript or request is persisted.
+    finally:
+        cs.shutdown()
+        is_.shutdown()
+
+
+def test_ambiguous_destination_contacts_nothing():
+    cs, cu = serve(ChatStub)
+    is_, iu = serve(IntentStub)
+    try:
+        for text in ("go there", "drive to it", "run it", "follow that"):
+            t = Turn(cu, iu, text)
+            check(t.mick == [] and t.chat == [],
+                  f"{text!r} must contact NOTHING: mick={t.mick} chat={t.chat}")
+    finally:
+        cs.shutdown()
+        is_.shutdown()
+
+
+def test_destination_prose_still_routes_to_chat_only():
+    cs, cu = serve(ChatStub)
+    is_, iu = serve(IntentStub)
+    try:
+        for text in ("tell me about the kitchen", "what is route planning",
+                     "where is the red cup"):
+            t = Turn(cu, iu, text)
+            check(t.chat == ["/chat/stream"] and t.mick == [],
+                  f"{text!r} must be chat-only: chat={t.chat} mick={t.mick}")
+    finally:
+        cs.shutdown()
+        is_.shutdown()
+
+
+def test_destination_content_never_appears_in_logs():
+    cs, cu = serve(ChatStub)
+    is_, iu = serve(IntentStub)
+    try:
+        StubState.dest_mode = "resolved"
+        # Distinctive markers in the place name, the address and the object.
+        for text in ("drive to the zebrawaffle",
+                     "drive to 125 Unicornfeather Street",
+                     "drive to the red cup"):
+            t = Turn(cu, iu, text)
+            for marker in ("zebrawaffle", "unicornfeather", "red cup",
+                           "Unicornfeather"):
+                check(marker not in t.err,
+                      f"destination content leaked to logs for {text!r}")
+        # The refusal DETAIL from the resolver is never echoed to logs either.
+        StubState.dest_mode = "not_found"
+        t = Turn(cu, iu, "drive to the zebrawaffle")
+        check("zebrawaffle" not in t.err and "refused" not in t.err,
+              f"a refusal must log the CODE only: {t.err!r}")
+        check("resolve_outcome=dest_not_found" in t.err,
+              f"the stable outcome token is logged: {t.err!r}")
+        StubState.dest_mode = "resolved"
+    finally:
+        cs.shutdown()
+        is_.shutdown()
+
+
+def test_destination_speech_holds_the_playback_lock():
+    # Every spoken destination line goes through speak_line, which holds the
+    # PlaybackGuard for the whole utterance — so the robot cannot hear its own
+    # acknowledgement and start another turn (the #1290 self-echo regression).
+    import inspect
+    import voice_playback
+    src = inspect.getsource(router.speak_line)
+    check("PlaybackGuard" in src, "speak_line must hold the playback guard")
+    body = inspect.getsource(router.handle_turn)
+    check(body.count("speak_line") >= 3,
+          "every non-chat branch (motion, destination, ambiguous) speaks "
+          "through the guarded path")
+    # And while the lock is held no trigger may be emitted at all — so a
+    # destination acknowledgement cannot self-trigger the next turn.
+    check(not voice_playback.should_emit_trigger(
+        playback=True, episode_followups=0, max_followups=3),
+        "no turn may be created while playback holds the lock")
+    # The episode cap is unchanged by this PR: a destination turn is one
+    # real user turn and adds no follow-up of its own.
+    check(voice_playback.should_emit_trigger(
+        playback=False, episode_followups=0, max_followups=3),
+        "a genuine wake-free follow-up under the cap is still allowed")
+    check(not voice_playback.should_emit_trigger(
+        playback=False, episode_followups=3, max_followups=3),
+        "the existing follow-up cap still binds")
+
+
+def test_destination_turn_creates_no_automatic_follow_up():
+    # A destination turn is ONE user turn: the router speaks once and returns.
+    # It never issues a second request, and it never enqueues another turn.
+    cs, cu = serve(ChatStub)
+    is_, iu = serve(IntentStub)
+    try:
+        for mode in ("resolved", "not_found", "unsupported"):
+            StubState.dest_mode = mode
+            t = Turn(cu, iu, "drive to the kitchen")
+            check(len(t.dest) == 1 and t.chat == [],
+                  f"{mode}: exactly one request, no follow-up turn")
+        StubState.dest_mode = "resolved"
     finally:
         cs.shutdown()
         is_.shutdown()
@@ -354,6 +633,45 @@ def test_router_sources_know_only_the_two_http_doors():
     code = _code_only((HERE / "mick_voice_chat.py").read_text())
     check(join("/int", "ent") not in code,
           "the shared chat client must stay motion-free")
+
+
+def test_voice_router_cannot_import_or_reference_actuation():
+    """The structural fence, stated as a property of the SOURCE: no module in
+    the voice-router layer may import or name any actuation machinery. Only
+    comments and docstrings (which explain what the layer is fenced FROM) are
+    exempt — `_code_only` strips them, so a breach must be real code."""
+    import ast
+    join = lambda a, b: a + b  # noqa: E731 — needles built by concat so this
+    #                            test cannot match its own source text
+    forbidden_tokens = [
+        join("rcl", "py"), join("ro", "s2"), join("ser", "ial"),
+        join("cmd", "_vel"), join("Twi", "st"), join("release", "_token"),
+        join("Release", "Token"), join("actu", "ator"), join("Motor", "Serial"),
+        join("kirra_", "ffi"), join("set_car", "_motion"), join("/pl", "an"),
+    ]
+    forbidden_imports = {join("rcl", "py"), join("ser", "ial"),
+                         join("kirra_", "ffi"), join("kirra_motor", "_consumer"),
+                         join("kirra_release", "_publisher")}
+    layer = ("voice_route.py", "voice_turn_router.py", "mick_voice_chat.py")
+    for name in layer:
+        src = (HERE / name).read_text()
+        code = _code_only(src)
+        for needle in forbidden_tokens:
+            check(needle.lower() not in code.lower(),
+                  f"{name} references actuation machinery {needle!r}")
+        # An import is checked structurally, not textually: a renamed or
+        # aliased import still shows up as a module name in the AST.
+        for node in ast.walk(ast.parse(src)):
+            mods = []
+            if isinstance(node, ast.Import):
+                mods = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                mods = [node.module or ""]
+            for m in mods:
+                root = m.split(".")[0]
+                check(root not in forbidden_imports,
+                      f"{name} imports {m!r} — the voice layer has no "
+                      "actuation dependency")
 
 
 def test_explicit_motion_cannot_reach_chat_under_normal_routing():

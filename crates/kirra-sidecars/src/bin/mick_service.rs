@@ -18,6 +18,17 @@
 //!     → 422 {"ok":false,"error":"MICK_JSON_PARSE_ERROR"}   (fail-closed: no intent latched)
 //!     → 429 {"ok":false,"error":"MICK_RATE_LIMITED"}
 //!   GET  /intent/last     → {"intent":{...},"seq":n,"at_ms":t} | {"intent":null}
+//!   POST /destination     {"destination":{"kind":"named_place","query":"kitchen"},
+//!                          "targets"?:[..], "targets_stamp_ms"?, "ego"?}
+//!     → 200 {"ok":true,"seq":n,"outcome":"resolved",..}  ADMISSION ONLY — no pose
+//!     → 422 {"ok":false,"error":"DEST_NOT_FOUND"|"DEST_AMBIGUOUS"|"DEST_STALE"|
+//!            "DEST_UNSUPPORTED_ADDRESS"|…,"detail":"<operator sentence>"}
+//!            (fail-closed: NOTHING latched, seq unchanged)
+//!     → 429 {"ok":false,"error":"DEST_RATE_LIMITED"}
+//!   GET  /destination/last → {"destination":{..,"frame":"map"|"ego",..},"seq":n}
+//!                            | {"destination":null}. FRAME-EXPLICIT and its own
+//!                            channel: a map-frame registry pose published on
+//!                            /intent/last would be misread as ego-relative.
 //!   GET  /narration/last  → relay of the verifier's #893 GET /system/verdicts/last
 //!                           (AUDITOR tier — never the admin token); 503 if unconfigured
 //!   GET  /health          → {"status":"ok"}
@@ -27,7 +38,10 @@
 //! OllamaClient pair); `KIRRA_MICK_PERSONA` = `chauffeur` (default) |
 //! `courier`; `KIRRA_VERIFIER_URL` + `KIRRA_MICK_AUDITOR_TOKEN` (both or
 //! neither — half-configured aborts startup);
-//! `KIRRA_SIDECAR_ALLOW_NONLOCAL=1` to permit a routable bind.
+//! `KIRRA_SIDECAR_ALLOW_NONLOCAL=1` to permit a routable bind. The typed
+//! destination registries/policy come from the SAME `KIRRA_DEST_*` vars
+//! `planner_service` reads (`destination::resolver_from_env`) — one config
+//! path, so two processes cannot disagree about what "the kitchen" means.
 //!
 //! Fail-closed by construction: no Ollama / a hallucinated reply / a
 //! non-finite goal → 422 and NO latched intent — the doer sees nothing new,
@@ -37,6 +51,8 @@ use std::net::{TcpListener, TcpStream};
 
 use kirra_mick::OllamaClient;
 use kirra_planner::LlmBrain;
+use kirra_sidecars::destination::resolver_from_env;
+use kirra_sidecars::destination_service::{DestinationRequest, DestinationService};
 use kirra_sidecars::http::{read_request, respond, respond_error};
 use kirra_sidecars::mick::{IntentOutcome, IntentRequest, IntentService};
 use kirra_sidecars::narrator::{fetch_last_verdict, NarratorConfig};
@@ -45,6 +61,7 @@ use kirra_sidecars::net::{allow_nonlocal_from_env, enforce_bind_policy, now_ms};
 fn serve(
     mut stream: TcpStream,
     svc: &mut IntentService<OllamaClient>,
+    dest: &mut DestinationService,
     narrator: Option<&NarratorConfig>,
 ) {
     let req = match read_request(&mut stream) {
@@ -85,6 +102,35 @@ fn serve(
                 "400 Bad Request",
                 &serde_json::json!({"ok": false, "error": format!("{e}")}).to_string(),
             ),
+        },
+        // The TYPED DESTINATION door — "drive to the kitchen". The caller
+        // sends a kind + the operator's words; the TRUSTED resolver supplies
+        // the coordinates. Every non-resolved outcome is a 422 carrying the
+        // stable DEST_* code, with the latch and seq UNCHANGED: no grounded
+        // destination, no goal, no plan.
+        ("POST", "/destination") => match serde_json::from_slice::<DestinationRequest>(&req.body) {
+            Ok(r) => match dest.handle(&r, now_ms()) {
+                // Admission only — the success body carries NO pose.
+                Ok(accepted) => respond(&mut stream, "200 OK", &accepted.to_post_wire()),
+                Err(refusal) if refusal.code == "DEST_RATE_LIMITED" => {
+                    respond(&mut stream, "429 Too Many Requests", &refusal.to_json())
+                }
+                Err(refusal) => {
+                    respond(&mut stream, "422 Unprocessable Entity", &refusal.to_json())
+                }
+            },
+            Err(e) => respond(
+                &mut stream,
+                "400 Bad Request",
+                &serde_json::json!({"ok": false, "error": format!("{e}")}).to_string(),
+            ),
+        },
+        // The doer-facing grounded destination, FRAME-EXPLICIT. Deliberately
+        // its own channel: `/intent/last` is consumed as ego-frame, and a
+        // map-frame registry pose published there would be silently misread.
+        ("GET", "/destination/last") => match dest.last() {
+            Some(d) => respond(&mut stream, "200 OK", &d.to_wire()),
+            None => respond(&mut stream, "200 OK", "{\"destination\":null}"),
         },
         ("GET", "/intent/last") => match svc.last() {
             Some(a) => respond(&mut stream, "200 OK", &a.to_wire()),
@@ -152,17 +198,24 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // The trusted destination resolver, from the SAME env config
+    // planner_service uses — one config path, so two processes can never
+    // disagree about what "the kitchen" means. Malformed → startup abort.
+    let mut dest = DestinationService::new(resolver_from_env().unwrap_or_else(|e| {
+        eprintln!("mick_service: destination config: {e}");
+        std::process::exit(1);
+    }));
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| {
         eprintln!("mick_service: bind {addr}: {e}");
         std::process::exit(1);
     });
     println!(
-        "Mick intent service on http://{addr}  (POST /intent, GET /intent/last, GET /narration/last, GET /health) — persona {persona_label}, narrator {}",
+        "Mick intent service on http://{addr}  (POST /intent, GET /intent/last, POST /destination, GET /destination/last, GET /narration/last, GET /health) — persona {persona_label}, narrator {}",
         if narrator.is_some() { "on" } else { "off" }
     );
     for stream in listener.incoming() {
         match stream {
-            Ok(s) => serve(s, &mut svc, narrator.as_ref()),
+            Ok(s) => serve(s, &mut svc, &mut dest, narrator.as_ref()),
             Err(e) => eprintln!("mick_service: accept error: {e}"),
         }
     }

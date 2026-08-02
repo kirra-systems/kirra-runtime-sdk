@@ -4,6 +4,84 @@
 trusted resolver chooses the actual coordinates. The LLM never invents map
 coordinates, object poses, addresses, or routes.**
 
+## The live voice path
+
+Destination-shaped speech no longer goes to the ordinary `/intent` door (where
+a model would have had to invent a goal point). It routes to the typed
+destination door:
+
+```
+wake phrase → bounded capture → STT
+  → voice_route.classify_transcript      (PURE, deterministic — no LLM)
+      ├─ conversation      → POST /chat/stream
+      ├─ explicit motion   → POST /intent            (unchanged)
+      ├─ semantic destination
+      │     → typed DestinationRef {"kind":…, "query":…}
+      │     → POST /destination  (mick_service)
+      │        → DestinationRef::parse_json   (the ONE fail-closed parse)
+      │        → DestinationResolver          (the ONLY source of coordinates)
+      │        → grounded target latched on GET /destination/last
+      │        → ordinary MickIntent::GoTo → Occy → KIRRA checker → release
+      │                                       → verifying consumer
+      └─ ambiguous         → a fixed local clarification, NO endpoint
+```
+
+**One transcript reaches at most one endpoint.** A destination that does not
+resolve produces **no planner request at all** — there is no fallback to
+`/intent`, no fallback to chat, and no retry (a retry could duplicate an
+accepted grounded target).
+
+The voice router has **zero motion authority and never creates a coordinate**:
+it sends a kind plus the operator's own words, and the success body it gets
+back carries no pose — so there is nothing for it to speak, log, or leak. The
+grounded pose lives only on the doer-facing latch.
+
+### Spoken outcomes
+
+| resolver outcome | spoken line |
+|---|---|
+| resolved | "Destination accepted for governed navigation." |
+| resolved (saved route) | "Destination accepted for governed navigation, first waypoint only." |
+| `DEST_NOT_FOUND` / `DEST_NO_REGISTRY` / `DEST_NOT_SEEN` | "I don't have a configured location matching that request." |
+| `DEST_AMBIGUOUS` | "That destination is ambiguous. Please be more specific." |
+| `DEST_STALE` / `DEST_LOW_CONFIDENCE` | "I no longer have a fresh position for that object." |
+| `DEST_UNSUPPORTED_ADDRESS` | "Address routing isn't configured on this robot." |
+| unreachable service | "The destination service is unavailable." |
+| malformed / unknown code | "I couldn't validate that destination." |
+
+Acceptance is **admission, not execution**: the ack never claims the robot
+moved or arrived. Every line is spoken through the existing `PlaybackGuard`,
+so the robot cannot hear its own acknowledgement and start another turn.
+
+### The phrase grammar (deliberately small, pure, no LLM)
+
+| said | typed request |
+|---|---|
+| "drive to the kitchen", "go to the charging dock", "take me to the workshop", "navigate to the front door", "head to the garage" | `{"kind":"named_place","query":"kitchen"}` |
+| "run route A", "follow route A", "take route A", "start patrol route", "follow the perimeter route" | `{"kind":"saved_route","query":"route a"}` |
+| "drive to the red cup", "go to the blue chair", "move near the person", "navigate to the box" | `{"kind":"tracked_object","class":"cup","color":"red"}` |
+| "drive to 125 Main Street" | `{"kind":"address","query":"125 Main Street"}` |
+
+Wake phrases, courtesy prefixes and articles are stripped; meaningful
+destination words are not. The object vocabulary is a **closed** list of
+classes and colours — free-form scene description is out of scope, and an
+unrecognised thing falls through to `named_place` where the registry refuses
+it. An address needs a leading house number **and** a street suffix.
+
+These never become destinations: "what is the kitchen used for", "tell me
+about Route 66", "where is the red cup", "what do you see near the chair",
+"explain how address routing works", "tell me about the kitchen", "what is
+route planning", "describe a red cup" (all conversation), and "go there",
+"take me there", "drive to it", "run it", "follow that" (all **ambiguous** —
+a pronoun names nothing, so the robot asks rather than guesses). "Drive
+forward one meter", "turn left", "stop" and "pull over" remain ordinary
+motion on `/intent`.
+
+**Reclassification note.** "go to the loading dock" / "take me to the dock"
+were `MOTION` before this integration and are now `DESTINATION`. That is the
+point: they name a place, and a place must be grounded by the trusted
+resolver rather than by a model guessing a goal point.
+
 Before this system, a spoken "drive to the kitchen" reached Mick's LLM, which
 could only answer with a `go_to`/`route_to` intent — i.e. with coordinates it
 made up. The typed destination layer replaces that with a typed, fail-closed
@@ -134,6 +212,40 @@ stale, so I won't drive on it"); a stale position is never driven to.
 Malformed knob values ABORT startup (`ObjectPolicy::validated`), never
 silently default.
 
+## mick_service wiring (the voice-facing door)
+
+```
+POST /destination  {"destination":{"kind":"named_place","query":"kitchen"},
+                    "targets"?:[…], "targets_stamp_ms"?, "ego"?}
+  → 200 {"ok":true,"seq":n,"outcome":"resolved","kind":…,"route_resolution":…}
+        ADMISSION ONLY — no pose, no map id
+  → 422 {"ok":false,"error":"DEST_…","detail":"<operator sentence>"}
+        fail-closed: NOTHING latched, seq unchanged
+  → 429 {"ok":false,"error":"DEST_RATE_LIMITED"}
+
+GET /destination/last → {"destination":{…,"frame":"map"|"ego",…},"seq":n}
+```
+
+`mick_service` reads the **same** `KIRRA_DEST_*` registry/policy vars as
+`planner_service` (`destination::resolver_from_env`) — one config path, so two
+processes can never disagree about what "the kitchen" means. A malformed value
+or an invalid registry aborts startup.
+
+**The latch is frame-explicit, and deliberately its own channel.** A registry
+pose is in the registry's map frame; `GET /intent/last` is consumed by
+`occy_doer` as **ego-frame at receipt**. Publishing a map pose there would be
+silently misread as ego-relative and aim the robot at the wrong place — so
+grounded destinations ride `GET /destination/last` with an explicit `frame`
+(`map` + `map_id`, or `ego`), and a consumer must understand the frame before
+it can use the pose.
+
+**Tracked objects need a perception-aware caller.** `mick_service` has no
+perception (it is inside the actuation fence — no ROS, no camera). Object
+resolution runs against the `targets` the *caller* supplies. The voice router
+supplies none, so an object destination spoken today resolves `DEST_STALE` —
+"the detector did not look" is never "it isn't there". Relaying live targets
+is the deferred doer-bridge step below.
+
 ## planner_service wiring
 
 `POST /plan` accepts an opt-in `destination` field (the `DestinationRef`
@@ -171,15 +283,34 @@ python3 robot/location_registry.py lookup "the dock" --places places.json
 Read-only; validation mirrors the resolver's rules (the Rust resolver
 remains authoritative — it re-validates at load).
 
+## Verification discipline
+
+**Keep the planner parked for initial verification.** With
+`kirra-planner.service` stopped, every step below exercises voice → typed
+destination → trusted resolver → refusal-or-admission and the robot cannot
+move. That is deliberate: the resolver round trip is what this integration
+adds, and it is verifiable without motion.
+
+Do **not** claim voice-to-destination navigation works on hardware until a
+real calibrated destination resolves *and* the full governed chain (Occy →
+checker → release token → verifying consumer) has been observed end to end.
+
 ## Deferred (documented, not wired in this slice)
 
-* **Live voice-loop rewiring** — the R2 voice router still sends
-  destination-shaped motion text to `POST /intent` (where the model answers
-  with a typed intent). Routing "go to X" through `destination_schema()` +
-  `DestinationRef` into the planner's `destination` channel needs the
-  mick-service endpoint + occy_doer bridge changes, done as its own slice.
+* **Doer-bridge consumption of the grounded latch** — `occy_doer` polls
+  `GET /intent/last` (ego-frame) and does not yet read
+  `GET /destination/last`. Consuming it requires honouring the explicit
+  `frame`: a `map` pose is usable only by a consumer localized against that
+  `map_id`. Until then a grounded destination is resolved, latched and
+  auditable, but is not yet picked up by the ROS doer.
+* **Live target relay for object destinations** — the voice path supplies no
+  `targets`, so spoken object destinations resolve `DEST_STALE`. A
+  perception-aware caller (the doer bridge) supplying `targets` +
+  `targets_stamp_ms` gets full standoff resolution today.
 * **Waypoint sequencing** for saved routes (mission layer receding-horizon
-  advance past the first waypoint).
+  advance past the first waypoint). Phase 1 grounds the FIRST waypoint only
+  and marks it `route_resolution=first_waypoint_only` on every wire read, in
+  the logs, and in the spoken acknowledgement.
 * **Map identity plumbing** — the plan request carries no map id today; the
   grounded `map_id` is echoed so a localized caller can check it.
 * **Address resolution** — requires a trusted geocoding source + map
