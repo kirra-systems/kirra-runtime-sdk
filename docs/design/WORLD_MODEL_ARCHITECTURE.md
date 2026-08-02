@@ -1017,6 +1017,25 @@ Named so they are not mistaken for solved:
 | **WM-9** | Operator teaching protocol — robot supplies pose, operator supplies meaning | Product-defining |
 | **WM-10** | Federation exchanges signed observations; ledgers stay local | Sets the fleet trajectory |
 
+### 23.0 ADR status index
+
+Drafted ADRs use the repository's sequential `NNNN-kebab-title.md` convention;
+the `WM-n` labels above are the blueprint's internal names and are carried in
+each ADR's title for cross-reference.
+
+| Blueprint | ADR | Title | Status |
+|---|---|---|---|
+| **WM-6** | [`0039`](../adr/0039-world-model-bidirectional-governor-fence.md) | Preserve bidirectional independence between the World Model and the Governor | **Proposed — not ratified on merge** |
+| **WM-1** | [`0040`](../adr/0040-world-model-ownership-and-boundary.md) | Establish `kirra-world` as the owner of semantic world evidence | **Proposed — not ratified on merge** |
+| **WM-2** | [`0041`](../adr/0041-world-model-persistence-architecture.md) | Use a SQLite event log with deterministic projections | **Proposed — measurement-gated** |
+| WM-3, WM-4, WM-5, WM-7, WM-8, WM-9, WM-10 | — | — | Not yet drafted |
+
+> These three ADRs deliberately depart from the repository's usual
+> *"Proposed (design note) — ratified on merge"* convention. Their ratification
+> criteria include named owner reviews and, for WM-2, measured target-hardware
+> evidence — none of which a merge can supply. **No implementation is
+> authorized by their existence.**
+
 ### 23.1 Ratification order
 
 The order is not arbitrary. It runs from *hardest to reverse* to *easiest*.
