@@ -1,9 +1,143 @@
-# Kirra Runtime SDK
+# Kirra OS
 
 ![CI](https://github.com/kirra-systems/kirra-runtime-sdk/actions/workflows/ci.yml/badge.svg)
 ![Version](https://img.shields.io/github/v/tag/kirra-systems/kirra-runtime-sdk)
 
-A distributed runtime legitimacy engine and safety governor for AI-driven robotic and edge systems. Kirra enforces **fail-closed trust semantics** across a heterogeneous fleet — preventing unsafe or unauthorized commands from reaching actuators regardless of what an AI model, LLM output, or upstream orchestration layer instructs.
+**The governed cognitive operating system for robots.**
+
+Kirra sits between probabilistic autonomy and physical actuation. It lets
+language models, learned planners, geometric planners, and other doers propose
+actions while an independent governed architecture decides what may safely
+reach the robot.
+
+At the human interface is **Mick, the Robot Companion**.
+
+> *"Operating system"* is the platform framing for the governed intelligence
+> and interaction layer **above** robotics middleware. Kirra is not a kernel,
+> not a certified operating system, and not a replacement for Linux or ROS 2.
+
+---
+
+## The architecture in one picture
+
+```
+Human
+  → Mick                    the Robot Companion — explains, clarifies, translates
+  → typed intent            language becomes a typed proposal
+  → Occy or another doer    proposes a plan or trajectory (untrusted)
+  → Kirra bounds and verifies   independent check against envelopes + containment
+  → verdict                 Accept · Clamp · MRCFallback · Pending
+  → release token           Ed25519 over exactly the approved bytes
+  → verifying consumer      verify-before-act at the hardware edge
+  → hardware
+```
+
+**Intelligence proposes. Architecture decides.**
+**Mick communicates. Occy proposes. Kirra decides.**
+
+---
+
+## The product family
+
+| Name | Role | Status |
+|---|---|---|
+| **Kirra OS** | Governed cognitive operating system for robots | Active |
+| **Mick** | The Robot Companion — conversation and explanation, **no actuation authority** | Active |
+| **Occy** | The untrusted planning doer (geometric, learned, or LLM-driven) | Active |
+| **Kirra Governor / Verifier** | The trusted checker and authorization boundary | Active |
+| **Taj** | Perception → objects, drivable corridor, per-output health | Active |
+| **Parko** | Vendor-neutral ML inference substrate | Active |
+| **Kirra Studio** | Developer and operations tooling | *Planned* |
+| **Kirra Fleet** | Fleet deployment and monitoring tooling | *Planned* |
+
+A doer is never trusted merely because it is well formed. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for the full picture and
+[`docs/adr/0014-rosmaster-r2-orin-nx-kirra-integration.md`](docs/adr/0014-rosmaster-r2-orin-nx-kirra-integration.md)–[`0015`](docs/adr/0015-rosmaster-r2-perception-layer.md)
+for the Rosmaster R2 + Jetson Orin NX reference integration.
+
+---
+
+## Safety qualification
+
+> **Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508 SIL 3 requirements. Independent third-party assessment has not yet been performed.**
+
+Alignment, mappings, tests, and draft evidence are **not** equivalent to
+independent certification. Nothing here has been certified, approved, or
+assessed by a third party, and every safety-case document is **Draft**.
+
+Full statement, claim taxonomy, evidence index, and assumptions of use:
+**[`SAFETY.md`](SAFETY.md)**.
+
+---
+
+## Major implemented capabilities
+
+- **Per-node Ed25519 attestation** — a node proves possession of its
+  registered attestation key; optional TPM2 quote under a per-node policy
+- **Live posture gating** — gray/black DAG traversal over the fleet dependency
+  graph; commands gated on current posture, stale cache fails closed
+- **Kinematic envelopes** — velocity, acceleration, yaw rate; non-finite
+  values rejected before any check
+- **Two-rate AV checking** — trajectory validated at planning rate, verdict
+  enforced at control rate
+- **RSS, containment, occlusion, and predictive bounds** on the AV line
+- **Release-token enforcement** — authorization bound cryptographically to
+  exactly the approved bytes
+- **Ed25519 fleet federation** — signed cross-controller reports, replay
+  prevention, generation ordering
+- **Hash-chained audit ledger** + deterministic incident replay
+- **Fail-closed everywhere** — missing, stale, malformed, unauthenticated, or
+  non-finite evidence never becomes a permissive default
+
+Each with links to its source: [`SAFETY.md`](SAFETY.md#technical-safety-mechanisms).
+
+---
+
+## Quick links
+
+| | |
+|---|---|
+| **Why this exists** | [`VISION.md`](VISION.md) |
+| **Non-negotiable principles** | [`CONSTITUTION.md`](CONSTITUTION.md) |
+| **How it fits together** | [`ARCHITECTURE.md`](ARCHITECTURE.md) · [`docs/ARCHITECTURE_STACK.md`](docs/ARCHITECTURE_STACK.md) |
+| **The Robot Companion** | [`COMPANION.md`](COMPANION.md) |
+| **Safety evidence** | [`SAFETY.md`](SAFETY.md) · [`docs/safety/SAFETY_CASE_INDEX.md`](docs/safety/SAFETY_CASE_INDEX.md) |
+| **What's next** | [`ROADMAP.md`](ROADMAP.md) |
+| **Decisions** | [`docs/adr/`](docs/adr/) |
+
+---
+
+## Current maturity
+
+| Area | State |
+|---|---|
+| Host-side governor, verifier, attestation, fleet trust | **Implemented and tested** |
+| AV checker (Occy line) — containment, RSS, occlusion, MRC | **Implemented and tested** |
+| Conversational companion (Mick) on the reference robot | **Implemented; hardware verification in progress** |
+| Voice → destination | **Resolution and admission only** — not completed navigation |
+| QNX safety partition | **Specified; pending hardware** |
+| Independent assessment | **Not started** |
+
+> **Physical deployment requires system integration and verification.** Kirra
+> is a Safety Element out of Context. System-level safety depends on the ODD,
+> hardware, configuration, maps, sensor contracts, integration assumptions, and
+> the verification chain you actually deploy — see
+> [`docs/safety/ASSUMPTIONS_OF_USE.md`](docs/safety/ASSUMPTIONS_OF_USE.md) and
+> [`docs/safety/GOVERNOR_SAFETY_MANUAL.md`](docs/safety/GOVERNOR_SAFETY_MANUAL.md).
+
+---
+
+## Build and test
+
+```bash
+cargo build --release --bin kirra_verifier_service   # core verifier
+cargo build --release -p kirra-sidecars              # Mick / Occy / Taj sidecars
+cargo test                                           # workspace tests
+cd parko && cargo test                               # ML + diverse-governor workspace
+```
+
+Full prerequisites, run, install and configuration instructions are in
+[Getting Started](#getting-started) below.
 
 > **Note on versioning:** v1.5.0 was a documentation-only release
 > (ASIL-D safety case foundation) tagged out-of-band by CI automation, so it
@@ -16,25 +150,9 @@ A distributed runtime legitimacy engine and safety governor for AI-driven roboti
 
 ---
 
-## The Kirra Stack (named components)
-
-The runtime is built as a **doer / checker** architecture — untrusted components *propose*, the governor *disposes*:
-
-| Component | Role |
-|---|---|
-| **Mick** | the LLM brain — System-2 cognition / LLM-as-planner. *Proposes* intent; never touches the actuator. |
-| **Taj** | perception — sensors → the Kirra perception input contract (objects + drivable corridor + per-output health). |
-| **Occy** (`kirra-planner`) | the formal autonomy planner — proposes trajectories the governor checks (Option-B, #131). |
-| **Kirra** | the fail-closed **governor / checker** — the sole authority that may pass a command to an actuator. |
-| **Parko** (`parko-core`) | vendor-neutral ML inference substrate (TensorRT / ONNX / OpenVINO / QNN / …) that Taj's ML phase runs on. |
-
-**The rule:** Mick reasons / Occy plans → they *propose* typed claims → **Kirra** validates against posture + the kinematic envelope + RSS/containment → only a clamped, safe command reaches the chassis. See `docs/adr/0014`–`0015` for the Rosmaster R2 + Jetson Orin NX reference integration.
-
----
-
 ## AI Safety Integration
 
-Kirra is the enforcement layer that prevents LLM hallucinations from reaching physical actuators — drop it between your AI agent and your robot fleet in minutes.
+Kirra is the enforcement layer that keeps unsafe model output from reaching physical actuators — drop it between your AI agent and your robot fleet.
 
 ```
 LLM output  →  Kirra Action Filter  →  Actuator
@@ -119,19 +237,27 @@ for the integrator runbook.
 
 Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508 SIL 3 requirements. Independent third-party assessment has not yet been performed.
 
+**The full safety statement, claim taxonomy, evidence index, assumptions of use,
+and non-certification notice live in [`SAFETY.md`](SAFETY.md).**
+
 ### Foundation (Kirra / Aegis line)
+
+> `AEGIS-*` IDs are **deliberately retained** across the Aegis → Kirra rename —
+> immutable cert-configuration lineage, not an incomplete rebrand. Newer
+> documents mint `KIRRA-*` IDs. The authoritative registry is
+> [`docs/safety/SAFETY_CASE_INDEX.md`](docs/safety/SAFETY_CASE_INDEX.md).
 
 | Document | Doc ID | Status |
 |----------|--------|--------|
-| Hazard Analysis and Risk Assessment (HARA) | KIRRA-HARA-001 | Draft |
+| Hazard Analysis and Risk Assessment (HARA) | AEGIS-HARA-001 | Draft |
 | Safety Goals | AEGIS-SG-001 | Draft |
-| Safety Architecture | KIRRA-SA-001 | Draft |
-| Requirements Traceability Matrix | KIRRA-RTM-001 | Draft |
-| Coding Guidelines | KIRRA-CG-001 | Draft |
-| Safety Standards Matrix (23 standards, 5 verticals) | KIRRA-STD-001 | Draft |
-| ASTM F3269 Run Time Assurance Mapping | KIRRA-F3269-001 | Draft |
+| Safety Architecture | AEGIS-SA-001 | Draft |
+| Requirements Traceability Matrix | AEGIS-RTM-001 | Draft |
+| Coding Guidelines | AEGIS-CG-001 | Draft |
+| Safety Standards Matrix (25 standards, 5 verticals) | AEGIS-STD-001 | Draft |
+| ASTM F3269 Run Time Assurance Mapping | AEGIS-F3269-001 | Draft |
 | ASTM F3269-21 Bounded Operation Mapping (current) | KIRRA-RTA-001 | Draft |
-| IEC 61508 SIL 3 Preliminary Claim Mapping | KIRRA-61508-001 | Draft |
+| IEC 61508 SIL 3 Preliminary Claim Mapping | AEGIS-61508-001 | Draft (Preliminary — pre-assessment) |
 | IEC 61508 SIL 3 Requirements Mapping (current) | KIRRA-SIL3-001 | Draft |
 | External Security/Safety Review Wrap-Up | KIRRA-REV-001 | Final |
 
@@ -232,7 +358,7 @@ See [docs/roadmap/](docs/roadmap/) for sequencing dependencies and execution pla
 
 Modern robotic and autonomous deployments increasingly rely on AI models to generate operational commands. Kirra sits between those models and the physical actuators, acting as a cryptographically-grounded safety layer that:
 
-- **Attests** each fleet node via HMAC-SHA256 challenge/response
+- **Attests** each fleet node via an Ed25519 challenge/response the node signs with its registered attestation key
 - **Tracks trust posture** per-node and fleet-wide using a gray/black DAG traversal algorithm
 - **Gates commands** based on live posture — locking out unsafe operations before they reach hardware
 - **Monitors AV sensor health** with a configurable telemetry watchdog and hysteresis-based recovery
@@ -604,7 +730,7 @@ KIRRA_VERIFIER_MODE=passive_standby KIRRA_INSTANCE_ID=kirra-standby ./kirra_veri
 | `dashmap` | 6 | Concurrent hashmaps |
 | `rusqlite` | 0.31 (bundled) | WAL-mode SQLite persistence |
 | `ed25519-dalek` | 2 | Federation signature verification |
-| `hmac` + `sha2` | 0.12 / 0.10 | Attestation proof computation |
+| `hmac` + `sha2` | 0.12 / 0.10 | HMAC for the two-box UDP prototype path; SHA-256 for the audit chain and digests (attestation proofs are Ed25519) |
 | `base64` | 0.22 | Encoding |
 | `tokio-stream` | 0.1 | SSE broadcast |
 | `reqwest` | 0.12 | CARLA client HTTP |
