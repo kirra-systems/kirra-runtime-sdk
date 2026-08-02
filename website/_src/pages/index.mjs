@@ -327,7 +327,7 @@ export const body = `
             <h3>Never trusted for safety</h3>
             <p>An LLM can invent a 999&nbsp;m/s velocity or an action type that doesn't exist. Both die at the
             typed parse or the envelope — and the attempt is permanently recorded in the hash-chained audit ledger.</p>
-            ${evRow("README.md:40", "crates/kirra-planner/src/mick_llm.rs")}
+            ${evRow("docs/action_filter.md", "crates/kirra-planner/src/mick_llm.rs")}
           </div>
           <div class="card" data-reveal>
             <h3>One safety authority</h3>
@@ -658,7 +658,7 @@ export const body = `
         <div class="hero__ctas" style="justify-content:center" data-reveal>
           <a class="btn btn--ghost" href="certification.html">Read the certification posture <span class="arrow" aria-hidden="true">→</span></a>
         </div>
-        <p class="evidence-row" style="justify-content:center" data-reveal>${ev("README.md:117", "README — the claim, verbatim")}${ev("docs/safety/", "docs/safety — 65 artifacts")}</p>
+        <p class="evidence-row" style="justify-content:center" data-reveal>${ev("SAFETY.md", "SAFETY.md — the claim, verbatim")}${ev("docs/safety/", "docs/safety — 65 artifacts")}</p>
       </div>
     </section>
 
