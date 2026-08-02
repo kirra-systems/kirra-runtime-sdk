@@ -1403,6 +1403,31 @@ jobs:
         # crate — and no actuation seam tokens in their source. See
         # ci/check_mick_actuation_fence.py.
         run: python3 ci/check_mick_actuation_fence.py
+      - name: Kirra World bidirectional fence (knowledge cannot act; safety cannot depend on it)
+        # The ADR-0039 boundary, enforced BEFORE any kirra-world code exists —
+        # a fence built after the subsystem is a fence argued with, not applied.
+        #
+        # Fence A: Kirra World must be structurally unable to reach actuation or
+        # authorization. Fence B: the transitive safety closure (19 workspace
+        # crates from 10 roots, measured, not hand-listed) must not reach
+        # kirra-world*, its endpoints, its database, or its projections.
+        #
+        # The subtle half is Fence B's trait rule. CorridorSource is a TRAIT and
+        # the checker takes `&dyn CorridorSource`, so `impl CorridorSource for
+        # WorldModelCorridor` would pass any crate-name scan while inverting the
+        # dependency direction entirely. Implementations are reviewed in
+        # ci/kirra_world_fence_allowlist.toml and fail closed when unknown.
+        #
+        # Language-independent by necessity: the verifying consumer is Python,
+        # the process graph is systemd, endpoints are environment config.
+        #
+        # Self-test first — 29 fixture cases, each building a throwaway
+        # workspace, covering both the forbidden shapes AND the permitted ones
+        # (Occy depending on Kirra World to plan must NOT trip it).
+        # This does NOT replace ci/check_mick_actuation_fence.py; both run.
+        run: |
+          python3 ci/test_kirra_world_bidirectional_fence.py
+          python3 ci/check_kirra_world_bidirectional_fence.py --verbose
       - name: Verdict-core purity fence (crypto separation + no_std kernel)
         # ADR-0031, structurally: the safety verdict is computed BEFORE signing,
         # so kirra-core + kirra-trajectory must have NO crypto (signing) edge,
