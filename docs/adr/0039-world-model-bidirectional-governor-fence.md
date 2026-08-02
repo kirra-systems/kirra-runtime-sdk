@@ -6,6 +6,7 @@
 | Date | 2026-08-02 |
 | Blueprint | `KIRRA-WM-ARCH-001` §18 (WM-6) — [`docs/design/WORLD_MODEL_ARCHITECTURE.md`](../design/WORLD_MODEL_ARCHITECTURE.md) |
 | Deciders | Governor / safety-case owner · World Model owner · architecture owner · safety-assurance owner |
+| **Clarified by** | **[ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md)** — canonical terminology, semantic-map vs safety-corridor boundary, transitive Fence B, language independence, and the PENDING assurance ruling. **Read 0042 alongside this ADR; it supersedes the scope claim below.** |
 | Safety goals | **SG7** (the safety check is invariant to the command's origin) · **SG1** (the checker's bound is what holds) |
 | Cross-refs | [`ADR-0020`](0020-doer-invariant-safety-case.md) (doer-invariant safety case) · [`ADR-0031`](0031-release-token-on-the-actuation-path.md) · [`ADR-0033`](0033-actuation-authority-ros-r2-topology.md) · [`ci/check_mick_actuation_fence.py`](../../ci/check_mick_actuation_fence.py) · [`crates/kirra-trajectory/src/validation.rs`](../../crates/kirra-trajectory/src/validation.rs) · [`robot/world_model.py`](../../robot/world_model.py) §5.1 |
 
@@ -17,6 +18,13 @@
 > not happened. See §*Ratification criteria*.
 
 ---
+
+## Terminology (canonical — [ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md) Decision 1)
+
+**Kirra World** is the semantic evidence subsystem this ADR fences. It is
+distinct from an **independent perception channel** — the redundant perception
+inputs that `perception_redundancy.rs` unfortunately also calls "world models".
+Bare *"world model"* is not canonical; this ADR's uses refer to **Kirra World**.
 
 ## Context
 
@@ -119,6 +127,20 @@ decision**.
 The safety path reads its own authoritative inputs directly — as applicable:
 odometry, trajectory, corridor / map safety inputs, perceived objects, watchdog
 state, kinematic configuration, release-token state, and posture state.
+
+**Fence B is TRANSITIVE** ([ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md)
+Decision 3). It applies to the full dependency closure of the safety decision
+path — **12 workspace crates**, measured, not the 7 roots listed below — and
+`kirra-core` is inside that closure under a strict no-dependency rule. A
+direct-import-only check is insufficient.
+
+**Fence B is LANGUAGE-INDEPENDENT** (Decision 4). It applies to Python, shell,
+systemd configuration, ROS topic wiring and service URLs, not only Rust. The
+verifying consumer is Python; configuration alone can create a dependency that
+no dependency graph would see.
+
+**Trait implementations and hidden adapters are in scope** (Decision 2). See
+the corollary below.
 
 > **World Model → may inform proposal generation.**
 > **World Model ↛ safety authorization.**
@@ -278,11 +300,24 @@ existing one. Specifically it preserves the ADR-0020 doer-invariance property
 by ensuring the verdict remains a pure function of inputs the checker reads
 itself.
 
-Because Fence B holds, the World Model is **out of scope** for the ASIL-D
-evidence set. That scoping is a deliberate architectural trade and should be
-recorded in the safety case as such — not assumed. If Fence B were later
-relaxed, the World Model would enter the assurance scope and require the
-corresponding traceability, coverage, and qualification treatment.
+**Scope determination — PENDING, corrected by [ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md) Decision 5.**
+
+An earlier revision of this ADR stated that Kirra World is out of scope for the
+ASIL-D evidence set. **That was asserted, not ruled, and the claim is
+withdrawn.** The correct formulation is the *proposed argument*:
+
+> If Fence A and Fence B hold, Kirra World is **intended** to remain outside
+> the safety decision and authorization scope.
+
+This requires an explicit ruling from the **safety-assurance owner**, addressing
+the eight questions in ADR-0042 Decision 5 — including whether absence of a
+runtime dependency is sufficient, whether semantic goal selection can influence
+a safety goal indirectly, and whether common-source artifacts create
+dependent-failure concerns. Until that ruling is recorded, **no document may
+state the scope determination as settled**, and this ADR cannot be accepted.
+
+If Fence B were later relaxed, Kirra World would enter the assurance scope and
+require the corresponding traceability, coverage, and qualification treatment.
 
 No existing safety claim, ASIL rating, or standards mapping changes.
 Kirra is designed in alignment with ISO 26262 ASIL-D requirements and
@@ -352,10 +387,13 @@ following are recorded:
 - [ ] **Governor / safety-case owner** review and sign-off
 - [ ] **World Model owner** review and sign-off
 - [ ] **Architecture owner** review and sign-off
-- [ ] **Safety-assurance owner** review and sign-off, confirming the
-      out-of-scope determination for the World Model is acceptable to the
-      safety case
-- [ ] C1 (terminology collision) has a decided disposition
-- [ ] C2 (map/corridor boundary) is stated in the safety architecture
+- [ ] **Safety-assurance owner** ruling recorded per
+      [ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md)
+      Decision 5, using its decision-record template. The ruling must be
+      *recorded*; it need not be favourable. **Until then the scope
+      determination is PENDING and this ADR cannot be accepted**
+- [x] C1 (terminology collision) — canonical set decided in ADR-0042 Decision 1
+- [x] C2 (map/corridor boundary) — stated in ADR-0042 Decision 2
+- [ ] ADR-0042 itself accepted
 
 Merging this PR satisfies none of the above.

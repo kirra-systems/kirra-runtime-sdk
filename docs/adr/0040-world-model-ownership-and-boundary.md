@@ -7,6 +7,7 @@
 | Blueprint | `KIRRA-WM-ARCH-001` §4, §5, §14, §15 (WM-1) — [`docs/design/WORLD_MODEL_ARCHITECTURE.md`](../design/WORLD_MODEL_ARCHITECTURE.md) |
 | Deciders | World Model owner · architecture owner · deployment owner |
 | Depends on | [`ADR-0039`](0039-world-model-bidirectional-governor-fence.md) (WM-6) — the fence constrains every option below |
+| **Clarified by** | **[ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md)** — canonical terminology (Decision 1) and the semantic-map boundary (Decision 2). |
 | Cross-refs | [`ADR-0035`](0035-verifier-crate-decomposition.md) (crate decomposition precedent) · [`crates/kirra-sidecars/src/destination.rs`](../../crates/kirra-sidecars/src/destination.rs) · [`robot/world_model.py`](../../robot/world_model.py) · [`robot/location_registry.py`](../../robot/location_registry.py) |
 
 > **Convention deviation** — as ADR-0039: *not* ratified on merge. Ratification
@@ -14,6 +15,20 @@
 > cannot supply.
 
 ---
+
+## Terminology and what the name does NOT imply
+
+The subsystem's canonical name is **Kirra World**
+([ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md)
+Decision 1). The crate is `kirra-world`; the generic phrase is *semantic world
+model*; the unrelated perception concept is an *independent perception channel*.
+
+> **Naming confers no authority.** "Kirra World" names the subsystem that owns
+> semantic evidence. It does **not** make that evidence authoritative for any
+> safety decision, and owning a category (including `Map`) does **not** make
+> Kirra World the source of the checker's corresponding safety input. Ownership
+> is about who curates and answers for the data — never about who the checker
+> may believe.
 
 ## Context
 
@@ -256,9 +271,15 @@ accidental. An in-process-only first cut means the Python layer waits.
 
 ## Assurance impact
 
-**None to the existing safety case, by construction.** `kirra-world` is out of
-the safety scope because ADR-0039 Fence B holds; that scoping is inherited from
-WM-6 and is not independently claimed here.
+**No new safety claim is made here, and no scope determination is asserted.**
+
+The *intent* is that `kirra-world` remains outside the safety decision and
+authorization scope if Fence A and Fence B hold. **That determination is PENDING
+an explicit safety-assurance ruling**
+([ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md)
+Decision 5) and must not be stated as settled. This ADR neither claims it nor
+depends on it: ownership of semantic evidence is a curation decision, and
+**naming a subsystem the owner of a category confers no safety authority**.
 
 No existing safety claim, ASIL rating, or standards mapping changes.
 Kirra is designed in alignment with ISO 26262 ASIL-D requirements and
