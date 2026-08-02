@@ -320,6 +320,178 @@ pub fn fast_route(text: &str) -> Option<&'static str> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Deterministic identity + memory routes
+// ---------------------------------------------------------------------------
+//
+// Observed on the robot AFTER the identity prompt landed: asked "what do you
+// remember about previous conversations?", the local model answered "as an AI
+// developed by Microsoft and strictly adhering to privacy guidelines…". The
+// prompt names Microsoft in an explicit prohibition three sentences earlier
+// and lost anyway — the question pattern-matches a memorized privacy-
+// disclaimer template, and a 3.8B model reaching for a memorized template
+// beats an instruction more often than not.
+//
+// 🔴 So identity is not left to the model. These questions have exactly ONE
+// correct answer, the model contributes nothing to them, and a wrong answer
+// is a false claim about what the operator is talking to. They are answered
+// from a fixed table with ZERO model calls, which makes the drift impossible
+// rather than unlikely — and faster, since there is no round trip. The system
+// prompt stays as second-line defence for phrasings this matcher misses.
+
+/// What Mick is. No vendor name appears in any reply here — the answers state
+/// the truth rather than negotiating with a false premise.
+const REPLY_WHO_ARE_YOU: &str =
+    "I'm Mick, this robot's local onboard companion. Conversation only — I don't move the robot.";
+/// Provenance: no outside company, no invented maker.
+const REPLY_WHO_MADE_YOU: &str =
+    "I run locally on this robot, on its configured language model. No outside assistant or company is behind me.";
+/// The answer to "are you <some external assistant>?" — a plain no plus what
+/// is actually true, so the reply never repeats the false premise back.
+const REPLY_NOT_EXTERNAL: &str =
+    "No. I'm Mick, running locally on this robot on its configured language model.";
+/// The model question. Deliberately unnamed: this service cannot verify which
+/// model is configured (the chat core never sees it), and an unverifiable
+/// claim is the failure being fixed.
+const REPLY_WHICH_MODEL: &str = "I'm running the locally configured language model for this robot.";
+/// Memory. A stateless service retains nothing; this is a fact, not privacy
+/// boilerplate about being an AI.
+const REPLY_NO_MEMORY: &str = "I don't retain previous conversations.";
+
+/// Every fixed identity/memory reply, for the tests that sweep them.
+pub const IDENTITY_REPLIES: &[&str] = &[
+    REPLY_WHO_ARE_YOU,
+    REPLY_WHO_MADE_YOU,
+    REPLY_NOT_EXTERNAL,
+    REPLY_WHICH_MODEL,
+    REPLY_NO_MEMORY,
+];
+
+/// External assistants/vendors an operator might name in "are you …?". Used
+/// ONLY to recognize the question — never echoed into a reply.
+const EXTERNAL_ASSISTANTS: &[&str] = &[
+    "microsoft",
+    "copilot",
+    "chatgpt",
+    "chat gpt",
+    "gpt",
+    "openai",
+    "open ai",
+    "claude",
+    "anthropic",
+    "gemini",
+    "bard",
+    "llama",
+    "alexa",
+    "siri",
+];
+
+/// Whole-utterance forms for each fixed answer. Whole-utterance on purpose:
+/// a substring rule would swallow ordinary questions ("who are you sending it
+/// to", "what model of lidar is this"), and a false fast-route is a wrong
+/// answer with no model behind it to recover.
+const WHO_ARE_YOU_FORMS: &[&str] = &[
+    "who are you",
+    "what are you",
+    "who am i talking to",
+    "who is this",
+    "introduce yourself",
+    "introduce yourself briefly",
+    "tell me about yourself",
+];
+
+const WHO_MADE_YOU_FORMS: &[&str] = &[
+    "who made you",
+    "who developed you",
+    "who created you",
+    "who built you",
+    "who wrote you",
+    "who designed you",
+    "what company made you",
+    "what company developed you",
+    "who is your developer",
+    "who is your manufacturer",
+    "who are you made by",
+    "where do you come from",
+];
+
+const WHICH_MODEL_FORMS: &[&str] = &[
+    "what model are you",
+    "what model are you running",
+    "which model are you",
+    "which model are you running",
+    "what model do you use",
+    "what model is running",
+    "what llm are you",
+    "what llm are you running",
+    "what language model are you",
+    "what language model are you running",
+    "which language model are you running",
+    "what are you running on",
+];
+
+const MEMORY_FORMS: &[&str] = &[
+    "do you remember me",
+    "do you remember our last conversation",
+    "do you remember our previous conversation",
+    "do you remember what i said",
+    "do you remember yesterday",
+    "what do you remember",
+    "what do you remember about me",
+    "what do you remember about previous conversations",
+    "what do you remember about our previous conversations",
+    "what do you remember from previous conversations",
+    "do you remember previous conversations",
+    "do you remember anything",
+    "what did we talk about last time",
+    "have we spoken before",
+];
+
+/// Is this an "are you <external assistant>?" challenge?
+///
+/// Requires BOTH the interrogative opening and a named assistant, so "what is
+/// ChatGPT" (a legitimate question, answered by the model) is untouched while
+/// "are you ChatGPT" is not.
+fn is_external_identity_challenge(norm: &str) -> bool {
+    let asks = norm.starts_with("are you")
+        || norm.starts_with("aren't you")
+        || norm.starts_with("arent you")
+        || norm.starts_with("you are")
+        || norm.starts_with("you're");
+    asks && EXTERNAL_ASSISTANTS.iter().any(|v| norm.contains(v))
+}
+
+/// Fixed answer for an identity or memory question — or `None` to let the
+/// model handle it.
+///
+/// 🔴 Zero model calls on a hit. The reply is a constant, so it cannot drift,
+/// cannot name an external vendor, and cannot claim a model this service
+/// hasn't verified.
+#[must_use]
+pub fn identity_route(text: &str) -> Option<&'static str> {
+    let n = light_normalize(text);
+    if n.is_empty() {
+        return None;
+    }
+    if is_external_identity_challenge(&n) {
+        return Some(REPLY_NOT_EXTERNAL);
+    }
+    let in_set = |forms: &[&str]| forms.contains(&n.as_str());
+    if in_set(WHO_ARE_YOU_FORMS) {
+        return Some(REPLY_WHO_ARE_YOU);
+    }
+    if in_set(WHO_MADE_YOU_FORMS) {
+        return Some(REPLY_WHO_MADE_YOU);
+    }
+    if in_set(WHICH_MODEL_FORMS) {
+        return Some(REPLY_WHICH_MODEL);
+    }
+    if in_set(MEMORY_FORMS) {
+        return Some(REPLY_NO_MEMORY);
+    }
+    None
+}
+
 /// Leading motion verbs/phrases → the utterance is an explicit motion request
 /// and chat refuses deterministically (no model call, no forwarding — chat
 /// NEVER invokes the motion door). Conservative: only a LEADING match counts
@@ -530,6 +702,7 @@ pub struct ChatService<M: ChatModelClient> {
     next_request_id: u64,
     motion_shape_guarded: u64,
     fast_routed: u64,
+    identity_routed: u64,
     motion_refused: u64,
 }
 
@@ -544,6 +717,7 @@ impl<M: ChatModelClient> ChatService<M> {
             next_request_id: 0,
             motion_shape_guarded: 0,
             fast_routed: 0,
+            identity_routed: 0,
             motion_refused: 0,
         }
     }
@@ -551,6 +725,14 @@ impl<M: ChatModelClient> ChatService<M> {
     #[must_use]
     pub fn motion_shape_guarded(&self) -> u64 {
         self.motion_shape_guarded
+    }
+
+    /// How many identity/memory questions were answered from the fixed table
+    /// this process — each one a model call NOT made, and a drift that could
+    /// not happen.
+    #[must_use]
+    pub fn identity_routed(&self) -> u64 {
+        self.identity_routed
     }
 
     #[must_use]
@@ -611,6 +793,12 @@ impl<M: ChatModelClient> ChatService<M> {
         // Deterministic fast paths: zero model calls, ~zero latency.
         let deterministic_reply = if let Some(fixed) = fast_route(text) {
             self.fast_routed += 1;
+            Some(fixed)
+        } else if let Some(fixed) = identity_route(text) {
+            // Identity and memory are answered from the fixed table, never by
+            // the model — see the identity-route section for why.
+            self.fast_routed += 1;
+            self.identity_routed += 1;
             Some(fixed)
         } else if is_explicit_motion_request(text) {
             self.motion_refused += 1;
@@ -1162,6 +1350,158 @@ mod tests {
         );
     }
 
+    // --- deterministic identity + memory routes ------------------------------
+
+    /// THE live regression, as a unit: every identity/memory question the
+    /// operator asked on the robot now has a fixed answer, and NONE of them
+    /// reaches the model.
+    #[test]
+    fn every_identity_and_memory_question_is_answered_from_the_fixed_table() {
+        let cases = [
+            ("Who are you?", REPLY_WHO_ARE_YOU),
+            ("Introduce yourself briefly.", REPLY_WHO_ARE_YOU),
+            ("what are you", REPLY_WHO_ARE_YOU),
+            ("Who developed you?", REPLY_WHO_MADE_YOU),
+            ("who made you", REPLY_WHO_MADE_YOU),
+            ("Who created you?", REPLY_WHO_MADE_YOU),
+            ("What company developed you?", REPLY_WHO_MADE_YOU),
+            ("Are you Microsoft Copilot?", REPLY_NOT_EXTERNAL),
+            ("are you chatgpt", REPLY_NOT_EXTERNAL),
+            ("Are you an AI developed by Microsoft?", REPLY_NOT_EXTERNAL),
+            ("aren't you Gemini", REPLY_NOT_EXTERNAL),
+            ("you're Claude, right", REPLY_NOT_EXTERNAL),
+            ("What model are you running?", REPLY_WHICH_MODEL),
+            ("which model are you", REPLY_WHICH_MODEL),
+            ("what llm are you running", REPLY_WHICH_MODEL),
+            ("Do you remember me?", REPLY_NO_MEMORY),
+            (
+                "What do you remember about previous conversations?",
+                REPLY_NO_MEMORY,
+            ),
+            ("do you remember our last conversation", REPLY_NO_MEMORY),
+            ("have we spoken before", REPLY_NO_MEMORY),
+        ];
+        for (question, expected) in cases {
+            assert_eq!(
+                identity_route(question),
+                Some(expected),
+                "identity question not fixed-routed: {question:?}"
+            );
+        }
+    }
+
+    /// No fixed reply may name an external assistant — not even to deny it.
+    /// Repeating the false premise back is how "I am not Microsoft Copilot"
+    /// becomes "…Microsoft…" in a transcript someone skims.
+    #[test]
+    fn no_fixed_identity_reply_names_an_external_assistant() {
+        for reply in IDENTITY_REPLIES {
+            let lower = reply.to_lowercase();
+            for vendor in EXTERNAL_ASSISTANTS {
+                assert!(
+                    !lower.contains(vendor),
+                    "fixed reply names {vendor:?}: {reply}"
+                );
+            }
+            // Same register as the rest of the canned lines.
+            assert!(!reply.contains('!'), "exclamation in: {reply}");
+            for hype in ["Absolutely", "awesome", "happy to help", "Happy to"] {
+                assert!(!reply.contains(hype), "hype {hype:?} in: {reply}");
+            }
+        }
+        // And no model name is claimed — the service cannot verify one.
+        for reply in IDENTITY_REPLIES {
+            for model in ["phi3", "phi-3", "llama", "gemma", "mistral", "qwen"] {
+                assert!(
+                    !reply.to_lowercase().contains(model),
+                    "fixed reply claims a model: {reply}"
+                );
+            }
+        }
+    }
+
+    /// The matcher is CONSERVATIVE: a false hit is a wrong answer with no
+    /// model behind it to recover, so ordinary questions that merely mention
+    /// a vendor or the word "model" must fall through.
+    #[test]
+    fn ordinary_questions_are_not_captured_by_the_identity_matcher() {
+        for passthrough in [
+            "what is chatgpt",
+            "how does copilot work",
+            "explain what a language model is",
+            "what model of lidar is this",
+            "who are you sending it to",
+            "what do you remember about the water pump",
+            "are you sure",
+            "are you able to see the camera feed",
+            "tell me about Saturn",
+            "who is the operator",
+        ] {
+            assert_eq!(
+                identity_route(passthrough),
+                None,
+                "ordinary question was captured: {passthrough:?}"
+            );
+        }
+    }
+
+    /// The point of the whole change: these questions make ZERO model calls.
+    /// Asserted against the stub's CALL COUNTER — not a log line, and not the
+    /// absence of deltas, which a broken-but-silent model could also produce.
+    #[test]
+    fn identity_questions_make_no_model_call_at_all() {
+        for question in [
+            "Who are you?",
+            "Who developed you?",
+            "Are you Microsoft Copilot?",
+            "What model are you running?",
+            "Do you remember me?",
+            "What do you remember about previous conversations?",
+        ] {
+            // The stub would answer with the live drift if it were ever
+            // reached, so a regression fails loudly rather than coincidentally.
+            let mut h = harness(&["as an AI developed by Microsoft, "]);
+            let (events, r) = run(&mut h, question);
+            r.expect("a fixed-routed question still answers");
+            assert_eq!(
+                h.calls.get(),
+                0,
+                "{question:?} reached the model — identity must never be model-authored"
+            );
+            let done = events
+                .iter()
+                .find_map(|e| match e {
+                    StreamEvent::Done { reply, .. } => Some(reply.clone()),
+                    _ => None,
+                })
+                .expect("a Done event carries the reply");
+            assert!(
+                IDENTITY_REPLIES.contains(&done.as_str()),
+                "{question:?} answered with something other than a fixed reply: {done}"
+            );
+            assert!(
+                !done.to_lowercase().contains("microsoft"),
+                "the drift reached the operator: {done}"
+            );
+            assert_eq!(h.svc.identity_routed(), 1, "the counter must record it");
+        }
+    }
+
+    /// A question the matcher deliberately passes through DOES reach the
+    /// model — non-vacuity for the test above.
+    #[test]
+    fn an_ordinary_question_still_reaches_the_model() {
+        let mut h = harness(&["Saturn has rings."]);
+        let (_, r) = run(&mut h, "tell me one fact about Saturn");
+        r.expect("an ordinary question answers");
+        assert_eq!(
+            h.calls.get(),
+            1,
+            "ordinary questions must still be modelled"
+        );
+        assert_eq!(h.svc.identity_routed(), 0);
+    }
+
     /// THE identity regression: asked who it was, the local model answered
     /// "I am an AI developed by Microsoft" — its pretrained self-description
     /// surfacing through a prompt that never said otherwise.
@@ -1419,8 +1759,11 @@ mod tests {
 
     #[test]
     fn deltas_stream_before_completion_and_ttft_is_stamped_exactly_once() {
-        let mut h = harness(&["Hello", ". ", "How can I help", "?"]);
-        let (events, r) = run(&mut h, "introduce yourself briefly");
+        // NOT an identity question: "introduce yourself" is now answered from
+        // the fixed table with no model call, which would make this streaming
+        // test vacuous. The subject here is streaming, so the input is neutral.
+        let mut h = harness(&["Rings", ". ", "Saturn has many moons", "."]);
+        let (events, r) = run(&mut h, "tell me one fact about saturn");
         let timing = r.unwrap();
         assert!(!timing.deterministic);
         assert!(timing.ttft_ms > 0 && timing.ttft_ms < timing.total_ms);
@@ -1440,7 +1783,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(sentences, vec!["Hello. How can I help?"]);
+        assert_eq!(sentences, vec!["Rings. Saturn has many moons."]);
         assert!(timing.first_sentence_ms >= timing.ttft_ms);
     }
 
