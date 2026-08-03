@@ -784,8 +784,10 @@ observations, not the same observations spread thinner), and the classifier
 **refuses** a steeply falling curve as `INSUFFICIENT` with the reason and the
 fix rather than praising it.
 
-No target sweep has been run, so the scale gate remains open. What changed is
-that it can now be closed with a verdict instead of an impression.
+What this changed was that the gate could then be closed with a verdict instead
+of an impression. **It since has been — see D-9**, which records the target
+sweep and its two verdicts. This section is the account of how the instrument
+came to be trustworthy; D-9 is the result it produced.
 
 ### D-9 — the scale gate closes: Option A survives on target
 
