@@ -297,9 +297,9 @@ and derives views, rather than storing facts.
 | Transactions | One event append per transaction; projection updates may batch | |
 | Migration locking | Exclusive during migration; fail-closed on a future schema | ADR-0035 / `migrations.rs` precedent |
 | DB ownership | Single writer process (ADR-0040) | |
-| Read-only degraded mode | Serve projections read-only if the log is unwritable — **never** silently drop writes | |
+| Read-only degraded mode | Serve projections read-only if the log is unwritable — **never** silently drop writes | **Tested** (harness `pressure`) |
 | Corruption response | `integrity_check` on open; refuse to serve rather than serve partial evidence | |
-| Disk-full | Refuse new observations with `Unavailable`; never overwrite | |
+| Disk-full | Refuse new observations with `Unavailable`; never overwrite | **Tested** (harness `pressure`) |
 | Backups | Single-file copy + `VACUUM INTO` | |
 
 **Do not inherit the verifier's durability claim.** `kirra-persistence` uses
@@ -411,6 +411,11 @@ source; they are not migrated destructively (ADR-0040).
    for a fleet, local evidence staying local?
 6. Event payload encoding — the blueprint does not fix one; JSON is
    inspectable, a binary format is compact.
+7. **Partial projections under disk pressure.** A fold writes, so it is refused
+   when the store is full. A fold interrupted that way leaves partial
+   projections with nothing marking them as incomplete. Needs either a
+   fold-in-progress marker, a transactional whole-fold, or an explicit rule that
+   projections are invalid until a checkpoint confirms them.
 
 ---
 
@@ -465,6 +470,24 @@ tamper evidence degrades to tamper-evident citation of a removed span. The
 verifier reports `compacted_windows` and a time-travel query into a compacted
 window returns a degraded summary rather than a value or a bare absence, so the
 degradation is visible instead of silent.
+
+**It tests the two disk-pressure claims that had never been exercised.** The
+configuration table above asserts read-only degraded mode and clean disk-full
+refusal; the harness's `pressure` stage checks both, including the one that
+decides whether running out of space is recoverable at all — that a batch
+refused for lack of room rolls back **whole**. A half-committed batch would tear
+the generation sequence and fork the chain, converting a transient out-of-space
+condition into permanent evidence corruption. It also times `VACUUM` separately
+from compaction, since the two are now modelled as separate operations and the
+scheduled one needs its own cost.
+
+That stage surfaced a gap this ADR does not currently cover, recorded here
+rather than left implicit: **a projection fold writes**, so it is refused under
+pressure exactly as an append is. What a store that fills *mid-fold* leaves
+behind is undefined — the projections would be partial with nothing marking them
+as such, and a consumer could not distinguish a partial projection from a
+complete one. The "no projection-only fact" rule does not address it. Open
+question 7.
 
 **It reports what it cannot establish.** The corruption gate is three tiers:
 `SIGKILL` crash-consistency and WAL-loss prefix validity are automated; the

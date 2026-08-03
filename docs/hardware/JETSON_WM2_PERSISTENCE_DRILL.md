@@ -25,11 +25,12 @@ This drill produces those recordings. The instrument is
 | Measured Jetson prototype | ✅ | the whole run, if it reports `JETSON-TARGET-MEASURED` |
 | Replay benchmark (full + checkpointed) | ✅ | `replay` |
 | Query benchmark, one per §12 family | ✅ | `query` |
-| Corruption / restart experiment | ⚠️ **partly** | `crash` tiers A and B; **tier C is manual, §7** |
+| Corruption / restart experiment | ⚠️ **partly** | `crash` tiers A and B; **tier C is manual, §8** |
 | Storage growth estimate | ✅ | `growth` |
 | Migration proof of concept | ✅ | `migrate` |
 | Compaction-with-citation (§11.3; not a numbered gate, but the retention policy the growth number makes urgent) | ✅ | `compact` |
-| Scale assumptions confirmed or corrected | ⚠️ **partly** | the §8 sweep informs it; the operational answer needs real deployment |
+| Disk-pressure + reclamation behaviour (ADR-0041 SQLite-config table; not a numbered gate) | ⚠️ **partly** | `pressure` proves clean refusal at the SQLite layer; a genuinely full partition needs the device |
+| Scale assumptions confirmed or corrected | ⚠️ **partly** | the §9 sweep informs it; the operational answer needs real deployment |
 
 Two of the seven are deliberately marked partial. Marking them complete on the
 strength of this harness alone would be the exact failure the measurement gate
@@ -50,7 +51,7 @@ exists to prevent.
 - **A release build.** A debug build measures rustc, and the harness refuses
   that too.
 - Rust toolchain on the Orin (or cross-compile for `aarch64-unknown-linux-gnu`).
-- Roughly **2 GiB free** at the default volume, and more for the §8 sweep.
+- Roughly **2 GiB free** at the default volume, and more for the §9 sweep.
 
 ```sh
 cd tools/wm2-persistence-harness
@@ -82,7 +83,7 @@ Expect **tens of minutes**. The append benchmark alone runs six configurations
 is one fsync per event by construction.
 
 Individual stages run on their own: `platform`, `append`, `replay`, `query`,
-`growth`, `migrate`, `compact`, `crash`. Start with `platform` — it prints, in about a
+`growth`, `migrate`, `compact`, `pressure`, `crash`. Start with `platform` — it prints, in about a
 millisecond, whether anything you run afterwards will be citable.
 
 Exit status is `1` if any measurement failed **or was unusable** — a query family
@@ -92,7 +93,7 @@ precondition, so neither a pass nor a failure would mean anything, and letting
 the run exit 0 would leave a results file that looks complete with a
 load-bearing gate silently missing.
 
-Tier C is the one exemption: it is *always* `NOT-RUN` by construction (§7), so
+Tier C is the one exemption: it is *always* `NOT-RUN` by construction (§8), so
 counting it would make every run exit 1 and the exit code would stop carrying
 information.
 
@@ -165,7 +166,7 @@ jq -r 'select(.record=="run") | "citable=\(.citable) \(.evidence_status)"' resul
 | `query` | `rows_matched_total` | A family that matched nothing is a broken benchmark, not a fast one. Zero here is reported as a failure. |
 | `growth` | `bytes_per_event`, `days_to_fill_budget` | Risk R7. This is what decides whether compaction (§11.3) is a future concern or an immediate one. |
 | `migrate` | `future_schema_refused` | The fail-closed policy surviving contact with a populated store. |
-| `crash` | tier outcomes | §5 and §6 below. |
+| `crash` | tier outcomes | §7 and §8 below. |
 
 ### A host baseline, for orientation only
 
@@ -276,7 +277,83 @@ retroactively by relabelling: it has to be a forward-looking decision.
 
 ---
 
-## 6. Crash tiers A and B (automated)
+## 6. Disk pressure and reclamation (`pressure`)
+
+ADR-0041's SQLite-configuration table asserts two things that nothing had ever
+exercised:
+
+| Setting | Proposal |
+|---|---|
+| Read-only degraded mode | Serve projections read-only if the log is unwritable — **never** silently drop writes |
+| Disk-full | Refuse new observations with `Unavailable`; never overwrite |
+
+Both are claims about the worst moment in a store's life. A robot that fills its
+disk mid-mission and *silently* stops recording observations — while continuing
+to answer queries as though its knowledge were current — is a far worse failure
+than one that refuses loudly.
+
+### How a full disk is simulated
+
+`PRAGMA max_page_count` caps the database at a fixed page count; writing past it
+returns `SQLITE_FULL`, the same error through the same code path a genuinely
+full filesystem produces. That makes the experiment deterministic and
+privilege-free.
+
+**The honest limit:** this exercises SQLite's full-*database* behaviour, not the
+filesystem's ENOSPC behaviour, and not what happens when a Jetson's eMMC is
+genuinely at 100 % — where the WAL, the journal and every other process sharing
+that mount are also failing. It establishes the store refuses cleanly rather
+than corrupting; it does not establish the device stays healthy. Confirming the
+second needs the real device, under a deliberately filled partition.
+
+### The seven checks
+
+| Field | What it establishes |
+|---|---|
+| `write_refused` | the append past the cap errored rather than silently succeeding |
+| `refusal_is_disk_full` | the error names a full database, not an unrelated fault |
+| **`partial_batch_rolled_back`** | **the one that matters most** — see below |
+| `chain_intact_after_refusal` | the refusal did not corrupt the chain |
+| `reads_serve_while_full` | read-only degraded mode: log *and* materialized projections still answer |
+| `recovers_when_space_returns` | full is a condition, not a state the store gets stuck in |
+| `chain_intact_after_recovery` | and recovery does not fork the chain |
+
+`append_batch` writes N events in **one** transaction. If a full database
+half-committed a batch, the generation sequence would be torn and the hash chain
+would fork — turning a recoverable out-of-space condition into permanent
+evidence corruption. That is the check to read first.
+
+`reads_serve_while_full` requires `projection_rows_while_full > 0`. Without that,
+it would pass on a store that had no projections to serve and therefore proved
+nothing.
+
+### A design gap this surfaced, not yet resolved
+
+A projection **fold writes**, so it is subject to the same refusal as an append.
+What a store that fills *mid-fold* leaves behind is an open question: the
+projections would be partial, with nothing marking them as such, and a consumer
+could not tell a partial projection from a complete one. ADR-0041's "no
+projection-only fact" rule does not cover this case. Worth settling before the
+real store is built; recorded here rather than papered over.
+
+### Reclamation cost (`reclaim` record)
+
+The `VACUUM` is now timed separately from compaction, because the ADR models
+them as two operations (see *Compaction is not reclamation*) and a reclamation
+that must be scheduled against power, thermal and mission state needs its own
+number to be scheduled against.
+
+`bytes_freed` may be zero or negative on a store with nothing to reclaim. That
+is reported rather than clamped, because a `VACUUM` that costs seconds and frees
+nothing is precisely the case a scheduler must avoid.
+
+On target, measure this on a store at realistic occupancy, and record it
+alongside the device and medium — a rewrite of the whole database has an I/O and
+power profile that does not transfer between eMMC, microSD and NVMe.
+
+---
+
+## 7. Crash tiers A and B (automated)
 
 Both run under `crash`.
 
@@ -304,7 +381,7 @@ decoration.
 
 ---
 
-## 7. Tier C — the power cut (manual, and the only real durability test)
+## 8. Tier C — the power cut (manual, and the only real durability test)
 
 **Nothing in software can distinguish a filesystem that honoured `fsync` from
 one that acknowledged it and buffered the write in a device cache.** Lying write
@@ -350,7 +427,7 @@ made to report anything else, so a results file can never imply this happened.
 
 ---
 
-## 8. Scale sweep — the reopening condition
+## 9. Scale sweep — the reopening condition
 
 ADR-0041's assumptions are provisional: hundreds-to-low-thousands of entities,
 thousands-to-millions of observations. It states its own reopening condition —
@@ -379,7 +456,7 @@ produce.
 
 ---
 
-## 9. Recording the result
+## 10. Recording the result
 
 Attach the JSONL file to the ADR-0041 ratification conversation, with:
 

@@ -291,7 +291,7 @@ pub fn tier_c_not_run() -> TierOutcome {
     TierOutcome::NotRun(
         "a real power cut cannot be performed from software: nothing in-process can \
          tell an honest fsync from a device cache that acknowledged and buffered it. \
-         Manual procedure in docs/hardware/JETSON_WM2_PERSISTENCE_DRILL.md §6; until \
+         Manual procedure in docs/hardware/JETSON_WM2_PERSISTENCE_DRILL.md §8; until \
          it is run and its result recorded, no durability claim is supported."
             .to_string(),
     )

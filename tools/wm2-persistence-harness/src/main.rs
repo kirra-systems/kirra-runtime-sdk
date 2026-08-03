@@ -21,6 +21,7 @@ mod crash;
 mod gen;
 mod json;
 mod platform;
+mod pressure;
 mod sha256;
 mod standin;
 
@@ -45,6 +46,7 @@ COMMANDS:
     migrate     Schema migration against a populated store; fail-closed check
     crash       Corruption / restart experiment (tiers A and B; C is manual)
     compact     Compaction-with-citation experiment (ADR-0041 §11.3)
+    pressure    Disk-pressure behaviour + reclamation cost (ADR-0041 §SQLite config)
     all         Every command above, into one result stream
 
 OPTIONS:
@@ -501,6 +503,58 @@ fn main() {
         }
     }
 
+    if run("pressure") {
+        let d = args.durability.unwrap_or(Durability::Normal);
+        match pressure::run(&args.db, d, args.seed) {
+            Ok(r) => {
+                let checks = [
+                    ("write_refused", r.write_refused),
+                    ("refusal_is_disk_full", r.refusal_is_disk_full),
+                    ("partial_batch_rolled_back", r.partial_batch_rolled_back),
+                    ("chain_intact_after_refusal", r.chain_intact_after_refusal),
+                    ("reads_serve_while_full", r.reads_serve_while_full),
+                    ("recovers_when_space_returns", r.recovers_when_space_returns),
+                    ("chain_intact_after_recovery", r.chain_intact_after_recovery),
+                ];
+                let mut record = stamp(&class, &facts, &args)
+                    .str("record", "pressure")
+                    .int("events_before_full", r.events_before_full)
+                    .int("page_cap", r.page_cap.max(0) as u64)
+                    .int("projection_rows_while_full", r.projection_rows_while_full)
+                    .str("refusal_message", &r.refusal_message);
+                for (name, ok) in checks {
+                    if !ok {
+                        failures += 1;
+                    }
+                    record = record.bool(name, ok);
+                }
+                sink.emit(record);
+            }
+            Err(e) => {
+                failures += 1;
+                sink.emit(error_record(&class, &facts, &args, "pressure", &e));
+            }
+        }
+
+        // Reclamation cost, measured on a store with something to reclaim —
+        // the number a maintenance scheduler needs, separate from compaction.
+        match reclaim_measurement(&args, args.durability.unwrap_or(Durability::Normal)) {
+            Ok(r) => sink.emit(
+                stamp(&class, &facts, &args)
+                    .str("record", "reclaim")
+                    .float("vacuum_ms", r.vacuum_ms)
+                    .int("bytes_before", r.bytes_before)
+                    .int("bytes_after", r.bytes_after)
+                    .float("bytes_freed", r.bytes_freed as f64)
+                    .float("bytes_per_ms", r.bytes_per_ms),
+            ),
+            Err(e) => {
+                failures += 1;
+                sink.emit(error_record(&class, &facts, &args, "reclaim", &e));
+            }
+        }
+    }
+
     if run("crash") {
         let d = args.durability.unwrap_or(Durability::Full);
         let r = crash::run(&args.db, d, args.crash_run_ms, 400, 400);
@@ -535,6 +589,35 @@ fn main() {
              Run on the target device with --assert-target for that."
         );
     }
+}
+
+/// Populate a store, delete most of it, and time the reclamation.
+///
+/// A `VACUUM` on a store with nothing to reclaim measures the rewrite cost but
+/// not the trade a scheduler is deciding, so the fixture deliberately creates
+/// free pages first.
+fn reclaim_measurement(a: &Args, d: Durability) -> Result<pressure::ReclaimResult, String> {
+    let mut path = a.db.clone();
+    path.set_extension("reclaim.sqlite");
+    let _ = std::fs::remove_file(&path);
+
+    let mut store = standin::Store::open(&path, d).map_err(|e| e.to_string())?;
+    let events = a.events.min(50_000);
+    for chunk in gen::events(0, events, a.entities, a.seed).chunks(512) {
+        store.append_batch(chunk).map_err(|e| e.to_string())?;
+    }
+    store
+        .conn
+        .execute(
+            "DELETE FROM world_events WHERE generation < ?1",
+            rusqlite::params![(events as i64) * 3 / 4],
+        )
+        .map_err(|e| e.to_string())?;
+
+    let result = pressure::reclaim(&store, &path);
+    drop(store);
+    let _ = std::fs::remove_file(&path);
+    result
 }
 
 fn error_record(
