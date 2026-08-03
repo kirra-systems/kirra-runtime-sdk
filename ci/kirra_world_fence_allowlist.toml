@@ -1,0 +1,119 @@
+# Kirra World bidirectional fence — reviewed exceptions.
+#
+# Read ci/check_kirra_world_bidirectional_fence.py first. Two fences:
+#
+#   Fence A — Kirra World cannot act (no actuation, no authorization).
+#   Fence B — the safety path cannot depend on Kirra World.
+#
+# This file records what a human has REVIEWED, not what is convenient. The
+# checker fails closed on anything not listed, so adding an entry is an
+# assertion that someone looked. Every entry needs a rationale and an owning
+# ADR; the checker rejects entries missing either, and rejects duplicates.
+#
+# 🔴 A Kirra World-derived corridor is NOT pre-authorized here and must not be
+# added without a superseding ADR. `impl CorridorSource for <anything backed by
+# Kirra World>` is the exact edge Fence B exists to forbid: it would pass a
+# crate-name dependency scan while inverting the dependency direction.
+
+# ---------------------------------------------------------------------------
+# Safety-authoritative trait implementations.
+#
+# A "safety-authoritative trait" is one whose implementations feed the checker's
+# decision. `CorridorSource` is the first: `validate_trajectory_slow` receives
+# `&dyn CorridorSource` and treats whatever it returns as the admissibility
+# region. Whoever implements it therefore holds safety authority, regardless of
+# which crate they live in — which is why the fence is on the IMPL, not the
+# crate name.
+#
+# Only implementations in production scope need an entry. Implementations inside
+# `#[cfg(test)]` modules and under `tests/` are still scanned for Kirra World
+# markers but do not require review, because they are not linked into a shipped
+# artifact. See the checker's LIMITATIONS section.
+# ---------------------------------------------------------------------------
+
+[[safety_authoritative_impl]]
+trait = "CorridorSource"
+type = "MockCorridorSource"
+file = "crates/kirra-core/src/corridor.rs"
+rationale = """
+The in-tree reference corridor: a fixed polygon supplied by the caller. Holds no
+external data source of any kind, so there is nothing for it to be derived from.
+"""
+adr = "ADR-0039"
+owner = "TBD — Governor/safety owner (ADR-0039 ratification criteria)"
+
+[[safety_authoritative_impl]]
+trait = "CorridorSource"
+type = "LaneCorridor"
+file = "crates/kirra-map/src/lanemap/mod.rs"
+rationale = """
+The lane-graph corridor, derived from the Lanelet2-lite map that the safety path
+reads directly. This is the checker's OWN authoritative input, not a projection
+of anyone else's belief — the distinction ADR-0042 draws between a shared source
+artifact (permitted) and a shared derived projection (prohibited).
+"""
+adr = "ADR-0039"
+owner = "TBD — Governor/safety owner (ADR-0039 ratification criteria)"
+
+[[safety_authoritative_impl]]
+trait = "CorridorSource"
+type = "Lanelet2CorridorSource"
+file = "crates/kirra-ros2-adapter/src/corridor/lanelet2.rs"
+rationale = """
+Loads a Lanelet2 map directly in the adapter. Same argument as LaneCorridor: the
+map file is a source artifact read independently, and no semantic layer sits
+between the file and the corridor.
+"""
+adr = "ADR-0039"
+owner = "TBD — Governor/safety owner (ADR-0039 ratification criteria)"
+
+[[safety_authoritative_impl]]
+trait = "CorridorSource"
+type = "TajCorridor"
+file = "crates/kirra-taj/src/lib.rs"
+rationale = """
+The R2 perception corridor (ADR-0015). Geometric Phase-A free space, optionally
+TIGHTENED by Phase-B semantic hazards — the KPI gate scores a fusion result that
+LOOSENS the corridor as a hard zero. Derived from live sensor returns, not from
+accumulated semantic belief. If Kirra World were ever allowed to feed this
+clipping step, this entry would no longer be valid and the fence would be
+breached; that route is prohibited, not merely absent.
+"""
+adr = "ADR-0039"
+owner = "TBD — perception owner + Governor/safety owner"
+
+[[safety_authoritative_impl]]
+trait = "CorridorSource"
+type = "ReqCorridor"
+file = "crates/kirra-sidecars/src/planner.rs"
+rationale = """
+Deserializes the corridor supplied in the planner sidecar's HTTP request. The
+corridor arrives with the request rather than being fetched, so the sidecar
+introduces no data source. Noted as the structural SHAPE a disguised adapter
+would take — an inline impl over request data — which is why this file is
+allowlisted explicitly rather than skipped.
+"""
+adr = "ADR-0039"
+owner = "TBD — Governor/safety owner (ADR-0039 ratification criteria)"
+
+# ---------------------------------------------------------------------------
+# Shared source artifacts.
+#
+# ADR-0042 permits Kirra World and the safety path to read the SAME underlying
+# source artifact (an approved map, say) provided each validates it
+# independently and they do not share a derived semantic projection. Every such
+# relationship must be recorded here.
+#
+# Empty today, deliberately: no Kirra World code exists, so nothing is shared
+# yet. The first entry will need to survive the review the ADR describes.
+#
+# [[shared_source_artifact]]
+# artifact = "maps/*.osm"
+# world_consumer = "kirra-world-store"
+# safety_consumer = "kirra-map"
+# independent_validation = "each parses and validates the file separately; no
+#   parsed/derived structure crosses between them"
+# adr = "ADR-0042"
+# owner = "TBD"
+# reason = "a byte-identical input read twice is not a runtime dependency"
+# ---------------------------------------------------------------------------

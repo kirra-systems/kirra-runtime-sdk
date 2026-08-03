@@ -215,6 +215,20 @@ Computed from the workspace manifests at `922a0d0c` — transitive over normal
 **Closure: 12 workspace crates.** All are in Fence B scope, not the 7 roots
 alone.
 
+> **Now enforced, from a wider root set.**
+> [`ci/check_kirra_world_bidirectional_fence.py`](../../ci/check_kirra_world_bidirectional_fence.py)
+> implements this rule and measures the closure at **19 workspace crates from 10
+> roots** — it additionally roots at `kirra-verifier`, `kirra-persistence`,
+> `kirra-policy-types` and `kirra-ros2-adapter`. The table above remains correct
+> for the 7 roots it names; the checker's wider set is the one enforced. The
+> enforced closure was cross-checked against `cargo metadata` and agrees exactly.
+> Dev-dependency edges are deliberately excluded from the closure — the safety
+> roots test-harness against the doer crates, which are precisely the ones that
+> may legitimately depend on Kirra World — while a *direct* dev edge from a
+> safety root onto `kirra-world*` is still refused. See ADR-0039
+> §*Structural enforcement — IMPLEMENTED* for what the checker does and does not
+> prove.
+
 ## Treatment of `kirra-core`
 
 `kirra-core` is **inside the closure** — reached by `kirra-trajectory`,

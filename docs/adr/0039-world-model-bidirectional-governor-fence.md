@@ -188,7 +188,53 @@ plan below names the traits for this reason.
 
 ---
 
-## Planned structural enforcement
+## Structural enforcement — IMPLEMENTED
+
+> **Status update.** The enforcement described in this section is no longer only
+> planned: it is implemented by
+> [`ci/check_kirra_world_bidirectional_fence.py`](../../ci/check_kirra_world_bidirectional_fence.py),
+> with reviewed exceptions in
+> [`ci/kirra_world_fence_allowlist.toml`](../../ci/kirra_world_fence_allowlist.toml)
+> and 29 fixture cases in
+> [`ci/test_kirra_world_bidirectional_fence.py`](../../ci/test_kirra_world_bidirectional_fence.py).
+> It runs in the `static-analysis` CI lane alongside — **not instead of** —
+> `check_mick_actuation_fence.py`. Implementing the fence does **not** ratify
+> this ADR, and authorizes no Kirra World implementation.
+>
+> **What the checker proves.** Within this repository, at merge time: no package
+> in the measured safety closure depends on `kirra-world*` (normal + build
+> edges, transitively, plus a direct dev-edge rule); no `kirra-world*` package
+> depends on an actuation or authorization crate; no safety-path public item
+> names a Kirra World type; every production implementation of a
+> safety-authoritative trait has been reviewed and none is Kirra World-derived;
+> no safety-path Python module imports Kirra World or reads its reserved
+> resources, and no Kirra World Python module imports an actuation module,
+> publishes `cmd_vel`, calls a release-token API, or opens an actuator device;
+> no safety systemd unit is wired to a reserved Kirra World endpoint, database,
+> or unit, and no Kirra World unit is wired to actuation; every allowlist entry
+> carries a rationale and an owning ADR.
+>
+> **What it does NOT prove.** It is static analysis of one repository, so it
+> cannot establish what deployed processes actually talk to, what a
+> runtime-loaded plugin or a dynamically generated ROS graph connects, whether
+> units or environment files were edited on the device, or whether an external
+> database is shared out of band. **Runtime topology verification on a real
+> deployment remains required**, and the checker's own module docstring says so.
+> It is a ratchet against the accidental and convenient edge — not a proof of
+> isolation, and not evidence of certification of any kind.
+>
+> **Closure size — reconciled with ADR-0042.** The checker measures **19
+> workspace crates** from **10** configured roots;
+> [ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md)
+> §*Measured closure* records **12** from **7**. Both are correct: the
+> difference is the root set, not an error in either. The checker additionally
+> roots at `kirra-verifier`, `kirra-persistence`, `kirra-policy-types` and
+> `kirra-ros2-adapter` — the governor control plane, the store behind posture and
+> attestation decisions, command classification, and the adapter that runs the
+> checker loops. Each is listed with its justification in the checker's
+> `SAFETY_ROOTS` block, because an unexplained root is one nobody will dare
+> remove or dare trust. The wider set is the one enforced; it was cross-checked
+> against `cargo metadata` and agrees exactly.
 
 Modelled on [`ci/check_mick_actuation_fence.py`](../../ci/check_mick_actuation_fence.py),
 whose two-part mechanism (transitive `[dependencies]` closure over workspace
