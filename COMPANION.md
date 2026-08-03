@@ -29,7 +29,7 @@ Mick is **not**:
 - a direct controller
 - a safety verifier
 - an actuator
-- a replacement for the world model
+- a replacement for the semantic world model
 - a source of unsourced sensor facts
 - a human
 - conscious

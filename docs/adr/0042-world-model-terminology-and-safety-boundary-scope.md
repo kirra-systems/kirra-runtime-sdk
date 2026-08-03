@@ -403,14 +403,39 @@ Documented, **not rewritten**.
 | M3 | Ambiguous prose in docs/tests | Various | New documents must qualify; existing cleaned opportunistically |
 | M4 | "Map" as semantic category **and** safety artifact | Blueprint §4.1 vs `CorridorSource` | Resolved by Decision 2; blueprint §4.1 to be annotated |
 
-### Migration checklist — no renames in this PR
+### Migration checklist
 
-- [ ] Rename ambiguous **prose** (docs first, lowest risk)
+- [x] Rename ambiguous **prose** (docs first, lowest risk) — done for LIVE prose; see scope below
 - [ ] Rename **source symbols** where justified — safety-closure files need safety review
 - [ ] Update **tests** that assert on renamed identifiers
 - [ ] Update **diagrams**
 - [ ] Update **traceability links** (`// SAFETY:` / `REQ:` tags)
 - [ ] **Preserve stable public APIs**; deprecate before removing
+
+#### Prose migration — what was changed, and what was deliberately not
+
+**Changed** (5 live source comments + 3 normative documents):
+
+| Location | Was | Now |
+|---|---|---|
+| `kirra-trajectory/src/perception_redundancy.rs` ×2 | "two INDEPENDENT world models" / "redundant world model" | *independent perception channels* / *redundant perception channel* |
+| `kirra-ros2-adapter/src/node.rs` | "a camera-only world model" | *a camera-only perception channel* |
+| `parko-core/src/detector.rs` ×2 | "the perception world model" / "an empty world model" | *the perception hypothesis* / *an empty perception hypothesis* |
+| `CONSTITUTION.md` §7, `COMPANION.md` | bare "the world model" | *the semantic world model* |
+| `ARCHITECTURE.md` §6 heading | "World model versus conversation" | *World state versus conversation* — matching that section's own body, which already said **World state** |
+
+The two `perception_redundancy.rs` hits are the ones Decision 1 called unacceptable: they sit **inside the safety closure**, where "the world model was wrong" must not be able to mean either a perception fault or a semantic-knowledge fault. Notably that file's *next line* already read "given two independent perception channels" — the canonical term was already the natural one there.
+
+The normative documents take the generic ***semantic* world model** rather than the subsystem name **Kirra World**, deliberately: Kirra World is not built, and writing "Kirra World represents sourced physical-world facts" in a constitutional document would assert a shipped capability. The qualifier removes the ambiguity without making a claim.
+
+**Deliberately NOT changed**, each for a stated reason:
+
+| Left alone | Why |
+|---|---|
+| Historical ADRs (`0003`, `0004`, `0014`) | An ADR is a dated record of a decision. Retro-editing its prose to match later terminology rewrites the record rather than migrating it. |
+| Dated analyses (`docs/analysis/ADAS_BENCHMARK_*`, `docs/COMPETITIVE_*`) | Point-in-time snapshots, including an assessor-style critique that uses "shared world model" as its own finding. |
+| Third-party terms of art | "world models" describing Waymo/NVIDIA *generative* foundation models is their vocabulary, not ours; renaming it would misquote them. |
+| `robot/world_model.py` | A **source-symbol** rename (module name), which this checklist puts behind safety review. It is also imported by `rabbit_converse.py`, staged by the installer, and gated by the live `KIRRA_WORLD_MODEL_ENABLED` variable — renaming it changes robot deployment, not prose. Its own module docstring already states it is a non-authoritative read projection. |
 
 ---
 
