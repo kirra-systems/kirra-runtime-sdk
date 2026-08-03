@@ -544,7 +544,7 @@ the harness reports `NOT-RUN` at `0/5` and will continue to. Until both are
 closed this ADR stays **Proposed**.
 
 **No implementation should begin merely because this proposed ADR exists**, and
-in particular not because six of eight gates now read *Met*. The domain-logic
+in particular not because five of the seven gates now read *Met*. The domain-logic
 gate (ADR-0042 Decision 5) is a separate and independent hold.
 
 ---
