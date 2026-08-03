@@ -3,8 +3,21 @@ name: CI
 on:
   push:
     branches: [main]
+  # NO `branches:` filter here, deliberately. On `pull_request` that key filters
+  # by the PR's BASE, so `branches: [main]` meant a PR stacked on another branch
+  # matched nothing and CI never ran — silently. Not a skipped run, not a
+  # warning: zero checks, which reads as "nothing to report" rather than
+  # "nothing was tested". #1307 and #1310 were both merged into that blind spot
+  # before it was noticed, and the repo had gone 100+ PRs without stacking, so
+  # it had never fired before.
+  #
+  # Retargeting a PR to main does NOT repair it either — that fires
+  # `pull_request.edited`, which is not in the default type set
+  # (opened/synchronize/reopened), so the PR stays untested until someone
+  # force-pushes or closes and reopens it.
+  #
+  # ci/check_workflow_pr_coverage.py fails the build if this filter comes back.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
@@ -1350,6 +1363,21 @@ jobs:
         run: |
           python3 ci/check_reexport_shims.py --self-test
           python3 ci/check_reexport_shims.py
+      - name: PR-coverage ratchet (no workflow may be unable to run on a PR)
+        # `pull_request.branches:` filters by the PR's BASE, so `branches: [main]`
+        # meant a stacked PR got NO CI — silently, with zero checks rather than a
+        # visible failure. #1307 and #1310 were both merged into that blind spot,
+        # after 100+ consecutive PRs that never stacked and so never tripped it.
+        #
+        # This gate fails if the filter returns, or if `types:` is narrowed to
+        # drop `synchronize` (the same bug elsewhere: first push tested, the rest
+        # not). Self-test first — a gate that cannot go red proves nothing.
+        #
+        # It proves CI is ABLE to run, not that it ran; requiring a check before
+        # merge is branch protection, configured outside this repository.
+        run: |
+          python3 ci/check_workflow_pr_coverage.py --self-test
+          python3 ci/check_workflow_pr_coverage.py
       - name: Website evidence-citation gate (path + anchored line)
         # The marketing site backs each claim with an "evidence chip" that
         # deep-links into this repo. Nothing connected the two, so a rename here

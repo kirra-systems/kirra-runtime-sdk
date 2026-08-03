@@ -114,7 +114,7 @@ ${pageHero({
           no target-cpu — because a reproducible artifact beats a fast one where it counts. And CI double-builds
           the QNX judge and byte-compares the results.</p>
         </div>
-        ${evRow("docs/PERFORMANCE_BUILD_TUNING.md", ".github/workflows/ci.yml:199#- name: Reproducibility (double-build cmp of the staticlibs)")}
+        ${evRow("docs/PERFORMANCE_BUILD_TUNING.md", ".github/workflows/ci.yml:212#- name: Reproducibility (double-build cmp of the staticlibs)")}
       </div>
     </section>
 
