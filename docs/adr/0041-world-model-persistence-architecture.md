@@ -320,7 +320,10 @@ source; they are not migrated destructively (ADR-0040).
 ## Open questions
 
 1. `synchronous` policy per source class — measurement required.
-2. Retention classes: exact list and their durations.
+2. Retention classes: exact list and their durations. The harness models the
+   §11.3 protected set (safety, incident, calibration, adjudication, operator)
+   and enforces it — a window containing any of them is refused whole — but the
+   *durations* remain unmeasured and unset.
 3. Whether projections live in the same database file or a rebuildable
    sidecar file (a corrupt sidecar is cheaper to discard).
 4. Index rebuild strategy: eager at startup vs lazy per query family.
@@ -363,6 +366,25 @@ the database, a release build) *and* an explicit operator assertion — neither
 alone. A `tmpfs` path forfeits target status outright, because a run that never
 fsyncs produces the best numbers the harness can emit while measuring none of
 the property open question 1 is about.
+
+**It turns §11.3's compaction policy into a mechanism.** Compaction-with-citation
+is ratified above as policy while its mechanism is left open, and there is a
+real problem in that gap: deleting events from a hash-chained append-only log
+breaks the chain. The harness implements and measures one answer — a compacted
+span becomes a `Summary` plus a `compaction_citations` row carrying the removed
+range's digest and the chain digests on **both** sides, so verification links
+the summary from one and resumes from the other. Nothing downstream is
+re-chained and no history is rewritten. Nine §11.3 requirements are checked as
+conditions rather than assumed, including the non-vacuity control that tampering
+with a summary must break the chain.
+
+The honest consequence, which any retention policy built on this must carry:
+after compaction the *contents* of a removed span can no longer be verified,
+only that a span was removed, how large it was and what it hashed to. Full
+tamper evidence degrades to tamper-evident citation of a removed span. The
+verifier reports `compacted_windows` and a time-travel query into a compacted
+window returns a degraded summary rather than a value or a bare absence, so the
+degradation is visible instead of silent.
 
 **It reports what it cannot establish.** The corruption gate is three tiers:
 `SIGKILL` crash-consistency and WAL-loss prefix validity are automated; the

@@ -16,6 +16,7 @@
 //! ```
 
 mod bench;
+mod compact;
 mod crash;
 mod gen;
 mod json;
@@ -43,6 +44,7 @@ COMMANDS:
     growth      Bytes per event and a storage projection
     migrate     Schema migration against a populated store; fail-closed check
     crash       Corruption / restart experiment (tiers A and B; C is manual)
+    compact     Compaction-with-citation experiment (ADR-0041 §11.3)
     all         Every command above, into one result stream
 
 OPTIONS:
@@ -414,6 +416,87 @@ fn main() {
             Err(e) => {
                 failures += 1;
                 sink.emit(error_record(&class, &facts, &args, "migrate", &e));
+            }
+        }
+    }
+
+    if run("compact") {
+        let d = args.durability.unwrap_or(Durability::Normal);
+        // A fixed transaction timestamp: the generator's clock is synthetic, so
+        // reading the wall clock here would make the experiment irreproducible
+        // from its recorded seed for no benefit.
+        let now_ms = 1_700_000_000_000i64 + (args.events as i64) * 50 + 1_000_000;
+        match compact::run(&args.db, d, args.events, args.entities, args.seed, now_ms) {
+            Ok(r) => {
+                let checks = [
+                    ("citation_digest_reverifies", r.citation_digest_reverifies),
+                    ("protected_window_refused", r.protected_window_refused),
+                    ("protected_events_survived", r.protected_events_survived),
+                    ("chain_intact_across_window", r.chain_intact_across_window),
+                    (
+                        "query_into_window_is_degraded",
+                        r.query_into_window_is_degraded,
+                    ),
+                    (
+                        "query_outside_window_is_unknown",
+                        r.query_outside_window_is_unknown,
+                    ),
+                    (
+                        "redaction_keeps_chain_intact",
+                        r.redaction_keeps_chain_intact,
+                    ),
+                    (
+                        "tampered_summary_breaks_chain",
+                        r.tampered_summary_breaks_chain,
+                    ),
+                    ("all_windows_reported", r.all_windows_reported),
+                ];
+                let mut record = stamp(&class, &facts, &args)
+                    .str("record", "compact")
+                    .int("events_before", r.events_before)
+                    .int("events_after", r.events_after)
+                    .int("compacted", r.compacted)
+                    .int("bytes_before", r.bytes_before)
+                    .int("bytes_after", r.bytes_after)
+                    .int("bytes_after_vacuum", r.bytes_after_vacuum)
+                    // Cast to f64 BEFORE subtracting. On u64 this underflows
+                    // when a vacuum leaves the file larger, and the wrapped
+                    // value renders as a plausible-looking percentage in the
+                    // hundreds of trillions rather than as a negative number.
+                    .float(
+                        "bytes_reclaimed_percent",
+                        if r.bytes_before > 0 {
+                            100.0 * (r.bytes_before as f64 - r.bytes_after_vacuum as f64)
+                                / r.bytes_before as f64
+                        } else {
+                            f64::NAN
+                        },
+                    )
+                    .float("compact_ms", r.compact_ms)
+                    .float("verify_after_ms", r.verify_ms)
+                    .int("compacted_windows_reported", r.compacted_windows_reported)
+                    .obj(
+                        "citation",
+                        Obj::new()
+                            .int("summary_generation", r.citation.summary_generation)
+                            .int("lo_generation", r.citation.lo)
+                            .int("hi_generation", r.citation.hi)
+                            .int("event_count", r.citation.event_count)
+                            .str("range_digest", &r.citation.range_digest)
+                            .str("chain_before", &r.citation.chain_before)
+                            .str("chain_after", &r.citation.chain_after),
+                    );
+                for (name, ok) in checks {
+                    if !ok {
+                        failures += 1;
+                    }
+                    record = record.bool(name, ok);
+                }
+                sink.emit(record);
+            }
+            Err(e) => {
+                failures += 1;
+                sink.emit(error_record(&class, &facts, &args, "compact", &e));
             }
         }
     }

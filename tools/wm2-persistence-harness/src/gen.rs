@@ -21,7 +21,7 @@
 //! precisely so the "if entities are in the millions, Option B becomes
 //! materially stronger" reopening condition is decided by measurement.
 
-use crate::standin::{Event, EventKind};
+use crate::standin::{Event, EventKind, RetentionClass};
 
 /// splitmix64 — small, well-distributed, and reproducible across platforms
 /// because every operation is defined on wrapping u64.
@@ -54,6 +54,22 @@ impl Rng {
 /// Relationships change far more slowly than positions do — a robot re-observes
 /// where things are constantly and re-learns that a box is *on* a shelf rarely.
 const RELATIONSHIP_EVERY: u64 = 7;
+
+/// One in this many events belongs to a protected retention class.
+///
+/// Protected traffic is rare and must survive compaction forever, so the
+/// generator has to produce some: a load made entirely of raw observations
+/// would let the compaction experiment pass without ever exercising the refusal
+/// that makes ADR-0041's retention policy real.
+const PROTECTED_EVERY: u64 = 97;
+
+const PROTECTED_CLASSES: [RetentionClass; 5] = [
+    RetentionClass::Safety,
+    RetentionClass::Incident,
+    RetentionClass::Calibration,
+    RetentionClass::Adjudication,
+    RetentionClass::Operator,
+];
 
 pub const DEFAULT_PAYLOAD_BYTES: usize = 96;
 
@@ -117,6 +133,11 @@ pub fn events_sized(
             predicate,
             object,
             payload: payload(&mut rng, payload_bytes),
+            retention: if generation.is_multiple_of(PROTECTED_EVERY) {
+                PROTECTED_CLASSES[(generation / PROTECTED_EVERY) as usize % PROTECTED_CLASSES.len()]
+            } else {
+                RetentionClass::Raw
+            },
         });
     }
     out

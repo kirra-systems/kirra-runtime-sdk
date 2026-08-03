@@ -25,10 +25,11 @@ This drill produces those recordings. The instrument is
 | Measured Jetson prototype | ✅ | the whole run, if it reports `JETSON-TARGET-MEASURED` |
 | Replay benchmark (full + checkpointed) | ✅ | `replay` |
 | Query benchmark, one per §12 family | ✅ | `query` |
-| Corruption / restart experiment | ⚠️ **partly** | `crash` tiers A and B; **tier C is manual, §6** |
+| Corruption / restart experiment | ⚠️ **partly** | `crash` tiers A and B; **tier C is manual, §7** |
 | Storage growth estimate | ✅ | `growth` |
 | Migration proof of concept | ✅ | `migrate` |
-| Scale assumptions confirmed or corrected | ⚠️ **partly** | the §7 sweep informs it; the operational answer needs real deployment |
+| Compaction-with-citation (§11.3; not a numbered gate, but the retention policy the growth number makes urgent) | ✅ | `compact` |
+| Scale assumptions confirmed or corrected | ⚠️ **partly** | the §8 sweep informs it; the operational answer needs real deployment |
 
 Two of the seven are deliberately marked partial. Marking them complete on the
 strength of this harness alone would be the exact failure the measurement gate
@@ -49,7 +50,7 @@ exists to prevent.
 - **A release build.** A debug build measures rustc, and the harness refuses
   that too.
 - Rust toolchain on the Orin (or cross-compile for `aarch64-unknown-linux-gnu`).
-- Roughly **2 GiB free** at the default volume, and more for the §7 sweep.
+- Roughly **2 GiB free** at the default volume, and more for the §8 sweep.
 
 ```sh
 cd tools/wm2-persistence-harness
@@ -81,7 +82,7 @@ Expect **tens of minutes**. The append benchmark alone runs six configurations
 is one fsync per event by construction.
 
 Individual stages run on their own: `platform`, `append`, `replay`, `query`,
-`growth`, `migrate`, `crash`. Start with `platform` — it prints, in about a
+`growth`, `migrate`, `compact`, `crash`. Start with `platform` — it prints, in about a
 millisecond, whether anything you run afterwards will be citable.
 
 Exit status is `1` if any measurement failed **or was unusable** (a query family
@@ -167,17 +168,18 @@ one, and nothing else.
 
 | Measurement | Host-indicative value |
 |---|---|
-| append, `FULL`, batch=1 | ~745 ev/s, p99 3.3 ms, max 63 ms |
-| append, `NORMAL`, batch=1 | ~6 300 ev/s |
-| append, `OFF`, batch=1 | ~37 000 ev/s |
-| append, `FULL`, batch=64 | ~14 800 ev/s |
-| cold rebuild / checkpointed resume | 41 ms / 2.1 ms (2 000-event tail) |
-| point (latest / time-travel) | 3.2 µs / 9.7 µs median |
-| set | 4.1 µs median |
-| **graph, bounded depth 4** | **736 µs median** |
-| temporal `changes_since` | 5.0 ms median |
-| growth | 458 B/event at a 96-byte payload |
+| append, `FULL`, batch=1 | ~850 ev/s, p99 3.4 ms, max 87 ms |
+| append, `NORMAL`, batch=1 | ~7 500 ev/s |
+| append, `OFF`, batch=1 | ~39 000 ev/s |
+| append, `FULL`, batch=64 | ~12 800 ev/s |
+| cold rebuild / checkpointed resume | 39 ms / 2.0 ms (2 000-event tail) |
+| point (latest / time-travel) | 4.5 µs / 12.9 µs median |
+| set | 6.0 µs median |
+| **graph, bounded depth 4** | **1 033 µs median** |
+| temporal `changes_since` | 5.3 ms median |
+| growth | 459 B/event at a 96-byte payload |
 | hash share, `FULL` batch=1 | 0.2 % |
+| compaction | 9 898 events over 104 spans, **49.6 % reclaimed**, 329 ms + 34 ms re-verify |
 
 Two things in that table are worth reading twice even as indicative numbers.
 
@@ -193,7 +195,80 @@ prudent.
 
 ---
 
-## 5. Crash tiers A and B (automated)
+## 5. Compaction with citation (`compact`)
+
+ADR-0041 §11.3 calls this "the one place P2 (append-only forever) is knowingly
+bounded" and defers every threshold until measured. What neither it nor the
+blueprint settles is the *mechanism*, and there is a real problem in the gap:
+
+**Deleting events from a hash-chained append-only log breaks the chain.**
+
+Re-chaining everything after the window rewrites history — precisely what §11.3
+forbids — and costs O(n). Leaving the hole makes the log unverifiable past the
+first compaction, destroying the tamper evidence the design rests on.
+
+### The mechanism under test
+
+A compacted span `[lo, hi]` becomes one `Summary` event at `lo`, plus a
+`compaction_citations` row carrying `event_count`, a `range_digest` over the
+removed events' canonical bytes, and the chain digests on **both** sides.
+Verification links the summary from `chain_before` and resumes from
+`chain_after`, so events written after the window still verify against the links
+they were originally computed from. Nothing is re-chained.
+
+The pass compacts every maximal raw span in a retention horizon, not one
+abstract window — protected classes are scattered through the log and partition
+the compactable traffic, which is what a real policy operates on.
+
+### What is lost, and how the run says so
+
+After compaction you can no longer verify the *contents* of a removed span, only
+that a span was removed, how large it was, and what it hashed to. Full tamper
+evidence degrades to **tamper-evident citation of a removed span**. Two
+mechanisms keep that visible rather than silent:
+
+- the chain verifier reports `compacted_windows` and `redacted` counts, so a
+  compacted log never reads as a plain "intact";
+- a time-travel query into a compacted window returns `DegradedSummary`, never a
+  value and never a bare `Unknown` — `Unknown` is also what you get for
+  something never observed, and conflating "we had this and compacted it" with
+  "we never saw it" destroys the one fact an incident investigator most needs.
+
+### The nine checks in the record
+
+Each is a §11.3 sentence turned into a condition; any `false` fails the run.
+
+| Field | What it establishes |
+|---|---|
+| `citation_digest_reverifies` | every citation matches a digest computed independently before deletion |
+| `protected_window_refused` | a window containing a protected retention class is refused **whole** |
+| `protected_events_survived` | no pre-existing protected event was destroyed |
+| `chain_intact_across_window` | the log verifies across the holes, not merely up to the first one |
+| `all_windows_reported` | the verifier counts every compaction, not some |
+| `query_into_window_is_degraded` | degraded resolution, never silent fabrication |
+| `query_outside_window_is_unknown` | and `Unknown` still means never-observed |
+| `redaction_keeps_chain_intact` | a redaction leaves a tombstone; absence is never how deletion is represented |
+| `tampered_summary_breaks_chain` | **the non-vacuity control** — without it every row above is unfalsifiable |
+
+### Two findings from the host run, worth confirming on target
+
+**Compaction alone reclaims no disk.** `bytes_after` came back byte-identical to
+`bytes_before`: deleting rows leaves free pages inside the file. The 49.6 %
+reclaim appears only after a `VACUUM`, which rewrites the entire database. On an
+embedded device sharing storage with perception that is a significant
+operational cost with its own I/O and power profile, and it means "compact"
+and "reclaim" are two operations that must be scheduled separately. Measure the
+`VACUUM` on target before assuming a retention policy is affordable.
+
+**Retention class is inside the chained bytes.** Downgrading a protected event
+to `raw` — the obvious way to make it deletable — breaks the chain at that
+generation. The protection is structural rather than procedural, which is what
+you want, but it also means a retention *policy* change cannot be applied
+retroactively by relabelling: it has to be a forward-looking decision.
+
+---
+
+## 6. Crash tiers A and B (automated)
 
 Both run under `crash`.
 
@@ -221,7 +296,7 @@ decoration.
 
 ---
 
-## 6. Tier C — the power cut (manual, and the only real durability test)
+## 7. Tier C — the power cut (manual, and the only real durability test)
 
 **Nothing in software can distinguish a filesystem that honoured `fsync` from
 one that acknowledged it and buffered the write in a device cache.** Lying write
@@ -267,7 +342,7 @@ made to report anything else, so a results file can never imply this happened.
 
 ---
 
-## 7. Scale sweep — the reopening condition
+## 8. Scale sweep — the reopening condition
 
 ADR-0041's assumptions are provisional: hundreds-to-low-thousands of entities,
 thousands-to-millions of observations. It states its own reopening condition —
@@ -296,7 +371,7 @@ produce.
 
 ---
 
-## 8. Recording the result
+## 9. Recording the result
 
 Attach the JSONL file to the ADR-0041 ratification conversation, with:
 

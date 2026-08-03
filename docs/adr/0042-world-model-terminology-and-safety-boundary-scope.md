@@ -352,18 +352,59 @@ error that produces a legal trajectory to a wrong-but-reachable place is bounded
 kinematically while still being operationally wrong. Whether that is a safety
 concern or an availability concern is precisely the owner's call.
 
-## Decision record — template, to be completed by the owner
+## The merge-blocking rule
+
+> **No Kirra World domain implementation may merge until this ruling is
+> assigned to a named owner and recorded.**
+
+This is enforced, not requested:
+[`ci/check_world_domain_logic_gate.py`](../../ci/check_world_domain_logic_gate.py)
+reads the record below and, while it is unrecorded, requires the `kirra-world*`
+crates to contain declarations only — no function, no hand-written `impl`, no
+struct field beyond the unconstructible unit placeholder, no enum variant
+carrying data, no `const` or `static`, no macro, and no dependency of any kind.
+
+**Why it is a gate and not a paragraph.** The risk at this point is
+organizational rather than technical. The ten placeholder types in
+`crates/kirra-world` are unconstructible on purpose, and their emptiness is not
+an unfinished state — it is holding the shape open while this decision is still
+being made. But an empty crate reads as an invitation. With the ruling still
+open some weeks from now, *"just the `EntityId` newtype, it is obviously a
+`u128`"* is an entirely reasonable-sounding pull request, and the reasoning that
+makes it sound reasonable is precisely the reasoning this ruling was supposed to
+perform. Prose does not run in CI; the person with the deadline wins that
+argument every time.
+
+**What the gate does not claim.** It cannot stop a determined bypass, and it is
+not trying to — the record below is text in a document and anyone may edit it.
+That is correct, because the edit *is* the ruling and it belongs in review. What
+changes is the failure mode: without the gate the guardrail erodes silently, one
+defensible type at a time, with nobody ever deciding to bypass anything. With
+it, proceeding requires editing a named field in a named ADR, in a diff a
+reviewer sees, with an owner's name attached.
+
+The gate is **self-releasing**: recording the ruling relaxes it automatically
+and it reports the owner and classification thereafter. Nobody has to delete it
+to make progress, because a gate that must be deleted gets deleted wholesale —
+taking its checks with it — rather than satisfied.
+
+## Decision record — to be completed by the owner
+
+Machine-read by the gate above. `UNASSIGNED` in any field, or a placeholder such
+as `TBD` or the role name `the safety-assurance owner`, counts as unrecorded: a
+role cannot be accountable for a decision, which is the point of naming a
+person.
 
 ```
-Safety-assurance ruling: Pending
+Safety-assurance ruling: PENDING
 
-Owner:
-Date:
-Scope classification:
-Rationale:
-Assumptions:
-Required evidence:
-Conditions that reopen the decision:
+Owner: UNASSIGNED
+Date: UNASSIGNED
+Scope classification: UNASSIGNED
+Rationale: UNASSIGNED
+Assumptions: UNASSIGNED
+Required evidence: UNASSIGNED
+Conditions that reopen the decision: UNASSIGNED
 ```
 
 **Merging this PR does not constitute approval.** The ruling is not invented

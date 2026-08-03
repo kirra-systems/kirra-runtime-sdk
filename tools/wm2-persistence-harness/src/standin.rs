@@ -63,7 +63,9 @@ CREATE TABLE world_events (
     object          TEXT,
     payload         TEXT    NOT NULL,
     payload_digest  TEXT    NOT NULL,
-    chain_digest    TEXT    NOT NULL
+    chain_digest    TEXT    NOT NULL,
+    retention_class TEXT    NOT NULL DEFAULT 'raw',
+    redacted        INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_events_subject_valid ON world_events (subject, valid_from_ms);
 CREATE INDEX idx_events_txn           ON world_events (txn_time_ms);
@@ -91,6 +93,21 @@ CREATE TABLE projection_checkpoints (
     name         TEXT PRIMARY KEY,
     generation   INTEGER NOT NULL,
     state_digest TEXT    NOT NULL
+);
+
+-- The citation half of compaction-with-citation (ADR-0041 §11.3). A compacted
+-- window leaves this row behind: what was summarized, how much of it, the
+-- digest of the removed span, and the chain digests on either side so the log
+-- stays verifiable ACROSS the hole rather than merely up to it.
+CREATE TABLE compaction_citations (
+    summary_generation  INTEGER PRIMARY KEY,
+    lo_generation       INTEGER NOT NULL,
+    hi_generation       INTEGER NOT NULL,
+    event_count         INTEGER NOT NULL,
+    range_digest        TEXT    NOT NULL,
+    chain_before        TEXT    NOT NULL,
+    chain_after         TEXT    NOT NULL,
+    compacted_at_ms     INTEGER NOT NULL
 );
 "#;
 
@@ -161,14 +178,77 @@ impl Durability {
 pub enum EventKind {
     Observation,
     Relationship,
+    /// The citation left behind by a compacted window. Written by
+    /// [`crate::compact`], never by a producer.
+    Summary,
 }
 
 impl EventKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Observation => "observation",
             Self::Relationship => "relationship",
+            Self::Summary => "summary",
         }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "observation" => Self::Observation,
+            "summary" => Self::Summary,
+            _ => Self::Relationship,
+        }
+    }
+}
+
+/// Retention class, deciding what compaction is allowed to touch.
+///
+/// ADR-0041 §11.3 names the protected set explicitly: safety-relevant events,
+/// incident windows, calibration, identity adjudications, and operator-confirmed
+/// events must be retained longer than raw observation traffic. Only `Raw` is
+/// compactable, and the harness proves the distinction is enforced rather than
+/// documented -- the compaction pass refuses a window containing anything else,
+/// which is the property that decides whether "compaction loses something
+/// needed for an incident" (risk R4) is mitigated or merely hoped for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionClass {
+    Raw,
+    Safety,
+    Incident,
+    Calibration,
+    Adjudication,
+    Operator,
+}
+
+impl RetentionClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Safety => "safety",
+            Self::Incident => "incident",
+            Self::Calibration => "calibration",
+            Self::Adjudication => "adjudication",
+            Self::Operator => "operator",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "raw" => Self::Raw,
+            "safety" => Self::Safety,
+            "incident" => Self::Incident,
+            "calibration" => Self::Calibration,
+            "adjudication" => Self::Adjudication,
+            "operator" => Self::Operator,
+            // An UNRECOGNISED class is treated as protected, not as raw. A
+            // typo in a retention policy must never make an event eligible for
+            // deletion.
+            _ => Self::Safety,
+        }
+    }
+
+    pub fn is_protected(self) -> bool {
+        !matches!(self, Self::Raw)
     }
 }
 
@@ -186,6 +266,7 @@ pub struct Event {
     pub predicate: Option<String>,
     pub object: Option<String>,
     pub payload: String,
+    pub retention: RetentionClass,
 }
 
 impl Event {
@@ -212,16 +293,24 @@ impl Event {
         push(self.predicate.as_deref().unwrap_or(""));
         push(self.object.as_deref().unwrap_or(""));
         push(&self.payload);
+        push(self.retention.as_str());
         buf
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainStatus {
-    /// Every link recomputes, and the log is a contiguous generation run.
+    /// Every link recomputes, and the log is a contiguous generation run —
+    /// contiguous *modulo* cited compaction windows, which are counted rather
+    /// than hidden. A verifier reporting a plain "intact" over a compacted log
+    /// would be concealing exactly the degradation compaction causes, and
+    /// `redacted` does the same job for tombstones: both are states a reader
+    /// must be able to see without going looking.
     Intact {
         entries: u64,
         head: String,
+        compacted_windows: u64,
+        redacted: u64,
     },
     /// A link does not recompute — tampering or corruption.
     Broken {
@@ -336,8 +425,8 @@ impl Store {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO world_events (generation, event_id, txn_time_ms, valid_from_ms, \
                  valid_to_ms, source, source_version, payload_schema, kind, subject, predicate, \
-                 object, payload, payload_digest, chain_digest) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                 object, payload, payload_digest, chain_digest, retention_class) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             )?;
             for ev in events {
                 let payload_digest = sha256::hex(&ev.canonical_bytes());
@@ -358,6 +447,7 @@ impl Store {
                     ev.payload,
                     payload_digest,
                     chain,
+                    ev.retention.as_str(),
                 ])?;
                 prev = chain;
             }
@@ -365,21 +455,49 @@ impl Store {
         tx.commit()
     }
 
-    /// Recompute every link in generation order.
+    /// Recompute every link in generation order, across compaction and
+    /// redaction.
+    ///
+    /// # What compaction does to tamper evidence
+    ///
+    /// Deleting events from a hash-chained log breaks it. The resolution here
+    /// is the "citation" half of ADR-0041's compaction-with-citation: a
+    /// compacted window leaves a `Summary` event plus a
+    /// `compaction_citations` row recording the chain digest on BOTH sides of
+    /// the removed span. Verification links the summary from `chain_before`,
+    /// then resumes from `chain_after` — so the events written after the window
+    /// still verify against the links they were originally computed from, and
+    /// nothing downstream has to be re-chained.
+    ///
+    /// The honest consequence, which the caller must not lose: after
+    /// compaction you can no longer verify the *contents* of the removed span,
+    /// only that a span was removed, how large it was, and what it hashed to.
+    /// Full tamper evidence degrades to a tamper-evident citation OF a removed
+    /// span. That is a real loss, and it is why `Intact` carries
+    /// `compacted_windows` — a verifier that flattened this to a plain "intact"
+    /// would be concealing the one thing about the log that changed.
+    ///
+    /// A redacted event keeps its row and its ORIGINAL stored `payload_digest`,
+    /// so the chain stays continuous while the content is gone. That is
+    /// ADR-0041's rule that "a redaction must leave a tombstone, or the chain
+    /// breaks", made mechanical: absence is never how a deletion is
+    /// represented.
     pub fn verify_chain(&self) -> rusqlite::Result<ChainStatus> {
         let mut stmt = self.conn.prepare(
             "SELECT generation, event_id, txn_time_ms, valid_from_ms, valid_to_ms, source, \
-             source_version, kind, subject, predicate, object, payload, chain_digest \
+             source_version, kind, subject, predicate, object, payload, chain_digest, \
+             retention_class, redacted, payload_digest \
              FROM world_events ORDER BY generation ASC",
         )?;
         let mut rows = stmt.query([])?;
         let mut prev = "genesis".to_string();
         let mut count: u64 = 0;
+        let mut compacted_windows: u64 = 0;
+        let mut redacted_count: u64 = 0;
         let mut expect_generation: Option<u64> = None;
 
         while let Some(row) = rows.next()? {
-            let generation: i64 = row.get(0)?;
-            let generation = generation as u64;
+            let generation = row.get::<_, i64>(0)? as u64;
             if let Some(expected) = expect_generation {
                 if generation != expected {
                     return Ok(ChainStatus::Gap {
@@ -387,10 +505,11 @@ impl Store {
                     });
                 }
             }
-            let kind = match row.get::<_, String>(7)?.as_str() {
-                "observation" => EventKind::Observation,
-                _ => EventKind::Relationship,
-            };
+            let kind = EventKind::parse(&row.get::<_, String>(7)?);
+            let redacted: i64 = row.get(14)?;
+            let stored_chain: String = row.get(12)?;
+            let stored_payload_digest: String = row.get(15)?;
+
             let ev = Event {
                 generation,
                 event_id: row.get(1)?,
@@ -404,17 +523,57 @@ impl Store {
                 predicate: row.get(9)?,
                 object: row.get(10)?,
                 payload: row.get(11)?,
+                retention: RetentionClass::parse(&row.get::<_, String>(13)?),
             };
-            let stored: String = row.get(12)?;
-            let recomputed =
-                sha256::chain_link(&prev, sha256::hex(&ev.canonical_bytes()).as_bytes());
-            if recomputed != stored {
+
+            // A tombstone's content is gone by design, so its digest cannot be
+            // recomputed — the stored one is what the chain was built on and
+            // remains the thing being attested.
+            let payload_digest = if redacted != 0 {
+                redacted_count += 1;
+                stored_payload_digest
+            } else {
+                sha256::hex(&ev.canonical_bytes())
+            };
+
+            if sha256::chain_link(&prev, payload_digest.as_bytes()) != stored_chain {
                 return Ok(ChainStatus::Broken {
                     at_generation: generation,
                 });
             }
-            prev = stored;
             count += 1;
+
+            if kind == EventKind::Summary {
+                // Resume from the far side of the cited window.
+                let cited: Option<(i64, i64, String, String)> = self
+                    .conn
+                    .query_row(
+                        "SELECT lo_generation, hi_generation, chain_before, chain_after \
+                         FROM compaction_citations WHERE summary_generation = ?1",
+                        params![generation as i64],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .optional()?;
+                let Some((_lo, hi, chain_before, chain_after)) = cited else {
+                    // A summary with no citation is an uncited hole: exactly
+                    // the "compaction silently rewriting history" this design
+                    // forbids.
+                    return Ok(ChainStatus::Broken {
+                        at_generation: generation,
+                    });
+                };
+                if chain_before != prev {
+                    return Ok(ChainStatus::Broken {
+                        at_generation: generation,
+                    });
+                }
+                compacted_windows += 1;
+                prev = chain_after;
+                expect_generation = Some(hi as u64 + 1);
+                continue;
+            }
+
+            prev = stored_chain;
             expect_generation = Some(generation + 1);
         }
 
@@ -424,6 +583,8 @@ impl Store {
             Ok(ChainStatus::Intact {
                 entries: count,
                 head: prev,
+                compacted_windows,
+                redacted: redacted_count,
             })
         }
     }
