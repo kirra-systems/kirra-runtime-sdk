@@ -25,7 +25,7 @@ This drill produces those recordings. The instrument is
 | Measured Jetson prototype | ✅ | the whole run, if it reports `JETSON-TARGET-MEASURED` |
 | Replay benchmark (full + checkpointed) | ✅ | `replay` |
 | Query benchmark, one per §12 family | ✅ | `query` |
-| Corruption / restart experiment | ⚠️ **partly** | `crash` tiers A and B; **tier C is manual, §8** |
+| Corruption / restart experiment | ⚠️ **partly** | `crash` tiers A and B automatically; **tier C needs a power switch — `powercut arm`/`verify`, §8** |
 | Storage growth estimate | ✅ | `growth` |
 | Migration proof of concept | ✅ | `migrate` |
 | Compaction-with-citation (§11.3; not a numbered gate, but the retention policy the growth number makes urgent) | ✅ | `compact` |
@@ -389,41 +389,70 @@ caches are common on embedded storage, especially microSD. `SIGKILL` leaves the
 page cache intact, so tier A proves nothing about durability. The only
 instrument is a power switch.
 
-The harness always reports tier C as `NOT-RUN` with that reason. It cannot be
-made to report anything else, so a results file can never imply this happened.
+The harness cannot perform this tier. What it *can* do is record it, so the
+result is a machine-checked ledger rather than a recollection: `powercut arm`
+fsyncs a known prefix and states what must survive, and `powercut verify` — run
+after the reboot — checks what actually did and appends the verdict.
+
+With no trials recorded, tier C stays `NOT-RUN`, which is the default for every
+automated run and keeps the exit code meaningful.
 
 ### Procedure
 
+Run this **five times**, incrementing `--trial` each time. Use one database for
+the whole series; the trials ledger accumulates beside it.
+
 1. Boot the Orin normally, on the storage under test.
-2. Append a known, counted prefix at the durability setting you intend to ship:
+
+2. Arm the trial. This appends a prefix at `synchronous=FULL`, checkpoints it
+   into the main file, fsyncs a marker recording exactly what was made durable,
+   and then appends an un-checkpointed tail forever:
+
    ```sh
-   ./wm2-persistence-harness append \
-       --db /var/lib/kirra/wm2/power.sqlite \
-       --durability full --events 50000 --batch 1 --assert-target
+   ./wm2-persistence-harness powercut arm --db /var/lib/kirra/wm2/power.sqlite
    ```
-3. Record the committed count:
+
+   Wait for the `ARMED:` line. **Before it appears, nothing has been promised
+   and a cut proves nothing.**
+
+3. With the tail still running, cut power **at the source** — pull the barrel
+   jack or kill the bench supply. Do **not** use `poweroff`, `reboot`, or a
+   long-press: each of those flushes, which is the opposite of the experiment.
+
+4. Restore power, boot, and verify:
+
    ```sh
-   sqlite3 /var/lib/kirra/wm2/power.sqlite 'SELECT COUNT(*), MAX(generation) FROM world_events;'
-   ```
-4. Start a second append run and, **while it is running**, cut power at the
-   source — pull the barrel jack or kill the bench supply. Do **not** use
-   `poweroff`, `reboot`, or a long-press: each of those flushes.
-5. Restore power, boot, and re-verify:
-   ```sh
-   ./wm2-persistence-harness crash --db /var/lib/kirra/wm2/power.sqlite --assert-target
+   ./wm2-persistence-harness powercut verify \
+       --db /var/lib/kirra/wm2/power.sqlite --trial 1
    sqlite3 /var/lib/kirra/wm2/power.sqlite 'PRAGMA integrity_check;'
    ```
-6. **Pass** = the chain verifies intact, the count is ≥ the step-3 count, and
-   `integrity_check` reports `ok`. **Fail** = a broken chain, a count *below*
-   the committed prefix, or any corruption. A count below step 3 at
-   `synchronous=FULL` means the storage is lying about `fsync` — that is a
-   hardware finding, and it invalidates the durability half of every other
-   result on that medium.
-7. Repeat **at least five times**. One power cut that happens to land between
-   commits proves nothing.
-8. Record the outcome in the ADR conversation with the medium named
-   (`db_fs_source` from the results file). Durability is a property of *that
-   medium*, and it does not transfer to a different one.
+
+   `verify` exits non-zero until five clean trials are recorded, so a
+   half-finished series cannot be filed as a complete one.
+
+5. Repeat from step 2 with `--trial 2`, `3`, `4`, `5`.
+
+### Reading the verdict
+
+| Result | Meaning |
+|---|---|
+| `PASS` | Chain intact and the fsynced prefix survived. Losing the un-fsynced tail is **correct** — that is what tier B already establishes portably. |
+| `FAIL` — *DURABILITY VIOLATION* | Fewer events came back than were fsynced and acknowledged. **The storage device acknowledged writes it had not persisted.** This is the only failure tier C can detect that tiers A and B cannot, no `synchronous` setting compensates for it, and it invalidates the durability half of every other result on that medium. |
+| `FAIL` — broken chain / gap | A torn or forked write: worse than a lost tail. |
+| `INCONCLUSIVE` | No armed marker — the cut landed before `ARMED:`, so nothing stated what should have survived. Re-run that trial. |
+
+Five is a floor, not a ritual: device-cache loss is probabilistic and depends
+where in the erase-block cycle the cut lands, so a store that survives once can
+lose an acknowledged write on the next attempt. Below five the aggregate reports
+`INCONCLUSIVE` rather than a pass.
+
+> **Do not run `crash` against the power-cut database.** Tier A deletes and
+> recreates the store it is given. The trials ledger survives (it is a separate
+> file, and is read before tier A runs), but the database state the cuts
+> produced does not. Use `powercut verify`, which only reads.
+
+Record the medium (`db_fs_source`) alongside the result. Durability is a
+property of *that medium* and does not transfer to a different one.
 
 ---
 
@@ -458,14 +487,50 @@ produce.
 
 ## 10. Recording the result
 
-Attach the JSONL file to the ADR-0041 ratification conversation, with:
+Attach the JSONL file and the trials ledger
+(`<db>-tierc-trials.jsonl`) to the ADR-0041 ratification conversation. Every
+field below is stamped by the harness — the record should be a file, not a
+retyping of one.
 
-- the `evidence_status` line, quoted verbatim;
-- the device and medium (`device_model`, `db_fs_source`);
-- the tier C outcome and how many power cuts were performed, or an explicit
-  statement that tier C was not run;
-- the `standin_schema_digest`, so a later reader can tell whether the schema
-  measured is the schema ratified.
+**Provenance** — on every record:
+
+| Field | Why it is in the record |
+|---|---|
+| `evidence_status` | Quoted verbatim. Anything but `JETSON-TARGET-MEASURED` is not ratification evidence. |
+| `device_model`, `db_fs_type`, `db_fs_source` | Durability is a property of the medium; the number does not transfer off it. |
+| `build_profile`, `rustc_version`, `git_commit`, `source_digest` | Which binary said this. `git_commit` carries a `-dirty` suffix when the tree had uncommitted changes; `source_digest` is what was *actually* built, which is the pair that makes a figure reproducible later. |
+| `standin_schema_digest` | Whether the schema measured is the schema ratified. |
+| `sqlite_version` | |
+
+**Measurements** — the load-bearing rows:
+
+| Question | Records / fields |
+|---|---|
+| Bytes per event | `growth` → `bytes_per_event` |
+| Point vs graph latency | `query` → the `point_*` and `graph_*` families |
+| Replay / restart recovery | `replay` → cold rebuild vs checkpointed resume |
+| Corruption detection | `crash` tier A, plus `compact`'s tamper control |
+| Migration behaviour | `migrate` |
+| Logical compaction | `compact` → events removed, spans, `bytes_reclaimed_percent` |
+| VACUUM duration and reclaimed bytes | `reclaim` → `vacuum_ms`, `bytes_freed` |
+| **VACUUM system impact** | `reclaim` → `transient_overhead_bytes`, `transient_overhead_ratio`, `temp_dir_fs_type`, `temp_fs_is_volatile`, `max_append_stall_ms`, `concurrent_appends_blocked` |
+| Disk-pressure behaviour | `pressure` → the seven boolean checks |
+| Tier A / B | `crash` → `outcome` + `detail` |
+| Tier C | the trials ledger, plus `tier_c_trials_recorded` / `tier_c_trials_required` |
+
+Three of those deserve to be read rather than filed:
+
+- **`temp_fs_is_volatile`.** If SQLite's temp directory is `tmpfs`, `VACUUM`
+  builds its copy in **RAM**. On an 8 GiB store the failure mode is the OOM
+  killer, not `ENOSPC`. Point `TMPDIR` at durable storage before concluding
+  anything about reclamation cost.
+- **`transient_overhead_bytes`.** Reclamation *consumes* free space to release
+  it, so this — not `bytes_freed` — is what a minimum-free-space reserve is set
+  from. The overhead scales with what will remain, so the worst case is a store
+  with little to reclaim, and the conservative reserve is ~1× the database size.
+- **`max_append_stall_ms`.** `VACUUM` holds an exclusive lock for its whole
+  duration; the store cannot record events during it. This is the number the
+  "required robot state during reclamation" decision rests on.
 
 **Do not tick a box in ADR-0041 from a `HOST-INDICATIVE-NOT-TARGET` run**, and
 do not tick the corruption/restart box from tiers A and B alone. Say what was

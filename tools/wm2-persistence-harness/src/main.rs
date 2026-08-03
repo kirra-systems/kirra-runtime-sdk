@@ -49,6 +49,12 @@ COMMANDS:
     pressure    Disk-pressure behaviour + reclamation cost (ADR-0041 §SQLite config)
     all         Every command above, into one result stream
 
+  Tier C (manual, needs a power switch — see the drill §8):
+    powercut arm     Fsync a known prefix, record it, then append until the
+                     power is cut. Does not return.
+    powercut verify  After reboot: check the fsynced prefix survived and the
+                     chain is intact; append the result to the trials ledger.
+
 OPTIONS:
     --db <path>              Working database (default: a temp file)
     --out <path>             Append JSONL results here (default: stdout)
@@ -62,6 +68,7 @@ OPTIONS:
     --events-per-day <n>     For the growth projection (default: 864000 = 10 Hz)
     --budget-gib <n>         Storage budget for the projection (default: 8)
     --crash-run-ms <n>       How long the crash child runs before SIGKILL (default: 750)
+    --trial <n>              Power-cut trial number, for `powercut verify`
     --assert-target          Operator asserts this is target hardware under
                              representative storage, power and thermal conditions
 
@@ -84,6 +91,9 @@ struct Args {
     events_per_day: f64,
     budget_gib: f64,
     crash_run_ms: u64,
+    trial: u64,
+    /// Positional word after the command, used only by `powercut arm|verify`.
+    subcommand: Option<String>,
     assert_target: bool,
 }
 
@@ -110,10 +120,27 @@ fn parse_args() -> Result<Args, String> {
         events_per_day: 864_000.0,
         budget_gib: 8.0,
         crash_run_ms: 750,
+        trial: 0,
+        subcommand: None,
         assert_target: false,
     };
 
+    // A single positional word may follow `powercut`, and only `powercut`.
+    // Anywhere else it is a typo, and swallowing it silently would run a
+    // different experiment than the one that was asked for.
     let mut i = 1;
+    if let Some(word) = raw.get(1) {
+        if !word.starts_with("--") {
+            if a.command != "powercut" {
+                return Err(format!(
+                    "unexpected argument `{word}` after `{}`\n\n{USAGE}",
+                    a.command
+                ));
+            }
+            a.subcommand = Some(word.clone());
+            i = 2;
+        }
+    }
     while i < raw.len() {
         let flag = raw[i].as_str();
         // Every flag but --assert-target takes a value; missing it is a usage
@@ -137,6 +164,7 @@ fn parse_args() -> Result<Args, String> {
             "--repeats" => a.repeats = parse_num(&value(flag)?, flag)? as usize,
             "--seed" => a.seed = parse_num(&value(flag)?, flag)?,
             "--crash-run-ms" => a.crash_run_ms = parse_num(&value(flag)?, flag)?,
+            "--trial" => a.trial = parse_num(&value(flag)?, flag)?,
             "--events-per-day" => a.events_per_day = parse_float(&value(flag)?, flag)?,
             "--budget-gib" => a.budget_gib = parse_float(&value(flag)?, flag)?,
             "--durability" => {
@@ -198,6 +226,13 @@ fn stamp(class: &platform::Classification, facts: &platform::PlatformFacts, a: &
         .str("harness_version", env!("CARGO_PKG_VERSION"))
         .str("sqlite_version", rusqlite::version())
         .str("build_profile", &facts.build_profile)
+        // Build identity: which binary produced this number. `build_profile`
+        // says release-or-debug; these say *which* release. Captured in
+        // build.rs — see its header for why a dirty tree is labelled rather
+        // than rejected.
+        .str("rustc_version", env!("WM2_RUSTC_VERSION"))
+        .str("git_commit", env!("WM2_GIT_COMMIT"))
+        .str("source_digest", env!("WM2_SOURCE_DIGEST"))
         .str("arch", &facts.arch)
         .opt_str("device_model", facts.model.as_deref())
         .opt_str("db_fs_type", facts.db_fs_type.as_deref())
@@ -225,6 +260,55 @@ fn main() {
     // append until killed.
     if args.command == "crash-child" {
         crash::crash_child(&args.db, args.durability.unwrap_or(Durability::Full));
+    }
+
+    // Tier C. Deliberately outside the reporting pipeline: `arm` never returns
+    // (the operator ends it with the power switch) and `verify` runs after a
+    // reboot, so neither fits the run/stage shape the other commands share.
+    if args.command == "powercut" {
+        if let Some(parent) = args.db.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match args.subcommand.as_deref() {
+            Some("arm") => {
+                crash::powercut_arm(&args.db, 400, args.entities, args.seed);
+            }
+            Some("verify") => {
+                if args.trial == 0 {
+                    eprintln!(
+                        "powercut verify requires --trial <n> (1-based). The number is \
+                         recorded in the ledger so trials can be counted and re-run \
+                         individually."
+                    );
+                    std::process::exit(2);
+                }
+                let rec = crash::powercut_verify(&args.db, args.trial);
+                println!(
+                    "trial {}: {} — {}",
+                    rec.trial,
+                    rec.outcome.token(),
+                    rec.outcome.detail()
+                );
+                let all = crash::read_trials(&args.db);
+                let agg = crash::tier_c_from_trials(&all);
+                println!(
+                    "\ntier C after {} trial(s): {} — {}",
+                    all.len(),
+                    agg.token(),
+                    agg.detail()
+                );
+                // A failed or still-insufficient tier C exits non-zero, for the
+                // same reason every other unusable measurement does.
+                std::process::exit(i32::from(agg.fails_the_run()));
+            }
+            other => {
+                eprintln!(
+                    "powercut needs a subcommand: `arm` or `verify` (got {})",
+                    other.unwrap_or("nothing")
+                );
+                std::process::exit(2);
+            }
+        }
     }
 
     if let Some(parent) = args.db.parent() {
@@ -546,7 +630,28 @@ fn main() {
                     .int("bytes_before", r.bytes_before)
                     .int("bytes_after", r.bytes_after)
                     .float("bytes_freed", r.bytes_freed as f64)
-                    .float("bytes_per_ms", r.bytes_per_ms),
+                    .float("bytes_per_ms", r.bytes_per_ms)
+                    // Transient cost. `transient_overhead_bytes` — not
+                    // `bytes_freed` — is what a minimum-free-space reserve has
+                    // to be set from: VACUUM materialises a second copy before
+                    // it can shrink anything.
+                    .int("peak_bytes_during", r.peak_bytes_during)
+                    .float(
+                        "transient_overhead_bytes",
+                        r.transient_overhead_bytes as f64,
+                    )
+                    .float("transient_overhead_ratio", r.transient_overhead_ratio)
+                    .int("footprint_samples", r.footprint_samples)
+                    // Where the second copy lands. A volatile temp filesystem
+                    // means reclamation runs through RAM.
+                    .str("temp_dir", &r.temp_dir)
+                    .opt_str("temp_dir_fs_type", r.temp_dir_fs_type.as_deref())
+                    .bool("temp_on_same_fs_as_db", r.temp_on_same_fs_as_db)
+                    .bool("temp_fs_is_volatile", r.temp_fs_is_volatile)
+                    // Availability: what a robot cannot do while this runs.
+                    .int("concurrent_append_attempts", r.concurrent_append_attempts)
+                    .int("concurrent_appends_blocked", r.concurrent_appends_blocked)
+                    .float("max_append_stall_ms", r.max_append_stall_ms),
             ),
             Err(e) => {
                 failures += 1;
@@ -572,6 +677,12 @@ fn main() {
                     .str("tier", tier)
                     .str("durability", d.pragma())
                     .str("outcome", outcome.token())
+                    // Recorded manual power-cut trials found next to the
+                    // database. Stamped on every tier so a reader of any one
+                    // row can tell a genuine NOT-RUN from a drill that
+                    // stopped short of the required count.
+                    .int("tier_c_trials_recorded", r.tier_c_trials)
+                    .int("tier_c_trials_required", crash::MIN_TIER_C_TRIALS)
                     .str("detail", outcome.detail()),
             );
         }
@@ -692,6 +803,8 @@ mod tests {
             events_per_day: 1.0,
             budget_gib: 1.0,
             crash_run_ms: 1,
+            trial: 0,
+            subcommand: None,
             assert_target: false,
         };
         let rendered = stamp(&class, &facts, &args).render();
@@ -722,6 +835,8 @@ mod tests {
             events_per_day: 1.0,
             budget_gib: 1.0,
             crash_run_ms: 1,
+            trial: 0,
+            subcommand: None,
             assert_target: false,
         };
         assert_eq!(durabilities(&a).len(), 3);

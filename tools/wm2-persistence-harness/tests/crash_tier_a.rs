@@ -162,3 +162,109 @@ fn a_flag_missing_its_value_is_rejected() {
         .expect("did not run");
     assert_eq!(status.code(), Some(2));
 }
+
+#[test]
+fn a_stray_positional_word_is_rejected_outside_powercut() {
+    // `powercut` takes a positional subcommand, so the parser accepts one
+    // bare word. It must not accept one anywhere else, or a mistyped
+    // invocation quietly runs a different experiment than was asked for.
+    let status = Command::new(BIN)
+        .args(["all", "verify"])
+        .status()
+        .expect("did not run");
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "a bare word after a normal command must be a usage error"
+    );
+}
+
+#[test]
+fn powercut_requires_a_subcommand_and_verify_requires_a_trial_number() {
+    for args in [
+        vec!["powercut"],
+        vec!["powercut", "sideways"],
+        vec!["powercut", "verify"], // no --trial
+    ] {
+        let status = Command::new(BIN).args(&args).status().expect("did not run");
+        assert_eq!(
+            status.code(),
+            Some(2),
+            "`{}` must be a usage error, not a silent no-op",
+            args.join(" ")
+        );
+    }
+}
+
+/// The full tier C loop, with `SIGKILL` standing in for the power switch.
+///
+/// This does **not** make tier C automatable — a signal leaves the page cache
+/// intact, which is exactly why tier C needs a power supply and why the harness
+/// refuses to claim it. What it proves is that the *recording* machinery works:
+/// the marker survives, `verify` judges against it, the ledger accumulates, and
+/// the aggregate still refuses to pass below the required trial count.
+#[test]
+fn the_powercut_ledger_accumulates_and_still_refuses_to_pass_early() {
+    use std::io::Read;
+
+    let mut db = scratch("powercut-loop");
+    db.push("w.sqlite");
+    for suffix in ["", "-wal", "-shm", "-tierc-armed", "-tierc-trials.jsonl"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", db.display()));
+    }
+
+    // Arm never returns, so it is killed the way the mains would kill it.
+    let mut child = Command::new(BIN)
+        .args(["powercut", "arm", "--db", &db.to_string_lossy()])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn arm");
+
+    // Wait for it to announce that the prefix is fsynced and recorded, so the
+    // kill lands on the tail rather than on the prefix.
+    let mut out = child.stdout.take().expect("stdout");
+    let mut seen = String::new();
+    let mut byte = [0u8; 1];
+    while !seen.contains("ARMED:") {
+        match out.read(&mut byte) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => seen.push(byte[0] as char),
+        }
+    }
+    assert!(seen.contains("ARMED:"), "arm never armed: {seen}");
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // Three trials: below the required five, so the tier must still refuse.
+    for trial in 1..=3 {
+        let status = Command::new(BIN)
+            .args([
+                "powercut",
+                "verify",
+                "--db",
+                &db.to_string_lossy(),
+                "--trial",
+                &trial.to_string(),
+            ])
+            .status()
+            .expect("did not run");
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "trial {trial}: an incomplete tier C must exit non-zero"
+        );
+    }
+
+    let ledger = std::fs::read_to_string(format!("{}-tierc-trials.jsonl", db.display()))
+        .expect("ledger written");
+    let lines: Vec<&str> = ledger.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 3, "one row per trial: {ledger}");
+    for line in &lines {
+        assert!(
+            line.contains("\"outcome\":\"PASS\""),
+            "a SIGKILL must not lose the fsynced prefix — that would be a real \
+             finding, not a test artefact: {line}"
+        );
+    }
+}

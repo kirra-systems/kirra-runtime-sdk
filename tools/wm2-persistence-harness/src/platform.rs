@@ -260,6 +260,35 @@ pub fn gather(db_path: &std::path::Path, operator_asserted_target: bool) -> Plat
     }
 }
 
+/// Whether a filesystem type cannot carry a durability measurement.
+///
+/// Exposed so the reclamation stage can ask the same question of the *temp*
+/// directory that classification asks of the database directory: a `VACUUM`
+/// whose working copy lands on `tmpfs` is building it in RAM, which fails
+/// differently and worse than running out of disk.
+pub fn is_non_durable_fs(fs: &str) -> bool {
+    NON_DURABLE_FS.contains(&fs)
+}
+
+/// Filesystem type backing `dir`, resolved through `/proc/self/mountinfo`.
+pub fn fs_type_of(dir: &std::path::Path) -> Option<String> {
+    mount_of(dir).map(|(fs, _)| fs)
+}
+
+/// Mount source (backing device) for `dir`.
+///
+/// Distinct from the type: two separate ext4 volumes share a type but not a
+/// device, and treating them as one would understate a free-space reserve.
+pub fn fs_source_of(dir: &std::path::Path) -> Option<String> {
+    mount_of(dir).map(|(_, src)| src)
+}
+
+fn mount_of(dir: &std::path::Path) -> Option<(String, String)> {
+    let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let info = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    resolve_mount(&info, &canonical.to_string_lossy())
+}
+
 /// `debug_assertions` is the only profile signal available without a build
 /// script, and it is the one that matters: it is on exactly when the
 /// optimiser is not doing the work the benchmark is meant to measure.
