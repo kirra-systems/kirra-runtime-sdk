@@ -47,7 +47,12 @@ pub const STALL_THRESHOLD_MS: f64 = 1_000.0;
 pub struct SystemSample {
     /// `/proc/pressure/io` total stall microseconds (PSI). Monotonic.
     pub psi_io_total_us: Option<u64>,
-    /// `/proc/diskstats` field 10 summed: milliseconds spent doing I/O.
+    /// `/proc/diskstats` **field 13** summed: milliseconds spent doing I/O.
+    ///
+    /// Field 13 in the kernel's 1-based numbering (`f[12]` zero-indexed after
+    /// major/minor/name) is *time spent doing I/Os*. Naming it correctly
+    /// matters: an operator reading `IO-DEVICE` needs to know the attribution
+    /// rests on device busy-time, not on a queue depth or a byte count.
     pub disk_io_ms: Option<u64>,
     /// `/proc/meminfo` `Dirty:` in kB.
     pub dirty_kb: Option<u64>,
@@ -269,7 +274,12 @@ fn read_psi_io_total_us() -> Option<u64> {
     None
 }
 
-/// Summed field 10 of `/proc/diskstats` — milliseconds spent doing I/O.
+/// Summed **field 13** of `/proc/diskstats` — milliseconds spent doing I/O.
+///
+/// 1-based kernel numbering: fields 1–3 are major, minor and device name, so
+/// field 13 is `f[12]` here. It is the cumulative time the device had I/O in
+/// flight, which is what "the block layer was busy" means in
+/// [`attribute_stall`].
 ///
 /// Partitions are skipped (they double-count their parent device) by taking
 /// only entries whose name has no trailing digit-after-letter partition suffix

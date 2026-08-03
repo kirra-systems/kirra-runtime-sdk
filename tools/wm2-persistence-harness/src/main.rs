@@ -803,7 +803,13 @@ fn main() {
                     .into(),
             )
         };
-        if verdict.fails_the_run() {
+        // Only count the verdict when the ladder itself measured cleanly. A
+        // broken rung already incremented `failures`, and the resulting
+        // INSUFFICIENT verdict is a CONSEQUENCE of that same problem — counting
+        // both inflates the "N measurement(s) failed" summary and makes one
+        // fault look like two. The exit code is unaffected either way, because
+        // the rung failure alone already fails the run.
+        if ladder_ok && verdict.fails_the_run() {
             failures += 1;
         }
         sink.emit(

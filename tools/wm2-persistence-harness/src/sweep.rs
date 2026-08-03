@@ -158,20 +158,43 @@ pub fn classify_scaling(points: &[SweepPoint]) -> ScalingVerdict {
         );
     }
 
-    let slopes: Vec<f64> = points
-        .windows(2)
-        .filter_map(|w| segment_slope(w[0], w[1]))
-        .collect();
-    if slopes.len() + 1 < MIN_SWEEP_POINTS {
-        return ScalingVerdict::Insufficient(
-            "too many segments had undefined slope (zero or negative timings) to classify".into(),
-        );
+    // EVERY segment must be defined. Dropping the undefined ones and carrying
+    // on was a real defect: on a ladder of four or more points, one bad rung
+    // could be filtered out while enough slopes survived the length check, and
+    // then `slopes[0]` no longer described the ladder's first segment — the
+    // knee test would compare the wrong pair. The same filtering also let an
+    // endpoint with a zero timing reach the overall-slope computation, which
+    // panicked rather than failing closed.
+    //
+    // A hole in the ladder is exactly as unclassifiable as a short one: the
+    // missing rung might be the knee.
+    let mut slopes: Vec<f64> = Vec::with_capacity(points.len() - 1);
+    for (i, w) in points.windows(2).enumerate() {
+        match segment_slope(w[0], w[1]) {
+            Some(s) => slopes.push(s),
+            None => {
+                return ScalingVerdict::Insufficient(format!(
+                    "segment {i} (entities {} -> {}) has an undefined slope: a timing was zero, \
+                     negative or non-finite. A ladder with a hole cannot be classified — the \
+                     missing rung might be the knee.",
+                    w[0].entities, w[1].entities
+                ))
+            }
+        }
     }
 
     let first = slopes[0];
     let last = slopes[slopes.len() - 1];
-    let overall =
-        segment_slope(points[0], points[points.len() - 1]).expect("endpoints validated above");
+    // No `expect`: the endpoints are validated by the loop above for every
+    // ladder this can reach, but a fail-closed classifier must not depend on
+    // that argument staying true as the code changes.
+    let Some(overall) = segment_slope(points[0], points[points.len() - 1]) else {
+        return ScalingVerdict::Insufficient(
+            "the ladder endpoints do not admit an overall slope (zero, negative or non-finite \
+             timing)"
+                .into(),
+        );
+    };
 
     // The knee test runs FIRST. A curve can have a benign overall slope and
     // still bend sharply at the top of the ladder, and the top of the ladder is
@@ -362,6 +385,47 @@ mod tests {
         // calling the answer good news.
         let v = classify_scaling(&ladder(&[(1_000, 0.0), (10_000, 0.0), (100_000, 0.0)]));
         assert_eq!(v.token(), "INSUFFICIENT", "{}", v.detail());
+    }
+
+    #[test]
+    fn a_hole_in_a_long_ladder_is_refused_rather_than_panicking() {
+        // Regression: this shape used to PANIC. The first segment was dropped
+        // by a filter, three later slopes survived the length check, and then
+        // the overall-slope computation hit an `expect` on the zero endpoint.
+        // A classifier whose whole purpose is failing closed must not abort.
+        let pts = ladder(&[
+            (1_000, 0.0),
+            (10_000, 10.0),
+            (100_000, 100.0),
+            (1_000_000, 1_000.0),
+        ]);
+        let v = classify_scaling(&pts);
+        assert_eq!(v.token(), "INSUFFICIENT", "{}", v.detail());
+        assert!(v.fails_the_run());
+    }
+
+    #[test]
+    fn a_hole_in_the_middle_does_not_shift_which_segment_is_first() {
+        // The other half of the same defect: filtering a middle segment out
+        // silently re-labelled `slopes[0]`, so the knee test compared the wrong
+        // pair. Refusing the ladder makes that impossible by construction.
+        let pts = ladder(&[
+            (1_000, 10.0),
+            (10_000, 0.0),
+            (100_000, 100.0),
+            (1_000_000, 10_000.0),
+        ]);
+        let v = classify_scaling(&pts);
+        assert_eq!(v.token(), "INSUFFICIENT", "{}", v.detail());
+        assert!(v.detail().contains("segment 0") || v.detail().contains("segment 1"));
+    }
+
+    #[test]
+    fn a_non_finite_timing_is_refused() {
+        let pts = ladder(&[(1_000, 10.0), (10_000, f64::NAN), (100_000, 100.0)]);
+        assert_eq!(classify_scaling(&pts).token(), "INSUFFICIENT");
+        let pts = ladder(&[(1_000, 10.0), (10_000, f64::INFINITY), (100_000, 100.0)]);
+        assert_eq!(classify_scaling(&pts).token(), "INSUFFICIENT");
     }
 
     #[test]
