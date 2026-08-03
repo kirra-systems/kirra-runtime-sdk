@@ -44,6 +44,7 @@ Checks
   5  Python consumers, via AST              (both)
   6  systemd / shell / config topology       (both)
   7  Shared source-artifact allowlist        (Fence B)
+  7b Shared source-artifact PAIRING          (Fence B)
   8  Reserved database + endpoint isolation  (both)
 
 LIMITATIONS — read before trusting a green run
@@ -57,7 +58,11 @@ This is static analysis of one repository. It CANNOT prove:
     device;
   * that an external database is not shared out of band;
   * that a shared artifact outside repository configuration is not a hidden
-    coupling.
+    coupling. Check 7b detects sharing only where BOTH consumers reference the
+    artifact in tracked source. A map supplied purely at deployment time,
+    through a path in an environment file this repository never names, is
+    invisible to it — and no .osm map is committed here, so that is the normal
+    case rather than an edge one.
 
 It is a ratchet against the accidental and the convenient edge — the same
 honesty `ci/check_mick_actuation_fence.py` states about itself — not a proof of
@@ -174,6 +179,35 @@ PY_ACTUATION_ROS = {"geometry_msgs", "ackermann_msgs", "geometry_msgs.msg"}
 PY_ACTUATION_CALLS = {"set_car_motion", "write_twist", "issue_ros_release", "verify_release_token"}
 PY_ACTUATION_TOPICS = {"cmd_vel", "/cmd_vel"}
 PY_ACTUATION_DEVICES = {"/dev/myserial", "/dev/ttyUSB0", "/dev/ttyTHS1"}
+
+# Shared source-artifact classes (ADR-0042 Decision 2).
+#
+# ADR-0042 permits Kirra World and the safety path to read the SAME underlying
+# source artifact, provided each validates it independently and no DERIVED
+# semantic projection crosses between them. That permission is not
+# self-executing: something has to notice when the sharing actually starts.
+#
+# Each class names the tokens that identify a consumer of the artifact. When a
+# `kirra-world*` package and a safety-closure package both reference the same
+# class and no allowlist entry records the relationship, the fence fails --
+# which is what turns "permitted, with an allowlist entry" from a sentence in a
+# document into a condition.
+#
+# Detection is by source token, so it finds a consumer, not a file path. That is
+# a real limit and it is stated in LIMITATIONS: an artifact shared purely at
+# deployment time, through a path in an environment file that nothing in this
+# repository names, is invisible here.
+SHARED_ARTIFACT_CLASSES: dict[str, dict[str, object]] = {
+    "lanelet2-osm-map": {
+        "tokens": ("lanelet2", "Lanelet2", ".osm"),
+        "what": "the Lanelet2 OSM lane-geometry map",
+        "why_it_matters": (
+            "the safety corridor is derived from it, so a Kirra World consumer of the same "
+            "artifact is the single most likely route to an accidental Fence B breach "
+            "(ADR-0042 Decision 2, the semantic-map vs safety-corridor boundary)"
+        ),
+    },
+}
 
 # Service-role inventory. A role decides which fence applies to a unit; an
 # unclassified unit is reported rather than assumed safe.
@@ -903,6 +937,90 @@ def load_allowlist(root: Path, rep: Report) -> dict:
         return {}
 
 
+def artifact_consumers(root: Path, manifests: dict, tokens: tuple) -> set[str]:
+    """Workspace packages whose CODE references any of `tokens`.
+
+    Comments are stripped first, and that materially changes the answer: before
+    stripping, `kirra-core` and `kirra-trajectory` both looked like Lanelet2
+    consumers, when in fact each only mentions Lanelet2 in prose explaining that
+    the cxx bridge lives in the ADAPTER and deliberately not in them. Counting
+    those would have put two crates on the shared-artifact baseline that read
+    nothing, and a baseline nobody trusts is one nobody checks.
+
+    String literals are kept -- a map path or filename is a literal, and that is
+    exactly the kind of consumption worth catching.
+    """
+    dirs = crate_dirs(manifests)
+    found: set[str] = set()
+    for pkg, (crate_dir, _data) in manifests.items():
+        for path in rust_sources(crate_dir, dirs):
+            rel = str(path.relative_to(root)).replace("\\", "/")
+            if _exempt(rel):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if any(tok in strip_rust(text, drop_strings=False) for tok in tokens):
+                found.add(pkg)
+                break
+    return found
+
+
+def check_7b_shared_artifacts(
+    root: Path, manifests: dict, closure_pkgs: dict, allow: dict, rep: Report
+) -> list[str]:
+    """Require an allowlist entry wherever Kirra World and safety share an artifact.
+
+    Reports the safety-side consumers of every configured class even when no
+    Kirra World consumer exists, so the baseline is on the record BEFORE the
+    sharing can happen -- a reviewer judging a future allowlist entry needs to
+    know what the safety path was already reading independently.
+    """
+    recorded = {
+        (e.get("artifact"), e.get("world_consumer"), e.get("safety_consumer"))
+        for e in allow.get("shared_source_artifact", [])
+    }
+    notes: list[str] = []
+
+    for name, spec in sorted(SHARED_ARTIFACT_CLASSES.items()):
+        tokens = tuple(spec["tokens"])  # type: ignore[arg-type]
+        consumers = artifact_consumers(root, manifests, tokens)
+        safety_side = sorted(c for c in consumers if c in closure_pkgs)
+        world_side = sorted(c for c in consumers if is_world_package(c))
+        other_side = sorted(c for c in consumers if c not in closure_pkgs and not is_world_package(c))
+
+        notes.append(
+            f"shared artifact `{name}`: safety-side consumers {safety_side or '[]'}; "
+            f"Kirra World consumers {world_side or '[]'}; other (doer/product) {other_side or '[]'}"
+        )
+
+        for w in world_side:
+            for s in safety_side:
+                if not any(
+                    a == name and wc == w and sc == s for (a, wc, sc) in recorded
+                ):
+                    rep.add(
+                        fence="B",
+                        check="Check 7b — shared source artifact",
+                        location=f"{w} + {s}",
+                        detail=(
+                            f"both consume `{name}` ({spec['what']}) with no allowlist entry. "
+                            f"{spec['why_it_matters']}"
+                        ),
+                        adr="ADR-0042 Decision 2",
+                        repair=(
+                            f"If each validates the artifact INDEPENDENTLY and no derived semantic "
+                            f"projection crosses between them, record it in {ALLOWLIST_NAME} as a "
+                            f"[[shared_source_artifact]] with artifact=\"{name}\", "
+                            f"world_consumer=\"{w}\", safety_consumer=\"{s}\", and the independence "
+                            "argument. If a derived projection DOES cross, that is a Fence B breach "
+                            "and needs a superseding ADR, not an allowlist entry."
+                        ),
+                    )
+    return notes
+
+
 def check_7_allowlist(root: Path, allow: dict, today: str, rep: Report) -> None:
     def validate(entries: list, kind: str, required: set[str], key_fields: tuple[str, ...]) -> None:
         seen: set[tuple] = set()
@@ -1020,6 +1138,8 @@ def run(root: Path, today: str) -> Report:
     check_5_python(root, rep)
     check_6_topology(root, rep)
     check_7_allowlist(root, allow, today, rep)
+    for note in check_7b_shared_artifacts(root, manifests, closure_pkgs, allow, rep):
+        rep.note(note)
     check_8_reserved(root, manifests, closure_pkgs, rep)
 
     rep.note(f"safety closure: {len(closure_pkgs)} workspace packages from {len(SAFETY_ROOTS)} roots")

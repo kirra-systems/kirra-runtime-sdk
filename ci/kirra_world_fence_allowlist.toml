@@ -105,14 +105,41 @@ owner = "TBD — Governor/safety owner (ADR-0039 ratification criteria)"
 # relationship must be recorded here.
 #
 # Empty today, deliberately: no Kirra World code exists, so nothing is shared
-# yet. The first entry will need to survive the review the ADR describes.
+# yet. The first entry will need to survive the review the ADR describes, and
+# the checker REFUSES the pairing until that entry exists — Check 7b fails the
+# build the moment a kirra-world* package and a safety-closure package consume
+# the same configured artifact class.
+#
+# MEASURED BASELINE (recorded now, before sharing is possible, because whoever
+# judges the first entry needs to know what the safety path was already reading
+# on its own). For `lanelet2-osm-map`, measured over comment-stripped source:
+#
+#   safety-side consumer   kirra-ros2-adapter   — the cxx bridge to C++ lanelet2_core
+#   doer/product-side      kirra-map            — an INDEPENDENT pure-Rust .osm parser
+#                          kirra-planner
+#   Kirra World            (none — the crate does not exist)
+#
+# Worth noting for whoever writes that first entry: the repository ALREADY has
+# two independent Lanelet2 implementations — the adapter's C++ `lanelet2_core`
+# bridge and `kirra-map`'s pure-Rust parser (`crates/kirra-map/src/lanelet2.rs`,
+# written explicitly "without the C++ lanelet2_core library"). Two separate
+# parsers over one file format is close to the independence argument ADR-0042
+# Decision 2 asks for. It is not the whole argument — independence of PARSING is
+# not independence of the artifact itself, and a corrupt or wrong map still
+# breaks both — but it means the first entry starts from a real position rather
+# than an assertion.
+#
+# No .osm map is committed to this repository; maps arrive at deployment. So a
+# future entry describes a CLASS of artifact, not a tracked file, and the
+# deployment-time path is outside what static analysis can see. Stated in the
+# checker's LIMITATIONS.
 #
 # [[shared_source_artifact]]
-# artifact = "maps/*.osm"
+# artifact = "lanelet2-osm-map"
 # world_consumer = "kirra-world-store"
-# safety_consumer = "kirra-map"
-# independent_validation = "each parses and validates the file separately; no
-#   parsed/derived structure crosses between them"
+# safety_consumer = "kirra-ros2-adapter"
+# independent_validation = "each parses and validates the OSM document separately;
+#   no parsed or derived structure crosses between them"
 # adr = "ADR-0042"
 # owner = "TBD"
 # reason = "a byte-identical input read twice is not a runtime dependency"
