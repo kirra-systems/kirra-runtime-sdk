@@ -56,9 +56,21 @@ can emit while measuring none of the property being decided.
 **Tier C.** The crash experiment has three tiers. `SIGKILL` crash-consistency
 and WAL-loss prefix validity are automated. The actual power cut is not, because
 nothing in software distinguishes an honest `fsync` from a device cache that
-acknowledged and buffered it. That tier always reports `NOT-RUN` with the reason
-attached, so a results file can never imply a durability test that did not
-happen.
+acknowledged and buffered it.
+
+The harness cannot perform that tier, but it does *record* it. `powercut arm`
+fsyncs a known prefix and writes a durable marker stating what must survive;
+`powercut verify`, run after the reboot, checks what actually did and appends
+the verdict to a ledger beside the database. The judgement is pure and unit
+tested, so the distinction it turns on is not left to the operator: losing the
+un-fsynced tail is **correct**, while coming back with fewer events than were
+fsynced is a device that acknowledged writes it had not persisted — the one
+failure this tier can detect that A and B cannot.
+
+With no trials recorded, tier C reports `NOT-RUN` with the reason attached, so
+a results file can never imply a durability test that did not happen. Below the
+required five trials the aggregate is `INCONCLUSIVE`, not a pass: device-cache
+loss is probabilistic, so one survived cut is not evidence.
 
 ## Layout
 
@@ -68,6 +80,8 @@ happen.
 | `standin.rs` | The stand-in schema, hash chain, deterministic fold, migrations |
 | `gen.rs` | Seeded synthetic load (splitmix64, dependency-free) |
 | `bench.rs` | Append, replay, the four §12 query families, growth, migration |
-| `crash.rs` | Corruption / restart tiers A, B and the C refusal |
+| `crash.rs` | Corruption / restart tiers A, B, and tier C's arm/verify/ledger machinery |
+| `pressure.rs` | Disk-full behaviour, and what `VACUUM` costs the system while it runs |
 | `json.rs`, `sha256.rs` | Minimal writer and the local hash — see above |
+| `build.rs` | Build identity: rustc version, git commit (`-dirty` when it is), source digest |
 | `tests/crash_tier_a.rs` | Tier A end-to-end against the real binary (a unit test would exercise the spawn-failure path forever and look like coverage) |

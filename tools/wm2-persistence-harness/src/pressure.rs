@@ -41,8 +41,9 @@
 
 use crate::gen;
 use crate::standin::{ChainStatus, Durability, Store};
-use std::path::Path;
-use std::time::Instant;
+use rusqlite::Connection;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub struct PressureResult {
     pub events_before_full: u64,
@@ -206,22 +207,173 @@ pub struct ReclaimResult {
     pub bytes_after: u64,
     pub bytes_freed: i64,
     pub bytes_per_ms: f64,
+
+    // --- transient cost: what reclamation *needs*, not what it returns ------
+    /// Peak combined footprint (database directory + temp directory) observed
+    /// while the `VACUUM` was running.
+    pub peak_bytes_during: u64,
+    /// `peak_bytes_during - bytes_before`: the free space a `VACUUM` consumes
+    /// **on top of** the database it is shrinking. This, not `bytes_freed`, is
+    /// the number a minimum-free-space reserve has to be set from.
+    pub transient_overhead_bytes: i64,
+    /// `peak_bytes_during / bytes_before`.
+    ///
+    /// Measured at 1.36 on the host baseline, *not* the 2.0 a "VACUUM needs
+    /// twice the space" rule of thumb predicts — because the copy it builds is
+    /// the size of the **result**, not of the source. The overhead therefore
+    /// scales with what will remain, and the worst case is a store with
+    /// nothing to reclaim (copy ≈ source ⇒ ratio ≈ 2.0), not a bloated one.
+    ///
+    /// The conservative reserve is consequently ~1× the current database size
+    /// rather than the measured 0.36×: a maintenance window that only ever ran
+    /// when there was a lot to reclaim would be sized from the easy case.
+    pub transient_overhead_ratio: f64,
+    pub footprint_samples: u64,
+
+    // --- where the second copy lands ---------------------------------------
+    pub temp_dir: String,
+    pub temp_dir_fs_type: Option<String>,
+    /// True when the temp copy shares a filesystem with the database, so the
+    /// reserve must cover both.
+    pub temp_on_same_fs_as_db: bool,
+    /// True when the temp directory is `tmpfs`/`ramfs` — the copy is built in
+    /// **RAM**, and the failure mode is the OOM killer rather than `ENOSPC`.
+    pub temp_fs_is_volatile: bool,
+
+    // --- availability during reclamation ------------------------------------
+    /// Appends attempted from a second connection while the `VACUUM` ran.
+    pub concurrent_append_attempts: u64,
+    /// How many of those were refused or blocked. `VACUUM` takes an exclusive
+    /// lock, so a robot cannot record events for its duration.
+    pub concurrent_appends_blocked: u64,
+    pub max_append_stall_ms: f64,
 }
 
+/// Time a `VACUUM` on a populated store, and measure what it costs the *system*
+/// — not just how long it takes.
+///
+/// Three things beyond duration matter to ADR-0041's reclamation preconditions,
+/// and none of them are visible from `bytes_freed`:
+///
+/// 1. **Transient space.** `VACUUM` writes a complete copy and only then swaps
+///    it in, so it *consumes* free space in order to release it. A device that
+///    waits until it is nearly full to reclaim is a device that cannot
+///    reclaim. The reserve threshold follows from `transient_overhead_bytes`,
+///    not from the reclaimed figure — and see that field's note for why the
+///    conservative reserve is ~1× the database size even though the measured
+///    overhead is smaller.
+/// 2. **Where the copy goes.** SQLite builds it in the temp directory, which
+///    may be a different filesystem — and on a Jetson is frequently `tmpfs`.
+///    Reclaiming an 8 GiB store through RAM is a different and worse failure
+///    than running out of disk, so the medium is reported, not assumed.
+/// 3. **Availability.** `VACUUM` holds an exclusive lock for its whole
+///    duration. The store cannot accept events during it, which is precisely
+///    why the ADR now requires a robot state rather than an opportunistic
+///    schedule. The stall is measured from a second connection rather than
+///    argued from the documentation.
 pub fn reclaim(store: &Store, path: &Path) -> Result<ReclaimResult, String> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+
     store.durable_checkpoint().map_err(|e| e.to_string())?;
     let bytes_before = crate::bench::db_bytes(path);
 
+    let db_dir = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let temp_dir = resolve_sqlite_temp_dir();
+    let temp_fs = crate::platform::fs_type_of(&temp_dir);
+    let db_fs = crate::platform::fs_type_of(&db_dir);
+
+    // When SQLite's temp directory IS the database directory, `dir_bytes`
+    // already counts the `etilqs_*` files and adding `sqlite_temp_bytes` would
+    // count them twice — inflating the peak and over-sizing the free-space
+    // reserve derived from it. Resolved once, through `canonicalize`, so
+    // `/tmp` and a symlink to it are recognised as the same place.
+    let temp_dir_is_db_dir = canonical(&temp_dir) == canonical(&db_dir);
+
+    let running = Arc::new(AtomicBool::new(true));
+    let peak = Arc::new(AtomicU64::new(bytes_before));
+    let samples = Arc::new(AtomicU64::new(0));
+
+    // Footprint sampler. Directory-summing rather than free-space polling: it
+    // is attributable to this operation, where free space on a shared
+    // filesystem moves for reasons that have nothing to do with the VACUUM.
+    let sampler = {
+        let running = Arc::clone(&running);
+        let peak = Arc::clone(&peak);
+        let samples = Arc::clone(&samples);
+        let db_dir = db_dir.clone();
+        let temp_dir = temp_dir.clone();
+        std::thread::spawn(move || {
+            while running.load(Ordering::Relaxed) {
+                let total = sampled_footprint(&db_dir, &temp_dir, temp_dir_is_db_dir);
+                peak.fetch_max(total, Ordering::Relaxed);
+                samples.fetch_add(1, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        })
+    };
+
+    // Availability probe: a second connection trying to do what a robot would
+    // be doing. Opened before the VACUUM so connection setup is not counted as
+    // a stall.
+    let attempts = Arc::new(AtomicU64::new(0));
+    let blocked = Arc::new(AtomicU64::new(0));
+    let max_stall_us = Arc::new(AtomicU64::new(0));
+    let writer = {
+        let running = Arc::clone(&running);
+        let attempts = Arc::clone(&attempts);
+        let blocked = Arc::clone(&blocked);
+        let max_stall_us = Arc::clone(&max_stall_us);
+        let path = path.to_path_buf();
+        std::thread::spawn(move || {
+            // A short busy timeout: the question is whether writes stall, so
+            // waiting indefinitely would measure nothing and hang the probe.
+            let Ok(conn) = Connection::open(&path) else {
+                return;
+            };
+            let _ = conn.busy_timeout(Duration::from_millis(50));
+            while running.load(Ordering::Relaxed) {
+                let t = Instant::now();
+                let r = conn.execute_batch(
+                    "BEGIN IMMEDIATE; \
+                     INSERT INTO projection_checkpoints(name, generation) \
+                     VALUES ('reclaim_probe', 1) \
+                     ON CONFLICT(name) DO UPDATE SET generation = generation + 1; \
+                     COMMIT;",
+                );
+                let us = t.elapsed().as_micros() as u64;
+                attempts.fetch_add(1, Ordering::Relaxed);
+                if r.is_err() {
+                    blocked.fetch_add(1, Ordering::Relaxed);
+                    // A failed BEGIN IMMEDIATE leaves no transaction, but a
+                    // failure after it would; roll back defensively so the
+                    // probe cannot itself hold a lock.
+                    let _ = conn.execute_batch("ROLLBACK;");
+                }
+                max_stall_us.fetch_max(us, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+
     let t = Instant::now();
-    store
-        .conn
-        .execute_batch("VACUUM;")
-        .map_err(|e| e.to_string())?;
+    let vacuum = store.conn.execute_batch("VACUUM;");
     let vacuum_ms = t.elapsed().as_secs_f64() * 1e3;
+
+    running.store(false, Ordering::Relaxed);
+    let _ = sampler.join();
+    let _ = writer.join();
+
+    vacuum.map_err(|e| e.to_string())?;
 
     store.durable_checkpoint().map_err(|e| e.to_string())?;
     let bytes_after = crate::bench::db_bytes(path);
     let bytes_freed = bytes_before as i64 - bytes_after as i64;
+
+    let peak_bytes_during = peak.load(Ordering::Relaxed).max(bytes_before);
 
     Ok(ReclaimResult {
         vacuum_ms,
@@ -233,7 +385,131 @@ pub fn reclaim(store: &Store, path: &Path) -> Result<ReclaimResult, String> {
         } else {
             f64::NAN
         },
+        peak_bytes_during,
+        transient_overhead_bytes: peak_bytes_during as i64 - bytes_before as i64,
+        transient_overhead_ratio: if bytes_before > 0 {
+            peak_bytes_during as f64 / bytes_before as f64
+        } else {
+            f64::NAN
+        },
+        footprint_samples: samples.load(Ordering::Relaxed),
+        temp_dir: temp_dir.to_string_lossy().into_owned(),
+        temp_on_same_fs_as_db: match (&temp_fs, &db_fs) {
+            (Some(a), Some(b)) => a == b && same_device(&temp_dir, &db_dir),
+            _ => false,
+        },
+        temp_fs_is_volatile: temp_fs
+            .as_deref()
+            .is_some_and(crate::platform::is_non_durable_fs),
+        temp_dir_fs_type: temp_fs,
+        concurrent_append_attempts: attempts.load(Ordering::Relaxed),
+        concurrent_appends_blocked: blocked.load(Ordering::Relaxed),
+        max_append_stall_ms: max_stall_us.load(Ordering::Relaxed) as f64 / 1e3,
     })
+}
+
+/// Where SQLite will build the `VACUUM` copy, following its unix temp-file
+/// search order.
+///
+/// Replicated rather than queried because there is no pragma that reports the
+/// resolved answer — `temp_store_directory` reports only an override, and is
+/// deprecated. Being explicit about the order is the point: on a Jetson the
+/// difference between `/var/tmp` and a `tmpfs` `/tmp` is the difference between
+/// a slow reclamation and an out-of-memory kill.
+fn resolve_sqlite_temp_dir() -> PathBuf {
+    for var in ["SQLITE_TMPDIR", "TMPDIR"] {
+        if let Ok(v) = std::env::var(var) {
+            if !v.is_empty() && Path::new(&v).is_dir() {
+                return PathBuf::from(v);
+            }
+        }
+    }
+    for fallback in ["/var/tmp", "/usr/tmp", "/tmp"] {
+        if Path::new(fallback).is_dir() {
+            return PathBuf::from(fallback);
+        }
+    }
+    PathBuf::from(".")
+}
+
+/// One footprint sample: the database directory, plus SQLite's temp files
+/// **only when they are somewhere else**.
+///
+/// Extracted from the sampler thread so the double-count this avoids is
+/// testable. Getting it wrong is not a cosmetic inflation — `peak_bytes_during`
+/// is what `transient_overhead_bytes` is derived from, and that is what the
+/// minimum-free-space reserve is set from, so an over-count here becomes an
+/// over-large reserve that keeps a device from ever reclaiming.
+fn sampled_footprint(db_dir: &Path, temp_dir: &Path, temp_dir_is_db_dir: bool) -> u64 {
+    let base = dir_bytes(db_dir);
+    if temp_dir_is_db_dir {
+        // `dir_bytes` already counted the `etilqs_*` files.
+        base
+    } else {
+        base + sqlite_temp_bytes(temp_dir)
+    }
+}
+
+/// Resolve a directory for identity comparison, so `/tmp` and a symlink to it
+/// are recognised as the same place. Falls back to the literal path when the
+/// directory cannot be canonicalised.
+fn canonical(dir: &Path) -> PathBuf {
+    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// Total bytes of regular files directly in `dir`.
+///
+/// Non-recursive: the database directory's own contents are what a reserve has
+/// to cover, and descending into unrelated subdirectories would attribute
+/// someone else's data to this operation.
+fn dir_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.metadata().ok())
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// Bytes of SQLite's own temp files in `dir`.
+///
+/// SQLite names them `etilqs_*` ("sqlite" reversed). Filtering by that prefix
+/// keeps an unrelated large file in `/tmp` from being charged to the VACUUM.
+fn sqlite_temp_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(SQLITE_TEMP_PREFIX)
+        })
+        .filter_map(|e| e.metadata().ok())
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .sum()
+}
+
+const SQLITE_TEMP_PREFIX: &str = "etilqs_";
+
+/// Whether two paths resolve to the same mount source.
+///
+/// Filesystem *type* matching is not sufficient — two separate ext4 volumes
+/// would compare equal and understate the reserve, which is the unsafe
+/// direction.
+fn same_device(a: &Path, b: &Path) -> bool {
+    match (
+        crate::platform::fs_source_of(a),
+        crate::platform::fs_source_of(b),
+    ) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -343,5 +619,83 @@ mod tests {
             "implausible reclaim on a dense store"
         );
         let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn a_temp_dir_inside_the_db_dir_is_not_counted_twice() {
+        // The case: SQLite resolves its temp directory to the same place the
+        // database lives (both under /tmp, say). `dir_bytes` already sees the
+        // `etilqs_*` files, so adding `sqlite_temp_bytes` on top would inflate
+        // the peak — and the free-space reserve is derived from that peak, so
+        // the error propagates into an over-large reserve that could stop a
+        // device reclaiming at all.
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("wm2-footprint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        std::fs::write(dir.join("w.sqlite"), vec![0u8; 1000]).expect("db");
+        std::fs::write(dir.join("etilqs_abc123"), vec![0u8; 4000]).expect("temp");
+
+        let shared = sampled_footprint(&dir, &dir, true);
+        assert_eq!(shared, 5000, "the temp file must be counted exactly once");
+
+        let double = sampled_footprint(&dir, &dir, false);
+        assert_eq!(
+            double, 9000,
+            "sanity: without the guard the temp file IS counted twice, so the \
+             guard is doing real work rather than being a no-op"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_separate_temp_dir_is_added_rather_than_ignored() {
+        // The other direction: when the temp copy lands elsewhere it must
+        // still be charged to the VACUUM, or the reserve would be understated
+        // — the unsafe direction.
+        let base = std::env::temp_dir();
+        let db_dir = base.join(format!("wm2-fp-db-{}", std::process::id()));
+        let tmp_dir = base.join(format!("wm2-fp-tmp-{}", std::process::id()));
+        for d in [&db_dir, &tmp_dir] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).expect("mkdir");
+        }
+
+        std::fs::write(db_dir.join("w.sqlite"), vec![0u8; 1000]).expect("db");
+        std::fs::write(tmp_dir.join("etilqs_xyz"), vec![0u8; 4000]).expect("temp");
+        // An unrelated large file in the temp directory must NOT be charged to
+        // this VACUUM — that is what the `etilqs_` prefix filter is for.
+        std::fs::write(tmp_dir.join("someone-elses.bin"), vec![0u8; 1_000_000]).expect("other");
+
+        assert_eq!(sampled_footprint(&db_dir, &tmp_dir, false), 5000);
+
+        for d in [&db_dir, &tmp_dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn canonical_sees_through_a_symlink_to_the_same_directory() {
+        // Why identity is `canonicalize`d rather than a string compare: a
+        // TMPDIR of `/tmp` against a database under a symlinked path is the
+        // same directory, and comparing the literal strings would miss it and
+        // double-count.
+        let base = std::env::temp_dir();
+        let real = base.join(format!("wm2-canon-{}", std::process::id()));
+        let link = base.join(format!("wm2-canon-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&real);
+        let _ = std::fs::remove_file(&link);
+        std::fs::create_dir_all(&real).expect("mkdir");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, &link).expect("symlink");
+            assert_eq!(canonical(&link), canonical(&real));
+        }
+
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&real);
     }
 }

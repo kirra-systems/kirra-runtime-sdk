@@ -96,6 +96,10 @@ pub struct CrashResult {
     pub tier_a_sigkill: TierOutcome,
     pub tier_b_wal_loss: TierOutcome,
     pub tier_c_power_cut: TierOutcome,
+    /// How many manual power-cut trials were found recorded next to the
+    /// database. Reported alongside the outcome so a reader can tell a genuine
+    /// `NOT-RUN` from a drill that stopped short.
+    pub tier_c_trials: u64,
 }
 
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
@@ -287,14 +291,408 @@ pub fn tier_b_wal_loss(
 // Tier C
 // ---------------------------------------------------------------------------
 
+/// How many power cuts a tier C claim requires.
+///
+/// A single surviving cut proves nothing: device-cache loss is probabilistic,
+/// depends where in the erase-block cycle the cut lands, and a store that
+/// survives once can lose an acknowledged write on the next attempt. Five is
+/// the drill's stated floor — enough that a pass is not a coincidence, few
+/// enough to actually perform by hand.
+pub const MIN_TIER_C_TRIALS: u64 = 5;
+
+/// One recorded power-cut trial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrialRecord {
+    pub trial: u64,
+    pub outcome: TierOutcome,
+    /// Generation of the last event fsynced *before* the cut. Everything up to
+    /// here was acknowledged as durable and must survive.
+    pub durable_generation: u64,
+    /// Highest generation present after the reboot.
+    pub recovered_generation: u64,
+    pub chain: String,
+}
+
+/// What `powercut arm` fsyncs before the tail starts, so that after the reboot
+/// there is an independent statement of what *should* have survived.
+///
+/// Without this the trial is unfalsifiable: a store that came back with fewer
+/// events than it acknowledged would be indistinguishable from one that was
+/// simply cut earlier than the operator thought.
+pub struct ArmedMarker {
+    pub durable_generation: u64,
+    pub durable_head: String,
+}
+
+impl ArmedMarker {
+    fn render(&self) -> String {
+        format!("{}\n{}\n", self.durable_generation, self.durable_head)
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        let mut lines = s.lines();
+        let durable_generation = lines.next()?.trim().parse().ok()?;
+        let durable_head = lines.next()?.trim().to_string();
+        Some(Self {
+            durable_generation,
+            durable_head,
+        })
+    }
+}
+
+pub fn armed_marker_path(db: &Path) -> PathBuf {
+    sidecar(db, "-tierc-armed")
+}
+
+pub fn trials_ledger_path(db: &Path) -> PathBuf {
+    sidecar(db, "-tierc-trials.jsonl")
+}
+
+/// Judge one trial from what the marker promised and what came back.
+///
+/// Pure, so the three outcomes that matter can be tested without a power
+/// supply. The distinction that carries the whole tier:
+///
+/// - a **shorter** log than armed is a `FAIL` only if it is shorter than the
+///   *fsynced prefix*. Losing un-fsynced tail events is correct behaviour —
+///   that is what tier B already establishes portably.
+/// - a log shorter than the fsynced prefix means the device acknowledged a
+///   write it had not persisted. That is the device-cache lie, it is the only
+///   thing tier C can detect that tiers A and B cannot, and it is a `FAIL`.
+/// - a broken chain is a torn or forked write: also `FAIL`, and worse.
+pub fn judge_trial(
+    trial: u64,
+    marker: Option<&ArmedMarker>,
+    recovered: &Result<ChainStatus, String>,
+) -> TrialRecord {
+    let Some(marker) = marker else {
+        return TrialRecord {
+            trial,
+            outcome: TierOutcome::Inconclusive(
+                "no armed marker: `powercut arm` did not fsync a durable prefix before \
+                 the cut, so nothing states what should have survived"
+                    .into(),
+            ),
+            durable_generation: 0,
+            recovered_generation: 0,
+            chain: "unknown".into(),
+        };
+    };
+
+    let (chain_token, recovered_generation, verdict) = match recovered {
+        Ok(ChainStatus::Intact { entries, .. }) => {
+            let entries = *entries;
+            if entries >= marker.durable_generation {
+                (
+                    "intact",
+                    entries,
+                    TierOutcome::Pass(format!(
+                        "chain intact after power cut; fsynced prefix of {} event(s) survived \
+                         ({} present)",
+                        marker.durable_generation, entries
+                    )),
+                )
+            } else {
+                (
+                    "intact",
+                    entries,
+                    TierOutcome::Fail(format!(
+                        "DURABILITY VIOLATION: {} event(s) were fsynced and acknowledged before \
+                         the cut, but only {} came back. The storage device acknowledged writes \
+                         it had not persisted — this is the failure tier C exists to detect, and \
+                         no `synchronous` setting can compensate for it.",
+                        marker.durable_generation, entries
+                    )),
+                )
+            }
+        }
+        Ok(ChainStatus::Broken { at_generation }) => (
+            "broken",
+            *at_generation,
+            TierOutcome::Fail(format!(
+                "chain broken at generation {at_generation} after power cut: a torn or forked \
+                 write, not merely a lost tail"
+            )),
+        ),
+        Ok(ChainStatus::Gap { after_generation }) => (
+            "gap",
+            *after_generation,
+            TierOutcome::Fail(format!(
+                "generation gap after {after_generation}: the log came back missing an interior \
+                 run, which a valid prefix cannot contain"
+            )),
+        ),
+        Ok(ChainStatus::Empty) => (
+            "empty",
+            0,
+            TierOutcome::Fail(format!(
+                "store came back empty although {} event(s) were fsynced before the cut",
+                marker.durable_generation
+            )),
+        ),
+        Err(e) => (
+            "unreadable",
+            0,
+            TierOutcome::Fail(format!(
+                "store could not be reopened after the power cut: {e}"
+            )),
+        ),
+    };
+
+    TrialRecord {
+        trial,
+        outcome: verdict,
+        durable_generation: marker.durable_generation,
+        recovered_generation,
+        chain: chain_token.into(),
+    }
+}
+
+/// Aggregate recorded trials into the tier C outcome.
+///
+/// Zero trials stays `NOT-RUN` — the default for every automated run, so the
+/// exit code keeps its meaning. Between one and [`MIN_TIER_C_TRIALS`] is
+/// `INCONCLUSIVE` rather than a pass: partial evidence toward a durability
+/// claim is not a durability claim, and it fails the run so a half-finished
+/// drill cannot be filed as a complete one.
+pub fn tier_c_from_trials(trials: &[TrialRecord]) -> TierOutcome {
+    if trials.is_empty() {
+        return tier_c_not_run();
+    }
+
+    let failures: Vec<&TrialRecord> = trials
+        .iter()
+        .filter(|t| matches!(t.outcome, TierOutcome::Fail(_)))
+        .collect();
+    if let Some(first) = failures.first() {
+        return TierOutcome::Fail(format!(
+            "{} of {} power-cut trial(s) failed. First: trial {} — {}",
+            failures.len(),
+            trials.len(),
+            first.trial,
+            first.outcome.detail()
+        ));
+    }
+
+    let inconclusive = trials
+        .iter()
+        .filter(|t| matches!(t.outcome, TierOutcome::Inconclusive(_)))
+        .count();
+    if inconclusive > 0 {
+        return TierOutcome::Inconclusive(format!(
+            "{inconclusive} of {} trial(s) never established a durable prefix; re-run those cuts",
+            trials.len()
+        ));
+    }
+
+    let n = trials.len() as u64;
+    if n < MIN_TIER_C_TRIALS {
+        return TierOutcome::Inconclusive(format!(
+            "only {n} of the required {MIN_TIER_C_TRIALS} power-cut trial(s) recorded; a single \
+             survived cut is not evidence of durability, because device-cache loss is \
+             probabilistic"
+        ));
+    }
+
+    TierOutcome::Pass(format!(
+        "{n} power-cut trial(s) recorded, all preserving the fsynced prefix with an intact chain"
+    ))
+}
+
 pub fn tier_c_not_run() -> TierOutcome {
     TierOutcome::NotRun(
         "a real power cut cannot be performed from software: nothing in-process can \
          tell an honest fsync from a device cache that acknowledged and buffered it. \
          Manual procedure in docs/hardware/JETSON_WM2_PERSISTENCE_DRILL.md §8; until \
-         it is run and its result recorded, no durability claim is supported."
+         it is run and its result recorded, no durability claim is supported. Record \
+         trials with `powercut arm` / `powercut verify`."
             .to_string(),
     )
+}
+
+/// Read whatever trials have been recorded next to this database.
+///
+/// A malformed line is skipped rather than fatal: the ledger is appended to
+/// across reboots and power cuts, so a torn final line is an expected state,
+/// and losing the trials already recorded because of it would be perverse.
+pub fn read_trials(db: &Path) -> Vec<TrialRecord> {
+    let Ok(text) = std::fs::read_to_string(trials_ledger_path(db)) else {
+        return Vec::new();
+    };
+    text.lines().filter_map(parse_trial_line).collect()
+}
+
+/// Minimal field extraction from a ledger line.
+///
+/// The ledger is written by this harness in a fixed shape, so a full JSON
+/// parser would be a dependency bought for nothing.
+fn parse_trial_line(line: &str) -> Option<TrialRecord> {
+    let field = |key: &str| -> Option<String> {
+        let pat = format!("\"{key}\":");
+        let start = line.find(&pat)? + pat.len();
+        let rest = line[start..].trim_start();
+        if let Some(stripped) = rest.strip_prefix('"') {
+            let end = stripped.find('"')?;
+            Some(stripped[..end].to_string())
+        } else {
+            let end = rest.find([',', '}'])?;
+            Some(rest[..end].trim().to_string())
+        }
+    };
+
+    let trial = field("trial")?.parse().ok()?;
+    let token = field("outcome")?;
+    let detail = field("detail").unwrap_or_default();
+    let outcome = match token.as_str() {
+        "PASS" => TierOutcome::Pass(detail),
+        "FAIL" => TierOutcome::Fail(detail),
+        "INCONCLUSIVE" => TierOutcome::Inconclusive(detail),
+        _ => return None,
+    };
+    Some(TrialRecord {
+        trial,
+        outcome,
+        durable_generation: field("durable_generation")?.parse().ok()?,
+        recovered_generation: field("recovered_generation")?.parse().ok()?,
+        chain: field("chain").unwrap_or_default(),
+    })
+}
+
+pub fn append_trial(db: &Path, rec: &TrialRecord) -> Result<(), String> {
+    use std::io::Write;
+    let line = crate::json::Obj::new()
+        .int("trial", rec.trial)
+        .str("outcome", rec.outcome.token())
+        .int("durable_generation", rec.durable_generation)
+        .int("recovered_generation", rec.recovered_generation)
+        .str("chain", &rec.chain)
+        .str("detail", rec.outcome.detail())
+        .render();
+
+    let path = trials_ledger_path(db);
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    writeln!(f, "{line}").map_err(|e| e.to_string())?;
+    // The ledger records evidence about power loss and is itself written on a
+    // machine that is about to lose power again. fsync it.
+    f.sync_all().map_err(|e| e.to_string())?;
+    // And fsync the directory: on the trial that CREATES the ledger, syncing
+    // the file alone leaves the directory entry un-durable, so a cut can lose
+    // the whole file — and with it every trial recorded so far. Same reason
+    // `write_marker` does it.
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
+}
+
+/// Arm a power-cut trial: fsync a known prefix, record it, then append forever.
+///
+/// Never returns — the operator ends it with the power switch. That is the
+/// instrument, and it is why this cannot be a normal stage.
+pub fn powercut_arm(db: &Path, prefix_events: u64, entities: u64, seed: u64) -> ! {
+    let mut store = match Store::open(db, Durability::Full) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("powercut arm: cannot open store: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    // The durable prefix, one transaction per event at synchronous=FULL, then
+    // an explicit checkpoint so the content is in the main file and not only
+    // in a WAL that the cut may take with it.
+    let events = gen::events(0, prefix_events, entities, seed);
+    for e in &events {
+        if let Err(err) = store.append_batch(std::slice::from_ref(e)) {
+            eprintln!("powercut arm: append failed: {err}");
+            std::process::exit(2);
+        }
+    }
+    if let Err(e) = store.durable_checkpoint() {
+        eprintln!("powercut arm: checkpoint failed: {e}");
+        std::process::exit(2);
+    }
+
+    let head = match store.verify_chain() {
+        Ok(ChainStatus::Intact { entries, head, .. }) => ArmedMarker {
+            durable_generation: entries,
+            durable_head: head,
+        },
+        other => {
+            eprintln!("powercut arm: prefix did not verify: {other:?}");
+            std::process::exit(2);
+        }
+    };
+
+    if let Err(e) = write_marker(db, &head) {
+        eprintln!("powercut arm: cannot record marker: {e}");
+        std::process::exit(2);
+    }
+
+    println!(
+        "ARMED: {} event(s) fsynced and recorded. Cut power NOW, at any time.\n\
+         After reboot, run: wm2-persistence-harness powercut verify --db {} --trial <n>",
+        head.durable_generation,
+        db.display()
+    );
+    // This function never returns, so nothing else will ever flush this. To a
+    // terminal it would appear anyway; to a pipe it would not, and an operator
+    // who cannot see "ARMED" does not know when it is safe to cut power.
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    // The tail: appended continuously and deliberately never checkpointed, so
+    // the cut always lands mid-write. Losing all of this is correct; losing any
+    // of the prefix above is not.
+    let mut n = prefix_events;
+    loop {
+        let batch = gen::events(n, 64, entities, seed);
+        if store.append_batch(&batch).is_err() {
+            // A write error here is expected as the device dies. Keep going;
+            // only the power switch ends this.
+            continue;
+        }
+        n += 64;
+    }
+}
+
+fn write_marker(db: &Path, marker: &ArmedMarker) -> Result<(), String> {
+    use std::io::Write;
+    let path = armed_marker_path(db);
+    let mut f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    f.write_all(marker.render().as_bytes())
+        .map_err(|e| e.to_string())?;
+    // Must be durable before the tail starts, or the trial is unfalsifiable.
+    f.sync_all().map_err(|e| e.to_string())?;
+    // fsync the directory too, so the file's *existence* survives the cut.
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
+}
+
+pub fn read_marker(db: &Path) -> Option<ArmedMarker> {
+    ArmedMarker::parse(&std::fs::read_to_string(armed_marker_path(db)).ok()?)
+}
+
+/// Verify one power-cut trial after the reboot and record it.
+pub fn powercut_verify(db: &Path, trial: u64) -> TrialRecord {
+    let marker = read_marker(db);
+    let recovered = Store::open(db, Durability::Full)
+        .map_err(|e| e.to_string())
+        .and_then(|s| s.verify_chain().map_err(|e| e.to_string()));
+    let rec = judge_trial(trial, marker.as_ref(), &recovered);
+    if let Err(e) = append_trial(db, &rec) {
+        eprintln!("warning: could not append to the trials ledger: {e}");
+    }
+    rec
 }
 
 pub fn run(
@@ -304,10 +702,15 @@ pub fn run(
     prefix_events: u64,
     tail_events: u64,
 ) -> CrashResult {
+    // Tier A and B rewrite the database, so the trials ledger is read first —
+    // it is evidence about earlier power cuts and must not be interpreted
+    // against a store this run has since replaced.
+    let trials = read_trials(path);
     CrashResult {
         tier_a_sigkill: tier_a_sigkill(path, durability, run_ms),
         tier_b_wal_loss: tier_b_wal_loss(path, durability, prefix_events, tail_events),
-        tier_c_power_cut: tier_c_not_run(),
+        tier_c_power_cut: tier_c_from_trials(&trials),
+        tier_c_trials: trials.len() as u64,
     }
 }
 
@@ -395,5 +798,182 @@ mod tests {
         ];
         let unique: std::collections::HashSet<_> = tokens.iter().collect();
         assert_eq!(unique.len(), 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tier C — the judgement is pure, so it is tested without a power supply
+    // -----------------------------------------------------------------------
+
+    fn marker(gen: u64) -> ArmedMarker {
+        ArmedMarker {
+            durable_generation: gen,
+            durable_head: "deadbeef".into(),
+        }
+    }
+
+    fn intact(entries: u64) -> Result<ChainStatus, String> {
+        Ok(ChainStatus::Intact {
+            entries,
+            head: "deadbeef".into(),
+            compacted_windows: 0,
+            redacted: 0,
+        })
+    }
+
+    #[test]
+    fn a_surviving_fsynced_prefix_passes() {
+        let r = judge_trial(1, Some(&marker(400)), &intact(400));
+        assert!(matches!(r.outcome, TierOutcome::Pass(_)), "{r:?}");
+    }
+
+    #[test]
+    fn losing_only_the_unfsynced_tail_passes() {
+        // The tail is appended without a checkpoint precisely so it can be
+        // lost; more events than the prefix came back, which is also fine.
+        let r = judge_trial(1, Some(&marker(400)), &intact(512));
+        assert!(matches!(r.outcome, TierOutcome::Pass(_)), "{r:?}");
+    }
+
+    #[test]
+    fn losing_an_fsynced_event_is_the_durability_violation_tier_c_exists_for() {
+        let r = judge_trial(1, Some(&marker(400)), &intact(399));
+        match r.outcome {
+            TierOutcome::Fail(d) => assert!(
+                d.contains("DURABILITY VIOLATION"),
+                "must name the failure plainly: {d}"
+            ),
+            other => panic!("a lost acknowledged write must FAIL, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_broken_chain_after_a_cut_fails() {
+        let r = judge_trial(
+            1,
+            Some(&marker(400)),
+            &Ok(ChainStatus::Broken { at_generation: 7 }),
+        );
+        assert!(matches!(r.outcome, TierOutcome::Fail(_)), "{r:?}");
+    }
+
+    #[test]
+    fn an_unreadable_store_after_a_cut_fails() {
+        let r = judge_trial(1, Some(&marker(400)), &Err("disk I/O error".into()));
+        assert!(matches!(r.outcome, TierOutcome::Fail(_)), "{r:?}");
+    }
+
+    #[test]
+    fn an_unarmed_trial_is_inconclusive_not_a_pass() {
+        // Nothing states what should have survived, so a survived cut proves
+        // nothing — the exact shape of vacuity the tier must refuse.
+        let r = judge_trial(1, None, &intact(9_999));
+        assert!(matches!(r.outcome, TierOutcome::Inconclusive(_)), "{r:?}");
+        assert!(r.outcome.fails_the_run());
+    }
+
+    #[test]
+    fn no_trials_stays_not_run_and_does_not_fail_the_run() {
+        // The default for every automated run. If this ever failed the run,
+        // CI would be red permanently and the exit code would stop meaning
+        // anything.
+        let o = tier_c_from_trials(&[]);
+        assert_eq!(o.token(), "NOT-RUN");
+        assert!(!o.fails_the_run());
+    }
+
+    fn passing_trial(n: u64) -> TrialRecord {
+        judge_trial(n, Some(&marker(400)), &intact(400))
+    }
+
+    #[test]
+    fn fewer_than_the_required_trials_is_inconclusive() {
+        for n in 1..MIN_TIER_C_TRIALS {
+            let trials: Vec<_> = (1..=n).map(passing_trial).collect();
+            let o = tier_c_from_trials(&trials);
+            assert_eq!(o.token(), "INCONCLUSIVE", "{n} trial(s) must not pass");
+            assert!(o.fails_the_run());
+        }
+    }
+
+    #[test]
+    fn the_required_number_of_clean_trials_passes() {
+        let trials: Vec<_> = (1..=MIN_TIER_C_TRIALS).map(passing_trial).collect();
+        let o = tier_c_from_trials(&trials);
+        assert_eq!(o.token(), "PASS", "{}", o.detail());
+        assert!(!o.fails_the_run());
+    }
+
+    #[test]
+    fn one_failure_among_many_passes_still_fails() {
+        // A durability violation is not outvoted by successful trials: the
+        // device demonstrated it can lose an acknowledged write.
+        let mut trials: Vec<_> = (1..=MIN_TIER_C_TRIALS + 3).map(passing_trial).collect();
+        trials[4] = judge_trial(5, Some(&marker(400)), &intact(12));
+        let o = tier_c_from_trials(&trials);
+        assert_eq!(o.token(), "FAIL");
+        assert!(o.detail().contains("trial 5"), "{}", o.detail());
+    }
+
+    #[test]
+    fn the_marker_round_trips() {
+        let m = marker(1234);
+        let back = ArmedMarker::parse(&m.render()).expect("parses");
+        assert_eq!(back.durable_generation, 1234);
+        assert_eq!(back.durable_head, "deadbeef");
+    }
+
+    #[test]
+    fn a_truncated_marker_is_not_silently_zero() {
+        // A marker torn by the very power cut it was recording must read as
+        // absent, which makes the trial inconclusive — not as generation 0,
+        // which would make every trial trivially pass.
+        assert!(ArmedMarker::parse("").is_none());
+        assert!(ArmedMarker::parse("400").is_none());
+        assert!(ArmedMarker::parse("notanumber\nhead\n").is_none());
+    }
+
+    #[test]
+    fn the_ledger_round_trips_through_its_own_writer() {
+        let db = temp("tierc-ledger");
+        let _ = std::fs::remove_file(trials_ledger_path(&db));
+        let written = [
+            passing_trial(1),
+            judge_trial(2, Some(&marker(400)), &intact(3)),
+            judge_trial(3, None, &intact(400)),
+        ];
+        for r in &written {
+            append_trial(&db, r).expect("append");
+        }
+
+        let read = read_trials(&db);
+        assert_eq!(read.len(), 3);
+        for (w, r) in written.iter().zip(&read) {
+            assert_eq!(w.trial, r.trial);
+            assert_eq!(w.outcome.token(), r.outcome.token());
+            assert_eq!(w.durable_generation, r.durable_generation);
+            assert_eq!(w.recovered_generation, r.recovered_generation);
+        }
+        let _ = std::fs::remove_file(trials_ledger_path(&db));
+    }
+
+    #[test]
+    fn a_torn_final_ledger_line_does_not_discard_earlier_trials() {
+        use std::io::Write;
+        let db = temp("tierc-torn");
+        let path = trials_ledger_path(&db);
+        let _ = std::fs::remove_file(&path);
+        append_trial(&db, &passing_trial(1)).expect("append");
+        append_trial(&db, &passing_trial(2)).expect("append");
+        // The ledger is appended to on a machine that is about to lose power
+        // again, so a half-written last line is an expected state.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open");
+        write!(f, "{{\"trial\":3,\"outcome\":\"PA").expect("write");
+        drop(f);
+
+        assert_eq!(read_trials(&db).len(), 2);
+        let _ = std::fs::remove_file(&path);
     }
 }
