@@ -351,6 +351,33 @@ On target, measure this on a store at realistic occupancy, and record it
 alongside the device and medium — a rewrite of the whole database has an I/O and
 power profile that does not transfer between eMMC, microSD and NVMe.
 
+### Capture the environment *before* the first VACUUM
+
+The harness records where SQLite resolved its temp directory and whether that
+directory is volatile, but it cannot record how much room there was or how much
+RAM was free at the time. Capture that first, into the run's evidence:
+
+```sh
+df -hT                              # free space, per mount, with fs types
+free -h                             # available RAM — see the tmpfs warning below
+printf 'TMPDIR=%q\n' "${TMPDIR:-}"  # empty is meaningful: SQLite falls back
+findmnt /tmp                        # is /tmp its own mount, and of what type
+ls -l /var/lib/kirra/wm2/           # database size going in
+```
+
+Read them against three `reclaim` fields:
+
+| Captured | Compare with | Because |
+|---|---|---|
+| `df -hT` free on the database mount | `transient_overhead_bytes` | reclamation *consumes* free space to release it. Too little free space and the `VACUUM` fails — the store cannot shrink precisely when it most needs to. |
+| `free -h` | `temp_fs_is_volatile` + database size | if the temp directory is `tmpfs`, the copy is built in **RAM**. An 8 GiB store against 4 GiB free is an OOM kill, not an `ENOSPC`. |
+| `findmnt /tmp`, `TMPDIR` | `temp_dir`, `temp_on_same_fs_as_db` | when the temp copy shares the database's mount, the reserve has to cover **both** at once. |
+
+An empty `TMPDIR` is not a non-result: it means SQLite falls through to
+`/var/tmp`, `/usr/tmp`, `/tmp` in that order, and on a Jetson those are
+frequently not the same medium as `/var/lib/kirra`. Record what it actually
+resolved to (`temp_dir` in the results), not what it was assumed to be.
+
 ---
 
 ## 7. Crash tiers A and B (automated)
