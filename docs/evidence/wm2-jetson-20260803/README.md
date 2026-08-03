@@ -44,6 +44,9 @@ The count is worth recording: a stage that failed to run leaves no record, so
 21 with this breakdown is the difference between "every stage completed" and
 "every stage that completed passed".
 
+Verified against the archived file: 21 records, every one stamped
+`JETSON-TARGET-MEASURED`.
+
 ## What this bundle does and does not establish
 
 **Established on target:** replay (with `deterministic: true`), all four query
@@ -62,32 +65,39 @@ Consequently **ADR-0041 remains Proposed.**
 
 ## Files
 
-| File | | Present |
-|---|---|---|
-| `SHA256SUMS` | digests **as taken on the device**, transcribed here | yes |
-| `results.jsonl` | the run, one JSON record per measurement | **not yet** |
+| File | |
+|---|---|
+| `results.jsonl` | the run — 21 records, one per measurement |
+| `JETSON_WM2_PERSISTENCE_DRILL.md` | the exact runbook followed, archived alongside |
+| `SHA256SUMS` | digests **as taken on the device** |
 
-Run `sha256sum -c SHA256SUMS` from this directory. Today it reports:
+The bundle is **self-contained and self-verifying**. From this directory:
 
+```console
+$ sha256sum -c SHA256SUMS
+results.jsonl: OK
+JETSON_WM2_PERSISTENCE_DRILL.md: OK
 ```
-../../hardware/JETSON_WM2_PERSISTENCE_DRILL.md: OK
-results.jsonl: FAILED open or read
-```
 
-which is the accurate state of the bundle: **the procedure is pinned and
-verified, the results file has not arrived.**
+`results.jsonl` is the artifact copied off the device, not a transcription:
+it hashes to `189e3a98…`, the digest recorded on the Jetson before it was
+moved. Anything retyped from terminal output would not.
 
-### The drill digest is a verified pin, not a copy
+### The archived runbook is also a pin
 
-The runbook is *not* duplicated into this directory. Instead `SHA256SUMS`
-points at the tracked copy, and that line **passes**: the digest recorded on
-the device, `4ecdb939…`, is byte-identical to
-`docs/hardware/JETSON_WM2_PERSISTENCE_DRILL.md` at commit `021ec82379be` — the
-same commit the harness binary was built from — and to the copy at `HEAD`.
+A copied runbook can drift from the tracked one, which would leave the bundle
+self-consistent but no longer tied to a revision anybody can find. It has not
+drifted here:
 
-That is stronger than shipping a second copy. It proves *which tracked
-revision* of the procedure was followed, and a later edit to the drill will
-make this line fail rather than silently diverging from an archived duplicate.
+`4ecdb939…` — the archived copy — is byte-identical to
+`docs/hardware/JETSON_WM2_PERSISTENCE_DRILL.md` at commit `021ec82379be`, the
+same commit the harness binary was built from, and to the tracked copy at
+`HEAD`.
+
+So the bundle answers both questions independently: **what was run** (the
+digests verify in place, offline, with no repository) and **which tracked
+revision it corresponds to** (the drill digest matches a commit). If the two
+ever diverge, that is a finding — re-check before citing anything here.
 
 > **`results.jsonl` has not been committed.** It exists on the device at
 > `~/wm2-jetson-evidence-20260803-083703/`. It is deliberately *not*
