@@ -392,14 +392,24 @@ source; they are not migrated destructively (ADR-0040).
 
 ## Open questions
 
-1. `synchronous` policy per source class — measurement required.
+1. `synchronous` policy per source class — measurement required. **Target data
+   exists but is not yet usable:** the `NORMAL`/batch=64 row is corrupted by the
+   ~29 s stall of open question 9, and the durability ordering inverts at
+   batch=64. A policy must not be fixed from that run.
 2. Retention classes: exact list and their durations. The harness models the
    §11.3 protected set (safety, incident, calibration, adjudication, operator)
    and enforces it — a window containing any of them is refused whole — but the
-   *durations* remain unmeasured and unset.
+   *durations* remain unset. **D-2 now bounds them**: on 8 GiB at 10 Hz the
+   store fills in 21.7 days, so any horizon beyond three weeks requires the
+   event rate to fall (2.4 events/s for 90 days). The durations and the
+   sampling policy are a single coupled decision, not two.
 2a. Reclamation scheduling: the precondition thresholds in *Compaction is not
-   reclamation* are proposed, not measured. `VACUUM` cost, its free-space
-   requirement, and its interruption behaviour all need target measurement.
+   reclamation* were proposed, not measured. **D-3 measures them**: ~399 MB/s,
+   a ~1× free-space reserve, a total write blackout for the duration (~21.5 s
+   on a full store), and `/var/tmp` non-volatile on this device. What remains
+   unmeasured is **interruption behaviour** — what a `VACUUM` killed midway
+   leaves behind — which the harness does not exercise and a power-cut trial
+   would.
 2b. Whether policy-supersession records (route 3 above) are needed at WM-2 or
    can wait. Without them, a compacted span cannot be audited against the policy
    that authorized compacting it — which may or may not be acceptable before the
@@ -416,6 +426,20 @@ source; they are not migrated destructively (ADR-0040).
    projections with nothing marking them as incomplete. Needs either a
    fold-in-progress marker, a transactional whole-fold, or an explicit rule that
    projections are invalid until a checkpoint confirms them.
+8. **Migration strategy — blocking for acceptance (D-6).** Measured at
+   0.325 ms/event, a whole-store offline migration costs ~101 minutes at the
+   8 GiB ceiling. WM-2 must choose: bound the store, migrate lazily/online, or
+   accept a documented maintenance window. The third conflicts with an
+   available robot, so it needs stating explicitly if chosen.
+9. **The ~29 s write stall (O-1).** One commit under `NORMAL`/batch=64 took
+   29.27 s on NVMe — ~293 unrecordable observations at 10 Hz. Cause unknown;
+   ext4 journal commit, NVMe garbage collection and thermal/power management
+   are all candidates and are distinguishable only by re-running. Blocks open
+   question 1.
+10. **Graph-query placement (D-1).** At 13.4 ms p99 — 1 496× the point family,
+   and 6.5× worse in *ratio* on target than on host — bounded-depth reach
+   cannot sit on a deadline path. Whether any planned consumer needs it there
+   is unresolved; if one does, that is the trigger to re-evaluate Option B.
 
 ---
 
@@ -504,16 +528,244 @@ file can never imply a durability test that did not happen.
 The right-hand column names the instrument, not a result — **no gate below is
 satisfied, and none may be ticked from a `HOST-INDICATIVE-NOT-TARGET` run:**
 
-| | Gate | Produced by |
-|---|---|---|
-| [ ] | **Measured Jetson prototype** — the log + projection path on target hardware, not a development host | the whole run, only when it reports `JETSON-TARGET-MEASURED` |
-| [ ] | **Replay benchmark** — full rebuild time at the assumed observation volume, with the checkpointed case measured separately | `replay` (also asserts rebuild-equals-incremental determinism, which gates the rest) |
-| [ ] | **Representative query benchmark** — one measurement per query family in blueprint §12 (point, set, graph, temporal) | `query`, plus a separate bitemporal point query the projection cannot answer |
-| [ ] | **Corruption / restart experiment** — power-loss-class behaviour, in the spirit of the existing audit-chain crash-consistency drill | `crash` tiers A and B; **tier C is manual** (drill §6) and this gate is not complete without it |
-| [ ] | **Storage growth estimate** — observations/day at realistic sensor rates, projected against the device budget | `growth` |
-| [ ] | **Migration proof of concept** — a schema change applied to a populated store, fail-closed on a future schema version | `migrate` |
-| [ ] | Scale assumptions confirmed or corrected; if materially wrong, Option B is re-evaluated before acceptance | the drill §7 sweep informs it; what the deployed robot actually reaches is an operational fact the harness cannot produce |
+| | Gate | Produced by | Status |
+|---|---|---|---|
+| [x] | **Measured Jetson prototype** — the log + projection path on target hardware, not a development host | the whole run, only when it reports `JETSON-TARGET-MEASURED` | **Met** — see *Target measurements* |
+| [x] | **Replay benchmark** — full rebuild time at the assumed observation volume, with the checkpointed case measured separately | `replay` (also asserts rebuild-equals-incremental determinism, which gates the rest) | **Met** — `deterministic: true` |
+| [x] | **Representative query benchmark** — one measurement per query family in blueprint §12 (point, set, graph, temporal) | `query`, plus a separate bitemporal point query the projection cannot answer | **Met — and adverse.** See D-1 |
+| [ ] | **Corruption / restart experiment** — power-loss-class behaviour, in the spirit of the existing audit-chain crash-consistency drill | `crash` tiers A and B; **tier C is manual** (drill §8) and this gate is not complete without it | **Partial** — A and B PASS; **tier C `NOT-RUN`, 0 of 5 trials** |
+| [x] | **Storage growth estimate** — observations/day at realistic sensor rates, projected against the device budget | `growth` | **Met — and adverse.** See D-2 |
+| [x] | **Migration proof of concept** — a schema change applied to a populated store, fail-closed on a future schema version | `migrate` | **Met — and adverse.** See D-6 |
+| [ ] | Scale assumptions confirmed or corrected; if materially wrong, Option B is re-evaluated before acceptance | the drill §9 sweep informs it; what the deployed robot actually reaches is an operational fact the harness cannot produce | **Open** — see D-2, and the §9 sweep has not been run |
 
-**No implementation should begin merely because this proposed ADR exists.**
-Merging this PR satisfies none of the above, and neither does the existence of
-the harness.
+**Two gates remain open, and one of them cannot be closed from software.** Tier C
+requires five physical power cuts (drill §8, `powercut arm` / `powercut verify`);
+the harness reports `NOT-RUN` at `0/5` and will continue to. Until both are
+closed this ADR stays **Proposed**.
+
+**No implementation should begin merely because this proposed ADR exists**, and
+in particular not because six of eight gates now read *Met*. The domain-logic
+gate (ADR-0042 Decision 5) is a separate and independent hold.
+
+---
+
+## Target measurements
+
+**Evidence:** `JETSON-TARGET-MEASURED`, `citable: true`, `blockers: []`.
+NVIDIA Jetson Orin NX Engineering Reference Developer Kit Super, `aarch64`,
+`ext4` on `/dev/nvme0n1p1`, release build, `rustc 1.94.1`, harness at
+`git_commit 021ec82379be` (clean), `source_digest a0c2c1c870d6…`,
+`standin_schema_digest 630eb690aaef…`, 100 000 events at a 96-byte payload.
+
+> The `standin_schema_digest` is load-bearing when reading these numbers: they
+> describe the harness's **stand-in** schema, not a ratified one. When the real
+> schema lands its digest differs, and every figure below becomes a figure about
+> something else.
+
+The two questions this run existed to answer were both answered, and both
+answers are adverse to the proposal as written.
+
+### D-1 — the graph family is ~1 500× the point family, and worse on target than on host
+
+| Family | Median | p99 | vs point | Share of a 100 ms (10 Hz) period, at p99 |
+|---|---|---|---|---|
+| `point_latest` | 7.7 µs | 14.9 µs | 1× | 0.01 % |
+| `point_time_travel` | 25.6 µs | 40.8 µs | 3.3× | 0.04 % |
+| `set_entities_in` | 11.6 µs | 18.0 µs | 1.5× | 0.02 % |
+| **`graph_bounded_reach`** | **11.54 ms** | **13.44 ms** | **1 496×** | **13.4 %** |
+| **`temporal_changes_since`** | **27.41 ms** | **58.68 ms** | **3 554×** | **58.7 %** |
+
+The host-indicative ratio was ~230×. On target it is ~1 496× — **6.5× worse in
+ratio, not merely slower across the board.** The point and set families are
+fast enough to be uninteresting; the graph and temporal families are the entire
+cost.
+
+This is the measurement most likely to overturn the SQLite recommendation, and
+it does not. It qualifies it:
+
+- The proposal's claim that **graph shape belongs in an index, not the
+  substrate** survives — but only if the index is real. A bounded-depth reach
+  that costs 13.4 ms at p99 cannot be issued per perception tick.
+- **Decision:** graph and temporal queries are **not** permitted on the
+  synchronous path of any loop with a deadline. They are background or
+  on-demand operations. If a future consumer needs bounded reach at tick rate,
+  that is the trigger to re-evaluate Option B, not a reason to optimise this
+  one.
+- The 420 983 rows matched by `graph_bounded_reach` and 197 315 by
+  `temporal_changes_since` indicate the cost is fan-out, not per-row overhead.
+  A depth or result bound is a design requirement, not a tuning knob.
+
+### D-2 — 458.5 B/event means retention and sampling are mandatory, not deferred
+
+`bytes_per_event: 458.50624` log-only, `476.32384` with projections.
+Against an 8 GiB budget at the assumed 864 000 events/day (10 Hz):
+
+| | Events | Days to fill 8 GiB |
+|---|---|---|
+| Log only | 18 734 608 | **21.7** |
+| With projections | 18 033 812 | **20.9** |
+
+Inverting it is the decision-forcing form — **the maximum sustained event rate
+for a given retention horizon on 8 GiB**:
+
+| Retention horizon | Max sustained rate |
+|---|---|
+| 30 days | 7.2 events/s |
+| **90 days** | **2.4 events/s** |
+| 180 days | 1.2 events/s |
+| 365 days | 0.6 events/s |
+
+10 Hz sustained is viable for **three weeks**. Any longer horizon requires the
+event rate to come down by roughly 4× (90 days) or more. **Sampling/coalescing
+is therefore a design requirement of WM-2, not a later optimisation**, and the
+"observations/day at realistic sensor rates" assumption in *Provisional scale
+assumptions* is now measured rather than assumed.
+
+Compaction recovers ~50 % (D-4), which roughly doubles the horizon for
+compactable regions — but compaction is **lossy** (`DegradedSummary`), so it
+buys retention of *summaries*, not of observations. It does not change the
+sampling conclusion.
+
+### D-3 — reclamation cannot be scheduled naively, and bounds the store size
+
+`vacuum_ms 57.34` on a 22.9 MB store → **~399 MB/s processed**.
+`transient_overhead_ratio 1.294`, `transient_overhead_bytes 6.73 MB`.
+`temp_dir /var/tmp`, `ext4`, `temp_fs_is_volatile: false`,
+`temp_on_same_fs_as_db: true`.
+`concurrent_appends_blocked: 2 of 2`, `max_append_stall_ms 50.87`.
+
+Three decisions follow:
+
+1. **The tmpfs hazard is not present in this configuration.** `/var/tmp` on
+   this Orin is `ext4`, so the `VACUUM` copy is not built in RAM. This is a
+   property of *this* device's layout, not of Jetsons, and must be re-checked
+   per deployment — the harness reports it precisely so it is checked rather
+   than assumed.
+2. **The free-space reserve is ~1× the database size**, not the measured
+   0.294×. The measured overhead scales with what will *remain*, so the worst
+   case is a store with nothing to reclaim. **Consequence: an 8 GiB store on an
+   8 GiB budget can never be vacuumed.** The practical database ceiling is
+   about **half the partition**, or reclamation must become incremental. This
+   is a hard constraint on the deployment layout, and it was not visible before
+   measurement.
+3. **Reclamation is a total write blackout for its duration.** Every concurrent
+   append was blocked (2/2), longest stall 50.9 ms on a 22.9 MB store. Scaled
+   to a full store the `VACUUM` runs **~21.5 s**, during which the world model
+   records nothing. At 10 Hz that is ~215 unrecorded observations.
+   **Reclamation therefore requires the robot to be stationary and
+   out-of-mission — it is not an idle-time background task**, which is what
+   R8's precondition table already required and this now quantifies.
+
+### D-4 — compaction with citation holds on target
+
+49 486 of 100 000 events compacted into 516 cited windows; **49.83 %
+reclaimed** after `VACUUM`; 1 206 ms to compact, 243 ms to re-verify. All nine
+§11.3 conditions hold on target, including the non-vacuity control
+`tampered_summary_breaks_chain: true` — without which the other eight would be
+worthless.
+
+`compaction windows: 516` for ~49 k events implies a mean window of ~96 events.
+Compaction throughput is ~41 k events/s; re-verification of the whole chain
+costs 243 ms. Both are cheap relative to the `VACUUM` that must follow, which
+reinforces R8: the two operations have different costs and different
+preconditions, and must be scheduled separately.
+
+### D-5 — checkpointing is mandatory, not an optimisation
+
+Cold rebuild 324.9 ms per 100 k events; checkpointed resume 19.1 ms — **17×**.
+`deterministic: true` (rebuild equals incremental), which is the property the
+rest of the replay argument rests on.
+
+Extrapolated to a full 18.7 M-event store, a cold rebuild costs **~61 s of
+boot**. **Decision: projection checkpoints are a WM-2 requirement.** A store
+that can only be rebuilt cold does not meet any plausible availability target
+on this hardware.
+
+### D-6 — schema migration does not scale, and this is the sharpest finding
+
+50 000 events migrated v1→v2 in **16.24 s** — 0.325 ms/event.
+`future_schema_refused: true`, `chain_intact_after: true` (the fail-closed
+policy holds on target).
+
+Extrapolated linearly:
+
+| Store size | Offline migration |
+|---|---|
+| 1 M events | 5.4 min |
+| 5 M events | 27.1 min |
+| 18.7 M events (full 8 GiB) | **101 min** |
+
+**A whole-store offline migration is not viable on this hardware.** An OTA that
+takes 101 minutes with the world model unavailable is not an OTA. Three routes
+exist and WM-2 must choose one before acceptance:
+
+- bound the store so migrations stay minutes (which D-2's sampling decision
+  tends to do anyway);
+- make migrations **lazy/online** — new schema written forward, old rows
+  migrated on read or in the background;
+- accept a documented maintenance window, which conflicts with a robot that is
+  expected to be available.
+
+This is now **open question 8**, and it is a blocker for acceptance rather than
+a note.
+
+### D-7 — the two SQLite-config claims hold on target
+
+The SQLite-configuration table asserts read-only degraded mode and clean
+disk-full refusal. Both were previously exercised only on a development host.
+On target, all seven checks hold:
+
+| Check | Result | |
+|---|---|---|
+| `write_refused` | true | the append past the cap errored rather than silently succeeding |
+| `refusal_is_disk_full` | true | `"database or disk is full"` — the error names the condition |
+| **`partial_batch_rolled_back`** | **true** | **the one that matters most** — a half-committed batch would tear the generation sequence and fork the chain, turning a recoverable out-of-space condition into permanent evidence corruption |
+| `chain_intact_after_refusal` | true | |
+| `reads_serve_while_full` | true | read-only degraded mode: log *and* projections still answer |
+| `recovers_when_space_returns` | true | full is a condition, not a state the store is stuck in |
+| `chain_intact_after_recovery` | true | recovery does not fork the chain |
+
+`projection_rows_while_full: 100` — non-zero, so `reads_serve_while_full` was
+answered from real projection rows rather than passing vacuously on a store with
+nothing to serve.
+
+**The honest limit is unchanged by running on target.** `PRAGMA max_page_count`
+(here `page_cap: 247`, filling after 2 000 events) exercises SQLite's full-
+*database* path, not the filesystem's `ENOSPC` path, and not what an Orin does
+when `/dev/nvme0n1p1` is genuinely at 100 % and every other process sharing that
+mount is failing too. This establishes that the store refuses cleanly; it does
+not establish that the device stays healthy. Confirming the second still needs a
+deliberately filled partition — and open question 7 (partial projections under
+pressure) remains open regardless, because a fold that is *interrupted* is a
+different case from one that is refused.
+
+### O-1 — an unexplained ~29 second write stall (open, needs a re-run)
+
+| Durability | Batch | Throughput | p99 | max |
+|---|---|---|---|---|
+| FULL | 1 | 3 279 ev/s | 0.67 ms | 6.60 ms |
+| FULL | 64 | 31 809 ev/s | 8.09 ms | 8.75 ms |
+| NORMAL | 1 | 9 945 ev/s | 0.48 ms | 15.76 ms |
+| **NORMAL** | **64** | **3 123 ev/s** | 11.35 ms | **29 271.78 ms** |
+| OFF | 1 | 15 250 ev/s | 0.10 ms | 1.25 ms |
+| OFF | 64 | 56 260 ev/s | 3.44 ms | 3.68 ms |
+
+At a fixed batch the expected ordering is `OFF > NORMAL > FULL`. It holds at
+batch=1. **At batch=64 it is inverted — `NORMAL` is the slowest of the three**,
+which no durability model predicts.
+
+The cause is visible in the `max`: a single commit took **29.27 seconds**. That
+one event is ~91 % of the stage's wall time; excluding it, throughput is
+~36 400 ev/s, consistent with `FULL`/64 and `OFF`/64. So this is **not a
+throughput regime — it is one stall**, and the throughput figure for that row
+should not be used.
+
+This matters more than the benchmark it corrupted. A 29-second write stall on
+target means **~293 observations at 10 Hz that cannot be recorded**, or a
+writer blocked for 29 s. Candidate causes — ext4 journal commit, NVMe garbage
+collection, thermal or power management — are distinguishable only with another
+run. **Until characterised, no `synchronous` policy should be ratified from
+this data.** Recorded as **open question 9**.
+
+That the tail was *visible at all* is the argument for reporting `max`
+alongside `p99`: at p99 this row reads 11.35 ms and looks unremarkable.
