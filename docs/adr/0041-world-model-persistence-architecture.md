@@ -435,7 +435,13 @@ source; they are not migrated destructively (ADR-0040).
    29.27 s on NVMe — ~293 unrecordable observations at 10 Hz. Cause unknown;
    ext4 journal commit, NVMe garbage collection and thermal/power management
    are all candidates and are distinguishable only by re-running. Blocks open
-   question 1.
+   question 1. **An instrument now exists** (`stall`, drill §9a): it repeats the
+   configuration to establish a *rate*, reports a median throughput that one
+   pathological run cannot move, and samples PSI I/O, block-layer busy time,
+   dirty/writeback peak and thermal across each run to narrow the cause. Its
+   attribution is deliberately reluctant — `UNATTRIBUTED` unless one cause is
+   clear — because a confident wrong attribution closes the investigation.
+   **Not yet run on target.**
 10. **Graph-query placement (D-1).** At 13.4 ms p99 — 1 496× the point family,
    and 6.5× worse in *ratio* on target than on host — bounded-depth reach
    cannot sit on a deadline path. Whether any planned consumer needs it there
@@ -536,7 +542,7 @@ satisfied, and none may be ticked from a `HOST-INDICATIVE-NOT-TARGET` run:**
 | [ ] | **Corruption / restart experiment** — power-loss-class behaviour, in the spirit of the existing audit-chain crash-consistency drill | `crash` tiers A and B; **tier C is manual** (drill §8) and this gate is not complete without it | **Partial** — A and B PASS; **tier C `NOT-RUN`, 0 of 5 trials** |
 | [x] | **Storage growth estimate** — observations/day at realistic sensor rates, projected against the device budget | `growth` | **Met — and adverse.** See D-2 |
 | [x] | **Migration proof of concept** — a schema change applied to a populated store, fail-closed on a future schema version | `migrate` | **Met — and adverse.** See D-6 |
-| [ ] | Scale assumptions confirmed or corrected; if materially wrong, Option B is re-evaluated before acceptance | the drill §9 sweep informs it; what the deployed robot actually reaches is an operational fact the harness cannot produce | **Open** — see D-2, and the §9 sweep has not been run |
+| [ ] | Scale assumptions confirmed or corrected; if materially wrong, Option B is re-evaluated before acceptance | the drill §9 sweep, which now emits a **computed** verdict against this ADR's own reopening condition; what the deployed robot actually reaches remains an operational fact the harness cannot produce | **Open** — see D-2 and D-8; the sweep has not been run on target |
 
 **Two gates remain open, and one of them cannot be closed from software.** Tier C
 requires five physical power cuts (drill §8, `powercut arm` / `powercut verify`);
@@ -738,6 +744,37 @@ not establish that the device stays healthy. Confirming the second still needs a
 deliberately filled partition — and open question 7 (partial projections under
 pressure) remains open regardless, because a fold that is *interrupted* is a
 different case from one that is refused.
+
+### D-8 — the reopening condition is now decidable, and the obvious sweep was wrong
+
+This ADR states the condition under which it should be abandoned — *"entities in
+the millions or genuinely unbounded ad-hoc traversal"* — and the drill
+previously discharged it with a shell loop and the instruction to *look at* how
+`graph_bounded_reach` grows. Whether a curve has a knee is precisely the
+judgement that gets made favourably under deadline and re-made unfavourably by
+an assessor a year later, from the same numbers. It is now a function
+(`sweep`, drill §9) with a fail-closed verdict: `SUBLINEAR` / `LINEAR` /
+`SUPERLINEAR` / `KNEE` / `INSUFFICIENT`, where both `KNEE` and `INSUFFICIENT`
+exit non-zero.
+
+**Building it exposed a defect in the sweep the drill specified.** Sweeping
+entity count at a *fixed total event count* reduces observations-per-entity as
+the ladder rises, so graph fan-out — and cost — go **down**. On a host ladder of
+100/1 000/10 000 entities at a fixed 20 000 events the medians were 1 687 µs →
+73.7 µs → 10.9 µs, a log-log slope of **−1.10**.
+
+That ladder would have reported excellent sublinear scaling and closed this
+gate, while measuring density rather than scale. It is the most dangerous shape
+available here, because it looks like unusually good news.
+
+The sweep therefore holds observations-per-entity **constant** by default
+(`--events-per-entity`, deployment-realistic: more entities means more
+observations, not the same observations spread thinner), and the classifier
+**refuses** a steeply falling curve as `INSUFFICIENT` with the reason and the
+fix rather than praising it.
+
+No target sweep has been run, so the scale gate remains open. What changed is
+that it can now be closed with a verdict instead of an impression.
 
 ### O-1 — an unexplained ~29 second write stall (open, needs a re-run)
 

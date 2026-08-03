@@ -82,6 +82,8 @@ loss is probabilistic, so one survived cut is not evidence.
 | `bench.rs` | Append, replay, the four §12 query families, growth, migration |
 | `crash.rs` | Corruption / restart tiers A, B, and tier C's arm/verify/ledger machinery |
 | `pressure.rs` | Disk-full behaviour, and what `VACUUM` costs the system while it runs |
+| `sweep.rs` | The scale ladder, with a computed fail-closed verdict against ADR-0041's own reopening condition |
+| `stall.rs` | The ~29 s write-stall investigation: repetition, a stall rate, and system counters sampled across each run |
 | `json.rs`, `sha256.rs` | Minimal writer and the local hash — see above |
 | `build.rs` | Build identity: rustc version, git commit (`-dirty` when it is), source digest |
 | `tests/crash_tier_a.rs` | Tier A end-to-end against the real binary (a unit test would exercise the spawn-failure path forever and look like coverage) |

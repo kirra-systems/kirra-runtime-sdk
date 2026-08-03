@@ -23,7 +23,9 @@ mod json;
 mod platform;
 mod pressure;
 mod sha256;
+mod stall;
 mod standin;
+mod sweep;
 
 use json::Obj;
 use platform::EvidenceStatus;
@@ -47,6 +49,10 @@ COMMANDS:
     crash       Corruption / restart experiment (tiers A and B; C is manual)
     compact     Compaction-with-citation experiment (ADR-0041 §11.3)
     pressure    Disk-pressure behaviour + reclamation cost (ADR-0041 §SQLite config)
+    sweep       Scale ladder across entity counts; classifies the growth curve
+                against ADR-0041's own reopening condition (drill §9)
+    stall       Repeat one append configuration and hunt the ~29 s write stall,
+                sampling system counters across it (ADR-0041 open question 9)
     all         Every command above, into one result stream
 
   Tier C (manual, needs a power switch — see the drill §8):
@@ -69,6 +75,13 @@ OPTIONS:
     --budget-gib <n>         Storage budget for the projection (default: 8)
     --crash-run-ms <n>       How long the crash child runs before SIGKILL (default: 750)
     --trial <n>              Power-cut trial number, for `powercut verify`
+    --entity-ladder <a,b,c>  Entity counts for `sweep` (default: 1000,10000,100000)
+    --events-per-entity <n>  Hold density CONSTANT across the ladder: each rung
+                             uses entities x n events (default: 100). Set 0 to
+                             use a fixed --events instead, which DILUTES the
+                             ladder and cannot answer the scale question
+    --sweep-family <name>    Family to classify: graph | temporal (default: graph)
+    --stall-repeats <n>      Repetitions for `stall` (default: 20)
     --assert-target          Operator asserts this is target hardware under
                              representative storage, power and thermal conditions
 
@@ -92,6 +105,10 @@ struct Args {
     budget_gib: f64,
     crash_run_ms: u64,
     trial: u64,
+    entity_ladder: Vec<u64>,
+    events_per_entity: u64,
+    sweep_family: String,
+    stall_repeats: usize,
     /// Positional word after the command, used only by `powercut arm|verify`.
     subcommand: Option<String>,
     assert_target: bool,
@@ -121,6 +138,10 @@ fn parse_args() -> Result<Args, String> {
         budget_gib: 8.0,
         crash_run_ms: 750,
         trial: 0,
+        entity_ladder: vec![1_000, 10_000, 100_000],
+        events_per_entity: 100,
+        sweep_family: "graph".into(),
+        stall_repeats: 20,
         subcommand: None,
         assert_target: false,
     };
@@ -165,6 +186,40 @@ fn parse_args() -> Result<Args, String> {
             "--seed" => a.seed = parse_num(&value(flag)?, flag)?,
             "--crash-run-ms" => a.crash_run_ms = parse_num(&value(flag)?, flag)?,
             "--trial" => a.trial = parse_num(&value(flag)?, flag)?,
+            "--stall-repeats" => a.stall_repeats = parse_num(&value(flag)?, flag)? as usize,
+            "--events-per-entity" => a.events_per_entity = parse_num(&value(flag)?, flag)?,
+            "--sweep-family" => {
+                let v = value(flag)?;
+                if v != "graph" && v != "temporal" {
+                    return Err(format!(
+                        "--sweep-family expects `graph` or `temporal`, got `{v}`"
+                    ));
+                }
+                a.sweep_family = v;
+            }
+            "--entity-ladder" => {
+                let v = value(flag)?;
+                let mut out = Vec::new();
+                for part in v.split(',') {
+                    let part = part.trim();
+                    if part.is_empty() {
+                        continue;
+                    }
+                    out.push(parse_num(part, "--entity-ladder")?);
+                }
+                // A ladder shorter than the classifier's minimum cannot yield a
+                // verdict, so reject it here rather than running a long sweep
+                // that is guaranteed to report INSUFFICIENT.
+                if out.len() < sweep::MIN_SWEEP_POINTS {
+                    return Err(format!(
+                        "--entity-ladder needs at least {} values (got {}): two points define \
+                         a slope, and detecting a CHANGE in slope needs three",
+                        sweep::MIN_SWEEP_POINTS,
+                        out.len()
+                    ));
+                }
+                a.entity_ladder = out;
+            }
             "--events-per-day" => a.events_per_day = parse_float(&value(flag)?, flag)?,
             "--budget-gib" => a.budget_gib = parse_float(&value(flag)?, flag)?,
             "--durability" => {
@@ -660,6 +715,173 @@ fn main() {
         }
     }
 
+    // `sweep` and `stall` are explicit-only, NOT part of `all`. The sweep runs
+    // the full query suite once per ladder rung and the stall repeats an append
+    // --stall-repeats times; folding either into the routine run would multiply
+    // every drill by a large constant and pressure people into skipping `all`.
+    if args.command == "sweep" {
+        // ADR-0041's reopening condition is about a CHANGE in exponent, so the
+        // ladder is measured end to end and classified as a whole. Emitting the
+        // points without the verdict would put the judgement back where it was:
+        // in whoever reads the file.
+        let d = args.durability.unwrap_or(Durability::Normal);
+        let mut points: Vec<sweep::SweepPoint> = Vec::new();
+        let mut ladder_ok = true;
+
+        for &entities in &args.entity_ladder {
+            // Constant density by default. Sweeping entity count at a FIXED
+            // total event count makes each entity thinner, so fan-out and cost
+            // FALL — which measures density, not scale, and cannot answer the
+            // reopening condition. `--events-per-entity 0` opts back into the
+            // fixed-events ladder; the classifier refuses the result.
+            let events = if args.events_per_entity > 0 {
+                entities.saturating_mul(args.events_per_entity)
+            } else {
+                args.events
+            };
+            match bench::queries(&args.db, d, events, entities, args.seed, args.repeats) {
+                Ok(q) => {
+                    let want = if args.sweep_family == "graph" {
+                        "graph_bounded_reach"
+                    } else {
+                        "temporal_changes_since"
+                    };
+                    let t = q.timings.iter().find(|t| t.label == want);
+                    let rows = q
+                        .rows_returned
+                        .iter()
+                        .find(|(l, _)| l == want)
+                        .map(|(_, n)| *n)
+                        .unwrap_or(0);
+                    match t {
+                        Some(t) => {
+                            points.push(sweep::SweepPoint {
+                                entities,
+                                median_us: t.median_us,
+                            });
+                            sink.emit(
+                                stamp(&class, &facts, &args)
+                                    .str("record", "sweep_point")
+                                    .str("family", want)
+                                    .int("entities", entities)
+                                    .int("events", events)
+                                    .int("events_per_entity", args.events_per_entity)
+                                    .float("median_us", t.median_us)
+                                    .float("p99_us", t.p99_us)
+                                    .int("rows_matched_total", rows),
+                            );
+                        }
+                        None => {
+                            ladder_ok = false;
+                            failures += 1;
+                            sink.emit(error_record(
+                                &class,
+                                &facts,
+                                &args,
+                                "sweep_point",
+                                &format!("family `{want}` missing from the query result"),
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    ladder_ok = false;
+                    failures += 1;
+                    sink.emit(error_record(&class, &facts, &args, "sweep_point", &e));
+                }
+            }
+        }
+
+        // A ladder with a hole cannot be classified: the missing point might be
+        // the knee. Refuse rather than classifying the survivors.
+        let verdict = if ladder_ok {
+            sweep::classify_scaling(&points)
+        } else {
+            sweep::ScalingVerdict::Insufficient(
+                "one or more ladder points failed to measure; the missing point may be the \
+                 knee, so the survivors are not classifiable"
+                    .into(),
+            )
+        };
+        if verdict.fails_the_run() {
+            failures += 1;
+        }
+        sink.emit(
+            stamp(&class, &facts, &args)
+                .str("record", "sweep_summary")
+                .str(
+                    "family",
+                    if args.sweep_family == "graph" {
+                        "graph_bounded_reach"
+                    } else {
+                        "temporal_changes_since"
+                    },
+                )
+                .int("points", points.len() as u64)
+                .int("min_points_required", sweep::MIN_SWEEP_POINTS as u64)
+                .str("verdict", verdict.token())
+                .bool("supports_option_a", verdict.supports_option_a())
+                .str("detail", verdict.detail()),
+        );
+    }
+
+    if args.command == "stall" {
+        // Deliberately NOT part of `all`: it is a targeted investigation of one
+        // configuration, and folding it into the standard run would multiply
+        // every drill by --stall-repeats.
+        let d = args.durability.unwrap_or(Durability::Normal);
+        let r = stall::run(
+            &args.db,
+            d,
+            args.events,
+            args.entities,
+            args.batch,
+            args.seed,
+            args.stall_repeats,
+        );
+        if r.fails_the_run() {
+            failures += 1;
+        }
+        sink.emit(
+            stamp(&class, &facts, &args)
+                .str("record", "stall")
+                .str("durability", d.pragma())
+                .int("batch", args.batch as u64)
+                .int("repeats", r.repeats as u64)
+                .int("completed", r.completed as u64)
+                .int("stalls_observed", r.stalls_observed as u64)
+                .float("stall_rate", r.stall_rate())
+                .float("stall_threshold_ms", stall::STALL_THRESHOLD_MS)
+                .float("worst_commit_ms", r.worst_commit_ms)
+                .float("median_worst_ms", r.median_worst_ms)
+                .float("median_throughput_eps", r.median_throughput_eps())
+                .str("attribution", r.attribution.token())
+                .str("detail", r.attribution.detail())
+                .float(
+                    "psi_io_stall_us",
+                    r.delta_at_worst
+                        .psi_io_stall_us
+                        .map_or(f64::NAN, |v| v as f64),
+                )
+                .float(
+                    "disk_io_ms",
+                    r.delta_at_worst.disk_io_ms.map_or(f64::NAN, |v| v as f64),
+                )
+                .float(
+                    "peak_dirty_writeback_kb",
+                    r.delta_at_worst
+                        .peak_dirty_writeback_kb
+                        .map_or(f64::NAN, |v| v as f64),
+                )
+                .float(
+                    "thermal_max_mc",
+                    r.delta_at_worst
+                        .thermal_max_mc
+                        .map_or(f64::NAN, |v| v as f64),
+                ),
+        );
+    }
+
     if run("crash") {
         let d = args.durability.unwrap_or(Durability::Full);
         let r = crash::run(&args.db, d, args.crash_run_ms, 400, 400);
@@ -804,6 +1026,10 @@ mod tests {
             budget_gib: 1.0,
             crash_run_ms: 1,
             trial: 0,
+            entity_ladder: vec![1_000, 10_000, 100_000],
+            events_per_entity: 100,
+            sweep_family: "graph".into(),
+            stall_repeats: 20,
             subcommand: None,
             assert_target: false,
         };
@@ -836,6 +1062,10 @@ mod tests {
             budget_gib: 1.0,
             crash_run_ms: 1,
             trial: 0,
+            entity_ladder: vec![1_000, 10_000, 100_000],
+            events_per_entity: 100,
+            sweep_family: "graph".into(),
+            stall_repeats: 20,
             subcommand: None,
             assert_target: false,
         };
