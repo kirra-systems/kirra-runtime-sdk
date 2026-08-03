@@ -635,6 +635,94 @@ def t26_error_output_quality() -> None:
 # ===========================================================================
 
 
+def _map_sharing_fixture(fx: Fixture, with_world: bool = True) -> None:
+    """A safety-side map consumer that is a REAL package, optionally shared.
+
+    `kirra-ros2-adapter` must be created as a crate, not just written into: a
+    directory with no Cargo.toml is not a package, so it never enters the safety
+    closure and no pairing can be detected. Getting this wrong made three of the
+    tests below pass vacuously — they asserted "no breach" against a fixture
+    incapable of producing one.
+    """
+    fx.crate("kirra-ros2-adapter", deps=["kirra-core"])
+    fx.rust("crates/kirra-ros2-adapter/src/lib.rs", 'pub fn load() { let _ = "town.osm"; }\n')
+    if with_world:
+        fx.crate("kirra-world")
+        fx.rust("crates/kirra-world/src/lib.rs", 'pub fn places() { let _ = "town.osm"; }\n')
+
+
+def t30_shared_artifact_without_allowlist_fails() -> None:
+    fx = Fixture()
+    try:
+        base_safety_workspace(fx)
+        _map_sharing_fixture(fx)
+        expect_breach(fx, "30 Kirra World and safety share an artifact with no allowlist entry",
+                      "B", "lanelet2-osm-map")
+    finally:
+        fx.close()
+
+
+def t31_shared_artifact_with_allowlist_passes() -> None:
+    fx = Fixture()
+    try:
+        base_safety_workspace(fx)
+        _map_sharing_fixture(fx)
+        fx.allowlist(
+            BASE_ALLOWLIST
+            + """
+        [[shared_source_artifact]]
+        artifact = "lanelet2-osm-map"
+        world_consumer = "kirra-world"
+        safety_consumer = "kirra-ros2-adapter"
+        independent_validation = "each parses the OSM document separately; no parsed or derived structure crosses between them"
+        adr = "ADR-0042"
+        owner = "test-owner"
+        reason = "a byte-identical input read twice is not a runtime dependency"
+        """
+        )
+        expect_intact(fx, "31 the same sharing passes once reviewed and allowlisted")
+    finally:
+        fx.close()
+
+
+def t32_safety_only_consumer_is_not_sharing() -> None:
+    fx = Fixture()
+    try:
+        base_safety_workspace(fx)
+        # The safety path reads the map; nobody from Kirra World does. That is
+        # the situation today and it is not sharing.
+        _map_sharing_fixture(fx, with_world=False)
+        expect_intact(fx, "32 a safety-only artifact consumer is not a shared artifact")
+    finally:
+        fx.close()
+
+
+def t33_comment_mention_is_not_a_consumer() -> None:
+    fx = Fixture()
+    try:
+        base_safety_workspace(fx)
+        _map_sharing_fixture(fx)  # a REAL breach exists, so the run is non-vacuous
+        # kirra-core only TALKS about Lanelet2; it does not read it. Counting
+        # prose as consumption put two crates on the real baseline that read
+        # nothing.
+        fx.rust(
+            "crates/kirra-core/src/notes.rs",
+            "// The Lanelet2 cxx bridge stays in the adapter, deliberately not here.\n",
+        )
+        rep = fx.run()
+        shared = [v for v in rep.violations if "shared source artifact" in v.check]
+        named_core = [v for v in shared if "kirra-core" in v.location]
+        problems = []
+        if not shared:
+            problems.append("the planted real sharing should still breach — test is vacuous otherwise")
+        if named_core:
+            problems.append("kirra-core was counted as a consumer on the strength of a comment")
+        record(not problems, "33 a comment mentioning the artifact is not a consumer",
+               "; ".join(problems))
+    finally:
+        fx.close()
+
+
 def t27_real_repo_intact() -> None:
     repo = CI.parent
     rep = fence.run(repo, TODAY)

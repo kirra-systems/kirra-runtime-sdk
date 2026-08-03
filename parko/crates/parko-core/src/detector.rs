@@ -2,7 +2,7 @@
 //! `Detection`s.
 //!
 //! Distinct from Parko's end-to-end driving *policy* (sensor → `ControlCommand`): a
-//! detector emits object boxes for the perception world model that feeds RSS and the
+//! detector emits object boxes for the perception hypothesis that feeds RSS and the
 //! perception-redundancy cross-check. The **decode** — confidence threshold + non-max
 //! suppression on the raw output tensor — is pure Rust and fully tested here; the model
 //! weights live behind the hardware backends and run through the SAME
@@ -163,7 +163,7 @@ fn nms(dets: &mut [Detection], iou_threshold: f32) -> Vec<Detection> {
 
 /// Run a detector end-to-end: execute `backend` on `inputs`, pull the configured output
 /// tensor, and decode it. **Fail-closed:** a backend error or a missing output tensor is
-/// returned as `Err` (the caller MRCs rather than driving on an empty world model).
+/// returned as `Err` (the caller MRCs rather than driving on an empty perception hypothesis).
 pub fn run_detector(
     backend: &dyn InferenceBackend,
     model: &ModelHandle,

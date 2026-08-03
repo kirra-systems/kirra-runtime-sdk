@@ -92,7 +92,7 @@ ${pageHero({
           to a zero-speed minimum-risk cap. Losing redundancy is itself a fault.</p>
         </div>
         <div class="diagram-frame flow-anim" data-reveal>${redunSvg}</div>
-        ${evRow("crates/kirra-trajectory/src/perception_redundancy.rs:237#pub fn cross_check(", "crates/kirra-core/src/perception_monitor.rs", "docs/adr/0018-perception-divergence-monitor.md")}
+        ${evRow("crates/kirra-trajectory/src/perception_redundancy.rs:238#pub fn cross_check(", "crates/kirra-core/src/perception_monitor.rs", "docs/adr/0018-perception-divergence-monitor.md")}
         <div class="compare-note" data-reveal style="margin-top:24px">
           <strong>Derate-only composition:</strong> every predictive perception bound — redundancy, occlusion, VRU —
           is fail-closed and derate-only. Absent input is a no-op (the Nominal hot path is byte-identical);

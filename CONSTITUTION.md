@@ -51,7 +51,7 @@ invented sensor reading is worse than an admitted gap, because it is
 indistinguishable from a real one.
 → [`robot/mick_chat_contract.py`](robot/mick_chat_contract.py)
 
-### 7. The world model represents sourced physical-world facts, not model imagination
+### 7. The semantic world model represents sourced physical-world facts, not model imagination
 
 Coordinates, poses, object positions, and map features come from perception or
 a trusted registry. Language selects *which* thing is meant; it never supplies

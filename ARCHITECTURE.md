@@ -117,7 +117,7 @@ distinction the rest of the architecture exists to preserve.
 
 ---
 
-## 6. World model versus conversation
+## 6. World state versus conversation
 
 Two separate stores, deliberately not merged:
 

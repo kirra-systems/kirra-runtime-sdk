@@ -372,7 +372,7 @@ pub async fn run_adapter(
         ingress_sensor_qos(), // N1
     )?;
     // Redundant (channel-B) objects subscription — a SECOND, INDEPENDENT PredictedObjects topic
-    // (e.g. a camera-only world model vs the primary radar+lidar) feeding the True-Redundancy
+    // (e.g. a camera-only perception channel vs the primary radar+lidar) feeding the True-Redundancy
     // cross-check (gap #2b). Registered ONLY when the divergence monitor is enabled, so a
     // deployment without redundancy adds no subscription. Remap `~/input/objects_secondary` to
     // the redundant detector's topic in the launch file.

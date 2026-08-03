@@ -1,7 +1,7 @@
 //! **Perception redundancy cross-check** — a fail-closed assurance monitor, the
 //! True-Redundancy analog (gap #2b / P1).
 //!
-//! The *True Redundancy* pattern runs two INDEPENDENT world models (camera-only vs.
+//! The *True Redundancy* pattern runs two INDEPENDENT perception channels (camera-only vs.
 //! radar+lidar) as mutual backups. KIRRA promotes that idea from a perception design
 //! into an **assurance check**: given two independent perception channels, verify they
 //! AGREE — and **fail closed** when they don't. A divergence means at least one channel
@@ -153,8 +153,9 @@ pub fn more_restrictive_cap(a: Option<f64>, b: Option<f64>) -> Option<f64> {
 /// per-tick MRC cap absorbs, but a perception-integrity concern.
 pub const DIVERGENCE_DEGRADE_MS: u64 = 1_000;
 /// Continuous-divergence duration (ms) after which the monitor escalates to `LockedOut` — the
-/// redundant world model has been untrustworthy long enough that a controlled stop + human reset
-/// is warranted, not just a speed cap. Mirrors the verifier's LockedOut "human-reset" semantics.
+/// redundant perception channel has been untrustworthy long enough that a controlled stop + human
+/// reset is warranted, not just a speed cap. Mirrors the verifier's LockedOut "human-reset"
+/// semantics.
 pub const DIVERGENCE_LOCKOUT_MS: u64 = 5_000;
 
 /// **Sustained-divergence posture escalator.** The per-tick [`resolve_redundancy_cap`] already
