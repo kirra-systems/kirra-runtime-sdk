@@ -171,6 +171,77 @@ knowingly bounded. Ratifying **compaction-with-citation**:
 **Thresholds are deferred until measured.** Choosing them now would be a guess
 presented as a policy.
 
+### Compaction is not reclamation — two operations, not one
+
+**Measured** (`tools/wm2-persistence-harness`, `compact`; host-indicative,
+target confirmation required): compacting 9 898 events across 104 spans left the
+database file **byte-identical in size**. SQLite row deletion returns pages to a
+free list inside the file; it does not shrink it. The ~50 % reduction appeared
+only after a `VACUUM`, which rewrites the entire database.
+
+The operational model is therefore:
+
+> **logical compaction → *optionally, separately scheduled* reclamation**
+
+and explicitly **not** "compaction → disk immediately freed". A retention policy
+written against the second model will fail in the field: the device keeps
+compacting, the free-space alarm keeps firing, and nobody can see why.
+
+`VACUUM` is a maintenance operation with power, I/O, thermal and availability
+consequences, on a Jetson sharing storage with perception and logs. Reclamation
+should therefore be **gated on preconditions**, not run opportunistically. The
+proposed gate — measurement on target required before any of these numbers are
+fixed:
+
+| Precondition | Why |
+|---|---|
+| Robot stationary, no active mission | The rewrite competes with perception for the same storage; a mission is the worst time to find out how much |
+| Adequate battery or external power | A rewrite interrupted by power loss is the one operation where the WAL's protection is doing the most work |
+| Bounded free-space reserve available | `VACUUM` needs room for a second copy before it has freed the first; running it at 98 % full is how a full disk becomes a corrupt one |
+| Crash-safe scheduling | It must be safe to lose power mid-`VACUUM`; the drill's tier B covers the shape, tier C the medium |
+| Defined interruption behaviour | Aborted reclamation must leave a usable store, and must not leave the policy believing it succeeded |
+
+**Consequence for the storage-growth gate.** Days-to-full must be computed
+against *logical* growth plus whatever reclamation actually runs, and a policy
+that assumes continuous reclamation is assuming a maintenance window that may
+never open. The conservative planning figure is the un-reclaimed one.
+
+### Retention class is immutable evidence
+
+**Measured**: the retention class is inside the canonically-hashed event bytes,
+so rewriting it breaks the chain at that generation. This was found by a test
+that tried to relabel events in bulk and got a broken chain instead.
+
+That is the correct behaviour and it is worth stating as a decision rather than
+leaving as an implementation detail, because it constrains operators in a way
+they will not expect:
+
+> **A retention policy change cannot be applied retroactively by relabelling
+> existing events.** Editing an event's class is tamper-evident, and the log
+> will correctly report itself broken.
+
+The security property this buys: the obvious attack on a retention policy is to
+downgrade a protected event to `raw` so a later compaction pass is allowed to
+delete it. That attack is structurally unavailable — it does not fail a check,
+it fails the chain.
+
+The cost is that policy evolution has exactly three legitimate routes:
+
+1. **Forward-only** — the new policy governs newly created events. The default,
+   and the only one needing no ceremony.
+2. **Explicit migration through a new cited event** — old evidence is
+   re-classified by *appending* a record that cites what it re-classifies and
+   why, leaving the original intact. The same citation discipline compaction
+   uses.
+3. **A policy-supersession record** — the policy itself is an event in the log,
+   so "which retention rules were in force when this was written?" is
+   answerable after the fact. Without this, a compacted span cannot be audited
+   against the policy that authorized compacting it.
+
+Routes 2 and 3 are **not implemented and not ratified**; they are named here so
+the constraint does not read as an oversight, and so nobody builds an operator
+tool that silently attempts route 0.
+
 ---
 
 ## Audit-chain relationship
@@ -226,9 +297,9 @@ and derives views, rather than storing facts.
 | Transactions | One event append per transaction; projection updates may batch | |
 | Migration locking | Exclusive during migration; fail-closed on a future schema | ADR-0035 / `migrations.rs` precedent |
 | DB ownership | Single writer process (ADR-0040) | |
-| Read-only degraded mode | Serve projections read-only if the log is unwritable — **never** silently drop writes | |
+| Read-only degraded mode | Serve projections read-only if the log is unwritable — **never** silently drop writes | **Tested** (harness `pressure`) |
 | Corruption response | `integrity_check` on open; refuse to serve rather than serve partial evidence | |
-| Disk-full | Refuse new observations with `Unavailable`; never overwrite | |
+| Disk-full | Refuse new observations with `Unavailable`; never overwrite | **Tested** (harness `pressure`) |
 | Backups | Single-file copy + `VACUUM INTO` | |
 
 **Do not inherit the verifier's durability claim.** `kirra-persistence` uses
@@ -268,6 +339,8 @@ fact" rule exists to prevent.
 | R5 | A second hash-chain design emerges by accident | Shared `kirra-audit-hash`, distinct domain tag |
 | R6 | Verifier durability settings copied without thought | Explicitly forbidden above; per-source tiers to be measured |
 | R7 | Growth unbounded before thresholds are measured | Storage-growth estimate is a ratification gate |
+| R8 | A retention policy assumes compaction frees disk, and the device fills anyway | Measured: it does not. *Compaction is not reclamation* makes reclamation a separately scheduled, precondition-gated operation; the conservative planning figure is the un-reclaimed one |
+| R9 | An operator expects a retention-policy edit to apply to existing evidence | Structurally impossible — retention class is chained. Stated as a decision, with the three legitimate evolution routes named |
 
 ---
 
@@ -320,7 +393,17 @@ source; they are not migrated destructively (ADR-0040).
 ## Open questions
 
 1. `synchronous` policy per source class — measurement required.
-2. Retention classes: exact list and their durations.
+2. Retention classes: exact list and their durations. The harness models the
+   §11.3 protected set (safety, incident, calibration, adjudication, operator)
+   and enforces it — a window containing any of them is refused whole — but the
+   *durations* remain unmeasured and unset.
+2a. Reclamation scheduling: the precondition thresholds in *Compaction is not
+   reclamation* are proposed, not measured. `VACUUM` cost, its free-space
+   requirement, and its interruption behaviour all need target measurement.
+2b. Whether policy-supersession records (route 3 above) are needed at WM-2 or
+   can wait. Without them, a compacted span cannot be audited against the policy
+   that authorized compacting it — which may or may not be acceptable before the
+   store holds anything an assessor would ask about.
 3. Whether projections live in the same database file or a rebuildable
    sidecar file (a corrupt sidecar is cheaper to discard).
 4. Index rebuild strategy: eager at startup vs lazy per query family.
@@ -328,27 +411,109 @@ source; they are not migrated destructively (ADR-0040).
    for a fleet, local evidence staying local?
 6. Event payload encoding — the blueprint does not fix one; JSON is
    inspectable, a binary format is compact.
+7. **Partial projections under disk pressure.** A fold writes, so it is refused
+   when the store is full. A fold interrupted that way leaves partial
+   projections with nothing marking them as incomplete. Needs either a
+   fold-in-progress marker, a transactional whole-fold, or an explicit rule that
+   projections are invalid until a checkpoint confirms them.
+
+---
+
+## Measurement harness
+
+The instrument for the gates below exists:
+[`tools/wm2-persistence-harness`](../../tools/wm2-persistence-harness/), with
+the operator runbook at
+[`docs/hardware/JETSON_WM2_PERSISTENCE_DRILL.md`](../hardware/JETSON_WM2_PERSISTENCE_DRILL.md).
+
+**Its existence ratifies nothing and ticks nothing.** It is workspace-detached,
+depends on `rusqlite` alone, and is covered by ADR-0039's Fence A as an extra
+root — so it cannot become a dependency of anything, and a transport crate added
+to it reds CI exactly as one added to `kirra-world` would.
+
+Three properties of the harness are load-bearing for how its output may be used.
+
+**It is not the store, and is built so it cannot quietly become one.** The
+schema it benchmarks is a *stand-in* — this ADR states that column-level schemas
+are deliberately not fixed, so anything concrete enough to measure is
+necessarily invented. Every emitted record therefore carries the stand-in
+schema's SHA-256, and when the real schema is ratified its digest will differ,
+making an old measurement visibly about something else rather than quietly
+authoritative. The harness also uses a local SHA-256 with a harness-only domain
+tag rather than `kirra-audit-hash`, precisely so its bytes cannot be mistaken
+for the on-disk format the store will owe.
+
+**It refuses to let a host run be cited.** Following the `TBD-QNX-TARGET`
+convention already used for governor timing, every record is stamped
+`JETSON-TARGET-MEASURED` or `HOST-INDICATIVE-NOT-TARGET`. The first requires
+both machine corroboration (aarch64, Tegra evidence, a durable filesystem under
+the database, a release build) *and* an explicit operator assertion — neither
+alone. A `tmpfs` path forfeits target status outright, because a run that never
+fsyncs produces the best numbers the harness can emit while measuring none of
+the property open question 1 is about.
+
+**It turns §11.3's compaction policy into a mechanism.** Compaction-with-citation
+is ratified above as policy while its mechanism is left open, and there is a
+real problem in that gap: deleting events from a hash-chained append-only log
+breaks the chain. The harness implements and measures one answer — a compacted
+span becomes a `Summary` plus a `compaction_citations` row carrying the removed
+range's digest and the chain digests on **both** sides, so verification links
+the summary from one and resumes from the other. Nothing downstream is
+re-chained and no history is rewritten. Nine §11.3 requirements are checked as
+conditions rather than assumed, including the non-vacuity control that tampering
+with a summary must break the chain.
+
+The honest consequence, which any retention policy built on this must carry:
+after compaction the *contents* of a removed span can no longer be verified,
+only that a span was removed, how large it was and what it hashed to. Full
+tamper evidence degrades to tamper-evident citation of a removed span. The
+verifier reports `compacted_windows` and a time-travel query into a compacted
+window returns a degraded summary rather than a value or a bare absence, so the
+degradation is visible instead of silent.
+
+**It tests the two disk-pressure claims that had never been exercised.** The
+configuration table above asserts read-only degraded mode and clean disk-full
+refusal; the harness's `pressure` stage checks both, including the one that
+decides whether running out of space is recoverable at all — that a batch
+refused for lack of room rolls back **whole**. A half-committed batch would tear
+the generation sequence and fork the chain, converting a transient out-of-space
+condition into permanent evidence corruption. It also times `VACUUM` separately
+from compaction, since the two are now modelled as separate operations and the
+scheduled one needs its own cost.
+
+That stage surfaced a gap this ADR does not currently cover, recorded here
+rather than left implicit: **a projection fold writes**, so it is refused under
+pressure exactly as an append is. What a store that fills *mid-fold* leaves
+behind is undefined — the projections would be partial with nothing marking them
+as such, and a consumer could not distinguish a partial projection from a
+complete one. The "no projection-only fact" rule does not address it. Open
+question 7.
+
+**It reports what it cannot establish.** The corruption gate is three tiers:
+`SIGKILL` crash-consistency and WAL-loss prefix validity are automated; the
+actual power cut is not, because nothing in software distinguishes an honest
+`fsync` from a device cache that acknowledged and buffered it. The harness
+always reports that tier as `NOT-RUN` with the reason attached, so a results
+file can never imply a durability test that did not happen.
 
 ---
 
 ## Ratification criteria
 
-**Proposed. Measurement-gated.** Accepted only when **all** are recorded:
+**Proposed. Measurement-gated.** Accepted only when **all** are recorded.
+The right-hand column names the instrument, not a result — **no gate below is
+satisfied, and none may be ticked from a `HOST-INDICATIVE-NOT-TARGET` run:**
 
-- [ ] **Measured Jetson prototype** — the log + projection path on target
-      hardware, not a development host
-- [ ] **Replay benchmark** — full rebuild time at the assumed observation
-      volume, with the checkpointed case measured separately
-- [ ] **Representative query benchmark** — one measurement per query family in
-      blueprint §12 (point, set, graph, temporal)
-- [ ] **Corruption / restart experiment** — power-loss-class behaviour, in the
-      spirit of the existing audit-chain crash-consistency drill
-- [ ] **Storage growth estimate** — observations/day at realistic sensor rates,
-      projected against the device budget
-- [ ] **Migration proof of concept** — a schema change applied to a populated
-      store, fail-closed on a future schema version
-- [ ] Scale assumptions confirmed or corrected; if materially wrong, Option B
-      is re-evaluated before acceptance
+| | Gate | Produced by |
+|---|---|---|
+| [ ] | **Measured Jetson prototype** — the log + projection path on target hardware, not a development host | the whole run, only when it reports `JETSON-TARGET-MEASURED` |
+| [ ] | **Replay benchmark** — full rebuild time at the assumed observation volume, with the checkpointed case measured separately | `replay` (also asserts rebuild-equals-incremental determinism, which gates the rest) |
+| [ ] | **Representative query benchmark** — one measurement per query family in blueprint §12 (point, set, graph, temporal) | `query`, plus a separate bitemporal point query the projection cannot answer |
+| [ ] | **Corruption / restart experiment** — power-loss-class behaviour, in the spirit of the existing audit-chain crash-consistency drill | `crash` tiers A and B; **tier C is manual** (drill §6) and this gate is not complete without it |
+| [ ] | **Storage growth estimate** — observations/day at realistic sensor rates, projected against the device budget | `growth` |
+| [ ] | **Migration proof of concept** — a schema change applied to a populated store, fail-closed on a future schema version | `migrate` |
+| [ ] | Scale assumptions confirmed or corrected; if materially wrong, Option B is re-evaluated before acceptance | the drill §7 sweep informs it; what the deployed robot actually reaches is an operational fact the harness cannot produce |
 
 **No implementation should begin merely because this proposed ADR exists.**
-Merging this PR satisfies none of the above.
+Merging this PR satisfies none of the above, and neither does the existence of
+the harness.

@@ -121,6 +121,27 @@ SAFETY_ROOTS: dict[str, str] = {
 WORLD_PACKAGE_EXACT = {"kirra-world", "kirra-world-store", "kirra-world-service"}
 WORLD_PACKAGE_PREFIX = "kirra-world"
 
+# Kirra World-adjacent packages that Fence A must cover even though they do not
+# carry the `kirra-world` name.
+#
+# The naming rule above is the primary mechanism and it is deliberately blunt.
+# But a package can be Kirra World work without claiming the namespace, and the
+# WM-2 measurement harness is exactly that case: it deliberately avoids the
+# `kirra-world*` prefix so that "how many Kirra World packages exist" stays an
+# honest count of the subsystem, while being precisely the kind of code that
+# accretes dependencies — a benchmark grows a transport crate "just to publish
+# results" far more easily than a domain crate does.
+#
+# Listing it here means an actuation edge added to the harness reds CI the same
+# as one added to `kirra-world` itself. Anything else with the same shape
+# (a spike, a bench, a prototype adapter) belongs here too.
+FENCE_A_EXTRA_PACKAGES: dict[str, str] = {
+    "wm2-persistence-harness": (
+        "the ADR-0041 (WM-2) measurement harness — Kirra World work by purpose, "
+        "outside the namespace by design"
+    ),
+}
+
 # Fence A: what Kirra World must never depend on. Derived from the workspace —
 # these are the crates that actuate or authorize.
 ACTUATION_PACKAGES: dict[str, str] = {
@@ -498,11 +519,17 @@ def check_1_safety_closure(root: Path, manifests: dict, rep: Report) -> dict[str
 
 def check_2_world_outbound(root: Path, manifests: dict, rep: Report) -> int:
     world = sorted(n for n in manifests if is_world_package(n))
-    if not world:
+    extra = sorted(n for n in FENCE_A_EXTRA_PACKAGES if n in manifests)
+    for missing in sorted(set(FENCE_A_EXTRA_PACKAGES) - set(extra)):
+        # As with a vanished safety root: a package that disappeared must not
+        # silently shrink the fence.
+        rep.note(f"configured extra Fence A package not found: {missing}")
+
+    if not world and not extra:
         rep.note("Kirra World packages not present yet — reserved fence validated.")
         return 0
 
-    for pkg in world:
+    for pkg in world + extra:
         paths = closure([pkg], manifests)
         for dep, path in sorted(paths.items()):
             if dep == pkg:
@@ -1147,6 +1174,9 @@ def run(root: Path, today: str) -> Report:
 
     rep.note(f"safety closure: {len(closure_pkgs)} workspace packages from {len(SAFETY_ROOTS)} roots")
     rep.note(f"kirra-world* packages present: {n_world}")
+    covered = sorted(n for n in FENCE_A_EXTRA_PACKAGES if n in manifests)
+    if covered:
+        rep.note("Fence A also covers (by name, not namespace): " + ", ".join(covered))
     return rep
 
 

@@ -1,0 +1,60 @@
+# WM-2 — the measurement harness for ADR-0041's persistence proposal.
+#
+# ADR-0041 proposes a SQLite append-only event log plus materialized
+# projections, and refuses to ratify that on argument: acceptance is
+# MEASUREMENT-GATED on target hardware. This crate is the instrument that
+# produces those measurements. It is not the store.
+#
+# THIS IS NOT THE KIRRA WORLD STORE, AND LIFTING CODE OUT OF IT IS A DEFECT.
+#
+#   * Its schema is a deliberate STAND-IN. ADR-0041 says column-level schemas
+#     are "deliberately not fixed here", so anything concrete enough to
+#     benchmark is necessarily a guess. Every result record carries the
+#     stand-in's digest so a number can never be quietly re-read as evidence
+#     for a schema nobody ratified.
+#   * Its hash chain is a LOCAL SHA-256 with a harness-only domain tag, not
+#     `kirra-audit-hash`. That is on purpose: kirra-audit-hash's encoders ARE
+#     the production on-disk format, and a harness emitting production-shaped
+#     bytes is an invitation to copy it into `kirra-world-store`. This one
+#     cannot be mistaken for the real format because it is visibly not it.
+#   * It is workspace-DETACHED (the empty `[workspace]` table below), so no
+#     workspace crate can path-depend on it and it never enters the SDK build.
+#
+# ONE dependency, and that is itself part of the argument. Fence A says Kirra
+# World must be structurally unable to reach an actuator; a harness that
+# accretes a transport crate is the cheapest possible route to eroding that
+# before the subsystem even exists. `ci/check_kirra_world_bidirectional_fence.py`
+# walks this manifest as an extra Fence A root for exactly that reason, so a
+# `serialport` or `r2r` added here reds CI the same as one added to
+# `kirra-world` itself.
+#
+# RUN:  cargo run --release -- all --out results.jsonl
+#       cargo run --release -- platform            (what would this run count as?)
+#       cargo test                                 (pure logic; no target needed)
+# See:  docs/hardware/JETSON_WM2_PERSISTENCE_DRILL.md
+
+[package]
+name = "wm2-persistence-harness"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+description = "ADR-0041 (WM-2) measurement harness — NOT the Kirra World store"
+
+# Detaches from the root workspace: own lockfile, own target dir, never built
+# by `cargo test --workspace`. Same isolation discipline as
+# tools/iceoryx2-spike and verification/kani.
+[workspace]
+
+[dependencies]
+# Bundled so the measurement is of a KNOWN SQLite build rather than whatever
+# the target image happens to ship. The version tracks the root workspace's
+# pin: benchmarking a different SQLite than production would run is a way to
+# produce a real number that answers the wrong question.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Release profile matters here: a debug-build benchmark measures rustc, not
+# SQLite. The drill doc requires --release and the harness records the profile
+# it was built under so a debug run cannot be cited by accident.
+[profile.release]
+debug = true       # keep symbols; a profile of a stripped harness is useless

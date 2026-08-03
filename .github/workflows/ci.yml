@@ -273,6 +273,7 @@ jobs:
           cargo fmt --check --manifest-path verification/kani/Cargo.toml
           cargo fmt --check --manifest-path crates/kirra-loom-models/Cargo.toml
           cargo fmt --check --manifest-path tools/iceoryx2-spike/Cargo.toml
+          cargo fmt --check --manifest-path tools/wm2-persistence-harness/Cargo.toml
       - name: frozen-talisman blob pin survives formatting
         run: |
           # Anchored on the PATH, not on the hash value (#1242). This grep used
@@ -914,6 +915,56 @@ jobs:
           cargo test --no-default-features
           cargo clippy --all-targets -- -D warnings
 
+  wm2-persistence-harness:
+    name: WM-2 persistence harness (ADR-0041 measurement instrument)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: clippy
+      - name: harness self-tests + a full host run
+        # `tools/wm2-persistence-harness` is its OWN workspace (own Cargo.lock,
+        # gitignored) so the root `cargo test --workspace` never descends into
+        # it. Without this lane the instrument ADR-0041's ratification depends
+        # on compiles for nobody, and would rot silently between the day it was
+        # written and the day someone carries a Jetson to a bench.
+        #
+        # The host run is deliberately part of the lane. It is NOT evidence —
+        # every record it emits is stamped HOST-INDICATIVE-NOT-TARGET and the
+        # harness says so on stderr. What it proves is that the measurement
+        # path still executes end to end: the crash tier still spawns and kills
+        # a real child, every query family still matches rows, the rebuild is
+        # still deterministic, and the migration still fails closed on a future
+        # schema. Exit status is 1 if any of those regress.
+        working-directory: tools/wm2-persistence-harness
+        run: |
+          cargo test --release
+          cargo clippy --all-targets --release -- -D warnings
+          # --crash-run-ms is generous because INCONCLUSIVE is FATAL (exit 1):
+          # tier A kills a real child mid-append, and on a slow shared runner
+          # the child may not commit anything within the 750 ms default, which
+          # the harness correctly refuses to score as a pass. Giving the
+          # precondition time to be established is not weakening the assertion —
+          # the assertion is unchanged, and a tier that genuinely cannot commit
+          # in 2 s is a finding worth failing on.
+          ./target/release/wm2-persistence-harness all \
+              --db "$RUNNER_TEMP/wm2.sqlite" \
+              --out "$RUNNER_TEMP/wm2-results.jsonl" \
+              --events 20000 --entities 500 --repeats 50 --crash-run-ms 2000
+      - name: a host run must never classify itself as citable evidence
+        # The guard that matters most in this whole lane. If a CI runner ever
+        # reports JETSON-TARGET-MEASURED, the classifier has broken open and a
+        # laptop number could be entered against a ratification gate.
+        run: |
+          if grep -q '"evidence_status":"JETSON-TARGET-MEASURED"' "$RUNNER_TEMP/wm2-results.jsonl"; then
+            echo "a CI host classified itself as target hardware — the evidence gate is broken"
+            exit 1
+          fi
+          grep -q '"citable":false' "$RUNNER_TEMP/wm2-results.jsonl" \
+            || { echo "run record missing or not marked uncitable"; exit 1; }
+
   r2cp-bridge:
     name: R2CP host bridge (PTY loop + dependency-free core)
     runs-on: ubuntu-latest
@@ -1456,6 +1507,24 @@ jobs:
         run: |
           python3 ci/test_kirra_world_bidirectional_fence.py
           python3 ci/check_kirra_world_bidirectional_fence.py --verbose
+      - name: Kirra World domain-logic gate (ADR-0042 Decision 5)
+        # THE RULE: no Kirra World domain implementation may merge until
+        # ADR-0042's safety-assurance scope ruling is assigned to a named owner
+        # and recorded. The kirra-world* crates currently hold unconstructible
+        # placeholders, and that emptiness is the guardrail holding the shape
+        # open while the decision is still being made.
+        #
+        # The risk here is organizational, not technical: an empty crate reads
+        # as an invitation, and "just the EntityId newtype, it is obviously a
+        # u128" is a reasonable-sounding PR that performs the very reasoning the
+        # ruling was supposed to perform. Prose does not run in CI.
+        #
+        # Self-releasing: recording the ruling relaxes the gate automatically,
+        # so nobody has to delete it to make progress.
+        run: |
+          python3 ci/test_world_domain_logic_gate.py
+          python3 ci/check_world_domain_logic_gate.py
+
       - name: Verdict-core purity fence (crypto separation + no_std kernel)
         # ADR-0031, structurally: the safety verdict is computed BEFORE signing,
         # so kirra-core + kirra-trajectory must have NO crypto (signing) edge,

@@ -761,6 +761,96 @@ def t29_real_corridor_impls_are_covered() -> None:
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Fence A coverage for Kirra World work that is outside the kirra-world*
+# namespace (FENCE_A_EXTRA_PACKAGES).
+# ---------------------------------------------------------------------------
+
+
+def _extra_package(fx: Fixture, deps: list[str] | None = None, ext: list[str] | None = None) -> None:
+    """The WM-2 harness's real shape: a workspace-DETACHED crate under tools/.
+
+    Written under `tools/` rather than `crates/` on purpose. The checker finds
+    manifests by rglob, so the location does not change the result today — but a
+    fixture that puts the package where the real one is not would stop
+    representing it the moment location ever starts to matter.
+    """
+    name = next(iter(fence.FENCE_A_EXTRA_PACKAGES))
+    d = fx.root / "tools" / name
+    (d / "src").mkdir(parents=True, exist_ok=True)
+    lines = [f'[package]\nname = "{name}"\nversion = "0.1.0"\nedition = "2021"\n', "[workspace]\n", "[dependencies]"]
+    for dep in deps or []:
+        lines.append(f'{dep} = {{ path = "../../crates/{dep}" }}')
+    for dep in ext or []:
+        lines.append(f'{dep} = "1"')
+    (d / "Cargo.toml").write_text("\n".join(lines) + "\n")
+    (d / "src" / "main.rs").write_text("fn main() {}\n")
+
+
+def t34_extra_package_with_an_actuation_transport_breaches() -> None:
+    """The hole this closes: the harness is not named kirra-world*, so before
+    FENCE_A_EXTRA_PACKAGES existed a serialport dependency added to it passed."""
+    fx = Fixture()
+    try:
+        base_safety_workspace(fx)
+        _extra_package(fx, ext=["serialport"])
+        expect_breach(fx, "34 an extra Fence A package taking a transport crate breaches",
+                      "A", "serialport")
+    finally:
+        fx.close()
+
+
+def t35_extra_package_reaching_an_actuation_crate_breaches() -> None:
+    fx = Fixture()
+    try:
+        base_safety_workspace(fx)
+        # Transitive, not direct: harness -> kirra-actuation-consumer is the
+        # obvious edge; harness -> a crate that depends on it is the one that
+        # gets argued for.
+        fx.crate("bench-helper", deps=["kirra-actuation-consumer"])
+        _extra_package(fx, deps=["bench-helper"])
+        expect_breach(fx, "35 an extra Fence A package reaching actuation transitively breaches",
+                      "A", "kirra-actuation-consumer")
+    finally:
+        fx.close()
+
+
+def t36_extra_package_with_only_benign_deps_is_intact() -> None:
+    """The required-pass half: the real harness depends on rusqlite alone."""
+    fx = Fixture()
+    try:
+        base_safety_workspace(fx)
+        _extra_package(fx, ext=["rusqlite"])
+        expect_intact(fx, "36 an extra Fence A package with only storage deps is intact")
+    finally:
+        fx.close()
+
+
+def t37_a_vanished_extra_package_is_noted_not_silently_dropped() -> None:
+    fx = Fixture()
+    try:
+        base_safety_workspace(fx)  # deliberately does NOT create the extra package
+        rep = fx.run()
+        noted = [n for n in rep.notes if "extra Fence A package not found" in n]
+        record(bool(noted),
+               "37 a configured extra Fence A package that vanished is reported",
+               "no note emitted; the fence would have shrunk silently")
+    finally:
+        fx.close()
+
+
+def t38_the_real_harness_is_actually_covered() -> None:
+    """Against the REAL repository, not a fixture: the shipped harness must be
+    present and inside Fence A. A config entry naming a package that does not
+    exist protects nothing."""
+    repo = CI.parent
+    man = fence.find_manifests(repo)
+    missing = [n for n in fence.FENCE_A_EXTRA_PACKAGES if n not in man]
+    record(not missing,
+           f"38 all {len(fence.FENCE_A_EXTRA_PACKAGES)} configured extra Fence A package(s) exist",
+           f"not found in the repository: {missing}")
+
 ALL = [v for k, v in sorted(globals().items()) if k.startswith("t") and k[1:3].isdigit()]
 
 
