@@ -187,7 +187,7 @@ Two things in that table are worth reading twice even as indicative numbers.
 ADR-0041 is most likely to be wrong, and it is measurable now rather than after
 the store is built.
 
-**458 bytes per event, against a 96-byte payload.** At 10 Hz that is an 8 GiB
+**459 bytes per event, against a 96-byte payload.** At 10 Hz that is an 8 GiB
 budget exhausted in about **22 days**. If that survives target measurement,
 compaction-with-citation is not a future concern — it is load-bearing inside a
 month, and ADR-0041's deferred retention thresholds become urgent rather than

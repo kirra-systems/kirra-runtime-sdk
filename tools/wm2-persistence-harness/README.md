@@ -13,7 +13,7 @@ Operator runbook:
 cargo build --release
 ./target/release/wm2-persistence-harness platform     # would a run here be citable?
 ./target/release/wm2-persistence-harness all --out results.jsonl
-cargo test                                            # 74 tests, no target needed
+cargo test                                            # unit + integration; no target needed
 ```
 
 ## This is not the Kirra World store

@@ -942,10 +942,17 @@ jobs:
         run: |
           cargo test --release
           cargo clippy --all-targets --release -- -D warnings
+          # --crash-run-ms is generous because INCONCLUSIVE is FATAL (exit 1):
+          # tier A kills a real child mid-append, and on a slow shared runner
+          # the child may not commit anything within the 750 ms default, which
+          # the harness correctly refuses to score as a pass. Giving the
+          # precondition time to be established is not weakening the assertion —
+          # the assertion is unchanged, and a tier that genuinely cannot commit
+          # in 2 s is a finding worth failing on.
           ./target/release/wm2-persistence-harness all \
               --db "$RUNNER_TEMP/wm2.sqlite" \
               --out "$RUNNER_TEMP/wm2-results.jsonl" \
-              --events 20000 --entities 500 --repeats 50
+              --events 20000 --entities 500 --repeats 50 --crash-run-ms 2000
       - name: a host run must never classify itself as citable evidence
         # The guard that matters most in this whole lane. If a CI runner ever
         # reports JETSON-TARGET-MEASURED, the classifier has broken open and a

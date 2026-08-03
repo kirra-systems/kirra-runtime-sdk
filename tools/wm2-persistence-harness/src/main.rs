@@ -509,7 +509,7 @@ fn main() {
             ("B_wal_loss_prefix_validity", &r.tier_b_wal_loss),
             ("C_power_cut_durability", &r.tier_c_power_cut),
         ] {
-            if outcome.token() == "FAIL" {
+            if outcome.fails_the_run() {
                 failures += 1;
             }
             sink.emit(

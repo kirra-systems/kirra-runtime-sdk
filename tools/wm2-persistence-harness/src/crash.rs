@@ -66,6 +66,25 @@ impl TierOutcome {
         }
     }
 
+    /// Whether this outcome should fail the overall run.
+    ///
+    /// `INCONCLUSIVE` counts, and that is the whole point of the variant. The
+    /// experiment never established its precondition — the child was killed
+    /// before committing, or the tail was checkpointed away so nothing was at
+    /// risk — so neither a pass nor a failure would mean anything. Letting the
+    /// run exit 0 anyway produces a results file that looks complete while a
+    /// load-bearing gate is silently missing, which is exactly the "an
+    /// inconclusive run silently counted as a pass is how a drill becomes
+    /// decoration" failure the variant exists to prevent.
+    ///
+    /// `NOT-RUN` is exempt, and must be: tier C is ALWAYS `NOT-RUN` by
+    /// construction (a power cut cannot be performed from software), so
+    /// counting it would make every run exit 1 and the exit code would stop
+    /// carrying information.
+    pub fn fails_the_run(&self) -> bool {
+        matches!(self, Self::Fail(_) | Self::Inconclusive(_))
+    }
+
     pub fn detail(&self) -> &str {
         match self {
             Self::Pass(d) | Self::Fail(d) | Self::Inconclusive(d) | Self::NotRun(d) => d,
@@ -330,6 +349,38 @@ mod tests {
         let c = tier_c_not_run();
         assert_eq!(c.token(), "NOT-RUN");
         assert!(c.detail().contains("power cut"));
+    }
+
+    #[test]
+    fn inconclusive_fails_the_run_but_not_run_does_not() {
+        // The contract the driver broke: the drill doc says exit status is 1
+        // if any measurement "failed OR WAS UNUSABLE", and INCONCLUSIVE is
+        // exactly the unusable case. Counting it as a pass produces a results
+        // file that looks complete while a load-bearing gate is silently
+        // missing.
+        assert!(TierOutcome::Fail(String::new()).fails_the_run());
+        assert!(TierOutcome::Inconclusive(String::new()).fails_the_run());
+        assert!(!TierOutcome::Pass(String::new()).fails_the_run());
+
+        // NOT-RUN must be exempt or the exit code stops carrying information:
+        // tier C is ALWAYS NOT-RUN by construction, so counting it would make
+        // every single run exit 1.
+        assert!(!TierOutcome::NotRun(String::new()).fails_the_run());
+        assert!(!tier_c_not_run().fails_the_run());
+    }
+
+    #[test]
+    fn a_vacuous_tier_b_would_fail_the_run() {
+        // End to end rather than on the predicate alone: the zero-tail case is
+        // deterministically INCONCLUSIVE, and it must now be fatal.
+        let p = temp("tier-b-fatal");
+        let outcome = tier_b_wal_loss(&p, Durability::Full, 200, 0);
+        assert_eq!(outcome.token(), "INCONCLUSIVE");
+        assert!(
+            outcome.fails_the_run(),
+            "a vacuous tier B would still exit 0"
+        );
+        remove_db(&p);
     }
 
     #[test]
