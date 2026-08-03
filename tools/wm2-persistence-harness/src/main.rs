@@ -337,17 +337,31 @@ fn main() {
                     );
                     std::process::exit(2);
                 }
-                let rec = crash::powercut_verify(&args.db, args.trial);
+                let rec = match crash::powercut_verify(&args.db, args.trial) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // A refused verification is not a failed measurement —
+                        // it is the harness declining to record something that
+                        // would not mean what it appears to mean.
+                        eprintln!("powercut verify refused: {e}");
+                        std::process::exit(2);
+                    }
+                };
                 println!(
-                    "trial {}: {} — {}",
+                    "trial {} [arm {}]: {} — {}",
                     rec.trial,
+                    rec.arm_id,
                     rec.outcome.token(),
                     rec.outcome.detail()
                 );
                 let all = crash::read_trials(&args.db);
                 let agg = crash::tier_c_from_trials(&all);
+                // Distinct armings, not ledger rows: a trial is an arming that a
+                // power cut was applied to, and quoting the row count beside a
+                // verdict that counted armings would contradict it.
                 println!(
-                    "\ntier C after {} trial(s): {} — {}",
+                    "\ntier C after {} arming(s) across {} row(s): {} — {}",
+                    crash::distinct_armings(&all),
                     all.len(),
                     agg.token(),
                     agg.detail()

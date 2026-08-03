@@ -179,6 +179,163 @@ fn a_stray_positional_word_is_rejected_outside_powercut() {
     );
 }
 
+/// `powercut arm` never returns — the operator ends it with the power switch —
+/// so it is driven as a child, given time to print `ARMED`, and killed. That is
+/// as close to a power cut as software gets, and it is enough to exercise the
+/// marker lifecycle, which is the part under test here.
+fn arm_and_kill(db: &PathBuf) -> bool {
+    let mut child = Command::new(BIN)
+        .args(["powercut", "arm", "--db"])
+        .arg(db)
+        .args(["--events", "64", "--entities", "8"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("arm did not start");
+
+    // Poll for the marker rather than sleeping a fixed period: on a slow
+    // machine a fixed sleep flakes, and on a fast one it wastes the wall clock
+    // of every run.
+    let marker = {
+        let mut p = db.as_os_str().to_os_string();
+        p.push("-tierc-armed");
+        PathBuf::from(p)
+    };
+    for _ in 0..300 {
+        if marker.exists() {
+            break;
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            // Exited without arming — the refusal path.
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let armed = marker.exists();
+    let _ = child.kill();
+    let _ = child.wait();
+    armed
+}
+
+#[test]
+fn each_power_cut_trial_needs_its_own_arming() {
+    // The defect this test exists for: `arm` restarted at generation 0, so the
+    // second arming hit a primary-key collision and died while the FIRST
+    // marker survived. `verify` then re-read the same surviving store and
+    // recorded another PASS — one real power cut produced a tier C row per
+    // invocation, and five "trials" were satisfiable by one cut and four
+    // no-ops.
+    let dir = scratch("powercut-independence");
+    let db = dir.join("pc.sqlite");
+    let ledger = dir.join("pc.sqlite-tierc-trials.jsonl");
+
+    // Trial 1: arm, "cut", verify.
+    assert!(
+        arm_and_kill(&db),
+        "the first arming did not produce a marker"
+    );
+    let status = Command::new(BIN)
+        .args(["powercut", "verify", "--db"])
+        .arg(&db)
+        .args(["--trial", "1"])
+        .status()
+        .expect("verify did not run");
+    // A legitimate verify still exits 1 here, and must: one arming is short of
+    // the five tier C requires, so the aggregate is INCONCLUSIVE and an
+    // incomplete drill is not allowed to exit 0. Exit 2 is the distinct code
+    // for a *refused* verification, which is what the rest of this test turns
+    // on — the two must not be conflated.
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "a recorded-but-insufficient trial must exit 1, not be refused"
+    );
+    assert_eq!(read_records(&ledger).len(), 1);
+
+    // Verifying again without re-arming must be refused, not recorded.
+    let status = Command::new(BIN)
+        .args(["powercut", "verify", "--db"])
+        .arg(&db)
+        .args(["--trial", "2"])
+        .status()
+        .expect("verify did not run");
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "re-verifying without re-arming must be a refusal — this is how one power cut \
+         became three PASS rows"
+    );
+    assert_eq!(
+        read_records(&ledger).len(),
+        1,
+        "a refused verify appended to the ledger anyway"
+    );
+
+    // A second arming must succeed on the now-populated store: it starts at
+    // MAX(generation)+1 rather than colliding at 0.
+    assert!(
+        arm_and_kill(&db),
+        "the second arming failed on a populated store — it restarted at generation 0"
+    );
+
+    // ...and the two rows carry different arm ids, so they count as two.
+    let status = Command::new(BIN)
+        .args(["powercut", "verify", "--db"])
+        .arg(&db)
+        .args(["--trial", "2"])
+        .status()
+        .expect("verify did not run");
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "the second verify was refused rather than recorded"
+    );
+
+    let rows = read_records(&ledger);
+    assert_eq!(rows.len(), 2);
+    let ids: Vec<&str> = rows.iter().filter_map(|r| field(r, "arm_id")).collect();
+    assert_eq!(ids.len(), 2, "a ledger row carried no arm id");
+    assert_ne!(
+        ids[0], ids[1],
+        "two separate armings minted the same id, so they would count as one trial"
+    );
+
+    // Arming over an outstanding marker is refused: the previous trial would be
+    // orphaned and its marker would describe a store state that no longer
+    // exists.
+    assert!(arm_and_kill(&db), "third arming");
+    // Bounded, because a regression here does not fail — it arms, and `arm`
+    // never returns. A plain `.status()` would hang the suite instead of
+    // reporting the bug.
+    let mut child = Command::new(BIN)
+        .args(["powercut", "arm", "--db"])
+        .arg(&db)
+        .args(["--events", "64", "--entities", "8"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("arm did not start");
+    let mut code = None;
+    for _ in 0..300 {
+        if let Ok(Some(s)) = child.try_wait() {
+            code = s.code();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if code.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    assert_eq!(
+        code,
+        Some(2),
+        "arming over an unused marker must be refused; it armed again instead"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn powercut_requires_a_subcommand_and_verify_requires_a_trial_number() {
     for args in [
@@ -192,79 +349,6 @@ fn powercut_requires_a_subcommand_and_verify_requires_a_trial_number() {
             Some(2),
             "`{}` must be a usage error, not a silent no-op",
             args.join(" ")
-        );
-    }
-}
-
-/// The full tier C loop, with `SIGKILL` standing in for the power switch.
-///
-/// This does **not** make tier C automatable — a signal leaves the page cache
-/// intact, which is exactly why tier C needs a power supply and why the harness
-/// refuses to claim it. What it proves is that the *recording* machinery works:
-/// the marker survives, `verify` judges against it, the ledger accumulates, and
-/// the aggregate still refuses to pass below the required trial count.
-#[test]
-fn the_powercut_ledger_accumulates_and_still_refuses_to_pass_early() {
-    use std::io::Read;
-
-    let mut db = scratch("powercut-loop");
-    db.push("w.sqlite");
-    for suffix in ["", "-wal", "-shm", "-tierc-armed", "-tierc-trials.jsonl"] {
-        let _ = std::fs::remove_file(format!("{}{suffix}", db.display()));
-    }
-
-    // Arm never returns, so it is killed the way the mains would kill it.
-    let mut child = Command::new(BIN)
-        .args(["powercut", "arm", "--db", &db.to_string_lossy()])
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn arm");
-
-    // Wait for it to announce that the prefix is fsynced and recorded, so the
-    // kill lands on the tail rather than on the prefix.
-    let mut out = child.stdout.take().expect("stdout");
-    let mut seen = String::new();
-    let mut byte = [0u8; 1];
-    while !seen.contains("ARMED:") {
-        match out.read(&mut byte) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => seen.push(byte[0] as char),
-        }
-    }
-    assert!(seen.contains("ARMED:"), "arm never armed: {seen}");
-    std::thread::sleep(std::time::Duration::from_millis(150));
-    let _ = child.kill();
-    let _ = child.wait();
-
-    // Three trials: below the required five, so the tier must still refuse.
-    for trial in 1..=3 {
-        let status = Command::new(BIN)
-            .args([
-                "powercut",
-                "verify",
-                "--db",
-                &db.to_string_lossy(),
-                "--trial",
-                &trial.to_string(),
-            ])
-            .status()
-            .expect("did not run");
-        assert_eq!(
-            status.code(),
-            Some(1),
-            "trial {trial}: an incomplete tier C must exit non-zero"
-        );
-    }
-
-    let ledger = std::fs::read_to_string(format!("{}-tierc-trials.jsonl", db.display()))
-        .expect("ledger written");
-    let lines: Vec<&str> = ledger.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 3, "one row per trial: {ledger}");
-    for line in &lines {
-        assert!(
-            line.contains("\"outcome\":\"PASS\""),
-            "a SIGKILL must not lose the fsynced prefix — that would be a real \
-             finding, not a test artefact: {line}"
         );
     }
 }

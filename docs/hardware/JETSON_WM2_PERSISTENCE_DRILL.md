@@ -426,10 +426,49 @@ after the reboot — checks what actually did and appends the verdict.
 With no trials recorded, tier C stays `NOT-RUN`, which is the default for every
 automated run and keeps the exit code meaningful.
 
+### One arming is one trial
+
+**The marker is single-use, and a trial is an *arming* that a power cut was
+applied to — not a row in the ledger.** Every trial needs its own `powercut arm`,
+its own cut, and its own `verify`:
+
+- `arm` refuses to run while an unused marker exists. An outstanding marker means
+  the previous arming was never verified, and arming over it would orphan that
+  trial while leaving a marker describing a store state that no longer exists.
+- `arm` continues from `MAX(generation) + 1`, so a second arming appends after
+  the first instead of colliding with it.
+- `verify` refuses a repeated trial number **and** a repeated arm id, before
+  writing anything.
+- `verify` appends and fsyncs the verdict *first*, and removes the marker only
+  after. If the machine dies in between, the marker survives and the next
+  `verify` is refused as a duplicate arm id — recoverable, where the reverse
+  order would lose the verdict.
+- The aggregate counts **distinct arm ids**. Three rows carrying one arm id are
+  three verifications of one power cut, and count as one.
+
+> **Earlier builds did not do this.** `arm` restarted at generation 0, so on a
+> populated store the second arming died on `UNIQUE constraint failed:
+> world_events.generation` while the first marker survived — and each subsequent
+> `verify` re-read the same surviving store and appended another `PASS`. Five
+> "trials" were satisfiable by one real cut and four no-ops. Ledgers written by
+> those builds carry no arm id at all; the aggregate now refuses them as
+> unattributable and asks for a fresh database rather than counting them.
+
+**The R2 attempt is corrected accordingly.** It recorded three `PASS` rows, but
+only the first followed an arming: trials 2 and 3 re-verified the same marker
+against the same surviving store, and trial 4 surfaced the defect by failing with
+`UNIQUE constraint failed: world_events.generation`. Its honest status is **1
+valid independent PASS of the 5 required** — tier C remains incomplete.
+
+**Restart tier C on a fresh database.** A ledger that predates arm ids cannot be
+salvaged, and mixing it with new rows would understate what is missing.
+
 ### Procedure
 
 Run this **five times**, incrementing `--trial` each time. Use one database for
-the whole series; the trials ledger accumulates beside it.
+the whole series; the trials ledger accumulates beside it. Each pass through
+steps 2–4 is one arming; skipping step 2 does not produce another trial, it
+produces a refusal.
 
 1. Boot the Orin normally, on the storage under test.
 
@@ -441,8 +480,13 @@ the whole series; the trials ledger accumulates beside it.
    ./wm2-persistence-harness powercut arm --db /var/lib/kirra/wm2/power.sqlite
    ```
 
-   Wait for the `ARMED:` line. **Before it appears, nothing has been promised
-   and a cut proves nothing.**
+   Wait for the `ARMED [<arm id>]:` line. **Before it appears, nothing has been
+   promised and a cut proves nothing.** The line also names the generations this
+   arming appended, so a later ledger row can be tied back to it.
+
+   If `arm` exits 2 saying a marker already exists, the previous arming was
+   never verified. Verify it first, or delete the marker deliberately if that
+   cut never happened.
 
 3. With the tail still running, cut power **at the source** — pull the barrel
    jack or kill the bench supply. Do **not** use `poweroff`, `reboot`, or a
@@ -456,10 +500,14 @@ the whole series; the trials ledger accumulates beside it.
    sqlite3 /var/lib/kirra/wm2/power.sqlite 'PRAGMA integrity_check;'
    ```
 
-   `verify` exits non-zero until five clean trials are recorded, so a
-   half-finished series cannot be filed as a complete one.
+   `verify` exits **1** until five distinct clean armings are recorded, so a
+   half-finished series cannot be filed as a complete one. It exits **2** when
+   it *refuses* to record at all — no marker, a repeated trial number, or a
+   repeated arm id. The two are different: exit 1 recorded a trial, exit 2 did
+   not.
 
-5. Repeat from step 2 with `--trial 2`, `3`, `4`, `5`.
+5. Repeat from step 2 with `--trial 2`, `3`, `4`, `5`. **Step 2 is not
+   optional** — re-running `verify` without re-arming is refused.
 
 ### Reading the verdict
 
@@ -472,8 +520,10 @@ the whole series; the trials ledger accumulates beside it.
 
 Five is a floor, not a ritual: device-cache loss is probabilistic and depends
 where in the erase-block cycle the cut lands, so a store that survives once can
-lose an acknowledged write on the next attempt. Below five the aggregate reports
-`INCONCLUSIVE` rather than a pass.
+lose an acknowledged write on the next attempt. Below five **distinct armings**
+the aggregate reports `INCONCLUSIVE` rather than a pass, and it says how many it
+counted — `only 2 DISTINCT arming(s) recorded across 5 ledger row(s)` is a
+series that needs three more cuts, not a series that is finished.
 
 > **Do not run `crash` against the power-cut database.** Tier A deletes and
 > recreates the store it is given. The trials ledger survives (it is a separate
