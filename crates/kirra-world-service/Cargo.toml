@@ -1,0 +1,13 @@
+[package]
+name = "kirra-world-service"
+version = "0.1.0"
+edition = "2021"
+description = "Kirra World service adapter — PROTOTYPE crate graph only, no service (ADR-0040 WM-1)"
+publish = false
+
+# Depends on the domain core and the storage adapter. No HTTP, no runtime, no
+# transport: adding one here is what Fence A exists to prevent, and the gate
+# checks this crate's closure for actuation and authorization edges.
+[dependencies]
+kirra-world = { path = "../kirra-world" }
+kirra-world-store = { path = "../kirra-world-store" }
