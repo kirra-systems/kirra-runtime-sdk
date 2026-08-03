@@ -72,6 +72,24 @@ a results file can never imply a durability test that did not happen. Below the
 required five trials the aggregate is `INCONCLUSIVE`, not a pass: device-cache
 loss is probabilistic, so one survived cut is not evidence.
 
+**A trial is an arming, not a ledger row.** The marker is single-use: `arm`
+refuses to run over an unused one, continues from `MAX(generation) + 1` rather
+than restarting at 0, and `verify` rejects both a repeated trial number and a
+repeated arm id before writing anything. The verdict is appended and fsynced
+*before* the marker is removed, so a cut in between leaves the arming
+outstanding — recoverable — instead of losing the verdict. The aggregate counts
+**distinct arm ids**, so three rows carrying one id are three verifications of
+one power cut and count as one.
+
+This was not true of earlier builds, and the difference is not academic. `arm`
+restarted at generation 0, so on a populated store the second arming died on a
+primary-key collision while the first marker survived, and each later `verify`
+re-read the same surviving store and appended another `PASS`. **The R2 attempt
+recorded three `PASS` rows from one real power cut; its honest status is 1 valid
+independent PASS of the 5 required.** Ledgers from those builds carry no arm id,
+and the aggregate now refuses them as unattributable rather than counting them —
+restart tier C on a fresh database.
+
 ## Layout
 
 | File | What it is |
