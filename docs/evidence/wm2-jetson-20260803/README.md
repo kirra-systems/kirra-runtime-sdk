@@ -90,14 +90,35 @@ self-consistent but no longer tied to a revision anybody can find. It has not
 drifted here:
 
 `4ecdb939…` — the archived copy — is byte-identical to
-`docs/hardware/JETSON_WM2_PERSISTENCE_DRILL.md` at commit `021ec82379be`, the
-same commit the harness binary was built from, and to the tracked copy at
-`HEAD`.
+`docs/hardware/JETSON_WM2_PERSISTENCE_DRILL.md` **at commit `021ec82379be`**,
+the same commit the harness binary was built from.
 
 So the bundle answers both questions independently: **what was run** (the
 digests verify in place, offline, with no repository) and **which tracked
-revision it corresponds to** (the drill digest matches a commit). If the two
-ever diverge, that is a finding — re-check before citing anything here.
+revision it corresponds to** (the drill digest matches a commit).
+
+#### The tracked drill has since moved — and that is correct
+
+`HEAD`'s copy no longer matches `4ecdb939…`. The drill gained a rewritten §9
+(scale sweep with a computed verdict) and a new §9a (the ~29 s stall
+investigation) *after* this run.
+
+**The archived copy must not be updated to match.** It records the procedure
+that was actually followed on the device, and rewriting it would make this
+bundle describe a run that never happened. A frozen copy going stale relative
+to a living document is the expected, healthy behaviour of a pin — the failure
+mode it guards against is the opposite one, where an archived copy is quietly
+edited and the evidence silently comes to describe something else.
+
+Verify the pin against the commit rather than against `HEAD`:
+
+```sh
+git show 021ec82379be:docs/hardware/JETSON_WM2_PERSISTENCE_DRILL.md | sha256sum
+# 4ecdb93972d474d6ebc68802e46cbbb7f45a501786f6fcda1a128512c6f98584
+```
+
+If *that* ever stops matching, this bundle's provenance is broken and nothing
+in it should be cited until the discrepancy is explained.
 
 > **`results.jsonl` has not been committed.** It exists on the device at
 > `~/wm2-jetson-evidence-20260803-083703/`. It is deliberately *not*

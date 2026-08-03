@@ -30,7 +30,7 @@ This drill produces those recordings. The instrument is
 | Migration proof of concept | ✅ | `migrate` |
 | Compaction-with-citation (§11.3; not a numbered gate, but the retention policy the growth number makes urgent) | ✅ | `compact` |
 | Disk-pressure + reclamation behaviour (ADR-0041 SQLite-config table; not a numbered gate) | ⚠️ **partly** | `pressure` proves clean refusal at the SQLite layer; a genuinely full partition needs the device |
-| Scale assumptions confirmed or corrected | ⚠️ **partly** | the §9 sweep informs it; the operational answer needs real deployment |
+| Scale assumptions confirmed or corrected | ⚠️ **partly** | the §9 sweep now emits a computed `sweep_summary` verdict (`SUBLINEAR`/`LINEAR`/`SUPERLINEAR`/`KNEE`/`INSUFFICIENT`) rather than a curve to eyeball; the operational answer still needs real deployment |
 
 Two of the seven are deliberately marked partial. Marking them complete on the
 strength of this harness alone would be the exact failure the measurement gate
@@ -83,7 +83,9 @@ Expect **tens of minutes**. The append benchmark alone runs six configurations
 is one fsync per event by construction.
 
 Individual stages run on their own: `platform`, `append`, `replay`, `query`,
-`growth`, `migrate`, `compact`, `pressure`, `crash`. Start with `platform` — it prints, in about a
+`growth`, `migrate`, `compact`, `pressure`, `crash`. Two more are **explicit-only**
+and deliberately outside `all`, because each multiplies the runtime: `sweep`
+(§9) and `stall` (§9a). Start with `platform` — it prints, in about a
 millisecond, whether anything you run afterwards will be citable.
 
 Exit status is `1` if any measurement failed **or was unusable** — a query family
@@ -494,21 +496,137 @@ reopened."*
 Sweep past the assumption rather than confirming it:
 
 ```sh
-for e in 1000 10000 100000; do
-  ./target/release/wm2-persistence-harness query \
-      --db /var/lib/kirra/wm2/scale.sqlite \
-      --out ~/wm2-scale.jsonl \
-      --events 1000000 --entities "$e" --assert-target
-done
+./target/release/wm2-persistence-harness sweep \
+    --db /var/lib/kirra/wm2/scale.sqlite \
+    --out ~/wm2-scale.jsonl \
+    --entity-ladder 1000,10000,100000 \
+    --events-per-entity 100 \
+    --sweep-family graph \
+    --assert-target
 ```
 
-Then look at how `graph_bounded_reach` and `temporal_changes_since` grow against
-entity count. Sub-linear or gently linear supports Option A. A knee supports
-reopening in favour of Option B.
+Then repeat with `--sweep-family temporal`. Each rung emits a `sweep_point`
+record; the ladder as a whole emits a `sweep_summary` carrying the **verdict**.
 
-The sweep informs the scale question; it does not settle it. What entity counts
-the deployed robot actually reaches is an operational fact this harness cannot
-produce.
+### The verdict is computed, not eyeballed
+
+Whether a curve "has a knee" is exactly the kind of judgement that gets made
+favourably by someone with a deadline and re-made unfavourably by an assessor a
+year later, from the same numbers. So it is a function, and it is fail-closed:
+
+| Verdict | Meaning | Exit |
+|---|---|---|
+| `SUBLINEAR` / `LINEAR` | cost grows no faster than entity count — **supports Option A** | 0 |
+| `SUPERLINEAR` | uniformly steeper than proportional, but no inflection. Expensive and *predictable*: a bound on how far this may be scaled, not a reopening trigger | 0 |
+| `KNEE` | **the exponent increases along the ladder** — the shape ADR-0041's reopening condition describes. Option B becomes materially stronger | **1** |
+| `INSUFFICIENT` | the ladder cannot be classified | **1** |
+
+A knee exits non-zero deliberately. A sweep that reports the finding and then
+exits 0 invites the finding to be skimmed past.
+
+### Hold the density constant — this is not optional
+
+`--events-per-entity` makes each rung use `entities × n` events, so the number
+of observations *per entity* stays fixed while the entity count grows. That is
+the deployment-realistic shape: more entities means more observations, not the
+same observations spread thinner.
+
+The obvious alternative — sweep entity count at a fixed total event count — is
+wrong, and wrong in the direction that looks like good news. It makes each
+entity thinner, so graph fan-out and cost go **down**. Measured on a host ladder
+of 100/1 000/10 000 entities at a fixed 20 000 events:
+
+```
+entities=  100  median 1687.0 us
+entities= 1000  median   73.7 us
+entities=10000  median   10.9 us     log-log slope -1.10
+```
+
+Falling cost as scale rises is not sublinear scaling; it is a ladder that
+diluted. `--events-per-entity 0` selects that ladder, and the classifier
+**refuses** it (`INSUFFICIENT`, exit 1) with the reason and the fix, rather than
+reporting excellent scaling from a measurement of density.
+
+### What the sweep still cannot settle
+
+It measures the stand-in schema against synthetic load. What entity counts the
+deployed robot actually reaches is an operational fact no benchmark produces,
+and ADR-0041 says so. The sweep narrows the question from "does SQLite scale" to
+"does it scale *on this shape, to this point*" — the answerable half.
+
+---
+
+## 9a. The ~29 second write stall (ADR-0041 open question 9)
+
+The merged R2 run recorded one commit taking **29.27 s** under
+`synchronous=NORMAL` at batch=64, on NVMe. It inverted the durability ordering —
+`NORMAL` came out slower than `FULL` at the same batch — and accounted for ~91 %
+of that stage's wall time, so that row's throughput figure is unusable and **no
+`synchronous` policy may be ratified until this is characterised.**
+
+At 10 Hz, 29 s is ~293 observations that cannot be recorded. That is the reason
+to understand it rather than re-run until it disappears.
+
+```sh
+./target/release/wm2-persistence-harness stall \
+    --db /var/lib/kirra/wm2/stall.sqlite \
+    --out ~/wm2-stall.jsonl \
+    --durability normal --batch 64 \
+    --events 100000 --stall-repeats 20 \
+    --assert-target
+```
+
+Then repeat with `--durability full` and `--durability off`, and with
+`--batch 1`. The question is not only *how big* the stall is but *which
+configurations produce it* — if it appears at every setting, it is not about
+durability at all.
+
+`stall` is deliberately **not** part of `all`: it repeats an append 20 times
+and would multiply every routine drill.
+
+### What it adds over a single run
+
+- **Repetition**, so the stall gets a *rate*. One-in-fifty and one-in-two are
+  different engineering problems at identical magnitude.
+- **`median_throughput_eps`**, a median across repetitions. One pathological run
+  cannot move it, so throughput and stall rate become two separate facts rather
+  than the single contaminated one the original benchmark produced.
+- **Concurrent system counters**, sampled across each run: PSI `full` I/O stall,
+  `/proc/diskstats` busy-milliseconds, peak dirty+writeback, hottest thermal
+  zone.
+
+### Attribution is deliberately reluctant
+
+| Verdict | What the evidence showed |
+|---|---|
+| `IO-DEVICE` | block layer busy for most of the stall, **no** large dirty backlog. On NVMe: garbage collection or an SLC-cache cliff. Confirm against the drive's SMART counters — the harness cannot read them |
+| `WRITEBACK-BACKLOG` | block layer busy **and** a large dirty/writeback backlog. The flush is the work: page cache and journal, not the device |
+| `THERMAL` | block layer idle, hottest zone ≥ 85 °C. Confirm against the Jetson's power mode and `tegrastats` |
+| `UNATTRIBUTED` | the counters do not discriminate — **the expected outcome**, and not a failed measurement |
+| `NO-STALL` | worst commit below the 1 000 ms threshold |
+
+`UNATTRIBUTED` is common by design. A confident wrong attribution closes the
+investigation, which costs more than an honest shrug. Note also that thermal is
+only considered when the block layer was *idle*: a hot SoC during heavy I/O is a
+consequence, not a cause, and blaming it would send the investigation the wrong
+way.
+
+**Observing zero stalls is a result, not a failure.** It bounds the rate. The
+run exits non-zero only if no repetition completed — treating "no stall seen" as
+failure would pressure an operator into re-running until one appeared, which
+turns a rate estimate into fiction.
+
+### Capture alongside
+
+The harness reads `/proc` and `/sys`; it does not read the drive or the SoC.
+Capture these around the run so a device-side answer is available:
+
+```sh
+sudo nvme smart-log /dev/nvme0n1     # media errors, wear, thermal throttle counters
+sudo tegrastats --interval 1000      # SoC clocks and thermal throttling
+cat /sys/block/nvme0n1/queue/scheduler
+cat /proc/sys/vm/dirty_background_ratio /proc/sys/vm/dirty_ratio
+```
 
 ---
 
@@ -544,6 +662,8 @@ retyping of one.
 | Disk-pressure behaviour | `pressure` → the seven boolean checks |
 | Tier A / B | `crash` → `outcome` + `detail` |
 | Tier C | the trials ledger, plus `tier_c_trials_recorded` / `tier_c_trials_required` |
+| **Scale sweep** (§9) | `sweep_point` rows + the `sweep_summary` `verdict` / `supports_option_a` |
+| **The ~29 s stall** (§9a) | `stall` → `stall_rate`, `median_throughput_eps`, `attribution`, and the four system-counter fields |
 
 Three of those deserve to be read rather than filed:
 
