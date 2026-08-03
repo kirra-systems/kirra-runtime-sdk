@@ -67,6 +67,28 @@ Consequently **ADR-0041 remains Proposed.**
 | `SHA256SUMS` | digests **as taken on the device**, transcribed here | yes |
 | `results.jsonl` | the run, one JSON record per measurement | **not yet** |
 
+Run `sha256sum -c SHA256SUMS` from this directory. Today it reports:
+
+```
+../../hardware/JETSON_WM2_PERSISTENCE_DRILL.md: OK
+results.jsonl: FAILED open or read
+```
+
+which is the accurate state of the bundle: **the procedure is pinned and
+verified, the results file has not arrived.**
+
+### The drill digest is a verified pin, not a copy
+
+The runbook is *not* duplicated into this directory. Instead `SHA256SUMS`
+points at the tracked copy, and that line **passes**: the digest recorded on
+the device, `4ecdb939…`, is byte-identical to
+`docs/hardware/JETSON_WM2_PERSISTENCE_DRILL.md` at commit `021ec82379be` — the
+same commit the harness binary was built from — and to the copy at `HEAD`.
+
+That is stronger than shipping a second copy. It proves *which tracked
+revision* of the procedure was followed, and a later edit to the drill will
+make this line fail rather than silently diverging from an archived duplicate.
+
 > **`results.jsonl` has not been committed.** It exists on the device at
 > `~/wm2-jetson-evidence-20260803-083703/`. It is deliberately *not*
 > reconstructed from terminal output: a retyped file is a transcription, not the
