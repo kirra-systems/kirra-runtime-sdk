@@ -362,23 +362,37 @@ impl ArmedMarker {
     }
 }
 
+/// Monotonic within this process, so two mints cannot collide however coarse
+/// the wall clock is. See [`mint_arm_id`].
+static ARM_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Mint an arm ID unique to this arming.
 ///
 /// Derived from the durable head and boundary (so it is tied to the state it
-/// describes) plus wall-clock nanos and the pid (so two armings of an
-/// identical-looking store still differ). Truncated to 64 bits, which is far
-/// more than enough to distinguish a handful of manual trials.
+/// describes) plus wall-clock nanos, the pid, and a process-local counter (so
+/// two armings of an identical-looking store still differ). Truncated to 64
+/// bits, which is far more than enough to distinguish a handful of manual
+/// trials.
+///
+/// The counter is not redundant with the clock. Wall-clock resolution is a
+/// platform property — coarse enough on some targets that two calls in quick
+/// succession read the same value — and an id collision here does not degrade
+/// gracefully: it makes a legitimate second arming look like a re-verification
+/// of the first and get refused. Across processes the pid and the clock
+/// separate; within one, the counter does.
 fn mint_arm_id(head: &str, generation: u64) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
+    let seq = ARM_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut buf = Vec::new();
     buf.extend_from_slice(b"wm2-tierc-arm-v1\x00");
     buf.extend_from_slice(head.as_bytes());
     buf.extend_from_slice(&generation.to_le_bytes());
     buf.extend_from_slice(&nanos.to_le_bytes());
     buf.extend_from_slice(&std::process::id().to_le_bytes());
+    buf.extend_from_slice(&seq.to_le_bytes());
     crate::sha256::hex(&buf)[..16].to_string()
 }
 
@@ -688,13 +702,21 @@ pub fn powercut_arm(db: &Path, prefix_events: u64, entities: u64, seed: u64) -> 
     // report PASS for a cut that never happened. Refuse; the operator must
     // verify or explicitly discard.
     if armed_marker_path(db).exists() {
+        let torn = matches!(read_marker_state(db), MarkerState::Unreadable);
         eprintln!(
             "powercut arm: an unused marker already exists at {}.\n\
              A marker is SINGLE-USE: each trial needs its own arming, and the marker is \
              removed only after its verdict is durably recorded.\n\
-             Run `powercut verify --trial <n>` for the outstanding arming first, or delete \
-             the marker deliberately if that cut never happened.",
-            armed_marker_path(db).display()
+             {}",
+            armed_marker_path(db).display(),
+            if torn {
+                "That marker does not parse — torn by the cut, or written by a build that \
+                 predates arm ids. It cannot be verified. Delete it and arm again to re-run \
+                 this trial."
+            } else {
+                "Run `powercut verify --trial <n>` for the outstanding arming first, or delete \
+                 the marker deliberately if that cut never happened."
+            }
         );
         std::process::exit(2);
     }
@@ -814,8 +836,34 @@ fn write_marker(db: &Path, marker: &ArmedMarker) -> Result<(), String> {
     Ok(())
 }
 
-pub fn read_marker(db: &Path) -> Option<ArmedMarker> {
-    ArmedMarker::parse(&std::fs::read_to_string(armed_marker_path(db)).ok()?)
+/// What is sitting at the marker path.
+///
+/// `Unreadable` must be distinct from `Absent`. `arm` refuses while the file
+/// exists and `verify` needs a parseable marker, so collapsing the two leaves
+/// an operator with a torn marker stuck between "arm refuses, a marker exists"
+/// and "verify refuses, no marker" — with no stated way out. A marker torn by
+/// the very power cut it was recording is an expected state, not an exotic one.
+pub enum MarkerState {
+    Absent,
+    /// The file is there but does not parse: torn by the cut, or written by a
+    /// build that predates arm ids.
+    Unreadable,
+    Armed(ArmedMarker),
+}
+
+pub fn read_marker_state(db: &Path) -> MarkerState {
+    let path = armed_marker_path(db);
+    match std::fs::read_to_string(&path) {
+        Err(_) if !path.exists() => MarkerState::Absent,
+        // Unreadable for any other reason — permissions, an I/O error — is
+        // still "something is there and it is not usable", which is the state
+        // the operator has to be told about.
+        Err(_) => MarkerState::Unreadable,
+        Ok(text) => match ArmedMarker::parse(&text) {
+            Some(m) => MarkerState::Armed(m),
+            None => MarkerState::Unreadable,
+        },
+    }
 }
 
 /// Remove the armed marker. Called only after the verdict is durably recorded.
@@ -860,13 +908,29 @@ pub fn powercut_verify(db: &Path, trial: u64) -> Result<TrialRecord, String> {
         ));
     }
 
-    let Some(marker) = read_marker(db) else {
-        return Err(format!(
-            "no armed marker at {}. Each trial requires its OWN arming: run `powercut arm`, \
-             wait for the ARMED line, cut power, then verify. Verifying without arming would \
-             re-read a surviving store and record a pass for a cut that never happened.",
-            armed_marker_path(db).display()
-        ));
+    let marker = match read_marker_state(db) {
+        MarkerState::Armed(m) => m,
+        MarkerState::Absent => {
+            return Err(format!(
+                "no armed marker at {}. Each trial requires its OWN arming: run `powercut arm`, \
+                 wait for the ARMED line, cut power, then verify. Verifying without arming would \
+                 re-read a surviving store and record a pass for a cut that never happened.",
+                armed_marker_path(db).display()
+            ));
+        }
+        // Distinct from absent, and it must be: `arm` refuses while this file
+        // exists, so reporting it as missing would leave the operator with two
+        // refusals and no stated way forward.
+        MarkerState::Unreadable => {
+            return Err(format!(
+                "the marker at {} exists but cannot be read. Either the cut tore it — in which \
+                 case nothing states what should have survived and this arming cannot be judged \
+                 — or it was written by a build that predates arm ids.\n\
+                 Delete it and re-arm to re-run this trial. If it predates arm ids, its earlier \
+                 rows cannot be attributed either: restart tier C on a fresh database.",
+                armed_marker_path(db).display()
+            ));
+        }
     };
 
     if let Some(prev) = existing.iter().find(|t| t.arm_id == marker.arm_id) {
@@ -1429,9 +1493,56 @@ mod tests {
         // from the state alone the second arming would be indistinguishable
         // from the first, and the duplicate check would reject a legitimate
         // trial.
-        let a = mint_arm_id("deadbeef", 400);
-        let b = mint_arm_id("deadbeef", 400);
-        assert_ne!(a, b);
-        assert_eq!(a.len(), 16);
+        //
+        // A thousand back-to-back mints, because a wall clock alone would not
+        // survive this on a platform with coarse resolution: the counter in the
+        // hashed material is what makes it unconditional rather than a race
+        // that usually goes the right way.
+        let ids: std::collections::BTreeSet<String> =
+            (0..1000).map(|_| mint_arm_id("deadbeef", 400)).collect();
+        assert_eq!(ids.len(), 1000, "two mints collided");
+        assert!(ids.iter().all(|i| i.len() == 16));
+    }
+
+    #[test]
+    fn a_torn_marker_is_refused_as_torn_rather_than_as_absent() {
+        // `arm` refuses while the marker file exists, so reporting an
+        // unparseable one as "no armed marker" leaves the operator with two
+        // refusals and no stated way forward. A marker torn by the very cut it
+        // was recording is an expected state, not an exotic one.
+        let db = fresh("tierc-torn-marker");
+        Store::open(&db, Durability::Full).expect("open");
+        std::fs::write(armed_marker_path(&db), "400\ndeadbeef\n").expect("legacy 2-line marker");
+
+        assert!(matches!(read_marker_state(&db), MarkerState::Unreadable));
+
+        let err = powercut_verify(&db, 1).expect_err("an unjudgeable arming must be refused");
+        assert!(
+            err.contains("cannot be read"),
+            "the refusal must not claim the marker is absent: {err}"
+        );
+        assert!(
+            err.contains("Delete it and re-arm"),
+            "the refusal must name the way out: {err}"
+        );
+        assert!(read_trials(&db).is_empty(), "a refusal wrote a ledger row");
+        cleanup(&db);
+    }
+
+    #[test]
+    fn an_absent_marker_and_an_unreadable_one_are_different_refusals() {
+        let db = fresh("tierc-marker-states");
+        Store::open(&db, Durability::Full).expect("open");
+        assert!(matches!(read_marker_state(&db), MarkerState::Absent));
+        let absent = powercut_verify(&db, 1).expect_err("no marker");
+        assert!(absent.contains("no armed marker"), "{absent}");
+
+        std::fs::write(armed_marker_path(&db), "not a marker").expect("write");
+        let torn = powercut_verify(&db, 1).expect_err("torn marker");
+        assert_ne!(
+            absent, torn,
+            "the two states must not produce the same message — they need different actions"
+        );
+        cleanup(&db);
     }
 }
