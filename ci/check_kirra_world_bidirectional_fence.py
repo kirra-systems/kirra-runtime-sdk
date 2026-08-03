@@ -961,7 +961,12 @@ def artifact_consumers(root: Path, manifests: dict, tokens: tuple) -> set[str]:
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            if any(tok in strip_rust(text, drop_strings=False) for tok in tokens):
+            # Strip ONCE per file. Putting the call inside the `any(...)`
+            # generator re-ran the regex stripping for every token, so a
+            # three-token class did three times the work on every source file in
+            # the workspace.
+            stripped = strip_rust(text, drop_strings=False)
+            if any(tok in stripped for tok in tokens):
                 found.add(pkg)
                 break
     return found
@@ -997,9 +1002,7 @@ def check_7b_shared_artifacts(
 
         for w in world_side:
             for s in safety_side:
-                if not any(
-                    a == name and wc == w and sc == s for (a, wc, sc) in recorded
-                ):
+                if (name, w, s) not in recorded:
                     rep.add(
                         fence="B",
                         check="Check 7b — shared source artifact",
