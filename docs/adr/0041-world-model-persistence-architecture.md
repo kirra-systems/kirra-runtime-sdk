@@ -171,6 +171,77 @@ knowingly bounded. Ratifying **compaction-with-citation**:
 **Thresholds are deferred until measured.** Choosing them now would be a guess
 presented as a policy.
 
+### Compaction is not reclamation — two operations, not one
+
+**Measured** (`tools/wm2-persistence-harness`, `compact`; host-indicative,
+target confirmation required): compacting 9 898 events across 104 spans left the
+database file **byte-identical in size**. SQLite row deletion returns pages to a
+free list inside the file; it does not shrink it. The ~50 % reduction appeared
+only after a `VACUUM`, which rewrites the entire database.
+
+The operational model is therefore:
+
+> **logical compaction → *optionally, separately scheduled* reclamation**
+
+and explicitly **not** "compaction → disk immediately freed". A retention policy
+written against the second model will fail in the field: the device keeps
+compacting, the free-space alarm keeps firing, and nobody can see why.
+
+`VACUUM` is a maintenance operation with power, I/O, thermal and availability
+consequences, on a Jetson sharing storage with perception and logs. Reclamation
+should therefore be **gated on preconditions**, not run opportunistically. The
+proposed gate — measurement on target required before any of these numbers are
+fixed:
+
+| Precondition | Why |
+|---|---|
+| Robot stationary, no active mission | The rewrite competes with perception for the same storage; a mission is the worst time to find out how much |
+| Adequate battery or external power | A rewrite interrupted by power loss is the one operation where the WAL's protection is doing the most work |
+| Bounded free-space reserve available | `VACUUM` needs room for a second copy before it has freed the first; running it at 98 % full is how a full disk becomes a corrupt one |
+| Crash-safe scheduling | It must be safe to lose power mid-`VACUUM`; the drill's tier B covers the shape, tier C the medium |
+| Defined interruption behaviour | Aborted reclamation must leave a usable store, and must not leave the policy believing it succeeded |
+
+**Consequence for the storage-growth gate.** Days-to-full must be computed
+against *logical* growth plus whatever reclamation actually runs, and a policy
+that assumes continuous reclamation is assuming a maintenance window that may
+never open. The conservative planning figure is the un-reclaimed one.
+
+### Retention class is immutable evidence
+
+**Measured**: the retention class is inside the canonically-hashed event bytes,
+so rewriting it breaks the chain at that generation. This was found by a test
+that tried to relabel events in bulk and got a broken chain instead.
+
+That is the correct behaviour and it is worth stating as a decision rather than
+leaving as an implementation detail, because it constrains operators in a way
+they will not expect:
+
+> **A retention policy change cannot be applied retroactively by relabelling
+> existing events.** Editing an event's class is tamper-evident, and the log
+> will correctly report itself broken.
+
+The security property this buys: the obvious attack on a retention policy is to
+downgrade a protected event to `raw` so a later compaction pass is allowed to
+delete it. That attack is structurally unavailable — it does not fail a check,
+it fails the chain.
+
+The cost is that policy evolution has exactly three legitimate routes:
+
+1. **Forward-only** — the new policy governs newly created events. The default,
+   and the only one needing no ceremony.
+2. **Explicit migration through a new cited event** — old evidence is
+   re-classified by *appending* a record that cites what it re-classifies and
+   why, leaving the original intact. The same citation discipline compaction
+   uses.
+3. **A policy-supersession record** — the policy itself is an event in the log,
+   so "which retention rules were in force when this was written?" is
+   answerable after the fact. Without this, a compacted span cannot be audited
+   against the policy that authorized compacting it.
+
+Routes 2 and 3 are **not implemented and not ratified**; they are named here so
+the constraint does not read as an oversight, and so nobody builds an operator
+tool that silently attempts route 0.
+
 ---
 
 ## Audit-chain relationship
@@ -268,6 +339,8 @@ fact" rule exists to prevent.
 | R5 | A second hash-chain design emerges by accident | Shared `kirra-audit-hash`, distinct domain tag |
 | R6 | Verifier durability settings copied without thought | Explicitly forbidden above; per-source tiers to be measured |
 | R7 | Growth unbounded before thresholds are measured | Storage-growth estimate is a ratification gate |
+| R8 | A retention policy assumes compaction frees disk, and the device fills anyway | Measured: it does not. *Compaction is not reclamation* makes reclamation a separately scheduled, precondition-gated operation; the conservative planning figure is the un-reclaimed one |
+| R9 | An operator expects a retention-policy edit to apply to existing evidence | Structurally impossible — retention class is chained. Stated as a decision, with the three legitimate evolution routes named |
 
 ---
 
@@ -324,6 +397,13 @@ source; they are not migrated destructively (ADR-0040).
    §11.3 protected set (safety, incident, calibration, adjudication, operator)
    and enforces it — a window containing any of them is refused whole — but the
    *durations* remain unmeasured and unset.
+2a. Reclamation scheduling: the precondition thresholds in *Compaction is not
+   reclamation* are proposed, not measured. `VACUUM` cost, its free-space
+   requirement, and its interruption behaviour all need target measurement.
+2b. Whether policy-supersession records (route 3 above) are needed at WM-2 or
+   can wait. Without them, a compacted span cannot be audited against the policy
+   that authorized compacting it — which may or may not be acceptable before the
+   store holds anything an assessor would ask about.
 3. Whether projections live in the same database file or a rebuildable
    sidecar file (a corrupt sidecar is cheaper to discard).
 4. Index rebuild strategy: eager at startup vs lazy per query family.
