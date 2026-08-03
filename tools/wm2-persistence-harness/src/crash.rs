@@ -569,15 +569,26 @@ pub fn append_trial(db: &Path, rec: &TrialRecord) -> Result<(), String> {
         .str("detail", rec.outcome.detail())
         .render();
 
+    let path = trials_ledger_path(db);
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(trials_ledger_path(db))
+        .open(&path)
         .map_err(|e| e.to_string())?;
     writeln!(f, "{line}").map_err(|e| e.to_string())?;
     // The ledger records evidence about power loss and is itself written on a
     // machine that is about to lose power again. fsync it.
-    f.sync_all().map_err(|e| e.to_string())
+    f.sync_all().map_err(|e| e.to_string())?;
+    // And fsync the directory: on the trial that CREATES the ledger, syncing
+    // the file alone leaves the directory entry un-durable, so a cut can lose
+    // the whole file — and with it every trial recorded so far. Same reason
+    // `write_marker` does it.
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
 }
 
 /// Arm a power-cut trial: fsync a known prefix, record it, then append forever.

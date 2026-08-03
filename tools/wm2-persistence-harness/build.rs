@@ -40,8 +40,13 @@ use sha256::hex;
 
 fn main() {
     // Re-run when any measured source changes, so the digest can never be
-    // stale relative to the binary it describes.
+    // stale relative to the binary it describes. These must cover EXACTLY what
+    // `source_digest` reads — a file inside the digest but outside this list
+    // can change without the digest being recomputed, which is worse than not
+    // digesting it at all: the value would still be reported, and would be
+    // wrong.
     println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=tests");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
 

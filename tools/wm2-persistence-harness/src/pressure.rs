@@ -286,6 +286,13 @@ pub fn reclaim(store: &Store, path: &Path) -> Result<ReclaimResult, String> {
     let temp_fs = crate::platform::fs_type_of(&temp_dir);
     let db_fs = crate::platform::fs_type_of(&db_dir);
 
+    // When SQLite's temp directory IS the database directory, `dir_bytes`
+    // already counts the `etilqs_*` files and adding `sqlite_temp_bytes` would
+    // count them twice — inflating the peak and over-sizing the free-space
+    // reserve derived from it. Resolved once, through `canonicalize`, so
+    // `/tmp` and a symlink to it are recognised as the same place.
+    let temp_dir_is_db_dir = canonical(&temp_dir) == canonical(&db_dir);
+
     let running = Arc::new(AtomicBool::new(true));
     let peak = Arc::new(AtomicU64::new(bytes_before));
     let samples = Arc::new(AtomicU64::new(0));
@@ -301,7 +308,7 @@ pub fn reclaim(store: &Store, path: &Path) -> Result<ReclaimResult, String> {
         let temp_dir = temp_dir.clone();
         std::thread::spawn(move || {
             while running.load(Ordering::Relaxed) {
-                let total = dir_bytes(&db_dir) + sqlite_temp_bytes(&temp_dir);
+                let total = sampled_footprint(&db_dir, &temp_dir, temp_dir_is_db_dir);
                 peak.fetch_max(total, Ordering::Relaxed);
                 samples.fetch_add(1, Ordering::Relaxed);
                 std::thread::sleep(Duration::from_millis(1));
@@ -423,6 +430,31 @@ fn resolve_sqlite_temp_dir() -> PathBuf {
         }
     }
     PathBuf::from(".")
+}
+
+/// One footprint sample: the database directory, plus SQLite's temp files
+/// **only when they are somewhere else**.
+///
+/// Extracted from the sampler thread so the double-count this avoids is
+/// testable. Getting it wrong is not a cosmetic inflation — `peak_bytes_during`
+/// is what `transient_overhead_bytes` is derived from, and that is what the
+/// minimum-free-space reserve is set from, so an over-count here becomes an
+/// over-large reserve that keeps a device from ever reclaiming.
+fn sampled_footprint(db_dir: &Path, temp_dir: &Path, temp_dir_is_db_dir: bool) -> u64 {
+    let base = dir_bytes(db_dir);
+    if temp_dir_is_db_dir {
+        // `dir_bytes` already counted the `etilqs_*` files.
+        base
+    } else {
+        base + sqlite_temp_bytes(temp_dir)
+    }
+}
+
+/// Resolve a directory for identity comparison, so `/tmp` and a symlink to it
+/// are recognised as the same place. Falls back to the literal path when the
+/// directory cannot be canonicalised.
+fn canonical(dir: &Path) -> PathBuf {
+    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
 }
 
 /// Total bytes of regular files directly in `dir`.
@@ -587,5 +619,83 @@ mod tests {
             "implausible reclaim on a dense store"
         );
         let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn a_temp_dir_inside_the_db_dir_is_not_counted_twice() {
+        // The case: SQLite resolves its temp directory to the same place the
+        // database lives (both under /tmp, say). `dir_bytes` already sees the
+        // `etilqs_*` files, so adding `sqlite_temp_bytes` on top would inflate
+        // the peak — and the free-space reserve is derived from that peak, so
+        // the error propagates into an over-large reserve that could stop a
+        // device reclaiming at all.
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("wm2-footprint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        std::fs::write(dir.join("w.sqlite"), vec![0u8; 1000]).expect("db");
+        std::fs::write(dir.join("etilqs_abc123"), vec![0u8; 4000]).expect("temp");
+
+        let shared = sampled_footprint(&dir, &dir, true);
+        assert_eq!(shared, 5000, "the temp file must be counted exactly once");
+
+        let double = sampled_footprint(&dir, &dir, false);
+        assert_eq!(
+            double, 9000,
+            "sanity: without the guard the temp file IS counted twice, so the \
+             guard is doing real work rather than being a no-op"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_separate_temp_dir_is_added_rather_than_ignored() {
+        // The other direction: when the temp copy lands elsewhere it must
+        // still be charged to the VACUUM, or the reserve would be understated
+        // — the unsafe direction.
+        let base = std::env::temp_dir();
+        let db_dir = base.join(format!("wm2-fp-db-{}", std::process::id()));
+        let tmp_dir = base.join(format!("wm2-fp-tmp-{}", std::process::id()));
+        for d in [&db_dir, &tmp_dir] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).expect("mkdir");
+        }
+
+        std::fs::write(db_dir.join("w.sqlite"), vec![0u8; 1000]).expect("db");
+        std::fs::write(tmp_dir.join("etilqs_xyz"), vec![0u8; 4000]).expect("temp");
+        // An unrelated large file in the temp directory must NOT be charged to
+        // this VACUUM — that is what the `etilqs_` prefix filter is for.
+        std::fs::write(tmp_dir.join("someone-elses.bin"), vec![0u8; 1_000_000]).expect("other");
+
+        assert_eq!(sampled_footprint(&db_dir, &tmp_dir, false), 5000);
+
+        for d in [&db_dir, &tmp_dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn canonical_sees_through_a_symlink_to_the_same_directory() {
+        // Why identity is `canonicalize`d rather than a string compare: a
+        // TMPDIR of `/tmp` against a database under a symlinked path is the
+        // same directory, and comparing the literal strings would miss it and
+        // double-count.
+        let base = std::env::temp_dir();
+        let real = base.join(format!("wm2-canon-{}", std::process::id()));
+        let link = base.join(format!("wm2-canon-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&real);
+        let _ = std::fs::remove_file(&link);
+        std::fs::create_dir_all(&real).expect("mkdir");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, &link).expect("symlink");
+            assert_eq!(canonical(&link), canonical(&real));
+        }
+
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&real);
     }
 }
