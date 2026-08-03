@@ -88,7 +88,11 @@ def check_workflow(name: str, doc: dict) -> list[str]:
 
     pr = on["pull_request"] or {}
     if not isinstance(pr, dict):
-        return []  # `pull_request:` with no config = every PR, which is the goal
+        # A non-mapping form (a string or list, e.g. `pull_request: [main]`).
+        # Note this is NOT the bare `pull_request:` case -- that is None, which
+        # the `or {}` above already normalised to an empty mapping, and an empty
+        # mapping means "every PR", which is exactly what this gate wants.
+        return []
 
     problems: list[str] = []
     for key in ("branches", "branches-ignore"):
@@ -101,7 +105,12 @@ def check_workflow(name: str, doc: dict) -> list[str]:
 
     types = pr.get("types")
     if types is not None:
-        missing = REQUIRED_TYPES - set(types)
+        # A scalar `types: opened` must be normalised, not iterated: `set()` on a
+        # string yields {'o','p','e','n','d'} and would report every required
+        # type missing -- a confidently wrong diagnostic, which is worse than no
+        # diagnostic because someone would act on it.
+        given = {types} if isinstance(types, str) else set(types or ())
+        missing = REQUIRED_TYPES - given
         if missing:
             problems.append(
                 f"{name}: `pull_request.types` omits {sorted(missing)}. Without `synchronize` "
@@ -143,6 +152,7 @@ _GOOD = "name: x\non:\n  pull_request:\n  push:\n    branches: [main]\n"
 _BASE_FILTERED = "name: x\non:\n  pull_request:\n    branches: [main]\n"
 _IGNORE_FILTERED = "name: x\non:\n  pull_request:\n    branches-ignore: [wip/**]\n"
 _NARROW_TYPES = "name: x\non:\n  pull_request:\n    types: [opened]\n"
+_SCALAR_TYPE = "name: x\non:\n  pull_request:\n    types: opened\n"
 _FULL_TYPES = "name: x\non:\n  pull_request:\n    types: [opened, synchronize, reopened, ready_for_review]\n"
 _PUSH_ONLY = "name: x\non:\n  push:\n    branches: [main]\n"
 
@@ -166,16 +176,29 @@ def self_test() -> int:
     if problems_for(_PUSH_ONLY):
         failures.append("a push-only workflow is out of scope and should pass")
 
-    # The YAML 1.1 `on:` -> True quirk. If this regressed, every check above
-    # would pass vacuously against real workflow files.
+    # A scalar `types:` must be normalised rather than iterated as characters.
+    scalar = problems_for(_SCALAR_TYPE)
+    if not scalar:
+        failures.append("`types: opened` as a scalar must still be detected as missing synchronize")
+    elif "'d'" in scalar[0] or "'o'" in scalar[0]:
+        failures.append(f"scalar `types:` was iterated as characters: {scalar[0]}")
+
+    # `load_on_block` must find the trigger block whichever way the parser spells
+    # the key. PyYAML's YAML 1.1 resolver turns a bare `on:` into the BOOLEAN
+    # True; a YAML 1.2 parser keeps the string "on". Asserting the QUIRK would
+    # make this gate fail the day the dependency modernises, even though the
+    # code still handles both — so assert the CAPABILITY instead.
+    for key in (True, "on"):
+        block = load_on_block({key: {"pull_request": None}})
+        if block is None or "pull_request" not in block:
+            failures.append(f"load_on_block must resolve the trigger block spelled {key!r}")
+
+    # Non-vacuity of that workaround: whichever spelling PyYAML actually uses,
+    # the real parse path must reach the trigger block.
     parsed = yaml.safe_load(_GOOD)
-    if "on" in parsed:
-        failures.append(
-            "expected PyYAML to parse bare `on:` as the boolean True — "
-            "the load_on_block workaround may now be masking a real lookup"
-        )
-    if load_on_block(parsed) is None or "pull_request" not in load_on_block(parsed):
-        failures.append("load_on_block must find the trigger block despite the True-key quirk")
+    resolved = load_on_block(parsed)
+    if resolved is None or "pull_request" not in resolved:
+        failures.append("load_on_block failed on a real PyYAML parse — the gate would be vacuous")
 
     if failures:
         print("SELF-TEST FAILED", file=sys.stderr)
