@@ -2599,6 +2599,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-world"
+version = "0.1.0"
+
+[[package]]
+name = "kirra-world-service"
+version = "0.1.0"
+dependencies = [
+ "kirra-world",
+ "kirra-world-store",
+]
+
+[[package]]
+name = "kirra-world-store"
+version = "0.1.0"
+dependencies = [
+ "kirra-world",
+]
+
+[[package]]
 name = "konst"
 version = "0.2.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"

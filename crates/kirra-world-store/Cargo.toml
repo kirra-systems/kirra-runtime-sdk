@@ -1,0 +1,13 @@
+[package]
+name = "kirra-world-store"
+version = "0.1.0"
+edition = "2021"
+description = "Kirra World storage adapter — PROTOTYPE crate graph only, no storage (ADR-0040 WM-1)"
+publish = false
+
+# Depends on the domain core ONLY. Whether this seam earns its own crate is
+# ADR-0040 open question 1, and collapsing it into a `kirra-world` feature is
+# pre-authorized there if the graph shows it does not. See the crate docs for
+# what this prototype can and cannot settle about that.
+[dependencies]
+kirra-world = { path = "../kirra-world" }

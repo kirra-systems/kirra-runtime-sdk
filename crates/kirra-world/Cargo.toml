@@ -1,0 +1,12 @@
+[package]
+name = "kirra-world"
+version = "0.1.0"
+edition = "2021"
+description = "Kirra World domain core — PROTOTYPE crate graph only, no domain logic (ADR-0040 WM-1)"
+publish = false
+
+# ZERO dependencies, deliberately. ADR-0040's ratification criteria ask for
+# "kirra-world compiling as a leaf with no ROS, no actuation, and no checker
+# edge". A leaf with no dependency section cannot acquire one by accident, and
+# ci/check_kirra_world_bidirectional_fence.py now verifies that rather than
+# reporting "Kirra World packages not present yet".

@@ -299,9 +299,58 @@ remain the operative coordinate source until an import path is proven.
 
 ---
 
+## Prototype crate-graph findings
+
+Built as `crates/kirra-world`, `-store`, `-service` — three crates of
+**unconstructible placeholder types with no fields, no logic, no storage and no
+API**. Recorded here because a prototype's value is what it *rules out*, and
+because the boundary between what it settled and what it did not is easy to
+overstate.
+
+**Confirmed.**
+
+| Claim | Result |
+|---|---|
+| `kirra-world` compiles as a leaf | **0 dependencies** — no dependency section at all, so it cannot acquire one silently |
+| No ROS / actuation / checker edge | Fence A **INTACT** across all three crates |
+| Safety closure unaffected | Still **19 workspace packages**; nothing in it reaches `kirra-world*` |
+| The proposed three-node shape compiles | `-service → -store → kirra-world` builds, `cargo fmt` and `clippy -D warnings` clean |
+
+**The fence is now live rather than reserved.** It previously reported *"Kirra
+World packages not present yet — reserved fence validated"*; it now reports
+**3 packages present** and checks them. Both directions were exercised against
+the real crates, not fixtures:
+
+- adding `kirra-release-token` to `kirra-world-service` → **Fence A breach**,
+  naming the path `kirra-world-service -> kirra-release-token`;
+- adding `kirra-world` to `kirra-trajectory` → **Fence B breach**, naming
+  `kirra-ros2-adapter -> kirra-trajectory -> kirra-world`.
+
+**Open question 1 is NOT closed.** The graph shows what the seam is *for*: a
+consumer can depend on `kirra-world` alone and get the domain vocabulary with no
+storage dependency — a future doer-side adapter that only needs to name entities
+would not link a database. What it cannot show is whether that is worth the
+maintenance cost, because **an empty crate splits cleanly from anything**. If no
+second backend appears and nothing ever depends on the core without the store,
+the honest answer will be that the seam did not earn its keep, and the collapse
+into a `kirra-world` feature is already pre-authorized above for exactly that
+outcome. Deciding it needs the storage implementation that ADR-0041 gates behind
+measurement.
+
+**What this does not do.** It ratifies nothing. All four World Model ADRs remain
+**Proposed**. The safety-assurance scope ruling (ADR-0042 Decision 5) is still
+**PENDING and unassigned**, and the first real domain-types work stays gated
+behind it — the placeholders are unconstructible precisely so that gate cannot
+be crossed by accident while it is open.
+
+---
+
 ## Open questions
 
 1. Does `kirra-world-store` earn its separation? Prototype graph decides.
+   **Partially answered — see *Prototype crate-graph findings*. The seam's
+   purpose is demonstrated; its cost/benefit is not, and cannot be until storage
+   exists. Remains open.**
 2. Should the destination resolver migrate to a consumer in the first
    implementation phase, or later once the store is proven?
 3. Who owns `Capability` — the agent or the World Model? The blueprint keeps it
@@ -318,8 +367,9 @@ remain the operative coordinate source until an import path is proven.
 
 - [ ] **Repository dependency review** — the proposed crate graph reviewed
       against the existing workspace
-- [ ] **Prototype crate graph** — `kirra-world` compiling as a leaf with no
-      ROS, no actuation, and no checker edge (ADR-0039 baseline preserved)
+- [x] **Prototype crate graph** — `kirra-world` compiling as a leaf with no
+      ROS, no actuation, and no checker edge (ADR-0039 baseline preserved).
+      **Built; findings below. Ratifies nothing else in this ADR.**
 - [ ] **Compatibility inventory** — each row of the compatibility table
       confirmed by its current owner
 - [ ] **Deployment ownership decision** — who runs it, where it stores, who
