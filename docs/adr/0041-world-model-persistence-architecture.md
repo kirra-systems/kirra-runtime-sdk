@@ -392,10 +392,15 @@ source; they are not migrated destructively (ADR-0040).
 
 ## Open questions
 
-1. `synchronous` policy per source class — measurement required. **Target data
-   exists but is not yet usable:** the `NORMAL`/batch=64 row is corrupted by the
-   ~29 s stall of open question 9, and the durability ordering inverts at
-   batch=64. A policy must not be fixed from that run.
+1. `synchronous` policy per source class — measurement required. **Now
+   measurable, and one obstacle removed.** The stall matrix (D-10) supplies
+   stall-robust median throughputs, so the corrupted `NORMAL`/batch=64 figure is
+   superseded: 19 351 ev/s across 20 runs rather than the single run's 3 123.
+   **The batch=64 inversion survives that correction, however** — medians run
+   `OFF` 55 275 > `FULL` 31 497 > `NORMAL` 19 351, from a configuration with
+   zero stalls. `NORMAL` slower than `FULL` is not predicted by any durability
+   model, and until it is explained a per-source-class policy should not be
+   fixed at batch=64. The batch=1 ordering is correct and could be decided now.
 2. Retention classes: exact list and their durations. The harness models the
    §11.3 protected set (safety, incident, calibration, adjudication, operator)
    and enforces it — a window containing any of them is refused whole — but the
@@ -431,21 +436,23 @@ source; they are not migrated destructively (ADR-0040).
    8 GiB ceiling. WM-2 must choose: bound the store, migrate lazily/online, or
    accept a documented maintenance window. The third conflicts with an
    available robot, so it needs stating explicitly if chosen.
-9. **The ~29 s write stall (O-1).** One commit under `NORMAL`/batch=64 took
-   29.27 s on NVMe — ~293 unrecordable observations at 10 Hz. Cause unknown;
-   ext4 journal commit, NVMe garbage collection and thermal/power management
-   are all candidates and are distinguishable only by re-running. Blocks open
-   question 1. **An instrument now exists** (`stall`, drill §9a): it repeats the
-   configuration to establish a *rate*, reports a median throughput that one
-   pathological run cannot move, and samples PSI I/O, block-layer busy time,
-   dirty/writeback peak and thermal across each run to narrow the cause. Its
-   attribution is deliberately reluctant — `UNATTRIBUTED` unless one cause is
-   clear — because a confident wrong attribution closes the investigation.
-   **Not yet run on target.**
-10. **Graph-query placement (D-1).** At 13.4 ms p99 — 1 496× the point family,
-   and 6.5× worse in *ratio* on target than on host — bounded-depth reach
-   cannot sit on a deadline path. Whether any planned consumer needs it there
-   is unresolved; if one does, that is the trigger to re-evaluate Option B.
+9. **Multi-second write stalls (O-1, D-10).** **Measured on target; the
+   original theory is rejected and the mechanism is partly unresolved.**
+   `NORMAL`/batch=64 — the suspect — produced **zero** stalls in 20 repetitions.
+   The stalls appeared in `FULL`/batch=64 and `NORMAL`/batch=1 instead: 3 events
+   in 120 repetitions, crossing both fsyncing modes and both batch sizes.
+   Classified **intermittent and block-device/environment-correlated**. Thermal
+   is *ruled out by measurement* (hottest zone 59.6 °C against an 85 °C
+   threshold). What remains unknown is the mechanism: one `IO-DEVICE`
+   attribution held loosely, one `UNATTRIBUTED`, PSI unavailable on this kernel,
+   and no SMART data. See the follow-ups in *Design implications*.
+10. **Graph and temporal query placement (D-1, D-9).** Neither may sit on a
+   deadline path, and the sweep sharpens by how much. At 100 000 entities the
+   graph family is 159 ms p99 (1.6× a 10 Hz period) and the temporal family is
+   **10.5 s p99** (105×). Both scale acceptably in *shape*; neither is
+   interactive at that size. Whether a planned consumer needs either at tick
+   rate is unresolved — if one does, that is a re-evaluation trigger, and it is
+   now a question about absolute latency rather than about scaling.
 
 ---
 
@@ -542,15 +549,19 @@ satisfied, and none may be ticked from a `HOST-INDICATIVE-NOT-TARGET` run:**
 | [ ] | **Corruption / restart experiment** — power-loss-class behaviour, in the spirit of the existing audit-chain crash-consistency drill | `crash` tiers A and B; **tier C is manual** (drill §8) and this gate is not complete without it | **Partial** — A and B PASS; **tier C `NOT-RUN`, 0 of 5 trials** |
 | [x] | **Storage growth estimate** — observations/day at realistic sensor rates, projected against the device budget | `growth` | **Met — and adverse.** See D-2 |
 | [x] | **Migration proof of concept** — a schema change applied to a populated store, fail-closed on a future schema version | `migrate` | **Met — and adverse.** See D-6 |
-| [ ] | Scale assumptions confirmed or corrected; if materially wrong, Option B is re-evaluated before acceptance | the drill §9 sweep, which now emits a **computed** verdict against this ADR's own reopening condition; what the deployed robot actually reaches remains an operational fact the harness cannot produce | **Open** — see D-2 and D-8; the sweep has not been run on target |
+| [x] | Scale assumptions confirmed or corrected; if materially wrong, Option B is re-evaluated before acceptance | the drill §9 sweep, emitting a **computed** verdict against this ADR's own reopening condition | **Met — and Option A survives.** Graph `SUBLINEAR` (0.45), temporal `LINEAR` (1.14), both on target. See D-9. What the deployed robot actually reaches remains an operational fact no benchmark produces |
 
-**Two gates remain open, and one of them cannot be closed from software.** Tier C
+**One gate remains open, and it cannot be closed from software.** Tier C
 requires five physical power cuts (drill §8, `powercut arm` / `powercut verify`);
-the harness reports `NOT-RUN` at `0/5` and will continue to. Until both are
-closed this ADR stays **Proposed**.
+the harness reports `NOT-RUN` at `0/5` and will continue to. Until it is closed
+this ADR stays **Proposed**.
+
+Six of the seven gates now read *Met*. That is not an argument for acceptance —
+the remaining one is the durability gate, and no quantity of scale and latency
+evidence substitutes for it.
 
 **No implementation should begin merely because this proposed ADR exists**, and
-in particular not because five of the seven gates now read *Met*. The domain-logic
+in particular not because six of the seven gates now read *Met*. The domain-logic
 gate (ADR-0042 Decision 5) is a separate and independent hold.
 
 ---
@@ -773,10 +784,120 @@ observations, not the same observations spread thinner), and the classifier
 **refuses** a steeply falling curve as `INSUFFICIENT` with the reason and the
 fix rather than praising it.
 
-No target sweep has been run, so the scale gate remains open. What changed is
-that it can now be closed with a verdict instead of an impression.
+What this changed was that the gate could then be closed with a verdict instead
+of an impression. **It since has been — see D-9**, which records the target
+sweep and its two verdicts. This section is the account of how the instrument
+came to be trustworthy; D-9 is the result it produced.
 
-### O-1 — an unexplained ~29 second write stall (open, needs a re-run)
+### D-9 — the scale gate closes: Option A survives on target
+
+Evidence: `docs/evidence/wm2-jetson-scale-stall-20260803/`,
+`JETSON-TARGET-MEASURED`, harness `ba818b0b22b3`, constant density at 100
+observations per entity.
+
+| Entities | Events | `graph_bounded_reach` median / p99 | `temporal_changes_since` median / p99 |
+|---:|---:|---:|---:|
+| 1 000 | 100 000 | 11.46 / 13.56 ms | 28.44 / 61.64 ms |
+| 10 000 | 1 000 000 | 50.92 / 71.43 ms | 427.76 / 751.68 ms |
+| 100 000 | 10 000 000 | **91.95 / 158.95 ms** | **5 536.23 / 10 503.70 ms** |
+
+| Family | Verdict | Overall slope | Segments |
+|---|---|---:|---|
+| `graph_bounded_reach` | **`SUBLINEAR`** | **0.45** | 0.65 → 0.26 |
+| `temporal_changes_since` | **`LINEAR`** | **1.14** | 1.18 → 1.11 |
+
+**Neither curve bends upward.** The reopening condition in *Provisional scale
+assumptions* — "entities in the millions or genuinely unbounded ad-hoc
+traversal" — is not met at 100 000 entities and 10 M events. The graph
+exponent *falls* along the ladder. Option A stands, and the claim that graph
+shape belongs in an index rather than the substrate survives its sharpest test.
+
+**The verdict is about shape, and the shape is not the whole story.** At the top
+rung 100× the entities costs 8.0× (graph) and **195×** (temporal) the time.
+Against a 100 ms (10 Hz) period, the p99s are **1.6×** and **105×**
+respectively. A 10.5-second p99 is linear *and* unusable interactively; the two
+are not in tension, and reading `LINEAR` as reassurance would be the error this
+row exists to prevent.
+
+What is still not established is what entity counts a deployed robot actually
+reaches. That is an operational fact no benchmark produces, and this ADR said
+so before the measurement. The gate is met; the assumption is not thereby
+confirmed for all time.
+
+### D-10 — the stall theory is rejected, and the mechanism is partly unresolved
+
+Six configurations, 20 repetitions each, all exiting 0.
+
+| Config | Stalls | Worst commit | Median throughput | Attribution |
+|---|---:|---:|---:|---|
+| `FULL` batch 1 | 0/20 | 18.75 ms | 3 099 ev/s | `NO-STALL` |
+| `FULL` batch 64 | **2/20** | **19 644.91 ms** | 31 497 ev/s | `UNATTRIBUTED` |
+| `NORMAL` batch 1 | **1/20** | **12 864.32 ms** | 5 143 ev/s | `IO-DEVICE` |
+| `NORMAL` batch 64 | 0/20 | 63.16 ms | 19 351 ev/s | `NO-STALL` |
+| `OFF` batch 1 | 0/20 | 29.83 ms | 15 079 ev/s | `NO-STALL` |
+| `OFF` batch 64 | 0/20 | 4.00 ms | 55 275 ev/s | `NO-STALL` |
+
+**O-1's theory is rejected.** The 29.27 s event was recorded under
+`NORMAL`/batch=64, which made that configuration the suspect. Twenty repetitions
+of exactly it produced **zero** stalls, worst commit **63 ms** — three orders of
+magnitude below the original. The stalls appeared in `FULL`/batch=64 and
+`NORMAL`/batch=1 instead, neither of which was suspected. A single observation
+had pointed at the wrong variable, which is what a single observation is prone
+to do.
+
+**Classification: intermittent, block-device/environment-correlated, mechanism
+partly unresolved.**
+
+- **Intermittent** — 3 in 120 (2.5 %). Rare enough that a single run misses it,
+  as four of six configurations here did.
+- **Not durability-specific** — it crossed both fsyncing modes and both batch
+  sizes. `synchronous` is the only variable the harness controls, so a stall
+  indifferent to it is not explained by it.
+- **Never seen under `OFF`** — 0/40 against 3/80 for the fsyncing modes.
+  Suggestive that fsync is involved; three events cannot carry that claim, and
+  it is recorded as a hypothesis rather than a finding.
+- **Thermal ruled out by measurement.** Hottest zone across all six runs:
+  **59.6 °C**, against the 85 °C threshold. Not an assumption — a reading.
+- **One attribution, held loosely.** `IO-DEVICE` on `NORMAL`/batch=1 (block
+  layer busy, no large dirty backlog → NVMe garbage collection or an SLC-cache
+  cliff). `UNATTRIBUTED` on `FULL`/batch=64, which is the expected outcome and
+  not a failure.
+
+Two measurement limits bound how far that attribution can be pushed. **PSI was
+unavailable on this kernel** (`psi_io_stall_us` is `None` in every record), so
+one of the two I/O signals was simply absent. And **the counter delta is taken
+across a whole repetition while the stall is a single commit**, which can
+over-state I/O evidence.
+
+**The stall-robust medians resolve the corrupted benchmark row** — and expose
+something else. `NORMAL`/batch=64 reads 19 351 ev/s across 20 runs against the
+original 3 123, confirming that row was a stall artefact. But at batch=64 the
+medians run `OFF` 55 275 > `FULL` 31 497 > `NORMAL` 19 351: **`NORMAL` slower
+than `FULL`**, from a configuration with zero stalls. No durability model
+predicts that. It is not a tail artefact and it is not explained; open question
+1 should not be settled at batch=64 until it is.
+
+### D-11 — design implications the measurement forces
+
+Not decisions, and not part of this ADR's proposal. They follow from D-9 and
+D-10 and belong in WM-2's design:
+
+| Implication | Because |
+|---|---|
+| **Semantic persistence must not block safety or actuation** | a 10.5 s p99 query and a 19.6 s stall are equally fatal to a loop that waits on either, and this holds whether or not the stall is ever explained |
+| **Bounded queue** between producers and the store | so a slow write applies backpressure to a queue rather than to the caller |
+| **Explicit backpressure / shed semantics** | dropping observations must be a declared behaviour with a recorded reason, never an emergent one |
+| **Latency watchdog** on store operations | the stall is intermittent at 2.5 %; only continuous monitoring catches it in the field |
+| **Writer isolation** | the checker and actuation path must not share a thread, connection or lock with the world-model writer |
+| **SMART telemetry capture** | `nvme smart-log` was absent, and it is what would confirm or refute the `IO-DEVICE` reading |
+
+### O-1 — the original ~29 second write stall (SUPERSEDED by D-10)
+
+> **Retained as the historical record.** The theory below — that the stall was a
+> property of `NORMAL`/batch=64 — was **tested on target and rejected**: that
+> configuration produced zero stalls in 20 repetitions. See D-10. What survives
+> is the observation itself and the reasoning about why `max` beside `p99`
+> mattered; the attribution does not.
 
 | Durability | Batch | Throughput | p99 | max |
 |---|---|---|---|---|

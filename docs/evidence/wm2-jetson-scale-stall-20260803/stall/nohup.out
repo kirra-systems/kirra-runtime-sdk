@@ -1,0 +1,55 @@
+nohup: ignoring input
+wm2-persistence-harness — ADR-0041 (WM-2) measurement, NOT the Kirra World store
+  database        : /var/lib/kirra/wm2/stall-full-batch1.sqlite
+  stand-in schema : 630eb690aaef3df32690c39c283f6c3b30c60ac04264a84d95051cfaf29c3292
+  sqlite          : 3.45.0
+  evidence status : JETSON-TARGET-MEASURED
+  -> citable in ADR-0041's ratification checklist.
+
+
+Done. Results are JETSON-TARGET-MEASURED.
+wm2-persistence-harness — ADR-0041 (WM-2) measurement, NOT the Kirra World store
+  database        : /var/lib/kirra/wm2/stall-full-batch64.sqlite
+  stand-in schema : 630eb690aaef3df32690c39c283f6c3b30c60ac04264a84d95051cfaf29c3292
+  sqlite          : 3.45.0
+  evidence status : JETSON-TARGET-MEASURED
+  -> citable in ADR-0041's ratification checklist.
+
+
+Done. Results are JETSON-TARGET-MEASURED.
+wm2-persistence-harness — ADR-0041 (WM-2) measurement, NOT the Kirra World store
+  database        : /var/lib/kirra/wm2/stall-normal-batch1.sqlite
+  stand-in schema : 630eb690aaef3df32690c39c283f6c3b30c60ac04264a84d95051cfaf29c3292
+  sqlite          : 3.45.0
+  evidence status : JETSON-TARGET-MEASURED
+  -> citable in ADR-0041's ratification checklist.
+
+
+Done. Results are JETSON-TARGET-MEASURED.
+wm2-persistence-harness — ADR-0041 (WM-2) measurement, NOT the Kirra World store
+  database        : /var/lib/kirra/wm2/stall-normal-batch64.sqlite
+  stand-in schema : 630eb690aaef3df32690c39c283f6c3b30c60ac04264a84d95051cfaf29c3292
+  sqlite          : 3.45.0
+  evidence status : JETSON-TARGET-MEASURED
+  -> citable in ADR-0041's ratification checklist.
+
+
+Done. Results are JETSON-TARGET-MEASURED.
+wm2-persistence-harness — ADR-0041 (WM-2) measurement, NOT the Kirra World store
+  database        : /var/lib/kirra/wm2/stall-off-batch1.sqlite
+  stand-in schema : 630eb690aaef3df32690c39c283f6c3b30c60ac04264a84d95051cfaf29c3292
+  sqlite          : 3.45.0
+  evidence status : JETSON-TARGET-MEASURED
+  -> citable in ADR-0041's ratification checklist.
+
+
+Done. Results are JETSON-TARGET-MEASURED.
+wm2-persistence-harness — ADR-0041 (WM-2) measurement, NOT the Kirra World store
+  database        : /var/lib/kirra/wm2/stall-off-batch64.sqlite
+  stand-in schema : 630eb690aaef3df32690c39c283f6c3b30c60ac04264a84d95051cfaf29c3292
+  sqlite          : 3.45.0
+  evidence status : JETSON-TARGET-MEASURED
+  -> citable in ADR-0041's ratification checklist.
+
+
+Done. Results are JETSON-TARGET-MEASURED.
