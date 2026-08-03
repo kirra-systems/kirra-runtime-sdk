@@ -101,6 +101,14 @@ EXIT_USAGE = 2
 
 # Every field the ruling record must carry. A ruling missing any of them is not
 # a ruling; it is an intention.
+# The owner is tracked separately from the rest: assigning accountability and
+# taking the decision are two different events, and a gate that could not tell
+# them apart would report "not recorded" identically before and after someone
+# accepted responsibility for producing the ruling. That erases a real state
+# change, and the whole reason this file exists is that invisible states are the
+# ones that drift.
+OWNER_FIELD = "Owner"
+
 REQUIRED_FIELDS = (
     "Owner",
     "Date",
@@ -150,6 +158,16 @@ class Ruling:
     @property
     def recorded(self) -> bool:
         return not self.problems
+
+    @property
+    def owner(self) -> str | None:
+        """The named owner, or None if still a placeholder."""
+        value = self.fields.get(OWNER_FIELD, "")
+        return value if value.strip().lower() not in PLACEHOLDERS else None
+
+    @property
+    def owner_assigned(self) -> bool:
+        return self.owner is not None
 
 
 def parse_ruling(text: str) -> Ruling | None:
@@ -305,6 +323,7 @@ def check(root: Path, verbose: bool) -> tuple[int, list[str]]:
     all_dirs = fence.crate_dirs(manifests)
     notes.append(f"kirra-world* packages: {len(world)}")
     notes.append(f"ruling status: {ruling.status}")
+    notes.append(f"ruling owner: {ruling.owner or '(unassigned)'}")
 
     if ruling.recorded:
         owner = ruling.fields.get("Owner", "?")
@@ -346,15 +365,26 @@ def check(root: Path, verbose: bool) -> tuple[int, list[str]]:
             findings.extend(scan_source(pkg, src, str(src.relative_to(root))))
 
     if not findings:
-        print("Kirra World domain-logic gate: HOLDING")
-        print(f"  ADR-0042 Decision 5 ruling is NOT recorded ({len(ruling.problems)} gap(s)):")
+        if ruling.owner_assigned:
+            print("Kirra World domain-logic gate: HOLDING (owner assigned, ruling pending)")
+            print(f"  ADR-0042 Decision 5 is OWNED by: {ruling.owner}")
+            print(f"  The ruling itself is not yet made ({len(ruling.problems)} field(s) outstanding):")
+        else:
+            print("Kirra World domain-logic gate: HOLDING (UNOWNED)")
+            print("  ADR-0042 Decision 5 has no named owner and no ruling.")
+            print(f"  {len(ruling.problems)} gap(s):")
         for p in ruling.problems:
             print(f"    - {p}")
         print(f"  {len(world)} kirra-world* package(s) contain shape only. Nothing to block.")
         print()
-        print("  No Kirra World domain implementation may merge until that ruling is")
-        print("  assigned to a named owner and recorded. Record it in")
-        print(f"  {ADR_PATH} and this gate releases itself.")
+        if ruling.owner_assigned:
+            print("  Accountability is assigned; the decision is not taken. Domain")
+            print("  implementation stays blocked until the ruling is recorded in")
+            print(f"  {ADR_PATH}, at which point this gate releases itself.")
+        else:
+            print("  No Kirra World domain implementation may merge until that ruling is")
+            print("  assigned to a named owner and recorded. Record it in")
+            print(f"  {ADR_PATH} and this gate releases itself.")
         return EXIT_OK, notes
 
     print("Kirra World domain-logic gate: BLOCKED\n")

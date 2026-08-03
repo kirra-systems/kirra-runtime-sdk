@@ -423,6 +423,86 @@ def t24_the_real_world_crates_are_still_shape_only() -> None:
     )
 
 
+OWNED_PENDING_RULING = """
+```
+Safety-assurance ruling: PENDING
+
+Owner: A. Named Person
+Owner assigned: 2026-08-03
+Date: UNASSIGNED
+Scope classification: UNASSIGNED
+Rationale: UNASSIGNED
+Assumptions: UNASSIGNED
+Required evidence: UNASSIGNED
+Conditions that reopen the decision: UNASSIGNED
+```
+"""
+
+
+def t25_an_assigned_owner_does_not_release_the_gate() -> None:
+    """Assigning accountability is not taking the decision. The gate must keep
+    holding, or naming someone would silently unblock domain work."""
+    fx = Fixture(ruling=OWNED_PENDING_RULING)
+    try:
+        fx.world_crate("kirra-world", "pub struct EntityId(u128);\n")
+        expect(gate.EXIT_BLOCKED, fx, "25 an assigned owner alone does not release the gate")
+    finally:
+        fx.close()
+
+
+def t26_an_assigned_owner_is_visible_and_distinct_from_unowned() -> None:
+    """The state change this models: before, both cases printed the same thing,
+    so accepting responsibility was invisible in CI."""
+    owned = Fixture(ruling=OWNED_PENDING_RULING)
+    unowned = Fixture(ruling=PENDING_RULING)
+    try:
+        r_owned = gate.parse_ruling((owned.root / gate.ADR_PATH).read_text())
+        r_unowned = gate.parse_ruling((unowned.root / gate.ADR_PATH).read_text())
+        record(
+            r_owned.owner_assigned and r_owned.owner == "A. Named Person",
+            "26 an assigned owner is parsed and named",
+            f"got owner={r_owned.owner!r}",
+        )
+        record(
+            not r_unowned.owner_assigned,
+            "26b an UNASSIGNED owner is not treated as assigned",
+            f"got owner={r_unowned.owner!r}",
+        )
+        # Neither is recorded — the distinction is orthogonal to release.
+        record(
+            not r_owned.recorded and not r_unowned.recorded,
+            "26c neither state counts as a recorded ruling",
+        )
+    finally:
+        owned.close()
+        unowned.close()
+
+
+def t27_a_placeholder_owner_is_not_an_assignment() -> None:
+    for owner in ("TBD", "the safety-assurance owner", "UNASSIGNED", ""):
+        fx = Fixture(ruling=OWNED_PENDING_RULING.replace("A. Named Person", owner))
+        try:
+            r = gate.parse_ruling((fx.root / gate.ADR_PATH).read_text())
+            record(
+                not r.owner_assigned,
+                f"27 owner `{owner or '(empty)'}` is not an assignment",
+                f"got owner={r.owner!r}",
+            )
+        finally:
+            fx.close()
+
+
+def t28_the_real_adr_names_an_owner() -> None:
+    """Against the shipped ADR. If this fails, the owner was removed."""
+    text = (CI.parent / gate.ADR_PATH).read_text(encoding="utf-8")
+    r = gate.parse_ruling(text)
+    record(
+        r is not None and r.owner_assigned,
+        f"28 ADR-0042 names a real safety-assurance owner ({r.owner if r else '?'})",
+        "the ruling block has no named owner",
+    )
+
+
 ALL = [v for k, v in sorted(globals().items()) if k.startswith("t") and k[1:3].isdigit()]
 
 

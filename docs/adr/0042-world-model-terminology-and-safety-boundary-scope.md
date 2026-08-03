@@ -395,10 +395,18 @@ as `TBD` or the role name `the safety-assurance owner`, counts as unrecorded: a
 role cannot be accountable for a decision, which is the point of naming a
 person.
 
+**Ownership is assigned; the ruling is not made.** These are separate states and
+the gate now reports them separately. An owner exists and is accountable for
+producing the decision — that is real progress and is visible in CI — but the
+decision itself has not been taken, so the gate continues to hold and
+`kirra-world*` stays declaration-only. The remaining `UNASSIGNED` fields are the
+ruling, not the ownership.
+
 ```
 Safety-assurance ruling: PENDING
 
-Owner: UNASSIGNED
+Owner: Justin Looney
+Owner assigned: 2026-08-03
 Date: UNASSIGNED
 Scope classification: UNASSIGNED
 Rationale: UNASSIGNED
