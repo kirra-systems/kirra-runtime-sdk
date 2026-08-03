@@ -59,3 +59,8 @@ mutants.out.old/
 # describes one model on one machine at one moment.
 robot/contract_reports/
 *.assistant-contract.json
+
+# WM-2 persistence harness — workspace-detached (own lockfile + target dir),
+# same treatment as tools/iceoryx2-spike.
+/tools/wm2-persistence-harness/Cargo.lock
+/tools/wm2-persistence-harness/target/

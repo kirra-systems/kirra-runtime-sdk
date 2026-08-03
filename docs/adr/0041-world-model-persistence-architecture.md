@@ -331,24 +331,64 @@ source; they are not migrated destructively (ADR-0040).
 
 ---
 
+## Measurement harness
+
+The instrument for the gates below exists:
+[`tools/wm2-persistence-harness`](../../tools/wm2-persistence-harness/), with
+the operator runbook at
+[`docs/hardware/JETSON_WM2_PERSISTENCE_DRILL.md`](../hardware/JETSON_WM2_PERSISTENCE_DRILL.md).
+
+**Its existence ratifies nothing and ticks nothing.** It is workspace-detached,
+depends on `rusqlite` alone, and is covered by ADR-0039's Fence A as an extra
+root — so it cannot become a dependency of anything, and a transport crate added
+to it reds CI exactly as one added to `kirra-world` would.
+
+Three properties of the harness are load-bearing for how its output may be used.
+
+**It is not the store, and is built so it cannot quietly become one.** The
+schema it benchmarks is a *stand-in* — this ADR states that column-level schemas
+are deliberately not fixed, so anything concrete enough to measure is
+necessarily invented. Every emitted record therefore carries the stand-in
+schema's SHA-256, and when the real schema is ratified its digest will differ,
+making an old measurement visibly about something else rather than quietly
+authoritative. The harness also uses a local SHA-256 with a harness-only domain
+tag rather than `kirra-audit-hash`, precisely so its bytes cannot be mistaken
+for the on-disk format the store will owe.
+
+**It refuses to let a host run be cited.** Following the `TBD-QNX-TARGET`
+convention already used for governor timing, every record is stamped
+`JETSON-TARGET-MEASURED` or `HOST-INDICATIVE-NOT-TARGET`. The first requires
+both machine corroboration (aarch64, Tegra evidence, a durable filesystem under
+the database, a release build) *and* an explicit operator assertion — neither
+alone. A `tmpfs` path forfeits target status outright, because a run that never
+fsyncs produces the best numbers the harness can emit while measuring none of
+the property open question 1 is about.
+
+**It reports what it cannot establish.** The corruption gate is three tiers:
+`SIGKILL` crash-consistency and WAL-loss prefix validity are automated; the
+actual power cut is not, because nothing in software distinguishes an honest
+`fsync` from a device cache that acknowledged and buffered it. The harness
+always reports that tier as `NOT-RUN` with the reason attached, so a results
+file can never imply a durability test that did not happen.
+
+---
+
 ## Ratification criteria
 
-**Proposed. Measurement-gated.** Accepted only when **all** are recorded:
+**Proposed. Measurement-gated.** Accepted only when **all** are recorded.
+The right-hand column names the instrument, not a result — **no gate below is
+satisfied, and none may be ticked from a `HOST-INDICATIVE-NOT-TARGET` run:**
 
-- [ ] **Measured Jetson prototype** — the log + projection path on target
-      hardware, not a development host
-- [ ] **Replay benchmark** — full rebuild time at the assumed observation
-      volume, with the checkpointed case measured separately
-- [ ] **Representative query benchmark** — one measurement per query family in
-      blueprint §12 (point, set, graph, temporal)
-- [ ] **Corruption / restart experiment** — power-loss-class behaviour, in the
-      spirit of the existing audit-chain crash-consistency drill
-- [ ] **Storage growth estimate** — observations/day at realistic sensor rates,
-      projected against the device budget
-- [ ] **Migration proof of concept** — a schema change applied to a populated
-      store, fail-closed on a future schema version
-- [ ] Scale assumptions confirmed or corrected; if materially wrong, Option B
-      is re-evaluated before acceptance
+| | Gate | Produced by |
+|---|---|---|
+| [ ] | **Measured Jetson prototype** — the log + projection path on target hardware, not a development host | the whole run, only when it reports `JETSON-TARGET-MEASURED` |
+| [ ] | **Replay benchmark** — full rebuild time at the assumed observation volume, with the checkpointed case measured separately | `replay` (also asserts rebuild-equals-incremental determinism, which gates the rest) |
+| [ ] | **Representative query benchmark** — one measurement per query family in blueprint §12 (point, set, graph, temporal) | `query`, plus a separate bitemporal point query the projection cannot answer |
+| [ ] | **Corruption / restart experiment** — power-loss-class behaviour, in the spirit of the existing audit-chain crash-consistency drill | `crash` tiers A and B; **tier C is manual** (drill §6) and this gate is not complete without it |
+| [ ] | **Storage growth estimate** — observations/day at realistic sensor rates, projected against the device budget | `growth` |
+| [ ] | **Migration proof of concept** — a schema change applied to a populated store, fail-closed on a future schema version | `migrate` |
+| [ ] | Scale assumptions confirmed or corrected; if materially wrong, Option B is re-evaluated before acceptance | the drill §7 sweep informs it; what the deployed robot actually reaches is an operational fact the harness cannot produce |
 
 **No implementation should begin merely because this proposed ADR exists.**
-Merging this PR satisfies none of the above.
+Merging this PR satisfies none of the above, and neither does the existence of
+the harness.

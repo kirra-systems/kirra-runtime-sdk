@@ -1,0 +1,328 @@
+# Jetson WM-2 persistence drill (ADR-0041)
+
+The on-device measurement that ADR-0041 is blocked on. That ADR proposes a
+SQLite append-only event log with materialized projections for Kirra World and
+then refuses to ratify itself on argument:
+
+> **Proposed. Measurement-gated.** Accepted only when **all** are recorded […]
+> **No implementation should begin merely because this proposed ADR exists.**
+
+This drill produces those recordings. The instrument is
+[`tools/wm2-persistence-harness`](../../tools/wm2-persistence-harness/).
+
+> **The harness is not the Kirra World store.** Its schema is a stand-in, its
+> hash chain is a deliberately-different local SHA-256, and it is
+> workspace-detached so nothing can depend on it. Lifting code out of it into
+> `kirra-world-store` is a defect, not a shortcut — the store must use
+> `kirra-audit-hash` and a ratified schema, neither of which this has.
+
+---
+
+## 0. What this drill can and cannot establish
+
+| Ratification gate | Established here | By |
+|---|---|---|
+| Measured Jetson prototype | ✅ | the whole run, if it reports `JETSON-TARGET-MEASURED` |
+| Replay benchmark (full + checkpointed) | ✅ | `replay` |
+| Query benchmark, one per §12 family | ✅ | `query` |
+| Corruption / restart experiment | ⚠️ **partly** | `crash` tiers A and B; **tier C is manual, §6** |
+| Storage growth estimate | ✅ | `growth` |
+| Migration proof of concept | ✅ | `migrate` |
+| Scale assumptions confirmed or corrected | ⚠️ **partly** | the §7 sweep informs it; the operational answer needs real deployment |
+
+Two of the seven are deliberately marked partial. Marking them complete on the
+strength of this harness alone would be the exact failure the measurement gate
+exists to prevent.
+
+---
+
+## 1. Prerequisites
+
+- **A Jetson Orin** (NX or AGX). Per
+  [`TARGET_PLATFORM_MATRIX.md`](TARGET_PLATFORM_MATRIX.md) a Jetson is a *doer*,
+  never the governor's cert target — which is exactly right here: Kirra World
+  runs on the doer side, and this is the machine it will actually live on.
+- **Real storage.** The database must sit on the medium the deployment will use
+  (eMMC, NVMe, or the microSD the robot actually boots from). The harness
+  **refuses** target status on `tmpfs`, `overlay`, `ramfs`, `aufs` and
+  `squashfs` — see §3.
+- **A release build.** A debug build measures rustc, and the harness refuses
+  that too.
+- Rust toolchain on the Orin (or cross-compile for `aarch64-unknown-linux-gnu`).
+- Roughly **2 GiB free** at the default volume, and more for the §7 sweep.
+
+```sh
+cd tools/wm2-persistence-harness
+cargo build --release
+```
+
+The harness has exactly one dependency (`rusqlite`, bundled). That is a
+constraint, not a coincidence: `ci/check_kirra_world_bidirectional_fence.py`
+walks this manifest as an extra Fence A root, so adding a transport crate to it
+reds CI the same as adding one to `kirra-world` itself.
+
+---
+
+## 2. Run it
+
+```sh
+sudo mkdir -p /var/lib/kirra/wm2 && sudo chown "$USER" /var/lib/kirra/wm2
+
+./target/release/wm2-persistence-harness all \
+    --db   /var/lib/kirra/wm2/bench.sqlite \
+    --out  ~/wm2-results-$(date +%Y%m%d).jsonl \
+    --events 100000 \
+    --entities 1000 \
+    --assert-target
+```
+
+Expect **tens of minutes**. The append benchmark alone runs six configurations
+(three `synchronous` settings × two batch sizes), and the `FULL`/`batch=1` case
+is one fsync per event by construction.
+
+Individual stages run on their own: `platform`, `append`, `replay`, `query`,
+`growth`, `migrate`, `crash`. Start with `platform` — it prints, in about a
+millisecond, whether anything you run afterwards will be citable.
+
+Exit status is `1` if any measurement failed **or was unusable** (a query family
+that matched nothing, a non-deterministic rebuild, a crash tier that failed).
+
+---
+
+## 3. `--assert-target` is an assertion, not a flag
+
+A run is citable in ADR-0041's checklist only when it reports
+`JETSON-TARGET-MEASURED`, which requires **both**:
+
+1. the machine corroborates it — aarch64, Tegra evidence
+   (`/etc/nv_tegra_release` or a Jetson/Tegra device-tree model), a durable
+   filesystem under the database, a release build; **and**
+2. you pass `--assert-target`.
+
+Neither half is sufficient, and the asymmetry is deliberate. Detection alone
+would let a dev-rig run under conditions nobody inspected become evidence
+silently. Assertion alone would make the flag a rubber stamp — so it cannot
+override the facts, and a laptop run with `--assert-target` is still
+`HOST-INDICATIVE-NOT-TARGET`.
+
+**What you are asserting** when you pass it: this is the real device, the
+database is on the storage the deployment will use, the board is under
+representative thermal and power conditions, and nothing else is saturating the
+same storage. The harness can check the first of those; the rest are yours.
+
+**Why the filesystem forfeits target status rather than warning.** SQLite's
+durability cost is dominated by `fsync`, and `fsync` on a Jetson spans more than
+an order of magnitude between microSD, eMMC and NVMe. A `tmpfs` run does not
+fsync to anything — it would produce the *best* numbers the harness can emit
+while measuring none of the property being decided. That is the most dangerous
+false positive available here, so it is refused outright.
+
+---
+
+## 4. Reading the results
+
+JSON Lines, one record per measurement, each stamped with `evidence_status`,
+`standin_schema_digest`, `sqlite_version`, `build_profile`, `arch`,
+`device_model`, `db_fs_type`, `db_fs_source` and `seed`.
+
+The **`standin_schema_digest`** is the field that keeps this honest over time. A
+number produced against the stand-in schema reads exactly like one produced
+against the ratified schema, and in six months nobody will remember which. When
+the real schema lands, its digest differs, and an old measurement becomes
+visibly about something else rather than quietly authoritative.
+
+```sh
+# Everything at a glance
+jq -r 'select(.record=="append")
+       | "\(.durability)\tbatch=\(.batch)\t\(.events_per_second|floor) ev/s\tp99=\(.timing.p99_us)us"' results.jsonl
+
+# The gate that matters more than any timing
+jq -r 'select(.record=="replay") | "deterministic=\(.deterministic)"' results.jsonl
+
+# Nothing may be cited unless this is true
+jq -r 'select(.record=="run") | "citable=\(.citable) \(.evidence_status)"' results.jsonl
+```
+
+### What to look at, and why
+
+| Record | Field | Why it decides something |
+|---|---|---|
+| `append` | `events_per_second` per `durability` | ADR-0041 open question 1 — the `synchronous` policy per source class. The FULL-vs-NORMAL gap *is* the cost of durability, and the ADR forbids inheriting the verifier's answer. |
+| `append` | `timing.max_us` | The tail, not the mean. A robot is hurt by the one commit that blocked, not the average. |
+| `append` | `hash_share_percent` | Honesty check on the harness's local SHA-256. Small → the substitution does not move the decision. Large → re-run against `kirra-audit-hash` before concluding anything. |
+| `replay` | `deterministic` | **Load-bearing.** `false` should stop ratification regardless of how good the milliseconds are: a rebuild that disagrees with the incremental fold makes every other number meaningless. |
+| `replay` | `cold_rebuild` vs `checkpointed_resume` | Risk R2 (rebuild too slow at startup) and whether checkpointing actually bounds it. |
+| `query` | `graph_bounded_reach` vs the rest | The single most contestable claim in ADR-0041 — that the graph shape belongs in an *index*, not the durable substrate. If bounded traversal is orders of magnitude worse than the other families at realistic scale, Option B gets stronger. |
+| `query` | `rows_matched_total` | A family that matched nothing is a broken benchmark, not a fast one. Zero here is reported as a failure. |
+| `growth` | `bytes_per_event`, `days_to_fill_budget` | Risk R7. This is what decides whether compaction (§11.3) is a future concern or an immediate one. |
+| `migrate` | `future_schema_refused` | The fail-closed policy surviving contact with a populated store. |
+| `crash` | tier outcomes | §5 and §6 below. |
+
+### A host baseline, for orientation only
+
+Recorded on an x86-64 development container, ext4, `--events 20000
+--entities 500`. **`HOST-INDICATIVE-NOT-TARGET` — not citable, and a Jetson will
+be slower on every line.** It is here so you can tell a broken run from a slow
+one, and nothing else.
+
+| Measurement | Host-indicative value |
+|---|---|
+| append, `FULL`, batch=1 | ~745 ev/s, p99 3.3 ms, max 63 ms |
+| append, `NORMAL`, batch=1 | ~6 300 ev/s |
+| append, `OFF`, batch=1 | ~37 000 ev/s |
+| append, `FULL`, batch=64 | ~14 800 ev/s |
+| cold rebuild / checkpointed resume | 41 ms / 2.1 ms (2 000-event tail) |
+| point (latest / time-travel) | 3.2 µs / 9.7 µs median |
+| set | 4.1 µs median |
+| **graph, bounded depth 4** | **736 µs median** |
+| temporal `changes_since` | 5.0 ms median |
+| growth | 458 B/event at a 96-byte payload |
+| hash share, `FULL` batch=1 | 0.2 % |
+
+Two things in that table are worth reading twice even as indicative numbers.
+
+**The graph family is ~200× the point family.** That is precisely where
+ADR-0041 is most likely to be wrong, and it is measurable now rather than after
+the store is built.
+
+**458 bytes per event, against a 96-byte payload.** At 10 Hz that is an 8 GiB
+budget exhausted in about **22 days**. If that survives target measurement,
+compaction-with-citation is not a future concern — it is load-bearing inside a
+month, and ADR-0041's deferred retention thresholds become urgent rather than
+prudent.
+
+---
+
+## 5. Crash tiers A and B (automated)
+
+Both run under `crash`.
+
+**Tier A — crash consistency.** The harness re-execs itself as a child that
+appends in a loop, `SIGKILL`s it mid-append, reopens the database and verifies
+the hash chain. A real child process, not a simulated one: you cannot kill a
+thread in a way that leaves SQLite in the state a crash leaves it in, and
+simulating the crash inside the process under test means testing the simulation.
+
+**Tier B — prefix validity.** A durable prefix is checkpointed into the main
+database file, more events are appended into an un-checkpointed WAL, and the
+main file *alone* is copied and reopened. Recovery must yield exactly the
+durable prefix: intact, shorter, never torn or forked.
+
+Tier B is deliberately **conservative** — it discards the whole WAL, which is
+more than a real power cut takes (under `synchronous=FULL` the WAL is fsynced
+per commit and would survive). Passing it is a stronger result than power loss
+requires.
+
+`INCONCLUSIVE` is a distinct outcome from `PASS` and must be treated as one. It
+means the experiment never established its precondition — the child was killed
+before committing anything, or the tail was checkpointed away so nothing was at
+risk. An inconclusive run silently counted as a pass is how a drill becomes
+decoration.
+
+---
+
+## 6. Tier C — the power cut (manual, and the only real durability test)
+
+**Nothing in software can distinguish a filesystem that honoured `fsync` from
+one that acknowledged it and buffered the write in a device cache.** Lying write
+caches are common on embedded storage, especially microSD. `SIGKILL` leaves the
+page cache intact, so tier A proves nothing about durability. The only
+instrument is a power switch.
+
+The harness always reports tier C as `NOT-RUN` with that reason. It cannot be
+made to report anything else, so a results file can never imply this happened.
+
+### Procedure
+
+1. Boot the Orin normally, on the storage under test.
+2. Append a known, counted prefix at the durability setting you intend to ship:
+   ```sh
+   ./wm2-persistence-harness append \
+       --db /var/lib/kirra/wm2/power.sqlite \
+       --durability full --events 50000 --batch 1 --assert-target
+   ```
+3. Record the committed count:
+   ```sh
+   sqlite3 /var/lib/kirra/wm2/power.sqlite 'SELECT COUNT(*), MAX(generation) FROM world_events;'
+   ```
+4. Start a second append run and, **while it is running**, cut power at the
+   source — pull the barrel jack or kill the bench supply. Do **not** use
+   `poweroff`, `reboot`, or a long-press: each of those flushes.
+5. Restore power, boot, and re-verify:
+   ```sh
+   ./wm2-persistence-harness crash --db /var/lib/kirra/wm2/power.sqlite --assert-target
+   sqlite3 /var/lib/kirra/wm2/power.sqlite 'PRAGMA integrity_check;'
+   ```
+6. **Pass** = the chain verifies intact, the count is ≥ the step-3 count, and
+   `integrity_check` reports `ok`. **Fail** = a broken chain, a count *below*
+   the committed prefix, or any corruption. A count below step 3 at
+   `synchronous=FULL` means the storage is lying about `fsync` — that is a
+   hardware finding, and it invalidates the durability half of every other
+   result on that medium.
+7. Repeat **at least five times**. One power cut that happens to land between
+   commits proves nothing.
+8. Record the outcome in the ADR conversation with the medium named
+   (`db_fs_source` from the results file). Durability is a property of *that
+   medium*, and it does not transfer to a different one.
+
+---
+
+## 7. Scale sweep — the reopening condition
+
+ADR-0041's assumptions are provisional: hundreds-to-low-thousands of entities,
+thousands-to-millions of observations. It states its own reopening condition —
+*"if measurement shows entities in the millions or genuinely unbounded ad-hoc
+traversal, Option B becomes materially stronger and this ADR should be
+reopened."*
+
+Sweep past the assumption rather than confirming it:
+
+```sh
+for e in 1000 10000 100000; do
+  ./target/release/wm2-persistence-harness query \
+      --db /var/lib/kirra/wm2/scale.sqlite \
+      --out ~/wm2-scale.jsonl \
+      --events 1000000 --entities "$e" --assert-target
+done
+```
+
+Then look at how `graph_bounded_reach` and `temporal_changes_since` grow against
+entity count. Sub-linear or gently linear supports Option A. A knee supports
+reopening in favour of Option B.
+
+The sweep informs the scale question; it does not settle it. What entity counts
+the deployed robot actually reaches is an operational fact this harness cannot
+produce.
+
+---
+
+## 8. Recording the result
+
+Attach the JSONL file to the ADR-0041 ratification conversation, with:
+
+- the `evidence_status` line, quoted verbatim;
+- the device and medium (`device_model`, `db_fs_source`);
+- the tier C outcome and how many power cuts were performed, or an explicit
+  statement that tier C was not run;
+- the `standin_schema_digest`, so a later reader can tell whether the schema
+  measured is the schema ratified.
+
+**Do not tick a box in ADR-0041 from a `HOST-INDICATIVE-NOT-TARGET` run**, and
+do not tick the corruption/restart box from tiers A and B alone. Say what was
+measured and what was not — a partially satisfied gate recorded honestly is
+worth more than a fully ticked one that nobody can reconstruct.
+
+Whatever comes out of this, ADR-0041 stays **Proposed** until the deciders named
+in its header accept it. This drill produces evidence; it does not ratify
+anything.
+
+---
+
+## Cross-references
+
+- [`docs/adr/0041-world-model-persistence-architecture.md`](../adr/0041-world-model-persistence-architecture.md) — the proposal and its gates
+- [`docs/adr/0039-world-model-bidirectional-governor-fence.md`](../adr/0039-world-model-bidirectional-governor-fence.md) — Fence A, which covers this harness
+- [`docs/design/WORLD_MODEL_ARCHITECTURE.md`](../design/WORLD_MODEL_ARCHITECTURE.md) §11–13 — the time model, retention, and the persistence recommendation
+- [`tests/audit_chain_prefix_on_kill.rs`](../../tests/audit_chain_prefix_on_kill.rs) — the existing crash-consistency drill whose two-tier structure this follows
+- [`docs/hardware/TARGET_PLATFORM_MATRIX.md`](TARGET_PLATFORM_MATRIX.md) — why a Jetson is the doer, never the governor's cert target
+- [`tools/qnx-rtm-harness/QNX_MAPPING.md`](../../tools/qnx-rtm-harness/QNX_MAPPING.md) — the `TBD-QNX-TARGET` convention this harness's evidence status is modelled on

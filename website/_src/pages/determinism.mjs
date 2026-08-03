@@ -70,7 +70,7 @@ ${pageHero({
             <p>The contract channel — the seqlock the whole enforcement path reads through — runs under Miri with
             multi-seed scheduling in CI, checking for undefined behavior at the Rust memory-model level, not just
             observable bugs.</p>
-            ${evRow(".github/workflows/ci.yml:333#miri:", "crates/kirra-contract-channel/src/seqlock.rs")}
+            ${evRow(".github/workflows/ci.yml:334#miri:", "crates/kirra-contract-channel/src/seqlock.rs")}
           </div>
         </div>
       </div>

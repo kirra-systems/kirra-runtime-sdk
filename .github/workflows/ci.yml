@@ -273,6 +273,7 @@ jobs:
           cargo fmt --check --manifest-path verification/kani/Cargo.toml
           cargo fmt --check --manifest-path crates/kirra-loom-models/Cargo.toml
           cargo fmt --check --manifest-path tools/iceoryx2-spike/Cargo.toml
+          cargo fmt --check --manifest-path tools/wm2-persistence-harness/Cargo.toml
       - name: frozen-talisman blob pin survives formatting
         run: |
           # Anchored on the PATH, not on the hash value (#1242). This grep used
@@ -913,6 +914,49 @@ jobs:
           cargo test
           cargo test --no-default-features
           cargo clippy --all-targets -- -D warnings
+
+  wm2-persistence-harness:
+    name: WM-2 persistence harness (ADR-0041 measurement instrument)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: clippy
+      - name: harness self-tests + a full host run
+        # `tools/wm2-persistence-harness` is its OWN workspace (own Cargo.lock,
+        # gitignored) so the root `cargo test --workspace` never descends into
+        # it. Without this lane the instrument ADR-0041's ratification depends
+        # on compiles for nobody, and would rot silently between the day it was
+        # written and the day someone carries a Jetson to a bench.
+        #
+        # The host run is deliberately part of the lane. It is NOT evidence —
+        # every record it emits is stamped HOST-INDICATIVE-NOT-TARGET and the
+        # harness says so on stderr. What it proves is that the measurement
+        # path still executes end to end: the crash tier still spawns and kills
+        # a real child, every query family still matches rows, the rebuild is
+        # still deterministic, and the migration still fails closed on a future
+        # schema. Exit status is 1 if any of those regress.
+        working-directory: tools/wm2-persistence-harness
+        run: |
+          cargo test --release
+          cargo clippy --all-targets --release -- -D warnings
+          ./target/release/wm2-persistence-harness all \
+              --db "$RUNNER_TEMP/wm2.sqlite" \
+              --out "$RUNNER_TEMP/wm2-results.jsonl" \
+              --events 20000 --entities 500 --repeats 50
+      - name: a host run must never classify itself as citable evidence
+        # The guard that matters most in this whole lane. If a CI runner ever
+        # reports JETSON-TARGET-MEASURED, the classifier has broken open and a
+        # laptop number could be entered against a ratification gate.
+        run: |
+          if grep -q '"evidence_status":"JETSON-TARGET-MEASURED"' "$RUNNER_TEMP/wm2-results.jsonl"; then
+            echo "a CI host classified itself as target hardware — the evidence gate is broken"
+            exit 1
+          fi
+          grep -q '"citable":false' "$RUNNER_TEMP/wm2-results.jsonl" \
+            || { echo "run record missing or not marked uncitable"; exit 1; }
 
   r2cp-bridge:
     name: R2CP host bridge (PTY loop + dependency-free core)
