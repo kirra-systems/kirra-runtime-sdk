@@ -709,6 +709,36 @@ exist and WM-2 must choose one before acceptance:
 This is now **open question 8**, and it is a blocker for acceptance rather than
 a note.
 
+### D-7 — the two SQLite-config claims hold on target
+
+The SQLite-configuration table asserts read-only degraded mode and clean
+disk-full refusal. Both were previously exercised only on a development host.
+On target, all seven checks hold:
+
+| Check | Result | |
+|---|---|---|
+| `write_refused` | true | the append past the cap errored rather than silently succeeding |
+| `refusal_is_disk_full` | true | `"database or disk is full"` — the error names the condition |
+| **`partial_batch_rolled_back`** | **true** | **the one that matters most** — a half-committed batch would tear the generation sequence and fork the chain, turning a recoverable out-of-space condition into permanent evidence corruption |
+| `chain_intact_after_refusal` | true | |
+| `reads_serve_while_full` | true | read-only degraded mode: log *and* projections still answer |
+| `recovers_when_space_returns` | true | full is a condition, not a state the store is stuck in |
+| `chain_intact_after_recovery` | true | recovery does not fork the chain |
+
+`projection_rows_while_full: 100` — non-zero, so `reads_serve_while_full` was
+answered from real projection rows rather than passing vacuously on a store with
+nothing to serve.
+
+**The honest limit is unchanged by running on target.** `PRAGMA max_page_count`
+(here `page_cap: 247`, filling after 2 000 events) exercises SQLite's full-
+*database* path, not the filesystem's `ENOSPC` path, and not what an Orin does
+when `/dev/nvme0n1p1` is genuinely at 100 % and every other process sharing that
+mount is failing too. This establishes that the store refuses cleanly; it does
+not establish that the device stays healthy. Confirming the second still needs a
+deliberately filled partition — and open question 7 (partial projections under
+pressure) remains open regardless, because a fold that is *interrupted* is a
+different case from one that is refused.
+
 ### O-1 — an unexplained ~29 second write stall (open, needs a re-run)
 
 | Durability | Batch | Throughput | p99 | max |

@@ -23,6 +23,27 @@ The `standin_schema_digest` is load-bearing. These numbers describe the
 harness's **stand-in** schema, not a ratified one — when the real schema lands
 its digest differs, and every figure here becomes a figure about something else.
 
+## Run inventory
+
+`results.jsonl` — **21 records**, a complete `all` run:
+
+| Records | Stage |
+|---|---|
+| 1 | `run` (the classification header) |
+| 6 | `append` — 3 durability settings × 2 batch sizes |
+| 1 | `replay` |
+| 5 | `query` — the four §12 families plus the bitemporal point query |
+| 1 | `growth` |
+| 1 | `migrate` |
+| 1 | `compact` |
+| 1 | `pressure` |
+| 1 | `reclaim` |
+| 3 | `crash` — tiers A, B, C |
+
+The count is worth recording: a stage that failed to run leaves no record, so
+21 with this breakdown is the difference between "every stage completed" and
+"every stage that completed passed".
+
 ## What this bundle does and does not establish
 
 **Established on target:** replay (with `deterministic: true`), all four query
