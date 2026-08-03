@@ -455,6 +455,15 @@ def apply_fixes(root: str, issues: list[AnchorIssue]) -> tuple[int, list[AnchorI
             if old in src:
                 src = src.replace(old, new)
                 fixed += 1
+            elif new in src:
+                # Already repaired by a sibling issue on this page. One page can
+                # cite the same anchored literal more than once (open-source.mjs
+                # cites the docs-and-sdk lane twice), and str.replace fixes every
+                # occurrence at once -- so the second issue finds nothing left to
+                # do. Reporting it as needing a human would make --fix exit 1
+                # after having completely succeeded, which trains people to
+                # ignore the one command that repairs this class of drift.
+                fixed += 1
             else:
                 unfixable.append(issue)
         with open(full, "w", encoding="utf-8") as fh:
