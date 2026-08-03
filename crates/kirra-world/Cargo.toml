@@ -10,4 +10,3 @@ publish = false
 # edge". A leaf with no dependency section cannot acquire one by accident, and
 # ci/check_kirra_world_bidirectional_fence.py now verifies that rather than
 # reporting "Kirra World packages not present yet".
-[dependencies]
