@@ -890,6 +890,18 @@ D-10 and belong in WM-2's design:
 | **Latency watchdog** on store operations | the stall is intermittent at 2.5 %; only continuous monitoring catches it in the field |
 | **Writer isolation** | the checker and actuation path must not share a thread, connection or lock with the world-model writer |
 | **SMART telemetry capture** | `nvme smart-log` was absent, and it is what would confirm or refute the `IO-DEVICE` reading |
+| **Bounded interactive queries** | temporal p99 is 10.5 s at the top rung — a query with no declared bound has no bounded cost, whatever its scaling verdict |
+
+**Interactive temporal queries require bounded result contracts,
+pagination/window limits, or purpose-built indexing. Neither graph nor temporal
+queries may sit directly on a control or safety deadline path.** The rows above
+isolate the store from the real-time path; this one bounds the query itself, and
+both are needed — isolation stops a slow query blocking a deadline, but it does
+not stop the query being slow, and D-9 measured 10.5 s p99 at 100 000 entities
+with `LINEAR` scaling. A verdict about *shape* places no ceiling on *cost*: the
+only thing that bounds an unbounded scan is a bound. Which mechanism —
+a result contract, a window limit, or an index built for the access pattern —
+is a WM-2 design choice this ADR does not make.
 
 ### O-1 — the original ~29 second write stall (SUPERSEDED by D-10)
 
