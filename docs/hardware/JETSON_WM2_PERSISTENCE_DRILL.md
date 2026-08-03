@@ -85,8 +85,16 @@ Individual stages run on their own: `platform`, `append`, `replay`, `query`,
 `growth`, `migrate`, `compact`, `crash`. Start with `platform` — it prints, in about a
 millisecond, whether anything you run afterwards will be citable.
 
-Exit status is `1` if any measurement failed **or was unusable** (a query family
-that matched nothing, a non-deterministic rebuild, a crash tier that failed).
+Exit status is `1` if any measurement failed **or was unusable** — a query family
+that matched nothing, a non-deterministic rebuild, a crash tier that failed *or
+came back `INCONCLUSIVE`*. An inconclusive tier never established its
+precondition, so neither a pass nor a failure would mean anything, and letting
+the run exit 0 would leave a results file that looks complete with a
+load-bearing gate silently missing.
+
+Tier C is the one exemption: it is *always* `NOT-RUN` by construction (§7), so
+counting it would make every run exit 1 and the exit code would stop carrying
+information.
 
 ---
 
