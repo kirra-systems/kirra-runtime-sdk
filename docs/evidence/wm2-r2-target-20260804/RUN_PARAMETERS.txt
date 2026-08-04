@@ -1,0 +1,21 @@
+Command, run once per fold-chunk count r in {2, 4, 8, 16, 32}:
+
+    ./target/release/wm2-persistence-harness rebuild \
+        --db  ~/wm2bench/wm2-rebuild-$r.sqlite \
+        --events 40000 --entities 2000 \
+        --rebuild-rounds $r --rebuild-ingest $((16000/r)) \
+        --assert-target --out ~/wm2-r2-target.jsonl
+
+Total ingest is held CONSTANT at 16 000 events across all five configurations
+(--rebuild-ingest = 16000/r), so the only variable is how finely the fold is
+chunked. --events/--entities are pinned to the host sweep's values rather than
+the harness defaults; a re-run on the defaults is a DIFFERENT experiment and its
+figures are not comparable (ADR-0041 D-16 records why this is stated).
+
+Store location: ~/wm2bench on /dev/nvme0n1p1, the same ext4 filesystem and the
+same NVMe device as the root filesystem. /var/lib/kirra was deliberately NOT
+used: it belongs to the deployed verifier's service user.
+
+Build: cargo build --release -j2. Two jobs rather than all cores, retained from
+an earlier session where the board's behaviour under full compile load was being
+ruled out; it has no bearing on the measurement, which is single-threaded.

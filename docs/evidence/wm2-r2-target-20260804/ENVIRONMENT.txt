@@ -1,0 +1,12 @@
+Linux yahboom 5.15.148-tegra #1 SMP PREEMPT Tue Jan 7 17:14:38 PST 2025 aarch64 aarch64 aarch64 GNU/Linux
+NVME Identify Controller:
+vid       : 0x10ec
+ssvid     : 0x10ec
+sn        : JRD2025120012734    
+mn        : SSD NVME 256GB                          
+Filesystem state:         clean with errors
+Errors behavior:          Remount read-only
+Last checked:             Thu Jun 26 04:52:21 2025
+ls: cannot access '/proc/self/io': No such file or directory
+--- git ---
+5eec0f0d feat(wm2): measure R2's alongside-rebuild cost against a control arm (#1336)
