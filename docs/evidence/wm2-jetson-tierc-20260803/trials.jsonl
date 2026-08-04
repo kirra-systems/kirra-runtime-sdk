@@ -1,0 +1,5 @@
+{"trial":1,"arm_id":"08c190deb2aff047","outcome":"PASS","durable_generation":400,"recovered_generation":3562064,"chain":"intact","detail":"chain intact after power cut; fsynced prefix of 400 event(s) survived (3562064 present)"}
+{"trial":2,"arm_id":"87c2f1a5fe1fd2b9","outcome":"PASS","durable_generation":3562464,"recovered_generation":4086048,"chain":"intact","detail":"chain intact after power cut; fsynced prefix of 3562464 event(s) survived (4086048 present)"}
+{"trial":3,"arm_id":"ea795da4698e94b7","outcome":"PASS","durable_generation":4086448,"recovered_generation":4463024,"chain":"intact","detail":"chain intact after power cut; fsynced prefix of 4086448 event(s) survived (4463024 present)"}
+{"trial":4,"arm_id":"b28ce3b1844f3856","outcome":"PASS","durable_generation":4463424,"recovered_generation":4632000,"chain":"intact","detail":"chain intact after power cut; fsynced prefix of 4463424 event(s) survived (4632000 present)"}
+{"trial":5,"arm_id":"f565d7f947376e1a","outcome":"PASS","durable_generation":4632400,"recovered_generation":4748880,"chain":"intact","detail":"chain intact after power cut; fsynced prefix of 4632400 event(s) survived (4748880 present)"}

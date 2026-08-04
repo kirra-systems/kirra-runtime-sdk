@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Proposed — NOT ratified on merge.** Ratification is **measurement-gated**; see *Ratification criteria*. Merging records the proposal; it does not ratify it and authorizes no implementation. |
+| Status | **Proposed — NOT ratified.** All seven measurement gates are now **Met** (tier C closed by five physical power cuts, D-11). Ratification still requires open question 8 — migration strategy, named a blocker for acceptance — to be decided, and acceptance recorded by the deciders below. A complete measurement record authorizes no implementation. See *Ratification criteria*. |
 | Date | 2026-08-02 |
 | Blueprint | `KIRRA-WM-ARCH-001` §7, §10, §11, §13 (WM-2) — [`docs/design/WORLD_MODEL_ARCHITECTURE.md`](../design/WORLD_MODEL_ARCHITECTURE.md) |
 | Deciders | World Model owner · architecture owner · deployment owner |
@@ -529,9 +529,12 @@ question 7.
 **It reports what it cannot establish.** The corruption gate is three tiers:
 `SIGKILL` crash-consistency and WAL-loss prefix validity are automated; the
 actual power cut is not, because nothing in software distinguishes an honest
-`fsync` from a device cache that acknowledged and buffered it. The harness
-always reports that tier as `NOT-RUN` with the reason attached, so a results
-file can never imply a durability test that did not happen.
+`fsync` from a device cache that acknowledged and buffered it. An automated run
+therefore reports that tier as `NOT-RUN` with the reason attached, so a results
+file can never imply a durability test that did not happen. It reads `PASS` only
+from a ledger of manually performed cuts, and only when those cuts are
+**distinct armings** — five verifications of one power cut count as one (#1322,
+and D-11).
 
 ---
 
@@ -546,23 +549,41 @@ satisfied, and none may be ticked from a `HOST-INDICATIVE-NOT-TARGET` run:**
 | [x] | **Measured Jetson prototype** — the log + projection path on target hardware, not a development host | the whole run, only when it reports `JETSON-TARGET-MEASURED` | **Met** — see *Target measurements* |
 | [x] | **Replay benchmark** — full rebuild time at the assumed observation volume, with the checkpointed case measured separately | `replay` (also asserts rebuild-equals-incremental determinism, which gates the rest) | **Met** — `deterministic: true` |
 | [x] | **Representative query benchmark** — one measurement per query family in blueprint §12 (point, set, graph, temporal) | `query`, plus a separate bitemporal point query the projection cannot answer | **Met — and adverse.** See D-1 |
-| [ ] | **Corruption / restart experiment** — power-loss-class behaviour, in the spirit of the existing audit-chain crash-consistency drill | `crash` tiers A and B; **tier C is manual** (drill §8) and this gate is not complete without it | **Partial** — A and B PASS; **tier C `NOT-RUN`, 0 of 5 trials** |
+| [x] | **Corruption / restart experiment** — power-loss-class behaviour, in the spirit of the existing audit-chain crash-consistency drill | `crash` tiers A and B; **tier C is manual** (drill §8) and this gate is not complete without it | **Met** — A and B PASS; **tier C `PASS`, 5 of 5** on target. See D-11 |
 | [x] | **Storage growth estimate** — observations/day at realistic sensor rates, projected against the device budget | `growth` | **Met — and adverse.** See D-2 |
 | [x] | **Migration proof of concept** — a schema change applied to a populated store, fail-closed on a future schema version | `migrate` | **Met — and adverse.** See D-6 |
 | [x] | Scale assumptions confirmed or corrected; if materially wrong, Option B is re-evaluated before acceptance | the drill §9 sweep, emitting a **computed** verdict against this ADR's own reopening condition | **Met — and Option A survives.** Graph `SUBLINEAR` (0.45), temporal `LINEAR` (1.14), both on target. See D-9. What the deployed robot actually reaches remains an operational fact no benchmark produces |
 
-**One gate remains open, and it cannot be closed from software.** Tier C
-requires five physical power cuts (drill §8, `powercut arm` / `powercut verify`);
-the harness reports `NOT-RUN` at `0/5` and will continue to. Until it is closed
-this ADR stays **Proposed**.
+**All seven measurement gates now read *Met*.** The last of them — tier C, the
+one that could not be closed from software — was closed by five physical power
+cuts on the target device (D-11).
 
-Six of the seven gates now read *Met*. That is not an argument for acceptance —
-the remaining one is the durability gate, and no quantity of scale and latency
-evidence substitutes for it.
+### This ADR remains **Proposed**, and closing the gates did not change that
+
+The checklist above is a *measurement* checklist. Its preamble says acceptance
+requires all of it to be recorded; it does not say the measurements are the only
+condition. Two things stated elsewhere in this ADR still block acceptance, and
+neither is a measurement:
+
+1. **Open question 8 — migration strategy — is named "a blocker for acceptance
+   rather than a note."** D-6 measured a whole-store offline migration at ~101
+   minutes at the 8 GiB ceiling, which is not an OTA. WM-2 must choose one of
+   three routes — bound the store, migrate lazily/online, or accept a documented
+   maintenance window — and **no choice has been recorded.** The gate that is
+   *Met* is the migration proof-of-concept; the decision it forced is open.
+2. **The named deciders have not recorded approval.** This ADR lists *World
+   Model owner · architecture owner · deployment owner*. Ratification is theirs
+   to record, and closing a measurement gate does not stand in for it.
+
+Separately, the safety-scope determination in *Assurance impact* stays PENDING an
+explicit safety-assurance ruling (ADR-0042 Decision 5). That governs what may be
+claimed about scope, not whether this ADR is ratified, and it is unaffected here.
 
 **No implementation should begin merely because this proposed ADR exists**, and
-in particular not because six of the seven gates now read *Met*. The domain-logic
-gate (ADR-0042 Decision 5) is a separate and independent hold.
+in particular not because all seven gates now read *Met*. A complete measurement
+record is what makes the remaining decisions *answerable*; it does not answer
+them. The domain-logic gate (ADR-0042 Decision 5) is a separate and independent
+hold and is **not** released by this evidence.
 
 ---
 
@@ -877,7 +898,59 @@ than `FULL`**, from a configuration with zero stalls. No durability model
 predicts that. It is not a tail artefact and it is not explained; open question
 1 should not be settled at batch=64 until it is.
 
-### D-11 — design implications the measurement forces
+### D-11 — the durability gate closes: five power cuts, no acknowledged write lost
+
+**Evidence:** [`docs/evidence/wm2-jetson-tierc-20260803/`](../evidence/wm2-jetson-tierc-20260803/),
+self-verifying via `sha256sum -c SHA256SUMS`. Jetson Orin NX, `ext4` on
+`/dev/nvme0n1p1`, a **fresh** database at `/var/lib/kirra/wm2/powercut-v2.sqlite`,
+harness at `6eaeb643e3f8`.
+
+The last gate, and the only one no software could produce. `SIGKILL` leaves the
+page cache intact and tier B discards the whole WAL; neither can tell a
+filesystem that honoured `fsync` from a device cache that acknowledged the write
+and buffered it. Five physical cuts at the power source:
+
+| Trial | Arm id | Fsynced prefix | Recovered | Chain | |
+|---:|---|---:|---:|---|---|
+| 1 | `08c190de…` | 400 | 3 562 064 | intact | PASS |
+| 2 | `87c2f1a5…` | 3 562 464 | 4 086 048 | intact | PASS |
+| 3 | `ea795da4…` | 4 086 448 | 4 463 024 | intact | PASS |
+| 4 | `b28ce3b1…` | 4 463 424 | 4 632 000 | intact | PASS |
+| 5 | `f565d7f9…` | 4 632 400 | 4 748 880 | intact | PASS |
+
+`tier C after 5 arming(s) across 5 row(s): PASS`. `PRAGMA integrity_check: ok`.
+
+**In every trial the recovered log was at least as long as the fsynced prefix,
+and the chain verified end to end. This device does not acknowledge writes it
+has not persisted** — which is the one failure tiers A and B cannot detect, is a
+common failure on embedded storage, and no `synchronous` setting compensates for
+it. Some un-fsynced tail survived each cut too, which is why `recovered` exceeds
+the prefix; losing all of it would have been equally correct.
+
+**The series is checkable, not merely asserted.** Each arming appends its
+400-event prefix from `MAX(generation) + 1` of whatever survived the previous
+cut, so consecutive rows must satisfy `prefix(n+1) = recovered(n) + 400`. That
+holds exactly four times over. Five genuinely independent cuts on a store that
+carries forward produce a strictly increasing, gap-free chain of boundaries, and
+a replayed marker cannot.
+
+**The prior attempt counted as 1 valid cut, not 3.** An earlier series on
+`powercut.sqlite` recorded three `PASS` rows from a *single* physical cut:
+`powercut arm` restarted at generation 0, so the second arming died on a
+primary-key collision while the first marker survived, and each later `verify`
+re-read the same surviving store and appended another pass. Fixed in #1322,
+which made a trial mean an *arming* and made the aggregate count distinct arm
+ids. Those rows predate arm ids and the corrected harness refuses them as
+unattributable, so the exclusion is enforced by the instrument rather than by
+recollection. The bundle above is a fresh database and a fresh ledger.
+
+**What this does not establish.** One device, one NVMe — durability is a property
+of *that* medium and does not transfer to eMMC or microSD, where lying write
+caches are most common. Five cuts clear the drill's floor but cannot bound a
+failure *rate*; they cannot distinguish "never" from "rarely". And the store was
+the stand-in schema, as everywhere else in this section.
+
+### D-12 — design implications the measurement forces
 
 Not decisions, and not part of this ADR's proposal. They follow from D-9 and
 D-10 and belong in WM-2's design:
