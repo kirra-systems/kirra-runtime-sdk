@@ -95,7 +95,8 @@ figures were taken.
 | `ENVIRONMENT.txt` | Kernel, NVMe controller identity, filesystem state, the `/proc/self/io` absence, harness commit |
 | `RUN_PARAMETERS.txt` | The exact command, and why the parameters are pinned rather than defaulted |
 | `GIT_COMMIT` | Harness commit the binary was built from |
-| `SHA256SUMS` | Checksums of every file above. It does not cover itself — verify with `sha256sum -c SHA256SUMS` |
+| `.gitattributes` | `* -text`, which stops git normalising line endings in this directory. **Integrity-relevant, not decoration:** without it a checkout could hand back bytes that differ from the ones measured, and every checksum below would fail for a reason that has nothing to do with the evidence |
+| `SHA256SUMS` | Checksums of **every other file in this directory**, `.gitattributes` included. It cannot cover itself. Verify with `sha256sum -c SHA256SUMS` |
 
 ## Reproducing
 
