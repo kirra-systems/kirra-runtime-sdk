@@ -131,6 +131,38 @@ Verify from this directory:
 sha256sum -c SHA256SUMS
 ```
 
+### `ENVIRONMENT.txt` contains one NUL byte, deliberately left in
+
+Git reports the file as binary and `grep` calls it a binary match. That is a
+single `\0` at the end of the device-model line, and it is **not** corruption:
+the model is read from `/proc/device-tree/model`, device-tree property strings
+are NUL-terminated, and the capture emitted the terminator verbatim.
+
+It is left in place because **an evidence file records what the device produced.**
+Rewriting a captured artifact to be easier to read would mean the digest in
+`SHA256SUMS` no longer corresponds to anything the device emitted — and
+detecting exactly that kind of after-the-fact edit is what the checksums are
+for. A bundle whose files get tidied when they are inconvenient has checksums
+that no longer mean what they claim.
+
+The NUL is also mild corroboration in its own right: it is the shape you get
+from reading a real Tegra device tree, which is consistent with capture on the
+target rather than a hand-written file. Weak on its own, and not offered as
+proof — but it is a reason to preserve the bytes rather than a reason to lose
+them.
+
+To read it as plain text without modifying it:
+
+```sh
+tr '\0' '\n' < ENVIRONMENT.txt
+```
+
+A `.gitattributes` beside these files marks the captured artifacts `-text`, so
+no checkout ever line-ending-normalizes them. Without it a checkout with
+`autocrlf` enabled would rewrite the bytes and `sha256sum -c` would fail on a
+bundle nobody had touched — a false alarm that would discredit the check rather
+than the file.
+
 The tier C verdict is a pure function of `trials.jsonl`, so it can be recomputed
 rather than taken on trust — point the corrected harness at a throwaway database
 with this ledger beside it:

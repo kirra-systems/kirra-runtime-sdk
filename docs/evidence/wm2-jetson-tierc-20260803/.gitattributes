@@ -1,0 +1,12 @@
+# Captured evidence — byte-exact, never line-ending-normalized.
+#
+# Every digest in SHA256SUMS is over the bytes the Jetson produced. A checkout
+# that rewrote CRLF/LF (autocrlf on Windows, say) would change those bytes and
+# `sha256sum -c` would fail on a bundle nobody had tampered with — turning the
+# self-verification claim into a false alarm. `-text` switches EOL conversion
+# off so the files survive any checkout unchanged.
+ENVIRONMENT.txt -text
+GIT_COMMIT      -text
+SHA256SUMS      -text
+integrity.txt   -text
+trials.jsonl    -text
