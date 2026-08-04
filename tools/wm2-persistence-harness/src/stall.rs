@@ -195,6 +195,24 @@ const WRITEBACK_BACKLOG_KB: u64 = 256 * 1024;
 /// Sustained temperature (milli-degrees C) suggesting thermal capping.
 const THERMAL_HOT_MC: u64 = 85_000;
 
+/// The stalling repetitions' durations, ascending, from every repetition's worst
+/// commit.
+///
+/// A free function rather than three lines inline, so a test can exercise **this
+/// code** instead of a copy of it. Both halves matter and neither is obvious
+/// from the output alone: the sort is what makes a cluster distinguishable from
+/// a spread at a glance, and the filter is what ties the array's length to
+/// `stalls_observed`.
+pub fn stall_durations_from(worst_per_run: &[f64]) -> Vec<f64> {
+    let mut out: Vec<f64> = worst_per_run
+        .iter()
+        .copied()
+        .filter(|ms| *ms >= STALL_THRESHOLD_MS)
+        .collect();
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
 /// Extract the counter delta across one commit's window from a sampled series.
 ///
 /// This is the OQ9 instrument fix. `series` is the background sampler's output,
@@ -618,12 +636,15 @@ pub fn run(
     } else {
         worst_per_run[worst_per_run.len() / 2]
     };
-    // Sorted, so the shape is readable without post-processing.
-    let stall_durations_ms: Vec<f64> = worst_per_run
-        .iter()
-        .copied()
-        .filter(|ms| *ms >= STALL_THRESHOLD_MS)
-        .collect();
+    let stall_durations_ms = stall_durations_from(&worst_per_run);
+    // The array and the count are two views of the same thing; a refactor that
+    // let them disagree would read as a measurement gap rather than a
+    // bookkeeping bug, which is the expensive kind of confusion.
+    debug_assert_eq!(
+        stall_durations_ms.len(),
+        stalls,
+        "stall_durations_ms must have one entry per stalling repetition"
+    );
 
     let attribution = if worst_per_run.is_empty() {
         StallAttribution::Unattributed(
@@ -1028,17 +1049,20 @@ mod tests {
 
     #[test]
     fn the_stall_durations_are_exactly_the_repetitions_that_stalled() {
-        // The list and the count come from the same source and must not drift:
-        // a reader comparing `stalls_observed` against the array's length is
-        // entitled to find them equal, and a mismatch would look like a
-        // measurement gap rather than a bookkeeping bug.
-        let worst_per_run = [4.0, 12.5, STALL_THRESHOLD_MS, 8_496.0, 30_182.4];
-        let durations: Vec<f64> = worst_per_run
-            .iter()
-            .copied()
-            .filter(|ms| *ms >= STALL_THRESHOLD_MS)
-            .collect();
+        // Calls `stall_durations_from` — the function `run` uses — with input
+        // deliberately OUT OF ORDER. An earlier version of this test filtered a
+        // pre-sorted array itself, so it asserted "ascending" about a list that
+        // arrived ascending and would have passed even if the real code stopped
+        // sorting. A test that reimplements the logic tests the
+        // reimplementation.
+        let worst_per_run = [30_182.4, 4.0, 8_496.0, 12.5, STALL_THRESHOLD_MS];
+        let durations = stall_durations_from(&worst_per_run);
+
+        // Sorted output from unsorted input: the sort is real, not inherited.
         assert_eq!(durations, vec![STALL_THRESHOLD_MS, 8_496.0, 30_182.4]);
+        assert!(durations.windows(2).all(|w| w[0] <= w[1]));
+
+        // Length ties to what `stalls_observed` counts, by the same predicate.
         assert_eq!(
             durations.len(),
             worst_per_run
@@ -1047,11 +1071,10 @@ mod tests {
                 .count(),
             "the array length must equal stalls_observed by construction"
         );
-        // Ascending, so the shape reads without post-processing — the whole
-        // point is telling a cluster at a timeout bound from a spread below it.
-        assert!(durations.windows(2).all(|w| w[0] <= w[1]));
-        // The threshold is inclusive on both sides of the comparison.
+        // The threshold is inclusive, matching the `>=` that counts a stall.
         assert!(durations.contains(&STALL_THRESHOLD_MS));
+        assert!(stall_durations_from(&[]).is_empty());
+        assert!(stall_durations_from(&[4.0, 999.999]).is_empty());
     }
 
     #[test]

@@ -177,6 +177,25 @@ mod tests {
     }
 
     #[test]
+    fn a_float_array_renders_numbers_and_nulls_not_invalid_json() {
+        // Same contract as `float`, which is the point: a non-finite entry must
+        // not arrive as a number a consumer would then average, and must not
+        // break the parse for every other record in the file.
+        assert_eq!(
+            Obj::new().float_array("d", &[1.5, 30_182.4]).render(),
+            r#"{"d":[1.500000,30182.400000]}"#
+        );
+        assert_eq!(
+            Obj::new()
+                .float_array("d", &[f64::NAN, 2.0, f64::INFINITY])
+                .render(),
+            r#"{"d":[null,2.000000,null]}"#
+        );
+        // The empty case is the common one — most runs record no stall at all.
+        assert_eq!(Obj::new().float_array("d", &[]).render(), r#"{"d":[]}"#);
+    }
+
+    #[test]
     fn keys_are_escaped_too() {
         assert_eq!(Obj::new().int("a\"b", 1).render(), r#"{"a\"b":1}"#);
     }
