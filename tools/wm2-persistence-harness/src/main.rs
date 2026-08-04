@@ -35,6 +35,31 @@ use standin::Durability;
 use std::io::Write;
 use std::path::PathBuf;
 
+/// Every command this binary implements. The gate that makes an unknown
+/// command fail closed rather than produce an evidence stamp over no
+/// measurements — see the check in `parse`.
+///
+/// Adding a command means adding it here. The `every_dispatched_command_is_in
+/// _the_known_list` test greps this file's dispatch guards and fails if one is
+/// missing, so the list cannot silently fall behind the code.
+const KNOWN_COMMANDS: &[&str] = &[
+    "platform",
+    "append",
+    "replay",
+    "query",
+    "growth",
+    "migrate",
+    "crash",
+    "compact",
+    "pressure",
+    "sweep",
+    "stall",
+    "rebuild",
+    "all",
+    "powercut",
+    "crash-child",
+];
+
 const USAGE: &str = "\
 wm2-persistence-harness — ADR-0041 (WM-2) measurement harness
 
@@ -171,11 +196,43 @@ struct Args {
     assert_target: bool,
 }
 
+/// Refuse a command this binary does not implement.
+///
+/// Pure so it can be tested — `parse_args` reads `std::env::args()` directly
+/// and the fail-open this guards against is not otherwise reachable from a
+/// test.
+fn validate_command(cmd: &str) -> Result<(), String> {
+    if KNOWN_COMMANDS.contains(&cmd) {
+        return Ok(());
+    }
+    Err(format!(
+        "unknown command `{cmd}`\n\nThis binary may PREDATE it. Check `git log --oneline -1` \
+         against the commit you expect, and rebuild — an out-of-date binary is the likeliest \
+         cause.\n\n{USAGE}"
+    ))
+}
+
 fn parse_args() -> Result<Args, String> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.is_empty() || raw[0] == "-h" || raw[0] == "--help" {
         return Err(USAGE.to_string());
     }
+
+    // Fail closed on a command this binary does not implement.
+    //
+    // Dispatch is a chain of `if command == "..."` guards with no final else,
+    // so an unrecognized command used to match nothing, fall through every
+    // measurement, and still reach the epilogue — printing
+    // `evidence status : JETSON-TARGET-MEASURED` and `Done.` having measured
+    // NOTHING. Observed for real: an older binary on the target was handed
+    // `rebuild`, a command it predates, and reported a citable run.
+    //
+    // That is the worst failure this harness can have. Every other guard here
+    // exists to stop a number describing the wrong experiment; this one
+    // produced a citability stamp with no experiment at all, and the operator
+    // had no way to tell from the output. An unknown OPTION already failed
+    // closed with usage — only the command itself was fail-open.
+    validate_command(&raw[0])?;
 
     let mut default_db = std::env::temp_dir();
     default_db.push("wm2-persistence-harness.sqlite");
@@ -1267,5 +1324,65 @@ mod tests {
         assert_eq!(durabilities(&a).len(), 3);
         a.durability = Some(Durability::Full);
         assert_eq!(durabilities(&a), vec![Durability::Full]);
+    }
+
+    #[test]
+    fn an_unknown_command_fails_closed_instead_of_stamping_a_citable_run() {
+        // The defect this guards: dispatch is a chain of `if command == "..."`
+        // guards with no final else, so an unrecognized command matched
+        // nothing, fell through every measurement, and still reached the
+        // epilogue printing `evidence status : JETSON-TARGET-MEASURED` and
+        // `Done.` — a citability stamp over ZERO measurements.
+        //
+        // Observed on the target: a binary predating the `rebuild` command was
+        // handed `rebuild` and reported a citable run. An unknown OPTION
+        // already failed closed; only the command was fail-open.
+        let err = validate_command("rebuild-typo").expect_err("must refuse");
+        assert!(
+            err.contains("unknown command `rebuild-typo`"),
+            "refusal must name the command: {err}"
+        );
+        assert!(
+            err.contains("PREDATE"),
+            "an out-of-date binary is the likeliest cause and the message must say so: {err}"
+        );
+        // Every real command still passes, or this guard would break the tool.
+        for c in KNOWN_COMMANDS {
+            assert!(validate_command(c).is_ok(), "{c} must be accepted");
+        }
+    }
+
+    #[test]
+    fn every_dispatched_command_is_in_the_known_list() {
+        // KNOWN_COMMANDS is what makes an unknown command fail closed, so a
+        // command added to dispatch but not to the list would be refused at
+        // the door. Read the dispatch guards out of this file rather than
+        // trusting the two to be kept in step by hand.
+        let src = include_str!("main.rs");
+        let mut dispatched: Vec<String> = Vec::new();
+        for pat in [r#"args.command == ""#, r#"run(""#] {
+            let mut rest = src;
+            while let Some(i) = rest.find(pat) {
+                rest = &rest[i + pat.len()..];
+                if let Some(end) = rest.find('"') {
+                    let name = &rest[..end];
+                    if !name.is_empty() && !name.contains(' ') {
+                        dispatched.push(name.to_string());
+                    }
+                }
+            }
+        }
+        assert!(
+            dispatched.len() > 5,
+            "found only {dispatched:?} — the scrape stopped matching dispatch, \
+             so this test is no longer checking anything"
+        );
+        for name in &dispatched {
+            assert!(
+                KNOWN_COMMANDS.contains(&name.as_str()),
+                "`{name}` is dispatched but missing from KNOWN_COMMANDS, so it would be \
+                 refused as unknown before ever reaching its guard"
+            );
+        }
     }
 }
