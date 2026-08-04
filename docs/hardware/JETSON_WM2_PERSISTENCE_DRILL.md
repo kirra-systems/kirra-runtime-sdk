@@ -148,8 +148,8 @@ wrong:
 
 | | The number | Was called | Actually was |
 |---|---|---|---|
-| Tier C | 6 ledger rows | 6 independent power-cut trials | 1 cut re-verified 5 times (#1322) |
-| D-6 | 16.24 s at 50 000 events / 1 000 entities | store-size scaling | scaling *in events only*, with entities pinned (D-13/D-14) |
+| Tier C | 6 ledger rows | 6 independent power-cut trials | 1 cut re-verified 5 times (PR #1322) |
+| D-6 | 16.24 s at 50 000 events / 1 000 entities | store-size scaling | scaling *in events only*, with entities pinned ([ADR-0041](../adr/0041-world-model-persistence-architecture.md) D-13/D-14) |
 
 Neither was a bad measurement. Both were real numbers reported under a semantic
 label they did not earn, and **a digest cannot detect that** — `sha256sum -c`
