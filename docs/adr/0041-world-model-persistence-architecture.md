@@ -1070,10 +1070,10 @@ two-axis ladder says that model is wrong:
 | Axis | Held fixed | Varied | Behaviour |
 |---|---|---|---|
 | A | entities = 1 000 | events 6 250 → 50 000 | linear in events (µs/event flat, 200 → 215) |
-| B | events = 50 000 | entities 125 → 4 000 | **linear in entities** (ms/entity flat, 11.9 → 12.1) |
+| B | events = 50 000 | entities 125 → 8 000 | **linear in entities** (ms/entity flat, 11.9 → 11.3 across 64×) |
 
-`k = ms / (events × entities)` is flat within ±10 % across a 32× entity spread
-and an 8× event spread, so **`migration_time ≈ k · events · entities`** — growing
+`k = ms / (events × entities)` is flat within ±10 % across a **64×** entity
+spread and an 8× event spread, so **`migration_time ≈ k · events · entities`** — growing
 with the *square* of store size when both axes grow together, which is what
 constant density means.
 

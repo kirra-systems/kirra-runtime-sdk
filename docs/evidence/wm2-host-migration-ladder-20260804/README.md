@@ -33,7 +33,7 @@ Two axes, using only existing harness flags (`migrate` caps `--events` at
 50 000, so both axes stay inside it):
 
 - **Axis A** — `--entities 1000` fixed, `--events` ∈ {6 250, 12 500, 25 000, 50 000}
-- **Axis B** — `--events 50000` fixed, `--entities` ∈ {125, 250, 500, 1 000, 2 000, 4 000}
+- **Axis B** — `--events 50000` fixed, `--entities` ∈ {125, 250, 500, 1 000, 2 000, 4 000, 8 000}
 
 The harness times `migrate_to_v2()` alone — the `ALTER TABLE` plus the backfill
 `UPDATE` — not the store setup that precedes it.
@@ -61,13 +61,14 @@ Linear in events — consistent with D-6's assumption, *as long as entities hold
 | 1 000 | 11 729 ms | 11.73 |
 | 2 000 | 23 590 ms | 11.80 |
 | 4 000 | 48 534 ms | 12.13 |
+| 8 000 | 90 589 ms | 11.32 |
 
 **Also linear — in entities, at a fixed event count.** Doubling the entity count
 doubles the migration time while the log stays exactly the same size.
 
 ### Both together
 
-`k = ms / (events × entities)` is flat to within ±10 % across a 32× spread in
+`k = ms / (events × entities)` is flat to within ±10 % across a **64×** spread in
 entities and an 8× spread in events:
 
 | Events | Entities | k (×10⁻⁴ ms) |
@@ -82,6 +83,7 @@ entities and an 8× spread in events:
 | 50 000 | 1 000 | 2.35 |
 | 50 000 | 2 000 | 2.36 |
 | 50 000 | 4 000 | 2.43 |
+| 50 000 | 8 000 | 2.26 |
 
 **`migration_time ≈ k · events · entities`.** Not linear in the store's size —
 quadratic in it, when both axes grow together.
@@ -170,7 +172,7 @@ for e in 6250 12500 25000 50000; do
   wm2-persistence-harness migrate --db /tmp/a.sqlite --out ladder.jsonl \
       --events $e --entities 1000
 done
-for n in 125 250 500 1000 2000 4000; do
+for n in 125 250 500 1000 2000 4000 8000; do
   wm2-persistence-harness migrate --db /tmp/b.sqlite --out ladder.jsonl \
       --events 50000 --entities $n
 done
