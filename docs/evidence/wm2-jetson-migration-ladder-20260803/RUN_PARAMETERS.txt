@@ -1,0 +1,20 @@
+Commit: 29aa1b2496e9
+
+Axis A:
+  entities fixed: 1000
+  events: 5000,10000,20000,30000,40000,50000
+
+Axis B:
+  events fixed: 30000
+  entities: 100,200,400,800,1600,3200
+
+Both axes were run separately with:
+  --migration-sql legacy
+  --migration-sql grouped
+  --assert-target
+
+Record ordering:
+  First six migrate records are Axis A.
+  Final six migrate records are Axis B.
+  The current migrate records do not emit entity count, so rung identity is
+  reconstructed from this recorded command order.
