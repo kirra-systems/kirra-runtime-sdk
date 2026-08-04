@@ -31,9 +31,16 @@ schema, or the `synchronous` setting.
 | `ENVIRONMENT.txt` | `io_timeout`, `dirty_expire_centisecs`, drive identity, filesystem state, kernel |
 | `RUN_PARAMETERS.txt` | the exact invocation parameters |
 | `GIT_COMMIT` / `GIT_STATUS` | harness provenance — the tree was clean apart from this bundle |
-| `SHA256SUMS` | covers every file here, including this README |
+| `SHA256SUMS` | covers every other file here, including this README and `.gitattributes` |
 
 Verify with `sha256sum -c SHA256SUMS` from inside this directory.
+
+`SHA256SUMS` cannot list itself — a file cannot contain its own hash — so it is
+the one file the check does not cover. Everything else in the bundle is, and
+`sha256sum -c` reports one `OK` per listed file, so a missing line is visible as
+a shorter output rather than a silent gap. If the integrity of `SHA256SUMS`
+itself matters for a given use, the git object hash of the commit that added it
+is the anchor.
 
 ## The measurements
 
@@ -129,8 +136,16 @@ failed.
   `synchronous` mode.
 - The block layer, the page cache and thermal are all excluded as causes.
 
-**Inferred, and strongly supported:** the proximate mechanism is a lost or
-missed completion interrupt on this NVMe/PCIe path.
+**Established, as a consequence of the kernel message rather than an
+inference:** the completion was **not delivered by the normal interrupt path
+within the timeout**. The handler only runs because the command was still
+outstanding at 30 s, and it then found the completion present — so the device
+had produced it and the host had not acted on it.
+
+**Inferred, and NOT discriminated by this run:** whether the completion was
+*lost* and recovered only by polling, or merely *delayed* and arriving near the
+timeout. The 8 496 ms stall in the mitigation follow-up is consistent with
+delayed delivery, and nothing here separates the two.
 
 **Not established:** the *root* cause of the lost interrupt.
 

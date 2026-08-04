@@ -1395,7 +1395,7 @@ the full-store extrapolation (~12.8 days versus ~12.6 s) explicitly marked as an
 order of magnitude rather than planning evidence — it runs ~374× beyond the
 largest rung, the same overreach D-6 was corrected for.
 
-### D-15 — the stall is a lost NVMe completion interrupt, and it is not a persistence property
+### D-15 — the stall is an NVMe completion the host never acted on, and it is not a persistence property
 
 Six configurations, 20 repetitions, 100 000 events — **D-10's protocol exactly**,
 re-run on target with the windowed instrument (PR #1332). Evidence bundle:
@@ -1435,9 +1435,17 @@ Three measurements identify the mechanism.
    > inflated the figure past 100 % and prompted a claim that the metric exceeds
    > wall time. It does not, in this data. The stall rows are unaffected —
    > there the window and the commit differ by a few milliseconds.
-3. **"completion polled" names the cause.** The timeout handler fired at 30 s,
+3. **"completion polled" names the failure.** The timeout handler fired at 30 s,
    polled the completion queue, and found the command *already complete*. The
-   work was done; the completion interrupt never reached the host.
+   handler only runs because the command was still outstanding at the timeout,
+   so this is a **consequence of the message rather than an inference**: the
+   completion was not delivered by the normal interrupt path within 30 s, and
+   the device had produced it.
+
+   What the run does **not** discriminate is whether that completion was *lost*
+   — recovered only by the poll — or merely *delayed*, arriving near the
+   timeout. The 8 496 ms stall below is consistent with delayed delivery. The
+   heading says "never acted on" rather than "lost interrupt" for that reason.
 
 Writeback is excluded (peak dirty+writeback 1 220 kB and 4 216 kB against a
 262 144 kB threshold) and thermal is excluded (58.0–58.2 °C against 85 °C). Both
