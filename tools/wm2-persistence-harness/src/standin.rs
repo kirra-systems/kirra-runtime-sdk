@@ -115,6 +115,24 @@ CREATE TABLE compaction_citations (
 /// plus a backfill, which is the realistic shape of a schema change against a
 /// populated store (adding an unpopulated column is not a migration, it is a
 /// DDL statement).
+///
+/// # This form is QUADRATIC, and it is kept deliberately
+///
+/// The backfill is a correlated scalar subquery, and SQLite plans it as
+/// `SEARCH world_events USING INDEX idx_events_kind (kind=?)` — keyed on the
+/// kind alone, so **every projection row walks every observation event**.
+/// `idx_events_subject_valid` goes unused. Cost is therefore
+/// `O(events × entities)`, not `O(events)`.
+///
+/// ADR-0041 D-6 measured this statement and extrapolated it linearly in events;
+/// D-13 shows the model is wrong and the number describes this SQL rather than
+/// the store. It is retained so that measurement stays reproducible — deleting
+/// it would orphan an archived target result — and as the negative control for
+/// [`SCHEMA_V2_STEP_GROUPED`], which is what a migration should actually look
+/// like.
+///
+/// **Do not copy this shape into a real migration.** See
+/// [`crate::standin::tests::the_backfill_must_not_rescan_the_log_per_entity`].
 pub const SCHEMA_V2_STEP: &str = r#"
 ALTER TABLE entities_projection ADD COLUMN observed_count INTEGER NOT NULL DEFAULT 0;
 UPDATE entities_projection SET observed_count = (
@@ -122,6 +140,27 @@ UPDATE entities_projection SET observed_count = (
      WHERE world_events.subject = entities_projection.entity_id
        AND world_events.kind = 'observation'
 );
+"#;
+
+/// The same v2 migration, as a single grouped pass over the log.
+///
+/// `UPDATE … FROM` a materialized `GROUP BY` plans as one scan of the log
+/// followed by an indexed lookup per projection row — `O(events + entities)`.
+/// Entities with no observations keep the column's `DEFAULT 0`, which is what
+/// the correlated form's `COUNT(*)` of an empty set produces, so the two are
+/// equivalent by construction as well as by test.
+///
+/// On the same database this is ~3 100× faster than [`SCHEMA_V2_STEP`]
+/// (93 132 ms → 30 ms, ADR-0041 D-13). The difference is entirely the query
+/// plan; the schemas and the results are identical.
+pub const SCHEMA_V2_STEP_GROUPED: &str = r#"
+ALTER TABLE entities_projection ADD COLUMN observed_count INTEGER NOT NULL DEFAULT 0;
+UPDATE entities_projection SET observed_count = g.c
+  FROM (SELECT subject, COUNT(*) AS c
+          FROM world_events
+         WHERE kind = 'observation'
+         GROUP BY subject) AS g
+ WHERE g.subject = entities_projection.entity_id;
 "#;
 
 /// The schema version this binary understands. A database stamped higher than
@@ -717,9 +756,19 @@ impl Store {
     }
 
     /// Apply the v2 migration step to a populated store.
+    /// Apply the v2 migration using the historical (quadratic) backfill.
+    ///
+    /// Retained so the archived D-6 measurement stays reproducible. The CLI
+    /// selects between this and [`SCHEMA_V2_STEP_GROUPED`] via
+    /// [`Store::migrate_to_v2_using`].
+    #[cfg(test)]
     pub fn migrate_to_v2(&mut self) -> rusqlite::Result<()> {
+        self.migrate_to_v2_using(SCHEMA_V2_STEP)
+    }
+
+    pub fn migrate_to_v2_using(&mut self, step: &str) -> rusqlite::Result<()> {
         self.conn.execute_batch("BEGIN EXCLUSIVE;")?;
-        match self.conn.execute_batch(SCHEMA_V2_STEP) {
+        match self.conn.execute_batch(step) {
             Ok(()) => {
                 self.conn.execute_batch("PRAGMA user_version=2; COMMIT;")?;
                 Ok(())
@@ -972,5 +1021,192 @@ mod tests {
             assert_eq!(actual, expected, "{d:?} did not take effect");
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration cost-shape gate (ADR-0041 D-13)
+    // -----------------------------------------------------------------------
+    //
+    // A migration whose backfill rescans the whole event log once per entity
+    // costs O(events x entities). On the measured ladder that was ~3 100x the
+    // grouped equivalent on identical data, and it is the kind of defect a
+    // later "clearer" rewrite reintroduces silently, because the SQL reads
+    // perfectly well and the result is correct. Only the plan is wrong.
+    //
+    // These tests gate the shape, not a wall-clock number: the plan assertion
+    // is deterministic, and the timing check compares the two statements inside
+    // one process so machine speed cancels out.
+
+    /// Every `EXPLAIN QUERY PLAN` line for the backfill in `step`.
+    fn backfill_plan(step: &str, path: &std::path::Path) -> Vec<String> {
+        let backfill = step
+            .split(';')
+            .map(str::trim)
+            .find(|s| s.starts_with("UPDATE"))
+            .expect("the step must contain an UPDATE backfill");
+        let conn = rusqlite::Connection::open(path).expect("open");
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {backfill}"))
+            .expect("plan");
+        let rows: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(3))
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .collect();
+        rows
+    }
+
+    fn migrated(name: &str, step: &str, events: u64, entities: u64) -> std::path::PathBuf {
+        let (mut s, path) = store(name);
+        s.append_batch(&gen::events(0, events, entities, 11))
+            .unwrap();
+        s.fold_from(0).unwrap();
+        s.migrate_to_v2_using(step).expect("migrate");
+        drop(s);
+        path
+    }
+
+    #[test]
+    fn the_backfill_must_not_rescan_the_log_per_entity() {
+        // The gate. A correlated scalar subquery over the log is the shape that
+        // made the measured migration quadratic; the grouped form must not have
+        // one.
+        let path = migrated("plan-grouped", SCHEMA_V2_STEP_GROUPED, 400, 40);
+        let plan = backfill_plan(SCHEMA_V2_STEP_GROUPED, &path).join(" | ");
+        assert!(
+            !plan.to_uppercase().contains("CORRELATED"),
+            "the grouped backfill regressed to a per-entity rescan of the log.\nplan: {plan}"
+        );
+        assert!(
+            plan.to_uppercase().contains("GROUP BY") || plan.to_uppercase().contains("MATERIALIZE"),
+            "the grouped backfill no longer makes a single grouped pass.\nplan: {plan}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_plan_gate_can_actually_tell_the_two_shapes_apart() {
+        // Non-vacuity. Without this the assertion above would pass against a
+        // plan-detection method that never fires, which is the failure mode
+        // that makes a regression gate decorative.
+        let path = migrated("plan-legacy", SCHEMA_V2_STEP, 400, 40);
+        let plan = backfill_plan(SCHEMA_V2_STEP, &path).join(" | ");
+        assert!(
+            plan.to_uppercase().contains("CORRELATED"),
+            "the legacy backfill is supposed to BE the bad shape; if it no longer \
+             reads as correlated, this gate is no longer detecting anything.\nplan: {plan}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn both_backfills_compute_the_same_counts_including_unobserved_entities() {
+        // Deterministic equivalence, which is what makes swapping the statement
+        // legitimate rather than merely faster. The zero-observation case is
+        // called out because the two forms reach it differently: the correlated
+        // subquery COUNTs an empty set, the grouped form never matches and
+        // leaves the column's DEFAULT.
+        let read = |path: &std::path::Path| -> Vec<(String, i64)> {
+            let conn = rusqlite::Connection::open(path).expect("open");
+            let mut stmt = conn
+                .prepare(
+                    "SELECT entity_id, observed_count FROM entities_projection ORDER BY entity_id",
+                )
+                .expect("prepare");
+            let v: Vec<(String, i64)> = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .expect("query")
+                .map(|r| r.expect("row"))
+                .collect();
+            v
+        };
+
+        let a = migrated("equiv-legacy", SCHEMA_V2_STEP, 600, 50);
+        let b = migrated("equiv-grouped", SCHEMA_V2_STEP_GROUPED, 600, 50);
+        let (ra, rb) = (read(&a), read(&b));
+        assert!(!ra.is_empty(), "no projection rows to compare");
+        assert_eq!(ra, rb, "the two backfills disagree");
+
+        // And prove the unobserved-entity path was actually exercised, rather
+        // than assumed: insert an entity the log never mentions, re-run both
+        // backfills against it, and require both to read 0.
+        for (name, step) in [
+            ("zero-legacy", SCHEMA_V2_STEP),
+            ("zero-grouped", SCHEMA_V2_STEP_GROUPED),
+        ] {
+            let (mut s, path) = store(name);
+            s.append_batch(&gen::events(0, 200, 20, 3)).unwrap();
+            s.fold_from(0).unwrap();
+            s.conn
+                .execute(
+                    "INSERT INTO entities_projection \
+                       (entity_id, kind, place_ref, valid_from_ms, generation) \
+                     VALUES ('never-observed', 'thing', 'nowhere', 0, 0)",
+                    [],
+                )
+                .expect("insert unobserved entity");
+            s.migrate_to_v2_using(step).expect("migrate");
+            let n: i64 = s
+                .conn
+                .query_row(
+                    "SELECT observed_count FROM entities_projection WHERE entity_id='never-observed'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("read back");
+            assert_eq!(n, 0, "{name}: an unobserved entity must count 0");
+            drop(s);
+            let _ = std::fs::remove_file(&path);
+        }
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    fn the_grouped_backfill_is_flat_in_entities_where_the_legacy_one_is_not() {
+        // Coarse by design. The legacy form doubles when the entity count
+        // doubles at a fixed log size; the grouped form should barely move.
+        // Both ratios are measured in one process against the same machine, so
+        // this asserts a relationship rather than a wall-clock budget.
+        let time_it = |name: &str, step: &str, entities: u64| -> std::time::Duration {
+            let (mut s, path) = store(name);
+            s.append_batch(&gen::events(0, 8_000, entities, 5)).unwrap();
+            s.fold_from(0).unwrap();
+            let t = std::time::Instant::now();
+            s.migrate_to_v2_using(step).expect("migrate");
+            let d = t.elapsed();
+            drop(s);
+            let _ = std::fs::remove_file(&path);
+            d
+        };
+
+        let legacy_lo = time_it("scale-l-lo", SCHEMA_V2_STEP, 100);
+        let legacy_hi = time_it("scale-l-hi", SCHEMA_V2_STEP, 400);
+        let grouped_lo = time_it("scale-g-lo", SCHEMA_V2_STEP_GROUPED, 100);
+        let grouped_hi = time_it("scale-g-hi", SCHEMA_V2_STEP_GROUPED, 400);
+
+        let ratio = |lo: std::time::Duration, hi: std::time::Duration| -> f64 {
+            hi.as_secs_f64() / lo.as_secs_f64().max(1e-6)
+        };
+        let (lr, gr) = (ratio(legacy_lo, legacy_hi), ratio(grouped_lo, grouped_hi));
+
+        // 4x the entities. Linear-in-entities predicts ~4.0; flat predicts ~1.0.
+        // The thresholds are wide because CI machines are noisy and this test is
+        // worth more as a shape check that never flakes than as a tight bound.
+        assert!(
+            lr > 2.0,
+            "the legacy backfill no longer grows with entity count (ratio {lr:.2}); \
+             either the planner changed or this test has stopped measuring the \
+             thing it was written for"
+        );
+        assert!(
+            gr < 2.0,
+            "the grouped backfill now grows with entity count (ratio {gr:.2}) — it has \
+             regressed toward a per-entity rescan of the log"
+        );
+        assert!(
+            gr < lr,
+            "grouped ({gr:.2}) must scale better than legacy ({lr:.2})"
+        );
     }
 }

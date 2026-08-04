@@ -504,6 +504,7 @@ pub fn migration(
     events: u64,
     entities: u64,
     seed: u64,
+    step: &str,
 ) -> Result<MigrationResult, String> {
     remove_db(path);
     let mut store = Store::open(path, durability).map_err(|e| e.to_string())?;
@@ -513,7 +514,7 @@ pub fn migration(
     store.fold_from(0).map_err(|e| e.to_string())?;
 
     let t = Instant::now();
-    store.migrate_to_v2().map_err(|e| e.to_string())?;
+    store.migrate_to_v2_using(step).map_err(|e| e.to_string())?;
     let apply = Timing::from_durations("migrate_v1_to_v2", vec![t.elapsed()]);
 
     let version_after = store.schema_version().map_err(|e| e.to_string())?;
@@ -636,7 +637,15 @@ mod tests {
     #[test]
     fn migration_applies_and_then_fails_closed() {
         let p = temp("migration");
-        let m = migration(&p, Durability::Off, 1_500, 80, 2).unwrap();
+        let m = migration(
+            &p,
+            Durability::Off,
+            1_500,
+            80,
+            2,
+            crate::standin::SCHEMA_V2_STEP,
+        )
+        .unwrap();
         assert_eq!(m.version_after, 2);
         assert!(
             m.future_schema_refused,
