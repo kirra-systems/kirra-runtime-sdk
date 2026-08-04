@@ -1,16 +1,16 @@
 # Jetson WM-2 persistence drill (ADR-0041)
 
-The on-device measurement that ADR-0041 is blocked on. That ADR proposes a
-SQLite append-only event log with materialized projections for Kirra World and
-refused to ratify itself on argument:
+The on-device measurement ADR-0041 was blocked on. That ADR proposed a SQLite
+append-only event log with materialized projections for Kirra World and refused
+to ratify itself on argument:
 
 > **Proposed. Measurement-gated.** Accepted only when **all** are recorded […]
 > **No implementation should begin merely because this proposed ADR exists.**
 
-This drill produced those recordings. **ADR-0041 was accepted on 2026-08-04** on
-the strength of them; the drill remains the instrument for re-running any gate,
-and a failing re-run is a reason to revisit the ADR rather than something to
-absorb. The instrument is
+This drill produced those recordings, and **ADR-0041 was accepted on 2026-08-04**
+on the strength of them. It remains the instrument for re-running any gate:
+re-running does not re-ratify, and a failing re-run is a reason to revisit the
+ADR rather than something to absorb. The instrument is
 [`tools/wm2-persistence-harness`](../../tools/wm2-persistence-harness/).
 
 > **The harness is not the Kirra World store.** Its schema is a stand-in, its
