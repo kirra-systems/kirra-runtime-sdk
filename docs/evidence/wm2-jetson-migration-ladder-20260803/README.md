@@ -220,6 +220,11 @@ done
 
 ## Status
 
-These measurements **support the proposed migration resolution but do not
-ratify ADR-0041.** The alongside-rebuild and atomic-cutover spike remains open,
-as do the three named decider approvals.
+These measurements **support the migration resolution but did not, by
+themselves, ratify ADR-0041** — evidence and acceptance are separate acts.
+
+The resolution (R1–R5) was adopted and ADR-0041 was accepted on **2026-08-04**,
+after this bundle was produced. **The alongside-rebuild and atomic-cutover spike
+remains open**, carried as an outstanding obligation of that acceptance: if it
+shows the protocol impractical, open question 8 reopens. See the ADR's
+*Acceptance record*.
