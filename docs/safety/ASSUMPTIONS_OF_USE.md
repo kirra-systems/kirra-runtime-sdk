@@ -1599,10 +1599,26 @@ which the robot was still operating.
     that do work: `/sys/block/<dev>/queue/io_timeout` (live, per-queue,
     re-applied every boot via udev) or `nvme_core.io_timeout=<n>` on the kernel
     command line (applies at probe, survives reboot).
+  - **`io_timeout` — subsequently APPLIED AND MEASURED.** Set to **5 000 ms**
+    on the per-queue file and verified before and after a 60-repetition run.
+    Worst-case stall fell **30 s → 5.25 s** (5.7×; ~300 → ~53 observations at
+    10 Hz), landing at the timeout plus 254.5 ms of handler latency. **Stalls
+    persisted (2/60 repetitions, 3 kernel timeouts)** — as predicted, since
+    capping recovery does not stop completions being lost. Not persistent: the
+    sysfs value is lost on reboot, so the deployed form is
+    `nvme_core.io_timeout=` on the kernel command line.
   - **ext4 `Errors behavior` — APPLIED.** `Continue` → `Remount read-only`, so
     the filesystem fails closed on detected corruption.
   - Neither addresses the root cause, and a lower timeout bounds the *recovery*
     of the symptom rather than preventing it.
+- **Instrument caveat that this AoU depends on.** With a 5 s stall, device
+  busy-time inside the measured window was **34.3 %** against 1–2 % for the 30 s
+  stalls, and the harness attributes `IO-DEVICE` above 50 %. Qualifying a drive
+  against a *short* timeout therefore risks a stall of this kind being labelled
+  a busy device — the false attribution the windowing fix removed. Until that
+  threshold is re-derived for short windows, read `UNATTRIBUTED` at a low
+  timeout as weaker evidence than the same verdict at a long one. See D-15
+  *Mitigation measured*.
 - **Scope is coverage, not durability.** Every timed-out command had completed —
   nothing was lost or retried, and D-11's five power cuts are unaffected. This
   is an availability and memory-completeness assumption.

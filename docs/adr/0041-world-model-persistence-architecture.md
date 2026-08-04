@@ -1484,6 +1484,51 @@ An attempt to lower it on the bench also **failed silently** — writing
 live queue stayed at 30 000 ms, since the value is latched at namespace probe.
 See `AOU-WM2-STORAGE-COMPLETION-001`.
 
+**Mitigation measured — the model holds at a second timeout value.** With
+`/sys/block/nvme0n1/queue/io_timeout` genuinely set to **5 000 ms** (the
+per-queue file, verified before *and* after the run), `NORMAL`/b1 over **60**
+repetitions produced:
+
+| Prediction, stated before the run | Result |
+|---|---|
+| Stalls persist — capping recovery does not stop completions being lost | **2/60** |
+| Worst commit caps near 5 000 ms plus handler latency | **5 254.5 ms = 5 000 + 254.5** |
+| Fresh kernel timeout entries dated inside the run | **3 new** (12:07:00, 12:15:01, 12:15:15) |
+
+The stall tracks whatever `io_timeout` is set to, now observed at **two
+different values** — a considerably stronger test than the original correlation.
+Worst case 30 s → 5.25 s is a **5.7×** cut in the observation gap (~300 → ~53
+observations at 10 Hz). The mitigation is a **sysfs setting that does not
+survive reboot**; the persistent form is `nvme_core.io_timeout=` on the kernel
+command line, which applies at probe.
+
+Three results the predictions did not cover, recorded as observations:
+
+1. **Three kernel timeouts, two counted stalls.** 12:15:01 and 12:15:15 are 14 s
+   apart, inside one ~20 s repetition. `stalls_observed` counts *repetitions
+   that stalled*, so two stalls in one repetition collapse to one —
+   **`stalls_observed` undercounts stalls**, demonstrated here on live data.
+2. **The rate appears to fall and the model does not explain it.** 4/20 → 2/60,
+   Fisher exact two-sided **p = 0.032**. A timeout value should change how long
+   a lost completion takes to recover, not how often one occurs. Two reasons not
+   to read this as the mitigation working: the "2" undercounts (point 1), and
+   this configuration is demonstrably unstable between runs (point 3).
+   **Unexplained.**
+3. **Device busy inside the stall window rose to 34.3 %** (1 804 ms of 5 254 ms),
+   against 1.0–2.1 % for the 30 s stalls. This is a **live risk to the
+   instrument**: `IO_BUSY_FRACTION` is 0.5, so a stall of this kind is now one
+   modest step from being attributed `IO-DEVICE` — reinstating exactly the false
+   attribution the windowing fix removed, this time from a correctly-windowed
+   measurement. The threshold was calibrated against 30 s stalls and does not
+   obviously transfer to shorter windows, where background I/O is a larger
+   fraction of the span. **Not yet addressed.**
+
+**`NORMAL`/b1's median throughput is bimodal across four target runs** — 5 143
+(D-10), 9 485, 9 821, 5 006 ev/s — two clusters roughly 2× apart. A median is
+robust to stalls, so this is not a tail artefact. It was recorded above as an
+unexplained +84 % against D-10; with four points it is better described as a
+**bistable configuration**, and it remains unexplained.
+
 **No rate law is claimed.** The events concentrate where more I/O is issued —
 all five at batch=1, none at batch=64, and `OFF` now at **0 stalls in 80
 repetitions** across both runs. But five events cannot support a rate model, and
