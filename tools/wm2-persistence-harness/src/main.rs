@@ -937,6 +937,11 @@ fn main() {
                 .float("stall_threshold_ms", stall::STALL_THRESHOLD_MS)
                 .float("worst_commit_ms", r.worst_commit_ms)
                 .float("median_worst_ms", r.median_worst_ms)
+                // One entry per STALLING repetition (its worst commit), ascending.
+                // A single `worst_commit_ms` cannot tell stalls clustered at a
+                // timeout bound from stalls spread below it, and those imply
+                // different mechanisms — see D-15 Refinement.
+                .float_array("stall_durations_ms", &r.stall_durations_ms)
                 .float("median_throughput_eps", r.median_throughput_eps())
                 .str("attribution", r.attribution.token())
                 .str("detail", r.attribution.detail())

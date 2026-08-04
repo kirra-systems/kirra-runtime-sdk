@@ -342,6 +342,19 @@ pub struct StallResult {
     pub worst_commit_ms: f64,
     /// Median of the per-run worst commit — how bad a *typical* run gets.
     pub median_worst_ms: f64,
+    /// Every stalling repetition's worst commit, milliseconds, ascending.
+    ///
+    /// **One entry per stalling repetition, not per stall** — `bench::append`
+    /// reports a repetition's `max`, so a repetition containing two stalls
+    /// contributes only its worse one. The length therefore equals
+    /// `stalls_observed` by construction.
+    ///
+    /// Exists because a single `worst_commit_ms` cannot distinguish stalls
+    /// *clustered* at a timeout bound from stalls *distributed* below it, and
+    /// those imply different mechanisms: clustering says the bound is doing the
+    /// recovering, spread says the fault often resolves on its own (D-15
+    /// *Refinement*).
+    pub stall_durations_ms: Vec<f64>,
     pub throughput_eps: Vec<f64>,
     pub attribution: StallAttribution,
     /// Counters across the worst commit's own window — **not** across the run.
@@ -605,6 +618,12 @@ pub fn run(
     } else {
         worst_per_run[worst_per_run.len() / 2]
     };
+    // Sorted, so the shape is readable without post-processing.
+    let stall_durations_ms: Vec<f64> = worst_per_run
+        .iter()
+        .copied()
+        .filter(|ms| *ms >= STALL_THRESHOLD_MS)
+        .collect();
 
     let attribution = if worst_per_run.is_empty() {
         StallAttribution::Unattributed(
@@ -622,6 +641,7 @@ pub fn run(
         stalls_observed: stalls,
         worst_commit_ms: worst_overall,
         median_worst_ms: median_worst,
+        stall_durations_ms,
         throughput_eps: throughput,
         attribution,
         delta_at_worst: worst_windowed,
@@ -926,6 +946,7 @@ mod tests {
             median_worst_ms: 9.0,
             throughput_eps: vec![30_000.0; 20],
             attribution: attribute_stall(&win(12.0, SystemDelta::default())),
+            stall_durations_ms: Vec::new(),
             delta_at_worst: win(0.0, SystemDelta::default()),
         };
         assert!(!r.fails_the_run());
@@ -948,6 +969,7 @@ mod tests {
             median_worst_ms: 11.0,
             throughput_eps: vec![36_000.0, 35_800.0, 3_123.0, 36_200.0, 35_900.0],
             attribution: StallAttribution::Unattributed(String::new()),
+            stall_durations_ms: Vec::new(),
             delta_at_worst: win(0.0, SystemDelta::default()),
         };
         assert_eq!(r.median_throughput_eps(), 35_900.0);
@@ -964,6 +986,7 @@ mod tests {
             median_worst_ms: f64::NAN,
             throughput_eps: vec![],
             attribution: StallAttribution::Unattributed(String::new()),
+            stall_durations_ms: Vec::new(),
             delta_at_worst: win(0.0, SystemDelta::default()),
         };
         assert!(r.median_throughput_eps().is_nan());
@@ -979,6 +1002,7 @@ mod tests {
             median_worst_ms: f64::NAN,
             throughput_eps: vec![],
             attribution: StallAttribution::Unattributed(String::new()),
+            stall_durations_ms: Vec::new(),
             delta_at_worst: win(0.0, SystemDelta::default()),
         };
         assert!(r.fails_the_run());
@@ -995,10 +1019,39 @@ mod tests {
             median_worst_ms: 10.0,
             throughput_eps: vec![],
             attribution: StallAttribution::Unattributed(String::new()),
+            stall_durations_ms: Vec::new(),
             delta_at_worst: win(0.0, SystemDelta::default()),
         };
         assert_eq!(mk(1).stall_rate(), 0.05);
         assert_eq!(mk(10).stall_rate(), 0.5);
+    }
+
+    #[test]
+    fn the_stall_durations_are_exactly_the_repetitions_that_stalled() {
+        // The list and the count come from the same source and must not drift:
+        // a reader comparing `stalls_observed` against the array's length is
+        // entitled to find them equal, and a mismatch would look like a
+        // measurement gap rather than a bookkeeping bug.
+        let worst_per_run = [4.0, 12.5, STALL_THRESHOLD_MS, 8_496.0, 30_182.4];
+        let durations: Vec<f64> = worst_per_run
+            .iter()
+            .copied()
+            .filter(|ms| *ms >= STALL_THRESHOLD_MS)
+            .collect();
+        assert_eq!(durations, vec![STALL_THRESHOLD_MS, 8_496.0, 30_182.4]);
+        assert_eq!(
+            durations.len(),
+            worst_per_run
+                .iter()
+                .filter(|ms| **ms >= STALL_THRESHOLD_MS)
+                .count(),
+            "the array length must equal stalls_observed by construction"
+        );
+        // Ascending, so the shape reads without post-processing — the whole
+        // point is telling a cluster at a timeout bound from a spread below it.
+        assert!(durations.windows(2).all(|w| w[0] <= w[1]));
+        // The threshold is inclusive on both sides of the comparison.
+        assert!(durations.contains(&STALL_THRESHOLD_MS));
     }
 
     #[test]

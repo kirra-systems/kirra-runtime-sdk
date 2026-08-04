@@ -103,6 +103,16 @@ impl Obj {
         self
     }
 
+    /// A numeric array. Non-finite entries render as `null`, exactly as
+    /// [`float`](Self::float) does — a missing measurement must not arrive as a
+    /// number a consumer would then average.
+    pub fn float_array(mut self, key: &str, values: &[f64]) -> Self {
+        let items: Vec<String> = values.iter().map(|v| number(*v)).collect();
+        self.parts
+            .push(format!("\"{}\":[{}]", escape(key), items.join(",")));
+        self
+    }
+
     pub fn obj(mut self, key: &str, value: Obj) -> Self {
         self.parts
             .push(format!("\"{}\":{}", escape(key), value.render()));
