@@ -1,0 +1,17 @@
+[Mon Aug  3 20:23:27 2026] nvme 0004:01:00.0: Adding to iommu group 5
+[Mon Aug  3 20:23:27 2026] nvme nvme0: pci function 0004:01:00.0
+[Mon Aug  3 20:23:27 2026] nvme 0004:01:00.0: enabling device (0000 -> 0002)
+[Mon Aug  3 20:23:27 2026] nvme nvme0: allocated 64 MiB host memory buffer.
+[Mon Aug  3 20:23:27 2026] nvme nvme0: 8/0/0 default/read/poll queues
+[Mon Aug  3 20:23:27 2026] nvme nvme0: Ignoring bogus Namespace Identifiers
+[Mon Aug  3 20:23:27 2026]  nvme0n1: p1 p2 p3 p4 p5 p6 p7 p8 p9 p10 p11 p12 p13 p14 p15
+[Mon Aug  3 20:23:27 2026] EXT4-fs (nvme0n1p1): warning: mounting fs with errors, running e2fsck is recommended
+[Mon Aug  3 20:23:27 2026] EXT4-fs (nvme0n1p1): recovery complete
+[Mon Aug  3 20:23:27 2026] EXT4-fs (nvme0n1p1): mounted filesystem with ordered data mode. Opts: (null). Quota mode: none.
+[Mon Aug  3 20:23:28 2026] EXT4-fs (nvme0n1p1): re-mounted. Opts: (null). Quota mode: none.
+[Mon Aug  3 20:23:30 2026]  host1x_fence(O) nvidia_vrs_pseq(O) nvhost_isp5(O) nvhost_vi5(O) nvhost_nvcsi_t194(O) tegra_camera(O) v4l2_dv_timings nvhost_nvcsi(O) tegra_camera_platform(O) capture_ivc(O) governor_userspace tegra_camera_rtcpu(O) ivc_bus(O) hsp_mailbox_client(O) ivc_ext(O) v4l2_fwnode v4l2_async tegra_drm(O) videobuf2_dma_contig nvhost_nvdla(O) nvhost_pva(O) tegra_wmark(O) videobuf2_memops nvhost_capture(O) videobuf2_v4l2 videobuf2_common nvhwpm(O) videodev mc cec host1x_nvhost(O) drm_kms_helper nvidia_p2p(O) ina3221 nvgpu(O) governor_pod_scaling(O) host1x(O) mc_utils(O) nvmap(O) nvsciipc(O) quota_v2 quota_tree fuse drm ip_tables x_tables ipv6 pwm_fan pwm_tegra tegra_bpmp_thermal tegra_xudc ucsi_ccg typec_ucsi typec nvme nvme_core phy_tegra194_p2u pcie_tegra194
+[Tue Aug  4 09:52:54 2026] nvme nvme0: I/O 719 QID 6 timeout, completion polled
+[Tue Aug  4 10:38:47 2026] nvme nvme0: I/O 510 QID 6 timeout, completion polled
+[Tue Aug  4 10:42:05 2026] nvme nvme0: I/O 817 QID 5 timeout, completion polled
+[Tue Aug  4 10:43:03 2026] nvme nvme0: I/O 690 QID 6 timeout, completion polled
+[Tue Aug  4 10:43:35 2026] nvme nvme0: I/O 56 QID 5 timeout, completion polled

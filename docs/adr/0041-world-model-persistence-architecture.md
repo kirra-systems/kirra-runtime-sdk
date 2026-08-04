@@ -404,6 +404,13 @@ source; they are not migrated destructively (ADR-0040).
    zero stalls. `NORMAL` slower than `FULL` is not predicted by any durability
    model, and until it is explained a per-source-class policy should not be
    fixed at batch=64. The batch=1 ordering is correct and could be decided now.
+   **The inversion REPRODUCED on target 2026-08-04 (D-15):** `OFF` 54 636 >
+   `FULL` 30 545 > `NORMAL` 19 881 — the same ordering, all three medians within
+   3 % of D-10, from configurations recording zero stalls in both runs. Two
+   independent observations make it a real effect rather than noise, so this
+   blocker is **stronger**, not weaker. D-15 does not touch it: the stall
+   mechanism turned out to be a driver defect independent of `synchronous`,
+   which is a different question from why `NORMAL` is slower than `FULL`.
 2. Retention classes: exact list and their durations. The harness models the
    §11.3 protected set (safety, incident, calibration, adjudication, operator)
    and enforces it — a window containing any of them is refused whole — but the
@@ -472,7 +479,30 @@ source; they are not migrated destructively (ADR-0040).
    particular backfill statement*, and the same schema change written as a
    grouped pass is orders of magnitude cheaper. See *Open question 8 — drafted
    resolution*.
-9. **Multi-second write stalls (O-1, D-10).** **Measured on target; the
+9. **Multi-second write stalls (O-1, D-10, D-15). MECHANISM IDENTIFIED
+   2026-08-04 — a lost or delayed NVMe completion. `io_timeout` bounds how long
+   the host waits for one; it is the backstop, not the cause** (a later 8 496 ms
+   stall with the same idle-device signature resolved on its own, well under the
+   30 s bound — D-15 *Refinement*). Five stalls in 120 repetitions coincide
+   one-for-one with five
+   `nvme0: I/O ... timeout, completion polled` entries in the kernel log; the
+   stall durations are the timeout plus 19.4 ms and 182.4 ms of handler latency;
+   and the device was **1–2 % busy** across windows that cover the stalls
+   themselves, against 107–214 % on ordinary windows. The commands had all
+   completed — **durability is unaffected**, and D-11 stands independently. This
+   is a **platform/driver defect, not a persistence-architecture property**:
+   SQLite, the schema and `synchronous` are bystanders. See **D-15** and
+   `docs/evidence/wm2-jetson-oq9-rerun-20260804/`.
+   **What remains open** is the *root* cause of the lost interrupt — controller
+   firmware, PCIe ASPM, or Tegra MSI-X routing are the candidates and this run
+   does not discriminate. That is a hardware-qualification question, and it
+   belongs in Assumptions of Use: at 10 Hz a 30 s stall is ~300 observations
+   that cannot be recorded, at ~4 % of batch=1 runs on this drive. PSI remains
+   unavailable on this kernel.
+   *The pre-2026-08-04 classification is preserved below, because the reasoning
+   that narrowed the field is what made the kernel-log check the obvious next
+   move.*
+   **Measured on target; the
    original theory is rejected and the mechanism is partly unresolved.**
    `NORMAL`/batch=64 — the suspect — produced **zero** stalls in 20 repetitions.
    The stalls appeared in `FULL`/batch=64 and `NORMAL`/batch=1 instead: 3 events
@@ -1364,6 +1394,182 @@ outlier excluded from that one fit. The bundle README carries these, and carries
 the full-store extrapolation (~12.8 days versus ~12.6 s) explicitly marked as an
 order of magnitude rather than planning evidence — it runs ~374× beyond the
 largest rung, the same overreach D-6 was corrected for.
+
+### D-15 — the stall is an NVMe completion the host never acted on, and it is not a persistence property
+
+Six configurations, 20 repetitions, 100 000 events — **D-10's protocol exactly**,
+re-run on target with the windowed instrument (PR #1332). Evidence bundle:
+`docs/evidence/wm2-jetson-oq9-rerun-20260804/`, `JETSON-TARGET-MEASURED`.
+
+**5 stalls in 120 repetitions, and 5 NVMe command timeouts in the kernel log.**
+
+```
+[Tue Aug  4 09:52:54 2026] nvme nvme0: I/O 719 QID 6 timeout, completion polled
+[Tue Aug  4 10:38:47 2026] nvme nvme0: I/O 510 QID 6 timeout, completion polled
+[Tue Aug  4 10:42:05 2026] nvme nvme0: I/O 817 QID 5 timeout, completion polled
+[Tue Aug  4 10:43:03 2026] nvme nvme0: I/O 690 QID 6 timeout, completion polled
+[Tue Aug  4 10:43:35 2026] nvme nvme0: I/O  56 QID 5 timeout, completion polled
+```
+
+The grouping matches too: one early event (`FULL`/b1, which recorded 1 stall)
+and four clustered inside five minutes (`NORMAL`/b1, which recorded 4). **Zero
+resets, zero I/O errors, zero aborts** — no command ever failed.
+
+Three measurements identify the mechanism.
+
+1. **The duration is a constant.** `nvme_core.io_timeout` is **30**, and the two
+   stalls were 30 019.4 ms and 30 182.4 ms — the timeout plus **19.4 ms** and
+   **182.4 ms** of handler latency. A timeout-bounded wait cannot come in under
+   the timeout and exceeds it only by handling delay.
+2. **The device was idle while the host waited.** These are the first stalls
+   measured over *their own window* (1 412 and 1 418 samples at 20 ms). Device
+   busy-time inside the window: **2.12 %** and **1.05 %** of the stall. On the
+   non-stalling rows the same counter reads **74–100 %** of its window.
+   Normally this drive is saturated; during the stalls it did essentially
+   nothing.
+
+   > **Corrected.** An earlier revision of this paragraph said 107–214 %, from
+   > dividing `disk_io_ms` by `worst_commit_ms`. The delta is accumulated over
+   > `counter_window_ms`, so that is the only denominator it can be divided by;
+   > on the non-stalling rows the window is much wider than the commit, which
+   > inflated the figure past 100 % and prompted a claim that the metric exceeds
+   > wall time. It does not, in this data. The stall rows are unaffected —
+   > there the window and the commit differ by a few milliseconds.
+3. **"completion polled" names the failure.** The timeout handler fired at 30 s,
+   polled the completion queue, and found the command *already complete*. The
+   handler only runs because the command was still outstanding at the timeout,
+   so this is a **consequence of the message rather than an inference**: the
+   completion was not delivered by the normal interrupt path within 30 s, and
+   the device had produced it.
+
+   What the run does **not** discriminate is whether that completion was *lost*
+   — recovered only by the poll — or merely *delayed*, arriving near the
+   timeout. The 8 496 ms stall below is consistent with delayed delivery. The
+   heading says "never acted on" rather than "lost interrupt" for that reason.
+
+Writeback is excluded (peak dirty+writeback 1 220 kB and 4 216 kB against a
+262 144 kB threshold) and thermal is excluded (58.0–58.2 °C against 85 °C). Both
+stalls report `UNATTRIBUTED`, and here that is **positive evidence**: everything
+the harness can observe says nothing was happening.
+
+**Durability is unaffected.** Every timed-out command had completed — nothing
+was lost, nothing was retried. This is a latency and availability defect, and
+D-11's five power cuts stand independently of it.
+
+**What is not established** is the *root* cause of the lost interrupt. The device
+identifies as **Realtek `10ec:5765`** (`nvme id-ctrl`: vid/ssvid `0x10ec`, IEEE
+OUI `00e04c`, model `SSD NVME 256GB`, FW `VC400622`) — an RTS5765-class
+**DRAM-less** controller, which the boot log corroborates: `nvme nvme0:
+allocated 64 MiB host memory buffer`. A DRAM-less controller keeps its mapping
+tables in host RAM over HMB, so it sustains materially more host-side DMA than a
+DRAM-equipped drive. That is a **lead, not a conclusion**: candidates remain
+controller firmware, the HMB path, PCIe ASPM power-state transitions, and MSI-X
+routing on the Tegra host controller, and this run does not discriminate between
+them.
+
+**Refinement, same day — the timeout bounds RECOVERY, it is not the cause, and
+sub-timeout stalls of the same signature exist.**
+
+A follow-up run of `NORMAL`/b1 (20 repetitions) recorded **1 stall of 8 496 ms**
+with the device **0.61 % busy** across a usable 8 502 ms / 400-sample window —
+the same host-waiting-on-an-idle-device signature — and **no kernel timeout
+entry**, correctly, because 8.5 s never reached the 30 s bound.
+
+That reframes the finding. The three measurements above establish that the five
+30 s stalls were *recovered* by the timeout handler; they do not establish that
+30 s is intrinsic to the fault. The 8 496 ms event shows the underlying stall can
+resolve on its own, so:
+
+> **The fault is a lost or delayed completion. `io_timeout` is the backstop that
+> bounds how long the host waits for one, not the thing that causes the wait.**
+
+A mechanism consistent with both, offered as **hypothesis**: NVMe completion
+processing drains the whole completion queue, so a stranded completion can be
+picked up by any later interrupt on the same queue. At batch=1 the harness has
+nothing else in flight, so recovery depends on unrelated system I/O landing on
+that queue — arriving early gives an 8.5 s stall, never arriving gives 30 s. This
+predicts that stall durations below the timeout should be *distributed* rather
+than clustered, which the two runs are consistent with but cannot confirm at
+n=6.
+
+**Consequence for mitigation:** lowering `io_timeout` caps the worst case but
+cannot remove stalls, because events shorter than the timeout do not touch it.
+An attempt to lower it on the bench also **failed silently** — writing
+`/sys/module/nvme_core/parameters/io_timeout` set the parameter to 5 while the
+live queue stayed at 30 000 ms, since the value is latched at namespace probe.
+See `AOU-WM2-STORAGE-COMPLETION-001`.
+
+**Mitigation measured — the model holds at a second timeout value.** With
+`/sys/block/nvme0n1/queue/io_timeout` genuinely set to **5 000 ms** (the
+per-queue file, verified before *and* after the run), `NORMAL`/b1 over **60**
+repetitions produced:
+
+| Prediction, stated before the run | Result |
+|---|---|
+| Stalls persist — capping recovery does not stop completions being lost | **2/60** |
+| Worst commit caps near 5 000 ms plus handler latency | **5 254.5 ms = 5 000 + 254.5** |
+| Fresh kernel timeout entries dated inside the run | **3 new** (12:07:00, 12:15:01, 12:15:15) |
+
+The stall tracks whatever `io_timeout` is set to, now observed at **two
+different values** — a considerably stronger test than the original correlation.
+Worst case 30 s → 5.25 s is a **5.7×** cut in the observation gap (~300 → ~53
+observations at 10 Hz). The mitigation is a **sysfs setting that does not
+survive reboot**; the persistent form is `nvme_core.io_timeout=` on the kernel
+command line, which applies at probe.
+
+Three results the predictions did not cover, recorded as observations:
+
+1. **Three kernel timeouts, two counted stalls.** 12:15:01 and 12:15:15 are 14 s
+   apart, inside one ~20 s repetition. `stalls_observed` counts *repetitions
+   that stalled*, so two stalls in one repetition collapse to one —
+   **`stalls_observed` undercounts stalls**, demonstrated here on live data.
+2. **The rate appears to fall and the model does not explain it.** 4/20 → 2/60,
+   Fisher exact two-sided **p = 0.032**. A timeout value should change how long
+   a lost completion takes to recover, not how often one occurs. Two reasons not
+   to read this as the mitigation working: the "2" undercounts (point 1), and
+   this configuration is demonstrably unstable between runs (point 3).
+   **Unexplained.**
+3. **Device busy inside the stall window rose to 34.3 %** (1 804 ms of 5 254 ms),
+   against 1.0–2.1 % for the 30 s stalls. This is a **live risk to the
+   instrument**: `IO_BUSY_FRACTION` is 0.5, so a stall of this kind is now one
+   modest step from being attributed `IO-DEVICE` — reinstating exactly the false
+   attribution the windowing fix removed, this time from a correctly-windowed
+   measurement. The threshold was calibrated against 30 s stalls and does not
+   obviously transfer to shorter windows, where background I/O is a larger
+   fraction of the span. **Not yet addressed.**
+
+**`NORMAL`/b1's median throughput is bimodal across four target runs** — 5 143
+(D-10), 9 485, 9 821, 5 006 ev/s — two clusters roughly 2× apart. A median is
+robust to stalls, so this is not a tail artefact. It was recorded above as an
+unexplained +84 % against D-10; with four points it is better described as a
+**bistable configuration**, and it remains unexplained.
+
+**No rate law is claimed.** The events concentrate where more I/O is issued —
+all five at batch=1, none at batch=64, and `OFF` now at **0 stalls in 80
+repetitions** across both runs. But five events cannot support a rate model, and
+the simplest version fails: `NORMAL` fsyncs *less* than `FULL` in WAL mode yet
+recorded four stalls against one.
+
+**Two things moved against D-10 and are recorded rather than explained.** Five of
+six throughput medians reproduce within 3 %, which makes the comparison
+like-for-like; `NORMAL`/b1 did not, going 5 143 → 9 485 ev/s (**+84 %**) while
+recording *more* stalls, which is the wrong direction for a stall artefact since
+a median is robust to them. And the stall distribution shifted: D-10 saw 3/120
+at `FULL`/b64 (2) and `NORMAL`/b1 (1); this run saw 5/120 at `FULL`/b1 (1) and
+`NORMAL`/b1 (4). Both runs agree only that `OFF` never stalls.
+
+**The batch=64 inversion reproduced** — `OFF` 54 636 > `FULL` 30 545 >
+`NORMAL` 19 881, the same ordering as D-10 with all three within 3 %, from
+configurations with zero stalls in both runs. That is a second independent
+observation of an effect no durability model predicts, so it **strengthens**
+open question 1's blocker rather than removing it.
+
+**Platform caveat.** The filesystem holding the test database reports `clean
+with errors` with `Errors behavior: Continue`, unchecked in 13 months and 50
+mounts. It does not affect this finding — the failure is in the NVMe driver,
+below the filesystem, and the mechanism rests on kernel-log correlation — but a
+durability evidence platform configured to continue past filesystem errors is a
+gap to close before the next evidence run.
 
 ### D-12 — design implications the measurement forces
 

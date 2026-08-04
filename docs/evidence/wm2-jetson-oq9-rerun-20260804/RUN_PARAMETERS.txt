@@ -1,0 +1,7 @@
+command      : stall
+configs      : {full,normal,off} x batch {1,64}
+events       : 100000
+stall-repeats: 20
+db           : /var/lib/kirra/wm2/stall.sqlite
+assert-target: yes  (JETSON-TARGET-MEASURED)
+harness commit: a27fdbf8  (fixed windowed instrument, PR #1332)
