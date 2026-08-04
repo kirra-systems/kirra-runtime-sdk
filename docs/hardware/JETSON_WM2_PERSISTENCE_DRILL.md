@@ -25,7 +25,7 @@ This drill produces those recordings. The instrument is
 | Measured Jetson prototype | ✅ | the whole run, if it reports `JETSON-TARGET-MEASURED` |
 | Replay benchmark (full + checkpointed) | ✅ | `replay` |
 | Query benchmark, one per §12 family | ✅ | `query` |
-| Corruption / restart experiment | ⚠️ **partly** | `crash` tiers A and B automatically; **tier C needs a power switch — `powercut arm`/`verify`, §8** |
+| Corruption / restart experiment | ✅ | `crash` tiers A and B automatically; **tier C needs a power switch — `powercut arm`/`verify`, §8.** Closed 2026-08-03: 5 distinct armings, 5 cuts, 5 PASS — `docs/evidence/wm2-jetson-tierc-20260803/` |
 | Storage growth estimate | ✅ | `growth` |
 | Migration proof of concept | ✅ | `migrate` |
 | Compaction-with-citation (§11.3; not a numbered gate, but the retention policy the growth number makes urgent) | ✅ | `compact` |
