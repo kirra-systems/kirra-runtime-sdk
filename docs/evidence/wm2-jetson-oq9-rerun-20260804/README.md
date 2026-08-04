@@ -132,10 +132,31 @@ failed.
 **Inferred, and strongly supported:** the proximate mechanism is a lost or
 missed completion interrupt on this NVMe/PCIe path.
 
-**Not established:** the *root* cause of the lost interrupt. Candidates are
-controller firmware (`SSD NVME 256GB`, FW `VC400622` — a generic OEM device with
-no vendor string), PCIe ASPM power-state transitions, and MSI-X routing on the
-Tegra host controller. This bundle does not discriminate between them.
+**Not established:** the *root* cause of the lost interrupt.
+
+The controller was identified after this bundle was captured, so it is **not**
+in `ENVIRONMENT.txt` — recorded here with the commands that produced it, run on
+the same machine and the same boot:
+
+```
+$ sudo nvme id-ctrl /dev/nvme0 | grep -iE '^(vid|ssvid|mn|sn|fr|ieee)'
+vid   : 0x10ec        ssvid : 0x10ec        ieee : 00e04c
+mn    : SSD NVME 256GB    sn : JRD2025120012734    fr : VC400622
+
+$ lspci -nn | grep -i non-volatile
+0004:01:00.0 Non-Volatile memory controller [0108]:
+    Realtek Semiconductor Co., Ltd. Device [10ec:5765] (rev 01)
+```
+
+**Realtek `10ec:5765`, an RTS5765-class DRAM-less controller.** `DMESG_NVME.txt`
+corroborates the DRAM-less part — `nvme nvme0: allocated 64 MiB host memory
+buffer` — since a controller without onboard DRAM keeps its mapping tables in
+host RAM over HMB and therefore sustains materially more host-side DMA than a
+DRAM-equipped drive.
+
+That is a **lead, not a conclusion**. Candidates remain controller firmware, the
+HMB path, PCIe ASPM power-state transitions, and MSI-X routing on the Tegra host
+controller; nothing in this bundle discriminates between them.
 
 **Deliberately not claimed — a rate law.** The events concentrate where more I/O
 is issued: all five at batch=1 and none at batch=64, and `OFF` has now produced

@@ -1580,10 +1580,20 @@ which the robot was still operating.
 
 ### Status / scope
 - **OPEN — violated on the current bench hardware.** Drive `SSD NVME 256GB`,
-  FW `VC400622` (generic OEM, no vendor string), on Jetson Orin NX / L4T
-  5.15.148-tegra. Root cause of the lost interrupt is **not** established:
-  controller firmware, PCIe ASPM power-state transitions and Tegra MSI-X routing
-  are all candidates and D-15 does not discriminate between them.
+  FW `VC400622`, controller **Realtek `10ec:5765`** (RTS5765-class, **DRAM-less**
+  — the boot log shows `allocated 64 MiB host memory buffer`), on Jetson Orin NX
+  / L4T 5.15.148-tegra. Root cause of the lost interrupt is **not** established:
+  controller firmware, the HMB path, PCIe ASPM power-state transitions and Tegra
+  MSI-X routing are all candidates and D-15 does not discriminate between them.
+  The DRAM-less/HMB detail is recorded because such a controller sustains
+  materially more host-side DMA than a DRAM-equipped one, which makes it the
+  first thing to vary when qualifying a replacement drive.
+- **Mitigations applied on the bench 2026-08-04, effectiveness NOT yet
+  measured.** `nvme_core.io_timeout` lowered 30 → 5 (caps the worst-case gap at
+  ~50 observations instead of ~300; runtime-set, does not survive reboot), and
+  the filesystem's `Errors behavior` changed `Continue` → `Remount read-only` so
+  ext4 fails closed on detected corruption. Neither addresses the root cause,
+  and a lower timeout bounds the symptom rather than removing it.
 - **Scope is coverage, not durability.** Every timed-out command had completed —
   nothing was lost or retried, and D-11's five power cuts are unaffected. This
   is an availability and memory-completeness assumption.

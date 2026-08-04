@@ -1438,10 +1438,16 @@ the harness can observe says nothing was happening.
 was lost, nothing was retried. This is a latency and availability defect, and
 D-11's five power cuts stand independently of it.
 
-**What is not established** is the *root* cause of the lost interrupt. Candidates
-are controller firmware (`SSD NVME 256GB`, FW `VC400622`, a generic OEM device),
-PCIe ASPM power-state transitions, and MSI-X routing on the Tegra host
-controller. This run does not discriminate between them.
+**What is not established** is the *root* cause of the lost interrupt. The device
+identifies as **Realtek `10ec:5765`** (`nvme id-ctrl`: vid/ssvid `0x10ec`, IEEE
+OUI `00e04c`, model `SSD NVME 256GB`, FW `VC400622`) — an RTS5765-class
+**DRAM-less** controller, which the boot log corroborates: `nvme nvme0:
+allocated 64 MiB host memory buffer`. A DRAM-less controller keeps its mapping
+tables in host RAM over HMB, so it sustains materially more host-side DMA than a
+DRAM-equipped drive. That is a **lead, not a conclusion**: candidates remain
+controller firmware, the HMB path, PCIe ASPM power-state transitions, and MSI-X
+routing on the Tegra host controller, and this run does not discriminate between
+them.
 
 **No rate law is claimed.** The events concentrate where more I/O is issued —
 all five at batch=1, none at batch=64, and `OFF` now at **0 stalls in 80
