@@ -105,9 +105,18 @@ pub struct WindowedDelta {
 
 impl WindowedDelta {
     /// Is this delta actually about the stall it names?
+    ///
+    /// Bounded on BOTH sides. Too wide and the counters describe more than the
+    /// stall (the original defect). Too narrow and they describe only part of
+    /// it, which is just as wrong and less obvious — a window covering 17 % of a
+    /// commit is not "a slightly conservative measurement", it is a different
+    /// measurement. [`delta_over_window`] already guarantees containment by
+    /// construction; this repeats it so a hand-built `WindowedDelta` cannot
+    /// claim to be usable without it.
     pub fn window_is_usable(&self) -> bool {
         self.samples >= MIN_WINDOW_SAMPLES
             && self.covered_ms > 0.0
+            && self.covered_ms >= self.stall_ms
             && self.covered_ms <= self.stall_ms * MAX_WINDOW_OVERSHOOT
     }
 }
@@ -212,14 +221,14 @@ pub fn delta_over_window(
     if series.len() < 2 || !start_ms.is_finite() || !end_ms.is_finite() || end_ms < start_ms {
         return None;
     }
-    let lo = series
-        .iter()
-        .rposition(|s| s.at_ms <= start_ms)
-        .unwrap_or(0);
-    let hi = series
-        .iter()
-        .position(|s| s.at_ms >= end_ms)
-        .unwrap_or(series.len() - 1);
+    // Both brackets must EXIST. Falling back to the first/last sample when one
+    // is missing produces a window that does not contain the commit — e.g. a
+    // series ending at 1 000 ms against a commit spanning 900-1 500 ms yields a
+    // 100 ms window for a 600 ms stall, covering 17 % of it while looking like a
+    // measurement. That is the same defect as the whole-run delta with the
+    // inequality pointing the other way, so it fails closed too.
+    let lo = series.iter().rposition(|s| s.at_ms <= start_ms)?;
+    let hi = series.iter().position(|s| s.at_ms >= end_ms)?;
     if hi <= lo {
         return None;
     }
@@ -523,20 +532,20 @@ pub fn run(
     };
 
     for i in 0..repeats {
-        // The sampler stamps against the same origin the append loop measures
-        // from, so `CommitWindow` offsets and `StampedSample::at_ms` are
-        // directly comparable. `bench::append` does setup (event generation,
-        // the hash calibration) before its loop starts, so the two origins are
-        // not identical — the sampler starts earlier. That is the safe
-        // direction: the series covers more than the loop, never less, so a
-        // window is always bracketable.
+        // ONE origin, shared by the sampler and the commit windows. Two
+        // `Instant::now()` calls would be two coordinate systems: `append` does
+        // event generation and a hash calibration before its loop, so the gap
+        // between them is seconds, and a window looked up across that gap lands
+        // on an unrelated span of the series rather than a slightly shifted one.
+        // That would leave the counters as wrong as the whole-run delta this
+        // module exists to replace, while looking correct.
+        let origin = std::time::Instant::now();
         let series = std::sync::Arc::new(std::sync::Mutex::new(Vec::<StampedSample>::new()));
         let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let sampler = {
             use std::sync::atomic::Ordering;
             let series = std::sync::Arc::clone(&series);
             let running = std::sync::Arc::clone(&running);
-            let origin = std::time::Instant::now();
             std::thread::spawn(move || {
                 while running.load(Ordering::Relaxed) {
                     let at_ms = origin.elapsed().as_secs_f64() * 1e3;
@@ -549,7 +558,15 @@ pub fn run(
             })
         };
 
-        let r = crate::bench::append(path, durability, events, entities, batch, seed + i as u64);
+        let r = crate::bench::append_from(
+            path,
+            durability,
+            events,
+            entities,
+            batch,
+            seed + i as u64,
+            Some(origin),
+        );
 
         running.store(false, std::sync::atomic::Ordering::Relaxed);
         let _ = sampler.join();
@@ -820,6 +837,34 @@ mod tests {
             w.is_none() || !w.unwrap().window_is_usable(),
             "a window past the end of the series was treated as measured"
         );
+    }
+
+    #[test]
+    fn a_window_that_covers_only_part_of_the_commit_is_refused() {
+        // The mirror image of the original defect, and the easier one to miss:
+        // the series ends at 1 000 ms but the commit runs 900-1 500 ms. The
+        // first version fell back to the last sample, producing a 100 ms window
+        // for a 600 ms stall — 17 % coverage — which passed the "not too wide"
+        // guard and was attributed from.
+        let s = series(1_000, 0.0, 1_000.0);
+        assert!(
+            delta_over_window(&s, 900.0, 1_500.0).is_none(),
+            "a commit running past the end of the series was windowed anyway"
+        );
+        // Same on the left: a commit starting before the first sample.
+        let late: Vec<StampedSample> = s.iter().filter(|x| x.at_ms >= 500.0).cloned().collect();
+        assert!(
+            delta_over_window(&late, 100.0, 700.0).is_none(),
+            "a commit starting before the series was windowed anyway"
+        );
+        // And the guard holds even if such a delta is built by hand.
+        let truncated = WindowedDelta {
+            delta: d(None, Some(100), Some(1_024), None),
+            stall_ms: 600.0,
+            covered_ms: 100.0,
+            samples: 6,
+        };
+        assert!(!truncated.window_is_usable());
     }
 
     #[test]
