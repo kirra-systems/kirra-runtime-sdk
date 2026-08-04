@@ -18,9 +18,11 @@ ADR-0041 open question 9 — the multi-second write stall — was classified in
 D-10 as "intermittent, block-device/environment-correlated, **mechanism partly
 unresolved**". This run identifies the mechanism.
 
-**The stalls are lost NVMe completion interrupts, bounded by the driver's 30 s
-`io_timeout`.** They are a platform/driver defect, not a property of SQLite, the
-schema, or the `synchronous` setting.
+**The stalls are NVMe completions the host never acted on, bounded by the
+driver's `io_timeout`.** They are a platform/driver defect, not a property of
+SQLite, the schema, or the `synchronous` setting. Whether each completion was
+*lost* or merely *delayed* is not discriminated here — see *What this
+establishes, and what it does not*.
 
 ## Files
 
