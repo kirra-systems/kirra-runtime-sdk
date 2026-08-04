@@ -23,6 +23,7 @@ mod json;
 mod platform;
 mod pressure;
 mod rebuild;
+mod rebuild_cost;
 mod sha256;
 mod stall;
 mod standin;
@@ -54,6 +55,9 @@ COMMANDS:
                 against ADR-0041's own reopening condition (drill §9)
     stall       Repeat one append configuration and hunt the ~29 s write stall,
                 sampling system counters across it (ADR-0041 open question 9)
+    rebuild     Cost ADR-0041 R2's alongside-rebuild-and-swap: peak disk, write
+                amplification and cutover latency, against a control arm running
+                the same ingest WITHOUT the rebuild (the acceptance obligation)
     all         Every command above, into one result stream
 
   Tier C (manual, needs a power switch — see the drill §8):
@@ -90,6 +94,11 @@ OPTIONS:
                              Both are emitted with a `migration_sql` field, so a
                              record can never be mistaken for the other
     --stall-repeats <n>      Repetitions for `stall` (default: 20)
+    --rebuild-rounds <n>     Ingest/fold rounds for `rebuild` (default: 8). Each
+                             round appends --rebuild-ingest events and folds a
+                             chunk, so the head MOVES under the fold — which is
+                             the condition R2's protocol exists to handle
+    --rebuild-ingest <n>     Events appended per round (default: 2000)
     --assert-target          Operator asserts this is target hardware under
                              representative storage, power and thermal conditions
 
@@ -154,6 +163,8 @@ struct Args {
     events_per_entity: u64,
     sweep_family: String,
     stall_repeats: usize,
+    rebuild_rounds: usize,
+    rebuild_ingest: u64,
     migration_sql: MigrationSql,
     /// Positional word after the command, used only by `powercut arm|verify`.
     subcommand: Option<String>,
@@ -188,6 +199,8 @@ fn parse_args() -> Result<Args, String> {
         events_per_entity: 100,
         sweep_family: "graph".into(),
         stall_repeats: 20,
+        rebuild_rounds: 8,
+        rebuild_ingest: 2_000,
         migration_sql: MigrationSql::Legacy,
         subcommand: None,
         assert_target: false,
@@ -239,6 +252,8 @@ fn parse_args() -> Result<Args, String> {
             "--crash-run-ms" => a.crash_run_ms = parse_num(&value(flag)?, flag)?,
             "--trial" => a.trial = parse_num(&value(flag)?, flag)?,
             "--stall-repeats" => a.stall_repeats = parse_num(&value(flag)?, flag)? as usize,
+            "--rebuild-rounds" => a.rebuild_rounds = parse_num(&value(flag)?, flag)? as usize,
+            "--rebuild-ingest" => a.rebuild_ingest = parse_num(&value(flag)?, flag)?,
             "--events-per-entity" => a.events_per_entity = parse_num(&value(flag)?, flag)?,
             "--sweep-family" => {
                 let v = value(flag)?;
@@ -908,6 +923,76 @@ fn main() {
         );
     }
 
+    if args.command == "rebuild" {
+        let d = args.durability.unwrap_or(Durability::Full);
+        // The control arm needs its own file: same ingest, same seed, no
+        // rebuild. Sitting beside the working DB so both land on one device.
+        let mut control_db = args.db.clone();
+        let name = control_db
+            .file_name()
+            .map(|s| format!("control-{}", s.to_string_lossy()))
+            .unwrap_or_else(|| "control.sqlite".into());
+        control_db.set_file_name(name);
+
+        let r = rebuild_cost::run(
+            &args.db,
+            &control_db,
+            d,
+            args.events,
+            args.entities,
+            args.rebuild_rounds,
+            args.rebuild_ingest,
+            args.seed,
+        );
+        sink.emit(
+            stamp(&class, &facts, &args)
+                .str("record", "rebuild")
+                .str("durability", d.pragma())
+                .int("seeded_events", r.seeded_events)
+                .int("ingested_during", r.ingested_during)
+                .int("rounds", r.rounds as u64)
+                .int("entities", r.entities)
+                // Gate: numbers from an attempt that never reached Active
+                // describe something other than an alongside rebuild.
+                .int("completed", u64::from(r.completed()))
+                .str("final_state", &r.final_state)
+                .int("equivalence_proven", u64::from(r.equivalence_proven))
+                .int("converged", u64::from(r.converged))
+                .int("catchup_rounds", r.catchup_rounds as u64)
+                .opt_str("failure", r.failure.as_deref())
+                // The three costs the acceptance record asks for.
+                .float("cutover_ms", r.cutover_ms)
+                .float("retire_ms", r.retire_ms)
+                .int("peak_overhead_bytes", r.peak_overhead_bytes)
+                .float("peak_overhead_ratio", r.peak_overhead_ratio)
+                .int("projection_bytes", r.projection_bytes)
+                .float(
+                    "extra_write_bytes",
+                    r.extra_write_bytes.map_or(f64::NAN, |v| v as f64),
+                )
+                .float(
+                    "write_amplification",
+                    r.write_amplification.unwrap_or(f64::NAN),
+                )
+                // Both arms, so the difference above can be checked rather than
+                // taken on trust.
+                .float("control_wall_ms", r.control.wall_ms)
+                .float("rebuild_wall_ms", r.rebuild.wall_ms)
+                .float(
+                    "control_write_bytes",
+                    r.control.write_bytes.map_or(f64::NAN, |v| v as f64),
+                )
+                .float(
+                    "rebuild_write_bytes",
+                    r.rebuild.write_bytes.map_or(f64::NAN, |v| v as f64),
+                )
+                .int("control_peak_db_bytes", r.control.peak_db_bytes)
+                .int("rebuild_peak_db_bytes", r.rebuild.peak_db_bytes)
+                .int("control_final_db_bytes", r.control.final_db_bytes)
+                .int("rebuild_final_db_bytes", r.rebuild.final_db_bytes),
+        );
+    }
+
     if args.command == "stall" {
         // Deliberately NOT part of `all`: it is a targeted investigation of one
         // configuration, and folding it into the standard run would multiply
@@ -1134,6 +1219,8 @@ mod tests {
             events_per_entity: 100,
             sweep_family: "graph".into(),
             stall_repeats: 20,
+            rebuild_rounds: 8,
+            rebuild_ingest: 2_000,
             migration_sql: MigrationSql::Legacy,
             subcommand: None,
             assert_target: false,
@@ -1171,6 +1258,8 @@ mod tests {
             events_per_entity: 100,
             sweep_family: "graph".into(),
             stall_repeats: 20,
+            rebuild_rounds: 8,
+            rebuild_ingest: 2_000,
             migration_sql: MigrationSql::Legacy,
             subcommand: None,
             assert_target: false,

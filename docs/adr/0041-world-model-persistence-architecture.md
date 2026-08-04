@@ -729,15 +729,18 @@ reasons, which D-13 shows are avoidable.
    costs in code, in peak disk, in write amplification and in cutover latency.
    Storage is the *smallest* of those: projections are 3.74 % of total store
    size, so a duplicate is ≈306 MiB (321 MB) at the 8 GiB ceiling rather than a
-   second 8 GiB. **Partially discharged 2026-08-04 — still open.** The protocol
-   is now specified and prototyped
-   (`docs/design/WM2_PROJECTION_REBUILD_PROTOCOL.md`), which answers the *code*
-   cost and settles cutover ordering and the partial-projection state. **Peak
-   disk, write amplification and cutover latency are still unmeasured**, and
-   those are the three that need the store the design does not build.
+   second 8 GiB. **Measured 2026-08-04 — see D-16. Host-indicative; the target
+   run remains.** The protocol was specified and prototyped
+   (`docs/design/WM2_PROJECTION_REBUILD_PROTOCOL.md`), answering the *code* cost
+   and settling cutover ordering and the partial-projection state; the
+   `rebuild` harness command then measured the other three against a control arm
+   running identical ingest without the rebuild. **Write amplification is the
+   finding, and it is a dial rather than a constant: 2.7×–35.6× across a 16×
+   range of fold-chunk counts.**
 
-Items 1 and 2 are closed on target. **Item 3 is the real engineering, it is
-untouched, and it is the part that should carry a spike before anyone signs** —
+Items 1 and 2 are closed on target. **Item 3 is no longer untouched — D-16
+measures it — but it is host-indicative, so the obligation narrows rather than
+closes** —
 D-14 establishes that a migration *can* be cheap, not that the alongside-rebuild
 protocol R2 specifies has been built or costed.
 
@@ -1570,6 +1573,100 @@ mounts. It does not affect this finding — the failure is in the NVMe driver,
 below the filesystem, and the mechanism rests on kernel-log correlation — but a
 durability evidence platform configured to continue past filesystem errors is a
 gap to close before the next evidence run.
+
+### D-16 — R2's alongside rebuild costs a *dial*, not a number: write amplification 2.7×–35.6×
+
+`HOST-INDICATIVE-NOT-TARGET.` The acceptance record's outstanding obligation
+asks what alongside-rebuild-and-swap costs "in code, in peak disk, in write
+amplification and in cutover latency". The protocol answered *code*. The
+`rebuild` harness command answers the rest.
+
+**The measurement has a control**, because it has to. A rebuild runs while
+ingest continues, and both write through the same process — `/proc/self/io`
+cannot say which bytes belong to which, and neither can the file size. So two
+arms run **identical ingest**, one with the rebuild and one without, and every
+cost below is the *difference*. Without that control the numbers would be "bytes
+written while a rebuild happened to be running", which overstates the rebuild by
+the entire ingest load.
+
+Every transition is driven by the protocol's own state machine, so what is
+measured is the procedure R2 specifies rather than something resembling it.
+
+#### Write amplification is a tunable, and quoting one number for it would mislead
+
+Total ingest held constant at 16 000 events; only the fold's chunk count varies:
+
+| Fold chunks | Write amplification | Extra writes | Cutover | Catch-up laps |
+|---:|---:|---:|---:|---:|
+| 2 | **2.7×** | 3.2 MB | 1.83 ms | 1 |
+| 4 | **5.3×** | 6.3 MB | 1.60 ms | 2 |
+| 8 | **14.0×** | 16.7 MB | 1.55 ms | 3 |
+| 16 | **20.4×** | 24.0 MB | 1.61 ms | 6 |
+| 32 | **35.6×** | 42.5 MB | 1.50 ms | 12 |
+
+Amplification is **not a property of the rebuild**. It rises roughly linearly
+with how finely the fold is chunked, because each chunk commits a transaction
+that rewrites projection pages already written, and each commit adds WAL frames
+that a checkpoint later writes again. A single figure — the first run gave
+14.0× — would have described one arbitrary point on a curve spanning **13.2×**.
+
+**The engineering consequence is a trade-off, now quantified.** Coarser chunks
+cost far less I/O; finer chunks hold each fold transaction for less time. An
+implementation has to pick, and on flash the pick matters: at the ≈306 MiB
+duplicate-projection figure, a 3× rebuild is ~0.9 GB of device writes and a 35×
+rebuild is ~10.7 GB. That is a wear question, not a throughput one.
+
+#### Cutover is flat, which is what R2's availability claim needs
+
+**1.50–1.83 ms**, independent of chunking — the swap is a rename pair inside one
+transaction, so no rows move. Against a 620 ms rebuild that is **0.26 %**. The
+claim R2 rests on — the robot keeps serving throughout, and the only moment it
+cannot is the swap — is supported rather than assumed. Retiring the old tables
+(`DROP`) is measured separately at ~0.9 ms and is reclamation, not cutover.
+
+**What that figure excludes, and it is not a rounding detail.** SQLite renames
+tables but not their indexes, so a rename-pair cutover leaves the live projection
+carrying the rebuild's index names and the next cycle collides. Every resolution
+costs something — recreating indexes inside the blackout window turns the swap
+into an index rebuild, name ping-pong makes the live schema depend on cycle
+parity, and pointer-based cutover avoids it but is a different design. The
+prototype takes none of them: it runs one cycle and **refuses a second with a
+stated reason**, so 1.50–1.83 ms is the cost of a rename pair and nothing else.
+Read it as a floor. The choice is now explicit implementation work under the
+protocol's S-2 (`docs/design/WM2_PROJECTION_REBUILD_PROTOCOL.md` §8).
+
+#### Peak disk: use the free-list measure, not the file size
+
+The duplicate projection measures **2.61–2.69 %** of store size (mean 2.64 %),
+and that figure is *stable* across chunk counts (1.02× spread) because it is the
+same projection either way.
+
+Two cautions, both learned by getting them wrong first:
+
+- **`DROP TABLE` does not shrink a SQLite file.** It moves pages to the free
+  list. Measuring the retired projection by file shrinkage reports **zero**,
+  which reads as a projection that cost nothing. The figures above come from the
+  free-list delta.
+- **Peak on-disk overhead is the noisier measure** (3.46× spread across the same
+  runs) because it moves with WAL checkpoint timing. It is emitted, but the
+  projection's own size is the number to cite.
+
+**Against D-2's arithmetic.** The acceptance record derived ≈306 MiB from D-2's
+3.74 % projection overhead. This measures **2.64 %** directly — the same order,
+about 30 % lower. Neither refutes the other: D-2's figure is bytes-per-event
+overhead on its configuration, this is projection pages as a fraction of a store
+with a different entity count and event mix. They are two measurements, not one
+measurement twice.
+
+#### What this does not do
+
+**It is not a target run.** `HOST-INDICATIVE-NOT-TARGET`, so none of it is
+citable against the ratification checklist, and the amplification figure in
+particular is the one most likely to move on the Jetson's NVMe — D-15 has just
+established that device's write path has a defect. It is also over the
+**stand-in schema**, so the constants describe that schema and not a ratified
+one. The *shape* — amplification linear in chunk count, cutover flat and small,
+projection a low single-digit percentage — is what should be expected to carry.
 
 ### D-12 — design implications the measurement forces
 
