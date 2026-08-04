@@ -535,18 +535,32 @@ reasons, which D-13 shows are avoidable.
 
 ### Before this can be ruled on
 
-1. **Re-measure on target.** D-13 is `HOST-INDICATIVE-NOT-TARGET`. Run the
-   two-axis ladder on the Jetson and confirm the product model and the query
-   plan hold there.
-2. **Re-measure the grouped-pass rewrite end to end**, as an `UPDATE` rather
-   than the `SELECT` D-13 timed, to confirm R3 is satisfiable in practice on the
-   real statement.
+1. ~~**Re-measure on target.**~~ **Done — D-14.** The two-axis ladder ran on the
+   Jetson under both statements, `JETSON-TARGET-MEASURED`. Legacy is linear in
+   each axis independently (31.70× over a 32× entity increase at a fixed log
+   size); grouped is flat (1.33×). The product model holds on target.
+2. ~~**Re-measure the grouped-pass rewrite end to end**, as an `UPDATE`.~~
+   **Done — D-14.** Measured as the real `migrate_to_v2_using()` statement, not
+   the `SELECT` D-13 timed: **472×** at 50 000 events / 1 000 entities and
+   **1 184×** at 30 000 / 3 200, with the projection result and the chain
+   identical. **R3 is satisfiable in practice.**
 3. **Prototype R2's alongside-rebuild-and-swap** far enough to know what it
    costs in code and in peak disk — a second projection is a second copy, and
-   the D-2 budget is already tight.
+   the D-2 budget is already tight. **Still open.**
 
-Items 1 and 2 are hours of work on hardware that exists. Item 3 is the real
-engineering, and it is the part that should carry a spike before anyone signs.
+Items 1 and 2 are closed on target. **Item 3 is the real engineering, it is
+untouched, and it is the part that should carry a spike before anyone signs** —
+D-14 establishes that a migration *can* be cheap, not that the alongside-rebuild
+protocol R2 specifies has been built or costed.
+
+### What the deciders are being asked to rule on
+
+| | |
+|---|---|
+| **The resolution** | R1–R5 above, as a whole |
+| **Target evidence for R3** | D-14 — the statement, not the store, sets the cost |
+| **Still unevidenced** | R2's alongside-rebuild-and-swap (item 3); R1 and R4 are argued from existing measurements (the chain's construction, D-2, D-9) rather than newly measured |
+| **Not asked for here** | ratification of ADR-0041. Approving this resolution closes open question 8; the ADR still needs the deciders' acceptance as a separate act |
 
 ---
 
@@ -836,7 +850,8 @@ Extrapolated linearly:
 > and rewritten as a single grouped pass the same migration is orders of
 > magnitude *better*. Read the row below as "an offline whole-store backfill is
 > not viable", which is the conclusion it supports; do not plan against the
-> minutes. **A target re-measurement is required** (open question 8).
+> minutes. **The target re-measurement is done: D-14 reproduces this figure
+> within 1.46 % and measures the corrected statement 472–1 184× faster.**
 
 **A whole-store offline migration is not viable on this hardware.** An OTA that
 takes 101 minutes with the world model unavailable is not an OTA. Three routes
@@ -1061,8 +1076,8 @@ the stand-in schema, as everywhere else in this section.
 > gate and is not target evidence. Evidence:
 > [`docs/evidence/wm2-host-migration-ladder-20260804/`](../evidence/wm2-host-migration-ladder-20260804/).
 > What transfers across architectures is the **shape** and the query plan, both
-> algorithmic; the constants do not. Target re-measurement is part of open
-> question 8's resolution.
+> algorithmic; the constants do not. **Target re-measurement is now done —
+> see D-14, which confirms the product model and the query plan on the Jetson.**
 
 D-6 extrapolated migration linearly in events with entities pinned at 1 000. A
 two-axis ladder says that model is wrong:
@@ -1104,6 +1119,55 @@ Two consequences, and the second matters more than the first:
 
 That is why the resolution proposed for open question 8 constrains what a
 migration is *allowed to do*, rather than picking a downtime budget to live with.
+
+### D-14 — on target: the cost is the statement, and the corrected one is 472–1 184× faster
+
+**Evidence:** [`docs/evidence/wm2-jetson-migration-ladder-20260803/`](../evidence/wm2-jetson-migration-ladder-20260803/),
+`JETSON-TARGET-MEASURED`, `citable: true`, `blockers: []` on all 24 records.
+Harness `29aa1b2496e9`, `source_digest ec580e2c…` **verified by rebuilding from
+that commit**. Self-verifying via `sha256sum -c SHA256SUMS`.
+
+D-13 established the cost *shape* on a development host. This is the same
+two-axis ladder on the Jetson, run under both statements.
+
+| Axis | Held fixed | Varied | legacy | grouped |
+|---|---|---|---|---|
+| A | entities = 1 000 | events 5 000 → 50 000 | `−109.9 ms + 322.1 µs·events` (R² 0.9995) | `1.39 ms + 0.652 µs·events` (R² 0.9995) |
+| B | events = 30 000 | entities 100 → 3 200 | `90.2 ms + 9.268 ms·entities` (R² 0.9999) | `19.12 ms + 1.97 µs·entities` |
+
+**Over a 32× increase in entity count at a fixed log size, legacy grows 31.70×
+and grouped grows 1.33×.** Legacy is linear in each axis independently — the
+signature of a cost proportional to their product, confirming D-13 on target.
+Grouped's per-entity term is **4 700× smaller** (1.97 µs against 9.268 ms).
+
+| Configuration | legacy | grouped | speedup |
+|---|---:|---:|---:|
+| 50 000 events, 1 000 entities | 16 003 ms | 33.9 ms | **472×** |
+| 30 000 events, 3 200 entities | 29 674 ms | 25.1 ms | **1 184×** |
+
+Both arms produce the same projection and leave the chain intact
+(`chain_intact_after: true`, `future_schema_refused: true`, all 24 records). The
+only difference is the query plan.
+
+**The run also reproduces D-6.** Its legacy arm reads 16 003 ms at 50 000
+events / 1 000 entities against D-6's archived 16 240 ms — **1.46 % apart**, on
+a later commit and a fresh database. That corroborates the original target
+measurement *and* confirms the legacy statement here is the one D-6 measured, so
+the comparison is like-for-like.
+
+**Consequently the 101-minute figure is retired as an architecture input.** It
+measured a quadratic backfill, not an inherent migration cost, and the same
+schema change written as one grouped pass is three orders of magnitude cheaper
+on the same hardware. This is the target evidence for **R3**, and it removes the
+premise the offline-maintenance-window route rested on.
+
+Honest scope: one device, one medium, one migration statement, **a single sample
+per rung** (D-10 measured rare multi-second stalls on this device at 2.5 %, which
+a single sample cannot exclude), and the 5 000-event legacy rung is a cold-start
+outlier excluded from that one fit. The bundle README carries these, and carries
+the full-store extrapolation (~12.8 days versus ~12.6 s) explicitly marked as an
+order of magnitude rather than planning evidence — it runs ~374× beyond the
+largest rung, the same overreach D-6 was corrected for.
 
 ### D-12 — design implications the measurement forces
 

@@ -1,1 +1,17 @@
-docs/evidence/wm2-jetson-migration-ladder-20260803/*.jsonl -text
+# Captured evidence — byte-exact, never line-ending-normalized.
+#
+# Patterns in a .gitattributes are relative to the directory containing it, so
+# these must be bare globs. A path-prefixed pattern
+# (docs/evidence/<bundle>/*.jsonl) silently matches nothing from here and the
+# files stay `text: unspecified` — verify with:
+#   git check-attr text -- docs/evidence/<bundle>/legacy.jsonl
+#
+# Without this a checkout with autocrlf enabled would rewrite the bytes and
+# `sha256sum -c` would fail on a bundle nobody had tampered with — a false alarm
+# that discredits the check rather than the file.
+*.jsonl        -text
+SHA256SUMS     -text
+GIT_COMMIT     -text
+GIT_STATUS     -text
+ENVIRONMENT.txt -text
+RUN_PARAMETERS.txt -text
