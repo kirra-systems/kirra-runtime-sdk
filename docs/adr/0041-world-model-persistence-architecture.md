@@ -428,6 +428,19 @@ source; they are not migrated destructively (ADR-0040).
    and dirty-page pressure. The decision this question gated can proceed on the
    reproducible property D-17 does establish — `NORMAL` trades tail latency for
    median throughput — while the anomaly itself stays on the record.
+
+   **A policy is PROPOSED, not ruled**, in
+   `docs/design/WM2_SYNCHRONOUS_POLICY.md`: `synchronous=FULL` universally, with
+   per-class differentiation moved to commit grouping. It rests on three
+   findings — that a per-class `synchronous` value **is** implementable via
+   separate writer connections, but buys no per-class guarantee, because
+   `fsync` flushes the shared WAL rather than a transaction, so a lax class's
+   durability is set by other classes' traffic; that batching is a 9.8× lever
+   where the setting is 1.16× at batch=64; and that tier C's five power cuts
+   (D-11) were run at `FULL`, so
+   `NORMAL` would leave a closed gate not covering the shipped configuration.
+   The proposal also records that **"source class" is undefined in this ADR** —
+   only *retention* class is — so it supplies a rule rather than a class table.
 2. Retention classes: exact list and their durations. The harness models the
    §11.3 protected set (safety, incident, calibration, adjudication, operator)
    and enforces it — a window containing any of them is refused whole — but the
