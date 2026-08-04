@@ -1133,12 +1133,19 @@ two-axis ladder on the Jetson, run under both statements.
 | Axis | Held fixed | Varied | legacy | grouped |
 |---|---|---|---|---|
 | A | entities = 1 000 | events 5 000 → 50 000 | `−109.9 ms + 322.1 µs·events` (R² 0.9995) | `1.39 ms + 0.652 µs·events` (R² 0.9995) |
-| B | events = 30 000 | entities 100 → 3 200 | `90.2 ms + 9.268 ms·entities` (R² 0.9999) | `19.12 ms + 1.97 µs·entities` |
+| B | events = 30 000 | entities 100 → 3 200 | `90.2 ms + 9.268 ms·entities` (R² 0.9999) | `19.12 ms + 1.97 µs·entities` (R² 0.9060) |
 
 **Over a 32× increase in entity count at a fixed log size, legacy grows 31.70×
 and grouped grows 1.33×.** Legacy is linear in each axis independently — the
 signature of a cost proportional to their product, confirming D-13 on target.
 Grouped's per-entity term is **4 700× smaller** (1.97 µs against 9.268 ms).
+
+Grouped/axis B fits at **R² 0.9060**, well below the other three. That is
+expected rather than concerning — its entity term contributes ~6 ms across the
+whole sweep against a ~19 ms floor, so the residual is measurement noise, not a
+missing term — but it is quoted here rather than left out, because a table that
+prints R² for three rows and omits it for the fourth is a table that has chosen
+which numbers to show.
 
 | Configuration | legacy | grouped | speedup |
 |---|---:|---:|---:|
