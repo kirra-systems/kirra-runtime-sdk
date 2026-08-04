@@ -61,6 +61,7 @@ the verification passes for the target deployment.
 | AOU-HV-CLOCK-001 | The hypervisor provides the **boundary clock domain** (HVCHAN §5, R-HV-3): one shared, monotonic time source readable identically from the guest and governor partitions, with a **bounded max cross-partition skew** (bound: **VALIDATION-PENDING**, set with the FTTI budget on hypervisor hardware) | Integrator (hypervisor / platform) | **AoU-GAP** — Phase-II hypervisor gate; the concrete QNX primitive + skew figure are #274/#278 target work | every governor deadline/staleness verdict (`validate` `now > deadline`, HVCHAN §3); the §4 `clock skew beyond bound` fail-closed backstop. Distinct from AOU-TIMESYNC-001 (that binds the integrator's *timestamps*; this binds the *clock source*) |
 | AOU-HV-ROMAP-001 | The hypervisor maps the contract region **read-only into the governor partition** (HVCHAN R-HV-1): the governor cannot write it, and no guest action can induce a governor-side write; verified at hypervisor-configuration level | Integrator (hypervisor / platform) | **AoU-GAP** — Phase-II hypervisor gate; the software mirrors (`PosixShmReader` `PROT_READ` + no-`ContractWriter`-impl) are defense-in-depth, **not** the discharge | the one-way trust direction of the whole Clause-2 channel; `HV_FAULT_CAMPAIGN.md` row HV-R1 |
 | AOU-HV-SCHED-001 | The hypervisor grants the governor partition a **CPU scheduling guarantee independent of guest behavior** (HVCHAN R-HV-4): a guest CPU flood or starve-then-burst cannot delay the governor's bounded snapshot→validate→decide path beyond its FTTI allocation | Integrator (hypervisor / platform) | **AoU-GAP** — Phase-II hypervisor gate; tested by the `HV_FAULT_CAMPAIGN.md` HV-S* rows (a flood absorbed only by judge speed is a FINDING, per the #279 attribution rule) | the `publisher silent` liveness row (§4) and the verdict-latency half of FTTI — without it, guest misbehavior converts into governor latency, the interference FFI forbids |
+| AOU-WM2-STORAGE-COMPLETION-001 | The block device carrying the World Model store does not lose I/O completion interrupts, so commit latency is bounded by device service time rather than by the driver's command-timeout recovery path. Where that cannot be assured for a drive/firmware/host-controller combination, the integrator qualifies the device by measurement and bounds the worst case via `nvme_core.io_timeout` | Integrator (hardware / platform) | **OPEN — MEASURED VIOLATED** on the WM-2 bench Jetson (D-15): 5 stalls in 120 repetitions, each a lost NVMe completion resolved by the 30 s timeout handler finding the command already complete. Root cause (firmware / PCIe ASPM / Tegra MSI-X) not discriminated. Durability unaffected — every command had completed | WM-2 memory coverage: at 10 Hz a 30 s stall is ~300 observations that cannot be recorded, with nothing in the store marking the gap. Severity is contingent on ADR-0042 Decision 5 — see the entry's *Status / scope* |
 | AOU-R2-ENVIRONMENT-001 | The R2 operates **indoors only** — enclosed, no weather exposure, no precipitation, no standing water on the operating surface | Operator (R2 deployment) | **AoU-GAP** — nothing in the stack detects that the robot has been carried outdoors | the `R2_ODD_SPEED_CAP_MPS` basis prose; the absence of any weather-derate path on this platform (KIRRA-R2-ODD-001 §2.1) |
 | AOU-R2-SURFACE-001 | The R2 operating area is a **flat hard floor with no drop-offs**, and contains no obstacle that a horizontally-scanning 2-D lidar cannot see (below the chassis, above the scan plane, or a negative obstacle such as a stair edge) | Operator (R2 deployment) | **AoU-GAP** — structurally undetectable by the deployed sensor; operator-fenced | SG2 drivable-space containment on this platform: the corridor reads clear up to a stair edge (KIRRA-R2-ODD-001 §2.2) |
 | AOU-R2-CROWD-001 | Only the supervisor and briefed participants are in the R2's operating area; **no uninstructed persons and no VRU-class agents** (children, pets, persons unable to anticipate the robot) | Operator (R2 deployment) | **AoU-GAP** — the VRU bound exists (`vru_channel::resolve_vru_channel`) but `KIRRA_VRU_CHANNEL_ENABLED` is off on this platform, so persons are an operator obligation rather than a checker input | the omnidirectional pedestrian bound, disarmed here (KIRRA-R2-ODD-001 §2.4) |
@@ -1548,6 +1549,73 @@ deployed configuration is the integrator's obligation.
   `ros2_ws/src/kirra_safety/kirra_safety/perception_cap.py`
   (`resolve_stabilized_cap`).
 - Issue #1212.
+
+---
+
+## AOU-WM2-STORAGE-COMPLETION-001 — The World Model store's block device does not lose I/O completions
+
+### Assumption
+> *The block device carrying the World Model store completes I/O without losing
+> completion interrupts, so a commit's latency is bounded by device service time
+> rather than by the driver's command-timeout recovery path. Where that cannot
+> be assured for a given drive / firmware / host-controller combination, the
+> integrator **qualifies the device by measurement** (the `stall` command of the
+> WM-2 harness, or equivalent) and bounds the worst case by setting
+> `nvme_core.io_timeout` below the tolerable observation gap.*
+
+### Why it is load-bearing
+**Measured violated on the WM-2 bench Jetson.** D-15 recorded five stalls in 120
+repetitions where the NVMe driver's 30 s timeout handler fired, polled the
+completion queue, and found the command *already complete* — the device had done
+the work and the completion interrupt never reached the host. The stall duration
+is set by `nvme_core.io_timeout` (30 s), not by anything the workload controls:
+the two measured events were the timeout **+19.4 ms** and **+182.4 ms** of
+handler latency, with the device **1–2 %** busy across the stall against
+107–214 % on ordinary windows.
+
+At the WM-2 design rate of 10 Hz, a 30 s stall is **~300 observations that
+cannot be recorded**, at roughly 4 % of batch=1 runs on that drive. The world
+model acquires a three-hundred-sample hole in its memory of a period during
+which the robot was still operating.
+
+### Status / scope
+- **OPEN — violated on the current bench hardware.** Drive `SSD NVME 256GB`,
+  FW `VC400622` (generic OEM, no vendor string), on Jetson Orin NX / L4T
+  5.15.148-tegra. Root cause of the lost interrupt is **not** established:
+  controller firmware, PCIe ASPM power-state transitions and Tegra MSI-X routing
+  are all candidates and D-15 does not discriminate between them.
+- **Scope is coverage, not durability.** Every timed-out command had completed —
+  nothing was lost or retried, and D-11's five power cuts are unaffected. This
+  is an availability and memory-completeness assumption.
+- **Severity is contingent on ADR-0042 Decision 5.** Kirra World is proposed as
+  non-authoritative for safety decisions, which is why a gap in its record is
+  recorded here as coverage rather than as a safety-decision failure. That
+  ruling is `PENDING`, and its recorded reopening condition — *"it must reopen
+  if Kirra World gains authority over actuation, release, safety decisions, or
+  required safety inputs"* — applies directly: **if Kirra World ever becomes a
+  required safety input, the severity of this AoU must be re-assessed**, because
+  a 30 s hole in an authoritative input is a different class of problem.
+- **The harness can test a mitigation.** `stall` now windows its counters on the
+  stalling commit (PR #1332), so a candidate fix — a lower `io_timeout`, ASPM
+  disabled, updated firmware — is measurable against the same six-configuration
+  protocol rather than argued.
+
+### Consequence if violated
+The store stops accepting observations for the timeout duration while the
+process appears healthy: no error is raised, no command fails, and the write
+eventually succeeds. The world model's record of that window is simply absent,
+and nothing in the store marks the gap. An operator reconstructing an incident
+from that period would find a silence indistinguishable from the robot having
+observed nothing.
+
+### Evidence
+- **D-15**, `docs/adr/0041-world-model-persistence-architecture.md` — the
+  five-for-five stall/timeout correlation and the three measurements that
+  identify the mechanism.
+- `docs/evidence/wm2-jetson-oq9-rerun-20260804/` — `JETSON-TARGET-MEASURED`
+  bundle: `stall.jsonl`, `DMESG_NVME.txt`, `ENVIRONMENT.txt`.
+- `tools/wm2-persistence-harness/src/stall.rs` — the windowed instrument that
+  made the attribution possible, and the qualification tool for any mitigation.
 
 ---
 
