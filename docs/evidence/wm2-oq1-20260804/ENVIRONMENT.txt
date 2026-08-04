@@ -1,0 +1,6 @@
+Linux yahboom 5.15.148-tegra #1 SMP PREEMPT Tue Jan 7 17:14:38 PST 2025 aarch64 aarch64 aarch64 GNU/Linux
+Filesystem state:         clean with errors
+Errors behavior:          Remount read-only
+Last checked:             Thu Jun 26 04:52:21 2025
+Archived and active journals take up 250.8M in the file system.
+83998315 fix(wm2): show the derived control path, and refuse an unwritable one before measuring (#1340)

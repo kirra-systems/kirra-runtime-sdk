@@ -411,6 +411,23 @@ source; they are not migrated destructively (ADR-0040).
    blocker is **stronger**, not weaker. D-15 does not touch it: the stall
    mechanism turned out to be a driver defect independent of `synchronous`,
    which is a different question from why `NORMAL` is slower than `FULL`.
+
+   **NARROWED 2026-08-04 — the inversion does NOT reproduce (D-17).** Re-run on
+   the same target later the same day, two instruments, same parameters: `OFF`
+   55 267 > `NORMAL` 35 924 > `FULL` 31 083, the conventional ordering. `FULL`
+   and `OFF` reproduce D-15 within 2 %; `NORMAL` is **81 % away**. Those two are
+   the controls that make the third interpretable. **So the premise above — an
+   unexplained inversion — fails, and this open question no longer blocks
+   fixing a per-source-class policy at batch=64.** The paragraphs above are
+   retained as the record of what was observed and why it was treated as a
+   blocker, not as a live finding.
+
+   **What remains open is narrower and should not be read as closed:** *why
+   D-15's `NORMAL` figure was low* is unexplained. D-17 rules out the
+   instrument, a healthier device (the NVMe defect was live during the re-run),
+   and dirty-page pressure. The decision this question gated can proceed on the
+   reproducible property D-17 does establish — `NORMAL` trades tail latency for
+   median throughput — while the anomaly itself stays on the record.
 2. Retention classes: exact list and their durations. The harness models the
    §11.3 protected set (safety, incident, calibration, adjudication, operator)
    and enforces it — a window containing any of them is refused whole — but the
@@ -1811,6 +1828,86 @@ not a measurement. And the platform carried a **known-unrepaired filesystem**
 (`clean with errors`, `e2fsck` outstanding) under `Errors behavior: Remount
 read-only`, so a corrupt region would have aborted the run rather than silently
 altering a number.
+
+### D-17 — OQ1's inversion does not reproduce, and the mechanism I proposed for it is refuted
+
+`JETSON-TARGET-MEASURED`. Evidence: `docs/evidence/wm2-oq1-20260804/`.
+
+Open question 1 rests on an anomaly: at batch=64 the medians ran `OFF` > `FULL`
+> `NORMAL`, with `NORMAL` slower than `FULL`. Nothing predicts that —
+`synchronous=NORMAL` performs strictly fewer fsyncs than `FULL` — and the ADR
+holds a per-source-class policy on it. Two instruments were run against it on
+target, same session, same parameters D-10 and D-15 used.
+
+#### It does not reproduce
+
+`stall`, 20 repetitions at batch=64, the exact shape D-15 used:
+
+| batch=64 | eps D-15 → now | worst commit | dirty/writeback | stalls |
+|---|---|---|---|---|
+| FULL | 30 545 → 31 083 (**1.02×**) | 15.23 → 9.11 ms | 892 → 1280 kB | 0 → 1 |
+| NORMAL | **19 881 → 35 924 (1.81×)** | 58.88 → 12.28 ms | 4888 → 4572 kB | 0 → 0 |
+| OFF | 54 636 → 55 267 (**1.01×**) | 3.85 → 3.77 ms | 42 104 → 44 964 kB | 0 → 0 |
+
+`append` — an independent instrument — agrees **within ~3 %**: FULL 31 776,
+NORMAL 36 916, OFF 56 439 (`append` reads slightly *higher* throughout;
+`stall`/`append` = 0.97–0.99×). Today's ordering is conventional.
+
+**`FULL` and `OFF` are the internal controls.** They reproduce D-15 within 2 %
+while `NORMAL` moves 81 %. One setting shifting while both its neighbours hold
+is not device variance, and it is what makes the third number interpretable
+rather than merely different.
+
+#### Three explanations ruled out, including my own
+
+- **Not the instrument.** `stall` and `append` agree on target (**within ~3 %**)
+  and on a host control at the same settings (**within ~4.5 %**), `NORMAL`
+  included. A generic `stall` fault would have shown on the host. This was the
+  first hypothesis and the host control refuted it.
+- **Not a healthier device.** The NVMe lost-completion defect was **live**:
+  `FULL` took a 30 183.9 ms stall and the kernel log carries three
+  `completion polled` timeouts during these runs. The device was arguably worse
+  for `FULL` today, and `FULL` still reproduced.
+- **NOT dirty-page pressure — and this refutes the mechanism proposed while
+  investigating.** The argument was that `NORMAL` accumulates dirty pages like
+  `OFF` but must still flush them synchronously, so its 5.5× dirty load versus
+  `FULL` explained the loss. The re-run kills it: `NORMAL`'s peak
+  dirty/writeback is **4888 → 4572 kB, essentially unchanged**, while its
+  throughput rose 81 %. That column is a stable property of the setting and
+  does not track throughput. Recorded rather than deleted, because a hypothesis
+  that survived plausibility and died on data is part of what the next
+  investigator needs.
+
+What did change is **commit latency** — `NORMAL`'s median worst commit fell
+58.88 → 12.28 ms at unchanged dirty load. No mechanism is offered for that
+here. Replacing one refuted explanation with a second unfalsified one would be
+worse than leaving it open.
+
+#### The reproducible property, which is what the decision needs
+
+`append` emits the commit-latency distribution that `stall` does not. On
+**both** machines:
+
+| NORMAL / FULL, batch=64 | p50 | p99 | max |
+|---|---:|---:|---:|
+| target | 0.65× | 1.32× | 1.40× |
+| host (indicative) | 0.47× | 1.51× | 4.87× |
+
+**`synchronous=NORMAL` buys median throughput by paying tail latency.** It is
+faster at the median — as the fsync model requires — and worse in the tail, on
+two machines and both batch sizes. That is a stable property of the setting
+rather than a property of one machine-day, and for a store whose consumers care
+about worst-case behaviour it is the trade a per-source-class policy should
+turn on.
+
+#### What this does not do
+
+It does not explain D-15's figure, and OQ1 is **narrowed, not closed**. It is
+one machine-day against another — 20 repetitions per setting in both eras, so
+like-for-like, but a second observation rather than a distribution. It is over
+the stand-in schema. And the platform carried a `clean with errors` filesystem
+under `Errors behavior: Remount read-only`, with persistent journald newly
+enabled adding modest writes to the same device.
 
 ### D-12 — design implications the measurement forces
 

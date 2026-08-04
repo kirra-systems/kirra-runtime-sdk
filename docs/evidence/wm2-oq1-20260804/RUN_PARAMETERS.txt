@@ -1,0 +1,39 @@
+Two instruments, same machine, same session, same parameters. All defaults
+(--events 100000, --entities 1000, --seed 20260803), which are the parameters
+D-10 and D-15 used.
+
+A. `append` — emits the full commit-latency distribution (min/median/p99/max).
+   Three repetitions per durability:
+
+    for rep in 1 2 3; do
+      for d in full normal off; do
+        wm2-persistence-harness append \
+          --db ~/wm2bench/oq1-$d.sqlite --durability $d \
+          --assert-target --out ~/oq1-target.jsonl
+      done
+    done
+
+   The default --batch is 1, and the harness runs BOTH the requested batch and
+   64, so batch=1 arrives as a built-in control: it is the configuration where
+   the inversion was never observed.
+
+B. `stall` — 20 repetitions per durability at batch=64, the exact shape D-15
+   used, so the comparison is instrument-to-instrument rather than
+   instrument-to-memory:
+
+    for d in full normal off; do
+      wm2-persistence-harness stall \
+        --db ~/wm2bench/oq1s-$d.sqlite --durability $d \
+        --batch 64 --stall-repeats 20 --assert-target \
+        --out ~/oq1-stall-target.jsonl
+    done
+
+Note the harness's --durability flag takes `full|normal|off`; the usage string
+advertises `<f|n|off>`, which it does not accept. Recorded here because the
+abbreviations fail with "unknown durability" and cost a run.
+
+A matching HOST control was taken at the same settings (append and stall, 20
+repeats) on x86_64 / ext4 / virtio. It is not part of this evidence set --
+host runs are HOST-INDICATIVE-NOT-TARGET -- but its role in D-17 is to show
+the two instruments agree with each other (0.96-1.02x) on a machine that has
+never shown the inversion, which is what rules out a generic harness fault.
