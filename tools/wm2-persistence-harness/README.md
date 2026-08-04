@@ -90,6 +90,33 @@ independent PASS of the 5 required.** Ledgers from those builds carry no arm id,
 and the aggregate now refuses them as unattributable rather than counting them —
 restart tier C on a fresh database.
 
+**Migration cost is a property of the SQL, and the harness gates that.** The
+`migrate` command's backfill is selectable with `--migration-sql`:
+
+| | Statement | Cost | Why it exists |
+|---|---|---|---|
+| `legacy` (default) | correlated scalar subquery | **O(events × entities)** | what ADR-0041 D-6 measured on target; kept so that result stays reproducible |
+| `grouped` | `UPDATE … FROM` a materialized `GROUP BY` | O(events + entities) | what a migration should look like |
+
+Both emit a `migration_sql` field, so a record can never be mistaken for the
+other. They are hundreds of times apart and the gap **widens with entity count** —
+at 30 000 events the grouped form is ~750× faster at 2 000 entities, because the
+legacy plan rescans every observation event once per projection row.
+
+Four tests in `standin.rs` keep that from coming back through a later "clearer"
+rewrite, which is exactly how it would return — the SQL reads fine and the answer
+is correct, only the plan is wrong:
+
+- the grouped backfill's `EXPLAIN QUERY PLAN` must contain no correlated
+  subquery (the gate, deterministic);
+- the legacy one must still read as correlated (non-vacuity — otherwise the gate
+  could pass while detecting nothing);
+- both statements must compute identical counts, *including* for an entity the
+  log never mentions, which the two forms reach differently;
+- the grouped form must stay flat as entity count grows while the legacy form
+  does not (a coarse shape check, both measured in one process so machine speed
+  cancels).
+
 ## Layout
 
 | File | What it is |

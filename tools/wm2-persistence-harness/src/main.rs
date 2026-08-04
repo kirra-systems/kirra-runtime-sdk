@@ -81,6 +81,13 @@ OPTIONS:
                              use a fixed --events instead, which DILUTES the
                              ladder and cannot answer the scale question
     --sweep-family <name>    Family to classify: graph | temporal (default: graph)
+    --migration-sql <which>  Backfill statement for `migrate`: legacy | grouped
+                             (default: legacy). `legacy` is the correlated
+                             subquery ADR-0041 D-6 measured, kept so that result
+                             stays reproducible; it costs O(events x entities).
+                             `grouped` is the single-pass rewrite, O(events).
+                             Both are emitted with a `migration_sql` field, so a
+                             record can never be mistaken for the other
     --stall-repeats <n>      Repetitions for `stall` (default: 20)
     --assert-target          Operator asserts this is target hardware under
                              representative storage, power and thermal conditions
@@ -89,6 +96,43 @@ A run is citable in ADR-0041's ratification checklist only when the harness
 reports JETSON-TARGET-MEASURED. Everything else is HOST-INDICATIVE-NOT-TARGET
 and is useful for development and regression only.
 ";
+
+/// Which backfill statement `migrate` applies.
+///
+/// Selectable rather than replaced. The legacy form is what ADR-0041 D-6
+/// measured on target, and deleting it would orphan an archived result; the
+/// grouped form is what a migration should look like. Keeping both lets the
+/// same ladder measure each, and the emitted `migration_sql` field means a
+/// record can never be mistaken for the other.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MigrationSql {
+    Legacy,
+    Grouped,
+}
+
+impl MigrationSql {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "legacy" => Some(Self::Legacy),
+            "grouped" => Some(Self::Grouped),
+            _ => None,
+        }
+    }
+
+    fn token(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Grouped => "grouped",
+        }
+    }
+
+    fn step(self) -> &'static str {
+        match self {
+            Self::Legacy => standin::SCHEMA_V2_STEP,
+            Self::Grouped => standin::SCHEMA_V2_STEP_GROUPED,
+        }
+    }
+}
 
 struct Args {
     command: String,
@@ -109,6 +153,7 @@ struct Args {
     events_per_entity: u64,
     sweep_family: String,
     stall_repeats: usize,
+    migration_sql: MigrationSql,
     /// Positional word after the command, used only by `powercut arm|verify`.
     subcommand: Option<String>,
     assert_target: bool,
@@ -142,6 +187,7 @@ fn parse_args() -> Result<Args, String> {
         events_per_entity: 100,
         sweep_family: "graph".into(),
         stall_repeats: 20,
+        migration_sql: MigrationSql::Legacy,
         subcommand: None,
         assert_target: false,
     };
@@ -176,6 +222,11 @@ fn parse_args() -> Result<Args, String> {
         };
         match flag {
             "--assert-target" => a.assert_target = true,
+            "--migration-sql" => {
+                let v = value(flag)?;
+                a.migration_sql = MigrationSql::parse(&v)
+                    .ok_or_else(|| format!("--migration-sql must be legacy|grouped (got `{v}`)"))?;
+            }
             "--db" => a.db = PathBuf::from(value(flag)?),
             "--out" => a.out = Some(PathBuf::from(value(flag)?)),
             "--events" => a.events = parse_num(&value(flag)?, flag)?,
@@ -553,6 +604,7 @@ fn main() {
             args.events.min(50_000),
             args.entities,
             args.seed,
+            args.migration_sql.step(),
         ) {
             Ok(r) => {
                 if !r.future_schema_refused || !r.chain_intact_after {
@@ -561,6 +613,7 @@ fn main() {
                 sink.emit(
                     stamp(&class, &facts, &args)
                         .str("record", "migrate")
+                        .str("migration_sql", args.migration_sql.token())
                         .int("events", r.events)
                         .int("version_after", r.version_after as u64)
                         .bool("future_schema_refused", r.future_schema_refused)
@@ -1050,6 +1103,7 @@ mod tests {
             events_per_entity: 100,
             sweep_family: "graph".into(),
             stall_repeats: 20,
+            migration_sql: MigrationSql::Legacy,
             subcommand: None,
             assert_target: false,
         };
@@ -1086,6 +1140,7 @@ mod tests {
             events_per_entity: 100,
             sweep_family: "graph".into(),
             stall_repeats: 20,
+            migration_sql: MigrationSql::Legacy,
             subcommand: None,
             assert_target: false,
         };
