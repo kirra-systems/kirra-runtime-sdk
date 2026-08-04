@@ -22,6 +22,7 @@ mod gen;
 mod json;
 mod platform;
 mod pressure;
+mod rebuild;
 mod sha256;
 mod stall;
 mod standin;

@@ -429,11 +429,25 @@ source; they are not migrated destructively (ADR-0040).
    for a fleet, local evidence staying local?
 6. Event payload encoding — the blueprint does not fix one; JSON is
    inspectable, a binary format is compact.
-7. **Partial projections under disk pressure.** A fold writes, so it is refused
-   when the store is full. A fold interrupted that way leaves partial
-   projections with nothing marking them as incomplete. Needs either a
-   fold-in-progress marker, a transactional whole-fold, or an explicit rule that
-   projections are invalid until a checkpoint confirms them.
+7. **Partial projections under disk pressure — RESOLVED IN DESIGN 2026-08-04**,
+   with the implementation condition below still outstanding. A fold writes, so
+   it is refused when the store is full. A fold interrupted that way leaves
+   partial projections with nothing marking them as incomplete. The question
+   asked for "either a fold-in-progress marker, a transactional whole-fold, or
+   an explicit rule that projections are invalid until a checkpoint confirms
+   them". **The rebuild protocol supplies the first and third and shows they are
+   the same thing** — see `docs/design/WM2_PROJECTION_REBUILD_PROTOCOL.md`
+   (KIRRA-WM2-REBUILD-001), prototyped as a pure state machine in
+   `tools/wm2-persistence-harness/src/rebuild.rs`. A projection is authoritative
+   only in `Active`; a fold refused midway leaves `Building`, which cannot serve
+   and cannot cut over. The marker OQ7 said was missing **is the protocol state
+   itself**, so it need not be inferred from row counts or a sentinel row.
+   **Implementation condition, explicitly not met:** the protocol is correct only
+   if the store makes the rebuild-state record durable and transactional with the
+   fold progress it describes (design §8, S-1) and supplies an atomic swap
+   (S-2). Neither is built, because both are store work gated by ADR-0042
+   Decision 5. This is recorded on the same footing as open question 8 — the
+   design is adopted, the obligation is carried in the open rather than quietly.
 8. **Migration strategy — RESOLVED 2026-08-04** by adopting R1–R5 (see *Open
    question 8 — resolution*), subject to the outstanding R2 prototype obligation
    in the *Acceptance record*. Was blocking for acceptance (D-6, D-13).
@@ -502,6 +516,17 @@ The prototype must still measure peak storage, write amplification and cutover
 behaviour. **Capacity is not presently the primary risk**; cutover atomicity and
 the partial-projection state (open question 7) are.
 
+> **Partial discharge, 2026-08-04 — the code half only.**
+> `docs/design/WM2_PROJECTION_REBUILD_PROTOCOL.md` (KIRRA-WM2-REBUILD-001)
+> specifies the protocol and prototypes it as a pure state machine
+> (`tools/wm2-persistence-harness/src/rebuild.rs`, 14 tests), which answers *what
+> it costs in code* and resolves the partial-projection state named in the
+> paragraph above. **Peak storage, write amplification and cutover latency remain
+> unmeasured**, and the design deliberately says so rather than letting a
+> protocol document read as a cost result. The ≈306 MiB figure above is an
+> arithmetic consequence of D-2, not a measurement of a rebuild. This obligation
+> is therefore reduced, not closed.
+
 > An earlier revision read "a second projection is a second copy, and D-2's
 > budget is already tight." It is corrected above and noted rather than silently
 > replaced, because it went into a ratified document and the arithmetic was
@@ -538,7 +563,10 @@ done would have been a false record.
   else — the *shape* conclusions survive, the constants do not.
 - **It does not close the open questions other than 8.** Questions 7, 9 and 10
   in particular remain open, and 9 (the intermittent multi-second write stall)
-  is unresolved as to mechanism.
+  is unresolved as to mechanism. *(Later the same day, question 7 was resolved
+  **in design** — see its entry in *Open questions*. That happened after this
+  acceptance, not as part of it, and it did not close the question's
+  implementation condition. The sentence stands as written at the time.)*
 
 ### Reopening conditions
 
@@ -640,7 +668,12 @@ reasons, which D-13 shows are avoidable.
    costs in code, in peak disk, in write amplification and in cutover latency.
    Storage is the *smallest* of those: projections are 3.74 % of total store
    size, so a duplicate is ≈306 MiB (321 MB) at the 8 GiB ceiling rather than a
-   second 8 GiB. **Still open.**
+   second 8 GiB. **Partially discharged 2026-08-04 — still open.** The protocol
+   is now specified and prototyped
+   (`docs/design/WM2_PROJECTION_REBUILD_PROTOCOL.md`), which answers the *code*
+   cost and settles cutover ordering and the partial-projection state. **Peak
+   disk, write amplification and cutover latency are still unmeasured**, and
+   those are the three that need the store the design does not build.
 
 Items 1 and 2 are closed on target. **Item 3 is the real engineering, it is
 untouched, and it is the part that should carry a spike before anyone signs** —
