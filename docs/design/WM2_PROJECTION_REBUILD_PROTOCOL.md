@@ -267,6 +267,27 @@ and renaming has a window; a rebuild that swaps by pointer has one row to make
 durable. The choice interacts with open question 3 (projections in the same file
 or a rebuildable sidecar), which remains open.
 
+**S-2, concretely: rename-based cutover does not carry index names, and the
+prototype found this the hard way.** SQLite's `ALTER TABLE … RENAME TO` renames
+the table and leaves its indexes under their existing names. So a swap
+implemented as a rename pair leaves the now-live projection carrying the
+rebuild's index names, and the *next* rebuild collides on `CREATE INDEX`. The
+resolutions are all real cost or real risk:
+
+- rename indexes at cutover — SQLite has no `ALTER INDEX`, so this means dropping
+  and recreating them **inside the blackout window**, turning a rows-don't-move
+  swap into an index rebuild;
+- alternate name pairs (ping-pong between two index name sets) — cheap, but the
+  live schema's index names now depend on cycle parity;
+- pointer-based cutover (S-2's other candidate) — sidesteps it entirely, which is
+  a point in its favour that was not visible before prototyping.
+
+The measurement in ADR-0041 D-16 takes **none** of these: it does one cycle and
+then refuses a second with a stated reason. That keeps the cutover figure honest
+about what it measured (a rename pair, no index work) rather than baking in one
+arbitrary resolution and quoting its cost as *the* cost. **Choosing among the
+three is implementation work S-2 now explicitly carries.**
+
 ---
 
 ## 9. What this resolves, and what it does not

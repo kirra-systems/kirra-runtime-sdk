@@ -683,6 +683,196 @@ impl Store {
         Ok(applied as u64)
     }
 
+    /// Create the alongside projection tables an R2 rebuild folds into.
+    ///
+    /// Mirrors the live tables, indexes included — an index is real bytes and
+    /// real writes, and a rebuild measured without them would understate both
+    /// of the costs ADR-0041 asks about.
+    ///
+    /// **One cycle per store.** SQLite's `ALTER TABLE ... RENAME TO` does not
+    /// rename a table's indexes, so after [`Store::swap_rebuild_projection`] the
+    /// now-live tables still carry the `_rebuild` index names. A second cycle
+    /// would collide on `CREATE INDEX`. This refuses first, with a reason,
+    /// rather than surfacing SQLite's "index already exists" — and it does NOT
+    /// resolve the collision by dropping the offending index, because that
+    /// index is now serving the live projection.
+    ///
+    /// Renaming indexes back at cutover is possible only by dropping and
+    /// recreating them, which is an index rebuild inside the blackout window —
+    /// real cost, and an implementation decision the production store has to
+    /// make rather than one this prototype should make for it by measuring one
+    /// arbitrary choice. Recorded as such in the protocol's store requirements.
+    pub fn create_rebuild_projection(&mut self) -> rusqlite::Result<()> {
+        if self.rebuild_index_names_are_live()? {
+            return Err(rusqlite::Error::SqliteFailure(
+                // SQLITE_ERROR, not SQLITE_MISUSE: the caller did nothing
+                // invalid at the API level. This is a state-based refusal, and
+                // MISUSE would read in a log as though the caller had done
+                // something unsafe.
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                Some(
+                    "a cutover has already happened on this store: the live projection carries \
+                     the _rebuild index names, so a second rebuild cycle cannot create them. \
+                     Cutover index renaming is unresolved — see create_rebuild_projection."
+                        .to_string(),
+                ),
+            ));
+        }
+        self.conn.execute_batch(
+            "DROP TABLE IF EXISTS entities_projection_rebuild;
+             DROP TABLE IF EXISTS relationships_projection_rebuild;
+             CREATE TABLE entities_projection_rebuild (
+                 entity_id     TEXT PRIMARY KEY,
+                 kind          TEXT    NOT NULL,
+                 place_ref     TEXT    NOT NULL,
+                 valid_from_ms INTEGER NOT NULL,
+                 generation    INTEGER NOT NULL
+             );
+             CREATE INDEX idx_entities_place_rebuild
+                 ON entities_projection_rebuild (place_ref, kind);
+             CREATE TABLE relationships_projection_rebuild (
+                 subject    TEXT    NOT NULL,
+                 predicate  TEXT    NOT NULL,
+                 object     TEXT    NOT NULL,
+                 generation INTEGER NOT NULL,
+                 PRIMARY KEY (subject, predicate, object)
+             );
+             CREATE INDEX idx_rel_object_rebuild
+                 ON relationships_projection_rebuild (object, predicate);",
+        )
+    }
+
+    /// Whether a `_rebuild`-named index is attached to a table that is NOT a
+    /// `_rebuild` table — i.e. whether a cutover has already run here.
+    fn rebuild_index_names_are_live(&self) -> rusqlite::Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+              WHERE type = 'index'
+                AND name IN ('idx_entities_place_rebuild', 'idx_rel_object_rebuild')
+                AND tbl_name NOT LIKE '%\\_rebuild' ESCAPE '\\'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Fold `[from_generation, to_generation)` into the alongside projection.
+    ///
+    /// A RANGE rather than a tail, because a rebuild that folds the whole log
+    /// in one statement never lets ingest interleave — and interleaving is the
+    /// entire reason ADR-0041 R2 needs a protocol rather than a copy.
+    pub fn fold_rebuild_range(&mut self, from: u64, to: u64) -> rusqlite::Result<u64> {
+        let tx = self.conn.transaction()?;
+        {
+            tx.execute(
+                "INSERT INTO entities_projection_rebuild
+                     (entity_id, kind, place_ref, valid_from_ms, generation)
+                 SELECT subject, 'entity', substr(payload, 1, 10), valid_from_ms, generation
+                   FROM world_events
+                  WHERE kind = 'observation' AND generation >= ?1 AND generation < ?2
+                  ORDER BY valid_from_ms ASC, generation ASC
+                 ON CONFLICT(entity_id) DO UPDATE SET
+                    place_ref     = excluded.place_ref,
+                    valid_from_ms = excluded.valid_from_ms,
+                    generation    = excluded.generation
+                  WHERE (excluded.valid_from_ms, excluded.generation)
+                        > (entities_projection_rebuild.valid_from_ms,
+                           entities_projection_rebuild.generation)",
+                params![from as i64, to as i64],
+            )?;
+            tx.execute(
+                "INSERT INTO relationships_projection_rebuild
+                     (subject, predicate, object, generation)
+                 SELECT subject, predicate, object, generation FROM world_events
+                  WHERE kind = 'relationship' AND generation >= ?1 AND generation < ?2
+                    AND predicate IS NOT NULL AND object IS NOT NULL
+                  ORDER BY generation ASC
+                 ON CONFLICT(subject, predicate, object) DO UPDATE SET
+                    generation = excluded.generation
+                  WHERE excluded.generation > relationships_projection_rebuild.generation",
+                params![from as i64, to as i64],
+            )?;
+        }
+        let applied: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM world_events WHERE generation >= ?1 AND generation < ?2",
+            params![from as i64, to as i64],
+            |r| r.get(0),
+        )?;
+        tx.commit()?;
+        Ok(applied as u64)
+    }
+
+    /// The same digest as [`Store::projection_digest`], over the alongside
+    /// tables — literally the same code, so equivalence cannot fail for
+    /// reasons of serialization.
+    pub fn rebuild_projection_digest(&self) -> rusqlite::Result<String> {
+        self.projection_digest_of(
+            "entities_projection_rebuild",
+            "relationships_projection_rebuild",
+        )
+    }
+
+    /// The cutover: the alongside projection becomes the live one, atomically.
+    ///
+    /// A rename pair inside one transaction — no rows move, so this is a schema
+    /// operation and the blackout is meant to be short. The retired tables are
+    /// NOT dropped here: reclaiming them is separate work with its own cost, and
+    /// folding it into the swap would overstate the window in which readers are
+    /// blocked. See [`Store::drop_retired_projection`].
+    /// Driven through rusqlite's transaction API rather than a hand-written
+    /// `BEGIN IMMEDIATE … COMMIT` batch. With the batch form, a statement that
+    /// errors mid-way leaves the transaction OPEN on the connection — the
+    /// `COMMIT` is never reached and nothing rolls it back, so the store stays
+    /// locked and every later operation inherits a failed cutover's
+    /// transaction. The RAII guard rolls back on drop, which is the behaviour
+    /// invariant 4 assumes: a failed swap leaves the previous projection
+    /// active and untouched.
+    pub fn swap_rebuild_projection(&mut self) -> rusqlite::Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute_batch(
+            "ALTER TABLE entities_projection      RENAME TO entities_projection_retired;
+             ALTER TABLE relationships_projection RENAME TO relationships_projection_retired;
+             ALTER TABLE entities_projection_rebuild      RENAME TO entities_projection;
+             ALTER TABLE relationships_projection_rebuild RENAME TO relationships_projection;",
+        )?;
+        tx.commit()
+    }
+
+    /// Drop what the cutover retired. Reclamation, measured on its own.
+    pub fn drop_retired_projection(&mut self) -> rusqlite::Result<()> {
+        self.conn.execute_batch(
+            "DROP TABLE IF EXISTS entities_projection_retired;
+             DROP TABLE IF EXISTS relationships_projection_retired;",
+        )
+    }
+
+    /// Bytes currently on the free list.
+    ///
+    /// `DROP TABLE` does not shrink a SQLite file — it moves the table's pages
+    /// to the free list, to be reused. So the file size is unchanged and the
+    /// growth in THIS is what the dropped table actually occupied. Measuring
+    /// the retired projection by file shrinkage reports zero, which reads as
+    /// "the projection was free".
+    pub fn free_bytes(&self) -> rusqlite::Result<u64> {
+        let pages: i64 = self
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        let page_size: i64 = self.conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        Ok((pages.max(0) * page_size.max(0)) as u64)
+    }
+
+    /// Highest generation in the log, or 0 when empty.
+    pub fn max_generation(&self) -> rusqlite::Result<u64> {
+        let g: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(generation), -1) FROM world_events",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((g + 1).max(0) as u64)
+    }
+
     pub fn clear_projections(&mut self) -> rusqlite::Result<()> {
         self.conn
             .execute_batch("DELETE FROM entities_projection; DELETE FROM relationships_projection;")
@@ -694,11 +884,34 @@ impl Store {
     /// digest that depends on SQLite's storage order and compare unequal for
     /// reasons that have nothing to do with the fold.
     pub fn projection_digest(&self) -> rusqlite::Result<String> {
+        self.projection_digest_of("entities_projection", "relationships_projection")
+    }
+
+    /// The digest of a projection pair, whichever tables hold it.
+    ///
+    /// Parameterised rather than duplicated because the R2 rebuild has to
+    /// compare the alongside projection against the live one, and a comparison
+    /// implemented twice compares the implementations. A hand-written second
+    /// copy of this function disagreed with the original on both the field
+    /// separators and whether `generation` is included — and reported a
+    /// perfectly correct rebuild as a mismatch.
+    ///
+    /// Table names are formatted in rather than bound: SQLite cannot bind an
+    /// identifier, and these are internal literals, never operator input.
+    ///
+    /// Note what is NOT hashed: `generation`. Two folds that reach the same
+    /// projection state by different routes are the same state, and the
+    /// generation that last touched a row is bookkeeping about how it got there.
+    fn projection_digest_of(
+        &self,
+        entities_table: &str,
+        relationships_table: &str,
+    ) -> rusqlite::Result<String> {
         let mut buf = Vec::new();
-        let mut stmt = self.conn.prepare(
-            "SELECT entity_id, kind, place_ref, valid_from_ms, generation \
-             FROM entities_projection ORDER BY entity_id",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT entity_id, kind, place_ref, valid_from_ms \
+             FROM {entities_table} ORDER BY entity_id"
+        ))?;
         let mut rows = stmt.query([])?;
         while let Some(r) = rows.next()? {
             buf.extend_from_slice(r.get::<_, String>(0)?.as_bytes());
@@ -710,10 +923,10 @@ impl Store {
             buf.extend_from_slice(r.get::<_, i64>(3)?.to_string().as_bytes());
             buf.push(0x1e);
         }
-        let mut stmt = self.conn.prepare(
-            "SELECT subject, predicate, object FROM relationships_projection \
-             ORDER BY subject, predicate, object",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT subject, predicate, object FROM {relationships_table} \
+             ORDER BY subject, predicate, object"
+        ))?;
         let mut rows = stmt.query([])?;
         while let Some(r) = rows.next()? {
             for i in 0..3 {
@@ -1211,5 +1424,55 @@ mod tests {
             gr < lr,
             "grouped ({gr:.2}) must scale better than legacy ({lr:.2})"
         );
+    }
+
+    #[test]
+    fn a_rebuild_cycle_reaches_an_equivalent_projection_and_a_second_cycle_refuses() {
+        let (mut s, path) = store("rebuild-cycle");
+        s.append_batch(&gen::events(0, 200, 12, 3)).unwrap();
+        s.fold_from(0).unwrap();
+        let live = s.projection_digest().unwrap();
+
+        // One full cycle, folded in two chunks so the range path is exercised
+        // rather than a single whole-log statement.
+        s.create_rebuild_projection().unwrap();
+        let head = s.max_generation().unwrap();
+        s.fold_rebuild_range(0, head / 2).unwrap();
+        s.fold_rebuild_range(head / 2, head).unwrap();
+        assert_eq!(
+            s.rebuild_projection_digest().unwrap(),
+            live,
+            "an alongside fold of the same log must reach the same projection; \
+             if this diverges the equivalence check in rebuild_cost is measuring \
+             two different serializations, not two different states"
+        );
+
+        s.swap_rebuild_projection().unwrap();
+        assert_eq!(
+            s.projection_digest().unwrap(),
+            live,
+            "the cutover must leave the live projection holding the rebuilt state"
+        );
+        s.drop_retired_projection().unwrap();
+
+        // The trap this guard exists for: ALTER TABLE RENAME left the _rebuild
+        // index names attached to the now-live tables, so CREATE INDEX would
+        // collide. It must refuse with a reason, not with SQLite's message, and
+        // it must not "fix" it by dropping an index the live projection uses.
+        let err = s.create_rebuild_projection().expect_err(
+            "a second cycle must refuse: the live tables carry the _rebuild index names",
+        );
+        assert!(
+            format!("{err}").contains("cutover has already happened"),
+            "refusal must name the reason, got: {err}"
+        );
+        assert_eq!(
+            s.projection_digest().unwrap(),
+            live,
+            "a refused second cycle must leave the live projection untouched"
+        );
+
+        drop(s);
+        let _ = std::fs::remove_file(&path);
     }
 }

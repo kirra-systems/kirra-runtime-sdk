@@ -23,6 +23,7 @@ mod json;
 mod platform;
 mod pressure;
 mod rebuild;
+mod rebuild_cost;
 mod sha256;
 mod stall;
 mod standin;
@@ -33,6 +34,31 @@ use platform::EvidenceStatus;
 use standin::Durability;
 use std::io::Write;
 use std::path::PathBuf;
+
+/// Every command this binary implements. The gate that makes an unknown
+/// command fail closed rather than produce an evidence stamp over no
+/// measurements — see the check in `parse`.
+///
+/// Adding a command means adding it here. The `every_dispatched_command_is_in
+/// _the_known_list` test greps this file's dispatch guards and fails if one is
+/// missing, so the list cannot silently fall behind the code.
+const KNOWN_COMMANDS: &[&str] = &[
+    "platform",
+    "append",
+    "replay",
+    "query",
+    "growth",
+    "migrate",
+    "crash",
+    "compact",
+    "pressure",
+    "sweep",
+    "stall",
+    "rebuild",
+    "all",
+    "powercut",
+    "crash-child",
+];
 
 const USAGE: &str = "\
 wm2-persistence-harness — ADR-0041 (WM-2) measurement harness
@@ -54,6 +80,9 @@ COMMANDS:
                 against ADR-0041's own reopening condition (drill §9)
     stall       Repeat one append configuration and hunt the ~29 s write stall,
                 sampling system counters across it (ADR-0041 open question 9)
+    rebuild     Cost ADR-0041 R2's alongside-rebuild-and-swap: peak disk, write
+                amplification and cutover latency, against a control arm running
+                the same ingest WITHOUT the rebuild (the acceptance obligation)
     all         Every command above, into one result stream
 
   Tier C (manual, needs a power switch — see the drill §8):
@@ -90,6 +119,11 @@ OPTIONS:
                              Both are emitted with a `migration_sql` field, so a
                              record can never be mistaken for the other
     --stall-repeats <n>      Repetitions for `stall` (default: 20)
+    --rebuild-rounds <n>     Ingest/fold rounds for `rebuild` (default: 8). Each
+                             round appends --rebuild-ingest events and folds a
+                             chunk, so the head MOVES under the fold — which is
+                             the condition R2's protocol exists to handle
+    --rebuild-ingest <n>     Events appended per round (default: 2000)
     --assert-target          Operator asserts this is target hardware under
                              representative storage, power and thermal conditions
 
@@ -154,10 +188,28 @@ struct Args {
     events_per_entity: u64,
     sweep_family: String,
     stall_repeats: usize,
+    rebuild_rounds: usize,
+    rebuild_ingest: u64,
     migration_sql: MigrationSql,
     /// Positional word after the command, used only by `powercut arm|verify`.
     subcommand: Option<String>,
     assert_target: bool,
+}
+
+/// Refuse a command this binary does not implement.
+///
+/// Pure so it can be tested — `parse_args` reads `std::env::args()` directly
+/// and the fail-open this guards against is not otherwise reachable from a
+/// test.
+fn validate_command(cmd: &str) -> Result<(), String> {
+    if KNOWN_COMMANDS.contains(&cmd) {
+        return Ok(());
+    }
+    Err(format!(
+        "unknown command `{cmd}`\n\nThis binary may PREDATE it. Check `git log --oneline -1` \
+         against the commit you expect, and rebuild — an out-of-date binary is the likeliest \
+         cause.\n\n{USAGE}"
+    ))
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -165,6 +217,22 @@ fn parse_args() -> Result<Args, String> {
     if raw.is_empty() || raw[0] == "-h" || raw[0] == "--help" {
         return Err(USAGE.to_string());
     }
+
+    // Fail closed on a command this binary does not implement.
+    //
+    // Dispatch is a chain of `if command == "..."` guards with no final else,
+    // so an unrecognized command used to match nothing, fall through every
+    // measurement, and still reach the epilogue — printing
+    // `evidence status : JETSON-TARGET-MEASURED` and `Done.` having measured
+    // NOTHING. Observed for real: an older binary on the target was handed
+    // `rebuild`, a command it predates, and reported a citable run.
+    //
+    // That is the worst failure this harness can have. Every other guard here
+    // exists to stop a number describing the wrong experiment; this one
+    // produced a citability stamp with no experiment at all, and the operator
+    // had no way to tell from the output. An unknown OPTION already failed
+    // closed with usage — only the command itself was fail-open.
+    validate_command(&raw[0])?;
 
     let mut default_db = std::env::temp_dir();
     default_db.push("wm2-persistence-harness.sqlite");
@@ -188,6 +256,8 @@ fn parse_args() -> Result<Args, String> {
         events_per_entity: 100,
         sweep_family: "graph".into(),
         stall_repeats: 20,
+        rebuild_rounds: 8,
+        rebuild_ingest: 2_000,
         migration_sql: MigrationSql::Legacy,
         subcommand: None,
         assert_target: false,
@@ -239,6 +309,8 @@ fn parse_args() -> Result<Args, String> {
             "--crash-run-ms" => a.crash_run_ms = parse_num(&value(flag)?, flag)?,
             "--trial" => a.trial = parse_num(&value(flag)?, flag)?,
             "--stall-repeats" => a.stall_repeats = parse_num(&value(flag)?, flag)? as usize,
+            "--rebuild-rounds" => a.rebuild_rounds = parse_num(&value(flag)?, flag)? as usize,
+            "--rebuild-ingest" => a.rebuild_ingest = parse_num(&value(flag)?, flag)?,
             "--events-per-entity" => a.events_per_entity = parse_num(&value(flag)?, flag)?,
             "--sweep-family" => {
                 let v = value(flag)?;
@@ -908,6 +980,76 @@ fn main() {
         );
     }
 
+    if args.command == "rebuild" {
+        let d = args.durability.unwrap_or(Durability::Full);
+        // The control arm needs its own file: same ingest, same seed, no
+        // rebuild. Sitting beside the working DB so both land on one device.
+        let mut control_db = args.db.clone();
+        let name = control_db
+            .file_name()
+            .map(|s| format!("control-{}", s.to_string_lossy()))
+            .unwrap_or_else(|| "control.sqlite".into());
+        control_db.set_file_name(name);
+
+        let r = rebuild_cost::run(
+            &args.db,
+            &control_db,
+            d,
+            args.events,
+            args.entities,
+            args.rebuild_rounds,
+            args.rebuild_ingest,
+            args.seed,
+        );
+        sink.emit(
+            stamp(&class, &facts, &args)
+                .str("record", "rebuild")
+                .str("durability", d.pragma())
+                .int("seeded_events", r.seeded_events)
+                .int("ingested_during", r.ingested_during)
+                .int("rounds", r.rounds as u64)
+                .int("entities", r.entities)
+                // Gate: numbers from an attempt that never reached Active
+                // describe something other than an alongside rebuild.
+                .int("completed", u64::from(r.completed()))
+                .str("final_state", &r.final_state)
+                .int("equivalence_proven", u64::from(r.equivalence_proven))
+                .int("converged", u64::from(r.converged))
+                .int("catchup_rounds", r.catchup_rounds as u64)
+                .opt_str("failure", r.failure.as_deref())
+                // The three costs the acceptance record asks for.
+                .float("cutover_ms", r.cutover_ms)
+                .float("retire_ms", r.retire_ms)
+                .int("peak_overhead_bytes", r.peak_overhead_bytes)
+                .float("peak_overhead_ratio", r.peak_overhead_ratio)
+                .int("projection_bytes", r.projection_bytes)
+                .float(
+                    "extra_write_bytes",
+                    r.extra_write_bytes.map_or(f64::NAN, |v| v as f64),
+                )
+                .float(
+                    "write_amplification",
+                    r.write_amplification.unwrap_or(f64::NAN),
+                )
+                // Both arms, so the difference above can be checked rather than
+                // taken on trust.
+                .float("control_wall_ms", r.control.wall_ms)
+                .float("rebuild_wall_ms", r.rebuild.wall_ms)
+                .float(
+                    "control_write_bytes",
+                    r.control.write_bytes.map_or(f64::NAN, |v| v as f64),
+                )
+                .float(
+                    "rebuild_write_bytes",
+                    r.rebuild.write_bytes.map_or(f64::NAN, |v| v as f64),
+                )
+                .int("control_peak_db_bytes", r.control.peak_db_bytes)
+                .int("rebuild_peak_db_bytes", r.rebuild.peak_db_bytes)
+                .int("control_final_db_bytes", r.control.final_db_bytes)
+                .int("rebuild_final_db_bytes", r.rebuild.final_db_bytes),
+        );
+    }
+
     if args.command == "stall" {
         // Deliberately NOT part of `all`: it is a targeted investigation of one
         // configuration, and folding it into the standard run would multiply
@@ -1134,6 +1276,8 @@ mod tests {
             events_per_entity: 100,
             sweep_family: "graph".into(),
             stall_repeats: 20,
+            rebuild_rounds: 8,
+            rebuild_ingest: 2_000,
             migration_sql: MigrationSql::Legacy,
             subcommand: None,
             assert_target: false,
@@ -1171,6 +1315,8 @@ mod tests {
             events_per_entity: 100,
             sweep_family: "graph".into(),
             stall_repeats: 20,
+            rebuild_rounds: 8,
+            rebuild_ingest: 2_000,
             migration_sql: MigrationSql::Legacy,
             subcommand: None,
             assert_target: false,
@@ -1178,5 +1324,65 @@ mod tests {
         assert_eq!(durabilities(&a).len(), 3);
         a.durability = Some(Durability::Full);
         assert_eq!(durabilities(&a), vec![Durability::Full]);
+    }
+
+    #[test]
+    fn an_unknown_command_fails_closed_instead_of_stamping_a_citable_run() {
+        // The defect this guards: dispatch is a chain of `if command == "..."`
+        // guards with no final else, so an unrecognized command matched
+        // nothing, fell through every measurement, and still reached the
+        // epilogue printing `evidence status : JETSON-TARGET-MEASURED` and
+        // `Done.` — a citability stamp over ZERO measurements.
+        //
+        // Observed on the target: a binary predating the `rebuild` command was
+        // handed `rebuild` and reported a citable run. An unknown OPTION
+        // already failed closed; only the command was fail-open.
+        let err = validate_command("rebuild-typo").expect_err("must refuse");
+        assert!(
+            err.contains("unknown command `rebuild-typo`"),
+            "refusal must name the command: {err}"
+        );
+        assert!(
+            err.contains("PREDATE"),
+            "an out-of-date binary is the likeliest cause and the message must say so: {err}"
+        );
+        // Every real command still passes, or this guard would break the tool.
+        for c in KNOWN_COMMANDS {
+            assert!(validate_command(c).is_ok(), "{c} must be accepted");
+        }
+    }
+
+    #[test]
+    fn every_dispatched_command_is_in_the_known_list() {
+        // KNOWN_COMMANDS is what makes an unknown command fail closed, so a
+        // command added to dispatch but not to the list would be refused at
+        // the door. Read the dispatch guards out of this file rather than
+        // trusting the two to be kept in step by hand.
+        let src = include_str!("main.rs");
+        let mut dispatched: Vec<String> = Vec::new();
+        for pat in [r#"args.command == ""#, r#"run(""#] {
+            let mut rest = src;
+            while let Some(i) = rest.find(pat) {
+                rest = &rest[i + pat.len()..];
+                if let Some(end) = rest.find('"') {
+                    let name = &rest[..end];
+                    if !name.is_empty() && !name.contains(' ') {
+                        dispatched.push(name.to_string());
+                    }
+                }
+            }
+        }
+        assert!(
+            dispatched.len() > 5,
+            "found only {dispatched:?} — the scrape stopped matching dispatch, \
+             so this test is no longer checking anything"
+        );
+        for name in &dispatched {
+            assert!(
+                KNOWN_COMMANDS.contains(&name.as_str()),
+                "`{name}` is dispatched but missing from KNOWN_COMMANDS, so it would be \
+                 refused as unknown before ever reaching its guard"
+            );
+        }
     }
 }
