@@ -940,25 +940,41 @@ fn main() {
                 .float("median_throughput_eps", r.median_throughput_eps())
                 .str("attribution", r.attribution.token())
                 .str("detail", r.attribution.detail())
+                // The counter fields below are deltas across the WORST COMMIT'S
+                // OWN WINDOW, not across the run. `counter_window_ms` and
+                // `counter_window_samples` state what span produced them, so a
+                // reader never has to assume — the OQ9 instrument fix.
+                .float("counter_window_ms", r.delta_at_worst.covered_ms)
+                .int("counter_window_samples", r.delta_at_worst.samples as u64)
+                .int(
+                    "counter_window_usable",
+                    u64::from(r.delta_at_worst.window_is_usable()),
+                )
                 .float(
                     "psi_io_stall_us",
                     r.delta_at_worst
+                        .delta
                         .psi_io_stall_us
                         .map_or(f64::NAN, |v| v as f64),
                 )
                 .float(
                     "disk_io_ms",
-                    r.delta_at_worst.disk_io_ms.map_or(f64::NAN, |v| v as f64),
+                    r.delta_at_worst
+                        .delta
+                        .disk_io_ms
+                        .map_or(f64::NAN, |v| v as f64),
                 )
                 .float(
                     "peak_dirty_writeback_kb",
                     r.delta_at_worst
+                        .delta
                         .peak_dirty_writeback_kb
                         .map_or(f64::NAN, |v| v as f64),
                 )
                 .float(
                     "thermal_max_mc",
                     r.delta_at_worst
+                        .delta
                         .thermal_max_mc
                         .map_or(f64::NAN, |v| v as f64),
                 ),

@@ -104,6 +104,33 @@ pub fn db_bytes(path: &Path) -> u64 {
 // Append
 // ---------------------------------------------------------------------------
 
+/// When one commit happened, in milliseconds from a stated origin.
+///
+/// The origin is the caller's if one is supplied to [`append_from`], otherwise
+/// the start of the append loop. **Which origin matters more than it looks.**
+/// These offsets exist to be looked up in a concurrently-sampled series, and two
+/// `Instant::now()` calls taken at different moments are two different
+/// coordinate systems — a lookup across them lands on the wrong span entirely,
+/// not merely a slightly shifted one. `append` does event generation and a hash
+/// calibration before its loop, so that gap is seconds, not microseconds.
+///
+/// Exists so a stall can be correlated with system counters sampled *across it*
+/// rather than across the whole run. Without a window, the only honest thing to
+/// say about a concurrent counter is that it accumulated somewhere during the
+/// run — see [`crate::stall`], where reading a whole-run counter against a
+/// one-commit duration was a real defect (ADR-0041 open question 9).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CommitWindow {
+    pub start_ms: f64,
+    pub end_ms: f64,
+}
+
+impl CommitWindow {
+    pub fn duration_ms(&self) -> f64 {
+        self.end_ms - self.start_ms
+    }
+}
+
 pub struct AppendResult {
     pub timing: Timing,
     pub durability: Durability,
@@ -111,6 +138,11 @@ pub struct AppendResult {
     pub events: u64,
     pub events_per_second: f64,
     pub hash_share_percent: f64,
+    /// The window of the single slowest commit. `None` only when no commit ran.
+    ///
+    /// This is the slowest by the same measurement that produces
+    /// `timing.max_us`, so the two always describe the same commit.
+    pub slowest_commit: Option<CommitWindow>,
 }
 
 /// Append `events` in transactions of `batch` events each, timing every commit.
@@ -128,6 +160,27 @@ pub fn append(
     batch: usize,
     seed: u64,
 ) -> Result<AppendResult, String> {
+    append_from(path, durability, events, entities, batch, seed, None)
+}
+
+/// [`append`], with [`CommitWindow`] offsets measured from a caller-supplied
+/// origin.
+///
+/// Pass `Some(origin)` when something else is sampling concurrently and needs
+/// its timestamps to share a coordinate system with the commit windows — see
+/// [`crate::stall::run`], which starts its sampler at that origin. `None`
+/// measures from the start of the append loop, which is right for every caller
+/// that is not correlating against an external series.
+#[allow(clippy::too_many_arguments)]
+pub fn append_from(
+    path: &Path,
+    durability: Durability,
+    events: u64,
+    entities: u64,
+    batch: usize,
+    seed: u64,
+    origin: Option<Instant>,
+) -> Result<AppendResult, String> {
     remove_db(path);
     let mut store = Store::open(path, durability).map_err(|e| e.to_string())?;
     let all = gen::events(0, events, entities, seed);
@@ -143,11 +196,26 @@ pub fn append(
     };
 
     let mut durations = Vec::with_capacity(all.len() / batch.max(1) + 1);
+    let mut slowest: Option<(Duration, CommitWindow)> = None;
     let wall = Instant::now();
+    // The origin the windows are reported against. Defaults to the loop start;
+    // a concurrent sampler supplies its own so the two agree.
+    let window_origin = origin.unwrap_or(wall);
     for chunk in all.chunks(batch.max(1)) {
         let t = Instant::now();
         store.append_batch(chunk).map_err(|e| e.to_string())?;
-        durations.push(t.elapsed());
+        let took = t.elapsed();
+        let start_ms = t.duration_since(window_origin).as_secs_f64() * 1e3;
+        if slowest.as_ref().is_none_or(|(d, _)| took > *d) {
+            slowest = Some((
+                took,
+                CommitWindow {
+                    start_ms,
+                    end_ms: start_ms + took.as_secs_f64() * 1e3,
+                },
+            ));
+        }
+        durations.push(took);
     }
     let wall = wall.elapsed().as_secs_f64();
 
@@ -168,6 +236,7 @@ pub fn append(
         } else {
             f64::NAN
         },
+        slowest_commit: slowest.map(|(_, w)| w),
         timing,
     })
 }
@@ -662,6 +731,68 @@ mod tests {
         assert_eq!(a.events, 2_000);
         assert!(a.timing.samples == 2_000, "batch=1 should time every event");
         assert!(a.hash_share_percent.is_finite() && a.hash_share_percent >= 0.0);
+        remove_db(&p);
+    }
+
+    #[test]
+    fn the_slowest_commit_window_describes_the_same_commit_as_max_us() {
+        // The stall attribution correlates system counters against this window,
+        // so a window that named a DIFFERENT commit than `max_us` would put the
+        // counters on the wrong two seconds and report confidently from them.
+        // Cheap to assert here, and the alternative is unfalsifiable on target.
+        let p = temp("append-window");
+        let a = append(&p, Durability::Off, 2_000, 100, 16, 4).unwrap();
+        let w = a
+            .slowest_commit
+            .expect("commits ran, so there is a slowest");
+        assert!(
+            (w.duration_ms() - a.timing.max_us / 1e3).abs() < 1e-6,
+            "window {:.6} ms != max_us {:.6} ms — they name different commits",
+            w.duration_ms(),
+            a.timing.max_us / 1e3
+        );
+        assert!(w.start_ms >= 0.0 && w.end_ms >= w.start_ms);
+        assert!(
+            w.end_ms <= a.timing.total_ms + 1.0,
+            "window ends past the whole append loop"
+        );
+        remove_db(&p);
+    }
+
+    #[test]
+    fn commit_windows_are_measured_from_the_supplied_origin() {
+        // The correlation in `stall` is only sound if the commit windows and the
+        // sampler share one origin. `append` does event generation and a hash
+        // calibration before its loop, so an unshared origin is off by that much
+        // — seconds, not microseconds — and a lookup lands on an unrelated span
+        // of the series while still looking like a measurement.
+        //
+        // The sleep stands in for that setup gap: with the origin honoured the
+        // offset must include it; with the loop start used instead it would not.
+        let p = temp("append-origin");
+        let origin = Instant::now();
+        std::thread::sleep(Duration::from_millis(60));
+        let a = append_from(&p, Durability::Off, 2_000, 100, 16, 4, Some(origin)).unwrap();
+        let w = a.slowest_commit.expect("commits ran");
+        assert!(
+            w.start_ms >= 60.0,
+            "window start {:.1} ms ignores the supplied origin",
+            w.start_ms
+        );
+        // And the default still measures from the loop start, so every other
+        // caller is unaffected. The invariant there is containment in the loop,
+        // NOT an upper bound in milliseconds: the slowest commit may fall
+        // anywhere in the run, so "start_ms is small" would be a coincidence
+        // dressed as an assertion.
+        let b = append(&p, Durability::Off, 2_000, 100, 16, 4).unwrap();
+        let bw = b.slowest_commit.expect("commits ran");
+        assert!(
+            bw.start_ms >= 0.0 && bw.end_ms <= b.timing.total_ms + 1.0,
+            "default-origin window [{:.1}, {:.1}] ms escapes its own {:.1} ms loop",
+            bw.start_ms,
+            bw.end_ms,
+            b.timing.total_ms
+        );
         remove_db(&p);
     }
 

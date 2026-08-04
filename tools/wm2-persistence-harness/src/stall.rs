@@ -73,6 +73,78 @@ pub struct SystemDelta {
     pub thermal_max_mc: Option<u64>,
 }
 
+/// A [`SystemDelta`] **together with the window it was measured over**.
+///
+/// # Why the window is not optional
+///
+/// Attribution asks "was the block layer busy for most of *the stall*". That
+/// question only has an answer if the counters were accumulated across the
+/// stall. The first version of this module sampled once before the whole append
+/// run and once after, then compared that whole-run `disk_io_ms` against a
+/// single commit's duration — a **denominator mismatch**. A 60 s run with 5 s of
+/// ordinary device busy-time satisfies `5000 >= 1200 * 0.5` for a 1.2 s stall,
+/// so it reported `IO-DEVICE` even when the device was idle for the entire
+/// stall. That is how D-10 got "one `IO-DEVICE` attribution held loosely".
+///
+/// Carrying the window in the type makes the mistake hard to repeat: nothing
+/// can be attributed without stating what span the counters cover, and
+/// [`attribute_stall`] refuses outright when the span is materially wider than
+/// the stall it claims to describe.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowedDelta {
+    pub delta: SystemDelta,
+    /// The stall being explained, milliseconds.
+    pub stall_ms: f64,
+    /// The span the counters actually cover, milliseconds. Ideally ≈ `stall_ms`;
+    /// it is bounded by the sampler's cadence, so it is never exactly equal.
+    pub covered_ms: f64,
+    /// How many samples fell in the window. Below [`MIN_WINDOW_SAMPLES`] the
+    /// window is not resolved well enough to attribute anything.
+    pub samples: usize,
+}
+
+impl WindowedDelta {
+    /// Is this delta actually about the stall it names?
+    ///
+    /// Bounded on BOTH sides. Too wide and the counters describe more than the
+    /// stall (the original defect). Too narrow and they describe only part of
+    /// it, which is just as wrong and less obvious — a window covering 17 % of a
+    /// commit is not "a slightly conservative measurement", it is a different
+    /// measurement. [`delta_over_window`] already guarantees containment by
+    /// construction; this repeats it so a hand-built `WindowedDelta` cannot
+    /// claim to be usable without it.
+    pub fn window_is_usable(&self) -> bool {
+        self.samples >= MIN_WINDOW_SAMPLES
+            && self.covered_ms > 0.0
+            && self.covered_ms >= self.stall_ms
+            && self.covered_ms <= self.stall_ms * MAX_WINDOW_OVERSHOOT
+    }
+}
+
+/// How much wider than the stall the sampled window may be before the counters
+/// stop being about the stall.
+///
+/// Not 1.0: the sampler ticks every [`SAMPLE_INTERVAL_MS`], so the bracketing
+/// samples always sit slightly outside the commit. 1.5× leaves room for that at
+/// the [`STALL_THRESHOLD_MS`] floor (where the overshoot is at most ~4 %) while
+/// still rejecting a whole-run window by orders of magnitude.
+pub const MAX_WINDOW_OVERSHOOT: f64 = 1.5;
+
+/// Fewer samples than this and the window is a guess, not a measurement.
+pub const MIN_WINDOW_SAMPLES: usize = 3;
+
+/// Background sampler cadence. At [`STALL_THRESHOLD_MS`] this yields ~50
+/// samples across the shortest event that counts as a stall.
+pub const SAMPLE_INTERVAL_MS: u64 = 20;
+
+/// One sample, stamped against the same origin the append loop measures from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StampedSample {
+    /// Milliseconds from the start of the append loop.
+    pub at_ms: f64,
+    pub sample: SystemSample,
+}
+
 /// What the evidence supports. Deliberately coarse: these are *directions to
 /// look*, not root causes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,17 +195,89 @@ const WRITEBACK_BACKLOG_KB: u64 = 256 * 1024;
 /// Sustained temperature (milli-degrees C) suggesting thermal capping.
 const THERMAL_HOT_MC: u64 = 85_000;
 
-/// Attribute one stall from its duration and the system delta across it.
+/// Extract the counter delta across one commit's window from a sampled series.
+///
+/// This is the OQ9 instrument fix. `series` is the background sampler's output,
+/// oldest first; `start_ms`/`end_ms` bound the commit being explained. The
+/// bracketing samples are the last one at or before `start_ms` and the first one
+/// at or after `end_ms`, so the window always *contains* the commit rather than
+/// clipping it.
+///
+/// Returns `None` when the series cannot resolve the window at all — no
+/// bracketing pair. That is a fail-closed answer: a caller with `None` has
+/// nothing to attribute, which is correct, whereas a caller handed a
+/// whole-series delta would attribute confidently and wrongly.
+///
+/// `peak_dirty_writeback_kb` is a peak *within the window*, not across the run,
+/// for the same reason.
+pub fn delta_over_window(
+    series: &[StampedSample],
+    start_ms: f64,
+    end_ms: f64,
+) -> Option<WindowedDelta> {
+    // Non-finite bounds are rejected explicitly rather than left to comparison:
+    // a NaN bound makes every `<=` false, which would silently select index 0
+    // for both ends and produce a zero-width "measurement".
+    if series.len() < 2 || !start_ms.is_finite() || !end_ms.is_finite() || end_ms < start_ms {
+        return None;
+    }
+    // Both brackets must EXIST. Falling back to the first/last sample when one
+    // is missing produces a window that does not contain the commit — e.g. a
+    // series ending at 1 000 ms against a commit spanning 900-1 500 ms yields a
+    // 100 ms window for a 600 ms stall, covering 17 % of it while looking like a
+    // measurement. That is the same defect as the whole-run delta with the
+    // inequality pointing the other way, so it fails closed too.
+    let lo = series.iter().rposition(|s| s.at_ms <= start_ms)?;
+    let hi = series.iter().position(|s| s.at_ms >= end_ms)?;
+    if hi <= lo {
+        return None;
+    }
+    let (a, b) = (&series[lo], &series[hi]);
+    let peak = series[lo..=hi]
+        .iter()
+        .filter_map(|s| match (s.sample.dirty_kb, s.sample.writeback_kb) {
+            (Some(d), Some(w)) => Some(d + w),
+            _ => None,
+        })
+        .max();
+    Some(WindowedDelta {
+        delta: delta(&a.sample, &b.sample, peak),
+        stall_ms: end_ms - start_ms,
+        covered_ms: b.at_ms - a.at_ms,
+        samples: hi - lo + 1,
+    })
+}
+
+/// Attribute one stall from the counters measured **across it**.
 ///
 /// The ordering matters. Device-side I/O is checked before writeback because a
 /// writeback flush *also* drives the block layer busy, so "disk busy" alone
 /// cannot distinguish them — the discriminator is whether a large dirty backlog
 /// was present. Thermal is checked last and only in the absence of I/O
 /// evidence, because a hot SoC during heavy I/O is a consequence, not a cause.
-pub fn attribute_stall(stall_ms: f64, d: &SystemDelta) -> StallAttribution {
+///
+/// Before any of that, the window is checked. Counters covering materially more
+/// than the stall cannot answer "was the device busy *during the stall*", and
+/// this returns `Unattributed` rather than the answer they superficially
+/// support. See [`WindowedDelta`] for the defect this closes.
+pub fn attribute_stall(w: &WindowedDelta) -> StallAttribution {
+    let stall_ms = w.stall_ms;
+    let d = &w.delta;
     if stall_ms < STALL_THRESHOLD_MS {
         return StallAttribution::NoStall(format!(
             "worst commit {stall_ms:.1} ms is below the {STALL_THRESHOLD_MS:.0} ms threshold"
+        ));
+    }
+
+    if !w.window_is_usable() {
+        return StallAttribution::Unattributed(format!(
+            "a {stall_ms:.0} ms stall whose counters cover {:.0} ms across {} sample(s) — the \
+             window does not describe the stall, so nothing may be attributed from it \
+             (need >= {MIN_WINDOW_SAMPLES} samples and <= {MAX_WINDOW_OVERSHOOT:.1}x the stall). \
+             This is an INSTRUMENT limitation, not a finding about the device: reading \
+             whole-run counters against a one-commit duration is the defect that produced \
+             D-10's loosely-held IO-DEVICE attribution.",
+            w.covered_ms, w.samples
         ));
     }
 
@@ -200,7 +344,10 @@ pub struct StallResult {
     pub median_worst_ms: f64,
     pub throughput_eps: Vec<f64>,
     pub attribution: StallAttribution,
-    pub delta_at_worst: SystemDelta,
+    /// Counters across the worst commit's own window — **not** across the run.
+    /// `covered_ms` and `samples` are emitted alongside so a reader can see how
+    /// well the window was resolved rather than trusting it.
+    pub delta_at_worst: WindowedDelta,
 }
 
 impl StallResult {
@@ -377,32 +524,53 @@ pub fn run(
     let mut throughput: Vec<f64> = Vec::new();
     let mut stalls = 0usize;
     let mut worst_overall = 0.0f64;
-    let mut worst_delta = SystemDelta::default();
+    let mut worst_windowed = WindowedDelta {
+        delta: SystemDelta::default(),
+        stall_ms: 0.0,
+        covered_ms: 0.0,
+        samples: 0,
+    };
 
     for i in 0..repeats {
-        let before = sample_system();
-        let peak_dw = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // ONE origin, shared by the sampler and the commit windows. Two
+        // `Instant::now()` calls would be two coordinate systems: `append` does
+        // event generation and a hash calibration before its loop, so the gap
+        // between them is seconds, and a window looked up across that gap lands
+        // on an unrelated span of the series rather than a slightly shifted one.
+        // That would leave the counters as wrong as the whole-run delta this
+        // module exists to replace, while looking correct.
+        let origin = std::time::Instant::now();
+        let series = std::sync::Arc::new(std::sync::Mutex::new(Vec::<StampedSample>::new()));
         let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let sampler = {
             use std::sync::atomic::Ordering;
-            let peak_dw = std::sync::Arc::clone(&peak_dw);
+            let series = std::sync::Arc::clone(&series);
             let running = std::sync::Arc::clone(&running);
             std::thread::spawn(move || {
                 while running.load(Ordering::Relaxed) {
-                    let s = sample_system();
-                    if let (Some(d), Some(w)) = (s.dirty_kb, s.writeback_kb) {
-                        peak_dw.fetch_max(d + w, Ordering::Relaxed);
+                    let at_ms = origin.elapsed().as_secs_f64() * 1e3;
+                    let sample = sample_system();
+                    if let Ok(mut v) = series.lock() {
+                        v.push(StampedSample { at_ms, sample });
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    std::thread::sleep(std::time::Duration::from_millis(SAMPLE_INTERVAL_MS));
                 }
             })
         };
 
-        let r = crate::bench::append(path, durability, events, entities, batch, seed + i as u64);
+        let r = crate::bench::append_from(
+            path,
+            durability,
+            events,
+            entities,
+            batch,
+            seed + i as u64,
+            Some(origin),
+        );
 
         running.store(false, std::sync::atomic::Ordering::Relaxed);
         let _ = sampler.join();
-        let after = sample_system();
+        let samples = series.lock().map(|v| v.clone()).unwrap_or_default();
 
         let Ok(r) = r else { continue };
         let max_ms = r.timing.max_us / 1e3;
@@ -413,8 +581,21 @@ pub fn run(
         }
         if max_ms > worst_overall {
             worst_overall = max_ms;
-            let peak = peak_dw.load(std::sync::atomic::Ordering::Relaxed);
-            worst_delta = delta(&before, &after, (peak > 0).then_some(peak));
+            // Windowed on the slowest commit only. If the window cannot be
+            // resolved, carry a delta that declares that — never a whole-run
+            // one, which would attribute confidently from the wrong span.
+            let slowest = r.slowest_commit;
+            worst_windowed = slowest
+                .and_then(|w| delta_over_window(&samples, w.start_ms, w.end_ms))
+                .unwrap_or(WindowedDelta {
+                    delta: SystemDelta::default(),
+                    // The commit's own duration, taken from the window bench
+                    // measured, so the refusal message quotes the same number
+                    // the timing does.
+                    stall_ms: slowest.map_or(max_ms, |w| w.duration_ms()),
+                    covered_ms: 0.0,
+                    samples: 0,
+                });
         }
     }
 
@@ -432,7 +613,7 @@ pub fn run(
                 .into(),
         )
     } else {
-        attribute_stall(worst_overall, &worst_delta)
+        attribute_stall(&worst_windowed)
     };
 
     StallResult {
@@ -443,13 +624,25 @@ pub fn run(
         median_worst_ms: median_worst,
         throughput_eps: throughput,
         attribution,
-        delta_at_worst: worst_delta,
+        delta_at_worst: worst_windowed,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A delta over a window that IS the stall — the good case. Tests about
+    /// attribution logic should not have to think about the window; tests about
+    /// the window say so explicitly by building a `WindowedDelta` directly.
+    fn win(stall_ms: f64, d: SystemDelta) -> WindowedDelta {
+        WindowedDelta {
+            delta: d,
+            stall_ms,
+            covered_ms: stall_ms * 1.02,
+            samples: (stall_ms / SAMPLE_INTERVAL_MS as f64) as usize + 2,
+        }
+    }
 
     fn d(psi: Option<u64>, disk: Option<u64>, dw: Option<u64>, temp: Option<u64>) -> SystemDelta {
         SystemDelta {
@@ -462,27 +655,27 @@ mod tests {
 
     #[test]
     fn below_threshold_is_no_stall() {
-        let a = attribute_stall(8.75, &SystemDelta::default());
+        let a = attribute_stall(&win(8.75, SystemDelta::default()));
         assert_eq!(a.token(), "NO-STALL");
     }
 
     #[test]
     fn the_measured_29_second_event_is_over_the_threshold() {
         // The event this module exists for: 29 271.78 ms.
-        let a = attribute_stall(29_271.78, &SystemDelta::default());
+        let a = attribute_stall(&win(29_271.78, SystemDelta::default()));
         assert_ne!(a.token(), "NO-STALL");
     }
 
     #[test]
     fn no_counters_at_all_is_unattributed_not_a_guess() {
-        let a = attribute_stall(29_271.78, &SystemDelta::default());
+        let a = attribute_stall(&win(29_271.78, SystemDelta::default()));
         assert_eq!(a.token(), "UNATTRIBUTED", "{}", a.detail());
     }
 
     #[test]
     fn busy_block_layer_without_a_backlog_points_at_the_device() {
         // 20 s of disk-busy inside a 29 s stall, small dirty set.
-        let a = attribute_stall(29_000.0, &d(None, Some(20_000), Some(1_024), None));
+        let a = attribute_stall(&win(29_000.0, d(None, Some(20_000), Some(1_024), None)));
         assert_eq!(a.token(), "IO-DEVICE", "{}", a.detail());
         assert!(a.detail().contains("SMART"), "must say what it cannot read");
     }
@@ -490,19 +683,25 @@ mod tests {
     #[test]
     fn busy_block_layer_with_a_backlog_points_at_writeback_instead() {
         // Same disk-busy evidence, but a 1 GB dirty backlog explains it.
-        let a = attribute_stall(29_000.0, &d(None, Some(20_000), Some(1_024 * 1_024), None));
+        let a = attribute_stall(&win(
+            29_000.0,
+            d(None, Some(20_000), Some(1_024 * 1_024), None),
+        ));
         assert_eq!(a.token(), "WRITEBACK-BACKLOG", "{}", a.detail());
     }
 
     #[test]
     fn psi_alone_is_enough_io_evidence() {
-        let a = attribute_stall(29_000.0, &d(Some(20_000_000), None, Some(1_024), None));
+        let a = attribute_stall(&win(29_000.0, d(Some(20_000_000), None, Some(1_024), None)));
         assert_eq!(a.token(), "IO-DEVICE", "{}", a.detail());
     }
 
     #[test]
     fn heat_with_an_idle_block_layer_points_at_thermal() {
-        let a = attribute_stall(29_000.0, &d(Some(10), Some(5), Some(1_024), Some(96_000)));
+        let a = attribute_stall(&win(
+            29_000.0,
+            d(Some(10), Some(5), Some(1_024), Some(96_000)),
+        ));
         assert_eq!(a.token(), "THERMAL", "{}", a.detail());
     }
 
@@ -510,15 +709,192 @@ mod tests {
     fn heat_during_heavy_io_is_not_blamed_on_thermal() {
         // A hot SoC during sustained I/O is a consequence, not a cause.
         // Blaming thermal here would send the investigation the wrong way.
-        let a = attribute_stall(29_000.0, &d(None, Some(25_000), Some(1_024), Some(96_000)));
+        let a = attribute_stall(&win(
+            29_000.0,
+            d(None, Some(25_000), Some(1_024), Some(96_000)),
+        ));
         assert_eq!(a.token(), "IO-DEVICE", "{}", a.detail());
     }
 
     #[test]
     fn a_briefly_busy_disk_does_not_explain_a_long_stall() {
         // 100 ms of disk activity inside a 29 s stall explains nothing.
-        let a = attribute_stall(29_000.0, &d(None, Some(100), Some(1_024), None));
+        let a = attribute_stall(&win(29_000.0, d(None, Some(100), Some(1_024), None)));
         assert_eq!(a.token(), "UNATTRIBUTED", "{}", a.detail());
+    }
+
+    // -----------------------------------------------------------------------
+    // OQ9 instrument fix — the window must be about the stall
+    // -----------------------------------------------------------------------
+
+    /// Samples every 20 ms from 0, with the counters advancing only inside
+    /// `[busy_from, busy_to)`. Everything outside that span is a quiet device.
+    fn series(span_ms: u64, busy_from: f64, busy_to: f64) -> Vec<StampedSample> {
+        let mut v = Vec::new();
+        let (mut disk, mut psi) = (0u64, 0u64);
+        let mut t = 0u64;
+        while t <= span_ms {
+            let at = t as f64;
+            if at >= busy_from && at < busy_to {
+                disk += SAMPLE_INTERVAL_MS; // fully busy
+                psi += SAMPLE_INTERVAL_MS * 1_000;
+            }
+            v.push(StampedSample {
+                at_ms: at,
+                sample: SystemSample {
+                    psi_io_total_us: Some(psi),
+                    disk_io_ms: Some(disk),
+                    dirty_kb: Some(1_024),
+                    writeback_kb: Some(0),
+                    thermal_max_mc: Some(50_000),
+                },
+            });
+            t += SAMPLE_INTERVAL_MS;
+        }
+        v
+    }
+
+    #[test]
+    fn whole_run_counters_can_no_longer_be_attributed_to_one_commit() {
+        // THE DEFECT, pinned. A 60 s run with 20 s of ordinary device busy-time
+        // and a 2 s stall. Under the old instrument the whole-run disk_io_ms
+        // (20 000) was compared against the stall (2 000 x 0.5 = 1 000) and
+        // cleared the bar easily -> a confident IO-DEVICE verdict, regardless of
+        // whether the device did anything at all during those 2 seconds.
+        let whole_run = WindowedDelta {
+            delta: d(Some(20_000_000), Some(20_000), Some(1_024), None),
+            stall_ms: 2_000.0,
+            covered_ms: 60_000.0,
+            samples: 3_000,
+        };
+        assert!(!whole_run.window_is_usable());
+        let a = attribute_stall(&whole_run);
+        assert_eq!(
+            a.token(),
+            "UNATTRIBUTED",
+            "a whole-run window was attributed to a single commit: {}",
+            a.detail()
+        );
+        assert!(
+            a.detail().contains("INSTRUMENT"),
+            "the refusal must say it is an instrument limit, not a device finding: {}",
+            a.detail()
+        );
+    }
+
+    #[test]
+    fn a_device_idle_through_the_stall_is_not_blamed_for_it() {
+        // The same run, now windowed properly: the device was busy from 0-20 s
+        // and the stall ran 40 000-42 000 ms, with the device idle throughout.
+        // The old instrument called this IO-DEVICE. It must not.
+        let s = series(60_000, 0.0, 20_000.0);
+        let w = delta_over_window(&s, 40_000.0, 42_000.0).expect("window is resolvable");
+        assert!(w.window_is_usable(), "{w:?}");
+        assert_eq!(
+            w.delta.disk_io_ms,
+            Some(0),
+            "device was idle in this window"
+        );
+        assert_eq!(attribute_stall(&w).token(), "UNATTRIBUTED");
+    }
+
+    #[test]
+    fn a_device_busy_through_the_stall_still_is() {
+        // The fix must not simply suppress attribution. Same shape, but the
+        // busy span now covers the stall.
+        let s = series(60_000, 39_000.0, 43_000.0);
+        let w = delta_over_window(&s, 40_000.0, 42_000.0).expect("window is resolvable");
+        assert!(w.window_is_usable());
+        assert_eq!(attribute_stall(&w).token(), "IO-DEVICE");
+    }
+
+    #[test]
+    fn the_window_brackets_the_commit_rather_than_clipping_it() {
+        // Bounds land between samples: the chosen pair must sit outside, so the
+        // commit is fully contained. Clipping would undercount the very
+        // counters the attribution turns on.
+        let s = series(1_000, 0.0, 0.0);
+        let w = delta_over_window(&s, 205.0, 315.0).expect("resolvable");
+        assert!(
+            w.covered_ms >= 110.0,
+            "window {} ms does not contain the 110 ms commit",
+            w.covered_ms
+        );
+        assert!(w.covered_ms <= 110.0 + 2.0 * SAMPLE_INTERVAL_MS as f64);
+    }
+
+    #[test]
+    fn an_unresolvable_window_returns_none_rather_than_the_whole_series() {
+        // Fail closed. Returning the whole-series delta here is exactly the old
+        // behaviour, so `None` is the load-bearing answer.
+        assert!(delta_over_window(&[], 0.0, 100.0).is_none());
+        assert!(delta_over_window(&series(100, 0.0, 0.0)[..1], 0.0, 100.0).is_none());
+        // A commit entirely after the last sample has no bracketing pair on the
+        // right, and must not silently reuse the final sample as both ends.
+        let s = series(100, 0.0, 0.0);
+        let w = delta_over_window(&s, 5_000.0, 5_100.0);
+        assert!(
+            w.is_none() || !w.unwrap().window_is_usable(),
+            "a window past the end of the series was treated as measured"
+        );
+    }
+
+    #[test]
+    fn a_window_that_covers_only_part_of_the_commit_is_refused() {
+        // The mirror image of the original defect, and the easier one to miss:
+        // the series ends at 1 000 ms but the commit runs 900-1 500 ms. The
+        // first version fell back to the last sample, producing a 100 ms window
+        // for a 600 ms stall — 17 % coverage — which passed the "not too wide"
+        // guard and was attributed from.
+        let s = series(1_000, 0.0, 1_000.0);
+        assert!(
+            delta_over_window(&s, 900.0, 1_500.0).is_none(),
+            "a commit running past the end of the series was windowed anyway"
+        );
+        // Same on the left: a commit starting before the first sample.
+        let late: Vec<StampedSample> = s.iter().filter(|x| x.at_ms >= 500.0).cloned().collect();
+        assert!(
+            delta_over_window(&late, 100.0, 700.0).is_none(),
+            "a commit starting before the series was windowed anyway"
+        );
+        // And the guard holds even if such a delta is built by hand.
+        let truncated = WindowedDelta {
+            delta: d(None, Some(100), Some(1_024), None),
+            stall_ms: 600.0,
+            covered_ms: 100.0,
+            samples: 6,
+        };
+        assert!(!truncated.window_is_usable());
+    }
+
+    #[test]
+    fn too_few_samples_is_not_a_measurement() {
+        let thin = WindowedDelta {
+            delta: d(None, Some(20_000), Some(1_024), None),
+            stall_ms: 29_000.0,
+            covered_ms: 29_000.0,
+            samples: MIN_WINDOW_SAMPLES - 1,
+        };
+        assert!(!thin.window_is_usable());
+        assert_eq!(attribute_stall(&thin).token(), "UNATTRIBUTED");
+    }
+
+    #[test]
+    fn the_peak_backlog_is_taken_inside_the_window_only() {
+        // A backlog spike elsewhere in the run must not turn this stall into
+        // WRITEBACK-BACKLOG — same denominator error, different counter.
+        let mut s = series(60_000, 39_000.0, 43_000.0);
+        for x in s.iter_mut() {
+            if x.at_ms < 10_000.0 {
+                x.sample.dirty_kb = Some(4 * 1_024 * 1_024); // huge, far from the stall
+            }
+        }
+        let w = delta_over_window(&s, 40_000.0, 42_000.0).expect("resolvable");
+        assert!(
+            w.delta.peak_dirty_writeback_kb.unwrap_or(0) < WRITEBACK_BACKLOG_KB,
+            "a backlog outside the window leaked into it"
+        );
+        assert_eq!(attribute_stall(&w).token(), "IO-DEVICE");
     }
 
     #[test]
@@ -549,8 +925,8 @@ mod tests {
             worst_commit_ms: 12.0,
             median_worst_ms: 9.0,
             throughput_eps: vec![30_000.0; 20],
-            attribution: attribute_stall(12.0, &SystemDelta::default()),
-            delta_at_worst: SystemDelta::default(),
+            attribution: attribute_stall(&win(12.0, SystemDelta::default())),
+            delta_at_worst: win(0.0, SystemDelta::default()),
         };
         assert!(!r.fails_the_run());
         assert_eq!(r.stall_rate(), 0.0);
@@ -572,7 +948,7 @@ mod tests {
             median_worst_ms: 11.0,
             throughput_eps: vec![36_000.0, 35_800.0, 3_123.0, 36_200.0, 35_900.0],
             attribution: StallAttribution::Unattributed(String::new()),
-            delta_at_worst: SystemDelta::default(),
+            delta_at_worst: win(0.0, SystemDelta::default()),
         };
         assert_eq!(r.median_throughput_eps(), 35_900.0);
         assert_eq!(r.stall_rate(), 0.2);
@@ -588,7 +964,7 @@ mod tests {
             median_worst_ms: f64::NAN,
             throughput_eps: vec![],
             attribution: StallAttribution::Unattributed(String::new()),
-            delta_at_worst: SystemDelta::default(),
+            delta_at_worst: win(0.0, SystemDelta::default()),
         };
         assert!(r.median_throughput_eps().is_nan());
     }
@@ -603,7 +979,7 @@ mod tests {
             median_worst_ms: f64::NAN,
             throughput_eps: vec![],
             attribution: StallAttribution::Unattributed(String::new()),
-            delta_at_worst: SystemDelta::default(),
+            delta_at_worst: win(0.0, SystemDelta::default()),
         };
         assert!(r.fails_the_run());
         assert!(r.stall_rate().is_nan());
@@ -619,7 +995,7 @@ mod tests {
             median_worst_ms: 10.0,
             throughput_eps: vec![],
             attribution: StallAttribution::Unattributed(String::new()),
-            delta_at_worst: SystemDelta::default(),
+            delta_at_worst: win(0.0, SystemDelta::default()),
         };
         assert_eq!(mk(1).stall_rate(), 0.05);
         assert_eq!(mk(10).stall_rate(), 0.5);

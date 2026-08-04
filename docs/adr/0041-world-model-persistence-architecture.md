@@ -479,9 +479,26 @@ source; they are not migrated destructively (ADR-0040).
    in 120 repetitions, crossing both fsyncing modes and both batch sizes.
    Classified **intermittent and block-device/environment-correlated**. Thermal
    is *ruled out by measurement* (hottest zone 59.6 °C against an 85 °C
-   threshold). What remains unknown is the mechanism: one `IO-DEVICE`
-   attribution held loosely, one `UNATTRIBUTED`, PSI unavailable on this kernel,
-   and no SMART data. See the follow-ups in *Design implications*.
+   threshold). What remains unknown is the mechanism: **both attributions are
+   now `UNATTRIBUTED` or withdrawn**, PSI unavailable on this kernel, and no
+   SMART data. See the follow-ups in *Design implications*.
+
+   **Instrument fixed 2026-08-04; the mechanism question is unchanged and the
+   re-measurement is outstanding.** `attribute_stall` was comparing a
+   *whole-repetition* `disk_io_ms` against a *single-commit* `stall_ms` — a
+   denominator mismatch that clears the "block layer busy" bar from ordinary
+   background I/O alone. The `IO-DEVICE` attribution on `NORMAL`/batch=1 is
+   therefore **withdrawn** (D-10, boxed note): it is not weak evidence, it is
+   not evidence. `stall.rs` now samples a timestamped series at
+   `SAMPLE_INTERVAL_MS` and deltas across the slowest commit's own window, and
+   refuses to attribute when the sampled span is materially wider than the
+   stall — so the defect cannot recur silently. **What this does NOT do:** it
+   measures nothing new. The stall counts, latencies, throughput medians and
+   thermal reading in D-10 stand; the mechanism is exactly as unknown as before,
+   minus one attribution that looked like progress and was not. **Next step:**
+   re-run the six configurations on target with the fixed instrument, and
+   pursue PSI availability (the kernel lacks `/proc/pressure`) since without it
+   one of the two I/O signals is absent regardless of windowing.
 10. **Graph and temporal query placement (D-1, D-9).** Neither may sit on a
    deadline path, and the sweep sharpens by how much. At 100 000 entities the
    graph family is 159 ms p99 (1.6× a 10 Hz period) and the temporal family is
@@ -1149,6 +1166,30 @@ unavailable on this kernel** (`psi_io_stall_us` is `None` in every record), so
 one of the two I/O signals was simply absent. And **the counter delta is taken
 across a whole repetition while the stall is a single commit**, which can
 over-state I/O evidence.
+
+> **The second limit is now fixed in the instrument, and the `IO-DEVICE`
+> attribution above is WITHDRAWN — 2026-08-04.**
+>
+> The limitation was worse than "can over-state". `attribute_stall` tested
+> `disk_io_ms >= stall_ms * 0.5` with `disk_io_ms` accumulated over the whole
+> repetition and `stall_ms` a single commit — a **denominator mismatch**. A
+> repetition with a few seconds of ordinary device busy-time clears that bar for
+> any stall in this range *regardless of whether the device did anything during
+> the stall itself*. So `IO-DEVICE` on `NORMAL`/batch=1 is not a weakly-supported
+> finding; it is a number the pre-fix instrument would have produced from an idle
+> device, and it carries no information about the mechanism.
+>
+> `stall.rs` now samples a timestamped series at 20 ms and computes the delta
+> across **the slowest commit's own window** (`bench::CommitWindow`), and
+> attribution **refuses** when the sampled span is materially wider than the
+> stall it claims to describe. The stall counts, worst-commit latencies,
+> throughput medians and the thermal reading in the table are unaffected — they
+> never depended on the window. Only the attribution column does.
+>
+> **This is an instrument correction, not a new measurement.** Nothing here says
+> the device was idle during that stall; it says the run cannot tell. Re-running
+> the six configurations on target with the fixed instrument is the open work —
+> see open question 9.
 
 **The stall-robust medians resolve the corrupted benchmark row** — and expose
 something else. `NORMAL`/batch=64 reads 19 351 ev/s across 20 runs against the
