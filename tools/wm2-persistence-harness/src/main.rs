@@ -1261,37 +1261,84 @@ pub fn control_db_path(db: &Path) -> PathBuf {
 ///
 /// Each path carries a label so the message can say *which* of the two failed
 /// and, for the derived one, that it was derived.
+///
+/// **This is not a mkdir gate.** `main` runs `create_dir_all` on `--db`'s
+/// parent before calling this, so a merely-absent directory is created rather
+/// than refused; the not-exists branch here fires only when that creation ALSO
+/// failed. Permissions, not existence, are what this catches.
+///
+/// **Deliberately over-strict in one case.** `rebuild`'s `seed` unlinks the
+/// database before opening it, and unlinking needs permission on the
+/// DIRECTORY, not the file — so an existing read-only database that this
+/// refuses would in fact have been removed and recreated successfully. That
+/// false refusal is accepted: it costs the operator one `rm`, whereas the
+/// commands that open an existing store without unlinking would otherwise
+/// reach the same panic this function was written to prevent. Refusing a run
+/// that would have worked is the cheaper error.
 fn preflight_writable(paths: &[(&str, &Path)]) -> Result<(), String> {
     for (label, p) in paths {
+        // An EXISTING file's own permissions decide, not its directory's. A
+        // 0444 database inside a writable directory passes a directory probe
+        // and then fails inside SQLite — the very failure this function exists
+        // to move forward — so probing only the directory would reintroduce it
+        // for the re-run case.
+        //
+        // `write(true)` WITHOUT `truncate`: this must not modify a store it is
+        // only inspecting.
+        if p.exists() {
+            if let Err(e) = std::fs::OpenOptions::new().write(true).open(p) {
+                return Err(format!(
+                    "cannot write the {label} database: {e}\n  path: {}\n  \
+                     The file already exists and is not writable by this user. \
+                     Check `ls -l {}`.",
+                    p.display(),
+                    p.display()
+                ));
+            }
+            continue;
+        }
+
         let dir = match p.parent() {
             Some(d) if !d.as_os_str().is_empty() => d,
             _ => Path::new("."),
         };
         if !dir.exists() {
+            // Reached only when main's earlier `create_dir_all` ALSO failed,
+            // because that runs first — so the message names both
+            // possibilities rather than implying the operator simply forgot to
+            // create the directory.
             return Err(format!(
-                "cannot write the {label} database: directory `{}` does not exist.\n  \
-                 path: {}\n  Create it, or pass a --db under a directory that exists.",
+                "cannot write the {label} database: directory `{}` does not exist and \
+                 could not be created.\n  path: {}\n  \
+                 Check permissions on its parent, or pass a --db under a directory you own.",
                 dir.display(),
                 p.display()
             ));
         }
         let probe = dir.join(format!(".wm2-write-probe-{}", std::process::id()));
-        match std::fs::File::create(&probe) {
-            Ok(_) => {
-                let _ = std::fs::remove_file(&probe);
-            }
-            Err(e) => {
-                return Err(format!(
-                    "cannot write the {label} database: {e}\n  \
-                     path     : {}\n  directory: {}\n  \
-                     Most likely the directory is owned by another user — check `ls -ld {}`. \
-                     Do NOT chown a service directory to run a benchmark; pass --db somewhere \
-                     you own instead.",
-                    p.display(),
-                    dir.display(),
-                    dir.display()
-                ));
-            }
+        if let Err(e) = std::fs::File::create(&probe) {
+            return Err(format!(
+                "cannot write the {label} database: {e}\n  path     : {}\n  \
+                 directory: {}\n  \
+                 Most likely the directory is owned by another user — check `ls -ld {}`. \
+                 Do NOT chown a service directory to run a benchmark; pass --db somewhere \
+                 you own instead.",
+                p.display(),
+                dir.display(),
+                dir.display()
+            ));
+        }
+        // Fail closed rather than ignore the failure. A harness that cannot
+        // remove its own probe has left a file in the directory it is about to
+        // measure, and proceeding silently would make "leaves no probe behind"
+        // false exactly when it stopped being true.
+        if let Err(e) = std::fs::remove_file(&probe) {
+            return Err(format!(
+                "wrote a probe file for the {label} database but could not remove it: {e}\n  \
+                 probe: {}\n  \
+                 Refusing rather than measuring in a directory the harness cannot clean.",
+                probe.display()
+            ));
         }
     }
     Ok(())
@@ -1491,21 +1538,48 @@ mod tests {
     }
 
     #[test]
-    fn preflight_refuses_a_missing_directory_and_names_the_derived_arm() {
-        // The failure this exists for: the operator never typed the control
-        // path, so a bare OS error about a file they did not choose reads as a
-        // harness bug rather than a permissions problem.
+    fn preflight_refuses_an_uncreatable_directory_and_names_the_arm() {
+        // Note the framing: via the CLI, `main` has already run
+        // `create_dir_all`, so this branch is reached only when creating the
+        // directory ALSO failed. The message must therefore not tell the
+        // operator to create a directory they could not have created — it says
+        // "does not exist and could not be created" and points at permissions.
         let missing = PathBuf::from("/nonexistent-wm2-preflight/db.sqlite");
         let derived = control_db_path(&missing);
         let err = preflight_writable(&[
             ("working", missing.as_path()),
             ("control-arm (derived)", derived.as_path()),
         ])
-        .expect_err("a missing directory must refuse");
+        .expect_err("an uncreatable directory must refuse");
         assert!(
             err.contains("working") && err.contains("/nonexistent-wm2-preflight"),
             "must name which database and which directory: {err}"
         );
+        assert!(
+            err.contains("could not be created"),
+            "must not imply the operator simply forgot to mkdir: {err}"
+        );
+    }
+
+    #[test]
+    fn preflight_checks_an_existing_files_own_permissions_not_its_directorys() {
+        // A database that already exists but cannot be written passes a
+        // DIRECTORY probe and then fails inside SQLite — which is the failure
+        // this function exists to move forward, so the re-run case has to be
+        // covered too.
+        //
+        // Exercised with a path that exists and is not writable AS A FILE for
+        // any user, including root: a directory. A 0444 regular file would
+        // make this test vacuous under root, which is how it runs in CI.
+        let dir = std::env::temp_dir().join(format!("wm2-existing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = preflight_writable(&[("working", dir.as_path())])
+            .expect_err("an existing unwritable path must refuse");
+        assert!(
+            err.contains("already exists and is not writable"),
+            "must name the real cause rather than blaming the directory: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
