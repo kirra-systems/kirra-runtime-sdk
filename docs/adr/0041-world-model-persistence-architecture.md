@@ -1424,10 +1424,17 @@ Three measurements identify the mechanism.
 2. **The device was idle while the host waited.** These are the first stalls
    measured over *their own window* (1 412 and 1 418 samples at 20 ms). Device
    busy-time inside the window: **2.12 %** and **1.05 %** of the stall. On the
-   non-stalling rows the same counter reads **107–214 %** of its window
-   (`/proc/diskstats` field 13 sums per-I/O busy time across queues, so a
-   saturated multi-queue device exceeds wall time). Normally this drive is
-   saturated; during the stalls it did essentially nothing.
+   non-stalling rows the same counter reads **74–100 %** of its window.
+   Normally this drive is saturated; during the stalls it did essentially
+   nothing.
+
+   > **Corrected.** An earlier revision of this paragraph said 107–214 %, from
+   > dividing `disk_io_ms` by `worst_commit_ms`. The delta is accumulated over
+   > `counter_window_ms`, so that is the only denominator it can be divided by;
+   > on the non-stalling rows the window is much wider than the commit, which
+   > inflated the figure past 100 % and prompted a claim that the metric exceeds
+   > wall time. It does not, in this data. The stall rows are unaffected —
+   > there the window and the commit differ by a few milliseconds.
 3. **"completion polled" names the cause.** The timeout handler fired at 30 s,
    polled the completion queue, and found the command *already complete*. The
    work was done; the completion interrupt never reached the host.

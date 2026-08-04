@@ -1613,7 +1613,8 @@ which the robot was still operating.
     of the symptom rather than preventing it.
 - **Instrument caveat that this AoU depends on.** With a 5 s stall, device
   busy-time inside the measured window was **34.3 %** against 1–2 % for the 30 s
-  stalls, and the harness attributes `IO-DEVICE` above 50 %. Qualifying a drive
+  stalls (ordinary non-stalling windows in the same runs read 74–100 %), and the
+  harness attributes `IO-DEVICE` above 50 %. Qualifying a drive
   against a *short* timeout therefore risks a stall of this kind being labelled
   a busy device — the false attribution the windowing fix removed. Until that
   threshold is re-derived for short windows, read `UNATTRIBUTED` at a low
