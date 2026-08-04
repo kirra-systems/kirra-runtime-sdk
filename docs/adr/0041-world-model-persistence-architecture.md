@@ -480,8 +480,11 @@ source; they are not migrated destructively (ADR-0040).
    grouped pass is orders of magnitude cheaper. See *Open question 8 — drafted
    resolution*.
 9. **Multi-second write stalls (O-1, D-10, D-15). MECHANISM IDENTIFIED
-   2026-08-04 — a lost NVMe completion interrupt, bounded by the driver's 30 s
-   `io_timeout`.** Five stalls in 120 repetitions coincide one-for-one with five
+   2026-08-04 — a lost or delayed NVMe completion. `io_timeout` bounds how long
+   the host waits for one; it is the backstop, not the cause** (a later 8 496 ms
+   stall with the same idle-device signature resolved on its own, well under the
+   30 s bound — D-15 *Refinement*). Five stalls in 120 repetitions coincide
+   one-for-one with five
    `nvme0: I/O ... timeout, completion polled` entries in the kernel log; the
    stall durations are the timeout plus 19.4 ms and 182.4 ms of handler latency;
    and the device was **1–2 % busy** across windows that cover the stalls
@@ -1448,6 +1451,38 @@ DRAM-equipped drive. That is a **lead, not a conclusion**: candidates remain
 controller firmware, the HMB path, PCIe ASPM power-state transitions, and MSI-X
 routing on the Tegra host controller, and this run does not discriminate between
 them.
+
+**Refinement, same day — the timeout bounds RECOVERY, it is not the cause, and
+sub-timeout stalls of the same signature exist.**
+
+A follow-up run of `NORMAL`/b1 (20 repetitions) recorded **1 stall of 8 496 ms**
+with the device **0.61 % busy** across a usable 8 502 ms / 400-sample window —
+the same host-waiting-on-an-idle-device signature — and **no kernel timeout
+entry**, correctly, because 8.5 s never reached the 30 s bound.
+
+That reframes the finding. The three measurements above establish that the five
+30 s stalls were *recovered* by the timeout handler; they do not establish that
+30 s is intrinsic to the fault. The 8 496 ms event shows the underlying stall can
+resolve on its own, so:
+
+> **The fault is a lost or delayed completion. `io_timeout` is the backstop that
+> bounds how long the host waits for one, not the thing that causes the wait.**
+
+A mechanism consistent with both, offered as **hypothesis**: NVMe completion
+processing drains the whole completion queue, so a stranded completion can be
+picked up by any later interrupt on the same queue. At batch=1 the harness has
+nothing else in flight, so recovery depends on unrelated system I/O landing on
+that queue — arriving early gives an 8.5 s stall, never arriving gives 30 s. This
+predicts that stall durations below the timeout should be *distributed* rather
+than clustered, which the two runs are consistent with but cannot confirm at
+n=6.
+
+**Consequence for mitigation:** lowering `io_timeout` caps the worst case but
+cannot remove stalls, because events shorter than the timeout do not touch it.
+An attempt to lower it on the bench also **failed silently** — writing
+`/sys/module/nvme_core/parameters/io_timeout` set the parameter to 5 while the
+live queue stayed at 30 000 ms, since the value is latched at namespace probe.
+See `AOU-WM2-STORAGE-COMPLETION-001`.
 
 **No rate law is claimed.** The events concentrate where more I/O is issued —
 all five at batch=1, none at batch=64, and `OFF` now at **0 stalls in 80
