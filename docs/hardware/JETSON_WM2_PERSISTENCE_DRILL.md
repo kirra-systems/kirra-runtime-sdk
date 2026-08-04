@@ -1,13 +1,16 @@
 # Jetson WM-2 persistence drill (ADR-0041)
 
-The on-device measurement that ADR-0041 is blocked on. That ADR proposes a
-SQLite append-only event log with materialized projections for Kirra World and
-then refuses to ratify itself on argument:
+The on-device measurement ADR-0041 was blocked on. That ADR proposed a SQLite
+append-only event log with materialized projections for Kirra World and refused
+to ratify itself on argument:
 
 > **Proposed. Measurement-gated.** Accepted only when **all** are recorded […]
 > **No implementation should begin merely because this proposed ADR exists.**
 
-This drill produces those recordings. The instrument is
+This drill produced those recordings, and **ADR-0041 was accepted on 2026-08-04**
+on the strength of them. It remains the instrument for re-running any gate:
+re-running does not re-ratify, and a failing re-run is a reason to revisit the
+ADR rather than something to absorb. The instrument is
 [`tools/wm2-persistence-harness`](../../tools/wm2-persistence-harness/).
 
 > **The harness is not the Kirra World store.** Its schema is a stand-in, its
@@ -734,9 +737,12 @@ do not tick the corruption/restart box from tiers A and B alone. Say what was
 measured and what was not — a partially satisfied gate recorded honestly is
 worth more than a fully ticked one that nobody can reconstruct.
 
-Whatever comes out of this, ADR-0041 stays **Proposed** until the deciders named
-in its header accept it. This drill produces evidence; it does not ratify
-anything.
+Whatever comes out of this, a drill result does not ratify anything — it
+produces evidence, and acceptance is a separate act by the deciders named in
+ADR-0041's header. (They accepted it on 2026-08-04, on the strength of evidence
+this drill produced. The rule stands for every future gate and every re-run:
+running the drill again does not re-ratify, and a failing re-run is a reason to
+revisit the ADR.)
 
 ---
 

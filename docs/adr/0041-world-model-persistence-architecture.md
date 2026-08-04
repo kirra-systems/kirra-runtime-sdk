@@ -2,8 +2,9 @@
 
 | Field | Value |
 |---|---|
-| Status | **Proposed — NOT ratified.** All seven measurement gates are now **Met** (tier C closed by five physical power cuts, D-11). Ratification still requires open question 8 — migration strategy, named a blocker for acceptance — to be decided, and acceptance recorded by the deciders below. A complete measurement record authorizes no implementation. See *Ratification criteria*. |
-| Date | 2026-08-02 |
+| Status | **Accepted** — 2026-08-04. All seven measurement gates **Met** (tier C closed by five physical power cuts, D-11), and open question 8 resolved by adopting R1–R5. Acceptance carries one **outstanding obligation** and does **not** release the domain-logic gate — see *Acceptance record*. |
+| Date | 2026-08-02 (proposed) · 2026-08-04 (accepted) |
+| Accepted by | **Justin Looney**, holding the World Model owner, architecture owner and deployment owner roles. One approver across all three — see *Acceptance record* for why that is recorded plainly rather than as three sign-offs. |
 | Blueprint | `KIRRA-WM-ARCH-001` §7, §10, §11, §13 (WM-2) — [`docs/design/WORLD_MODEL_ARCHITECTURE.md`](../design/WORLD_MODEL_ARCHITECTURE.md) |
 | Deciders | World Model owner · architecture owner · deployment owner |
 | Depends on | [`ADR-0039`](0039-world-model-bidirectional-governor-fence.md) (WM-6) · [`ADR-0040`](0040-world-model-ownership-and-boundary.md) (WM-1) |
@@ -11,8 +12,10 @@
 | Cross-refs | [`crates/kirra-persistence`](../../crates/kirra-persistence/) (migrations, WAL, durability tiers) · [`crates/kirra-audit-hash`](../../crates/kirra-audit-hash/) (shared chain primitives) · [`src/audit_chain.rs`](../../src/audit_chain.rs) · [`ADR-0038`](0038-postgres-shared-state-hybrid.md) (hybrid backend precedent) · [`ADR-0037`](0037-epoch-fenced-generation-ordering.md) |
 
 > **Convention deviation** — as ADR-0039/0040: *not* ratified on merge. This one
-> additionally requires **measured evidence on target hardware**. A merged
-> document is not a benchmark.
+> additionally required **measured evidence on target hardware**. A merged
+> document is not a benchmark. That evidence was produced and the ADR was
+> accepted separately on 2026-08-04; the merge that introduced it ratified
+> nothing.
 
 ---
 
@@ -431,8 +434,9 @@ source; they are not migrated destructively (ADR-0040).
    projections with nothing marking them as incomplete. Needs either a
    fold-in-progress marker, a transactional whole-fold, or an explicit rule that
    projections are invalid until a checkpoint confirms them.
-8. **Migration strategy — blocking for acceptance (D-6, D-13). A resolution is
-   drafted below and awaits the deciders' ruling; the question is NOT closed.**
+8. **Migration strategy — RESOLVED 2026-08-04** by adopting R1–R5 (see *Open
+   question 8 — resolution*), subject to the outstanding R2 prototype obligation
+   in the *Acceptance record*. Was blocking for acceptance (D-6, D-13).
    D-6 measured a whole-store offline migration at ~101 minutes at the 8 GiB
    ceiling and offered three routes: bound the store, migrate lazily/online, or
    accept a documented maintenance window. D-13 shows that framing rests on an
@@ -460,12 +464,78 @@ source; they are not migrated destructively (ADR-0040).
 
 ---
 
-## Open question 8 — drafted resolution
+## Acceptance record — 2026-08-04
 
-> **DRAFT. Not a decision.** Open question 8 is blocking for acceptance, and
-> resolving it belongs to WM-2 and the deciders named in this ADR's header. This
-> section states a proposal for them to accept, amend or reject. **Until they
-> rule, open question 8 remains open and this ADR remains Proposed.**
+**Accepted by Justin Looney**, holding the World Model owner, architecture owner
+and deployment owner roles.
+
+**All three decider roles are held by one person.** That is recorded plainly
+here rather than presented as three sign-offs, because a reader six months from
+now should be able to tell the difference between three independent reviews and
+one person wearing three hats. It is the latter. The ADR's *Deciders* field
+names three roles, not three people, and this project currently has one holder
+for all of them.
+
+### What was accepted
+
+| | |
+|---|---|
+| The persistence decision | Option A — SQLite append-only event log + materialized projections, with an in-memory graph index built from projections |
+| Open question 8 | **Resolved** by adopting **R1–R5** below as the migration strategy |
+| Evidence base | Seven measurement gates Met, all `JETSON-TARGET-MEASURED`; D-1…D-14 |
+
+### Outstanding obligation, accepted with the decision rather than before it
+
+**R2's alongside-rebuild-and-swap has not been prototyped.** D-14 establishes
+that a migration *can* be cheap — it does not establish that the protocol R2
+specifies has been built, or what it costs in code and in peak disk. A second
+projection is a second copy, and D-2's budget is already tight.
+
+This was item 3 of *before this can be ruled on*, and it is **not** closed. It
+is carried forward as a condition of the acceptance: **WM-2 must prototype
+alongside-rebuild-and-swap far enough to cost it before the first migration
+ships.** If that spike shows the protocol is impractical on this hardware, R2
+must be revisited, and revisiting R2 reopens open question 8.
+
+Recording it this way is deliberate. The alternative — waiting for the spike —
+was available and was not chosen; the alternative of quietly implying item 3 was
+done would have been a false record.
+
+### What acceptance does NOT do
+
+- **It makes no safety claim and asserts no scope determination.** The
+  determination in *Assurance impact* stays **PENDING** an explicit
+  safety-assurance ruling (ADR-0042 Decision 5). Accepting a persistence
+  architecture is not a safety argument.
+- **It does not release the domain-logic gate.** ADR-0042 Decision 5 remains a
+  separate and independent hold, and its ruling is still `PENDING`. Kirra World
+  domain logic, storage, APIs and services remain blocked.
+- **It does not ratify the stand-in schema.** Every measurement describes the
+  harness's stand-in (`standin_schema_digest 630eb690aaef…`). When the real
+  schema lands its digest differs and the figures become figures about something
+  else — the *shape* conclusions survive, the constants do not.
+- **It does not close the open questions other than 8.** Questions 7, 9 and 10
+  in particular remain open, and 9 (the intermittent multi-second write stall)
+  is unresolved as to mechanism.
+
+### Reopening conditions
+
+Unchanged from the body of this ADR, plus one: **if the R2 spike shows
+alongside-rebuild-and-swap is impractical, open question 8 reopens.** The
+existing scale reopening condition (entities in the millions, or genuinely
+unbounded ad-hoc traversal) also stands — D-9 found Option A survives at
+100 000 entities, which is not the same as surviving at 10 000 000.
+
+---
+
+## Open question 8 — resolution, adopted 2026-08-04
+
+> **ADOPTED.** This was drafted as a proposal for the deciders to accept, amend
+> or reject. It was **accepted unamended** on 2026-08-04 (see *Acceptance
+> record*), which closes open question 8 — subject to the outstanding R2
+> obligation recorded there. The reasoning below is preserved as written,
+> because the argument is the decision's justification and should not be
+> retroactively smoothed.
 
 ### The framing has to change first
 
@@ -553,14 +623,14 @@ untouched, and it is the part that should carry a spike before anyone signs** �
 D-14 establishes that a migration *can* be cheap, not that the alongside-rebuild
 protocol R2 specifies has been built or costed.
 
-### What the deciders are being asked to rule on
+### What was ruled on, and on what basis
 
 | | |
 |---|---|
-| **The resolution** | R1–R5 above, as a whole |
+| **The resolution** | R1–R5 above, accepted as a whole and unamended |
 | **Target evidence for R3** | D-14 — the statement, not the store, sets the cost |
-| **Still unevidenced** | R2's alongside-rebuild-and-swap (item 3); R1 and R4 are argued from existing measurements (the chain's construction, D-2, D-9) rather than newly measured |
-| **Not asked for here** | ratification of ADR-0041. Approving this resolution closes open question 8; the ADR still needs the deciders' acceptance as a separate act |
+| **Accepted while still unevidenced** | R2's alongside-rebuild-and-swap (item 3), carried as an outstanding obligation; R1 and R4 are argued from existing measurements (the chain's construction, D-2, D-9) rather than newly measured |
+| **Decided separately, same day** | ratification of ADR-0041 itself — see *Acceptance record* |
 
 ---
 
@@ -666,32 +736,31 @@ satisfied, and none may be ticked from a `HOST-INDICATIVE-NOT-TARGET` run:**
 one that could not be closed from software — was closed by five physical power
 cuts on the target device (D-11).
 
-### This ADR remains **Proposed**, and closing the gates did not change that
+### The gates were necessary, not sufficient — and both remaining conditions are now met
 
 The checklist above is a *measurement* checklist. Its preamble says acceptance
 requires all of it to be recorded; it does not say the measurements are the only
-condition. Two things stated elsewhere in this ADR still block acceptance, and
-neither is a measurement:
+condition. Two further things were required, neither of them a measurement, and
+both were satisfied on 2026-08-04 (*Acceptance record*):
 
-1. **Open question 8 — migration strategy — is named "a blocker for acceptance
+1. **Open question 8 — migration strategy — was named "a blocker for acceptance
    rather than a note."** D-6 measured a whole-store offline migration at ~101
-   minutes at the 8 GiB ceiling, which is not an OTA. WM-2 must choose one of
-   three routes — bound the store, migrate lazily/online, or accept a documented
-   maintenance window — and **no choice has been recorded.** The gate that is
-   *Met* is the migration proof-of-concept; the decision it forced is open.
-2. **The named deciders have not recorded approval.** This ADR lists *World
-   Model owner · architecture owner · deployment owner*. Ratification is theirs
-   to record, and closing a measurement gate does not stand in for it.
+   minutes at the 8 GiB ceiling, which is not an OTA. D-13 and D-14 showed that
+   figure described a quadratic backfill rather than an inherent cost. **Resolved
+   by adopting R1–R5**, with R2's prototype carried as an outstanding obligation.
+2. **The named deciders had not recorded approval.** **Recorded 2026-08-04** —
+   one approver holding all three roles, stated as such in the *Acceptance
+   record* rather than presented as three independent sign-offs.
 
 Separately, the safety-scope determination in *Assurance impact* stays PENDING an
 explicit safety-assurance ruling (ADR-0042 Decision 5). That governs what may be
 claimed about scope, not whether this ADR is ratified, and it is unaffected here.
 
-**No implementation should begin merely because this proposed ADR exists**, and
-in particular not because all seven gates now read *Met*. A complete measurement
-record is what makes the remaining decisions *answerable*; it does not answer
-them. The domain-logic gate (ADR-0042 Decision 5) is a separate and independent
-hold and is **not** released by this evidence.
+**Acceptance of this ADR does not authorize Kirra World domain implementation.**
+The domain-logic gate (ADR-0042 Decision 5) is a separate and independent hold,
+its ruling is still `PENDING`, and **nothing here releases it.** What this ADR
+now authorizes is the persistence architecture itself, subject to the
+outstanding R2 obligation.
 
 ---
 
