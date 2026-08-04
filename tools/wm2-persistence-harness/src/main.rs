@@ -615,6 +615,15 @@ fn main() {
                         .str("record", "migrate")
                         .str("migration_sql", args.migration_sql.token())
                         .int("events", r.events)
+                        // Self-describing on purpose. `migrate`'s cost depends
+                        // on BOTH axes (ADR-0041 D-13), so a record carrying
+                        // only `events` cannot be placed on the ladder without
+                        // pairing it against the preceding `run` record by
+                        // position. Reconstructing an axis from record ORDER is
+                        // fragile — a reordered, filtered or partially copied
+                        // file silently yields the wrong ladder — so the field
+                        // that determines the cost travels with the measurement.
+                        .int("entities", args.entities)
                         .int("version_after", r.version_after as u64)
                         .bool("future_schema_refused", r.future_schema_refused)
                         .bool("chain_intact_after", r.chain_intact_after)
