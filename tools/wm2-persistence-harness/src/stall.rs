@@ -101,6 +101,13 @@ pub struct WindowedDelta {
     /// How many samples fell in the window. Below [`MIN_WINDOW_SAMPLES`] the
     /// window is not resolved well enough to attribute anything.
     pub samples: usize,
+    /// Device busy-ms per ms over the rest of the run — the same measurement,
+    /// on the same device, outside this stall. `None` when the series cannot
+    /// supply one.
+    ///
+    /// This is the control the absolute threshold never had. See
+    /// [`IO_BUSY_BASELINE_MULTIPLE`].
+    pub baseline_busy_rate: Option<f64>,
 }
 
 impl WindowedDelta {
@@ -113,6 +120,25 @@ impl WindowedDelta {
     /// measurement. [`delta_over_window`] already guarantees containment by
     /// construction; this repeats it so a hand-built `WindowedDelta` cannot
     /// claim to be usable without it.
+    /// Device busy-ms per ms of window. Not a probability: `/proc/diskstats`
+    /// field 13 accumulates per-I/O service time, so this has no fixed ceiling
+    /// and only means something next to another measurement of the same thing.
+    pub fn busy_rate(&self) -> Option<f64> {
+        if self.covered_ms <= 0.0 {
+            return None;
+        }
+        self.delta.disk_io_ms.map(|ms| ms as f64 / self.covered_ms)
+    }
+
+    /// Was the device at least as busy during the stall as it is when nothing
+    /// is wrong? `None` when there is no baseline to compare against.
+    pub fn busy_against_baseline(&self) -> Option<bool> {
+        match (self.busy_rate(), self.baseline_busy_rate) {
+            (Some(r), Some(b)) if b > 0.0 => Some(r >= b * IO_BUSY_BASELINE_MULTIPLE),
+            _ => None,
+        }
+    }
+
     pub fn window_is_usable(&self) -> bool {
         self.samples >= MIN_WINDOW_SAMPLES
             && self.covered_ms > 0.0
@@ -130,8 +156,41 @@ impl WindowedDelta {
 /// still rejecting a whole-run window by orders of magnitude.
 pub const MAX_WINDOW_OVERSHOOT: f64 = 1.5;
 
+/// How busy the device must be **relative to the same run's ordinary rate** for
+/// device work to explain a stall.
+///
+/// `1.0` — at least as busy as when nothing is wrong. The reasoning is what
+/// `IO-DEVICE` claims: that the block layer was doing the work the stall was
+/// waiting on. A device genuinely stalling on garbage collection or an SLC
+/// cliff is doing *more* work than usual, not less, and field 13 accumulates
+/// service time so slower I/Os push it up rather than down.
+///
+/// # Why a ratio and not a bigger constant
+///
+/// [`IO_BUSY_FRACTION`] compares device busy-time against the stall's own
+/// length, and that comparison does not transfer across window lengths. Measured
+/// on target: the same drive read **2.1 %** and **1.05 %** across 30 s stalls but
+/// **34.3 %** across a 5 s one, while ordinary non-stalling windows in those runs
+/// read **74–100 %**. A fixed cut calibrated on the 30 s stalls sits far from the
+/// 5 s one for no reason to do with the device.
+///
+/// A ratio against the run's own baseline is self-calibrating and dimensionally
+/// honest — the same odd metric on both sides, same device, same run. Against it
+/// the three measured stalls sit at ratios of roughly **0.02, 0.01 and 0.40**,
+/// so the margin is wide rather than the coin-flip the absolute test had become.
+///
+/// This is applied **in addition to** [`IO_BUSY_FRACTION`], not instead of it:
+/// one short-window measurement cannot recalibrate an absolute constant, and
+/// the known failure mode is a FALSE `IO-DEVICE`, so the conservative direction
+/// is the correct one to move in.
+pub const IO_BUSY_BASELINE_MULTIPLE: f64 = 1.0;
+
 /// Fewer samples than this and the window is a guess, not a measurement.
 pub const MIN_WINDOW_SAMPLES: usize = 3;
+
+/// How much of a run must lie outside the stall before the remainder can be
+/// called "ordinary". Below this the control is too short to mean anything.
+pub const MIN_BASELINE_MS: f64 = 1_000.0;
 
 /// Background sampler cadence. At [`STALL_THRESHOLD_MS`] this yields ~50
 /// samples across the shortest event that counts as a stall.
@@ -194,6 +253,44 @@ const PSI_FRACTION: f64 = 0.5;
 const WRITEBACK_BACKLOG_KB: u64 = 256 * 1024;
 /// Sustained temperature (milli-degrees C) suggesting thermal capping.
 const THERMAL_HOT_MC: u64 = 85_000;
+
+/// Device busy-ms per ms over the parts of `series` OUTSIDE `[start_ms, end_ms]`
+/// — the run's ordinary rate, measured on the same device in the same run.
+///
+/// Computed as the total busy-time and elapsed time of the series minus the
+/// stall window's share, so it needs no second pass and cannot disagree with the
+/// window it is the control for. Returns `None` when the series has no usable
+/// counter, or when the stall covers essentially all of it — a "baseline" drawn
+/// from the stall itself would be a control that isn't one.
+pub fn baseline_busy_rate_excluding(
+    series: &[StampedSample],
+    start_ms: f64,
+    end_ms: f64,
+) -> Option<f64> {
+    if series.len() < 2 {
+        return None;
+    }
+    let (first, last) = (series.first()?, series.last()?);
+    let total_ms = last.at_ms - first.at_ms;
+    let total_busy = last
+        .sample
+        .disk_io_ms?
+        .checked_sub(first.sample.disk_io_ms?)? as f64;
+
+    let window = delta_over_window(series, start_ms, end_ms);
+    let (win_ms, win_busy) = match &window {
+        Some(w) => (w.covered_ms, w.delta.disk_io_ms.unwrap_or(0) as f64),
+        None => (0.0, 0.0),
+    };
+
+    let rest_ms = total_ms - win_ms;
+    // Guard the denominator AND demand enough of the run to be outside the
+    // stall for the remainder to describe "ordinary" at all.
+    if rest_ms < MIN_BASELINE_MS {
+        return None;
+    }
+    Some(((total_busy - win_busy).max(0.0)) / rest_ms)
+}
 
 /// The stalling repetitions' durations, ascending, from every repetition's worst
 /// commit.
@@ -263,7 +360,25 @@ pub fn delta_over_window(
         stall_ms: end_ms - start_ms,
         covered_ms: b.at_ms - a.at_ms,
         samples: hi - lo + 1,
+        // Filled by `windowed_delta_with_baseline`; left None here so this stays
+        // a pure window extraction and the baseline has exactly one origin.
+        baseline_busy_rate: None,
     })
+}
+
+/// [`delta_over_window`] with the run's ordinary busy rate attached.
+///
+/// The pairing is the point: a busy figure without its control is the thing
+/// that made `IO-DEVICE` unfalsifiable, so the two are produced together rather
+/// than left for a caller to remember to combine.
+pub fn windowed_delta_with_baseline(
+    series: &[StampedSample],
+    start_ms: f64,
+    end_ms: f64,
+) -> Option<WindowedDelta> {
+    let mut w = delta_over_window(series, start_ms, end_ms)?;
+    w.baseline_busy_rate = baseline_busy_rate_excluding(series, start_ms, end_ms);
+    Some(w)
 }
 
 /// Attribute one stall from the counters measured **across it**.
@@ -309,16 +424,41 @@ pub fn attribute_stall(w: &WindowedDelta) -> StallAttribution {
     let psi_busy = d
         .psi_io_stall_us
         .map(|us| us as f64 / 1e3 >= stall_ms * PSI_FRACTION);
-    let io_evidence = io_busy.unwrap_or(false) || psi_busy.unwrap_or(false);
+    let io_evidence_absolute = io_busy.unwrap_or(false) || psi_busy.unwrap_or(false);
+
+    // The absolute test alone cleared `IO-DEVICE` for stalls where the device
+    // was demonstrably quieter than usual, because its cut point does not
+    // transfer across window lengths. Requiring BOTH keeps every refusal the
+    // absolute test already made and adds the one it could not: was the device
+    // actually busier than this run's own normal?
+    let io_evidence = match (io_evidence_absolute, w.busy_against_baseline()) {
+        (false, _) => false,
+        (true, Some(vs_baseline)) => vs_baseline,
+        // No baseline to compare against. The absolute test stands alone, which
+        // is where it is weakest — so the detail string says so rather than
+        // presenting the verdict as fully supported.
+        (true, None) => true,
+    };
 
     if io_evidence && !backlog {
         return StallAttribution::IoDevice(format!(
             "block layer busy for most of a {stall_ms:.0} ms stall with no large dirty \
-             backlog (disk_io_ms={:?}, psi_io_stall_us={:?}, peak_dirty_writeback_kb={:?}). \
+             backlog (disk_io_ms={:?}, psi_io_stall_us={:?}, peak_dirty_writeback_kb={:?}); \
+             busy rate {} vs this run's baseline {} ({}). \
              Device-side: on NVMe this points at garbage collection or an SLC-cache cliff. \
              Confirm with the drive's own SMART/health counters — this harness cannot read \
              them.",
-            d.disk_io_ms, d.psi_io_stall_us, d.peak_dirty_writeback_kb
+            d.disk_io_ms,
+            d.psi_io_stall_us,
+            d.peak_dirty_writeback_kb,
+            w.busy_rate().map_or("?".to_string(), |r| format!("{r:.3}")),
+            w.baseline_busy_rate
+                .map_or("unavailable".to_string(), |b| format!("{b:.3}")),
+            match w.busy_against_baseline() {
+                Some(true) => "at or above baseline",
+                Some(false) => "BELOW baseline — should not have been attributed",
+                None => "NO BASELINE: absolute test only, the weaker evidence",
+            }
         ));
     }
 
@@ -560,6 +700,7 @@ pub fn run(
         stall_ms: 0.0,
         covered_ms: 0.0,
         samples: 0,
+        baseline_busy_rate: None,
     };
 
     for i in 0..repeats {
@@ -617,7 +758,7 @@ pub fn run(
             // one, which would attribute confidently from the wrong span.
             let slowest = r.slowest_commit;
             worst_windowed = slowest
-                .and_then(|w| delta_over_window(&samples, w.start_ms, w.end_ms))
+                .and_then(|w| windowed_delta_with_baseline(&samples, w.start_ms, w.end_ms))
                 .unwrap_or(WindowedDelta {
                     delta: SystemDelta::default(),
                     // The commit's own duration, taken from the window bench
@@ -626,6 +767,7 @@ pub fn run(
                     stall_ms: slowest.map_or(max_ms, |w| w.duration_ms()),
                     covered_ms: 0.0,
                     samples: 0,
+                    baseline_busy_rate: None,
                 });
         }
     }
@@ -682,6 +824,10 @@ mod tests {
             stall_ms,
             covered_ms: stall_ms * 1.02,
             samples: (stall_ms / SAMPLE_INTERVAL_MS as f64) as usize + 2,
+            // A quiet baseline, so these cases exercise the ABSOLUTE arm: any
+            // real device activity clears it and the relative arm stays out of
+            // the way. Tests about the baseline set it explicitly.
+            baseline_busy_rate: Some(0.001),
         }
     }
 
@@ -807,6 +953,7 @@ mod tests {
             stall_ms: 2_000.0,
             covered_ms: 60_000.0,
             samples: 3_000,
+            baseline_busy_rate: None,
         };
         assert!(!whole_run.window_is_usable());
         let a = attribute_stall(&whole_run);
@@ -904,8 +1051,127 @@ mod tests {
             stall_ms: 600.0,
             covered_ms: 100.0,
             samples: 6,
+            baseline_busy_rate: None,
         };
         assert!(!truncated.window_is_usable());
+    }
+
+    // -----------------------------------------------------------------------
+    // The busy-rate baseline: the control the absolute threshold never had
+    // -----------------------------------------------------------------------
+
+    /// A window whose busy rate and baseline are stated directly, so a test can
+    /// say what it means without constructing a series.
+    fn rates(stall_ms: f64, busy_rate: f64, baseline: Option<f64>) -> WindowedDelta {
+        let covered = stall_ms * 1.02;
+        WindowedDelta {
+            delta: d(None, Some((busy_rate * covered) as u64), Some(1_024), None),
+            stall_ms,
+            covered_ms: covered,
+            samples: (stall_ms / SAMPLE_INTERVAL_MS as f64) as usize + 2,
+            baseline_busy_rate: baseline,
+        }
+    }
+
+    #[test]
+    fn the_measured_five_second_stall_is_not_blamed_on_the_device() {
+        // The real numbers from the target mitigation run: 1 804 ms of device
+        // busy-time across a 5 254 ms stall (0.343), against ordinary windows in
+        // the same runs reading 74-100 % (baseline 0.85).
+        //
+        // 0.343 clears the ABSOLUTE test only barely-not — it is under 0.5, but
+        // only by a third — while being less than half the run's own normal.
+        // The relative arm makes the verdict robust instead of marginal.
+        let w = rates(5_254.5, 0.343, Some(0.85));
+        assert_eq!(w.busy_against_baseline(), Some(false));
+        assert_eq!(attribute_stall(&w).token(), "UNATTRIBUTED");
+    }
+
+    #[test]
+    fn a_short_window_that_would_clear_the_absolute_bar_still_needs_the_baseline() {
+        // The failure this fix exists to prevent. Same stall, a busy rate of
+        // 0.60 — over IO_BUSY_FRACTION, so the absolute test alone says
+        // IO-DEVICE — but the device is normally at 0.95, so it was QUIETER than
+        // usual. Attributing that to device work is exactly backwards.
+        let w = rates(5_254.5, 0.60, Some(0.95));
+        assert!(
+            w.delta.disk_io_ms.unwrap() as f64 >= w.stall_ms * IO_BUSY_FRACTION,
+            "this case must clear the absolute bar, or it tests nothing"
+        );
+        assert_eq!(w.busy_against_baseline(), Some(false));
+        assert_eq!(
+            attribute_stall(&w).token(),
+            "UNATTRIBUTED",
+            "a device quieter than its own normal was blamed for the stall"
+        );
+    }
+
+    #[test]
+    fn a_device_genuinely_busier_than_normal_is_still_attributed() {
+        // The fix must not simply suppress IO-DEVICE. A device working at or
+        // above its ordinary rate through the stall is what the verdict means,
+        // and it must survive.
+        let w = rates(5_254.5, 1.10, Some(0.85));
+        assert_eq!(w.busy_against_baseline(), Some(true));
+        assert_eq!(attribute_stall(&w).token(), "IO-DEVICE");
+    }
+
+    #[test]
+    fn without_a_baseline_the_verdict_says_so_rather_than_hiding_it() {
+        // No control available: the absolute test stands alone, which is where
+        // it is weakest. The verdict is still reachable — refusing outright
+        // would lose real findings on systems whose series cannot supply a
+        // baseline — but the detail must not present it as fully supported.
+        let w = rates(29_000.0, 0.90, None);
+        assert_eq!(w.busy_against_baseline(), None);
+        let a = attribute_stall(&w);
+        assert_eq!(a.token(), "IO-DEVICE");
+        assert!(
+            a.detail().contains("NO BASELINE"),
+            "an unsupported IO-DEVICE verdict did not disclose the missing control: {}",
+            a.detail()
+        );
+    }
+
+    #[test]
+    fn the_baseline_excludes_the_stall_it_is_a_control_for() {
+        // Busy 0-1000 ms, then a quiet stall 1000-3000 ms, then busy again.
+        // A baseline that included the stall would be dragged down by it and
+        // the comparison would flatter the device.
+        let mut v = Vec::new();
+        let (mut disk, mut t) = (0u64, 0u64);
+        while t <= 5_000 {
+            if !(1_000..3_000).contains(&t) {
+                disk += SAMPLE_INTERVAL_MS; // fully busy outside the stall
+            }
+            v.push(StampedSample {
+                at_ms: t as f64,
+                sample: SystemSample {
+                    disk_io_ms: Some(disk),
+                    dirty_kb: Some(1_024),
+                    writeback_kb: Some(0),
+                    ..Default::default()
+                },
+            });
+            t += SAMPLE_INTERVAL_MS;
+        }
+        let b = baseline_busy_rate_excluding(&v, 1_000.0, 3_000.0).expect("resolvable");
+        assert!(
+            b > 0.9,
+            "baseline {b:.3} was dragged down by the stall it should exclude"
+        );
+        let w = windowed_delta_with_baseline(&v, 1_000.0, 3_000.0).expect("resolvable");
+        assert_eq!(w.busy_against_baseline(), Some(false));
+        assert_eq!(attribute_stall(&w).token(), "UNATTRIBUTED");
+    }
+
+    #[test]
+    fn a_run_that_is_almost_all_stall_yields_no_baseline() {
+        // Fail closed: a "baseline" drawn from a run that is mostly the stall is
+        // a control that isn't one.
+        let s = series(1_500, 0.0, 0.0);
+        assert!(baseline_busy_rate_excluding(&s, 100.0, 1_400.0).is_none());
+        assert!(baseline_busy_rate_excluding(&[], 0.0, 100.0).is_none());
     }
 
     #[test]
@@ -915,6 +1181,7 @@ mod tests {
             stall_ms: 29_000.0,
             covered_ms: 29_000.0,
             samples: MIN_WINDOW_SAMPLES - 1,
+            baseline_busy_rate: None,
         };
         assert!(!thin.window_is_usable());
         assert_eq!(attribute_stall(&thin).token(), "UNATTRIBUTED");
