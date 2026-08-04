@@ -1860,8 +1860,9 @@ target, same session, same parameters D-10 and D-15 used.
 | NORMAL | **19 881 → 35 924 (1.81×)** | 58.88 → 12.28 ms | 4888 → 4572 kB | 0 → 0 |
 | OFF | 54 636 → 55 267 (**1.01×**) | 3.85 → 3.77 ms | 42 104 → 44 964 kB | 0 → 0 |
 
-`append` — an independent instrument — agrees within 0.97–0.99×: FULL 31 776,
-NORMAL 36 916, OFF 56 439. Today's ordering is conventional.
+`append` — an independent instrument — agrees **within ~3 %**: FULL 31 776,
+NORMAL 36 916, OFF 56 439 (`append` reads slightly *higher* throughout;
+`stall`/`append` = 0.97–0.99×). Today's ordering is conventional.
 
 **`FULL` and `OFF` are the internal controls.** They reproduce D-15 within 2 %
 while `NORMAL` moves 81 %. One setting shifting while both its neighbours hold
@@ -1870,10 +1871,10 @@ rather than merely different.
 
 #### Three explanations ruled out, including my own
 
-- **Not the instrument.** `stall` and `append` agree on target (0.97–0.99×) and
-  on a host control at the same settings (0.96–1.02×), `NORMAL` included. A
-  generic `stall` fault would have shown on the host. This was the first
-  hypothesis and the host control refuted it.
+- **Not the instrument.** `stall` and `append` agree on target (**within ~3 %**)
+  and on a host control at the same settings (**within ~4.5 %**), `NORMAL`
+  included. A generic `stall` fault would have shown on the host. This was the
+  first hypothesis and the host control refuted it.
 - **Not a healthier device.** The NVMe lost-completion defect was **live**:
   `FULL` took a 30 183.9 ms stall and the kernel log carries three
   `completion polled` timeouts during these runs. The device was arguably worse
