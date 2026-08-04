@@ -431,11 +431,15 @@ source; they are not migrated destructively (ADR-0040).
    projections with nothing marking them as incomplete. Needs either a
    fold-in-progress marker, a transactional whole-fold, or an explicit rule that
    projections are invalid until a checkpoint confirms them.
-8. **Migration strategy — blocking for acceptance (D-6).** Measured at
-   0.325 ms/event, a whole-store offline migration costs ~101 minutes at the
-   8 GiB ceiling. WM-2 must choose: bound the store, migrate lazily/online, or
-   accept a documented maintenance window. The third conflicts with an
-   available robot, so it needs stating explicitly if chosen.
+8. **Migration strategy — blocking for acceptance (D-6, D-13). A resolution is
+   drafted below and awaits the deciders' ruling; the question is NOT closed.**
+   D-6 measured a whole-store offline migration at ~101 minutes at the 8 GiB
+   ceiling and offered three routes: bound the store, migrate lazily/online, or
+   accept a documented maintenance window. D-13 shows that framing rests on an
+   artifact — migration cost is the product of events and entities *for that
+   particular backfill statement*, and the same schema change written as a
+   grouped pass is orders of magnitude cheaper. See *Open question 8 — drafted
+   resolution*.
 9. **Multi-second write stalls (O-1, D-10).** **Measured on target; the
    original theory is rejected and the mechanism is partly unresolved.**
    `NORMAL`/batch=64 — the suspect — produced **zero** stalls in 20 repetitions.
@@ -453,6 +457,96 @@ source; they are not migrated destructively (ADR-0040).
    interactive at that size. Whether a planned consumer needs either at tick
    rate is unresolved — if one does, that is a re-evaluation trigger, and it is
    now a question about absolute latency rather than about scaling.
+
+---
+
+## Open question 8 — drafted resolution
+
+> **DRAFT. Not a decision.** Open question 8 is blocking for acceptance, and
+> resolving it belongs to WM-2 and the deciders named in this ADR's header. This
+> section states a proposal for them to accept, amend or reject. **Until they
+> rule, open question 8 remains open and this ADR remains Proposed.**
+
+### The framing has to change first
+
+D-6's three routes — bound the store, migrate lazily/online, accept a
+maintenance window — all treat migration cost as a fixed property of the store,
+to be endured, capped or scheduled around. D-13 shows it is not. The measured
+cost came from one backfill statement whose correlated subquery rescans the log
+per projection row; the same schema change as a grouped pass is ~3 100× cheaper
+on identical data.
+
+**A strategy picked from that number would be a strategy picked from an
+artifact.** The proposal below therefore constrains what a migration is
+*permitted to do*, and treats downtime as a consequence of those constraints
+rather than as the thing being budgeted.
+
+### Proposed resolution
+
+**R1 — Migrations never rewrite the event log.** The chain hashes each event's
+canonical bytes, so re-encoding a stored event invalidates its payload digest
+and every link after it: an in-place log migration does not merely cost time, it
+destroys the tamper evidence the log exists to provide. Event encodings are
+**versioned and append-only** — new events are written in the new encoding, old
+rows are read forward in theirs, and nothing already written is rewritten. This
+is the load-bearing rule; the rest follows from it.
+
+**R2 — Projection changes are rebuilds, not backfills, and they run alongside.**
+Projections carry no independent truth — they are derived, and the replay gate
+already proves rebuild-equals-incremental determinism, which the ADR notes
+"gates the rest". So a projection schema change builds the new projection beside
+the live one, catches up, and swaps. The robot keeps serving the old projection
+throughout. This is the online route, and it is available *because* projections
+are derived rather than because of new machinery.
+
+**R3 — Any migration statement must be O(events), never O(events × entities).**
+D-13's cost was a query plan, and a plan is reviewable before it ships. A
+migration that cannot be expressed in a single pass over the log is not ready.
+Enforcement: the migration ladder becomes a harness command run per candidate
+migration, and a plan that is not flat in `ms/entity` fails review.
+
+**R4 — Bound the store, but size the bound from storage and query latency, not
+from migration downtime.** Retention is already mandatory — D-2 measures
+458.5 B/event and 21.7 days to fill 8 GiB at 10 Hz, and D-9 measures a 10.5 s
+temporal p99 at 10 M events. Those are the constraints that should set the
+bound. Sizing it to keep a quadratic backfill tolerable would trade away memory
+depth to work around R3's defect, and for a companion robot memory depth is not
+a spare resource: recall is the product.
+
+**R5 — Maintenance window is a recovery fallback, not a route.** It stays
+available for the case R1 is supposed to prevent — a defect that makes existing
+events genuinely unreadable. Using it requires a recorded decision naming the
+defect and the expected outage. It must not become the default by omission.
+
+### The availability trade, stated
+
+This is a deliberate availability decision, not a database detail: **WM-2 keeps
+the robot available across schema evolution, and pays for it in migration
+discipline** — versioned encodings, alongside-rebuilds, and a plan review on
+every migration. The alternative — a simpler implementation that accepts an
+offline window — was rejected because a companion robot that is unavailable is
+not degraded, it is absent, and the outage would recur on every schema change
+for the life of the product.
+
+R4 records the second half of the trade honestly: bounded retention means the
+world model forgets on a schedule. That cost is accepted for storage and latency
+reasons, which are real and measured, and explicitly **not** for migration
+reasons, which D-13 shows are avoidable.
+
+### Before this can be ruled on
+
+1. **Re-measure on target.** D-13 is `HOST-INDICATIVE-NOT-TARGET`. Run the
+   two-axis ladder on the Jetson and confirm the product model and the query
+   plan hold there.
+2. **Re-measure the grouped-pass rewrite end to end**, as an `UPDATE` rather
+   than the `SELECT` D-13 timed, to confirm R3 is satisfiable in practice on the
+   real statement.
+3. **Prototype R2's alongside-rebuild-and-swap** far enough to know what it
+   costs in code and in peak disk — a second projection is a second copy, and
+   the D-2 budget is already tight.
+
+Items 1 and 2 are hours of work on hardware that exists. Item 3 is the real
+engineering, and it is the part that should carry a spike before anyone signs.
 
 ---
 
@@ -733,6 +827,17 @@ Extrapolated linearly:
 | 5 M events | 27.1 min |
 | 18.7 M events (full 8 GiB) | **101 min** |
 
+> **The 16.24 s measurement stands; the extrapolation below does not.** The
+> table extrapolates **linearly in events** with the entity count pinned at the
+> measured 1 000. A host ladder over both axes (D-13) finds migration cost is the
+> **product** of events and entities, because the backfill's correlated subquery
+> rescans every observation event for every projection row. Under constant
+> density — D-8's own rule — the full-store figure is far worse than 101 minutes,
+> and rewritten as a single grouped pass the same migration is orders of
+> magnitude *better*. Read the row below as "an offline whole-store backfill is
+> not viable", which is the conclusion it supports; do not plan against the
+> minutes. **A target re-measurement is required** (open question 8).
+
 **A whole-store offline migration is not viable on this hardware.** An OTA that
 takes 101 minutes with the world model unavailable is not an OTA. Three routes
 exist and WM-2 must choose one before acceptance:
@@ -949,6 +1054,56 @@ of *that* medium and does not transfer to eMMC or microSD, where lying write
 caches are most common. Five cuts clear the drill's floor but cannot bound a
 failure *rate*; they cannot distinguish "never" from "rarely". And the store was
 the stand-in schema, as everywhere else in this section.
+
+### D-13 — migration cost is the product of events and entities, and it is a property of the SQL
+
+> **`HOST-INDICATIVE-NOT-TARGET`, `citable: false`.** This finding closes no
+> gate and is not target evidence. Evidence:
+> [`docs/evidence/wm2-host-migration-ladder-20260804/`](../evidence/wm2-host-migration-ladder-20260804/).
+> What transfers across architectures is the **shape** and the query plan, both
+> algorithmic; the constants do not. Target re-measurement is part of open
+> question 8's resolution.
+
+D-6 extrapolated migration linearly in events with entities pinned at 1 000. A
+two-axis ladder says that model is wrong:
+
+| Axis | Held fixed | Varied | Behaviour |
+|---|---|---|---|
+| A | entities = 1 000 | events 6 250 → 50 000 | linear in events (µs/event flat, 200 → 215) |
+| B | events = 50 000 | entities 125 → 8 000 | **linear in entities** (ms/entity flat, 11.9 → 11.3 across 64×) |
+
+`k = ms / (events × entities)` is flat within ±10 % across a **64×** entity
+spread and an 8× event spread, so **`migration_time ≈ k · events · entities`** — growing
+with the *square* of store size when both axes grow together, which is what
+constant density means.
+
+**The cause is the backfill's query plan**, not the store:
+
+```
+SCAN entities_projection USING COVERING INDEX …
+CORRELATED SCALAR SUBQUERY 1
+  SEARCH world_events USING INDEX idx_events_kind (kind=?)
+```
+
+The planner keys the subquery on `kind='observation'` alone, so every projection
+row walks every observation event; `idx_events_subject_valid` goes unused. The
+same aggregate as one grouped pass, same database, same 7 955 rows:
+**93 132 ms → 30 ms, a 3 100× difference.**
+
+Two consequences, and the second matters more than the first:
+
+1. **The 101-minute figure understates the offline route.** Carrying the host `k`
+   to a full store at D-8's 100 events/entity (18.7 M events, ~187 k entities)
+   gives days, not minutes — the same *diluting-ladder* error D-8 caught in the
+   sweep, appearing again in the migration extrapolation.
+2. **Migration cost is a property of the migration statement.** The same schema
+   change, written as a grouped pass, is O(events) and finishes in seconds. So
+   "how long does a migration take" has no answer at the level of the store —
+   only at the level of the SQL. **A strategy chosen from a single migration's
+   measured cost would be chosen from an artifact.**
+
+That is why the resolution proposed for open question 8 constrains what a
+migration is *allowed to do*, rather than picking a downtime budget to live with.
 
 ### D-12 — design implications the measurement forces
 
