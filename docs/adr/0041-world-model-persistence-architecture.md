@@ -729,20 +729,26 @@ reasons, which D-13 shows are avoidable.
    costs in code, in peak disk, in write amplification and in cutover latency.
    Storage is the *smallest* of those: projections are 3.74 % of total store
    size, so a duplicate is ≈306 MiB (321 MB) at the 8 GiB ceiling rather than a
-   second 8 GiB. **Measured 2026-08-04 — see D-16. Host-indicative; the target
-   run remains.** The protocol was specified and prototyped
+   second 8 GiB. **Measured 2026-08-04 on host (D-16) and on target (D-16a).
+   Three of the four sub-costs are settled; write amplification is NOT, and
+   cannot be on this target.** The protocol was specified and prototyped
    (`docs/design/WM2_PROJECTION_REBUILD_PROTOCOL.md`), answering the *code* cost
    and settling cutover ordering and the partial-projection state; the
    `rebuild` harness command then measured the other three against a control arm
-   running identical ingest without the rebuild. **Write amplification is the
-   finding, and it is a dial rather than a constant: 2.8×–35.8× across a 16×
-   range of fold-chunk counts.**
+   running identical ingest without the rebuild.
 
-Items 1 and 2 are closed on target. **Item 3 is no longer untouched — D-16
-measures it — but it is host-indicative, so the obligation narrows rather than
-closes** —
-D-14 establishes that a migration *can* be cheap, not that the alongside-rebuild
-protocol R2 specifies has been built or costed.
+   | Sub-cost | Status |
+   |---|---|
+   | Code | **Closed** — the protocol, 319 lines, exhaustively tested |
+   | Cutover latency | **Closed on target** — 2.33–2.48 ms, flat, ≈0.3 % of a rebuild (D-16a) |
+   | Peak disk | **Closed, but not by a target measurement** — 2.58 % of store, a *deterministic* function of schema and workload, identical host and target (D-16) |
+   | Write amplification | **OPEN, and unmeasurable on this target** — `/proc/self/io` absent (no `CONFIG_TASK_IO_ACCOUNTING`). Host says 2.8×–35.8×, a dial rather than a constant, and it **does not transfer** (D-16a) |
+
+Items 1 and 2 are closed on target. **Item 3 is now three-quarters discharged
+and the remaining quarter is the one that matters for flash wear** — the
+obligation narrows to write amplification alone, accepted as open by ruling
+rather than left unattempted. D-14 establishes that a migration *can* be cheap,
+not that the alongside-rebuild protocol R2 specifies has been built.
 
 ### What was ruled on, and on what basis
 
@@ -1705,6 +1711,17 @@ Two cautions, both learned by getting them wrong first:
   runs) because it moves with WAL checkpoint timing. It is emitted, but the
   projection's own size is the number to cite.
 
+**These two figures are DETERMINISTIC, and calling their stability a finding
+was wrong.** Both are functions of the seeded data and the schema, not of the
+machine: same seed, same code, same bytes. The target run below returned
+`2.58 / 2.61 / 2.59 / 2.54 / 2.57 %` and peak ratios `0.0111 / 0.0127 / 0.0390
+/ 0.0251 / 0.0259` — identical to every digit printed here, on a different CPU
+architecture. So the "stability across chunk counts" noted above is arithmetic
+rather than evidence, and host↔target agreement is a **reproducibility check**,
+not a measurement of the hardware. Cite the projection fraction as a property
+of this schema and workload. It is not a target result and must not be entered
+against the ratification checklist as one.
+
 **Against D-2's arithmetic.** The acceptance record derived ≈306 MiB from D-2's
 3.74 % projection overhead. This measures **2.58 %** directly — the same order,
 about 31 % lower. Neither refutes the other: D-2's figure is bytes-per-event
@@ -1712,15 +1729,84 @@ overhead on its configuration, this is projection pages as a fraction of a store
 with a different entity count and event mix. They are two measurements, not one
 measurement twice.
 
-#### What this does not do
+#### What the host run does not do
 
-**It is not a target run.** `HOST-INDICATIVE-NOT-TARGET`, so none of it is
-citable against the ratification checklist, and the amplification figure in
-particular is the one most likely to move on the Jetson's NVMe — D-15 has just
-established that device's write path has a defect. It is also over the
-**stand-in schema**, so the constants describe that schema and not a ratified
-one. The *shape* — amplification linear in chunk count, cutover flat and small,
-projection a low single-digit percentage — is what should be expected to carry.
+**It is not a target run.** `HOST-INDICATIVE-NOT-TARGET`, so none of the above
+is citable against the ratification checklist, and it is over the **stand-in
+schema**, so the constants describe that schema and not a ratified one. The
+target run below settles part of it and, more usefully, shows which parts were
+never the host's to settle.
+
+### D-16a — the target run: cutover holds, and write amplification cannot be measured on this hardware
+
+`JETSON-TARGET-MEASURED`, 2026-08-04, Jetson Orin NX / `/dev/nvme0n1p1` ext4,
+same parameters as the host sweep (`--events 40000 --entities 2000`, total
+ingest 16 000), so the only variable is the hardware.
+
+| Fold chunks | Cutover | Retire | Rebuild wall | Control wall | Catch-up |
+|---:|---:|---:|---:|---:|---:|
+| 2 | 2.48 ms | 1.70 ms | 495 ms | 297 ms | 1 |
+| 4 | 2.42 ms | 1.66 ms | 551 ms | 321 ms | 2 |
+| 8 | 2.40 ms | 1.41 ms | 593 ms | 349 ms | 3 |
+| 16 | 2.35 ms | 1.19 ms | 703 ms | 429 ms | 6 |
+| 32 | 2.33 ms | 1.17 ms | 852 ms | 534 ms | 12 |
+
+**Cutover holds, and it is the claim that needed target evidence.**
+2.33–2.48 ms against the host's 2.06–2.33 ms, flat across a 16× range of chunk
+counts. The target's spread across that whole range (1.06×) is *smaller than
+the host's run-to-run spread at a single configuration* (1.21×), so the two
+platforms are not distinguishable on this measure. R2 rests on the robot
+serving throughout with the swap as the only blackout; that now has a target
+number rather than an inference.
+
+**The protocol itself ran clean on target.** All five configurations reached
+`Active` with `completed` true: catch-up converged, equivalence was proven at a
+pinned generation, and the state machine's cutover guard accepted only at a
+matching head. Nothing in `docs/design/WM2_PROJECTION_REBUILD_PROTOCOL.md`
+needed target-specific handling. **No NVMe timeouts occurred during the sweep**
+— against D-15's five in 120 repetitions — so this run is not one where the
+device's known defect was active.
+
+#### Write amplification is NOT measurable on this target
+
+`process_write_bytes` reads `/proc/self/io`. **That file does not exist on this
+kernel** — the Tegra build ships without `CONFIG_TASK_IO_ACCOUNTING` (no
+`/proc/config.gz` either). Both arms' counters returned `None`, and the harness
+reported `None` rather than `0`, which is the behaviour its doc comment demands:
+*"a missing counter must not arrive as zero, which would render as a
+flatteringly efficient rebuild."* The fail-closed choice is what kept this from
+being recorded as a rebuild that wrote nothing.
+
+**So the R2 obligation stays open on its most consequential dimension.** Write
+amplification carries the flash-wear argument — ~0.9 GB of device writes at 3×
+versus ~10.7 GB at 35× — and the host's **2.8×–35.8× does not transfer** and
+must not be quoted as though it did. A prediction was recorded in advance that
+the figure would *move* on target; it did not move, it proved unmeasurable,
+which leaves that prediction **untested rather than confirmed or refuted**.
+
+**Ruled 2026-08-04: accept the gap rather than close it.** The alternatives were
+weighed and declined:
+
+| Option | Why not |
+|---|---|
+| `/proc/diskstats` sectors-written | Whole-device, so the attribution problem the control arm exists to solve returns; would need a quiesced machine and still could not separate the arms |
+| Rebuild the kernel with `CONFIG_TASK_IO_ACCOUNTING` | Disproportionate for one figure on a substrate ADR, and it would change the platform every other target result here was taken on |
+
+Revisit only if flash wear becomes load-bearing for a deployment decision. Note
+also that D-15 established this device's write path drops completions, so a
+target amplification number would have needed careful reading even if the
+counter had existed.
+
+#### What the target run does not do
+
+It is over the **stand-in schema**, like the host run, so the constants describe
+that schema rather than a ratified one. It is a **single sweep**, not repeated,
+so the target has no run-to-run spread of its own — the 1.21× figure quoted
+above is the host's, and using it to bound the target's noise is an assumption,
+not a measurement. And the platform carried a **known-unrepaired filesystem**
+(`clean with errors`, `e2fsck` outstanding) under `Errors behavior: Remount
+read-only`, so a corrupt region would have aborted the run rather than silently
+altering a number.
 
 ### D-12 — design implications the measurement forces
 
