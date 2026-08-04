@@ -131,8 +131,11 @@ CREATE TABLE compaction_citations (
 /// [`SCHEMA_V2_STEP_GROUPED`], which is what a migration should actually look
 /// like.
 ///
-/// **Do not copy this shape into a real migration.** See
-/// [`crate::standin::tests::the_backfill_must_not_rescan_the_log_per_entity`].
+/// **Do not copy this shape into a real migration.** The gate that keeps it
+/// from coming back is `the_backfill_must_not_rescan_the_log_per_entity` in
+/// this module's test submodule — named in plain text rather than linked,
+/// because `tests` is `#[cfg(test)]` and an intra-doc link to it does not
+/// resolve in a normal doc build.
 pub const SCHEMA_V2_STEP: &str = r#"
 ALTER TABLE entities_projection ADD COLUMN observed_count INTEGER NOT NULL DEFAULT 0;
 UPDATE entities_projection SET observed_count = (
