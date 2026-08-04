@@ -488,8 +488,30 @@ for all of them.
 
 **R2's alongside-rebuild-and-swap has not been prototyped.** D-14 establishes
 that a migration *can* be cheap — it does not establish that the protocol R2
-specifies has been built, or what it costs in code and in peak disk. A second
-projection is a second copy, and D-2's budget is already tight.
+specifies has been built, or what it costs in code and in peak disk.
+
+**A second projection is not a second store.** D-2 measured 458.51 B/event
+log-only against 476.32 B/event with projections, so the projection overhead is
+17.82 B/event — **3.74 % of total store size** (equivalently 3.89 % measured
+against the log alone; both denominators are stated because the two differ and
+the smaller one is not the flattering one). At the 8 GiB ceiling that is
+**≈306 MiB (321 MB)** of additional projection storage for an alongside rebuild,
+against another 8 GiB implied by "a second copy" — a factor of **≈27×**.
+
+The prototype must still measure peak storage, write amplification and cutover
+behaviour. **Capacity is not presently the primary risk**; cutover atomicity and
+the partial-projection state (open question 7) are.
+
+> An earlier revision read "a second projection is a second copy, and D-2's
+> budget is already tight." It is corrected above and noted rather than silently
+> replaced, because it went into a ratified document and the arithmetic was
+> available in D-2 the whole time.
+>
+> The first correction of it, in this same section, said the original
+> "overstated the risk by roughly two orders of magnitude." That was itself
+> wrong: 8 GiB against ≈306 MiB is **26.7×, about 1.4 orders of magnitude.**
+> Recorded because a paragraph about undone arithmetic is the worst possible
+> place to do arithmetic loosely.
 
 This was item 3 of *before this can be ruled on*, and it is **not** closed. It
 is carried forward as a condition of the acceptance: **WM-2 must prototype
@@ -615,8 +637,10 @@ reasons, which D-13 shows are avoidable.
    **1 184×** at 30 000 / 3 200, with the projection result and the chain
    identical. **R3 is satisfiable in practice.**
 3. **Prototype R2's alongside-rebuild-and-swap** far enough to know what it
-   costs in code and in peak disk — a second projection is a second copy, and
-   the D-2 budget is already tight. **Still open.**
+   costs in code, in peak disk, in write amplification and in cutover latency.
+   Storage is the *smallest* of those: projections are 3.74 % of total store
+   size, so a duplicate is ≈306 MiB (321 MB) at the 8 GiB ceiling rather than a
+   second 8 GiB. **Still open.**
 
 Items 1 and 2 are closed on target. **Item 3 is the real engineering, it is
 untouched, and it is the part that should carry a spike before anyone signs** —
@@ -1188,6 +1212,14 @@ Two consequences, and the second matters more than the first:
 
 That is why the resolution proposed for open question 8 constrains what a
 migration is *allowed to do*, rather than picking a downtime budget to live with.
+
+**The general rule this and the tier C defect share** is recorded in
+[the Jetson drill](../hardware/JETSON_WM2_PERSISTENCE_DRILL.md), §4 *Reading the
+results*: *every reported number must state its counting unit, its independence
+unit, the variables held fixed, and the claim it is allowed to support.* Both
+errors were real measurements under a label they had not earned — "rows" read as
+"independent trials", "events at fixed entities" read as "store-size scaling" —
+and a checksum verifies bytes, not interpretation.
 
 ### D-14 — on target: the cost is the statement, and the corrected one is 472–1 184× faster
 
