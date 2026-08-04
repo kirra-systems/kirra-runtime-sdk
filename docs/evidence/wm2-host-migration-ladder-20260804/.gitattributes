@@ -1,0 +1,5 @@
+# Captured measurement output — byte-exact, never line-ending-normalized, so
+# the SHA256SUMS digests survive any checkout. Same rationale as the tier C
+# bundle.
+ladder.jsonl -text
+SHA256SUMS   -text
