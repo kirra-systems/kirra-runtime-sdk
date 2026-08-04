@@ -1,0 +1,14 @@
+[    7.656894] nvme 0004:01:00.0: Adding to iommu group 5
+[    7.657117] nvme nvme0: pci function 0004:01:00.0
+[    7.657180] nvme 0004:01:00.0: enabling device (0000 -> 0002)
+[    7.732093] nvme nvme0: allocated 64 MiB host memory buffer.
+[    7.753640] nvme nvme0: 8/0/0 default/read/poll queues
+[    7.763002] nvme nvme0: Ignoring bogus Namespace Identifiers
+[    7.764436]  nvme0n1: p1 p2 p3 p4 p5 p6 p7 p8 p9 p10 p11 p12 p13 p14 p15
+[    7.993452] EXT4-fs (nvme0n1p1): warning: mounting fs with errors, running e2fsck is recommended
+[    8.002020] EXT4-fs (nvme0n1p1): mounted filesystem with ordered data mode. Opts: (null). Quota mode: none.
+[    8.502877] EXT4-fs (nvme0n1p1): re-mounted. Opts: (null). Quota mode: none.
+[   10.546784]  videobuf2_common drm_kms_helper nvhost_capture(O) videodev host1x_nvhost(O) mc nvidia_p2p(O) ina3221 nvgpu(O) governor_pod_scaling(O) host1x(O) mc_utils(O) nvmap(O) nvsciipc(O) quota_v2 quota_tree drm fuse ip_tables x_tables ipv6 pwm_fan pwm_tegra tegra_bpmp_thermal tegra_xudc ucsi_ccg typec_ucsi typec nvme nvme_core phy_tegra194_p2u pcie_tegra194
+[ 7657.919466] nvme nvme0: I/O 233 QID 6 timeout, completion polled
+[ 7727.549197] nvme nvme0: I/O 600 QID 6 timeout, completion polled
+[ 8167.597401] nvme nvme0: I/O 266 QID 5 timeout, completion polled
