@@ -33,7 +33,7 @@ use json::Obj;
 use platform::EvidenceStatus;
 use standin::Durability;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Every command this binary implements. The gate that makes an unknown
 /// command fail closed rather than produce an evidence stamp over no
@@ -510,7 +510,27 @@ fn main() {
     let facts = platform::gather(&args.db, args.assert_target);
     let class = platform::classify(&facts);
 
-    banner(&class, &args);
+    // Derived before the banner so the operator sees it, and preflighted
+    // before any measurement so a permissions failure is a refusal rather than
+    // a panic three hundred milliseconds into a run that already claimed to be
+    // citable.
+    let control_db = (args.command == "rebuild").then(|| control_db_path(&args.db));
+    // Preflight BEFORE the banner. The banner prints `evidence status :
+    // JETSON-TARGET-MEASURED -> citable`, and a run that is about to refuse
+    // must not advertise citability first — that is the shape of the
+    // fail-open this harness already had once.
+    if args.command != "platform" {
+        let mut targets: Vec<(&str, &Path)> = vec![("working", args.db.as_path())];
+        if let Some(c) = control_db.as_deref() {
+            targets.push(("control-arm (derived)", c));
+        }
+        if let Err(e) = preflight_writable(&targets) {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
+
+    banner(&class, &args, control_db.as_deref());
 
     let mut sink = match Sink::open(args.out.as_ref()) {
         Ok(s) => s,
@@ -982,14 +1002,11 @@ fn main() {
 
     if args.command == "rebuild" {
         let d = args.durability.unwrap_or(Durability::Full);
-        // The control arm needs its own file: same ingest, same seed, no
-        // rebuild. Sitting beside the working DB so both land on one device.
-        let mut control_db = args.db.clone();
-        let name = control_db
-            .file_name()
-            .map(|s| format!("control-{}", s.to_string_lossy()))
-            .unwrap_or_else(|| "control.sqlite".into());
-        control_db.set_file_name(name);
+        // Derived once, above, so the banner and the preflight named the same
+        // file this run actually uses.
+        let control_db = control_db
+            .clone()
+            .unwrap_or_else(|| control_db_path(&args.db));
 
         let r = rebuild_cost::run(
             &args.db,
@@ -1218,9 +1235,123 @@ fn dedup(mut v: Vec<usize>) -> Vec<usize> {
     v
 }
 
-fn banner(class: &platform::Classification, a: &Args) {
+/// Where the `rebuild` command's control arm writes.
+///
+/// Derived from `--db` rather than chosen by the operator — beside the working
+/// database, so both arms land on the same device and the differenced numbers
+/// mean something. Pure, so the banner and the dispatch cannot disagree about
+/// it, and so a caller can find out where it will be BEFORE the run.
+pub fn control_db_path(db: &Path) -> PathBuf {
+    let mut p = db.to_path_buf();
+    let name = p
+        .file_name()
+        .map(|s| format!("control-{}", s.to_string_lossy()))
+        .unwrap_or_else(|| "control.sqlite".into());
+    p.set_file_name(name);
+    p
+}
+
+/// Refuse before measuring if a database path is not writable.
+///
+/// The `rebuild` command derives a SECOND path the operator never typed, and
+/// the control arm runs first — so a permissions problem surfaced as a panic
+/// from inside the seed, naming a file the operator had not chosen, after the
+/// banner had already printed `JETSON-TARGET-MEASURED`. Observed for real
+/// against `/var/lib/kirra`, which belonged to a service user.
+///
+/// Each path carries a label so the message can say *which* of the two failed
+/// and, for the derived one, that it was derived.
+///
+/// **This is not a mkdir gate.** `main` runs `create_dir_all` on `--db`'s
+/// parent before calling this, so a merely-absent directory is created rather
+/// than refused; the not-exists branch here fires only when that creation ALSO
+/// failed. Permissions, not existence, are what this catches.
+///
+/// **Deliberately over-strict in one case.** `rebuild`'s `seed` unlinks the
+/// database before opening it, and unlinking needs permission on the
+/// DIRECTORY, not the file — so an existing read-only database that this
+/// refuses would in fact have been removed and recreated successfully. That
+/// false refusal is accepted: it costs the operator one `rm`, whereas the
+/// commands that open an existing store without unlinking would otherwise
+/// reach the same panic this function was written to prevent. Refusing a run
+/// that would have worked is the cheaper error.
+fn preflight_writable(paths: &[(&str, &Path)]) -> Result<(), String> {
+    for (label, p) in paths {
+        // An EXISTING file's own permissions decide, not its directory's. A
+        // 0444 database inside a writable directory passes a directory probe
+        // and then fails inside SQLite — the very failure this function exists
+        // to move forward — so probing only the directory would reintroduce it
+        // for the re-run case.
+        //
+        // `write(true)` WITHOUT `truncate`: this must not modify a store it is
+        // only inspecting.
+        if p.exists() {
+            if let Err(e) = std::fs::OpenOptions::new().write(true).open(p) {
+                return Err(format!(
+                    "cannot write the {label} database: {e}\n  path: {}\n  \
+                     The file already exists and is not writable by this user. \
+                     Check `ls -l {}`.",
+                    p.display(),
+                    p.display()
+                ));
+            }
+            continue;
+        }
+
+        let dir = match p.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        if !dir.exists() {
+            // Reached only when main's earlier `create_dir_all` ALSO failed,
+            // because that runs first — so the message names both
+            // possibilities rather than implying the operator simply forgot to
+            // create the directory.
+            return Err(format!(
+                "cannot write the {label} database: directory `{}` does not exist and \
+                 could not be created.\n  path: {}\n  \
+                 Check permissions on its parent, or pass a --db under a directory you own.",
+                dir.display(),
+                p.display()
+            ));
+        }
+        let probe = dir.join(format!(".wm2-write-probe-{}", std::process::id()));
+        if let Err(e) = std::fs::File::create(&probe) {
+            return Err(format!(
+                "cannot write the {label} database: {e}\n  path     : {}\n  \
+                 directory: {}\n  \
+                 Most likely the directory is owned by another user — check `ls -ld {}`. \
+                 Do NOT chown a service directory to run a benchmark; pass --db somewhere \
+                 you own instead.",
+                p.display(),
+                dir.display(),
+                dir.display()
+            ));
+        }
+        // Fail closed rather than ignore the failure. A harness that cannot
+        // remove its own probe has left a file in the directory it is about to
+        // measure, and proceeding silently would make "leaves no probe behind"
+        // false exactly when it stopped being true.
+        if let Err(e) = std::fs::remove_file(&probe) {
+            return Err(format!(
+                "wrote a probe file for the {label} database but could not remove it: {e}\n  \
+                 probe: {}\n  \
+                 Refusing rather than measuring in a directory the harness cannot clean.",
+                probe.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn banner(class: &platform::Classification, a: &Args, control: Option<&Path>) {
     eprintln!("wm2-persistence-harness — ADR-0041 (WM-2) measurement, NOT the Kirra World store");
     eprintln!("  database        : {}", a.db.display());
+    // Shown because the operator did not choose it. A derived path that only
+    // becomes visible when it fails is a path nobody checked.
+    if let Some(c) = control {
+        eprintln!("  control arm     : {} (derived)", c.display());
+    }
     eprintln!("  stand-in schema : {}", standin::schema_digest());
     eprintln!("  sqlite          : {}", rusqlite::version());
     eprintln!("  evidence status : {}", class.status.token());
@@ -1384,5 +1515,93 @@ mod tests {
                  refused as unknown before ever reaching its guard"
             );
         }
+    }
+
+    #[test]
+    fn the_control_path_sits_beside_the_working_database() {
+        // Same directory is the whole point: the two arms must land on ONE
+        // device, or the differenced write and timing figures compare storage
+        // rather than the rebuild.
+        let db = PathBuf::from("/var/lib/kirra/wm2-rebuild-8.sqlite");
+        let c = control_db_path(&db);
+        assert_eq!(
+            c,
+            PathBuf::from("/var/lib/kirra/control-wm2-rebuild-8.sqlite")
+        );
+        assert_eq!(c.parent(), db.parent(), "arms must share a directory");
+
+        // A bare filename has no parent to preserve, and must still work.
+        assert_eq!(
+            control_db_path(&PathBuf::from("x.sqlite")),
+            PathBuf::from("control-x.sqlite")
+        );
+    }
+
+    #[test]
+    fn preflight_refuses_an_uncreatable_directory_and_names_the_arm() {
+        // Note the framing: via the CLI, `main` has already run
+        // `create_dir_all`, so this branch is reached only when creating the
+        // directory ALSO failed. The message must therefore not tell the
+        // operator to create a directory they could not have created — it says
+        // "does not exist and could not be created" and points at permissions.
+        let missing = PathBuf::from("/nonexistent-wm2-preflight/db.sqlite");
+        let derived = control_db_path(&missing);
+        let err = preflight_writable(&[
+            ("working", missing.as_path()),
+            ("control-arm (derived)", derived.as_path()),
+        ])
+        .expect_err("an uncreatable directory must refuse");
+        assert!(
+            err.contains("working") && err.contains("/nonexistent-wm2-preflight"),
+            "must name which database and which directory: {err}"
+        );
+        assert!(
+            err.contains("could not be created"),
+            "must not imply the operator simply forgot to mkdir: {err}"
+        );
+    }
+
+    #[test]
+    fn preflight_checks_an_existing_files_own_permissions_not_its_directorys() {
+        // A database that already exists but cannot be written passes a
+        // DIRECTORY probe and then fails inside SQLite — which is the failure
+        // this function exists to move forward, so the re-run case has to be
+        // covered too.
+        //
+        // Exercised with a path that exists and is not writable AS A FILE for
+        // any user, including root: a directory. A 0444 regular file would
+        // make this test vacuous under root, which is how it runs in CI.
+        let dir = std::env::temp_dir().join(format!("wm2-existing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = preflight_writable(&[("working", dir.as_path())])
+            .expect_err("an existing unwritable path must refuse");
+        assert!(
+            err.contains("already exists and is not writable"),
+            "must name the real cause rather than blaming the directory: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preflight_admits_a_writable_directory_and_leaves_no_probe_behind() {
+        let dir = std::env::temp_dir().join(format!("wm2-preflight-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("db.sqlite");
+        let derived = control_db_path(&db);
+        preflight_writable(&[
+            ("working", db.as_path()),
+            ("control-arm (derived)", derived.as_path()),
+        ])
+        .expect("a writable directory must be admitted");
+
+        // The probe file must not survive — a benchmark that litters the
+        // directory it is about to measure is measuring itself.
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect();
+        assert!(left.is_empty(), "preflight left files behind: {left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
