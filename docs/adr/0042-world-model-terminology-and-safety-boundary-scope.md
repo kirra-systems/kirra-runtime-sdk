@@ -12,6 +12,12 @@
 > **This ADR does not ratify WM-1, WM-2 or WM-6.** They remain Proposed. This
 > resolves five blockers found during review of #1306 so that WM-6 can later be
 > *considered* for acceptance.
+>
+> **Decision 5's safety-assurance ruling is still `PENDING`**, and when it is
+> made it will be an **owner self-assessment, not an independent assurance
+> review** — see *Independence posture*. Kirra is designed in alignment with
+> ISO 26262 ASIL-D requirements and IEC 61508 SIL 3 requirements; independent
+> third-party assessment has not yet been performed.
 
 ---
 
@@ -417,6 +423,66 @@ Conditions that reopen the decision: UNASSIGNED
 
 **Merging this PR does not constitute approval.** The ruling is not invented
 here, and no classification is claimed.
+
+## Independence posture — recorded 2026-08-04
+
+The record above says *who* will rule and *that* they have not. It does not say
+what kind of assessment the eventual ruling will be, and a reader six months
+from now — or an assessor — would be entitled to assume the stronger answer.
+Recorded here so they cannot.
+
+> **Owner self-assessment, not independent assurance review.**
+
+Four statements, each load-bearing:
+
+1. **The same person may hold the system-owner and assessor roles.** In this
+   project they do. Role separation is a control that has not been applied here.
+2. **No independent assessment has occurred** — internal or external. Not
+   "pending scheduling"; none.
+3. **The ruling is a scope classification, not a safety certification.** It
+   answers *where does Kirra World sit relative to the safety scope*. It does
+   not certify anything, and no downstream document may cite it as if it did.
+4. **The ruling must reopen if Kirra World gains authority over actuation,
+   release, safety decisions, or required safety inputs** — any one of the four.
+
+This posture is recorded **now, before the ruling**, rather than as a caveat
+attached to it afterwards. A limitation written after a conclusion reads as a
+hedge on the conclusion; written before, it is a constraint on what the
+conclusion is allowed to be. The distinction matters most to the reader who
+was not in the room.
+
+**Statement 4 is a pre-commitment, not the `Conditions that reopen the
+decision` field.** That field stays `UNASSIGNED` because the full set of
+reopening conditions has not been decided — statement 4 fixes a floor beneath
+it. Whatever the eventual ruling says, it says at least this, and a ruling that
+recorded a *narrower* reopening condition would contradict a commitment made
+before the ruling existed.
+
+Nothing here rules on anything. The gate reads the record above and continues
+to hold: status is `PENDING`, seven fields are `UNASSIGNED`, and `kirra-world*`
+stays declaration-only.
+
+### What completing the ruling would take
+
+Recorded so "the ruling is pending" does not stay a state with no visible exit.
+The eight questions in *Questions the ruling must address* map onto the record's
+fields as follows — this mapping is descriptive, and the owner may answer them
+in any structure they choose.
+
+| Field | What would fill it | Which questions bear on it |
+|---|---|---|
+| `Date` | The date the ruling is taken | — |
+| `Scope classification` | QM, safety-related but non-authoritative, or another classification, stated as a term of art with its source standard named | Q7 |
+| `Rationale` | Why that classification follows, given Fence A and Fence B — including whether absence of a runtime dependency is *sufficient* | Q1, Q2, Q5, Q6 |
+| `Assumptions` | What must stay true for the classification to hold — ODD assumptions and common-source artifact handling among them | Q3, Q4 |
+| `Required evidence` | What must be produced and re-produced to preserve the classification over time | Q8 |
+| `Conditions that reopen the decision` | The full set, of which statement 4 above is the pre-committed floor | Q2, Q5 |
+
+**Q5 remains the sharpest and this PR does not soften it.** The checker bounds
+*trajectories*; a semantic error producing a legal trajectory to a
+wrong-but-reachable place is bounded kinematically while being operationally
+wrong. Whether that is a safety concern or an availability concern is the
+owner's call, and it is not made here.
 
 ---
 

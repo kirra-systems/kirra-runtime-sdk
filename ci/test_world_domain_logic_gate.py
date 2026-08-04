@@ -503,6 +503,57 @@ def t28_the_real_adr_names_an_owner() -> None:
     )
 
 
+def t29_the_real_adr_records_the_independence_posture() -> None:
+    """Against the shipped ADR.
+
+    The posture is the statement that stops a reader assuming the eventual
+    ruling is an independent assessment. Unlike a `UNASSIGNED` field, deleting
+    it makes the document look *stronger*, not weaker — nothing else in the ADR
+    would go red, and CI would stay green while the record quietly became a
+    claim it has not earned. So it is pinned here.
+
+    Substring checks, deliberately: these are the load-bearing clauses, not the
+    prose around them. Rewording the surrounding paragraph is free; removing a
+    limitation is not.
+    """
+    text = (CI.parent / gate.ADR_PATH).read_text(encoding="utf-8")
+    required = {
+        "the self-assessment framing": "self-assessment, not independent assurance review",
+        "the role-separation admission": "system-owner and assessor roles",
+        "the no-assessment-occurred statement": "No independent assessment has occurred",
+        "the not-a-certification statement": "scope classification, not a safety certification",
+        "the reopening pre-commitment": "must reopen if Kirra World gains authority",
+    }
+    missing = [label for label, needle in required.items() if needle.lower() not in text.lower()]
+    record(
+        not missing,
+        "29 ADR-0042 records the independence posture (self-assessment, limits, reopening floor)",
+        "missing from the ADR: " + "; ".join(missing),
+    )
+
+
+def t30_the_independence_posture_does_not_release_the_gate() -> None:
+    """Recording *how* the ruling will be made is not making it.
+
+    t23 already asserts the shipped ruling parses as unrecorded. This asserts
+    the narrower thing the posture PR could plausibly have broken: that the
+    ruling's own fields are all still open, so no single field was quietly
+    filled in while adding prose about the ruling's limits.
+    """
+    text = (CI.parent / gate.ADR_PATH).read_text(encoding="utf-8")
+    r = gate.parse_ruling(text)
+    if r is None:
+        record(False, "30 the independence posture leaves every ruling field open", "no ruling record parsed")
+        return
+    open_fields = [f for f in gate.REQUIRED_FIELDS if f != gate.OWNER_FIELD and r.fields.get(f, "").strip().lower() in gate.PLACEHOLDERS]
+    expected = [f for f in gate.REQUIRED_FIELDS if f != gate.OWNER_FIELD]
+    record(
+        open_fields == expected and not r.recorded,
+        "30 the independence posture leaves every ruling field open and the gate holding",
+        f"filled: {sorted(set(expected) - set(open_fields))}; recorded={r.recorded}",
+    )
+
+
 ALL = [v for k, v in sorted(globals().items()) if k.startswith("t") and k[1:3].isdigit()]
 
 
