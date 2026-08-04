@@ -36,7 +36,8 @@ parameters.
 | OFF | 54 636 → 55 267 (**1.01×**) | 3.85 → 3.77 ms | 42 104 → 44 964 kB | 0 → 0 |
 
 `append`, three repetitions, an independent instrument, agrees: FULL 31 776,
-NORMAL 36 916, OFF 56 439 — within 0.97–0.99× of the `stall` figures.
+NORMAL 36 916, OFF 56 439 — **within ~3 %** of the `stall` figures. (`append`
+reads slightly *higher* on all three; `stall`/`append` = 0.97–0.99×.)
 
 **FULL and OFF reproduce D-15 within 2 %. NORMAL is 81 % away.** Those two are
 the internal controls that make the third interpretable: one setting moving
@@ -49,9 +50,9 @@ Today's ordering is the conventional one: `OFF` > `NORMAL` > `FULL`.
 **Why D-15's `NORMAL` was slow. This is unexplained and is recorded as such.**
 The obvious candidates are ruled out or weakened:
 
-- **Not the instrument.** `stall` and `append` agree here (0.97–0.99×) and on a
-  host control at the same settings (0.96–1.02×) — including for `NORMAL`. A
-  generic `stall`-command fault would have shown on the host too.
+- **Not the instrument.** `stall` and `append` agree here (**within ~3 %**) and
+  on a host control at the same settings (**within ~4.5 %**) — including for
+  `NORMAL`. A generic `stall`-command fault would have shown on the host too.
 - **Not a healthier device.** The NVMe lost-completion defect was **live during
   this run**: `FULL` took a 30 183.9 ms stall and `DMESG_NVME.txt` carries three
   `completion polled` timeouts. If anything the device was worse for `FULL`
