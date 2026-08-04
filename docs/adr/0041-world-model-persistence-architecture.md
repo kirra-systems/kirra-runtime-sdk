@@ -488,8 +488,20 @@ for all of them.
 
 **R2's alongside-rebuild-and-swap has not been prototyped.** D-14 establishes
 that a migration *can* be cheap — it does not establish that the protocol R2
-specifies has been built, or what it costs in code and in peak disk. A second
-projection is a second copy, and D-2's budget is already tight.
+specifies has been built, or what it costs in code and in peak disk.
+
+**A second projection is not a second store.** At the measured baseline (D-2:
+458.51 B/event log-only against 476.32 B/event with projections) projections add
+about **3.7 %** over the event log, so an alongside rebuild near the 8 GiB
+ceiling implies roughly **306 MB** of additional projection storage, not another
+8 GiB. The prototype must still measure peak storage, write amplification and
+cutover behaviour — **capacity is not presently the primary risk.**
+
+> An earlier revision of this section read "a second projection is a second
+> copy, and D-2's budget is already tight." That overstated the risk by roughly
+> two orders of magnitude and is corrected above. It is noted rather than
+> silently replaced because it went into a ratified document: the arithmetic was
+> available in D-2 the whole time and was not done.
 
 This was item 3 of *before this can be ruled on*, and it is **not** closed. It
 is carried forward as a condition of the acceptance: **WM-2 must prototype
@@ -615,8 +627,9 @@ reasons, which D-13 shows are avoidable.
    **1 184×** at 30 000 / 3 200, with the projection result and the chain
    identical. **R3 is satisfiable in practice.**
 3. **Prototype R2's alongside-rebuild-and-swap** far enough to know what it
-   costs in code and in peak disk — a second projection is a second copy, and
-   the D-2 budget is already tight. **Still open.**
+   costs in code, in peak disk, in write amplification and in cutover latency.
+   Storage is the *smallest* of those: projections are ~3.7 % of the store, so
+   a duplicate is ~306 MB at the ceiling, not a second 8 GiB. **Still open.**
 
 Items 1 and 2 are closed on target. **Item 3 is the real engineering, it is
 untouched, and it is the part that should carry a spike before anyone signs** —
@@ -1188,6 +1201,13 @@ Two consequences, and the second matters more than the first:
 
 That is why the resolution proposed for open question 8 constrains what a
 migration is *allowed to do*, rather than picking a downtime budget to live with.
+
+**The general rule this and the tier C defect share** is recorded in the drill
+(§4): *every reported number must state its counting unit, its independence
+unit, the variables held fixed, and the claim it is allowed to support.* Both
+errors were real measurements under a label they had not earned — "rows" read as
+"independent trials", "events at fixed entities" read as "store-size scaling" —
+and a checksum verifies bytes, not interpretation.
 
 ### D-14 — on target: the cost is the statement, and the corrected one is 472–1 184× faster
 
