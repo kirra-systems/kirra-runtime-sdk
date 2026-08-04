@@ -203,13 +203,20 @@ pub fn run(
     );
 
     let mut store = seed(path, durability, seeded, entities, seed_n);
-    store
-        .create_rebuild_projection()
-        .expect("create alongside projection");
 
     let before = process_write_bytes();
     let mut peak = db_bytes(path);
     let t = Instant::now();
+
+    // Creating the alongside tables and their indexes is part of the rebuild's
+    // cost, so it belongs INSIDE the measured window. It sat outside until
+    // review caught it, which undercounted `extra_write_bytes` and wall time by
+    // the DDL — small next to the fold, but the claim being made is that the
+    // measurement includes the indexes, and a claim that excludes what it names
+    // is the defect regardless of magnitude.
+    store
+        .create_rebuild_projection()
+        .expect("create alongside projection");
 
     let mut state = RebuildState::begin();
     let mut folded_to = 0u64;
@@ -327,7 +334,6 @@ pub fn run(
     }
 
     if failure.is_none() {
-        let before_swap = db_bytes(path);
         let c = Instant::now();
         store.swap_rebuild_projection().expect("cutover");
         cutover_ms = c.elapsed().as_secs_f64() * 1e3;
@@ -348,7 +354,6 @@ pub fn run(
         store.drop_retired_projection().expect("retire");
         retire_ms = r.elapsed().as_secs_f64() * 1e3;
         projection_bytes = store.free_bytes().unwrap_or(0).saturating_sub(free_before);
-        let _ = before_swap;
     }
 
     let wall_ms = t.elapsed().as_secs_f64() * 1e3;

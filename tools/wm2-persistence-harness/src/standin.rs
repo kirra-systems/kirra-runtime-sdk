@@ -705,7 +705,11 @@ impl Store {
     pub fn create_rebuild_projection(&mut self) -> rusqlite::Result<()> {
         if self.rebuild_index_names_are_live()? {
             return Err(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                // SQLITE_ERROR, not SQLITE_MISUSE: the caller did nothing
+                // invalid at the API level. This is a state-based refusal, and
+                // MISUSE would read in a log as though the caller had done
+                // something unsafe.
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
                 Some(
                     "a cutover has already happened on this store: the live projection carries \
                      the _rebuild index names, so a second rebuild cycle cannot create them. \
@@ -815,15 +819,25 @@ impl Store {
     /// NOT dropped here: reclaiming them is separate work with its own cost, and
     /// folding it into the swap would overstate the window in which readers are
     /// blocked. See [`Store::drop_retired_projection`].
+    /// Driven through rusqlite's transaction API rather than a hand-written
+    /// `BEGIN IMMEDIATE … COMMIT` batch. With the batch form, a statement that
+    /// errors mid-way leaves the transaction OPEN on the connection — the
+    /// `COMMIT` is never reached and nothing rolls it back, so the store stays
+    /// locked and every later operation inherits a failed cutover's
+    /// transaction. The RAII guard rolls back on drop, which is the behaviour
+    /// invariant 4 assumes: a failed swap leaves the previous projection
+    /// active and untouched.
     pub fn swap_rebuild_projection(&mut self) -> rusqlite::Result<()> {
-        self.conn.execute_batch(
-            "BEGIN IMMEDIATE;
-             ALTER TABLE entities_projection      RENAME TO entities_projection_retired;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute_batch(
+            "ALTER TABLE entities_projection      RENAME TO entities_projection_retired;
              ALTER TABLE relationships_projection RENAME TO relationships_projection_retired;
              ALTER TABLE entities_projection_rebuild      RENAME TO entities_projection;
-             ALTER TABLE relationships_projection_rebuild RENAME TO relationships_projection;
-             COMMIT;",
-        )
+             ALTER TABLE relationships_projection_rebuild RENAME TO relationships_projection;",
+        )?;
+        tx.commit()
     }
 
     /// Drop what the cutover retired. Reclamation, measured on its own.
