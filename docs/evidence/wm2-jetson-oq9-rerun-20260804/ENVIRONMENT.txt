@@ -1,0 +1,14 @@
+io_timeout: 30
+dirty_expire_centisecs: 3000
+Node                  SN                   Model                                    Namespace Usage                      Format           FW Rev  
+--------------------- -------------------- ---------------------------------------- --------- -------------------------- ---------------- --------
+/dev/nvme0n1          JRD2025120012734     SSD NVME 256GB                           1         256.06  GB / 256.06  GB    512   B +  0 B   VC400622
+
+Filesystem state:         clean with errors
+Errors behavior:          Continue
+Mount count:              50
+Maximum mount count:      -1
+Last checked:             Thu Jun 26 04:52:21 2025
+
+Linux yahboom 5.15.148-tegra #1 SMP PREEMPT Tue Jan 7 17:14:38 PST 2025 aarch64 aarch64 aarch64 GNU/Linux
+/dev/nvme0n1p1 ext4
