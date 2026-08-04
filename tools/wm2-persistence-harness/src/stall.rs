@@ -111,15 +111,6 @@ pub struct WindowedDelta {
 }
 
 impl WindowedDelta {
-    /// Is this delta actually about the stall it names?
-    ///
-    /// Bounded on BOTH sides. Too wide and the counters describe more than the
-    /// stall (the original defect). Too narrow and they describe only part of
-    /// it, which is just as wrong and less obvious — a window covering 17 % of a
-    /// commit is not "a slightly conservative measurement", it is a different
-    /// measurement. [`delta_over_window`] already guarantees containment by
-    /// construction; this repeats it so a hand-built `WindowedDelta` cannot
-    /// claim to be usable without it.
     /// Device busy-ms per ms of window. Not a probability: `/proc/diskstats`
     /// field 13 accumulates per-I/O service time, so this has no fixed ceiling
     /// and only means something next to another measurement of the same thing.
@@ -139,6 +130,15 @@ impl WindowedDelta {
         }
     }
 
+    /// Is this delta actually about the stall it names?
+    ///
+    /// Bounded on BOTH sides. Too wide and the counters describe more than the
+    /// stall (the original defect). Too narrow and they describe only part of
+    /// it, which is just as wrong and less obvious — a window covering 17 % of a
+    /// commit is not "a slightly conservative measurement", it is a different
+    /// measurement. [`delta_over_window`] already guarantees containment by
+    /// construction; this repeats it so a hand-built `WindowedDelta` cannot
+    /// claim to be usable without it.
     pub fn window_is_usable(&self) -> bool {
         self.samples >= MIN_WINDOW_SAMPLES
             && self.covered_ms > 0.0
@@ -277,11 +277,17 @@ pub fn baseline_busy_rate_excluding(
         .disk_io_ms?
         .checked_sub(first.sample.disk_io_ms?)? as f64;
 
-    let window = delta_over_window(series, start_ms, end_ms);
-    let (win_ms, win_busy) = match &window {
-        Some(w) => (w.covered_ms, w.delta.disk_io_ms.unwrap_or(0) as f64),
-        None => (0.0, 0.0),
-    };
+    // Every branch below fails closed, and the direction matters. Treating an
+    // unresolvable window as zero-width would compute the "baseline" across the
+    // WHOLE series — including the stall — and since these stalls are quiet, that
+    // drags the baseline DOWN and makes the stall look relatively busier. The
+    // silent fallback would therefore bias toward `IO-DEVICE`, which is the one
+    // verdict this control exists to make harder.
+    let window = delta_over_window(series, start_ms, end_ms)?;
+    // A window without its own busy counter cannot have its share removed;
+    // subtracting zero would overstate the remainder for the same reason.
+    let win_busy = window.delta.disk_io_ms? as f64;
+    let win_ms = window.covered_ms;
 
     let rest_ms = total_ms - win_ms;
     // Guard the denominator AND demand enough of the run to be outside the
@@ -289,7 +295,14 @@ pub fn baseline_busy_rate_excluding(
     if rest_ms < MIN_BASELINE_MS {
         return None;
     }
-    Some(((total_busy - win_busy).max(0.0)) / rest_ms)
+    // Not clamped. A window busier than the whole series it came from means the
+    // counters disagree with themselves, and a clamp to 0.0 would present that
+    // as a perfectly idle baseline — the most permissive possible answer.
+    let rest_busy = total_busy - win_busy;
+    if rest_busy < 0.0 {
+        return None;
+    }
+    Some(rest_busy / rest_ms)
 }
 
 /// The stalling repetitions' durations, ascending, from every repetition's worst
@@ -1163,6 +1176,62 @@ mod tests {
         let w = windowed_delta_with_baseline(&v, 1_000.0, 3_000.0).expect("resolvable");
         assert_eq!(w.busy_against_baseline(), Some(false));
         assert_eq!(attribute_stall(&w).token(), "UNATTRIBUTED");
+    }
+
+    #[test]
+    fn an_unresolvable_window_yields_no_baseline_rather_than_a_whole_series_one() {
+        // The silent fallback this replaces computed the baseline across the
+        // WHOLE series when the window would not resolve — including the stall.
+        // These stalls are QUIET, so folding one in drags the baseline down and
+        // makes the stall look relatively busier: the fallback biased toward
+        // IO-DEVICE, the single verdict this control exists to make harder.
+        let s = series(60_000, 0.0, 10_000.0);
+        // A window past the end of the series cannot be bracketed.
+        assert!(delta_over_window(&s, 90_000.0, 91_000.0).is_none());
+        assert!(
+            baseline_busy_rate_excluding(&s, 90_000.0, 91_000.0).is_none(),
+            "an unresolvable window produced a baseline computed over the stall"
+        );
+    }
+
+    #[test]
+    fn a_window_without_its_own_busy_counter_yields_no_baseline() {
+        // Subtracting zero for a window whose counter is absent overstates the
+        // remainder, which again flatters the device.
+        let mut v = Vec::new();
+        let mut t = 0u64;
+        while t <= 5_000 {
+            v.push(StampedSample {
+                at_ms: t as f64,
+                sample: SystemSample {
+                    // No disk_io_ms anywhere: the series cannot support the
+                    // comparison at all.
+                    dirty_kb: Some(1_024),
+                    writeback_kb: Some(0),
+                    ..Default::default()
+                },
+            });
+            t += SAMPLE_INTERVAL_MS;
+        }
+        assert!(baseline_busy_rate_excluding(&v, 1_000.0, 2_000.0).is_none());
+    }
+
+    #[test]
+    fn counters_that_disagree_with_themselves_yield_no_baseline() {
+        // A window busier than the whole series it came from is impossible, so
+        // the counters are inconsistent. Clamping to 0.0 would report a
+        // perfectly idle baseline — the most permissive answer available, from
+        // data known to be wrong.
+        let w = WindowedDelta {
+            delta: d(None, Some(9_999), Some(1_024), None),
+            stall_ms: 1_000.0,
+            covered_ms: 1_020.0,
+            samples: 51,
+            baseline_busy_rate: Some(0.0),
+        };
+        // A zero baseline is refused by the comparison rather than treated as a
+        // bar everything clears.
+        assert_eq!(w.busy_against_baseline(), None);
     }
 
     #[test]
