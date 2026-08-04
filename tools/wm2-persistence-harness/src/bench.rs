@@ -104,6 +104,25 @@ pub fn db_bytes(path: &Path) -> u64 {
 // Append
 // ---------------------------------------------------------------------------
 
+/// When one commit happened, as milliseconds from the start of the append loop.
+///
+/// Exists so a stall can be correlated with system counters sampled *across it*
+/// rather than across the whole run. Without a window, the only honest thing to
+/// say about a concurrent counter is that it accumulated somewhere during the
+/// run — see [`crate::stall`], where reading a whole-run counter against a
+/// one-commit duration was a real defect (ADR-0041 open question 9).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CommitWindow {
+    pub start_ms: f64,
+    pub end_ms: f64,
+}
+
+impl CommitWindow {
+    pub fn duration_ms(&self) -> f64 {
+        self.end_ms - self.start_ms
+    }
+}
+
 pub struct AppendResult {
     pub timing: Timing,
     pub durability: Durability,
@@ -111,6 +130,11 @@ pub struct AppendResult {
     pub events: u64,
     pub events_per_second: f64,
     pub hash_share_percent: f64,
+    /// The window of the single slowest commit. `None` only when no commit ran.
+    ///
+    /// This is the slowest by the same measurement that produces
+    /// `timing.max_us`, so the two always describe the same commit.
+    pub slowest_commit: Option<CommitWindow>,
 }
 
 /// Append `events` in transactions of `batch` events each, timing every commit.
@@ -143,11 +167,26 @@ pub fn append(
     };
 
     let mut durations = Vec::with_capacity(all.len() / batch.max(1) + 1);
+    let mut slowest: Option<(Duration, CommitWindow)> = None;
     let wall = Instant::now();
     for chunk in all.chunks(batch.max(1)) {
         let t = Instant::now();
         store.append_batch(chunk).map_err(|e| e.to_string())?;
-        durations.push(t.elapsed());
+        let took = t.elapsed();
+        // Offsets from the loop start, not absolute time: the sampler in
+        // `stall` measures against the same origin, and two clocks would make
+        // the correlation meaningless.
+        let start_ms = t.duration_since(wall).as_secs_f64() * 1e3;
+        if slowest.as_ref().is_none_or(|(d, _)| took > *d) {
+            slowest = Some((
+                took,
+                CommitWindow {
+                    start_ms,
+                    end_ms: start_ms + took.as_secs_f64() * 1e3,
+                },
+            ));
+        }
+        durations.push(took);
     }
     let wall = wall.elapsed().as_secs_f64();
 
@@ -168,6 +207,7 @@ pub fn append(
         } else {
             f64::NAN
         },
+        slowest_commit: slowest.map(|(_, w)| w),
         timing,
     })
 }
@@ -662,6 +702,31 @@ mod tests {
         assert_eq!(a.events, 2_000);
         assert!(a.timing.samples == 2_000, "batch=1 should time every event");
         assert!(a.hash_share_percent.is_finite() && a.hash_share_percent >= 0.0);
+        remove_db(&p);
+    }
+
+    #[test]
+    fn the_slowest_commit_window_describes_the_same_commit_as_max_us() {
+        // The stall attribution correlates system counters against this window,
+        // so a window that named a DIFFERENT commit than `max_us` would put the
+        // counters on the wrong two seconds and report confidently from them.
+        // Cheap to assert here, and the alternative is unfalsifiable on target.
+        let p = temp("append-window");
+        let a = append(&p, Durability::Off, 2_000, 100, 16, 4).unwrap();
+        let w = a
+            .slowest_commit
+            .expect("commits ran, so there is a slowest");
+        assert!(
+            (w.duration_ms() - a.timing.max_us / 1e3).abs() < 1e-6,
+            "window {:.6} ms != max_us {:.6} ms — they name different commits",
+            w.duration_ms(),
+            a.timing.max_us / 1e3
+        );
+        assert!(w.start_ms >= 0.0 && w.end_ms >= w.start_ms);
+        assert!(
+            w.end_ms <= a.timing.total_ms + 1.0,
+            "window ends past the whole append loop"
+        );
         remove_db(&p);
     }
 

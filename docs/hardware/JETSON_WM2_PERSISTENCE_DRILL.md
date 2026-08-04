@@ -674,9 +674,31 @@ and would multiply every routine drill.
 - **`median_throughput_eps`**, a median across repetitions. One pathological run
   cannot move it, so throughput and stall rate become two separate facts rather
   than the single contaminated one the original benchmark produced.
-- **Concurrent system counters**, sampled across each run: PSI `full` I/O stall,
-  `/proc/diskstats` busy-milliseconds, peak dirty+writeback, hottest thermal
-  zone.
+- **Concurrent system counters**, sampled across **the stalling commit**: PSI
+  `full` I/O stall, `/proc/diskstats` busy-milliseconds, peak dirty+writeback,
+  hottest thermal zone.
+
+### The counters describe one commit, not the run — check that they do
+
+A background sampler records these every 20 ms with a timestamp, and the delta
+is taken across the window of the **single slowest commit**. Three fields on the
+record say how well that window resolved, and they should be read before the
+attribution:
+
+| Field | Read it as |
+|---|---|
+| `counter_window_ms` | the span the counters actually cover. For a real stall this should be within a few tens of ms of `worst_commit_ms` |
+| `counter_window_samples` | how many 20 ms samples fell in the window. A 1 s stall should yield ~50 |
+| `counter_window_usable` | `1` if the window is tight enough to attribute from; `0` and the attribution will be `UNATTRIBUTED` on instrument grounds |
+
+**Why this is called out.** Before 2026-08-04 the delta was taken across the
+whole repetition and compared against a single commit's duration. A repetition
+with a few seconds of ordinary device busy-time satisfies "block layer busy for
+most of the stall" no matter what the device did during the stall, so the
+instrument could report `IO-DEVICE` from an idle disk — and did, once, in D-10.
+That attribution is withdrawn. If you see `counter_window_usable: 0` on a run
+with a real stall, the counters are not describing it and the verdict is about
+the instrument, not the device; the detail string says so explicitly.
 
 ### Attribution is deliberately reluctant
 
@@ -746,7 +768,7 @@ retyping of one.
 | Tier A / B | `crash` → `outcome` + `detail` |
 | Tier C | the trials ledger, plus `tier_c_trials_recorded` / `tier_c_trials_required` |
 | **Scale sweep** (§9) | `sweep_point` rows + the `sweep_summary` `verdict` / `supports_option_a` |
-| **The ~29 s stall** (§9a) | `stall` → `stall_rate`, `median_throughput_eps`, `attribution`, and the four system-counter fields |
+| **The ~29 s stall** (§9a) | `stall` → `stall_rate`, `median_throughput_eps`, `attribution`, the four system-counter fields, and the three `counter_window_*` fields that say what span those counters cover |
 
 Three of those deserve to be read rather than filed:
 
