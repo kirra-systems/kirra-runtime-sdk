@@ -281,12 +281,30 @@ invalid-until-confirmed rule. A fold refused midway under disk pressure leaves
 
 **Does not resolve — the same question in the live store.** OQ7 is about
 behaviour under disk pressure in a real store. The protocol says what the state
-must be; S-1 above says the state record must be durable and transactional with
-the fold; neither is implemented, because implementing it means store work that
-ADR-0042 Decision 5 gates. **OQ7 should be recorded as resolved-in-design with
-the implementation condition named**, on the same footing OQ8 was — where the
-strategy was adopted and the R2 prototype obligation carried explicitly rather
-than quietly.
+must be; §8 says the state record must be durable and transactional with the
+fold; none of it is implemented, because implementing it means store work that
+ADR-0042 Decision 5 gates.
+
+**The ruling, 2026-08-04**, recorded in ADR-0041's OQ7 entry:
+
+> OQ7 is resolved at the protocol level. Full closure is conditional on the
+> production store implementing and testing durable rebuild state,
+> pinned-generation equivalence verification, and atomic cutover with restart
+> recovery.
+
+Which properties fall on which side:
+
+| Property | Protocol | Store |
+|---|---|---|
+| Restart/recovery | **Answered** — `on_restart` is total (§7) | S-1: the durable state record it resumes from |
+| Old-active preservation on failure | **Guaranteed** — no transition retires a projection (§5, invariant 4) | — |
+| Equivalence proof before activation | **Required** — `Active` only from `Verified` (§5, invariant 6) | **S-4: the comparison itself** |
+| Cutover atomicity | **State transition** is atomic (§5, invariant 3) | **S-2: the database swap, for readers and across restart** |
+
+The two bold store entries are the load-bearing gap. Recorded this way so the
+state machine does not stand in for unbuilt persistence behaviour — the same
+posture as OQ8, where the strategy was adopted and the R2 prototype obligation
+carried explicitly rather than quietly.
 
 **Does not discharge — the R2 cost obligation.** ADR-0041's acceptance record
 carries one outstanding obligation: prototype R2's alongside-rebuild-and-swap far

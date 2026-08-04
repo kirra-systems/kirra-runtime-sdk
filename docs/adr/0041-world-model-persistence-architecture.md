@@ -442,12 +442,26 @@ source; they are not migrated destructively (ADR-0040).
    only in `Active`; a fold refused midway leaves `Building`, which cannot serve
    and cannot cut over. The marker OQ7 said was missing **is the protocol state
    itself**, so it need not be inferred from row counts or a sentinel row.
-   **Implementation condition, explicitly not met:** the protocol is correct only
-   if the store makes the rebuild-state record durable and transactional with the
-   fold progress it describes (design §8, S-1) and supplies an atomic swap
-   (S-2). Neither is built, because both are store work gated by ADR-0042
-   Decision 5. This is recorded on the same footing as open question 8 — the
-   design is adopted, the obligation is carried in the open rather than quietly.
+   **Disposition, ruled 2026-08-04:**
+
+   > OQ7 is resolved at the protocol level. Full closure is conditional on the
+   > production store implementing and testing durable rebuild state,
+   > pinned-generation equivalence verification, and atomic cutover with restart
+   > recovery.
+
+   The split behind that ruling. The protocol answers **restart/recovery**
+   (`on_restart` is total), guarantees **old-active preservation** (no
+   transition retires a projection at all), requires an **equivalence proof
+   before activation** (`Active` is reachable only from `Verified`), and makes
+   the **state transition** atomic (`Verified → Active`, no intermediate). Two
+   load-bearing properties still depend on the store and are **not** built:
+   the equivalence *comparison* at the pinned generation (design §8, S-4), and
+   the *database* cutover being atomic for readers and durable across restart
+   (S-1, S-2). Those are store work gated by ADR-0042 Decision 5.
+
+   Recorded this way so the state machine does not stand in for unbuilt
+   persistence behaviour — the same posture as open question 8, where the design
+   is adopted and the obligation is carried in the open rather than quietly.
 8. **Migration strategy — RESOLVED 2026-08-04** by adopting R1–R5 (see *Open
    question 8 — resolution*), subject to the outstanding R2 prototype obligation
    in the *Acceptance record*. Was blocking for acceptance (D-6, D-13).
