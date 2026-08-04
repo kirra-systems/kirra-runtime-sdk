@@ -1611,15 +1611,29 @@ which the robot was still operating.
     the filesystem fails closed on detected corruption.
   - Neither addresses the root cause, and a lower timeout bounds the *recovery*
     of the symptom rather than preventing it.
-- **Instrument caveat that this AoU depends on.** With a 5 s stall, device
-  busy-time inside the measured window was **34.3 %** against 1–2 % for the 30 s
-  stalls (ordinary non-stalling windows in the same runs read 74–100 %), and the
-  harness attributes `IO-DEVICE` above 50 %. Qualifying a drive
-  against a *short* timeout therefore risks a stall of this kind being labelled
-  a busy device — the false attribution the windowing fix removed. Until that
-  threshold is re-derived for short windows, read `UNATTRIBUTED` at a low
-  timeout as weaker evidence than the same verdict at a long one. See D-15
-  *Mitigation measured*.
+- **Instrument caveat that this AoU depends on — ADDRESSED 2026-08-04.** With a
+  5 s stall, device busy-time inside the measured window was **34.3 %**, versus
+  1–2 % for the 30 s stalls and 74–100 % for ordinary non-stalling windows in
+  the same runs — all judged by a single absolute `IO-DEVICE` threshold of 50 %.
+  Qualifying a drive at a *short* timeout therefore risked a stall of this kind
+  being labelled a busy device, the false attribution the windowing fix removed.
+
+  The instrument now judges busy-time against a **baseline measured on the same
+  device in the same run**, outside the stall window, and attributes `IO-DEVICE`
+  only if the device was at least as busy as usual. Same metric on both sides,
+  so window length cancels and the comparison transfers across timeout values.
+  The three measured stalls sit at ≈0.02, 0.01 and 0.40 of baseline.
+
+  **What is still weaker, and why this bullet is not deleted.** The absolute
+  threshold was *not* recalibrated — one short-window measurement cannot
+  re-derive it — so it is applied in conjunction with the baseline test, where
+  it can only remove verdicts. Where no baseline can be drawn (no counter, or
+  too little of the run outside the stall), the `IO-DEVICE` verdict stays
+  reachable — refusing outright would lose real findings on systems that cannot
+  supply a control — but rests on the uncalibrated constant alone and discloses
+  it. **Read an `IO-DEVICE` attribution carrying `NO BASELINE` as weaker
+  evidence than one carrying a baseline; it is the case this bullet was
+  originally written about.** See D-15 *Mitigation measured*.
 - **Scope is coverage, not durability.** Every timed-out command had completed —
   nothing was lost or retried, and D-11's five power cuts are unaffected. This
   is an availability and memory-completeness assumption.

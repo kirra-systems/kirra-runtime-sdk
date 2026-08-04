@@ -1545,7 +1545,35 @@ Three results the predictions did not cover, recorded as observations:
    attribution the windowing fix removed, this time from a correctly-windowed
    measurement. The threshold was calibrated against 30 s stalls and does not
    obviously transfer to shorter windows, where background I/O is a larger
-   fraction of the span. **Not yet addressed.**
+   fraction of the span.
+
+   **Addressed 2026-08-04, by a control rather than a recalibration.** The
+   attribution now also asks whether the device was *at least as busy as usual*,
+   compared with a baseline measured on the same device in the same run with the
+   stall window's share removed. That is what `IO-DEVICE` claims, and it is
+   self-calibrating: the same metric on both sides, so window length cancels.
+
+   **So the risk described above no longer applies as stated.** Where a baseline
+   can be drawn, `IO-DEVICE` requires **both** tests — the 0.5 absolute bar
+   *and* at-or-above baseline — so clearing 0.5 is no longer sufficient, and a
+   5 s stall of the kind measured here is refused on the baseline arm at ~0.40.
+   The 0.5 bar only decides alone in the **fallback** case, where no baseline is
+   available, and there the verdict discloses that (`NO BASELINE`). The
+   paragraph above is retained as the record of why the control was added, not
+   as a live risk.
+   Against it the three measured stalls sit at roughly **0.02, 0.01 and 0.40** of
+   baseline — a wide margin rather than the coin flip the absolute test had
+   become. Deeper than the calibration problem: `/proc/diskstats` field 13
+   accumulates per-I/O *service time*, so the ratio has no fixed ceiling and 0.5
+   was never a probability.
+
+   **The absolute constant was NOT recalibrated, deliberately.** One short-window
+   measurement cannot re-derive it, and the known failure mode is a *false*
+   `IO-DEVICE`, so the relative arm is applied **in conjunction** — it can only
+   remove verdicts, never add them. `IO_BUSY_FRACTION = 0.5` remains an
+   uncalibrated constant that no longer decides anything on its own; where no
+   baseline can be drawn, the verdict stays reachable but is reported as
+   `NO BASELINE: absolute test only, the weaker evidence`.
 
 **`NORMAL`/b1's median throughput is bimodal across four target runs** — 5 143
 (D-10), 9 485, 9 821, 5 006 ev/s — two clusters roughly 2× apart. A median is
