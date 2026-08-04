@@ -1612,11 +1612,11 @@ which the robot was still operating.
   - Neither addresses the root cause, and a lower timeout bounds the *recovery*
     of the symptom rather than preventing it.
 - **Instrument caveat that this AoU depends on — ADDRESSED 2026-08-04.** With a
-  5 s stall, device busy-time inside the measured window was **34.3 %** against
-  1–2 % for the 30 s stalls (ordinary non-stalling windows in the same runs read
-  74–100 %), against an absolute `IO-DEVICE` threshold of 50 %. Qualifying a
-  drive against a *short* timeout therefore risked a stall of this kind being
-  labelled a busy device — the false attribution the windowing fix removed.
+  5 s stall, device busy-time inside the measured window was **34.3 %**, versus
+  1–2 % for the 30 s stalls and 74–100 % for ordinary non-stalling windows in
+  the same runs — all judged by a single absolute `IO-DEVICE` threshold of 50 %.
+  Qualifying a drive at a *short* timeout therefore risked a stall of this kind
+  being labelled a busy device, the false attribution the windowing fix removed.
 
   The instrument now judges busy-time against a **baseline measured on the same
   device in the same run**, outside the stall window, and attributes `IO-DEVICE`
