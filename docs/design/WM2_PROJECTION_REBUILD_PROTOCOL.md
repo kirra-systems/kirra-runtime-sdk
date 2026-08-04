@@ -6,7 +6,7 @@
 | **Status** | **Design — proposed.** The protocol and its tests exist; the store-side implementation does not, and is gated by ADR-0042 Decision 5. |
 | **Implements** | ADR-0041 **R2** — "Projection changes are rebuilds, not backfills, and they run alongside" |
 | **Addresses** | ADR-0041 **open question 7** — partial projections under disk pressure |
-| **Prototype** | `tools/wm2-persistence-harness/src/rebuild.rs` (pure state machine, 14 tests) |
+| **Prototype** | `tools/wm2-persistence-harness/src/rebuild.rs` (pure state machine, 15 tests) |
 | **Date** | 2026-08-04 |
 
 > Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508
@@ -34,7 +34,7 @@ question a query path actually asks — *when may this projection be believed*.
   closure of the prototype.
 - **Cost.** ADR-0041's outstanding R2 obligation asks what alongside-rebuild
   costs "in code, in peak disk, in write amplification and in cutover latency".
-  This document answers the *code* half — the protocol is 269 lines and its
+  This document answers the *code* half — the protocol is 319 lines and its
   decision surface is exhaustively testable — and answers none of the other
   three. See §9.
 
@@ -114,13 +114,13 @@ a caller cannot log "transition failed" without saying which one).
 
 | from \ on | `fold_progress(p)` | `reached_head(h)` | `append(h)` | `equivalence_proven(g)` | `cutover(h)` | `failure(r)` | `restart()` |
 |---|---|---|---|---|---|---|---|
-| `Building{f}` | `Building{p}`, — if `p < f` | `CaughtUp{h}`, — if `f > h` | `Building{f}`, — if `h < f` | — | — | `Failed(r)` | `Building{f}` |
+| `Building{f}` | `Building{p}`, — if `p < f` | `CaughtUp{h}`, — unless `f == h` | `Building{f}`, — if `h < f` | — | — | `Failed(r)` | `Building{f}` |
 | `CaughtUp{at}` | — | — | **`Building{at}`**, — if `h < at` | `Verified{g}` if `g == at`, else — | — | `Failed(r)` | `Building{at}` |
 | `Verified{at}` | — | — | **`Building{at}`**, — if `h < at` | — | `Active` if `h == at`, else — | `Failed(r)` | **`Building{at}`** |
 | `Active` | — | — | `Active` | — | — | — | `Active` |
 | `Failed(_)` | — | — | — | — | — | — | `Failed(_)` |
 
-Five cells carry the argument.
+Six cells carry the argument.
 
 **`Verified` + `append` → `Building`.** The single most important transition
 here, and the one a hand-rolled implementation would omit. The proof was taken at
@@ -129,6 +129,16 @@ would be served. It **demotes rather than fails** — nothing is wrong, the worl
 simply moved — and it demotes to `Building` rather than `CaughtUp` because the
 projection is now genuinely behind by the appended event. It has to fold again,
 not merely be re-proven.
+
+**`reached_head` refused unless the fold position *equals* the head.** Folding
+past it is impossible; folding short of it and claiming catch-up anyway is the
+dangerous case, and it is not obviously dangerous, which is why it is stated
+here. `CaughtUp` is one transition from `Verified` and two from `Active`, so
+accepting `reached_head(900)` from a projection folded only to 400 activates an
+unfolded projection asserting it is current at 900 — **with every other
+invariant in §5 still satisfied**. The state machine does not assume its caller
+has folded as far as it says it has; that assumption is the thing a decision
+table exists to remove.
 
 **`cutover` refused unless `h == at`.** Belt and braces for the same race: even
 if a caller reached `Verified` and the head moved by a path the state machine did
@@ -287,7 +297,7 @@ and its decision surface is exhaustively testable. The other three are
 
 | Cost | Status |
 |---|---|
-| Code | Answered. 269 lines of protocol (about a fifth of it documentation) plus 249 of tests; 14 tests; no store dependency |
+| Code | Answered. 319 lines of protocol (about a third of it documentation) plus 266 of tests; 15 tests; no store dependency |
 | Peak disk | **Unmeasured.** Bounded above by the D-2 arithmetic — projections are 3.74 % of store size, so a duplicate is ≈306 MiB (321 MB) at the 8 GiB ceiling — but *bounded* is not *measured*, and that figure is an arithmetic consequence of a measurement, not itself one |
 | Write amplification | **Unmeasured.** The fold writes the whole projection while ingest writes it incrementally; the sum has not been observed |
 | Cutover latency | **Unmeasured.** Depends entirely on S-2, which is not chosen |
@@ -305,7 +315,7 @@ rebuild throughput, peak disk during a rebuild, or the cost of the swap.
 ## 10. Prototype status
 
 `tools/wm2-persistence-harness/src/rebuild.rs` — pure state machine, no SQL, no
-I/O, no schema. 14 tests covering the six invariants, fold-position and log-head
+I/O, no schema. 15 tests covering the six invariants, fold-position and log-head
 sanity, convergence, and the two end-to-end paths (clean run; late append forcing
 another lap rather than a stale cutover).
 

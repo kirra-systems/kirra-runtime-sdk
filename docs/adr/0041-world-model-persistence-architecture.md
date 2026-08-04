@@ -519,7 +519,7 @@ the partial-projection state (open question 7) are.
 > **Partial discharge, 2026-08-04 — the code half only.**
 > `docs/design/WM2_PROJECTION_REBUILD_PROTOCOL.md` (KIRRA-WM2-REBUILD-001)
 > specifies the protocol and prototypes it as a pure state machine
-> (`tools/wm2-persistence-harness/src/rebuild.rs`, 14 tests), which answers *what
+> (`tools/wm2-persistence-harness/src/rebuild.rs`, 15 tests), which answers *what
 > it costs in code* and resolves the partial-projection state named in the
 > paragraph above. **Peak storage, write amplification and cutover latency remain
 > unmeasured**, and the design deliberately says so rather than letting a

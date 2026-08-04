@@ -145,11 +145,27 @@ impl RebuildState {
     }
 
     /// The fold reached the log head, which was at `head` when observed.
+    ///
+    /// Requires the fold position to **equal** `head`. Folding *past* it is
+    /// impossible; folding *short* of it and calling this anyway would claim a
+    /// catch-up that did not happen — and since `CaughtUp` is one
+    /// `on_equivalence_proven` away from `Verified` and two from `Active`, that
+    /// claim would activate a projection folded to 400 while asserting it is
+    /// current at 900. The state machine does not assume its caller has folded
+    /// as far as it says.
     pub fn on_reached_head(&self, head: u64) -> Step {
         match self {
-            Self::Building { folded_to } if *folded_to > head => Err(self.refuse(
+            Self::Building { folded_to } if *folded_to != head => Err(self.refuse(
                 "reached_head",
-                format!("folded past the head it claims to have reached: {folded_to} > {head}"),
+                if *folded_to > head {
+                    format!("folded past the head it claims to have reached: {folded_to} > {head}")
+                } else {
+                    format!(
+                        "not caught up: folded to {folded_to}, head is {head}. \
+                         Keep folding — claiming this would put an unfolded projection \
+                         two transitions from serving"
+                    )
+                },
             )),
             Self::Building { .. } => Ok(Self::CaughtUp { at: head }),
             _ => Err(self.refuse("reached_head", "only a Building projection can catch up")),
@@ -161,9 +177,13 @@ impl RebuildState {
     /// **This is the transition that makes the protocol correct.** A `Verified`
     /// projection was proven equivalent *at a generation*; once the log moves,
     /// that proof describes a state that is no longer current, so the
-    /// projection drops back to `CaughtUp` and must be verified again. Omitting
-    /// this is how an alongside-rebuild silently activates a projection that
-    /// was never checked against the data it is about to serve.
+    /// projection drops back to `Building` and must be folded and verified
+    /// again. Omitting this is how an alongside-rebuild silently activates a
+    /// projection that was never checked against the data it is about to serve.
+    ///
+    /// It demotes to `Building`, not `CaughtUp`: the appended event puts the
+    /// projection genuinely behind the head, so there is fold work to do and
+    /// not merely a proof to retake.
     pub fn on_append(&self, head: u64) -> Step {
         // The log head cannot land behind work already folded out of it. If it
         // does, the generation source is not monotonic (design §8, S-3) and
@@ -473,6 +493,24 @@ mod tests {
         assert_eq!(
             built_to(500).on_reached_head(500).unwrap(),
             RebuildState::CaughtUp { at: 500 }
+        );
+    }
+
+    #[test]
+    fn claiming_catch_up_short_of_the_head_cannot_smuggle_a_partial_fold_through() {
+        // The hole this closes: CaughtUp is one transition from Verified and
+        // two from Active, so accepting `reached_head(900)` from a projection
+        // folded only to 400 would activate an unfolded projection asserting it
+        // is current at 900 — with every other invariant still satisfied.
+        assert!(built_to(400).on_reached_head(900).is_err());
+        // And the whole path is closed, not just the first step.
+        let smuggled = built_to(400)
+            .on_reached_head(900)
+            .and_then(|s| s.on_equivalence_proven(900))
+            .and_then(|s| s.on_cutover(900));
+        assert!(
+            smuggled.is_err(),
+            "a projection folded to 400 reached Active claiming generation 900"
         );
     }
 
