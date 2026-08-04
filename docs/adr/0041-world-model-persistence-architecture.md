@@ -1739,6 +1739,10 @@ never the host's to settle.
 
 ### D-16a — the target run: cutover holds, and write amplification cannot be measured on this hardware
 
+Evidence: `docs/evidence/wm2-r2-target-20260804/`. Every figure in the table
+below was re-verified against that raw result stream after transfer, and the
+set carries its own `SHA256SUMS`.
+
 `JETSON-TARGET-MEASURED`, 2026-08-04, Jetson Orin NX / `/dev/nvme0n1p1` ext4,
 same parameters as the host sweep (`--events 40000 --entities 2000`, total
 ingest 16 000), so the only variable is the hardware.
