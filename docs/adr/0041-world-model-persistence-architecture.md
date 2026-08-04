@@ -404,6 +404,13 @@ source; they are not migrated destructively (ADR-0040).
    zero stalls. `NORMAL` slower than `FULL` is not predicted by any durability
    model, and until it is explained a per-source-class policy should not be
    fixed at batch=64. The batch=1 ordering is correct and could be decided now.
+   **The inversion REPRODUCED on target 2026-08-04 (D-15):** `OFF` 54 636 >
+   `FULL` 30 545 > `NORMAL` 19 881 — the same ordering, all three medians within
+   3 % of D-10, from configurations recording zero stalls in both runs. Two
+   independent observations make it a real effect rather than noise, so this
+   blocker is **stronger**, not weaker. D-15 does not touch it: the stall
+   mechanism turned out to be a driver defect independent of `synchronous`,
+   which is a different question from why `NORMAL` is slower than `FULL`.
 2. Retention classes: exact list and their durations. The harness models the
    §11.3 protected set (safety, incident, calibration, adjudication, operator)
    and enforces it — a window containing any of them is refused whole — but the
@@ -472,7 +479,27 @@ source; they are not migrated destructively (ADR-0040).
    particular backfill statement*, and the same schema change written as a
    grouped pass is orders of magnitude cheaper. See *Open question 8 — drafted
    resolution*.
-9. **Multi-second write stalls (O-1, D-10).** **Measured on target; the
+9. **Multi-second write stalls (O-1, D-10, D-15). MECHANISM IDENTIFIED
+   2026-08-04 — a lost NVMe completion interrupt, bounded by the driver's 30 s
+   `io_timeout`.** Five stalls in 120 repetitions coincide one-for-one with five
+   `nvme0: I/O ... timeout, completion polled` entries in the kernel log; the
+   stall durations are the timeout plus 19.4 ms and 182.4 ms of handler latency;
+   and the device was **1–2 % busy** across windows that cover the stalls
+   themselves, against 107–214 % on ordinary windows. The commands had all
+   completed — **durability is unaffected**, and D-11 stands independently. This
+   is a **platform/driver defect, not a persistence-architecture property**:
+   SQLite, the schema and `synchronous` are bystanders. See **D-15** and
+   `docs/evidence/wm2-jetson-oq9-rerun-20260804/`.
+   **What remains open** is the *root* cause of the lost interrupt — controller
+   firmware, PCIe ASPM, or Tegra MSI-X routing are the candidates and this run
+   does not discriminate. That is a hardware-qualification question, and it
+   belongs in Assumptions of Use: at 10 Hz a 30 s stall is ~300 observations
+   that cannot be recorded, at ~4 % of batch=1 runs on this drive. PSI remains
+   unavailable on this kernel.
+   *The pre-2026-08-04 classification is preserved below, because the reasoning
+   that narrowed the field is what made the kernel-log check the obvious next
+   move.*
+   **Measured on target; the
    original theory is rejected and the mechanism is partly unresolved.**
    `NORMAL`/batch=64 — the suspect — produced **zero** stalls in 20 repetitions.
    The stalls appeared in `FULL`/batch=64 and `NORMAL`/batch=1 instead: 3 events
@@ -1364,6 +1391,84 @@ outlier excluded from that one fit. The bundle README carries these, and carries
 the full-store extrapolation (~12.8 days versus ~12.6 s) explicitly marked as an
 order of magnitude rather than planning evidence — it runs ~374× beyond the
 largest rung, the same overreach D-6 was corrected for.
+
+### D-15 — the stall is a lost NVMe completion interrupt, and it is not a persistence property
+
+Six configurations, 20 repetitions, 100 000 events — **D-10's protocol exactly**,
+re-run on target with the windowed instrument (PR #1332). Evidence bundle:
+`docs/evidence/wm2-jetson-oq9-rerun-20260804/`, `JETSON-TARGET-MEASURED`.
+
+**5 stalls in 120 repetitions, and 5 NVMe command timeouts in the kernel log.**
+
+```
+[Tue Aug  4 09:52:54 2026] nvme nvme0: I/O 719 QID 6 timeout, completion polled
+[Tue Aug  4 10:38:47 2026] nvme nvme0: I/O 510 QID 6 timeout, completion polled
+[Tue Aug  4 10:42:05 2026] nvme nvme0: I/O 817 QID 5 timeout, completion polled
+[Tue Aug  4 10:43:03 2026] nvme nvme0: I/O 690 QID 6 timeout, completion polled
+[Tue Aug  4 10:43:35 2026] nvme nvme0: I/O  56 QID 5 timeout, completion polled
+```
+
+The grouping matches too: one early event (`FULL`/b1, which recorded 1 stall)
+and four clustered inside five minutes (`NORMAL`/b1, which recorded 4). **Zero
+resets, zero I/O errors, zero aborts** — no command ever failed.
+
+Three measurements identify the mechanism.
+
+1. **The duration is a constant.** `nvme_core.io_timeout` is **30**, and the two
+   stalls were 30 019.4 ms and 30 182.4 ms — the timeout plus **19.4 ms** and
+   **182.4 ms** of handler latency. A timeout-bounded wait cannot come in under
+   the timeout and exceeds it only by handling delay.
+2. **The device was idle while the host waited.** These are the first stalls
+   measured over *their own window* (1 412 and 1 418 samples at 20 ms). Device
+   busy-time inside the window: **2.12 %** and **1.05 %** of the stall. On the
+   non-stalling rows the same counter reads **107–214 %** of its window
+   (`/proc/diskstats` field 13 sums per-I/O busy time across queues, so a
+   saturated multi-queue device exceeds wall time). Normally this drive is
+   saturated; during the stalls it did essentially nothing.
+3. **"completion polled" names the cause.** The timeout handler fired at 30 s,
+   polled the completion queue, and found the command *already complete*. The
+   work was done; the completion interrupt never reached the host.
+
+Writeback is excluded (peak dirty+writeback 1 220 kB and 4 216 kB against a
+262 144 kB threshold) and thermal is excluded (58.0–58.2 °C against 85 °C). Both
+stalls report `UNATTRIBUTED`, and here that is **positive evidence**: everything
+the harness can observe says nothing was happening.
+
+**Durability is unaffected.** Every timed-out command had completed — nothing
+was lost, nothing was retried. This is a latency and availability defect, and
+D-11's five power cuts stand independently of it.
+
+**What is not established** is the *root* cause of the lost interrupt. Candidates
+are controller firmware (`SSD NVME 256GB`, FW `VC400622`, a generic OEM device),
+PCIe ASPM power-state transitions, and MSI-X routing on the Tegra host
+controller. This run does not discriminate between them.
+
+**No rate law is claimed.** The events concentrate where more I/O is issued —
+all five at batch=1, none at batch=64, and `OFF` now at **0 stalls in 80
+repetitions** across both runs. But five events cannot support a rate model, and
+the simplest version fails: `NORMAL` fsyncs *less* than `FULL` in WAL mode yet
+recorded four stalls against one.
+
+**Two things moved against D-10 and are recorded rather than explained.** Five of
+six throughput medians reproduce within 3 %, which makes the comparison
+like-for-like; `NORMAL`/b1 did not, going 5 143 → 9 485 ev/s (**+84 %**) while
+recording *more* stalls, which is the wrong direction for a stall artefact since
+a median is robust to them. And the stall distribution shifted: D-10 saw 3/120
+at `FULL`/b64 (2) and `NORMAL`/b1 (1); this run saw 5/120 at `FULL`/b1 (1) and
+`NORMAL`/b1 (4). Both runs agree only that `OFF` never stalls.
+
+**The batch=64 inversion reproduced** — `OFF` 54 636 > `FULL` 30 545 >
+`NORMAL` 19 881, the same ordering as D-10 with all three within 3 %, from
+configurations with zero stalls in both runs. That is a second independent
+observation of an effect no durability model predicts, so it **strengthens**
+open question 1's blocker rather than removing it.
+
+**Platform caveat.** The filesystem holding the test database reports `clean
+with errors` with `Errors behavior: Continue`, unchecked in 13 months and 50
+mounts. It does not affect this finding — the failure is in the NVMe driver,
+below the filesystem, and the mechanism rests on kernel-log correlation — but a
+durability evidence platform configured to continue past filesystem errors is a
+gap to close before the next evidence run.
 
 ### D-12 — design implications the measurement forces
 
