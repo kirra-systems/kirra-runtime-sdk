@@ -345,6 +345,117 @@ be crossed by accident while it is open.
 
 ---
 
+## Repository dependency review — findings, 2026-08-05
+
+The first ratification item, performed against the workspace as it stands after
+WM-2 shipped. **This is evidence for a ruling, not a ruling.** No checklist box
+is ticked by this section; the reviews it feeds belong to the owners named
+above.
+
+### The graph as built matches the graph as proposed
+
+| Crate | Direct dependencies |
+|---|---|
+| `kirra-world` | **0** |
+| `kirra-world-store` | 6 — `kirra-world`, `kirra-audit-hash`, `rusqlite`, `serde_json`, `sha2`, `hex` |
+| `kirra-world-service` | 2 — `kirra-world`, `kirra-world-store` |
+
+`-service → -store → kirra-world`, with the core a true zero-dependency leaf.
+Fence A holds; the safety closure is unchanged at 19 workspace packages from 10
+roots.
+
+### Open question 1 named the wrong prerequisite
+
+The question is *"does `kirra-world-store` earn its separation?"*, and the ADR
+records that its cost/benefit *"cannot [be shown] until storage exists."*
+
+**Storage now exists** — 2 673 lines across schema, write path, chain,
+projection, bitemporal queries and compaction, measured on target (D-20, D-21).
+The question is still not decidable, and the reason is instructive:
+
+> The seam carries **one line**. `kirra-world-store` uses exactly
+> `pub use kirra_world::{EntityId, ObservationId}` — a re-export of two
+> unconstructible placeholders which, by its own comment, exists *"so the
+> dependency edge is real rather than declared-and-unused."* Nothing in the
+> store's 2 673 lines consumes a domain type, because there are none to consume.
+
+The dependency runs **store → core**. An empty core therefore means an empty
+seam *regardless of how much store exists*. The prerequisite for deciding Q1 was
+never storage; it is the **domain core** — Tier 1 of
+[`WM_SCOPE.md`](../design/WM_SCOPE.md). Building more store cannot answer it.
+
+Cost today is one manifest line and one re-export. Measurable benefit today is
+zero. **Neither figure decides anything**, and quoting either as though it did
+would be the error this section exists to prevent.
+
+### The seam's original justification has partly been spent
+
+ADR-0040 justifies the store seam as keeping ADR-0041's persistence decision
+reversible while that decision was open. **ADR-0041 is now Accepted**
+(2026-08-04, R1–R5 adopted), so the decision is made. Reversibility still has
+value against ADR-0041's own reopening conditions, but that is the weaker
+*"if reopened"* form, not the original *"while open"* form.
+
+If the seam is kept, it should be kept on a justification that survives —
+and a stronger one is available: the blueprint's §5 layering requires the domain
+core to be **pure**, and collapsing the store into it would put `rusqlite`,
+`serde_json`, `sha2` and `hex` in the same crate as the domain types, inverting
+the direction §5 specifies. That argument does not depend on any decision
+staying open.
+
+### Compatibility inventory — prepared for confirmation, not confirmed
+
+Each row checked against the tree. **Owner confirmation is still required**;
+what follows only removes the "does this still exist and mean what it says"
+question from the owner's plate.
+
+| Row | State on 2026-08-05 |
+|---|---|
+| `robot/world_model.py` | **Exists**, 195 lines, still an opt-in TTL'd read projection. Matches "compatibility projection — retain" |
+| `crates/kirra-sidecars/src/destination.rs` | **Exists**, 1 734 lines; the `ResolveOutcome` contract the query API is meant to model is present (55 references) |
+| `crates/kirra-sidecars/src/destination_service.rs` | **Exists**, 717 lines. Matches "retain" |
+| Tracked-object inputs | Not verifiable by inspection — genuinely needs its owner |
+| `places.json` / `routes.json` | **Cited path is wrong.** The files are `robot/testdata/places.example.json` and `routes.example.json`. The row's disposition is unaffected; the citation is not |
+
+### Open question 4 appears already dispositioned
+
+Q4 is *"naming collision disposition (ADR-0039 C1/C3)"*.
+
+* **C1** — terminology collision — is **already ticked in ADR-0039**, decided by
+  ADR-0042 Decision 1.
+* **C3** — `robot/world_model.py` — has a disposition in **this ADR's own
+  compatibility table** ("retain"), and ADR-0042 additionally puts its rename
+  behind safety review because the module is imported, installer-staged and
+  env-gated.
+
+Both halves therefore have recorded dispositions. **Q4 looks like a bookkeeping
+gap rather than an open question** — but closing it is the owner's act, not this
+section's.
+
+### One further checkbox may be tickable
+
+ADR-0039's safety-assurance item says the ruling *"must be **recorded**; it need
+not be favourable."* **Decision 5 was recorded on 2026-08-05.** That box is
+still unticked. Flagged, not ticked.
+
+### Deployment ownership cannot be prepared — only framed
+
+The one item with no technical component. Recorded here is what the decision
+*costs*, since two of its three parts already have measured consequences:
+
+* **Where it stores** is a capacity decision, not a path decision. D-20/D-21
+  measured **15.79 days** to fill 8 GiB at 10 Hz on the ratified schema, and no
+  retention driver exists yet — so "where" implies "how big" and "who empties
+  it".
+* **Who backs it up** interacts with the ledger's tamper-evidence. Per ADR-0038
+  the hash-chained audit ledger is **per-instance and local**; a backup regime
+  that copies or merges instances has to preserve chain semantics, or the
+  property the ledger exists for does not survive the backup.
+* **Who runs it** is unconstrained by anything measured, and is a pure
+  ownership question.
+
+---
+
 ## Open questions
 
 1. Does `kirra-world-store` earn its separation? Prototype graph decides.
