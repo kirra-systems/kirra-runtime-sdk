@@ -126,7 +126,7 @@ ${pageHero({
             <p>Storage is a family of traits — epoch fence, node store, federation, posture state, OTA campaigns —
             and the <em>same</em> conformance suites run against SQLite, in-memory, and a live Postgres 16 service
             container in CI. Corrupt rows decode fail-closed on every backend.</p>
-            ${evRow("crates/kirra-persistence/src/postgres", ".github/workflows/ci.yml:613#postgres-conformance:")}
+            ${evRow("crates/kirra-persistence/src/postgres", ".github/workflows/ci.yml:614#postgres-conformance:")}
           </div>
           <div class="card" data-reveal>
             <h3>Config that fails at boot</h3>
