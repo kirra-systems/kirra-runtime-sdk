@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Identifier** | KIRRA-WM2-SYNC-001 |
-| **Status** | **Proposed.** A recommendation for the World Model owner to rule on. It decides nothing. |
+| **Status** | **ADOPTED 2026-08-05.** P-1 through P-4 were ruled on by the World Model owner and are now the rule. Recorded in ADR-0041 *Open questions* 1. |
 | **Addresses** | ADR-0041 **open question 1** — "`synchronous` policy per source class" |
 | **Evidence** | ADR-0041 **D-17**, `docs/evidence/wm2-oq1-20260804/` (`JETSON-TARGET-MEASURED`) |
 | **Date** | 2026-08-04 |
@@ -16,8 +16,16 @@
 
 ## 1. Summary
 
-**Proposed: `synchronous=FULL` for the evidence log, for every class, and move
-per-class differentiation to commit grouping instead.**
+**ADOPTED: `synchronous=FULL` for the evidence log, for every class, with
+per-class differentiation moved to commit grouping instead.**
+
+> **Ruled 2026-08-05.** P-1 through P-4 were adopted as written. The document is
+> retained in its proposing voice below — the argument is the record of why, and
+> rewriting it into the imperative would lose the alternatives that were
+> weighed. §7's falsifiers remain the conditions for revisiting.
+>
+> One thing strengthened after adoption: **D-19** supplies a third observation
+> of the reproducible property this rests on, agreeing with D-17 within 0.2 %.
 
 Three findings drive it. The first says the question as posed cannot be
 answered; the second says it does not need to be; the third says the answer it
