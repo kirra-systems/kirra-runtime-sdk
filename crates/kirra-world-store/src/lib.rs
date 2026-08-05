@@ -552,6 +552,25 @@ impl WorldStore {
         Ok(())
     }
 
+    /// Test-only: the digest recorded in the checkpoint, as committed.
+    ///
+    /// Exists so a test can assert the checkpoint and the state it describes
+    /// were committed together, rather than trusting that they were.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn checkpoint_state_digest_for_test(&self) -> Result<Option<String>, StoreError> {
+        if !self.has_projections()? {
+            return Ok(None);
+        }
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT state_digest FROM projection_checkpoint WHERE name = ?1",
+                params![projection::CURRENT_PROJECTION],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// Test-only: rewrite one column of one row, bypassing the write path.
     ///
     /// This exists so the tamper tests can prove the chain **detects** an edit.
@@ -604,6 +623,23 @@ impl WorldStore {
 /// Columns the fold reads, in one place so the two readers cannot drift.
 const CLAIM_COLUMNS: &str = "subject, predicate, object, kind, payload, frame_id, map_id, \
      source, valid_from_ms, valid_to_ms, txn_time_ms, generation, event_id";
+
+/// The projected-state digest, over any connection.
+///
+/// Free-standing so the fold can compute it **inside** its own transaction
+/// (a `Transaction` derefs to `Connection`), rather than after commit.
+fn state_digest_of(conn: &Connection) -> Result<String, StoreError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CLAIM_COLUMNS} FROM world_current ORDER BY subject, predicate_key"
+    ))?;
+    let mut rows = stmt.query([])?;
+    let mut acc = String::new();
+    while let Some(r) = rows.next()? {
+        let c = claim_from_row(r)?;
+        acc.push_str(&format!("{c:?}\n"));
+    }
+    Ok(sha256_hex(acc.as_bytes()))
+}
 
 fn claim_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectedClaim> {
     Ok(ProjectedClaim {
@@ -758,14 +794,34 @@ impl WorldStore {
              ON CONFLICT (name) DO UPDATE SET generation = excluded.generation",
             params![projection::CURRENT_PROJECTION, head],
         )?;
-        tx.commit()?;
-
-        let digest = self.projection_state_digest()?;
-        self.conn.execute(
+        // The digest is computed and stored INSIDE the transaction. Doing it
+        // after `commit` would mean a failure here returned `Err` from a fold
+        // whose rows and checkpoint were already durable — the caller told the
+        // fold did not happen, the store disagreeing. That is exactly the
+        // all-or-nothing property this transaction exists to provide, so it
+        // has to cover the digest too.
+        let digest = state_digest_of(&tx)?;
+        tx.execute(
             "UPDATE projection_checkpoint SET state_digest = ?1 WHERE name = ?2",
             params![digest, projection::CURRENT_PROJECTION],
         )?;
+        tx.commit()?;
         Ok(head)
+    }
+
+    /// How many rows the projection holds, unfiltered by time.
+    ///
+    /// Deliberately NOT `current_all(..).len()`: that applies `holds_at`, so a
+    /// bounded claim whose `valid_to_ms` has passed would be excluded from the
+    /// count while still occupying a row and its bytes. For a size question the
+    /// table is the answer; for a state question `current_all` is.
+    pub fn projected_row_count(&self) -> Result<i64, StoreError> {
+        if !self.has_projections()? {
+            return Ok(0);
+        }
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM world_current", [], |r| r.get(0))?)
     }
 
     /// A digest over the whole projected state, in key order.
@@ -778,16 +834,7 @@ impl WorldStore {
         if !self.has_projections()? {
             return Ok(sha256_hex(b""));
         }
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {CLAIM_COLUMNS} FROM world_current ORDER BY subject, predicate_key"
-        ))?;
-        let mut rows = stmt.query([])?;
-        let mut acc = String::new();
-        while let Some(r) = rows.next()? {
-            let c = claim_from_row(r)?;
-            acc.push_str(&format!("{c:?}\n"));
-        }
-        Ok(sha256_hex(acc.as_bytes()))
+        state_digest_of(&self.conn)
     }
 
     /// Every confirmed claim currently held about `subject` at `now_ms`.

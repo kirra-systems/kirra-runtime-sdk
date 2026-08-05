@@ -509,6 +509,78 @@ fn a_second_fold_with_no_new_events_is_stable() {
     clean(&p);
 }
 
+/// `projected_row_count` must count the TABLE, not the time-filtered view.
+///
+/// A bounded claim whose `valid_to_ms` has passed still occupies a row and
+/// still costs bytes; counting via `current_all` would exclude it and
+/// undercount a figure whose entire subject is size. With every claim expired
+/// the two answers differ maximally — `current_all` sees none, the table holds
+/// them all.
+#[test]
+fn projected_row_count_is_not_time_filtered() {
+    let p = tmp("row-count");
+    let mut s = WorldStore::open(&p).expect("open");
+    for i in 1..=5i64 {
+        let eid = format!("e{i}");
+        let subj = format!("cup-{i}");
+        s.append(&NewEvent {
+            valid_to_ms: Some(T0 + 100),
+            ..ev(&eid, &subj, Some("colour"), None, T0, T0)
+        })
+        .expect("bounded claim");
+    }
+    s.fold().expect("fold");
+
+    let after_expiry = T0 + 10_000;
+    assert!(
+        s.current_all(after_expiry).unwrap().is_empty(),
+        "every claim has expired, so the state view is empty"
+    );
+    assert_eq!(
+        s.projected_row_count().unwrap(),
+        5,
+        "but the rows are still there, and still cost bytes"
+    );
+    clean(&p);
+}
+
+/// The fold's all-or-nothing claim must cover the state digest too. If the
+/// digest were written after commit, a failure there would report a fold that
+/// had in fact happened as failed — the store and the caller disagreeing about
+/// whether it ran.
+#[test]
+fn a_successful_fold_leaves_a_checkpoint_matching_its_state() {
+    let p = tmp("fold-atomic");
+    let mut s = WorldStore::open(&p).expect("open");
+    s.append(&ev("e1", "cup-1", Some("colour"), Some("red"), T0, T0))
+        .expect("a");
+    s.fold().expect("fold");
+
+    let recorded = s.checkpoint_state_digest_for_test().unwrap();
+    assert_eq!(
+        recorded,
+        Some(s.projection_state_digest().unwrap()),
+        "the committed checkpoint must describe the committed state"
+    );
+
+    // And it must keep matching after a second fold moves the state.
+    s.append(&ev(
+        "e2",
+        "cup-1",
+        Some("colour"),
+        Some("blue"),
+        T0 + 100,
+        T0 + 100,
+    ))
+    .expect("b");
+    s.fold().expect("fold again");
+    assert_eq!(
+        s.checkpoint_state_digest_for_test().unwrap(),
+        Some(s.projection_state_digest().unwrap())
+    );
+    clean(&p);
+}
+
 /// The chain must still verify after folding — the read path is a derived
 /// cache and must never touch the evidence log.
 #[test]

@@ -207,10 +207,13 @@ fn growth(
     let ft = Instant::now();
     store.fold().map_err(|e| e.to_string())?;
     let fold_elapsed_s = ft.elapsed().as_secs_f64();
-    let projected_rows = store
-        .current_all(i64::MAX)
-        .map_err(|e| e.to_string())?
-        .len() as i64;
+    // The TABLE's row count, not `current_all(..).len()`. The latter applies
+    // `holds_at`, so a bounded claim whose `valid_to_ms` has passed would be
+    // excluded while still occupying a row and its bytes — an undercount in a
+    // measurement whose entire subject is size. The generated stream sets no
+    // `valid_to_ms`, so the two agree today; relying on that would make the
+    // figure correct by accident.
+    let projected_rows = store.projected_row_count().map_err(|e| e.to_string())?;
     drop(store);
 
     checkpoint(path)?;
