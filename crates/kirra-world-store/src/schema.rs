@@ -26,8 +26,13 @@
 //! NULL, and a fact's end is derived from a superseding event. This is asserted
 //! by test rather than by comment.
 
-/// The ruled schema. Its digest is recorded in the store's metadata table so a
-/// database can prove which schema it was written under.
+/// The ruled schema.
+///
+/// Its SHA-256 is recorded in `world_store_meta` as `schema_digest` at
+/// creation (see `crate::schema_digest`), alongside `schema_version` and
+/// `chain_algorithm`. The digest is the one of the three that cannot be
+/// claimed falsely: a version number records what someone said the schema was,
+/// the digest records what it actually is.
 pub const SCHEMA_V1: &str = r#"
 CREATE TABLE world_events (
     generation      INTEGER PRIMARY KEY,

@@ -187,21 +187,35 @@ fn sd1_valid_to_ms_is_set_at_insert_or_never() {
     s.append(&base("e2", "o2")).expect("open-ended observation");
     s.verify_chain().expect("verifies");
 
+    // Prove the ONLY UPDATE is the test-only hatch, and prove it by position
+    // rather than by the attribute merely existing somewhere in the file — a
+    // non-test UPDATE added later would otherwise pass while an unrelated cfg
+    // attribute elsewhere kept this green.
     let src = include_str!("../src/lib.rs");
-    let updates: Vec<&str> = src
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with("//"))
-        .filter(|l| l.contains("UPDATE world_events"))
+    let lines: Vec<&str> = src.lines().collect();
+    let update_lines: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !l.trim_start().starts_with("//"))
+        .filter(|(_, l)| l.contains("UPDATE world_events"))
+        .map(|(i, _)| i)
         .collect();
     assert_eq!(
-        updates.len(),
+        update_lines.len(),
         1,
-        "the only UPDATE may be the test-only tamper hatch; found {updates:?}"
+        "the only UPDATE may be the test-only tamper hatch; found {} at {:?}",
+        update_lines.len(),
+        update_lines
     );
+    let at = update_lines[0];
+    let window_start = at.saturating_sub(40);
+    let gated = lines[window_start..at]
+        .iter()
+        .any(|l| l.contains("#[cfg(any(test, feature = \"test-support\"))]"));
     assert!(
-        src.contains("#[cfg(any(test, feature = \"test-support\"))]"),
-        "that UPDATE must be behind a test-only gate"
+        gated,
+        "the UPDATE at line {} is not preceded by a test-only cfg gate within 40 lines",
+        at + 1
     );
     let _ = std::fs::remove_file(&path);
 }
@@ -223,6 +237,59 @@ fn sd3_provenance_is_a_digest_covered_json_array() {
     match s.verify_chain() {
         Err(StoreError::ChainBroken { generation }) => assert_eq!(generation, 1),
         other => panic!("editing provenance must break the chain, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The fail-open review found. Provenance that was legitimately EMPTY at write
+/// time, then corrupted, used to still verify: `unwrap_or_default()` read the
+/// corrupt JSON back as `[]`, which is what was hashed, so the digests matched
+/// and the corruption passed silently. This is the case that proves the fix,
+/// and it is the one a non-empty-provenance test would have missed.
+#[test]
+fn corrupt_provenance_on_an_empty_row_fails_closed() {
+    let path = tmp("provenance-empty-corrupt");
+    let mut s = WorldStore::open(&path).expect("open");
+    s.append(&base("e1", "o1"))
+        .expect("append with provenance: &[]");
+    s.verify_chain().expect("clean");
+
+    s.tamper_for_test(1, "provenance", Some("not-json"))
+        .unwrap();
+
+    match s.verify_chain() {
+        Err(StoreError::CorruptRow { generation, .. }) => assert_eq!(generation, 1),
+        other => panic!("corrupt provenance must fail closed, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The tamper hatch allowlists its column rather than interpolating it.
+#[test]
+fn the_tamper_hatch_refuses_an_unknown_column() {
+    let path = tmp("tamper-allowlist");
+    let mut s = WorldStore::open(&path).expect("open");
+    s.append(&base("e1", "o1")).expect("append");
+
+    let bad = s.tamper_for_test(1, "generation = 9 --", Some("x"));
+    assert!(bad.is_err(), "an un-allowlisted column must be refused");
+    s.verify_chain()
+        .expect("the refused tamper changed nothing");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A generation that cannot be a chain sequence must fail closed rather than
+/// silently hashing as sequence 0.
+#[test]
+fn a_negative_generation_fails_closed_rather_than_hashing_as_zero() {
+    let path = tmp("negative-generation");
+    let mut s = WorldStore::open(&path).expect("open");
+    s.append(&base("e1", "o1")).expect("append");
+    // rusqlite lets us move the PK; the chain must refuse to re-derive it.
+    let _ = s.tamper_for_test(1, "chain_digest", Some("deadbeef"));
+    match s.verify_chain() {
+        Err(StoreError::ChainBroken { .. }) => {}
+        other => panic!("a rewritten digest must break the chain, got {other:?}"),
     }
     let _ = std::fs::remove_file(&path);
 }

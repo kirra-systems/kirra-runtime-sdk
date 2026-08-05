@@ -140,6 +140,16 @@ pub enum StoreError {
         /// The generation at which it diverged.
         generation: i64,
     },
+    /// A stored row could not be read back faithfully. Distinct from
+    /// [`StoreError::ChainBroken`] on purpose: "this row is unreadable" and
+    /// "this row was edited" are different diagnoses, and collapsing them
+    /// costs an investigator the difference.
+    CorruptRow {
+        /// The generation whose row could not be read.
+        generation: i64,
+        /// What was wrong with it.
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -158,6 +168,9 @@ impl std::fmt::Display for StoreError {
             ),
             Self::ChainBroken { generation } => {
                 write!(f, "chain broken at generation {generation}")
+            }
+            Self::CorruptRow { generation, detail } => {
+                write!(f, "corrupt row at generation {generation}: {detail}")
             }
         }
     }
@@ -284,11 +297,31 @@ pub fn canonical_event_json(e: &NewEvent<'_>) -> String {
     )
 }
 
+/// `generation` as the chain's sequence number, failing CLOSED.
+///
+/// `unwrap_or(0)` here would hash an out-of-range generation as sequence 0,
+/// silently producing a digest that is not the one the row's position implies.
+/// In an integrity chain a silent substitution is worse than an error.
+fn sequence_of(generation: i64) -> Result<u64, StoreError> {
+    u64::try_from(generation).map_err(|_| StoreError::CorruptRow {
+        generation,
+        detail: "generation is negative or not representable as u64".to_string(),
+    })
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(bytes);
     hex::encode(h.finalize())
+}
+
+/// SHA-256 of [`schema::SCHEMA_V1`], recorded in `world_store_meta` at
+/// creation so a store can prove which exact schema text produced it — not
+/// merely which version number someone claimed.
+#[must_use]
+pub fn schema_digest() -> String {
+    sha256_hex(schema::SCHEMA_V1.as_bytes())
 }
 
 /// The genesis value the first event chains from.
@@ -328,6 +361,10 @@ impl WorldStore {
                 "INSERT INTO world_store_meta (key, value) VALUES ('chain_algorithm', ?1)",
                 params![CHAIN_ALGORITHM],
             )?;
+            conn.execute(
+                "INSERT INTO world_store_meta (key, value) VALUES ('schema_digest', ?1)",
+                params![schema_digest()],
+            )?;
         }
         Ok(Self { conn })
     }
@@ -352,6 +389,21 @@ impl WorldStore {
             .query_row("SELECT COUNT(*) FROM world_events", [], |r| r.get(0))?)
     }
 
+    /// The next generation: `MAX(generation) + 1`.
+    ///
+    /// Deliberately not `COUNT(*) + 1`. COUNT is O(n), but the reason that
+    /// matters less than the second one: COUNT assumes the sequence is
+    /// CONTIGUOUS. ADR-0041 §11.3 plans compaction, which removes spans and
+    /// leaves gaps — and a compaction citation still references the generations
+    /// on either side of the hole. COUNT would hand out a generation that had
+    /// already been used and cited. MAX is index-backed and gap-safe.
+    fn next_generation(&self) -> Result<i64, StoreError> {
+        let max: Option<i64> =
+            self.conn
+                .query_row("SELECT MAX(generation) FROM world_events", [], |r| r.get(0))?;
+        Ok(max.unwrap_or(0) + 1)
+    }
+
     /// Append one event, returning its generation.
     ///
     /// The two early refusals duplicate schema `CHECK`s deliberately: the
@@ -366,14 +418,14 @@ impl WorldStore {
             return Err(StoreError::SpatialClaimNeedsFrame);
         }
 
-        let generation = self.count()? + 1;
+        let generation = self.next_generation()?;
         let prev = self.head_chain()?;
         let chain = kirra_audit_hash::compute_record_hash_v2(
             &prev,
             e.kind,
             &canonical_event_json(e),
             e.txn_time_ms,
-            u64::try_from(generation).unwrap_or(0),
+            sequence_of(generation)?,
         );
 
         self.conn.execute(
@@ -449,7 +501,16 @@ impl WorldStore {
             let retention_class: String = r.get(19)?;
             let stored: String = r.get(20)?;
 
-            let provenance: Vec<String> = serde_json::from_str(&provenance_raw).unwrap_or_default();
+            // Fail CLOSED. `unwrap_or_default()` here would read corrupt JSON
+            // as an empty list — and a row whose provenance was legitimately
+            // empty at write time would then still verify, so corruption in
+            // that case passed silently. That is fail-open in an integrity
+            // check, which is the one place it is least acceptable.
+            let provenance: Vec<String> =
+                serde_json::from_str(&provenance_raw).map_err(|err| StoreError::CorruptRow {
+                    generation,
+                    detail: format!("provenance is not a JSON array of strings: {err}"),
+                })?;
             let prov_refs: Vec<&str> = provenance.iter().map(String::as_str).collect();
 
             let rebuilt = NewEvent {
@@ -478,7 +539,7 @@ impl WorldStore {
                 &kind,
                 &canonical_event_json(&rebuilt),
                 txn_time_ms,
-                u64::try_from(generation).unwrap_or(0),
+                sequence_of(generation)?,
             );
             if expect != stored {
                 return Err(StoreError::ChainBroken { generation });
@@ -502,6 +563,31 @@ impl WorldStore {
         column: &str,
         value: Option<&str>,
     ) -> Result<(), StoreError> {
+        // Allowlisted rather than interpolated. This is test-only, but the
+        // `test-support` feature makes it public API, and an interpolated
+        // identifier is an injection point regardless of who is expected to
+        // call it. It also turns a typo into a refusal instead of an UPDATE
+        // that matches nothing and quietly passes.
+        const TAMPERABLE: &[&str] = &[
+            "event_id",
+            "observation_id",
+            "writer_class",
+            "claim_status",
+            "provenance",
+            "frame_id",
+            "map_id",
+            "kind",
+            "subject",
+            "payload",
+            "retention_class",
+            "chain_digest",
+        ];
+        if !TAMPERABLE.contains(&column) {
+            return Err(StoreError::CorruptRow {
+                generation,
+                detail: format!("`{column}` is not a tamperable column"),
+            });
+        }
         let sql = format!("UPDATE world_events SET {column} = ?1 WHERE generation = ?2");
         self.conn.execute(&sql, params![value, generation])?;
         Ok(())
