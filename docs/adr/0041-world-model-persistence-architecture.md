@@ -210,6 +210,63 @@ enough to be past its retention horizon to still hold one means nothing has been
 observed about that subject since — rare in a sensor stream, and when it does
 happen that claim is arguably still-live evidence rather than history.
 
+#### Discharging *"returns the summary and says so"*, 2026-08-05
+
+The clause above has two halves, and the first pass implemented only one. The
+citation landed — what was removed, its digest, and the chain on either side, so
+the log verifies *across* the hole. The **retained summary** did not, and neither
+did *"and says so"*: a `history()` into a compacted window simply returned fewer
+rows. Nothing distinguished *"nothing was known about this"* from *"we deleted
+it"*, and both looked like a complete answer. Recorded here because the gap was
+real on `main` for the length of one merge, not because it was theoretical.
+
+Both halves are now implemented, with three decisions worth fixing in the record:
+
+**1. Summaries are per `(subject, predicate)`, not per span.** A span-level
+aggregate cannot answer the question an incident reconstruction asks — *what did
+we know about **this thing** during the window*. The cost argument is D-21's,
+reused: keys are bounded by the **entity** count, not the log length (4 886 for
+100 000 events on the reference stream), so a summary set is bounded like a
+projection rather than like a log. Each row carries the count, the first and last
+valid times, the first transaction time, and the last object and payload. The
+trajectory is gone; the endpoints survive.
+
+**2. The signal is carried in the return type.** `as_of` and `history` return a
+`TemporalAnswer` — claims plus a `Resolution` of `Full` or
+`Degraded { spans, summaries }` — rather than a `Vec` with a flag beside it. The
+reasoning is the one that made the projection fold confirmed-only: *a guarantee
+a caller must remember to check is not a guarantee.* "Says so" has to be
+unignorable at the call site or it does not discharge the clause.
+
+**3. The direction of error is fixed, and it is not symmetric.** The
+degradation test is a *necessary* condition on the removed events, not an exact
+one — a window is reported degraded if it *could* have held an observation
+bearing on the query. Both bitemporal filters are sound in that direction:
+nothing with `valid_from > valid_at` could have appeared in the answer, and
+likewise on the transaction axis, so ruling a window out is exact while ruling
+one in may be pessimistic. **Over-reporting costs a caveat; under-reporting is
+the silent rewrite this section forbids.** The same rule decides the upgrade
+path: a store compacted before summaries were retained reports degraded with an
+*empty* summary set, never full — reading "no summary" as "nothing was lost"
+would convert a missing feature into exactly that silent rewrite.
+
+Two consequences follow, and both are asserted as tests:
+
+- **Summaries are confirmed-only.** This is what a degraded answer returns *in
+  place of* evidence, so an LLM candidate standing there is precisely what SD-2
+  exists to prevent — even when the candidate is the newest event in the window.
+  The arithmetic is checkable: per-key counts sum to **at most** the citation's
+  `event_count`, and the difference is the candidates. The corollary is a
+  recorded gap rather than a hidden one — `candidates()` carries no resolution,
+  so superseded LLM proposals can vanish from a compacted window without the API
+  saying so, and it must not be used to reconstruct what was proposed during a
+  compacted incident window.
+- **`current()` can never be degraded by compaction**, and this is proved rather
+  than hoped: a key's current claim *is* a projection head, and heads are
+  refused. So the head refusal — adopted above for rebuild correctness — buys a
+  second thing worth naming: **current state survives retention.** A device that
+  has compacted its way back under budget still knows where everything is.
+
 ### Compaction is not reclamation — two operations, not one
 
 **Measured** (`tools/wm2-persistence-harness`, `compact`; host-indicative,

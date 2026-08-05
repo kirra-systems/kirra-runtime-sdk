@@ -17,10 +17,15 @@
 //!
 //! # What is implemented, and what deliberately is not
 //!
-//! Implemented: the schema, the write path, and chain verification.
-//! **Not** implemented: projections, queries, compaction, retention
-//! enforcement, or any service. `retention_class` is *stored and constrained*
-//! here, but nothing yet applies ADR-0041 OQ2's durations to it.
+//! Implemented: the schema, the write path, chain verification, the
+//! current-state projection and its queries, and compaction-with-citation
+//! including the per-key summaries a compacted window leaves behind.
+//!
+//! **Not** implemented: a retention *policy driver*, or any service.
+//! [`WorldStore::compact_range`] enforces what compaction is allowed to do;
+//! nothing yet decides which spans are past ADR-0041 OQ2's horizons and calls
+//! it. `retention_class` is stored, constrained, and honoured by the protected
+//! -class refusal — but the horizons themselves are still applied by hand.
 //!
 //! # Durability
 //!
@@ -48,7 +53,7 @@ pub mod compaction;
 pub mod projection;
 pub mod schema;
 
-pub use compaction::{Citation, CompactionOutcome};
+pub use compaction::{Citation, CompactionOutcome, DegradedSummary, Resolution, TemporalAnswer};
 pub use projection::{ProjectedClaim, CURRENT_PROJECTION};
 
 // Re-exported so the dependency edge is real rather than declared-and-unused.
@@ -748,17 +753,33 @@ impl WorldStore {
         Ok(out)
     }
 
-    /// Whether any compaction has run against this store.
-    pub fn has_citations(&self) -> Result<bool, StoreError> {
+    /// Whether a table exists. Used for the lazily-installed tables, whose
+    /// absence is the normal state of a store that has never folded or
+    /// compacted rather than an error.
+    fn has_table(&self, name: &str) -> Result<bool, StoreError> {
         let n: Option<i64> = self
             .conn
             .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='compaction_citations'",
-                [],
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1",
+                params![name],
                 |r| r.get(0),
             )
             .optional()?;
         Ok(n.is_some())
+    }
+
+    /// Whether any compaction has run against this store.
+    pub fn has_citations(&self) -> Result<bool, StoreError> {
+        self.has_table("compaction_citations")
+    }
+
+    /// Whether this store retains per-key summaries for its compacted spans.
+    ///
+    /// False for a store compacted by a build that predates them. That case is
+    /// **not** treated as "nothing was lost": see
+    /// [`WorldStore::resolution_for`].
+    pub fn has_summaries(&self) -> Result<bool, StoreError> {
+        self.has_table("compaction_summaries")
     }
 
     /// Every recorded compaction, oldest span first.
@@ -800,6 +821,20 @@ impl WorldStore {
             "DELETE FROM compaction_citations WHERE lo_generation = ?1",
             params![lo_generation],
         )?;
+        Ok(())
+    }
+
+    /// Test-only: drop the summaries table, leaving citations behind.
+    ///
+    /// Reproduces a store compacted by a build that predates summary retention.
+    /// That state is only reachable by *being* such a store, so without this a
+    /// test could not show what the read path does with one — and the answer
+    /// (degraded with nothing to show, never full) is the whole reason the
+    /// upgrade path is handled explicitly.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn drop_summaries_for_test(&self) -> Result<(), StoreError> {
+        self.conn
+            .execute_batch("DROP TABLE IF EXISTS compaction_summaries")?;
         Ok(())
     }
 
@@ -1104,6 +1139,21 @@ impl WorldStore {
     /// `now_ms` is a parameter rather than a clock read: a query whose answer
     /// depends on an ambient clock cannot be replayed, and incident
     /// reconstruction is the reason this store exists.
+    ///
+    /// # Why this one returns claims and not a [`TemporalAnswer`]
+    ///
+    /// Because **compaction can never degrade it**, and that is a proved
+    /// property rather than an optimistic one: [`WorldStore::compact_range`]
+    /// refuses any window containing a projection head, and the current claim
+    /// for a key *is* a projection head. So the events this method reads are
+    /// exactly the events compaction is forbidden to remove. Returning a
+    /// resolution that is structurally always `Full` would be noise, and worse,
+    /// it would suggest the check is doing something.
+    ///
+    /// The head refusal was adopted to keep rebuild-equals-incremental true.
+    /// This is the second thing it buys, and it is worth naming: **current
+    /// state survives retention**, so a device that has compacted its way back
+    /// under budget still knows where everything is.
     pub fn current(&self, subject: &str, now_ms: i64) -> Result<Vec<ProjectedClaim>, StoreError> {
         if !self.has_projections()? {
             return Ok(Vec::new());
@@ -1150,12 +1200,18 @@ impl WorldStore {
     /// bitemporal store silently becomes a unitemporal one.
     ///
     /// Confirmed-only, for the same reason [`WorldStore::fold`] is.
+    ///
+    /// Returns a [`TemporalAnswer`] rather than the claims directly, because
+    /// this is the query compaction can silently truncate: the log is where the
+    /// removed events used to be. If a compacted span could have borne on the
+    /// answer, [`TemporalAnswer::resolution`] is [`Resolution::Degraded`] and
+    /// carries the summaries retained in their place.
     pub fn as_of(
         &self,
         subject: &str,
         valid_at_ms: i64,
         as_known_at_ms: i64,
-    ) -> Result<Vec<ProjectedClaim>, StoreError> {
+    ) -> Result<TemporalAnswer, StoreError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CLAIM_COLUMNS} FROM world_events
              WHERE subject = ?1 AND claim_status = 'confirmed'
@@ -1173,18 +1229,30 @@ impl WorldStore {
                 candidates.push(c);
             }
         }
-        Ok(projection::fold_all(candidates).into_values().collect())
+        Ok(TemporalAnswer {
+            claims: projection::fold_all(candidates).into_values().collect(),
+            resolution: self.resolution_for(subject, Some(valid_at_ms), Some(as_known_at_ms))?,
+        })
     }
 
     /// Every confirmed event about `subject`, oldest first — the audit view.
-    pub fn history(&self, subject: &str) -> Result<Vec<ProjectedClaim>, StoreError> {
+    ///
+    /// The query most exposed to compaction, and therefore the one where a
+    /// bare `Vec` would be most misleading: history is *precisely* the
+    /// trajectory compaction removes. No time bounds are applied to the
+    /// resolution, because none are applied to the query — any compacted event
+    /// about this subject is one this answer is missing.
+    pub fn history(&self, subject: &str) -> Result<TemporalAnswer, StoreError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CLAIM_COLUMNS} FROM world_events
              WHERE subject = ?1 AND claim_status = 'confirmed'
              ORDER BY generation ASC"
         ))?;
         let rows = stmt.query_map(params![subject], claim_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        Ok(TemporalAnswer {
+            claims: rows.collect::<rusqlite::Result<Vec<_>>>()?,
+            resolution: self.resolution_for(subject, None, None)?,
+        })
     }
 
     /// Proposed-but-unconfirmed claims about `subject`.
@@ -1195,6 +1263,15 @@ impl WorldStore {
     /// boolean, the safe reading would stop being the default one and SD-2's
     /// guarantee would end at the API boundary. Asking for candidates means
     /// naming them.
+    ///
+    /// **Known gap, recorded rather than hidden:** compaction removes candidate
+    /// events with the rest of a window, and no summary is retained for them
+    /// (see [`DegradedSummary`] — a candidate may not stand in for deleted
+    /// evidence). So this returns a plain `Vec` and carries no resolution: an
+    /// LLM's superseded proposals can vanish from a compacted window without
+    /// this saying so. That is deliberate — a proposal is not evidence — but it
+    /// means this method must not be used to reconstruct what was proposed
+    /// during an incident window that has since been compacted.
     pub fn candidates(&self, subject: &str) -> Result<Vec<ProjectedClaim>, StoreError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CLAIM_COLUMNS} FROM world_events
@@ -1382,11 +1459,39 @@ impl WorldStore {
             }
         };
 
+        // Built BEFORE the delete, and committed in the same transaction as
+        // it. A summary written afterwards could be lost to a crash between
+        // the two, leaving a citation admitting a hole with nothing standing
+        // in for it — which is the failure §11.3 is about, arrived at by
+        // accident instead of by design.
+        let summaries = self.build_summaries(lo, hi)?;
+
         let tx = self.conn.transaction()?;
         tx.execute(
             "DELETE FROM world_events WHERE generation BETWEEN ?1 AND ?2",
             params![lo, hi],
         )?;
+        for s in &summaries {
+            tx.execute(
+                "INSERT INTO compaction_summaries (
+                    lo_generation, subject, predicate_key, predicate, event_count,
+                    first_valid_from_ms, last_valid_from_ms, first_txn_time_ms,
+                    last_object, last_payload
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![
+                    s.lo_generation,
+                    s.subject,
+                    s.predicate.clone().unwrap_or_default(),
+                    s.predicate,
+                    s.event_count,
+                    s.first_valid_from_ms,
+                    s.last_valid_from_ms,
+                    s.first_txn_time_ms,
+                    s.last_object,
+                    s.last_payload,
+                ],
+            )?;
+        }
         tx.execute(
             "INSERT INTO compaction_citations (
                 lo_generation, hi_generation, event_count, range_digest,
@@ -1415,7 +1520,175 @@ impl WorldStore {
                 compacted_at_ms: now_ms,
             },
             removed: event_count,
+            summaries,
         })
+    }
+
+    /// The per-key summaries of a span, taken before it is removed.
+    ///
+    /// Streams the window in generation order and keeps one accumulator per
+    /// `(subject, predicate)`. That is the same cost argument D-21 measured for
+    /// the projection — 4 886 keys for 100 000 events on the reference stream —
+    /// so memory here is bounded by the **entity** count, not by the window
+    /// length. It has to be: [`WorldStore::summarize_range`] documents why
+    /// buffering an 8.3 M-event `raw` window is an OOM triggered by the very
+    /// operation you run because the device is full, and building summaries by
+    /// collecting the rows first would reintroduce exactly that.
+    ///
+    /// Confirmed-only, and "latest" is by `(valid_from_ms, generation)` — see
+    /// [`DegradedSummary`] for both.
+    fn build_summaries(&self, lo: i64, hi: i64) -> Result<Vec<DegradedSummary>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT subject, predicate, object, payload, valid_from_ms, txn_time_ms, generation
+             FROM world_events
+             WHERE generation BETWEEN ?1 AND ?2 AND claim_status = 'confirmed'
+             ORDER BY generation ASC",
+        )?;
+        let mut rows = stmt.query(params![lo, hi])?;
+
+        // BTreeMap, not HashMap: the retained set is evidence, and its order
+        // should not depend on hash seeding.
+        let mut acc: std::collections::BTreeMap<(String, String), (DegradedSummary, (i64, i64))> =
+            std::collections::BTreeMap::new();
+
+        while let Some(r) = rows.next()? {
+            let subject: String = r.get(0)?;
+            let predicate: Option<String> = r.get(1)?;
+            let object: Option<String> = r.get(2)?;
+            let payload: String = r.get(3)?;
+            let valid_from_ms: i64 = r.get(4)?;
+            let txn_time_ms: i64 = r.get(5)?;
+            let generation: i64 = r.get(6)?;
+
+            let key = (subject.clone(), predicate.clone().unwrap_or_default());
+            match acc.get_mut(&key) {
+                Some((s, best)) => {
+                    s.event_count += 1;
+                    s.first_valid_from_ms = s.first_valid_from_ms.min(valid_from_ms);
+                    s.first_txn_time_ms = s.first_txn_time_ms.min(txn_time_ms);
+                    if (valid_from_ms, generation) > *best {
+                        *best = (valid_from_ms, generation);
+                        s.last_valid_from_ms = valid_from_ms;
+                        s.last_object = object;
+                        s.last_payload = payload;
+                    }
+                }
+                None => {
+                    acc.insert(
+                        key,
+                        (
+                            DegradedSummary {
+                                lo_generation: lo,
+                                subject,
+                                predicate,
+                                event_count: 1,
+                                first_valid_from_ms: valid_from_ms,
+                                last_valid_from_ms: valid_from_ms,
+                                first_txn_time_ms: txn_time_ms,
+                                last_object: object,
+                                last_payload: payload,
+                            },
+                            (valid_from_ms, generation),
+                        ),
+                    );
+                }
+            }
+        }
+        Ok(acc.into_values().map(|(s, _)| s).collect())
+    }
+
+    /// Every retained summary, oldest span first.
+    pub fn summaries(&self) -> Result<Vec<DegradedSummary>, StoreError> {
+        self.load_summaries(None)
+    }
+
+    /// Retained summaries, optionally narrowed to one subject.
+    fn load_summaries(&self, subject: Option<&str>) -> Result<Vec<DegradedSummary>, StoreError> {
+        if !self.has_summaries()? {
+            return Ok(Vec::new());
+        }
+        let sql = "SELECT lo_generation, subject, predicate, event_count,
+                          first_valid_from_ms, last_valid_from_ms, first_txn_time_ms,
+                          last_object, last_payload
+                   FROM compaction_summaries
+                   WHERE (?1 IS NULL OR subject = ?1)
+                   ORDER BY lo_generation ASC, subject ASC, predicate_key ASC";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![subject], |r| {
+            Ok(DegradedSummary {
+                lo_generation: r.get(0)?,
+                subject: r.get(1)?,
+                predicate: r.get(2)?,
+                event_count: r.get(3)?,
+                first_valid_from_ms: r.get(4)?,
+                last_valid_from_ms: r.get(5)?,
+                first_txn_time_ms: r.get(6)?,
+                last_object: r.get(7)?,
+                last_payload: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Whether a query about `subject` is answering across a compacted span,
+    /// and what stands in for it.
+    ///
+    /// The bitemporal bounds are **optional filters**, and each one is a
+    /// *necessary* condition rather than an exact one:
+    ///
+    /// * A removed event can only have appeared in an `as_of(valid_at)` answer
+    ///   if its `valid_from_ms <= valid_at` — [`ProjectedClaim::holds_at`] says
+    ///   so. If the window's earliest valid time is already after `valid_at`,
+    ///   no event in it could have contributed, and the answer is genuinely
+    ///   full.
+    /// * Likewise on the transaction axis for `as_known_at`.
+    ///
+    /// Both bounds are minima over the whole key, so passing them does not
+    /// prove a qualifying event existed — only failing them proves none did.
+    /// The error therefore falls on the reporting-degraded side, which is the
+    /// one that costs a caveat rather than hiding a deletion.
+    ///
+    /// **The upgrade path is handled explicitly.** A store compacted before
+    /// summaries were retained has citations and no summaries table; that is
+    /// reported as degraded with an empty summary set, never as full. Inferring
+    /// "no summary, so nothing was lost" would turn a missing feature into a
+    /// silent rewrite of history.
+    fn resolution_for(
+        &self,
+        subject: &str,
+        valid_at_ms: Option<i64>,
+        as_known_at_ms: Option<i64>,
+    ) -> Result<Resolution, StoreError> {
+        if !self.has_citations()? {
+            return Ok(Resolution::Full);
+        }
+        let citations = self.load_citations()?;
+        if citations.is_empty() {
+            return Ok(Resolution::Full);
+        }
+        if !self.has_summaries()? {
+            return Ok(Resolution::Degraded {
+                spans: citations.into_values().collect(),
+                summaries: Vec::new(),
+            });
+        }
+
+        let summaries: Vec<DegradedSummary> = self
+            .load_summaries(Some(subject))?
+            .into_iter()
+            .filter(|s| valid_at_ms.is_none_or(|v| s.first_valid_from_ms <= v))
+            .filter(|s| as_known_at_ms.is_none_or(|k| s.first_txn_time_ms <= k))
+            .collect();
+        if summaries.is_empty() {
+            return Ok(Resolution::Full);
+        }
+
+        let mut spans: Vec<Citation> = summaries
+            .iter()
+            .filter_map(|s| citations.get(&s.lo_generation).cloned())
+            .collect();
+        spans.dedup_by_key(|c| c.lo_generation);
+        Ok(Resolution::Degraded { spans, summaries })
     }
 
     /// Count, content digest and final chain digest of a span, before removal.
