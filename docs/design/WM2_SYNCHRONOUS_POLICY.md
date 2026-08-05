@@ -5,7 +5,7 @@
 | **Identifier** | KIRRA-WM2-SYNC-001 |
 | **Status** | **ADOPTED 2026-08-05.** P-1 through P-4 were ruled on by the World Model owner and are now the rule. Recorded in ADR-0041 *Open questions* 1. |
 | **Addresses** | ADR-0041 **open question 1** — "`synchronous` policy per source class" |
-| **Evidence** | ADR-0041 **D-17**, `docs/evidence/wm2-oq1-20260804/` (`JETSON-TARGET-MEASURED`) |
+| **Evidence** | ADR-0041 **D-17**, `docs/evidence/wm2-oq1-20260804/` · **D-19**, `docs/evidence/wm2-postrepair-20260804/` — the third observation, cited in §1 (both `JETSON-TARGET-MEASURED`) |
 | **Date** | 2026-08-04 |
 
 > Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508
