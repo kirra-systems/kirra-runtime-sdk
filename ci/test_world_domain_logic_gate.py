@@ -392,16 +392,29 @@ def t22_the_real_repository_holds() -> None:
     record(code == gate.EXIT_OK, "22 the real repository passes the gate", f"exit {code}")
 
 
-def t23_the_real_ruling_is_still_open() -> None:
-    """If this ever fails, the ruling was recorded — which is the goal, and the
-    moment to re-read what it says rather than to delete this test."""
+def t23_the_real_ruling_is_recorded_and_real() -> None:
+    """CONVERTED 2026-08-05, when the ruling was recorded.
+
+    This asserted the ruling was still open, with a docstring saying that its
+    firing was the moment to re-read the record rather than delete the test.
+    That happened. Deleting it would have dropped the coverage entirely, so it
+    now guards the opposite invariant: that the recorded ruling stays real.
+
+    A ruling can be un-made by degradation as easily as by deletion — a field
+    quietly emptied, a classification replaced by a placeholder. This catches
+    that; `gate.parse_ruling` treats placeholders as unrecorded, so `recorded`
+    is the whole check.
+    """
     text = (CI.parent / gate.ADR_PATH).read_text(encoding="utf-8")
     ruling = gate.parse_ruling(text)
-    record(
-        ruling is not None and not ruling.recorded,
-        "23 ADR-0042's ruling is still unrecorded (the gate is load-bearing today)",
-        "the ruling now parses as RECORDED — verify the owner and classification are real",
+    ok = (
+        ruling is not None
+        and ruling.recorded
+        and ruling.owner is not None
+        and ruling.fields.get("Scope classification", "").strip() != ""
     )
+    detail = "no ruling record parsed" if ruling is None else f"problems={ruling.problems}"
+    record(ok, "23 ADR-0042's ruling is recorded, owned and classified", detail)
 
 
 def t24_the_real_world_crates_are_still_shape_only() -> None:
@@ -532,25 +545,32 @@ def t29_the_real_adr_records_the_independence_posture() -> None:
     )
 
 
-def t30_the_independence_posture_does_not_release_the_gate() -> None:
-    """Recording *how* the ruling will be made is not making it.
+def t30_no_ruling_field_is_hollow() -> None:
+    """CONVERTED 2026-08-05, the mirror of t23's conversion.
 
-    t23 already asserts the shipped ruling parses as unrecorded. This asserts
-    the narrower thing the posture PR could plausibly have broken: that the
-    ruling's own fields are all still open, so no single field was quietly
-    filled in while adding prose about the ruling's limits.
+    Before the ruling this asserted every field was still open, so that no
+    single field could be quietly filled while prose was added around it. The
+    symmetric risk now runs the other way: a field quietly HOLLOWED while the
+    classification stays put, leaving a record that still parses as recorded
+    but no longer says anything.
+
+    Checked per-field rather than through `recorded` so the failure message
+    names which field went hollow.
     """
     text = (CI.parent / gate.ADR_PATH).read_text(encoding="utf-8")
     r = gate.parse_ruling(text)
     if r is None:
-        record(False, "30 the independence posture leaves every ruling field open", "no ruling record parsed")
+        record(False, "30 no ruling field is hollow", "no ruling record parsed")
         return
-    open_fields = [f for f in gate.REQUIRED_FIELDS if f != gate.OWNER_FIELD and r.fields.get(f, "").strip().lower() in gate.PLACEHOLDERS]
-    expected = [f for f in gate.REQUIRED_FIELDS if f != gate.OWNER_FIELD]
+    hollow = [
+        f
+        for f in gate.REQUIRED_FIELDS
+        if r.fields.get(f, "").strip().lower() in gate.PLACEHOLDERS
+    ]
     record(
-        open_fields == expected and not r.recorded,
-        "30 the independence posture leaves every ruling field open and the gate holding",
-        f"filled: {sorted(set(expected) - set(open_fields))}; recorded={r.recorded}",
+        not hollow and r.recorded,
+        "30 every ruling field carries a real value",
+        f"hollow: {sorted(hollow)}; recorded={r.recorded}",
     )
 
 

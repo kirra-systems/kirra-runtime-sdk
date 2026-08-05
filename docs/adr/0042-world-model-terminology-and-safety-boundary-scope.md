@@ -13,11 +13,14 @@
 > resolves five blockers found during review of #1306 so that WM-6 can later be
 > *considered* for acceptance.
 >
-> **Decision 5's safety-assurance ruling is still `PENDING`**, and when it is
-> made it will be an **owner self-assessment, not an independent assurance
-> review** — see *Independence posture*. Kirra is designed in alignment with
-> ISO 26262 ASIL-D requirements and IEC 61508 SIL 3 requirements; independent
-> third-party assessment has not yet been performed.
+> **Decision 5's safety-assurance ruling was RECORDED on 2026-08-05** —
+> *safety-related, non-authoritative* — and it is an **owner self-assessment,
+> not an independent assurance review**, taken on structural evidence with three
+> of its eight supporting questions recorded open. See *Independence posture*,
+> written before the ruling so that it constrains what the ruling was allowed to
+> be. Kirra is designed in alignment with ISO 26262 ASIL-D requirements and
+> IEC 61508 SIL 3 requirements; independent third-party assessment has not yet
+> been performed.
 
 ---
 
@@ -401,28 +404,30 @@ as `TBD` or the role name `the safety-assurance owner`, counts as unrecorded: a
 role cannot be accountable for a decision, which is the point of naming a
 person.
 
-**Ownership is assigned; the ruling is not made.** These are separate states and
-the gate now reports them separately. An owner exists and is accountable for
-producing the decision — that is real progress and is visible in CI — but the
-decision itself has not been taken, so the gate continues to hold and
-`kirra-world*` stays declaration-only. The remaining `UNASSIGNED` fields are the
-ruling, not the ownership.
+**Recorded 2026-08-05.** Ownership was assigned 2026-08-03 and the ruling taken
+two days later. The gate reads the block below, finds no placeholder, and
+releases itself: `kirra-world*` is no longer held to declaration-only by this
+record. What continues to constrain it is Fence A/B, the *Assumptions* field,
+and the *Conditions that reopen the decision* field — not this gate.
 
 ```
-Safety-assurance ruling: PENDING
+Safety-assurance ruling: RECORDED
 
 Owner: Justin Looney
 Owner assigned: 2026-08-03
-Date: UNASSIGNED
-Scope classification: UNASSIGNED
-Rationale: UNASSIGNED
-Assumptions: UNASSIGNED
-Required evidence: UNASSIGNED
-Conditions that reopen the decision: UNASSIGNED
+Date: 2026-08-05
+Scope classification: Safety-related, non-authoritative — inside the safety scope, carrying no allocated safety requirement and no authority over actuation, release, safety decisions, or required safety inputs. Source standard for the terminology: ISO 26262. The nearest specific machinery is Part 9 coexistence of elements, whose freedom-from-interference argument this record makes structurally; that clause mapping is INDICATED, NOT assessor-confirmed, and no independent assessment has been performed.
+Rationale: Fence A and Fence B machine-answer LINKAGE — INTACT over a transitive closure of 19 workspace packages from 10 roots, cross-checked against cargo metadata — but linkage is not influence. Q2 (whether semantic goal selection can steer proposal distribution within the admissible set), Q4 (ODD, coupled to Q2) and Q5 (the checker's bounds are kinematic and geometric and do not evaluate destination semantics) are recorded OPEN rather than answered. A QM classification was considered and REJECTED because it would assert here the negative that those three questions decline to assert; an ASIL-decomposed classification was rejected because it would allocate requirements to an element that by construction holds no safety authority.
+Assumptions: (1) The checker's corridor is not map-derived — `~/input/map` is a placeholder subscription, the slow loop uses the injected CorridorSource, and `kirra-map` is outside the enforced closure; no other common-source artifact exists between doer and checker, established by search across the closure rather than assumed. (2) ODD membership is an operator guarantee with NO runtime detection of exit (AOU-R2-ENVIRONMENT-001), and several ODD-bearing perception assumptions remain AoU-GAP. (3) The checker's independent input channels are independent by construction and fail closed when armed-but-silent, but all three default OFF, so adequacy is conditional on deployment configuration; their producers carry AOU-VRU-RATE-001 and AOU-OCCLUSION-RATE-001.
+Required evidence: The four per-PR structural gates — check_kirra_world_bidirectional_fence.py, check_world_domain_logic_gate.py, test_world_domain_logic_gate.py and check_mick_actuation_fence.py — re-run on every change, with this KNOWN GAP recorded as part of the ruling rather than outside it: none of them produces recurring evidence for Q2, Q4 or Q5, because those concern influence and semantics rather than linkage. Q5's residual is settled in docs/safety/HARA.md or not at all. This classification is supported by structural evidence only.
+Conditions that reopen the decision: (1) The independence-posture statement 4 floor — Kirra World gaining authority over actuation, release, safety decisions, or required safety inputs, any one of the four. (2) Phase-2 adoption making the map load-bearing to the checker, which the code already names along with its mitigation. (3) Any new common-source artifact appearing between doer and checker. (4) Any of Q2, Q4 or Q5 being answered in a direction inconsistent with a non-authoritative classification. (5) Any independent assessment reaching a different classification, which supersedes this one rather than competing with it.
 ```
 
-**Merging this PR does not constitute approval.** The ruling is not invented
-here, and no classification is claimed.
+**This is an owner self-assessment.** It was taken by one person holding the
+system-owner and assessor roles, on structural evidence, with three of the eight
+supporting questions recorded open. Nothing about recording it makes it an
+independent review — see *Independence posture*, which was written before the
+ruling precisely so it could constrain what the ruling was allowed to be.
 
 ## Independence posture — recorded 2026-08-04
 
@@ -458,13 +463,19 @@ it. Whatever the eventual ruling says, it says at least this, and a ruling that
 recorded a *narrower* reopening condition would contradict a commitment made
 before the ruling existed.
 
-Nothing here rules on anything. The gate reads the record above and continues
-to hold: status is `PENDING`, seven fields are `UNASSIGNED`, and `kirra-world*`
-stays declaration-only.
+**The posture above was written before the ruling and survives it unchanged.**
+Recording the ruling did not weaken any of its four statements; statement 4's
+floor is carried verbatim into the record's *Conditions that reopen the
+decision* field as condition (1).
 
-### What completing the ruling would take
+### How the ruling was completed
 
-Recorded so "the ruling is pending" does not stay a state with no visible exit.
+Retained as the record of how the decision was reached, and as the mapping any
+future re-ruling should follow. The eight questions in *Questions the ruling
+must address* map onto the record's fields as below. Seven were answered on
+2026-08-05; **Q2, Q4 and Q5 were answered as OPEN rather than resolved**, and
+that is visible in the *Rationale*, *Assumptions* and *Required evidence*
+fields rather than hidden behind the classification.
 The eight questions in *Questions the ruling must address* map onto the record's
 fields as follows — this mapping is descriptive, and the owner may answer them
 in any structure they choose.
@@ -478,11 +489,20 @@ in any structure they choose.
 | `Required evidence` | What must be produced and re-produced to preserve the classification over time | Q8 |
 | `Conditions that reopen the decision` | The full set, of which statement 4 above is the pre-committed floor | Q2, Q5 |
 
-**Q5 remains the sharpest and this PR does not soften it.** The checker bounds
-*trajectories*; a semantic error producing a legal trajectory to a
+**Q5 remains the sharpest, and the ruling did not soften it.** The checker
+bounds *trajectories*; a semantic error producing a legal trajectory to a
 wrong-but-reachable place is bounded kinematically while being operationally
-wrong. Whether that is a safety concern or an availability concern is the
-owner's call, and it is not made here.
+wrong.
+
+The ruling's *Rationale* records the scope of the bound rather than closing the
+question: the checker's bounds are kinematic and geometric — containment,
+per-pose kinematics, RSS, occlusion, multi-modal predictive RSS — and none of
+them evaluate destination semantics. So "fully bounded for every hazardous
+outcome" resolves to *bounded for every hazardous outcome expressible in that
+geometry*. Whether the remainder is empty is a HARA question, not a code
+question, and `docs/safety/HARA.md` is where it is settled or found wanting.
+**Answering it in a direction inconsistent with a non-authoritative
+classification is condition (4) for reopening the decision.**
 
 ---
 
