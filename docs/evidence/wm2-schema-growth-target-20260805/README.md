@@ -169,12 +169,23 @@ record shows is ext4 on `/dev/nvme0n1p1`, so both arms land on one filesystem.
 - **No with-projections figure for the ratified schema.** Not measurable until
   projections exist. The budget comparison is therefore optimistic — it is a
   log-only figure against a budget that counted projections.
-- **`wm2-schema-growth` has no `--assert-target` of its own.** Its records carry
-  `arch`/`os` and nothing more; the target status of this bundle is inherited
-  from the paired harness arm, by operator assertion in this README. That is a
-  real gap: the instrument cannot presently refuse to be cited as target
-  evidence on its own say-so, the way the harness can. Adding the assertion is
-  the honest follow-up.
+- **`wm2-schema-growth` had no `--assert-target` when this bundle was made.**
+  Its records carried `arch`/`os` and nothing more, so the target status of this
+  bundle is inherited from the paired harness arm, **by operator assertion in
+  this README** — the instrument could not refuse to be cited as target evidence
+  the way the harness can.
+
+  **The follow-up has since been done** (2026-08-05): the tool now runs the
+  harness's classifier — the *same module*, `#[path]`-included rather than
+  copied, so the token cannot come to mean two things — and stamps
+  `evidence_status` plus the corroborating facts into every record.
+
+  **This does not retroactively attest this bundle.** The records below were
+  produced by the earlier build and carry no classification; they remain
+  operator-asserted, exactly as described above. A re-run on target would
+  produce instrument-attested records, and that is what a future bundle should
+  cite. Recorded rather than quietly upgraded, because "we fixed the tool" and
+  "this measurement is attested" are different claims.
 - **No claim about where in the band real traffic sits.** `lean` and `populated`
   bound a modelling choice; nothing measures the middle.
 - **No deep-provenance case.** `populated` cites one upstream observation; SD-3
