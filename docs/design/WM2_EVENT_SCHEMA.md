@@ -1,9 +1,9 @@
-# WM-2 event schema — proposal
+# WM-2 event schema
 
 | | |
 |---|---|
 | **Identifier** | KIRRA-WM2-SCHEMA-001 |
-| **Status** | **Proposed.** A recommendation for the World Model owner to rule on. It decides nothing, and no store is implemented against it. |
+| **Status** | **RULED 2026-08-05** — D-1 through D-4 decided by the World Model owner (§6). The schema is fixed; **no store is implemented against it yet**. |
 | **Addresses** | The prerequisite ADR-0041 leaves open — *"column-level schemas are deliberately not fixed here"* — and the `kirra-audit-hash` adoption the harness README requires |
 | **Unblocked by** | ADR-0042 **Decision 5**, recorded 2026-08-05 (*safety-related, non-authoritative*) |
 | **Date** | 2026-08-05 |
@@ -49,23 +49,24 @@ means either a separate column the store validates, or separate tables, or a
 claim-status field that only a non-LLM writer may set to `confirmed`. **That is
 a design decision, not a column name**, and it is proposed as D-2 below.
 
-## 3. Proposed columns
+## 3. The columns (as ruled)
 
 Keeping the stand-in's shape where it was right — one append-only
 hash-chained `world_events` as the only writable table, bitemporal
 (`txn_time_ms` / `valid_from_ms` / `valid_to_ms`), `generation` as the total
-replay order — and adding what §2 found missing.
+replay order — and adding what §2 found missing. The §6 rulings are folded in.
 
 | Column | Change | Note |
 |---|---|---|
-| `generation`, `txn_time_ms`, `valid_from_ms`, `valid_to_ms` | **keep** | The bitemporal core; unchanged |
+| `generation`, `txn_time_ms`, `valid_from_ms` | **keep** | The bitemporal core; unchanged |
+| `valid_to_ms` | **keep, WRITE-ONCE** | D-1. Set at insert for an inherently bounded observation, else NULL and the end derived from supersession. Never updated — there is no `UPDATE` in an append-only log |
 | `event_id` | **keep** | Identity of the *record* |
 | `observation_id` | **ADD** | Identity of the *observation*, stable across re-attribution |
-| `source`, `source_version` | **keep** | Who produced it |
-| `writer_class` | **ADD** | `sensor` \| `operator` \| `derivation` \| `llm_candidate`. See D-2 |
-| `claim_status` | **ADD** | `candidate` \| `confirmed`. An `llm_candidate` writer may never write `confirmed` |
-| `provenance` | **ADD** | The derivation chain: what this rests on. Structure is D-3 |
-| `frame_id`, `map_id` | **ADD** | Nullable — non-spatial claims have neither. See D-4 |
+| `source`, `source_version` | **keep** | Who produced it; also carries the derivation *method* (D-3) |
+| `writer_class` | **ADD** | D-2. `sensor` \| `operator` \| `derivation` \| `llm_candidate`. Inside the hashed bytes |
+| `claim_status` | **ADD** | D-2. `candidate` \| `confirmed`. Inside the hashed bytes, so relabelling breaks the chain |
+| `provenance` | **ADD** | D-3. A JSON **array of `observation_id`s**, digest-covered — traversable with `json_each`, no second writable table |
+| `frame_id`, `map_id` | **ADD** | D-4. Nullable, with `CHECK (kind <> 'spatial' OR frame_id IS NOT NULL)` |
 | `kind`, `subject`, `predicate`, `object` | **keep** | The claim triple |
 | `payload`, `payload_schema`, `payload_digest` | **keep** | Opaque body + its versioned schema |
 | `retention_class` | **keep** | The six classes ruled in OQ2; inside the hashed bytes, so immutable |
@@ -112,14 +113,76 @@ changes is how many events fit.
 This is recorded now, before implementation, so that it reads as a known
 coupling rather than a discovery.
 
-## 6. The four decisions this asks for
+## 6. The four decisions — RULED 2026-08-05
 
-| | Decision | Options |
-|---|---|---|
-| **D-1** | Is the stand-in's bitemporal core kept as-is? | (a) yes, as §3 (b) revisit `valid_to_ms` nullability (c) other |
-| **D-2** | How is *"an LLM may never write a confirmed fact"* made structural? | (a) `writer_class` + `claim_status` with a store-enforced invariant (b) separate tables per writer class (c) enforced above the store — **rejected as conventional, not structural** |
-| **D-3** | What shape is `provenance`? | (a) JSON blob, digest-covered (b) a normalized edge table (c) a citation list of `observation_id`s |
-| **D-4** | Are `frame_id`/`map_id` nullable columns, or is a spatial claim a distinct `kind`? | (a) nullable columns (b) distinct kind with its own required fields |
+### D-1 — the bitemporal core is kept, and `valid_to_ms` is WRITE-ONCE
+
+The columns are unchanged. What was missing was a rule, and the rule is the
+decision: **`valid_to_ms` is set at insert or never.**
+
+In an append-only log there is no `UPDATE` that closes a fact's validity, so the
+column has exactly two honest uses — set at insert when the observation is
+*inherently* bounded ("seen between 10:00 and 10:05"), or left NULL with the end
+derived from a superseding event. Leaving it nullable and silent invites the
+third thing, an `UPDATE` that breaks append-only. Stating write-once removes the
+temptation rather than relying on nobody taking it.
+
+### D-2 — `writer_class` + `claim_status`, both inside the hashed bytes
+
+**Separate tables per writer class (option b) is rejected**, and it was already
+rejected once: ADR-0041 open question 1, ruled the same day, enumerates what
+splitting the log costs — one chain becomes several, the total replay order is
+lost, compaction citations fragment. Those costs are not cheaper when the split
+is by writer instead of by durability.
+
+**Enforcement above the store (option c) is rejected as conventional.** "The
+caller promises not to" is the thing `kirra-world`'s own comment rules out when
+it demands the distinction be *unforgeable rather than conventional*.
+
+The adopted option buys more than validation. Because both columns sit inside
+the canonically-hashed event bytes — the property `retention_class` already has
+— relabelling an LLM-written event as `confirmed` **does not fail a check, it
+breaks the chain**. The tamper evidence does the enforcement, not the code path.
+A code path can be bypassed; a hash cannot.
+
+> **Invariant.** `writer_class = 'llm_candidate'` ⇒ `claim_status = 'candidate'`.
+> Enforced at the write path *and* structurally evident in the chain.
+
+### D-3 — provenance is a citation list of `observation_id`s, digest-covered
+
+**A normalized edge table (option b) is rejected on architecture:** ADR-0041
+fixes `world_events` as *"the append-only evidence log (the only writable
+table)"*, and an edge table is a second one.
+
+**A free-form JSON blob (option a) is rejected on purpose:** provenance exists so
+a claim can be re-judged when the evidence under it changes, which means walking
+it. Unstructured, it cannot be walked.
+
+Adopted: a **JSON array of `observation_id`s** in one digest-covered column —
+structured enough to traverse with `json_each`, with no second writable table.
+The derivation *method* needs no new field; `kind`, `source` and
+`source_version` already carry it. If provenance later needs to be queryable at
+speed, that is a **projection** — rebuildable, not writable — which is the
+escape hatch the architecture already provides.
+
+### D-4 — nullable `frame_id`/`map_id`, with a CHECK that excludes the bad state
+
+```sql
+CHECK (kind <> 'spatial' OR frame_id IS NOT NULL)
+```
+
+Plain nullable columns would permit a spatial claim with a NULL frame, which is
+precisely what ADR-0042 Decision 2 needs excluded. A distinct `kind` with its own
+required fields (option b) gets the guarantee at the cost of a kind taxonomy that
+forks every query. The `CHECK` gets option b's guarantee inside option a's shape,
+at the storage layer rather than by convention.
+
+### The through-line
+
+D-2 and D-4 are the same decision twice: **structural, not conventional.** Both
+are answered by putting the constraint somewhere a caller cannot route around —
+the hashed bytes in one case, a storage-layer `CHECK` in the other. D-1 is the
+same instinct applied to a rule that had simply gone unstated.
 
 ## 7. What this does not decide
 
@@ -127,5 +190,22 @@ coupling rather than a discovery.
   rebuildable views and follow from the fold, not from this table.
 - **The grouping budgets** left unset by OQ1's P-2/P-3.
 - **OQ2b** — whether policy-supersession records are needed at WM-2.
-- **Any implementation.** No store is written against this document, and none
-  should be until D-1…D-4 are ruled.
+- **The implementation.** D-1…D-4 are ruled, so the schema is no longer the
+  blocker — but **no store is written against this document**, and
+  `kirra-world*` remains declaration-only at the time of this ruling.
+
+## 8. What the first implementation must carry
+
+Recorded here so the rulings above are not re-derived from prose when someone
+writes the migration:
+
+1. **The `CHECK` from D-4 is part of the schema**, not a validation the writer
+   performs. A spatial claim with a NULL frame must be rejected by the storage
+   layer.
+2. **The D-2 invariant is enforced at the write path AND evident in the chain.**
+   Enforcing it only in code would satisfy the letter and lose the property that
+   made option (a) win.
+3. **`kirra-audit-hash` from the first commit**, not retrofitted — §4 explains
+   why there is no upgrade path from a store written under the harness chain.
+4. **Re-measure bytes/event before trusting OQ2's horizons** (§5). The
+   instrument exists; the digest gate will confirm it is unchanged.
