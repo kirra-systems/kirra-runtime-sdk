@@ -15,9 +15,13 @@
 #
 # This repository is overwhelmingly Rust. A typical pull request touches
 # crates/ and nothing else, yet every push rebuilds the Next.js console —
-# once per connected Vercel project. That is how the account reached its
-# build-rate limit while the changes under review contained no console code
-# at all.
+# once per connected Vercel project. Those rebuilds are pure waste: build
+# minutes spent producing a byte-identical result while the changes under
+# review contain no console code at all.
+#
+# They are **not** what exhausts the account's daily limit, and this script
+# does not stop the red statuses that limit produces. Read "What this script
+# does NOT fix" below before concluding otherwise.
 #
 # Vercel builds this project from the console/ Root Directory, so console/ is
 # the complete set of inputs. If nothing under it changed, the previous
@@ -28,8 +32,9 @@
 # What this script does NOT fix — measured 2026-08-05
 #
 # This works: PR checks show `Canceled by Ignored Build Step` against a
-# SUCCESS status wherever it runs. It did not stop the account hitting its
-# limit, and the paragraph above is wrong about which limit that was.
+# SUCCESS status wherever it runs. It saves the build minutes described
+# above. It does not stop the account hitting its daily limit, because that
+# limit counts something else.
 #
 # The failures still seen on Rust-only pull requests are:
 #
