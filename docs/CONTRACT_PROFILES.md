@@ -213,23 +213,31 @@ duplication is stated, cited and controlled (`contract_profiles.rs`
 the single source of truth). **The class *selector* is a different thing and is
 not analysed there**, so it is analysed here.
 
-The verifier's actuator envelope and parko's SG6 impact threshold are two
-governors intended to be **diverse** — `parko-kirra`'s `GovernorComparator`
-accumulates divergence between them and escalates the effective posture on it.
-Both take their class from the same logical value.
+**One value, two independent consumers, in two different subsystems:**
 
-**What that costs, stated precisely:**
-
-| Fault class | Diversity preserved? |
+| Consumer | What the class selects |
 |---|---|
-| Implementation fault in one governor | **Yes.** Separate code, separate enums, separate parsers, no dependency edge. The comparator sees it |
-| **Parameterization fault** — a valid-but-wrong class | **No.** Both governors move consistently to the same wrong class, agree with each other, and the comparator sees nothing |
+| Verifier service | The actuator envelope — `contract_for(class)` / `mrc_fallback_for(class)` |
+| `parko_ros2_node` | The SG6 impact threshold — `impact_cfg_for_class(class).spike_threshold_mps2` |
 
-The failure mode is therefore *not* a crash and *not* a divergence. It is two
-governors agreeing, correctly, about the wrong vehicle. `courier` on R2 hardware
-is the concrete instance already documented under #1219: it assumes 2× the
-braking (3.0 vs 1.5 m/s²), and over-estimating available brake under-estimates
-stopping distance directly.
+**No mechanism cross-checks the two selections.** In particular, parko's
+`GovernorComparator` is *not* that mechanism, and it would be easy to assume
+otherwise: it holds `primary: KirraGovernor` and `shadow: DiverseKirraGovernor`,
+so it compares two governor implementations **inside parko** against each other.
+It never observes the verifier, and the class selector feeds the SG6 impact path
+rather than either governor it compares. Its diversity argument is about
+implementation faults and is untouched by anything on this page.
+
+**The fault this leaves is a common-cause configuration fault.** A valid-but-
+wrong class parameterizes both consumers *consistently* — each receives a
+well-formed class string, each fail-closed parser accepts it, and neither
+subsystem holds anything to compare it against. The failure mode is not a crash
+and not a disagreement between components: it is the whole stack configured,
+coherently, for a vehicle that is not the one it is bolted to.
+
+`courier` on R2 hardware is the concrete instance already documented under
+#1219: it assumes 2× the braking (3.0 vs 1.5 m/s²), and over-estimating
+available brake under-estimates stopping distance directly.
 
 **This is latent, not live.** `parko_ros2_node` is not in the R2 launch graph —
 `kirra_with_robot.launch.py` starts `kirra_safety` nodes only — so on the R2
