@@ -140,6 +140,12 @@ FENCE_A_EXTRA_PACKAGES: dict[str, str] = {
         "the ADR-0041 (WM-2) measurement harness — Kirra World work by purpose, "
         "outside the namespace by design"
     ),
+    "wm2-schema-growth": (
+        "the KIRRA-WM2-SCHEMA-001 §8.4 bytes/event instrument (ADR-0041 D-20) — "
+        "same shape as the harness, and it additionally DEPENDS on "
+        "kirra-world-store, so an actuation edge added here would reach the real "
+        "store's dependency graph rather than a stand-in's"
+    ),
 }
 
 # Fence A: what Kirra World must never depend on. Derived from the workspace —

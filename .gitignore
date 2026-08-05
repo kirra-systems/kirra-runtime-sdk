@@ -64,3 +64,7 @@ robot/contract_reports/
 # same treatment as tools/iceoryx2-spike.
 /tools/wm2-persistence-harness/Cargo.lock
 /tools/wm2-persistence-harness/target/
+
+# WM-2 schema-growth instrument (ADR-0041 D-20) — same treatment.
+/tools/wm2-schema-growth/Cargo.lock
+/tools/wm2-schema-growth/target/

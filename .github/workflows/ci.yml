@@ -274,6 +274,7 @@ jobs:
           cargo fmt --check --manifest-path crates/kirra-loom-models/Cargo.toml
           cargo fmt --check --manifest-path tools/iceoryx2-spike/Cargo.toml
           cargo fmt --check --manifest-path tools/wm2-persistence-harness/Cargo.toml
+          cargo fmt --check --manifest-path tools/wm2-schema-growth/Cargo.toml
       - name: frozen-talisman blob pin survives formatting
         run: |
           # Anchored on the PATH, not on the hash value (#1242). This grep used
@@ -964,6 +965,61 @@ jobs:
           fi
           grep -q '"citable":false' "$RUNNER_TEMP/wm2-results.jsonl" \
             || { echo "run record missing or not marked uncitable"; exit 1; }
+
+  wm2-schema-growth:
+    name: WM-2 schema growth (ADR-0041 D-20 instrument)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: clippy
+      - name: instrument self-tests + a short paired run
+        # Its own workspace, like the harness, so the root `cargo test
+        # --workspace` never reaches it. This lane exists for the same reason:
+        # the instrument that discharged `KIRRA-WM2-SCHEMA-001` §8.4 must still
+        # compile and run on the day someone re-measures after the next schema
+        # change, not merely on the day it was written.
+        #
+        # It has one dependency the harness does not — `kirra-world-store` —
+        # which makes this lane double as an early warning: a schema change
+        # that breaks the append path breaks HERE before anyone reruns the
+        # measurement and misreads a compile error as a result.
+        #
+        # Event count is small deliberately. The lane proves the path executes;
+        # it is not producing evidence, and the fixed per-database overhead at
+        # 5 000 events makes its bytes/event figure visibly not a citable one.
+        working-directory: tools/wm2-schema-growth
+        run: |
+          cargo test --release
+          cargo clippy --all-targets --release -- -D warnings
+          ./target/release/wm2-schema-growth \
+              --events 5000 --entities 200 \
+              --db "$RUNNER_TEMP/wm2-growth.sqlite" \
+              --out "$RUNNER_TEMP/wm2-growth.jsonl"
+      - name: a ratio is never emitted without a same-host control
+        # This instrument's version of the harness's citability guard, and the
+        # same class of failure: the harness's danger is a laptop number
+        # entered as target evidence; this one's is a RATIO computed against a
+        # figure from another machine, which silently confounds the schema
+        # effect it claims to isolate with a platform difference. The run above
+        # deliberately omits --standin-bpe, so a `paired_ratio` record
+        # appearing here means the refusal has broken open.
+        run: |
+          if grep -q '"record":"paired_ratio"' "$RUNNER_TEMP/wm2-growth.jsonl"; then
+            echo "a ratio was emitted with no --standin-bpe control — the pairing guard is broken"
+            exit 1
+          fi
+          # Every record must carry the store's own schema digest, so a figure
+          # can never be re-read as being about a schema edited after the run.
+          grep -q '"schema_digest":"[0-9a-f]\{64\}"' "$RUNNER_TEMP/wm2-growth.jsonl" \
+            || { echo "records are missing the ratified schema digest"; exit 1; }
+          # Both ends of the band must be present. One arm alone is a number,
+          # not a bound, and D-20's horizons are taken from the upper end.
+          grep -q '"fill":"lean"' "$RUNNER_TEMP/wm2-growth.jsonl" \
+            && grep -q '"fill":"populated"' "$RUNNER_TEMP/wm2-growth.jsonl" \
+            || { echo "the measured band is incomplete"; exit 1; }
 
   r2cp-bridge:
     name: R2CP host bridge (PTY loop + dependency-free core)
