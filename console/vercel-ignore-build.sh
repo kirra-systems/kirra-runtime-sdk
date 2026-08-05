@@ -25,6 +25,41 @@
 # rebuilding produces a byte-identical result at the cost of a build slot.
 #
 # ---------------------------------------------------------------------------
+# What this script does NOT fix — measured 2026-08-05
+#
+# This works: PR checks show `Canceled by Ignored Build Step` against a
+# SUCCESS status wherever it runs. It did not stop the account hitting its
+# limit, and the paragraph above is wrong about which limit that was.
+#
+# The failures still seen on Rust-only pull requests are:
+#
+#   Resource is limited - try again in 24 hours
+#   (more than 100, code: "api-deployments-free-per-day")
+#
+# `api-DEPLOYMENTS-per-day`, not builds. It is an account-level cap on
+# deployments CREATED, and it is enforced before the build runs — so this
+# script never gets the chance to skip anything. On a rate-limited day the
+# statuses are red no matter what is written here.
+#
+# The cause is not this script and cannot be fixed by it: **seven Vercel
+# projects are connected to this one repository, every one of them with
+# console/ as its Root Directory** — observed on 2026-08-05 as
+# kirra-runtime-sdk, -1vdc, -5lt3, -f35q, -hdy4, -og6p, -tgo8. Seven
+# deployments per push exhausts a 100/day cap in well under a day of ordinary
+# work, and an ignored build still creates a deployment (Vercel lists the
+# ignored ones with inspector and preview URLs, so they are objects, not
+# no-ops) — check the account's usage page to confirm how they are counted.
+#
+# Six of those projects are redundant. Removing them is a DASHBOARD action;
+# there is no repository-side equivalent, because all seven read THIS file and
+# this vercel.json, so any switch here — `git.deploymentEnabled` included —
+# turns all seven off together rather than six.
+#
+# Recorded here rather than in a ticket because this is the file someone
+# reaches for when the statuses go red, and the honest answer is "this script
+# is working; the problem is upstream of it."
+#
+# ---------------------------------------------------------------------------
 # The fail-safe direction is BUILD, not SKIP
 #
 # Every uncertain case below exits 1. The two errors are not symmetric:
