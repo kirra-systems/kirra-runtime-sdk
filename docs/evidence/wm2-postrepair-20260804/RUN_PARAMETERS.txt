@@ -63,9 +63,22 @@ already answered and did not need re-answering here.
 TRANSFER: the whole directory was tarred with an inner SHA256SUMS and moved
 base64-over-terminal. The outer tarball digest was
 84c40edef690d86cf913469f6f5d993d80a5774e5b20b49a5d699bbeec08c4b8 and matched on
-arrival; the inner manifest then verified all five files OK. This double check
-exists because OQ1's stall file failed its first transfer with an IDENTICAL byte
-count and a different digest, and only the inner manifest isolated which file.
+arrival; the inner manifest then verified every transferred file OK. This double
+check exists because OQ1's stall file failed its first transfer with an IDENTICAL
+byte count and a different digest, and only the inner manifest isolated which
+file.
+
+TWO MANIFESTS, DIFFERENT SCOPES — stated so an audit does not read a discrepancy
+where there is none. The transfer-time manifest, generated on the device before
+tarring, covered the FIVE files that crossed the wire:
+
+    postrepair-append.jsonl  postrepair-stall.jsonl
+    ENVIRONMENT.txt          DMESG_NVME.txt          GIT_COMMIT
+
+The SHA256SUMS committed here covers NINE, because README.md, RUN_PARAMETERS.txt,
+.gitattributes and probe.jsonl were added after arrival and the manifest was
+regenerated. The five transferred files carry BYTE-IDENTICAL digests in both, so
+the device-side manifest and this one can be cross-checked directly.
 
 Note the harness's --durability flag takes `full|normal|off`; the usage string
 advertises `<f|n|off>`, which it does not accept.
