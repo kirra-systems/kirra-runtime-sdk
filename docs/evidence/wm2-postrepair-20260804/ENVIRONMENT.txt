@@ -1,0 +1,10 @@
+Captured:         2026-08-04T21:40:30-04:00
+Kernel:           Linux 5.15.148-tegra aarch64
+Filesystem state:         clean
+Block count:              39268536
+Free blocks:              10701568
+Mount count:              1
+Last checked:             Tue Aug  4 20:43:07 2026
+journald usage:   Archived and active journals take up 227.0M in the file system.
+df /:             /dev/nvme0n1p1  147G  107G   34G  76% /
+harness source:   8882f659... (probe-verified identical to pre-repair)
