@@ -44,9 +44,11 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+pub mod compaction;
 pub mod projection;
 pub mod schema;
 
+pub use compaction::{Citation, CompactionOutcome};
 pub use projection::{ProjectedClaim, CURRENT_PROJECTION};
 
 // Re-exported so the dependency edge is real rather than declared-and-unused.
@@ -153,6 +155,43 @@ pub enum StoreError {
         /// What was wrong with it.
         detail: String,
     },
+    /// A compaction window contained a protected-class event. §11.3 refuses
+    /// such a window **whole** rather than compacting around it.
+    ProtectedClassInRange {
+        /// The offending generation.
+        generation: i64,
+        /// Its retention class.
+        retention_class: String,
+    },
+    /// A compaction window contained an event that defines a projection's
+    /// current claim. Removing it would make `rebuild_projections` stop
+    /// reproducing the incremental state.
+    ProjectionHeadInRange {
+        /// The offending generation.
+        generation: i64,
+        /// The subject whose current claim it defines.
+        subject: String,
+    },
+    /// Generations are missing with no citation explaining them. This is what
+    /// stops a span being deleted quietly.
+    UncitedGap {
+        /// The first missing generation.
+        generation: i64,
+    },
+    /// A citation exists but does not join the chain it claims to bridge.
+    CitationBroken {
+        /// The citation's first generation.
+        lo_generation: i64,
+        /// What did not line up.
+        detail: String,
+    },
+    /// A compaction range was empty or inverted.
+    EmptyRange {
+        /// The requested low bound.
+        lo: i64,
+        /// The requested high bound.
+        hi: i64,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -174,6 +213,36 @@ impl std::fmt::Display for StoreError {
             }
             Self::CorruptRow { generation, detail } => {
                 write!(f, "corrupt row at generation {generation}: {detail}")
+            }
+            Self::ProtectedClassInRange {
+                generation,
+                retention_class,
+            } => write!(
+                f,
+                "generation {generation} is retention_class={retention_class}, which is \
+                 protected from compaction; the window is refused whole \
+                 (ADR-0041 §11.3, OQ2)"
+            ),
+            Self::ProjectionHeadInRange {
+                generation,
+                subject,
+            } => write!(
+                f,
+                "generation {generation} defines the current claim for `{subject}`; \
+                 compacting it would make a projection rebuild diverge from the \
+                 incremental fold"
+            ),
+            Self::UncitedGap { generation } => write!(
+                f,
+                "generation {generation} is missing with no compaction citation \
+                 accounting for it"
+            ),
+            Self::CitationBroken {
+                lo_generation,
+                detail,
+            } => write!(f, "citation at generation {lo_generation}: {detail}"),
+            Self::EmptyRange { lo, hi } => {
+                write!(f, "compaction range {lo}..={hi} is empty or inverted")
             }
         }
     }
@@ -484,8 +553,53 @@ impl WorldStore {
         let mut rows = stmt.query([])?;
         let mut prev = GENESIS.to_string();
 
+        // Compaction citations, keyed by the generation each span starts at.
+        // Loaded up front so a hole can be crossed the moment it is reached,
+        // rather than discovered as a missing row and reported as corruption.
+        let citations = self.load_citations()?;
+        let mut expected_generation: i64 = 1;
+        // Which citations the walk actually consumed. Checked at the end, so
+        // an unreachable one cannot sit unread.
+        let mut visited: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+
         while let Some(r) = rows.next()? {
             let generation: i64 = r.get(0)?;
+
+            // Cross any compacted spans standing between the last verified row
+            // and this one. Each must be cited, and each citation must join the
+            // chain where it claims to — that pairing is what makes a silent
+            // deletion impossible: remove rows and the gap is uncited; forge a
+            // citation and `chain_before` will not match what we computed.
+            while expected_generation < generation {
+                let c = citations.get(&expected_generation).ok_or({
+                    StoreError::UncitedGap {
+                        generation: expected_generation,
+                    }
+                })?;
+                if c.chain_before != prev {
+                    return Err(StoreError::CitationBroken {
+                        lo_generation: c.lo_generation,
+                        detail: format!(
+                            "chain_before does not match the digest at generation {}",
+                            expected_generation - 1
+                        ),
+                    });
+                }
+                visited.insert(c.lo_generation);
+                prev = c.chain_after.clone();
+                expected_generation = c.hi_generation + 1;
+            }
+            if expected_generation != generation {
+                // A citation overshot into a surviving row: its span claims
+                // generations that are still present.
+                return Err(StoreError::CitationBroken {
+                    lo_generation: expected_generation,
+                    detail: format!(
+                        "a citation covers generation {generation}, which is still present"
+                    ),
+                });
+            }
+
             let event_id: String = r.get(1)?;
             let observation_id: String = r.get(2)?;
             let txn_time_ms: i64 = r.get(3)?;
@@ -548,6 +662,40 @@ impl WorldStore {
                 return Err(StoreError::ChainBroken { generation });
             }
             prev = stored;
+            expected_generation = generation + 1;
+        }
+
+        // A span compacted off the END of the log leaves no following row to
+        // trigger the crossing above, so it is followed here.
+        while let Some(c) = citations.get(&expected_generation) {
+            if c.chain_before != prev {
+                return Err(StoreError::CitationBroken {
+                    lo_generation: c.lo_generation,
+                    detail: "trailing citation does not join the chain".to_string(),
+                });
+            }
+            visited.insert(c.lo_generation);
+            prev = c.chain_after.clone();
+            expected_generation = c.hi_generation + 1;
+        }
+
+        // EVERY citation must have been walked. The loops above only follow
+        // citations reachable by contiguity from generation 1, so one sitting
+        // at an unreachable `lo_generation` — past the end of the log, or
+        // behind a gap nothing accounts for — would otherwise be ignored and
+        // the whole verification still return Ok.
+        //
+        // That is a hole in the property this design exists to provide: a
+        // citation is an *admission* that a span was removed, so an admission
+        // no verifier ever reads is not one. Refusing here means every
+        // citation is either walked and checked, or the chain fails.
+        if let Some(orphan) = citations.keys().find(|k| !visited.contains(k)) {
+            return Err(StoreError::CitationBroken {
+                lo_generation: *orphan,
+                detail: "citation is unreachable from the verified sequence — it \
+                         accounts for generations that were never reached"
+                    .to_string(),
+            });
         }
         Ok(())
     }
@@ -569,6 +717,120 @@ impl WorldStore {
                 |r| r.get(0),
             )
             .optional()?)
+    }
+
+    /// Every citation, keyed by the generation its span starts at.
+    fn load_citations(&self) -> Result<std::collections::BTreeMap<i64, Citation>, StoreError> {
+        if !self.has_citations()? {
+            return Ok(std::collections::BTreeMap::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT lo_generation, hi_generation, event_count, range_digest,
+                    chain_before, chain_after, compacted_at_ms
+             FROM compaction_citations ORDER BY lo_generation ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Citation {
+                lo_generation: r.get(0)?,
+                hi_generation: r.get(1)?,
+                event_count: r.get(2)?,
+                range_digest: r.get(3)?,
+                chain_before: r.get(4)?,
+                chain_after: r.get(5)?,
+                compacted_at_ms: r.get(6)?,
+            })
+        })?;
+        let mut out = std::collections::BTreeMap::new();
+        for c in rows {
+            let c = c?;
+            out.insert(c.lo_generation, c);
+        }
+        Ok(out)
+    }
+
+    /// Whether any compaction has run against this store.
+    pub fn has_citations(&self) -> Result<bool, StoreError> {
+        let n: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='compaction_citations'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(n.is_some())
+    }
+
+    /// Every recorded compaction, oldest span first.
+    pub fn citations(&self) -> Result<Vec<Citation>, StoreError> {
+        Ok(self.load_citations()?.into_values().collect())
+    }
+
+    /// Test-only: insert a citation for a span that was never removed.
+    ///
+    /// Lets a test plant an **unreachable** citation — one the verification
+    /// walk never arrives at — which is the case that must be refused rather
+    /// than quietly ignored.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn forge_citation_for_test(
+        &self,
+        lo_generation: i64,
+        hi_generation: i64,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute_batch(compaction::COMPACTION_V1)?;
+        self.conn.execute(
+            "INSERT INTO compaction_citations (
+                lo_generation, hi_generation, event_count, range_digest,
+                chain_before, chain_after, compacted_at_ms
+             ) VALUES (?1,?2,1,'forged','forged','forged',?3)",
+            params![lo_generation, hi_generation, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Test-only: remove a citation, leaving its gap unexplained.
+    ///
+    /// This is how a test proves the chain refuses an **uncited** gap — the
+    /// property that stops compaction being a licence to delete evidence. A
+    /// test that only compacted correctly could never show it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn delete_citation_for_test(&self, lo_generation: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM compaction_citations WHERE lo_generation = ?1",
+            params![lo_generation],
+        )?;
+        Ok(())
+    }
+
+    /// Test-only: rewrite one column of a citation, to forge one.
+    ///
+    /// Allowlisted rather than interpolated, for the same reason
+    /// [`WorldStore::tamper_for_test`] is: the `test-support` feature makes
+    /// this public API.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn tamper_citation_for_test(
+        &self,
+        lo_generation: i64,
+        column: &str,
+        value: &str,
+    ) -> Result<(), StoreError> {
+        const TAMPERABLE: &[&str] = &[
+            "chain_before",
+            "chain_after",
+            "range_digest",
+            "event_count",
+            "hi_generation",
+        ];
+        if !TAMPERABLE.contains(&column) {
+            return Err(StoreError::CitationBroken {
+                lo_generation,
+                detail: format!("`{column}` is not a tamperable column"),
+            });
+        }
+        let sql = format!("UPDATE compaction_citations SET {column} = ?1 WHERE lo_generation = ?2");
+        self.conn.execute(&sql, params![value, lo_generation])?;
+        Ok(())
     }
 
     /// Test-only: rewrite one column of one row, bypassing the write path.
@@ -941,6 +1203,303 @@ impl WorldStore {
         ))?;
         let rows = stmt.query_map(params![subject], claim_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The largest `lo..=n` that [`WorldStore::compact_range`] would accept,
+    /// or `None` if nothing in the window is compactable.
+    ///
+    /// Both refusals name their first blocking generation, so a caller can
+    /// always retry on the sub-range below it. This makes that a **designed**
+    /// recovery rather than an accident of the error type: a refusal is a
+    /// redirect, not a dead end.
+    ///
+    /// Note the asymmetry, which is deliberate. The two refusals are refusals
+    /// of different kinds:
+    ///
+    /// * **Protected classes** are a *policy* unit. §11.3 refuses such a window
+    ///   whole, and this helper honours that by stopping at the protected
+    ///   event rather than stepping over it — compacting around it would make
+    ///   how much of a span survives a question about interleaving.
+    /// * **Projection heads** are a *correctness* constraint. Nothing says a
+    ///   head's neighbours must survive, only the head itself.
+    ///
+    /// So for heads, stopping short is a conservative simplification rather
+    /// than a requirement. If measurement ever shows head refusals blocking a
+    /// material fraction of reclaimable space, the escalation is to compact
+    /// *around* them — the citation model already handles disjoint spans, so
+    /// it is a loop over sub-ranges, not a redesign. Recorded here and in
+    /// ADR-0041 §11.3 so that is a pre-agreed trigger, not a later argument.
+    pub fn largest_compactable_prefix(&self, lo: i64, hi: i64) -> Result<Option<i64>, StoreError> {
+        if lo < 1 || hi < lo {
+            return Ok(None);
+        }
+        let mut limit = hi;
+
+        let protected: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MIN(generation) FROM world_events
+                 WHERE generation BETWEEN ?1 AND ?2 AND retention_class <> 'raw'",
+                params![lo, hi],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        if let Some(g) = protected {
+            limit = limit.min(g - 1);
+        }
+
+        if self.has_projections()? {
+            let head: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT MIN(e.generation) FROM world_events e
+                     JOIN world_current c ON c.generation = e.generation
+                     WHERE e.generation BETWEEN ?1 AND ?2",
+                    params![lo, hi],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            if let Some(g) = head {
+                limit = limit.min(g - 1);
+            }
+        }
+
+        if limit < lo {
+            return Ok(None);
+        }
+        // A prefix with no rows in it is not compactable either — otherwise
+        // this would hand back a range `compact_range` refuses as empty.
+        let present: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM world_events WHERE generation BETWEEN ?1 AND ?2",
+            params![lo, limit],
+            |r| r.get(0),
+        )?;
+        Ok(if present > 0 { Some(limit) } else { None })
+    }
+
+    /// Compact `lo..=hi` out of the log, leaving a citation in its place.
+    ///
+    /// Refuses, whole, if the window contains:
+    ///
+    /// * a **protected-class** event (§11.3, OQ2's 365-day classes), or
+    /// * an event that is a **projection head** — removing it would make
+    ///   [`WorldStore::rebuild_projections`] stop reproducing the incremental
+    ///   fold, quietly falsifying the property ADR-0041 names.
+    ///
+    /// Both refusals are all-or-nothing. Compacting "around" the offending
+    /// events would make how much of a span survives a question about arrival
+    /// order rather than about policy.
+    ///
+    /// This does **not** reclaim disk. Deleted pages return to SQLite's free
+    /// list; D-3 measured what an actual `VACUUM` costs (a ~1× free-space
+    /// reserve and a total write blackout), so it is the caller's decision and
+    /// not a side effect of retention.
+    pub fn compact_range(
+        &mut self,
+        lo: i64,
+        hi: i64,
+        now_ms: i64,
+    ) -> Result<CompactionOutcome, StoreError> {
+        if lo < 1 || hi < lo {
+            return Err(StoreError::EmptyRange { lo, hi });
+        }
+        self.conn.execute_batch(compaction::COMPACTION_V1)?;
+
+        // --- refusal 1: protected classes ---------------------------------
+        let protected: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT generation, retention_class FROM world_events
+                 WHERE generation BETWEEN ?1 AND ?2 AND retention_class <> 'raw'
+                 ORDER BY generation ASC LIMIT 1",
+                params![lo, hi],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((generation, retention_class)) = protected {
+            return Err(StoreError::ProtectedClassInRange {
+                generation,
+                retention_class,
+            });
+        }
+
+        // --- refusal 2: projection heads ----------------------------------
+        if self.has_projections()? {
+            let head: Option<(i64, String)> = self
+                .conn
+                .query_row(
+                    "SELECT e.generation, e.subject FROM world_events e
+                     JOIN world_current c ON c.generation = e.generation
+                     WHERE e.generation BETWEEN ?1 AND ?2
+                     ORDER BY e.generation ASC LIMIT 1",
+                    params![lo, hi],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((generation, subject)) = head {
+                return Err(StoreError::ProjectionHeadInRange {
+                    generation,
+                    subject,
+                });
+            }
+        }
+
+        // --- the span itself ----------------------------------------------
+        let (event_count, range_digest, chain_after) = self.summarize_range(lo, hi)?;
+        if event_count == 0 {
+            return Err(StoreError::EmptyRange { lo, hi });
+        }
+
+        // `chain_before` is the digest the verifier will have computed when it
+        // arrives at the hole: the last surviving row below `lo`, or GENESIS.
+        // Taking the row below `lo` rather than `lo - 1` is deliberate — an
+        // earlier compaction may already have removed `lo - 1`.
+        let surviving_below: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT chain_digest FROM world_events
+                 WHERE generation < ?1 ORDER BY generation DESC LIMIT 1",
+                params![lo],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let chain_before: String = match surviving_below {
+            Some(d) => d,
+            None => {
+                // Nothing survives below the hole. If an earlier compaction
+                // already covers that region, its `chain_after` is where the
+                // chain stands; otherwise we are at the head of the log.
+                //
+                // Note the `?`: a failure to read the citations must surface,
+                // not silently fall through to GENESIS and mint a citation
+                // that claims the chain starts here.
+                self.load_citations()?
+                    .values()
+                    .rfind(|c| c.hi_generation < lo)
+                    .map_or_else(|| GENESIS.to_string(), |c| c.chain_after.clone())
+            }
+        };
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM world_events WHERE generation BETWEEN ?1 AND ?2",
+            params![lo, hi],
+        )?;
+        tx.execute(
+            "INSERT INTO compaction_citations (
+                lo_generation, hi_generation, event_count, range_digest,
+                chain_before, chain_after, compacted_at_ms
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                lo,
+                hi,
+                event_count,
+                range_digest,
+                chain_before,
+                chain_after,
+                now_ms
+            ],
+        )?;
+        tx.commit()?;
+
+        Ok(CompactionOutcome {
+            citation: Citation {
+                lo_generation: lo,
+                hi_generation: hi,
+                event_count,
+                range_digest,
+                chain_before,
+                chain_after,
+                compacted_at_ms: now_ms,
+            },
+            removed: event_count,
+        })
+    }
+
+    /// Count, content digest and final chain digest of a span, before removal.
+    ///
+    /// `range_digest` is taken over the canonical bytes of each event in
+    /// generation order — the same bytes the chain covers. That is what keeps
+    /// removed content *attestable*: it cannot be recovered, but anyone who
+    /// later produces those events can be checked against this.
+    ///
+    /// The hash is **streamed**, not accumulated. Buffering the window's
+    /// canonical JSON before hashing would be O(window) memory at exactly the
+    /// moment memory is least available: a 30-day `raw` window at OQ2's ruled
+    /// 3.20 /s is ~8.3 M events, which at ~600 B each is several GB of
+    /// `String` — an OOM triggered by the operation you run *because* the
+    /// device is full. Feeding `Sha256` per event keeps it bounded regardless
+    /// of window size, and produces the identical digest.
+    fn summarize_range(&self, lo: i64, hi: i64) -> Result<(i64, String, String), StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT generation, event_id, observation_id, txn_time_ms, valid_from_ms,
+                    valid_to_ms, source, source_version, writer_class, claim_status,
+                    provenance, frame_id, map_id, kind, subject, predicate, object,
+                    payload, payload_schema, retention_class, chain_digest
+             FROM world_events WHERE generation BETWEEN ?1 AND ?2
+             ORDER BY generation ASC",
+        )?;
+        let mut rows = stmt.query(params![lo, hi])?;
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        let mut count = 0i64;
+        let mut last_chain = String::new();
+
+        while let Some(r) = rows.next()? {
+            let generation: i64 = r.get(0)?;
+            let event_id: String = r.get(1)?;
+            let observation_id: String = r.get(2)?;
+            let txn_time_ms: i64 = r.get(3)?;
+            let source: String = r.get(6)?;
+            let source_version: String = r.get(7)?;
+            let writer_class: String = r.get(8)?;
+            let claim_status: String = r.get(9)?;
+            let provenance_raw: String = r.get(10)?;
+            let frame_id: Option<String> = r.get(11)?;
+            let map_id: Option<String> = r.get(12)?;
+            let kind: String = r.get(13)?;
+            let subject: String = r.get(14)?;
+            let predicate: Option<String> = r.get(15)?;
+            let object: Option<String> = r.get(16)?;
+            let payload: String = r.get(17)?;
+            let retention_class: String = r.get(19)?;
+            last_chain = r.get(20)?;
+
+            let provenance: Vec<String> =
+                serde_json::from_str(&provenance_raw).map_err(|err| StoreError::CorruptRow {
+                    generation,
+                    detail: format!("provenance is not a JSON array of strings: {err}"),
+                })?;
+            let prov_refs: Vec<&str> = provenance.iter().map(String::as_str).collect();
+
+            let rebuilt = NewEvent {
+                event_id: &event_id,
+                observation_id: &observation_id,
+                txn_time_ms,
+                valid_from_ms: r.get(4)?,
+                valid_to_ms: r.get(5)?,
+                source: &source,
+                source_version: &source_version,
+                writer_class: WriterClass::from_stored(&writer_class),
+                claim_status: ClaimStatus::from_stored(&claim_status),
+                provenance: &prov_refs,
+                frame_id: frame_id.as_deref(),
+                map_id: map_id.as_deref(),
+                kind: &kind,
+                subject: &subject,
+                predicate: predicate.as_deref(),
+                object: object.as_deref(),
+                payload: &payload,
+                payload_schema: r.get(18)?,
+                retention_class: &retention_class,
+            };
+            hasher.update(canonical_event_json(&rebuilt).as_bytes());
+            hasher.update(b"\n");
+            count += 1;
+        }
+        Ok((count, hex::encode(hasher.finalize()), last_chain))
     }
 
     /// Subjects whose state changed after transaction time `since_ms`.
