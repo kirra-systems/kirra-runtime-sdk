@@ -2,12 +2,32 @@
 name = "kirra-world-store"
 version = "0.1.0"
 edition = "2021"
-description = "Kirra World storage adapter — PROTOTYPE crate graph only, no storage (ADR-0040 WM-1)"
+description = "Kirra World storage — the append-only evidence log (KIRRA-WM2-SCHEMA-001)"
 publish = false
 
-# Depends on the domain core ONLY. Whether this seam earns its own crate is
-# ADR-0040 open question 1, and collapsing it into a `kirra-world` feature is
-# pre-authorized there if the graph shows it does not. See the crate docs for
-# what this prototype can and cannot settle about that.
+# ADR-0040 open question 1 asks whether this seam earns its own crate, and
+# pre-authorizes collapsing it into a `kirra-world` feature if it does not.
+# With a real storage implementation here that question becomes answerable on
+# evidence rather than on an empty graph — but it is NOT answered yet, and this
+# crate does not claim to close it.
+#
+# CONDITION (1), ADR-0042 Decision 5. This crate must gain no dependency giving
+# it authority over actuation, release, safety decisions, or required safety
+# inputs. The bidirectional fence checks the EDGES; gate test t24 checks the
+# CONTENTS, because an inverted dependency — this crate SUPPLYING the checker —
+# appears in neither the manifest nor the fence.
 [dependencies]
 kirra-world = { path = "../kirra-world" }
+kirra-audit-hash = { path = "../kirra-audit-hash" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+
+[features]
+# Exposes `WorldStore::tamper_for_test`, so an out-of-crate test can prove the
+# chain DETECTS an edit rather than only that the writer refuses to make one.
+test-support = []
+
+[dev-dependencies]
+kirra-world-store = { path = ".", features = ["test-support"] }

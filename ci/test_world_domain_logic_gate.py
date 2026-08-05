@@ -417,22 +417,71 @@ def t23_the_real_ruling_is_recorded_and_real() -> None:
     record(ok, "23 ADR-0042's ruling is recorded, owned and classified", detail)
 
 
-def t24_the_real_world_crates_are_still_shape_only() -> None:
-    """Directly, against the shipped crates, independent of the ruling state —
-    so this keeps meaning something after the ruling is recorded and the gate
-    itself stops constraining them."""
+# Condition (1) of ADR-0042 Decision 5's *Conditions that reopen the decision*:
+# Kirra World must gain no authority over actuation, release, safety decisions,
+# or required safety inputs. These are the CONTENT signatures of crossing it.
+#
+# `CorridorSource` leads deliberately. ADR-0042 Decision 2 records that a
+# crate-name-only scan cannot catch the hidden adapter, because the dependency
+# is INVERTED — the semantic layer would be *supplying* the checker, not calling
+# it. The bidirectional fence checks dependency EDGES and would see nothing.
+# This is the contents half, and the two are not redundant.
+CONDITION_1_SIGNATURES: tuple[tuple[str, str], ...] = (
+    ("CorridorSource", "supplying the checker's authoritative geometry (ADR-0042 Decision 2)"),
+    ("kirra_release_token", "release-token authority"),
+    ("release_token", "release-token authority"),
+    ("kirra_actuation_consumer", "the actuator chokepoint"),
+    ("cmd_vel", "an actuator topic"),
+    ("set_motor", "direct motor command"),
+    ("validate_trajectory", "the checker's verdict path"),
+    ("enforce_actuator", "the actuator safety envelope"),
+)
+
+
+def t24_the_real_world_crates_hold_no_condition_1_authority() -> None:
+    """CONVERTED 2026-08-05, when the ruling was recorded and the store landed.
+
+    This asserted the shipped crates held *shape only*, unconditionally. That
+    was correct while the gate constrained them and it fired correctly on the
+    first real store commit — but the ruling is now recorded, `kirra-world*` is
+    permitted to hold code, and an unconditional shape-only assertion would be a
+    test demanding the subsystem never be built.
+
+    Deleting it would drop real coverage. What still binds after the ruling is
+    **condition (1)** — no authority over actuation, release, safety decisions,
+    or required safety inputs — because crossing that reopens Decision 5 and
+    re-closes the gate. So this now guards that, by CONTENTS.
+
+    Why not simply rely on `check_kirra_world_bidirectional_fence.py`: the fence
+    checks dependency EDGES. ADR-0042 Decision 2 records the case it cannot see
+    — an `impl CorridorSource for …` inside a Kirra World crate inverts the
+    dependency, so the semantic layer supplies the checker while importing
+    nothing from it. Edges and contents catch different failures.
+    """
     repo = CI.parent
     manifests = gate.fence.find_manifests(repo)
     all_dirs = gate.fence.crate_dirs(manifests)
-    findings = []
+    hits: list[str] = []
     for pkg in sorted(n for n in manifests if gate.fence.is_world_package(n)):
         crate_dir, _ = manifests[pkg]
         for src in gate.fence.rust_sources(crate_dir, all_dirs):
-            findings.extend(gate.scan_source(pkg, src, str(src.relative_to(repo))))
+            try:
+                text = src.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for lineno, line in enumerate(text.splitlines(), 1):
+                # A doc comment naming the prohibition is not the prohibition.
+                stripped = line.lstrip()
+                if stripped.startswith("//") or stripped.startswith("#"):
+                    continue
+                for needle, why in CONDITION_1_SIGNATURES:
+                    if needle in line:
+                        rel = src.relative_to(repo)
+                        hits.append(f"    {rel}:{lineno} — {needle}: {why}")
     record(
-        not findings,
-        "24 the shipped kirra-world* crates contain shape only",
-        "\n".join(f.render() for f in findings),
+        not hits,
+        "24 the shipped kirra-world* crates hold no condition-(1) authority",
+        "\n".join(hits),
     )
 
 

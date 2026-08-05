@@ -2614,7 +2614,13 @@ dependencies = [
 name = "kirra-world-store"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "kirra-audit-hash",
  "kirra-world",
+ "kirra-world-store",
+ "rusqlite",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
