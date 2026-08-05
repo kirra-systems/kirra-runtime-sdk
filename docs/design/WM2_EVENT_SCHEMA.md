@@ -115,12 +115,15 @@ coupling rather than a discovery.
 
 ### DISCHARGED 2026-08-05 — and it did move materially
 
-Measured: ADR-0041 **D-20**, evidence `docs/evidence/wm2-schema-growth-20260805/`.
+Measured: ADR-0041 **D-20**, evidence
+**`docs/evidence/wm2-schema-growth-target-20260805/`** (`JETSON-TARGET-MEASURED`).
+An earlier host bundle, `wm2-schema-growth-20260805/`, is **superseded** — its
+figures were 32 768 B/arm high, from a counted SQLite `-shm` file. Cite the
+target bundle.
 
 The figure moved **1.2349×** (`lean`) to **1.3345×** (`populated`) — 458.51 →
-**566.23 / 611.86 B/event**, measured on target
-(`docs/evidence/wm2-schema-growth-target-20260805/`). The six columns above were
-"plausibly additive"; they are, and the addition is large enough to matter.
+**566.23 / 611.86 B/event**. The six columns above were "plausibly additive";
+they are, and the addition is large enough to matter.
 
 **OQ2's allocation no longer closes.** Its 15 448 320 allocated events exceed
 the corrected budget at both ends of the band — headroom **+14 % → −1.8 % /

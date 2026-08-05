@@ -2175,15 +2175,20 @@ one machine-day.
 
 ### D-20 — the ratified schema costs 1.24×–1.34× more per event, and OQ2's allocation no longer fits
 
-Evidence: `docs/evidence/wm2-schema-growth-20260805/`. This discharges the
-obligation `KIRRA-WM2-SCHEMA-001` §8.4 recorded when the event schema was
-ratified: **every figure in D-2, and every horizon OQ2 derived from it, was
-measured against the harness's deliberate stand-in schema.** The ratified
-schema (`502b5460…`, merged in #1350) adds six columns.
+Evidence: **`docs/evidence/wm2-schema-growth-target-20260805/`** —
+`JETSON-TARGET-MEASURED`, `citable:true`. (A first host bundle,
+`wm2-schema-growth-20260805/`, is **superseded**: its figures were 32 768 B/arm
+high. Cite the target bundle; the host one is retained only as the record of
+that error.)
 
-Two arms, one host, one session, same SQLite 3.45.0, same event stream —
-D-2's own parameters (seed `20260803`, 100 000 events, 1 000 entities, 96-byte
-payload). Log-only in both, because `kirra-world-store` has no projections yet.
+This discharges the obligation `KIRRA-WM2-SCHEMA-001` §8.4 recorded when the
+event schema was ratified: **every figure in D-2, and every horizon OQ2 derived
+from it, was measured against the harness's deliberate stand-in schema.** The
+ratified schema (`502b5460…`, merged in #1350) adds six columns.
+
+Two arms, one session, same SQLite 3.45.0, same event stream — D-2's own
+parameters (seed `20260803`, 100 000 events, 1 000 entities, 96-byte payload).
+Log-only in both, because `kirra-world-store` has no projections yet.
 
 | Arm | B/event | `page_count` | Days to fill 8 GiB @ 10 Hz | Ratio |
 |---|---:|---:|---:|---:|
