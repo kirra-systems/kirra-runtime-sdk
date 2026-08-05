@@ -66,14 +66,25 @@ claims.
 Target hardware, ratified schema, and the instrument's own guard satisfied (a
 same-host control was supplied, so the paired ratios are real ratios).
 
-**One honest caveat**, unchanged from D-20's bundle and still owed:
-`wm2-schema-growth` has **no `--assert-target` of its own**. Its records carry
+**One honest caveat**, unchanged from D-20's bundle: `wm2-schema-growth` had
+**no `--assert-target` of its own** when this run was made. Its records carry
 `arch`/`os` and nothing more, so `TARGET-MEASURED` above is an operator
 assertion in this README rather than a classification the instrument made and
-could refuse to make. The harness can refuse; this tool cannot. That remains the
-follow-up, and it is why this bundle says `TARGET-MEASURED` rather than
-borrowing the harness's `JETSON-TARGET-MEASURED` token — the two are not
-attested the same way and should not read as though they are.
+could refuse to make. It is why this bundle says `TARGET-MEASURED` rather than
+borrowing the harness's `JETSON-TARGET-MEASURED` token — the two were not
+attested the same way and should not read as though they were.
+
+**The follow-up has since been done** (2026-08-05). The tool now runs the
+harness's classifier — the *same module*, `#[path]`-included rather than copied,
+so one definition of "target" governs both instruments — and stamps
+`evidence_status` with the corroborating facts into every record. A future run
+will emit `JETSON-TARGET-MEASURED` in the same sense the harness does.
+
+**It does not attest this bundle retroactively.** These records predate the
+change and carry no classification, so the operator assertion above still stands
+as the basis for their status. Said plainly because "the instrument was fixed"
+and "this measurement is attested" are different claims, and only a re-run turns
+the first into the second.
 
 ## Files
 
