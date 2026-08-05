@@ -1,0 +1,267 @@
+# Kirra World — what is left, and what "done" means
+
+| | |
+|---|---|
+| **Identifier** | KIRRA-WM-SCOPE-001 |
+| **Status** | **SCOPE — not a ruling and not an authorization.** It records what remains against a definition of done taken from the blueprint, so that "how much is left" stops being re-estimated from memory. It ratifies nothing and authorizes no implementation. |
+| **Blueprint** | `KIRRA-WM-ARCH-001` — [`WORLD_MODEL_ARCHITECTURE.md`](WORLD_MODEL_ARCHITECTURE.md), especially §9, §12, §14, §16, §22, §25 |
+| **Depends on** | [ADR-0039](../adr/0039-world-model-bidirectional-governor-fence.md) · [ADR-0040](../adr/0040-world-model-ownership-and-boundary.md) · [ADR-0041](../adr/0041-world-model-persistence-architecture.md) · [ADR-0042](../adr/0042-world-model-terminology-and-safety-boundary-scope.md) |
+| **Date** | 2026-08-05 |
+
+> Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508
+> SIL 3 requirements. Independent third-party assessment has not yet been
+> performed.
+
+---
+
+## 0. Naming, before anything else
+
+Canonical name: **Kirra World**. Accurate prose gloss: **evidence ledger**.
+
+**Not "world model"** — ADR-0042 Decision 1 ruled that off a measured collision,
+and the reason is safety communication rather than taste: *"the world model was
+wrong"* must not be able to mean a perception fault and a knowledge fault at
+once. Two of the three colliding uses were **inside the safety closure** and
+have since been renamed to *independent perception channel*; one is still live
+(`robot/world_model.py`, whose rename ADR-0042 puts behind safety review).
+
+To an outside reader the term also suggests a *learned predictive model*. Kirra
+World predicts nothing. It records.
+
+---
+
+## 1. What "done" means here
+
+Taken from the blueprint rather than invented, so this document cannot quietly
+raise its own bar.
+
+§25 sets **Year 1** as:
+
+> *Append-only log, projections, entity resolution, `Explain`, fences, Mick's
+> six flows, registries migrated. **A robot that can justify every fact it
+> states.***
+
+And §16 names the flagship inside it:
+
+> *"Explain why you believe that" is the flagship capability. It is the reason
+> provenance is mandatory rather than nice-to-have, and it is the single feature
+> most likely to distinguish Kirra from every other robotics knowledge layer. It
+> should be treated as a **product requirement**, not a debugging tool.*
+
+**So: done is a robot that can be asked why it believes something and answer
+with the evidence.** Everything below is scoped to that sentence. Years 2–5 —
+fleet knowledge exchange, predictive integration, the public schema — are out of
+scope for this document entirely.
+
+---
+
+## 2. What is built
+
+| Capability | Where | Landed |
+|---|---|---|
+| Event schema (SD-1…SD-4), write path, SHA-256 chain | `kirra-world-store` | #1350 |
+| Bytes/event against the ratified schema; with projections | `tools/wm2-schema-growth` | #1351 / #1353 (D-20, D-21) |
+| Current-state projection, confirmed-only fold, rebuild-equals-incremental digest | `kirra-world-store::projection` | #1353 |
+| Bitemporal queries — `current` / `as_of` / `history` / `candidates` / `changed_since` | `kirra-world-store` | #1353 |
+| Compaction-with-citation; chain verifies **across** a hole | `kirra-world-store::compaction` | #1354 |
+| Per-key degraded summaries; a compacted window says so | same | #1355 |
+| Evidence attestation — the growth instrument can refuse to be cited | `wm2-schema-growth` | #1358 |
+
+Roughly **the persistence third of Year 1**. The read path exists; the *trust*
+and *explanation* halves do not.
+
+---
+
+## 3. Tier 0 — Governance, which gates the rest
+
+Not code. It blocks authorized implementation by the ADRs' own words.
+
+| Item | State |
+|---|---|
+| ADR-0041 | **Accepted** (2026-08-04), carrying one outstanding obligation (R2's alongside rebuild-and-swap) |
+| ADR-0039, ADR-0040, ADR-0042 | **Proposed** |
+| ADR-0040 ratification checklist | **4 of 5 unticked** — dependency review, compatibility inventory, deployment ownership, open questions 1 & 4 |
+| ADR-0042 Decision 5 | Recorded, but an **owner self-assessment, not an independent assurance review**, with Q2/Q4/Q5 open |
+
+**Deployment ownership is the one that bites later.** Nobody has decided who
+runs Kirra World, where it stores, or who backs it up. That answer is needed
+*before* a service exists, not after one is running.
+
+---
+
+## 4. Tier 1 — The domain core
+
+`kirra-world` is ten unconstructible placeholders. Everything below depends on
+it. The domain-logic gate that once held it is **self-releasing and already
+released** (ADR-0042 Decision 5, recorded 2026-08-05) — so this is sequencing,
+not permission.
+
+- [ ] **Entity taxonomy** (§6)
+- [ ] **Observation model** (§7)
+- [ ] **Relationship model** (§8)
+- [ ] **The four orthogonal trust axes** (§9):
+      `Origin × Corroboration × Adjudication × Validity`
+- [ ] **The seven transition rules** (§9.2)
+
+### Why the axes are not one enum
+
+Today the store carries `writer_class` plus a two-value `claim_status`, which is
+an **adjudication proxy** and nothing more. The blueprint is explicit that
+collapsing the axes is *"exactly why trust states in most systems become mush
+after eighteen months — every new case forces either a wrong assignment or a new
+variant."*
+
+Two of the seven rules are load-bearing and genuinely hard:
+
+* **Derived inherits the weakest input** on every axis. This is the
+  anti-laundering rule, and it prevents the most common knowledge-graph
+  pathology: a chain of plausible inferences producing a high-confidence
+  conclusion from low-confidence roots.
+* **Validity is computed at read time, never stored.** `Fresh` is not a state
+  the system enters; it is a question asked with the clock passed in. The store
+  already does half of this in `ProjectedClaim::holds_at`.
+
+`Corroboration(n)` presupposes cross-observation matching — i.e. it cannot land
+before entity resolution (Tier 2).
+
+**Largest single body of work in this document.**
+
+---
+
+## 5. Tier 2 — Identity adjudication
+
+- [ ] Entity resolution — matching incoming observations to existing entities
+- [ ] `MergeEntities` / `SplitEntity` / `ForgetEntity` as **recorded events**
+
+Merge and split are *events, never destructive edits*. This is what makes an
+`EntityId` revisable, and it is precisely what a store built on a bare opaque
+key can never retrofit — the key would have already lost its own history.
+
+`ForgetEntity` retires an entity and suppresses it from default projections. It
+is **not** deletion. Genuine erasure, if ever required, is a distinct audited
+`Redact` with its own ADR, and must leave a tombstone or the chain breaks.
+
+---
+
+## 6. Tier 3 — The query engine
+
+Eight verbs in §14.2; about five exist in partial form.
+
+- [ ] `Resolve` · [ ] `Related` (bounded graph) · [ ] `WhatIsAt` ·
+      [ ] `Capabilities` · [ ] `Freshness`
+
+Three rules matter more than the verb count:
+
+1. **No API returns a bare value.** Every answer carries the value, the trust
+   axes, the validity at the supplied clock, and a `ProvenanceHandle`. The
+   blueprint calls this *"a deliberate ergonomic cost: it makes 'I got a number
+   and lost where it came from' impossible to write."*
+   **This is a breaking change to the API that exists today**, which returns
+   bare `ProjectedClaim`s.
+2. **Queries are bounded.** Not a preference: D-9 measured **10.5 s p99**
+   temporal queries at 100 000 entities, and ADR-0041 D-12 already records that
+   neither graph nor temporal queries may sit on a control or safety deadline
+   path, and that an unbounded query has no bounded cost whatever its scaling
+   verdict.
+3. **`Unknown` is a success.** The error channel is for malformed queries and
+   storage faults — never for absence of knowledge. Conflating the two is how
+   *"I don't know"* becomes an exception somebody catches and turns into a
+   default value.
+
+---
+
+## 7. Tier 4 — `Explain`, the flagship
+
+- [ ] `Explain(FactHandle) → ProvenanceTree`
+- [ ] Prose rendering through Mick (§16)
+
+Depends on the provenance model **and** on derivation edges being real structure
+rather than a JSON array of identifiers. This is the capability the whole
+evidence-first inversion exists to buy, and the one that makes the difference
+between a database and something that can be asked to justify itself.
+
+Mick's three non-negotiables apply unchanged and are already precedented in
+`robot/mick_chat_contract.py`: **never invent**, **never state stale as
+current**, **never supply geometry**.
+
+---
+
+## 8. Tier 5 — Surfaces
+
+- [ ] Semantic projections beyond `world_current` — relationships, capabilities,
+      map layers
+- [ ] **Retention policy driver** — the horizons OQ2 ruled are still applied by
+      hand. Its precondition is already recorded in ADR-0041's WM-2 milestone:
+      *the first doer-side consumer wired to the store ends the deferral.*
+- [ ] `kirra-world-service` as real CQRS — 9 commands, 8 queries, 10 emitted
+      events — still inside Fence A
+- [ ] Operator teaching surface (§17): `AssertEntity`, corrections
+
+---
+
+## 9. Two sequencing calls
+
+**Wire a small consumer EARLY — before Tier 3, not after.**
+
+Everything built so far is built for nobody: no planner, perception or LLM crate
+depends on `kirra-world*`, and the service crate is deliberately empty. The
+"no bare values" rule and the shape of the trust axes are exactly the decisions
+a real caller will falsify, and discovering that across eight verbs costs far
+more than discovering it against one.
+
+There are **no callers today**, so the breaking change is free *now* and never
+again.
+
+**Land the trust axes before the query engine.** Retrofitting four axes into an
+API that already returns claims means touching every verb twice.
+
+---
+
+## 10. Explicitly out of scope
+
+The blueprint defers eight items in §22, and this document holds every one:
+
+distributed consensus and partition-tolerant merge · erasure/redaction under a
+privacy regime · semantic similarity search over embeddings · multi-map topology
+and map-to-map transforms · person entities and the privacy question they open ·
+cross-robot entity identity · formal verification of projection determinism ·
+compaction *thresholds* beyond what measurement supports.
+
+Plus **Years 2–5 entirely** (§25): fleet knowledge exchange, predictive
+integration, the stable public schema.
+
+Naming them here is the point. An undeclared deferral becomes a surprise
+obligation the first time someone asks why it is missing.
+
+---
+
+## 11. The risk that is not on any checklist
+
+Every tier above makes Kirra World more **useful**, and usefulness is what
+generates pressure to let the checker read it.
+
+> **ADR-0042 Decision 5's condition (1) reopens the entire safety ruling the
+> moment Kirra World gains authority over actuation, release, safety decisions,
+> or required safety inputs — any one of the four.**
+
+The protection is as strong as this kind of protection gets: Fence A walks
+Kirra World's dependency closure for any route to an actuator or an
+authorization; Fence B walks the safety closure (19 workspace packages from 10
+roots, computed from the manifests rather than a hand-maintained list) for any
+dependency on Kirra World; and gate t24 checks *by contents* that the store
+implements no `CorridorSource`, because that dependency would be inverted and
+the closure walk would not see it.
+
+But a gate can refuse a dependency. It cannot refuse an argument. Holding the
+line is part of this scope, not a footnote to it.
+
+---
+
+## 12. What this document is not
+
+It is not a plan, a schedule, or an estimate. There are no dates and no effort
+figures, because none could be defended — the tiers are ordered by dependency,
+not by duration.
+
+It is not a ruling. Tier 0 is where rulings live, and four of them are still
+open.
