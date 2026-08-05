@@ -558,6 +558,9 @@ impl WorldStore {
         // rather than discovered as a missing row and reported as corruption.
         let citations = self.load_citations()?;
         let mut expected_generation: i64 = 1;
+        // Which citations the walk actually consumed. Checked at the end, so
+        // an unreachable one cannot sit unread.
+        let mut visited: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
 
         while let Some(r) = rows.next()? {
             let generation: i64 = r.get(0)?;
@@ -582,6 +585,7 @@ impl WorldStore {
                         ),
                     });
                 }
+                visited.insert(c.lo_generation);
                 prev = c.chain_after.clone();
                 expected_generation = c.hi_generation + 1;
             }
@@ -662,9 +666,7 @@ impl WorldStore {
         }
 
         // A span compacted off the END of the log leaves no following row to
-        // trigger the crossing above, so it is checked here. Without this a
-        // trailing citation would go unverified — the one place a forged
-        // citation could otherwise hide.
+        // trigger the crossing above, so it is followed here.
         while let Some(c) = citations.get(&expected_generation) {
             if c.chain_before != prev {
                 return Err(StoreError::CitationBroken {
@@ -672,8 +674,28 @@ impl WorldStore {
                     detail: "trailing citation does not join the chain".to_string(),
                 });
             }
+            visited.insert(c.lo_generation);
             prev = c.chain_after.clone();
             expected_generation = c.hi_generation + 1;
+        }
+
+        // EVERY citation must have been walked. The loops above only follow
+        // citations reachable by contiguity from generation 1, so one sitting
+        // at an unreachable `lo_generation` — past the end of the log, or
+        // behind a gap nothing accounts for — would otherwise be ignored and
+        // the whole verification still return Ok.
+        //
+        // That is a hole in the property this design exists to provide: a
+        // citation is an *admission* that a span was removed, so an admission
+        // no verifier ever reads is not one. Refusing here means every
+        // citation is either walked and checked, or the chain fails.
+        if let Some(orphan) = citations.keys().find(|k| !visited.contains(k)) {
+            return Err(StoreError::CitationBroken {
+                lo_generation: *orphan,
+                detail: "citation is unreachable from the verified sequence — it \
+                         accounts for generations that were never reached"
+                    .to_string(),
+            });
         }
         Ok(())
     }
@@ -742,6 +764,29 @@ impl WorldStore {
     /// Every recorded compaction, oldest span first.
     pub fn citations(&self) -> Result<Vec<Citation>, StoreError> {
         Ok(self.load_citations()?.into_values().collect())
+    }
+
+    /// Test-only: insert a citation for a span that was never removed.
+    ///
+    /// Lets a test plant an **unreachable** citation — one the verification
+    /// walk never arrives at — which is the case that must be refused rather
+    /// than quietly ignored.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn forge_citation_for_test(
+        &self,
+        lo_generation: i64,
+        hi_generation: i64,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute_batch(compaction::COMPACTION_V1)?;
+        self.conn.execute(
+            "INSERT INTO compaction_citations (
+                lo_generation, hi_generation, event_count, range_digest,
+                chain_before, chain_after, compacted_at_ms
+             ) VALUES (?1,?2,1,'forged','forged','forged',?3)",
+            params![lo_generation, hi_generation, now_ms],
+        )?;
+        Ok(())
     }
 
     /// Test-only: remove a citation, leaving its gap unexplained.
@@ -1379,6 +1424,14 @@ impl WorldStore {
     /// generation order — the same bytes the chain covers. That is what keeps
     /// removed content *attestable*: it cannot be recovered, but anyone who
     /// later produces those events can be checked against this.
+    ///
+    /// The hash is **streamed**, not accumulated. Buffering the window's
+    /// canonical JSON before hashing would be O(window) memory at exactly the
+    /// moment memory is least available: a 30-day `raw` window at OQ2's ruled
+    /// 3.20 /s is ~8.3 M events, which at ~600 B each is several GB of
+    /// `String` — an OOM triggered by the operation you run *because* the
+    /// device is full. Feeding `Sha256` per event keeps it bounded regardless
+    /// of window size, and produces the identical digest.
     fn summarize_range(&self, lo: i64, hi: i64) -> Result<(i64, String, String), StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT generation, event_id, observation_id, txn_time_ms, valid_from_ms,
@@ -1389,7 +1442,8 @@ impl WorldStore {
              ORDER BY generation ASC",
         )?;
         let mut rows = stmt.query(params![lo, hi])?;
-        let mut acc = String::new();
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
         let mut count = 0i64;
         let mut last_chain = String::new();
 
@@ -1441,11 +1495,11 @@ impl WorldStore {
                 payload_schema: r.get(18)?,
                 retention_class: &retention_class,
             };
-            acc.push_str(&canonical_event_json(&rebuilt));
-            acc.push('\n');
+            hasher.update(canonical_event_json(&rebuilt).as_bytes());
+            hasher.update(b"\n");
             count += 1;
         }
-        Ok((count, sha256_hex(acc.as_bytes()), last_chain))
+        Ok((count, hex::encode(hasher.finalize()), last_chain))
     }
 
     /// Subjects whose state changed after transaction time `since_ms`.

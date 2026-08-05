@@ -292,6 +292,66 @@ fn compaction_preserves_rebuild_equals_incremental() {
     clean(&p);
 }
 
+/// **Every citation must be walked.** The crossing loops only follow citations
+/// reachable by contiguity from generation 1, so one sitting at an unreachable
+/// `lo_generation` would be ignored and verification would still return `Ok`.
+///
+/// That is a hole in the property this whole design provides: a citation is an
+/// *admission* that a span was removed, and an admission no verifier ever
+/// reads is not one.
+#[test]
+fn an_unreachable_citation_is_refused() {
+    let p = tmp("orphan-citation");
+    let mut s = seeded(&p);
+    s.compact_range(1, 4, T0 + 9_000)
+        .expect("a real compaction");
+    s.verify_chain().expect("clean");
+
+    // Move the citation's span far past the end of the log. Nothing walks it,
+    // and before the fix nothing complained either.
+    s.tamper_citation_for_test(1, "hi_generation", "4").unwrap();
+    s.forge_citation_for_test(500, 600, T0 + 9_100).unwrap();
+
+    match s.verify_chain() {
+        Err(StoreError::CitationBroken { lo_generation, .. }) => assert_eq!(lo_generation, 500),
+        other => panic!("an unreachable citation must be refused, got {other:?}"),
+    }
+    clean(&p);
+}
+
+/// The digest must be **byte-identical** to the buffered form it replaced.
+/// Streaming is a memory fix, not a format change: if it altered the digest,
+/// every citation already written would silently stop matching its content.
+#[test]
+fn the_range_digest_is_stable_across_window_sizes() {
+    // Compact 1..=2 in one store, and the same two events in another whose
+    // window is expressed differently but covers the same rows. Same content,
+    // same digest — which is the property a streaming hash must preserve.
+    let p = tmp("digest-stable-a");
+    let mut a = seeded(&p);
+    let ra = a.compact_range(1, 2, T0 + 9_000).expect("a");
+
+    let p2 = tmp("digest-stable-b");
+    let mut b = seeded(&p2);
+    let rb = b.compact_range(1, 2, T0 + 9_999).expect("b");
+
+    assert_eq!(
+        ra.citation.range_digest, rb.citation.range_digest,
+        "the digest must depend on content only, not on when or how it was taken"
+    );
+
+    // And a one-event window must differ from a two-event one, so the test is
+    // not passing on a constant.
+    let p3 = tmp("digest-stable-c");
+    let mut c = seeded(&p3);
+    let rc = c.compact_range(1, 1, T0 + 9_000).expect("c");
+    assert_ne!(ra.citation.range_digest, rc.citation.range_digest);
+
+    clean(&p);
+    clean(&p2);
+    clean(&p3);
+}
+
 // ---------------------------------------------------------------------------
 // A refusal is a redirect, not a dead end
 // ---------------------------------------------------------------------------
