@@ -9,8 +9,11 @@
 //! # The attribution problem, and the control that solves it
 //!
 //! A rebuild runs *while ingest continues* — that is the whole premise — and
-//! both write through the same process. `/proc/self/io` therefore cannot say
+//! both write through the same process. A write counter therefore cannot say
 //! which bytes belong to the rebuild, and neither can the database file size.
+//! (The counter is thread-scoped — see [`thread_write_bytes`] — which excludes
+//! *other* threads but still cannot separate the rebuild from the ingest that
+//! is deliberately running beside it on the same one.)
 //!
 //! So this runs **two arms with identical ingest**:
 //!
@@ -48,17 +51,44 @@ use std::time::Instant;
 /// Generous: the point is to terminate rather than to grade the hardware.
 pub const MAX_CATCHUP_ROUNDS: usize = 64;
 
-/// Process-wide bytes actually written to storage, from `/proc/self/io`.
+/// Bytes actually written to storage by **this thread**, from
+/// `/proc/thread-self/io`.
 ///
 /// `write_bytes`, not `wchar`: wchar counts bytes handed to `write()`, which
 /// includes writes absorbed by the page cache and never sent anywhere. Write
 /// amplification is a question about the device.
 ///
+/// # Why thread-scoped, and not `/proc/self/io`
+///
+/// It used to read `/proc/self/io`, which is **process-wide** — and that is
+/// unsound under any multi-threaded caller, because a counter that cannot
+/// exclude other threads cannot attribute bytes to the work being measured.
+///
+/// The failure was not theoretical. `cargo test` runs tests concurrently as
+/// threads of ONE process, so a neighbouring test writing to disk landed
+/// inside this measurement's window. Measured, same test, same machine:
+///
+/// | Condition | coarse | fine | ratio |
+/// |---|---:|---:|---:|
+/// | test run alone | 1.0× | 5.1× | 5.24 |
+/// | full suite | **8.5×** | 5.1× | **0.60** |
+///
+/// The `fine` reading is untouched and `coarse` absorbs another test's writes,
+/// which inverts the comparison. It is intermittent because it depends on
+/// which tests happen to overlap — so it presents as flake and is in fact a
+/// measurement defect.
+///
+/// Thread-scoped fixes it at the source: every byte the arms write is written
+/// on the calling thread (nothing here spawns), so this counts the work and
+/// nothing else. It also makes the *instrument* honest for any future caller
+/// that measures from more than one thread.
+///
 /// `None` off Linux, or wherever the file is unreadable — a missing counter
 /// must not arrive as zero, which would render as a flatteringly efficient
-/// rebuild.
-pub fn process_write_bytes() -> Option<u64> {
-    let text = std::fs::read_to_string("/proc/self/io").ok()?;
+/// rebuild. Deliberately **no fallback** to `/proc/self/io`: falling back would
+/// silently restore the contaminated reading, which is worse than no reading.
+pub fn thread_write_bytes() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/thread-self/io").ok()?;
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("write_bytes:") {
             return v.trim().parse().ok();
@@ -154,7 +184,7 @@ fn run_control(
     seed_n: u64,
 ) -> ArmResult {
     let mut store = seed(path, durability, seeded, entities, seed_n);
-    let before = process_write_bytes();
+    let before = thread_write_bytes();
     let mut peak = db_bytes(path);
     let t = Instant::now();
     let mut next = seeded;
@@ -168,7 +198,7 @@ fn run_control(
         peak = peak.max(db_bytes(path));
     }
     let wall_ms = t.elapsed().as_secs_f64() * 1e3;
-    let after = process_write_bytes();
+    let after = thread_write_bytes();
     ArmResult {
         wall_ms,
         write_bytes: match (before, after) {
@@ -204,7 +234,7 @@ pub fn run(
 
     let mut store = seed(path, durability, seeded, entities, seed_n);
 
-    let before = process_write_bytes();
+    let before = thread_write_bytes();
     let mut peak = db_bytes(path);
     let t = Instant::now();
 
@@ -357,7 +387,7 @@ pub fn run(
     }
 
     let wall_ms = t.elapsed().as_secs_f64() * 1e3;
-    let after = process_write_bytes();
+    let after = thread_write_bytes();
     let rebuild_arm = ArmResult {
         wall_ms,
         write_bytes: match (before, after) {
@@ -490,6 +520,56 @@ mod tests {
         }
     }
 
+    /// The counter must be **thread-scoped**, and this is the regression guard
+    /// for it — a property test rather than a comment, because the failure it
+    /// prevents does not look like a failure.
+    ///
+    /// With process-wide `/proc/self/io`, a neighbouring thread's writes land
+    /// in the measurement window, and the result is not an error but a *wrong
+    /// number*: `write_amplification` inflated by whatever else the process
+    /// happened to be doing. Under `cargo test` — which runs tests as threads
+    /// of one process — that made
+    /// `write_amplification_rises_with_chunk_count_…` fail intermittently, and
+    /// intermittently is the worst way for it to fail, because it teaches
+    /// people to re-run rather than to read.
+    ///
+    /// So: write a large, fsynced file **on another thread** and require this
+    /// thread's counter not to notice. The margin is deliberately loose
+    /// (an eighth) — the assertion is about *attribution*, not about how many
+    /// bytes reach the device, and a tight bound here would be its own flake.
+    #[test]
+    fn the_write_counter_excludes_another_threads_writes() {
+        use std::io::Write;
+
+        let Some(before) = thread_write_bytes() else {
+            eprintln!("no /proc/thread-self/io on this platform; attribution not asserted");
+            return;
+        };
+
+        const PAYLOAD: usize = 8 << 20; // 8 MiB — far above any plausible drift
+        let path = std::env::temp_dir().join(format!("wm2-attrib-{}.bin", std::process::id()));
+        let p2 = path.clone();
+        std::thread::spawn(move || {
+            let mut f = std::fs::File::create(&p2).expect("create");
+            f.write_all(&vec![0xA5u8; PAYLOAD]).expect("write");
+            f.sync_all().expect("fsync");
+        })
+        .join()
+        .expect("writer thread");
+
+        let after = thread_write_bytes().expect("counter still readable");
+        let delta = after.saturating_sub(before);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            delta < (PAYLOAD as u64) / 8,
+            "this thread's counter moved {delta} bytes while ANOTHER thread \
+             wrote {PAYLOAD} — the counter is not thread-scoped, so every \
+             write_amplification figure it produces is contaminated by \
+             whatever else the process is doing"
+        );
+    }
+
     #[test]
     fn write_amplification_rises_with_chunk_count_so_it_is_a_dial_not_a_constant() {
         // THE finding, pinned. Amplification is not a property of the rebuild;
@@ -525,7 +605,7 @@ mod tests {
                  coarser ({c:.1}x) — the trade-off this measurement exists to \
                  expose is not present"
             ),
-            // No /proc/self/io: the platform cannot answer, which is a
+            // No /proc/thread-self/io: the platform cannot answer, which is a
             // limitation to report rather than a test to fail.
             _ => eprintln!("write_bytes unavailable on this platform; amplification not asserted"),
         }
