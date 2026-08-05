@@ -12,6 +12,18 @@
 > SIL 3 requirements. Independent third-party assessment has not yet been
 > performed.
 
+> ### ✅ SUPERSEDED 2026-08-05 — target run done, figures CONFIRMED
+>
+> The target re-run this bundle recorded as owed has been done:
+> **`docs/evidence/wm2-projection-growth-target-20260805/`**. It **confirms
+> rather than revises** — `with_projections_bytes` reproduced byte-for-byte on
+> aarch64 (58 277 888 / 62 963 712), as did `projected_rows` (4 886).
+>
+> Every number below therefore stands; cite the target bundle for them. The only
+> figures that moved are the timings, which were never claims: `fold_elapsed_s`
+> is 0.76 / 0.79 s on the Jetson against 0.69 / 0.73 s here, which is the axis
+> where platform is *expected* to matter.
+
 ## What this closes
 
 Both D-20 and the OQ2 re-ruling carried the same caveat, in the same words:
