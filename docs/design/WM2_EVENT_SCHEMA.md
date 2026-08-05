@@ -138,10 +138,13 @@ turned on — how far back an incident reconstruction must reach — was never i
 question; only how many events fit. **This is the schema's cost landing on the
 sampling policy, which is exactly the coupling §5 was written to predict.**
 
-Note the ruling is explicitly optimistic: its budget is **log-only**, because
-`kirra-world-store` has no projections yet. The ratified with-projections figure
-is unmeasurable until they exist and is strictly larger, so the real headroom is
-below 14 % and the ruling names projections as its first reopening condition.
+The ruling was explicitly optimistic — its budget was **log-only**, because
+`kirra-world-store` had no projections — and it named that as its first
+reopening condition. **That condition is now discharged (ADR-0041 D-21):** the
+read path landed, the with-projections figure is **629.63712 B/event**, and the
+budget is 13 642 675 rather than 14 039 041. Headroom **14 % → 11.5 %**; the
+allocation still fits and the ruling stands, with its margin corrected rather
+than left overstated.
 
 One caveat worth carrying: the instrument had to be a **new** one
 (`tools/wm2-schema-growth`), not `wm2-persistence-harness append` as

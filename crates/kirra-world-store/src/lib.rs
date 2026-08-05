@@ -44,7 +44,10 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+pub mod projection;
 pub mod schema;
+
+pub use projection::{ProjectedClaim, CURRENT_PROJECTION};
 
 // Re-exported so the dependency edge is real rather than declared-and-unused.
 pub use kirra_world::{EntityId, ObservationId};
@@ -549,6 +552,25 @@ impl WorldStore {
         Ok(())
     }
 
+    /// Test-only: the digest recorded in the checkpoint, as committed.
+    ///
+    /// Exists so a test can assert the checkpoint and the state it describes
+    /// were committed together, rather than trusting that they were.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn checkpoint_state_digest_for_test(&self) -> Result<Option<String>, StoreError> {
+        if !self.has_projections()? {
+            return Ok(None);
+        }
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT state_digest FROM projection_checkpoint WHERE name = ?1",
+                params![projection::CURRENT_PROJECTION],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// Test-only: rewrite one column of one row, bypassing the write path.
     ///
     /// This exists so the tamper tests can prove the chain **detects** an edit.
@@ -591,5 +613,349 @@ impl WorldStore {
         let sql = format!("UPDATE world_events SET {column} = ?1 WHERE generation = ?2");
         self.conn.execute(&sql, params![value, generation])?;
         Ok(())
+    }
+}
+
+// ===========================================================================
+// The read path
+// ===========================================================================
+
+/// Columns the fold reads, in one place so the two readers cannot drift.
+const CLAIM_COLUMNS: &str = "subject, predicate, object, kind, payload, frame_id, map_id, \
+     source, valid_from_ms, valid_to_ms, txn_time_ms, generation, event_id";
+
+/// The projected-state digest, over any connection.
+///
+/// Free-standing so the fold can compute it **inside** its own transaction
+/// (a `Transaction` derefs to `Connection`), rather than after commit.
+fn state_digest_of(conn: &Connection) -> Result<String, StoreError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CLAIM_COLUMNS} FROM world_current ORDER BY subject, predicate_key"
+    ))?;
+    let mut rows = stmt.query([])?;
+    let mut acc = String::new();
+    while let Some(r) = rows.next()? {
+        let c = claim_from_row(r)?;
+        acc.push_str(&format!("{c:?}\n"));
+    }
+    Ok(sha256_hex(acc.as_bytes()))
+}
+
+fn claim_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectedClaim> {
+    Ok(ProjectedClaim {
+        subject: r.get(0)?,
+        predicate: r.get(1)?,
+        object: r.get(2)?,
+        kind: r.get(3)?,
+        payload: r.get(4)?,
+        frame_id: r.get(5)?,
+        map_id: r.get(6)?,
+        source: r.get(7)?,
+        valid_from_ms: r.get(8)?,
+        valid_to_ms: r.get(9)?,
+        txn_time_ms: r.get(10)?,
+        generation: r.get(11)?,
+        event_id: r.get(12)?,
+    })
+}
+
+impl WorldStore {
+    /// Install the projection tables if absent.
+    ///
+    /// Called by the fold rather than by `open`, so a store that never projects
+    /// stays byte-identical to one written before projections existed. See
+    /// [`projection`] for why that matters to ADR-0041 D-20.
+    fn ensure_projections(&self) -> Result<(), StoreError> {
+        self.conn.execute_batch(projection::PROJECTIONS_V1)?;
+        Ok(())
+    }
+
+    /// Whether the projection tables have been installed.
+    pub fn has_projections(&self) -> Result<bool, StoreError> {
+        let n: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='world_current'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(n.is_some())
+    }
+
+    /// The generation the projection has consumed up to, or 0.
+    pub fn projection_generation(&self) -> Result<i64, StoreError> {
+        if !self.has_projections()? {
+            return Ok(0);
+        }
+        let g: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT generation FROM projection_checkpoint WHERE name = ?1",
+                params![projection::CURRENT_PROJECTION],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(g.unwrap_or(0))
+    }
+
+    /// Fold new events into the current-state projection, incrementally.
+    ///
+    /// Returns the generation now consumed. **Only `confirmed` claims are
+    /// folded** — see [`projection`] for why that is structural rather than a
+    /// default. Candidates remain reachable via [`WorldStore::candidates`].
+    ///
+    /// The whole fold runs in one transaction: a projection caught halfway
+    /// through a batch would disagree with its own checkpoint, and a reader
+    /// cannot tell a partial fold from a complete one.
+    pub fn fold(&mut self) -> Result<i64, StoreError> {
+        self.ensure_projections()?;
+        let from = self.projection_generation()?;
+        self.fold_range(from)
+    }
+
+    /// Discard the projection and rebuild it from generation 0.
+    ///
+    /// The result must equal an incremental fold — that is ADR-0041's stated
+    /// property, and [`WorldStore::projection_state_digest`] is how it is
+    /// checked rather than assumed.
+    pub fn rebuild_projections(&mut self) -> Result<i64, StoreError> {
+        self.ensure_projections()?;
+        self.conn.execute("DELETE FROM world_current", [])?;
+        self.conn.execute("DELETE FROM projection_checkpoint", [])?;
+        self.fold_range(0)
+    }
+
+    fn fold_range(&mut self, from_generation: i64) -> Result<i64, StoreError> {
+        let tx = self.conn.transaction()?;
+
+        let mut head = from_generation;
+        {
+            let mut stmt = tx.prepare(&format!(
+                "SELECT {CLAIM_COLUMNS} FROM world_events
+                 WHERE generation > ?1 AND claim_status = 'confirmed'
+                 ORDER BY generation ASC"
+            ))?;
+            let mut rows = stmt.query(params![from_generation])?;
+
+            let mut upsert = tx.prepare(
+                "INSERT INTO world_current (
+                    subject, predicate_key, predicate, object, kind, payload,
+                    frame_id, map_id, source, valid_from_ms, valid_to_ms,
+                    txn_time_ms, generation, event_id
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                 ON CONFLICT (subject, predicate_key) DO UPDATE SET
+                    predicate=excluded.predicate, object=excluded.object,
+                    kind=excluded.kind, payload=excluded.payload,
+                    frame_id=excluded.frame_id, map_id=excluded.map_id,
+                    source=excluded.source, valid_from_ms=excluded.valid_from_ms,
+                    valid_to_ms=excluded.valid_to_ms, txn_time_ms=excluded.txn_time_ms,
+                    generation=excluded.generation, event_id=excluded.event_id
+                 WHERE (excluded.valid_from_ms, excluded.generation)
+                     > (world_current.valid_from_ms, world_current.generation)",
+            )?;
+
+            while let Some(r) = rows.next()? {
+                let c = claim_from_row(r)?;
+                head = head.max(c.generation);
+                let (_, pkey) = c.key();
+                upsert.execute(params![
+                    c.subject,
+                    pkey,
+                    c.predicate,
+                    c.object,
+                    c.kind,
+                    c.payload,
+                    c.frame_id,
+                    c.map_id,
+                    c.source,
+                    c.valid_from_ms,
+                    c.valid_to_ms,
+                    c.txn_time_ms,
+                    c.generation,
+                    c.event_id,
+                ])?;
+            }
+        }
+
+        // The checkpoint must advance past every event CONSIDERED, not merely
+        // every event adopted — a batch of candidates adopts nothing, and a
+        // checkpoint that stayed put would re-scan them on every fold forever.
+        let considered: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(generation), ?1) FROM world_events",
+            params![from_generation],
+            |r| r.get(0),
+        )?;
+        head = head.max(considered);
+
+        tx.execute(
+            "INSERT INTO projection_checkpoint (name, generation, state_digest)
+             VALUES (?1, ?2, '')
+             ON CONFLICT (name) DO UPDATE SET generation = excluded.generation",
+            params![projection::CURRENT_PROJECTION, head],
+        )?;
+        // The digest is computed and stored INSIDE the transaction. Doing it
+        // after `commit` would mean a failure here returned `Err` from a fold
+        // whose rows and checkpoint were already durable — the caller told the
+        // fold did not happen, the store disagreeing. That is exactly the
+        // all-or-nothing property this transaction exists to provide, so it
+        // has to cover the digest too.
+        let digest = state_digest_of(&tx)?;
+        tx.execute(
+            "UPDATE projection_checkpoint SET state_digest = ?1 WHERE name = ?2",
+            params![digest, projection::CURRENT_PROJECTION],
+        )?;
+        tx.commit()?;
+        Ok(head)
+    }
+
+    /// How many rows the projection holds, unfiltered by time.
+    ///
+    /// Deliberately NOT `current_all(..).len()`: that applies `holds_at`, so a
+    /// bounded claim whose `valid_to_ms` has passed would be excluded from the
+    /// count while still occupying a row and its bytes. For a size question the
+    /// table is the answer; for a state question `current_all` is.
+    pub fn projected_row_count(&self) -> Result<i64, StoreError> {
+        if !self.has_projections()? {
+            return Ok(0);
+        }
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM world_current", [], |r| r.get(0))?)
+    }
+
+    /// A digest over the whole projected state, in key order.
+    ///
+    /// This is the instrument for ADR-0041's rebuild-equals-incremental
+    /// property: two folds agree iff their digests agree, which is a single
+    /// comparison rather than a row-by-row walk that could quietly skip a
+    /// column.
+    pub fn projection_state_digest(&self) -> Result<String, StoreError> {
+        if !self.has_projections()? {
+            return Ok(sha256_hex(b""));
+        }
+        state_digest_of(&self.conn)
+    }
+
+    /// Every confirmed claim currently held about `subject` at `now_ms`.
+    ///
+    /// `now_ms` is a parameter rather than a clock read: a query whose answer
+    /// depends on an ambient clock cannot be replayed, and incident
+    /// reconstruction is the reason this store exists.
+    pub fn current(&self, subject: &str, now_ms: i64) -> Result<Vec<ProjectedClaim>, StoreError> {
+        if !self.has_projections()? {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CLAIM_COLUMNS} FROM world_current WHERE subject = ?1 ORDER BY predicate_key"
+        ))?;
+        let rows = stmt.query_map(params![subject], claim_from_row)?;
+        let mut out = Vec::new();
+        for c in rows {
+            let c = c?;
+            if c.holds_at(now_ms) {
+                out.push(c);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The whole projected state at `now_ms`, in key order.
+    pub fn current_all(&self, now_ms: i64) -> Result<Vec<ProjectedClaim>, StoreError> {
+        if !self.has_projections()? {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CLAIM_COLUMNS} FROM world_current ORDER BY subject, predicate_key"
+        ))?;
+        let rows = stmt.query_map([], claim_from_row)?;
+        let mut out = Vec::new();
+        for c in rows {
+            let c = c?;
+            if c.holds_at(now_ms) {
+                out.push(c);
+            }
+        }
+        Ok(out)
+    }
+
+    /// **Bitemporal query.** What the store, as of transaction time
+    /// `as_known_at_ms`, held to be true at valid time `valid_at_ms`.
+    ///
+    /// Answered from the LOG, not the projection — the projection is a cache of
+    /// one point on the two-dimensional surface (latest known, latest valid),
+    /// and every other point has to be replayed. Pretending otherwise is how a
+    /// bitemporal store silently becomes a unitemporal one.
+    ///
+    /// Confirmed-only, for the same reason [`WorldStore::fold`] is.
+    pub fn as_of(
+        &self,
+        subject: &str,
+        valid_at_ms: i64,
+        as_known_at_ms: i64,
+    ) -> Result<Vec<ProjectedClaim>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CLAIM_COLUMNS} FROM world_events
+             WHERE subject = ?1 AND claim_status = 'confirmed'
+               AND txn_time_ms <= ?2 AND valid_from_ms <= ?3
+             ORDER BY generation ASC"
+        ))?;
+        let rows = stmt.query_map(
+            params![subject, as_known_at_ms, valid_at_ms],
+            claim_from_row,
+        )?;
+        let mut candidates = Vec::new();
+        for c in rows {
+            let c = c?;
+            if c.holds_at(valid_at_ms) {
+                candidates.push(c);
+            }
+        }
+        Ok(projection::fold_all(candidates).into_values().collect())
+    }
+
+    /// Every confirmed event about `subject`, oldest first — the audit view.
+    pub fn history(&self, subject: &str) -> Result<Vec<ProjectedClaim>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CLAIM_COLUMNS} FROM world_events
+             WHERE subject = ?1 AND claim_status = 'confirmed'
+             ORDER BY generation ASC"
+        ))?;
+        let rows = stmt.query_map(params![subject], claim_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Proposed-but-unconfirmed claims about `subject`.
+    ///
+    /// Deliberately a **separate method** rather than a flag on
+    /// [`WorldStore::current`]. ADR-0040 lets an LLM write only candidates; if
+    /// a caller could opt into mixing them with confirmed facts through a
+    /// boolean, the safe reading would stop being the default one and SD-2's
+    /// guarantee would end at the API boundary. Asking for candidates means
+    /// naming them.
+    pub fn candidates(&self, subject: &str) -> Result<Vec<ProjectedClaim>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CLAIM_COLUMNS} FROM world_events
+             WHERE subject = ?1 AND claim_status = 'candidate'
+             ORDER BY generation ASC"
+        ))?;
+        let rows = stmt.query_map(params![subject], claim_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Subjects whose state changed after transaction time `since_ms`.
+    ///
+    /// Transaction time, not valid time: "what have I not seen yet" is a
+    /// question about the store's knowledge, and answering it in valid time
+    /// would silently skip late-arriving events about the past — the exact
+    /// traffic a bitemporal store exists to handle.
+    pub fn changed_since(&self, since_ms: i64) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT subject FROM world_events
+             WHERE txn_time_ms > ?1 AND claim_status = 'confirmed'
+             ORDER BY subject ASC",
+        )?;
+        let rows = stmt.query_map(params![since_ms], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }

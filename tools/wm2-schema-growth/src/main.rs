@@ -16,9 +16,16 @@
 //! page fill depends on insertion order) and no per-event variance is claimed.
 //!
 //! **Held fixed:** platform, SQLite build, event stream (seed, entity count,
-//! payload width, event count), and the log-only condition — no projections
-//! exist in `kirra-world-store` yet, so the comparable D-2 figure is
-//! `bytes_per_event`, never `bytes_per_event_with_projections`.
+//! payload width, event count).
+//!
+//! **Two arms, both reported.** `bytes_per_event` is log-only;
+//! `bytes_per_event_with_projections` is after the current-state projection is
+//! materialized. D-2 reported both for the stand-in and **OQ2's budget derives
+//! from the with-projections figure** — so until `kirra-world-store` grew a
+//! read path, D-20 could only compare log-only against a with-projections
+//! budget and had to record itself as optimistic. Both are measured now
+//! (ADR-0041 D-21), and the second arm runs strictly AFTER the first so it
+//! cannot disturb it.
 //!
 //! **Varied:** the schema, and the fill of the columns the schema added
 //! (see [`fill`]).
@@ -105,6 +112,17 @@ struct Growth {
     page_size: i64,
     page_count: i64,
     elapsed_s: f64,
+    /// Size after the current-state projection is materialized.
+    ///
+    /// D-2 reported this for the stand-in and **OQ2's budget derives from it**,
+    /// not from the log-only figure. Until `kirra-world-store` grew a read
+    /// path there was no ratified counterpart, so D-20 could only compare
+    /// log-only against a with-projections budget and had to record itself as
+    /// optimistic. This is the number that closes that gap.
+    with_projections_bytes: u64,
+    bytes_per_event_with_projections: f64,
+    projected_rows: i64,
+    fold_elapsed_s: f64,
 }
 
 fn growth(
@@ -178,11 +196,46 @@ fn growth(
     let log_only_bytes = db_bytes(path);
     let (page_size, page_count) = page_stats(path)?;
 
+    // --- second arm: materialize the projection and re-measure ------------
+    //
+    // Strictly AFTER the log-only figure is taken, so this arm cannot move it.
+    // The projection tables do not exist until the fold installs them (that is
+    // deliberate in `kirra-world-store`, for exactly this reason), so the
+    // log-only number above is of a store holding only the event log — the
+    // same thing D-2 measured on the stand-in.
+    let mut store = WorldStore::open(path).map_err(|e| e.to_string())?;
+    let ft = Instant::now();
+    store.fold().map_err(|e| e.to_string())?;
+    let fold_elapsed_s = ft.elapsed().as_secs_f64();
+    // The TABLE's row count, not `current_all(..).len()`. The latter applies
+    // `holds_at`, so a bounded claim whose `valid_to_ms` has passed would be
+    // excluded while still occupying a row and its bytes — an undercount in a
+    // measurement whose entire subject is size. The generated stream sets no
+    // `valid_to_ms`, so the two agree today; relying on that would make the
+    // figure correct by accident.
+    let projected_rows = store.projected_row_count().map_err(|e| e.to_string())?;
+    drop(store);
+
+    checkpoint(path)?;
+    let with_projections_bytes = db_bytes(path);
+
+    if with_projections_bytes < log_only_bytes {
+        return Err(format!(
+            "with-projections ({with_projections_bytes}) below log-only \
+             ({log_only_bytes}) — the fold cannot shrink the database, so one \
+             of the two measurements is wrong"
+        ));
+    }
+
     Ok(Growth {
         fill,
         events,
         payload_bytes,
         log_only_bytes,
+        with_projections_bytes,
+        bytes_per_event_with_projections: with_projections_bytes as f64 / events as f64,
+        projected_rows,
+        fold_elapsed_s,
         // `events` is > 0 by the guard above, so this is not a max(1) fudge.
         bytes_per_event: log_only_bytes as f64 / events as f64,
         page_size,
@@ -399,6 +452,13 @@ fn main() {
                     .i("payload_bytes", g.payload_bytes as i64)
                     .i("log_only_bytes", g.log_only_bytes as i64)
                     .f("bytes_per_event", g.bytes_per_event)
+                    .i("with_projections_bytes", g.with_projections_bytes as i64)
+                    .f(
+                        "bytes_per_event_with_projections",
+                        g.bytes_per_event_with_projections,
+                    )
+                    .i("projected_rows", g.projected_rows)
+                    .f("fold_elapsed_s", g.fold_elapsed_s)
                     .i("page_size", g.page_size)
                     .i("page_count", g.page_count)
                     .f("append_elapsed_s", g.elapsed_s)
@@ -407,6 +467,17 @@ fn main() {
                     .f(
                         "days_to_fill_budget",
                         days_to_fill(g.bytes_per_event, events_per_day, budget_bytes),
+                    )
+                    // The horizon OQ2's budget is actually derived from. D-2
+                    // used the with-projections figure; comparing a log-only
+                    // number against it is what made D-20 optimistic.
+                    .f(
+                        "days_to_fill_budget_with_projections",
+                        days_to_fill(
+                            g.bytes_per_event_with_projections,
+                            events_per_day,
+                            budget_bytes,
+                        ),
                     );
                 println!("{}", rec.clone_line(&mut lines));
                 measured.push(g);
