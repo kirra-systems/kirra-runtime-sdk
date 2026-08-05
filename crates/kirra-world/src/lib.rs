@@ -28,6 +28,37 @@
 //! observations with provenance (§9). Names are placeholders too — a name is a
 //! decision, and these have not been ratified either.
 //!
+//! # Why the ADAPTER is ahead of this core — read this before assuming neglect
+//!
+//! An unusual shape, and the one most likely to read as sloppiness to someone
+//! scanning the crate list: **`kirra-world-store` is a working implementation**
+//! — schema, write path, hash chain, current-state projection, bitemporal
+//! queries, compaction — **while this crate, the domain core it adapts, is
+//! still unconstructible placeholders.** Adapters normally trail their core.
+//!
+//! It is intended. ADR-0042 Decision 5 released the *storage* gate specifically,
+//! on the argument that persisting evidence carries no authority; it did not
+//! release the domain-logic gate, which is what would let real types, fields and
+//! invariants land here. So the store could proceed and this could not.
+//!
+//! The private unit fields below are what keep that honest. Nothing outside this
+//! crate can construct these types, so no logic can quietly accrete around a
+//! name while the ruling that governs it is still open — which is exactly the
+//! failure the split is protecting against.
+//!
+//! # Naming — this is NOT "the world model"
+//!
+//! Canonical name: **Kirra World**. Accurate prose gloss: **evidence ledger**.
+//!
+//! "World model" is ruled out (ADR-0042 Decision 1) because it already means
+//! two other things here — *redundant perception channels* in
+//! `kirra-trajectory`'s `perception_redundancy.rs` and the ros2 adapter, **both
+//! inside the safety closure**, and a TTL'd operator-facing read projection in
+//! `robot/world_model.py`. The reason is safety communication, not taste:
+//! *"the world model was wrong"* must not be able to mean a perception fault
+//! and a knowledge fault at once. Externally it invites a second wrong reading —
+//! a learned predictive model — which this is not, in any part.
+//!
 //! # Fence position
 //!
 //! This crate is inside **Fence A**: Kirra World must be structurally unable to

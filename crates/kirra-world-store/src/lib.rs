@@ -5,6 +5,31 @@
 //! (*safety-related, non-authoritative*, recorded 2026-08-05), which released
 //! the domain-logic gate.
 //!
+//! # What to call this, and what not to
+//!
+//! Canonical name: **Kirra World**. Accurate prose gloss: **evidence ledger** —
+//! an append-only, hash-chained, bitemporal record of what was claimed and on
+//! whose authority.
+//!
+//! **Not "the world model."** ADR-0042 Decision 1 ruled that off a measured
+//! collision: the term already means *redundant perception channels* in
+//! `kirra-trajectory`'s `perception_redundancy.rs` and in the ros2 adapter —
+//! **both inside the safety closure** — and a TTL'd operator-facing read
+//! projection in `robot/world_model.py`. The reason is safety communication:
+//! *"the world model was wrong"* must not be able to mean a perception fault
+//! and a knowledge fault at once. To an outside reader it also suggests a
+//! learned predictive model, which this is not — nothing here predicts
+//! anything. It records.
+//!
+//! # This crate is AHEAD of the domain core it adapts
+//!
+//! Deliberate, and worth knowing before it looks like a mistake in the other
+//! direction: `kirra-world`, the domain core, is still unconstructible
+//! placeholders while this adapter is a working implementation. ADR-0042
+//! Decision 5 released the *storage* gate specifically and left the
+//! domain-logic gate closed, so the store could proceed and the core could not.
+//! See that crate's docs for the full reasoning.
+//!
 //! # The boundary this crate must not cross
 //!
 //! Decision 5's classification holds only while Kirra World has **no authority
