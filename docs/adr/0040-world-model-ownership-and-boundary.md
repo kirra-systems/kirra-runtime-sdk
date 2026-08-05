@@ -510,6 +510,64 @@ unblocked. This gate no longer constrains the `kirra-world*` crates."*
 ADR-0040's Proposed status is a governance position, not an enforced gate — so
 Tier 1 is not mechanically blocked either way.
 
+### Open question 6 — predictive containment
+
+Raised 2026-08-05, because a layering diagram and the blueprint currently
+disagree and nobody had noticed.
+
+> **Should predictive state remain in a separate store referenced by Kirra
+> World entity IDs, or may Kirra World host a separately fenced predictive
+> namespace?**
+
+**This does not gate ratification.** The checklist names open questions **1 and
+4** specifically; raising a sixth must not silently enlarge that gate, and this
+sentence exists so it cannot.
+
+#### What the blueprint currently says
+
+`KIRRA-WM-ARCH-001` §20 — *not* ADR-0041, which is where these rules are most
+often mis-attributed because the persistence decisions live there:
+
+> *"Predictions live in a **separate store** and reference World Model entity
+> IDs. They are never observations... A prediction may not be promoted to an
+> observation... The World Model stays deterministic. **A learned model in that
+> path would destroy replay.**"*
+
+And §9.1: `Predicted` **never appears in the evidence store**.
+
+#### The distinction the question exists to protect
+
+Two things are both "the LLM's opinion", and only one is admitted today:
+
+| | Example | Status |
+|---|---|---|
+| **LLM-originated candidate** — proposes something confirmable | *"I think that is the toolbox"* | **Already inside, already fenced** — `writer_class = llm_candidate`, refused `confirmed` by the schema (SD-2), excluded from the confirmed-only fold, reachable only by naming `candidates()` |
+| **Predictive belief** — a probability over unobserved state | *"The keys are probably still near the door"* | **Outside.** §9.1 |
+
+A diagram that nests "the cognitive layer" inside Kirra World collapses these,
+and the collapse is invisible because both are the same thing to a reader.
+
+#### The default, unless and until a ruling changes it
+
+* the prediction store is **separate**;
+* predictions **never become observations**;
+* predictions **cannot enter confirmed-only projections**;
+* predictive consumers get a **read seam, not write authority** over confirmed
+  knowledge.
+
+#### Why it is worth asking rather than assuming
+
+The "separately fenced namespace" option is not obviously wrong — the store
+already demonstrates that hostile content can live inside a structure that
+refuses to fold it, which is exactly what SD-2 and the confirmed-only fold do
+for `llm_candidate`. The argument against is §20's: a learned model *in the
+projection path* destroys replay, and replay is what the whole evidence-first
+inversion buys.
+
+Answering it means deciding whether "separately fenced" can be made as
+structural as SD-2 is — a schema-level refusal, not a convention. That is a
+ruling, not a diagram.
+
 ### One further checkbox may be tickable
 
 ADR-0039's safety-assurance item says the ruling *"must be **recorded**; it need
@@ -547,6 +605,12 @@ The one item with no technical component. Recorded here is what the decision
 4. Naming collision disposition (ADR-0039 C1/C3).
 5. Does the dashboard's "administrative write" need a distinct writer class, or
    is it an operator-calibration adapter with a different transport?
+6. **Predictive containment.** Should predictive state remain in a **separate
+   store** referenced by Kirra World entity IDs, or may Kirra World host a
+   **separately fenced predictive namespace**? See *Open question 6 —
+   predictive containment* below. **Does not gate ratification**: the checklist
+   names open questions 1 and 4 specifically, and raising this must not
+   silently enlarge that gate.
 
 ---
 
