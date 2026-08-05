@@ -470,10 +470,13 @@ source; they are not migrated destructively (ADR-0040).
    event rate to fall (2.4 events/s for 90 days). The durations and the
    sampling policy are a single coupled decision, not two.
 
-   **RULED 2026-08-05.** Budget is **18 033 812 events** — 8 GiB with
-   projections, from D-2. The protected classes are low-volume, so `raw` is
-   essentially the whole cost and the decision reduces to one trade: `raw`
-   horizon against the coalescing factor it forces.
+   **RULED 2026-08-05** — *superseded the same day by the re-ruling below; kept
+   because the re-ruling changes one number in it and inherits everything else,
+   and because the reasoning here is the reasoning that still stands.* Budget is
+   **18 033 812 events** — 8 GiB with projections, from D-2. The protected
+   classes are low-volume, so `raw` is essentially the whole cost and the
+   decision reduces to one trade: `raw` horizon against the coalescing factor it
+   forces.
 
    | Class | Horizon | Sustained rate | Events | Budget |
    |---|---|---:|---:|---:|
@@ -529,8 +532,57 @@ source; they are not migrated destructively (ADR-0040).
    built on — 30 days of reach is retained, at ~3× rather than ~2× on a 10 Hz
    sensor. Shortening `raw` to 21 days spends the thing the ruling explicitly
    bought ("a cause found late has nothing to reach back to"), and 21 days is
-   close to the 7-day case it rejected for that reason. **This is a decision
-   about incident reconstruction and it is not made here.**
+   close to the 7-day case it rejected for that reason.
+
+   ### RE-RULED 2026-08-05 — the coalescing lever
+
+   **Owner: Justin Looney. Lever chosen: hold the 30-day `raw` horizon, and pay
+   for it in coalescing.** Budget is **14 039 041 events** — 8 GiB at the
+   target-measured `populated` figure (611.86048 B/event, D-20). The `populated`
+   end is used, not `lean`, because a retention horizon states when a disk fills
+   and the lean end reserves the least margin.
+
+   | Class | Horizon | Sustained rate | Events | Budget |
+   |---|---|---:|---:|---:|
+   | `raw` | **30 days** | ≤ **3.20 /s** (**~3.1× coalescing** from 10 Hz) | 8 294 400 | 59 % |
+   | `safety`, `incident`, `calibration`, `adjudication`, `operator` (aggregate) | **365 days** | ≤ 0.12 /s | 3 784 320 | 27 % |
+   | — | — | headroom | 1 960 321 | **14 %** |
+
+   **What changed and what did not.** Only the rate: **4.5 → 3.20 /s**,
+   coalescing ~2× → **~3.1×**. Both horizons, the protected-class allocation and
+   the 14 % headroom are unchanged — 3.20 /s lands the headroom at 14.0 %,
+   which is why it is the chosen figure rather than a rounder one. The original
+   ruling's reasoning is untouched: it turned on how far back an incident
+   reconstruction must reach, that answer is still 30 days, and D-20 bears only
+   on how many events fit.
+
+   **Why this lever and not the other two.** Shortening `raw` to 21.3 days
+   spends exactly what the original ruling bought, and lands close to the 7-day
+   case it rejected on those grounds — a cause found late would again have
+   nothing to reach back to. Raising the budget to ~9.9 GiB moves a hardware
+   constraint to buy a software margin, and the 8 GiB figure is what tier C's
+   power-cut gate and every growth measurement have been taken against.
+   Coalescing is the only lever that keeps the answer and pays in a currency
+   the sensor can actually spend: ~3.1× on a 10 Hz feed is a sample every
+   ~310 ms, which is still well inside the perception rates the checker bounds.
+
+   **Conditions that reopen this.** Two, both already known:
+
+   1. **Projections.** The 14 039 041 figure is **log-only**, compared against a
+      budget the original ruling took *with* projections. `kirra-world-store`
+      has none yet, so the ratified with-projections figure cannot be measured —
+      only bounded below. It is strictly larger, so **this allocation is
+      optimistic and the headroom is smaller than 14 %.** When projections land
+      and D-2's `bytes_per_event_with_projections` has a ratified counterpart,
+      re-derive. This is the most likely reopening and it is expected, not a
+      risk being waved at.
+   2. **A schema change.** Any column added to `world_events` moves B/event, and
+      `KIRRA-WM2-SCHEMA-001` §8.4 already makes re-measurement an obligation
+      rather than a courtesy. `tools/wm2-schema-growth` is the instrument.
+
+   The three rules above (forward-only evolution, compaction buys summaries,
+   plan against the un-reclaimed figure) carry over unchanged, and OQ2b — how a
+   retention policy change reaches already-written events — **remains open**.
 
    **Coupling to OQ1.** P-2/P-3 make commit grouping the per-class knob; the
    classes those budgets attach to are the six named here. The grouping budgets

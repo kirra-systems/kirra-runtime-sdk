@@ -125,12 +125,23 @@ The figure moved **1.2349×** (`lean`) to **1.3345×** (`populated`) — 458.51 
 **566.23 / 611.86 B/event**. The six columns above were "plausibly additive";
 they are, and the addition is large enough to matter.
 
-**OQ2's allocation no longer closes.** Its 15 448 320 allocated events exceed
-the corrected budget at both ends of the band — headroom **+14 % → −1.8 % /
-−10.0 %** — so the durations were not merely revisable in principle, they are
-arithmetically unaffordable as ruled. ADR-0041's OQ2 section carries the
-reopening, the three levers and their numbers; the choice among them is a
-decision about incident reconstruction and is not made in this document.
+**OQ2's allocation did not close, and has been re-ruled.** Its 15 448 320
+allocated events exceeded the corrected budget at both ends of the band —
+headroom **+14 % → −1.8 % / −10.0 %** — so the durations were not merely
+revisable in principle, they were arithmetically unaffordable as ruled.
+
+**Re-ruled 2026-08-05 on the coalescing lever** (ADR-0041 OQ2): the 30-day `raw`
+horizon is **held**, and paid for in sampling — sustained rate **4.5 → 3.20 /s**,
+coalescing **~2× → ~3.1×** from 10 Hz. Both horizons, the protected-class
+allocation and the 14 % headroom are unchanged. The input the original ruling
+turned on — how far back an incident reconstruction must reach — was never in
+question; only how many events fit. **This is the schema's cost landing on the
+sampling policy, which is exactly the coupling §5 was written to predict.**
+
+Note the ruling is explicitly optimistic: its budget is **log-only**, because
+`kirra-world-store` has no projections yet. The ratified with-projections figure
+is unmeasurable until they exist and is strictly larger, so the real headroom is
+below 14 % and the ruling names projections as its first reopening condition.
 
 One caveat worth carrying: the instrument had to be a **new** one
 (`tools/wm2-schema-growth`), not `wm2-persistence-harness append` as
