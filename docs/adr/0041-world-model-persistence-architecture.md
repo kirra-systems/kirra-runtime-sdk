@@ -1044,14 +1044,20 @@ The canonical name is **Kirra World** (ADR-0042 Decision 1). In prose, the
 accurate gloss is **evidence ledger**: an append-only, hash-chained,
 bitemporal record of what was claimed and on whose authority.
 
-**Do not call it a "world model."** The term is already taken twice inside the
-safety closure — `perception_redundancy.rs` and the ros2 adapter use it for
-*redundant perception channels* — and a third time in `robot/world_model.py`,
-a TTL'd operator-facing read projection. Decision 1 ruled the collision off a
-measured table, for a safety-communication reason: *"the world model was
-wrong"* must not be able to mean a perception fault and a knowledge fault at
-once. Externally the term invites a second wrong inference — a learned
-predictive model — which this is not, in any part.
+**Do not call it a "world model."** Decision 1 ruled the collision off a
+measured table of three uses. Two were inside the safety closure —
+`perception_redundancy.rs` and the ros2 adapter, for *redundant perception
+channels* — and **have since been renamed** to *independent perception
+channel*, so that half is resolved in code and the rule is what keeps it
+resolved. The third is still live: `robot/world_model.py`, a TTL'd
+operator-facing read projection whose rename ADR-0042 puts behind safety review
+because it is imported, installer-staged and gated by
+`KIRRA_WORLD_MODEL_ENABLED` — renaming it changes robot deployment, not prose.
+
+The reason is safety communication: *"the world model was wrong"* must not be
+able to mean a perception fault and a knowledge fault at once. Externally the
+term invites a second wrong inference — a learned predictive model — which this
+is not, in any part.
 
 Renaming the subsystem to "evidence ledger" was considered and rejected:
 *Kirra Evidence Model* and *Kirra Knowledge Model* describe the content
@@ -1096,23 +1102,38 @@ produced, and no behaviour at all while none are.
 
 An unusual shape, stated here so it is not read as neglect: `kirra-world` (the
 **domain core**) is unconstructible placeholders, while `kirra-world-store` (an
-**adapter**) is a working implementation. ADR-0042 Decision 5 released the
-storage gate specifically; the core's types carry private unit fields so no
-logic can accrete around them while the ruling that governs them is open. The
-inversion is the discipline working, not a gap in it. Mirrored into both
-crates' top-level docs, because a crate-list scan is where the confusion
-happens and an ADR is not where it gets resolved.
+**adapter**) is a working implementation. Adapters normally trail their core.
 
-### Status of the ruling this rests on
+**It is not a gate.** The domain-logic gate
+(`ci/check_world_domain_logic_gate.py`) is deliberately *self-releasing* —
+recording the Decision 5 ruling relaxes it automatically — and the ruling was
+recorded 2026-08-05. `kirra-world*` is no longer held to declaration-only by
+it. What still constrains the subsystem is the ruling's own *Conditions that
+reopen the decision*.
 
-ADR-0039, ADR-0040, ADR-0041 and ADR-0042 are **Proposed**. Decision 5's
-classification — *safety-related, non-authoritative* — is an **owner
-self-assessment, not an independent assurance review**, with three of its eight
-supporting questions recorded open, and it holds only while Kirra World has no
-authority over actuation, release, safety decisions, or required safety inputs.
-Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508
-SIL 3 requirements. Independent third-party assessment has not yet been
-performed.
+So the honest reason is simpler, and worth writing down precisely because it is
+less flattering than an external hold: **WM-2's scoped work was the storage
+slice, and the domain-types work has not been done.** That is a sequencing
+decision, recorded here as one. The core's private unit fields still earn their
+place — they stop logic accreting around names ADR-0040 has not ratified — but
+that is a *naming* constraint, not a safety gate.
+
+Mirrored into both crates' top-level docs, because a crate-list scan is where
+the confusion happens and an ADR is not where it gets resolved.
+
+### Status of the rulings this rests on
+
+**ADR-0041 is Accepted** (2026-08-04). ADR-0039, ADR-0040 and ADR-0042 remain
+**Proposed**. ADR-0042 Decision 5 was **recorded** 2026-08-05.
+
+That classification — *safety-related, non-authoritative* — is an **owner
+self-assessment, not an independent assurance review**, supported by structural
+evidence only, with three of its eight supporting questions (Q2, Q4, Q5)
+recorded open as a KNOWN GAP inside the ruling rather than outside it. It holds
+only while Kirra World has no authority over actuation, release, safety
+decisions, or required safety inputs — any one of the four reopens it. Kirra is
+designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508 SIL 3
+requirements. Independent third-party assessment has not yet been performed.
 
 ---
 

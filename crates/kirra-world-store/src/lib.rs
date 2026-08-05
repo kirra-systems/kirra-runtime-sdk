@@ -12,23 +12,30 @@
 //! whose authority.
 //!
 //! **Not "the world model."** ADR-0042 Decision 1 ruled that off a measured
-//! collision: the term already means *redundant perception channels* in
-//! `kirra-trajectory`'s `perception_redundancy.rs` and in the ros2 adapter —
-//! **both inside the safety closure** — and a TTL'd operator-facing read
-//! projection in `robot/world_model.py`. The reason is safety communication:
-//! *"the world model was wrong"* must not be able to mean a perception fault
-//! and a knowledge fault at once. To an outside reader it also suggests a
-//! learned predictive model, which this is not — nothing here predicts
-//! anything. It records.
+//! collision. Two of the three colliding uses were inside the safety closure —
+//! `kirra-trajectory`'s `perception_redundancy.rs` and the ros2 adapter, for
+//! *redundant perception channels* — and have since been renamed to
+//! *independent perception channel*; the rule is what keeps them that way. One
+//! remains live: `robot/world_model.py`, a TTL'd operator-facing read
+//! projection whose rename ADR-0042 puts behind safety review, because it is
+//! imported, installer-staged and env-gated.
+//!
+//! The reason is safety communication: *"the world model was wrong"* must not
+//! be able to mean a perception fault and a knowledge fault at once. To an
+//! outside reader the term also suggests a learned predictive model, which this
+//! is not — nothing here predicts anything. It records.
 //!
 //! # This crate is AHEAD of the domain core it adapts
 //!
-//! Deliberate, and worth knowing before it looks like a mistake in the other
-//! direction: `kirra-world`, the domain core, is still unconstructible
-//! placeholders while this adapter is a working implementation. ADR-0042
-//! Decision 5 released the *storage* gate specifically and left the
-//! domain-logic gate closed, so the store could proceed and the core could not.
-//! See that crate's docs for the full reasoning.
+//! Worth knowing before it looks like a mistake in the other direction:
+//! `kirra-world`, the domain core, is still unconstructible placeholders while
+//! this adapter is a working implementation.
+//!
+//! **Not because a gate holds the core closed.** The domain-logic gate is
+//! self-releasing and released when Decision 5 was recorded on 2026-08-05. The
+//! core is empty because WM-2's scoped work was the storage slice and the
+//! domain-types work has not been done — sequencing, recorded as such in
+//! ADR-0041's *WM-2 implementation milestone*. See that crate's docs.
 //!
 //! # The boundary this crate must not cross
 //!
