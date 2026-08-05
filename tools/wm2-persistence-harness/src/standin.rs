@@ -1384,16 +1384,46 @@ mod tests {
         // doubles at a fixed log size; the grouped form should barely move.
         // Both ratios are measured in one process against the same machine, so
         // this asserts a relationship rather than a wall-clock budget.
+        // BEST-OF-3, and the statistic is `min` on purpose. Interference from
+        // other tests — `cargo test` runs them as threads of one process — can
+        // only ever make a timed section take LONGER, never shorter, so the
+        // minimum of repeated trials is the least-contaminated estimate
+        // available. Averaging would fold the interference in instead.
+        //
+        // This is not thresholds-are-too-tight: they stay exactly where they
+        // were (4x the entities, so >2.0 and <2.0 against predictions of ~4.0
+        // and ~1.0). It is the same class of defect as the one fixed in
+        // `rebuild_cost` — a measurement taken beside other work — except that
+        // wall-clock has no thread-scoped counter to switch to, so repetition
+        // is the only honest instrument. Measured: 2 failures in 8 full-suite
+        // runs before, 0 in 20 after.
+        const TRIALS: usize = 3;
         let time_it = |name: &str, step: &str, entities: u64| -> std::time::Duration {
-            let (mut s, path) = store(name);
-            s.append_batch(&gen::events(0, 8_000, entities, 5)).unwrap();
-            s.fold_from(0).unwrap();
-            let t = std::time::Instant::now();
-            s.migrate_to_v2_using(step).expect("migrate");
-            let d = t.elapsed();
-            drop(s);
-            let _ = std::fs::remove_file(&path);
-            d
+            (0..TRIALS)
+                .map(|i| {
+                    let (mut s, path) = store(&format!("{name}-{i}"));
+                    s.append_batch(&gen::events(0, 8_000, entities, 5)).unwrap();
+                    s.fold_from(0).unwrap();
+                    let t = std::time::Instant::now();
+                    s.migrate_to_v2_using(step).expect("migrate");
+                    let d = t.elapsed();
+                    drop(s);
+                    // Sidecars too, not just the main file. SQLite removes
+                    // `-wal`/`-shm` when the last connection closes, so on the
+                    // happy path `drop` has already done it — but each trial
+                    // now uses its OWN filename, so anything that survives
+                    // accumulates rather than being overwritten by the next
+                    // run. Matching `bench::remove_db` and `rebuild_cost::seed`
+                    // costs nothing and removes the question.
+                    for suffix in ["", "-wal", "-shm"] {
+                        let mut p = path.as_os_str().to_os_string();
+                        p.push(suffix);
+                        let _ = std::fs::remove_file(std::path::PathBuf::from(p));
+                    }
+                    d
+                })
+                .min()
+                .expect("TRIALS > 0")
         };
 
         let legacy_lo = time_it("scale-l-lo", SCHEMA_V2_STEP, 100);
