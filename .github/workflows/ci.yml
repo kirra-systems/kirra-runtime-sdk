@@ -994,6 +994,15 @@ jobs:
         run: |
           cargo test --release
           cargo clippy --all-targets --release -- -D warnings
+          # Explicit, and NOT redundant with `cargo test --release` above.
+          # `cargo test` compiles main.rs as a test harness into deps/ and only
+          # emits the real binary when a crate has integration tests that might
+          # exec it. This tool's tests are all unit tests inside main.rs, so
+          # `target/release/wm2-schema-growth` is never produced by the test
+          # step — unlike the harness lane above, which has a tests/ directory
+          # and therefore gets the binary for free. Relying on that difference
+          # is how this lane failed the first time it ran.
+          cargo build --release
           ./target/release/wm2-schema-growth \
               --events 5000 --entities 200 \
               --db "$RUNNER_TEMP/wm2-growth.sqlite" \

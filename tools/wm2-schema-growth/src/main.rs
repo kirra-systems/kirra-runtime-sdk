@@ -115,6 +115,21 @@ fn growth(
     seed: u64,
     payload_bytes: usize,
 ) -> Result<Growth, String> {
+    // Fail closed on a degenerate run rather than dividing by `events.max(1)`
+    // and reporting the fixed schema overhead as a "bytes per event" figure.
+    // Zero events produces a real number from a real database — it is just a
+    // number about nothing, and this instrument's whole purpose is that its
+    // outputs cannot be mistaken for measurements of something they are not.
+    if events == 0 {
+        return Err("events must be > 0: a zero-event run has no bytes/event".to_string());
+    }
+    if entities == 0 {
+        return Err("entities must be > 0".to_string());
+    }
+    if payload_bytes == 0 {
+        return Err("payload_bytes must be > 0".to_string());
+    }
+
     remove_db(path);
     let mut store = WorldStore::open(path).map_err(|e| e.to_string())?;
 
@@ -151,6 +166,14 @@ fn growth(
     }
     let elapsed_s = t.elapsed().as_secs_f64();
 
+    // Close the writer BEFORE checkpointing. `checkpoint` opens its own
+    // connection, and `wal_checkpoint(TRUNCATE)` against a file another
+    // connection still holds can return SQLITE_BUSY. That would not merely
+    // fail loudly — a partial checkpoint leaves bytes in the WAL that a
+    // successful one would have folded into the main file, so the measurement
+    // would vary with lock timing rather than with the schema.
+    drop(store);
+
     checkpoint(path)?;
     let log_only_bytes = db_bytes(path);
     let (page_size, page_count) = page_stats(path)?;
@@ -160,7 +183,8 @@ fn growth(
         events,
         payload_bytes,
         log_only_bytes,
-        bytes_per_event: log_only_bytes as f64 / events.max(1) as f64,
+        // `events` is > 0 by the guard above, so this is not a max(1) fudge.
+        bytes_per_event: log_only_bytes as f64 / events as f64,
         page_size,
         page_count,
         elapsed_s,
@@ -211,7 +235,23 @@ impl Rec {
         self.0.push(format!("\"{k}\":{v}"));
         self
     }
+    /// A float field, refusing anything JSON cannot represent.
+    ///
+    /// Rust prints `f64::INFINITY` as `inf` and NaN as `NaN`, neither of which
+    /// is valid JSON — a record carrying one produces an evidence file that
+    /// **will not parse**, which is a worse outcome than any wrong number
+    /// because it silently breaks every downstream reader.
+    ///
+    /// The upstream inputs are validated in `main`, so reaching this is a bug
+    /// rather than bad user input. It panics for exactly that reason: an
+    /// instrument that cannot emit a valid record must stop, not write a
+    /// half-valid line and exit 0.
     fn f(mut self, k: &str, v: f64) -> Self {
+        assert!(
+            v.is_finite(),
+            "refusing to emit non-finite value for {k:?} ({v}) — JSON has no \
+             representation for it and the record would not parse"
+        );
         self.0.push(format!("\"{k}\":{v}"));
         self
     }
@@ -311,6 +351,37 @@ fn main() {
         i += 1;
     }
 
+    // Validate before measuring, not after. Every one of these feeds a
+    // division whose result is emitted as JSON, and JSON has no `inf` — a run
+    // with `--events-per-day 0` would otherwise produce an evidence file that
+    // does not parse. Rejecting the input costs a second; a corrupt evidence
+    // bundle costs whoever tries to read it later.
+    for (name, v) in [
+        ("--events-per-day", events_per_day),
+        ("--budget-gib", budget_gib),
+    ] {
+        if !v.is_finite() || v <= 0.0 {
+            eprintln!("{name} must be a finite positive number (got {v})");
+            std::process::exit(2);
+        }
+    }
+    if let Some(sb) = standin_bpe {
+        if !sb.is_finite() || sb <= 0.0 {
+            eprintln!("--standin-bpe must be a finite positive number (got {sb})");
+            std::process::exit(2);
+        }
+    }
+    for (name, v) in [
+        ("--events", events),
+        ("--entities", entities),
+        ("--payload-bytes", payload_bytes as u64),
+    ] {
+        if v == 0 {
+            eprintln!("{name} must be > 0");
+            std::process::exit(2);
+        }
+    }
+
     let budget_bytes = budget_gib * 1024.0 * 1024.0 * 1024.0;
     let mut lines: Vec<String> = Vec::new();
     let mut measured: Vec<Growth> = Vec::new();
@@ -407,6 +478,18 @@ impl Rec {
 mod tests {
     use super::*;
 
+    /// Test databases keyed by PID *and* test name. Rust runs tests in
+    /// parallel threads of ONE process, so a PID-only path is shared by every
+    /// test that uses it — and `growth` starts by deleting the file it is
+    /// about to write.
+    fn tmp(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "wm2-growth-test-{}-{}.sqlite",
+            name,
+            std::process::id()
+        ))
+    }
+
     #[test]
     fn days_to_fill_is_the_harness_formula() {
         // 458.50624 B/event, 864 000 events/day, 8 GiB — D-2's own inputs.
@@ -434,8 +517,7 @@ mod tests {
     /// horizon derived from its upper end is not conservative.
     #[test]
     fn populated_costs_more_per_event_than_lean() {
-        let dir = std::env::temp_dir();
-        let p = dir.join(format!("wm2-growth-test-{}.sqlite", std::process::id()));
+        let p = tmp("band");
         let lean = growth(&p, Fill::Lean, 2_000, 50, 7, 96).expect("lean");
         let pop = growth(&p, Fill::Populated, 2_000, 50, 7, 96).expect("populated");
         remove_db(&p);
@@ -446,5 +528,42 @@ mod tests {
             pop.bytes_per_event,
             lean.bytes_per_event
         );
+    }
+
+    /// A zero-event run must be refused, not reported. `events.max(1)` would
+    /// have divided the fixed schema overhead by one and emitted it as a
+    /// bytes/event figure — a real number about nothing.
+    #[test]
+    fn a_degenerate_run_is_refused_rather_than_reported() {
+        let p = tmp("degenerate");
+        assert!(growth(&p, Fill::Lean, 0, 50, 7, 96).is_err(), "0 events");
+        assert!(growth(&p, Fill::Lean, 10, 0, 7, 96).is_err(), "0 entities");
+        assert!(growth(&p, Fill::Lean, 10, 50, 7, 0).is_err(), "0 payload");
+        remove_db(&p);
+    }
+
+    /// The emitter must refuse a value JSON cannot represent. Rust prints
+    /// infinity as `inf`, which parses as nothing — so a record carrying one
+    /// would silently produce an evidence file no reader can load.
+    #[test]
+    #[should_panic(expected = "refusing to emit non-finite")]
+    fn the_emitter_refuses_infinity() {
+        let _ = Rec::new().f("days_to_fill_budget", f64::INFINITY).line();
+    }
+
+    #[test]
+    #[should_panic(expected = "refusing to emit non-finite")]
+    fn the_emitter_refuses_nan() {
+        let _ = Rec::new().f("ratio", f64::NAN).line();
+    }
+
+    /// Everything the instrument actually emits stays finite for the
+    /// parameters it validates — the assert above is a backstop, not the gate.
+    #[test]
+    fn validated_inputs_produce_only_finite_output() {
+        let d = days_to_fill(612.18816, 864_000.0, 8.0 * 1024.0 * 1024.0 * 1024.0);
+        assert!(d.is_finite() && d > 0.0);
+        let l = Rec::new().f("days_to_fill_budget", d).line();
+        assert!(!l.contains("inf") && !l.contains("NaN"), "{l}");
     }
 }
