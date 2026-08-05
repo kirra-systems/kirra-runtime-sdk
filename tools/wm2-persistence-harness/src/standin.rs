@@ -1408,7 +1408,18 @@ mod tests {
                     s.migrate_to_v2_using(step).expect("migrate");
                     let d = t.elapsed();
                     drop(s);
-                    let _ = std::fs::remove_file(&path);
+                    // Sidecars too, not just the main file. SQLite removes
+                    // `-wal`/`-shm` when the last connection closes, so on the
+                    // happy path `drop` has already done it — but each trial
+                    // now uses its OWN filename, so anything that survives
+                    // accumulates rather than being overwritten by the next
+                    // run. Matching `bench::remove_db` and `rebuild_cost::seed`
+                    // costs nothing and removes the question.
+                    for suffix in ["", "-wal", "-shm"] {
+                        let mut p = path.as_os_str().to_os_string();
+                        p.push(suffix);
+                        let _ = std::fs::remove_file(std::path::PathBuf::from(p));
+                    }
                     d
                 })
                 .min()
