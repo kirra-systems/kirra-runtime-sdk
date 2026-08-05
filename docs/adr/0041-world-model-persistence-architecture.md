@@ -429,8 +429,29 @@ source; they are not migrated destructively (ADR-0040).
    reproducible property D-17 does establish — `NORMAL` trades tail latency for
    median throughput — while the anomaly itself stays on the record.
 
-   **A policy is PROPOSED, not ruled**, in
-   `docs/design/WM2_SYNCHRONOUS_POLICY.md`: `synchronous=FULL` universally, with
+   **RULED 2026-08-05 — P-1 through P-4 adopted as written.** The policy in
+   `docs/design/WM2_SYNCHRONOUS_POLICY.md` is now the rule, not a proposal:
+
+   | | Adopted |
+   |---|---|
+   | **P-1** | `synchronous=FULL` on the evidence log, **universally** — one log, one chain, one setting |
+   | **P-2** | Per-class differentiation moves to **commit grouping**, a property of the writer rather than the store |
+   | **P-3** | Grouping is the class-visible durability knob, stated as a **loss window** — at most N events or T ms of *uncommitted* tail. Committed events are never at risk: under P-1 every commit fsyncs, so acknowledgement means durable |
+   | **P-4** | `synchronous=OFF` is never used for the log |
+
+   **What this commits to:** tier C's five physical power cuts (D-11) were run
+   at `Durability::Full`, so adopting `FULL` keeps the closed durability gate
+   covering the shipped configuration. Moving to `NORMAL` later would re-open
+   tier C — five more power cuts — for a 16 % median gain that costs 32 % at
+   p99. The falsifiers in §7 of the policy document remain the conditions under
+   which this ruling should be revisited.
+
+   The residual anomaly below is **not** closed by this ruling, and the ruling
+   does not depend on it: D-19 gives a third observation agreeing with D-17
+   within 0.2 %, so the reproducible property the decision rests on is now
+   observed three times.
+
+   The proposal (now the rule) said: `synchronous=FULL` universally, with
    per-class differentiation moved to commit grouping. It rests on three
    findings — that a per-class `synchronous` value **is** implementable via
    separate writer connections, but buys no per-class guarantee, because
@@ -448,6 +469,43 @@ source; they are not migrated destructively (ADR-0040).
    store fills in 21.7 days, so any horizon beyond three weeks requires the
    event rate to fall (2.4 events/s for 90 days). The durations and the
    sampling policy are a single coupled decision, not two.
+
+   **RULED 2026-08-05.** Budget is **18 033 812 events** — 8 GiB with
+   projections, from D-2. The protected classes are low-volume, so `raw` is
+   essentially the whole cost and the decision reduces to one trade: `raw`
+   horizon against the coalescing factor it forces.
+
+   | Class | Horizon | Sustained rate | Events | Budget |
+   |---|---|---:|---:|---:|
+   | `raw` | **30 days** | ≤ 4.5 /s (**~2× coalescing** from 10 Hz) | 11 664 000 | 65 % |
+   | `safety`, `incident`, `calibration`, `adjudication`, `operator` (aggregate) | **365 days** | ≤ 0.12 /s | 3 784 320 | 21 % |
+   | — | — | headroom | 2 585 492 | **14 %** |
+
+   **Why 30 days rather than 7 or 90.** 7 days needs no coalescing at all and
+   uses 55 % of budget — genuinely cheaper — but it only works if every incident
+   is diagnosed inside a week; a cause found late has nothing to reach back to.
+   90 days forces ~6.7× coalescing, which risks discarding the resolution that
+   made the evidence worth keeping. 30 days at ~2× is the knee, and 2× on a
+   10 Hz sensor is modest. **This choice turns on how far back an incident
+   reconstruction must reach**, and should be revisited if that answer changes.
+
+   **Three rules come with it, none optional:**
+
+   1. **Forward-only is the operative evolution route.** Retention class is
+      inside the canonically-hashed event bytes, so a policy change cannot be
+      applied retroactively — routes 2 and 3 above are unimplemented and
+      unratified, and OQ2b is still open.
+   2. **Compaction buys summaries, not observations.** D-4's ~50 % recovery is
+      lossy (`DegradedSummary`), so it roughly doubles the horizon for
+      compactable regions without relaxing the sampling conclusion.
+   3. **Plan against the un-reclaimed figure.** D-3: reclamation needs a ~1×
+      free-space reserve and a total write blackout (~21.5 s on a full store),
+      and a policy assuming continuous reclamation assumes a maintenance window
+      that may never open.
+
+   **Coupling to OQ1.** P-2/P-3 make commit grouping the per-class knob; the
+   classes those budgets attach to are the six named here. The grouping budgets
+   themselves are still unset and are a WM-2 design task, not a further ruling.
 2a. Reclamation scheduling: the precondition thresholds in *Compaction is not
    reclamation* were proposed, not measured. **D-3 measures them**: ~399 MB/s,
    a ~1× free-space reserve, a total write blackout for the duration (~21.5 s
