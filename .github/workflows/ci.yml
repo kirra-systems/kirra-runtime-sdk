@@ -1029,6 +1029,11 @@ jobs:
           grep -q '"fill":"lean"' "$RUNNER_TEMP/wm2-growth.jsonl" \
             && grep -q '"fill":"populated"' "$RUNNER_TEMP/wm2-growth.jsonl" \
             || { echo "the measured band is incomplete"; exit 1; }
+          # The with-projections figure must be present. OQ2's budget derives
+          # from it, not from the log-only number, and a record missing it
+          # would silently re-create the gap D-21 closed.
+          grep -q '"bytes_per_event_with_projections":' "$RUNNER_TEMP/wm2-growth.jsonl" \
+            || { echo "records are missing the with-projections figure"; exit 1; }
 
   r2cp-bridge:
     name: R2CP host bridge (PTY loop + dependency-free core)

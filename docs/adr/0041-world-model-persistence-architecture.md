@@ -544,9 +544,18 @@ source; they are not migrated destructively (ADR-0040).
 
    | Class | Horizon | Sustained rate | Events | Budget |
    |---|---|---:|---:|---:|
-   | `raw` | **30 days** | ≤ **3.20 /s** (**~3.1× coalescing** from 10 Hz) | 8 294 400 | 59 % |
-   | `safety`, `incident`, `calibration`, `adjudication`, `operator` (aggregate) | **365 days** | ≤ 0.12 /s | 3 784 320 | 27 % |
-   | — | — | headroom | 1 960 321 | **14 %** |
+   | `raw` | **30 days** | ≤ **3.20 /s** (**~3.1× coalescing** from 10 Hz) | 8 294 400 | 61 % |
+   | `safety`, `incident`, `calibration`, `adjudication`, `operator` (aggregate) | **365 days** | ≤ 0.12 /s | 3 784 320 | 28 % |
+   | — | — | headroom | 1 563 955 | **11.5 %** |
+
+   **Headroom corrected 2026-08-05 by D-21.** This table first read 14 % on a
+   budget of 14 039 041, which was the **log-only** figure — the ruling said so
+   and named the with-projections number as its first reopening condition. That
+   number is now measured (629.63712 B/event), the budget is **13 642 675**, and
+   the real headroom is **11.5 %**. The allocation still fits and the ruling
+   stands; only its margin was overstated, by 2.5 points. Restoring a full 14 %
+   would take 3.07 /s rather than 3.20 — a further turn of the same lever,
+   deliberately not taken without an owner's decision.
 
    **What changed and what did not.** Only the rate: **4.5 → 3.20 /s**,
    coalescing ~2× → **~3.1×**. Both horizons, the protected-class allocation and
@@ -568,14 +577,14 @@ source; they are not migrated destructively (ADR-0040).
 
    **Conditions that reopen this.** Two, both already known:
 
-   1. **Projections.** The 14 039 041 figure is **log-only**, compared against a
-      budget the original ruling took *with* projections. `kirra-world-store`
-      has none yet, so the ratified with-projections figure cannot be measured —
-      only bounded below. It is strictly larger, so **this allocation is
-      optimistic and the headroom is smaller than 14 %.** When projections land
-      and D-2's `bytes_per_event_with_projections` has a ratified counterpart,
-      re-derive. This is the most likely reopening and it is expected, not a
-      risk being waved at.
+   1. ~~**Projections.**~~ **DISCHARGED 2026-08-05 by D-21.** This condition
+      read: the budget is log-only, the ratified with-projections figure cannot
+      be measured until a read path exists, and the allocation is therefore
+      optimistic by an unknown amount. The read path landed, the figure is
+      629.63712 B/event, and the unknown is now 2.82 % of budget — headroom
+      14 % → **11.5 %**, allocation still fitting. The ruling survives its own
+      first reopening condition, which is the outcome it was written hoping for
+      but could not assume.
    2. **A schema change.** Any column added to `world_events` moves B/event, and
       `KIRRA-WM2-SCHEMA-001` §8.4 already makes re-measurement an obligation
       rather than a courtesy. `tools/wm2-schema-growth` is the instrument.
@@ -2319,6 +2328,57 @@ commits on a machine whose stall behaviour D-15/D-19 characterise separately.
 `populated` cites one upstream observation; a derivation-heavy workload sits
 above this band. Platform invariance is shown for *this* quantity only — for
 any timing quantity the opposite holds, which is the whole point of D-15.
+
+### D-21 — the with-projections figure exists now, and OQ2's headroom was 11.5 %, not 14 %
+
+Evidence: `docs/evidence/wm2-projection-growth-20260805/`. Closes the caveat
+D-20 and the OQ2 re-ruling both carried in the same words: their budget was
+**log-only**, compared against D-2's **with-projections** original, because
+`kirra-world-store` had no read path and the ratified with-projections figure
+was unmeasurable. The read path now exists, so the number does.
+
+| Arm | log-only | with projections | Δ |
+|---|---:|---:|---:|
+| `lean` | 566.23104 | **582.77888** | +16.54784 (+2.92 %) |
+| `populated` | 611.86048 | **629.63712** | +17.77664 (+2.91 %) |
+
+Days to fill 8 GiB at 10 Hz, `populated`: **16.25 → 15.79**.
+
+**Why the overhead is ~3 % and not ~100 %.** The projection holds **4 886
+rows** for 100 000 events. It is keyed on `(subject, predicate)`, so it is
+bounded by the *entity* count, not the log length — which is the property that
+makes materialized projections affordable and is exactly what ADR-0041's
+Option A assumes. That assumption is now measured on the ratified schema
+rather than inherited from the stand-in.
+
+#### What it does to OQ2
+
+The re-ruling allocated 12 078 720 events and stated 14 % headroom.
+
+| Basis | Budget | Headroom |
+|---|---:|---:|
+| log-only (what the ruling used) | 14 039 041 | 1 960 321 (**14.0 %**) |
+| with projections (correct) | **13 642 675** | 1 563 955 (**11.5 %**) |
+
+**The ruling holds** — the allocation still fits with real margin. But its
+stated headroom was wrong by 2.5 points, and the OQ2 table above has been
+corrected rather than left showing a figure now known to be false. Restoring a
+full 14 % would take **3.07 /s** rather than 3.20 (~3.3× coalescing, not
+~3.1×); that is a further turn of the same lever and is **not decided here**.
+
+#### Confounders and scope
+
+Host run. D-20 established by measurement that this quantity is
+platform-invariant (byte-for-byte on aarch64 and x86_64), which licenses
+reading these as target numbers *for bytes specifically* — but a target re-run
+is ~2 minutes and is owed before this figure goes against the ratification
+checklist. **One** projection is materialized; a multi-projection store costs
+more, so this is a floor. The 4 886-row figure reflects the generated stream's
+1 000 entities: a workload with an unbounded subject space would grow the
+projection toward the log's own size and the ~3 % would not survive — that
+regime is unmeasured. `fold_elapsed_s` (0.69 / 0.73 s) is run cost, not a
+performance claim. Candidates are excluded from the fold by design and
+contribute nothing here.
 
 ### D-12 — design implications the measurement forces
 
