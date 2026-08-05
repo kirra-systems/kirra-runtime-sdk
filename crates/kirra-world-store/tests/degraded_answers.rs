@@ -314,6 +314,70 @@ fn a_store_compacted_before_summaries_existed_reports_degraded_with_nothing_to_s
     clean(&p);
 }
 
+/// A summary and its citation are two halves of one record. A `Degraded`
+/// answer carrying only the first cannot be traced back to the range and digest
+/// it is degraded by — so the read path must **error**, not quietly return a
+/// degraded answer with the span dropped. Compaction is defensible because the
+/// admission is checkable; half an admission is the fail-open version.
+///
+/// `verify_chain` already refuses this store as an uncited gap, but a reader is
+/// not obliged to have verified the chain first, and this is the path that
+/// reader is on.
+#[test]
+fn a_summary_whose_citation_is_missing_fails_closed() {
+    let p = tmp("orphan-summary");
+    let mut s = seeded(&p);
+    s.compact_range(1, 6, T0 + 9_000).expect("compact");
+    s.history("cup-0").expect("healthy before");
+
+    s.delete_citation_for_test(1).unwrap();
+
+    match s.history("cup-0") {
+        Err(StoreError::CitationBroken { lo_generation, .. }) => assert_eq!(lo_generation, 1),
+        other => panic!("expected a fail-closed citation error, got {other:?}"),
+    }
+    match s.as_of("cup-0", T0 + 10_000, T0 + 10_000) {
+        Err(StoreError::CitationBroken { .. }) => {}
+        other => panic!("as_of must fail closed the same way, got {other:?}"),
+    }
+
+    // The store with zero citation ROWS is the most damaged one here, not the
+    // healthiest — a row-count short-circuit would have reported it as full.
+    assert!(!s.has_citations().unwrap());
+    clean(&p);
+}
+
+/// `has_citations()` answers "has a compaction *run*", so a refused attempt
+/// must not make it true. `compact_range` installs its DDL before running its
+/// refusals, so the tables exist either way and the question has to be about
+/// recorded rows.
+#[test]
+fn a_refused_compaction_does_not_report_a_citation() {
+    let p = tmp("refused-no-citation");
+    let mut s = WorldStore::open(&p).expect("open");
+    write(&mut s, &Ev::new("e1", "cup-0", T0 + 100));
+    write(&mut s, &Ev::new("e2", "cup-0", T0 + 200).class("incident"));
+    write(&mut s, &Ev::new("keep", "cup-9", T0 + 1_000));
+    assert!(!s.has_citations().unwrap(), "nothing attempted yet");
+
+    assert!(
+        s.compact_range(1, 2, T0 + 9_000).is_err(),
+        "protected class"
+    );
+    assert!(
+        !s.has_citations().unwrap(),
+        "a refused attempt installs the tables but records nothing; \
+         `has_citations` must not read as `a compaction has run`"
+    );
+    assert!(s.citations().unwrap().is_empty());
+
+    // And it stays true across a later successful compaction of a clean range.
+    s.compact_range(1, 1, T0 + 9_100)
+        .expect("gen 1 alone is raw");
+    assert!(s.has_citations().unwrap(), "now one really has run");
+    clean(&p);
+}
+
 // ---------------------------------------------------------------------------
 // What the summary is allowed to say
 // ---------------------------------------------------------------------------

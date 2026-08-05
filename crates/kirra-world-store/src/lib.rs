@@ -726,7 +726,9 @@ impl WorldStore {
 
     /// Every citation, keyed by the generation its span starts at.
     fn load_citations(&self) -> Result<std::collections::BTreeMap<i64, Citation>, StoreError> {
-        if !self.has_citations()? {
+        // Guards on the TABLE, not on [`WorldStore::has_citations`] — this only
+        // needs to avoid querying a table that was never installed.
+        if !self.has_table("compaction_citations")? {
             return Ok(std::collections::BTreeMap::new());
         }
         let mut stmt = self.conn.prepare(
@@ -768,16 +770,36 @@ impl WorldStore {
         Ok(n.is_some())
     }
 
-    /// Whether any compaction has run against this store.
+    /// Whether any compaction has actually run against this store.
+    ///
+    /// Deliberately a question about **recorded citations**, not about the
+    /// table. [`WorldStore::compact_range`] installs the DDL before it runs its
+    /// refusals, so a store that only ever *attempted* a compaction and was
+    /// refused has the table and no rows — and answering "yes, a compaction has
+    /// run" there would be false for the one caller that matters: a reader
+    /// deciding whether an answer can be trusted as complete.
     pub fn has_citations(&self) -> Result<bool, StoreError> {
-        self.has_table("compaction_citations")
+        if !self.has_table("compaction_citations")? {
+            return Ok(false);
+        }
+        let any: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM compaction_citations)",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(any != 0)
     }
 
-    /// Whether this store retains per-key summaries for its compacted spans.
+    /// Whether this store's compactions retain per-key summaries at all.
     ///
-    /// False for a store compacted by a build that predates them. That case is
-    /// **not** treated as "nothing was lost": see
-    /// [`WorldStore::resolution_for`].
+    /// A question about the **table**, unlike [`WorldStore::has_citations`],
+    /// and the difference is load-bearing. This asks "does summary retention
+    /// apply to this store" — false only for one compacted by a build that
+    /// predates the feature, which
+    /// [`WorldStore::resolution_for`] then treats pessimistically. An *empty*
+    /// summaries table is a different thing entirely: it means the compacted
+    /// window held nothing summarizable (only candidates, say), which is an
+    /// answer, not a missing feature.
     pub fn has_summaries(&self) -> Result<bool, StoreError> {
         self.has_table("compaction_summaries")
     }
@@ -1653,20 +1675,32 @@ impl WorldStore {
     /// reported as degraded with an empty summary set, never as full. Inferring
     /// "no summary, so nothing was lost" would turn a missing feature into a
     /// silent rewrite of history.
+    ///
+    /// **A summary with no citation is an error, not a dropped span.** The two
+    /// are halves of one record — the summary says what was removed, the
+    /// citation says from where and under which digest — and a `Degraded`
+    /// answer carrying only the first cannot be traced back to the range it is
+    /// degraded by. Compaction is defensible because the admission is
+    /// *checkable*; publishing half of one is the fail-open version of saying
+    /// so.
     fn resolution_for(
         &self,
         subject: &str,
         valid_at_ms: Option<i64>,
         as_known_at_ms: Option<i64>,
     ) -> Result<Resolution, StoreError> {
-        if !self.has_citations()? {
-            return Ok(Resolution::Full);
-        }
+        // Guards on the TABLES, not on `has_citations()`. The row-counting
+        // question is the wrong one here, and dangerously so: a store whose
+        // citation was deleted out from under a retained summary has zero
+        // citation rows, and short-circuiting to `Full` on that would report
+        // the *most* damaged store as the healthiest one. The orphan check
+        // below is what must see that case.
         let citations = self.load_citations()?;
-        if citations.is_empty() {
+        let summaries_retained = self.has_summaries()?;
+        if citations.is_empty() && !summaries_retained {
             return Ok(Resolution::Full);
         }
-        if !self.has_summaries()? {
+        if !summaries_retained {
             return Ok(Resolution::Degraded {
                 spans: citations.into_values().collect(),
                 summaries: Vec::new(),
@@ -1683,11 +1717,33 @@ impl WorldStore {
             return Ok(Resolution::Full);
         }
 
-        let mut spans: Vec<Citation> = summaries
-            .iter()
-            .filter_map(|s| citations.get(&s.lo_generation).cloned())
-            .collect();
-        spans.dedup_by_key(|c| c.lo_generation);
+        // Every summary must resolve to its citation, and a miss is an ERROR
+        // rather than a dropped span. `filter_map` here would hand back a
+        // `Degraded` answer whose spans are incomplete — degraded, but with no
+        // range or digest to trace it to — and the whole reason compaction is
+        // an admission rather than an erasure is that the admission is
+        // *checkable*. A summary is one half of that record; silently
+        // publishing it without the other half is the fail-open version of
+        // saying so.
+        //
+        // The state is reachable: `verify_chain` refuses an uncited gap, but a
+        // reader is not obliged to have verified the chain first, and this is
+        // the path that reader is on.
+        let mut spans: Vec<Citation> = Vec::with_capacity(summaries.len());
+        for s in &summaries {
+            let c = citations
+                .get(&s.lo_generation)
+                .ok_or_else(|| StoreError::CitationBroken {
+                    lo_generation: s.lo_generation,
+                    detail: "a retained summary names a compaction with no \
+                             citation — the answer cannot be traced to the \
+                             range and digest it is degraded by"
+                        .to_string(),
+                })?;
+            if spans.last().map(|p: &Citation| p.lo_generation) != Some(c.lo_generation) {
+                spans.push(c.clone());
+            }
+        }
         Ok(Resolution::Degraded { spans, summaries })
     }
 
