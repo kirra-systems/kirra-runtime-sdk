@@ -113,6 +113,31 @@ changes is how many events fit.
 This is recorded now, before implementation, so that it reads as a known
 coupling rather than a discovery.
 
+### DISCHARGED 2026-08-05 — and it did move materially
+
+Measured: ADR-0041 **D-20**, evidence `docs/evidence/wm2-schema-growth-20260805/`.
+
+The figure moved **1.236×** (`lean`) to **1.335×** (`populated`) — 458.51 →
+**566.56 / 612.19 B/event**. The six columns above were "plausibly additive";
+they are, and the addition is large enough to matter.
+
+**OQ2's allocation no longer closes.** Its 15 448 320 allocated events exceed
+the corrected budget at both ends of the band — headroom **+14 % → −1.9 % /
+−10.1 %** — so the durations were not merely revisable in principle, they are
+arithmetically unaffordable as ruled. ADR-0041's OQ2 section carries the
+reopening, the three levers and their numbers; the choice among them is a
+decision about incident reconstruction and is not made in this document.
+
+One caveat worth carrying: the instrument had to be a **new** one
+(`tools/wm2-schema-growth`), not `wm2-persistence-harness append` as
+anticipated above. The harness must not depend on `kirra-world-store` — that
+separation is what keeps its stand-in numbers from ever being re-read as being
+about the real store — so measuring the real schema needed a second instrument
+that shares the harness's event generator and nothing else. The shared
+generator is pinned by a test that reds if the harness's own copy drifts,
+because a ratio between the two is only a *schema* ratio while the stream is
+identical.
+
 ## 6. The four decisions — RULED 2026-08-05
 
 > **On the labels.** These are **SD-n** — *schema decisions* — and not `D-n`.

@@ -1,0 +1,57 @@
+# WM-2 — bytes/event against the RATIFIED schema.
+#
+# `KIRRA-WM2-SCHEMA-001` §8.4 records an obligation created by ratifying the
+# event schema: ADR-0041 D-2's 458.51 B/event, and every retention horizon
+# OQ2 derived from it, were measured against `wm2-persistence-harness`'s
+# deliberate STAND-IN schema. The ratified schema adds columns. Until the
+# figure is re-measured, the horizons stand on a number about a different
+# table.
+#
+# This is the instrument that discharges that obligation, and it is a
+# SEPARATE instrument from the harness on purpose:
+#
+#   * The harness must not depend on `kirra-world-store`. Its manifest says
+#     so and gives the reason — it is an extra Fence A root, and the whole
+#     point of its stand-in schema is that its numbers can never be quietly
+#     re-read as being about the real store. Adding the real store as a
+#     dependency would destroy exactly that property.
+#   * This tool has the opposite job: it measures the real store, through the
+#     real store's public API, with no schema of its own. It cannot drift
+#     from the ratified schema because it does not restate it.
+#
+# The two instruments therefore answer two different questions and are kept
+# physically apart. What they SHARE is the event generator's shape — same RNG,
+# same field widths, same seed — because a growth ratio between them is only
+# meaningful if the event stream is held fixed.
+#
+# Workspace-DETACHED (the empty `[workspace]` table below), like the harness,
+# `tools/iceoryx2-spike`, and `verification/kani`: own lockfile, own target
+# dir, never built by `cargo test --workspace`.
+#
+# RUN:  cargo run --release -- --out results.jsonl
+#       cargo test                      (pure logic; no target hardware needed)
+
+[package]
+name = "wm2-schema-growth"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+description = "WM-2 bytes/event against the ratified schema — NOT a second store"
+
+[workspace]
+
+[dependencies]
+# The instrument under measurement. Path-only, never versioned: measuring a
+# published copy rather than the tree's own store is how a number ends up
+# describing a schema nobody merged.
+kirra-world-store = { path = "../../crates/kirra-world-store" }
+
+# Used ONLY to checkpoint the WAL and read back page statistics. The store's
+# public API deliberately exposes no connection, and it should not grow one
+# for a benchmark's convenience — so the instrument opens its own read-side
+# connection to the same file. Bundled to match the store's own SQLite build.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[profile.release]
+debug = true
