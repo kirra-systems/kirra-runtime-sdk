@@ -414,8 +414,39 @@ question from the owner's plate.
 | `robot/world_model.py` | **Exists**, 195 lines, still an opt-in TTL'd read projection. Matches "compatibility projection — retain" |
 | `crates/kirra-sidecars/src/destination.rs` | **Exists**, 1 734 lines; the `ResolveOutcome` contract the query API is meant to model is present (55 references) |
 | `crates/kirra-sidecars/src/destination_service.rs` | **Exists**, 717 lines. Matches "retain" |
-| Tracked-object inputs | Not verifiable by inspection — genuinely needs its owner |
+| Tracked-object inputs | **Checked, and the row's factual half is only half true — see below.** The *disposition* still needs its owner |
 | `places.json` / `routes.json` | **The compatibility row is right; the inventory row's path was wrong — now fixed.** The deployed files really are `places.json` / `routes.json` (set by `KIRRA_DEST_PLACES_PATH` / `KIRRA_DEST_ROUTES_PATH`), so the disposition above stands. What did not exist was `robot/testdata/places.json`: the shipped examples are `places.example.json` / `routes.example.json`, and the inventory now cites those |
+
+#### Tracked-object inputs — "already carry confidence and staleness" is true of the wrong type
+
+The row's rationale reads *"Perception observations; already carry confidence
+and staleness."* Checked against the tree, that is true of some perception
+types and **false of the one the checker actually consumes**:
+
+| Type | `confidence` | timestamp |
+|---|---|---|
+| `kirra_taj::CameraVruObservation` | **yes** | **yes** (`stamp_ms`) |
+| `kirra_taj` object-goal / intent types | **yes** | — |
+| **`kirra_core::trajectory::PerceivedObject`** | **no** | **no** |
+
+`PerceivedObject` — id, position, velocity, heading, velocity vector — is what
+the RSS and trajectory checks run on, and it carries neither. **Staleness on
+that path is a property of the *channel*, not of the object**: freshness is
+enforced by subscription policy (`KIRRA_SUBSCRIPTION_STALENESS_MS`) and by
+`AcceptedTrajectory`'s `promoted_at_ms` + `max_age_ms`, never by a field
+travelling with the datum.
+
+**Why this matters to the disposition rather than being a nitpick.** The row
+says these become import-source *observations*, and an observation in Kirra
+World must carry its own provenance and validity. If the datum has neither, the
+importer has to attach both from channel context — and "attach a confidence
+from context" is precisely how a fabricated confidence enters an evidence
+store wearing the same clothes as a measured one.
+
+So the disposition is still plausible, but it is **not free**, and whoever
+confirms this row should confirm it knowing that the import needs a stated rule
+for where confidence and validity come from on the `PerceivedObject` path.
+That rule does not exist yet.
 
 ### Open question 4 appears already dispositioned
 
