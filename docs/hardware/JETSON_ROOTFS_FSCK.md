@@ -36,7 +36,7 @@ The chain is:
    `/boot/extlinux/extlinux.conf` **does** reach the kernel; `/proc/cmdline` and
    the `Kernel command line:` dmesg line both confirm it.
 2. NVIDIA's L4T initrd then mounts the rootfs **read-write** on its own and
-   switch-roots.
+   performs switch-root.
 3. By the time systemd evaluates the condition, `/` is already read-write.
    The unit is skipped. No check ever runs.
 
@@ -223,7 +223,7 @@ Expect `Filesystem state: clean`, today's date on `Last checked`, `Mount count: 
 | `0` | No errors | Success — already clean |
 | `1` | Errors corrected | Success |
 | `2` | Errors corrected, reboot required | Success; the reboot is the one you came up from |
-| `3` | Both of the above (`1｜2`) | Success |
+| `3` | Both of the above (bits `1` and `2` set) | Success |
 | `4` | Errors left **uncorrected** | **Read the log before doing anything else.** Do not re-arm blindly |
 | `8` / `16` / `128` | Operational, usage, or library error | The check did not run properly; read the log |
 
