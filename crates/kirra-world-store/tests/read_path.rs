@@ -328,7 +328,7 @@ fn a_tie_in_valid_time_resolves_to_the_later_generation() {
     let replayed = s.as_of("cup-1", T0 + 1000, T0 + 1000).unwrap();
     assert_eq!(replayed.len(), 1);
     assert_eq!(
-        replayed[0].object.as_deref(),
+        replayed.claims[0].object.as_deref(),
         Some("blue"),
         "as_of must resolve the tie the same way the projection does"
     );
@@ -375,7 +375,7 @@ fn a_late_arrival_about_the_past_does_not_overwrite_the_present() {
     // But asking about the past does surface it.
     let then = s.as_of("cup-1", T0 + 100, T0 + 5000).unwrap();
     assert_eq!(then.len(), 1);
-    assert_eq!(then[0].object.as_deref(), Some("red"));
+    assert_eq!(then.claims[0].object.as_deref(), Some("red"));
     clean(&p);
 }
 
@@ -454,7 +454,7 @@ fn history_is_every_confirmed_event_oldest_first() {
         ))
         .expect("append");
     }
-    let h = s.history("cup-1").unwrap();
+    let h = s.history("cup-1").unwrap().claims;
     assert_eq!(h.len(), 4);
     assert!(
         h.windows(2).all(|w| w[0].generation < w[1].generation),

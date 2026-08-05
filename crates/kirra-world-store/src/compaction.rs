@@ -124,7 +124,197 @@ CREATE TABLE IF NOT EXISTS compaction_citations (
     CHECK (hi_generation >= lo_generation),
     CHECK (event_count > 0)
 );
+
+-- What a time-travel query into a compacted window gets INSTEAD of the
+-- observations. One row per `(subject, predicate)` the window held; see
+-- `DegradedSummary` for why per-key rather than per-span.
+--
+-- `predicate_key` is the predicate or `''`, matching `world_current`: SQLite
+-- permits multiple NULLs in a non-INTEGER primary key, so a NULL-keyed row
+-- would duplicate rather than collide.
+CREATE TABLE IF NOT EXISTS compaction_summaries (
+    lo_generation       INTEGER NOT NULL,
+    subject             TEXT    NOT NULL,
+    predicate_key       TEXT    NOT NULL,
+    predicate           TEXT,
+    event_count         INTEGER NOT NULL,
+    first_valid_from_ms INTEGER NOT NULL,
+    last_valid_from_ms  INTEGER NOT NULL,
+    first_txn_time_ms   INTEGER NOT NULL,
+    last_object         TEXT,
+    last_payload        TEXT    NOT NULL,
+
+    PRIMARY KEY (lo_generation, subject, predicate_key),
+    CHECK (event_count > 0),
+    CHECK (last_valid_from_ms >= first_valid_from_ms)
+);
 "#;
+
+/// The per-key summary retained when a span is compacted.
+///
+/// §11.3 requires the retained summary to **cite the source event range and its
+/// digest** — that is the [`Citation`] — and to be what a time-travel query
+/// into the window returns *instead of* the observations. This is that second
+/// half.
+///
+/// # Why per `(subject, predicate)` rather than per span
+///
+/// A span-level aggregate ("N events between T1 and T2") cannot answer the
+/// question an incident reconstruction actually asks, which is *what did we
+/// know about **this thing** during the window*. Per-key can.
+///
+/// The cost argument is the same one that makes projections affordable and was
+/// measured in D-21: keys are bounded by the **entity** count, not the log
+/// length — 4 886 for 100 000 events on the reference stream. A summary set is
+/// therefore bounded like a projection, not like a log.
+///
+/// # What "degraded" means precisely
+///
+/// The trajectory is gone; the endpoints survive. You learn that a key was
+/// observed `event_count` times between `first_valid_from_ms` and
+/// `last_valid_from_ms`, and what the **last** value in the window was. You
+/// cannot recover the individual observations, and nothing here pretends
+/// otherwise — which is the difference §11.3 draws between degraded resolution
+/// and silent fabrication.
+///
+/// "Last" is by `(valid_from_ms, generation)` — the *same* order
+/// [`crate::projection::supersedes`] uses. Deliberately not "highest
+/// generation": the summary has to answer *what was true at the end of the
+/// window*, and a late-arriving backfill about an earlier instant does not
+/// change that. Two orders here would mean the summary and the projection
+/// could disagree about which observation was the latest one.
+///
+/// # Confirmed-only
+///
+/// Summaries are built from `confirmed` events alone, for the reason the fold
+/// is confirmed-only: this is what a degraded answer returns *in place of*
+/// evidence, and a candidate standing in for a deleted observation would put an
+/// LLM proposal exactly where SD-2 says it may never appear. The consequence is
+/// arithmetic and testable — the per-key counts sum to **at most** the
+/// citation's `event_count`, and the difference is the candidates the window
+/// held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DegradedSummary {
+    /// The citation this summary belongs to.
+    pub lo_generation: i64,
+    /// Claim subject.
+    pub subject: String,
+    /// Claim predicate, `None` for predicate-less claims.
+    pub predicate: Option<String>,
+    /// How many confirmed events about this key the window held.
+    pub event_count: i64,
+    /// Valid time of the earliest.
+    pub first_valid_from_ms: i64,
+    /// Valid time of the latest, by the supersession order.
+    pub last_valid_from_ms: i64,
+    /// Transaction time of the earliest-known. Carried so a bitemporal query
+    /// can rule a window out on the *transaction* axis too — without it,
+    /// `as_of` could only filter soundly on valid time.
+    pub first_txn_time_ms: i64,
+    /// Object of the latest observation in the window.
+    pub last_object: Option<String>,
+    /// Payload of the latest observation in the window.
+    pub last_payload: String,
+}
+
+/// Whether an answer is the whole truth, or what remains of it.
+///
+/// §11.3: *"compaction must never silently rewrite history. A time-travel query
+/// into a compacted window returns the summary **and says so** — degraded
+/// resolution, never silent fabrication."*
+///
+/// This is carried **in the return type** rather than as a flag a caller can
+/// forget to read, an out-parameter, or a separate method. The reasoning is the
+/// same one that made the projection fold confirmed-only: a guarantee that
+/// depends on the caller remembering to check is not a guarantee, and the
+/// failure it prevents here is specific — an incident reconstruction unable to
+/// tell *"nothing was known"* from *"we deleted it"*, with the answer looking
+/// complete either way.
+///
+/// # Which way it is allowed to be wrong
+///
+/// The test for degradation is a **necessary condition** on the removed events,
+/// not an exact one: a window is reported degraded if it *could* have held an
+/// observation bearing on the query. So this can say `Degraded` where a full
+/// answer would in fact have been identical. It cannot say `Full` where
+/// something was lost, and that asymmetry is the point — over-reporting costs a
+/// caveat, under-reporting is the silent rewrite §11.3 forbids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    /// No compacted span could have borne on the queried range.
+    Full,
+    /// Part of the queried range was compacted. The claims returned alongside
+    /// are what survives; these summaries are what stands for the rest.
+    Degraded {
+        /// The spans that were compacted away.
+        spans: Vec<Citation>,
+        /// Per-key summaries covering the query's subject. **May be empty** —
+        /// a span compacted before summaries were retained still degrades the
+        /// answer, and reports so with nothing to show for it.
+        summaries: Vec<DegradedSummary>,
+    },
+}
+
+impl Resolution {
+    /// Whether anything was lost to compaction.
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        matches!(self, Self::Degraded { .. })
+    }
+
+    /// The summaries standing in for what was removed; empty when [`Self::Full`].
+    #[must_use]
+    pub fn summaries(&self) -> &[DegradedSummary] {
+        match self {
+            Self::Full => &[],
+            Self::Degraded { summaries, .. } => summaries,
+        }
+    }
+
+    /// The spans that were compacted away; empty when [`Self::Full`].
+    #[must_use]
+    pub fn spans(&self) -> &[Citation] {
+        match self {
+            Self::Full => &[],
+            Self::Degraded { spans, .. } => spans,
+        }
+    }
+}
+
+/// A temporal answer: the surviving claims, and whether that is all of them.
+///
+/// Returning `Vec<ProjectedClaim>` directly would make the degradation
+/// invisible at the call site. This type exists so a caller cannot obtain the
+/// claims without the answer's resolution being in front of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemporalAnswer {
+    /// The claims that survive in the log.
+    pub claims: Vec<crate::ProjectedClaim>,
+    /// Whether a compacted span intersects the queried range.
+    pub resolution: Resolution,
+}
+
+impl TemporalAnswer {
+    /// Shorthand for [`Resolution::is_degraded`].
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        self.resolution.is_degraded()
+    }
+
+    /// How many claims survive. Shorthand, so a caller counting an answer does
+    /// not have to reach past the resolution to do it.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.claims.len()
+    }
+
+    /// Whether no claims survive. Note this is **not** the same question as
+    /// "nothing was known": an empty `Degraded` answer means the opposite.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.claims.is_empty()
+    }
+}
 
 /// One recorded compaction: the citation left where a span used to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +343,10 @@ pub struct CompactionOutcome {
     pub citation: Citation,
     /// Events removed.
     pub removed: i64,
+    /// The per-key summaries retained in their place — OQ2 rule 2's "compaction
+    /// buys retention of summaries, not of observations", returned rather than
+    /// merely asserted. Bounded by the window's **key** count, not its length.
+    pub summaries: Vec<DegradedSummary>,
 }
 
 #[cfg(test)]
