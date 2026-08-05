@@ -1920,7 +1920,79 @@ one machine-day against another — 20 repetitions per setting in both eras, so
 like-for-like, but a second observation rather than a distribution. It is over
 the stand-in schema. And the platform carried a `clean with errors` filesystem
 under `Errors behavior: Remount read-only`, with persistent journald newly
-enabled adding modest writes to the same device.
+enabled adding modest writes to the same device. **That filesystem was repaired
+later the same day — see D-18. Measurements taken after the repair are not
+directly comparable with these.**
+
+### D-18 — the measurement platform changed: the root filesystem was repaired
+
+Not a measurement. A recorded **discontinuity in the instrument's environment**,
+written down so that a future comparison across it is made deliberately rather
+than by accident.
+
+Every target figure in this ADR — D-1 through D-17 — was taken on a root
+filesystem carrying `clean with errors`, unchecked since `2025-06-26`, through
+53 mounts and 918 GB of lifetime writes. On **2026-08-04 20:43** it was checked
+and repaired. It now reads `clean`.
+
+#### Why it had never been checked
+
+`systemd-fsck-root.service` carries `ConditionPathIsReadWrite=!/` and so runs
+only against a read-only root. On this platform `ro` on the kernel command line
+*does* reach the kernel, but NVIDIA's L4T initrd mounts the rootfs read-write
+before switch-root — so the condition failed on every boot and the check never
+ran. `fsck.repair=yes` and `fsck.mode=force` are both inert here: they configure
+a service that never starts. The repair was performed by a `systemd-shutdown`
+hook, which runs after every filesystem has been remounted read-only. Procedure
+and the approaches that do **not** work:
+[`docs/hardware/JETSON_ROOTFS_FSCK.md`](../hardware/JETSON_ROOTFS_FSCK.md).
+
+#### What was actually wrong
+
+Allocation accounting, and only that:
+
+| Finding | Direction |
+|---|---|
+| 17 deleted inodes with zero `dtime` | — |
+| Block and inode bitmap differences | **all** "marked in use, actually free" |
+| Free block/inode counts wrong across ~90 groups | undercounting free space |
+| 2 extent trees narrowed | optimisation, not a defect |
+
+Passes 2, 3 and 4 — directory structure, connectivity, reference counts —
+produced no output. `/lost+found` was empty. Nothing was orphaned or lost; the
+filesystem had been miscounting what it owned.
+
+**Free blocks 10 449 148 → 10 701 568**: 252 420 blocks of 4 KiB, about
+0.96 GiB, plus 128 inodes. Counting unit is the 4 KiB filesystem block;
+the independence unit is one filesystem at one instant, so this is a single
+observation of the *size* of the accounting error at the moment of the check.
+It supports no claim about accumulation rate, and none about whether the error
+was present during any particular earlier measurement.
+
+#### What this does and does not do to D-1 … D-17
+
+It does **not** invalidate them, and it is not a correction. Nobody measured
+whether a wrong free-block map affected any recorded figure, and this entry does
+not assert that it did.
+
+What it does is make one variable **no longer held fixed** across the boundary.
+Anything comparing a post-repair run with D-1 … D-17 must state that the
+allocator's free-space picture differs by ~0.96 GiB and that the filesystem had
+been running unchecked with an error flag set. The evidence bundles under
+`docs/evidence/` record `clean with errors` in their `ENVIRONMENT.txt`; those
+remain accurate statements about *those* runs and should not be edited.
+
+#### One consistency observation, offered as no more than that
+
+Leaked allocations with intact directory structure is the signature of lost
+**metadata** writes. D-15 identified lost NVMe completions
+(`nvme0: I/O N QID M timeout, completion polled`) as the stall mechanism on this
+same device, and that defect was still live during the D-17 run. The two
+observations are consistent, from layers the WM-2 work otherwise never connected.
+
+That is suggestive, not conclusive. No common cause was demonstrated: the
+filesystem damage carries no timestamps tying it to any observed completion
+timeout, and the repair fixes the filesystem, not the device. The defect remains.
 
 ### D-12 — design implications the measurement forces
 
