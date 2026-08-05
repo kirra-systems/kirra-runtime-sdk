@@ -293,6 +293,97 @@ fn compaction_preserves_rebuild_equals_incremental() {
 }
 
 // ---------------------------------------------------------------------------
+// A refusal is a redirect, not a dead end
+// ---------------------------------------------------------------------------
+
+/// `largest_compactable_prefix` must return a range `compact_range` actually
+/// accepts — otherwise it is advice that does not work.
+#[test]
+fn the_prefix_helper_returns_a_range_compaction_accepts() {
+    let p = tmp("prefix-accepts");
+    let mut s = seeded(&p);
+    s.fold().expect("fold");
+
+    // Heads are 10, 11, 12, so the largest compactable prefix of 1..=12 is 9.
+    let limit = s.largest_compactable_prefix(1, 12).unwrap();
+    assert_eq!(limit, Some(9));
+
+    s.compact_range(1, limit.unwrap(), T0 + 9_000)
+        .expect("the helper's answer must be accepted");
+    s.verify_chain().expect("chain intact");
+    clean(&p);
+}
+
+/// The asymmetry between the two refusals, asserted rather than only argued.
+///
+/// A protected event makes the window a *policy* unit, so the helper stops
+/// below it. A projection head only requires the head itself to survive, so
+/// stopping below it is a conservative simplification — recorded as such,
+/// with compacting-around pre-authorized if measurement demands it.
+#[test]
+fn the_prefix_helper_stops_below_the_first_blocker_of_either_kind() {
+    // Protected at 4 → prefix is 3.
+    let p = tmp("prefix-protected");
+    let mut s = WorldStore::open(&p).expect("open");
+    for i in 1..=6i64 {
+        let eid = format!("e{i}");
+        let subj = format!("cup-{i}");
+        s.append(&NewEvent {
+            retention_class: if i == 4 { "incident" } else { "raw" },
+            ..ev(&eid, &subj, T0 + i * 100)
+        })
+        .expect("append");
+    }
+    assert_eq!(s.largest_compactable_prefix(1, 6).unwrap(), Some(3));
+    s.compact_range(1, 3, T0 + 9_000).expect("accepted");
+    clean(&p);
+
+    // Head at 10 → prefix is 9, same shape, different reason.
+    let p2 = tmp("prefix-head");
+    let mut s2 = seeded(&p2);
+    s2.fold().expect("fold");
+    assert_eq!(s2.largest_compactable_prefix(7, 12).unwrap(), Some(9));
+    clean(&p2);
+}
+
+/// A window blocked at its very first generation has no compactable prefix at
+/// all, and must say so rather than returning an empty range compaction would
+/// then refuse.
+#[test]
+fn a_window_blocked_at_its_first_generation_has_no_prefix() {
+    let p = tmp("prefix-none");
+    let mut s = WorldStore::open(&p).expect("open");
+    s.append(&NewEvent {
+        retention_class: "safety",
+        ..ev("e1", "cup-1", T0)
+    })
+    .expect("protected first");
+    s.append(&ev("e2", "cup-2", T0 + 100)).expect("raw");
+
+    assert_eq!(s.largest_compactable_prefix(1, 2).unwrap(), None);
+    assert_eq!(
+        s.largest_compactable_prefix(90, 99).unwrap(),
+        None,
+        "a range matching no rows has no prefix either"
+    );
+    assert_eq!(s.largest_compactable_prefix(6, 3).unwrap(), None);
+    clean(&p);
+}
+
+/// An unfolded store has no heads, so only the policy refusal applies.
+#[test]
+fn without_a_projection_only_the_policy_refusal_bounds_the_prefix() {
+    let p = tmp("prefix-unfolded");
+    let s = seeded(&p);
+    assert_eq!(
+        s.largest_compactable_prefix(1, 12).unwrap(),
+        Some(12),
+        "no projection means no heads, so the whole raw window is compactable"
+    );
+    clean(&p);
+}
+
+// ---------------------------------------------------------------------------
 // Attestability and bounds
 // ---------------------------------------------------------------------------
 

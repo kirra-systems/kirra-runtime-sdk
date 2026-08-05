@@ -174,6 +174,42 @@ knowingly bounded. Ratifying **compaction-with-citation**:
 **Thresholds are deferred until measured.** Choosing them now would be a guess
 presented as a policy.
 
+#### A third refusal, added 2026-08-05 when the read path landed
+
+`crates/kirra-world-store` now implements this section. Doing so surfaced a
+constraint §11.3 could not have stated, because it predates the store having
+projections: **an event that is a projection head is not compactable.**
+
+Removing the event that defines a `(subject, predicate)`'s current claim makes
+`rebuild_projections` stop reproducing the incremental fold — falsifying, and
+silently, the pure-fold property this ADR names elsewhere as a thing to test
+rather than assume. Refusing heads resolves it *provably*: the fold retains only
+heads, so a compaction that removes none cannot change what a rebuild produces.
+
+**The two refusals are not the same kind of rule, and the difference is
+load-bearing:**
+
+| Refusal | Kind | Whole-window refusal is… |
+|---|---|---|
+| protected class | **policy** — the window is a retention unit | a **requirement**; compacting around it would make how much of a span survives a question about interleaving |
+| projection head | **correctness** — only the head must survive | a **conservative simplification**; nothing says a head's neighbours must survive |
+
+**Pre-agreed escalation.** Because the head refusal is a simplification rather
+than a requirement, its relaxation is authorized *now* rather than argued later:
+**if measurement shows head refusals blocking a material fraction of reclaimable
+space, compact _around_ heads instead.** The citation model already supports
+disjoint spans, so that is a loop over sub-ranges, not a redesign.
+
+Until then, `WorldStore::largest_compactable_prefix` makes a refusal a redirect
+rather than a dead end — both refusals name their first blocking generation, and
+a caller can retry immediately on the sub-range below it.
+
+The concern is also smaller than it first appears, because **heads age out**. An
+event stops being a head as soon as something supersedes it, so for a span old
+enough to be past its retention horizon to still hold one means nothing has been
+observed about that subject since — rare in a sensor stream, and when it does
+happen that claim is arguably still-live evidence rather than history.
+
 ### Compaction is not reclamation — two operations, not one
 
 **Measured** (`tools/wm2-persistence-harness`, `compact`; host-indicative,

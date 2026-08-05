@@ -46,6 +46,33 @@
 //! produces. The rule also reads correctly on its own terms — the event saying
 //! where a thing *is* is evidence still in use, not history to summarize.
 //!
+//! ## The two refusals are not alike, and the difference is pre-recorded
+//!
+//! It would be easy to read them as one rule applied twice. They are not:
+//!
+//! * A **protected class** makes the window a policy unit. Compacting around
+//!   it would make how much of a span survives a question about interleaving
+//!   rather than about policy, so refusing whole is the *requirement*.
+//! * A **projection head** only requires that the head itself survive. Nothing
+//!   says its neighbours must. Refusing the whole window there is a
+//!   conservative simplification, not a requirement.
+//!
+//! Two things follow. First, [`crate::WorldStore::largest_compactable_prefix`]
+//! exists so a refusal is a redirect rather than a dead end — both refusals
+//! name their first blocking generation, and that is now a designed recovery.
+//!
+//! Second, the escalation is agreed in advance: **if measurement ever shows
+//! head refusals blocking a material fraction of reclaimable space, compact
+//! *around* heads instead.** The citation model already supports disjoint
+//! spans, so that is a loop over sub-ranges rather than a redesign. Recording
+//! the trigger now costs nothing and stops it becoming an argument later.
+//!
+//! The concern is also smaller than it first looks, because **heads age out**.
+//! An event stops being a head the moment something supersedes it, so for an
+//! old span to still hold one means nothing has been observed about that
+//! `(subject, predicate)` since — which is rare in a sensor stream, and when it
+//! happens that claim is arguably still-live evidence rather than history.
+//!
 //! # What compaction is NOT
 //!
 //! **Lossy, and only for summaries** (OQ2 rule 2). D-4 measured ~50 % recovery

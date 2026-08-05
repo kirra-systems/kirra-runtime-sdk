@@ -1160,6 +1160,80 @@ impl WorldStore {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The largest `lo..=n` that [`WorldStore::compact_range`] would accept,
+    /// or `None` if nothing in the window is compactable.
+    ///
+    /// Both refusals name their first blocking generation, so a caller can
+    /// always retry on the sub-range below it. This makes that a **designed**
+    /// recovery rather than an accident of the error type: a refusal is a
+    /// redirect, not a dead end.
+    ///
+    /// Note the asymmetry, which is deliberate. The two refusals are refusals
+    /// of different kinds:
+    ///
+    /// * **Protected classes** are a *policy* unit. §11.3 refuses such a window
+    ///   whole, and this helper honours that by stopping at the protected
+    ///   event rather than stepping over it — compacting around it would make
+    ///   how much of a span survives a question about interleaving.
+    /// * **Projection heads** are a *correctness* constraint. Nothing says a
+    ///   head's neighbours must survive, only the head itself.
+    ///
+    /// So for heads, stopping short is a conservative simplification rather
+    /// than a requirement. If measurement ever shows head refusals blocking a
+    /// material fraction of reclaimable space, the escalation is to compact
+    /// *around* them — the citation model already handles disjoint spans, so
+    /// it is a loop over sub-ranges, not a redesign. Recorded here and in
+    /// ADR-0041 §11.3 so that is a pre-agreed trigger, not a later argument.
+    pub fn largest_compactable_prefix(&self, lo: i64, hi: i64) -> Result<Option<i64>, StoreError> {
+        if lo < 1 || hi < lo {
+            return Ok(None);
+        }
+        let mut limit = hi;
+
+        let protected: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MIN(generation) FROM world_events
+                 WHERE generation BETWEEN ?1 AND ?2 AND retention_class <> 'raw'",
+                params![lo, hi],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        if let Some(g) = protected {
+            limit = limit.min(g - 1);
+        }
+
+        if self.has_projections()? {
+            let head: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT MIN(e.generation) FROM world_events e
+                     JOIN world_current c ON c.generation = e.generation
+                     WHERE e.generation BETWEEN ?1 AND ?2",
+                    params![lo, hi],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            if let Some(g) = head {
+                limit = limit.min(g - 1);
+            }
+        }
+
+        if limit < lo {
+            return Ok(None);
+        }
+        // A prefix with no rows in it is not compactable either — otherwise
+        // this would hand back a range `compact_range` refuses as empty.
+        let present: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM world_events WHERE generation BETWEEN ?1 AND ?2",
+            params![lo, limit],
+            |r| r.get(0),
+        )?;
+        Ok(if present > 0 { Some(limit) } else { None })
+    }
+
     /// Compact `lo..=hi` out of the log, leaving a citation in its place.
     ///
     /// Refuses, whole, if the window contains:
