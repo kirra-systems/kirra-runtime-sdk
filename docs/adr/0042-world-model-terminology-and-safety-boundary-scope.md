@@ -397,7 +397,7 @@ and it reports the owner and classification thereafter. Nobody has to delete it
 to make progress, because a gate that must be deleted gets deleted wholesale —
 taking its checks with it — rather than satisfied.
 
-## Decision record — to be completed by the owner
+## Decision record — completed by the owner, 2026-08-05
 
 Machine-read by the gate above. `UNASSIGNED` in any field, or a placeholder such
 as `TBD` or the role name `the safety-assurance owner`, counts as unrecorded: a
@@ -450,23 +450,25 @@ Four statements, each load-bearing:
 4. **The ruling must reopen if Kirra World gains authority over actuation,
    release, safety decisions, or required safety inputs** — any one of the four.
 
-This posture is recorded **now, before the ruling**, rather than as a caveat
-attached to it afterwards. A limitation written after a conclusion reads as a
-hedge on the conclusion; written before, it is a constraint on what the
-conclusion is allowed to be. The distinction matters most to the reader who
-was not in the room.
+This posture was recorded on **2026-08-04, before the ruling was made on
+2026-08-05**, rather than as a caveat attached to it afterwards. A limitation
+written after a conclusion reads as a hedge on the conclusion; written before,
+it is a constraint on what the conclusion is allowed to be. The distinction
+matters most to the reader who was not in the room, and it is checkable rather
+than asserted: the dates differ and the git history carries both.
 
-**Statement 4 is a pre-commitment, not the `Conditions that reopen the
-decision` field.** That field stays `UNASSIGNED` because the full set of
-reopening conditions has not been decided — statement 4 fixes a floor beneath
-it. Whatever the eventual ruling says, it says at least this, and a ruling that
-recorded a *narrower* reopening condition would contradict a commitment made
-before the ruling existed.
+**Statement 4 was a pre-commitment made while `Conditions that reopen the
+decision` was still `UNASSIGNED`** — a floor fixed beneath a field nobody had
+filled, so that whatever the eventual ruling said, it would say at least this. A
+ruling recording a *narrower* reopening condition would have contradicted a
+commitment made before the ruling existed.
 
-**The posture above was written before the ruling and survives it unchanged.**
-Recording the ruling did not weaken any of its four statements; statement 4's
-floor is carried verbatim into the record's *Conditions that reopen the
-decision* field as condition (1).
+**The commitment was kept, and that is verifiable.** Statement 4's four triggers
+— authority over actuation, release, safety decisions, or required safety inputs
+— are carried verbatim into the recorded record as condition (1) of *Conditions
+that reopen the decision*, alongside four further conditions the ruling added.
+Recording the ruling weakened none of the posture's four statements; the ruling
+is broader than the floor, which is the direction the pre-commitment permitted.
 
 ### How the ruling was completed
 
