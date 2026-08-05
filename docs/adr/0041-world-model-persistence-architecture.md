@@ -1032,6 +1032,111 @@ not that the alongside-rebuild protocol R2 specifies has been built.
 
 ---
 
+## WM-2 implementation milestone — 2026-08-05
+
+A stopping point, recorded deliberately rather than reached by drift. What
+follows says what is **built**, what is **designed and not built**, and — the
+part worth writing down — **what would make the deferrals stop being safe**.
+
+### Naming, before anything else
+
+The canonical name is **Kirra World** (ADR-0042 Decision 1). In prose, the
+accurate gloss is **evidence ledger**: an append-only, hash-chained,
+bitemporal record of what was claimed and on whose authority.
+
+**Do not call it a "world model."** Decision 1 ruled the collision off a
+measured table of three uses. Two were inside the safety closure —
+`perception_redundancy.rs` and the ros2 adapter, for *redundant perception
+channels* — and **have since been renamed** to *independent perception
+channel*, so that half is resolved in code and the rule is what keeps it
+resolved. The third is still live: `robot/world_model.py`, a TTL'd
+operator-facing read projection whose rename ADR-0042 puts behind safety review
+because it is imported, installer-staged and gated by
+`KIRRA_WORLD_MODEL_ENABLED` — renaming it changes robot deployment, not prose.
+
+The reason is safety communication: *"the world model was wrong"* must not be
+able to mean a perception fault and a knowledge fault at once. Externally the
+term invites a second wrong inference — a learned predictive model — which this
+is not, in any part.
+
+Renaming the subsystem to "evidence ledger" was considered and rejected:
+*Kirra Evidence Model* and *Kirra Knowledge Model* describe the content
+accurately but lose the product framing already in the blueprint and
+`VISION.md`. Canonical name, plain-language gloss — not a rename.
+
+### Built
+
+| | Where |
+|---|---|
+| Event schema (SD-1…SD-4), write path, SHA-256 hash chain | `kirra-world-store`, #1350 |
+| Bytes/event against the ratified schema (D-20), and with projections (D-21) | `tools/wm2-schema-growth`, #1351/#1353 |
+| Current-state projection, confirmed-only fold, rebuild-equals-incremental digest | #1353 |
+| Bitemporal queries — `current` / `as_of` / `history` / `candidates` / `changed_since` | #1353 |
+| Compaction-with-citation, both refusals, chain verifying **across** a hole | #1354 |
+| Per-key degraded summaries and the `TemporalAnswer` that says so (§11.3) | #1355 |
+
+### Designed, not built
+
+Retention **policy driver** · the service · semantic projections beyond
+current-state · identity adjudication · the four trust axes · the domain core
+itself.
+
+### Why stopping here is safe, and the precondition that ends it
+
+Not "finishing unlocks nothing" — that is too soft, and would still be true of
+work that ought to be done. The structural reason is that **nothing writes to
+it**. No planner, perception or LLM crate depends on `kirra-world*`; the service
+crate is deliberately empty; the only consumers are two measurement
+instruments.
+
+That is what makes the retention gap deferrable rather than latent. D-20/D-21
+measured the store filling in **15.79 days** at 10 Hz, and OQ2 ruled horizons
+that nothing applies — which is a real behaviour the moment events are being
+produced, and no behaviour at all while none are.
+
+> **Precondition, not an intention:** the first doer-side consumer wired to
+> `kirra-world-store` ends the deferral. Retention enforcement is then owed
+> before that consumer runs anywhere it can fill a disk.
+
+### The adapter is ahead of the core it adapts
+
+An unusual shape, stated here so it is not read as neglect: `kirra-world` (the
+**domain core**) is unconstructible placeholders, while `kirra-world-store` (an
+**adapter**) is a working implementation. Adapters normally trail their core.
+
+**It is not a gate.** The domain-logic gate
+(`ci/check_world_domain_logic_gate.py`) is deliberately *self-releasing* —
+recording the Decision 5 ruling relaxes it automatically — and the ruling was
+recorded 2026-08-05. `kirra-world*` is no longer held to declaration-only by
+it. What still constrains the subsystem is the ruling's own *Conditions that
+reopen the decision*.
+
+So the honest reason is simpler, and worth writing down precisely because it is
+less flattering than an external hold: **WM-2's scoped work was the storage
+slice, and the domain-types work has not been done.** That is a sequencing
+decision, recorded here as one. The core's private unit fields still earn their
+place — they stop logic accreting around names ADR-0040 has not ratified — but
+that is a *naming* constraint, not a safety gate.
+
+Mirrored into both crates' top-level docs, because a crate-list scan is where
+the confusion happens and an ADR is not where it gets resolved.
+
+### Status of the rulings this rests on
+
+**ADR-0041 is Accepted** (2026-08-04). ADR-0039, ADR-0040 and ADR-0042 remain
+**Proposed**. ADR-0042 Decision 5 was **recorded** 2026-08-05.
+
+That classification — *safety-related, non-authoritative* — is an **owner
+self-assessment, not an independent assurance review**, supported by structural
+evidence only, with three of its eight supporting questions (Q2, Q4, Q5)
+recorded open as a KNOWN GAP inside the ruling rather than outside it. It holds
+only while Kirra World has no authority over actuation, release, safety
+decisions, or required safety inputs — any one of the four reopens it. Kirra is
+designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508 SIL 3
+requirements. Independent third-party assessment has not yet been performed.
+
+---
+
 ## Measurement harness
 
 The instrument for the gates below exists:

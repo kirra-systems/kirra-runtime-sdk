@@ -16,10 +16,11 @@
 //!
 //! That decision is the safety-assurance scope ruling
 //! ([ADR-0042](../../../docs/adr/0042-world-model-terminology-and-safety-boundary-scope.md)
-//! Decision 5), which is **PENDING and unassigned**. ADR-0039, ADR-0040,
-//! ADR-0041 and ADR-0042 are all **Proposed**, none Accepted. Nothing here
-//! ratifies any of them, and the first real domain-types work is gated behind
-//! that ruling — not behind this crate existing.
+//! Decision 5) — which was **PENDING and unassigned when this crate was
+//! written, and was RECORDED on 2026-08-05** as *safety-related,
+//! non-authoritative*. Statuses as they now stand: **ADR-0041 is Accepted**
+//! (2026-08-04); ADR-0039, ADR-0040 and ADR-0042 remain **Proposed**. Nothing
+//! here ratifies any of them.
 //!
 //! # The names
 //!
@@ -27,6 +28,54 @@
 //! here: bitemporal time (P7), four orthogonal trust axes (P6), entities and
 //! observations with provenance (§9). Names are placeholders too — a name is a
 //! decision, and these have not been ratified either.
+//!
+//! # Why the ADAPTER is ahead of this core — read this before assuming neglect
+//!
+//! An unusual shape, and the one most likely to read as sloppiness to someone
+//! scanning the crate list: **`kirra-world-store` is a working implementation**
+//! — schema, write path, hash chain, current-state projection, bitemporal
+//! queries, compaction — **while this crate, the domain core it adapts, is
+//! still unconstructible placeholders.** Adapters normally trail their core.
+//!
+//! **It is not because a gate holds this crate closed.** The domain-logic gate
+//! (`ci/check_world_domain_logic_gate.py`) is deliberately **self-releasing**:
+//! recording the Decision 5 ruling relaxes it automatically, and the ruling was
+//! recorded on 2026-08-05. `kirra-world*` is no longer held to
+//! declaration-only. What still constrains this crate is the ruling's own
+//! *Conditions that reopen the decision* — not the gate.
+//!
+//! So the honest reason the core is empty is simpler and less flattering than a
+//! gate: **WM-2's scoped work was the storage slice, and nobody has done the
+//! domain-types work yet.** That is a decision about sequencing, and it is
+//! recorded as one (ADR-0041, *WM-2 implementation milestone*) rather than
+//! dressed up as an external hold.
+//!
+//! The private unit fields below still earn their place. They stop logic
+//! accreting around names that ADR-0040 has not ratified — `ADR-0040` is still
+//! **Proposed**, and a name is a decision — so the constraint they enforce is
+//! real, it is just a *naming* constraint rather than a safety gate.
+//!
+//! # Naming — this is NOT "the world model"
+//!
+//! Canonical name: **Kirra World**. Accurate prose gloss: **evidence ledger**.
+//!
+//! "World model" is ruled out by ADR-0042 Decision 1, off a collision that was
+//! **live in the safety closure when the ruling was made**: `kirra-trajectory`'s
+//! `perception_redundancy.rs` and the ros2 adapter used it for *redundant
+//! perception channels*. Those have since been renamed to *independent
+//! perception channel*, so that half of the collision is resolved in code — the
+//! rule is what keeps it resolved.
+//!
+//! One live collision remains: `robot/world_model.py`, a TTL'd operator-facing
+//! read projection. ADR-0042 puts its rename behind safety review, because the
+//! module is imported by `rabbit_converse.py`, staged by the installer, and
+//! gated by `KIRRA_WORLD_MODEL_ENABLED` — renaming it changes robot deployment,
+//! not prose.
+//!
+//! The reason is safety communication, not taste: *"the world model was wrong"*
+//! must not be able to mean a perception fault and a knowledge fault at once.
+//! Externally the term invites a second wrong reading — a learned predictive
+//! model — which this is not, in any part.
 //!
 //! # Fence position
 //!
@@ -143,7 +192,7 @@ pub struct TrustAxes(());
 // Query results
 // ---------------------------------------------------------------------------
 
-/// The outcome of asking the world model a question.
+/// The outcome of asking Kirra World a question.
 ///
 /// PLACEHOLDER, and deliberately **not** `Option<T>`. ADR-0040 records why:
 /// `Option::None` collapses "we looked and it is not there", "we could not
