@@ -39,7 +39,7 @@ that knowledge is scattered:
 |---|---|---|
 | [`robot/world_model.py`](../../robot/world_model.py) | Posture, perception, stop reason, operator — TTL'd, `UNKNOWN` on stale | Read projection, explicitly non-authoritative, opt-in |
 | [`crates/kirra-sidecars/src/destination.rs`](../../crates/kirra-sidecars/src/destination.rs) | `PlaceRegistry`, `RouteRegistry` — operator-calibrated coordinates | Trusted config, fail-closed resolver |
-| `robot/testdata/places.json`, `routes.json` | Named places + saved routes with `map_id` | Operator-authored JSON |
+| [`robot/testdata/places.example.json`](../../robot/testdata/places.example.json), [`routes.example.json`](../../robot/testdata/routes.example.json) | Named places + saved routes with `map_id` | Operator-authored JSON; the deployed paths are set by `KIRRA_DEST_PLACES_PATH` / `KIRRA_DEST_ROUTES_PATH`, and these are the shipped examples of their shape |
 | [`crates/kirra-sidecars/src/destination_service.rs`](../../crates/kirra-sidecars/src/destination_service.rs) | Grounded destination latch, frame-explicit | Apply-once, seq-ordered |
 | Perception (`kirra-taj`) | Objects, corridor, health | Live, per-tick |
 
@@ -415,7 +415,7 @@ question from the owner's plate.
 | `crates/kirra-sidecars/src/destination.rs` | **Exists**, 1 734 lines; the `ResolveOutcome` contract the query API is meant to model is present (55 references) |
 | `crates/kirra-sidecars/src/destination_service.rs` | **Exists**, 717 lines. Matches "retain" |
 | Tracked-object inputs | Not verifiable by inspection — genuinely needs its owner |
-| `places.json` / `routes.json` | **Cited path is wrong.** The files are `robot/testdata/places.example.json` and `routes.example.json`. The row's disposition is unaffected; the citation is not |
+| `places.json` / `routes.json` | **The compatibility row is right; the inventory row's path was wrong — now fixed.** The deployed files really are `places.json` / `routes.json` (set by `KIRRA_DEST_PLACES_PATH` / `KIRRA_DEST_ROUTES_PATH`), so the disposition above stands. What did not exist was `robot/testdata/places.json`: the shipped examples are `places.example.json` / `routes.example.json`, and the inventory now cites those |
 
 ### Open question 4 appears already dispositioned
 
@@ -431,6 +431,53 @@ Q4 is *"naming collision disposition (ADR-0039 C1/C3)"*.
 Both halves therefore have recorded dispositions. **Q4 looks like a bookkeeping
 gap rather than an open question** — but closing it is the owner's act, not this
 section's.
+
+### Open question 1 is circular as stated, and the checklist already contains the way out
+
+Ratification requires Q1 *dispositioned*. The finding above says Q1 cannot be
+**answered** before the domain core exists. But ADR-0040 also states that
+merging *"authorizes no implementation"* — so, read strictly, ratification waits
+on a question that needs the implementation ratification gates.
+
+Two things dissolve it.
+
+**First, the checklist asks for a disposition, not an answer.** A deferral with
+a recorded trigger *is* a disposition, and this repository already uses that
+shape — ADR-0041's WM-2 milestone defers retention enforcement against a named
+precondition rather than leaving it open-ended.
+
+**Second, the outcome is already pre-authorized.** This ADR states that
+collapsing `kirra-world-store` into `kirra-world` behind a feature is *"an
+acceptable simplification"* if the seam does not earn its keep. So a deferral
+concedes nothing that has not already been conceded.
+
+#### Proposed wording — for the owner to accept, amend or reject
+
+> **Q1 — dispositioned by deferral, 2026-08-05.** The seam is **retained** for
+> now. Its original justification (keeping ADR-0041's persistence decision
+> reversible *while open*) is spent, since ADR-0041 is Accepted; it is retained
+> instead on the blueprint §5 layering argument — the domain core must stay
+> pure, and collapsing the store into it would place `rusqlite`, `serde_json`,
+> `sha2` and `hex` beside the domain types.
+>
+> **Revisit trigger:** when the domain core carries real types and the store
+> consumes them — i.e. on completion of `WM_SCOPE.md` Tier 1 — measure what the
+> seam actually carries. **If it is still near-empty, collapse it**, under the
+> authorization this ADR already gives. Not before: until then the measurement
+> has no content, because the dependency runs store → core and an empty core
+> means an empty seam.
+
+This is **drafted, not decided.** Nothing above ticks the box, and the owner may
+prefer the alternative ordering — build Tier 1 first and ratify with a real
+answer — at the cost of leaving this ADR Proposed while its own subject matter
+is implemented, which is the situation ADR-0042 was created to correct.
+
+**A note on the gate, so the deadlock is not overstated.** The domain-logic gate
+is self-releasing and released; running
+`ci/check_world_domain_logic_gate.py` reports *"Domain implementation is
+unblocked. This gate no longer constrains the `kirra-world*` crates."*
+ADR-0040's Proposed status is a governance position, not an enforced gate — so
+Tier 1 is not mechanically blocked either way.
 
 ### One further checkbox may be tickable
 
