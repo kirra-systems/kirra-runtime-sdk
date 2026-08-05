@@ -634,10 +634,79 @@ been performed.
 
 ---
 
+## Open question 1 — evidence, 2026-08-05
+
+Prepared against the workspace after WM-2 shipped. **Evidence for a ruling, not
+a ruling**; no checklist box is ticked here.
+
+### What the rule actually says, because it is easy to misread
+
+> *"`kirra-core` (and every other closure member) **must not** depend on Kirra
+> World under any feature, including optional and dev-dependencies."*
+
+It is a prohibition on depending on **Kirra World**, not a prohibition on
+dependencies in general. `kirra-core` carries `serde`, `kirra-contract-channel`
+and `kirra-capture-schema`, plus heavier optional ones behind the default-off
+`capture` feature — **none of which bear on this rule**, and citing them as
+evidence about it is a category error.
+
+### The rule holds today, and is machine-checked
+
+| Check | Result |
+|---|---|
+| `kirra-core` → Kirra World | **Absent** — `kirra-contract-channel`, `kirra-capture-schema` only |
+| Any closure member referencing `kirra_world` | **None**, by contents across `kirra-core`, `kirra-trajectory`, `kirra-inline-governor`, `kirra-safety-authority` |
+| Fence B | **INTACT**, transitive over the manifests, 19 packages from 10 roots |
+
+### But sustainability is untested, because the triggering event has not happened
+
+The question asks whether the split is needed *"at the first shared-primitive
+request."* **There has been no such request.** Kirra World exposes two
+unconstructible placeholder types, so nothing inside the closure could want a
+shared primitive from it even if it wished to. A rule that has never been
+pushed against is not yet demonstrated sustainable — it is merely unviolated.
+
+This is the **same structural shape as ADR-0040's open question 1**: the
+question is not answerable yet, and its triggering event lies downstream of
+`WM_SCOPE.md` Tier 1.
+
+### One property makes this easier than ADR-0040's Q1
+
+**The trigger is self-announcing.** ADR-0040's Q1 needs somebody to remember to
+measure. This one does not: the first shared-primitive request, if satisfied by
+a dependency, **reds Fence B**. A CI failure *is* the request arriving, with the
+path named. No vigilance is required, which is the strongest form a deferral can
+take.
+
+### Proposed wording — for the owner to accept, amend or reject
+
+> **OQ1 — dispositioned by deferral, 2026-08-05.** The strict rule is
+> **retained**. It holds, it is machine-enforced transitively, and no
+> shared-primitive request has yet tested it.
+>
+> **Revisit trigger:** the first Fence B breach naming a closure member reaching
+> `kirra-world*`. That breach is the request, and it arrives with its own
+> diagnosis. At that point choose between the two alternatives this ADR already
+> considered — the lower-level crate split, or living without the shared
+> primitive — on the evidence of the specific request rather than in the
+> abstract.
+>
+> The cost of being wrong is already accepted above: *"the strict
+> no-dependency rule for `kirra-core` may eventually force a crate split."*
+> Deferring concedes nothing new.
+
+**Drafted, not decided.** The alternative is to pre-emptively split now, which
+this ADR already rejected as *"adds a crate today to solve a problem that does
+not yet exist"* — and nothing measured here disturbs that reasoning.
+
+---
+
 ## Open questions
 
 1. Is the strict no-dependency rule for `kirra-core` sustainable, or is the
    lower-level split needed at the first shared-primitive request?
+   **Evidence prepared and a disposition drafted — see *Open question 1 —
+   evidence* above. Remains open until the owner rules.**
 2. Which additional traits are safety-authoritative inputs? The list is open.
 3. Does the shared-artifact allowlist need per-entry validation evidence, or
    does the owning contract suffice?
