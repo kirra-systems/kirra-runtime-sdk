@@ -432,7 +432,7 @@ Both halves therefore have recorded dispositions. **Q4 looks like a bookkeeping
 gap rather than an open question** — but closing it is the owner's act, not this
 section's.
 
-### Open question 1 is circular as stated, and the checklist already says how out
+### Open question 1 is circular as stated, and the checklist already contains the way out
 
 Ratification requires Q1 *dispositioned*. The finding above says Q1 cannot be
 **answered** before the domain core exists. But ADR-0040 also states that
