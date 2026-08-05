@@ -204,6 +204,72 @@ library use that never call the startup init resolve to the frozen reference
 instance — `robotaxi` — so existing contract tests stay byte-identical; the
 fail-closed guarantee lives at the binary startup boundary.)
 
+### The selector is shared; the numbers are not. What that does and does not mean
+
+The section above records that **one env var parameterizes two binaries**. The
+per-class *numbers* are duplicated across two workspaces deliberately, and that
+duplication is stated, cited and controlled (`contract_profiles.rs`
+"CROSS-WORKSPACE DUPLICATION", `REQ: KIRRA-CLASS-PROFILES-001`, this document as
+the single source of truth). **The class *selector* is a different thing and is
+not analysed there**, so it is analysed here.
+
+The verifier's actuator envelope and parko's SG6 impact threshold are two
+governors intended to be **diverse** — `parko-kirra`'s `GovernorComparator`
+accumulates divergence between them and escalates the effective posture on it.
+Both take their class from the same logical value.
+
+**What that costs, stated precisely:**
+
+| Fault class | Diversity preserved? |
+|---|---|
+| Implementation fault in one governor | **Yes.** Separate code, separate enums, separate parsers, no dependency edge. The comparator sees it |
+| **Parameterization fault** — a valid-but-wrong class | **No.** Both governors move consistently to the same wrong class, agree with each other, and the comparator sees nothing |
+
+The failure mode is therefore *not* a crash and *not* a divergence. It is two
+governors agreeing, correctly, about the wrong vehicle. `courier` on R2 hardware
+is the concrete instance already documented under #1219: it assumes 2× the
+braking (3.0 vs 1.5 m/s²), and over-estimating available brake under-estimates
+stopping distance directly.
+
+**This is latent, not live.** `parko_ros2_node` is not in the R2 launch graph —
+`kirra_with_robot.launch.py` starts `kirra_safety` nodes only — so on the R2
+bench robot there is currently one consumer, not two. It becomes live the moment
+parko is deployed alongside the verifier.
+
+**Controls that already exist**, so this is a scoped observation and not an open
+hole:
+
+1. **Fail-closed parsing in both binaries.** The exposure is a *valid but wrong*
+   class, never a missing or typo'd one.
+2. **`preflight_autostart.sh` validates the value** in `/etc/kirra/kirra.env` and
+   WARNs when the class is parseable but not this platform's (#1219).
+3. **One runtime cross-check exists** —
+   `enforcement_decision.wheelbase_consistent` compares the interceptor's
+   configured wheelbase against the class the verifier reports and latches a
+   permanent stop on mismatch. It catches the class/platform mismatch *through
+   its geometry consequence*, which is narrower than checking the class itself,
+   but it is a real runtime detector and it is why a `courier`-on-R2
+   misconfiguration does not simply drive.
+
+**What is not controlled:** nothing asserts that the class the verifier resolved
+and the class parko resolved are the *same value*. They are supplied by
+integrator configuration, and the two binaries are launched by different units
+with different `EnvironmentFile` sources (`kirra.env` for the verifier;
+whatever the parko unit provides). A deployment that sets them inconsistently
+would run two governors parameterized for different vehicles, and neither would
+say so.
+
+**If parko is deployed alongside the verifier, the cheap mitigation is a startup
+cross-check**: have parko report its resolved class and compare it against the
+verifier's, refusing to start on mismatch — the same fail-closed discipline both
+binaries already apply to an unset value, extended to disagreement. That is not
+implemented and is recorded here as the known next step rather than as done.
+
+> Recorded 2026-08-05 during the ADR-0042 Decision 5 common-source sweep. It is
+> **out of scope for that ruling** — Decision 5 asks about Kirra World, and this
+> is verifier↔parko — but it is the same *kind* of question, so it is written
+> down where the class family is normative rather than left in a review thread.
+
 ---
 
 ## Provenance coverage (#1219 part 2) — a derived view, not a second inventory
