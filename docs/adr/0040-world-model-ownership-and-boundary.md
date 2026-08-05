@@ -608,7 +608,7 @@ The one item with no technical component. Recorded here is what the decision
 6. **Predictive containment.** Should predictive state remain in a **separate
    store** referenced by Kirra World entity IDs, or may Kirra World host a
    **separately fenced predictive namespace**? See *Open question 6 —
-   predictive containment* below. **Does not gate ratification**: the checklist
+   predictive containment* above, in the dependency-review findings. **Does not gate ratification**: the checklist
    names open questions 1 and 4 specifically, and raising this must not
    silently enlarge that gate.
 

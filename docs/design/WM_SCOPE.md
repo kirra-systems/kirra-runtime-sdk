@@ -61,7 +61,7 @@ container.
 ### Predictive state is not part of Kirra World
 
 Not unless a future ruling changes `KIRRA-WM-ARCH-001` §9.1 and §20. See
-*Open question — predictive containment* in
+*Open question 6 — predictive containment* in
 [ADR-0040](../adr/0040-world-model-ownership-and-boundary.md).
 
 > **Citation note.** §9.1 (trust model) and §20 (AI prediction integration) are
