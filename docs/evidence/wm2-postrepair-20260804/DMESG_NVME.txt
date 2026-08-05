@@ -1,0 +1,11 @@
+[    7.731832] nvme 0004:01:00.0: Adding to iommu group 5
+[    7.732003] nvme nvme0: pci function 0004:01:00.0
+[    7.732066] nvme 0004:01:00.0: enabling device (0000 -> 0002)
+[    7.805282] nvme nvme0: allocated 64 MiB host memory buffer.
+[    7.826569] nvme nvme0: 8/0/0 default/read/poll queues
+[    7.831647] nvme nvme0: Ignoring bogus Namespace Identifiers
+[    7.834096]  nvme0n1: p1 p2 p3 p4 p5 p6 p7 p8 p9 p10 p11 p12 p13 p14 p15
+[    8.072970] EXT4-fs (nvme0n1p1): mounted filesystem with ordered data mode. Opts: (null). Quota mode: none.
+[    8.584258] EXT4-fs (nvme0n1p1): re-mounted. Opts: (null). Quota mode: none.
+[   10.669791]  tegra_wmark(O) mc nvhwpm(O) cec host1x_nvhost(O) drm_kms_helper nvidia_p2p(O) ina3221 nvgpu(O) governor_pod_scaling(O) host1x(O) mc_utils(O) nvmap(O) nvsciipc(O) quota_v2 quota_tree fuse drm ip_tables x_tables ipv6 pwm_fan pwm_tegra tegra_bpmp_thermal tegra_xudc ucsi_ccg typec_ucsi typec nvme nvme_core phy_tegra194_p2u pcie_tegra194
+[ 2400.400831] nvme nvme0: I/O 13 QID 5 timeout, completion polled

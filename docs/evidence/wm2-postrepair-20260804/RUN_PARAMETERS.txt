@@ -1,0 +1,71 @@
+Post-repair baseline. The parameters are OQ1's, unchanged, because the whole
+point is comparability across the ADR-0041 D-18 filesystem boundary. Anything
+re-tuned here would have made the run uninterpretable.
+
+INSTRUMENT IDENTITY — gated, not assumed.
+
+The script refused to proceed unless the harness reported
+
+    source_digest         8882f659337f4b69492f91529a9d79ed5bb5494b99575188d94f952544aa997e
+    standin_schema_digest 630eb690aaef3df32690c39c283f6c3b30c60ac04264a84d95051cfaf29c3292
+
+identical to the OQ1 run's. It matched (see probe.jsonl, the throwaway run that
+produced the check). The device's checkout is still at 83998315 (#1040 -> #1340),
+so the binary is the SAME COMMIT as OQ1's, not merely the same source. Build was
+incremental: `cargo build --release -j2` finished in 0.14 s against a surviving
+target/ tree.
+
+All defaults (--events 100000, --entities 1000, --seed 20260803), the parameters
+D-10, D-15 and D-17 used.
+
+A. `append` — three repetitions per durability:
+
+    for rep in 1 2 3; do
+      for d in full normal off; do
+        wm2-persistence-harness append \
+          --db ~/wm2bench/post-$d.sqlite --durability $d \
+          --assert-target --out ~/wm2-postrepair/postrepair-append.jsonl
+      done
+    done
+
+   The harness runs BOTH the requested batch and 64, so batch=1 arrives as a
+   built-in control. Databases are reused across reps within a durability,
+   exactly as OQ1 did.
+
+B. `stall` — 20 repetitions per durability at batch=64:
+
+    for d in full normal off; do
+      wm2-persistence-harness stall \
+        --db ~/wm2bench/posts-$d.sqlite --durability $d \
+        --batch 64 --stall-repeats 20 --assert-target \
+        --out ~/wm2-postrepair/postrepair-stall.jsonl
+    done
+
+Record counts came out 27 (9 run + 18 append) and 6 (3 run + 3 stall) —
+identical to OQ1's, which is the cheap check that the shape matches.
+
+Store location: ~/wm2bench on /dev/nvme0n1p1, the same ext4 filesystem and NVMe
+device as OQ1 used, and the same one repaired between the two runs.
+/var/lib/kirra was deliberately NOT used: it belongs to the deployed verifier's
+service user.
+
+Databases were removed before each phase so every run started from an empty
+store.
+
+The run was launched under nohup and detached; the environment capture is a
+SEPARATE step because it needs root, and a sudo password prompt inside a
+nohup'd job with no tty would have hung the whole run.
+
+NO HOST CONTROL was taken for this run. D-17 took one to show the two
+instruments agree on a machine that never showed the inversion; that question is
+already answered and did not need re-answering here.
+
+TRANSFER: the whole directory was tarred with an inner SHA256SUMS and moved
+base64-over-terminal. The outer tarball digest was
+84c40edef690d86cf913469f6f5d993d80a5774e5b20b49a5d699bbeec08c4b8 and matched on
+arrival; the inner manifest then verified all five files OK. This double check
+exists because OQ1's stall file failed its first transfer with an IDENTICAL byte
+count and a different digest, and only the inner manifest isolated which file.
+
+Note the harness's --durability flag takes `full|normal|off`; the usage string
+advertises `<f|n|off>`, which it does not accept.

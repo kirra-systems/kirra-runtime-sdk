@@ -1975,6 +1975,12 @@ It does **not** invalidate them, and it is not a correction. Nobody measured
 whether a wrong free-block map affected any recorded figure, and this entry does
 not assert that it did.
 
+> **Since measured — see D-19.** A post-repair baseline at OQ1's exact
+> parameters, on the same commit and a digest-gated identical instrument,
+> reproduces every D-17 figure within 1.3 %. The boundary named below is
+> **crossable**; the caution in the next paragraph is retained as the reason the
+> measurement was taken rather than as an outstanding doubt.
+
 What it does is make one variable **no longer held fixed** across the boundary.
 Anything comparing a post-repair run with D-1 … D-17 must state that the
 allocator's free-space picture differs by ~0.96 GiB and that the filesystem had
@@ -1993,6 +1999,92 @@ observations are consistent, from layers the WM-2 work otherwise never connected
 That is suggestive, not conclusive. No common cause was demonstrated: the
 filesystem damage carries no timestamps tying it to any observed completion
 timeout, and the repair fixes the filesystem, not the device. The defect remains.
+
+### D-19 — the repair moved nothing: the D-18 boundary is crossable
+
+D-18 recorded the filesystem repair as a discontinuity and deliberately declined
+to say whether it affected any measured figure, because nobody had measured it.
+This does. Evidence bundle: `docs/evidence/wm2-postrepair-20260804/`,
+`JETSON-TARGET-MEASURED`.
+
+**Instrument identity was gated, not assumed.** The run refused to proceed unless
+the harness reported `source_digest 8882f659…` and the same stand-in schema as
+the OQ1 run. It matched, and the device's checkout is still at `83998315`, so the
+binary is the **same commit** — not merely the same source.
+
+#### Nothing moved
+
+`append`, median of 3 repetitions, against D-17:
+
+| durability | b=1 post | b=1 D-17 | ratio | b=64 post | b=64 D-17 | ratio |
+|---|---:|---:|---:|---:|---:|---:|
+| FULL | 3 270 | 3 246 | 1.007 | 31 778 | 31 665 | 1.004 |
+| NORMAL | 9 936 | 9 924 | 1.001 | 36 405 | 36 870 | 0.987 |
+| OFF | 15 077 | 15 089 | 0.999 | 56 403 | 56 406 | 1.000 |
+
+Every cell within **1.3 %**, five of six within **0.7 %**. The latency shape
+reproduces too: NORMAL/FULL at batch=64 gives p50 **0.64×**, p99 **1.30×**, max
+**1.42×**, against D-17's 0.65× / 1.32× / 1.40×.
+
+**Counting unit** events/second; **independence unit** one machine-day at one
+filesystem state (three repetitions inside a run are repetitions, not independent
+observations); **held fixed** instrument, commit, parameters, seed, store
+location, device; **changed** the filesystem. **The claim supported:** the repair
+did not move these figures, so D-1…D-17 and post-repair runs are comparable. It
+supports no claim that the allocation errors were harmless in general — only that
+they are not visible here at this precision.
+
+#### D-15's `NORMAL` is now one observation against two
+
+`stall`, batch=64, 20 repetitions:
+
+| batch=64 | D-15 | D-17 | post-repair |
+|---|---:|---:|---:|
+| FULL | 30 545 | 31 083 | **30 697** |
+| NORMAL | 19 881 | 35 924 | **35 992** |
+| OFF | 54 636 | 55 267 | **55 834** |
+
+Post-repair `NORMAL` lands **0.2 %** from D-17. This does **not** explain D-15,
+and open question 1's residual stays open as worded. What changes is the weight:
+a reading that was one of two competing eras is now one anomalous observation
+against two that agree.
+
+#### The dirty-page mechanism is refuted a second time
+
+`NORMAL` peak dirty/writeback: **4 888 → 4 572 → 5 224 kB**. The post-repair run
+carries the *highest* dirty load of the three while its throughput matches the
+*fast* era. D-17 refuted this mechanism by holding dirty constant while
+throughput rose 81 %; this refutes it from the opposite direction. The hypothesis
+is wrong under two independent tests and stays on the record rather than being
+dropped.
+
+#### What does not fit
+
+`FULL` recorded **4 stalls in 20 repetitions** (D-17: 1), durations `1942.5,
+5926.0, 15077.1, 30091.8` ms. The 30 091.8 ms one is D-15's signature exactly —
+`nvme_core.io_timeout` is 30, so timeout plus handler latency.
+
+**But the kernel log carries only ONE `completion polled` event for this run.**
+Three of the four stalls have no corresponding NVMe timeout, and the nvme lines
+run unbroken from boot to 2 400 s, so this is not a truncated ring buffer.
+
+D-15's mechanism rested on 5 stalls coinciding with 5 timeouts; here the
+correspondence is **1 of 4**. Either there is a second stall population D-15 did
+not separate, or the sub-30 s stalls have another cause. **This evidence cannot
+resolve it and none is asserted** — it is recorded because a mechanism finding
+that fits 5 of 5 in one run and 1 of 4 in another is not yet settled.
+
+Median throughput is unchanged despite four times the stalls, which is D-15's own
+point — stalls are a device property, not a persistence property — now observed
+on a repaired filesystem.
+
+#### Confounders
+
+journald was **growing** during this run (227.0 M against a 200 M cap, from
+194 M), as it was during OQ1; the NVMe defect was **live**, which is what makes
+the comparison like-for-like rather than "quieter machine"; free space differs by
+the reclaimed ~0.96 GiB plus this run's databases; stand-in schema throughout;
+one machine-day.
 
 ### D-12 — design implications the measurement forces
 
