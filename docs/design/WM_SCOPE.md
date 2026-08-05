@@ -83,9 +83,37 @@ Not code. It blocks authorized implementation by the ADRs' own words.
 | ADR-0040 ratification checklist | **4 of 5 unticked** — dependency review, compatibility inventory, deployment ownership, open questions 1 & 4 |
 | ADR-0042 Decision 5 | Recorded, but an **owner self-assessment, not an independent assurance review**, with Q2/Q4/Q5 open |
 
-**Deployment ownership is the one that bites later.** Nobody has decided who
-runs Kirra World, where it stores, or who backs it up. That answer is needed
-*before* a service exists, not after one is running.
+### The ratification order is forced
+
+ADR-0040 *"depends on ADR-0039"*; ADR-0039's checklist requires *"ADR-0042
+itself accepted."* So the chain is **0042 → 0039 → 0040**, and ADR-0040 cannot
+be accepted first however much evidence is prepared for it. **ADR-0042 is the
+critical path.**
+
+### Evidence prepared, so the boxes are decisions rather than work
+
+Every box below is still unticked — none of this ticks anything — but the
+research behind them is done, and a reader should not restart it:
+
+| Box | Prepared |
+|---|---|
+| ADR-0040 dependency review | **Written** — ADR-0040 *Repository dependency review — findings* |
+| ADR-0040 compatibility inventory | **All five rows checked** against the tree; one citation error found and fixed; the `tracked-object inputs` row's factual claim corrected. Dispositions still need their owners |
+| ADR-0040 Q1 | **Circular as stated**; a deferral disposition is drafted for accept/amend/reject |
+| ADR-0040 Q4 | **Appears already dispositioned** — C1 in ADR-0039 via ADR-0042 Decision 1, C3 in ADR-0040's own compatibility table |
+| ADR-0042 Decision 5 template | **Already satisfied** — recorded 2026-08-05; the ADR requires it *recorded*, not favourable |
+| ADR-0042 M1 rename | **Already executed** — `61dbf57f`; the box confirms a completed change |
+| ADR-0042 OQ1 | **Evidence prepared**, disposition drafted; its revisit trigger is self-announcing (a Fence B breach *is* the request arriving) |
+| ADR-0039 safety-assurance box | **Flagged as possibly tickable** — its own text says the ruling need only be *recorded* |
+
+**What is left is judgement, not research** — with one exception.
+
+**Deployment ownership is the one that bites later**, and the only item no
+preparation can move. Nobody has decided who runs Kirra World, where it stores,
+or who backs it up. That answer is needed *before* a service exists, not after
+one is running — and two of its three parts already have measured consequences
+(see ADR-0040's review section: the 15.79-day fill, and ADR-0038's per-instance
+local audit chain).
 
 ---
 
