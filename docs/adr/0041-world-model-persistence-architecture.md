@@ -505,11 +505,12 @@ source; they are not migrated destructively (ADR-0040).
 
    **REOPENED 2026-08-05 by D-20 — the allocation no longer closes.** The
    budget above is 8 GiB at D-2's 476.32384 B/event, and D-2 measured the
-   harness's **stand-in** schema. Re-measured against the ratified schema the
-   budget falls to 15 161 596 events (`lean`) or 14 031 527 (`populated`),
-   against an allocation of 15 448 320. Headroom goes from +14 % to **−1.9 %**
-   / **−10.1 %**, and that understates it: these are log-only figures against a
-   budget that included projections the ratified store has not built.
+   harness's **stand-in** schema. Re-measured on target against the ratified
+   schema the budget falls to 15 170 370 events (`lean`) or 14 039 041
+   (`populated`), against an allocation of 15 448 320. Headroom goes from +14 %
+   to **−1.8 %** / **−10.0 %**, and that understates it: these are log-only
+   figures against a budget that included projections the ratified store has
+   not built.
 
    **What is unchanged is the input the ruling turns on** — how far back an
    incident reconstruction must reach. That question was answered 30 days and
@@ -522,7 +523,7 @@ source; they are not migrated destructively (ADR-0040).
    |---|---|
    | Hold `raw` at 30 days, coalesce harder | sustained rate **4.5 → 3.20 /s** (~3.1× from 10 Hz, was ~2×) |
    | Hold ~4.5 /s, shorten `raw` | 30 days → **21.3 days** |
-   | Raise the budget | 8 GiB → **~10.3 GiB** restores the ruled allocation |
+   | Raise the budget | 8 GiB → **~9.9 GiB** restores the ruled allocation |
 
    Coalescing harder is the lever that preserves the answer the ruling was
    built on — 30 days of reach is retained, at ~3× rather than ~2× on a 10 Hz
@@ -2184,11 +2185,25 @@ Two arms, one host, one session, same SQLite 3.45.0, same event stream —
 D-2's own parameters (seed `20260803`, 100 000 events, 1 000 entities, 96-byte
 payload). Log-only in both, because `kirra-world-store` has no projections yet.
 
-| Arm | B/event | Days to fill 8 GiB @ 10 Hz | Ratio |
-|---|---:|---:|---:|
-| stand-in (D-2's schema) | 458.50624 | 21.68 | 1.000× |
-| ratified, `lean` | **566.55872** | 17.55 | **1.236×** |
-| ratified, `populated` | **612.18816** | 16.24 | **1.335×** |
+| Arm | B/event | `page_count` | Days to fill 8 GiB @ 10 Hz | Ratio |
+|---|---:|---:|---:|---:|
+| stand-in (D-2's schema) | 458.50624 | — | 21.68 | 1.000× |
+| ratified, `lean` | **566.23104** | 13 824 | 17.56 | **1.2349×** |
+| ratified, `populated` | **611.86048** | 14 938 | 16.25 | **1.3345×** |
+
+**These are the TARGET figures** (`docs/evidence/wm2-schema-growth-target-20260805/`,
+`JETSON-TARGET-MEASURED`, `citable:true`). The first host bundle published each
+arm **32 768 B high** — `lean` 566.55872, `populated` 612.18816 — because its run
+predates the `drop(store)` fix and so counted a still-present SQLite `-shm` file
+as data. `page_count` was identical on both machines, so this was never a
+platform difference. Post-fix, `log_only_bytes` equals `page_count × page_size`
+exactly. The correction is ≈0.06 % and changes nothing qualitative.
+
+**Platform invariance is measured, not inferred.** The ratified arms reproduce
+**byte-for-byte** on aarch64 and x86_64 (56 623 104 / 61 186 048 in both), and
+the control arm reproduced D-2 exactly for a third time. The host bundle could
+only argue this from one control-arm identity and said so; it is now
+demonstrated on the ratified schema itself.
 
 Counting unit: bytes of database per appended event (`main` + `-wal` + `-shm`
 after a TRUNCATE checkpoint — the harness's own `db_bytes`). Independence unit:
@@ -2212,14 +2227,14 @@ the least margin.
 
 OQ2's budget of 18 033 812 events is 8 GiB at D-2's *with-projections* figure.
 Against the ratified schema's *log-only* figure the budget falls to
-**15 161 596** (`lean`, 0.841×) or **14 031 527** (`populated`, 0.778×).
+**15 170 370** (`lean`, 0.841×) or **14 039 041** (`populated`, 0.778×).
 OQ2 allocated 11 664 000 to `raw` and 3 784 320 to the protected classes —
 **15 448 320** together, with a stated 14 % headroom.
 
 | Against | Headroom |
 |---|---:|
-| ratified `lean` | **−286 724 (−1.9 %)** |
-| ratified `populated` | **−1 416 793 (−10.1 %)** |
+| ratified `lean` | **−277 950 (−1.8 %)** |
+| ratified `populated` | **−1 409 279 (−10.0 %)** |
 
 **The headroom is gone and the allocation overruns at both ends of the band** —
 and the overrun is understated, because these are log-only figures against a
@@ -2229,18 +2244,24 @@ deficit is larger.
 
 #### Confounders and scope
 
-Host run, `x86_64`, not target — the harness would label it
-`HOST-INDICATIVE-NOT-TARGET` and that label is not being argued around. Two
-things make the bundle usable and neither is a proof: the control arm
-reproduced D-2's Jetson `log_only_bytes` **byte-for-byte** (45 850 624), which
-is expected for a logical file length but is an empirical identity on one pair;
-and the reported result is a **ratio taken within one host**, so any platform
-dependence divides out. The instrument refuses to emit a ratio at all unless a
-same-host control figure is supplied. A target run with `--assert-target` is
-still owed before any figure here is entered against the ratification
-checklist. Nothing about latency, throughput, durability or stalls was
-measured. `populated` cites one upstream observation; a derivation-heavy
-workload sits above this band.
+Target-measured; the harness arm reports `citable:true`, `blockers:[]`. The
+instrument refuses to emit a ratio at all unless a same-host control figure is
+supplied, so the schema effect is never confounded with a platform difference.
+
+Remaining limits. **No with-projections figure** for the ratified schema — not
+measurable until projections exist, so the budget comparison is a log-only
+figure against a budget that counted projections, and is therefore optimistic.
+**`wm2-schema-growth` has no `--assert-target` of its own**: its records carry
+`arch`/`os` only, and this bundle's target status is inherited from the paired
+harness arm by operator assertion in the evidence README — the instrument
+cannot presently refuse to be cited as target evidence the way the harness can,
+and adding that assertion is the honest follow-up. **Nothing about latency,
+throughput, durability or stalls** was measured; `append_elapsed_s` (≈40 s per
+arm) is run cost, not throughput — it is 100 000 unbatched `synchronous=FULL`
+commits on a machine whose stall behaviour D-15/D-19 characterise separately.
+`populated` cites one upstream observation; a derivation-heavy workload sits
+above this band. Platform invariance is shown for *this* quantity only — for
+any timing quantity the opposite holds, which is the whole point of D-15.
 
 ### D-12 — design implications the measurement forces
 

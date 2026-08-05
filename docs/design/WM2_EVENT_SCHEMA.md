@@ -117,13 +117,14 @@ coupling rather than a discovery.
 
 Measured: ADR-0041 **D-20**, evidence `docs/evidence/wm2-schema-growth-20260805/`.
 
-The figure moved **1.236×** (`lean`) to **1.335×** (`populated`) — 458.51 →
-**566.56 / 612.19 B/event**. The six columns above were "plausibly additive";
-they are, and the addition is large enough to matter.
+The figure moved **1.2349×** (`lean`) to **1.3345×** (`populated`) — 458.51 →
+**566.23 / 611.86 B/event**, measured on target
+(`docs/evidence/wm2-schema-growth-target-20260805/`). The six columns above were
+"plausibly additive"; they are, and the addition is large enough to matter.
 
 **OQ2's allocation no longer closes.** Its 15 448 320 allocated events exceed
-the corrected budget at both ends of the band — headroom **+14 % → −1.9 % /
-−10.1 %** — so the durations were not merely revisable in principle, they are
+the corrected budget at both ends of the band — headroom **+14 % → −1.8 % /
+−10.0 %** — so the durations were not merely revisable in principle, they are
 arithmetically unaffordable as ruled. ADR-0041's OQ2 section carries the
 reopening, the three levers and their numbers; the choice among them is a
 decision about incident reconstruction and is not made in this document.

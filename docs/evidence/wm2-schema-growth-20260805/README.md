@@ -16,6 +16,33 @@
 > SIL 3 requirements. Independent third-party assessment has not yet been
 > performed.
 
+> ### ⚠ SUPERSEDED 2026-08-05 — figures here are 32 768 B/arm high
+>
+> The target run this bundle said was owed has been done:
+> **`docs/evidence/wm2-schema-growth-target-20260805/`**. Two outcomes.
+>
+> **The good one.** Platform invariance is now *measured* rather than inferred:
+> the ratified arms reproduce **byte-for-byte** on aarch64 and x86_64, and the
+> control arm again reproduced D-2 exactly. This bundle's central caveat is
+> discharged.
+>
+> **The correction.** The ratified figures below are each **32 768 bytes** too
+> high — `lean` 566.55872 → **566.23104**, `populated` 612.18816 → **611.86048**
+> (≈0.06 %). `page_count` was identical across both machines, so this was never
+> a platform difference: it is the SQLite `-shm` file, which `db_bytes` counts.
+> This run predates the `drop(store)` fix made during review of #1351, so the
+> store's connection was still open at checkpoint time, `-shm` still existed,
+> and its 32 KiB was counted as if it were data.
+>
+> **`results.jsonl` here is deliberately left unedited.** It is a faithful record
+> of what the instrument emitted that day, and rewriting it would erase the only
+> evidence that the `-shm` inclusion ever happened. Read the numbers below as
+> historical; cite the target bundle.
+>
+> Nothing qualitative changes: OQ2's allocation still fails to close at both ends
+> of the band, still by ~10 % at the `populated` end. See the target bundle for
+> the corrected arithmetic.
+
 ## What this run answers
 
 `KIRRA-WM2-SCHEMA-001` §8.4 recorded an obligation created by ratifying the
