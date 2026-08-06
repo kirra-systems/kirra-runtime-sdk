@@ -1,4 +1,4 @@
-//! **Kirra World — domain core. Tier 1 in progress: the trust model is real.**
+//! **Kirra World — domain core. Tier 1 in progress: the domain model is real.**
 //!
 //! This crate exists to prove ONE thing that is expensive to get wrong later:
 //! the dependency *shape*. ADR-0040 (WM-1) proposes `kirra-world` as a pure
@@ -8,16 +8,25 @@
 //!
 //! # What this crate contains, and what it still does not
 //!
-//! **Real:** [`mod@trust`] — the four orthogonal trust axes (`Origin`,
-//! `Corroboration`, `Adjudication`, `Validity`) and the seven transition rules,
-//! with the anti-laundering rule (rule 5) and read-time validity (rule 6) as its
-//! load-bearing parts. Pure functions over pure data; still zero dependencies.
+//! **Real** — four modules, pure functions over pure data, still zero
+//! dependencies:
 //!
-//! **Still absent:** storage, API, queries, and the entity/observation/
-//! relationship models. The nine remaining types below are **unconstructible
-//! placeholders** — each has a private unit field, so nothing outside this crate
-//! can build one and no logic can quietly accrete around a name before the model
-//! that gives it meaning exists.
+//! * [`mod@trust`] (§9) — the four orthogonal trust axes and the transition
+//!   rules, with the anti-laundering rule (5) and read-time validity (6) as the
+//!   load-bearing parts.
+//! * [`mod@observation`] (§7, pure half) — structured `Confidence`, source
+//!   classes, clock domains that cannot be mixed.
+//! * [`mod@entity`] (§6, structure and kinds) — the root-closed taxonomy,
+//!   lifecycle, and kind as adjudicated evidence rather than a stored field.
+//! * [`mod@relationship`] (§8) — directed, typed, time-bounded relations;
+//!   supersession instead of update; inferences that cannot omit their
+//!   derivation.
+//!
+//! **Still absent:** storage, API and queries — plus the parts of §6/§7 that
+//! need a dependency (ULID identity, content hashing, frames, maps, typed
+//! payloads), which belong to the store. The remaining types below are
+//! **unconstructible placeholders**, each with a private unit field, so no logic
+//! can accrete around a name before the model that gives it meaning exists.
 //!
 //! The governing decision is the safety-assurance scope ruling
 //! ([ADR-0042](../../../docs/adr/0042-world-model-terminology-and-safety-boundary-scope.md)
@@ -55,8 +64,8 @@
 //! (ADR-0041, *WM-2 implementation milestone*) rather than dressed up as an
 //! external hold.
 //!
-//! **Tier 1 has now started**, and the gap is closing from this end: the trust
-//! model above is domain logic the store does not have. Note which direction
+//! **Tier 1 has now started**, and the gap is closing from this end: the four
+//! modules above are domain logic the store does not have. Note which direction
 //! that runs — the store's `WriterClass` + two-valued `ClaimStatus` is, in the
 //! scope doc's words, *"an adjudication proxy and nothing more"*. The four axes
 //! are what it is a proxy **for**, so the core is now ahead of the adapter on
@@ -100,6 +109,7 @@
 
 pub mod entity;
 pub mod observation;
+pub mod relationship;
 pub mod trust;
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 name = "kirra-world"
 version = "0.1.0"
 edition = "2021"
-description = "Kirra World domain core — Tier 1: the four orthogonal trust axes (ADR-0040 WM-1, blueprint §9)"
+description = "Kirra World domain core — Tier 1: trust axes, observations, entities, relationships (ADR-0040 WM-1)"
 publish = false
 
 # ZERO dependencies, deliberately. ADR-0040's ratification criteria ask for
