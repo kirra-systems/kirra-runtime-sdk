@@ -383,7 +383,40 @@ not permission.
       all three — pulling them into the core would spend ADR-0040's Q1 seam
       decision without revisiting it. `ObservationKind` is also absent because
       the blueprint names the field but never enumerates its variants.
-- [ ] **Relationship model** (§8)
+- [x] **Relationship model** (§8) — **DONE 2026-08-06**,
+      `crates/kirra-world/src/relationship.rs`, 20 tests, still zero-dependency.
+      **All ten §8 record fields**, all 15 predicates across the four groups.
+      Bitemporal: `valid_time` on the shared `ValidInterval` (so clock domains
+      still cannot mix within it) plus `transaction_time`, which is deliberately
+      NOT forced into the same domain — valid time is a fact about the world,
+      transaction time a fact about the recorder, and `DomainInstant::compare`
+      already refuses to order one against the other.
+      **Three of §8's four design notes are structural, not documented:**
+      an inference **carries its `DerivationRef` in the enum variant**, so
+      "inferred, derivation missing" is unrepresentable — and
+      `Direct(SourceClass::Derivation)`, the hole that would route around it, is
+      refused; **`caused_by` combined with `Inferred` is refused**, which is what
+      §8's *"deliberately weak"* means written as a type; and there is **no
+      `update` and no `valid_time` setter** — `supersede` returns *both* the
+      closed predecessor and the replacement, so history cannot be dropped by
+      omission. `supersede` takes the closing **instant**, not an interval, so
+      neither an open "closed" predecessor nor a rewritten start is
+      representable.
+      **The fourth note is half-doable in a pure module.** A pure crate cannot
+      stop a store writing both `contains` and `inside`; `canonical()` normalizes
+      them to the same *direction*, so the two rows carry one
+      subject/predicate/object triple (`canonical_triple()`) and a dedupe has
+      something to compare. Not the same record — identity, times, source and
+      confidence differ between two separately-written rows and should. The
+      canonical direction is the lexicographically smaller token — mechanical on
+      purpose, since choosing on meaning would be a domain judgement.
+      **The relation algebra is deliberately sparse.** §8 states exactly one
+      implication (`contains` → `inside`) and says nothing about the other
+      thirteen predicates, so `symmetry()` returns `Unspecified` for all of them
+      rather than guessing. Recorded as an open question with the candidates
+      named: `near`/`adjacent_to` look symmetric, `connected_to` probably but a
+      one-way corridor breaks it, `supports`/`on_top_of` look like an inverse
+      pair, and `part_of` has no `has_part` in the table at all.
 - [x] **The four orthogonal trust axes** (§9):
       `Origin × Corroboration × Adjudication × Validity` — **DONE 2026-08-06**,
       `crates/kirra-world/src/trust.rs`. Pure, zero-dependency, 27 tests.
