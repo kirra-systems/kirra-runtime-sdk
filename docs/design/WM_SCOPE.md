@@ -399,10 +399,15 @@ not permission.
       §8's *"deliberately weak"* means written as a type; and there is **no
       `update` and no `valid_time` setter** — `supersede` returns *both* the
       closed predecessor and the replacement, so history cannot be dropped by
-      omission.
+      omission. `supersede` takes the closing **instant**, not an interval, so
+      neither an open "closed" predecessor nor a rewritten start is
+      representable.
       **The fourth note is half-doable in a pure module.** A pure crate cannot
-      stop a store writing both `contains` and `inside`; `canonical()` makes the
-      two spellings the *same value* so a dedupe has something to compare. The
+      stop a store writing both `contains` and `inside`; `canonical()` normalizes
+      them to the same *direction*, so the two rows carry one
+      subject/predicate/object triple (`canonical_triple()`) and a dedupe has
+      something to compare. Not the same record — identity, times, source and
+      confidence differ between two separately-written rows and should. The
       canonical direction is the lexicographically smaller token — mechanical on
       purpose, since choosing on meaning would be a domain judgement.
       **The relation algebra is deliberately sparse.** §8 states exactly one

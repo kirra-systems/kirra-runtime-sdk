@@ -36,8 +36,10 @@
 //!
 //! A pure module cannot stop a store writing both rows. What it can do is
 //! define **one canonical direction**, so the two spellings normalize to the
-//! same value and a store's dedupe has something to compare — see
-//! [`Relationship::canonical`].
+//! same subject/predicate/object triple and a store's dedupe has something to
+//! compare — see [`Relationship::canonical`] and
+//! [`Relationship::canonical_triple`]. Not the same *record*: identity, times,
+//! source and confidence still differ, and should.
 //!
 //! **The relation algebra is deliberately sparse.** §8 states exactly one
 //! implication (`contains` → `inside`) and says nothing about the other
@@ -46,7 +48,7 @@
 //! docs for the specific candidates, recorded as an open question.
 
 use crate::entity::EntityId;
-use crate::observation::{Confidence, DomainInstant, SourceClass, ValidInterval};
+use crate::observation::{Confidence, DomainInstant, SourceClass, TimeError, ValidInterval};
 
 // ---------------------------------------------------------------------------
 // Predicates — §8's four groups
@@ -268,6 +270,15 @@ pub enum RelationshipError {
     /// The relationship has already been superseded. Supersession is terminal
     /// for the record — §8's *"the history is the point"*.
     AlreadySuperseded,
+    /// The instant offered to [`Relationship::supersede`] cannot close this
+    /// record's window: it is on another clock
+    /// ([`TimeError::DomainsDiffer`]) or precedes the window's start
+    /// ([`TimeError::IntervalEndsBeforeItStarts`]).
+    ///
+    /// The inner error is **reused, not restated**. Re-declaring "ends before it
+    /// starts" here would let the two spellings drift apart, and the interval
+    /// rule belongs to [`ValidInterval`] whoever asks it.
+    ClosingTime(TimeError),
 }
 
 /// An opaque relationship identifier. Generation lives in the store.
@@ -438,22 +449,46 @@ impl Relationship {
     /// point"*, and a caller that keeps only the second half has to discard the
     /// first explicitly rather than by omission.
     ///
+    /// # Why this takes an INSTANT and not an interval
+    ///
+    /// It used to take a whole [`ValidInterval`], which quietly made it the
+    /// `valid_time` setter this type claims not to have. Two things were
+    /// representable that must not be:
+    ///
+    /// * **An open "closed" predecessor.** Handing in
+    ///   [`ValidInterval::open_from`] left the superseded record with no end, so
+    ///   it and its replacement both claimed to hold from their starts forever
+    ///   — the exact overlap supersession exists to prevent, while the method
+    ///   still reported a "closed predecessor".
+    /// * **A rewritten start.** An interval whose start differed from the
+    ///   original silently moved when the old fact began. That is an edit to
+    ///   history wearing supersession's clothes.
+    ///
+    /// Taking the closing **instant** removes both: the start is not an input,
+    /// so it cannot be rewritten, and an end is not optional, so the result
+    /// cannot be open. Neither needed a check, a test or a reviewer.
+    ///
     /// # Errors
     ///
-    /// [`RelationshipError::AlreadySuperseded`] — terminal, like
-    /// [`crate::trust::Adjudication::Rejected`] and
-    /// [`crate::entity::Lifecycle::Merged`]. A record that has already been
-    /// closed is not closed again.
+    /// * [`RelationshipError::AlreadySuperseded`] — terminal, like
+    ///   [`crate::trust::Adjudication::Rejected`] and
+    ///   [`crate::entity::Lifecycle::Merged`]. A record that has already been
+    ///   closed is not closed again.
+    /// * [`RelationshipError::ClosingTime`] if `closed_at` is on a different
+    ///   clock from the window it closes, or precedes its start. Both are
+    ///   [`ValidInterval::new`]'s own rules, asked rather than re-implemented.
     pub fn supersede(
         self,
-        closed_at: ValidInterval,
+        closed_at: DomainInstant,
         replacement: Relationship,
     ) -> Result<(Self, Self), RelationshipError> {
         if self.superseded_by.is_some() {
             return Err(RelationshipError::AlreadySuperseded);
         }
+        let valid_time = ValidInterval::new(self.valid_time.start(), Some(closed_at))
+            .map_err(RelationshipError::ClosingTime)?;
         let closed = Self {
-            valid_time: closed_at,
+            valid_time,
             superseded_by: Some(replacement.id.clone()),
             ..self
         };
@@ -461,11 +496,22 @@ impl Relationship {
     }
 
     /// Normalize to the canonical direction, so the two spellings of one fact
-    /// compare equal — §8's *"symmetry and inverses are derived, not stored
-    /// twice."*
+    /// carry **the same subject/predicate/object triple** — §8's *"symmetry and
+    /// inverses are derived, not stored twice."*
     ///
-    /// A pure module cannot stop a store writing both rows; it can make them
-    /// **the same value** so a dedupe has something to compare.
+    /// A pure module cannot stop a store writing both rows; it can make the
+    /// thing a dedupe compares agree. Read [`Self::canonical_triple`] for what
+    /// that comparable is, and the paragraph below for what this does **not**
+    /// claim.
+    ///
+    /// # This does not make the two records equal
+    ///
+    /// Worth being exact, because the looser phrasing is tempting and wrong:
+    /// `Relationship`'s [`PartialEq`] spans every field, including `id`,
+    /// `transaction_time`, `origination` and `confidence`. Two rows written
+    /// separately by two producers will differ on all four, and canonicalizing
+    /// them changes none of it. What agrees afterwards is the triple —
+    /// which is the part a duplicate-detector is asking about.
     ///
     /// # Which direction is canonical, and why it is arbitrary on purpose
     ///
@@ -496,6 +542,19 @@ impl Relationship {
             ..self
         }
     }
+
+    /// The part of this record that [`Self::canonical`] normalizes — *what is
+    /// related to what, how.*
+    ///
+    /// This exists so the canonicalization claim is checkable rather than
+    /// asserted. A store deduping the two spellings of one fact compares
+    /// **this**, not whole records: the identity, times, source and confidence
+    /// of two separately-written rows differ by construction and say nothing
+    /// about whether they state the same thing.
+    #[must_use]
+    pub fn canonical_triple(&self) -> (&EntityId, Predicate, &RelObject) {
+        (&self.subject, self.predicate, &self.object)
+    }
 }
 
 #[cfg(test)]
@@ -509,11 +568,14 @@ mod tests {
     fn rid(s: &str) -> RelationshipId {
         RelationshipId::new(s).unwrap()
     }
-    fn interval(from: u64) -> ValidInterval {
-        ValidInterval::open_from(DomainInstant {
-            ms: from,
+    fn instant(ms: u64) -> DomainInstant {
+        DomainInstant {
+            ms,
             domain: ClockDomain::System,
-        })
+        }
+    }
+    fn interval(from: u64) -> ValidInterval {
+        ValidInterval::open_from(instant(from))
     }
     fn txn() -> DomainInstant {
         DomainInstant {
@@ -531,12 +593,23 @@ mod tests {
         object: &str,
         o: Origination,
     ) -> Result<Relationship, RelationshipError> {
+        rel_from(id, subject, p, object, o, 0)
+    }
+    #[allow(clippy::too_many_arguments)] // mirrors Relationship::new; see there
+    fn rel_from(
+        id: &str,
+        subject: &str,
+        p: Predicate,
+        object: &str,
+        o: Origination,
+        start_ms: u64,
+    ) -> Result<Relationship, RelationshipError> {
         Relationship::new(
             rid(id),
             eid(subject),
             p,
             RelObject::Entity(eid(object)),
-            interval(0),
+            interval(start_ms),
             txn(),
             o,
             conf(),
@@ -677,22 +750,22 @@ mod tests {
         )
         .unwrap();
 
-        let closed_window = ValidInterval::new(
-            DomainInstant {
-                ms: 0,
-                domain: ClockDomain::System,
-            },
-            Some(DomainInstant {
-                ms: 500,
-                domain: ClockDomain::System,
-            }),
-        )
-        .unwrap();
-
-        let (closed, replacement) = old.supersede(closed_window, new).unwrap();
+        // `rel` opens the window at ms 0 on the System clock.
+        let (closed, replacement) = old
+            .supersede(
+                DomainInstant {
+                    ms: 500,
+                    domain: ClockDomain::System,
+                },
+                new,
+            )
+            .unwrap();
 
         assert_eq!(closed.superseded_by(), Some(&rid("r-2")));
+        // Closed at the instant given, and — the part that cannot be passed in
+        // — still opening where it always did.
         assert_eq!(closed.valid_time().end().unwrap().ms, 500);
+        assert_eq!(closed.valid_time().start().ms, 0);
         assert_eq!(replacement.id(), &rid("r-2"));
         assert_eq!(replacement.superseded_by(), None);
         // The old fact is still fully readable — "where was it yesterday?"
@@ -726,11 +799,132 @@ mod tests {
         )
         .unwrap();
 
-        let (closed, _) = a.supersede(interval(0), b).unwrap();
+        let (closed, _) = a.supersede(instant(10), b).unwrap();
+        // Genuinely closed first — the guard being tested is terminality, not
+        // "an open window cannot be reopened".
+        assert!(closed.valid_time().end().is_some());
         assert_eq!(
-            closed.supersede(interval(0), c),
+            closed.supersede(instant(20), c),
             Err(RelationshipError::AlreadySuperseded)
         );
+    }
+
+    #[test]
+    fn a_superseded_window_can_never_be_left_open() {
+        // The structural claim: there is no argument that produces an open
+        // predecessor, because the end is not an Option at this boundary.
+        let a = rel(
+            "r-1",
+            "e-1",
+            Predicate::Near,
+            "e-2",
+            Origination::Direct(SourceClass::Sensor),
+        )
+        .unwrap();
+        let b = rel(
+            "r-2",
+            "e-1",
+            Predicate::Near,
+            "e-3",
+            Origination::Direct(SourceClass::Sensor),
+        )
+        .unwrap();
+        assert!(a.valid_time().end().is_none());
+        let (closed, _) = a.supersede(instant(1), b).unwrap();
+        assert!(closed.valid_time().end().is_some());
+    }
+
+    #[test]
+    fn supersession_cannot_rewrite_when_the_old_fact_began() {
+        // The start is not an input. Closing at an instant BEFORE the window
+        // opened is refused rather than quietly moving the start back to it.
+        let a = rel_from(
+            "r-1",
+            "e-1",
+            Predicate::Near,
+            "e-2",
+            Origination::Direct(SourceClass::Sensor),
+            100,
+        )
+        .unwrap();
+        let b = rel(
+            "r-2",
+            "e-1",
+            Predicate::Near,
+            "e-3",
+            Origination::Direct(SourceClass::Sensor),
+        )
+        .unwrap();
+        assert_eq!(
+            a.supersede(instant(50), b),
+            Err(RelationshipError::ClosingTime(
+                TimeError::IntervalEndsBeforeItStarts
+            ))
+        );
+    }
+
+    #[test]
+    fn a_closing_instant_from_another_clock_is_refused() {
+        // Inherited from ValidInterval rather than re-implemented — the point
+        // of wrapping TimeError instead of restating its variants.
+        let a = rel(
+            "r-1",
+            "e-1",
+            Predicate::Near,
+            "e-2",
+            Origination::Direct(SourceClass::Sensor),
+        )
+        .unwrap();
+        let b = rel(
+            "r-2",
+            "e-1",
+            Predicate::Near,
+            "e-3",
+            Origination::Direct(SourceClass::Sensor),
+        )
+        .unwrap();
+        assert_eq!(
+            a.supersede(
+                DomainInstant {
+                    ms: 500,
+                    domain: ClockDomain::Boundary,
+                },
+                b
+            ),
+            Err(RelationshipError::ClosingTime(TimeError::DomainsDiffer {
+                left: ClockDomain::System,
+                right: ClockDomain::Boundary,
+            }))
+        );
+    }
+
+    #[test]
+    fn canonicalizing_agrees_on_the_triple_and_not_on_the_record() {
+        // Exactly the claim the docs make, and exactly the one they do not.
+        // Two producers state one fact in opposite directions.
+        let contains = rel(
+            "r-1",
+            "room",
+            Predicate::Contains,
+            "chair",
+            Origination::Direct(SourceClass::Sensor),
+        )
+        .unwrap()
+        .canonical();
+        let inside = rel(
+            "r-2",
+            "chair",
+            Predicate::Inside,
+            "room",
+            Origination::Direct(SourceClass::Operator),
+        )
+        .unwrap()
+        .canonical();
+
+        assert_eq!(contains.canonical_triple(), inside.canonical_triple());
+        // ...and the records are still distinct, which is correct: two
+        // independent pieces of evidence are not one row.
+        assert_ne!(contains, inside);
     }
 
     // -- §8: inverses are derived, not stored twice ------------------------
