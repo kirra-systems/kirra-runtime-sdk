@@ -2,8 +2,9 @@
 
 | Field | Value |
 |---|---|
-| Status | **Proposed — NOT ratified on merge.** See *Ratification criteria*. Merging records the proposal; it does not ratify it and authorizes no implementation. |
-| Date | 2026-08-02 |
+| Status | **Accepted** — 2026-08-06. All five ratification criteria recorded. Acceptance settles ownership, boundary and deployment; it **authorizes no implementation** and carries two conditions — the `PerceivedObject` import rule and the Tier 1 retention driver. See *Acceptance record*. |
+| Date | 2026-08-02 (proposed) · 2026-08-06 (accepted) |
+| Accepted by | **Justin Looney**, holding the World Model owner, architecture owner and deployment owner roles. One approver across all three — recorded plainly rather than as three sign-offs, following [`ADR-0041`](0041-world-model-persistence-architecture.md)'s precedent. |
 | Blueprint | `KIRRA-WM-ARCH-001` §4, §5, §14, §15 (WM-1) — [`docs/design/WORLD_MODEL_ARCHITECTURE.md`](../design/WORLD_MODEL_ARCHITECTURE.md) |
 | Deciders | World Model owner · architecture owner · deployment owner |
 | Depends on | [`ADR-0039`](0039-world-model-bidirectional-governor-fence.md) (WM-6) — the fence constrains every option below |
@@ -521,9 +522,26 @@ not exist and is **not proposed here**, because designing it belongs with the
 Tier 1 observation model rather than ahead of it. Recorded so the owner
 confirms this row knowing the condition currently rests on remembering it.
 
-**Drafted, not decided.** No checkbox moves on this text. The compatibility
-inventory box requires *each row confirmed by its current owner*, and this is
-one row's evidence prepared for that confirmation.
+#### RULED — 2026-08-06
+
+> **CONFIRMED — 2026-08-06 by Justin Looney, World Model owner.** The wording
+> above is **adopted unamended**: unconditional for perception types carrying
+> their own confidence and timestamp, **conditional for `PerceivedObject`** —
+> no import path may be built until a stated rule exists for where its
+> confidence and validity come from, with the synthesis visible in the store
+> rather than indistinguishable from a measured value. The rule belongs to
+> `WM_SCOPE.md` Tier 1.
+>
+> **The import-boundary machine guard was offered and deliberately NOT taken.**
+> Adding it now would remove this deferral's known weakness — that nothing reds
+> in CI if an importer synthesizes a confidence — but it would mean designing
+> the guard ahead of the Tier 1 observation model that defines what it should
+> check. The weakness is therefore **accepted and recorded**, not mitigated:
+> until Tier 1 lands, this condition rests on being remembered.
+
+**One row of five.** The compatibility-inventory checkbox requires *each row
+confirmed by its current owner*; this ruling confirms the `tracked-object
+inputs` row only, so **that box stays unticked** pending the remaining four.
 
 ### Open question 4 appears already dispositioned
 
@@ -575,9 +593,24 @@ concedes nothing that has not already been conceded.
 > has no content, because the dependency runs store → core and an empty core
 > means an empty seam.
 
-This is **drafted, not decided.** Nothing above ticks the box, and the owner may
-prefer the alternative ordering — build Tier 1 first and ratify with a real
-answer — at the cost of leaving this ADR Proposed while its own subject matter
+> **RULED — 2026-08-06 by Justin Looney, World Model owner and architecture
+> owner.** The wording above is **adopted unamended**. The alternative ordering
+> (build Tier 1 first, ratify with a real answer) was considered and declined:
+> it leaves this ADR Proposed while its own subject matter is built, which is
+> the circularity the deferral exists to dissolve.
+>
+> **The box this feeds is `Open questions 1 and 4 dispositioned` — a
+> conjunction, and it stays UNTICKED.** Q1 is now dispositioned; Q4 is
+> *"appears already dispositioned"*, which is a finding, not the owner's act.
+> Ticking on a half-satisfied conjunction is exactly the drift these rulings
+> exist to prevent.
+
+The section below was the draft this ruling adopted, kept for the record.
+
+This was **drafted, not decided** when written. Nothing in it ticked the box,
+and the owner might have preferred the alternative ordering — build Tier 1 first
+and ratify with a real answer — at the cost of leaving this ADR Proposed while
+its own subject matter
 is implemented, which is the situation ADR-0042 was created to correct.
 
 **A note on the gate, so the deadlock is not overstated.** The domain-logic gate
@@ -709,18 +742,138 @@ The one item with no technical component. Recorded here is what the decision
 
 **Proposed.** Accepted only when all are recorded:
 
-- [ ] **Repository dependency review** — the proposed crate graph reviewed
+- [x] **Repository dependency review** — the proposed crate graph reviewed
       against the existing workspace
+
+      **SIGNED OFF — 2026-08-06 by Justin Looney.** On the findings recorded in
+      *Repository dependency review — findings, 2026-08-05* above: the graph as
+      built matches the graph as proposed. The review also surfaced four things
+      that were acted on rather than filed — Q1's wrong prerequisite, the seam's
+      partly-spent justification, the tracked-object row's half-true rationale,
+      and a wrong inventory citation — so this sign-off covers a review that
+      changed the ADR, not one that merely confirmed it.
 - [x] **Prototype crate graph** — `kirra-world` compiling as a leaf with no
       ROS, no actuation, and no checker edge (ADR-0039 baseline preserved).
       **Built; findings below. Ratifies nothing else in this ADR.**
-- [ ] **Compatibility inventory** — each row of the compatibility table
+- [x] **Compatibility inventory** — each row of the compatibility table
       confirmed by its current owner
-- [ ] **Deployment ownership decision** — who runs it, where it stores, who
+
+      **CONFIRMED — all five rows, by Justin Looney.** Four rows confirmed
+      2026-08-06 (`robot/world_model.py`, `destination.rs`,
+      `destination_service.rs`, `places.json`/`routes.json` — each verified
+      present against the tree and matching its stated disposition, with the
+      `places`/`routes` citation corrected to the shipped `*.example.json`
+      files). The fifth, **tracked-object inputs**, was confirmed separately
+      with a **condition** — see the ruling above: unconditional for perception
+      types carrying their own confidence and timestamp, conditional for
+      `PerceivedObject`, whose import path may not be built until a stated rule
+      exists for where its confidence and validity come from.
+
+      **This box therefore closes over one conditional row.** That is
+      deliberate: the row is confirmed, and its condition is carried in the
+      inventory rather than left as an unticked box, because the condition binds
+      Tier 1 work rather than this ADR's ratification.
+- [x] **Deployment ownership decision** — who runs it, where it stores, who
       backs it up
-- [ ] Open questions 1 and 4 dispositioned
+
+      **DECIDED — 2026-08-06 by Justin Looney, deployment owner.**
+
+      | Part | Decision |
+      |---|---|
+      | **Who runs it** | The **verifier's operator**. Kirra World is co-located with the verifier rather than given its own operator. |
+      | **Where it stores** | **Local SQLite**, alongside the verifier's own database — not the Postgres shared tier. A semantic, non-authoritative store does not belong in the tier the control plane depends on. |
+      | **Who backs it up** | The **verifier's existing backup regime**, which already respects [`ADR-0038`](0038-postgres-shared-state-hybrid.md)'s per-instance local audit ledger. Inherited rather than designed, so the chain semantics that regime already preserves are not re-derived for a second system. |
+
+      **The capacity consequence is bound, not accepted silently.** D-20/D-21
+      measured **15.79 days** to fill 8 GiB at 10 Hz on the ratified schema, and
+      no retention driver exists. This decision makes a **retention driver an
+      explicit exit criterion for `WM_SCOPE.md` Tier 1** — so the fill date
+      cannot arrive unowned, and Tier 1 cannot be called done without it.
+
+      **What co-location costs, stated rather than glossed.** A knowledge store
+      now shares a host with the safety verifier, so its disk pressure is the
+      verifier's disk pressure — which is precisely why the retention criterion
+      is attached rather than deferred. The blast-radius separation that a
+      dedicated host would have given is traded for a backup regime that already
+      exists and already handles the ledger correctly.
+- [x] Open questions 1 and 4 dispositioned
+
+      **BOTH HALVES NOW RULED — the conjunction is satisfied, 2026-08-06.**
+
+      **Q1 (the `kirra-world` / `kirra-world-store` seam)** — dispositioned by
+      **deferral**: the seam is retained on the blueprint §5 layering argument,
+      with a revisit trigger at Tier 1 completion. Full ruling above.
+
+      **Q4 (naming-collision disposition, ADR-0039 C1/C3)** — **dispositioned as
+      already settled.** C1 is ticked in ADR-0039, decided by ADR-0042
+      Decision 1. C3 (`robot/world_model.py`) carries "retain" in this ADR's own
+      compatibility table, with any rename behind safety review because the
+      module is imported by `rabbit_converse.py`, installer-staged, and gated by
+      the live `KIRRA_WORLD_MODEL_ENABLED`. Q4 was a **bookkeeping gap, not a
+      live question** — but closing it was the owner's act, which is what this
+      records. The rename is **not** decided here; it stays at "retain".
+
+      **This box stayed unticked while only Q1 was ruled** — earlier the same
+      day — because a conjunction is not half-satisfiable. It ticks now because
+      both halves are ruled, not because the second was assumed to follow.
 
 Merging the PR that **introduced this ADR** satisfied none of the above.
 Boxes above are ticked only by a separately recorded owner ruling, each of
 which names its owner and date inline — never by the act of merging a
 document change.
+
+---
+
+## Acceptance record
+
+**Accepted 2026-08-06 by Justin Looney**, holding the World Model owner,
+architecture owner and deployment owner roles — one approver across all three,
+recorded plainly rather than as three sign-offs.
+
+### Two conditions ride on this acceptance
+
+Neither gated it, and both bind Tier 1 rather than this ADR:
+
+| Condition | Source | Enforced by |
+|---|---|---|
+| **No `PerceivedObject` import path** until a stated rule exists for where its confidence and validity come from, with the synthesis visible in the store | Compatibility inventory, tracked-object row | **Nothing** — recorded weakness, see below |
+| **A retention driver** is an exit criterion for `WM_SCOPE.md` Tier 1 | Deployment-ownership decision | The Tier 1 checklist |
+
+### The first condition is not machine-checked, and that was a choice
+
+An import-boundary guard was offered and **deliberately declined**: designing it
+now would mean guessing what it should check, ahead of the Tier 1 observation
+model that defines the trust axes. So this condition rests on being remembered —
+unlike ADR-0042's open question 1, whose breach reds Fence B and therefore
+announces itself. Recorded here rather than in the row alone, so an accepted ADR
+does not quietly carry an unenforced condition.
+
+### What acceptance settled, and what it did not
+
+**Settled.** Crate layout and ownership, write and read authority, the service
+boundary, failure behaviour, the compatibility treatment of all five existing
+surfaces, the seam's retention with a Tier 1 revisit, and deployment ownership
+in all three parts.
+
+**Not settled.** No implementation is authorized. Open questions 2, 3, 5 and 6
+remain open — including **Q6 (predictive containment)**, which the dependency
+review raised and which was explicitly kept out of the ratification gate so that
+raising it could not silently enlarge the criteria.
+
+### Deployment ownership, and its cost
+
+Kirra World runs **co-located with the verifier**, on **local SQLite**, under the
+**verifier's existing backup regime**. The regime is inherited rather than
+designed, so [`ADR-0038`](0038-postgres-shared-state-hybrid.md)'s per-instance
+local audit ledger keeps the chain semantics that regime already preserves.
+
+The cost is stated rather than glossed: **a knowledge store now shares a host
+with the safety verifier**, so its disk pressure is the verifier's. That is
+exactly why the retention driver became a Tier 1 exit criterion instead of a
+later concern — the measured 15.79-day fill must not arrive unowned.
+
+### Independence posture
+
+Owner self-assessment throughout; no independent review. Kirra is designed in
+alignment with ISO 26262 ASIL-D requirements and IEC 61508 SIL 3 requirements;
+independent third-party assessment has not yet been performed.

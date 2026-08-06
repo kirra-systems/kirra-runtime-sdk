@@ -1,4 +1,4 @@
-//! **Kirra World — domain core. PROTOTYPE: shape only, no domain logic.**
+//! **Kirra World — domain core. Tier 1 in progress: the trust model is real.**
 //!
 //! This crate exists to prove ONE thing that is expensive to get wrong later:
 //! the dependency *shape*. ADR-0040 (WM-1) proposes `kirra-world` as a pure
@@ -6,21 +6,26 @@
 //! criteria ask for a "prototype crate graph — `kirra-world` compiling as a leaf
 //! with no ROS, no actuation, and no checker edge". That is what this is.
 //!
-//! # What this crate deliberately does NOT contain
+//! # What this crate contains, and what it still does not
 //!
-//! No fields. No invariants. No constructors. No storage. No API. No queries.
-//! The ten types below are **unconstructible placeholders** — each has a private
-//! unit field, so nothing outside this crate can build one and no logic can
-//! quietly accrete around them while the decision that governs them is still
-//! open.
+//! **Real:** [`mod@trust`] — the four orthogonal trust axes (`Origin`,
+//! `Corroboration`, `Adjudication`, `Validity`) and the seven transition rules,
+//! with the anti-laundering rule (rule 5) and read-time validity (rule 6) as its
+//! load-bearing parts. Pure functions over pure data; still zero dependencies.
 //!
-//! That decision is the safety-assurance scope ruling
+//! **Still absent:** storage, API, queries, and the entity/observation/
+//! relationship models. The nine remaining types below are **unconstructible
+//! placeholders** — each has a private unit field, so nothing outside this crate
+//! can build one and no logic can quietly accrete around a name before the model
+//! that gives it meaning exists.
+//!
+//! The governing decision is the safety-assurance scope ruling
 //! ([ADR-0042](../../../docs/adr/0042-world-model-terminology-and-safety-boundary-scope.md)
-//! Decision 5) — which was **PENDING and unassigned when this crate was
-//! written, and was RECORDED on 2026-08-05** as *safety-related,
-//! non-authoritative*. Statuses as they now stand: **ADR-0041 is Accepted**
-//! (2026-08-04); ADR-0039, ADR-0040 and ADR-0042 remain **Proposed**. Nothing
-//! here ratifies any of them.
+//! Decision 5) — **PENDING and unassigned when this crate was written, RECORDED
+//! on 2026-08-05** as *safety-related, non-authoritative*. Statuses as they now
+//! stand: **all four World Model ADRs are Accepted** — 0041 on 2026-08-04, and
+//! 0039, 0040 and 0042 on 2026-08-06. Each was an owner self-assessment; none
+//! authorizes implementation by its own terms.
 //!
 //! # The names
 //!
@@ -44,16 +49,19 @@
 //! declaration-only. What still constrains this crate is the ruling's own
 //! *Conditions that reopen the decision* — not the gate.
 //!
-//! So the honest reason the core is empty is simpler and less flattering than a
-//! gate: **WM-2's scoped work was the storage slice, and nobody has done the
-//! domain-types work yet.** That is a decision about sequencing, and it is
-//! recorded as one (ADR-0041, *WM-2 implementation milestone*) rather than
-//! dressed up as an external hold.
+//! So the honest reason the core was empty was simpler and less flattering than
+//! a gate: **WM-2's scoped work was the storage slice, and nobody had done the
+//! domain-types work.** That was a decision about sequencing, recorded as one
+//! (ADR-0041, *WM-2 implementation milestone*) rather than dressed up as an
+//! external hold.
 //!
-//! The private unit fields below still earn their place. They stop logic
-//! accreting around names that ADR-0040 has not ratified — `ADR-0040` is still
-//! **Proposed**, and a name is a decision — so the constraint they enforce is
-//! real, it is just a *naming* constraint rather than a safety gate.
+//! **Tier 1 has now started**, and the gap is closing from this end: the trust
+//! model above is domain logic the store does not have. Note which direction
+//! that runs — the store's `WriterClass` + two-valued `ClaimStatus` is, in the
+//! scope doc's words, *"an adjudication proxy and nothing more"*. The four axes
+//! are what it is a proxy **for**, so the core is now ahead of the adapter on
+//! this one concept, and the store will need to grow toward it rather than the
+//! reverse.
 //!
 //! # Naming — this is NOT "the world model"
 //!
@@ -89,6 +97,8 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+pub mod trust;
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -175,18 +185,22 @@ pub struct TransactionTime(());
 // Trust (blueprint P6)
 // ---------------------------------------------------------------------------
 
-/// Trust decomposed into its four orthogonal axes.
+/// Trust decomposed into its orthogonal axes.
 ///
-/// PLACEHOLDER. The blueprint is explicit that trust is **not a scalar and not a
-/// single enum**: it decomposes into *origin*, *corroboration*, *adjudication*
+/// **No longer a placeholder** — this is the first Tier 1 slice, implemented in
+/// [`mod@trust`]. The blueprint is explicit that trust is *not a scalar and not a
+/// single enum*: it decomposes into *origin*, *corroboration*, *adjudication*
 /// and *temporal validity*, stored separately and collapsed to a grade only at
 /// the query boundary, for consumers that ask for one.
 ///
 /// Collapsing early is the failure this type exists to prevent — a single number
 /// cannot distinguish "one trusted sensor said so once" from "three sources
 /// agree but the claim is stale".
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TrustAxes(());
+///
+/// Note the shape the implementation took: **three stored axes, not four.**
+/// Validity is computed by [`trust::validity_at`] and has nowhere to be written,
+/// which makes transition rule 6 unbreakable rather than merely documented.
+pub use trust::TrustAxes;
 
 // ---------------------------------------------------------------------------
 // Query results
