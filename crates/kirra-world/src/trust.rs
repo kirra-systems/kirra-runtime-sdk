@@ -590,15 +590,62 @@ pub enum RequestedState {
     /// Ruled inadmissible. Terminal for the record (rule 7), and dominates
     /// every other label.
     Rejected,
+    /// **The §9.1 table names no state for these axes.**
+    ///
+    /// Reachable today for one combination: an `Asserted` claim whose
+    /// adjudication is not `Confirmed` — an operator has stated something and
+    /// nothing has ruled on it. `OperatorConfirmed` would overstate it,
+    /// `Observed` would claim a sensor saw it, and the table offers nothing else.
+    ///
+    /// Reported rather than guessed, on ADR-0040's own reasoning about
+    /// `ResolutionOutcome`: collapsing distinct answers into one value is
+    /// unrecoverable once done. This is **not** the blueprint's `Unknown`, which
+    /// means *no admissible evidence* — here there is evidence, it simply has no
+    /// familiar name.
+    Unlabelled,
 }
+
+/// How many agreeing sources the §9.1 `Confirmed` row's `Corroborated(≥k)`
+/// requires.
+///
+/// **The blueprint does not define `k`.** Two is the smallest value for which
+/// "corroborated" means anything — one source agreeing with itself is not
+/// corroboration — so that is what this uses. Named rather than inlined so the
+/// policy is greppable and changeable in one place, and flagged as an open
+/// question for the World Model owner: **what is `k`, and is it per-kind?**
+pub const CORROBORATION_THRESHOLD_K: u32 = 2;
 
 /// Collapse the axes to the familiar label — §9.1.
 ///
-/// Order matters and follows the table's own precedence: `Rejected` and
-/// `Expired` dominate any origin, and `Ambiguous` dominates the rest, because
-/// each answers a question that outranks "where did this come from".
+/// # The table is not a partition, so precedence is this function's to state
+///
+/// §9.1 shows how each *named* state decomposes into axes; it does not claim
+/// every axis combination has a name, and its rows overlap (a `Derived` claim
+/// that is also `Corroborated(≥k)` and `Confirmed` matches two rows). Collapsing
+/// arbitrary axes to one label is therefore this function's construction on top
+/// of the table, and the precedence below is stated rather than inherited:
+///
+/// 1. `Rejected`, then `Expired`, then `Ambiguous` — the three rows the table
+///    itself marks as applying to *any* origin, so they dominate.
+/// 2. `OperatorConfirmed` before `Confirmed` — it is the **more specific** of
+///    the two, pinning origin to `Asserted` where `Confirmed` accepts any.
+/// 3. Otherwise the origin-only rows.
+///
+/// # Two corrections against the table
+///
+/// An earlier version of this function got both of these wrong, in opposite
+/// directions, and they are called out because one of them was unsafe:
+///
+/// * **`OperatorConfirmed` requires `Confirmed` adjudication.** It previously
+///   returned for *any* `Asserted` claim, so an operator assertion that had not
+///   been adjudicated was reported as operator-confirmed. That **overstates
+///   trust**, which is the direction that matters.
+/// * **`Confirmed` is "any origin".** It previously returned only for
+///   `Observed`, hiding confirmed status on `Imported` and `Derived` claims.
+///   That understates, which is safe but still wrong.
 #[must_use]
 pub fn requested_state(axes: &TrustAxes, validity: Validity) -> RequestedState {
+    // (1) The rows the table marks "any origin".
     if matches!(axes.adjudication(), Adjudication::Rejected) {
         return RequestedState::Rejected;
     }
@@ -608,17 +655,28 @@ pub fn requested_state(axes: &TrustAxes, validity: Validity) -> RequestedState {
     if matches!(axes.adjudication(), Adjudication::Ambiguous) {
         return RequestedState::Ambiguous;
     }
+
+    let confirmed = matches!(axes.adjudication(), Adjudication::Confirmed);
+
+    // (2) More specific first.
+    if confirmed && matches!(axes.origin(), Origin::Asserted) {
+        return RequestedState::OperatorConfirmed;
+    }
+    if confirmed
+        && matches!(axes.corroboration(), Corroboration::Corroborated(n)
+            if n >= CORROBORATION_THRESHOLD_K)
+    {
+        return RequestedState::Confirmed;
+    }
+
+    // (3) Origin-only rows.
     match axes.origin() {
-        Origin::Asserted => RequestedState::OperatorConfirmed,
         Origin::Derived => RequestedState::Derived,
         Origin::Imported => RequestedState::Imported,
-        Origin::Observed | Origin::Predicted => {
-            if matches!(axes.adjudication(), Adjudication::Confirmed) {
-                RequestedState::Confirmed
-            } else {
-                RequestedState::Observed
-            }
-        }
+        Origin::Observed | Origin::Predicted => RequestedState::Observed,
+        // `Asserted` without `Confirmed` adjudication. The table names no state
+        // for it — see [`RequestedState::Unlabelled`].
+        Origin::Asserted => RequestedState::Unlabelled,
     }
 }
 
@@ -941,7 +999,10 @@ mod tests {
             RequestedState::Observed
         );
 
+        // Corroborated(2) — the table's `Corroborated(>=k)`.
         let confirmed = TrustAxes::observed()
+            .agreed()
+            .unwrap()
             .agreed()
             .unwrap()
             .operator_confirm()
@@ -989,6 +1050,83 @@ mod tests {
         assert_eq!(
             requested_state(&imported.reject().unwrap(), Validity::Fresh),
             RequestedState::Rejected
+        );
+    }
+
+    #[test]
+    fn an_unadjudicated_operator_assertion_is_not_operator_confirmed() {
+        // REGRESSION. The earlier version returned OperatorConfirmed for ANY
+        // Asserted origin, so a claim nobody had ruled on was reported as
+        // operator-confirmed — OVERSTATING trust, the direction that matters.
+        // The table requires `Confirmed` adjudication for that row.
+        let pending = TrustAxes::new(
+            Origin::Asserted,
+            Corroboration::Uncorroborated,
+            Adjudication::Pending,
+        )
+        .unwrap();
+        assert_ne!(
+            requested_state(&pending, Validity::Fresh),
+            RequestedState::OperatorConfirmed
+        );
+        assert_eq!(
+            requested_state(&pending, Validity::Fresh),
+            RequestedState::Unlabelled
+        );
+
+        // ...and the confirmed one still is.
+        assert_eq!(
+            requested_state(&pending.operator_confirm().unwrap(), Validity::Fresh),
+            RequestedState::OperatorConfirmed
+        );
+    }
+
+    #[test]
+    fn confirmed_is_any_origin_not_just_observed() {
+        // REGRESSION. The earlier version only reported Confirmed for Observed
+        // origin, hiding confirmed status on Imported and Derived claims. The
+        // table's Confirmed row reads "any origin".
+        for origin in [Origin::Imported, Origin::Derived, Origin::Observed] {
+            let axes = TrustAxes::new(
+                origin,
+                Corroboration::Corroborated(CORROBORATION_THRESHOLD_K),
+                Adjudication::Confirmed,
+            )
+            .unwrap();
+            assert_eq!(
+                requested_state(&axes, Validity::Fresh),
+                RequestedState::Confirmed,
+                "origin {origin:?} should reach Confirmed"
+            );
+        }
+    }
+
+    #[test]
+    fn confirmed_needs_k_agreeing_sources() {
+        let below = TrustAxes::new(
+            Origin::Observed,
+            Corroboration::Corroborated(CORROBORATION_THRESHOLD_K - 1),
+            Adjudication::Confirmed,
+        )
+        .unwrap();
+        assert_eq!(
+            requested_state(&below, Validity::Fresh),
+            RequestedState::Observed
+        );
+    }
+
+    #[test]
+    fn operator_confirmed_outranks_confirmed_being_more_specific() {
+        // Both rows match; the one that pins origin wins.
+        let axes = TrustAxes::new(
+            Origin::Asserted,
+            Corroboration::Corroborated(CORROBORATION_THRESHOLD_K),
+            Adjudication::Confirmed,
+        )
+        .unwrap();
+        assert_eq!(
+            requested_state(&axes, Validity::Fresh),
+            RequestedState::OperatorConfirmed
         );
     }
 

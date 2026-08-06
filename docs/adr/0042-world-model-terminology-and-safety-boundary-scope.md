@@ -10,16 +10,23 @@
 | Deciders | Architecture owner · World Model owner · **safety-assurance owner** (Decision 5) |
 | Cross-refs | [`crates/kirra-trajectory/src/perception_redundancy.rs`](../../crates/kirra-trajectory/src/perception_redundancy.rs) · [`crates/kirra-core/src/corridor.rs`](../../crates/kirra-core/src/corridor.rs) · [`robot/world_model.py`](../../robot/world_model.py) · [`ci/check_mick_actuation_fence.py`](../../ci/check_mick_actuation_fence.py) |
 
-> **Accepting this ADR does not ratify WM-1 or WM-6.** ADR-0040 (WM-1) and
-> ADR-0039 (WM-6) both remain **Proposed** — ADR-0040 on four criteria of its
-> own, ADR-0039 on three owner sign-offs. What acceptance here *does* deliver is
-> ADR-0039's terminal criterion, *"ADR-0042 itself accepted"*, which was the
-> whole point of resolving the five blockers found during review of #1306.
+> **Accepting this ADR did not, by itself, ratify WM-1 or WM-6.** What it
+> delivered was ADR-0039's terminal criterion, *"ADR-0042 itself accepted"* —
+> the whole point of resolving the five blockers found during review of #1306.
+> ADR-0039 still needed its three owner sign-offs and ADR-0040 its four criteria;
+> **both were recorded separately later the same day.**
 >
-> **WM-2 (ADR-0041) is Accepted** — since 2026-08-04, independently of this ADR.
-> *(This line previously read "WM-1, WM-2 or WM-6 … remain Proposed", which was
-> correct when written on 2026-08-02 and went stale on 2026-08-04. Corrected
-> here rather than left standing.)*
+> **All four World Model ADRs are now Accepted:** WM-2 (ADR-0041) on 2026-08-04,
+> and this ADR, ADR-0039 (WM-6) and ADR-0040 (WM-1) on 2026-08-06, in that forced
+> order. Each is an owner self-assessment; none authorizes implementation.
+>
+> *(This paragraph has been wrong twice and is dated on purpose. It first read
+> "WM-1, WM-2 or WM-6 … remain Proposed", correct on 2026-08-02 and stale from
+> 2026-08-04. It was then rewritten to say WM-1 and WM-6 "remain Proposed",
+> correct for the hours between this ADR's acceptance and theirs, and stale by
+> the end of the same day. A status summary inside one document about three
+> others is a standing staleness hazard; it is kept only because the forced
+> ratification order is genuinely hard to reconstruct without it.)*
 >
 > **Decision 5's safety-assurance ruling was RECORDED on 2026-08-05** —
 > *safety-related, non-authoritative* — and it is an **owner self-assessment,
