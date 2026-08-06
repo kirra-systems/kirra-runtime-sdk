@@ -339,7 +339,7 @@ export const body = `
             <h3>Frozen where it matters</h3>
             <p>The kinematics checker core is pinned by git blob hash <code>ed00f4da…</code> — CI asserts the exact
             bytes survive every change, and the Kani proofs run against the shipped source verbatim.</p>
-            ${evRow("verification/kani/", ".github/workflows/ci.yml:278#- name: frozen-talisman blob pin survives formatting")}
+            ${evRow("verification/kani/", ".github/workflows/ci.yml:296#- name: frozen-talisman blob pin survives formatting")}
           </div>
         </div>
       </div>
@@ -546,7 +546,7 @@ export const body = `
           <div class="stat">
             <p class="stat__value"><span data-count="3305">0</span></p>
             <p class="stat__label">test functions across 330 files, run on every push</p>
-            <p class="stat__evidence">${ev(".github/workflows/ci.yml:313#name: Test", "ci.yml · Test")}</p>
+            <p class="stat__evidence">${ev(".github/workflows/ci.yml:331#name: Test", "ci.yml · Test")}</p>
           </div>
           <div class="stat">
             <p class="stat__value"><span data-count="12">0</span></p>
@@ -569,13 +569,13 @@ export const body = `
             <h3>Adversarial by default</h3>
             <p>4 fuzz targets run on every push and 90 minutes each, weekly. PR diffs to the checker face
             mutation testing: if a mutant survives your tests, the gate fails.</p>
-            ${evRow("fuzz/fuzz_targets/", ".github/workflows/ci.yml:794#mutation-gate:")}
+            ${evRow("fuzz/fuzz_targets/", ".github/workflows/ci.yml:812#mutation-gate:")}
           </div>
           <div class="card" data-reveal>
             <h3>Coverage that can't regress</h3>
             <p>Gated decision-coverage floors on the checker crates (77–79%, measured ≈80%) plus a Codecov
             ratchet: any PR dropping workspace coverage by &gt;0.5% fails.</p>
-            ${evRow(".github/workflows/ci.yml:485#checker-coverage:", "codecov.yml")}
+            ${evRow(".github/workflows/ci.yml:503#checker-coverage:", "codecov.yml")}
           </div>
           <div class="card" data-reveal>
             <h3>Supply chain, pinned</h3>
