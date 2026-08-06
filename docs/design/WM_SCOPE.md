@@ -344,6 +344,30 @@ not permission.
       something empties the store. This is the one item here that is not about
       the domain model; it is here because that decision put it here rather than
       leaving the fill date unowned.
+      **DECIDING HALF DONE 2026-08-06**, `crates/kirra-world/src/retention.rs`,
+      15 tests, still zero-dependency: `RetentionPolicy` (OQ2's 30/365-day
+      horizons, with **protected ≥ raw refused at construction** — the inversion
+      would age protected classes out *before* the traffic they exist to
+      outlive), saturating cutoffs (an underflow that wrapped would make
+      *everything* eligible, and compaction is irreversible), a wall-clock
+      requirement (a 30-day horizon read against the boundary timing domain is
+      meaningless), `RetentionSurvey` refusing logs that cannot exist, and
+      `decide` returning **four outcomes rather than `Option<Range>`** — because
+      "nothing is old enough" and "a protected event is pinning the store" both
+      compact nothing, and only the second is worth waking someone for.
+      `Blocker::may_compact_around` encodes §11.3's asymmetry: the pre-agreed
+      escalation to compact *around* a blocker applies to projection heads and
+      **not** to protected classes. `CompactablePrefix`/`Eligibility` make two
+      meaningless survey states unrepresentable — a refusal naming no blocker,
+      and a prefix over a range nothing aged into — which is what makes `decide`
+      **infallible**: every survey that exists maps to a decision.
+      **STILL OPEN — the acting half.** Nothing calls
+      `WorldStore::compact_range`; the mechanism has existed since WM-2 and has
+      never been reached. What remains is the store-side survey queries and a
+      scheduled driver (precedent: `src/campaign_monitor.rs`,
+      `src/cert_expiry_monitor.rs`). **The box stays unticked until something
+      actually empties the store** — a policy that decides correctly and is
+      never run leaves the 15.79 days exactly where they were.
 - [ ] **Entity taxonomy** (§6) — **structure and kinds DONE 2026-08-06**,
       `crates/kirra-world/src/entity.rs`, 18 tests, still zero-dependency.
       Delivered: the 19-kind root-closed taxonomy + `EntityGroup`, `Lifecycle`
@@ -546,6 +570,10 @@ current**, **never supply geometry**.
 - [ ] **Retention policy driver** — the horizons OQ2 ruled are still applied by
       hand. Its precondition is already recorded in ADR-0041's WM-2 milestone:
       *the first doer-side consumer wired to the store ends the deferral.*
+      **Superseded in part:** ADR-0040 promoted this to a **Tier 1 exit
+      criterion** (§4), so it no longer waits on that precondition, and its
+      *deciding* half landed 2026-08-06 as `kirra_world::retention`. This entry
+      now covers only the scheduled driver, tracked at §4.
 - [ ] `kirra-world-service` as real CQRS — 9 commands, 8 queries, 10 emitted
       events — still inside Fence A
 - [ ] Operator teaching surface (§17): `AssertEntity`, corrections
