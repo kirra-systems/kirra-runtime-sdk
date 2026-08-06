@@ -30,6 +30,80 @@ World predicts nothing. It records.
 
 ---
 
+## 0a. What Kirra World contains — the layer vocabulary
+
+Naming the layers, because "the world model" collapses three different things
+and the collapse is what makes the safety conversation hard. **This is
+vocabulary for architecture already ratified in ADR-0041, not new
+architecture** — the log-plus-projections shape, the rebuild property and the
+no-projection-only-fact rule are all existing normative requirements. What is
+new here is only that they have names.
+
+### Kirra World contains
+
+**1. Evidence Ledger** — immutable, provenance-carrying, bitemporal events.
+*"What happened."*
+
+**2. Deterministic World Knowledge** — materialized projections derived from
+**confirmed** evidence. *"What we currently know."* Governed by the rules
+ADR-0041 and the blueprint already impose:
+
+* rebuild-from-zero must equal the incremental state;
+* **no projection-only fact** — everything traces to events;
+* a reducer or rule version change forces a rebuild;
+* validity is computed at read time, never stored.
+
+### Kirra World may expose a Cognitive Interface
+
+A **one-way read seam** for external predictive systems. A seam, not a
+container.
+
+### Predictive state is not part of Kirra World
+
+Not unless a future ruling changes `KIRRA-WM-ARCH-001` §9.1 and §20. See
+*Open question 6 — predictive containment* in
+[ADR-0040](../adr/0040-world-model-ownership-and-boundary.md).
+
+> **Citation note.** §9.1 (trust model) and §20 (AI prediction integration) are
+> sections of the **blueprint**, `KIRRA-WM-ARCH-001`, *not* of ADR-0041. They
+> are easy to attribute to the ADR because that is where the persistence
+> decisions live; sending a reader to the wrong document over a boundary rule
+> is worth one sentence to prevent.
+
+### The distinction that must not be smoothed over
+
+Two things are both called "LLM output" and only one of them is admitted:
+
+| | Example | Status |
+|---|---|---|
+| **LLM-originated candidate** — proposes something confirmable | *"I think that is the toolbox"* | **Inside Kirra World, already fenced** — `writer_class = llm_candidate`, excluded from the confirmed-only fold, reachable only by naming `candidates()` |
+| **Predictive belief** — infers a probability over unobserved state | *"The keys are probably still near the door"* | **Outside Kirra World.** §9.1: `Predicted` never appears in the evidence store |
+
+A diagram that nests "the cognitive layer" inside Kirra World collapses these,
+and the collapse is invisible because both are "the LLM's opinion."
+
+### The precompute rider
+
+The layering invites *"maintain a projection for everything."* That is not free,
+and this project has the numbers:
+
+* **D-16** — rebuild write amplification **2.8×–35.8×**, and a *dial* rather
+  than a constant (it is a property of how finely the fold is chunked);
+* **D-21** — projections cost ~3 % storage, but that is **one** projection over
+  an entity-bounded stream; a projection per question changes the arithmetic;
+* the real hazard is that **a stale projection is worse than none, because a
+  consumer trusts it**.
+
+> **Precompute only when freshness, invalidation, rebuild cost, write
+> amplification and provenance are explicit.**
+
+Otherwise the trade is *"the LLM might be wrong"* for *"the cache is silently
+stale"* — which is harder to notice and looks like success. `robot/world_model.py`
+already encodes the defence: TTL'd fields read `UNKNOWN` when stale rather than
+returning the last value they held.
+
+---
+
 ## 1. What "done" means here
 
 Taken from the blueprint rather than invented, so this document cannot quietly
