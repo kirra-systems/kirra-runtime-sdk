@@ -120,7 +120,7 @@ curl -N localhost:8090/system/posture/stream \\
               <h3 style="font-size:1.05rem">APIs &amp; examples</h3>
               <p><code>cargo doc --open</code> builds the full API reference (deny-warnings enforced). The governor
               quickstart example and the C SDK example both build and run in CI, so they're never stale.</p>
-              ${evRow("examples/", ".github/workflows/ci.yml:429#docs-and-sdk:")}
+              ${evRow("examples/", ".github/workflows/ci.yml:447#docs-and-sdk:")}
             </div>
           </div>
         </div>
@@ -150,7 +150,7 @@ curl -N localhost:8090/system/posture/stream \\
             <h3>Docs that must compile</h3>
             <p><code>cargo doc</code> runs at deny-warnings, the C SDK examples build and run in CI, and the governor
             quickstart example is executed — documentation drift fails the build.</p>
-            ${evRow(".github/workflows/ci.yml:429#docs-and-sdk:", "examples/")}
+            ${evRow(".github/workflows/ci.yml:447#docs-and-sdk:", "examples/")}
           </div>
           <div class="card" data-reveal>
             <h3>Report a vulnerability</h3>

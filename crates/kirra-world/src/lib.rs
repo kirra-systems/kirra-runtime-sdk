@@ -123,11 +123,30 @@ pub mod trust;
 
 /// Stable identity of a thing the world contains.
 ///
-/// PLACEHOLDER. ADR-0040 fixes that identity adjudication is **revisable** —
-/// merge and split are recorded events, not destructive edits — so whatever
-/// this becomes cannot be a bare opaque key that loses its own history.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct EntityId(());
+/// **No longer a placeholder** — the real type is [`entity::EntityId`], and this
+/// is a re-export of it rather than a second type sharing its name.
+///
+/// # Why this is a re-export and not a struct
+///
+/// It *was* a struct — `EntityId(())`, unconstructible — and the §6 taxonomy
+/// slice added the real `entity::EntityId(String)` beside it without retiring
+/// it. That left the crate exporting **two distinct types with the same name**:
+/// inside the crate nothing was confused, because every module names
+/// `crate::entity::EntityId` explicitly, but `kirra_world::EntityId` resolved to
+/// the dead one — and `kirra-world-store` and `kirra-world-service` both
+/// re-exported that, putting an unconstructible placeholder three names from the
+/// domain type at the layer an integrator imports from.
+///
+/// Measured and recorded in
+/// [`WM_Q1_SEAM_BASELINE.md`](../../../docs/design/WM_Q1_SEAM_BASELINE.md)
+/// before being fixed here.
+///
+/// ADR-0040's constraint on whatever this became still holds and is now the
+/// real type's to keep: identity adjudication is **revisable** — merge and split
+/// are recorded events, not destructive edits — so it cannot be a bare opaque
+/// key that loses its own history. `entity::EntityId` is opaque by construction;
+/// the *history* half is entity resolution, `WM_SCOPE.md` Tier 2.
+pub use entity::EntityId;
 
 /// Identity of a single recorded observation.
 ///

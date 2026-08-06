@@ -77,7 +77,13 @@ pub const RAW_HORIZON_DAYS: u64 = 30;
 /// they come to disagree.
 pub const PROTECTED_HORIZON_DAYS: u64 = 365;
 
-/// Why a retention policy could not be built, or a decision could not be made.
+/// Why a retention policy could not be built, or a survey could not be recorded.
+///
+/// Deliberately **not** "why a decision could not be made": [`decide`] is
+/// infallible. Every error here arises when the *inputs* are assembled — an
+/// unbuildable policy, a cutoff asked of the wrong clock, or a survey whose own
+/// queries contradict each other. Once a [`RetentionSurvey`] exists, a decision
+/// always follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RetentionError {
     /// A horizon of zero days would make every event immediately eligible.
@@ -295,6 +301,16 @@ impl RetentionSurvey {
     /// in it.
     pub fn new(oldest_generation: u64, eligibility: Eligibility) -> Result<Self, RetentionError> {
         if let Eligibility::Aged { newest, prefix } = eligibility {
+            // Generation 0 does not exist: the store's generations are an
+            // INTEGER PRIMARY KEY starting at 1, and `compact_range` refuses
+            // `lo < 1`. Without this, a survey claiming eligibility from 0
+            // yields a range the store can only reject — failing closed, but
+            // one layer later than it should, and as a confusing `EmptyRange`
+            // rather than "your survey is wrong". Zero stays admissible with
+            // `NothingOldEnough`, which produces no range at all.
+            if oldest_generation == 0 {
+                return Err(RetentionError::IncoherentSurvey);
+            }
             if newest < oldest_generation {
                 return Err(RetentionError::IncoherentSurvey);
             }
@@ -675,6 +691,23 @@ mod tests {
             RetentionSurvey::new(1, aged(500, through(500, Some(Blocker::ProjectionHead)))),
             Err(RetentionError::IncoherentSurvey)
         );
+    }
+
+    #[test]
+    fn generation_zero_is_refused_when_anything_is_eligible() {
+        // Generations start at 1 (INTEGER PRIMARY KEY) and the store refuses
+        // `lo < 1`. Without this guard the survey constructed and `decide`
+        // produced `CompactPartial { lo: 0, .. }` — a range the store could only
+        // reject, failing closed one layer later than it should and as a
+        // confusing EmptyRange rather than "your survey is wrong".
+        assert_eq!(
+            RetentionSurvey::new(0, aged(5, through(3, Some(Blocker::ProjectionHead)))),
+            Err(RetentionError::IncoherentSurvey)
+        );
+        // Zero stays admissible where it produces no range at all.
+        let none = RetentionSurvey::new(0, Eligibility::NothingOldEnough).unwrap();
+        assert_eq!(decide(&none), RetentionDecision::NothingOldEnough);
+        assert_eq!(decide(&none).range(), None);
     }
 
     #[test]

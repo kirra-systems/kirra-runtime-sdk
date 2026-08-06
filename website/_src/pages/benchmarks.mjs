@@ -92,7 +92,7 @@ ${pageHero({
               <div class="barlist__row"><span class="barlist__label">parko-core · measured</span><span class="barlist__track"><span class="barlist__fill" style="--w:79.8%"></span></span><span class="barlist__value">79.8%</span></div>
               <div class="barlist__row"><span class="barlist__label">gated floors</span><span class="barlist__track"><span class="barlist__fill" style="--w:78%;background:var(--chart-4)"></span></span><span class="barlist__value">77–79%</span></div>
             </div>
-            ${evRow(".github/workflows/ci.yml:485#checker-coverage:", "codecov.yml")}
+            ${evRow(".github/workflows/ci.yml:503#checker-coverage:", "codecov.yml")}
           </div>
           <div class="chart" data-reveal>
             <p class="chart__title">Transport read latency — p50, host-indicative</p>

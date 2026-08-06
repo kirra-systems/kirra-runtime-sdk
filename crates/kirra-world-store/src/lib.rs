@@ -79,10 +79,13 @@
 
 use std::path::Path;
 
+use kirra_world::retention::RetentionError;
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub mod compaction;
 pub mod projection;
+pub mod retention_driver;
+pub mod retention_sweeper;
 pub mod schema;
 
 pub use compaction::{Citation, CompactionOutcome, DegradedSummary, Resolution, TemporalAnswer};
@@ -229,6 +232,13 @@ pub enum StoreError {
         /// The requested high bound.
         hi: i64,
     },
+    /// The retention policy refused the inputs it was given — a non-wall clock,
+    /// or a survey whose own queries contradict each other.
+    ///
+    /// Carries the pure error rather than restating it, for the same reason
+    /// [`kirra_world::relationship::RelationshipError::ClosingTime`] wraps a
+    /// `TimeError`: two spellings of one rule drift apart.
+    RetentionPolicyRefused(kirra_world::retention::RetentionError),
 }
 
 impl std::fmt::Display for StoreError {
@@ -280,6 +290,31 @@ impl std::fmt::Display for StoreError {
             } => write!(f, "citation at generation {lo_generation}: {detail}"),
             Self::EmptyRange { lo, hi } => {
                 write!(f, "compaction range {lo}..={hi} is empty or inverted")
+            }
+            Self::RetentionPolicyRefused(e) => {
+                // Spelled out rather than `{e:?}`: every other variant here
+                // reads as a sentence, and a maintenance path that fails is
+                // read by whoever is holding the pager.
+                let why = match e {
+                    RetentionError::HorizonZero => {
+                        "a retention horizon of zero days would make every event                          immediately eligible"
+                            .to_string()
+                    }
+                    RetentionError::ProtectedShorterThanRaw {
+                        raw_days,
+                        protected_days,
+                    } => format!(
+                        "the protected horizon ({protected_days}d) is shorter than the raw                          horizon ({raw_days}d), which would age protected classes out first"
+                    ),
+                    RetentionError::NotWallClock(domain) => format!(
+                        "retention needs a wall clock; it was given the {domain:?} timing domain"
+                    ),
+                    RetentionError::IncoherentSurvey => {
+                        "the survey describes a log that cannot exist, so the store's own                          queries disagree"
+                            .to_string()
+                    }
+                };
+                write!(f, "retention refused these inputs: {why}")
             }
         }
     }

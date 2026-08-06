@@ -23,3 +23,25 @@
 // not merely described in a manifest.
 pub use kirra_world::ResolutionOutcome;
 pub use kirra_world_store::EntityId;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_re_exported_entity_id_is_the_domain_type_not_a_placeholder() {
+        // Regression guard. `kirra_world` briefly exported TWO types named
+        // `EntityId` — the real `entity::EntityId(String)` and a dead
+        // crate-root `EntityId(())` — and the placeholder was what travelled
+        // core → store → service. This crate is the furthest hop, so it is
+        // where the substitution was hardest to see and is worth pinning.
+        //
+        // Before the fix this did not compile: the placeholder has a private
+        // unit field and no constructor.
+        let id = EntityId::new("e-1").expect("the real type constructs");
+        assert_eq!(id.as_str(), "e-1");
+
+        // And it is the SAME type the domain model uses, not a look-alike.
+        assert_eq!(id, kirra_world::entity::EntityId::new("e-1").unwrap());
+    }
+}
