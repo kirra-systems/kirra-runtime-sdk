@@ -19,6 +19,24 @@ on:
   # ci/check_workflow_pr_coverage.py fails the build if this filter comes back.
   pull_request:
 
+  # Manual re-run lever, added after 2026-08-06's GitHub Actions incident.
+  #
+  # During it, webhook delivery was throttled to ~15%, so a push frequently
+  # produced NO workflow run at all — not a failed run, not a queued one:
+  # nothing. With only `push` and `pull_request` declared, there was no way to
+  # ask for a run, because the REST `run_workflow` endpoint requires a workflow
+  # that accepts `workflow_dispatch`. The API's other levers did not help
+  # either: `cancel_workflow_run` returned 502 and `rerun_failed_jobs` returned
+  # 403 for a run that had not completed. The only remaining option was another
+  # push — which `cancel-in-progress` below makes actively harmful, since it
+  # reaps a run already sitting in the queue and then depends on the same
+  # throttled webhook to create a replacement.
+  #
+  # One line, no behavioural change to normal runs: `push` and `pull_request`
+  # keep triggering exactly as before, and this adds a third way in for when
+  # they silently do not.
+  workflow_dispatch:
+
 permissions:
   contents: read
 
