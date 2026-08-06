@@ -238,9 +238,23 @@ not permission.
 - [ ] **Entity taxonomy** (§6)
 - [ ] **Observation model** (§7)
 - [ ] **Relationship model** (§8)
-- [ ] **The four orthogonal trust axes** (§9):
-      `Origin × Corroboration × Adjudication × Validity`
-- [ ] **The seven transition rules** (§9.2)
+- [x] **The four orthogonal trust axes** (§9):
+      `Origin × Corroboration × Adjudication × Validity` — **DONE 2026-08-06**,
+      `crates/kirra-world/src/trust.rs`. Pure, zero-dependency, 27 tests.
+      Note the shape it took: **three stored axes, not four.** `TrustAxes` has no
+      validity field, so rule 6 ("computed at read time, never stored") is
+      **structurally unbreakable** rather than a rule someone remembers —
+      `validity_at` takes the clock as an argument and there is nowhere to write
+      its answer down.
+- [ ] **The seven transition rules** (§9.2) — **six and a half of seven.**
+      Rules 1, 2, 3, 5, 6, 7 are implemented and tested, including the two
+      load-bearing ones. **Rule 4 is half done**: its *adjudication* half is
+      `TrustAxes::operator_confirm`; its *geometry* half (an operator assertion
+      may never silently rewrite a measured pose, P10) constrains the
+      **observation payload**, so it cannot be enforced until the observation
+      model exists. Deliberately left unticked rather than counted as done —
+      the module cannot reach a payload, which is why it cannot yet be
+      sidestepped, but "cannot be sidestepped from here" is not "enforced".
 
 ### Why the axes are not one enum
 
@@ -261,7 +275,11 @@ Two of the seven rules are load-bearing and genuinely hard:
   already does half of this in `ProjectedClaim::holds_at`.
 
 `Corroboration(n)` presupposes cross-observation matching — i.e. it cannot land
-before entity resolution (Tier 2).
+before entity resolution (Tier 2). **This held, and shaped the delivered slice:**
+the axis, its monotonic `agreed`/`disagreed` transitions and its weakest-wins
+fold are all implemented, but **nothing populates the count** — no matcher exists
+to decide that two observations are about the same thing. The algebra is ready
+for Tier 2; it is not driven by anything yet.
 
 **Largest single body of work in this document.**
 
