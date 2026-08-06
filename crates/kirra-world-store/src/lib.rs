@@ -83,6 +83,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub mod compaction;
 pub mod projection;
+pub mod retention_driver;
 pub mod schema;
 
 pub use compaction::{Citation, CompactionOutcome, DegradedSummary, Resolution, TemporalAnswer};
@@ -229,6 +230,13 @@ pub enum StoreError {
         /// The requested high bound.
         hi: i64,
     },
+    /// The retention policy refused the inputs it was given — a non-wall clock,
+    /// or a survey whose own queries contradict each other.
+    ///
+    /// Carries the pure error rather than restating it, for the same reason
+    /// [`kirra_world::retention::RetentionError::ClosingTime`] wraps a
+    /// `TimeError`: two spellings of one rule drift apart.
+    RetentionPolicyRefused(kirra_world::retention::RetentionError),
 }
 
 impl std::fmt::Display for StoreError {
@@ -280,6 +288,9 @@ impl std::fmt::Display for StoreError {
             } => write!(f, "citation at generation {lo_generation}: {detail}"),
             Self::EmptyRange { lo, hi } => {
                 write!(f, "compaction range {lo}..={hi} is empty or inverted")
+            }
+            Self::RetentionPolicyRefused(e) => {
+                write!(f, "retention policy refused these inputs: {e:?}")
             }
         }
     }

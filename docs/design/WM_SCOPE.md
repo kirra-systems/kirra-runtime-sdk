@@ -361,13 +361,24 @@ not permission.
       meaningless survey states unrepresentable — a refusal naming no blocker,
       and a prefix over a range nothing aged into — which is what makes `decide`
       **infallible**: every survey that exists maps to a decision.
-      **STILL OPEN — the acting half.** Nothing calls
-      `WorldStore::compact_range`; the mechanism has existed since WM-2 and has
-      never been reached. What remains is the store-side survey queries and a
-      scheduled driver (precedent: `src/campaign_monitor.rs`,
+      **ACTING HALF — survey + pass DONE 2026-08-06**,
+      `crates/kirra-world-store/src/retention_driver.rs`, 7 tests:
+      `WorldStore::retention_survey` (asks the log the four questions the pure
+      policy needs and takes no decision) and `WorldStore::run_retention_pass`
+      (survey → `decide` → act) — **the only call to `compact_range` made on a
+      policy's authority anywhere in the workspace.** It reports which refusal
+      stopped the prefix, which `largest_compactable_prefix` discards, because a
+      driver that cannot tell `ProtectedClass` from `ProjectionHead` cannot act
+      on §11.3's asymmetry.
+      **Retention ages on `txn_time_ms`, not `valid_from_ms`** — recorded as a
+      decision, not a column choice: retention bounds disk and disk grows on
+      insertion, whereas ageing on valid time would delete a backdated import on
+      arrival and never age out a future-dated claim.
+      **STILL OPEN — the scheduler.** Nothing calls `run_retention_pass` on a
+      timer yet (precedent: `src/campaign_monitor.rs`,
       `src/cert_expiry_monitor.rs`). **The box stays unticked until something
-      actually empties the store** — a policy that decides correctly and is
-      never run leaves the 15.79 days exactly where they were.
+      actually empties the store on its own** — a pass that is never invoked
+      leaves the 15.79 days exactly where they were.
 - [ ] **Entity taxonomy** (§6) — **structure and kinds DONE 2026-08-06**,
       `crates/kirra-world/src/entity.rs`, 18 tests, still zero-dependency.
       Delivered: the 19-kind root-closed taxonomy + `EntityGroup`, `Lifecycle`
