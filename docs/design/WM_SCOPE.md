@@ -235,8 +235,45 @@ not permission.
       something empties the store. This is the one item here that is not about
       the domain model; it is here because that decision put it here rather than
       leaving the fill date unowned.
-- [ ] **Entity taxonomy** (§6)
-- [ ] **Observation model** (§7)
+- [ ] **Entity taxonomy** (§6) — **structure and kinds DONE 2026-08-06**,
+      `crates/kirra-world/src/entity.rs`, 18 tests, still zero-dependency.
+      Delivered: the 19-kind root-closed taxonomy + `EntityGroup`, `Lifecycle`
+      with validated transitions, `EntityId`/`Alias` (each alias carrying its own
+      `SourceClass`), `ResolutionConfidence`, and the `Entity` spine.
+      **Two more rules made structural:** an unrecognised kind has **no group to
+      read** (`group()` returns `Option`, `None` for `Unknown`), so §6.2's
+      *"degrade to `Unknown`, not guess a supertype"* is unavailable to violate;
+      and `ResolutionConfidence` is a newtype so the "is this **one** thing"
+      claim cannot be passed where an attribute confidence was wanted.
+      **`Entity` has no `kind` field** — kind is adjudicated from classification
+      evidence, so reclassification cannot contradict a stored value.
+      `adjudicated_kind` returns a three-way `KindAdjudication`
+      (`NoEvidence` / `Settled` / `Unrankable`) rather than a bare kind, so
+      "I hold evidence I have no grounds to rank" is reportable instead of
+      collapsed into a guess — and it ranks **through** the §7.3 cross-basis
+      guard rather than around it. That
+      follows §6.2 over §6.1's field table, which **contradict each other**; the
+      tension is recorded in the module as an open question rather than resolved.
+      **Still open:** identity *adjudication* — candidate clustering, merge/split
+      events — is Tier 2. `entity_id` generation, `first_observed`/
+      `last_observed` and `provenance_head` need the store (ULID, hashing).
+- [ ] **Observation model** (§7) — **pure half DONE 2026-08-06**,
+      `crates/kirra-world/src/observation.rs`, 17 tests, still zero-dependency.
+      Delivered: `Confidence`/`ConfidenceBasis` (§7.3), `SourceClass` + its
+      mapping to the trust `Origin`, `SubjectRef` (including `Unbound`, which is
+      why this did not need the entity taxonomy first), `ClockDomain`/
+      `DomainInstant`/`ValidInterval` and the projection into
+      `trust::ValidityWindow`.
+      **Two more rules made structural**, following rule 6's shape: cross-modal
+      confidence comparison **errors** unless the caller names the decision
+      (`compare_across_bases`), and clock domains **cannot** be compared at all —
+      unsound rather than merely unwise, so there is deliberately no escape hatch.
+      **Still open, and it needs dependencies:** `observation_id` (ULID),
+      `evidence_digest`/`prev_hash` (hashing), `frame`/`map`, and the per-kind
+      versioned `TypedPayload`. Those belong to the **store**, which already has
+      all three — pulling them into the core would spend ADR-0040's Q1 seam
+      decision without revisiting it. `ObservationKind` is also absent because
+      the blueprint names the field but never enumerates its variants.
 - [ ] **Relationship model** (§8)
 - [x] **The four orthogonal trust axes** (§9):
       `Origin × Corroboration × Adjudication × Validity` — **DONE 2026-08-06**,
