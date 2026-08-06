@@ -276,48 +276,113 @@ pub struct Classification {
     pub source: SourceClass,
 }
 
+/// The outcome of adjudicating a kind — three distinct answers, kept distinct.
+///
+/// Deliberately **not** a bare [`EntityKind`]. ADR-0040's reasoning about
+/// `ResolutionOutcome` applies exactly: collapsing "no evidence", "settled" and
+/// "evidence I cannot rank" into one value loses a distinction the caller must
+/// act on differently, and the loss is unrecoverable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KindAdjudication {
+    /// No classification evidence at all.
+    NoEvidence,
+    /// The evidence settles on one kind.
+    Settled(EntityKind),
+    /// **Evidence disagrees and cannot be ranked.**
+    ///
+    /// Either the contenders' confidences rest on different bases — which §7.3
+    /// forbids comparing, since *"a detector's 0.9 and a geometric residual's
+    /// 0.9 are not comparable"* — or a score is absent, and an absent score is
+    /// not a low one.
+    ///
+    /// **This is not a kind, and the caller must not pick one from it.** It is
+    /// the honest report that the system holds classification evidence it has no
+    /// grounds to rank.
+    Unrankable {
+        /// The distinct kinds in contention, in first-seen order.
+        contenders: Vec<EntityKind>,
+    },
+}
+
 /// Adjudicate a kind from classification evidence — §6.2.
 ///
 /// Kind is *"the adjudicated result"* of classification observations, never an
 /// intrinsic property, so this is the only way to obtain one.
 ///
-/// # The rule, and what it costs
+/// # The order of resolution
 ///
-/// An operator classification outranks a sensor one. That is transition rule 4's
-/// adjudication half applied here — an operator may settle *what a thing is*,
-/// which is a question of identity and classification, not of geometry.
+/// 1. **No evidence** → [`KindAdjudication::NoEvidence`]. Never a guess.
+/// 2. **An operator claim settles it** — transition rule 4's adjudication half.
+///    An operator may settle *what a thing is*, which is classification, not
+///    geometry. Two operators who disagree are themselves unrankable.
+/// 3. **Unanimous evidence settles it**, whatever the bases. If every claim says
+///    `Package`, no comparison is needed and none is made — so differing bases
+///    among agreeing sources are harmless, which is the common case.
+/// 4. **Otherwise rank by confidence** — through [`Confidence::compare`], which
+///    enforces §7.3's cross-basis guard. Any comparison it refuses makes the
+///    whole adjudication [`KindAdjudication::Unrankable`].
 ///
-/// With no operator claim, the highest-confidence classification wins. Ties and
-/// unscored claims fall back to **the first claim offered**, which is a real
-/// limitation: it makes the result depend on input order. Recorded rather than
-/// hidden — resolving it properly needs the corroboration counting that only
-/// Tier 2 entity resolution can supply.
+/// # Ties keep the earlier claim
 ///
-/// **No evidence at all yields [`EntityKind::Unknown`]**, never a guess.
+/// Only a strictly-greater confidence displaces, so an exact tie on the same
+/// basis resolves by input order. That residual order-dependence is real and
+/// pinned by a test; ranking equal-confidence disagreement properly needs the
+/// corroboration counting only Tier 2 entity resolution can supply.
 #[must_use]
-pub fn adjudicated_kind(classifications: &[Classification]) -> EntityKind {
+pub fn adjudicated_kind(classifications: &[Classification]) -> KindAdjudication {
     if classifications.is_empty() {
-        return EntityKind::Unknown;
+        return KindAdjudication::NoEvidence;
     }
 
-    // Rule 4: an operator settles classification.
-    if let Some(c) = classifications
-        .iter()
-        .find(|c| matches!(c.source, SourceClass::Operator))
-    {
-        return c.kind;
-    }
-
-    let mut best = &classifications[0];
-    for c in &classifications[1..] {
-        // Only strictly-greater displaces, so ties keep the earlier claim.
-        if let (Some(a), Some(b)) = (c.confidence.score(), best.confidence.score()) {
-            if a > b {
-                best = c;
+    /// Distinct kinds, in first-seen order.
+    fn contenders(cs: &[Classification]) -> Vec<EntityKind> {
+        let mut out: Vec<EntityKind> = Vec::new();
+        for c in cs {
+            if !out.contains(&c.kind) {
+                out.push(c.kind);
             }
         }
+        out
     }
-    best.kind
+
+    // (2) Rule 4: an operator settles classification.
+    let operator: Vec<&Classification> = classifications
+        .iter()
+        .filter(|c| matches!(c.source, SourceClass::Operator))
+        .collect();
+    if !operator.is_empty() {
+        let first = operator[0].kind;
+        return if operator.iter().all(|c| c.kind == first) {
+            KindAdjudication::Settled(first)
+        } else {
+            // Operators outrank sensors, but not each other.
+            KindAdjudication::Unrankable {
+                contenders: contenders(&operator.iter().map(|c| (*c).clone()).collect::<Vec<_>>()),
+            }
+        };
+    }
+
+    // (3) Unanimous evidence needs no comparison — so mismatched bases among
+    //     agreeing sources never block the answer.
+    let all = contenders(classifications);
+    if all.len() == 1 {
+        return KindAdjudication::Settled(all[0]);
+    }
+
+    // (4) Disagreement: rank THROUGH the §7.3 guard, never around it.
+    let mut best = &classifications[0];
+    for c in &classifications[1..] {
+        match c.confidence.compare(&best.confidence) {
+            Ok(core::cmp::Ordering::Greater) => best = c,
+            // Less or Equal: the incumbent holds, so ties keep the earlier claim.
+            Ok(_) => {}
+            // Bases differ, or a score is absent. Either way there is no ground
+            // to rank these, and inventing one is the silent over-trust §7.3
+            // exists to prevent.
+            Err(_) => return KindAdjudication::Unrankable { contenders: all },
+        }
+    }
+    KindAdjudication::Settled(best.kind)
 }
 
 // ---------------------------------------------------------------------------
@@ -686,7 +751,7 @@ mod tests {
 
     #[test]
     fn no_evidence_yields_unknown_rather_than_a_guess() {
-        assert_eq!(adjudicated_kind(&[]), EntityKind::Unknown);
+        assert_eq!(adjudicated_kind(&[]), KindAdjudication::NoEvidence);
     }
 
     #[test]
@@ -705,7 +770,10 @@ mod tests {
             },
         ];
         // The operator wins despite far lower confidence.
-        assert_eq!(adjudicated_kind(&claims), EntityKind::Tool);
+        assert_eq!(
+            adjudicated_kind(&claims),
+            KindAdjudication::Settled(EntityKind::Tool)
+        );
     }
 
     #[test]
@@ -722,7 +790,10 @@ mod tests {
                 source: SourceClass::Sensor,
             },
         ];
-        assert_eq!(adjudicated_kind(&claims), EntityKind::Tool);
+        assert_eq!(
+            adjudicated_kind(&claims),
+            KindAdjudication::Settled(EntityKind::Tool)
+        );
     }
 
     #[test]
@@ -741,7 +812,145 @@ mod tests {
                 source: SourceClass::Sensor,
             },
         ];
-        assert_eq!(adjudicated_kind(&claims), EntityKind::Package);
+        assert_eq!(
+            adjudicated_kind(&claims),
+            KindAdjudication::Settled(EntityKind::Package)
+        );
+    }
+
+    #[test]
+    fn disagreement_across_bases_is_unrankable_not_silently_ranked() {
+        // REGRESSION. The earlier version pulled raw .score() out and compared
+        // floats, reaching straight PAST the §7.3 cross-basis guard built in
+        // slice 2 — a detector's 0.9 and a geometric residual's 0.9 are not the
+        // same quantity, and ranking them is the silent over-trust §7.3 names.
+        let claims = [
+            Classification {
+                kind: EntityKind::Package,
+                confidence: Confidence::new(Some(0.9), ConfidenceBasis::ModelScore, None).unwrap(),
+                source: SourceClass::Sensor,
+            },
+            Classification {
+                kind: EntityKind::Tool,
+                confidence: Confidence::new(Some(0.95), ConfidenceBasis::GeometricResidual, None)
+                    .unwrap(),
+                source: SourceClass::Sensor,
+            },
+        ];
+        assert_eq!(
+            adjudicated_kind(&claims),
+            KindAdjudication::Unrankable {
+                contenders: vec![EntityKind::Package, EntityKind::Tool],
+            }
+        );
+    }
+
+    #[test]
+    fn agreeing_sources_settle_even_with_mismatched_bases() {
+        // The common case, and why the basis guard does not block it: if every
+        // claim says the same thing, no comparison is needed and none is made.
+        let claims = [
+            Classification {
+                kind: EntityKind::Package,
+                confidence: Confidence::new(Some(0.4), ConfidenceBasis::ModelScore, None).unwrap(),
+                source: SourceClass::Sensor,
+            },
+            Classification {
+                kind: EntityKind::Package,
+                confidence: Confidence::new(Some(0.9), ConfidenceBasis::GeometricResidual, None)
+                    .unwrap(),
+                source: SourceClass::Import,
+            },
+        ];
+        assert_eq!(
+            adjudicated_kind(&claims),
+            KindAdjudication::Settled(EntityKind::Package)
+        );
+    }
+
+    #[test]
+    fn an_unscored_first_claim_no_longer_freezes_the_result() {
+        // REGRESSION for the second half of the finding. The old loop gated
+        // displacement on `if let (Some, Some)`, so an unscored claim at index 0
+        // meant NOTHING could ever displace it — a later 0.99 claim could not
+        // win, contradicting "highest confidence wins".
+        //
+        // The honest answer is not "the scored one wins" either: an absent score
+        // is not a low score (asserted in the observation module). So this is
+        // Unrankable — which is at least no longer silently order-frozen.
+        let claims = [
+            Classification {
+                kind: EntityKind::Package,
+                confidence: Confidence::unspecified(),
+                source: SourceClass::Sensor,
+            },
+            Classification {
+                kind: EntityKind::Tool,
+                confidence: Confidence::new(Some(0.99), ConfidenceBasis::Unspecified, None)
+                    .unwrap(),
+                source: SourceClass::Sensor,
+            },
+        ];
+        assert_ne!(
+            adjudicated_kind(&claims),
+            KindAdjudication::Settled(EntityKind::Package),
+            "the unscored first claim must not win by freezing the loop"
+        );
+        assert_eq!(
+            adjudicated_kind(&claims),
+            KindAdjudication::Unrankable {
+                contenders: vec![EntityKind::Package, EntityKind::Tool],
+            }
+        );
+    }
+
+    #[test]
+    fn operators_outrank_sensors_but_not_each_other() {
+        let claims = [
+            Classification {
+                kind: EntityKind::Package,
+                confidence: conf(0.99),
+                source: SourceClass::Sensor,
+            },
+            Classification {
+                kind: EntityKind::Tool,
+                confidence: conf(0.5),
+                source: SourceClass::Operator,
+            },
+            Classification {
+                kind: EntityKind::Vehicle,
+                confidence: conf(0.5),
+                source: SourceClass::Operator,
+            },
+        ];
+        // The sensor claim is out of contention entirely; the two operators are
+        // not rankable against each other.
+        assert_eq!(
+            adjudicated_kind(&claims),
+            KindAdjudication::Unrankable {
+                contenders: vec![EntityKind::Tool, EntityKind::Vehicle],
+            }
+        );
+    }
+
+    #[test]
+    fn agreeing_operators_settle() {
+        let claims = [
+            Classification {
+                kind: EntityKind::Tool,
+                confidence: conf(0.1),
+                source: SourceClass::Operator,
+            },
+            Classification {
+                kind: EntityKind::Tool,
+                confidence: conf(0.2),
+                source: SourceClass::Operator,
+            },
+        ];
+        assert_eq!(
+            adjudicated_kind(&claims),
+            KindAdjudication::Settled(EntityKind::Tool)
+        );
     }
 
     #[test]
@@ -760,8 +969,14 @@ mod tests {
             confidence: conf(0.9),
             source: SourceClass::Operator,
         }];
-        assert_eq!(adjudicated_kind(&before), EntityKind::Package);
-        assert_eq!(adjudicated_kind(&after), EntityKind::Tool);
+        assert_eq!(
+            adjudicated_kind(&before),
+            KindAdjudication::Settled(EntityKind::Package)
+        );
+        assert_eq!(
+            adjudicated_kind(&after),
+            KindAdjudication::Settled(EntityKind::Tool)
+        );
         assert_eq!(
             e.id(),
             &eid("e-1"),

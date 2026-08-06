@@ -246,7 +246,12 @@ not permission.
       and `ResolutionConfidence` is a newtype so the "is this **one** thing"
       claim cannot be passed where an attribute confidence was wanted.
       **`Entity` has no `kind` field** — kind is adjudicated from classification
-      evidence, so reclassification cannot contradict a stored value. That
+      evidence, so reclassification cannot contradict a stored value.
+      `adjudicated_kind` returns a three-way `KindAdjudication`
+      (`NoEvidence` / `Settled` / `Unrankable`) rather than a bare kind, so
+      "I hold evidence I have no grounds to rank" is reportable instead of
+      collapsed into a guess — and it ranks **through** the §7.3 cross-basis
+      guard rather than around it. That
       follows §6.2 over §6.1's field table, which **contradict each other**; the
       tension is recorded in the module as an open question rather than resolved.
       **Still open:** identity *adjudication* — candidate clustering, merge/split
