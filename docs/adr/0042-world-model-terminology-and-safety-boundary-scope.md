@@ -744,6 +744,113 @@ not yet exist"* — and nothing measured here disturbs that reasoning.
 
 ---
 
+## Architecture owner sign-off — evidence, 2026-08-06
+
+Prepared for the one remaining ratification criterion. **Evidence for a ruling,
+not a ruling**; no checklist box is ticked here.
+
+**This box is not like the others.** ADR-0042's three other criteria are ticked,
+so ticking this one **accepts ADR-0042** — and ADR-0039's terminal criterion is
+*"ADR-0042 itself accepted"*. It is the single highest-consequence tick in
+Tier 0, and it should be made knowing that rather than as the fourth item on a
+list.
+
+### The half the ADR called unacceptable is executed, and verified today
+
+Decision 1 named two `perception_redundancy.rs` hits unacceptable because they
+sit inside the safety closure, *"where 'the world model was wrong' must not be
+able to mean either a perception fault or a semantic-knowledge fault."*
+
+Re-checked 2026-08-06 across the five closure crates — `kirra-core`,
+`kirra-trajectory`, `kirra-inline-governor`, `kirra-safety-authority`,
+`kirra-ros2-adapter`:
+
+| Check | Result |
+|---|---|
+| Bare "world model" anywhere in the safety closure | **Zero occurrences** |
+| The three originally-cited lines | Now read *independent perception channel* / *perception channel* |
+
+The load-bearing half of the migration is done and holds.
+
+### Two things the owner should know before signing
+
+**1. Nothing enforces the vocabulary.** Four CI scripts carry Kirra World in
+their names — [`check_kirra_world_bidirectional_fence.py`](../../ci/check_kirra_world_bidirectional_fence.py),
+[`check_world_domain_logic_gate.py`](../../ci/check_world_domain_logic_gate.py)
+and their self-tests — and **all of them enforce dependency separation, not
+terminology**. No lint, gate or ratchet fails when a document writes bare
+"world model". Adoption rests entirely on convention.
+
+Worth stating plainly, because it is the opposite of how the *other* rules in
+this ADR family are held. Fence B is machine-checked and transitive; open
+question 1 above was deferrable precisely because its breach reds CI. Decision 1
+has no such property — a canonical glossary that nothing checks decays at the
+rate people forget it.
+
+**2. Twenty-nine bare uses remain in `docs/safety`, and they are the perception
+sense.** Counted 2026-08-06, excluding qualified forms (*semantic* world model,
+Kirra World) and the `world_model.py` symbol:
+
+| File | Bare uses |
+|---|---|
+| `ASIL_DECOMPOSITION.md` | 5 |
+| `ASSUMPTIONS_OF_USE.md` | 4 |
+| `OCCY_SAFETY_GOALS.md` | 3 |
+| `OCCY_INDEPENDENT_DETECTOR.md` | 3 |
+| `OCCY_DFA.md` | 3 |
+| 7 further files | 1–2 each |
+| **Total across 12 files** | **29** |
+
+**This is not a violation of this ADR.** M3 dispositions ambiguous prose in
+docs/tests as *"new documents must qualify; existing cleaned opportunistically"*,
+and these are existing. The migration section is also explicit and reasoned
+about what it deliberately left alone — historical ADRs, dated analyses,
+third-party terms of art, and `robot/world_model.py` — and none of those
+exclusions covers this set. So these 29 sit squarely under "opportunistically".
+
+**The concern is that "opportunistically" is a weak commitment for exactly this
+corpus.** [`OCCY_DFA.md`](../safety/OCCY_DFA.md)'s C5 row reads *"Shared
+perception / world model (iii) — common-mode: a perception error corrupts BOTH
+plan and check"*, and its §4 is headed *"Central finding — the shared world
+model (C5/C7)"*. Today that is unambiguous, because only one referent exists.
+**Once Kirra World exists, it is not** — a reader meeting "the shared world
+model" in a dependent-failure analysis has two live referents and no qualifier
+to separate them. The same holds for a bare use in `ASIL_DECOMPOSITION.md` or
+`ASSUMPTIONS_OF_USE.md`.
+
+That is the precise harm Decision 1 was written to prevent, sitting in the
+documents where it is most expensive, held only by an intention to clean up when
+convenient.
+
+### Proposed wording — for the owner to accept, amend or reject
+
+> **Architecture owner sign-off on the canonical terminology — RECORDED
+> [date] by [owner].** The canonical set in Decision 1 is **accepted as
+> written**: *Kirra World* for the subsystem, *semantic world model* for the
+> generic phrase, *independent perception channel* and *perception hypothesis*
+> for the perception concepts, and bare "world model" canonical nowhere.
+>
+> Accepted on the evidence that its load-bearing half is already executed and
+> verified: zero bare uses remain anywhere in the safety closure, and the three
+> originally-cited lines now read *perception channel*.
+>
+> **Accepted with one named follow-up, which does not gate this sign-off:**
+> `docs/safety`'s 29 remaining bare uses are raised from M3's *"cleaned
+> opportunistically"* to an explicit migration item, to be completed **before
+> Kirra World exists as a running service**. The reason is dated rather than
+> stylistic — those uses are unambiguous only while there is one possible
+> referent, and the subsystem's existence is what removes that protection.
+>
+> **Recorded as an owner self-assessment, not an independent review.** Kirra is
+> designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508 SIL 3
+> requirements; independent third-party assessment has not yet been performed.
+
+**Drafted, not decided.** Ticking the box below accepts ADR-0042 and thereby
+satisfies ADR-0039's terminal criterion; it should be a deliberate act, not a
+consequence of merging this text.
+
+---
+
 ## Ratification criteria
 
 **Proposed.** Accepted only when:
