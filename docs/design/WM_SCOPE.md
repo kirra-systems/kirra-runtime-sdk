@@ -236,7 +236,23 @@ not permission.
       the domain model; it is here because that decision put it here rather than
       leaving the fill date unowned.
 - [ ] **Entity taxonomy** (§6)
-- [ ] **Observation model** (§7)
+- [ ] **Observation model** (§7) — **pure half DONE 2026-08-06**,
+      `crates/kirra-world/src/observation.rs`, 17 tests, still zero-dependency.
+      Delivered: `Confidence`/`ConfidenceBasis` (§7.3), `SourceClass` + its
+      mapping to the trust `Origin`, `SubjectRef` (including `Unbound`, which is
+      why this did not need the entity taxonomy first), `ClockDomain`/
+      `DomainInstant`/`ValidInterval` and the projection into
+      `trust::ValidityWindow`.
+      **Two more rules made structural**, following rule 6's shape: cross-modal
+      confidence comparison **errors** unless the caller names the decision
+      (`compare_across_bases`), and clock domains **cannot** be compared at all —
+      unsound rather than merely unwise, so there is deliberately no escape hatch.
+      **Still open, and it needs dependencies:** `observation_id` (ULID),
+      `evidence_digest`/`prev_hash` (hashing), `frame`/`map`, and the per-kind
+      versioned `TypedPayload`. Those belong to the **store**, which already has
+      all three — pulling them into the core would spend ADR-0040's Q1 seam
+      decision without revisiting it. `ObservationKind` is also absent because
+      the blueprint names the field but never enumerates its variants.
 - [ ] **Relationship model** (§8)
 - [x] **The four orthogonal trust axes** (§9):
       `Origin × Corroboration × Adjudication × Validity` — **DONE 2026-08-06**,
