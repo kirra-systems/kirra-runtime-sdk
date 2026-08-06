@@ -448,6 +448,83 @@ confirms this row should confirm it knowing that the import needs a stated rule
 for where confidence and validity come from on the `PerceivedObject` path.
 That rule does not exist yet.
 
+#### Re-verified 2026-08-06, and the gap is sharper than first stated
+
+Re-checked against the tree before drafting the disposition below. The original
+finding holds exactly:
+
+| Type | `confidence` | timestamp | Consumed by the checker |
+|---|---|---|---|
+| `kirra_core::trajectory::PerceivedObject` | **no** | **no** | **yes** — `rss_tangent_frame` and the object-slice RSS passes in `kirra-trajectory/src/validation.rs` |
+| `kirra_taj::CameraVruObservation` | **yes** | **yes** (`stamp_ms`) | via the VRU channel |
+
+`PerceivedObject` is `{id, pos, velocity_mps, heading_rad, vel}` — five fields,
+none of them provenance. Freshness on that path stays a property of the
+*channel*: `AcceptedTrajectory` carries `promoted_at_ms` + `max_age_ms`, and the
+subscription budget is `KIRRA_SUBSCRIPTION_STALENESS_MS`. Nothing travels with
+the datum.
+
+**What the re-check added.** The store has exactly **one** machine-enforced
+writer-class rule, and it does not cover this path:
+
+* `WriterClass::LlmCandidate` may never write `ClaimStatus::Confirmed` — rejected
+  at `kirra-world-store/src/lib.rs:523`.
+* `WriterClass::Sensor`, documented as *"a sensor or perception producer"*, has
+  **no such constraint**. It may write `Confirmed` freely.
+* Decoding an unrecognised writer class falls back to `LlmCandidate` — the most
+  constrained variant. The store's instinct is fail-closed, which is why the
+  uncovered path reads as an oversight rather than a decision.
+
+So a `PerceivedObject` importer — which would plausibly be classed `Sensor`,
+though **no importer exists yet and this is an inference, not an observation** —
+would enter the store as a **`Confirmed` `Sensor` claim**: the strongest
+assertion the store offers, built from a datum carrying neither a confidence nor
+a time of its own. Both would be synthesized from channel context, and nothing
+in the store would record that they were synthesized. The guard that exists
+catches the *obviously* untrustworthy writer; it does not catch the *silently
+under-determined* one.
+
+#### Proposed wording — for the owner to accept, amend or reject
+
+> **Tracked-object row — confirmed, split by type, one half conditional.
+> Drafted 2026-08-06.**
+>
+> The disposition *"import-source observations"* is **confirmed unconditionally
+> for perception types that carry their own confidence and timestamp**
+> (`CameraVruObservation` and the `kirra_taj` object-goal / intent types). For
+> those, the row's rationale is accurate as written.
+>
+> For **`PerceivedObject` it is confirmed conditionally**: the type may become an
+> import source only once a **stated rule exists for where its confidence and
+> validity come from**, and that rule must make the synthesis visible in the
+> store rather than indistinguishable from a measured value. Until then no
+> `PerceivedObject` import path may be built.
+>
+> **Where the rule belongs:** `WM_SCOPE.md` Tier 1 — the observation model and
+> the four orthogonal trust axes. This is not new work invented by the
+> condition; it is work Tier 1 already owns, and the anti-laundering rule
+> (*derived inherits the weakest input on every axis*) is the principle the rule
+> must satisfy.
+
+#### This deferral is weaker than ADR-0042's OQ1, and the difference should be stated
+
+ADR-0042's open question 1 was deferred on a **self-announcing** trigger: the
+first breach reds Fence B, so no vigilance is required. **This condition has no
+equivalent.** Nothing in CI fails if someone writes a `PerceivedObject` importer
+that synthesizes a confidence — the store would accept it as a `Confirmed`
+`Sensor` claim, exactly as intended for a real sensor.
+
+What would make it self-enforcing is a narrow guard on the import boundary — a
+requirement that any import from a type lacking a confidence field must declare
+its confidence source, checked where importers are constructed. That guard does
+not exist and is **not proposed here**, because designing it belongs with the
+Tier 1 observation model rather than ahead of it. Recorded so the owner
+confirms this row knowing the condition currently rests on remembering it.
+
+**Drafted, not decided.** No checkbox moves on this text. The compatibility
+inventory box requires *each row confirmed by its current owner*, and this is
+one row's evidence prepared for that confirmation.
+
 ### Open question 4 appears already dispositioned
 
 Q4 is *"naming collision disposition (ADR-0039 C1/C3)"*.
