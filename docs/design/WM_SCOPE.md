@@ -430,14 +430,37 @@ not permission.
       unsound rather than merely unwise, so there is deliberately no escape hatch;
       and **rule 4's geometry half / P10** — `Payload` + `PayloadSource`, added
       2026-08-06, which is what closed the transition rules at 7/7 above.
-      **Still open, and it needs dependencies:** `observation_id` (ULID),
-      `evidence_digest`/`prev_hash` (hashing), `frame`/`map`, and the per-kind
-      versioned `TypedPayload` **body** — `Payload` carries that body's
-      provenance, but the body itself stays a type parameter. Those belong to the
-      **store**, which already has all three — pulling them into the core would
-      spend ADR-0040's Q1 seam decision without revisiting it. `ObservationKind`
-      is also absent because the blueprint names the field but never enumerates
-      its variants.
+      **Identity and spatial reference DONE 2026-08-07** (Strand A),
+      `crates/kirra-world/src/reference.rs`, 11 tests + 4 doctests, still
+      zero-dependency. `ObservationId`, `FrameId` and `MapId` stop being
+      crate-root placeholders and become validated newtypes; `EventId` joins them.
+      The store's `NewEvent` is rebuilt out of all four, so the seam now carries
+      constructed values and called methods rather than re-exports (re-measured in
+      `WM_Q1_SEAM_BASELINE.md` "Measurement 2").
+      **The rule made structural:** the storage layer held `event_id`/
+      `observation_id` and `frame_id`/`map_id` as two adjacent pairs of the same
+      type, so **either pair could be passed in the wrong order and still compile,
+      write and hash** — and the frame/map swap additionally *satisfied* SD-4's
+      presence check while carrying the wrong reference. Four distinct types make
+      both unrepresentable; paired `compile_fail` doctests are the negative
+      control.
+      **A second rule, from the read path:** constructors **validate but never
+      normalize**. `verify_chain` rebuilds each record from its stored strings and
+      rehashes, so a constructor that trimmed would produce bytes the write never
+      produced and report untampered rows as broken chains. A stored value the core
+      refuses is a `CorruptRow`, never a `ChainBroken`.
+      **Minting stays out of the core** — ULID needs a dependency and this crate
+      has none by ratification criterion, so the core owns the *type* and the layer
+      with a clock mints the *value*. No loss: an id arriving from a replayed log
+      or another fleet must be admissible regardless.
+      **Still open:** `evidence_digest`/`prev_hash` as core types (the store
+      computes both today as bare hex strings), and the per-kind versioned
+      `TypedPayload` **body** — `Payload` carries that body's provenance, but the
+      body itself stays a type parameter. `ObservationKind` is absent for a
+      different reason and is **not** an implementation gap: the blueprint names
+      the field and never enumerates its variants, so writing that list is a
+      specification extension, not a derivation. `kind` stays `&str` until it
+      exists.
 - [x] **Relationship model** (§8) — **DONE 2026-08-06**,
       `crates/kirra-world/src/relationship.rs`, 20 tests, still zero-dependency.
       **All ten §8 record fields**, all 15 predicates across the four groups.
