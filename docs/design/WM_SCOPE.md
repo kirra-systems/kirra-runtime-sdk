@@ -50,7 +50,7 @@ new here is only that they have names.
 ║ KIRRA WORLD            │                                           ║
 ║  ┌─────────────────────┴─────────────────────────────────────────┐ ║
 ║  │ ANSWER TIER — the only read path                              │ ║
-║  │   Query Engine · EXPLAIN                                      │ ║
+║  │   Query Engine · Explain                                      │ ║
 ║  └─────────────────────▲─────────────────────────────────────────┘ ║
 ║  ┌─────────────────────┴─────────────────────────────────────────┐ ║
 ║  │ ACCESS STRUCTURES — spatial · temporal · subject · text       │ ║
