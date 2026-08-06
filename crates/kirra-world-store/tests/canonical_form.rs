@@ -26,7 +26,8 @@
 //! match a regression, since updating both in agreement is a deliberate act.
 
 use kirra_world_store::{
-    canonical_event_json, provenance_json, ClaimStatus, NewEvent, WriterClass,
+    canonical_event_json, provenance_json, ClaimStatus, EventId, FrameId, MapId, NewEvent,
+    ObservationId, WriterClass,
 };
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -36,12 +37,31 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
+/// The four typed references, owned so a `NewEvent` can borrow them.
+struct Refs {
+    event: EventId,
+    observation: ObservationId,
+    frame: FrameId,
+    map: MapId,
+}
+
+impl Refs {
+    fn fixture() -> Self {
+        Self {
+            event: EventId::new("evt-000000000000000000000001").unwrap(),
+            observation: ObservationId::new("obs-000000000000000000000001").unwrap(),
+            frame: FrameId::new("base_link").unwrap(),
+            map: MapId::new("lab-floor-2").unwrap(),
+        }
+    }
+}
+
 /// Every field populated, including the optional ones, so an accidental change
 /// to how `Some`/`None` are spelled cannot hide behind a null.
-fn fully_populated<'a>(provenance: &'a [&'a str]) -> NewEvent<'a> {
+fn fully_populated<'a>(r: &'a Refs, provenance: &'a [&'a str]) -> NewEvent<'a> {
     NewEvent {
-        event_id: "evt-000000000000000000000001",
-        observation_id: "obs-000000000000000000000001",
+        event_id: &r.event,
+        observation_id: &r.observation,
         txn_time_ms: 1_700_000_000_000,
         valid_from_ms: 1_699_999_999_000,
         valid_to_ms: Some(1_700_000_060_000),
@@ -50,8 +70,8 @@ fn fully_populated<'a>(provenance: &'a [&'a str]) -> NewEvent<'a> {
         writer_class: WriterClass::Sensor,
         claim_status: ClaimStatus::Confirmed,
         provenance,
-        frame_id: Some("base_link"),
-        map_id: Some("lab-floor-2"),
+        frame_id: Some(&r.frame),
+        map_id: Some(&r.map),
         kind: "spatial",
         subject: "cup-1",
         predicate: Some("located_in"),
@@ -64,8 +84,9 @@ fn fully_populated<'a>(provenance: &'a [&'a str]) -> NewEvent<'a> {
 
 #[test]
 fn canonical_json_is_byte_for_byte_what_it_has_always_been() {
+    let r = Refs::fixture();
     let prov: [&str; 2] = ["obs-a", "obs-b"];
-    let got = canonical_event_json(&fully_populated(&prov));
+    let got = canonical_event_json(&fully_populated(&r, &prov));
 
     let expected = concat!(
         r#"{"event_id":"evt-000000000000000000000001","#,
@@ -85,8 +106,9 @@ fn canonical_json_is_byte_for_byte_what_it_has_always_been() {
 
 #[test]
 fn canonical_json_digest_is_pinned() {
+    let r = Refs::fixture();
     let prov: [&str; 2] = ["obs-a", "obs-b"];
-    let got = sha256_hex(canonical_event_json(&fully_populated(&prov)).as_bytes());
+    let got = sha256_hex(canonical_event_json(&fully_populated(&r, &prov)).as_bytes());
 
     // Recorded from the implementation as it stood when the identity types were
     // introduced. If this changes, the chain in every existing store changed
@@ -104,7 +126,8 @@ fn canonical_json_digest_is_pinned() {
 /// different, silently incompatible canonical form.
 #[test]
 fn absent_optionals_are_spelled_null_not_omitted() {
-    let mut e = fully_populated(&[]);
+    let r = Refs::fixture();
+    let mut e = fully_populated(&r, &[]);
     e.valid_to_ms = None;
     e.frame_id = None;
     e.map_id = None;
@@ -138,7 +161,8 @@ fn absent_optionals_are_spelled_null_not_omitted() {
 /// to survive a round trip distinguishably.
 #[test]
 fn empty_provenance_is_an_empty_array() {
-    let e = fully_populated(&[]);
+    let r = Refs::fixture();
+    let e = fully_populated(&r, &[]);
     assert!(canonical_event_json(&e).contains(r#""provenance":[]"#));
     assert_eq!(provenance_json(&[]), "[]");
 }
@@ -149,7 +173,8 @@ fn empty_provenance_is_an_empty_array() {
 /// simpler ones agreeing, which is the hardest kind of divergence to diagnose.
 #[test]
 fn embedded_quotes_and_backslashes_escape_stably() {
-    let mut e = fully_populated(&[]);
+    let r = Refs::fixture();
+    let mut e = fully_populated(&r, &[]);
     e.payload = r#"{"path":"C:\\tmp","q":"\"hi\""}"#;
     e.subject = "cup\"1";
 
@@ -180,8 +205,9 @@ fn embedded_quotes_and_backslashes_escape_stably() {
 /// differ somewhere".
 #[test]
 fn field_order_is_fixed_and_complete() {
+    let r = Refs::fixture();
     let prov: [&str; 1] = ["obs-a"];
-    let got = canonical_event_json(&fully_populated(&prov));
+    let got = canonical_event_json(&fully_populated(&r, &prov));
 
     const ORDER: [&str; 19] = [
         "event_id",

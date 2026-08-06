@@ -91,8 +91,12 @@ pub mod schema;
 pub use compaction::{Citation, CompactionOutcome, DegradedSummary, Resolution, TemporalAnswer};
 pub use projection::{ProjectedClaim, CURRENT_PROJECTION};
 
-// Re-exported so the dependency edge is real rather than declared-and-unused.
-pub use kirra_world::{EntityId, ObservationId};
+// The domain core's types, re-exported so a caller of this crate needs only one
+// import to build an event. These are no longer placeholders and no longer
+// merely "so the dependency edge is real": [`NewEvent`] is built out of them, so
+// the edge now carries traffic. That is the measurement ADR-0040's open
+// question 1 defers its revisit to — see `docs/design/WM_Q1_SEAM_BASELINE.md`.
+pub use kirra_world::{EntityId, EventId, FrameId, MapId, ObservationId, ReferenceError};
 pub use schema::{CHAIN_ALGORITHM, SCHEMA_VERSION};
 
 /// Who or what produced an observation.
@@ -334,13 +338,33 @@ impl From<rusqlite::Error> for StoreError {
 /// inherently bounded, or leave it `None` and let a superseding event define
 /// the end. No method in this crate updates it, because in an append-only log
 /// there is no honest `UPDATE`.
+///
+/// # Why four fields are typed and the rest are `&str`
+///
+/// `event_id`, `observation_id`, `frame_id` and `map_id` carry the domain core's
+/// [`EventId`], [`ObservationId`], [`FrameId`] and [`MapId`]. They were all bare
+/// `&str` — two adjacent identities and two adjacent optional references, so
+/// **each pair could be passed in the wrong order and still compile, write and
+/// hash**. Neither swap is representable now — the compile-fail negative
+/// controls for that live with the types, in [`kirra_world::reference`], paired
+/// with positives so a mistake in the negative half cannot pass unnoticed.
+///
+/// The remaining `&str` fields are not an oversight, and the line between them
+/// is not arbitrary: a typed field is one whose *set of admissible values* the
+/// core defines. `kind`, `subject`, `predicate`, `object` and `retention_class`
+/// are constrained by the schema's closed vocabularies or by the claim's own
+/// shape, not by an identity rule — and `kind` in particular cannot be typed yet
+/// because the blueprint names `ObservationKind` without ever enumerating its
+/// variants (`WM_SCOPE.md` §7). Typing them on a guess would fix a vocabulary
+/// the specification has not fixed.
 #[derive(Debug, Clone)]
 pub struct NewEvent<'a> {
     /// Identity of this record.
-    pub event_id: &'a str,
+    pub event_id: &'a EventId,
     /// Identity of the observation. Distinct from `event_id` so re-attribution
-    /// does not rewrite the observation it re-attributes.
-    pub observation_id: &'a str,
+    /// does not rewrite the observation it re-attributes — a distinction that
+    /// is now enforced by the type system rather than by argument order.
+    pub observation_id: &'a ObservationId,
     /// When the store learned it.
     pub txn_time_ms: i64,
     /// When the fact began holding in the world.
@@ -359,9 +383,11 @@ pub struct NewEvent<'a> {
     /// Observation ids this claim rests on (SD-3).
     pub provenance: &'a [&'a str],
     /// Coordinate frame. Required when `kind == "spatial"` (SD-4).
-    pub frame_id: Option<&'a str>,
-    /// Map the claim is relative to.
-    pub map_id: Option<&'a str>,
+    pub frame_id: Option<&'a FrameId>,
+    /// Map the claim is relative to. A separate type from `frame_id` because a
+    /// swap between the two satisfies SD-4's presence check while carrying the
+    /// wrong reference — the quietest of the two failures these types close.
+    pub map_id: Option<&'a MapId>,
     /// Claim kind. `"spatial"` triggers the SD-4 constraint.
     pub kind: &'a str,
     /// Claim subject.
@@ -419,8 +445,8 @@ pub fn canonical_event_json(e: &NewEvent<'_>) -> String {
             "\"subject\":{},\"predicate\":{},\"object\":{},\"payload\":{},",
             "\"payload_schema\":{},\"retention_class\":{}}}"
         ),
-        json_str(e.event_id),
-        json_str(e.observation_id),
+        json_str(e.event_id.as_str()),
+        json_str(e.observation_id.as_str()),
         e.txn_time_ms,
         e.valid_from_ms,
         opt_i(e.valid_to_ms),
@@ -429,8 +455,8 @@ pub fn canonical_event_json(e: &NewEvent<'_>) -> String {
         json_str(e.writer_class.as_str()),
         json_str(e.claim_status.as_str()),
         provenance_json(e.provenance),
-        opt(e.frame_id),
-        opt(e.map_id),
+        opt(e.frame_id.map(FrameId::as_str)),
+        opt(e.map_id.map(MapId::as_str)),
         json_str(e.kind),
         json_str(e.subject),
         opt(e.predicate),
@@ -450,6 +476,30 @@ fn sequence_of(generation: i64) -> Result<u64, StoreError> {
     u64::try_from(generation).map_err(|_| StoreError::CorruptRow {
         generation,
         detail: "generation is negative or not representable as u64".to_string(),
+    })
+}
+
+/// Re-admit a stored reference on the read path.
+///
+/// A stored value the core no longer admits is a **corrupt row**, not a broken
+/// chain, and this keeps those two diagnoses apart — the same distinction
+/// [`StoreError::CorruptRow`] was introduced to preserve. "This row is
+/// unreadable" and "this row was edited" send an investigator to different
+/// places.
+///
+/// This can only ever *add* refusals: it never admits a row the chain check
+/// would have rejected, so it cannot weaken verification. A row written through
+/// [`WorldStore::append`] was built from already-admitted values, so reaching
+/// this error means the row predates the types, was written by another tool, or
+/// was edited in place.
+fn readmit<T>(
+    generation: i64,
+    field: &'static str,
+    r: Result<T, ReferenceError>,
+) -> Result<T, StoreError> {
+    r.map_err(|e| StoreError::CorruptRow {
+        generation,
+        detail: format!("{field}: {e}"),
     })
 }
 
@@ -581,8 +631,8 @@ impl WorldStore {
              ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
             params![
                 generation,
-                e.event_id,
-                e.observation_id,
+                e.event_id.as_str(),
+                e.observation_id.as_str(),
                 e.txn_time_ms,
                 e.valid_from_ms,
                 e.valid_to_ms,
@@ -591,8 +641,8 @@ impl WorldStore {
                 e.writer_class.as_str(),
                 e.claim_status.as_str(),
                 provenance_json(e.provenance),
-                e.frame_id,
-                e.map_id,
+                e.frame_id.map(FrameId::as_str),
+                e.map_id.map(MapId::as_str),
                 e.kind,
                 e.subject,
                 e.predicate,
@@ -702,6 +752,23 @@ impl WorldStore {
                 })?;
             let prov_refs: Vec<&str> = provenance.iter().map(String::as_str).collect();
 
+            // Re-admitted VERBATIM. The core's constructors never normalize, so
+            // these carry exactly the stored bytes into the rehash — a
+            // constructor that trimmed here would report every untampered row
+            // holding surrounding whitespace as a broken chain.
+            let event_id = readmit(generation, "event_id", EventId::new(event_id))?;
+            let observation_id = readmit(
+                generation,
+                "observation_id",
+                ObservationId::new(observation_id),
+            )?;
+            let frame_id = readmit(
+                generation,
+                "frame_id",
+                frame_id.map(FrameId::new).transpose(),
+            )?;
+            let map_id = readmit(generation, "map_id", map_id.map(MapId::new).transpose())?;
+
             let rebuilt = NewEvent {
                 event_id: &event_id,
                 observation_id: &observation_id,
@@ -713,8 +780,8 @@ impl WorldStore {
                 writer_class: WriterClass::from_stored(&writer_class),
                 claim_status: ClaimStatus::from_stored(&claim_status),
                 provenance: &prov_refs,
-                frame_id: frame_id.as_deref(),
-                map_id: map_id.as_deref(),
+                frame_id: frame_id.as_ref(),
+                map_id: map_id.as_ref(),
                 kind: &kind,
                 subject: &subject,
                 predicate: predicate.as_deref(),
@@ -1870,6 +1937,23 @@ impl WorldStore {
                 })?;
             let prov_refs: Vec<&str> = provenance.iter().map(String::as_str).collect();
 
+            // Re-admitted VERBATIM. The core's constructors never normalize, so
+            // these carry exactly the stored bytes into the rehash — a
+            // constructor that trimmed here would report every untampered row
+            // holding surrounding whitespace as a broken chain.
+            let event_id = readmit(generation, "event_id", EventId::new(event_id))?;
+            let observation_id = readmit(
+                generation,
+                "observation_id",
+                ObservationId::new(observation_id),
+            )?;
+            let frame_id = readmit(
+                generation,
+                "frame_id",
+                frame_id.map(FrameId::new).transpose(),
+            )?;
+            let map_id = readmit(generation, "map_id", map_id.map(MapId::new).transpose())?;
+
             let rebuilt = NewEvent {
                 event_id: &event_id,
                 observation_id: &observation_id,
@@ -1881,8 +1965,8 @@ impl WorldStore {
                 writer_class: WriterClass::from_stored(&writer_class),
                 claim_status: ClaimStatus::from_stored(&claim_status),
                 provenance: &prov_refs,
-                frame_id: frame_id.as_deref(),
-                map_id: map_id.as_deref(),
+                frame_id: frame_id.as_ref(),
+                map_id: map_id.as_ref(),
                 kind: &kind,
                 subject: &subject,
                 predicate: predicate.as_deref(),

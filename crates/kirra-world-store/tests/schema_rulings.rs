@@ -6,7 +6,9 @@
 //! than structural. So the tamper tests bypass the write path entirely and
 //! assert that the **chain** catches the edit.
 
-use kirra_world_store::{ClaimStatus, NewEvent, StoreError, WorldStore, WriterClass};
+use kirra_world_store::{
+    ClaimStatus, EventId, FrameId, NewEvent, ObservationId, StoreError, WorldStore, WriterClass,
+};
 
 fn tmp(name: &str) -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
@@ -19,10 +21,26 @@ fn tmp(name: &str) -> std::path::PathBuf {
     p
 }
 
-fn base<'a>(event_id: &'a str, observation_id: &'a str) -> NewEvent<'a> {
+/// Owned ids for one event, so a [`NewEvent`] can borrow them. This file's
+/// fixtures give the two DIFFERENT strings, which is the honest shape: an event
+/// and the observation it records are distinct identities, and they are now
+/// distinct types too.
+struct Ids {
+    event: EventId,
+    observation: ObservationId,
+}
+
+fn ids(e: &str, o: &str) -> Ids {
+    Ids {
+        event: EventId::new(e).expect("admissible event id"),
+        observation: ObservationId::new(o).expect("admissible observation id"),
+    }
+}
+
+fn base<'a>(id: &'a Ids) -> NewEvent<'a> {
     NewEvent {
-        event_id,
-        observation_id,
+        event_id: &id.event,
+        observation_id: &id.observation,
         txn_time_ms: 1_700_000_000_000,
         valid_from_ms: 1_700_000_000_000,
         valid_to_ms: None,
@@ -50,7 +68,7 @@ fn a_chain_of_events_verifies() {
     for i in 0..5 {
         let eid = format!("e{i}");
         let oid = format!("o{i}");
-        s.append(&base(&eid, &oid)).expect("append");
+        s.append(&base(&ids(&eid, &oid))).expect("append");
     }
     assert_eq!(s.count().unwrap(), 5);
     s.verify_chain().expect("chain must verify");
@@ -66,10 +84,10 @@ fn sd2_relabelling_claim_status_breaks_the_chain() {
     s.append(&NewEvent {
         writer_class: WriterClass::LlmCandidate,
         claim_status: ClaimStatus::Candidate,
-        ..base("e1", "o1")
+        ..base(&ids("e1", "o1"))
     })
     .expect("append");
-    s.append(&base("e2", "o2")).expect("append");
+    s.append(&base(&ids("e2", "o2"))).expect("append");
     s.verify_chain().expect("clean before tamper");
 
     // Bypass the write path completely. The schema CHECK would refuse this
@@ -97,7 +115,7 @@ fn sd2_an_llm_may_not_write_a_confirmed_fact() {
         .append(&NewEvent {
             writer_class: WriterClass::LlmCandidate,
             claim_status: ClaimStatus::Confirmed,
-            ..base("e1", "o1")
+            ..base(&ids("e1", "o1"))
         })
         .expect_err("must refuse");
     assert!(matches!(err, StoreError::LlmCannotConfirm));
@@ -115,7 +133,7 @@ fn sd2_is_a_schema_check_not_only_a_write_path_check() {
     s.append(&NewEvent {
         writer_class: WriterClass::LlmCandidate,
         claim_status: ClaimStatus::Candidate,
-        ..base("e1", "o1")
+        ..base(&ids("e1", "o1"))
     })
     .expect("a candidate is fine");
 
@@ -138,15 +156,16 @@ fn sd4_a_spatial_claim_without_a_frame_is_refused() {
         .append(&NewEvent {
             kind: "spatial",
             frame_id: None,
-            ..base("e1", "o1")
+            ..base(&ids("e1", "o1"))
         })
         .expect_err("must refuse");
     assert!(matches!(err, StoreError::SpatialClaimNeedsFrame));
 
+    let frame = FrameId::new("map:kitchen").expect("admissible frame");
     s.append(&NewEvent {
         kind: "spatial",
-        frame_id: Some("map:kitchen"),
-        ..base("e2", "o2")
+        frame_id: Some(&frame),
+        ..base(&ids("e2", "o2"))
     })
     .expect("with a frame it is fine");
     let _ = std::fs::remove_file(&path);
@@ -158,10 +177,11 @@ fn sd4_a_spatial_claim_without_a_frame_is_refused() {
 fn sd4_is_a_schema_check_not_only_a_write_path_check() {
     let path = tmp("sd4-schema");
     let mut s = WorldStore::open(&path).expect("open");
+    let frame = FrameId::new("map:kitchen").expect("admissible frame");
     s.append(&NewEvent {
         kind: "spatial",
-        frame_id: Some("map:kitchen"),
-        ..base("e1", "o1")
+        frame_id: Some(&frame),
+        ..base(&ids("e1", "o1"))
     })
     .expect("append");
     let cleared = s.tamper_for_test(1, "frame_id", None);
@@ -181,10 +201,11 @@ fn sd1_valid_to_ms_is_set_at_insert_or_never() {
     let mut s = WorldStore::open(&path).expect("open");
     s.append(&NewEvent {
         valid_to_ms: Some(1_700_000_005_000),
-        ..base("e1", "o1")
+        ..base(&ids("e1", "o1"))
     })
     .expect("bounded observation");
-    s.append(&base("e2", "o2")).expect("open-ended observation");
+    s.append(&base(&ids("e2", "o2")))
+        .expect("open-ended observation");
     s.verify_chain().expect("verifies");
 
     // Prove the ONLY UPDATE is the test-only hatch, and prove it by position
@@ -227,7 +248,7 @@ fn sd3_provenance_is_a_digest_covered_json_array() {
     let mut s = WorldStore::open(&path).expect("open");
     s.append(&NewEvent {
         provenance: &["o-a", "o-b"],
-        ..base("e1", "o1")
+        ..base(&ids("e1", "o1"))
     })
     .expect("append");
     s.verify_chain().expect("clean");
@@ -250,7 +271,7 @@ fn sd3_provenance_is_a_digest_covered_json_array() {
 fn corrupt_provenance_on_an_empty_row_fails_closed() {
     let path = tmp("provenance-empty-corrupt");
     let mut s = WorldStore::open(&path).expect("open");
-    s.append(&base("e1", "o1"))
+    s.append(&base(&ids("e1", "o1")))
         .expect("append with provenance: &[]");
     s.verify_chain().expect("clean");
 
@@ -269,7 +290,7 @@ fn corrupt_provenance_on_an_empty_row_fails_closed() {
 fn the_tamper_hatch_refuses_an_unknown_column() {
     let path = tmp("tamper-allowlist");
     let mut s = WorldStore::open(&path).expect("open");
-    s.append(&base("e1", "o1")).expect("append");
+    s.append(&base(&ids("e1", "o1"))).expect("append");
 
     let bad = s.tamper_for_test(1, "generation = 9 --", Some("x"));
     assert!(bad.is_err(), "an un-allowlisted column must be refused");
@@ -284,12 +305,89 @@ fn the_tamper_hatch_refuses_an_unknown_column() {
 fn a_negative_generation_fails_closed_rather_than_hashing_as_zero() {
     let path = tmp("negative-generation");
     let mut s = WorldStore::open(&path).expect("open");
-    s.append(&base("e1", "o1")).expect("append");
+    s.append(&base(&ids("e1", "o1"))).expect("append");
     // rusqlite lets us move the PK; the chain must refuse to re-derive it.
     let _ = s.tamper_for_test(1, "chain_digest", Some("deadbeef"));
     match s.verify_chain() {
         Err(StoreError::ChainBroken { .. }) => {}
         other => panic!("a rewritten digest must break the chain, got {other:?}"),
     }
+    let _ = std::fs::remove_file(&path);
+}
+
+// ---------------------------------------------------------------------------
+// Re-admission on the read path (the reference types)
+// ---------------------------------------------------------------------------
+
+/// A stored identity the core no longer admits is a **corrupt row**, not a
+/// broken chain.
+///
+/// Both are refusals, so nothing is let through either way — but they send an
+/// investigator to different places. "This row is unreadable" points at the
+/// writer or the storage medium; "this row was edited" points at an intruder.
+/// The store already drew that line for unparseable provenance; re-admission
+/// keeps drawing it.
+///
+/// An empty `observation_id` is the case that motivates this: the column is
+/// `TEXT NOT NULL`, so SQLite accepts `''` happily, and every layer that checks
+/// for *presence* reads it as present while it names nothing.
+#[test]
+fn an_inadmissible_stored_identity_reads_as_a_corrupt_row_not_a_broken_chain() {
+    let path = tmp("readmit-corrupt");
+    let mut s = WorldStore::open(&path).expect("open");
+    s.append(&base(&ids("e1", "o1"))).expect("append");
+
+    s.tamper_for_test(1, "observation_id", Some(""))
+        .expect("tamper");
+
+    match s.verify_chain() {
+        Err(StoreError::CorruptRow { generation, detail }) => {
+            assert_eq!(generation, 1);
+            assert!(
+                detail.contains("observation_id"),
+                "the diagnosis must name the field: {detail}"
+            );
+        }
+        other => panic!("an empty stored identity must read as CorruptRow, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Re-admission can only ever ADD refusals — it must never rescue a row the
+/// chain check would have rejected.
+///
+/// This is the property that makes the change safe to put in front of the
+/// integrity check. The tamper here is admissible as a *reference* (`"o2"` is a
+/// perfectly good identity) but wrong for this row, so re-admission passes it
+/// straight through to the digest comparison, which refuses it.
+#[test]
+fn re_admission_does_not_weaken_the_chain_check() {
+    let path = tmp("readmit-no-rescue");
+    let mut s = WorldStore::open(&path).expect("open");
+    s.append(&base(&ids("e1", "o1"))).expect("append");
+
+    s.tamper_for_test(1, "observation_id", Some("o2"))
+        .expect("tamper");
+
+    match s.verify_chain() {
+        Err(StoreError::ChainBroken { generation }) => assert_eq!(generation, 1),
+        other => panic!("a swapped-but-valid identity must still break the chain, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The verbatim rule, from the storage side.
+///
+/// A value with surrounding whitespace is admissible and is stored unchanged.
+/// If any constructor on the read path trimmed, the rehash would be computed
+/// over different bytes than the write produced and this untampered row would
+/// report as tampered — the failure mode that makes "validate, never normalize"
+/// load-bearing rather than stylistic.
+#[test]
+fn a_stored_identity_with_whitespace_still_verifies() {
+    let path = tmp("readmit-verbatim");
+    let mut s = WorldStore::open(&path).expect("open");
+    s.append(&base(&ids("  e1  ", " o1 "))).expect("append");
+    s.verify_chain().expect("a verbatim round trip must verify");
     let _ = std::fs::remove_file(&path);
 }

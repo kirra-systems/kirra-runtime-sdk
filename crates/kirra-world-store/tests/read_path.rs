@@ -9,7 +9,24 @@
 //! * `open_leaves_no_projection_tables` — protects ADR-0041 D-20's
 //!   `log_only_bytes` from being silently moved by this feature's existence.
 
-use kirra_world_store::{ClaimStatus, NewEvent, WorldStore, WriterClass};
+use kirra_world_store::{ClaimStatus, EventId, NewEvent, ObservationId, WorldStore, WriterClass};
+
+/// Owned ids for one event. [`NewEvent`] borrows its references, so they need a
+/// home that outlives it — and the two are separate types now, which is what
+/// stops them being passed in each other's place.
+struct Ids {
+    event: EventId,
+    observation: ObservationId,
+}
+
+/// One string for both ids. Fine for a fixture, and now *visibly* a conflation
+/// rather than an invisible one: the two fields have to be spelled separately.
+fn ids(s: &str) -> Ids {
+    Ids {
+        event: EventId::new(s).expect("admissible event id"),
+        observation: ObservationId::new(s).expect("admissible observation id"),
+    }
+}
 
 fn tmp(name: &str) -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
@@ -36,7 +53,7 @@ fn clean(p: &std::path::Path) {
 
 #[allow(clippy::too_many_arguments)]
 fn ev<'a>(
-    event_id: &'a str,
+    id: &'a Ids,
     subject: &'a str,
     predicate: Option<&'a str>,
     object: Option<&'a str>,
@@ -44,8 +61,8 @@ fn ev<'a>(
     txn_time_ms: i64,
 ) -> NewEvent<'a> {
     NewEvent {
-        event_id,
-        observation_id: event_id,
+        event_id: &id.event,
+        observation_id: &id.observation,
         txn_time_ms,
         valid_from_ms,
         valid_to_ms: None,
@@ -84,7 +101,7 @@ fn a_candidate_never_reaches_current_state() {
     s.append(&NewEvent {
         writer_class: WriterClass::LlmCandidate,
         claim_status: ClaimStatus::Candidate,
-        ..ev("e1", "cup-1", Some("colour"), Some("red"), T0, T0)
+        ..ev(&ids("e1"), "cup-1", Some("colour"), Some("red"), T0, T0)
     })
     .expect("a candidate is a legal write");
     s.fold().expect("fold");
@@ -112,13 +129,20 @@ fn a_newer_candidate_does_not_displace_a_confirmed_claim() {
     let p = tmp("candidate-no-shadow");
     let mut s = WorldStore::open(&p).expect("open");
 
-    s.append(&ev("e1", "cup-1", Some("colour"), Some("red"), T0, T0))
-        .expect("confirmed");
+    s.append(&ev(
+        &ids("e1"),
+        "cup-1",
+        Some("colour"),
+        Some("red"),
+        T0,
+        T0,
+    ))
+    .expect("confirmed");
     s.append(&NewEvent {
         writer_class: WriterClass::LlmCandidate,
         claim_status: ClaimStatus::Candidate,
         ..ev(
-            "e2",
+            &ids("e2"),
             "cup-1",
             Some("colour"),
             Some("blue"),
@@ -152,8 +176,10 @@ fn a_newer_candidate_does_not_displace_a_confirmed_claim() {
 fn open_leaves_no_projection_tables() {
     let p = tmp("no-projection-at-open");
     let mut s = WorldStore::open(&p).expect("open");
-    s.append(&ev("e1", "cup-1", None, None, T0, T0)).expect("a");
-    s.append(&ev("e2", "cup-2", None, None, T0, T0)).expect("b");
+    s.append(&ev(&ids("e1"), "cup-1", None, None, T0, T0))
+        .expect("a");
+    s.append(&ev(&ids("e2"), "cup-2", None, None, T0, T0))
+        .expect("b");
 
     assert!(
         !s.has_projections().unwrap(),
@@ -198,7 +224,7 @@ fn rebuild_from_zero_equals_incremental() {
             let eid = format!("e{n}");
             let subj = format!("entity-{:03}", n % 7);
             s.append(&ev(
-                &eid,
+                &ids(&eid),
                 &subj,
                 Some("position"),
                 None,
@@ -231,13 +257,20 @@ fn the_state_digest_distinguishes_states() {
     let p = tmp("digest-non-vacuous");
     let mut s = WorldStore::open(&p).expect("open");
 
-    s.append(&ev("e1", "cup-1", Some("colour"), Some("red"), T0, T0))
-        .expect("a");
+    s.append(&ev(
+        &ids("e1"),
+        "cup-1",
+        Some("colour"),
+        Some("red"),
+        T0,
+        T0,
+    ))
+    .expect("a");
     s.fold().expect("fold");
     let one = s.projection_state_digest().unwrap();
 
     s.append(&ev(
-        "e2",
+        &ids("e2"),
         "cup-1",
         Some("colour"),
         Some("blue"),
@@ -260,10 +293,17 @@ fn the_state_digest_distinguishes_states() {
 fn the_newest_claim_wins_per_subject_and_predicate() {
     let p = tmp("supersede");
     let mut s = WorldStore::open(&p).expect("open");
-    s.append(&ev("e1", "cup-1", Some("colour"), Some("red"), T0, T0))
-        .expect("a");
     s.append(&ev(
-        "e2",
+        &ids("e1"),
+        "cup-1",
+        Some("colour"),
+        Some("red"),
+        T0,
+        T0,
+    ))
+    .expect("a");
+    s.append(&ev(
+        &ids("e2"),
         "cup-1",
         Some("colour"),
         Some("blue"),
@@ -272,7 +312,7 @@ fn the_newest_claim_wins_per_subject_and_predicate() {
     ))
     .expect("b");
     s.append(&ev(
-        "e3",
+        &ids("e3"),
         "cup-1",
         Some("position"),
         Some("shelf"),
@@ -303,10 +343,17 @@ fn the_newest_claim_wins_per_subject_and_predicate() {
 fn a_tie_in_valid_time_resolves_to_the_later_generation() {
     let p = tmp("valid-time-tie");
     let mut s = WorldStore::open(&p).expect("open");
-    s.append(&ev("e1", "cup-1", Some("colour"), Some("red"), T0, T0))
-        .expect("first");
     s.append(&ev(
-        "e2",
+        &ids("e1"),
+        "cup-1",
+        Some("colour"),
+        Some("red"),
+        T0,
+        T0,
+    ))
+    .expect("first");
+    s.append(&ev(
+        &ids("e2"),
         "cup-1",
         Some("colour"),
         Some("blue"),
@@ -345,7 +392,7 @@ fn a_late_arrival_about_the_past_does_not_overwrite_the_present() {
 
     // Learned at T0+1000 that the cup was blue from T0+500.
     s.append(&ev(
-        "e1",
+        &ids("e1"),
         "cup-1",
         Some("colour"),
         Some("blue"),
@@ -355,7 +402,7 @@ fn a_late_arrival_about_the_past_does_not_overwrite_the_present() {
     .expect("a");
     // Then learned, LATER, that it had been red back at T0.
     s.append(&ev(
-        "e2",
+        &ids("e2"),
         "cup-1",
         Some("colour"),
         Some("red"),
@@ -386,7 +433,7 @@ fn as_of_respects_the_transaction_axis() {
     let p = tmp("txn-axis");
     let mut s = WorldStore::open(&p).expect("open");
     s.append(&ev(
-        "e1",
+        &ids("e1"),
         "cup-1",
         Some("colour"),
         Some("blue"),
@@ -395,7 +442,7 @@ fn as_of_respects_the_transaction_axis() {
     ))
     .expect("a");
     s.append(&ev(
-        "e2",
+        &ids("e2"),
         "cup-1",
         Some("colour"),
         Some("red"),
@@ -421,7 +468,7 @@ fn a_bounded_claim_expires() {
     let mut s = WorldStore::open(&p).expect("open");
     s.append(&NewEvent {
         valid_to_ms: Some(T0 + 200),
-        ..ev("e1", "cup-1", Some("colour"), Some("red"), T0, T0)
+        ..ev(&ids("e1"), "cup-1", Some("colour"), Some("red"), T0, T0)
     })
     .expect("bounded");
     s.fold().expect("fold");
@@ -445,7 +492,7 @@ fn history_is_every_confirmed_event_oldest_first() {
     for i in 0..4 {
         let eid = format!("e{i}");
         s.append(&ev(
-            &eid,
+            &ids(&eid),
             "cup-1",
             Some("colour"),
             None,
@@ -467,9 +514,10 @@ fn history_is_every_confirmed_event_oldest_first() {
 fn changed_since_uses_transaction_time() {
     let p = tmp("changed-since");
     let mut s = WorldStore::open(&p).expect("open");
-    s.append(&ev("e1", "cup-1", None, None, T0, T0)).expect("a");
+    s.append(&ev(&ids("e1"), "cup-1", None, None, T0, T0))
+        .expect("a");
     // Valid in the past, learned recently — must still be reported.
-    s.append(&ev("e2", "cup-2", None, None, T0 - 9_000, T0 + 500))
+    s.append(&ev(&ids("e2"), "cup-2", None, None, T0 - 9_000, T0 + 500))
         .expect("b");
 
     let changed = s.changed_since(T0 + 100).unwrap();
@@ -491,7 +539,7 @@ fn a_second_fold_with_no_new_events_is_stable() {
     s.append(&NewEvent {
         writer_class: WriterClass::LlmCandidate,
         claim_status: ClaimStatus::Candidate,
-        ..ev("e1", "cup-1", Some("colour"), Some("red"), T0, T0)
+        ..ev(&ids("e1"), "cup-1", Some("colour"), Some("red"), T0, T0)
     })
     .expect("candidate only");
 
@@ -525,7 +573,7 @@ fn projected_row_count_is_not_time_filtered() {
         let subj = format!("cup-{i}");
         s.append(&NewEvent {
             valid_to_ms: Some(T0 + 100),
-            ..ev(&eid, &subj, Some("colour"), None, T0, T0)
+            ..ev(&ids(&eid), &subj, Some("colour"), None, T0, T0)
         })
         .expect("bounded claim");
     }
@@ -552,8 +600,15 @@ fn projected_row_count_is_not_time_filtered() {
 fn a_successful_fold_leaves_a_checkpoint_matching_its_state() {
     let p = tmp("fold-atomic");
     let mut s = WorldStore::open(&p).expect("open");
-    s.append(&ev("e1", "cup-1", Some("colour"), Some("red"), T0, T0))
-        .expect("a");
+    s.append(&ev(
+        &ids("e1"),
+        "cup-1",
+        Some("colour"),
+        Some("red"),
+        T0,
+        T0,
+    ))
+    .expect("a");
     s.fold().expect("fold");
 
     let recorded = s.checkpoint_state_digest_for_test().unwrap();
@@ -565,7 +620,7 @@ fn a_successful_fold_leaves_a_checkpoint_matching_its_state() {
 
     // And it must keep matching after a second fold moves the state.
     s.append(&ev(
-        "e2",
+        &ids("e2"),
         "cup-1",
         Some("colour"),
         Some("blue"),
@@ -589,8 +644,15 @@ fn folding_does_not_disturb_the_chain() {
     let mut s = WorldStore::open(&p).expect("open");
     for i in 0..10 {
         let eid = format!("e{i}");
-        s.append(&ev(&eid, "cup-1", Some("colour"), None, T0 + i, T0 + i))
-            .expect("append");
+        s.append(&ev(
+            &ids(&eid),
+            "cup-1",
+            Some("colour"),
+            None,
+            T0 + i,
+            T0 + i,
+        ))
+        .expect("append");
     }
     s.fold().expect("fold");
     s.rebuild_projections().expect("rebuild");
