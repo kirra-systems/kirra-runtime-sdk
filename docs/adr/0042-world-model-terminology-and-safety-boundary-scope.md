@@ -744,7 +744,7 @@ not yet exist"* — and nothing measured here disturbs that reasoning.
 
 ---
 
-## Architecture-owner sign-off — evidence, 2026-08-06
+## Architecture owner sign-off — evidence, 2026-08-06
 
 Prepared for the one remaining ratification criterion. **Evidence for a ruling,
 not a ruling**; no checklist box is ticked here.
@@ -824,7 +824,7 @@ convenient.
 
 ### Proposed wording — for the owner to accept, amend or reject
 
-> **Architecture-owner sign-off on the canonical terminology — RECORDED
+> **Architecture owner sign-off on the canonical terminology — RECORDED
 > [date] by [owner].** The canonical set in Decision 1 is **accepted as
 > written**: *Kirra World* for the subsystem, *semantic world model* for the
 > generic phrase, *independent perception channel* and *perception hypothesis*
