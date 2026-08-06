@@ -117,9 +117,16 @@ import from.
 they are placeholders rather than shadows. They will acquire the same shape if
 their real versions land beside them rather than replacing them.
 
-**Not fixed here.** This document records; the fix is a separate change, and is
-worth making before the store begins consuming core types in earnest, since
-every new import is a chance to bind the wrong one.
+**Not fixed here** — this document records. **Fixed in the next commit on this
+branch**, before the store begins consuming core types in earnest, since every
+new import is a chance to bind the wrong one: the root placeholder is replaced
+by `pub use entity::EntityId`, so all three hops now resolve to the domain type,
+and `kirra-world-service` carries a regression test that fails to *compile* if
+the placeholder returns.
+
+The measurement above is left as it was taken, describing the tree at
+`ea06132d`. It is a baseline, and rewriting it to match a later tree would
+defeat the point of having one.
 
 ## What this implies for Tier 1 — and what it does not
 
