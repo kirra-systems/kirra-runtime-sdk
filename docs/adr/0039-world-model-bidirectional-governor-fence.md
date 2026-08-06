@@ -449,4 +449,7 @@ following are recorded:
 - [x] C2 (map/corridor boundary) — stated in ADR-0042 Decision 2
 - [ ] ADR-0042 itself accepted
 
-Merging this PR satisfies none of the above.
+Merging the PR that **introduced this ADR** satisfied none of the above.
+Boxes above are ticked only by a separately recorded owner ruling, each of
+which names its owner and date inline — never by the act of merging a
+document change.

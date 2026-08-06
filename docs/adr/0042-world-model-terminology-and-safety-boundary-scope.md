@@ -747,4 +747,7 @@ not yet exist"* — and nothing measured here disturbs that reasoning.
       open** — which the record states rather than conceals.
 - [ ] Open question 1 dispositioned
 
-Merging this PR satisfies none of the above.
+Merging the PR that **introduced this ADR** satisfied none of the above.
+Boxes above are ticked only by a separately recorded owner ruling, each of
+which names its owner and date inline — never by the act of merging a
+document change.

@@ -643,4 +643,7 @@ The one item with no technical component. Recorded here is what the decision
       backs it up
 - [ ] Open questions 1 and 4 dispositioned
 
-Merging this PR satisfies none of the above.
+Merging the PR that **introduced this ADR** satisfied none of the above.
+Boxes above are ticked only by a separately recorded owner ruling, each of
+which names its owner and date inline — never by the act of merging a
+document change.
