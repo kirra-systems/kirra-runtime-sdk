@@ -661,10 +661,37 @@ evidence about it is a category error.
 ### But sustainability is untested, because the triggering event has not happened
 
 The question asks whether the split is needed *"at the first shared-primitive
-request."* **There has been no such request.** Kirra World exposes two
-unconstructible placeholder types, so nothing inside the closure could want a
-shared primitive from it even if it wished to. A rule that has never been
-pushed against is not yet demonstrated sustainable — it is merely unviolated.
+request."* **There has been no such request.** A rule that has never been pushed
+against is not yet demonstrated sustainable — it is merely unviolated.
+
+> **Correction, 2026-08-06 — the paragraph above originally carried a second
+> argument, and it was wrong.** It read: *"Kirra World exposes two
+> unconstructible placeholder types, so nothing inside the closure could want a
+> shared primitive from it even if it wished to."* Re-checked before the ruling
+> below was recorded, both halves fail:
+>
+> * **The count is ten, not two.** `crates/kirra-world/src/lib.rs` declares ten
+>   `pub struct …(())` placeholders (`EntityId`, `ObservationId`, `Source`,
+>   `Provenance`, `FrameId`, `MapId`, `ValidTime`, `TransactionTime`,
+>   `TrustAxes`, `ResolutionOutcome`). All are still genuinely unconstructible —
+>   private unit field, and the crate has **zero dependencies** — so that half is
+>   an undercount, not a safety error.
+> * **"Nothing could want a primitive from it" no longer follows, and this half
+>   matters.** The fence defines Kirra World as three packages
+>   (`WORLD_PACKAGE_EXACT = {kirra-world, kirra-world-store,
+>   kirra-world-service}`), and since WM-2 shipped, `kirra-world-store` has a
+>   substantial real public surface — `WorldStore`, `ProjectedClaim`,
+>   `supersedes`/`fold_all`, `Resolution`, `TemporalAnswer`, `Citation`. A
+>   closure member could plausibly want one of those today. The emptiness
+>   argument has expired.
+>
+> **The deferral survives the correction, because the emptiness argument was
+> never the load-bearing one.** What carries it is the self-announcing trigger
+> in the next section: the first such request reds Fence B whether or not
+> anything is there to want. The correction removes a supporting argument and
+> strengthens the reason to keep the machine check — it does not change the
+> ruling. It is recorded here rather than silently deleted so the ruling below
+> is not read as resting on a claim that had already lapsed when it was made.
 
 This is the **same structural shape as ADR-0040's open question 1**: the
 question is not answerable yet, and its triggering event lies downstream of
@@ -705,8 +732,9 @@ not yet exist"* — and nothing measured here disturbs that reasoning.
 
 1. Is the strict no-dependency rule for `kirra-core` sustainable, or is the
    lower-level split needed at the first shared-primitive request?
-   **Evidence prepared and a disposition drafted — see *Open question 1 —
-   evidence* above. Remains open until the owner rules.**
+   **DISPOSITIONED BY DEFERRAL — Justin Looney, 2026-08-06.** The ruling is
+   recorded below; the evidence it rests on is *Open question 1 — evidence*
+   above, re-verified on the day of the ruling.
 2. Which additional traits are safety-authoritative inputs? The list is open.
 3. Does the shared-artifact allowlist need per-entry validation evidence, or
    does the owning contract suffice?
@@ -745,7 +773,45 @@ not yet exist"* — and nothing measured here disturbs that reasoning.
       conditions that reopen the decision. It is recorded, and it is an **owner
       self-assessment supported by structural evidence only, with Q2/Q4/Q5
       open** — which the record states rather than conceals.
-- [ ] Open question 1 dispositioned
+- [x] Open question 1 dispositioned
+
+      **DISPOSITIONED BY DEFERRAL — recorded 2026-08-06 by Justin Looney,
+      holding the architecture owner and World Model owner roles.** The
+      disposition adopts the wording drafted 2026-08-05 in *Open question 1 —
+      evidence* above, unamended:
+
+      > The strict rule is **retained**. It holds, it is machine-enforced
+      > transitively, and no shared-primitive request has yet tested it.
+      >
+      > **Revisit trigger:** the first Fence B breach naming a closure member
+      > reaching `kirra-world*`. That breach *is* the request, and it arrives
+      > with its own diagnosis. At that point choose between the two
+      > alternatives this ADR already considered — the lower-level crate split,
+      > or living without the shared primitive — on the evidence of the specific
+      > request rather than in the abstract.
+
+      **Evidence re-verified 2026-08-06 before the ruling**, not carried over
+      from the day it was prepared: Fence B **INTACT** (19 workspace packages
+      from 10 roots), `kirra-core`'s manifest naming no `kirra-world*` under any
+      feature (`serde`, `kirra-contract-channel`, `tracing`; `tokio`,
+      `serde_json`, `kirra-capture-schema` behind default-off `capture`), and no
+      textual `kirra_world` reference anywhere in `kirra-core`,
+      `kirra-trajectory`, `kirra-inline-governor` or `kirra-safety-authority`.
+
+      **What this ruling deliberately does NOT claim.** It does not find the
+      rule *sustainable* — that is the question, and it remains unanswered
+      because the triggering event has not occurred. It rules only that
+      deferring is the correct action now, and names what will force the answer.
+      Re-checking the evidence also **retired one of the arguments** that had
+      supported the draft (see *Correction, 2026-08-06* above): Kirra World is
+      no longer effectively empty, since `kirra-world-store` gained a real
+      public surface in WM-2. The deferral stands on the self-announcing trigger
+      alone, which is the half that never depended on emptiness.
+
+      **This box does not by itself accept ADR-0042.** The *architecture owner
+      sign-off on the canonical terminology* above remains open, and ADR-0039's
+      terminal criterion — *"ADR-0042 itself accepted"* — is gated on that
+      remaining item, not on this one.
 
 Merging the PR that **introduced this ADR** satisfied none of the above.
 Boxes above are ticked only by a separately recorded owner ruling, each of
