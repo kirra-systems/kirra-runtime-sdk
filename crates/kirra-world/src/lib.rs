@@ -98,6 +98,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod entity;
 pub mod observation;
 pub mod trust;
 

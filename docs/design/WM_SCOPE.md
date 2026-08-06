@@ -235,7 +235,23 @@ not permission.
       something empties the store. This is the one item here that is not about
       the domain model; it is here because that decision put it here rather than
       leaving the fill date unowned.
-- [ ] **Entity taxonomy** (§6)
+- [ ] **Entity taxonomy** (§6) — **structure and kinds DONE 2026-08-06**,
+      `crates/kirra-world/src/entity.rs`, 18 tests, still zero-dependency.
+      Delivered: the 19-kind root-closed taxonomy + `EntityGroup`, `Lifecycle`
+      with validated transitions, `EntityId`/`Alias` (each alias carrying its own
+      `SourceClass`), `ResolutionConfidence`, and the `Entity` spine.
+      **Two more rules made structural:** an unrecognised kind has **no group to
+      read** (`group()` returns `Option`, `None` for `Unknown`), so §6.2's
+      *"degrade to `Unknown`, not guess a supertype"* is unavailable to violate;
+      and `ResolutionConfidence` is a newtype so the "is this **one** thing"
+      claim cannot be passed where an attribute confidence was wanted.
+      **`Entity` has no `kind` field** — kind is adjudicated from classification
+      evidence, so reclassification cannot contradict a stored value. That
+      follows §6.2 over §6.1's field table, which **contradict each other**; the
+      tension is recorded in the module as an open question rather than resolved.
+      **Still open:** identity *adjudication* — candidate clustering, merge/split
+      events — is Tier 2. `entity_id` generation, `first_observed`/
+      `last_observed` and `provenance_head` need the store (ULID, hashing).
 - [ ] **Observation model** (§7) — **pure half DONE 2026-08-06**,
       `crates/kirra-world/src/observation.rs`, 17 tests, still zero-dependency.
       Delivered: `Confidence`/`ConfidenceBasis` (§7.3), `SourceClass` + its
