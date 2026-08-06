@@ -373,16 +373,20 @@ not permission.
       why this did not need the entity taxonomy first), `ClockDomain`/
       `DomainInstant`/`ValidInterval` and the projection into
       `trust::ValidityWindow`.
-      **Two more rules made structural**, following rule 6's shape: cross-modal
+      **Three more rules made structural**, following rule 6's shape: cross-modal
       confidence comparison **errors** unless the caller names the decision
-      (`compare_across_bases`), and clock domains **cannot** be compared at all —
-      unsound rather than merely unwise, so there is deliberately no escape hatch.
+      (`compare_across_bases`); clock domains **cannot** be compared at all —
+      unsound rather than merely unwise, so there is deliberately no escape hatch;
+      and **rule 4's geometry half / P10** — `Payload` + `PayloadSource`, added
+      2026-08-06, which is what closed the transition rules at 7/7 above.
       **Still open, and it needs dependencies:** `observation_id` (ULID),
       `evidence_digest`/`prev_hash` (hashing), `frame`/`map`, and the per-kind
-      versioned `TypedPayload`. Those belong to the **store**, which already has
-      all three — pulling them into the core would spend ADR-0040's Q1 seam
-      decision without revisiting it. `ObservationKind` is also absent because
-      the blueprint names the field but never enumerates its variants.
+      versioned `TypedPayload` **body** — `Payload` carries that body's
+      provenance, but the body itself stays a type parameter. Those belong to the
+      **store**, which already has all three — pulling them into the core would
+      spend ADR-0040's Q1 seam decision without revisiting it. `ObservationKind`
+      is also absent because the blueprint names the field but never enumerates
+      its variants.
 - [x] **Relationship model** (§8) — **DONE 2026-08-06**,
       `crates/kirra-world/src/relationship.rs`, 20 tests, still zero-dependency.
       **All ten §8 record fields**, all 15 predicates across the four groups.
@@ -425,15 +429,28 @@ not permission.
       **structurally unbreakable** rather than a rule someone remembers —
       `validity_at` takes the clock as an argument and there is nowhere to write
       its answer down.
-- [ ] **The seven transition rules** (§9.2) — **six and a half of seven.**
-      Rules 1, 2, 3, 5, 6, 7 are implemented and tested, including the two
-      load-bearing ones. **Rule 4 is half done**: its *adjudication* half is
-      `TrustAxes::operator_confirm`; its *geometry* half (an operator assertion
-      may never silently rewrite a measured pose, P10) constrains the
-      **observation payload**, so it cannot be enforced until the observation
-      model exists. Deliberately left unticked rather than counted as done —
-      the module cannot reach a payload, which is why it cannot yet be
-      sidestepped, but "cannot be sidestepped from here" is not "enforced".
+- [x] **The seven transition rules** (§9.2) — **all seven, DONE 2026-08-06.**
+      Rules 1, 2, 3, 5, 6, 7 landed with the trust axes. **Rule 4's geometry
+      half** (an operator assertion may never silently rewrite a measured pose,
+      P10) landed with `observation::Payload` — its *adjudication* half was
+      already `TrustAxes::operator_confirm`.
+      **It did not need the geometry types this entry previously assumed.** The
+      rule asks that an operator's payload be *"visibly distinct from a sensed
+      one"* — a claim about **provenance**, not about pose contents — so a crate
+      with no pose type can keep it in full. `Payload`'s body is a type
+      parameter for exactly that reason, leaving §7.1's versioned `TypedPayload`
+      with the store where ADR-0040's Q1 seam decision put it.
+      Two things make the failure unavailable rather than checked:
+      `Payload::correction` is an **associated function that never receives the
+      payload it corrects** (the measured record is not reachable from the
+      operation), and `PayloadSource::Correction` has **no source-class field**
+      to inherit (so an operator's numbers cannot carry `Sensor` provenance —
+      the *invisible* rewrite is the one the rule actually forbids).
+      Three limits are stated in the type's docs rather than papered over: this
+      cannot verify that `of` names the right record (identity is the store's),
+      cannot catch a producer lying about its own class (that is §7.2's
+      producing edge), and cannot judge the numbers at all (the body is opaque
+      by construction).
 
 ### Why the axes are not one enum
 
