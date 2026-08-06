@@ -447,7 +447,17 @@ following are recorded:
       acceptance of this ADR still is.
 - [x] C1 (terminology collision) — canonical set decided in ADR-0042 Decision 1
 - [x] C2 (map/corridor boundary) — stated in ADR-0042 Decision 2
-- [ ] ADR-0042 itself accepted
+- [x] ADR-0042 itself accepted
+
+      **SATISFIED — [ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md)
+      was accepted 2026-08-06** by Justin Looney, on the recording of its fourth
+      and final criterion (the architecture owner sign-off on the canonical
+      terminology). Its acceptance carries one named follow-up — the M5
+      `docs/safety` terminology migration — which is **not** a condition on this
+      box: ADR-0042 is accepted, and M5 is scheduled work inside it.
+
+      **This box is the only one here that acceptance of ADR-0042 moves.** The
+      three owner sign-offs above remain open, so **ADR-0039 is still Proposed**.
 
 Merging the PR that **introduced this ADR** satisfied none of the above.
 Boxes above are ticked only by a separately recorded owner ruling, each of

@@ -521,9 +521,26 @@ not exist and is **not proposed here**, because designing it belongs with the
 Tier 1 observation model rather than ahead of it. Recorded so the owner
 confirms this row knowing the condition currently rests on remembering it.
 
-**Drafted, not decided.** No checkbox moves on this text. The compatibility
-inventory box requires *each row confirmed by its current owner*, and this is
-one row's evidence prepared for that confirmation.
+#### RULED — 2026-08-06
+
+> **CONFIRMED — 2026-08-06 by Justin Looney, World Model owner.** The wording
+> above is **adopted unamended**: unconditional for perception types carrying
+> their own confidence and timestamp, **conditional for `PerceivedObject`** —
+> no import path may be built until a stated rule exists for where its
+> confidence and validity come from, with the synthesis visible in the store
+> rather than indistinguishable from a measured value. The rule belongs to
+> `WM_SCOPE.md` Tier 1.
+>
+> **The import-boundary machine guard was offered and deliberately NOT taken.**
+> Adding it now would remove this deferral's known weakness — that nothing reds
+> in CI if an importer synthesizes a confidence — but it would mean designing
+> the guard ahead of the Tier 1 observation model that defines what it should
+> check. The weakness is therefore **accepted and recorded**, not mitigated:
+> until Tier 1 lands, this condition rests on being remembered.
+
+**One row of five.** The compatibility-inventory checkbox requires *each row
+confirmed by its current owner*; this ruling confirms the `tracked-object
+inputs` row only, so **that box stays unticked** pending the remaining four.
 
 ### Open question 4 appears already dispositioned
 
@@ -575,9 +592,24 @@ concedes nothing that has not already been conceded.
 > has no content, because the dependency runs store → core and an empty core
 > means an empty seam.
 
-This is **drafted, not decided.** Nothing above ticks the box, and the owner may
-prefer the alternative ordering — build Tier 1 first and ratify with a real
-answer — at the cost of leaving this ADR Proposed while its own subject matter
+> **RULED — 2026-08-06 by Justin Looney, World Model owner and architecture
+> owner.** The wording above is **adopted unamended**. The alternative ordering
+> (build Tier 1 first, ratify with a real answer) was considered and declined:
+> it leaves this ADR Proposed while its own subject matter is built, which is
+> the circularity the deferral exists to dissolve.
+>
+> **The box this feeds is `Open questions 1 and 4 dispositioned` — a
+> conjunction, and it stays UNTICKED.** Q1 is now dispositioned; Q4 is
+> *"appears already dispositioned"*, which is a finding, not the owner's act.
+> Ticking on a half-satisfied conjunction is exactly the drift these rulings
+> exist to prevent.
+
+The section below was the draft this ruling adopted, kept for the record.
+
+This was **drafted, not decided** when written. Nothing in it ticked the box,
+and the owner might have preferred the alternative ordering — build Tier 1 first
+and ratify with a real answer — at the cost of leaving this ADR Proposed while
+its own subject matter
 is implemented, which is the situation ADR-0042 was created to correct.
 
 **A note on the gate, so the deadlock is not overstated.** The domain-logic gate
