@@ -721,11 +721,30 @@ not yet exist"* — and nothing measured here disturbs that reasoning.
 **Proposed.** Accepted only when:
 
 - [ ] **Architecture owner** sign-off on the canonical terminology
-- [ ] **Safety-assurance owner** confirms M1's prose rename inside the safety
-      closure is acceptable, and on what timeline
-- [ ] The **Decision 5 ruling template is completed** by the safety-assurance
+- [x] **Safety-assurance owner** confirms M1's prose rename inside the safety
+      closure is acceptable, and on what timeline.
+      **CONFIRMED — Justin Looney, 2026-08-06. Acceptable; timeline: already
+      executed.** The rename landed in `61dbf57f` ("migrate ambiguous 'world
+      model' prose (ADR-0042 checklist)"), prose-only, inside the safety
+      closure. Verifiable in one command: `grep -ni "world model"` across
+      `crates/kirra-trajectory/src/perception_redundancy.rs` and
+      `crates/kirra-ros2-adapter/src/node.rs` returns nothing; both now read
+      *independent perception channel*.
+      **Ordering noted rather than glossed:** the change was executed
+      **before** this confirmation was recorded. It was deliberate and labelled
+      as a checklist action, and it altered comments only — no logic, no
+      identifiers, no behaviour. This confirmation is therefore
+      **retrospective**, and says so rather than reading as prior
+      authorization.
+- [x] The **Decision 5 ruling template is completed** by the safety-assurance
       owner — this ADR does not require the ruling to be *favourable*, only
-      *recorded*
+      *recorded*.
+      **COMPLETE — recorded 2026-08-05 by Justin Looney (owner assigned
+      2026-08-03); ticked 2026-08-06.** Every template field is populated:
+      scope classification, rationale, assumptions, required evidence, and
+      conditions that reopen the decision. It is recorded, and it is an **owner
+      self-assessment supported by structural evidence only, with Q2/Q4/Q5
+      open** — which the record states rather than conceals.
 - [ ] Open question 1 dispositioned
 
 Merging this PR satisfies none of the above.

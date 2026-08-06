@@ -433,11 +433,18 @@ following are recorded:
 - [ ] **Governor / safety-case owner** review and sign-off
 - [ ] **World Model owner** review and sign-off
 - [ ] **Architecture owner** review and sign-off
-- [ ] **Safety-assurance owner** ruling recorded per
+- [x] **Safety-assurance owner** ruling recorded per
       [ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md)
       Decision 5, using its decision-record template. The ruling must be
-      *recorded*; it need not be favourable. **Until then the scope
-      determination is PENDING and this ADR cannot be accepted**
+      *recorded*; it need not be favourable.
+      **RECORDED — 2026-08-05, using that ADR's decision-record template;
+      ticked 2026-08-06 by Justin Looney.** The recorded classification is
+      *safety-related, non-authoritative*, an **owner self-assessment supported
+      by structural evidence only**, with Q2/Q4/Q5 open.
+      **This box does not by itself accept ADR-0039.** The separate item
+      *"ADR-0042 itself accepted"* below remains open, and ADR-0042's own four
+      criteria gate it — so the scope determination is no longer PENDING, but
+      acceptance of this ADR still is.
 - [x] C1 (terminology collision) — canonical set decided in ADR-0042 Decision 1
 - [x] C2 (map/corridor boundary) — stated in ADR-0042 Decision 2
 - [ ] ADR-0042 itself accepted
