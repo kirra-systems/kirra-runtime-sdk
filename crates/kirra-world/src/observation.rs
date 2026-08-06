@@ -4,7 +4,7 @@
 //! module implements the part of it that can be pure**, and deliberately stops
 //! short of the rest — see *What is missing and why* below.
 //!
-//! # Two rules made structural rather than remembered
+//! # Three rules made structural rather than remembered
 //!
 //! The same move that gave [`crate::trust`] its shape: where the blueprint
 //! states a rule in prose, prefer a type that cannot express the violation.
@@ -27,11 +27,27 @@
 //! carries its domain, and [`DomainInstant::compare`] refuses a cross-domain
 //! comparison rather than returning a confidently wrong ordering.
 //!
+//! **3. Language never supplies geometry (P10).** §9.2's transition rule 4 has
+//! two halves; the *adjudication* half is [`crate::trust::TrustAxes::operator_confirm`]
+//! and the *geometry* half is here. An operator correcting a pose builds a
+//! [`Payload::correction`] — an associated function that never receives the
+//! payload it corrects, and whose [`PayloadSource::Correction`] variant has no
+//! source-class field to inherit. So the corrected record is unreachable from
+//! the operation, and the correction cannot present as sensed.
+//!
+//! Worth noting where the enforcement point landed: **rule 4's geometry half
+//! turned out not to need geometry.** The rule asks that an operator's payload
+//! be *"visibly distinct from a sensed one"* — a claim about provenance, which
+//! a crate with no pose type can keep in full. The `Payload` body is a type
+//! parameter precisely so that stays true.
+//!
 //! # What is missing, and why — the dependency argument
 //!
 //! §7.1's record also carries `observation_id: Ulid`, `evidence_digest: Hash`,
 //! `prev_hash: Hash`, `frame: FrameRef`, `map: Option<MapVersion>` and a
-//! per-kind versioned `TypedPayload`. **None of them are here**, because each
+//! per-kind versioned `TypedPayload` **body** — [`Payload`] carries that body's
+//! provenance but leaves the body itself a type parameter. **None of them are
+//! here**, because each
 //! needs a dependency — ULID generation, a hash implementation, frame and map
 //! types — and `kirra-world` has **zero dependencies by design**.
 //!
@@ -475,6 +491,195 @@ impl ValidInterval {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Payload provenance — §9.2 rule 4's geometry half, and P10
+// ---------------------------------------------------------------------------
+
+/// Why a payload could not be built.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PayloadError {
+    /// A payload reference was empty.
+    EmptyPayloadRef,
+}
+
+/// A reference to an earlier recorded payload.
+///
+/// Opaque here on the same terms as [`crate::relationship::DerivationRef`]:
+/// this crate stores the reference, the store resolves it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PayloadRef(String);
+
+impl PayloadRef {
+    /// Wrap a reference.
+    ///
+    /// # Errors
+    ///
+    /// [`PayloadError::EmptyPayloadRef`] if empty or whitespace.
+    pub fn new(r: impl Into<String>) -> Result<Self, PayloadError> {
+        let r = r.into();
+        if r.trim().is_empty() {
+            return Err(PayloadError::EmptyPayloadRef);
+        }
+        Ok(Self(r))
+    }
+
+    /// The reference.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Where a payload's **content** came from — the distinction §9.2 rule 4 turns on.
+///
+/// Rule 4: *"An operator correcting a pose creates a `Correction` observation
+/// whose payload is itself an operator-sourced measurement, **visibly distinct
+/// from a sensed one**."*
+///
+/// "Visibly distinct" is the whole requirement, and it is a statement about
+/// provenance rather than about geometry — which is why this can be enforced
+/// here, in a crate that has no pose type and wants none.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PayloadSource {
+    /// Produced directly by this class of producer.
+    Produced(SourceClass),
+    /// **An operator correction of an earlier payload.**
+    ///
+    /// There is deliberately no [`SourceClass`] field. §7.2 lists `Correction`
+    /// under the **Operator** source class, so a correction is operator-sourced
+    /// by definition — and with no field to fill, "a correction that presents
+    /// as sensed" cannot be spelled. Same move as
+    /// [`crate::relationship::Origination::Inferred`] carrying its derivation:
+    /// the thing that must never be dropped lives in the variant.
+    Correction {
+        /// What is being corrected. A correction that does not say what it
+        /// corrects defeats the invalidate-by-provenance rule the same way an
+        /// uncited inference does.
+        of: PayloadRef,
+    },
+}
+
+/// An observation's payload: content, plus **who produced it**, inseparably.
+///
+/// # The body is a type parameter, not a type this crate invents
+///
+/// §7.1's `TypedPayload` is per-kind and versioned, and belongs to the store
+/// along with identity, hashing, frames and maps — see the module header's
+/// dependency argument. Making the body generic keeps that seam intact while
+/// still letting the rule below be enforced *here*, where the trust model is.
+/// The store plugs in its own body type and inherits the guarantee.
+///
+/// # Rule 4's geometry half, and what enforces it
+///
+/// The failure the rule names is *"an operator assertion silently rewriting a
+/// measured pose"*. Two things make it unavailable, neither of them a check:
+///
+/// 1. **There is no way to modify a payload.** No setter, no `&mut` accessor,
+///    and no method anywhere that takes a `Payload` and returns a changed one.
+///    A correction is built by [`Payload::correction`], an associated function
+///    — it never receives the payload it corrects, only a reference to it. The
+///    measured record is not merely protected from rewriting; it is not
+///    reachable from the operation.
+/// 2. **A correction cannot inherit the corrected payload's source class**,
+///    because [`PayloadSource::Correction`] has no such field. That is the
+///    laundering hole worth closing: had `correction` copied the original's
+///    class, an operator's numbers would carry `Sensor` provenance and become
+///    exactly the *invisible* rewrite the rule forbids.
+///
+/// # What this does NOT guarantee — read before relying on it
+///
+/// * **That `of` names the payload being corrected.** Identity is the store's
+///   (§7.1's `observation_id` is a ULID, absent here by the dependency
+///   argument), so this crate cannot check the reference resolves, let alone
+///   that it resolves to the right record. It guarantees a correction *cites
+///   something*, not that it cites truthfully.
+/// * **That a producer told the truth about its own class.** A writer
+///   constructing `Produced(SourceClass::Sensor)` for hand-typed numbers is
+///   lying at the producing edge, where §7.2's per-source schemas live. No type
+///   here can catch that, and pretending otherwise would be worse than saying so.
+/// * **Anything about the numbers.** The body is opaque by construction, so
+///   this module cannot tell a plausible corrected pose from an absurd one.
+///   Rule 4 does not ask it to; the rule is about provenance being visible, and
+///   that is the part being kept.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Payload<B> {
+    body: B,
+    source: PayloadSource,
+}
+
+impl<B> Payload<B> {
+    /// A payload produced directly by `by`.
+    #[must_use]
+    pub fn produced(body: B, by: SourceClass) -> Self {
+        Self {
+            body,
+            source: PayloadSource::Produced(by),
+        }
+    }
+
+    /// **An operator's correction of an earlier payload.**
+    ///
+    /// Note what is absent: this does not take the payload being corrected, so
+    /// there is no path by which the correction could copy its provenance, and
+    /// no path by which the original could be altered. It takes a *reference*,
+    /// and stamps the result operator-sourced itself.
+    #[must_use]
+    pub fn correction(of: PayloadRef, body: B) -> Self {
+        Self {
+            body,
+            source: PayloadSource::Correction { of },
+        }
+    }
+
+    /// The content.
+    #[must_use]
+    pub fn body(&self) -> &B {
+        &self.body
+    }
+
+    /// Where the content came from.
+    #[must_use]
+    pub fn source(&self) -> &PayloadSource {
+        &self.source
+    }
+
+    /// What this corrects, if it is a correction.
+    #[must_use]
+    pub fn corrects(&self) -> Option<&PayloadRef> {
+        match &self.source {
+            PayloadSource::Correction { of } => Some(of),
+            PayloadSource::Produced(_) => None,
+        }
+    }
+
+    /// **Whether an operator supplied these numbers** — the P10 read.
+    ///
+    /// True for a direct operator assertion *and* for a correction. A consumer
+    /// that must not take geometry from language asks this one question, and
+    /// the answer cannot be laundered by routing an assertion through a
+    /// correction.
+    #[must_use]
+    pub fn is_operator_supplied(&self) -> bool {
+        match &self.source {
+            PayloadSource::Produced(c) => *c == SourceClass::Operator,
+            PayloadSource::Correction { .. } => true,
+        }
+    }
+
+    /// Whether this system **sensed** the content.
+    ///
+    /// [`SourceClass::Sensor`] only — deliberately narrow, and not the negation
+    /// of [`Self::is_operator_supplied`]. An imported map layer and a derived
+    /// fact are neither operator-supplied nor sensed, and collapsing the three
+    /// into one boolean is how a relayed or inferred value comes to be read as
+    /// a local measurement. Compare [`SourceClass::origin`]'s refusal to map
+    /// `Network` to `Observed`, for the same reason.
+    #[must_use]
+    pub fn is_sensed(&self) -> bool {
+        matches!(&self.source, PayloadSource::Produced(SourceClass::Sensor))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,5 +939,101 @@ mod tests {
         let s = SubjectRef::Unbound;
         assert_eq!(s, SubjectRef::Unbound);
         assert_ne!(s, SubjectRef::Candidate("c-1".into()));
+    }
+
+    // -- §9.2 rule 4, geometry half: P10 -----------------------------------
+
+    fn pref(s: &str) -> PayloadRef {
+        PayloadRef::new(s).unwrap()
+    }
+
+    #[test]
+    fn a_correction_is_visibly_distinct_from_the_pose_it_corrects() {
+        // THE rule: "an operator correcting a pose creates a Correction
+        // observation whose payload is itself an operator-sourced measurement,
+        // visibly distinct from a sensed one."
+        let measured = Payload::produced("pose@sensor", SourceClass::Sensor);
+        let corrected = Payload::correction(pref("obs-77"), "pose@operator");
+
+        assert!(measured.is_sensed());
+        assert!(!measured.is_operator_supplied());
+
+        // Visibly distinct, on the one question P10 asks.
+        assert!(corrected.is_operator_supplied());
+        assert!(!corrected.is_sensed());
+        assert_eq!(corrected.corrects().unwrap().as_str(), "obs-77");
+    }
+
+    #[test]
+    fn a_correction_cannot_inherit_the_corrected_payloads_source_class() {
+        // The laundering hole: if `correction` copied the original's class, an
+        // operator's numbers would carry Sensor provenance — the INVISIBLE
+        // rewrite rule 4 forbids. The variant has no field to copy into.
+        let corrected = Payload::correction(pref("obs-77"), "pose@operator");
+        assert_eq!(
+            corrected.source(),
+            &PayloadSource::Correction { of: pref("obs-77") }
+        );
+        // Exhaustive over every producer class: none of them can be what a
+        // correction reports as its source.
+        for class in [
+            SourceClass::Sensor,
+            SourceClass::Operator,
+            SourceClass::Configuration,
+            SourceClass::Import,
+            SourceClass::Derivation,
+            SourceClass::Network,
+        ] {
+            assert_ne!(corrected.source(), &PayloadSource::Produced(class));
+        }
+    }
+
+    #[test]
+    fn the_measured_payload_is_untouched_by_a_correction() {
+        // `correction` never receives the payload it corrects — the original is
+        // not reachable from the operation, so "silently rewrite" has no path.
+        let measured = Payload::produced("pose@sensor", SourceClass::Sensor);
+        let before = measured.clone();
+        let _correction = Payload::correction(pref("obs-77"), "pose@operator");
+        assert_eq!(measured, before);
+        assert_eq!(*measured.body(), "pose@sensor");
+        assert!(measured.is_sensed());
+    }
+
+    #[test]
+    fn routing_an_assertion_through_a_correction_does_not_launder_it() {
+        // Both spellings of operator-supplied geometry answer P10's question the
+        // same way. A consumer that must not take geometry from language cannot
+        // be dodged by choosing the other variant.
+        let asserted = Payload::produced("pose@operator", SourceClass::Operator);
+        let corrected = Payload::correction(pref("obs-77"), "pose@operator");
+        assert!(asserted.is_operator_supplied());
+        assert!(corrected.is_operator_supplied());
+    }
+
+    #[test]
+    fn sensed_is_narrower_than_not_operator_supplied() {
+        // Deliberately NOT the negation of each other. An imported map layer and
+        // a derived fact are neither — collapsing the three is how a relayed or
+        // inferred value gets read as a local measurement.
+        for class in [
+            SourceClass::Configuration,
+            SourceClass::Import,
+            SourceClass::Derivation,
+            SourceClass::Network,
+        ] {
+            let p = Payload::produced("x", class);
+            assert!(!p.is_operator_supplied(), "{class:?}");
+            assert!(!p.is_sensed(), "{class:?}");
+        }
+    }
+
+    #[test]
+    fn a_correction_must_cite_something() {
+        // Same class of hole as an uncited inference: PayloadRef refuses empty,
+        // and the variant has no None case, so "corrects nothing" is unspellable.
+        assert_eq!(PayloadRef::new("  "), Err(PayloadError::EmptyPayloadRef));
+        assert_eq!(PayloadRef::new(""), Err(PayloadError::EmptyPayloadRef));
+        assert!(PayloadRef::new("obs-77").is_ok());
     }
 }

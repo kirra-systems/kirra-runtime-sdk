@@ -344,6 +344,30 @@ not permission.
       something empties the store. This is the one item here that is not about
       the domain model; it is here because that decision put it here rather than
       leaving the fill date unowned.
+      **DECIDING HALF DONE 2026-08-06**, `crates/kirra-world/src/retention.rs`,
+      15 tests, still zero-dependency: `RetentionPolicy` (OQ2's 30/365-day
+      horizons, with **protected ≥ raw refused at construction** — the inversion
+      would age protected classes out *before* the traffic they exist to
+      outlive), saturating cutoffs (an underflow that wrapped would make
+      *everything* eligible, and compaction is irreversible), a wall-clock
+      requirement (a 30-day horizon read against the boundary timing domain is
+      meaningless), `RetentionSurvey` refusing logs that cannot exist, and
+      `decide` returning **four outcomes rather than `Option<Range>`** — because
+      "nothing is old enough" and "a protected event is pinning the store" both
+      compact nothing, and only the second is worth waking someone for.
+      `Blocker::may_compact_around` encodes §11.3's asymmetry: the pre-agreed
+      escalation to compact *around* a blocker applies to projection heads and
+      **not** to protected classes. `CompactablePrefix`/`Eligibility` make two
+      meaningless survey states unrepresentable — a refusal naming no blocker,
+      and a prefix over a range nothing aged into — which is what makes `decide`
+      **infallible**: every survey that exists maps to a decision.
+      **STILL OPEN — the acting half.** Nothing calls
+      `WorldStore::compact_range`; the mechanism has existed since WM-2 and has
+      never been reached. What remains is the store-side survey queries and a
+      scheduled driver (precedent: `src/campaign_monitor.rs`,
+      `src/cert_expiry_monitor.rs`). **The box stays unticked until something
+      actually empties the store** — a policy that decides correctly and is
+      never run leaves the 15.79 days exactly where they were.
 - [ ] **Entity taxonomy** (§6) — **structure and kinds DONE 2026-08-06**,
       `crates/kirra-world/src/entity.rs`, 18 tests, still zero-dependency.
       Delivered: the 19-kind root-closed taxonomy + `EntityGroup`, `Lifecycle`
@@ -373,16 +397,20 @@ not permission.
       why this did not need the entity taxonomy first), `ClockDomain`/
       `DomainInstant`/`ValidInterval` and the projection into
       `trust::ValidityWindow`.
-      **Two more rules made structural**, following rule 6's shape: cross-modal
+      **Three more rules made structural**, following rule 6's shape: cross-modal
       confidence comparison **errors** unless the caller names the decision
-      (`compare_across_bases`), and clock domains **cannot** be compared at all —
-      unsound rather than merely unwise, so there is deliberately no escape hatch.
+      (`compare_across_bases`); clock domains **cannot** be compared at all —
+      unsound rather than merely unwise, so there is deliberately no escape hatch;
+      and **rule 4's geometry half / P10** — `Payload` + `PayloadSource`, added
+      2026-08-06, which is what closed the transition rules at 7/7 above.
       **Still open, and it needs dependencies:** `observation_id` (ULID),
       `evidence_digest`/`prev_hash` (hashing), `frame`/`map`, and the per-kind
-      versioned `TypedPayload`. Those belong to the **store**, which already has
-      all three — pulling them into the core would spend ADR-0040's Q1 seam
-      decision without revisiting it. `ObservationKind` is also absent because
-      the blueprint names the field but never enumerates its variants.
+      versioned `TypedPayload` **body** — `Payload` carries that body's
+      provenance, but the body itself stays a type parameter. Those belong to the
+      **store**, which already has all three — pulling them into the core would
+      spend ADR-0040's Q1 seam decision without revisiting it. `ObservationKind`
+      is also absent because the blueprint names the field but never enumerates
+      its variants.
 - [x] **Relationship model** (§8) — **DONE 2026-08-06**,
       `crates/kirra-world/src/relationship.rs`, 20 tests, still zero-dependency.
       **All ten §8 record fields**, all 15 predicates across the four groups.
@@ -425,15 +453,28 @@ not permission.
       **structurally unbreakable** rather than a rule someone remembers —
       `validity_at` takes the clock as an argument and there is nowhere to write
       its answer down.
-- [ ] **The seven transition rules** (§9.2) — **six and a half of seven.**
-      Rules 1, 2, 3, 5, 6, 7 are implemented and tested, including the two
-      load-bearing ones. **Rule 4 is half done**: its *adjudication* half is
-      `TrustAxes::operator_confirm`; its *geometry* half (an operator assertion
-      may never silently rewrite a measured pose, P10) constrains the
-      **observation payload**, so it cannot be enforced until the observation
-      model exists. Deliberately left unticked rather than counted as done —
-      the module cannot reach a payload, which is why it cannot yet be
-      sidestepped, but "cannot be sidestepped from here" is not "enforced".
+- [x] **The seven transition rules** (§9.2) — **all seven, DONE 2026-08-06.**
+      Rules 1, 2, 3, 5, 6, 7 landed with the trust axes. **Rule 4's geometry
+      half** (an operator assertion may never silently rewrite a measured pose,
+      P10) landed with `observation::Payload` — its *adjudication* half was
+      already `TrustAxes::operator_confirm`.
+      **It did not need the geometry types this entry previously assumed.** The
+      rule asks that an operator's payload be *"visibly distinct from a sensed
+      one"* — a claim about **provenance**, not about pose contents — so a crate
+      with no pose type can keep it in full. `Payload`'s body is a type
+      parameter for exactly that reason, leaving §7.1's versioned `TypedPayload`
+      with the store where ADR-0040's Q1 seam decision put it.
+      Two things make the failure unavailable rather than checked:
+      `Payload::correction` is an **associated function that never receives the
+      payload it corrects** (the measured record is not reachable from the
+      operation), and `PayloadSource::Correction` has **no source-class field**
+      to inherit (so an operator's numbers cannot carry `Sensor` provenance —
+      the *invisible* rewrite is the one the rule actually forbids).
+      Three limits are stated in the type's docs rather than papered over: this
+      cannot verify that `of` names the right record (identity is the store's),
+      cannot catch a producer lying about its own class (that is §7.2's
+      producing edge), and cannot judge the numbers at all (the body is opaque
+      by construction).
 
 ### Why the axes are not one enum
 
@@ -529,6 +570,10 @@ current**, **never supply geometry**.
 - [ ] **Retention policy driver** — the horizons OQ2 ruled are still applied by
       hand. Its precondition is already recorded in ADR-0041's WM-2 milestone:
       *the first doer-side consumer wired to the store ends the deferral.*
+      **Superseded in part:** ADR-0040 promoted this to a **Tier 1 exit
+      criterion** (§4), so it no longer waits on that precondition, and its
+      *deciding* half landed 2026-08-06 as `kirra_world::retention`. This entry
+      now covers only the scheduled driver, tracked at §4.
 - [ ] `kirra-world-service` as real CQRS — 9 commands, 8 queries, 10 emitted
       events — still inside Fence A
 - [ ] Operator teaching surface (§17): `AssertEntity`, corrections
