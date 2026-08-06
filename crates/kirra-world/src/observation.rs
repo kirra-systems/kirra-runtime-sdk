@@ -553,7 +553,7 @@ pub enum PayloadSource {
     /// the thing that must never be dropped lives in the variant.
     Correction {
         /// What is being corrected. A correction that does not say what it
-        /// corrects breaks invalidate-by-provenance the same way an
+        /// corrects defeats the invalidate-by-provenance rule the same way an
         /// uncited inference does.
         of: PayloadRef,
     },
