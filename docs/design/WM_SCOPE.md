@@ -30,16 +30,125 @@ World predicts nothing. It records.
 
 ---
 
-## 0a. What Kirra World contains — the layer vocabulary
+## 0a. What Kirra World contains — the tiers and their invariants
 
-Naming the layers, because "the world model" collapses three different things
+Naming the tiers, because "the world model" collapses several different things
 and the collapse is what makes the safety conversation hard. **This is
 vocabulary for architecture already ratified in ADR-0041, not new
 architecture** — the log-plus-projections shape, the rebuild property and the
 no-projection-only-fact rule are all existing normative requirements. What is
 new here is only that they have names.
 
-### Kirra World contains
+### The tiers
+
+```
+   OUTSIDE Kirra World ─────────────────────────────┐
+   Cognitive systems (predictive belief, LLM)       │
+   ──────────────────────▲──────────────────────────┘
+                         │  Cognitive Interface — one-way READ seam
+╔════════════════════════╪═══════════════════════════════════════════╗
+║ KIRRA WORLD            │                                           ║
+║  ┌─────────────────────┴─────────────────────────────────────────┐ ║
+║  │ ANSWER TIER — the only read path                              │ ║
+║  │   Query Engine · Explain                                      │ ║
+║  └─────────────────────▲─────────────────────────────────────────┘ ║
+║  ┌─────────────────────┴─────────────────────────────────────────┐ ║
+║  │ ACCESS STRUCTURES — spatial · temporal · subject · text       │ ║
+║  └─────────────────────▲─────────────────────────────────────────┘ ║
+║  ┌─────────────────────┴─────────────────────────────────────────┐ ║
+║  │ KNOWLEDGE TIER — deterministic projections (pure folds)       │ ║
+║  │   identity resolution · relationships · trust · semantics     │ ║
+║  └─────────────────────▲─────────────────────────────────────────┘ ║
+║  ┌─────────────────────┴─────────────────────────────────────────┐ ║
+║  │ ADMISSION — the only write door                               │ ║
+║  └─────────────────────▲─────────────────────────────────────────┘ ║
+║  ┌─────────────────────┴─────────────────────────────────────────┐ ║
+║  │ EVIDENCE TIER — immutable, append-only, hash-chained          │ ║
+║  └───────────────────────────────────────────────────────────────┘ ║
+║  Cross-cutting: Frame & Time · Provenance Chain · Retention        ║
+╚════════════════════════════════════════════════════════════════════╝
+```
+
+### One invariant per tier — the part that earns its keep
+
+A component list tells you what exists. **An invariant tells you what may be
+thrown away**, and that is the question that actually governs the design.
+
+| Tier | Invariant | Consequence |
+|---|---|---|
+| **Evidence** | Immutable, hash-chained, **never deleted** — compaction *cites*, it does not erase | Incident reconstruction stays possible |
+| **Admission** | The **only** write door; writer class, confidence basis and frame requirement are all decided here | A rule with no other place to live has one |
+| **Knowledge** | Rebuild-from-zero **==** incremental; **no projection-only fact** | Every belief traces to evidence |
+| **Access** | Rebuildable from the tier below — **losing an index loses performance, never truth** | The test for "is this an index or a projection?" |
+| **Answer** | Every answer carries provenance; a **degraded answer says so** | `Explain` is possible at all |
+
+That fourth row is the discriminator worth keeping. A flat component list puts
+spatial index, temporal index and identity resolution side by side — but two of
+those are rebuildable caches and the third is a projection whose history must
+survive forever, and a flat list cannot tell you which.
+
+### Why ADMISSION is named, when it was not before
+
+**The rules already exist; the component did not.** `WorldStore::append` already
+refuses an `LlmCandidate` writing `Confirmed`, and already requires `frame_id`
+on a spatial claim (SD-4). Those are admission decisions, living inside a
+function rather than in a named place.
+
+Naming the tier matters right now because **[ADR-0040](../adr/0040-world-model-ownership-and-boundary.md)'s
+`PerceivedObject` condition is an admission rule with nowhere to live.** That
+ruling forbids an import path until a stated rule exists for where the datum's
+confidence and validity come from, with any synthesis visible in the store.
+`ConfidenceBasis::Assumed` supplies the mechanism; the Admission tier supplies
+the place. Until both exist the condition rests on being remembered, which the
+ADR records as its known weakness.
+
+### Retention is cross-cutting, not a feature
+
+The retention driver is a **Tier 1 exit criterion** carried by ADR-0040's
+deployment-ownership decision, and it appeared in no earlier picture. It touches
+three tiers at once — the ledger (compaction), the knowledge tier (rebuild after
+compaction) and the answer tier (a compacted window must report itself degraded)
+— which is the definition of cross-cutting. The code already has that shape:
+`compaction.rs` returns `Resolution::Degraded` carrying citations.
+
+### Explain sits in the ANSWER tier deliberately
+
+Not decoration. §16 calls it *"a **product requirement**, not a debugging
+tool"* and §25 makes it the Year 1 deliverable. Placing it at the top is what
+forces every tier below to retain what it needs — it is the reason provenance is
+cross-cutting rather than a feature of one component.
+
+### Three tensions with the blueprint, flagged rather than picked
+
+This tiering was drafted against a proposed eight-component decomposition
+(Evidence Ledger · Deterministic Knowledge · Semantic Projections · Identity
+Resolution · Spatial Index · Temporal Index · Query Engine · Cognitive
+Interface). Three differences are **deliberate**, and each contradicts something,
+so they are recorded for the blueprint owner to rule on rather than settled here:
+
+1. **Spatial and temporal are access structures, not tiers.** Blueprint §5.1
+   makes Frame & Time *"cross-cutting, not a layer"*. Listing the indexes as
+   peers of the query engine re-layers what §5.1 de-layered, and invites a
+   pipeline reading ("through the spatial index, then the temporal one") that is
+   not how they are used.
+2. **Semantic projections are not separated from deterministic knowledge.**
+   §5.3 states *"Projection Engine replaces Entity Resolution + Semantic
+   Model"* — an earlier draft carried that split and it was **rejected**.
+   Re-introducing it also raises a question with no good answer: is a semantic
+   projection deterministic? If yes, why is it separate?
+3. **Identity resolution lives INSIDE the knowledge tier**, not beside it. §6.3:
+   *"identity is a projection like everything else"*, and *"a query at a past
+   instant resolves identity as it was adjudicated then."* Making it a peer of
+   the indexes invites a mutable side-table, which is the exact failure §6.3
+   opens with — *"the rows are merged, and the fact that the system ever
+   believed otherwise is gone."* Of the three, this is the one that could cause
+   real harm.
+
+### The two tiers that already exist, in prose
+
+The Evidence and Knowledge tiers are the ones with shipped code, and they carry
+the normative rules ADR-0041 and the blueprint already impose. Expanded here
+because those rules are what the invariant table compresses.
 
 **1. Evidence Ledger** — immutable, provenance-carrying, bitemporal events.
 *"What happened."*
