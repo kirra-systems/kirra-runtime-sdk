@@ -22,6 +22,9 @@
 //! * [`mod@relationship`] (§8) — directed, typed, time-bounded relations;
 //!   supersession instead of update; inferences that cannot omit their
 //!   derivation.
+//! * [`mod@retention`] — ADR-0040's Tier 1 exit criterion, deciding half. The
+//!   store has known *how* to compact since WM-2; nothing has ever decided
+//!   *when*, which is why the horizons OQ2 ruled have gone unenforced.
 //!
 //! **Still absent:** storage, API and queries — plus the parts of §6/§7 that
 //! need a dependency (ULID identity, content hashing, frames, maps, typed
@@ -111,6 +114,7 @@
 pub mod entity;
 pub mod observation;
 pub mod relationship;
+pub mod retention;
 pub mod trust;
 
 // ---------------------------------------------------------------------------
