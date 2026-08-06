@@ -345,7 +345,7 @@ not permission.
       the domain model; it is here because that decision put it here rather than
       leaving the fill date unowned.
       **DECIDING HALF DONE 2026-08-06**, `crates/kirra-world/src/retention.rs`,
-      12 tests, still zero-dependency: `RetentionPolicy` (OQ2's 30/365-day
+      15 tests, still zero-dependency: `RetentionPolicy` (OQ2's 30/365-day
       horizons, with **protected ≥ raw refused at construction** — the inversion
       would age protected classes out *before* the traffic they exist to
       outlive), saturating cutoffs (an underflow that wrapped would make
@@ -357,7 +357,10 @@ not permission.
       compact nothing, and only the second is worth waking someone for.
       `Blocker::may_compact_around` encodes §11.3's asymmetry: the pre-agreed
       escalation to compact *around* a blocker applies to projection heads and
-      **not** to protected classes.
+      **not** to protected classes. `CompactablePrefix`/`Eligibility` make two
+      meaningless survey states unrepresentable — a refusal naming no blocker,
+      and a prefix over a range nothing aged into — which is what makes `decide`
+      **infallible**: every survey that exists maps to a decision.
       **STILL OPEN — the acting half.** Nothing calls
       `WorldStore::compact_range`; the mechanism has existed since WM-2 and has
       never been reached. What remains is the store-side survey queries and a

@@ -45,6 +45,21 @@
 //! [`Blocker::may_compact_around`] is that distinction as a value rather than a
 //! paragraph, so a future driver cannot apply the escalation to the refusal it
 //! was never agreed for.
+//!
+//! # The survey shape, and a comment that was wrong
+//!
+//! [`RetentionSurvey`] first carried four loosely-coupled fields, two of them
+//! `Option`s over a coupling that is structural. That admitted a state with no
+//! meaning — *no compactable prefix and no blocker*, which says the first
+//! eligible generation was refused while naming nothing that refused it — and a
+//! comment in `decide` asserted it could not happen. It could: the survey
+//! constructed, and the decision had to carry an error arm for it.
+//!
+//! [`CompactablePrefix`] and [`Eligibility`] make that state and its twin (a
+//! prefix over a range nothing aged into) **unrepresentable**, which is worth
+//! more than the two runtime checks it replaced: [`decide`] is now infallible.
+//! Every survey that exists maps to a decision, and the only error moved to
+//! where the data is built — the one place it was ever answerable.
 
 use crate::observation::{ClockDomain, DomainInstant};
 
@@ -200,6 +215,54 @@ impl Blocker {
     }
 }
 
+/// How far `largest_compactable_prefix` reached over the eligible range.
+///
+/// # Why this is one enum and not two `Option`s
+///
+/// It was two — `compactable_through: Option<u64>` beside `blocked_by:
+/// Option<Blocker>` — and that admitted a state with no meaning: *no prefix and
+/// no blocker*, which says the very first eligible generation was refused while
+/// naming nothing that refused it. A comment asserted it could not happen. It
+/// could: the survey constructed, and the decision had to carry an error arm
+/// for it.
+///
+/// Here it does not typecheck. [`Self::Nothing`] must name its blocker, and a
+/// prefix that reached the end of the range simply has no blocker to name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompactablePrefix {
+    /// Nothing is compactable: the first eligible generation is itself refused.
+    Nothing {
+        /// What refused it. Not optional — "refused by nothing" is not a state.
+        blocker: Blocker,
+    },
+    /// A prefix reaches `through`.
+    Through {
+        /// The last compactable generation.
+        through: u64,
+        /// What stopped it going further, or `None` if it reached the end of
+        /// the eligible range.
+        blocker: Option<Blocker>,
+    },
+}
+
+/// What age made eligible, and how far compaction can reach into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Eligibility {
+    /// Nothing has aged past the cutoff, so there is nothing to survey.
+    ///
+    /// Pairing the age question with the prefix in one enum is what removes the
+    /// second impossible state the two-`Option` shape allowed: a compactable
+    /// prefix over a range that no event was old enough to enter.
+    NothingOldEnough,
+    /// Events aged out through `newest`.
+    Aged {
+        /// The newest generation older than the cutoff.
+        newest: u64,
+        /// How far a compactable prefix reached over that range.
+        prefix: CompactablePrefix,
+    },
+}
+
 /// What the store observed about its own log during one retention pass.
 ///
 /// Every field is something the store can answer cheaply; nothing here is
@@ -208,66 +271,49 @@ impl Blocker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RetentionSurvey {
     oldest_generation: u64,
-    newest_past_cutoff: Option<u64>,
-    compactable_through: Option<u64>,
-    blocked_by: Option<Blocker>,
+    eligibility: Eligibility,
 }
 
 impl RetentionSurvey {
     /// Record a survey.
     ///
     /// * `oldest_generation` — the oldest generation still present.
-    /// * `newest_past_cutoff` — the newest generation whose event is older than
-    ///   the cutoff, or `None` if none are. This is the *age* question.
-    /// * `compactable_through` — `largest_compactable_prefix` over that range,
-    ///   or `None` if even the first generation is refused.
-    /// * `blocked_by` — which refusal stopped it, if one did.
+    /// * `eligibility` — what age made eligible, and how far
+    ///   `largest_compactable_prefix` reached into it.
     ///
     /// # Errors
     ///
     /// [`RetentionError::IncoherentSurvey`] for a log that cannot exist:
     /// eligibility or a compactable prefix below the oldest surviving
-    /// generation, a compactable prefix beyond what age made eligible, a
-    /// blocker with nothing eligible to block, or a prefix that reached the end
-    /// of the eligible range while still claiming a blocker. Refused rather
-    /// than normalized — a survey this wrong means the caller's queries
-    /// disagree with each other, and compacting on it would act on a log
-    /// nobody actually observed.
-    pub fn new(
-        oldest_generation: u64,
-        newest_past_cutoff: Option<u64>,
-        compactable_through: Option<u64>,
-        blocked_by: Option<Blocker>,
-    ) -> Result<Self, RetentionError> {
-        if let Some(n) = newest_past_cutoff {
-            if n < oldest_generation {
+    /// generation, or a prefix past what age made eligible. Refused rather than
+    /// normalized — a survey this wrong means the caller's queries disagree with
+    /// each other, and compacting on it would act on a log nobody observed.
+    ///
+    /// The two impossibilities the previous shape needed runtime checks for —
+    /// a prefix of nothing, and a refusal naming no blocker — are now
+    /// unrepresentable, so they are absent from this list rather than enforced
+    /// in it.
+    pub fn new(oldest_generation: u64, eligibility: Eligibility) -> Result<Self, RetentionError> {
+        if let Eligibility::Aged { newest, prefix } = eligibility {
+            if newest < oldest_generation {
                 return Err(RetentionError::IncoherentSurvey);
             }
-        }
-        match (newest_past_cutoff, compactable_through) {
-            // A prefix of nothing.
-            (None, Some(_)) => return Err(RetentionError::IncoherentSurvey),
-            (Some(n), Some(c)) => {
-                if c < oldest_generation || c > n {
+            if let CompactablePrefix::Through { through, blocker } = prefix {
+                if through < oldest_generation || through > newest {
                     return Err(RetentionError::IncoherentSurvey);
                 }
-                // Reached the end of the eligible range, so nothing blocked it.
-                if c == n && blocked_by.is_some() {
+                // Reached the end of the eligible range while still naming a
+                // blocker. `largest_compactable_prefix` is capped at the range's
+                // end, so a refusal it reports must lie *within* the range —
+                // one that does not means the caller's two queries disagree.
+                if through == newest && blocker.is_some() {
                     return Err(RetentionError::IncoherentSurvey);
                 }
             }
-            _ => {}
-        }
-        // A blocker with nothing eligible is a refusal of a window that was
-        // never a candidate.
-        if newest_past_cutoff.is_none() && blocked_by.is_some() {
-            return Err(RetentionError::IncoherentSurvey);
         }
         Ok(Self {
             oldest_generation,
-            newest_past_cutoff,
-            compactable_through,
-            blocked_by,
+            eligibility,
         })
     }
 
@@ -277,22 +323,10 @@ impl RetentionSurvey {
         self.oldest_generation
     }
 
-    /// The newest generation older than the cutoff, if any.
+    /// What age made eligible, and how far compaction reached into it.
     #[must_use]
-    pub fn newest_past_cutoff(&self) -> Option<u64> {
-        self.newest_past_cutoff
-    }
-
-    /// How far a compactable prefix reached, if at all.
-    #[must_use]
-    pub fn compactable_through(&self) -> Option<u64> {
-        self.compactable_through
-    }
-
-    /// Which refusal stopped the prefix, if one did.
-    #[must_use]
-    pub fn blocked_by(&self) -> Option<Blocker> {
-        self.blocked_by
+    pub fn eligibility(&self) -> Eligibility {
+        self.eligibility
     }
 }
 
@@ -367,30 +401,38 @@ impl RetentionDecision {
 /// yields the same decision — the property that lets a retention run be
 /// replayed during incident reconstruction rather than reasoned about.
 ///
-/// # Errors
+/// # It cannot fail, and that is the point of [`RetentionSurvey::new`]
 ///
-/// [`RetentionError::IncoherentSurvey`] if the survey reports a blocker at a
-/// generation outside the eligible range. Every other coherence rule is already
-/// enforced by [`RetentionSurvey::new`].
-pub fn decide(survey: &RetentionSurvey) -> Result<RetentionDecision, RetentionError> {
-    let Some(newest) = survey.newest_past_cutoff else {
-        return Ok(RetentionDecision::NothingOldEnough);
+/// This returned a `Result` while the survey was four loosely-coupled fields,
+/// because one field combination had no meaning and had to be rejected
+/// *somewhere*. With [`CompactablePrefix`] making that combination
+/// unrepresentable and the constructor refusing the rest, every survey that
+/// exists maps to a decision. The error moved to where the data is built, which
+/// is the only place it was ever answerable.
+#[must_use]
+pub fn decide(survey: &RetentionSurvey) -> RetentionDecision {
+    let Eligibility::Aged { prefix, .. } = survey.eligibility else {
+        return RetentionDecision::NothingOldEnough;
     };
     let lo = survey.oldest_generation;
 
-    match (survey.compactable_through, survey.blocked_by) {
-        (None, Some(blocker)) => Ok(RetentionDecision::FullyBlocked {
+    match prefix {
+        CompactablePrefix::Nothing { blocker } => RetentionDecision::FullyBlocked {
             blocker,
             at_generation: lo,
-        }),
-        // No prefix and no blocker cannot happen: something refused generation
-        // `lo`, or the prefix would have reached at least that far.
-        (None, None) => Err(RetentionError::IncoherentSurvey),
-        (Some(hi), Some(blocker)) => Ok(RetentionDecision::CompactPartial { lo, hi, blocker }),
-        (Some(hi), None) => {
-            debug_assert_eq!(hi, newest, "survey construction guarantees this");
-            Ok(RetentionDecision::Compact { lo, hi })
-        }
+        },
+        CompactablePrefix::Through {
+            through,
+            blocker: Some(blocker),
+        } => RetentionDecision::CompactPartial {
+            lo,
+            hi: through,
+            blocker,
+        },
+        CompactablePrefix::Through {
+            through,
+            blocker: None,
+        } => RetentionDecision::Compact { lo, hi: through },
     }
 }
 
@@ -486,16 +528,31 @@ mod tests {
 
     // -- the four outcomes -------------------------------------------------
 
+    fn aged(newest: u64, prefix: CompactablePrefix) -> Eligibility {
+        Eligibility::Aged { newest, prefix }
+    }
+    fn through(through: u64, blocker: Option<Blocker>) -> CompactablePrefix {
+        CompactablePrefix::Through { through, blocker }
+    }
+
     #[test]
     fn nothing_old_enough_is_distinct_from_blocked() {
         // THE reason this is not Option<Range>. Both do nothing; only one is
         // worth waking someone for.
-        let young = RetentionSurvey::new(1, None, None, None).unwrap();
-        let pinned =
-            RetentionSurvey::new(1, Some(500), None, Some(Blocker::ProtectedClass)).unwrap();
+        let young = RetentionSurvey::new(1, Eligibility::NothingOldEnough).unwrap();
+        let pinned = RetentionSurvey::new(
+            1,
+            aged(
+                500,
+                CompactablePrefix::Nothing {
+                    blocker: Blocker::ProtectedClass,
+                },
+            ),
+        )
+        .unwrap();
 
-        let a = decide(&young).unwrap();
-        let b = decide(&pinned).unwrap();
+        let a = decide(&young);
+        let b = decide(&pinned);
 
         assert_eq!(a, RetentionDecision::NothingOldEnough);
         assert_eq!(
@@ -516,21 +573,18 @@ mod tests {
 
     #[test]
     fn a_clear_range_compacts_whole() {
-        let s = RetentionSurvey::new(1, Some(500), Some(500), None).unwrap();
-        assert_eq!(
-            decide(&s).unwrap(),
-            RetentionDecision::Compact { lo: 1, hi: 500 }
-        );
-        assert_eq!(decide(&s).unwrap().range(), Some((1, 500)));
+        let s = RetentionSurvey::new(1, aged(500, through(500, None))).unwrap();
+        assert_eq!(decide(&s), RetentionDecision::Compact { lo: 1, hi: 500 });
+        assert_eq!(decide(&s).range(), Some((1, 500)));
     }
 
     #[test]
     fn a_partial_prefix_is_progress_and_says_what_stopped_it() {
         // The designed shape: largest_compactable_prefix exists so a refusal is
         // a redirect, not a dead end.
-        let s =
-            RetentionSurvey::new(1, Some(500), Some(310), Some(Blocker::ProjectionHead)).unwrap();
-        let d = decide(&s).unwrap();
+        let s = RetentionSurvey::new(1, aged(500, through(310, Some(Blocker::ProjectionHead))))
+            .unwrap();
+        let d = decide(&s);
         assert_eq!(
             d,
             RetentionDecision::CompactPartial {
@@ -548,12 +602,56 @@ mod tests {
     fn the_decision_is_a_pure_function_of_the_survey() {
         // Replayability: the property that lets a retention run be reconstructed
         // during an incident rather than argued about.
-        let s =
-            RetentionSurvey::new(7, Some(900), Some(412), Some(Blocker::ProtectedClass)).unwrap();
-        let first = decide(&s).unwrap();
+        let s = RetentionSurvey::new(7, aged(900, through(412, Some(Blocker::ProtectedClass))))
+            .unwrap();
+        let first = decide(&s);
         for _ in 0..5 {
-            assert_eq!(decide(&s).unwrap(), first);
+            assert_eq!(decide(&s), first);
         }
+    }
+
+    #[test]
+    fn a_survey_reports_back_what_it_was_told() {
+        // The accessors a driver reads when it wants to log WHY, not just what.
+        let e = aged(900, through(412, Some(Blocker::ProtectedClass)));
+        let s = RetentionSurvey::new(7, e).unwrap();
+        assert_eq!(s.oldest_generation(), 7);
+        assert_eq!(s.eligibility(), e);
+
+        let young = RetentionSurvey::new(3, Eligibility::NothingOldEnough).unwrap();
+        assert_eq!(young.oldest_generation(), 3);
+        assert_eq!(young.eligibility(), Eligibility::NothingOldEnough);
+    }
+
+    // -- states that used to be representable, and now are not -------------
+
+    #[test]
+    fn a_refusal_that_names_no_blocker_does_not_typecheck() {
+        // Formerly (compactable_through: None, blocked_by: None) — "the first
+        // generation was refused by nothing". It CONSTRUCTED, a comment claimed
+        // it could not happen, and `decide` carried an error arm for it.
+        // CompactablePrefix::Nothing has a non-optional blocker, so the state is
+        // now unspellable and `decide` is infallible.
+        let must_name_it = CompactablePrefix::Nothing {
+            blocker: Blocker::ProtectedClass,
+        };
+        assert!(matches!(must_name_it, CompactablePrefix::Nothing { .. }));
+
+        // And the infallibility that follows: no `.unwrap()` anywhere above.
+        let s = RetentionSurvey::new(1, aged(9, must_name_it)).unwrap();
+        assert!(decide(&s).is_pinned());
+    }
+
+    #[test]
+    fn a_prefix_over_a_range_nothing_aged_into_does_not_typecheck() {
+        // Formerly (newest_past_cutoff: None, compactable_through: Some(_)).
+        // Eligibility::NothingOldEnough has nowhere to put a prefix.
+        let none = Eligibility::NothingOldEnough;
+        assert!(matches!(none, Eligibility::NothingOldEnough));
+        assert_eq!(
+            decide(&RetentionSurvey::new(1, none).unwrap()),
+            RetentionDecision::NothingOldEnough
+        );
     }
 
     // -- surveys that describe an impossible log ---------------------------
@@ -562,27 +660,19 @@ mod tests {
     fn a_survey_that_contradicts_itself_is_refused() {
         // Eligibility below the oldest surviving generation.
         assert_eq!(
-            RetentionSurvey::new(10, Some(5), None, None),
+            RetentionSurvey::new(10, aged(5, through(5, None))),
             Err(RetentionError::IncoherentSurvey)
         );
         // A compactable prefix past what age made eligible.
         assert_eq!(
-            RetentionSurvey::new(1, Some(100), Some(101), None),
+            RetentionSurvey::new(1, aged(100, through(101, None))),
             Err(RetentionError::IncoherentSurvey)
         );
-        // A prefix of nothing.
+        // Reached the end of the eligible range while still naming a blocker:
+        // largest_compactable_prefix is capped at the range end, so a refusal it
+        // reports must lie within the range.
         assert_eq!(
-            RetentionSurvey::new(1, None, Some(50), None),
-            Err(RetentionError::IncoherentSurvey)
-        );
-        // A blocker with nothing eligible to block.
-        assert_eq!(
-            RetentionSurvey::new(1, None, None, Some(Blocker::ProtectedClass)),
-            Err(RetentionError::IncoherentSurvey)
-        );
-        // Reached the end of the eligible range while still claiming a blocker.
-        assert_eq!(
-            RetentionSurvey::new(1, Some(500), Some(500), Some(Blocker::ProjectionHead)),
+            RetentionSurvey::new(1, aged(500, through(500, Some(Blocker::ProjectionHead)))),
             Err(RetentionError::IncoherentSurvey)
         );
     }
@@ -591,11 +681,11 @@ mod tests {
     fn a_prefix_below_the_oldest_generation_is_refused() {
         // Compacting generations that are already gone.
         assert_eq!(
-            RetentionSurvey::new(10, Some(100), Some(9), None),
+            RetentionSurvey::new(10, aged(100, through(9, None))),
             Err(RetentionError::IncoherentSurvey)
         );
         assert!(
-            RetentionSurvey::new(10, Some(100), Some(10), Some(Blocker::ProjectionHead)).is_ok()
+            RetentionSurvey::new(10, aged(100, through(10, Some(Blocker::ProjectionHead)))).is_ok()
         );
     }
 }
