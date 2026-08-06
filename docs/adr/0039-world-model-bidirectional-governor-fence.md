@@ -2,8 +2,9 @@
 
 | Field | Value |
 |---|---|
-| Status | **Proposed — NOT ratified on merge.** See *Ratification criteria*. Merging records the proposal; it does not ratify it and authorizes no implementation. |
-| Date | 2026-08-02 |
+| Status | **Accepted** — 2026-08-06. All seven ratification criteria recorded. The fences are **structurally enforced and machine-checked**, not merely asserted. Acceptance authorizes no implementation, and carries no runtime evidence — see *Acceptance record*. |
+| Date | 2026-08-02 (proposed) · 2026-08-06 (accepted) |
+| Accepted by | **Justin Looney**, holding the governor / safety-case owner, World Model owner and architecture owner roles. One approver across all three — recorded plainly rather than as three sign-offs, following [`ADR-0041`](0041-world-model-persistence-architecture.md)'s precedent. |
 | Blueprint | `KIRRA-WM-ARCH-001` §18 (WM-6) — [`docs/design/WORLD_MODEL_ARCHITECTURE.md`](../design/WORLD_MODEL_ARCHITECTURE.md) |
 | Deciders | Governor / safety-case owner · World Model owner · architecture owner · safety-assurance owner |
 | **Clarified by** | **[ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md)** — canonical terminology, semantic-map vs safety-corridor boundary, transitive Fence B, language independence, and the PENDING assurance ruling. **Read 0042 alongside this ADR; it supersedes the scope claim below.** |
@@ -430,16 +431,112 @@ this work, reported for the record.
 This ADR is **Proposed**. It becomes Accepted only when **all** of the
 following are recorded:
 
-- [ ] **Governor / safety-case owner** review and sign-off
-- [ ] **World Model owner** review and sign-off
-- [ ] **Architecture owner** review and sign-off
-- [ ] **Safety-assurance owner** ruling recorded per
+- [x] **Governor / safety-case owner** review and sign-off
+- [x] **World Model owner** review and sign-off
+- [x] **Architecture owner** review and sign-off
+
+      **RECORDED — 2026-08-06 by Justin Looney, holding all three roles.**
+      **One approver across all three, recorded plainly rather than as three
+      sign-offs**, per [`ADR-0041`](0041-world-model-persistence-architecture.md)'s
+      precedent. These three boxes are **one judgement written three times, not
+      three reviews** — see *Acceptance record*.
+
+      **What the judgement rests on.** Fence A (*knowledge cannot act*) and
+      Fence B (*safety cannot depend on knowledge*) are not asserted here; they
+      are **structurally enforced and transitively machine-checked** —
+      `check_kirra_world_bidirectional_fence.py`, both directions passing at
+      38/38, closure intact at 19 packages from 10 roots, computed over the
+      manifests rather than a maintained crate list. That is the strongest form
+      of evidence available for a claim of this shape: a breach reds CI with the
+      offending path named, rather than waiting to be noticed.
+
+      **What it does not rest on.** No independent assurance review, and no
+      runtime evidence — Kirra World has no running service, so the fences are
+      verified against the dependency graph, not against a deployed system.
+      SG7 (*the safety check is invariant to the command's origin*) and SG1
+      (*the checker's bound is what holds*) are served by the structure; neither
+      is demonstrated by test in a deployment that does not yet exist.
+
+      **Recorded as an owner self-assessment.** Kirra is designed in alignment
+      with ISO 26262 ASIL-D requirements and IEC 61508 SIL 3 requirements;
+      independent third-party assessment has not yet been performed.
+- [x] **Safety-assurance owner** ruling recorded per
       [ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md)
       Decision 5, using its decision-record template. The ruling must be
-      *recorded*; it need not be favourable. **Until then the scope
-      determination is PENDING and this ADR cannot be accepted**
+      *recorded*; it need not be favourable.
+      **RECORDED — 2026-08-05, using that ADR's decision-record template;
+      ticked 2026-08-06 by Justin Looney.** The recorded classification is
+      *safety-related, non-authoritative*, an **owner self-assessment supported
+      by structural evidence only**, with Q2/Q4/Q5 open.
+      **This box does not by itself accept ADR-0039.** The separate item
+      *"ADR-0042 itself accepted"* below remains open, and ADR-0042's own four
+      criteria gate it — so the scope determination is no longer PENDING, but
+      acceptance of this ADR still is.
 - [x] C1 (terminology collision) — canonical set decided in ADR-0042 Decision 1
 - [x] C2 (map/corridor boundary) — stated in ADR-0042 Decision 2
-- [ ] ADR-0042 itself accepted
+- [x] ADR-0042 itself accepted
 
-Merging this PR satisfies none of the above.
+      **SATISFIED — [ADR-0042](0042-world-model-terminology-and-safety-boundary-scope.md)
+      was accepted 2026-08-06** by Justin Looney, on the recording of its fourth
+      and final criterion (the architecture owner sign-off on the canonical
+      terminology). Its acceptance carries one named follow-up — the M5
+      `docs/safety` terminology migration — which is **not** a condition on this
+      box: ADR-0042 is accepted, and M5 is scheduled work inside it.
+
+      **This box was the only one here that acceptance of ADR-0042 moved.** When
+      it was ticked earlier on 2026-08-06 the three owner sign-offs above were
+      still open and this ADR was still Proposed; they were recorded later the
+      same day, which is what accepted it. *(This note read "remain open … still
+      Proposed" until those sign-offs landed; updated rather than left to
+      contradict the Status row.)*
+
+Merging the PR that **introduced this ADR** satisfied none of the above.
+Boxes above are ticked only by a separately recorded owner ruling, each of
+which names its owner and date inline — never by the act of merging a
+document change.
+
+---
+
+## Acceptance record
+
+**Accepted 2026-08-06 by Justin Looney**, holding the governor / safety-case
+owner, World Model owner and architecture owner roles.
+
+### Three boxes, one judgement
+
+ADR-0039 asks for three separate owner sign-offs. **One person holds all three
+roles**, so those boxes are one judgement recorded three times. Stated here for
+the reason [`ADR-0041`](0041-world-model-persistence-architecture.md) gave: a
+reader who counts sign-offs and infers independence from the count would be
+wrong, and the record must not permit that inference.
+
+### The evidence is structural, and that is a genuine strength here
+
+Unlike most acceptance criteria in this family, the fences are **not held by
+convention**. `check_kirra_world_bidirectional_fence.py` computes the closure
+**transitively over the Cargo manifests** — not against a maintained list of
+crate names — so a new package cannot silently escape it, and a violation reds
+CI with the offending path named. Both directions pass 38/38 with the closure
+intact at 19 packages from 10 roots.
+
+This is worth contrasting with ADR-0042's Decision 1, accepted the same day:
+that one has **no** machine check and is held by convention alone. The two
+acceptances are not equally well supported, and the difference is the enforcement
+mechanism, not the care taken.
+
+### What acceptance does not carry
+
+* **No runtime evidence.** Kirra World has no running service. The fences are
+  verified against the dependency graph of a system that does not yet execute.
+* **No independent review.** Owner self-assessment throughout.
+* **No implementation authorization.** Acceptance settles the architectural
+  claim; it does not license building against it.
+* **No ratification of ADR-0040**, which stands on its own four criteria.
+
+### Independence posture
+
+Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508
+SIL 3 requirements; independent third-party assessment has not yet been
+performed. Decision 5's assurance ruling — recorded via ADR-0042 — classifies
+Kirra World as *safety-related, non-authoritative*, on structural evidence, with
+three of its eight supporting questions open.

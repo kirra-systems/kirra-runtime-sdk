@@ -174,6 +174,99 @@ knowingly bounded. Ratifying **compaction-with-citation**:
 **Thresholds are deferred until measured.** Choosing them now would be a guess
 presented as a policy.
 
+#### A third refusal, added 2026-08-05 when the read path landed
+
+`crates/kirra-world-store` now implements this section. Doing so surfaced a
+constraint §11.3 could not have stated, because it predates the store having
+projections: **an event that is a projection head is not compactable.**
+
+Removing the event that defines a `(subject, predicate)`'s current claim makes
+`rebuild_projections` stop reproducing the incremental fold — falsifying, and
+silently, the pure-fold property this ADR names elsewhere as a thing to test
+rather than assume. Refusing heads resolves it *provably*: the fold retains only
+heads, so a compaction that removes none cannot change what a rebuild produces.
+
+**The two refusals are not the same kind of rule, and the difference is
+load-bearing:**
+
+| Refusal | Kind | Whole-window refusal is… |
+|---|---|---|
+| protected class | **policy** — the window is a retention unit | a **requirement**; compacting around it would make how much of a span survives a question about interleaving |
+| projection head | **correctness** — only the head must survive | a **conservative simplification**; nothing says a head's neighbours must survive |
+
+**Pre-agreed escalation.** Because the head refusal is a simplification rather
+than a requirement, its relaxation is authorized *now* rather than argued later:
+**if measurement shows head refusals blocking a material fraction of reclaimable
+space, compact _around_ heads instead.** The citation model already supports
+disjoint spans, so that is a loop over sub-ranges, not a redesign.
+
+Until then, `WorldStore::largest_compactable_prefix` makes a refusal a redirect
+rather than a dead end — both refusals name their first blocking generation, and
+a caller can retry immediately on the sub-range below it.
+
+The concern is also smaller than it first appears, because **heads age out**. An
+event stops being a head as soon as something supersedes it, so for a span old
+enough to be past its retention horizon to still hold one means nothing has been
+observed about that subject since — rare in a sensor stream, and when it does
+happen that claim is arguably still-live evidence rather than history.
+
+#### Discharging *"returns the summary and says so"*, 2026-08-05
+
+The clause above has two halves, and the first pass implemented only one. The
+citation landed — what was removed, its digest, and the chain on either side, so
+the log verifies *across* the hole. The **retained summary** did not, and neither
+did *"and says so"*: a `history()` into a compacted window simply returned fewer
+rows. Nothing distinguished *"nothing was known about this"* from *"we deleted
+it"*, and both looked like a complete answer. Recorded here because the gap was
+real on `main` for the length of one merge, not because it was theoretical.
+
+Both halves are now implemented, with three decisions worth fixing in the record:
+
+**1. Summaries are per `(subject, predicate)`, not per span.** A span-level
+aggregate cannot answer the question an incident reconstruction asks — *what did
+we know about **this thing** during the window*. The cost argument is D-21's,
+reused: keys are bounded by the **entity** count, not the log length (4 886 for
+100 000 events on the reference stream), so a summary set is bounded like a
+projection rather than like a log. Each row carries the count, the first and last
+valid times, the first transaction time, and the last object and payload. The
+trajectory is gone; the endpoints survive.
+
+**2. The signal is carried in the return type.** `as_of` and `history` return a
+`TemporalAnswer` — claims plus a `Resolution` of `Full` or
+`Degraded { spans, summaries }` — rather than a `Vec` with a flag beside it. The
+reasoning is the one that made the projection fold confirmed-only: *a guarantee
+a caller must remember to check is not a guarantee.* "Says so" has to be
+unignorable at the call site or it does not discharge the clause.
+
+**3. The direction of error is fixed, and it is not symmetric.** The
+degradation test is a *necessary* condition on the removed events, not an exact
+one — a window is reported degraded if it *could* have held an observation
+bearing on the query. Both bitemporal filters are sound in that direction:
+nothing with `valid_from > valid_at` could have appeared in the answer, and
+likewise on the transaction axis, so ruling a window out is exact while ruling
+one in may be pessimistic. **Over-reporting costs a caveat; under-reporting is
+the silent rewrite this section forbids.** The same rule decides the upgrade
+path: a store compacted before summaries were retained reports degraded with an
+*empty* summary set, never full — reading "no summary" as "nothing was lost"
+would convert a missing feature into exactly that silent rewrite.
+
+Two consequences follow, and both are asserted as tests:
+
+- **Summaries are confirmed-only.** This is what a degraded answer returns *in
+  place of* evidence, so an LLM candidate standing there is precisely what SD-2
+  exists to prevent — even when the candidate is the newest event in the window.
+  The arithmetic is checkable: per-key counts sum to **at most** the citation's
+  `event_count`, and the difference is the candidates. The corollary is a
+  recorded gap rather than a hidden one — `candidates()` carries no resolution,
+  so superseded LLM proposals can vanish from a compacted window without the API
+  saying so, and it must not be used to reconstruct what was proposed during a
+  compacted incident window.
+- **`current()` can never be degraded by compaction**, and this is proved rather
+  than hoped: a key's current claim *is* a projection head, and heads are
+  refused. So the head refusal — adopted above for rebuild correctness — buys a
+  second thing worth naming: **current state survives retention.** A device that
+  has compacted its way back under budget still knows where everything is.
+
 ### Compaction is not reclamation — two operations, not one
 
 **Measured** (`tools/wm2-persistence-harness`, `compact`; host-indicative,
@@ -936,6 +1029,111 @@ not that the alongside-rebuild protocol R2 specifies has been built.
 | **Target evidence for R3** | D-14 — the statement, not the store, sets the cost |
 | **Accepted while still unevidenced** | R2's alongside-rebuild-and-swap (item 3), carried as an outstanding obligation; R1 and R4 are argued from existing measurements (the chain's construction, D-2, D-9) rather than newly measured |
 | **Decided separately, same day** | ratification of ADR-0041 itself — see *Acceptance record* |
+
+---
+
+## WM-2 implementation milestone — 2026-08-05
+
+A stopping point, recorded deliberately rather than reached by drift. What
+follows says what is **built**, what is **designed and not built**, and — the
+part worth writing down — **what would make the deferrals stop being safe**.
+
+### Naming, before anything else
+
+The canonical name is **Kirra World** (ADR-0042 Decision 1). In prose, the
+accurate gloss is **evidence ledger**: an append-only, hash-chained,
+bitemporal record of what was claimed and on whose authority.
+
+**Do not call it a "world model."** Decision 1 ruled the collision off a
+measured table of three uses. Two were inside the safety closure —
+`perception_redundancy.rs` and the ros2 adapter, for *redundant perception
+channels* — and **have since been renamed** to *independent perception
+channel*, so that half is resolved in code and the rule is what keeps it
+resolved. The third is still live: `robot/world_model.py`, a TTL'd
+operator-facing read projection whose rename ADR-0042 puts behind safety review
+because it is imported, installer-staged and gated by
+`KIRRA_WORLD_MODEL_ENABLED` — renaming it changes robot deployment, not prose.
+
+The reason is safety communication: *"the world model was wrong"* must not be
+able to mean a perception fault and a knowledge fault at once. Externally the
+term invites a second wrong inference — a learned predictive model — which this
+is not, in any part.
+
+Renaming the subsystem to "evidence ledger" was considered and rejected:
+*Kirra Evidence Model* and *Kirra Knowledge Model* describe the content
+accurately but lose the product framing already in the blueprint and
+`VISION.md`. Canonical name, plain-language gloss — not a rename.
+
+### Built
+
+| | Where |
+|---|---|
+| Event schema (SD-1…SD-4), write path, SHA-256 hash chain | `kirra-world-store`, #1350 |
+| Bytes/event against the ratified schema (D-20), and with projections (D-21) | `tools/wm2-schema-growth`, #1351/#1353 |
+| Current-state projection, confirmed-only fold, rebuild-equals-incremental digest | #1353 |
+| Bitemporal queries — `current` / `as_of` / `history` / `candidates` / `changed_since` | #1353 |
+| Compaction-with-citation, both refusals, chain verifying **across** a hole | #1354 |
+| Per-key degraded summaries and the `TemporalAnswer` that says so (§11.3) | #1355 |
+
+### Designed, not built
+
+Retention **policy driver** · the service · semantic projections beyond
+current-state · identity adjudication · the four trust axes · the domain core
+itself.
+
+### Why stopping here is safe, and the precondition that ends it
+
+Not "finishing unlocks nothing" — that is too soft, and would still be true of
+work that ought to be done. The structural reason is that **nothing writes to
+it**. No planner, perception or LLM crate depends on `kirra-world*`; the service
+crate is deliberately empty; the only consumers are two measurement
+instruments.
+
+That is what makes the retention gap deferrable rather than latent. D-20/D-21
+measured the store filling in **15.79 days** at 10 Hz, and OQ2 ruled horizons
+that nothing applies — which is a real behaviour the moment events are being
+produced, and no behaviour at all while none are.
+
+> **Precondition, not an intention:** the first doer-side consumer wired to
+> `kirra-world-store` ends the deferral. Retention enforcement is then owed
+> before that consumer runs anywhere it can fill a disk.
+
+### The adapter is ahead of the core it adapts
+
+An unusual shape, stated here so it is not read as neglect: `kirra-world` (the
+**domain core**) is unconstructible placeholders, while `kirra-world-store` (an
+**adapter**) is a working implementation. Adapters normally trail their core.
+
+**It is not a gate.** The domain-logic gate
+(`ci/check_world_domain_logic_gate.py`) is deliberately *self-releasing* —
+recording the Decision 5 ruling relaxes it automatically — and the ruling was
+recorded 2026-08-05. `kirra-world*` is no longer held to declaration-only by
+it. What still constrains the subsystem is the ruling's own *Conditions that
+reopen the decision*.
+
+So the honest reason is simpler, and worth writing down precisely because it is
+less flattering than an external hold: **WM-2's scoped work was the storage
+slice, and the domain-types work has not been done.** That is a sequencing
+decision, recorded here as one. The core's private unit fields still earn their
+place — they stop logic accreting around names ADR-0040 has not ratified — but
+that is a *naming* constraint, not a safety gate.
+
+Mirrored into both crates' top-level docs, because a crate-list scan is where
+the confusion happens and an ADR is not where it gets resolved.
+
+### Status of the rulings this rests on
+
+**ADR-0041 is Accepted** (2026-08-04). ADR-0039, ADR-0040 and ADR-0042 remain
+**Proposed**. ADR-0042 Decision 5 was **recorded** 2026-08-05.
+
+That classification — *safety-related, non-authoritative* — is an **owner
+self-assessment, not an independent assurance review**, supported by structural
+evidence only, with three of its eight supporting questions (Q2, Q4, Q5)
+recorded open as a KNOWN GAP inside the ruling rather than outside it. It holds
+only while Kirra World has no authority over actuation, release, safety
+decisions, or required safety inputs — any one of the four reopens it. Kirra is
+designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508 SIL 3
+requirements. Independent third-party assessment has not yet been performed.
 
 ---
 
@@ -2331,11 +2529,17 @@ any timing quantity the opposite holds, which is the whole point of D-15.
 
 ### D-21 — the with-projections figure exists now, and OQ2's headroom was 11.5 %, not 14 %
 
-Evidence: `docs/evidence/wm2-projection-growth-20260805/`. Closes the caveat
-D-20 and the OQ2 re-ruling both carried in the same words: their budget was
-**log-only**, compared against D-2's **with-projections** original, because
-`kirra-world-store` had no read path and the ratified with-projections figure
-was unmeasurable. The read path now exists, so the number does.
+Evidence: **`docs/evidence/wm2-projection-growth-target-20260805/`**
+(`TARGET-MEASURED`, aarch64). A first host bundle,
+`wm2-projection-growth-20260805/`, is superseded — the target run **confirmed
+it byte-for-byte** rather than revising it, so the figures are unchanged and
+only their provenance improved.
+
+Closes the caveat D-20 and the OQ2 re-ruling both carried in the same words:
+their budget was **log-only**, compared against D-2's **with-projections**
+original, because `kirra-world-store` had no read path and the ratified
+with-projections figure was unmeasurable. The read path now exists, so the
+number does.
 
 | Arm | log-only | with projections | Δ |
 |---|---:|---:|---:|
@@ -2368,11 +2572,21 @@ full 14 % would take **3.07 /s** rather than 3.20 (~3.3× coalescing, not
 
 #### Confounders and scope
 
-Host run. D-20 established by measurement that this quantity is
-platform-invariant (byte-for-byte on aarch64 and x86_64), which licenses
-reading these as target numbers *for bytes specifically* — but a target re-run
-is ~2 minutes and is owed before this figure goes against the ratification
-checklist. **One** projection is materialized; a multi-projection store costs
+Target-measured on aarch64, confirming the host figures byte-for-byte —
+`with_projections_bytes` 58 277 888 / 62 963 712 and `projected_rows` 4 886 on
+both machines. That extends D-20's platform-invariance result to the
+with-projections quantity, and it is now measured rather than carried over.
+
+**One caveat stands, and it is about attestation rather than the number.**
+`wm2-schema-growth` has no `--assert-target` of its own — its records carry
+`arch`/`os` and nothing more — so `TARGET-MEASURED` is an operator assertion in
+the evidence README rather than a classification the instrument made and could
+refuse to make. The harness can refuse; this tool cannot. Adding that is the
+outstanding follow-up.
+
+`fold_elapsed_s` is 0.76 / 0.79 s on target against 0.69 / 0.73 s on host —
+slower, as expected, and precisely the axis where D-15 shows platform matters.
+Both are run cost, not performance claims. **One** projection is materialized; a multi-projection store costs
 more, so this is a floor. The 4 886-row figure reflects the generated stream's
 1 000 entities: a workload with an unbounded subject space would grow the
 projection toward the log's own size and the ~3 % would not survive — that

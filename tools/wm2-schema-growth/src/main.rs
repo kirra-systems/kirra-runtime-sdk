@@ -39,6 +39,52 @@
 mod fill;
 mod gen;
 
+/// Platform classification — **the harness's module, included verbatim**, not
+/// a copy of it.
+///
+/// This closes the gap both D-20 and D-21 evidence bundles recorded against
+/// themselves: their `TARGET-MEASURED` line was an operator assertion typed
+/// into a README, because this tool carried `arch`/`os` and nothing that could
+/// *refuse* to be called target evidence. `wm2-persistence-harness` could
+/// refuse; this one could not, so two bundles read as equally attested when
+/// they were not.
+///
+/// # Why `#[path]`, and not a copy
+///
+/// The thing being shared decides **whether evidence may be cited**. Two copies
+/// would be two definitions of "target" that can drift apart silently — both
+/// tools would still emit a token, and the token would quietly stop meaning one
+/// thing. A digest-pinned duplicate (the approach [`gen`] takes, where the
+/// shared object is a *data shape* and drift is what the pin exists to catch)
+/// would detect that only after it happened.
+///
+/// Including the source makes drift impossible rather than detectable, which is
+/// the same reasoning `verification/kani` uses to `#[path]`-include the frozen
+/// kinematics talisman. If the harness moves, this stops compiling — a loud
+/// failure in this tool's own CI lane, which is the correct one.
+///
+/// # One rule is stricter than this instrument needs, deliberately
+///
+/// The classifier forfeits target status on a non-durable filesystem, because
+/// `fsync` cost dominates the harness's measurements. It does **not** dominate
+/// this one: D-20 established `bytes_per_event` as the *logical* length of a
+/// SQLite database, reproduced byte-for-byte across x86_64 and aarch64, so a
+/// `tmpfs` run would give the same answer.
+///
+/// Reusing the rule anyway is the safe direction, and the alternative is worse
+/// than the strictness: a second, laxer definition of "target" living in a
+/// second file is exactly how a token stops being evidence.
+///
+/// `dead_code` is allowed **here, at the include site** rather than fixed in
+/// the shared source: this tool uses a subset of the module (the harness's
+/// reclamation stage calls the rest), and annotating the original to suit a
+/// consumer would be editing shared evidence machinery for one caller's
+/// convenience. The allow is scoped to this `mod`, so it silences nothing in
+/// this tool's own code.
+#[allow(dead_code)]
+#[path = "../../wm2-persistence-harness/src/platform.rs"]
+mod platform;
+
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -318,7 +364,27 @@ impl Rec {
 /// `schema_digest` is the load-bearing one: it comes from the store itself,
 /// so a result can never be re-read as being about a schema that was edited
 /// after the run.
-fn facts(rec: Rec, seed: u64) -> Rec {
+fn facts(rec: Rec, seed: u64, cls: &platform::Classification, pf: &platform::PlatformFacts) -> Rec {
+    let rec = rec
+        .s("evidence_status", cls.status.token())
+        .s(
+            "not_target_because",
+            &if cls.blockers.is_empty() {
+                String::new()
+            } else {
+                cls.blockers.join("; ")
+            },
+        )
+        // The facts the verdict was computed FROM, so a reader can check the
+        // classification rather than take it. A status with no corroborating
+        // facts is the same unverifiable assertion this flag exists to retire.
+        .s("platform_model", pf.model.as_deref().unwrap_or(""))
+        .s("db_fs_type", pf.db_fs_type.as_deref().unwrap_or(""))
+        .s("db_fs_source", pf.db_fs_source.as_deref().unwrap_or(""))
+        .i(
+            "operator_asserted_target",
+            i64::from(pf.operator_asserted_target),
+        );
     rec.s("tool", "wm2-schema-growth")
         .s("tool_version", env!("CARGO_PKG_VERSION"))
         .s("schema_digest", &kirra_world_store::schema_digest())
@@ -356,6 +422,12 @@ wm2-schema-growth — bytes/event against the ratified WM-2 schema
                           against. Omit and no ratio is emitted — a ratio
                           against a figure from another machine is not a
                           schema ratio and this tool will not fabricate one.
+  --assert-target         Operator asserts this is target hardware under
+                          representative conditions. Required for, but not
+                          sufficient for, JETSON-TARGET-MEASURED: the machine
+                          must corroborate it. Same classifier as
+                          wm2-persistence-harness, so the token means the same
+                          thing in both instruments' records.
   --db <path>             Scratch database path (default: ./wm2-growth.sqlite)
   --out <path>            Append JSONL here (default: stdout only)
 ";
@@ -368,6 +440,7 @@ fn main() {
     let mut events_per_day = 864_000.0f64;
     let mut budget_gib = 8.0f64;
     let mut standin_bpe: Option<f64> = None;
+    let mut assert_target = false;
     let mut db = PathBuf::from("wm2-growth.sqlite");
     let mut out: Option<PathBuf> = None;
 
@@ -394,6 +467,7 @@ fn main() {
             "--events-per-day" => events_per_day = val().parse().expect("--events-per-day"),
             "--budget-gib" => budget_gib = val().parse().expect("--budget-gib"),
             "--standin-bpe" => standin_bpe = Some(val().parse().expect("--standin-bpe")),
+            "--assert-target" => assert_target = true,
             "--db" => db = PathBuf::from(val()),
             "--out" => out = Some(PathBuf::from(val())),
             other => {
@@ -435,6 +509,22 @@ fn main() {
         }
     }
 
+    // Classify BEFORE measuring, and print the verdict first. An operator who
+    // is about to spend two minutes on a run that cannot be cited should learn
+    // it now, not from a field at the bottom of a JSONL file afterwards.
+    let pf = platform::gather(&db, assert_target);
+    let cls = platform::classify(&pf);
+    eprintln!("evidence status : {}", cls.status);
+    for b in &cls.blockers {
+        eprintln!("  not target    : {b}");
+    }
+    if !cls.status.is_citable() {
+        eprintln!(
+            "  -> useful for development and regression; NOT ratification \
+evidence for ADR-0041, and the records say so."
+        );
+    }
+
     let budget_bytes = budget_gib * 1024.0 * 1024.0 * 1024.0;
     let mut lines: Vec<String> = Vec::new();
     let mut measured: Vec<Growth> = Vec::new();
@@ -443,7 +533,7 @@ fn main() {
         eprintln!("measuring fill={} events={events} ...", f.as_str());
         match growth(&db, f, events, entities, seed, payload_bytes) {
             Ok(g) => {
-                let rec = facts(Rec::new(), seed)
+                let rec = facts(Rec::new(), seed, &cls, &pf)
                     .s("record", "growth")
                     .s("fill", g.fill.as_str())
                     .s("fill_describes", g.fill.describe())
@@ -483,7 +573,7 @@ fn main() {
                 measured.push(g);
             }
             Err(e) => {
-                let rec = facts(Rec::new(), seed)
+                let rec = facts(Rec::new(), seed, &cls, &pf)
                     .s("record", "error")
                     .s("stage", "growth")
                     .s("fill", f.as_str())
@@ -502,7 +592,7 @@ fn main() {
     // the whole point of pairing is to remove that confound.
     if let Some(sb) = standin_bpe {
         for g in &measured {
-            let rec = facts(Rec::new(), seed)
+            let rec = facts(Rec::new(), seed, &cls, &pf)
                 .s("record", "paired_ratio")
                 .s("fill", g.fill.as_str())
                 .f("standin_bytes_per_event_same_host", sb)
@@ -636,5 +726,86 @@ mod tests {
         assert!(d.is_finite() && d > 0.0);
         let l = Rec::new().f("days_to_fill_budget", d).line();
         assert!(!l.contains("inf") && !l.contains("NaN"), "{l}");
+    }
+
+    // -----------------------------------------------------------------
+    // Evidence classification
+    // -----------------------------------------------------------------
+
+    fn host_facts() -> platform::PlatformFacts {
+        platform::PlatformFacts {
+            arch: "x86_64".into(),
+            build_profile: "release".into(),
+            db_fs_type: Some("ext4".into()),
+            ..Default::default()
+        }
+    }
+
+    fn jetson_facts() -> platform::PlatformFacts {
+        platform::PlatformFacts {
+            arch: "aarch64".into(),
+            model: Some("NVIDIA Jetson Orin NX Engineering Reference Developer Kit".into()),
+            tegra_release: Some("# R36 (release), REVISION: 3.0".into()),
+            db_fs_type: Some("ext4".into()),
+            db_fs_source: Some("/dev/nvme0n1p1".into()),
+            build_profile: "release".into(),
+            operator_asserted_target: true,
+        }
+    }
+
+    /// **The gap this closes.** Every record must carry the classification, so
+    /// a bundle's `TARGET-MEASURED` line stops being an operator's claim in a
+    /// README and becomes something the instrument said — and could have
+    /// refused to say.
+    ///
+    /// A guard rather than a formality: dropping these fields in a refactor
+    /// would silently restore the un-attested state, and nothing else in this
+    /// tool would notice, because the numbers would still be right.
+    #[test]
+    fn every_record_carries_the_evidence_classification() {
+        let pf = host_facts();
+        let cls = platform::classify(&pf);
+        let line = facts(Rec::new(), 7, &cls, &pf).line();
+
+        assert!(line.contains("\"evidence_status\":\"HOST-INDICATIVE-NOT-TARGET\""));
+        assert!(line.contains("\"operator_asserted_target\":0"));
+        // The facts the verdict rests on travel with it, or the verdict is
+        // just another assertion.
+        assert!(line.contains("\"db_fs_type\":\"ext4\""));
+        assert!(
+            line.contains("not_target_because") && line.contains("aarch64"),
+            "the reason must be IN the record, not only on stderr: {line}"
+        );
+    }
+
+    /// The citable case, so the test above cannot pass by the tool being
+    /// incapable of ever emitting target evidence.
+    #[test]
+    fn a_corroborated_asserted_run_is_recorded_as_citable() {
+        let pf = jetson_facts();
+        let cls = platform::classify(&pf);
+        assert!(cls.status.is_citable(), "{:?}", cls.blockers);
+
+        let line = facts(Rec::new(), 7, &cls, &pf).line();
+        assert!(line.contains("\"evidence_status\":\"JETSON-TARGET-MEASURED\""));
+        assert!(line.contains("\"not_target_because\":\"\""));
+        assert!(line.contains("\"operator_asserted_target\":1"));
+        assert!(line.contains("/dev/nvme0n1p1"));
+    }
+
+    /// The token is the SAME token the harness emits, because both tools run
+    /// the same classifier over the same facts. That is the point of sharing
+    /// the module rather than copying it: two bundles carrying
+    /// `JETSON-TARGET-MEASURED` now mean it in one sense, not two.
+    #[test]
+    fn the_token_is_the_harnesss_token() {
+        assert_eq!(
+            platform::EvidenceStatus::JetsonTargetMeasured.token(),
+            "JETSON-TARGET-MEASURED"
+        );
+        assert_eq!(
+            platform::EvidenceStatus::HostIndicativeNotTarget.token(),
+            "HOST-INDICATIVE-NOT-TARGET"
+        );
     }
 }

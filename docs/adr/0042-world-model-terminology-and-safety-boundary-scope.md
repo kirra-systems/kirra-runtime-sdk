@@ -2,16 +2,31 @@
 
 | Field | Value |
 |---|---|
-| Status | **Proposed — NOT ratified on merge.** Merging records the clarification; it ratifies nothing and authorizes no implementation. |
-| Date | 2026-08-02 |
+| Status | **Accepted** — 2026-08-06. All four ratification criteria recorded. Acceptance settles this ADR's five clarifications and carries one **named follow-up** (the `docs/safety` terminology migration, below); it still **authorizes no implementation**, and it does not ratify ADR-0039 or ADR-0040. |
+| Date | 2026-08-02 (proposed) · 2026-08-06 (accepted) |
+| Accepted by | **Justin Looney**, holding the architecture owner, World Model owner and safety-assurance owner roles. One approver across all three — recorded plainly rather than as three sign-offs, following [`ADR-0041`](0041-world-model-persistence-architecture.md)'s precedent. See *Acceptance record*. |
 | Clarifies | [`ADR-0039`](0039-world-model-bidirectional-governor-fence.md) (WM-6) · [`ADR-0040`](0040-world-model-ownership-and-boundary.md) (WM-1) · [`ADR-0041`](0041-world-model-persistence-architecture.md) (WM-2) |
 | Blueprint | `KIRRA-WM-ARCH-001` — [`docs/design/WORLD_MODEL_ARCHITECTURE.md`](../design/WORLD_MODEL_ARCHITECTURE.md) |
 | Deciders | Architecture owner · World Model owner · **safety-assurance owner** (Decision 5) |
 | Cross-refs | [`crates/kirra-trajectory/src/perception_redundancy.rs`](../../crates/kirra-trajectory/src/perception_redundancy.rs) · [`crates/kirra-core/src/corridor.rs`](../../crates/kirra-core/src/corridor.rs) · [`robot/world_model.py`](../../robot/world_model.py) · [`ci/check_mick_actuation_fence.py`](../../ci/check_mick_actuation_fence.py) |
 
-> **This ADR does not ratify WM-1, WM-2 or WM-6.** They remain Proposed. This
-> resolves five blockers found during review of #1306 so that WM-6 can later be
-> *considered* for acceptance.
+> **Accepting this ADR did not, by itself, ratify WM-1 or WM-6.** What it
+> delivered was ADR-0039's terminal criterion, *"ADR-0042 itself accepted"* —
+> the whole point of resolving the five blockers found during review of #1306.
+> ADR-0039 still needed its three owner sign-offs and ADR-0040 its four criteria;
+> **both were recorded separately later the same day.**
+>
+> **All four World Model ADRs are now Accepted:** WM-2 (ADR-0041) on 2026-08-04,
+> and this ADR, ADR-0039 (WM-6) and ADR-0040 (WM-1) on 2026-08-06, in that forced
+> order. Each is an owner self-assessment; none authorizes implementation.
+>
+> *(This paragraph has been wrong twice and is dated on purpose. It first read
+> "WM-1, WM-2 or WM-6 … remain Proposed", correct on 2026-08-02 and stale from
+> 2026-08-04. It was then rewritten to say WM-1 and WM-6 "remain Proposed",
+> correct for the hours between this ADR's acceptance and theirs, and stale by
+> the end of the same day. A status summary inside one document about three
+> others is a standing staleness hazard; it is kept only because the forced
+> ratification order is genuinely hard to reconstruct without it.)*
 >
 > **Decision 5's safety-assurance ruling was RECORDED on 2026-08-05** —
 > *safety-related, non-authoritative* — and it is an **owner self-assessment,
@@ -539,10 +554,14 @@ Documented, **not rewritten**.
 | M2 | `robot/world_model.py` | Read projection sharing the subsystem name | Retain (ADR-0040 compatibility projection); consider `situation_projection.py` |
 | M3 | Ambiguous prose in docs/tests | Various | New documents must qualify; existing cleaned opportunistically |
 | M4 | "Map" as semantic category **and** safety artifact | Blueprint §4.1 vs `CorridorSource` | Resolved by Decision 2; blueprint §4.1 to be annotated |
+| M5 | Bare "world model" in the **safety documentation set** | 29 uses across 12 `docs/safety` files — `ASIL_DECOMPOSITION.md` (5), `ASSUMPTIONS_OF_USE.md` (4), `OCCY_SAFETY_GOALS.md` (3), `OCCY_INDEPENDENT_DETECTOR.md` (3), `OCCY_DFA.md` (3), 7 further files (1–2 each) | **Qualify each use**, before Kirra World exists as a running service. Raised out of M3's "opportunistically" by the architecture owner sign-off, 2026-08-06 — these read unambiguously only while one referent exists |
 
 ### Migration checklist
 
 - [x] Rename ambiguous **prose** (docs first, lowest risk) — done for LIVE prose; see scope below
+- [ ] **M5 — qualify the 29 bare uses in `docs/safety`** (added 2026-08-06 by the
+      architecture owner sign-off; deadline is *before Kirra World runs as a
+      service*, not before ratification — it gated nothing)
 - [ ] Rename **source symbols** where justified — safety-closure files need safety review
 - [ ] Update **tests** that assert on renamed identifiers
 - [ ] Update **diagrams**
@@ -634,10 +653,107 @@ been performed.
 
 ---
 
+## Open question 1 — evidence, 2026-08-05
+
+Prepared against the workspace after WM-2 shipped. **Evidence for a ruling, not
+a ruling**; no checklist box is ticked here.
+
+### What the rule actually says, because it is easy to misread
+
+> *"`kirra-core` (and every other closure member) **must not** depend on Kirra
+> World under any feature, including optional and dev-dependencies."*
+
+It is a prohibition on depending on **Kirra World**, not a prohibition on
+dependencies in general. `kirra-core` carries `serde`, `kirra-contract-channel`
+and `kirra-capture-schema`, plus heavier optional ones behind the default-off
+`capture` feature — **none of which bear on this rule**, and citing them as
+evidence about it is a category error.
+
+### The rule holds today, and is machine-checked
+
+| Check | Result |
+|---|---|
+| `kirra-core` → Kirra World | **Absent** — `kirra-contract-channel`, `kirra-capture-schema` only |
+| Any closure member referencing `kirra_world` | **None**, by contents across `kirra-core`, `kirra-trajectory`, `kirra-inline-governor`, `kirra-safety-authority` |
+| Fence B | **INTACT**, transitive over the manifests, 19 packages from 10 roots |
+
+### But sustainability is untested, because the triggering event has not happened
+
+The question asks whether the split is needed *"at the first shared-primitive
+request."* **There has been no such request.** A rule that has never been pushed
+against is not yet demonstrated sustainable — it is merely unviolated.
+
+> **Correction, 2026-08-06 — the paragraph above originally carried a second
+> argument, and it was wrong.** It read: *"Kirra World exposes two
+> unconstructible placeholder types, so nothing inside the closure could want a
+> shared primitive from it even if it wished to."* Re-checked before the ruling
+> below was recorded, both halves fail:
+>
+> * **The count is ten, not two.** `crates/kirra-world/src/lib.rs` declares ten
+>   `pub struct …(())` placeholders (`EntityId`, `ObservationId`, `Source`,
+>   `Provenance`, `FrameId`, `MapId`, `ValidTime`, `TransactionTime`,
+>   `TrustAxes`, `ResolutionOutcome`). All are still genuinely unconstructible —
+>   private unit field, and the crate has **zero dependencies** — so that half is
+>   an undercount, not a safety error.
+> * **"Nothing could want a primitive from it" no longer follows, and this half
+>   matters.** The fence defines Kirra World as three packages
+>   (`WORLD_PACKAGE_EXACT = {kirra-world, kirra-world-store,
+>   kirra-world-service}`), and since WM-2 shipped, `kirra-world-store` has a
+>   substantial real public surface — `WorldStore`, `ProjectedClaim`,
+>   `supersedes`/`fold_all`, `Resolution`, `TemporalAnswer`, `Citation`. A
+>   closure member could plausibly want one of those today. The emptiness
+>   argument has expired.
+>
+> **The deferral survives the correction, because the emptiness argument was
+> never the load-bearing one.** What carries it is the self-announcing trigger
+> in the next section: the first such request reds Fence B whether or not
+> anything is there to want. The correction removes a supporting argument and
+> strengthens the reason to keep the machine check — it does not change the
+> ruling. It is recorded here rather than silently deleted so the ruling below
+> is not read as resting on a claim that had already lapsed when it was made.
+
+This is the **same structural shape as ADR-0040's open question 1**: the
+question is not answerable yet, and its triggering event lies downstream of
+`WM_SCOPE.md` Tier 1.
+
+### One property makes this easier than ADR-0040's Q1
+
+**The trigger is self-announcing.** ADR-0040's Q1 needs somebody to remember to
+measure. This one does not: the first shared-primitive request, if satisfied by
+a dependency, **reds Fence B**. A CI failure *is* the request arriving, with the
+path named. No vigilance is required, which is the strongest form a deferral can
+take.
+
+### Proposed wording — for the owner to accept, amend or reject
+
+> **OQ1 — dispositioned by deferral, 2026-08-05.** The strict rule is
+> **retained**. It holds, it is machine-enforced transitively, and no
+> shared-primitive request has yet tested it.
+>
+> **Revisit trigger:** the first Fence B breach naming a closure member reaching
+> `kirra-world*`. That breach is the request, and it arrives with its own
+> diagnosis. At that point choose between the two alternatives this ADR already
+> considered — the lower-level crate split, or living without the shared
+> primitive — on the evidence of the specific request rather than in the
+> abstract.
+>
+> The cost of being wrong is already accepted above: *"the strict
+> no-dependency rule for `kirra-core` may eventually force a crate split."*
+> Deferring concedes nothing new.
+
+**Drafted, not decided.** The alternative is to pre-emptively split now, which
+this ADR already rejected as *"adds a crate today to solve a problem that does
+not yet exist"* — and nothing measured here disturbs that reasoning.
+
+---
+
 ## Open questions
 
 1. Is the strict no-dependency rule for `kirra-core` sustainable, or is the
    lower-level split needed at the first shared-primitive request?
+   **DISPOSITIONED BY DEFERRAL — Justin Looney, 2026-08-06.** The ruling is
+   recorded below; the evidence it rests on is *Open question 1 — evidence*
+   above, re-verified on the day of the ruling.
 2. Which additional traits are safety-authoritative inputs? The list is open.
 3. Does the shared-artifact allowlist need per-entry validation evidence, or
    does the owning contract suffice?
@@ -647,16 +763,261 @@ been performed.
 
 ---
 
+## Architecture owner sign-off — evidence, 2026-08-06
+
+Prepared for the one remaining ratification criterion. **Evidence for a ruling,
+not a ruling**; no checklist box is ticked here.
+
+**This box is not like the others.** ADR-0042's three other criteria are ticked,
+so ticking this one **accepts ADR-0042** — and ADR-0039's terminal criterion is
+*"ADR-0042 itself accepted"*. It is the single highest-consequence tick in
+Tier 0, and it should be made knowing that rather than as the fourth item on a
+list.
+
+### The half the ADR called unacceptable is executed, and verified today
+
+Decision 1 named two `perception_redundancy.rs` hits unacceptable because they
+sit inside the safety closure, *"where 'the world model was wrong' must not be
+able to mean either a perception fault or a semantic-knowledge fault."*
+
+Re-checked 2026-08-06 across the five closure crates — `kirra-core`,
+`kirra-trajectory`, `kirra-inline-governor`, `kirra-safety-authority`,
+`kirra-ros2-adapter`:
+
+| Check | Result |
+|---|---|
+| Bare "world model" anywhere in the safety closure | **Zero occurrences** |
+| The three originally-cited lines | Now read *independent perception channel* / *perception channel* |
+
+The load-bearing half of the migration is done and holds.
+
+### Two things the owner should know before signing
+
+**1. Nothing enforces the vocabulary.** Four CI scripts carry Kirra World in
+their names — [`check_kirra_world_bidirectional_fence.py`](../../ci/check_kirra_world_bidirectional_fence.py),
+[`check_world_domain_logic_gate.py`](../../ci/check_world_domain_logic_gate.py)
+and their self-tests — and **all of them enforce dependency separation, not
+terminology**. No lint, gate or ratchet fails when a document writes bare
+"world model". Adoption rests entirely on convention.
+
+Worth stating plainly, because it is the opposite of how the *other* rules in
+this ADR family are held. Fence B is machine-checked and transitive; open
+question 1 above was deferrable precisely because its breach reds CI. Decision 1
+has no such property — a canonical glossary that nothing checks decays at the
+rate people forget it.
+
+**2. Twenty-nine bare uses remain in `docs/safety`, and they are the perception
+sense.** Counted 2026-08-06, excluding qualified forms (*semantic* world model,
+Kirra World) and the `world_model.py` symbol:
+
+| File | Bare uses |
+|---|---|
+| `ASIL_DECOMPOSITION.md` | 5 |
+| `ASSUMPTIONS_OF_USE.md` | 4 |
+| `OCCY_SAFETY_GOALS.md` | 3 |
+| `OCCY_INDEPENDENT_DETECTOR.md` | 3 |
+| `OCCY_DFA.md` | 3 |
+| 7 further files | 1–2 each |
+| **Total across 12 files** | **29** |
+
+**This is not a violation of this ADR.** M3 dispositions ambiguous prose in
+docs/tests as *"new documents must qualify; existing cleaned opportunistically"*,
+and these are existing. The migration section is also explicit and reasoned
+about what it deliberately left alone — historical ADRs, dated analyses,
+third-party terms of art, and `robot/world_model.py` — and none of those
+exclusions covers this set. So these 29 sit squarely under "opportunistically".
+
+**The concern is that "opportunistically" is a weak commitment for exactly this
+corpus.** [`OCCY_DFA.md`](../safety/OCCY_DFA.md)'s C5 row reads *"Shared
+perception / world model (iii) — common-mode: a perception error corrupts BOTH
+plan and check"*, and its §4 is headed *"Central finding — the shared world
+model (C5/C7)"*. Today that is unambiguous, because only one referent exists.
+**Once Kirra World exists, it is not** — a reader meeting "the shared world
+model" in a dependent-failure analysis has two live referents and no qualifier
+to separate them. The same holds for a bare use in `ASIL_DECOMPOSITION.md` or
+`ASSUMPTIONS_OF_USE.md`.
+
+That is the precise harm Decision 1 was written to prevent, sitting in the
+documents where it is most expensive, held only by an intention to clean up when
+convenient.
+
+### Proposed wording — for the owner to accept, amend or reject
+
+> **Architecture owner sign-off on the canonical terminology — RECORDED
+> [date] by [owner].** The canonical set in Decision 1 is **accepted as
+> written**: *Kirra World* for the subsystem, *semantic world model* for the
+> generic phrase, *independent perception channel* and *perception hypothesis*
+> for the perception concepts, and bare "world model" canonical nowhere.
+>
+> Accepted on the evidence that its load-bearing half is already executed and
+> verified: zero bare uses remain anywhere in the safety closure, and the three
+> originally-cited lines now read *perception channel*.
+>
+> **Accepted with one named follow-up, which does not gate this sign-off:**
+> `docs/safety`'s 29 remaining bare uses are raised from M3's *"cleaned
+> opportunistically"* to an explicit migration item, to be completed **before
+> Kirra World exists as a running service**. The reason is dated rather than
+> stylistic — those uses are unambiguous only while there is one possible
+> referent, and the subsystem's existence is what removes that protection.
+>
+> **Recorded as an owner self-assessment, not an independent review.** Kirra is
+> designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508 SIL 3
+> requirements; independent third-party assessment has not yet been performed.
+
+**Drafted, not decided.** Ticking the box below accepts ADR-0042 and thereby
+satisfies ADR-0039's terminal criterion; it should be a deliberate act, not a
+consequence of merging this text.
+
+---
+
 ## Ratification criteria
 
 **Proposed.** Accepted only when:
 
-- [ ] **Architecture owner** sign-off on the canonical terminology
-- [ ] **Safety-assurance owner** confirms M1's prose rename inside the safety
-      closure is acceptable, and on what timeline
-- [ ] The **Decision 5 ruling template is completed** by the safety-assurance
-      owner — this ADR does not require the ruling to be *favourable*, only
-      *recorded*
-- [ ] Open question 1 dispositioned
+- [x] **Architecture owner** sign-off on the canonical terminology
 
-Merging this PR satisfies none of the above.
+      **RECORDED — 2026-08-06 by Justin Looney, architecture owner.** The
+      canonical set in Decision 1 is **accepted as written**: *Kirra World* for
+      the subsystem, *semantic world model* for the generic phrase, *independent
+      perception channel* and *perception hypothesis* for the perception
+      concepts, and bare "world model" canonical nowhere.
+
+      Accepted on the evidence that the half Decision 1 called unacceptable is
+      already executed and verified 2026-08-06: **zero** bare uses remain
+      anywhere in the safety closure (`kirra-core`, `kirra-trajectory`,
+      `kirra-inline-governor`, `kirra-safety-authority`, `kirra-ros2-adapter`),
+      and the three originally-cited lines now read *perception channel*. See
+      *Architecture owner sign-off — evidence* above.
+
+      **Accepted with one named follow-up, which did not gate this sign-off:**
+      the **29** bare uses remaining across 12 `docs/safety` files are raised
+      from M3's *"cleaned opportunistically"* to an **explicit migration item**,
+      to be completed **before Kirra World exists as a running service**. The
+      trigger is dated rather than stylistic — those uses are unambiguous only
+      while there is one possible referent, and the subsystem's existence is
+      what removes that protection. Tracked as **M5** in the migration
+      checklist.
+
+      **Recorded knowing that nothing enforces this vocabulary.** The four CI
+      scripts carrying Kirra World in their names enforce dependency separation,
+      not terminology; no gate fails on a bare "world model". Unlike Fence B and
+      open question 1, Decision 1 is held by convention alone.
+
+      **This is an owner self-assessment, not an independent review.** Kirra is
+      designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508
+      SIL 3 requirements; independent third-party assessment has not yet been
+      performed.
+- [x] **Safety-assurance owner** confirms M1's prose rename inside the safety
+      closure is acceptable, and on what timeline.
+      **CONFIRMED — Justin Looney, 2026-08-06. Acceptable; timeline: already
+      executed.** The rename landed in `61dbf57f` ("migrate ambiguous 'world
+      model' prose (ADR-0042 checklist)"), prose-only, inside the safety
+      closure. Verifiable in one command: `grep -ni "world model"` across
+      `crates/kirra-trajectory/src/perception_redundancy.rs` and
+      `crates/kirra-ros2-adapter/src/node.rs` returns nothing; both now read
+      *independent perception channel*.
+      **Ordering noted rather than glossed:** the change was executed
+      **before** this confirmation was recorded. It was deliberate and labelled
+      as a checklist action, and it altered comments only — no logic, no
+      identifiers, no behaviour. This confirmation is therefore
+      **retrospective**, and says so rather than reading as prior
+      authorization.
+- [x] The **Decision 5 ruling template is completed** by the safety-assurance
+      owner — this ADR does not require the ruling to be *favourable*, only
+      *recorded*.
+      **COMPLETE — recorded 2026-08-05 by Justin Looney (owner assigned
+      2026-08-03); ticked 2026-08-06.** Every template field is populated:
+      scope classification, rationale, assumptions, required evidence, and
+      conditions that reopen the decision. It is recorded, and it is an **owner
+      self-assessment supported by structural evidence only, with Q2/Q4/Q5
+      open** — which the record states rather than conceals.
+- [x] Open question 1 dispositioned
+
+      **DISPOSITIONED BY DEFERRAL — recorded 2026-08-06 by Justin Looney,
+      holding the architecture owner and World Model owner roles.** The
+      disposition adopts the wording drafted 2026-08-05 in *Open question 1 —
+      evidence* above, unamended:
+
+      > The strict rule is **retained**. It holds, it is machine-enforced
+      > transitively, and no shared-primitive request has yet tested it.
+      >
+      > **Revisit trigger:** the first Fence B breach naming a closure member
+      > reaching `kirra-world*`. That breach *is* the request, and it arrives
+      > with its own diagnosis. At that point choose between the two
+      > alternatives this ADR already considered — the lower-level crate split,
+      > or living without the shared primitive — on the evidence of the specific
+      > request rather than in the abstract.
+
+      **Evidence re-verified 2026-08-06 before the ruling**, not carried over
+      from the day it was prepared: Fence B **INTACT** (19 workspace packages
+      from 10 roots), `kirra-core`'s manifest naming no `kirra-world*` under any
+      feature (`serde`, `kirra-contract-channel`, `tracing`; `tokio`,
+      `serde_json`, `kirra-capture-schema` behind default-off `capture`), and no
+      textual `kirra_world` reference anywhere in `kirra-core`,
+      `kirra-trajectory`, `kirra-inline-governor` or `kirra-safety-authority`.
+
+      **What this ruling deliberately does NOT claim.** It does not find the
+      rule *sustainable* — that is the question, and it remains unanswered
+      because the triggering event has not occurred. It rules only that
+      deferring is the correct action now, and names what will force the answer.
+      Re-checking the evidence also **retired one of the arguments** that had
+      supported the draft (see *Correction, 2026-08-06* above): Kirra World is
+      no longer effectively empty, since `kirra-world-store` gained a real
+      public surface in WM-2. The deferral stands on the self-announcing trigger
+      alone, which is the half that never depended on emptiness.
+
+      **This box does not by itself accept ADR-0042.** The *architecture owner
+      sign-off on the canonical terminology* above remains open, and ADR-0039's
+      terminal criterion — *"ADR-0042 itself accepted"* — is gated on that
+      remaining item, not on this one.
+
+Merging the PR that **introduced this ADR** satisfied none of the above.
+Boxes above are ticked only by a separately recorded owner ruling, each of
+which names its owner and date inline — never by the act of merging a
+document change.
+
+---
+
+## Acceptance record
+
+**Accepted 2026-08-06 by Justin Looney**, holding the architecture owner, World
+Model owner and safety-assurance owner roles.
+
+### One approver across three roles, recorded plainly
+
+ADR-0042 names three decider roles. **One person holds all three**, so the four
+criteria above are one person's judgement recorded four times, not four
+reviews. This follows [`ADR-0041`](0041-world-model-persistence-architecture.md)'s
+precedent, and it is stated here for the same reason that ADR gave: a reader who
+counts sign-offs and infers independence from the count would be wrong, and the
+record should not let them make that inference.
+
+**What that costs, concretely.** Every one of the four criteria — the M1 rename
+confirmation, the Decision 5 ruling, open question 1, and the terminology
+sign-off — was recorded by the same person who did or directed the work being
+assessed. Two of them are retrospective (M1's rename was executed before its
+confirmation; Decision 5 was recorded a day before its box moved), and both say
+so at the point of record.
+
+### What acceptance does and does not deliver
+
+| | |
+|---|---|
+| **Delivers** | ADR-0039's terminal criterion *"ADR-0042 itself accepted"*. The five #1306 blockers are settled. |
+| **Does not deliver** | Ratification of ADR-0039 (three owner sign-offs outstanding) or ADR-0040 (four criteria outstanding). |
+| **Does not authorize** | Any implementation. The Status row said so while Proposed and it remains true. |
+
+### The one outstanding obligation
+
+**M5 — the `docs/safety` terminology migration.** 29 bare uses across 12 files,
+due **before Kirra World exists as a running service**. It did not gate this
+acceptance and was not treated as though it did; it is scheduled work carried by
+an accepted ADR, tracked in the migration checklist.
+
+### Independence posture
+
+This is an **owner self-assessment, not an independent assurance review**.
+Decision 5's ruling is recorded as *safety-related, non-authoritative*, on
+structural evidence, with Q2/Q4/Q5 open. Kirra is designed in alignment with
+ISO 26262 ASIL-D requirements and IEC 61508 SIL 3 requirements; independent
+third-party assessment has not yet been performed.

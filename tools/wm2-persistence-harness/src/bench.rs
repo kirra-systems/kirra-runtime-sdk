@@ -796,18 +796,43 @@ mod tests {
         remove_db(&p);
     }
 
+    /// BEST-OF-3 per arm, and the statistic is `max` on purpose — the mirror of
+    /// the `min` used for elapsed time in `standin`. This is a THROUGHPUT
+    /// comparison, and interference from other tests (`cargo test` runs them as
+    /// threads of one process) can only ever push events/second DOWN, never up.
+    /// So the maximum of repeated trials is the least-contaminated estimate,
+    /// and averaging would fold the interference in.
+    ///
+    /// Not a loosened threshold: the assertion is still strict `>`, on the same
+    /// two batch sizes. Measured here, the honest margin is 4.8x-7.6x. CI saw
+    /// it INVERT to 0.62x — batched 14 292 ev/s against unbatched 23 138 —
+    /// with the batched arm collapsing from a local 64 000-97 000. A five-fold
+    /// margin does not invert because batching stopped working; it inverts
+    /// because that arm lost the CPU. Three trials must all be contended for
+    /// the comparison to still flip.
+    ///
+    /// Third and rarest of the flakes in this lane: it did not fire once in the
+    /// 20 full-suite runs that verified the other two.
     #[test]
     fn batching_amortizes_the_commit() {
-        let p = temp("append-batch");
-        let one = append(&p, Durability::Off, 4_000, 100, 1, 4).unwrap();
-        let many = append(&p, Durability::Off, 4_000, 100, 256, 4).unwrap();
+        const TRIALS: usize = 3;
+        let best = |batch: usize| -> f64 {
+            (0..TRIALS)
+                .map(|i| {
+                    let p = temp(&format!("append-batch-{batch}-{i}"));
+                    let r = append(&p, Durability::Off, 4_000, 100, batch, 4).unwrap();
+                    remove_db(&p);
+                    r.events_per_second
+                })
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
+        let one = best(1);
+        let many = best(256);
         assert!(
-            many.events_per_second > one.events_per_second,
-            "batching did not help: {} vs {}",
-            many.events_per_second,
-            one.events_per_second
+            many > one,
+            "batching did not help: {many} vs {one} (best of {TRIALS} per arm, \
+             so this is not contention)"
         );
-        remove_db(&p);
     }
 
     #[test]
