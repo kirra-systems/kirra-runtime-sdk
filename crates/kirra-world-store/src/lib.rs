@@ -85,6 +85,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 pub mod compaction;
 pub mod projection;
 pub mod retention_driver;
+pub mod retention_sweeper;
 pub mod schema;
 
 pub use compaction::{Citation, CompactionOutcome, DegradedSummary, Resolution, TemporalAnswer};

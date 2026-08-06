@@ -336,7 +336,7 @@ it. The domain-logic gate that once held it is **self-releasing and already
 released** (ADR-0042 Decision 5, recorded 2026-08-05) — so this is sequencing,
 not permission.
 
-- [ ] **Retention driver** — **exit criterion, added 2026-08-06 by the ADR-0040
+- [x] **Retention driver** — **exit criterion, added 2026-08-06 by the ADR-0040
       deployment-ownership decision.** D-20/D-21 measured **15.79 days** to fill
       8 GiB at 10 Hz on the ratified schema, and Kirra World is now decided to
       run **co-located with the verifier on local SQLite** — so its disk
@@ -374,11 +374,27 @@ not permission.
       decision, not a column choice: retention bounds disk and disk grows on
       insertion, whereas ageing on valid time would delete a backdated import on
       arrival and never age out a future-dated claim.
-      **STILL OPEN — the scheduler.** Nothing calls `run_retention_pass` on a
-      timer yet (precedent: `src/campaign_monitor.rs`,
-      `src/cert_expiry_monitor.rs`). **The box stays unticked until something
-      actually empties the store on its own** — a pass that is never invoked
-      leaves the 15.79 days exactly where they were.
+      **SWEEPER DONE 2026-08-06**, `crates/kirra-world-store/src/retention_sweeper.rs`,
+      3 tests — **something now empties the store without being asked**, which
+      is what this exit criterion asked for.
+      **It is NOT in the verifier, and that is the load-bearing part.**
+      `src/campaign_monitor.rs` and `src/cert_expiry_monitor.rs` are the obvious
+      precedent, but they live in the root crate, which is **inside the safety
+      closure** — spawning the sweeper there would pull `kirra-world` into that
+      closure and breach ADR-0039's **Fence B**. The precedent copied is the
+      *shape* (sweep interval, explicit start, fail-closed on anything
+      unestablished), not the location.
+      `std::thread` + `mpsc::recv_timeout`, so no async runtime enters
+      `kirra-world`'s dependency closure to schedule a SQLite `DELETE`; the
+      sweeper opens its own connection because `rusqlite::Connection` is not
+      `Sync`, which also isolates it from a caller's in-flight transaction.
+      Fail-closed at start (an unopenable database is the caller's error, not a
+      thread rediscovering it hourly); a failed pass is **counted and skipped**,
+      never retried tight and never fatal, because retention failing is not a
+      reason to stop bounding the disk. `SweepCounters` keeps `compacted`,
+      `pinned` and `failed` apart, since **`pinned` climbing while `compacted`
+      stays flat is the alertable condition** and one success counter cannot
+      show it.
 - [ ] **Entity taxonomy** (§6) — **structure and kinds DONE 2026-08-06**,
       `crates/kirra-world/src/entity.rs`, 18 tests, still zero-dependency.
       Delivered: the 19-kind root-closed taxonomy + `EntityGroup`, `Lifecycle`
