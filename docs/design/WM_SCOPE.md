@@ -146,28 +146,51 @@ and *explanation* halves do not.
 
 ---
 
-## 3. Tier 0 — Governance, which gates the rest
+## 3. Tier 0 — Governance — **COMPLETE, 2026-08-06**
 
-Not code. It blocks authorized implementation by the ADRs' own words.
+Not code. It blocked authorized implementation by the ADRs' own words. **All
+four World Model ADRs are now Accepted**, every ratification block at zero
+unticked.
 
 | Item | State |
 |---|---|
 | ADR-0041 | **Accepted** (2026-08-04), carrying one outstanding obligation (R2's alongside rebuild-and-swap) |
-| ADR-0039, ADR-0040, ADR-0042 | **Proposed** |
-| ADR-0040 ratification checklist | **4 of 5 unticked** — dependency review, compatibility inventory, deployment ownership, open questions 1 & 4 |
-| ADR-0042 Decision 5 | Recorded, but an **owner self-assessment, not an independent assurance review**, with Q2/Q4/Q5 open |
+| ADR-0042 | **Accepted** (2026-08-06) — carries **M5**, the `docs/safety` terminology migration, due before Kirra World runs as a service |
+| ADR-0039 | **Accepted** (2026-08-06) — fences structurally enforced and machine-checked; no runtime evidence, no independent review |
+| ADR-0040 | **Accepted** (2026-08-06) — carries **two conditions**: no `PerceivedObject` import path without a stated confidence/validity rule, and a **retention driver as a Tier 1 exit criterion** |
 
-### The ratification order is forced
+### What acceptance did NOT do
 
-ADR-0040 *"depends on ADR-0039"*; ADR-0039's checklist requires *"ADR-0042
-itself accepted."* So the chain is **0042 → 0039 → 0040**, and ADR-0040 cannot
-be accepted first however much evidence is prepared for it. **ADR-0042 is the
-critical path.**
+**It authorized no implementation.** Every one of the four says so in its own
+Status row. Tier 1 proceeds because the domain-logic gate is self-releasing and
+already released, not because ratification licensed it.
+
+**It was one approver throughout.** Every sign-off across all four ADRs was
+recorded by the same person holding every role, plainly stated in each
+*Acceptance record* so no reader infers independence from a count of ticks.
+Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508
+SIL 3 requirements; independent third-party assessment has not yet been
+performed.
+
+**Not every acceptance is equally well supported.** ADR-0039's fences are
+transitively machine-checked — a breach reds CI with the path named. ADR-0042's
+Decision 1 terminology has **no** machine check at all and is held by convention.
+ADR-0040's `PerceivedObject` condition likewise rests on being remembered. The
+difference is the enforcement mechanism, not the care taken, and it is recorded
+in each ADR rather than averaged away here.
+
+### The ratification order was forced, and was followed
+
+ADR-0040 *"depends on ADR-0039"*; ADR-0039's checklist required *"ADR-0042
+itself accepted."* The chain **0042 → 0039 → 0040** was resolved in that order
+on 2026-08-06 — 0042 first, which satisfied 0039's terminal criterion, which
+freed 0040. ADR-0042 was the critical path and behaved like it.
 
 ### Evidence prepared, so the boxes are decisions rather than work
 
-Every box below is still unticked — none of this ticks anything — but the
-research behind them is done, and a reader should not restart it:
+**Every box below is now ticked** — all were ruled on 2026-08-06. The table is
+kept because it records *what each ruling rested on*, and a reader auditing an
+acceptance should be able to see the evidence without reconstructing it:
 
 | Box | Prepared |
 |---|---|
@@ -180,14 +203,20 @@ research behind them is done, and a reader should not restart it:
 | ADR-0042 OQ1 | **Evidence prepared**, disposition drafted; its revisit trigger is self-announcing (a Fence B breach *is* the request arriving) |
 | ADR-0039 safety-assurance box | **Flagged as possibly tickable** — its own text says the ruling need only be *recorded* |
 
-**What is left is judgement, not research** — with one exception.
+**All of it was judgement rather than research by the end** — and the one item
+no preparation could move was **deployment ownership**, which is now decided.
 
-**Deployment ownership is the one that bites later**, and the only item no
-preparation can move. Nobody has decided who runs Kirra World, where it stores,
-or who backs it up. That answer is needed *before* a service exists, not after
-one is running — and two of its three parts already have measured consequences
-(see ADR-0040's review section: the 15.79-day fill, and ADR-0038's per-instance
-local audit chain).
+**Deployment ownership — DECIDED 2026-08-06.** Kirra World runs **co-located
+with the verifier**, stores to **local SQLite** (not the Postgres shared tier),
+and inherits the **verifier's existing backup regime**, which already respects
+ADR-0038's per-instance local audit chain. It was answered *before* a service
+exists rather than after one is running, which is what the item asked for.
+
+**Its cost is carried into Tier 1, not absorbed silently.** Co-location means a
+knowledge store shares a host with the safety verifier, so the measured
+**15.79-day fill** is now the verifier's disk pressure — which is why a
+**retention driver is a Tier 1 exit criterion** (§4), the one item there that
+is not about the domain model.
 
 ---
 
@@ -198,6 +227,14 @@ it. The domain-logic gate that once held it is **self-releasing and already
 released** (ADR-0042 Decision 5, recorded 2026-08-05) — so this is sequencing,
 not permission.
 
+- [ ] **Retention driver** — **exit criterion, added 2026-08-06 by the ADR-0040
+      deployment-ownership decision.** D-20/D-21 measured **15.79 days** to fill
+      8 GiB at 10 Hz on the ratified schema, and Kirra World is now decided to
+      run **co-located with the verifier on local SQLite** — so its disk
+      pressure is the safety host's disk pressure. Tier 1 is **not done** until
+      something empties the store. This is the one item here that is not about
+      the domain model; it is here because that decision put it here rather than
+      leaving the fill date unowned.
 - [ ] **Entity taxonomy** (§6)
 - [ ] **Observation model** (§7)
 - [ ] **Relationship model** (§8)
