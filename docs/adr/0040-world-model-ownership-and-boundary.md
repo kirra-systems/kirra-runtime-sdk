@@ -455,7 +455,7 @@ finding holds exactly:
 
 | Type | `confidence` | timestamp | Consumed by the checker |
 |---|---|---|---|
-| `kirra_core::trajectory::PerceivedObject` | **no** | **no** | **yes** — `rss_tangent_frame` and the object-slice RSS passes in `kirra-trajectory/src/validation.rs` |
+| `kirra_core::trajectory::PerceivedObject` | **no** | **no** | **yes** — `rss_tangent_frame` and the object-slice RSS passes in [`crates/kirra-trajectory/src/validation.rs`](../../crates/kirra-trajectory/src/validation.rs) |
 | `kirra_taj::CameraVruObservation` | **yes** | **yes** (`stamp_ms`) | via the VRU channel |
 
 `PerceivedObject` is `{id, pos, velocity_mps, heading_rad, vel}` — five fields,
@@ -468,7 +468,7 @@ the datum.
 writer-class rule, and it does not cover this path:
 
 * `WriterClass::LlmCandidate` may never write `ClaimStatus::Confirmed` — rejected
-  at `kirra-world-store/src/lib.rs:523`.
+  at [`crates/kirra-world-store/src/lib.rs:523`](../../crates/kirra-world-store/src/lib.rs).
 * `WriterClass::Sensor`, documented as *"a sensor or perception producer"*, has
   **no such constraint**. It may write `Confirmed` freely.
 * Decoding an unrecognised writer class falls back to `LlmCandidate` — the most
