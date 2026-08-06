@@ -603,6 +603,20 @@ The one item with no technical component. Recorded here is what the decision
 3. Who owns `Capability` — the agent or the World Model? The blueprint keeps it
    a category (§4.2); ownership across a fleet is unresolved.
 4. Naming collision disposition (ADR-0039 C1/C3).
+   **DISPOSITIONED — Justin Looney, 2026-08-06.** Both halves already carried
+   dispositions recorded elsewhere; this records that fact rather than making a
+   new decision.
+   * **C1** (terminology collision) — disposed by ADR-0042 Decision 1, and
+     already ticked in ADR-0039's own checklist. Executed in code: the two
+     safety-closure uses now read *independent perception channel*.
+   * **C3** (`robot/world_model.py`) — disposed twice over: this ADR's
+     compatibility table says **retain**, and ADR-0042 puts any rename behind
+     safety review because the module is imported by `rabbit_converse.py`,
+     staged by the installer, and gated by `KIRRA_WORLD_MODEL_ENABLED` —
+     renaming it changes robot deployment, not prose.
+   No new decision was required. What was missing was the record.
+   **The ratification box stays unticked**: it reads *"open questions 1 **and**
+   4 dispositioned"*, and Q1 remains drafted-not-decided.
 5. Does the dashboard's "administrative write" need a distinct writer class, or
    is it an operator-calibration adapter with a different transport?
 6. **Predictive containment.** Should predictive state remain in a **separate
@@ -629,4 +643,7 @@ The one item with no technical component. Recorded here is what the decision
       backs it up
 - [ ] Open questions 1 and 4 dispositioned
 
-Merging this PR satisfies none of the above.
+Merging the PR that **introduced this ADR** satisfied none of the above.
+Boxes above are ticked only by a separately recorded owner ruling, each of
+which names its owner and date inline — never by the act of merging a
+document change.
