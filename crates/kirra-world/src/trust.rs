@@ -43,7 +43,8 @@
 //! assertion outranks sensor evidence *for adjudication*, and never *for
 //! geometry*. Only the adjudication half lives here — see
 //! [`TrustAxes::operator_confirm`]. The geometry half is a constraint on the
-//! observation payload, which Tier 1's observation model owns.
+//! observation payload, and is now enforced there:
+//! [`crate::observation::Payload::correction`].
 
 // ---------------------------------------------------------------------------
 // Origin — rule 1: fixed at write, never changes
@@ -454,7 +455,10 @@ impl TrustAxes {
     /// pose must instead create a `Correction` observation whose payload is
     /// visibly operator-sourced (P10). That half is the observation model's to
     /// enforce, and this method's inability to reach a payload is the reason it
-    /// cannot be used to sidestep it.
+    /// cannot be used to sidestep it. It is now enforced there rather than
+    /// merely unreachable from here — see
+    /// [`crate::observation::Payload::correction`], which stamps the correction
+    /// operator-sourced with no field a caller could set otherwise.
     ///
     /// # Errors
     ///
