@@ -1,8 +1,19 @@
-//! **Kirra World service adapter — PROTOTYPE: shape only, no service.**
+//! **Kirra World service adapter — PROTOTYPE: no service, but no longer empty.**
 //!
-//! No HTTP, no routes, no server, no runtime, no transport dependency. This
-//! crate exists so the third node of ADR-0040's proposed graph is present and
-//! checkable; it does not run.
+//! No HTTP, no routes, no server, no runtime, no transport dependency — all
+//! still true, and all still load-bearing. This crate does not run.
+//!
+//! **What changed 2026-08-07:** it now carries [`read_view`], the **answer
+//! boundary** — the one place Tier 3's "no bare values" rule can be made
+//! structural, since `ProjectedClaim` cannot carry it (see that module). It
+//! landed here because `WM_SCOPE.md` §9's consumer was refused every doer-side
+//! host by Fence B, and this is the only crate that could legally hold the shape
+//! that consumer produced.
+//!
+//! So the header below is amended rather than deleted: the crate is no longer
+//! *shape only*, but the emptiness that mattered — no transport, no runtime, no
+//! route to an actuator — is exactly as it was, and is what the section below is
+//! actually about.
 //!
 //! # Why the emptiness is the point
 //!
@@ -19,8 +30,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod read_view;
+
 // Both edges exercised, so the proposed three-node graph is genuinely built and
-// not merely described in a manifest.
+// not merely described in a manifest. The edge is no longer only exercised --
+// `read_view` consumes the core and the store in earnest.
 pub use kirra_world::ResolutionOutcome;
 pub use kirra_world_store::EntityId;
 
