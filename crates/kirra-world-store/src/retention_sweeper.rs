@@ -264,6 +264,7 @@ mod tests {
             payload: r#"{"n":1}"#,
             payload_schema: 1,
             retention_class: "raw",
+            trust: None,
         })
         .expect("append");
     }

@@ -102,4 +102,108 @@ CREATE TABLE world_store_meta (
 pub const CHAIN_ALGORITHM: &str = "kirra-audit-hash/compute_record_hash_v2";
 
 /// Schema version stamped into `world_store_meta`.
-pub const SCHEMA_VERSION: i64 = 1;
+///
+/// Bumped to **2** by the trust-axes migration below.
+pub const SCHEMA_VERSION: i64 = 2;
+
+/// **v2 — the four orthogonal trust axes, added additively.**
+///
+/// `KIRRA-WM2-SCHEMA-001` ratified v1 with a recorded digest, so growing it is a
+/// ruling rather than a refactor. The ruling taken on 2026-08-07 was **additive,
+/// with `writer_class` kept permanently**, and the reason is worth stating
+/// because it inverts an assumption that had been carried for a while:
+///
+/// # `writer_class` is not the origin axis in disguise
+///
+/// It looks like one. It is not, and neither derives the other:
+///
+/// * **`writer_class` records who held the pen** — `sensor`, `operator`,
+///   `derivation`, `llm_candidate`. It is what **D-2** keys on, and
+///   `llm_candidate` is not an origin at all: an LLM can propose a claim of any
+///   origin, and the rule that constrains it is about the *writer's authority*,
+///   not the claim's provenance.
+/// * **`origin` records where the claim came from** — `observed`, `derived`,
+///   `imported`, `asserted`. It carries `imported`, which no writer class
+///   expresses, and it has no way to say "an LLM wrote this".
+///
+/// Replacing `writer_class` with `origin` would therefore have deleted D-2's
+/// enforcement basis. It stays, permanently, as a first-class column.
+///
+/// # `claim_status` becomes derived, and the derivation is a `CHECK`
+///
+/// `claim_status` is the two-value adjudication proxy — `candidate` /
+/// `confirmed` against the axis's four states, so `rejected` and `ambiguous`
+/// were both unrepresentable. Rule 3 requires `Ambiguous` to be a stable,
+/// reportable state (*"I have conflicting information about that"*), which the
+/// proxy could not express.
+///
+/// It is retained for read compatibility, and its agreement with `adjudication`
+/// is enforced rather than remembered: the `CHECK` below makes
+/// `claim_status = 'confirmed'` hold exactly when `adjudication = 'confirmed'`.
+/// A row that disagrees cannot be written or updated into existence.
+///
+/// # Why `validity` has no column
+///
+/// Because transition rule 6 says it is computed at read time, never stored.
+/// Three axes are stored; the fourth is `trust::validity_at`. A column would be
+/// the one place the rule could be broken, so there isn't one — the same shape
+/// as `TrustAxes` itself, which holds three fields for four axes.
+///
+/// # Why `predicted` is absent from the origin vocabulary
+///
+/// Blueprint §20: it **never appears in the evidence store**.
+/// `TrustAxes::new` refuses it. The `CHECK` refuses it too, so the rule holds
+/// against raw SQL and not only against callers who went through the
+/// constructor.
+///
+/// # Enforced, not merely declared
+///
+/// Every constraint here — including the cross-column ones — was verified to
+/// fire on both `INSERT` and `UPDATE`. SQLite's `ALTER TABLE ADD COLUMN`
+/// accepts a `CHECK` that references other columns and enforces it, which is
+/// what makes an additive migration able to carry the same weight as the
+/// original table-level `CHECK`s rather than degrading to writer-side
+/// validation. That mattered: `KIRRA-WM2-SCHEMA-001` §8 rejects
+/// "the caller promises not to" as a substitute for a constraint.
+pub const SCHEMA_V2_MIGRATION: &str = r#"
+ALTER TABLE world_events ADD COLUMN origin TEXT
+    CHECK (origin IS NULL OR origin IN
+        ('observed','derived','imported','asserted'));
+
+ALTER TABLE world_events ADD COLUMN corroboration TEXT
+    CHECK (corroboration IS NULL OR corroboration IN
+        ('uncorroborated','corroborated','contradicted'));
+
+ALTER TABLE world_events ADD COLUMN corroboration_n INTEGER
+    CHECK (
+        (corroboration_n IS NULL OR corroboration_n >= 1)
+        AND (corroboration IS NULL
+             OR (corroboration = 'uncorroborated') = (corroboration_n IS NULL))
+    );
+
+ALTER TABLE world_events ADD COLUMN adjudication TEXT
+    CHECK (
+        (adjudication IS NULL OR adjudication IN
+            ('pending','confirmed','rejected','ambiguous'))
+
+        -- The three stored axes travel together. A row carrying one axis and
+        -- not the others is a partial trust record, and a reader cannot tell
+        -- it from an unlabelled one.
+        AND (adjudication IS NULL) = (origin IS NULL)
+        AND (adjudication IS NULL) = (corroboration IS NULL)
+
+        -- D-2, restated against the axis so it survives claim_status. An LLM
+        -- may never write a confirmed fact; if claim_status is ever dropped,
+        -- this is what keeps the rule.
+        AND (adjudication IS NULL
+             OR writer_class <> 'llm_candidate'
+             OR adjudication <> 'confirmed')
+
+        -- claim_status is DERIVED from adjudication. Enforced, so the proxy
+        -- cannot drift from the axis it now stands for.
+        AND (adjudication IS NULL
+             OR (claim_status = 'confirmed') = (adjudication = 'confirmed'))
+    );
+
+CREATE INDEX idx_events_adjudication ON world_events (adjudication, generation);
+"#;

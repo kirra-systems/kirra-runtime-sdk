@@ -541,11 +541,52 @@ is **self-releasing and already released** (ADR-0042 Decision 5, recorded
 
 ### Why the axes are not one enum
 
-Today the store carries `writer_class` plus a two-value `claim_status`, which is
+The store **carried** `writer_class` plus a two-value `claim_status`, which was
 an **adjudication proxy** and nothing more. The blueprint is explicit that
 collapsing the axes is *"exactly why trust states in most systems become mush
 after eighteen months — every new case forces either a wrong assignment or a new
 variant."*
+
+**Resolved 2026-08-07 (Strand C), schema v2.** The three stored axes now have
+columns — `origin`, `corroboration` + `corroboration_n`, `adjudication` — added
+additively, so `KIRRA-WM2-SCHEMA-001`'s ratified v1 grows rather than being
+replaced and every existing row stays readable.
+
+**The finding that shaped the ruling: `writer_class` is not the origin axis in
+disguise.** It looks like one, and neither derives the other. `writer_class`
+records *who held the pen* — it is what **D-2** keys on, and `llm_candidate` is
+not an origin at all, because an LLM can propose a claim of any provenance and
+the rule constraining it is about the writer's authority. `origin` records
+*where the claim came from*, carries `imported` which no writer class expresses,
+and cannot say "an LLM wrote this". Replacing `writer_class` would have deleted
+D-2's enforcement basis, so it is kept **permanently**, not transitionally.
+
+`claim_status` is retained for read compatibility and is now **derived**: a
+`CHECK` makes `claim_status = 'confirmed'` hold exactly when
+`adjudication = 'confirmed'`, so the proxy cannot drift from the axis it stands
+for. D-2 is additionally restated against `adjudication`, so the rule survives
+`claim_status` being dropped later.
+
+Two states the proxy could never express are now storable: **`Rejected`**
+(terminal under rule 7) and **`Ambiguous`**, which rule 3 requires to be a
+stable, reportable state — *"I have conflicting information about that."*
+
+**The axes are inside the hashed bytes**, appended to the canonical form only
+when present. An unlabelled row therefore hashes byte-identically to v1 — the
+compatibility property, pinned by tests written against the pre-v2 code — while
+stripping the axes from a labelled row breaks the chain rather than quietly
+reverting it to a valid unlabelled one. Same argument as SD-2: a trust label
+that is not hashed can be relabelled in place.
+
+**Rule 3 is not baked into storage.** `adjudication_stored()` is persisted, not
+`adjudication()` — `Contradicted + Pending` reads as `Ambiguous` at read time,
+and storing that derivation would fix a conclusion that must be recomputed when
+the corroboration changes. Same reason validity has no column at all.
+
+The migration also closed a gap it did not create: the store had **no schema
+version check on an existing database**. A future-stamped store is now refused
+(`SchemaFromTheFuture`) rather than opened by a binary that would write rows
+missing columns it never heard of.
 
 Two of the seven rules are load-bearing and genuinely hard:
 

@@ -124,6 +124,7 @@ impl Ev {
             payload: &self.payload,
             payload_schema: 1,
             retention_class: &self.retention_class,
+            trust: None,
         }
     }
 }

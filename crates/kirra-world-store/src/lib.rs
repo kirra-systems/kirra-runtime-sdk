@@ -96,6 +96,7 @@ pub use projection::{ProjectedClaim, CURRENT_PROJECTION};
 // merely "so the dependency edge is real": [`NewEvent`] is built out of them, so
 // the edge now carries traffic. That is the measurement ADR-0040's open
 // question 1 defers its revisit to — see `docs/design/WM_Q1_SEAM_BASELINE.md`.
+pub use kirra_world::trust::{Adjudication, Corroboration, Origin, TrustAxes};
 pub use kirra_world::{EntityId, EventId, FrameId, MapId, ObservationId, ReferenceError};
 pub use schema::{CHAIN_ALGORITHM, SCHEMA_VERSION};
 
@@ -184,6 +185,17 @@ pub enum StoreError {
     LlmCannotConfirm,
     /// SD-4, refused early for the same reason.
     SpatialClaimNeedsFrame,
+    /// The database is stamped with a schema version this binary does not
+    /// know. Refused rather than opened hopefully — an older binary writing
+    /// into a newer store produces rows missing columns it never heard of,
+    /// which in an evidence log is a partial trust record indistinguishable
+    /// from an unlabelled one.
+    SchemaFromTheFuture {
+        /// The version stamped in the database.
+        found: i64,
+        /// The newest version this binary can apply.
+        supported: i64,
+    },
     /// Recomputation diverged from a stored digest.
     ChainBroken {
         /// The generation at which it diverged.
@@ -258,6 +270,11 @@ impl std::fmt::Display for StoreError {
                 f,
                 "a spatial claim requires frame_id (ADR-0042 Decision 2; \
                  KIRRA-WM2-SCHEMA-001 SD-4)"
+            ),
+            Self::SchemaFromTheFuture { found, supported } => write!(
+                f,
+                "database is at schema version {found}, this binary supports \
+                 up to {supported} — refusing to open it"
             ),
             Self::ChainBroken { generation } => {
                 write!(f, "chain broken at generation {generation}")
@@ -402,6 +419,84 @@ pub struct NewEvent<'a> {
     pub payload_schema: i64,
     /// One of the six retention classes ruled in ADR-0041 OQ2.
     pub retention_class: &'a str,
+    /// The three **stored** trust axes (schema v2), or `None` for a row that
+    /// records no trust labelling.
+    ///
+    /// `Option` rather than required, because v1 rows exist and an unlabelled
+    /// row must stay distinguishable from a labelled one. A default would have
+    /// invented an origin and an adjudication for every historical row, which
+    /// is precisely the "mush after eighteen months" the four-axis model exists
+    /// to avoid.
+    ///
+    /// Validity is **not** here and has no column: transition rule 6 computes it
+    /// at read time from the validity window. Three axes are stored; the fourth
+    /// is `kirra_world::trust::validity_at`.
+    pub trust: Option<&'a TrustAxes>,
+}
+
+/// The stored spelling of [`Corroboration`], split into its token and its count.
+///
+/// `Corroborated(3)` and `Contradicted(3)` carry a number the other variant does
+/// not, so a single column would have to encode it in the string and parse it
+/// back. Two columns keep the count queryable and let the schema state the
+/// pairing rule as a `CHECK` — `n` is present exactly when the token is not
+/// `uncorroborated`.
+fn corroboration_columns(c: Corroboration) -> (&'static str, Option<u32>) {
+    match c {
+        Corroboration::Uncorroborated => ("uncorroborated", None),
+        Corroboration::Corroborated(n) => ("corroborated", Some(n)),
+        Corroboration::Contradicted(n) => ("contradicted", Some(n)),
+    }
+}
+
+/// Rebuild a [`Corroboration`] from its two stored columns.
+fn corroboration_from_columns(token: &str, n: Option<u32>) -> Option<Corroboration> {
+    match (token, n) {
+        ("uncorroborated", None) => Some(Corroboration::Uncorroborated),
+        ("corroborated", Some(n)) if n >= 1 => Some(Corroboration::Corroborated(n)),
+        ("contradicted", Some(n)) if n >= 1 => Some(Corroboration::Contradicted(n)),
+        _ => None,
+    }
+}
+
+/// The stored token for an [`Adjudication`].
+fn adjudication_token(a: Adjudication) -> &'static str {
+    match a {
+        Adjudication::Pending => "pending",
+        Adjudication::Confirmed => "confirmed",
+        Adjudication::Rejected => "rejected",
+        Adjudication::Ambiguous => "ambiguous",
+    }
+}
+
+/// Parse a stored adjudication token.
+///
+/// Returns `None` on anything unrecognised rather than defaulting. Every other
+/// `from_stored` in this crate degrades to the *weaker* value, which is right
+/// for a two-value proxy — but this axis has two weak states, `Rejected` and
+/// `Ambiguous`, that mean different things, and silently picking one would
+/// invent a ruling. An unreadable adjudication is a corrupt row.
+fn adjudication_from_token(s: &str) -> Option<Adjudication> {
+    match s {
+        "pending" => Some(Adjudication::Pending),
+        "confirmed" => Some(Adjudication::Confirmed),
+        "rejected" => Some(Adjudication::Rejected),
+        "ambiguous" => Some(Adjudication::Ambiguous),
+        _ => None,
+    }
+}
+
+/// Parse a stored origin token. `None` on anything unrecognised, including
+/// `predicted` — blueprint §20 says it never appears in the evidence store, so
+/// reading one back means the row is corrupt, not that the axis has five states.
+fn origin_from_token(s: &str) -> Option<Origin> {
+    match s {
+        "observed" => Some(Origin::Observed),
+        "derived" => Some(Origin::Derived),
+        "imported" => Some(Origin::Imported),
+        "asserted" => Some(Origin::Asserted),
+        _ => None,
+    }
 }
 
 fn json_str(v: &str) -> String {
@@ -436,14 +531,14 @@ pub fn canonical_event_json(e: &NewEvent<'_>) -> String {
     fn opt_i(v: Option<i64>) -> String {
         v.map_or_else(|| "null".to_string(), |x| x.to_string())
     }
-    format!(
+    let mut out = format!(
         concat!(
             "{{\"event_id\":{},\"observation_id\":{},\"txn_time_ms\":{},",
             "\"valid_from_ms\":{},\"valid_to_ms\":{},\"source\":{},",
             "\"source_version\":{},\"writer_class\":{},\"claim_status\":{},",
             "\"provenance\":{},\"frame_id\":{},\"map_id\":{},\"kind\":{},",
             "\"subject\":{},\"predicate\":{},\"object\":{},\"payload\":{},",
-            "\"payload_schema\":{},\"retention_class\":{}}}"
+            "\"payload_schema\":{},\"retention_class\":{}"
         ),
         json_str(e.event_id.as_str()),
         json_str(e.observation_id.as_str()),
@@ -464,7 +559,47 @@ pub fn canonical_event_json(e: &NewEvent<'_>) -> String {
         json_str(e.payload),
         e.payload_schema,
         json_str(e.retention_class),
-    )
+    );
+
+    // The v2 axes are APPENDED, and only when present.
+    //
+    // This is the one place the form is not fixed-arity, and the reason is
+    // forced rather than chosen. Emitting the axis keys unconditionally — as
+    // `null` for an unlabelled row, the way the five v1 optionals are spelled —
+    // would change the bytes of every row ever written and fail
+    // `verify_chain` on every existing store. So an unlabelled row produces
+    // EXACTLY the v1 form, byte for byte, and only a labelled row carries the
+    // extra keys.
+    //
+    // The axes are inside the hash rather than beside it for the same reason
+    // `writer_class` and `claim_status` are (SD-2): a trust label that is not
+    // hashed can be relabelled in place without breaking anything. Stripping
+    // the axes from a stored row does not turn it back into a valid v1 row —
+    // its stored digest was computed over the labelled bytes, so recomputation
+    // diverges and the chain reports it.
+    if let Some(t) = e.trust {
+        let (corr, n) = corroboration_columns(t.corroboration());
+        out.push_str(&format!(
+            concat!(
+                ",\"origin\":{},\"corroboration\":{},\"corroboration_n\":{},",
+                "\"adjudication\":{}"
+            ),
+            json_str(t.origin().as_str()),
+            json_str(corr),
+            n.map_or_else(|| "null".to_string(), |v| v.to_string()),
+            // Stored WITHOUT rule 3 applied. `adjudication()` reads
+            // `Contradicted + Pending` as `Ambiguous`, which is a READ-time
+            // derivation like validity — storing the derived value would bake
+            // in a conclusion that has to be recomputed if the corroboration
+            // later changes, and would make the stored row disagree with the
+            // axes it was built from.
+            json_str(adjudication_token(t.adjudication_stored())),
+        ));
+    }
+
+    // Closing brace last, so the appended fields sit inside the object.
+    out.push('}');
+    out
 }
 
 /// `generation` as the chain's sequence number, failing CLOSED.
@@ -503,6 +638,78 @@ fn readmit<T>(
     })
 }
 
+/// Column indices of the four v2 axis columns in both rebuild `SELECT`s.
+///
+/// Named rather than spelled inline at two call sites, because the two queries
+/// must agree and a silent drift between them would rehash different columns in
+/// `verify_chain` than in the projection digest.
+const COL_ORIGIN: usize = 21;
+const COL_CORROBORATION: usize = 22;
+const COL_CORROBORATION_N: usize = 23;
+const COL_ADJUDICATION: usize = 24;
+
+/// Rebuild the stored trust axes from a row, or refuse the row.
+///
+/// # All four states, and why three of them are not `None`
+///
+/// * **All absent** → `Ok(None)`. A v1 row, or a v2 row that records no trust
+///   labelling. This is the only benign absence.
+/// * **All present and parseable** → `Ok(Some(axes))`.
+/// * **Partially present** → [`StoreError::CorruptRow`]. The schema `CHECK`
+///   makes a partial set unwritable and un-updatable, so seeing one means the
+///   row was edited around the constraint. Reconstructing whichever part
+///   survived would manufacture a trust record out of a damaged one.
+/// * **Present but unparseable** → [`StoreError::CorruptRow`]. Includes an
+///   origin of `predicted`, which blueprint §20 says never appears in the
+///   evidence store.
+///
+/// Nothing here defaults. Every other `from_stored` in this crate degrades to
+/// the weaker value, which is right when the weaker value is unambiguous — but
+/// this axis set has two distinct weak states, `Rejected` and `Ambiguous`, and
+/// picking one would invent a ruling nobody made.
+fn axes_from_row(generation: i64, r: &rusqlite::Row<'_>) -> Result<Option<TrustAxes>, StoreError> {
+    let origin: Option<String> = r.get(COL_ORIGIN)?;
+    let corroboration: Option<String> = r.get(COL_CORROBORATION)?;
+    let corroboration_n: Option<i64> = r.get(COL_CORROBORATION_N)?;
+    let adjudication: Option<String> = r.get(COL_ADJUDICATION)?;
+
+    let corrupt = |detail: String| StoreError::CorruptRow { generation, detail };
+
+    match (origin, corroboration, adjudication) {
+        (None, None, None) => Ok(None),
+        (Some(o), Some(c), Some(a)) => {
+            let origin = origin_from_token(&o)
+                .ok_or_else(|| corrupt(format!("origin: `{o}` is not a storable origin")))?;
+            let n =
+                match corroboration_n {
+                    None => None,
+                    Some(v) => Some(u32::try_from(v).map_err(|_| {
+                        corrupt(format!("corroboration_n: {v} is not a valid count"))
+                    })?),
+                };
+            let corroboration = corroboration_from_columns(&c, n).ok_or_else(|| {
+                corrupt(format!(
+                    "corroboration: `{c}` with n={n:?} is not a valid corroboration"
+                ))
+            })?;
+            let adjudication = adjudication_from_token(&a).ok_or_else(|| {
+                corrupt(format!("adjudication: `{a}` is not a known adjudication"))
+            })?;
+            TrustAxes::new(origin, corroboration, adjudication)
+                .map(Some)
+                .map_err(|e| corrupt(format!("trust axes: {e:?}")))
+        }
+        (o, c, a) => Err(corrupt(format!(
+            "trust axes are partially present (origin: {}, corroboration: {}, \
+             adjudication: {}) — the schema CHECK makes this unwritable, so the \
+             row was edited",
+            o.is_some(),
+            c.is_some(),
+            a.is_some()
+        ))),
+    }
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -510,11 +717,28 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
-/// SHA-256 of [`schema::SCHEMA_V1`], recorded in `world_store_meta` at
-/// creation so a store can prove which exact schema text produced it — not
-/// merely which version number someone claimed.
+/// SHA-256 of the **effective** schema text — [`schema::SCHEMA_V1`] followed by
+/// [`schema::SCHEMA_V2_MIGRATION`] — recorded in `world_store_meta` so a store
+/// can prove which exact schema produced it, not merely which version number
+/// someone claimed.
+///
+/// A store migrated from v1 is re-stamped with this value, so a born-v2 store
+/// and a migrated one carry the **same** digest. That is correct and
+/// deliberate: they have the same effective schema, and a digest that
+/// distinguished them would be recording history rather than structure.
+/// [`schema_digest_v1`] remains available for reading a store that has not been
+/// migrated.
 #[must_use]
 pub fn schema_digest() -> String {
+    let mut effective = String::from(schema::SCHEMA_V1);
+    effective.push_str(schema::SCHEMA_V2_MIGRATION);
+    sha256_hex(effective.as_bytes())
+}
+
+/// SHA-256 of [`schema::SCHEMA_V1`] alone — the digest a store created before
+/// the trust-axes migration carries.
+#[must_use]
+pub fn schema_digest_v1() -> String {
     sha256_hex(schema::SCHEMA_V1.as_bytes())
 }
 
@@ -547,6 +771,7 @@ impl WorldStore {
             .optional()?;
         if installed.is_none() {
             conn.execute_batch(schema::SCHEMA_V1)?;
+            conn.execute_batch(schema::SCHEMA_V2_MIGRATION)?;
             conn.execute(
                 "INSERT INTO world_store_meta (key, value) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION.to_string()],
@@ -559,8 +784,101 @@ impl WorldStore {
                 "INSERT INTO world_store_meta (key, value) VALUES ('schema_digest', ?1)",
                 params![schema_digest()],
             )?;
+        } else {
+            Self::migrate(&conn)?;
         }
         Ok(Self { conn })
+    }
+
+    /// Bring an existing store up to [`SCHEMA_VERSION`], or refuse it.
+    ///
+    /// # Fail-closed on a future schema
+    ///
+    /// A database stamped **newer** than this binary is refused
+    /// ([`StoreError::SchemaFromTheFuture`]) rather than opened hopefully. The
+    /// store had no version check at all before this: an older binary would
+    /// happily open a newer database, read the columns it knew about, and write
+    /// rows missing the ones it did not — silently producing partial trust
+    /// records in a log whose whole purpose is that it can be trusted later.
+    /// `kirra-persistence` already fails closed this way
+    /// (`assert_schema_not_future`); this is the same rule, arrived at for the
+    /// same reason.
+    ///
+    /// # Why migration is forward-only and additive
+    ///
+    /// There is no down-migration and there will not be one. Every step adds
+    /// nullable columns to an append-only evidence table, so a v1 row remains
+    /// exactly a v1 row — unlabelled, not wrongly labelled. Removing a column
+    /// would have to rewrite rows that are inside a hash chain, which is not a
+    /// migration but a forgery.
+    fn migrate(conn: &Connection) -> Result<(), StoreError> {
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT value FROM world_store_meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        // An absent or unparseable stamp reads as v1: the store predates the
+        // stamp or its meta row is damaged, and v1 is the weakest assumption
+        // that cannot over-claim. It is never read as "already current", which
+        // would skip the migration and leave the columns missing.
+        let from = stored
+            .as_deref()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(1);
+
+        if from > SCHEMA_VERSION {
+            return Err(StoreError::SchemaFromTheFuture {
+                found: from,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        if from == SCHEMA_VERSION {
+            return Ok(());
+        }
+
+        if from < 2 {
+            conn.execute_batch(schema::SCHEMA_V2_MIGRATION)?;
+        }
+
+        // Re-stamp both, and in this order. The digest is the claim that can be
+        // checked against the schema text; the version is the one a reader
+        // consults first. Writing the version before the columns exist would
+        // leave a crash window in which the store claims a shape it does not
+        // have — so both stamps come last, after the DDL has committed.
+        conn.execute(
+            "INSERT INTO world_store_meta (key, value) VALUES ('schema_digest', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![schema_digest()],
+        )?;
+        conn.execute(
+            "INSERT INTO world_store_meta (key, value) VALUES ('schema_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![SCHEMA_VERSION.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// The schema version this store is stamped with.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the meta table cannot be read.
+    pub fn schema_version(&self) -> Result<i64, StoreError> {
+        let stored: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM world_store_meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(stored
+            .as_deref()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(1))
     }
 
     /// The chain digest of the newest event, or [`GENESIS`].
@@ -612,6 +930,8 @@ impl WorldStore {
             return Err(StoreError::SpatialClaimNeedsFrame);
         }
 
+        let axes = e.trust.map(|t| corroboration_columns(t.corroboration()));
+
         let generation = self.next_generation()?;
         let prev = self.head_chain()?;
         let chain = kirra_audit_hash::compute_record_hash_v2(
@@ -627,8 +947,10 @@ impl WorldStore {
                 generation, event_id, observation_id, txn_time_ms, valid_from_ms,
                 valid_to_ms, source, source_version, writer_class, claim_status,
                 provenance, frame_id, map_id, kind, subject, predicate, object,
-                payload, payload_schema, payload_digest, retention_class, chain_digest
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+                payload, payload_schema, payload_digest, retention_class, chain_digest,
+                origin, corroboration, corroboration_n, adjudication
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
+                       ?23,?24,?25,?26)",
             params![
                 generation,
                 e.event_id.as_str(),
@@ -652,6 +974,10 @@ impl WorldStore {
                 sha256_hex(e.payload.as_bytes()),
                 e.retention_class,
                 chain,
+                e.trust.map(|t| t.origin().as_str()),
+                axes.map(|(c, _)| c),
+                axes.and_then(|(_, n)| n),
+                e.trust.map(|t| adjudication_token(t.adjudication_stored())),
             ],
         )?;
         Ok(generation)
@@ -669,7 +995,8 @@ impl WorldStore {
             "SELECT generation, event_id, observation_id, txn_time_ms, valid_from_ms,
                     valid_to_ms, source, source_version, writer_class, claim_status,
                     provenance, frame_id, map_id, kind, subject, predicate, object,
-                    payload, payload_schema, retention_class, chain_digest
+                    payload, payload_schema, retention_class, chain_digest,
+                    origin, corroboration, corroboration_n, adjudication
              FROM world_events ORDER BY generation ASC",
         )?;
         let mut rows = stmt.query([])?;
@@ -769,6 +1096,13 @@ impl WorldStore {
             )?;
             let map_id = readmit(generation, "map_id", map_id.map(MapId::new).transpose())?;
 
+            // The axes, rebuilt from their columns. All-or-nothing: the schema
+            // CHECK makes a partial set unwritable, so a partial set read back
+            // means the row was edited around the constraint, and
+            // `axes_from_row` refuses it rather than reconstructing whichever
+            // part survived.
+            let trust = axes_from_row(generation, r)?;
+
             let rebuilt = NewEvent {
                 event_id: &event_id,
                 observation_id: &observation_id,
@@ -789,6 +1123,7 @@ impl WorldStore {
                 payload: &payload,
                 payload_schema: r.get(18)?,
                 retention_class: &retention_class,
+                trust: trust.as_ref(),
             };
             let expect = kirra_audit_hash::compute_record_hash_v2(
                 &prev,
@@ -1021,6 +1356,32 @@ impl WorldStore {
         }
         let sql = format!("UPDATE compaction_citations SET {column} = ?1 WHERE lo_generation = ?2");
         self.conn.execute(&sql, params![value, lo_generation])?;
+        Ok(())
+    }
+
+    /// Test-only: run one arbitrary SQL statement against the store.
+    ///
+    /// # Why this is broader than [`WorldStore::tamper_for_test`], deliberately
+    ///
+    /// That method is allowlisted specifically so it cannot become an injection
+    /// point, and it should stay that way. But an allowlisted single-column
+    /// setter cannot express the attacks the schema `CHECK`s exist to defeat: it
+    /// cannot clear all four axis columns in one statement, and it cannot be
+    /// extended to cover every constraint without the allowlist becoming the
+    /// test suite.
+    ///
+    /// The `CHECK`s are the guarantee, so proving they fire has to be done with
+    /// SQL that never went near the write path. This exists for that, is
+    /// `test-support`-gated like its neighbours, and is not used by any
+    /// non-test code path.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the statement is rejected — which for these
+    /// tests is usually the point.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn raw_execute_for_test(&self, sql: &str) -> Result<(), StoreError> {
+        self.conn.execute(sql, [])?;
         Ok(())
     }
 
@@ -1900,7 +2261,8 @@ impl WorldStore {
             "SELECT generation, event_id, observation_id, txn_time_ms, valid_from_ms,
                     valid_to_ms, source, source_version, writer_class, claim_status,
                     provenance, frame_id, map_id, kind, subject, predicate, object,
-                    payload, payload_schema, retention_class, chain_digest
+                    payload, payload_schema, retention_class, chain_digest,
+                    origin, corroboration, corroboration_n, adjudication
              FROM world_events WHERE generation BETWEEN ?1 AND ?2
              ORDER BY generation ASC",
         )?;
@@ -1954,6 +2316,13 @@ impl WorldStore {
             )?;
             let map_id = readmit(generation, "map_id", map_id.map(MapId::new).transpose())?;
 
+            // The axes, rebuilt from their columns. All-or-nothing: the schema
+            // CHECK makes a partial set unwritable, so a partial set read back
+            // means the row was edited around the constraint, and
+            // `axes_from_row` refuses it rather than reconstructing whichever
+            // part survived.
+            let trust = axes_from_row(generation, r)?;
+
             let rebuilt = NewEvent {
                 event_id: &event_id,
                 observation_id: &observation_id,
@@ -1974,6 +2343,7 @@ impl WorldStore {
                 payload: &payload,
                 payload_schema: r.get(18)?,
                 retention_class: &retention_class,
+                trust: trust.as_ref(),
             };
             hasher.update(canonical_event_json(&rebuilt).as_bytes());
             hasher.update(b"\n");

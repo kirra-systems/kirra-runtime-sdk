@@ -58,6 +58,7 @@ fn base<'a>(id: &'a Ids) -> NewEvent<'a> {
         payload: r#"{"note":"seen"}"#,
         payload_schema: 1,
         retention_class: "raw",
+        trust: None,
     }
 }
 

@@ -79,6 +79,7 @@ fn fully_populated<'a>(r: &'a Refs, provenance: &'a [&'a str]) -> NewEvent<'a> {
         payload: r#"{"x":1.5,"y":-2.0}"#,
         payload_schema: 3,
         retention_class: "raw",
+        trust: None,
     }
 }
 
