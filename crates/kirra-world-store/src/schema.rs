@@ -104,7 +104,7 @@ pub const CHAIN_ALGORITHM: &str = "kirra-audit-hash/compute_record_hash_v2";
 /// Schema version stamped into `world_store_meta`.
 ///
 /// Bumped to **2** by the trust-axes migration below.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// **v2 — the four orthogonal trust axes, added additively.**
 ///
@@ -217,4 +217,47 @@ ALTER TABLE world_events ADD COLUMN adjudication TEXT
     );
 
 CREATE INDEX idx_events_adjudication ON world_events (adjudication, generation);
+"#;
+
+/// **v3 — the subject discriminant.** `subject_projection`'s recorded gap,
+/// closed at the storage layer.
+///
+/// `kirra_world::observation::SubjectRef` distinguishes four cases; this table
+/// flattened all of them into one `subject TEXT NOT NULL` column and kept no
+/// discriminant, so a fold could not restrict itself to *resolved entities* —
+/// candidates and frames were indistinguishable from them once stored.
+///
+/// # Why the vocabulary is three tokens and not four
+///
+/// `unbound` is **deliberately absent**, and its absence is a refusal rather
+/// than an oversight. `SubjectRef::Unbound` is the one case carrying **no id**,
+/// and `subject` is `NOT NULL`. Admitting the token would bless a row whose
+/// `subject` column holds a value that nothing supplied — a fabricated
+/// identifier inside hashed evidence bytes, which is worse than the gap it
+/// would close.
+///
+/// Making `Unbound` storable means making `subject` nullable, and SQLite cannot
+/// drop `NOT NULL` with `ALTER TABLE`; it needs a table rebuild, which on an
+/// append-only hash-chained log is a slice with its own argument to make. Until
+/// then an unbound observation is stored exactly as it is today — with a
+/// caller-chosen subject and no discriminant — and `append` refuses to *label*
+/// it, so the store never claims to know a kind it cannot represent.
+///
+/// # Why one column needs no travel-together CHECK
+///
+/// The v2 axes needed `(adjudication IS NULL) = (origin IS NULL)` because four
+/// columns could disagree, and the review finding there was sharper still: an
+/// orphan `corroboration_n` would be **stored but not hashed**, editable in
+/// place without breaking the chain.
+///
+/// That failure cannot arise here, and the reason is structural rather than
+/// careful: there is exactly **one** column, and the canonical form emits its
+/// key if and only if the column is written. There is no second column to fall
+/// out of step with. The property is nonetheless asserted rather than argued —
+/// setting `subject_kind` on a row that was written without one breaks the
+/// chain, and there is a test that does precisely that.
+pub const SCHEMA_V3_MIGRATION: &str = r#"
+ALTER TABLE world_events ADD COLUMN subject_kind TEXT
+    CHECK (subject_kind IS NULL OR subject_kind IN
+        ('entity','candidate','frame'));
 "#;

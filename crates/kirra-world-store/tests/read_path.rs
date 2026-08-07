@@ -75,6 +75,7 @@ fn ev<'a>(
         map_id: None,
         kind: "observation",
         subject,
+        subject_ref: None,
         predicate,
         object,
         payload: r#"{"n":1}"#,

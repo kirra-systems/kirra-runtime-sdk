@@ -66,6 +66,7 @@ fn ev<'a>(id: &'a Ids, subject: &'a str, txn_time_ms: i64, status: ClaimStatus) 
         map_id: None,
         kind: "observation",
         subject,
+        subject_ref: None,
         predicate: Some("colour"),
         object: Some("red"),
         payload: r#"{"n":1}"#,

@@ -119,6 +119,7 @@ impl Ev {
             map_id: None,
             kind: "observation",
             subject: &self.subject,
+            subject_ref: None,
             predicate: self.predicate.as_deref(),
             object: self.object.as_deref(),
             payload: &self.payload,
