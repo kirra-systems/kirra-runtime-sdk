@@ -762,7 +762,12 @@ pub fn schema_digest_v1() -> String {
 }
 
 /// The genesis value the first event chains from.
-pub const GENESIS: &str = "kirra-world:genesis";
+///
+/// **One definition, in the core.** This was a literal here and is now the
+/// core's [`kirra_world::evidence::GENESIS_TOKEN`], because the value is inside
+/// the hashed bytes of every first record and two definitions of a frozen
+/// constant are two chances for it to drift. The public path is unchanged.
+pub const GENESIS: &str = kirra_world::evidence::GENESIS_TOKEN;
 
 /// The append-only evidence log.
 pub struct WorldStore {
