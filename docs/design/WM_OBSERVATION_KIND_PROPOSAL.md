@@ -1,6 +1,37 @@
-# `ObservationKind` — a proposal, for ruling
+# `ObservationKind` — RULED
 
-**KIRRA-WM-OBSKIND-001** · drafted 2026-08-07 · **status: PROPOSED, not adopted**
+**KIRRA-WM-OBSKIND-001** · drafted 2026-08-07 · **status: ADOPTED (option 2), 2026-08-07**
+
+## RULED — 2026-08-07
+
+> **ADOPTED — 2026-08-07 by Justin Looney, World Model owner. Option 2:** the
+> three **attested** variants only — `Attribute` (`observation`), `Spatial`
+> (`spatial`), `Relationship` (`relationship`) — plus `Unrecognised` as the
+> non-writable degrade target. **`Existence` is DEFERRED**, to be revisited when
+> a producer actually needs it.
+>
+> The three constraints in §"Three constraints" are carried into the ruling
+> unchanged: the existing tokens keep their exact spellings, SD-4's
+> `kind = 'spatial'` check moves with `Spatial`, and an unrecognised kind
+> degrades rather than guesses.
+>
+> **What this authorizes:** `ObservationKind` may enter `kirra-world` as an enum
+> shaped like `EntityKind`'s, and `TypedPayload`'s body becomes definable per
+> variant. It does **not** authorize changing `NewEvent::kind` from `&str` to the
+> enum in the same slice — that touches the canonically-hashed bytes and needs
+> its own compatibility argument, exactly as the trust axes did.
+>
+> **Revisit trigger for `Existence`:** a perception producer with a
+> saw-something-claiming-nothing output. Adding it then is an additive enum
+> variant; that asymmetry against removal is the reason it was deferred rather
+> than included.
+>
+> **One approver.** This ruling was recorded by the same person holding every
+> role, as with every other World Model ruling. Kirra is designed in alignment
+> with ISO 26262 ASIL-D requirements and IEC 61508 SIL 3 requirements;
+> independent third-party assessment has not yet been performed.
+
+The proposal as put to the owner follows, unamended.
 
 ## What this is, and what it is not
 
