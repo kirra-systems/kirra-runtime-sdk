@@ -1,4 +1,4 @@
-//! **Kirra World — domain core. Tier 1 in progress: the domain model is real.**
+//! **Kirra World — domain core. Tier 1 complete; Tier 2 begun.**
 //!
 //! This crate exists to prove ONE thing that is expensive to get wrong later:
 //! the dependency *shape*. ADR-0040 (WM-1) proposes `kirra-world` as a pure
@@ -8,8 +8,10 @@
 //!
 //! # What this crate contains, and what it still does not
 //!
-//! **Real** — seven modules, pure functions over pure data, still zero
-//! dependencies:
+//! **Real** — nine modules, pure functions over pure data, still zero
+//! dependencies. (It read *seven* until 2026-08-07, having missed `evidence`
+//! when that landed; a hand-maintained count drifts the moment someone adds a
+//! module without rereading the paragraph above it, which is what happened.)
 //!
 //! * [`mod@trust`] (§9) — the four orthogonal trust axes and the transition
 //!   rules, with the anti-laundering rule (5) and read-time validity (6) as the
@@ -32,6 +34,14 @@
 //! * [`mod@kind`] (§7.1) — `ObservationKind` and the per-kind versioned body
 //!   contract. Ruled rather than invented (`KIRRA-WM-OBSKIND-001`, 2026-08-07):
 //!   this was a *specification* gap, not an implementation one.
+//! * [`mod@evidence`] — `EvidenceDigest` and `PrevHash`, the chain-identity
+//!   types. `PrevHash` is an enum because the first record's predecessor
+//!   position holds a sentinel that is not a hash, and a single digest type
+//!   there would force fabricating one for genesis.
+//! * [`mod@adjudication`] (§6.3, §14.1) — **Tier 2's first slice**: merge,
+//!   split and forget as *recorded events* rather than destructive edits. The
+//!   verb an identity model needs and a lifecycle field cannot supply, since a
+//!   state says what an entity is now and never why or on what evidence.
 //!
 //! **Still absent:** storage, API and queries — plus the parts of §6/§7 that
 //! genuinely need a dependency (ULID *generation*, content hashing, frames,
@@ -77,9 +87,10 @@
 //! (ADR-0041, *WM-2 implementation milestone*) rather than dressed up as an
 //! external hold.
 //!
-//! **Tier 1 has now started**, and the gap is closing from this end: the four
-//! modules above are domain logic the store does not have. Note which direction
-//! that runs — the store's `WriterClass` + two-valued `ClaimStatus` is, in the
+//! **Tier 1 is complete** (`KIRRA-WM-TIER1-DONE-001`, ruled 2026-08-07) and
+//! **Tier 2 has started** with `adjudication`. The gap is closing from this
+//! end: the modules above are domain logic the store does not have. Note which
+//! direction that runs — the store's `WriterClass` + two-valued `ClaimStatus` is, in the
 //! scope doc's words, *"an adjudication proxy and nothing more"*. The four axes
 //! are what it is a proxy **for**, so the core is now ahead of the adapter on
 //! this one concept, and the store will need to grow toward it rather than the
@@ -120,6 +131,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod adjudication;
 pub mod entity;
 pub mod evidence;
 pub mod kind;
