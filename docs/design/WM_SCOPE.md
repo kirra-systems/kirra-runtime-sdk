@@ -495,14 +495,42 @@ is **self-releasing and already released** (ADR-0042 Decision 5, recorded
       has none by ratification criterion, so the core owns the *type* and the layer
       with a clock mints the *value*. No loss: an id arriving from a replayed log
       or another fleet must be admissible regardless.
-      **Still open:** `evidence_digest`/`prev_hash` as core types (the store
-      computes both today as bare hex strings), and the per-kind versioned
-      `TypedPayload` **body** — `Payload` carries that body's provenance, but the
-      body itself stays a type parameter. `ObservationKind` is absent for a
-      different reason and is **not** an implementation gap: the blueprint names
-      the field and never enumerates its variants, so writing that list is a
-      specification extension, not a derivation. `kind` stays `&str` until it
-      exists.
+      **`ObservationKind` + the per-kind versioned `TypedPayload` contract DONE
+      2026-08-07**, `crates/kirra-world/src/kind.rs`, 16 tests, still
+      zero-dependency. This was the **specification** gap, not an implementation
+      one — the blueprint named the field and never enumerated it — so it was
+      ruled rather than written: `KIRRA-WM-OBSKIND-001`, option 2, the three
+      variants **attested by what the system already writes** (`observation`,
+      `spatial`, `relationship`) plus `Unrecognised` as a degrade target.
+      `Existence` was proposed and **deferred**, on an asymmetry rather than a
+      preference: adding a variant later is an additive enum change, while
+      removing one already written into a hash-chained log would mean rewriting
+      rows inside the chain. Revisit trigger: a perception producer with a
+      saw-something-claiming-nothing output.
+      **Three rules made structural.** The tokens are FROZEN, because `kind` sits
+      inside the canonically-hashed bytes twice — re-spelling one is not a rename,
+      it breaks verification on every existing store. `Unrecognised` has **no
+      token**, so `as_str` returns `Option` and the degrade target cannot be
+      written at all. And `requires_frame()` answers `false` for `Unrecognised`
+      deliberately: SD-4's `CHECK` keys on the literal `'spatial'`, so a kind this
+      build cannot name is not spatial *to the schema* either, and answering
+      otherwise would put the type and the schema into disagreement about one row.
+      **`TypedBody`** gives §7.1 its two halves — `KIND` so a spatial body cannot
+      be attached to a relationship claim, and `SCHEMA_VERSION` so the store's
+      long-standing `payload_schema` column finally has a stated meaning. Checked
+      in the order kind → version → content, because a body offered under the
+      wrong kind should never have been considered and reporting its version
+      mismatch would send a reader to the wrong question. Fails closed against the
+      **future**: a newer producer's body is refused rather than decoded as the
+      known version, since a silently truncated record is worse than an unread one
+      in an evidence log. Encoding stays the implementor's job — a trait demanding
+      a serializer would break the crate's zero-dependency criterion.
+      **The stored bytes are unchanged**, and the ruling explicitly did not
+      authorize changing them in this slice: `NewEvent::kind` and `payload` stay
+      as they are. This types the *boundary*.
+      **Still open:** `evidence_digest`/`prev_hash` as core types — the store
+      computes both today as bare hex strings, so this is a typing gap rather than
+      a missing capability.
 - [x] **Relationship model** (§8) — **DONE 2026-08-06**,
       `crates/kirra-world/src/relationship.rs`, 20 tests, still zero-dependency.
       **All ten §8 record fields**, all 15 predicates across the four groups.
