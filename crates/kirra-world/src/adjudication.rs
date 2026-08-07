@@ -22,10 +22,11 @@
 //!   redirect target. §6.3 promises the old ids *"answer with a redirect"*
 //!   forever; a self-redirect is a resolution loop, and the failure would appear
 //!   at read time, in a projection, long after the event that caused it.
-//! * **A split into fewer than two** is not a split. Into one it is a no-op that
-//!   nonetheless records an identity change; into zero it is destruction, which
-//!   is what [`ForgetEntity`] is for and what §14.1 reserves for a `Redact`
-//!   operation with *"its own ADR"*.
+//! * **A split into fewer than two** is not a *partition*. Into one it is a
+//!   no-op that nonetheless records an identity change; into zero it is
+//!   destruction, which is what [`ForgetEntity`] is for and what §14.1 reserves
+//!   for a `Redact` operation with *"its own ADR"*. **This rule scopes the type
+//!   to partition-shaped splits** — see the constructor-neutrality note below.
 //! * **Duplicate sources or destinations** leave it ambiguous whether one event
 //!   or two occurred, which is unanswerable afterwards from the record.
 //! * **No supporting evidence** makes the adjudication an assertion. The whole
@@ -66,6 +67,33 @@
 //! [`IdentityAdjudication::unresolved_consequence`], so a caller that ignores it
 //! is making a choice it can be held to instead of reading a list that quietly
 //! omitted an entity.
+//!
+//! ## …but the CONSTRUCTOR is not neutral, and saying so is the point
+//!
+//! The paragraph above is true of `resulting_lifecycles` and **false as a claim
+//! about this module**. [`SplitEntity::new`] has already taken a position:
+//! `SplitTooNarrow` (fewer than two destinations) and `SplitIntoSelf` together
+//! refuse **both spellings of a surviving original** —
+//! `into = [piece]` and `into = [source, piece]`. So the ordinary subtraction
+//! case, where the source survives as one of the pieces (you believed one
+//! pallet; there is a pallet with a box on it), is **unrepresentable here**.
+//!
+//! What this type actually models is the **partition** shape: a source that was
+//! never a coherent thing, replaced by two or more successors that are not it.
+//! For that shape both refusals are right.
+//!
+//! Recorded rather than quietly corrected because an open question the
+//! implementation has already closed is worse than one still open — the next
+//! reader takes the constraint as considered. Written up for a ruling as
+//! **`KIRRA-WM-SPLIT-SURVIVAL-001`**
+//! (`docs/design/WM_SPLIT_SOURCE_PROPOSAL.md`), which finds that the two
+//! readings answer *different questions* and recommends admitting partition and
+//! subtraction as distinct shapes with separate constructors.
+//!
+//! Until that is ruled, treat the scope as: **partition only**.
+//! [`IdentityAdjudication::unresolved_consequence`] stays because it is honest
+//! about the lifecycle; it is expected to be deleted when the ruling supplies a
+//! state for a partitioned source.
 //!
 //! # ADR-0042 condition (1)
 //!
@@ -126,6 +154,11 @@ pub enum AdjudicationError {
     ///
     /// Into one it is a no-op recorded as an identity change; into zero it is
     /// destruction, which this module deliberately cannot express.
+    ///
+    /// **This is a partition rule, not a universal one.** Together with
+    /// [`Self::SplitIntoSelf`] it makes a *surviving* original unrepresentable,
+    /// which is a position on the open question rather than neutrality about it
+    /// — see the module docs and `KIRRA-WM-SPLIT-SURVIVAL-001`.
     SplitTooNarrow {
         /// How many destinations were supplied.
         found: usize,
@@ -140,6 +173,10 @@ pub enum AdjudicationError {
     /// A split named its own source among its destinations.
     ///
     /// The piece would carry `Split { from }` pointing at itself.
+    ///
+    /// Correct for a partition, and **the other half of what makes subtraction
+    /// unrepresentable** — a caller spelling "the source is one of the pieces"
+    /// lands here. See `KIRRA-WM-SPLIT-SURVIVAL-001`.
     SplitIntoSelf {
         /// The entity that appeared on both sides.
         entity: EntityId,
@@ -399,8 +436,16 @@ impl MergeEntities {
 /// One entity is judged to have been several things. Each destination becomes
 /// [`Lifecycle::Split`] carrying its origin.
 ///
-/// **The source's own fate is deliberately not stated here** — see
-/// [`IdentityAdjudication::unresolved_consequence`] and the module docs.
+/// **Scope: partition only.** The constructor's refusals make a *surviving*
+/// original unrepresentable, so this models a source that was never a coherent
+/// thing rather than one that a piece was carved off. That is a position on the
+/// open question, taken by the rules rather than argued for; see the module docs
+/// and `KIRRA-WM-SPLIT-SURVIVAL-001`.
+///
+/// **The source's own LIFECYCLE is deliberately not stated** — see
+/// [`IdentityAdjudication::unresolved_consequence`]. Note the two are different
+/// claims: no lifecycle is asserted for the source, *and* the constructor has
+/// nonetheless ruled out its survival.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitEntity {
     source: EntityId,
@@ -630,6 +675,12 @@ impl IdentityAdjudication {
     /// Returning it rather than omitting it means a caller that does not handle
     /// the source is visibly declining to, instead of consuming a list that
     /// silently dropped an entity.
+    ///
+    /// **Narrower than it looks.** This says no *lifecycle* is asserted for the
+    /// source; it does not mean the module is neutral on whether the source
+    /// survives. [`SplitEntity::new`] already forbids survival. Expected to be
+    /// deleted once `KIRRA-WM-SPLIT-SURVIVAL-001` supplies a state for a
+    /// partitioned source.
     #[must_use]
     pub fn unresolved_consequence(&self) -> Option<&EntityId> {
         match self {
@@ -836,6 +887,54 @@ mod tests {
             SplitEntity::new(eid("pallet"), [eid("b"), eid("b")], just(), T0).expect_err("refused"),
             AdjudicationError::DuplicateDestination { entity: eid("b") }
         );
+    }
+
+    /// **The scope this type actually has**, asserted rather than described.
+    ///
+    /// The module documents that it models *partition* and not *subtraction*.
+    /// A documented scope is a remembered one; this makes it a checked one, and
+    /// the check is what will FAIL when `KIRRA-WM-SPLIT-SURVIVAL-001` is ruled
+    /// in favour of admitting subtraction — which is the intended outcome, not
+    /// a regression.
+    ///
+    /// Both spellings of "the source survives as one of the pieces" are walked,
+    /// because a reader who tries one and gives up would conclude the other
+    /// works.
+    #[test]
+    fn a_split_where_the_source_survives_is_unrepresentable_today() {
+        // You believed one pallet. There is a pallet with a box on it. The
+        // pallet did not stop existing.
+        let carve_off_a_piece =
+            SplitEntity::new(eid("pallet"), [eid("box")], just(), T0).expect_err("refused");
+        assert_eq!(
+            carve_off_a_piece,
+            AdjudicationError::SplitTooNarrow { found: 1 },
+            "naming only the new piece is refused for being too narrow"
+        );
+
+        let name_the_survivor =
+            SplitEntity::new(eid("pallet"), [eid("pallet"), eid("box")], just(), T0)
+                .expect_err("refused");
+        assert_eq!(
+            name_the_survivor,
+            AdjudicationError::SplitIntoSelf {
+                entity: eid("pallet")
+            },
+            "and naming the survivor explicitly is refused too -- so there is \
+             no third spelling that works"
+        );
+    }
+
+    /// Non-vacuity for the test above: a **partition** of the same source is
+    /// admitted.
+    ///
+    /// Without this, `a_split_where_the_source_survives_is_unrepresentable_today`
+    /// would pass just as happily against a constructor that refused every
+    /// split, which would make it evidence of nothing.
+    #[test]
+    fn the_partition_shape_of_the_same_split_is_admitted() {
+        SplitEntity::new(eid("pallet"), [eid("pallet-deck"), eid("box")], just(), T0)
+            .expect("two successors, neither of them the source");
     }
 
     /// **The undecided consequence is reported, not omitted.**
