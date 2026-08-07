@@ -746,6 +746,27 @@ Three rules matter more than the verb count:
    and lost where it came from' impossible to write."*
    **This is a breaking change to the API that exists today**, which returns
    bare `ProjectedClaim`s.
+
+   **Falsified against a real caller, 2026-08-07** (§9): the rule **cannot be
+   met by `ProjectedClaim`**, and cannot be met by convention either.
+   `ProjectedClaim`'s fields are public, so
+
+   ```rust
+   let payload = &store.current("robot-01", now)?[0].payload;
+   ```
+
+   compiles — no validity, no trust, no handle. `validity_at` and `grade_at` are
+   *methods a caller must remember to call*, and forgetting is the default.
+
+   Not a defect in the store: `ProjectedClaim` is the projection **row**, and
+   that is the honest shape for a row. The finding is about *where* the rule has
+   to live — at an **answer boundary**, in a type with no constructor that omits
+   validity, trust or provenance, so an answer in hand always carries them.
+
+   The honest bound, since overclaiming here would be the same failure: such a
+   type closes the hole at *retrieval*. It does not stop a caller destructuring
+   and passing the value onward alone. Rust cannot prevent that without
+   infecting every downstream signature.
 2. **Queries are bounded.** Not a preference: D-9 measured **10.5 s p99**
    temporal queries at 100 000 entities, and ADR-0041 D-12 already records that
    neither graph nor temporal queries may sit on a control or safety deadline
@@ -803,6 +824,52 @@ more than discovering it against one.
 
 There are **no callers today**, so the breaking change is free *now* and never
 again.
+
+### Attempted 2026-08-07 — and it has nowhere to land
+
+Recorded because the call above reads as straightforward advice and **is not**.
+Anyone who acts on it next will otherwise rediscover this after writing the same
+code.
+
+A consumer was built and wired into `kirra-sidecars` — a doer-side crate,
+outside Fence B's safety closure, and cleared against
+`ci/check_mick_actuation_fence.py` before the dependency was added. **Fence B
+refused it anyway**, on a check the closure walk does not cover:
+
+> `impl CorridorSource for ReqCorridor` is Kirra World-derived: the implementing
+> crate `kirra-sidecars` depends on a `kirra-world*` package.
+> **This route requires a superseding ADR, not an allowlist entry.**
+
+The refusal is correct. A corridor is *authoritative to the checker*, so a crate
+that produces one must derive it from the safety path's own inputs and never
+from accumulated semantic belief — which is the hidden-adapter route ADR-0042
+Decision 5 exists to close.
+
+**The constraint §9 does not mention:** seven workspace crates implement
+`CorridorSource`. Three — `kirra-core`, `kirra-trajectory`, `kirra-ros2-adapter`
+— are safety-closure members and were already barred from depending on Kirra
+World at all. The other four are `kirra-map`, `kirra-planner`, `kirra-taj` and
+`kirra-sidecars`: **exactly the "planner, perception" crates this section
+nominates.** It is transitive, so anything `kirra-sidecars` depends on is barred
+too — which takes `kirra-mick`, the "LLM crate" of the same list, with it.
+
+So the consumer needs a host that consumes world knowledge and **never feeds the
+checker**. No such crate exists today, and the tier plan does not provide for
+one. That is an open placement decision, not a task.
+
+**What the attempt produced anyway**, because the falsification §9 predicted did
+happen — twice:
+
+* **Tier 3's rule 1 cannot be met by `ProjectedClaim`.** Recorded at the rule
+  itself, in §6 (Tier 3) above.
+* **An emergent guarantee, now pinned.** Nothing a reader can see through
+  `current()` is ever graded `Inadmissible` — it composes out of three
+  mechanisms added for unrelated reasons, was written down nowhere, and would
+  have been lost silently by a change to any one of them. Pinned in
+  `crates/kirra-world-store/tests/inadmissible_never_read.rs`.
+
+Both were found by a caller that never shipped. That is §9's argument working,
+not failing.
 
 **Land the trust axes before the query engine.** Retrofitting four axes into an
 API that already returns claims means touching every verb twice.
