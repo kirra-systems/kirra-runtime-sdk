@@ -17,8 +17,10 @@
 //!   rules, with the anti-laundering rule (5) and read-time validity (6) as the
 //!   load-bearing parts.
 //! * [`mod@observation`] (§7, pure half) — structured `Confidence`, source
-//!   classes, clock domains that cannot be mixed, and payload provenance that
-//!   an operator correction cannot launder (P10).
+//!   classes, clock domains that cannot be mixed, payload provenance that an
+//!   operator correction cannot launder (P10), and `SubjectRef`'s four-case
+//!   discriminant with its fail-closed re-admission path — the half a store
+//!   needs before a projection can tell a resolved entity from a candidate.
 //! * [`mod@entity`] (§6, structure and kinds) — the root-closed taxonomy,
 //!   lifecycle, and kind as adjudicated evidence rather than a stored field.
 //! * [`mod@relationship`] (§8) — directed, typed, time-bounded relations;
