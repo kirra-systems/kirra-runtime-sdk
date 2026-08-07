@@ -8,7 +8,7 @@
 //!
 //! # What this crate contains, and what it still does not
 //!
-//! **Real** — four modules, pure functions over pure data, still zero
+//! **Real** — seven modules, pure functions over pure data, still zero
 //! dependencies:
 //!
 //! * [`mod@trust`] (§9) — the four orthogonal trust axes and the transition
@@ -26,11 +26,20 @@
 //!   store has known *how* to compact since WM-2; nothing has ever decided
 //!   *when*, which is why the horizons OQ2 ruled have gone unenforced.
 //!
+//! * [`mod@reference`] — the opaque identity and spatial-reference newtypes
+//!   (`EventId`, `ObservationId`, `FrameId`, `MapId`), which make two adjacent
+//!   pairs of same-typed strings unswappable. Validated, never normalized.
+//! * [`mod@kind`] (§7.1) — `ObservationKind` and the per-kind versioned body
+//!   contract. Ruled rather than invented (`KIRRA-WM-OBSKIND-001`, 2026-08-07):
+//!   this was a *specification* gap, not an implementation one.
+//!
 //! **Still absent:** storage, API and queries — plus the parts of §6/§7 that
-//! need a dependency (ULID identity, content hashing, frames, maps, typed
-//! payloads), which belong to the store. The remaining types below are
-//! **unconstructible placeholders**, each with a private unit field, so no logic
-//! can accrete around a name before the model that gives it meaning exists.
+//! genuinely need a dependency (ULID *generation*, content hashing, frames,
+//! maps), which belong to the store. Note the split that settled: the core owns
+//! the **type** and what makes a value admissible; the layer with a clock and a
+//! hash **mints** the value. Five types below are still **unconstructible
+//! placeholders**, each with a private unit field, so no logic can accrete
+//! around a name before the model that gives it meaning exists.
 //!
 //! The governing decision is the safety-assurance scope ruling
 //! ([ADR-0042](../../../docs/adr/0042-world-model-terminology-and-safety-boundary-scope.md)
@@ -112,6 +121,7 @@
 #![warn(missing_docs)]
 
 pub mod entity;
+pub mod kind;
 pub mod observation;
 pub mod reference;
 pub mod relationship;
@@ -173,6 +183,16 @@ pub use reference::EventId;
 
 /// Why a reference was refused. See [`mod@reference`].
 pub use reference::ReferenceError;
+
+/// What a claim asserts about its subject, and the per-kind versioned body
+/// contract — §7.1's `TypedPayload`.
+///
+/// **No longer absent.** The variant list was a *specification* gap rather than
+/// an implementation one: §7.1 named the field and the blueprint never
+/// enumerated it, so [`mod@observation`] refused to invent a taxonomy. Ruled
+/// 2026-08-07 (`KIRRA-WM-OBSKIND-001`, option 2) — three attested variants plus
+/// a degrade target, with `Existence` deferred.
+pub use kind::{BodyError, ObservationKind, TypedBody};
 
 // ---------------------------------------------------------------------------
 // Where a claim came from
