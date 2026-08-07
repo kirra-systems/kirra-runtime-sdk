@@ -5,9 +5,9 @@
 //! §7.1 names this field and the blueprint never enumerates its variants, so
 //! [`observation`](crate::observation) refused to invent a taxonomy. The list
 //! below is not this module's guess: it was proposed in
-//! `WM_OBSERVATION_KIND_PROPOSAL.md` (`KIRRA-WM-OBSKIND-001`) and **adopted
-//! 2026-08-07, option 2** — the three variants attested by what the system
-//! actually writes, plus a degrade target.
+//! `docs/design/WM_OBSERVATION_KIND_PROPOSAL.md` (`KIRRA-WM-OBSKIND-001`) and
+//! **adopted 2026-08-07, option 2** — the three variants attested by what the
+//! system actually writes, plus a degrade target.
 //!
 //! `Existence` was proposed as a fourth and **deferred**, on an asymmetry
 //! rather than a preference: adding a variant later costs an additive enum
