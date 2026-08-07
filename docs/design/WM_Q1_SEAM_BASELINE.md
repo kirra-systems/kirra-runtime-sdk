@@ -251,3 +251,314 @@ If anything, the direction of the trend argues for taking one further
 measurement *at* completion rather than treating this one as sufficient — the
 ruling asked for a measurement at a defined moment, and answering early with a
 more convenient number is the failure mode it was written against.
+
+---
+
+# Measurement 3 — at the Tier 1 boundary
+
+**recorded 2026-08-07** · `main` at `9a0712da`, with `claude/wm-typed-payload`
+(#1381) at `ff394e89`
+
+> #1381's head advanced to `230edc4f` after this was recorded — a base-branch
+> update, not new work. `ff394e89` remains an ancestor of it, so the command
+> below still resolves, and the empty-diff claim was re-verified against **both**
+> heads. Noted rather than silently restamped: this document's SHAs say which
+> tree was measured, and quietly moving them would make a later reader trust a
+> pairing nobody checked.
+
+## The precondition, stated before the number rather than after it
+
+The revisit trigger fires on *"completion of `WM_SCOPE.md` Tier 1"*. On a strict
+reading of Tier 1's own checklist, **it has not fired**, and this document does
+not claim it has. Two boxes are unticked even with #1381 applied:
+
+| Tier 1 box | What is still open under it |
+|---|---|
+| **Entity taxonomy (§6)** | identity *adjudication* — candidate clustering, merge/split, `entity_id` minting — all of which that entry explicitly assigns to **Tier 2** |
+| **Observation model (§7)** | `evidence_digest` / `prev_hash` as core types; the store computes both today as bare hex strings |
+
+ADR-0040's own ruling on Q1 supplies the discipline for this situation, and it
+is quoted here because it cuts against the convenient reading:
+
+> Ticking on a half-satisfied conjunction is exactly the drift these rulings
+> exist to prevent.
+
+So the box is not ticked and no disposition is declared. What follows is the
+measurement, plus the argument for why taking it *now* is not the early answer
+[Measurement 2](#measurement-2--after-the-retention-driver-and-the-reference-types)
+warned against.
+
+### One record says otherwise, and the disagreement is worth naming
+
+#1381's pull request describes itself as firing this trigger — *"Closes Tier 1's
+last implementation item, and with it **fires ADR-0040's Q1 revisit trigger**"*.
+This document takes the narrower reading, so a reader meeting both should not
+have to guess which governs.
+
+**The durable record agrees with this document.** #1381 leaves both §6's and
+§7's checkboxes `- [ ]`; it ticks neither. `WM_SCOPE.md` is the record the
+trigger names, and by that record Tier 1 is open. The pull request's prose is
+commentary on a slice, and it is defensible on its own terms — Tier 1's
+*implementation* work is what that slice closed, and §6's residue really is
+assigned to Tier 2.
+
+The gap between the two is the word **completion**. "Every implementation item
+is done" and "the tier is complete" are not the same claim while two boxes are
+unticked, and the trigger is keyed to the second. Resolving that is the owner's
+call, not a measurement's — which is precisely why nothing here is ticked and no
+disposition is declared.
+
+## Why measuring now is not answering early
+
+Measurement 2 closed by warning that *"answering early with a more convenient
+number is the failure mode it was written against."* Three checks, each
+mechanical rather than argued, establish that this measurement is not that.
+
+**1 — It is invariant to the merged-pending item.** `#1381` is the slice that
+marks §7's last implementation item done. Its diff against `main`, restricted to
+the two consumer crates, is **empty**:
+
+```
+git fetch origin refs/pull/1381/head
+git diff --stat 9a0712da ff394e89 \
+  -- crates/kirra-world-store/ crates/kirra-world-service/
+(no output)
+```
+
+Written against the **pull request ref** rather than the branch name it was
+originally run with, because both of the obvious forms stop working. The branch
+`claude/wm-typed-payload` is deleted on merge; and #1381 is **squash**-merged, so
+`ff394e89` is not an ancestor of `main` afterwards and a fresh clone cannot
+resolve it either. `refs/pull/1381/head` outlives both. A reproduction command in
+a document about reproducibility should survive the merge it describes.
+
+It changes `crates/kirra-world/src/` and documentation only. The seam is counted
+in the *consumers*, so every number below is identical on both trees. Waiting for
+#1381 to merge would produce the same table.
+
+**2 — It is monotone in what remains.** `evidence_digest` / `prev_hash` becoming
+core types would mean the store *importing two more core types*, not fewer.
+§6's residue is Tier 2 by that entry's own assignment. Neither outstanding item
+can remove a line from the table.
+
+**3 — Therefore it is a lower bound.** Everything below is the *smallest* the
+seam will be when Tier 1 formally closes. The direction that would favour
+collapse is the one the remaining work cannot travel.
+
+That third point is what makes recording now defensible rather than premature. A
+lower bound that already clears "near-empty" by a wide margin cannot be reversed
+by finishing the tier — so the number was fixed before anyone could know whether
+it would be convenient, which is the property a baseline is supposed to have.
+
+## The measurement — the baseline's unit, unchanged
+
+Counting unit: **one `use`/`pub use` item naming a `kirra_world` path**, in the
+`src/` tree of a crate that depends on `kirra-world`. Independence unit: the
+consuming crate. Held fixed: `main` at `9a0712da`, default features, no `cfg`
+gating other than the test/non-test split, which is reported separately.
+
+**Population checked, not assumed.** Still exactly two crates depend on
+`kirra-world` directly. `tools/wm2-schema-growth` and
+`tools/wm2-persistence-harness` were inspected and are not in the population —
+the former depends on `kirra-world-store`, the latter on neither, by its own
+manifest's stated design.
+
+| Consumer | Lines (non-test) | Lines (test-only) |
+|---|---|---|
+| `kirra-world-store` | 8 | 2 |
+| `kirra-world-service` | 1 | 0 |
+| **Total** | **9** | **2** |
+
+On the baseline's own unit the trend is **2 → 8 → 9**.
+
+## The baseline's unit is the weakest thing in this document
+
+Said plainly, because the number above is the one most likely to be quoted and
+it understates the change by a wide margin.
+
+**One `use` item is insensitive to a braced list growing.** Two examples from
+this very tree:
+
+* `lib.rs:108` went from `{EntityId, ObservationId}` at baseline to
+  `{EntityId, EventId, FrameId, MapId, ObservationId, ReferenceError}` — six
+  names — and did not move the count.
+* `lib.rs:104` imports **nine** names from `kirra_world::trust` in a single item.
+
+So a second unit is reported. It is not a replacement — the first is what makes
+this comparable to the baseline, and swapping units between measurements would
+destroy the comparison the baseline exists to enable.
+
+| Unit | Baseline | Measurement 3 |
+|---|---|---|
+| `use` items naming a `kirra_world` path | 2 | **9** |
+| **distinct core paths named** | 3 | **26** |
+
+The 26 are: the six reference/identity types, nine from `trust::`, seven from
+`retention::`, two from `observation::`, `ReferenceError`, and
+`ResolutionOutcome`.
+
+## What the seam *does*, which is the part the ruling actually asked about
+
+The baseline's finding was never really "2 lines". It was this sentence:
+
+> **Neither crate calls a method, constructs a value, or matches on a variant of
+> any core type.** The dependency is declared in both manifests and, in the
+> direction that matters, carries nothing.
+
+Measurement 2 reported that sentence had become false. Measurement 3 puts
+numbers on it. All counts are non-test code, doc comments excluded:
+
+| Property | Baseline | Measurement 3 |
+|---|---|---|
+| constructor call sites (`EventId::new`, `ObservationId::new`, …) | 0 | **10** |
+| variant references in code (`RetentionDecision::…`, `Blocker::…`, …) | 0 | **29** |
+| **public struct fields typed by a core type** | 0 | **7** |
+| **public fn signatures naming a core type** | 0 | **5** |
+
+The last two rows are the ones that decide a collapse question, so they are
+listed rather than summarised.
+
+**Public fields (7)** — five of them are on `NewEvent`, which is the store's
+only write-path entry:
+
+```
+lib.rs:388               pub event_id: &'a EventId,
+lib.rs:392               pub observation_id: &'a ObservationId,
+lib.rs:411               pub frame_id: Option<&'a FrameId>,
+lib.rs:415               pub map_id: Option<&'a MapId>,
+lib.rs:442               pub trust: Option<&'a TrustAxes>,
+projection.rs:163        pub trust: Option<crate::TrustAxes>,
+retention_driver.rs:56   pub decision: RetentionDecision,
+```
+
+**Public signatures (5)**:
+
+```
+projection.rs:180        pub fn validity_at(…) -> crate::Validity
+projection.rs:199        pub fn grade_at(…) -> Option<crate::TrustGrade>
+retention_driver.rs:91   pub fn retention_survey(&self, policy: &RetentionPolicy, now: DomainInstant, …)
+retention_driver.rs:234  pub fn run_retention_pass(&mut self, policy: &RetentionPolicy, now: DomainInstant, …)
+retention_sweeper.rs:137 pub fn start(path: &Path, policy: RetentionPolicy, interval: Duration, …)
+```
+
+Reduced to one sentence: **a caller cannot append an event to the store, or run
+a retention pass over it, without constructing core values first.** A seam
+carrying re-exports dissolves by moving two lines; a seam whose consumer's write
+path is *made of* the core's types does not.
+
+## The method is now an instrument, and it immediately corrected me
+
+Measurement 2 said the method outlives the number:
+
+> the baseline's *number* has a much shorter shelf life than its *method*, and
+> the method is what should be reused.
+
+Three measurements have now re-derived that method by hand. It is committed as
+`ci/measure_q1_seam.py`, which reproduces every figure above.
+
+**Its first act was to correct this document.** The constructor count was
+hand-counted as 11; the instrument reported 10. The difference was
+`schema.rs:155` — `/// \`TrustAxes::new\` refuses it` — a doc comment. The hand
+count excluded comments when tallying variant references and forgot to when
+tallying constructors, which is exactly the kind of inconsistency that survives
+review and quietly inflates a series.
+
+Worth stating rather than silently shipping the corrected figure: the error
+inflated the number in the direction of the conclusion this measurement reaches.
+A hand-counted instrument that drifts toward its own finding is the failure the
+baseline's method discipline exists to catch, and here it took a script to catch
+it.
+
+**Its second act was to expose a fail-open in itself.** Reverting the population
+check to confirm it fires -- a guard that cannot fire is not a guard -- was run
+from a copy outside the tree. It duly reported a changed population, and also
+reported `actual: []`: finding no crates, it had measured *nothing* and rendered
+that as an empty seam.
+
+That is the wrong failure direction here, and not marginally. "The seam is
+near-empty" is the exact finding that authorizes collapsing it, so an instrument
+that returns zero when it cannot find the tree returns the collapse-authorizing
+answer on its own error. It now refuses to measure instead, because a missing
+tree and an empty seam produce identical numbers and mean opposite things.
+
+Both controls are recorded rather than merely run: the population check fires on
+a real tree with a shortened `RECORDED_CONSUMERS`, and the lost-tree guard fires
+on a copy, while the committed script passes.
+
+**It is deliberately not a CI gate.** Every figure it reports is *supposed* to
+change — the seam filling is the outcome the trigger was written to detect — so
+a gate would red on progress and be silenced. The one genuine invariant is
+offered as `--check-population`: if a third crate starts depending on
+`kirra-world`, the independence unit has changed and the recorded series is no
+longer comparable without saying so. That is a fact about the measurement, not
+about the code, so it is left for whoever takes Measurement 4 to run.
+
+## The finding the total would hide: one edge filled, the other did not
+
+Reporting "9 lines" for "the seam" would leave a reader with the impression that
+the graph filled. It did not. **8 of the 9 are one edge.**
+
+| Edge | Baseline | Measurement 3 |
+|---|---|---|
+| `kirra-world-store` → `kirra-world` | 1 line, 2 names, 0 constructions | 8 lines, 25 names, 10 constructions |
+| `kirra-world-service` → `kirra-world` | 1 line, 1 name, 0 constructions | **1 line, 1 name, 0 constructions** |
+
+The service edge is **verbatim what it was at baseline** — a single
+`pub use kirra_world::ResolutionOutcome;`.
+
+This is **not** a counter-finding against Q1, and should not be read as one. Q1
+names the `kirra-world` / `kirra-world-store` seam specifically; the service is
+outside its scope. And that crate's emptiness is deliberate and documented in
+its own module header — it exists so the fence has something to walk:
+
+> A *service* crate is where that would most plausibly erode — a transport
+> dependency added "just to publish status", a ROS handle threaded through
+> "temporarily". … A fence that arrives with the code is a fence argued with.
+> This one is already here.
+
+It is recorded here because the *aggregate* row is the one that travels, and it
+would carry a claim about the service edge that the evidence does not support.
+
+## What this selects — and what remains the owner's act
+
+ADR-0040 pre-authorized both outcomes, so the selection is mechanical:
+
+* **The seam carries real consumption** — 10 constructions, 29 variant
+  references, 12 public API bindings, and a write-path struct made of core
+  types. **Retained.**
+* *The seam is still near-empty* — not the case, by a wide margin, at a
+  measurement that is a lower bound.
+
+Two things are worth separating, because collapsing them is how a measurement
+turns into a ruling nobody made.
+
+**Recording this is low-cost, and that asymmetry is why it can be done now.**
+The outcome it selects — retain — is the one that requires *no action*. Collapse
+would be a restructuring; retention is the status quo continuing. A
+retain-pointing measurement filed before the tier formally closes therefore
+commits nothing that a later ruling could not simply override.
+
+**Closing Q1 is not this document's to do.** The trigger's precondition is two
+unticked boxes away, and Q1's disposition was recorded by the World Model owner,
+not derived from a table. What this removes is the measurement from the critical
+path: when those boxes tick, the number is already here.
+
+**One more thing the measurement does not carry.** The original ruling retained
+the seam on the **blueprint §5 layering argument** — *"the domain core must stay
+pure, and collapsing the store into it would place `rusqlite`, `serde_json`,
+`sha2` and `hex` beside the domain types."* That argument is independent of
+anything measured here and is untouched by it. The measurement is a second
+support for retention, not its only one — and had the number come out the other
+way, the two would have been in tension rather than the number simply winning.
+
+## Provenance
+
+Measured, and recorded, by the same person holding every role — as with every
+other World Model measurement. Stated so that nobody infers independence from a
+number being written down.
+
+---
+
+Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508
+SIL 3 requirements. Independent third-party assessment has not yet been
+performed.
