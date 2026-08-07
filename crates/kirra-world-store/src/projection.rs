@@ -77,6 +77,22 @@ CREATE TABLE IF NOT EXISTS world_current (
     generation     INTEGER NOT NULL,
     event_id       TEXT    NOT NULL,
 
+    -- The claim's own chain position, so an answer can be CITED rather than
+    -- merely read. Same argument as the subject summary's provenance_head.
+    chain_digest   TEXT    NOT NULL DEFAULT '',
+
+    -- The three STORED trust axes (schema v2), carried through so a reader
+    -- gets the claim's trust with the claim. Nullable together, exactly as in
+    -- world_events: a v1-shaped row is unlabelled, not wrongly labelled.
+    --
+    -- Validity is deliberately absent. Transition rule 6 computes it at READ
+    -- time from a caller-supplied clock, so a column here would be the one
+    -- place the rule could be broken.
+    origin           TEXT,
+    corroboration    TEXT,
+    corroboration_n  INTEGER,
+    adjudication     TEXT,
+
     PRIMARY KEY (subject, predicate_key)
 );
 
@@ -131,9 +147,67 @@ pub struct ProjectedClaim {
     pub generation: i64,
     /// Identity of that event.
     pub event_id: String,
+    /// The claim's chain digest — its position in the tamper-evident log.
+    ///
+    /// This is the **provenance handle**: it lets an answer be cited and
+    /// independently verified rather than merely trusted because the API
+    /// returned it. Empty only for a projection folded before this column
+    /// existed, which the rebuild-on-shape-change in `ensure_projections`
+    /// removes.
+    pub chain_digest: String,
+    /// The three **stored** trust axes, or `None` for an unlabelled claim.
+    ///
+    /// `Option` rather than a default, for the reason `NewEvent::trust` is:
+    /// inventing an origin and an adjudication for a claim that carries none is
+    /// the "mush after eighteen months" the four-axis model exists to prevent.
+    pub trust: Option<crate::TrustAxes>,
 }
 
 impl ProjectedClaim {
+    /// The fourth axis, **computed at read time** rather than stored.
+    ///
+    /// Transition rule 6: validity is not a state the system enters, it is a
+    /// question asked with a clock passed in. There is no `validity` column
+    /// anywhere — not in `world_events`, not in this projection — which is what
+    /// makes the rule unbreakable rather than documented.
+    ///
+    /// `staleness_budget_ms` comes from the **caller**, not from storage,
+    /// because how long a claim stays fresh is a policy of the asking consumer:
+    /// a floor plan and a person's location go stale at wildly different rates,
+    /// and baking one budget into the row would answer for every reader at once.
+    /// `None` means the claim does not go stale — [`Validity::Timeless`].
+    #[must_use]
+    pub fn validity_at(&self, now_ms: u64, staleness_budget_ms: Option<u64>) -> crate::Validity {
+        let window = crate::ValidityWindow {
+            valid_from_ms: self.valid_from_ms.max(0).unsigned_abs(),
+            valid_to_ms: self.valid_to_ms.map(|v| v.max(0).unsigned_abs()),
+            staleness_budget_ms,
+        };
+        crate::validity_at(&window, now_ms)
+    }
+
+    /// Collapse trust to a single grade — **only here, at the query boundary**.
+    ///
+    /// The blueprint is explicit that the axes are stored separately and
+    /// collapsed to a grade only for consumers that ask for one. This is that
+    /// boundary, and it is a method rather than a field so the collapse is
+    /// something a caller *does*, never something they receive by default.
+    ///
+    /// `None` when the claim carries no axes: an unlabelled claim has no trust
+    /// to grade, and returning a default grade would manufacture one.
+    #[must_use]
+    pub fn grade_at(
+        &self,
+        now_ms: u64,
+        staleness_budget_ms: Option<u64>,
+    ) -> Option<crate::TrustGrade> {
+        let axes = self.trust.as_ref()?;
+        Some(crate::trust_grade(
+            axes,
+            self.validity_at(now_ms, staleness_budget_ms),
+        ))
+    }
+
     /// The projection key: subject plus predicate-or-empty.
     #[must_use]
     pub fn key(&self) -> (String, String) {
@@ -218,6 +292,8 @@ mod tests {
             valid_to_ms: None,
             txn_time_ms: valid_from,
             generation: gen,
+            chain_digest: format!("digest-{gen}"),
+            trust: None,
             event_id: format!("e{gen}"),
         }
     }
