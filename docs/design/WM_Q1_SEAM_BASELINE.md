@@ -259,6 +259,13 @@ more convenient number is the failure mode it was written against.
 **recorded 2026-08-07** · `main` at `9a0712da`, with `claude/wm-typed-payload`
 (#1381) at `ff394e89`
 
+> #1381's head advanced to `230edc4f` after this was recorded — a base-branch
+> update, not new work. `ff394e89` remains an ancestor of it, so the command
+> below still resolves, and the empty-diff claim was re-verified against **both**
+> heads. Noted rather than silently restamped: this document's SHAs say which
+> tree was measured, and quietly moving them would make a later reader trust a
+> pairing nobody checked.
+
 ## The precondition, stated before the number rather than after it
 
 The revisit trigger fires on *"completion of `WM_SCOPE.md` Tier 1"*. On a strict
