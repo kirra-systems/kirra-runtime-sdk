@@ -208,11 +208,13 @@ fn growth(
         // generated id that the store would refuse must fail the RUN rather
         // than be silently reshaped — a measurement taken over rows the real
         // writer would not accept is not a measurement of the real schema.
-        let event_id = EventId::new(e.event_id.clone()).map_err(|err| {
-            format!("generated event_id at generation {}: {err}", e.generation)
-        })?;
+        let event_id = EventId::new(e.event_id.clone())
+            .map_err(|err| format!("generated event_id at generation {}: {err}", e.generation))?;
         let observation_id = ObservationId::new(a.observation_id.clone()).map_err(|err| {
-            format!("generated observation_id at generation {}: {err}", e.generation)
+            format!(
+                "generated observation_id at generation {}: {err}",
+                e.generation
+            )
         })?;
         let frame_id = a
             .frame_id
