@@ -177,8 +177,19 @@ ALTER TABLE world_events ADD COLUMN corroboration TEXT
 ALTER TABLE world_events ADD COLUMN corroboration_n INTEGER
     CHECK (
         (corroboration_n IS NULL OR corroboration_n >= 1)
-        AND (corroboration IS NULL
-             OR (corroboration = 'uncorroborated') = (corroboration_n IS NULL))
+
+        -- `n` is NULL EXACTLY when there is no count to carry — either no
+        -- axes at all, or `uncorroborated`, which has nothing to count.
+        --
+        -- The earlier form of this was `corroboration IS NULL OR (...)`, which
+        -- short-circuited: with the axes absent it permitted an orphan
+        -- `corroboration_n`. That was not a cosmetic gap. The canonical form
+        -- omits the axis keys when the axes are absent, so an orphan count is
+        -- a column that is stored but NOT hashed — editable in place without
+        -- breaking the chain, which is the one property this whole design
+        -- exists to deny. Found in review.
+        AND (corroboration_n IS NULL)
+            = (corroboration IS NULL OR corroboration = 'uncorroborated')
     );
 
 ALTER TABLE world_events ADD COLUMN adjudication TEXT

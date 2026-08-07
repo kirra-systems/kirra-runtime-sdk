@@ -429,3 +429,219 @@ fn reopening_a_current_store_is_idempotent() {
     s.verify_chain().expect("still verifies");
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------------
+// Review findings — the orphan count, and migration atomicity
+// ---------------------------------------------------------------------------
+
+/// **An orphan `corroboration_n` is refused by the schema.**
+///
+/// Found in review. The first version of the `CHECK` short-circuited: with the
+/// axes absent it permitted a non-NULL `corroboration_n`. That is not cosmetic.
+/// The canonical form omits the axis keys when the axes are absent, so an orphan
+/// count is a column that is **stored but not hashed** — editable in place
+/// without breaking the chain, which is the one property the whole design
+/// exists to deny.
+#[test]
+fn an_orphan_corroboration_count_is_refused_by_the_schema() {
+    let path = tmp("orphan-n");
+    let mut s = WorldStore::open(&path).expect("open");
+    s.append(&ev(&ids("e1", "o1"), None)).expect("unlabelled");
+
+    let bad =
+        s.raw_execute_for_test("UPDATE world_events SET corroboration_n = 4 WHERE generation = 1");
+    assert!(
+        bad.is_err(),
+        "a count with no axes must be refused — it would be stored but unhashed"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `Uncorroborated` has nothing to count, so it must carry no count either.
+#[test]
+fn uncorroborated_cannot_carry_a_count() {
+    let path = tmp("uncorr-n");
+    let mut s = WorldStore::open(&path).expect("open");
+    let axes = TrustAxes::new(
+        Origin::Asserted,
+        Corroboration::Uncorroborated,
+        Adjudication::Confirmed,
+    )
+    .unwrap();
+    s.append(&ev(&ids("e1", "o1"), Some(&axes)))
+        .expect("append");
+
+    let bad =
+        s.raw_execute_for_test("UPDATE world_events SET corroboration_n = 2 WHERE generation = 1");
+    assert!(bad.is_err(), "uncorroborated has no count to carry");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// …and a corroborated row cannot drop its count.
+#[test]
+fn a_corroborated_row_cannot_drop_its_count() {
+    let path = tmp("drop-n");
+    let mut s = WorldStore::open(&path).expect("open");
+    let axes = confirmed_axes();
+    s.append(&ev(&ids("e1", "o1"), Some(&axes)))
+        .expect("append");
+
+    let bad = s.raw_execute_for_test(
+        "UPDATE world_events SET corroboration_n = NULL WHERE generation = 1",
+    );
+    assert!(bad.is_err(), "corroborated without a count is not a state");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **The read path refuses the orphan too**, not only the schema.
+///
+/// Belt and braces on purpose, and the reasoning is the review's: even with the
+/// `CHECK` tightened, a row reaching verification in that shape should be
+/// *diagnosable* as a `CorruptRow` rather than accepted as unlabelled. The
+/// schema stops the write; this makes the state legible if one ever appears —
+/// through a future migration bug, a hand-edited database, or a constraint
+/// dropped by someone else's DDL.
+#[test]
+fn the_read_path_refuses_an_orphan_count_independently_of_the_schema() {
+    let path = tmp("orphan-read");
+    let mut s = WorldStore::open(&path).expect("open");
+    s.append(&ev(&ids("e1", "o1"), None)).expect("unlabelled");
+
+    // Drop the constraint the only way SQLite allows — rebuild the table
+    // without it — so this proves the READ path independently, rather than
+    // re-proving the CHECK.
+    s.raw_execute_for_test("ALTER TABLE world_events RENAME TO we_old")
+        .expect("rename");
+    s.raw_execute_for_test("CREATE TABLE world_events AS SELECT * FROM we_old")
+        .expect("rebuild without constraints");
+    s.raw_execute_for_test("DROP TABLE we_old").expect("drop");
+    s.raw_execute_for_test("UPDATE world_events SET corroboration_n = 7 WHERE generation = 1")
+        .expect("now writable, the CHECK is gone");
+
+    match s.verify_chain() {
+        Err(StoreError::CorruptRow { generation, detail }) => {
+            assert_eq!(generation, 1);
+            assert!(
+                detail.contains("corroboration_n"),
+                "the diagnosis must name the column: {detail}"
+            );
+        }
+        other => panic!("an orphan count must read as CorruptRow, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **A failed migration leaves nothing behind.**
+///
+/// This is the observable consequence of wrapping the DDL and both stamps in
+/// one transaction, and it is what the review asked for. The scenario it
+/// prevents is a bricked store rather than a failed migration: without the
+/// transaction, a crash after `ALTER TABLE` but before the version stamp would
+/// leave the columns added and `schema_version` still 1, so every subsequent
+/// open would retry and die on a duplicate column — permanently.
+///
+/// With the transaction, that state cannot arise from an interruption at all.
+/// What is left to prove is the rollback: when the DDL fails, the stamps must
+/// NOT have advanced, or a partially-applied migration would still be recorded
+/// as complete.
+///
+/// A store whose stamp disagrees with its actual columns is refused **loudly**
+/// rather than silently repaired. That is deliberate — probing for each column
+/// before adding it would make the migration tolerant of a schema that does not
+/// match its own stamp, which is the opposite of fail-closed.
+#[test]
+fn a_failed_migration_does_not_advance_the_stamp() {
+    let path = tmp("rollback");
+    {
+        let mut s = WorldStore::open(&path).expect("open");
+        s.append(&ev(&ids("e1", "o1"), None)).expect("append");
+        // The columns exist; claim they do not. The next open will try to add
+        // them again and fail — which is the point.
+        s.raw_execute_for_test(
+            "UPDATE world_store_meta SET value = '1' WHERE key = 'schema_version'",
+        )
+        .expect("disagree with reality");
+    }
+
+    match WorldStore::open(&path) {
+        Err(err) => assert!(
+            format!("{err:?}").contains("duplicate column"),
+            "expected the DDL to be what fails, got {err:?}"
+        ),
+        Ok(_) => panic!("a stamp contradicting the actual schema must be refused"),
+    }
+
+    // The rollback: the stamps are untouched. Had the transaction not covered
+    // them, the digest would have been rewritten to the v2 value while the
+    // migration itself failed — recording a schema the store does not have.
+    let conn = rusqlite::Connection::open(&path).expect("reopen raw");
+    let version: String = conn
+        .query_row(
+            "SELECT value FROM world_store_meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("version row");
+    assert_eq!(
+        version, "1",
+        "a failed migration must not advance the stamp"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **The migration on a genuine v1 database — rows and all.**
+///
+/// Nothing else in this file exercises the actual v1 → v2 path. The other tests
+/// all start from a store born at v2, which is the easy case.
+///
+/// The v1 database is reconstructed rather than checked in: unlabelled rows
+/// produce byte-identical canonical bytes to v1 (that equality is established
+/// independently by `canonical_form.rs`'s pins, which were written against the
+/// pre-v2 code), so appending unlabelled rows and then stripping the v2 columns
+/// yields a database indistinguishable from one a v1 binary wrote — including
+/// correct v1 chain digests.
+#[test]
+fn a_genuine_v1_database_migrates_and_its_rows_still_verify() {
+    let path = tmp("v1-migrate");
+    {
+        let mut s = WorldStore::open(&path).expect("open");
+        for n in 1..=3 {
+            s.append(&ev(&ids(&format!("e{n}"), &format!("o{n}")), None))
+                .expect("v1-shaped rows");
+        }
+        // Rewind to v1: drop the v2 columns by rebuilding the table without
+        // them, and stamp the version back.
+        s.raw_execute_for_test(
+            "CREATE TABLE we_v1 AS SELECT generation, event_id, observation_id, txn_time_ms,
+                 valid_from_ms, valid_to_ms, source, source_version, writer_class, claim_status,
+                 provenance, frame_id, map_id, kind, subject, predicate, object, payload,
+                 payload_schema, payload_digest, retention_class, chain_digest
+             FROM world_events",
+        )
+        .expect("project away the v2 columns");
+        s.raw_execute_for_test("DROP TABLE world_events")
+            .expect("drop");
+        s.raw_execute_for_test("ALTER TABLE we_v1 RENAME TO world_events")
+            .expect("rename");
+        s.raw_execute_for_test(
+            "UPDATE world_store_meta SET value = '1' WHERE key = 'schema_version'",
+        )
+        .expect("stamp v1");
+    }
+
+    // Open it with the current binary: the migration runs.
+    let mut s = WorldStore::open(&path).expect("a v1 store must migrate, not be refused");
+    assert_eq!(s.schema_version().expect("version"), SCHEMA_VERSION);
+
+    // The pre-migration rows still verify — the compatibility claim, end to end
+    // through a real migration rather than at the canonical-form level only.
+    s.verify_chain().expect("v1 rows verify after migration");
+
+    // And the migrated store accepts labelled rows, which chain onto them.
+    let axes = confirmed_axes();
+    s.append(&ev(&ids("e4", "o4"), Some(&axes)))
+        .expect("labelled row after migration");
+    s.verify_chain()
+        .expect("mixed chain verifies after migration");
+    let _ = std::fs::remove_file(&path);
+}

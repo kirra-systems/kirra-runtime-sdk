@@ -332,9 +332,12 @@ is not about the domain model.
 ## 4. Tier 1 — The domain core
 
 `kirra-world` **was** ten unconstructible placeholders. As of 2026-08-07 it is
-**five real types and five remaining placeholders**, plus five implemented
+**six real types and five remaining placeholders**, across six implemented
 modules (`trust`, `entity`, `observation`, `relationship`, `reference`,
 `retention`) carrying 128 tests — still zero-dependency.
+
+Six real against five remaining does not sum to ten, and should not: `EventId`
+is an addition, not one of the original ten.
 
 Real: `TrustAxes`, `EntityId`, `ObservationId`, `FrameId`, `MapId`, and
 `EventId`, which was not one of the original ten (the storage layer had carried

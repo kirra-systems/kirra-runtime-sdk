@@ -676,6 +676,17 @@ fn axes_from_row(generation: i64, r: &rusqlite::Row<'_>) -> Result<Option<TrustA
     let corrupt = |detail: String| StoreError::CorruptRow { generation, detail };
 
     match (origin, corroboration, adjudication) {
+        // An orphan `corroboration_n` is NOT an unlabelled row. The schema
+        // refuses to write one, and the read path refuses to read one — because
+        // the canonical form omits the axis keys when the axes are absent, so
+        // an orphan count is stored but not hashed. Verification would be blind
+        // to it if this arm accepted it, which is exactly why the check belongs
+        // on both sides rather than only in the schema.
+        (None, None, None) if corroboration_n.is_some() => Err(corrupt(format!(
+            "corroboration_n is present ({}) with no axes — the schema refuses \
+             this, so the row was edited",
+            corroboration_n.unwrap_or_default()
+        ))),
         (None, None, None) => Ok(None),
         (Some(o), Some(c), Some(a)) => {
             let origin = origin_from_token(&o)
@@ -770,20 +781,27 @@ impl WorldStore {
             )
             .optional()?;
         if installed.is_none() {
-            conn.execute_batch(schema::SCHEMA_V1)?;
-            conn.execute_batch(schema::SCHEMA_V2_MIGRATION)?;
-            conn.execute(
+            // All-or-nothing, for the same reason the migration below is.
+            // SQLite's DDL is transactional, so a crash between the table and
+            // its meta rows rolls back to no store at all — rather than leaving
+            // a store whose tables exist but whose version stamp does not, which
+            // the next open would try to migrate and fail on a duplicate column.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(schema::SCHEMA_V1)?;
+            tx.execute_batch(schema::SCHEMA_V2_MIGRATION)?;
+            tx.execute(
                 "INSERT INTO world_store_meta (key, value) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION.to_string()],
             )?;
-            conn.execute(
+            tx.execute(
                 "INSERT INTO world_store_meta (key, value) VALUES ('chain_algorithm', ?1)",
                 params![CHAIN_ALGORITHM],
             )?;
-            conn.execute(
+            tx.execute(
                 "INSERT INTO world_store_meta (key, value) VALUES ('schema_digest', ?1)",
                 params![schema_digest()],
             )?;
+            tx.commit()?;
         } else {
             Self::migrate(&conn)?;
         }
@@ -839,25 +857,36 @@ impl WorldStore {
             return Ok(());
         }
 
+        // ONE transaction for the DDL and both stamps. SQLite's DDL is
+        // transactional, so this is all-or-nothing.
+        //
+        // Without it the migration could brick a store outright, which is worse
+        // than failing to run: a crash after `ALTER TABLE` but before the
+        // version stamp leaves the columns added and `schema_version` still 1,
+        // so the next open retries the migration and dies on a duplicate
+        // column — permanently, on every subsequent open, with no path back
+        // except hand-editing the database. Found in review.
+        let tx = conn.unchecked_transaction()?;
+
         if from < 2 {
-            conn.execute_batch(schema::SCHEMA_V2_MIGRATION)?;
+            tx.execute_batch(schema::SCHEMA_V2_MIGRATION)?;
         }
 
-        // Re-stamp both, and in this order. The digest is the claim that can be
-        // checked against the schema text; the version is the one a reader
-        // consults first. Writing the version before the columns exist would
-        // leave a crash window in which the store claims a shape it does not
-        // have — so both stamps come last, after the DDL has committed.
-        conn.execute(
+        // Digest before version, inside the transaction. The order no longer
+        // guards a crash window — the transaction does — but it still reads in
+        // dependency order: the digest is the claim that can be checked against
+        // the schema text, the version is the one a reader consults first.
+        tx.execute(
             "INSERT INTO world_store_meta (key, value) VALUES ('schema_digest', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![schema_digest()],
         )?;
-        conn.execute(
+        tx.execute(
             "INSERT INTO world_store_meta (key, value) VALUES ('schema_version', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![SCHEMA_VERSION.to_string()],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
