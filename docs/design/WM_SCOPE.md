@@ -709,7 +709,7 @@ for Tier 2; it is not driven by anything yet.
 
 - [ ] Entity resolution — matching incoming observations to existing entities
 - [x] **`MergeEntities` / `SplitEntity` / `ForgetEntity` as recorded events** —
-      **DONE 2026-08-07**, `crates/kirra-world/src/adjudication.rs`, 23 unit
+      **DONE 2026-08-07**, `crates/kirra-world/src/adjudication.rs`, 24 unit
       tests, still zero-dependency.
       The three verbs are constructor-validated records, not commands: private
       fields, accessors only, so an "event" cannot be amended in place — which
@@ -737,6 +737,12 @@ for Tier 2; it is not driven by anything yet.
       permits, walked from every live state, so the event model and the state
       model cannot drift into contradiction. Non-vacuity anchored — reverting
       terminality in `advance_to` fails the anchor test *and* `entity.rs`'s own.
+      **The stamp is a `DomainInstant`, not an integer** — matching
+      `relationship.rs`'s transaction time, so an adjudication has to name the
+      clock it was recorded on. Two stamped on unsynchronized clocks are refused
+      a comparison rather than ordered confidently and wrongly; a bare `i64`
+      would also have made a negative timestamp representable and would have been
+      the store's SQLite spelling leaking up into the domain core.
       **One consequence is deliberately not stated** — see the open question
       below.
 - [ ] **`entity_id` minting** — moved here from §6 on 2026-08-07 by
