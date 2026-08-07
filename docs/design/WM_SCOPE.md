@@ -354,7 +354,15 @@ is not about the domain model.
 `kirra-world` **was** ten unconstructible placeholders. As of 2026-08-07 it is
 **six real types and five remaining placeholders**, across seven implemented
 modules (`trust`, `entity`, `observation`, `relationship`, `reference`,
-`retention`, `kind`) carrying 144 tests — still zero-dependency.
+`retention`, `kind`) carrying **144 unit tests + 4 doctests** — still
+zero-dependency.
+
+The counting unit is stated because this figure is quotable and the per-module
+figures below **do not sum to it**. Those are *as-landed* snapshots carrying the
+date they were recorded; the modules have since grown (summing them today gives
+124, not 144). They are left as recorded rather than restated, for the same
+reason the seam measurements are: a dated record revised to stay tidy stops being
+a record. The crate total above is the current one, read from `cargo test`.
 
 Six real against five remaining does not sum to ten, and should not: `EventId`
 is an addition, not one of the original ten.
