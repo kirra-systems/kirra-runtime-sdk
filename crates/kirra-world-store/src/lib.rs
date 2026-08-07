@@ -1551,6 +1551,15 @@ fn claim_axes_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<TrustAx
     };
 
     match (origin, corroboration, adjudication) {
+        // An orphan `corroboration_n` is NOT an unlabelled claim. The verify
+        // path already refuses this shape; the claim path must match, and the
+        // reason is stronger here — the projection's columns are not hashed at
+        // all, so an orphan count in a derived table is invisible to
+        // `verify_chain` and would be the only place such a value could sit
+        // undetected. Found in review, and the same defect class fixed on the
+        // verify path in #1376: fixing it there did not fix it here, because
+        // this is a second reader with its own column order.
+        (None, None, None) if corroboration_n.is_some() => Err(bad("orphan corroboration count")),
         (None, None, None) => Ok(None),
         (Some(o), Some(c), Some(a)) => {
             let origin = origin_from_token(&o).ok_or_else(|| bad("origin"))?;

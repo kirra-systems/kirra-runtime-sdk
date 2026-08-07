@@ -301,3 +301,37 @@ fn a_projection_of_the_old_shape_is_rebuilt_rather_than_left_short() {
     );
     clean(&path);
 }
+
+/// **An orphan `corroboration_n` in the projection is corruption, not an
+/// unlabelled claim.**
+///
+/// Found in review, and the same defect class already fixed on the verify path
+/// in #1376 — fixing it there did not fix it here, because the claim path is a
+/// second reader with its own column order.
+///
+/// The reason is stronger in the projection than in the log: `world_current`'s
+/// columns are **not hashed at all**, so an orphan count in this derived table
+/// is invisible to `verify_chain`. It is the one place such a value could sit
+/// undetected, which is exactly why the read has to refuse it.
+#[test]
+fn an_orphan_count_in_the_projection_is_refused_not_read_as_unlabelled() {
+    let path = tmp("orphan-projection");
+    let mut s = WorldStore::open(&path).expect("open");
+    s.append(&ev(&ids(1), None, None)).expect("unlabelled");
+    s.fold().expect("fold");
+
+    // The projection carries no CHECK constraints — it is derived, and its
+    // integrity comes from being rebuildable rather than from the schema. So
+    // this write succeeds, and the READ is what has to catch it.
+    s.raw_execute_for_test("UPDATE world_current SET corroboration_n = 5")
+        .expect("the projection has no constraint to stop this");
+
+    let err = s
+        .current("cup-1", T0 + 1)
+        .expect_err("an orphan count must be refused, not read as unlabelled");
+    assert!(
+        format!("{err:?}").contains("orphan"),
+        "the diagnosis must name what is wrong: {err:?}"
+    );
+    clean(&path);
+}
