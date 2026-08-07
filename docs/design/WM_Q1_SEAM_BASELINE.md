@@ -312,10 +312,18 @@ marks §7's last implementation item done. Its diff against `main`, restricted t
 the two consumer crates, is **empty**:
 
 ```
-git diff --stat main origin/claude/wm-typed-payload \
+git fetch origin refs/pull/1381/head
+git diff --stat 9a0712da ff394e89 \
   -- crates/kirra-world-store/ crates/kirra-world-service/
 (no output)
 ```
+
+Written against the **pull request ref** rather than the branch name it was
+originally run with, because both of the obvious forms stop working. The branch
+`claude/wm-typed-payload` is deleted on merge; and #1381 is **squash**-merged, so
+`ff394e89` is not an ancestor of `main` afterwards and a fresh clone cannot
+resolve it either. `refs/pull/1381/head` outlives both. A reproduction command in
+a document about reproducibility should survive the merge it describes.
 
 It changes `crates/kirra-world/src/` and documentation only. The seam is counted
 in the *consumers*, so every number below is identical on both trees. Waiting for
