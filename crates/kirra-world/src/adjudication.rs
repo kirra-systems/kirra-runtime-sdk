@@ -74,6 +74,7 @@
 //! dependencies, same as the rest of this crate.
 
 use crate::entity::{EntityId, Lifecycle};
+use crate::observation::DomainInstant;
 use crate::reference::ObservationId;
 
 // ---------------------------------------------------------------------------
@@ -173,10 +174,9 @@ impl core::fmt::Display for AdjudicationError {
                 "entity {:?} was listed twice as a merge source",
                 entity.as_str()
             ),
-            Self::SplitTooNarrow { found } => write!(
-                f,
-                "a split needs at least two destinations, got {found}"
-            ),
+            Self::SplitTooNarrow { found } => {
+                write!(f, "a split needs at least two destinations, got {found}")
+            }
             Self::DuplicateDestination { entity } => write!(
                 f,
                 "entity {:?} was listed twice as a split destination",
@@ -211,6 +211,13 @@ impl core::fmt::Display for AdjudicationError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Justification(Vec<ObservationId>);
 
+// No `is_empty` here, and its absence is deliberate rather than an oversight
+// -- hence the `allow`. The constructor refuses the empty case, so any
+// `is_empty` would return a CONSTANT `false`, and `!j.is_empty()` would be a
+// tautology that reads exactly like a real assertion. Offering it invites the
+// vacuous check; not offering it makes the check unwriteable. Anything meaning
+// "this really cites something" reads `observations()`.
+#[allow(clippy::len_without_is_empty)]
 impl Justification {
     /// Admit a non-empty, duplicate-free set of supporting observations.
     ///
@@ -246,18 +253,6 @@ impl Justification {
     #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
-    }
-
-    /// Always `false`. The constructor refuses the empty case.
-    ///
-    /// Present because [`Self::len`] without it is a lint, and worth a warning:
-    /// **it is a constant, so `!j.is_empty()` is a tautology.** A test that
-    /// means "this really cites something" must read
-    /// [`Self::observations`], not this — clippy will happily suggest
-    /// rewriting `len() >= 1` into a check that can never fail.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        false
     }
 }
 
@@ -325,16 +320,23 @@ pub struct MergeEntities {
     sources: Vec<EntityId>,
     into: EntityId,
     justification: Justification,
-    at_ms: i64,
+    at: DomainInstant,
 }
 
 impl MergeEntities {
     /// Adjudicate that `sources` and `into` are one entity.
     ///
-    /// `at_ms` is supplied rather than read from a clock: this crate has no
+    /// `at` is supplied rather than read from a clock: this crate has no
     /// dependencies and no clock, and the layer that appends the event is the
     /// one that knows what time it recorded it. Same core/adapter split as
     /// identity minting.
+    ///
+    /// It is a [`DomainInstant`] rather than a bare integer for the reason
+    /// [`crate::relationship`] already uses one for its transaction time: the
+    /// instant has to say **which clock it came from**, or two adjudications
+    /// stamped on unsynchronized clocks order confidently and wrongly. A bare
+    /// `i64` would also make a negative timestamp representable, and would be
+    /// the store's SQLite spelling leaking up into the domain core.
     ///
     /// # Errors
     ///
@@ -345,7 +347,7 @@ impl MergeEntities {
         sources: impl IntoIterator<Item = EntityId>,
         into: EntityId,
         justification: Justification,
-        at_ms: i64,
+        at: DomainInstant,
     ) -> Result<Self, AdjudicationError> {
         let sources: Vec<EntityId> = sources.into_iter().collect();
         if sources.is_empty() {
@@ -363,7 +365,7 @@ impl MergeEntities {
             sources,
             into,
             justification,
-            at_ms,
+            at,
         })
     }
 
@@ -385,10 +387,10 @@ impl MergeEntities {
         &self.justification
     }
 
-    /// When the adjudication was made.
+    /// When the adjudication was made, on a clock that names itself.
     #[must_use]
-    pub fn at_ms(&self) -> i64 {
-        self.at_ms
+    pub fn at(&self) -> DomainInstant {
+        self.at
     }
 }
 
@@ -404,7 +406,7 @@ pub struct SplitEntity {
     source: EntityId,
     into: Vec<EntityId>,
     justification: Justification,
-    at_ms: i64,
+    at: DomainInstant,
 }
 
 impl SplitEntity {
@@ -420,7 +422,7 @@ impl SplitEntity {
         source: EntityId,
         into: impl IntoIterator<Item = EntityId>,
         justification: Justification,
-        at_ms: i64,
+        at: DomainInstant,
     ) -> Result<Self, AdjudicationError> {
         let into: Vec<EntityId> = into.into_iter().collect();
         if into.len() < 2 {
@@ -438,7 +440,7 @@ impl SplitEntity {
             source,
             into,
             justification,
-            at_ms,
+            at,
         })
     }
 
@@ -460,10 +462,10 @@ impl SplitEntity {
         &self.justification
     }
 
-    /// When the adjudication was made.
+    /// When the adjudication was made, on a clock that names itself.
     #[must_use]
-    pub fn at_ms(&self) -> i64 {
-        self.at_ms
+    pub fn at(&self) -> DomainInstant {
+        self.at
     }
 }
 
@@ -484,7 +486,7 @@ pub struct ForgetEntity {
     entity: EntityId,
     reason: RetirementReason,
     justification: Justification,
-    at_ms: i64,
+    at: DomainInstant,
 }
 
 impl ForgetEntity {
@@ -501,13 +503,13 @@ impl ForgetEntity {
         entity: EntityId,
         reason: RetirementReason,
         justification: Justification,
-        at_ms: i64,
+        at: DomainInstant,
     ) -> Self {
         Self {
             entity,
             reason,
             justification,
-            at_ms,
+            at,
         }
     }
 
@@ -529,10 +531,10 @@ impl ForgetEntity {
         &self.justification
     }
 
-    /// When the adjudication was made.
+    /// When the adjudication was made, on a clock that names itself.
     #[must_use]
-    pub fn at_ms(&self) -> i64 {
-        self.at_ms
+    pub fn at(&self) -> DomainInstant {
+        self.at
     }
 }
 
@@ -557,11 +559,11 @@ pub enum IdentityAdjudication {
 impl IdentityAdjudication {
     /// When this adjudication was made.
     #[must_use]
-    pub fn at_ms(&self) -> i64 {
+    pub fn at(&self) -> DomainInstant {
         match self {
-            Self::Merge(m) => m.at_ms(),
-            Self::Split(s) => s.at_ms(),
-            Self::Forget(f) => f.at_ms(),
+            Self::Merge(m) => m.at(),
+            Self::Split(s) => s.at(),
+            Self::Forget(f) => f.at(),
         }
     }
 
@@ -644,6 +646,7 @@ impl IdentityAdjudication {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observation::{ClockDomain, TimeError};
 
     fn eid(s: &str) -> EntityId {
         EntityId::new(s).expect("test id")
@@ -657,7 +660,22 @@ mod tests {
         Justification::new([oid("obs-1")]).expect("one observation")
     }
 
-    const T0: i64 = 1_700_000_000_000;
+    const T0_MS: u64 = 1_700_000_000_000;
+
+    /// A system-clock instant. Adjudication is knowledge-layer bookkeeping, not
+    /// safety timing, so `System` is the honest domain -- and the caller has to
+    /// say so rather than inherit a default.
+    fn at(ms: u64) -> DomainInstant {
+        DomainInstant {
+            ms,
+            domain: ClockDomain::System,
+        }
+    }
+
+    const T0: DomainInstant = DomainInstant {
+        ms: T0_MS,
+        domain: ClockDomain::System,
+    };
 
     // -- Justification --------------------------------------------------
 
@@ -671,8 +689,8 @@ mod tests {
 
     #[test]
     fn a_repeated_citation_is_refused_rather_than_deduplicated() {
-        let err = Justification::new([oid("obs-1"), oid("obs-2"), oid("obs-1")])
-            .expect_err("refused");
+        let err =
+            Justification::new([oid("obs-1"), oid("obs-2"), oid("obs-1")]).expect_err("refused");
         assert_eq!(
             err,
             AdjudicationError::DuplicateJustification {
@@ -693,7 +711,11 @@ mod tests {
             "not sorted -- the caller's ordering is what it recorded"
         );
         assert_eq!(j.len(), 3);
-        assert!(!j.is_empty());
+        assert_eq!(
+            j.len(),
+            j.observations().len(),
+            "len() reports the real slice, not a stored count that could drift"
+        );
     }
 
     // -- Merge ----------------------------------------------------------
@@ -706,18 +728,8 @@ mod tests {
         assert_eq!(
             adj.resulting_lifecycles(),
             vec![
-                (
-                    eid("a"),
-                    Lifecycle::Merged {
-                        into: eid("keep")
-                    }
-                ),
-                (
-                    eid("b"),
-                    Lifecycle::Merged {
-                        into: eid("keep")
-                    }
-                ),
+                (eid("a"), Lifecycle::Merged { into: eid("keep") }),
+                (eid("b"), Lifecycle::Merged { into: eid("keep") }),
             ]
         );
     }
@@ -738,7 +750,12 @@ mod tests {
     fn a_merge_into_one_of_its_own_sources_is_refused() {
         let err = MergeEntities::new([eid("a"), eid("keep")], eid("keep"), just(), T0)
             .expect_err("refused");
-        assert_eq!(err, AdjudicationError::MergeIntoSelf { entity: eid("keep") });
+        assert_eq!(
+            err,
+            AdjudicationError::MergeIntoSelf {
+                entity: eid("keep")
+            }
+        );
     }
 
     #[test]
@@ -752,8 +769,7 @@ mod tests {
     #[test]
     fn a_source_listed_twice_is_refused() {
         assert_eq!(
-            MergeEntities::new([eid("a"), eid("a")], eid("keep"), just(), T0)
-                .expect_err("refused"),
+            MergeEntities::new([eid("a"), eid("a")], eid("keep"), just(), T0).expect_err("refused"),
             AdjudicationError::DuplicateSource { entity: eid("a") }
         );
     }
@@ -804,13 +820,8 @@ mod tests {
 
     #[test]
     fn a_split_naming_its_own_source_as_a_piece_is_refused() {
-        let err = SplitEntity::new(
-            eid("pallet"),
-            [eid("box-1"), eid("pallet")],
-            just(),
-            T0,
-        )
-        .expect_err("refused");
+        let err = SplitEntity::new(eid("pallet"), [eid("box-1"), eid("pallet")], just(), T0)
+            .expect_err("refused");
         assert_eq!(
             err,
             AdjudicationError::SplitIntoSelf {
@@ -822,8 +833,7 @@ mod tests {
     #[test]
     fn a_destination_listed_twice_is_refused() {
         assert_eq!(
-            SplitEntity::new(eid("pallet"), [eid("b"), eid("b")], just(), T0)
-                .expect_err("refused"),
+            SplitEntity::new(eid("pallet"), [eid("b"), eid("b")], just(), T0).expect_err("refused"),
             AdjudicationError::DuplicateDestination { entity: eid("b") }
         );
     }
@@ -831,8 +841,7 @@ mod tests {
     /// **The undecided consequence is reported, not omitted.**
     #[test]
     fn a_split_does_not_pretend_to_know_what_became_of_the_source() {
-        let s = SplitEntity::new(eid("pallet"), [eid("b1"), eid("b2")], just(), T0)
-            .expect("valid");
+        let s = SplitEntity::new(eid("pallet"), [eid("b1"), eid("b2")], just(), T0).expect("valid");
         let adj = IdentityAdjudication::Split(s);
 
         assert!(
@@ -935,7 +944,9 @@ mod tests {
             Lifecycle::Provisional,
             Lifecycle::Established,
             Lifecycle::Dormant,
-            Lifecycle::Split { from: eid("origin") },
+            Lifecycle::Split {
+                from: eid("origin"),
+            },
         ];
 
         let mut checked = 0usize;
@@ -978,9 +989,7 @@ mod tests {
             );
         }
         assert!(
-            Lifecycle::Retired
-                .advance_to(Lifecycle::Retired)
-                .is_err(),
+            Lifecycle::Retired.advance_to(Lifecycle::Retired).is_err(),
             "and a retired entity cannot be retired again"
         );
     }
@@ -998,7 +1007,7 @@ mod tests {
         let m = MergeEntities::new([eid("a")], eid("keep"), just(), T0).expect("valid");
         assert_eq!(m.sources(), &[eid("a")]);
         assert_eq!(m.into_entity(), &eid("keep"));
-        assert_eq!(m.at_ms(), T0);
+        assert_eq!(m.at(), T0);
         assert_eq!(m.justification().len(), 1);
         // Only accessors exist. Any mutation would need a field, and the
         // compiler is what enforces that rather than this comment.
@@ -1011,13 +1020,14 @@ mod tests {
                 MergeEntities::new([eid("a")], eid("keep"), just(), T0).expect("valid"),
             ),
             IdentityAdjudication::Split(
-                SplitEntity::new(eid("p"), [eid("b1"), eid("b2")], just(), T0 + 1).expect("valid"),
+                SplitEntity::new(eid("p"), [eid("b1"), eid("b2")], just(), at(T0_MS + 1))
+                    .expect("valid"),
             ),
             IdentityAdjudication::Forget(ForgetEntity::new(
                 eid("gone"),
                 RetirementReason::new("decommissioned").expect("reason"),
                 just(),
-                T0 + 2,
+                at(T0_MS + 2),
             )),
         ];
         for (n, adj) in cases.iter().enumerate() {
@@ -1025,8 +1035,47 @@ mod tests {
                 !adj.justification().observations().is_empty(),
                 "no verb is exempt from citing its evidence"
             );
-            assert_eq!(adj.at_ms(), T0 + n as i64);
+            assert_eq!(adj.at(), at(T0_MS + n as u64));
         }
+    }
+
+    /// **The stamp names its own clock**, which is the whole reason this is a
+    /// `DomainInstant` and not an integer.
+    ///
+    /// Two adjudications recorded against unsynchronized clocks must not order.
+    /// With a bare `i64` they would compare fine and be confidently wrong; here
+    /// the comparison is refused. `TimeError`'s own words: a cross-domain
+    /// ordering *"is not merely imprecise — it is meaningless"*.
+    #[test]
+    fn an_adjudication_time_carries_the_clock_it_came_from() {
+        let boundary = DomainInstant {
+            ms: T0_MS,
+            domain: ClockDomain::Boundary,
+        };
+        let stamped = IdentityAdjudication::Merge(
+            MergeEntities::new([eid("a")], eid("keep"), just(), boundary).expect("valid"),
+        );
+        assert_eq!(stamped.at().domain, ClockDomain::Boundary, "verbatim");
+
+        let on_system = IdentityAdjudication::Merge(
+            MergeEntities::new([eid("b")], eid("keep"), just(), at(T0_MS)).expect("valid"),
+        );
+        assert_eq!(
+            stamped.at().compare(&on_system.at()),
+            Err(TimeError::DomainsDiffer {
+                left: ClockDomain::Boundary,
+                right: ClockDomain::System,
+            }),
+            "two clocks that were never synchronized do not order"
+        );
+
+        // Non-vacuity: within ONE domain the comparison does work, so the
+        // refusal above is about the domains and not about comparison being
+        // broken for every adjudication.
+        assert_eq!(
+            on_system.at().compare(&at(T0_MS + 1)),
+            Ok(core::cmp::Ordering::Less)
+        );
     }
 
     #[test]
