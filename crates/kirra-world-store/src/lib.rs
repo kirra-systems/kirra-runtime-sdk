@@ -83,12 +83,17 @@ use kirra_world::retention::RetentionError;
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub mod compaction;
+pub mod entity_projection;
 pub mod projection;
 pub mod retention_driver;
 pub mod retention_sweeper;
 pub mod schema;
 
 pub use compaction::{Citation, CompactionOutcome, DegradedSummary, Resolution, TemporalAnswer};
+pub use entity_projection::{
+    entity_fold_all, entity_fold_step, ProjectedSubject, SubjectObservation,
+    ENTITY_SUMMARY_PROJECTION,
+};
 pub use projection::{ProjectedClaim, CURRENT_PROJECTION};
 
 // The domain core's types, re-exported so a caller of this crate needs only one
