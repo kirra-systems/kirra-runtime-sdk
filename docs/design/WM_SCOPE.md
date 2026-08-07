@@ -708,7 +708,37 @@ for Tier 2; it is not driven by anything yet.
 ## 5. Tier 2 — Identity adjudication
 
 - [ ] Entity resolution — matching incoming observations to existing entities
-- [ ] `MergeEntities` / `SplitEntity` / `ForgetEntity` as **recorded events**
+- [x] **`MergeEntities` / `SplitEntity` / `ForgetEntity` as recorded events** —
+      **DONE 2026-08-07**, `crates/kirra-world/src/adjudication.rs`, 23 unit
+      tests, still zero-dependency.
+      The three verbs are constructor-validated records, not commands: private
+      fields, accessors only, so an "event" cannot be amended in place — which
+      is the edit-wearing-an-event's-name failure §6.3 describes. Refused at
+      construction rather than by convention: a merge into one of its own
+      sources (a self-redirect, which would surface as a resolution loop in a
+      projection long after the event that caused it), a split into fewer than
+      two, duplicate sources/destinations/citations, and an unjustified
+      adjudication. **`ForgetEntity` has no sibling `Redact`**, so this module
+      cannot express erasure at all — a caller reaching for deletion finds
+      nothing to reach for.
+      **`Evidence` was a specification gap, ruled not invented.** §14.1 writes
+      `MergeEntities(from[], into, Evidence)` and defines `Evidence` nowhere; it
+      appears as an unelaborated parameter name in three verb signatures and
+      nothing else. Supplied reading: **evidence is the observations that
+      justify the judgement** (`Justification` — non-empty, duplicate-free,
+      order preserved). Deliberately **not** an `EvidenceDigest`: a digest is
+      the adjudication's own chain position, which the store computes *after*
+      appending it, so requiring one at construction would mean inventing a
+      value that does not exist yet. Operator teaching needs no exemption — an
+      operator's ruling is already recorded as a `SourceClass::Operator`
+      observation, so "the operator said so" cites a real `ObservationId`.
+      **Seamed to the lifecycle algebra**: every consequence
+      `resulting_lifecycles` states is a transition `Lifecycle::advance_to`
+      permits, walked from every live state, so the event model and the state
+      model cannot drift into contradiction. Non-vacuity anchored — reverting
+      terminality in `advance_to` fails the anchor test *and* `entity.rs`'s own.
+      **One consequence is deliberately not stated** — see the open question
+      below.
 - [ ] **`entity_id` minting** — moved here from §6 on 2026-08-07 by
       `KIRRA-WM-TIER1-DONE-001`. It was always described as belonging here
       (*"minting an id is deciding that something is a distinct thing, which is
@@ -724,6 +754,38 @@ key can never retrofit — the key would have already lost its own history.
 `ForgetEntity` retires an entity and suppresses it from default projections. It
 is **not** deletion. Genuine erasure, if ever required, is a distinct audited
 `Redact` with its own ADR, and must leave a tombstone or the chain breaks.
+
+### Open question, now blocking — what becomes of the entity that was split?
+
+`entity.rs` has carried this since the lifecycle went in: *"is `Split(from)` a
+live origin marker or a terminal marker on the entity that was split? The two
+readings differ in whether the **original survives** a split."* It was a note
+while nothing depended on it. Writing `SplitEntity` made it load-bearing,
+because a split event has to say what happened to both sides or admit it cannot.
+
+The two readings are not close together:
+
+* **Original survives.** An entity that no longer corresponds to anything stays
+  live in the model — a phantom that answers queries.
+* **Original is superseded**, terminal like `Merged`, still resolvable. But a
+  redirect needs a target, and a split has *N* of them. That is unanswerable by
+  a single redirect, and it is suggestively close to `WhereIs`'s third return
+  value in §14.2: `Located | Unknown | **Ambiguous**`.
+
+The second reading has the better of the argument, and it needs a `Lifecycle`
+state that does not exist today (`Merged { into }` cannot express *N* targets).
+Widening `Lifecycle` inside an event-model slice would have buried a ruling in a
+helper function, so it was **not** taken.
+
+**What was done instead**: `IdentityAdjudication::resulting_lifecycles` states
+no fate for the split source, and `unresolved_consequence` **names** it. A
+caller that does not handle the source is visibly declining to, rather than
+consuming a list that quietly dropped an entity. Pinned by test, and the
+negative control (fabricating a fate) fails three tests including the seam
+count.
+
+This has to be ruled before `SplitEntity` can be persisted — a store needs a
+row for the source, and "undecided" is not a column value.
 
 ---
 
