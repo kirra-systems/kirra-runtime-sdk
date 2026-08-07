@@ -1,13 +1,13 @@
 //! The per-subject summary projection, against a real store.
 //!
-//! The pure fold is unit-tested in `entity_projection`. What can only be tested
+//! The pure fold is unit-tested in `subject_projection`. What can only be tested
 //! here is that the **SQL upsert computes the same thing** — the fold exists
 //! twice, once in Rust and once as an `ON CONFLICT DO UPDATE`, and two
 //! implementations of one rule drift unless something compares them.
 
 use kirra_world_store::{
-    entity_fold_all, ClaimStatus, EventId, NewEvent, ObservationId, SubjectObservation, WorldStore,
-    WriterClass,
+    subject_fold_all, ClaimStatus, EventId, NewEvent, ObservationId, SubjectObservation,
+    WorldStore, WriterClass,
 };
 
 fn tmp(name: &str) -> std::path::PathBuf {
@@ -17,12 +17,22 @@ fn tmp(name: &str) -> std::path::PathBuf {
         name,
         std::process::id()
     ));
-    for s in ["", "-wal", "-shm"] {
+    clean(&p);
+    p
+}
+
+/// Remove the database AND its WAL sidecars.
+///
+/// `synchronous=FULL` in WAL mode leaves `-wal` and `-shm` beside the main
+/// file, so removing only the `.sqlite` leaks two files per test — and worse,
+/// a surviving `-wal` beside a recreated database of the same name is a
+/// recovery source, which can make a later run see rows it never wrote.
+fn clean(p: &std::path::Path) {
+    for suffix in ["", "-wal", "-shm"] {
         let mut q = p.as_os_str().to_os_string();
-        q.push(s);
+        q.push(suffix);
         let _ = std::fs::remove_file(std::path::PathBuf::from(q));
     }
-    p
 }
 
 struct Ids {
@@ -79,7 +89,7 @@ fn open_leaves_no_subject_summary_table() {
     );
     assert_eq!(s.subject_summary_generation().expect("generation"), 0);
     assert!(s.subject_summaries().expect("read").is_empty());
-    let _ = std::fs::remove_file(&path);
+    clean(&path);
 }
 
 #[test]
@@ -105,12 +115,12 @@ fn the_three_fields_are_folded_from_the_log() {
         !got.provenance_head.is_empty(),
         "the head must be a chain digest"
     );
-    let _ = std::fs::remove_file(&path);
+    clean(&path);
 }
 
 /// **The two implementations of the fold must agree.**
 ///
-/// `entity_fold_step` is the rule in Rust; the `ON CONFLICT DO UPDATE` is the
+/// `subject_fold_step` is the rule in Rust; the `ON CONFLICT DO UPDATE` is the
 /// same rule in SQL. Nothing but this test stops them drifting.
 #[test]
 fn the_sql_upsert_computes_what_the_pure_fold_computes() {
@@ -147,7 +157,7 @@ fn the_sql_upsert_computes_what_the_pure_fold_computes() {
                 .map_or_else(String::new, |p| p.provenance_head.clone()),
         })
         .collect();
-    let pure = entity_fold_all(&observations);
+    let pure = subject_fold_all(&observations);
 
     assert_eq!(stored.len(), pure.len(), "same subjects");
     for p in &stored {
@@ -168,7 +178,7 @@ fn the_sql_upsert_computes_what_the_pure_fold_computes() {
             "a real digest, not the placeholder"
         );
     }
-    let _ = std::fs::remove_file(&path);
+    clean(&path);
 }
 
 /// The head follows generation, not time — asserted through the real store, not
@@ -194,7 +204,7 @@ fn the_head_follows_generation_through_the_store_too() {
         "but the observed bound is the latest TIME, which is a different event"
     );
     assert_eq!(got.first_observed_ms, 100);
-    let _ = std::fs::remove_file(&path);
+    clean(&path);
 }
 
 /// Confirmed-only, following `world_current`'s precedent. A subject known only
@@ -222,7 +232,7 @@ fn candidates_do_not_contribute() {
         s.subject_summary("ghost-1").expect("read").is_none(),
         "a candidate-only subject has no confirmed observation to summarise"
     );
-    let _ = std::fs::remove_file(&path);
+    clean(&path);
 }
 
 /// ADR-0041's purity property, at the store level: a full rebuild must equal an
@@ -252,7 +262,7 @@ fn rebuild_equals_incremental() {
         incremental, rebuilt,
         "an incremental fold must equal a rebuild from zero"
     );
-    let _ = std::fs::remove_file(&path);
+    clean(&path);
 }
 
 /// The checkpoint advances past every event CONSIDERED, not merely adopted —
@@ -273,7 +283,7 @@ fn the_checkpoint_advances_past_candidates() {
         "a fold that adopted nothing must still have consumed the log"
     );
     assert!(s.subject_summaries().expect("read").is_empty());
-    let _ = std::fs::remove_file(&path);
+    clean(&path);
 }
 
 /// Folding twice with nothing new in between must change nothing — an idempotence
@@ -301,7 +311,7 @@ fn a_second_fold_with_no_new_events_is_a_no_op() {
             .observation_count,
         2
     );
-    let _ = std::fs::remove_file(&path);
+    clean(&path);
 }
 
 /// An empty log folds to an empty summary rather than erroring.
@@ -311,5 +321,5 @@ fn an_empty_log_folds_to_an_empty_summary() {
     let mut s = WorldStore::open(&path).expect("open");
     s.fold_subject_summary().expect("fold an empty log");
     assert!(s.subject_summaries().expect("read").is_empty());
-    let _ = std::fs::remove_file(&path);
+    clean(&path);
 }

@@ -66,12 +66,12 @@ use std::collections::BTreeMap;
 /// Named for what it computes. Calling it `entities_projection` would claim the
 /// rows are entities, and until the store carries `SubjectRef` they are
 /// subjects — which includes candidates and frames.
-pub const ENTITY_SUMMARY_PROJECTION: &str = "subject_summary";
+pub const SUBJECT_SUMMARY_PROJECTION: &str = "subject_summary";
 
 /// The projection schema, installed lazily by the first fold.
 ///
 /// Separate DDL from `SCHEMA_V1` on purpose — see the module docs.
-pub const ENTITY_PROJECTION_V1: &str = r#"
+pub const SUBJECT_PROJECTION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS subject_summary (
     subject            TEXT    PRIMARY KEY,
 
@@ -173,7 +173,7 @@ pub struct ProjectedSubject {
 /// `first_observed_ms` takes the min for the same reason, and the two are
 /// tracked independently: transaction time is monotonic per store today, but
 /// deriving one bound from the other would bake that assumption into the data.
-pub fn entity_fold_step(
+pub fn subject_fold_step(
     acc: &mut BTreeMap<String, ProjectedSubject>,
     incoming: &SubjectObservation,
 ) -> bool {
@@ -226,12 +226,12 @@ pub fn entity_fold_step(
 /// state digest is taken over this order, and a digest that depended on hash
 /// seeding would compare unequal to itself.
 #[must_use]
-pub fn entity_fold_all<'a, I: IntoIterator<Item = &'a SubjectObservation>>(
+pub fn subject_fold_all<'a, I: IntoIterator<Item = &'a SubjectObservation>>(
     observations: I,
 ) -> BTreeMap<String, ProjectedSubject> {
     let mut acc = BTreeMap::new();
     for o in observations {
-        entity_fold_step(&mut acc, o);
+        subject_fold_step(&mut acc, o);
     }
     acc
 }
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn a_single_observation_bounds_itself() {
-        let got = entity_fold_all(&[obs("cup-1", 100, 1)]);
+        let got = subject_fold_all(&[obs("cup-1", 100, 1)]);
         let s = &got["cup-1"];
         assert_eq!(s.first_observed_ms, 100);
         assert_eq!(s.last_observed_ms, 100);
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn repeated_observations_widen_the_bounds_and_advance_the_head() {
-        let got = entity_fold_all(&[obs("cup-1", 100, 1), obs("cup-1", 300, 2)]);
+        let got = subject_fold_all(&[obs("cup-1", 100, 1), obs("cup-1", 300, 2)]);
         let s = &got["cup-1"];
         assert_eq!(s.first_observed_ms, 100);
         assert_eq!(s.last_observed_ms, 300);
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn subjects_are_summarised_independently() {
-        let got = entity_fold_all(&[obs("cup-1", 100, 1), obs("cup-2", 200, 2)]);
+        let got = subject_fold_all(&[obs("cup-1", 100, 1), obs("cup-2", 200, 2)]);
         assert_eq!(got.len(), 2);
         assert_eq!(got["cup-1"].observation_count, 1);
         assert_eq!(got["cup-2"].first_observed_ms, 200);
@@ -288,11 +288,11 @@ mod tests {
             obs("cup-1", 300, 2),
             obs("cup-1", 200, 3),
         ];
-        let forward = entity_fold_all(&a);
+        let forward = subject_fold_all(&a);
 
         let mut reversed: Vec<&SubjectObservation> = a.iter().collect();
         reversed.reverse();
-        let backward = entity_fold_all(reversed);
+        let backward = subject_fold_all(reversed);
 
         assert_eq!(forward, backward, "reordering must not change the summary");
     }
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn the_head_follows_generation_not_time() {
         // Generation 3 carries an EARLIER timestamp than generation 2.
-        let got = entity_fold_all(&[
+        let got = subject_fold_all(&[
             obs("cup-1", 100, 1),
             obs("cup-1", 500, 2),
             obs("cup-1", 200, 3),
@@ -323,7 +323,7 @@ mod tests {
     /// Out-of-order arrival must still widen `first_observed` downward.
     #[test]
     fn an_earlier_time_arriving_later_moves_first_observed_back() {
-        let got = entity_fold_all(&[obs("cup-1", 300, 1), obs("cup-1", 100, 2)]);
+        let got = subject_fold_all(&[obs("cup-1", 300, 1), obs("cup-1", 100, 2)]);
         assert_eq!(got["cup-1"].first_observed_ms, 100);
     }
 
@@ -333,12 +333,12 @@ mod tests {
     #[test]
     fn the_two_bounds_are_independent() {
         let mut acc = BTreeMap::new();
-        entity_fold_step(&mut acc, &obs("cup-1", 100, 1));
+        subject_fold_step(&mut acc, &obs("cup-1", 100, 1));
         assert_eq!(
             acc["cup-1"].first_observed_ms,
             acc["cup-1"].last_observed_ms
         );
-        entity_fold_step(&mut acc, &obs("cup-1", 900, 2));
+        subject_fold_step(&mut acc, &obs("cup-1", 900, 2));
         assert_ne!(
             acc["cup-1"].first_observed_ms,
             acc["cup-1"].last_observed_ms
@@ -359,11 +359,11 @@ mod tests {
             obs("cup-2", 500, 5),
         ];
 
-        let full = entity_fold_all(&all);
+        let full = subject_fold_all(&all);
 
-        let mut incremental = entity_fold_all(&all[..2]);
+        let mut incremental = subject_fold_all(&all[..2]);
         for o in &all[2..] {
-            entity_fold_step(&mut incremental, o);
+            subject_fold_step(&mut incremental, o);
         }
 
         assert_eq!(full, incremental);
@@ -373,6 +373,6 @@ mod tests {
     /// answer the retention driver gives for a store never written to.
     #[test]
     fn an_empty_log_folds_to_nothing() {
-        assert!(entity_fold_all(&[]).is_empty());
+        assert!(subject_fold_all(&[]).is_empty());
     }
 }

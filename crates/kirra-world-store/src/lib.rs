@@ -83,18 +83,18 @@ use kirra_world::retention::RetentionError;
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub mod compaction;
-pub mod entity_projection;
 pub mod projection;
 pub mod retention_driver;
 pub mod retention_sweeper;
 pub mod schema;
+pub mod subject_projection;
 
 pub use compaction::{Citation, CompactionOutcome, DegradedSummary, Resolution, TemporalAnswer};
-pub use entity_projection::{
-    entity_fold_all, entity_fold_step, ProjectedSubject, SubjectObservation,
-    ENTITY_SUMMARY_PROJECTION,
-};
 pub use projection::{ProjectedClaim, CURRENT_PROJECTION};
+pub use subject_projection::{
+    subject_fold_all, subject_fold_step, ProjectedSubject, SubjectObservation,
+    SUBJECT_SUMMARY_PROJECTION,
+};
 
 // The domain core's types, re-exported so a caller of this crate needs only one
 // import to build an event. These are no longer placeholders and no longer
@@ -2410,10 +2410,10 @@ impl WorldStore {
 
 impl WorldStore {
     /// Install the subject-summary DDL. Lazy, for the D-20 reason in
-    /// [`entity_projection`]'s module docs.
+    /// [`subject_projection`]'s module docs.
     fn ensure_subject_summary(&self) -> Result<(), StoreError> {
         self.conn
-            .execute_batch(entity_projection::ENTITY_PROJECTION_V1)?;
+            .execute_batch(subject_projection::SUBJECT_PROJECTION_V1)?;
         Ok(())
     }
 
@@ -2447,7 +2447,7 @@ impl WorldStore {
             .conn
             .query_row(
                 "SELECT generation FROM projection_checkpoint WHERE name = ?1",
-                params![entity_projection::ENTITY_SUMMARY_PROJECTION],
+                params![subject_projection::SUBJECT_SUMMARY_PROJECTION],
                 |r| r.get(0),
             )
             .optional()?;
@@ -2490,7 +2490,7 @@ impl WorldStore {
         self.conn.execute("DELETE FROM subject_summary", [])?;
         self.conn.execute(
             "DELETE FROM projection_checkpoint WHERE name = ?1",
-            params![entity_projection::ENTITY_SUMMARY_PROJECTION],
+            params![subject_projection::SUBJECT_SUMMARY_PROJECTION],
         )?;
         self.fold_subject_range(0)
     }
@@ -2510,7 +2510,7 @@ impl WorldStore {
             // The upsert IS the fold step, expressed in SQL — the bounds are a
             // min and a max taken independently of which event is the head, and
             // the head advances only on a greater generation. It must stay in
-            // lock-step with `entity_fold_step`; `fold_matches_the_pure_step`
+            // lock-step with `subject_fold_step`; `the_sql_upsert_computes_what_the_pure_fold_computes`
             // walks a real log through both and compares.
             let mut upsert = tx.prepare(
                 "INSERT INTO subject_summary (
@@ -2562,12 +2562,12 @@ impl WorldStore {
             "INSERT INTO projection_checkpoint (name, generation, state_digest)
              VALUES (?1, ?2, '')
              ON CONFLICT (name) DO UPDATE SET generation = excluded.generation",
-            params![entity_projection::ENTITY_SUMMARY_PROJECTION, head],
+            params![subject_projection::SUBJECT_SUMMARY_PROJECTION, head],
         )?;
         let digest = subject_summary_digest_of(&tx)?;
         tx.execute(
             "UPDATE projection_checkpoint SET state_digest = ?1 WHERE name = ?2",
-            params![digest, entity_projection::ENTITY_SUMMARY_PROJECTION],
+            params![digest, subject_projection::SUBJECT_SUMMARY_PROJECTION],
         )?;
         tx.commit()?;
         Ok(head)
@@ -2581,7 +2581,7 @@ impl WorldStore {
     pub fn subject_summary(
         &self,
         subject: &str,
-    ) -> Result<Option<entity_projection::ProjectedSubject>, StoreError> {
+    ) -> Result<Option<subject_projection::ProjectedSubject>, StoreError> {
         if !self.has_subject_summary()? {
             return Ok(None);
         }
@@ -2593,7 +2593,7 @@ impl WorldStore {
                  FROM subject_summary WHERE subject = ?1",
                 params![subject],
                 |r| {
-                    Ok(entity_projection::ProjectedSubject {
+                    Ok(subject_projection::ProjectedSubject {
                         subject: r.get(0)?,
                         first_observed_ms: r.get(1)?,
                         last_observed_ms: r.get(2)?,
@@ -2615,7 +2615,7 @@ impl WorldStore {
     /// [`StoreError::Sqlite`] on any storage failure.
     pub fn subject_summaries(
         &self,
-    ) -> Result<Vec<entity_projection::ProjectedSubject>, StoreError> {
+    ) -> Result<Vec<subject_projection::ProjectedSubject>, StoreError> {
         if !self.has_subject_summary()? {
             return Ok(Vec::new());
         }
@@ -2625,7 +2625,7 @@ impl WorldStore {
              FROM subject_summary ORDER BY subject ASC",
         )?;
         let rows = stmt.query_map([], |r| {
-            Ok(entity_projection::ProjectedSubject {
+            Ok(subject_projection::ProjectedSubject {
                 subject: r.get(0)?,
                 first_observed_ms: r.get(1)?,
                 last_observed_ms: r.get(2)?,
