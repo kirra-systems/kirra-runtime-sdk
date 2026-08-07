@@ -851,6 +851,134 @@ def t38_the_real_harness_is_actually_covered() -> None:
            f"38 all {len(fence.FENCE_A_EXTRA_PACKAGES)} configured extra Fence A package(s) exist",
            f"not found in the repository: {missing}")
 
+def t39_a_perceived_object_import_path_breaches() -> None:
+    """The gate must FIRE. A check that cannot fail is not a guard.
+
+    ADR-0040 forbids building a `PerceivedObject` import path until a stated
+    rule exists for where its confidence and validity come from.
+    """
+    fx = Fixture()
+    try:
+        base_safety_workspace(fx)
+        fx.crate("kirra-world")
+        fx.rust(
+            "crates/kirra-world/src/import.rs",
+            """
+            pub fn ingest(o: PerceivedObject) -> Claim {
+                Claim::from(o)
+            }
+            """,
+        )
+        rep = fx.run()
+        hits = [v for v in rep.violations if "PerceivedObject" in v.check]
+        record(
+            bool(hits),
+            "39 a PerceivedObject import path breaches Fence A",
+            "the ADR-0040 condition is not enforced -- the check never fired",
+        )
+    finally:
+        fx.close()
+
+
+def t40_prose_about_perceived_object_is_not_an_import_path() -> None:
+    """Describing the rule is not breaking it.
+
+    `observation.rs` quotes this exact condition in a doc comment, so a check
+    that counted prose would red the real repository for explaining itself.
+    """
+    fx = Fixture()
+    try:
+        base_safety_workspace(fx)
+        fx.crate("kirra-world")
+        body = (
+            "//! ADR-0040 forbids a PerceivedObject import path until the rule exists.\n"
+            "/// See the PerceivedObject condition.\n"
+            "/* A block comment mentioning PerceivedObject,\n"
+            "   spanning several lines. */\n"
+            'pub const WHY: &str = "PerceivedObject has no confidence field";\n'
+            # Raw strings, every form. A raw string carrying an embedded quote
+            # defeated the normal string regex and leaked its contents to every
+            # check that reads stripped source -- found in review.
+            'pub const R0: &str = r"PerceivedObject";\n'
+            'pub const R1: &str = r#"PerceivedObject"#;\n'
+            'pub const R2: &str = r#"say "PerceivedObject" now"#;\n'
+            'pub const R3: &str = r##"PerceivedObject"##;\n'
+        )
+        fx.rust("crates/kirra-world/src/notes.rs", body)
+        rep = fx.run()
+        hits = [v for v in rep.violations if "PerceivedObject" in v.check]
+        record(
+            not hits,
+            "40 prose about PerceivedObject is not an import path",
+            "a doc comment or string literal was counted as a breach",
+        )
+    finally:
+        fx.close()
+
+
+def t41_the_condition_is_scoped_to_world_packages() -> None:
+    """Scope asserted, not implied.
+
+    The check sees `kirra-world*` only. An importer built elsewhere is outside
+    what it can detect, and the test says so rather than letting a reader infer
+    total coverage from a green run.
+    """
+    fx = Fixture()
+    try:
+        base_safety_workspace(fx)
+        fx.crate("kirra-world")
+        # A non-world package using the type is ordinary -- the safety path is
+        # where PerceivedObject legitimately lives.
+        fx.rust(
+            "crates/kirra-trajectory/src/rss.rs",
+            """
+            pub fn check(o: &PerceivedObject) -> bool { true }
+            """,
+        )
+        rep = fx.run()
+        hits = [v for v in rep.violations if "PerceivedObject" in v.check]
+        record(
+            not hits,
+            "41 the PerceivedObject condition is scoped to kirra-world*",
+            "a non-world package was flagged; the condition binds Kirra World only",
+        )
+    finally:
+        fx.close()
+
+
+def t42_a_violation_line_number_survives_a_block_comment() -> None:
+    """Reported line numbers must be real.
+
+    `strip_rust` collapsed a multi-line block comment to a single space, which
+    moved every subsequent line -- measured at real line 6 reported as line 2.
+    A guard that names the wrong line sends a reader hunting, and this affects
+    every check in this file, not only check 9.
+    """
+    fx = Fixture()
+    try:
+        base_safety_workspace(fx)
+        fx.crate("kirra-world")
+        body = (
+            "/*\n"
+            " a block comment\n"
+            " spanning four\n"
+            " separate lines\n"
+            "*/\n"
+            "pub fn ingest(o: PerceivedObject) {}\n"
+        )
+        fx.rust("crates/kirra-world/src/import.rs", body)
+        rep = fx.run()
+        hits = [v for v in rep.violations if "PerceivedObject" in v.check]
+        got = hits[0].location.rsplit(":", 1)[-1] if hits else "<no violation>"
+        record(
+            bool(hits) and got == "6",
+            "42 a reported line number survives a multi-line block comment",
+            f"expected the breach at line 6, reported {got}",
+        )
+    finally:
+        fx.close()
+
+
 ALL = [v for k, v in sorted(globals().items()) if k.startswith("t") and k[1:3].isdigit()]
 
 

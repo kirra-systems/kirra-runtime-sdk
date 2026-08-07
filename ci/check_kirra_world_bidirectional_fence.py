@@ -403,7 +403,25 @@ def is_world_package(name: str) -> bool:
 
 _LINE_COMMENT = re.compile(r"//.*?$", re.MULTILINE)
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+# Raw strings FIRST: `r#"..."#` has no escape processing, so the normal
+# string regex mis-parses one containing an embedded quote and leaks its
+# contents. `r#"say "X" now"#` left `X` visible to every check that reads
+# stripped source. The backreference matches the opening hash count exactly,
+# which is what makes nesting levels terminate correctly.
+_RAW_STRING_LIT = re.compile(r'r(#*)"(?s:.)*?"\1')
 _STRING_LIT = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def _blank_keeping_lines(m: "re.Match[str]") -> str:
+    """Replace a match with whitespace of the SAME line count.
+
+    Collapsing a multi-line construct to a single space moves every subsequent
+    line number, so a violation reported after a block comment pointed at the
+    wrong line — measured at 6 reported as 2. Newlines are whitespace, so
+    tokens stay separated exactly as a space would separate them.
+    """
+    n = m.group(0).count("\n")
+    return "\n" * n if n else " "
 
 
 def strip_rust(src: str, drop_strings: bool = True) -> str:
@@ -412,10 +430,12 @@ def strip_rust(src: str, drop_strings: bool = True) -> str:
     Documentation and prose must never trip this fence -- an ADR quoted in a doc
     comment is a description of the rule, not a breach of it.
     """
-    out = _BLOCK_COMMENT.sub(" ", src)
+    out = _BLOCK_COMMENT.sub(_blank_keeping_lines, src)
     out = _LINE_COMMENT.sub(" ", out)
     if drop_strings:
-        out = _STRING_LIT.sub('""', out)
+        # Raw strings before normal ones — see `_RAW_STRING_LIT`.
+        out = _RAW_STRING_LIT.sub(_blank_keeping_lines, out)
+        out = _STRING_LIT.sub(_blank_keeping_lines, out)
     return out
 
 
@@ -1162,6 +1182,83 @@ def check_8_reserved(root: Path, manifests: dict, closure_pkgs: dict, rep: Repor
 # ===========================================================================
 
 
+# ===========================================================================
+# Check 9 -- ADR-0040's PerceivedObject import condition
+# ===========================================================================
+
+# The type named by the condition. Matched as a whole word so that a mention in
+# a longer identifier is not a false positive.
+PERCEIVED_OBJECT = re.compile(r"\bPerceivedObject\b")
+
+
+def check_9_perceived_object(root: Path, manifests: dict, rep: Report) -> None:
+    """ADR-0040: no `PerceivedObject` import path may be built (yet).
+
+    # What this checks, and the narrower thing it deliberately is NOT
+
+    ADR-0040's tracked-object condition has two halves. The owner ruled on
+    2026-08-06 that `PerceivedObject` may become an import source **only once a
+    stated rule exists for where its confidence and validity come from**, and
+    that until then *"no `PerceivedObject` import path may be built."*
+
+    The ADR also records that a machine guard was **offered and deliberately
+    NOT taken** -- specifically a guard requiring "any import from a type
+    lacking a confidence field must declare its confidence source". That guard
+    needs the Tier 1 observation model to define what it should check, so
+    building it would design ahead of the ruling. **It is not built here, and
+    this check is not it.**
+
+    This checks the OTHER half: the flat prohibition, which needs no rule to
+    exist because it forbids rather than requires. A prohibition is cheaper to
+    check than a requirement -- there is nothing to design, only something to
+    detect.
+
+    # Scope, stated rather than implied
+
+    `kirra-world*` packages only. An importer built elsewhere is outside what
+    this can see, and saying so is the point: this converts "rests on being
+    remembered" into "reds CI" for the crates that would host such an importer,
+    which is strictly better than nothing and strictly less than total.
+
+    Comments and string literals are stripped first, so the ADR quoted in a doc
+    comment -- as it is, in `observation.rs` -- is a description of the rule and
+    not a breach of it.
+    """
+    all_dirs = crate_dirs(manifests)
+    for name, (crate_dir, _data) in sorted(manifests.items()):
+        if not is_world_package(name):
+            continue
+        for src in rust_sources(crate_dir, all_dirs):
+            try:
+                text = src.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            stripped = strip_rust(text)
+            m = PERCEIVED_OBJECT.search(stripped)
+            if m is None:
+                continue
+            line = stripped[: m.start()].count("\n") + 1
+            rep.add(
+                fence="A",
+                check="check 9: PerceivedObject import path (ADR-0040 condition)",
+                location=f"{src.relative_to(root)}:{line}",
+                detail=(
+                    f"package `{name}` references PerceivedObject in code. "
+                    "ADR-0040 forbids building a PerceivedObject import path until a "
+                    "stated rule exists for where its confidence and validity come from, "
+                    "with the synthesis visible in the store rather than "
+                    "indistinguishable from a measured value."
+                ),
+                adr="ADR-0040 -- tracked-object inputs row, RULED 2026-08-06",
+                repair=(
+                    "Land the confidence/validity rule in WM_SCOPE Tier 1 first and have "
+                    "the owner amend the condition. Until then the import path may not be "
+                    "built. A doc comment or string mentioning the type is fine -- this "
+                    "check strips both."
+                ),
+            )
+
+
 def run(root: Path, today: str) -> Report:
     rep = Report()
     manifests = find_manifests(root)
@@ -1177,6 +1274,7 @@ def run(root: Path, today: str) -> Report:
     for note in check_7b_shared_artifacts(root, manifests, closure_pkgs, allow, rep):
         rep.note(note)
     check_8_reserved(root, manifests, closure_pkgs, rep)
+    check_9_perceived_object(root, manifests, rep)
 
     rep.note(f"safety closure: {len(closure_pkgs)} workspace packages from {len(SAFETY_ROOTS)} roots")
     rep.note(f"kirra-world* packages present: {n_world}")
