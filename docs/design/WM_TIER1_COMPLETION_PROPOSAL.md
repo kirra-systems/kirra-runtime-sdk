@@ -1,6 +1,43 @@
-# Tier 1 completion, and the clause that decides Q1's trigger
+# Tier 1 completion, and the clause that decides Q1's trigger — RULED
 
-**KIRRA-WM-TIER1-DONE-001** · drafted 2026-08-07 · **status: PROPOSED, not adopted**
+**KIRRA-WM-TIER1-DONE-001** · drafted 2026-08-07 · **status: ADOPTED, 2026-08-07**
+
+## RULED — 2026-08-07
+
+> **ADOPTED — 2026-08-07 by Justin Looney, World Model owner and architecture
+> owner: TIER 1 IS DONE.**
+>
+> This is **option B, and it carries A with it.** Ticking both Tier 1 boxes
+> satisfies the proxy clause outright, so the trigger now fires on *both* of its
+> clauses and the question of which one governs no longer has to be answered.
+> That is a stronger outcome than option A alone, which would have left the
+> checklist misreporting the tier; and it settles the recommendation for C by
+> making its A-half moot rather than by rejecting it.
+>
+> **The three constraints are honoured, and the second one did real work:**
+>
+> 1. Measurement 3 is **not re-taken**. It stands as recorded and merged
+>    (`ed0a82e5`), before this ruling existed.
+> 2. **Neither residue was deleted.** `entity_id` minting is now listed at Tier 2
+>    (§5) and `evidence_digest`/`prev_hash` as core types at Tier 3 (§6) — each
+>    with a note saying where it came from and why it moved. §7's residue was not
+>    part of the original finding and needed a home of its own; ticking that box
+>    without one would have dropped a real work item while looking like progress.
+> 3. **Q1 is not ruled here.** Adoption fires the trigger. The disposition is a
+>    separate act.
+>
+> **What this authorizes:** Tier 1 may be described as complete; ADR-0040's Q1
+> revisit trigger has fired; and `KIRRA-WM-Q1-BASELINE-001` Measurement 3 is the
+> evidence in front of that ruling. It does **not** authorize retaining or
+> collapsing the seam, editing Measurement 3, or treating *retain* as decided
+> because the measurement points there.
+>
+> **One approver.** Recorded by the same person holding every role, as with every
+> other World Model ruling — stated so nobody infers independence from a decision
+> being written down.
+
+The proposal below is kept **unamended**, so the reasoning the decision rested on
+stays legible rather than being edited into agreement with its own outcome.
 
 ## The finding
 

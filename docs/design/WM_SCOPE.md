@@ -329,12 +329,40 @@ is not about the domain model.
 
 ---
 
-## 4. Tier 1 — The domain core
+## 4. Tier 1 — The domain core — **COMPLETE, 2026-08-07**
+
+> **RULED — 2026-08-07 by Justin Looney, World Model owner. Tier 1 is DONE.**
+> Recorded under `KIRRA-WM-TIER1-DONE-001`
+> ([proposal](WM_TIER1_COMPLETION_PROPOSAL.md)), which found this tier could not
+> complete as written: §6's box was held open entirely by work its own text
+> assigned to Tier 2. Both boxes are now ticked and **both residues are listed
+> at the tiers that own them** — `entity_id` minting at Tier 2 (§5),
+> `evidence_digest`/`prev_hash` as core types at Tier 3 (§6). Neither was
+> deleted; a residue that vanishes when a box is ticked is exactly what the
+> proposal's second constraint forbids.
+>
+> **This fires ADR-0040's Q1 revisit trigger**, on both of its clauses rather
+> than only the substantive one. The measurement it asks for is already on
+> record — `KIRRA-WM-Q1-BASELINE-001` Measurement 3, taken and merged
+> (`ed0a82e5`) *before* this ruling, which is the property that makes it
+> evidence rather than justification. **Q1's own disposition remains a separate
+> act** and is not taken here.
+>
+> **One approver.** Recorded by the same person holding every role, as with
+> every other World Model ruling.
 
 `kirra-world` **was** ten unconstructible placeholders. As of 2026-08-07 it is
-**six real types and five remaining placeholders**, across six implemented
+**six real types and five remaining placeholders**, across seven implemented
 modules (`trust`, `entity`, `observation`, `relationship`, `reference`,
-`retention`) carrying 128 tests — still zero-dependency.
+`retention`, `kind`) carrying **144 unit tests + 4 doctests** — still
+zero-dependency.
+
+The counting unit is stated because this figure is quotable and the per-module
+figures below **do not sum to it**. Those are *as-landed* snapshots carrying the
+date they were recorded; the modules have since grown (summing them today gives
+124, not 144). They are left as recorded rather than restated, for the same
+reason the seam measurements are: a dated record revised to stay tidy stops being
+a record. The crate total above is the current one, read from `cargo test`.
 
 Six real against five remaining does not sum to ten, and should not: `EventId`
 is an addition, not one of the original ten.
@@ -411,7 +439,7 @@ is **self-releasing and already released** (ADR-0042 Decision 5, recorded
       `pinned` and `failed` apart, since **`pinned` climbing while `compacted`
       stays flat is the alertable condition** and one success counter cannot
       show it.
-- [ ] **Entity taxonomy** (§6) — **structure and kinds DONE 2026-08-06**,
+- [x] **Entity taxonomy** (§6) — **structure and kinds DONE 2026-08-06**,
       `crates/kirra-world/src/entity.rs`, 18 tests, still zero-dependency.
       Delivered: the 19-kind root-closed taxonomy + `EntityGroup`, `Lifecycle`
       with validated transitions, `EntityId`/`Alias` (each alias carrying its own
@@ -454,12 +482,15 @@ is **self-releasing and already released** (ADR-0042 Decision 5, recorded
       discriminant touches `subject`, which is inside the hashed bytes, so it
       needs the append-only-when-present treatment the trust axes got — its own
       slice.
-      **Still open:** identity *adjudication* — candidate clustering, merge/split
-      events — is Tier 2. **`entity_id` generation belongs there too**, not here:
-      minting an id is deciding that something is a distinct thing, which is
+      **Moved out, 2026-08-07 by `KIRRA-WM-TIER1-DONE-001`:** identity
+      *adjudication* — candidate clustering, merge/split events — and
+      **`entity_id` generation** are Tier 2, and are now **listed there** (§5)
+      rather than sitting under a Tier 1 box they could never let tick. Minting
+      an id is deciding that something is a distinct thing, which is
       adjudication, whereas the three fields above are arithmetic over evidence
-      that already exists. This list previously grouped it with them.
-- [ ] **Observation model** (§7) — **pure half DONE 2026-08-06**,
+      that already exists. This list previously grouped it with them, and then
+      held this box open on it.
+- [x] **Observation model** (§7) — **pure half DONE 2026-08-06**,
       `crates/kirra-world/src/observation.rs`, 17 tests, still zero-dependency.
       Delivered: `Confidence`/`ConfidenceBasis` (§7.3), `SourceClass` + its
       mapping to the trust `Origin`, `SubjectRef` (including `Unbound`, which is
@@ -528,9 +559,15 @@ is **self-releasing and already released** (ADR-0042 Decision 5, recorded
       **The stored bytes are unchanged**, and the ruling explicitly did not
       authorize changing them in this slice: `NewEvent::kind` and `payload` stay
       as they are. This types the *boundary*.
-      **Still open:** `evidence_digest`/`prev_hash` as core types — the store
-      computes both today as bare hex strings, so this is a typing gap rather than
-      a missing capability.
+      **Moved out, 2026-08-07 by `KIRRA-WM-TIER1-DONE-001`:**
+      `evidence_digest`/`prev_hash` as core types — the store computes both today
+      as bare hex strings, so this is a typing gap rather than a missing
+      capability, and the tier's stated job (a real domain core the store
+      consumes) does not depend on it. **Now listed at Tier 3** (§6), which is
+      where it is first *required* rather than merely desirable: Tier 3's
+      no-bare-values rule demands every answer carry a `ProvenanceHandle`, and
+      Tier 4's `Explain` needs derivation edges to be real structure. Recorded as
+      relocated, not resolved — it is still core-crate work.
 - [x] **Relationship model** (§8) — **DONE 2026-08-06**,
       `crates/kirra-world/src/relationship.rs`, 20 tests, still zero-dependency.
       **All ten §8 record fields**, all 15 predicates across the four groups.
@@ -670,6 +707,13 @@ for Tier 2; it is not driven by anything yet.
 
 - [ ] Entity resolution — matching incoming observations to existing entities
 - [ ] `MergeEntities` / `SplitEntity` / `ForgetEntity` as **recorded events**
+- [ ] **`entity_id` minting** — moved here from §6 on 2026-08-07 by
+      `KIRRA-WM-TIER1-DONE-001`. It was always described as belonging here
+      (*"minting an id is deciding that something is a distinct thing, which is
+      adjudication"*) while being listed under Tier 1, which is what held that
+      tier's box open on Tier 2 work. Listed rather than deleted: §6's residue
+      was a real work item, and a residue that disappears when a box is ticked
+      is the failure the ruling's own second constraint names.
 
 Merge and split are *events, never destructive edits*. This is what makes an
 `EntityId` revisable, and it is precisely what a store built on a bare opaque
@@ -687,6 +731,12 @@ Eight verbs in §14.2; about five exist in partial form.
 
 - [ ] `Resolve` · [ ] `Related` (bounded graph) · [ ] `WhatIsAt` ·
       [ ] `Capabilities` · [ ] `Freshness`
+- [ ] **`evidence_digest` / `prev_hash` as core types** — moved here from §7 on
+      2026-08-07 by `KIRRA-WM-TIER1-DONE-001`. **Core-crate work, listed at the
+      tier that first requires it**, not reclassified as query work: rule 1 below
+      demands every answer carry a `ProvenanceHandle`, and a handle over two bare
+      hex strings is the thing that rule exists to prevent. Tier 4's `Explain`
+      needs the same edges as real structure.
 
 Three rules matter more than the verb count:
 
