@@ -331,10 +331,23 @@ is not about the domain model.
 
 ## 4. Tier 1 — The domain core
 
-`kirra-world` is ten unconstructible placeholders. Everything below depends on
-it. The domain-logic gate that once held it is **self-releasing and already
-released** (ADR-0042 Decision 5, recorded 2026-08-05) — so this is sequencing,
-not permission.
+`kirra-world` **was** ten unconstructible placeholders. As of 2026-08-07 it is
+**five real types and five remaining placeholders**, plus five implemented
+modules (`trust`, `entity`, `observation`, `relationship`, `reference`,
+`retention`) carrying 128 tests — still zero-dependency.
+
+Real: `TrustAxes`, `EntityId`, `ObservationId`, `FrameId`, `MapId`, and
+`EventId`, which was not one of the original ten (the storage layer had carried
+that concept as a bare `&str` since it was written). Still placeholders:
+`Source`, `Provenance`, `ValidTime`, `TransactionTime`, `ResolutionOutcome` —
+the first two waiting on the provenance model Tier 4 needs, the two temporal
+ones largely superseded in practice by `observation::ValidInterval` and the
+store's `txn_time_ms` and due a decision on whether they survive at all, and
+`ResolutionOutcome` belonging to Tier 3's query boundary.
+
+Everything below depends on this crate. The domain-logic gate that once held it
+is **self-releasing and already released** (ADR-0042 Decision 5, recorded
+2026-08-05) — so this is sequencing, not permission.
 
 - [x] **Retention driver** — **exit criterion, added 2026-08-06 by the ADR-0040
       deployment-ownership decision.** D-20/D-21 measured **15.79 days** to fill
