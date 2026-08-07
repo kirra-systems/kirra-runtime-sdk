@@ -860,7 +860,8 @@ one. That is an open placement decision, not a task.
 **What the attempt produced anyway**, because the falsification §9 predicted did
 happen — twice:
 
-* **Tier 3's rule 1 cannot be met by `ProjectedClaim`.** See §6 below.
+* **Tier 3's rule 1 cannot be met by `ProjectedClaim`.** Recorded at the rule
+  itself, in §6 (Tier 3) above.
 * **An emergent guarantee, now pinned.** Nothing a reader can see through
   `current()` is ever graded `Inadmissible` — it composes out of three
   mechanisms added for unrelated reasons, was written down nowhere, and would
