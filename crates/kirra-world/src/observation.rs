@@ -357,6 +357,142 @@ pub enum SubjectRef {
     Unbound,
 }
 
+/// Why a stored subject reference could not be re-admitted.
+///
+/// Every variant is a *refusal to reconstruct*, never a repair. A store reading
+/// a subject it cannot classify must say so: guessing `Entity` because that is
+/// the common case would silently promote a candidate — the one distinction the
+/// discriminant exists to preserve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubjectRefError {
+    /// The token is not one of the four.
+    ///
+    /// Refused rather than treated as `Unbound`, because "we do not know what
+    /// this is about" and "we cannot read what this says it is about" are
+    /// different facts, and the second one is a corrupt row.
+    UnknownKind {
+        /// The token as stored.
+        token: String,
+    },
+    /// A kind that names something was given nothing to name.
+    KindNeedsId {
+        /// Which kind.
+        kind: &'static str,
+    },
+    /// [`SubjectRef::Unbound`] was given an id.
+    ///
+    /// `Unbound` means nothing has decided what the observation is about. An
+    /// id attached to it is a contradiction, and admitting it would produce a
+    /// value whose own `id()` disagrees with its variant.
+    UnboundCarriesId,
+    /// The id was empty or whitespace-only.
+    ///
+    /// Same rule as [`crate::reference`]: an empty identity is not a missing
+    /// one, and `Some("")` reads as present at every call site that checks for
+    /// presence.
+    EmptyId,
+}
+
+impl core::fmt::Display for SubjectRefError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::UnknownKind { token } => {
+                write!(f, "{token:?} is not a subject kind")
+            }
+            Self::KindNeedsId { kind } => write!(f, "a {kind} subject needs an id"),
+            Self::UnboundCarriesId => {
+                write!(f, "an unbound subject cannot carry an id")
+            }
+            Self::EmptyId => write!(f, "a subject id may not be empty"),
+        }
+    }
+}
+
+impl SubjectRef {
+    /// The closed-vocabulary token for this reference's **kind**.
+    ///
+    /// Named `as_str` to match the store's existing convention, alongside
+    /// [`crate::trust::Origin::as_str`] and `WriterClass`.
+    ///
+    /// This is the discriminant only — the *value* is [`Self::id`]. The two are
+    /// separate because a store already keeps the value in a `subject` column;
+    /// what it has never kept is which of the four cases that value is, so a
+    /// projection cannot restrict itself to resolved entities. That gap is
+    /// recorded in `kirra-world-store`'s `subject_projection`, which is named
+    /// for what it actually computes rather than for what it looks like.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Entity(_) => "entity",
+            Self::Candidate(_) => "candidate",
+            Self::Frame(_) => "frame",
+            Self::Unbound => "unbound",
+        }
+    }
+
+    /// The id this reference names, if it names one.
+    ///
+    /// `None` **only** for [`Self::Unbound`] — and that asymmetry is the reason
+    /// a storage layer cannot represent all four cases in a `NOT NULL` subject
+    /// column without fabricating a value for the one case that has none.
+    #[must_use]
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            Self::Entity(id) | Self::Candidate(id) | Self::Frame(id) => Some(id),
+            Self::Unbound => None,
+        }
+    }
+
+    /// Re-admit a reference from a stored token and a stored id.
+    ///
+    /// The inverse of ([`Self::as_str`], [`Self::id`]), for a reader rebuilding
+    /// a row. **Validates, never normalizes** — the id is carried verbatim, so
+    /// a value stored with surrounding whitespace round-trips as written. A
+    /// constructor that trimmed here would make an untampered row rehash
+    /// differently from how it was written.
+    ///
+    /// # This is a re-admission path, not a gate
+    ///
+    /// Worth stating rather than implying: `SubjectRef`'s variants are **public
+    /// tuple variants**, so `SubjectRef::Entity(String::new())` compiles and
+    /// this function never sees it. The refusals below constrain what can be
+    /// *read back*, which is the path a store needs; they do not make a
+    /// malformed value unconstructible in memory. Same honest limit as
+    /// `ProjectedClaim`'s public fields.
+    ///
+    /// # Errors
+    ///
+    /// [`SubjectRefError::UnknownKind`] for a token outside the four;
+    /// [`SubjectRefError::KindNeedsId`] for a naming kind with no id;
+    /// [`SubjectRefError::UnboundCarriesId`] for the reverse;
+    /// [`SubjectRefError::EmptyId`] for an id that is empty or whitespace.
+    pub fn from_stored_parts(token: &str, id: Option<&str>) -> Result<Self, SubjectRefError> {
+        if let Some(v) = id {
+            if v.trim().is_empty() {
+                return Err(SubjectRefError::EmptyId);
+            }
+        }
+        let need = |kind: &'static str| -> Result<String, SubjectRefError> {
+            id.map(ToOwned::to_owned)
+                .ok_or(SubjectRefError::KindNeedsId { kind })
+        };
+        match token {
+            "entity" => Ok(Self::Entity(need("entity")?)),
+            "candidate" => Ok(Self::Candidate(need("candidate")?)),
+            "frame" => Ok(Self::Frame(need("frame")?)),
+            "unbound" => {
+                if id.is_some() {
+                    return Err(SubjectRefError::UnboundCarriesId);
+                }
+                Ok(Self::Unbound)
+            }
+            other => Err(SubjectRefError::UnknownKind {
+                token: other.to_owned(),
+            }),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Time — §7.1 "WHEN", and the non-mixing rule
 // ---------------------------------------------------------------------------
@@ -928,6 +1064,156 @@ mod tests {
         ] {
             assert_ne!(sc.origin(), Origin::Predicted, "{sc:?} routed to Predicted");
         }
+    }
+
+    // -- Subject discriminant ----------------------------------------------
+
+    /// Every variant round-trips through its stored form.
+    ///
+    /// Walked over all four rather than a sample, because the point of the
+    /// discriminant is that the cases are *distinguishable*, and a round-trip
+    /// that skipped one would not notice it collapsing into another.
+    #[test]
+    fn every_subject_kind_round_trips_through_its_stored_form() {
+        let cases = [
+            SubjectRef::Entity("e-1".into()),
+            SubjectRef::Candidate("c-1".into()),
+            SubjectRef::Frame("map/base_link".into()),
+            SubjectRef::Unbound,
+        ];
+        for original in cases {
+            let back = SubjectRef::from_stored_parts(original.as_str(), original.id())
+                .unwrap_or_else(|e| panic!("{original:?} did not re-admit: {e}"));
+            assert_eq!(back, original);
+        }
+    }
+
+    /// **The tokens are distinct**, so no two kinds collapse into one.
+    ///
+    /// This looks like it cannot fail until you notice these tokens are about
+    /// to be written into a hash-chained evidence row. Two kinds sharing a
+    /// token would make a candidate indistinguishable from a resolved entity
+    /// *in the stored bytes* — unrecoverable afterwards, since the row would
+    /// verify perfectly.
+    #[test]
+    fn the_four_kinds_have_four_distinct_tokens() {
+        let tokens = [
+            SubjectRef::Entity(String::from("x")).as_str(),
+            SubjectRef::Candidate(String::from("x")).as_str(),
+            SubjectRef::Frame(String::from("x")).as_str(),
+            SubjectRef::Unbound.as_str(),
+        ];
+        let mut seen: Vec<&str> = Vec::new();
+        for t in tokens {
+            assert!(!seen.contains(&t), "token {t:?} is used by two kinds");
+            seen.push(t);
+        }
+        assert_eq!(seen.len(), 4);
+    }
+
+    /// The tokens are pinned to their exact spellings.
+    ///
+    /// Not redundant with the round-trip: that would pass just as happily after
+    /// a rename, because it reads the token back through the same function that
+    /// wrote it. Once these are inside hashed bytes a rename is not a
+    /// refactor — it changes the digest of every row that carried the old one.
+    #[test]
+    fn the_tokens_are_the_exact_spellings_a_store_will_hash() {
+        assert_eq!(SubjectRef::Entity("x".into()).as_str(), "entity");
+        assert_eq!(SubjectRef::Candidate("x".into()).as_str(), "candidate");
+        assert_eq!(SubjectRef::Frame("x".into()).as_str(), "frame");
+        assert_eq!(SubjectRef::Unbound.as_str(), "unbound");
+    }
+
+    /// Only `Unbound` has no id, and that is what a `NOT NULL` subject column
+    /// cannot represent without inventing one.
+    #[test]
+    fn unbound_is_the_only_kind_without_an_id() {
+        assert_eq!(SubjectRef::Entity("e-1".into()).id(), Some("e-1"));
+        assert_eq!(SubjectRef::Candidate("c-1".into()).id(), Some("c-1"));
+        assert_eq!(SubjectRef::Frame("f-1".into()).id(), Some("f-1"));
+        assert_eq!(SubjectRef::Unbound.id(), None);
+    }
+
+    /// An unreadable kind is refused, **not** downgraded to `Unbound`.
+    ///
+    /// The tempting default is the wrong one in both directions: reading it as
+    /// `Entity` silently promotes a candidate, and reading it as `Unbound`
+    /// reports "nothing decided what this is about" when the truth is "this row
+    /// is corrupt". Those send an investigator to different places.
+    #[test]
+    fn an_unreadable_kind_is_refused_rather_than_guessed() {
+        assert_eq!(
+            SubjectRef::from_stored_parts("Entity", Some("e-1")).expect_err("refused"),
+            SubjectRefError::UnknownKind {
+                token: "Entity".into()
+            },
+            "case matters -- the token is a stored byte string, not a label"
+        );
+        assert_eq!(
+            SubjectRef::from_stored_parts("", Some("e-1")).expect_err("refused"),
+            SubjectRefError::UnknownKind {
+                token: String::new()
+            }
+        );
+    }
+
+    /// A kind that names something cannot be re-admitted naming nothing.
+    #[test]
+    fn a_naming_kind_without_an_id_is_refused() {
+        for kind in ["entity", "candidate", "frame"] {
+            assert_eq!(
+                SubjectRef::from_stored_parts(kind, None).expect_err("refused"),
+                SubjectRefError::KindNeedsId { kind },
+                "and the error names WHICH kind was left empty"
+            );
+        }
+    }
+
+    /// ...and the reverse: `Unbound` carrying an id is a contradiction.
+    #[test]
+    fn an_unbound_subject_carrying_an_id_is_refused() {
+        assert_eq!(
+            SubjectRef::from_stored_parts("unbound", Some("e-1")).expect_err("refused"),
+            SubjectRefError::UnboundCarriesId,
+            "admitting it would produce a value whose own id() disagrees with \
+             its variant"
+        );
+    }
+
+    /// An empty id is refused, and checked BEFORE the kind is resolved.
+    ///
+    /// Ordering matters here: an empty id is the more fundamental defect, and
+    /// reporting `KindNeedsId` for `("entity", Some(""))` would send a reader
+    /// looking for a missing column rather than an empty one.
+    #[test]
+    fn an_empty_id_is_refused_and_reported_as_the_emptier_fault() {
+        assert_eq!(
+            SubjectRef::from_stored_parts("entity", Some("")).expect_err("refused"),
+            SubjectRefError::EmptyId
+        );
+        assert_eq!(
+            SubjectRef::from_stored_parts("entity", Some("   ")).expect_err("refused"),
+            SubjectRefError::EmptyId,
+            "whitespace-only is empty for this purpose, as in `reference`"
+        );
+        // ...and it outranks an unknown kind for the same reason.
+        assert_eq!(
+            SubjectRef::from_stored_parts("nonsense", Some("")).expect_err("refused"),
+            SubjectRefError::EmptyId
+        );
+    }
+
+    /// Ids are carried **verbatim**, not tidied.
+    ///
+    /// A store rehashes what it read. Trimming here would make an untampered
+    /// row whose id legitimately holds surrounding whitespace re-admit as a
+    /// different string, and report a broken chain.
+    #[test]
+    fn an_id_is_re_admitted_verbatim_rather_than_tidied() {
+        let padded = " e-1 ";
+        let back = SubjectRef::from_stored_parts("entity", Some(padded)).expect("admitted");
+        assert_eq!(back.id(), Some(padded), "not trimmed");
     }
 
     // -- Evidence-first ----------------------------------------------------
