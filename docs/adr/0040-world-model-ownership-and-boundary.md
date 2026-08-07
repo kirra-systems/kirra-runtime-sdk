@@ -605,6 +605,49 @@ concedes nothing that has not already been conceded.
 > Ticking on a half-satisfied conjunction is exactly the drift these rulings
 > exist to prevent.
 
+> **REVISIT DISPOSITIONED — 2026-08-07 by Justin Looney, World Model owner and
+> architecture owner. The seam is RETAINED. Q1 is CLOSED.**
+>
+> The trigger fired on 2026-08-07 when Tier 1 was ruled complete
+> (`KIRRA-WM-TIER1-DONE-001`). It asked for a measurement; the measurement is
+> `KIRRA-WM-Q1-BASELINE-001` **Measurement 3**, and it selects **retain** —
+> which this ADR pre-authorized, so no new authority is being claimed here.
+>
+> **On the evidence.** Against a baseline where every one of these was zero, the
+> store now constructs core values at 10 sites, names 26 distinct core paths, and
+> binds core types into 12 public API positions. A caller cannot append an event
+> or run a retention pass without constructing core values first. And the figures
+> are a **lower bound** — the outstanding work can only add to them. *"Still
+> near-empty"*, the condition under which this ADR instructed a collapse, is not
+> a live reading.
+>
+> **On the layering argument, stated more precisely than the original ruling
+> did.** That ruling retained the seam because collapsing would place `rusqlite`,
+> `serde_json`, `sha2` and `hex` beside the domain types. Worth being exact now
+> that it is being relied on: this ADR contemplated collapsing *behind a feature*,
+> so a default build would stay zero-dependency. The argument is about the core's
+> purity as a matter of **placement**, not about default features — real, but
+> softer than it reads. **The measurement is what settles this, not the
+> layering.** Saying otherwise would overstate an argument that is now load-bearing.
+>
+> **What closing costs.** Nothing: retain is the outcome requiring no action.
+> What it *buys* is that "the revisit has not been dispositioned" stops reading
+> as *pending* when it is in fact *settled on evidence* — the gap between what a
+> record says and what it means being the thing these rulings exist to close.
+>
+> **The evidence predates the question.** Measurement 3 was recorded and merged
+> (`ed0a82e5`) before the criterion that fired the trigger existed, and was not
+> re-taken for this ruling. That ordering is the only reason it counts as
+> evidence rather than justification.
+>
+> **What this does not decide.** Nothing about `kirra-world-service`, whose edge
+> to the core is still one re-export — outside Q1's scope, which names the
+> `kirra-world` / `kirra-world-store` seam specifically. And it opens no
+> licence to grow the seam; it records that the seam earned its keep.
+>
+> **One approver.** Recorded by the same person holding every role, as with every
+> other World Model ruling.
+
 The section below was the draft this ruling adopted, kept for the record.
 
 This was **drafted, not decided** when written. Nothing in it ticked the box,

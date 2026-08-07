@@ -591,6 +591,32 @@ ADR-0040 pre-authorized, and which one the evidence selects:
 adopting ruling says so in its own words. What has changed is only that the
 question is now ripe, on evidence that predates the ripeness.
 
+## Q1 CLOSED — 2026-08-07, the seam is RETAINED
+
+Appended, not folded in. The paragraph directly above was true when written and
+stays; this records what happened next rather than replacing it.
+
+**Ruled 2026-08-07 by the World Model owner: the seam is retained and Q1 is
+closed.** Full disposition in
+[ADR-0040](../adr/0040-world-model-ownership-and-boundary.md), in the ruling
+block beneath the original deferral.
+
+Three things about this document's role, worth stating where the numbers are:
+
+* **It was the evidence, and it was not re-taken for the ruling.** Recorded and
+  merged (`ed0a82e5`) before the criterion that fired the trigger existed. That
+  ordering is the whole reason it counts as evidence rather than justification,
+  and re-running the instrument to produce fresher figures for the ruling would
+  have destroyed it.
+* **The instrument survives the ruling.** `ci/measure_q1_seam.py` is not retired
+  by Q1 closing. A closed question is not a frozen one, and if the seam ever does
+  hollow out, the way to find out is the method that was used here rather than
+  an impression.
+* **The service edge is untouched by this.** It is still one re-export, exactly
+  as at baseline. Q1 names the `kirra-world` / `kirra-world-store` seam, so the
+  ruling says nothing about it — recorded again here because the aggregate row
+  in this document is the one that travels.
+
 ---
 
 ## Provenance
