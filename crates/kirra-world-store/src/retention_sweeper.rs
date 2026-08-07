@@ -219,7 +219,7 @@ fn wall_clock_now() -> Option<DomainInstant> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ClaimStatus, NewEvent, WriterClass};
+    use crate::{ClaimStatus, EventId, NewEvent, ObservationId, WriterClass};
 
     fn tmp(name: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
@@ -239,9 +239,14 @@ mod tests {
     fn append_old(s: &mut WorldStore, id: &str) {
         // txn_time well before any plausible cutoff, so the event is eligible
         // the first time the sweeper looks.
+        // One string, two types. The fixture conflates them, as fixtures may —
+        // but it now has to say so, rather than the conflation being invisible
+        // in a pair of adjacent `&str`s.
+        let event_id = EventId::new(id).expect("admissible event id");
+        let observation_id = ObservationId::new(id).expect("admissible observation id");
         s.append(&NewEvent {
-            event_id: id,
-            observation_id: id,
+            event_id: &event_id,
+            observation_id: &observation_id,
             txn_time_ms: 1,
             valid_from_ms: 1,
             valid_to_ms: None,
@@ -259,6 +264,7 @@ mod tests {
             payload: r#"{"n":1}"#,
             payload_schema: 1,
             retention_class: "raw",
+            trust: None,
         })
         .expect("append");
     }

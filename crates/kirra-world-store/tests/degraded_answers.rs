@@ -23,7 +23,9 @@
 //! * `current()` is provably never degraded, which is the second thing the
 //!   projection-head refusal buys.
 
-use kirra_world_store::{ClaimStatus, NewEvent, Resolution, StoreError, WorldStore, WriterClass};
+use kirra_world_store::{
+    ClaimStatus, EventId, NewEvent, ObservationId, Resolution, StoreError, WorldStore, WriterClass,
+};
 
 fn tmp(name: &str) -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
@@ -47,7 +49,8 @@ fn clean(p: &std::path::Path) {
 const T0: i64 = 1_700_000_000_000;
 
 struct Ev {
-    event_id: String,
+    event_id: EventId,
+    observation_id: ObservationId,
     subject: String,
     predicate: Option<String>,
     object: Option<String>,
@@ -61,7 +64,8 @@ struct Ev {
 impl Ev {
     fn new(event_id: &str, subject: &str, valid_from_ms: i64) -> Self {
         Self {
-            event_id: event_id.to_string(),
+            event_id: EventId::new(event_id).expect("admissible event id"),
+            observation_id: ObservationId::new(event_id).expect("admissible observation id"),
             subject: subject.to_string(),
             predicate: Some("position".to_string()),
             object: None,
@@ -99,7 +103,7 @@ impl Ev {
     fn as_new(&self) -> NewEvent<'_> {
         NewEvent {
             event_id: &self.event_id,
-            observation_id: &self.event_id,
+            observation_id: &self.observation_id,
             txn_time_ms: self.txn_time_ms,
             valid_from_ms: self.valid_from_ms,
             valid_to_ms: None,
@@ -120,6 +124,7 @@ impl Ev {
             payload: &self.payload,
             payload_schema: 1,
             retention_class: &self.retention_class,
+            trust: None,
         }
     }
 }

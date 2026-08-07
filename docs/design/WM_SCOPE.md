@@ -331,10 +331,26 @@ is not about the domain model.
 
 ## 4. Tier 1 — The domain core
 
-`kirra-world` is ten unconstructible placeholders. Everything below depends on
-it. The domain-logic gate that once held it is **self-releasing and already
-released** (ADR-0042 Decision 5, recorded 2026-08-05) — so this is sequencing,
-not permission.
+`kirra-world` **was** ten unconstructible placeholders. As of 2026-08-07 it is
+**six real types and five remaining placeholders**, across six implemented
+modules (`trust`, `entity`, `observation`, `relationship`, `reference`,
+`retention`) carrying 128 tests — still zero-dependency.
+
+Six real against five remaining does not sum to ten, and should not: `EventId`
+is an addition, not one of the original ten.
+
+Real: `TrustAxes`, `EntityId`, `ObservationId`, `FrameId`, `MapId`, and
+`EventId`, which was not one of the original ten (the storage layer had carried
+that concept as a bare `&str` since it was written). Still placeholders:
+`Source`, `Provenance`, `ValidTime`, `TransactionTime`, `ResolutionOutcome` —
+the first two waiting on the provenance model Tier 4 needs, the two temporal
+ones largely superseded in practice by `observation::ValidInterval` and the
+store's `txn_time_ms` and due a decision on whether they survive at all, and
+`ResolutionOutcome` belonging to Tier 3's query boundary.
+
+Everything below depends on this crate. The domain-logic gate that once held it
+is **self-releasing and already released** (ADR-0042 Decision 5, recorded
+2026-08-05) — so this is sequencing, not permission.
 
 - [x] **Retention driver** — **exit criterion, added 2026-08-06 by the ADR-0040
       deployment-ownership decision.** D-20/D-21 measured **15.79 days** to fill
@@ -430,14 +446,37 @@ not permission.
       unsound rather than merely unwise, so there is deliberately no escape hatch;
       and **rule 4's geometry half / P10** — `Payload` + `PayloadSource`, added
       2026-08-06, which is what closed the transition rules at 7/7 above.
-      **Still open, and it needs dependencies:** `observation_id` (ULID),
-      `evidence_digest`/`prev_hash` (hashing), `frame`/`map`, and the per-kind
-      versioned `TypedPayload` **body** — `Payload` carries that body's
-      provenance, but the body itself stays a type parameter. Those belong to the
-      **store**, which already has all three — pulling them into the core would
-      spend ADR-0040's Q1 seam decision without revisiting it. `ObservationKind`
-      is also absent because the blueprint names the field but never enumerates
-      its variants.
+      **Identity and spatial reference DONE 2026-08-07** (Strand A),
+      `crates/kirra-world/src/reference.rs`, 11 tests + 4 doctests, still
+      zero-dependency. `ObservationId`, `FrameId` and `MapId` stop being
+      crate-root placeholders and become validated newtypes; `EventId` joins them.
+      The store's `NewEvent` is rebuilt out of all four, so the seam now carries
+      constructed values and called methods rather than re-exports (re-measured in
+      `WM_Q1_SEAM_BASELINE.md` "Measurement 2").
+      **The rule made structural:** the storage layer held `event_id`/
+      `observation_id` and `frame_id`/`map_id` as two adjacent pairs of the same
+      type, so **either pair could be passed in the wrong order and still compile,
+      write and hash** — and the frame/map swap additionally *satisfied* SD-4's
+      presence check while carrying the wrong reference. Four distinct types make
+      both unrepresentable; paired `compile_fail` doctests are the negative
+      control.
+      **A second rule, from the read path:** constructors **validate but never
+      normalize**. `verify_chain` rebuilds each record from its stored strings and
+      rehashes, so a constructor that trimmed would produce bytes the write never
+      produced and report untampered rows as broken chains. A stored value the core
+      refuses is a `CorruptRow`, never a `ChainBroken`.
+      **Minting stays out of the core** — ULID needs a dependency and this crate
+      has none by ratification criterion, so the core owns the *type* and the layer
+      with a clock mints the *value*. No loss: an id arriving from a replayed log
+      or another fleet must be admissible regardless.
+      **Still open:** `evidence_digest`/`prev_hash` as core types (the store
+      computes both today as bare hex strings), and the per-kind versioned
+      `TypedPayload` **body** — `Payload` carries that body's provenance, but the
+      body itself stays a type parameter. `ObservationKind` is absent for a
+      different reason and is **not** an implementation gap: the blueprint names
+      the field and never enumerates its variants, so writing that list is a
+      specification extension, not a derivation. `kind` stays `&str` until it
+      exists.
 - [x] **Relationship model** (§8) — **DONE 2026-08-06**,
       `crates/kirra-world/src/relationship.rs`, 20 tests, still zero-dependency.
       **All ten §8 record fields**, all 15 predicates across the four groups.
@@ -505,11 +544,52 @@ not permission.
 
 ### Why the axes are not one enum
 
-Today the store carries `writer_class` plus a two-value `claim_status`, which is
+The store **carried** `writer_class` plus a two-value `claim_status`, which was
 an **adjudication proxy** and nothing more. The blueprint is explicit that
 collapsing the axes is *"exactly why trust states in most systems become mush
 after eighteen months — every new case forces either a wrong assignment or a new
 variant."*
+
+**Resolved 2026-08-07 (Strand C), schema v2.** The three stored axes now have
+columns — `origin`, `corroboration` + `corroboration_n`, `adjudication` — added
+additively, so `KIRRA-WM2-SCHEMA-001`'s ratified v1 grows rather than being
+replaced and every existing row stays readable.
+
+**The finding that shaped the ruling: `writer_class` is not the origin axis in
+disguise.** It looks like one, and neither derives the other. `writer_class`
+records *who held the pen* — it is what **D-2** keys on, and `llm_candidate` is
+not an origin at all, because an LLM can propose a claim of any provenance and
+the rule constraining it is about the writer's authority. `origin` records
+*where the claim came from*, carries `imported` which no writer class expresses,
+and cannot say "an LLM wrote this". Replacing `writer_class` would have deleted
+D-2's enforcement basis, so it is kept **permanently**, not transitionally.
+
+`claim_status` is retained for read compatibility and is now **derived**: a
+`CHECK` makes `claim_status = 'confirmed'` hold exactly when
+`adjudication = 'confirmed'`, so the proxy cannot drift from the axis it stands
+for. D-2 is additionally restated against `adjudication`, so the rule survives
+`claim_status` being dropped later.
+
+Two states the proxy could never express are now storable: **`Rejected`**
+(terminal under rule 7) and **`Ambiguous`**, which rule 3 requires to be a
+stable, reportable state — *"I have conflicting information about that."*
+
+**The axes are inside the hashed bytes**, appended to the canonical form only
+when present. An unlabelled row therefore hashes byte-identically to v1 — the
+compatibility property, pinned by tests written against the pre-v2 code — while
+stripping the axes from a labelled row breaks the chain rather than quietly
+reverting it to a valid unlabelled one. Same argument as SD-2: a trust label
+that is not hashed can be relabelled in place.
+
+**Rule 3 is not baked into storage.** `adjudication_stored()` is persisted, not
+`adjudication()` — `Contradicted + Pending` reads as `Ambiguous` at read time,
+and storing that derivation would fix a conclusion that must be recomputed when
+the corroboration changes. Same reason validity has no column at all.
+
+The migration also closed a gap it did not create: the store had **no schema
+version check on an existing database**. A future-stamped store is now refused
+(`SchemaFromTheFuture`) rather than opened by a binary that would write rows
+missing columns it never heard of.
 
 Two of the seven rules are load-bearing and genuinely hard:
 

@@ -169,3 +169,85 @@ now is that "near-empty" should be a comparison, not an impression.
 Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508
 SIL 3 requirements. Independent third-party assessment has not yet been
 performed.
+
+---
+
+# Measurement 2 — after the retention driver and the reference types
+
+**recorded 2026-08-07** · workspace at `26c4c19b`
+
+## Why this is appended rather than edited in
+
+A baseline you revise is not a baseline. The table above stands as recorded at
+`ea06132d` and is not corrected below — including in the one place it went stale
+almost immediately, noted next.
+
+## The baseline was superseded by the same pull request that took it
+
+Worth stating plainly rather than leaving for someone to notice. `#1375` took the
+baseline in its first commit (`58fa1188`, at `ea06132d`) and then, three commits
+later, added the retention driver and sweeper — which import `kirra_world`
+directly. So the "2 lines / 3 types" figure was accurate when measured and
+outdated before that PR merged.
+
+That is not a flaw in the measurement; it is the trigger's own logic working.
+The ruling said the seam would fill as the core gained real types and the store
+consumed them, and it began filling within the hour. But it does mean the
+baseline's *number* has a much shorter shelf life than its *method*, and the
+method is what should be reused.
+
+## What the seam carries now
+
+Same counting unit: **one `use`/`pub use` item naming a `kirra_world` path**, in
+the `src/` tree of a crate that depends on `kirra-world`. Same independence unit:
+the consuming crate. Held fixed: default features, no `cfg` gating except where
+counted separately below.
+
+| Consumer | Lines (non-test) | Lines (test-only `mod tests`) |
+|---|---|---|
+| `kirra-world-store` | 7 | 2 |
+| `kirra-world-service` | 1 | 0 |
+| **Total** | **8** | **2** |
+
+Test-only lines are reported separately because they answer a different
+question. A seam carrying only test traffic would still be near-empty in the
+sense the ruling cares about; these eight are production paths.
+
+## The qualitative claim has inverted, and that is the load-bearing part
+
+The baseline's finding was not really "2 lines". It was this:
+
+> **Neither crate calls a method, constructs a value, or matches on a variant of
+> any core type.** The dependency is declared in both manifests and, in the
+> direction that matters, carries nothing.
+
+**That sentence is now false in every clause.** In `kirra-world-store` alone:
+
+- **Constructs values** — `EventId::new`, `ObservationId::new`, `FrameId::new`
+  and `MapId::new` are called on both the write path and the chain-verification
+  read path.
+- **Calls methods** — `as_str()` on all four, feeding both the SQL parameters and
+  the canonically-hashed JSON. 16 such call sites in `lib.rs`.
+- **Matches on variants** — `retention::decide`'s `RetentionDecision`, plus
+  `Eligibility`, `CompactablePrefix` and `Blocker`, drive `run_retention_pass`.
+- **Is bound by core types in its own public API** — `NewEvent`'s four reference
+  fields are core types, so a caller of the store cannot build an event without
+  going through them.
+
+That last point is the one that matters most for a future collapse decision. A
+seam carrying only re-exports can be dissolved by moving two lines. A seam whose
+consumer's public struct is *made of* the core's types is load-bearing in the
+ordinary sense.
+
+## What this does NOT authorize
+
+The trigger has still **not fired.** It is keyed to *completion of `WM_SCOPE.md`
+Tier 1*, and Tier 1 is not complete: the entity taxonomy's store-dependent half
+(`entity_id` minting, `first_observed`/`last_observed`, `provenance_head`) and
+the observation model's payload half (`TypedPayload`'s body, `ObservationKind`)
+are open. This is a second data point on a trend, not a verdict.
+
+If anything, the direction of the trend argues for taking one further
+measurement *at* completion rather than treating this one as sufficient — the
+ruling asked for a measurement at a defined moment, and answering early with a
+more convenient number is the failure mode it was written against.

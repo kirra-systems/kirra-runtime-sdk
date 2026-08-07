@@ -10,6 +10,13 @@
 //! not a single number — it is a function of how much of that new width real
 //! traffic actually carries, and nothing measured so far constrains that.
 //!
+//! **Schema v2 adds four more** — `origin`, `corroboration`,
+//! `corroboration_n`, `adjudication` — and they are all nullable, so they
+//! belong in the band rather than beside it. Measuring v2 with the axes always
+//! absent would report the v1 cost under a v2 label, which is precisely the
+//! "figure that looks measured while resting on an unstated guess" this module
+//! was written to avoid.
+//!
 //! Picking one filling and reporting one number would be the failure mode
 //! this project keeps catching: a figure that looks measured while resting on
 //! an unstated guess. So the instrument measures a BAND, with both ends named
@@ -43,6 +50,16 @@
 //! them to the sensor path matches the stream the harness generates.
 //! `observation_id` is present in both fills because it is NOT NULL — the
 //! schema gives no lean option there.
+//!
+//! The v2 axis *vocabularies* are not varied either, for the same reason: the
+//! three token columns are closed vocabularies a few bytes wide. What is varied
+//! is whether the axes are **present at all**, which is the choice that moves
+//! the number — and it is a real choice on both ends. `Lean` leaves them NULL,
+//! which is every row written before v2 and every row a producer writes without
+//! trust labelling; `Populated` carries a full axis set with a corroboration
+//! count, which is what a cross-checked claim records.
+
+use kirra_world_store::{Adjudication, Corroboration, Origin, TrustAxes};
 
 /// Which end of the band to measure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,21 +83,27 @@ impl Fill {
     pub fn describe(self) -> &'static str {
         match self {
             Self::Lean => {
-                "added columns at lightest legal values: provenance [], frame_id NULL, map_id NULL"
+                "added columns at lightest legal values: provenance [], frame_id NULL, \
+                 map_id NULL, trust axes NULL"
             }
             Self::Populated => {
-                "added columns realistic: provenance cites 1 observation, frame_id and map_id set"
+                "added columns realistic: provenance cites 1 observation, frame_id and \
+                 map_id set, trust axes present (observed/corroborated(2)/confirmed)"
             }
         }
     }
 }
 
-/// The per-event values for the six added columns.
+/// The per-event values for the added columns — six from the ratified v1
+/// schema, four more from the v2 trust axes.
 pub struct Added {
     pub observation_id: String,
     pub provenance: Vec<String>,
     pub frame_id: Option<String>,
     pub map_id: Option<String>,
+    /// The v2 axes, or `None` for an unlabelled row. All-or-nothing: the schema
+    /// refuses a partial set, so the band cannot measure one either.
+    pub trust: Option<TrustAxes>,
 }
 
 /// Derive the added columns for one event.
@@ -101,6 +124,7 @@ pub fn added(fill: Fill, generation: u64, seed: u64) -> Added {
             provenance: Vec::new(),
             frame_id: None,
             map_id: None,
+            trust: None,
         },
         Fill::Populated => Added {
             // One upstream citation. Not a long chain: SD-3 permits many, but
@@ -114,6 +138,18 @@ pub fn added(fill: Fill, generation: u64, seed: u64) -> Added {
             frame_id: Some(format!("map:zone-{:03}", generation % 64)),
             map_id: Some(format!("map-{:04}", generation % 16)),
             observation_id,
+            // A corroborated, confirmed observation — the widest of the axis
+            // shapes, because `Corroborated(n)` is the one that carries a
+            // count. `Uncorroborated` would store a NULL there and understate
+            // the populated end.
+            trust: Some(
+                TrustAxes::new(
+                    Origin::Observed,
+                    Corroboration::Corroborated(2),
+                    Adjudication::Confirmed,
+                )
+                .expect("observed/corroborated/confirmed is constructible"),
+            ),
         },
     }
 }
@@ -128,8 +164,10 @@ mod tests {
         let p = added(Fill::Populated, 500, 1);
         assert!(l.provenance.is_empty());
         assert!(l.frame_id.is_none() && l.map_id.is_none());
+        assert!(l.trust.is_none(), "lean leaves the v2 axes NULL");
         assert_eq!(p.provenance.len(), 1);
         assert!(p.frame_id.is_some() && p.map_id.is_some());
+        assert!(p.trust.is_some(), "populated carries a full axis set");
     }
 
     #[test]

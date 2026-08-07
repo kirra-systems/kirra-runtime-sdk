@@ -89,7 +89,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use fill::Fill;
-use kirra_world_store::{ClaimStatus, NewEvent, WorldStore, WriterClass};
+use kirra_world_store::{
+    ClaimStatus, EventId, FrameId, MapId, NewEvent, ObservationId, WorldStore, WriterClass,
+};
 
 // ---------------------------------------------------------------------------
 // db_bytes — deliberately identical to the harness's definition
@@ -202,10 +204,34 @@ fn growth(
     for e in &stream {
         let a = fill::added(fill, e.generation, seed);
         let prov: Vec<&str> = a.provenance.iter().map(String::as_str).collect();
+        // The store's identity and spatial-reference types are validated, so a
+        // generated id that the store would refuse must fail the RUN rather
+        // than be silently reshaped — a measurement taken over rows the real
+        // writer would not accept is not a measurement of the real schema.
+        let event_id = EventId::new(e.event_id.clone())
+            .map_err(|err| format!("generated event_id at generation {}: {err}", e.generation))?;
+        let observation_id = ObservationId::new(a.observation_id.clone()).map_err(|err| {
+            format!(
+                "generated observation_id at generation {}: {err}",
+                e.generation
+            )
+        })?;
+        let frame_id = a
+            .frame_id
+            .as_deref()
+            .map(FrameId::new)
+            .transpose()
+            .map_err(|err| format!("generated frame_id at generation {}: {err}", e.generation))?;
+        let map_id = a
+            .map_id
+            .as_deref()
+            .map(MapId::new)
+            .transpose()
+            .map_err(|err| format!("generated map_id at generation {}: {err}", e.generation))?;
         store
             .append(&NewEvent {
-                event_id: &e.event_id,
-                observation_id: &a.observation_id,
+                event_id: &event_id,
+                observation_id: &observation_id,
                 txn_time_ms: e.txn_time_ms,
                 valid_from_ms: e.valid_from_ms,
                 valid_to_ms: None,
@@ -216,8 +242,8 @@ fn growth(
                 writer_class: WriterClass::Sensor,
                 claim_status: ClaimStatus::Confirmed,
                 provenance: &prov,
-                frame_id: a.frame_id.as_deref(),
-                map_id: a.map_id.as_deref(),
+                frame_id: frame_id.as_ref(),
+                map_id: map_id.as_ref(),
                 kind: e.kind,
                 subject: &e.subject,
                 predicate: e.predicate.as_deref(),
@@ -225,6 +251,7 @@ fn growth(
                 payload: &e.payload,
                 payload_schema: 1,
                 retention_class: e.retention_class,
+                trust: a.trust.as_ref(),
             })
             .map_err(|err| format!("append at generation {}: {err}", e.generation))?;
     }

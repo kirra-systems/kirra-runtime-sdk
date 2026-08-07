@@ -113,6 +113,7 @@
 
 pub mod entity;
 pub mod observation;
+pub mod reference;
 pub mod relationship;
 pub mod retention;
 pub mod trust;
@@ -150,11 +151,28 @@ pub use entity::EntityId;
 
 /// Identity of a single recorded observation.
 ///
-/// PLACEHOLDER. Distinct from [`EntityId`] on purpose: the blueprint's model is
-/// evidence-first, so an observation outlives whatever entity it was later
-/// attributed to, and re-attribution must not rewrite it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ObservationId(());
+/// **No longer a placeholder** — the real type is [`reference::ObservationId`],
+/// re-exported rather than redeclared, following the shape [`EntityId`] and
+/// [`TrustAxes`] already use. Redeclaring is what produced the two-types-one-name
+/// collision fixed in #1375; there is now exactly one way to name each of these.
+///
+/// Distinct from [`EntityId`] on purpose: the blueprint's model is evidence-first,
+/// so an observation outlives whatever entity it was later attributed to, and
+/// re-attribution must not rewrite it. It is equally distinct from [`EventId`],
+/// which identifies the *record* — see that type for why collapsing the two costs
+/// the log its re-attribution history.
+pub use reference::ObservationId;
+
+/// Identity of one record in the evidence log.
+///
+/// New in the reference slice, and not one of the original placeholders: the
+/// storage layer had carried this concept as a bare `&str` alongside
+/// `observation_id` since it was written, with nothing but argument order
+/// keeping them apart. See [`reference::EventId`].
+pub use reference::EventId;
+
+/// Why a reference was refused. See [`mod@reference`].
+pub use reference::ReferenceError;
 
 // ---------------------------------------------------------------------------
 // Where a claim came from
@@ -183,20 +201,25 @@ pub struct Provenance(());
 
 /// The coordinate frame a spatial claim is expressed in.
 ///
-/// PLACEHOLDER, and the one to be most careful with. ADR-0042 Decision 2 draws
-/// the line between a *semantic* map and the checker's *authoritative* corridor:
-/// a frame or map reference held here may help an untrusted doer choose a goal,
-/// and must never become the checker's geometry by virtue of existing.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FrameId(());
+/// **No longer a placeholder** — [`reference::FrameId`], re-exported. Still the
+/// one to be most careful with: ADR-0042 Decision 2 draws the line between a
+/// *semantic* map and the checker's *authoritative* corridor, and a frame or map
+/// reference held here may help an untrusted doer choose a goal but must never
+/// become the checker's geometry by virtue of existing.
+pub use reference::FrameId;
 
 /// Which map a spatial claim is relative to.
 ///
-/// PLACEHOLDER. See [`FrameId`] — same boundary, same prohibition. If Kirra
-/// World and the safety path ever read the same map artifact, that is a
-/// reviewed [[shared_source_artifact]] entry, not an implicit permission.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MapId(());
+/// **No longer a placeholder** — [`reference::MapId`], re-exported. See
+/// [`FrameId`] — same boundary, same prohibition. If Kirra World and the safety
+/// path ever read the same map artifact, that is a reviewed
+/// `[[shared_source_artifact]]` entry, not an implicit permission.
+///
+/// Being a *separate type* from [`FrameId`] rather than another `Option<&str>` is
+/// what makes the two unswappable; the storage layer held them adjacent, and a
+/// swap there satisfied SD-4's "a spatial claim carries a frame" check while
+/// carrying the wrong one.
+pub use reference::MapId;
 
 // ---------------------------------------------------------------------------
 // Bitemporality (blueprint P7)

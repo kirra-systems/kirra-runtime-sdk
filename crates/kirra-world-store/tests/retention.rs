@@ -10,7 +10,26 @@
 //! * a projection head is refused, so a rebuild still reproduces the fold;
 //! * removed content stays **attestable** through `range_digest`.
 
-use kirra_world_store::{ClaimStatus, NewEvent, StoreError, WorldStore, WriterClass};
+use kirra_world_store::{
+    ClaimStatus, EventId, NewEvent, ObservationId, StoreError, WorldStore, WriterClass,
+};
+
+/// Owned ids for one event. [`NewEvent`] borrows its references, so they need a
+/// home that outlives it — and the two are separate types now, which is what
+/// stops them being passed in each other's place.
+struct Ids {
+    event: EventId,
+    observation: ObservationId,
+}
+
+/// One string for both ids. Fine for a fixture, and now *visibly* a conflation
+/// rather than an invisible one: the two fields have to be spelled separately.
+fn ids(s: &str) -> Ids {
+    Ids {
+        event: EventId::new(s).expect("admissible event id"),
+        observation: ObservationId::new(s).expect("admissible observation id"),
+    }
+}
 
 fn tmp(name: &str) -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
@@ -33,10 +52,10 @@ fn clean(p: &std::path::Path) {
 
 const T0: i64 = 1_700_000_000_000;
 
-fn ev<'a>(event_id: &'a str, subject: &'a str, valid_from_ms: i64) -> NewEvent<'a> {
+fn ev<'a>(id: &'a Ids, subject: &'a str, valid_from_ms: i64) -> NewEvent<'a> {
     NewEvent {
-        event_id,
-        observation_id: event_id,
+        event_id: &id.event,
+        observation_id: &id.observation,
         txn_time_ms: valid_from_ms,
         valid_from_ms,
         valid_to_ms: None,
@@ -54,6 +73,7 @@ fn ev<'a>(event_id: &'a str, subject: &'a str, valid_from_ms: i64) -> NewEvent<'
         payload: r#"{"n":1}"#,
         payload_schema: 1,
         retention_class: "raw",
+        trust: None,
     }
 }
 
@@ -64,7 +84,8 @@ fn seeded(path: &std::path::Path) -> WorldStore {
     for i in 1..=12i64 {
         let eid = format!("e{i}");
         let subj = format!("cup-{}", (i - 1) % 3);
-        s.append(&ev(&eid, &subj, T0 + i * 100)).expect("append");
+        s.append(&ev(&ids(&eid), &subj, T0 + i * 100))
+            .expect("append");
     }
     s
 }
@@ -192,7 +213,7 @@ fn a_window_containing_protected_traffic_is_refused_whole() {
         let subj = format!("cup-{i}");
         s.append(&NewEvent {
             retention_class: if i == 4 { "safety" } else { "raw" },
-            ..ev(&eid, &subj, T0 + i * 100)
+            ..ev(&ids(&eid), &subj, T0 + i * 100)
         })
         .expect("append");
     }
@@ -229,10 +250,10 @@ fn every_protected_class_refuses() {
     ] {
         let p = tmp(&format!("protected-{class}"));
         let mut s = WorldStore::open(&p).expect("open");
-        s.append(&ev("e1", "cup-1", T0)).expect("raw");
+        s.append(&ev(&ids("e1"), "cup-1", T0)).expect("raw");
         s.append(&NewEvent {
             retention_class: class,
-            ..ev("e2", "cup-2", T0 + 100)
+            ..ev(&ids("e2"), "cup-2", T0 + 100)
         })
         .expect("protected");
 
@@ -390,7 +411,7 @@ fn the_prefix_helper_stops_below_the_first_blocker_of_either_kind() {
         let subj = format!("cup-{i}");
         s.append(&NewEvent {
             retention_class: if i == 4 { "incident" } else { "raw" },
-            ..ev(&eid, &subj, T0 + i * 100)
+            ..ev(&ids(&eid), &subj, T0 + i * 100)
         })
         .expect("append");
     }
@@ -415,10 +436,10 @@ fn a_window_blocked_at_its_first_generation_has_no_prefix() {
     let mut s = WorldStore::open(&p).expect("open");
     s.append(&NewEvent {
         retention_class: "safety",
-        ..ev("e1", "cup-1", T0)
+        ..ev(&ids("e1"), "cup-1", T0)
     })
     .expect("protected first");
-    s.append(&ev("e2", "cup-2", T0 + 100)).expect("raw");
+    s.append(&ev(&ids("e2"), "cup-2", T0 + 100)).expect("raw");
 
     assert_eq!(s.largest_compactable_prefix(1, 2).unwrap(), None);
     assert_eq!(
