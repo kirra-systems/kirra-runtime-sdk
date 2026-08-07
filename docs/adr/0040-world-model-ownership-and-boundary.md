@@ -836,8 +836,35 @@ Neither gated it, and both bind Tier 1 rather than this ADR:
 
 | Condition | Source | Enforced by |
 |---|---|---|
-| **No `PerceivedObject` import path** until a stated rule exists for where its confidence and validity come from, with the synthesis visible in the store | Compatibility inventory, tracked-object row | **Nothing** — recorded weakness, see below |
+| **No `PerceivedObject` import path** until a stated rule exists for where its confidence and validity come from, with the synthesis visible in the store | Compatibility inventory, tracked-object row | **Partly** — the *prohibition* half is checked (fence check 9, 2026-08-07); the *requirement* half is still unenforced. See below |
 | **A retention driver** is an exit criterion for `WM_SCOPE.md` Tier 1 | Deployment-ownership decision | The Tier 1 checklist |
+
+### PARTLY machine-checked since 2026-08-07 — and only one half of it
+
+Recorded as a later fact, **not an amendment**: the ruling below stands
+unchanged, and nothing here revisits it.
+
+The condition has two halves, and they need different things:
+
+* **The prohibition** — *"no `PerceivedObject` import path may be built"* —
+  needs no rule to exist, because it forbids rather than requires. It is now
+  checked by **check 9** of `ci/check_kirra_world_bidirectional_fence.py`: any
+  reference to the type in a `kirra-world*` package's code reds CI. Comments and
+  string literals are stripped, so the quotation of this condition in
+  `observation.rs` is a description of the rule rather than a breach of it.
+  Three tests hold it: that it fires on a real import path, that prose does not
+  trip it, and that its scope is `kirra-world*` only.
+
+* **The requirement** — *"any import from a type lacking a confidence field must
+  declare its confidence source"* — is the guard offered and **deliberately not
+  taken** below, and it is **still not built**. It needs the Tier 1 observation
+  model to define what it should check, exactly as the ruling says.
+
+So the weakness recorded below is **narrowed, not closed**. What now reds CI is
+someone building the import path inside Kirra World. What still rests on being
+remembered is an importer that synthesizes a confidence — and one built outside
+`kirra-world*`, which check 9 cannot see. That scope limit is asserted by its
+own test rather than left for a reader to infer from a green run.
 
 ### The first condition is not machine-checked, and that was a choice
 
