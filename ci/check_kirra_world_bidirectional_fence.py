@@ -403,7 +403,25 @@ def is_world_package(name: str) -> bool:
 
 _LINE_COMMENT = re.compile(r"//.*?$", re.MULTILINE)
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+# Raw strings FIRST: `r#"..."#` has no escape processing, so the normal
+# string regex mis-parses one containing an embedded quote and leaks its
+# contents. `r#"say "X" now"#` left `X` visible to every check that reads
+# stripped source. The backreference matches the opening hash count exactly,
+# which is what makes nesting levels terminate correctly.
+_RAW_STRING_LIT = re.compile(r'r(#*)"(?s:.)*?"\1')
 _STRING_LIT = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def _blank_keeping_lines(m: "re.Match[str]") -> str:
+    """Replace a match with whitespace of the SAME line count.
+
+    Collapsing a multi-line construct to a single space moves every subsequent
+    line number, so a violation reported after a block comment pointed at the
+    wrong line — measured at 6 reported as 2. Newlines are whitespace, so
+    tokens stay separated exactly as a space would separate them.
+    """
+    n = m.group(0).count("\n")
+    return "\n" * n if n else " "
 
 
 def strip_rust(src: str, drop_strings: bool = True) -> str:
@@ -412,10 +430,12 @@ def strip_rust(src: str, drop_strings: bool = True) -> str:
     Documentation and prose must never trip this fence -- an ADR quoted in a doc
     comment is a description of the rule, not a breach of it.
     """
-    out = _BLOCK_COMMENT.sub(" ", src)
+    out = _BLOCK_COMMENT.sub(_blank_keeping_lines, src)
     out = _LINE_COMMENT.sub(" ", out)
     if drop_strings:
-        out = _STRING_LIT.sub('""', out)
+        # Raw strings before normal ones — see `_RAW_STRING_LIT`.
+        out = _RAW_STRING_LIT.sub(_blank_keeping_lines, out)
+        out = _STRING_LIT.sub(_blank_keeping_lines, out)
     return out
 
 

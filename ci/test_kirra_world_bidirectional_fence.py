@@ -893,7 +893,16 @@ def t40_prose_about_perceived_object_is_not_an_import_path() -> None:
         body = (
             "//! ADR-0040 forbids a PerceivedObject import path until the rule exists.\n"
             "/// See the PerceivedObject condition.\n"
+            "/* A block comment mentioning PerceivedObject,\n"
+            "   spanning several lines. */\n"
             'pub const WHY: &str = "PerceivedObject has no confidence field";\n'
+            # Raw strings, every form. A raw string carrying an embedded quote
+            # defeated the normal string regex and leaked its contents to every
+            # check that reads stripped source -- found in review.
+            'pub const R0: &str = r"PerceivedObject";\n'
+            'pub const R1: &str = r#"PerceivedObject"#;\n'
+            'pub const R2: &str = r#"say "PerceivedObject" now"#;\n'
+            'pub const R3: &str = r##"PerceivedObject"##;\n'
         )
         fx.rust("crates/kirra-world/src/notes.rs", body)
         rep = fx.run()
@@ -932,6 +941,39 @@ def t41_the_condition_is_scoped_to_world_packages() -> None:
             not hits,
             "41 the PerceivedObject condition is scoped to kirra-world*",
             "a non-world package was flagged; the condition binds Kirra World only",
+        )
+    finally:
+        fx.close()
+
+
+def t42_a_violation_line_number_survives_a_block_comment() -> None:
+    """Reported line numbers must be real.
+
+    `strip_rust` collapsed a multi-line block comment to a single space, which
+    moved every subsequent line -- measured at real line 6 reported as line 2.
+    A guard that names the wrong line sends a reader hunting, and this affects
+    every check in this file, not only check 9.
+    """
+    fx = Fixture()
+    try:
+        base_safety_workspace(fx)
+        fx.crate("kirra-world")
+        body = (
+            "/*\n"
+            " a block comment\n"
+            " spanning four\n"
+            " separate lines\n"
+            "*/\n"
+            "pub fn ingest(o: PerceivedObject) {}\n"
+        )
+        fx.rust("crates/kirra-world/src/import.rs", body)
+        rep = fx.run()
+        hits = [v for v in rep.violations if "PerceivedObject" in v.check]
+        got = hits[0].location.rsplit(":", 1)[-1] if hits else "<no violation>"
+        record(
+            bool(hits) and got == "6",
+            "42 a reported line number survives a multi-line block comment",
+            f"expected the breach at line 6, reported {got}",
         )
     finally:
         fx.close()
