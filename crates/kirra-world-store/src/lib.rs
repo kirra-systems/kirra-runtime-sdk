@@ -101,7 +101,10 @@ pub use subject_projection::{
 // merely "so the dependency edge is real": [`NewEvent`] is built out of them, so
 // the edge now carries traffic. That is the measurement ADR-0040's open
 // question 1 defers its revisit to — see `docs/design/WM_Q1_SEAM_BASELINE.md`.
-pub use kirra_world::trust::{Adjudication, Corroboration, Origin, TrustAxes};
+pub use kirra_world::trust::{
+    trust_grade, validity_at, Adjudication, Corroboration, Origin, TrustAxes, TrustGrade, Validity,
+    ValidityWindow,
+};
 pub use kirra_world::{EntityId, EventId, FrameId, MapId, ObservationId, ReferenceError};
 pub use schema::{CHAIN_ALGORITHM, SCHEMA_VERSION};
 
@@ -1419,6 +1422,21 @@ impl WorldStore {
         Ok(())
     }
 
+    /// Test-only: run one scalar query.
+    ///
+    /// Paired with [`WorldStore::raw_execute_for_test`] and gated the same way.
+    /// Exists so a test can assert against the store's LIVE schema — via
+    /// `pragma_table_info` — rather than against the DDL text it was created
+    /// from. Asserting on the text would pass while the real table disagreed.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the query fails or returns no row.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn query_scalar_for_test(&self, sql: &str) -> Result<i64, StoreError> {
+        Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
+    }
+
     /// Test-only: rewrite one column of one row, bypassing the write path.
     ///
     /// This exists so the tamper tests can prove the chain **detects** an edit.
@@ -1470,7 +1488,8 @@ impl WorldStore {
 
 /// Columns the fold reads, in one place so the two readers cannot drift.
 const CLAIM_COLUMNS: &str = "subject, predicate, object, kind, payload, frame_id, map_id, \
-     source, valid_from_ms, valid_to_ms, txn_time_ms, generation, event_id";
+     source, valid_from_ms, valid_to_ms, txn_time_ms, generation, event_id, chain_digest, \
+     origin, corroboration, corroboration_n, adjudication";
 
 /// The projected-state digest, over any connection.
 ///
@@ -1504,7 +1523,50 @@ fn claim_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectedClaim> {
         txn_time_ms: r.get(10)?,
         generation: r.get(11)?,
         event_id: r.get(12)?,
+        chain_digest: r.get(13)?,
+        trust: claim_axes_from_row(r)?,
     })
+}
+
+/// The three stored axes as read by the CLAIM path (indices 14..=17).
+///
+/// Distinct from [`axes_from_row`], which reads the VERIFY path's own column
+/// order and reports a `CorruptRow` naming a generation. Here the signature is
+/// `rusqlite::Result`, so an unreadable axis fails closed as a conversion
+/// error rather than being silently dropped to `None` — dropping it would turn
+/// a corrupt trust label into an unlabelled claim, which reads as "no trust
+/// recorded" instead of "something is wrong".
+fn claim_axes_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<TrustAxes>> {
+    let origin: Option<String> = r.get(14)?;
+    let corroboration: Option<String> = r.get(15)?;
+    let corroboration_n: Option<i64> = r.get(16)?;
+    let adjudication: Option<String> = r.get(17)?;
+
+    let bad = |what: &str| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("projected claim carries an unreadable {what}").into(),
+        )
+    };
+
+    match (origin, corroboration, adjudication) {
+        (None, None, None) => Ok(None),
+        (Some(o), Some(c), Some(a)) => {
+            let origin = origin_from_token(&o).ok_or_else(|| bad("origin"))?;
+            let n = corroboration_n
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| bad("corroboration count"))?;
+            let corroboration =
+                corroboration_from_columns(&c, n).ok_or_else(|| bad("corroboration"))?;
+            let adjudication = adjudication_from_token(&a).ok_or_else(|| bad("adjudication"))?;
+            TrustAxes::new(origin, corroboration, adjudication)
+                .map(Some)
+                .map_err(|_| bad("axis combination"))
+        }
+        _ => Err(bad("partial axis set")),
+    }
 }
 
 impl WorldStore {
@@ -1514,6 +1576,32 @@ impl WorldStore {
     /// stays byte-identical to one written before projections existed. See
     /// [`projection`] for why that matters to ADR-0041 D-20.
     fn ensure_projections(&self) -> Result<(), StoreError> {
+        // A projection folded before the trust columns existed has the old
+        // shape, and `CREATE TABLE IF NOT EXISTS` will not add them. Drop it so
+        // the next fold rebuilds.
+        //
+        // This is legitimate here and NOWHERE ELSE in this crate: a projection
+        // is derived, so deleting it loses no evidence — it is exactly what
+        // `rebuild_projections` already does on demand. The evidence log gets
+        // additive migrations precisely because the same move there would be a
+        // forgery.
+        if self.has_projections()? {
+            let has_trust: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM pragma_table_info('world_current') WHERE name = 'adjudication'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if has_trust.is_none() {
+                self.conn.execute("DROP TABLE world_current", [])?;
+                self.conn.execute(
+                    "DELETE FROM projection_checkpoint WHERE name = ?1",
+                    params![projection::CURRENT_PROJECTION],
+                )?;
+            }
+        }
         self.conn.execute_batch(projection::PROJECTIONS_V1)?;
         Ok(())
     }
@@ -1590,15 +1678,20 @@ impl WorldStore {
                 "INSERT INTO world_current (
                     subject, predicate_key, predicate, object, kind, payload,
                     frame_id, map_id, source, valid_from_ms, valid_to_ms,
-                    txn_time_ms, generation, event_id
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                    txn_time_ms, generation, event_id, chain_digest,
+                    origin, corroboration, corroboration_n, adjudication
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
                  ON CONFLICT (subject, predicate_key) DO UPDATE SET
                     predicate=excluded.predicate, object=excluded.object,
                     kind=excluded.kind, payload=excluded.payload,
                     frame_id=excluded.frame_id, map_id=excluded.map_id,
                     source=excluded.source, valid_from_ms=excluded.valid_from_ms,
                     valid_to_ms=excluded.valid_to_ms, txn_time_ms=excluded.txn_time_ms,
-                    generation=excluded.generation, event_id=excluded.event_id
+                    generation=excluded.generation, event_id=excluded.event_id,
+                    chain_digest=excluded.chain_digest, origin=excluded.origin,
+                    corroboration=excluded.corroboration,
+                    corroboration_n=excluded.corroboration_n,
+                    adjudication=excluded.adjudication
                  WHERE (excluded.valid_from_ms, excluded.generation)
                      > (world_current.valid_from_ms, world_current.generation)",
             )?;
@@ -1622,6 +1715,17 @@ impl WorldStore {
                     c.txn_time_ms,
                     c.generation,
                     c.event_id,
+                    c.chain_digest,
+                    c.trust.as_ref().map(|t| t.origin().as_str()),
+                    c.trust
+                        .as_ref()
+                        .map(|t| corroboration_columns(t.corroboration()).0),
+                    c.trust
+                        .as_ref()
+                        .and_then(|t| corroboration_columns(t.corroboration()).1),
+                    c.trust
+                        .as_ref()
+                        .map(|t| adjudication_token(t.adjudication_stored())),
                 ])?;
             }
         }
