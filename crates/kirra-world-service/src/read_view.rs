@@ -49,6 +49,16 @@
 //! [`WorldView::ask`] is the only way to obtain one. So an answer in hand always
 //! carries them.
 //!
+//! **"Trust" here means the axes, not a summary of them.** Rule 1 says *the
+//! trust axes*, and an earlier draft of this type carried only the collapsed
+//! [`TrustGrade`] while quoting the rule verbatim — which would have been the
+//! same overclaim this module exists to catch. Both are carried now:
+//! [`WorldAnswer::axes`] is what the rule requires, and [`WorldAnswer::grade`]
+//! is a convenience over it. Collapsing is fine; collapsing *and discarding the
+//! reason* is not, because `Weak` can mean uncorroborated, stale, or awaiting
+//! adjudication and a caller who needs to know which would be left with the raw
+//! log.
+//!
 //! **The honest bound, because overclaiming here would be the same failure the
 //! rule is about:** this closes the hole at *retrieval*. A caller cannot obtain
 //! the value without being handed the rest. It does **not** stop that caller
@@ -76,7 +86,7 @@
 //! the whole point of putting the boundary in a crate the fence already watches
 //! rather than in one it does not.
 
-use kirra_world_store::{ProjectedClaim, StoreError, TrustGrade, Validity, WorldStore};
+use kirra_world_store::{ProjectedClaim, StoreError, TrustAxes, TrustGrade, Validity, WorldStore};
 
 /// Why the world had nothing to say. **Not an error** — see rule 3.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +122,7 @@ pub struct WorldAnswer {
     predicate: Option<String>,
     value: String,
     validity: Validity,
+    axes: Option<TrustAxes>,
     grade: Option<TrustGrade>,
     provenance: String,
     event_id: String,
@@ -151,7 +162,31 @@ impl WorldAnswer {
         self.validity
     }
 
+    /// The three stored trust axes, or `None` when the claim is unlabelled.
+    ///
+    /// **This is what rule 1 actually requires** — *"the trust axes"*, not a
+    /// summary of them. It is carried beside [`Self::grade`] rather than instead
+    /// of it, and the distinction is not cosmetic.
+    ///
+    /// A grade is a **collapse**. `Weak` can mean uncorroborated, or stale, or
+    /// awaiting adjudication, and a boundary that returned only the grade would
+    /// have performed that collapse *and thrown away the reason* — leaving a
+    /// caller who needs to know **why** with nowhere to look but the raw log.
+    /// The store's own `grade_at` says the collapse should be "something a
+    /// caller *does*, never something they receive by default"; returning only
+    /// the result of it would invert exactly that.
+    ///
+    /// `None` is *"unlabelled"*, never *"assume the default"*.
+    #[must_use]
+    pub fn axes(&self) -> Option<TrustAxes> {
+        self.axes
+    }
+
     /// The collapsed trust grade, or `None` when the claim carries no axes.
+    ///
+    /// A convenience over [`Self::axes`] and [`Self::validity`], not a
+    /// replacement for them: every answer carries the axes it was collapsed
+    /// from, so taking the grade never costs the reason behind it.
     ///
     /// `None` means *"this claim is unlabelled"*, never *"assume the default"*.
     /// An unlabelled claim has no trust to grade, and manufacturing one is the
@@ -262,6 +297,7 @@ impl<'a> WorldView<'a> {
             predicate: claim.predicate.clone(),
             value: claim.payload.clone(),
             validity: claim.validity_at(clock, self.staleness_budget_ms),
+            axes: claim.trust,
             grade: claim.grade_at(clock, self.staleness_budget_ms),
             provenance: claim.chain_digest.clone(),
             event_id: claim.event_id.clone(),

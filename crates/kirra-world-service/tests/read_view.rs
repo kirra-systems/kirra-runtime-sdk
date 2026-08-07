@@ -130,6 +130,93 @@ fn the_store_row_is_a_bare_value_today() {
     assert_eq!(bare, r#"{"n":1}"#);
 }
 
+/// **Rule 1 says "the trust axes", and the answer carries them** — not just the
+/// grade collapsed out of them.
+///
+/// An earlier draft carried only [`WorldAnswer::grade`] while the module docs
+/// quoted the rule verbatim, which was an overclaim. This pins the fix.
+#[test]
+fn an_answer_carries_the_axes_not_only_the_collapsed_grade() {
+    let mut s = open("axes");
+    let a = axes(Corroboration::Corroborated(2), Adjudication::Confirmed);
+    seed(&mut s, 1, "cup-1", None, Some(&a), ClaimStatus::Confirmed);
+
+    let view = WorldView::new(&s, Some(60_000));
+    let WorldLookup::Answered(answers) = view.ask("cup-1", T0).expect("ask") else {
+        panic!("expected an answer");
+    };
+    let got = answers[0]
+        .axes()
+        .expect("a labelled claim carries its axes");
+    assert_eq!(got.origin(), Origin::Observed);
+    assert_eq!(got.corroboration(), Corroboration::Corroborated(2));
+    assert_eq!(got.adjudication(), Adjudication::Confirmed);
+}
+
+/// **The reason behind a grade survives the collapse.**
+///
+/// This is why carrying both matters rather than being belt-and-braces. Two
+/// claims can grade **identically for different reasons**, and a boundary
+/// returning only the grade would make them indistinguishable — leaving a caller
+/// who needs to know why with nowhere to look but the raw log.
+///
+/// Both below grade `Strong`. One is corroborated by two sources; the other has
+/// a single source and rests entirely on its adjudication. Same summary, very
+/// different evidentiary basis, and only the axes tell them apart.
+///
+/// **Why this pairing and not a weaker one:** `Weak` is unreachable through this
+/// boundary at all. `trust_grade` yields it only when the adjudication is not
+/// `Confirmed`, and the derivation `CHECK` plus the projection's confirmed-only
+/// fold mean every *labelled* claim that gets here is `Confirmed`. So the
+/// reachable set is `Strong`, `Adequate` and `None` — the same emergent
+/// narrowing that makes `Inadmissible` unreachable, one notch less severe.
+#[test]
+fn two_claims_can_share_a_grade_for_different_reasons() {
+    let mut s = open("why");
+    let corroborated = axes(Corroboration::Corroborated(2), Adjudication::Confirmed);
+    let single_source = axes(Corroboration::Uncorroborated, Adjudication::Confirmed);
+    seed(
+        &mut s,
+        1,
+        "a",
+        None,
+        Some(&corroborated),
+        ClaimStatus::Confirmed,
+    );
+    seed(
+        &mut s,
+        2,
+        "b",
+        None,
+        Some(&single_source),
+        ClaimStatus::Confirmed,
+    );
+
+    let view = WorldView::new(&s, Some(60_000));
+
+    let WorldLookup::Answered(a1) = view.ask("a", T0).expect("ask") else {
+        panic!("expected an answer");
+    };
+    let WorldLookup::Answered(a2) = view.ask("b", T0).expect("ask") else {
+        panic!("expected an answer");
+    };
+
+    // Identical summaries.
+    assert_eq!(a1[0].grade(), Some(TrustGrade::Strong));
+    assert_eq!(a2[0].grade(), Some(TrustGrade::Strong));
+
+    // Different reasons -- recoverable ONLY from the axes. Without them the
+    // grade would have been the end of the trail.
+    assert_eq!(
+        a1[0].axes().expect("labelled").corroboration(),
+        Corroboration::Corroborated(2)
+    );
+    assert_eq!(
+        a2[0].axes().expect("labelled").corroboration(),
+        Corroboration::Uncorroborated
+    );
+}
+
 /// An unlabelled claim grades to `None`, never a manufactured default.
 ///
 /// Revert that and this fails: defaulting to any grade invents a trust
@@ -144,6 +231,11 @@ fn an_unlabelled_claim_has_no_grade_rather_than_a_default() {
         panic!("expected an answer");
     };
     assert_eq!(answers[0].grade(), None);
+    assert_eq!(
+        answers[0].axes(),
+        None,
+        "an unlabelled claim carries no axes either -- absence, not a default set"
+    );
 }
 
 // ---------------------------------------------------------------------------
