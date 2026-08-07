@@ -110,8 +110,22 @@ pub enum AskError {
     /// `Unknown` means *"nothing is known"*, which would be a false statement
     /// here — something is known, and it is unreadable.
     CorruptProvenance {
-        /// The claim's subject, so the bad row can be found.
+        /// The claim's subject.
         subject: String,
+        /// The claim's predicate.
+        ///
+        /// Carried because `world_current` is keyed by
+        /// `PRIMARY KEY (subject, predicate_key)`, so the subject alone
+        /// under-identifies the row the moment a subject has more than one
+        /// predicate — which is the ordinary case, and is exactly why
+        /// [`WorldView::ask`] returns a *list* of answers. An error that
+        /// cannot name the row an operator must inspect is a report of a
+        /// fault rather than a report of *which* fault.
+        ///
+        /// Domain shape (`Option`) rather than the storage spelling; the
+        /// `Display` impl renders `predicate_key`'s empty-string form, since
+        /// that is what an operator has to type against the table.
+        predicate: Option<String>,
         /// What was wrong with the digest.
         cause: DigestError,
     },
@@ -121,8 +135,19 @@ impl fmt::Display for AskError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(e) => write!(f, "store: {e:?}"),
-            Self::CorruptProvenance { subject, cause } => {
-                write!(f, "unreadable provenance handle for {subject:?}: {cause}")
+            Self::CorruptProvenance {
+                subject,
+                predicate,
+                cause,
+            } => {
+                // `predicate_key` is the predicate or '' -- rendered as stored,
+                // so the message can be used against the table verbatim.
+                let key = predicate.as_deref().unwrap_or("");
+                write!(
+                    f,
+                    "unreadable provenance handle for world_current row \
+                     (subject={subject:?}, predicate_key={key:?}): {cause}"
+                )
             }
         }
     }
@@ -350,6 +375,7 @@ impl<'a> WorldView<'a> {
         let provenance = EvidenceDigest::new(claim.chain_digest.clone()).map_err(|cause| {
             AskError::CorruptProvenance {
                 subject: claim.subject.clone(),
+                predicate: claim.predicate.clone(),
                 cause,
             }
         })?;

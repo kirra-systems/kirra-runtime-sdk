@@ -70,6 +70,47 @@ fn seed(
     store.rebuild_projections().expect("project");
 }
 
+/// Like [`seed`], but with the predicate under the caller's control.
+///
+/// Needed because `world_current` is keyed by `(subject, predicate_key)`, so a
+/// test about *which row* is damaged cannot use a fixture that pins one
+/// predicate for every claim.
+fn seed_with_predicate(
+    store: &mut WorldStore,
+    n: i64,
+    subject: &str,
+    predicate: &str,
+    trust: Option<&TrustAxes>,
+) {
+    let event = EventId::new(format!("evt-{n}")).unwrap();
+    let observation = ObservationId::new(format!("obs-{n}")).unwrap();
+    store
+        .append(&NewEvent {
+            event_id: &event,
+            observation_id: &observation,
+            txn_time_ms: T0,
+            valid_from_ms: T0,
+            valid_to_ms: None,
+            source: "sensor-a",
+            source_version: "0.1.0",
+            writer_class: WriterClass::Sensor,
+            claim_status: ClaimStatus::Confirmed,
+            provenance: &[],
+            frame_id: None,
+            map_id: None,
+            kind: "observation",
+            subject,
+            predicate: Some(predicate),
+            object: Some("red"),
+            payload: r#"{"n":1}"#,
+            payload_schema: 1,
+            retention_class: "raw",
+            trust,
+        })
+        .expect("append");
+    store.rebuild_projections().expect("project");
+}
+
 fn open(name: &str) -> WorldStore {
     WorldStore::open(&tmp(name)).expect("open")
 }
@@ -412,8 +453,18 @@ fn an_unreadable_provenance_handle_is_refused_rather_than_served() {
 
     let view = WorldView::new(&s, Some(60_000));
     match view.ask("cup-1", T0) {
-        Err(AskError::CorruptProvenance { subject, cause }) => {
+        Err(AskError::CorruptProvenance {
+            subject,
+            predicate,
+            cause,
+        }) => {
             assert_eq!(subject, "cup-1", "names the row to go and look at");
+            assert_eq!(
+                predicate.as_deref(),
+                Some("colour"),
+                "and names it fully -- world_current is keyed by \
+                 (subject, predicate_key), so a subject alone is not a row"
+            );
             // Derived from the planted value rather than hardcoded, so the
             // assertion cannot drift from what was actually written.
             assert_eq!(
@@ -429,6 +480,77 @@ fn an_unreadable_provenance_handle_is_refused_rather_than_served() {
              rule 1 says every answer carries a ProvenanceHandle"
         ),
     }
+}
+
+/// **The error names the damaged row, not merely the damaged subject.**
+///
+/// `world_current` is `PRIMARY KEY (subject, predicate_key)`, so one subject
+/// holds one row per predicate — which is why [`WorldView::ask`] returns a
+/// *list*. An error carrying only the subject would send an operator to a
+/// subject that may have any number of rows, all but one of them fine, with
+/// nothing to say which to inspect.
+///
+/// Here `cup-1` has two predicates and exactly one is corrupted. The test is
+/// worth more than the assertion in the test above because it can distinguish
+/// a correct answer from a lucky one: with a single predicate, an error that
+/// named the wrong predicate — or none — would still pass.
+#[test]
+fn the_error_identifies_which_of_a_subject_s_rows_is_damaged() {
+    let mut s = open("corrupt-which-row");
+    let a = axes(Corroboration::Corroborated(2), Adjudication::Confirmed);
+    seed_with_predicate(&mut s, 1, "cup-1", "colour", Some(&a));
+    seed_with_predicate(&mut s, 2, "cup-1", "position", Some(&a));
+
+    // Two rows, both answerable, so the refusal below is caused by the
+    // corruption rather than by a fixture that never worked.
+    let view = WorldView::new(&s, Some(60_000));
+    let WorldLookup::Answered(before) = view.ask("cup-1", T0).expect("ask") else {
+        panic!("expected answers");
+    };
+    assert_eq!(before.len(), 2, "one row per predicate");
+
+    const PLANTED: &str = "not-a-digest";
+    s.raw_execute_for_test(&format!(
+        "UPDATE world_current SET chain_digest = '{PLANTED}' \
+         WHERE subject = 'cup-1' AND predicate_key = 'position'"
+    ))
+    .expect("plant the corruption in ONE row");
+
+    let view = WorldView::new(&s, Some(60_000));
+    match view.ask("cup-1", T0) {
+        Err(AskError::CorruptProvenance {
+            subject, predicate, ..
+        }) => {
+            assert_eq!(subject, "cup-1");
+            assert_eq!(
+                predicate.as_deref(),
+                Some("position"),
+                "the DAMAGED row, not the intact sibling on the same subject"
+            );
+        }
+        Err(other) => panic!("wrong error: {other}"),
+        Ok(lookup) => panic!("a damaged row was served as {lookup:?}"),
+    }
+}
+
+/// The rendered message carries the storage spelling of the key.
+///
+/// An operator repairing this queries `world_current`, where a claim with no
+/// predicate is stored as `''` rather than as an absent value. A message that
+/// said `None` would not be usable against the table it points at.
+#[test]
+fn the_message_renders_the_key_as_storage_spells_it() {
+    let err = AskError::CorruptProvenance {
+        subject: "cup-1".into(),
+        predicate: None,
+        cause: DigestError::WrongLength { len: 3 },
+    };
+    let shown = err.to_string();
+    assert!(
+        shown.contains("predicate_key=\"\""),
+        "an absent predicate is stored as the empty string: {shown}"
+    );
+    assert!(shown.contains("subject=\"cup-1\""), "{shown}");
 }
 
 /// The same corruption does **not** read as `Unknown`.
