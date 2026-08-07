@@ -281,6 +281,26 @@ measurement, plus the argument for why taking it *now* is not the early answer
 [Measurement 2](#measurement-2--after-the-retention-driver-and-the-reference-types)
 warned against.
 
+### One record says otherwise, and the disagreement is worth naming
+
+#1381's pull request describes itself as firing this trigger — *"Closes Tier 1's
+last implementation item, and with it **fires ADR-0040's Q1 revisit trigger**"*.
+This document takes the narrower reading, so a reader meeting both should not
+have to guess which governs.
+
+**The durable record agrees with this document.** #1381 leaves both §6's and
+§7's checkboxes `- [ ]`; it ticks neither. `WM_SCOPE.md` is the record the
+trigger names, and by that record Tier 1 is open. The pull request's prose is
+commentary on a slice, and it is defensible on its own terms — Tier 1's
+*implementation* work is what that slice closed, and §6's residue really is
+assigned to Tier 2.
+
+The gap between the two is the word **completion**. "Every implementation item
+is done" and "the tier is complete" are not the same claim while two boxes are
+unticked, and the trigger is keyed to the second. Resolving that is the owner's
+call, not a measurement's — which is precisely why nothing here is ticked and no
+disposition is declared.
+
 ## Why measuring now is not answering early
 
 Measurement 2 closed by warning that *"answering early with a more convenient
