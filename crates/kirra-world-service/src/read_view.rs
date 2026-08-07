@@ -86,7 +86,57 @@
 //! the whole point of putting the boundary in a crate the fence already watches
 //! rather than in one it does not.
 
+use kirra_world::evidence::{DigestError, EvidenceDigest};
 use kirra_world_store::{ProjectedClaim, StoreError, TrustAxes, TrustGrade, Validity, WorldStore};
+
+/// Why an ask could not be answered at all.
+///
+/// Distinct from [`WorldLookup::Unknown`], and the split is rule 3: *absence of
+/// knowledge is a success*, and only genuine faults use this channel.
+#[derive(Debug)]
+pub enum AskError {
+    /// The store could not be read.
+    Store(StoreError),
+    /// A stored chain digest is not a digest.
+    ///
+    /// **Refused rather than served**, and the reasoning is this module's own:
+    /// rule 1 says every answer carries a `ProvenanceHandle`, so an answer whose
+    /// handle cannot be parsed is one that cannot be *cited* — serving it would
+    /// break the rule this boundary exists to enforce, while looking like an
+    /// ordinary answer.
+    ///
+    /// It belongs in the **error** channel rather than in `Unknown` because it
+    /// is a storage fault: the stored bytes are not what the schema promises.
+    /// `Unknown` means *"nothing is known"*, which would be a false statement
+    /// here — something is known, and it is unreadable.
+    CorruptProvenance {
+        /// The claim's subject, so the bad row can be found.
+        subject: String,
+        /// What was wrong with the digest.
+        cause: DigestError,
+    },
+}
+
+impl fmt::Display for AskError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(e) => write!(f, "store: {e:?}"),
+            Self::CorruptProvenance { subject, cause } => {
+                write!(f, "unreadable provenance handle for {subject:?}: {cause}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AskError {}
+
+impl From<StoreError> for AskError {
+    fn from(e: StoreError) -> Self {
+        Self::Store(e)
+    }
+}
+
+use core::fmt;
 
 /// Why the world had nothing to say. **Not an error** — see rule 3.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +174,7 @@ pub struct WorldAnswer {
     validity: Validity,
     axes: Option<TrustAxes>,
     grade: Option<TrustGrade>,
-    provenance: String,
+    provenance: EvidenceDigest,
     event_id: String,
 }
 
@@ -202,7 +252,7 @@ impl WorldAnswer {
     /// the claim in the tamper-evident log, so a reader can verify it instead of
     /// trusting the API that served it.
     #[must_use]
-    pub fn provenance(&self) -> &str {
+    pub fn provenance(&self) -> &EvidenceDigest {
         &self.provenance
     }
 
@@ -256,18 +306,20 @@ impl<'a> WorldView<'a> {
     ///
     /// Only on a storage fault. An empty or wholly-inadmissible result is
     /// [`WorldLookup::Unknown`], which is a **success**.
-    pub fn ask(&self, subject: &str, now_ms: i64) -> Result<WorldLookup, StoreError> {
+    pub fn ask(&self, subject: &str, now_ms: i64) -> Result<WorldLookup, AskError> {
         let claims = self.store.current(subject, now_ms)?;
         if claims.is_empty() {
             return Ok(WorldLookup::Unknown(UnknownReason::NoClaim));
         }
 
         let clock = now_ms.max(0).unsigned_abs();
-        let answers: Vec<WorldAnswer> = claims
+        let mut answers: Vec<WorldAnswer> = Vec::new();
+        for c in claims
             .iter()
             .filter(|c| Self::is_admissible(c, clock, self.staleness_budget_ms))
-            .map(|c| self.bind(c, clock))
-            .collect();
+        {
+            answers.push(self.bind(c, clock)?);
+        }
 
         if answers.is_empty() {
             return Ok(WorldLookup::Unknown(UnknownReason::NoneAdmissible));
@@ -291,16 +343,25 @@ impl<'a> WorldView<'a> {
     }
 
     /// The one place a `WorldAnswer` is built — every field populated together.
-    fn bind(&self, claim: &ProjectedClaim, clock: u64) -> WorldAnswer {
-        WorldAnswer {
+    ///
+    /// Fallible only on the provenance handle, which is the one field that
+    /// carries an invariant the row cannot enforce.
+    fn bind(&self, claim: &ProjectedClaim, clock: u64) -> Result<WorldAnswer, AskError> {
+        let provenance = EvidenceDigest::new(claim.chain_digest.clone()).map_err(|cause| {
+            AskError::CorruptProvenance {
+                subject: claim.subject.clone(),
+                cause,
+            }
+        })?;
+        Ok(WorldAnswer {
             subject: claim.subject.clone(),
             predicate: claim.predicate.clone(),
             value: claim.payload.clone(),
             validity: claim.validity_at(clock, self.staleness_budget_ms),
             axes: claim.trust,
             grade: claim.grade_at(clock, self.staleness_budget_ms),
-            provenance: claim.chain_digest.clone(),
+            provenance,
             event_id: claim.event_id.clone(),
-        }
+        })
     }
 }
