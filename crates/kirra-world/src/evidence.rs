@@ -119,21 +119,36 @@ impl EvidenceDigest {
     /// characters of **lower-case** hex.
     pub fn new(v: impl Into<String>) -> Result<Self, DigestError> {
         let v = v.into();
-        if v.chars().count() != DIGEST_HEX_LEN {
-            return Err(DigestError::WrongLength {
-                len: v.chars().count(),
-            });
-        }
-        // Order matters: report the case problem specifically when the value is
-        // otherwise a valid digest, so "wrong case" never hides behind the
-        // blunter "not a digest".
-        if v.chars().all(|c| c.is_ascii_hexdigit()) {
-            if v.chars().any(|c| c.is_ascii_uppercase()) {
-                return Err(DigestError::UppercaseHex);
+
+        // One pass, then the decision. The loop deliberately does NOT return
+        // early on a non-hex character: length is checked first, so a short
+        // non-hex value must report its length rather than its content, and an
+        // early return would decide before the length is known.
+        let mut len = 0usize;
+        let mut all_hex = true;
+        let mut saw_upper = false;
+        for c in v.chars() {
+            len += 1;
+            if !c.is_ascii_hexdigit() {
+                all_hex = false;
+            } else if c.is_ascii_uppercase() {
+                saw_upper = true;
             }
-            return Ok(Self(v));
         }
-        Err(DigestError::NonHexCharacter)
+
+        // The precedence, in the order it is documented. "Wrong case" must not
+        // hide behind the blunter "not a digest", so the hex check comes first
+        // and the case check only sees values that are otherwise valid.
+        if len != DIGEST_HEX_LEN {
+            return Err(DigestError::WrongLength { len });
+        }
+        if !all_hex {
+            return Err(DigestError::NonHexCharacter);
+        }
+        if saw_upper {
+            return Err(DigestError::UppercaseHex);
+        }
+        Ok(Self(v))
     }
 
     /// The digest, exactly as admitted.
@@ -257,6 +272,35 @@ mod tests {
         assert_eq!(
             EvidenceDigest::new(mixed).expect_err("refused"),
             DigestError::UppercaseHex
+        );
+    }
+
+    /// **The precedence itself**, pinned with the only input that can see it.
+    ///
+    /// A value needs BOTH an upper-case hex character and a non-hex character to
+    /// distinguish "hex first" from "case first" — anything less passes under
+    /// either order. Without this test the documented precedence was decorative:
+    /// inverting the two checks left every other test green.
+    ///
+    /// `NonHexCharacter` is the right answer because it is the more fundamental
+    /// complaint. Reporting the case of a value that is not a digest at all
+    /// would send an investigator to fix the capitalisation of something that
+    /// was never going to parse.
+    #[test]
+    fn a_value_wrong_in_both_ways_reports_the_more_fundamental_one() {
+        let mut both = REAL.to_string();
+        both.replace_range(0..1, "A"); // upper-case, and a hex digit
+        both.replace_range(1..2, "z"); // not a hex digit at all
+        assert_eq!(
+            both.chars().count(),
+            DIGEST_HEX_LEN,
+            "length is not the issue"
+        );
+
+        assert_eq!(
+            EvidenceDigest::new(both).expect_err("refused"),
+            DigestError::NonHexCharacter,
+            "not-a-digest outranks wrong-case"
         );
     }
 

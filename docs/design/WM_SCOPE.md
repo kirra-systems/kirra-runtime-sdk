@@ -734,7 +734,7 @@ Eight verbs in §14.2; about five exist in partial form.
 - [ ] `Resolve` · [ ] `Related` (bounded graph) · [ ] `WhatIsAt` ·
       [ ] `Capabilities` · [ ] `Freshness`
 - [x] **`evidence_digest` / `prev_hash` as core types** — **DONE 2026-08-07**,
-      `crates/kirra-world/src/evidence.rs`, 10 unit tests + 5 seam tests in the
+      `crates/kirra-world/src/evidence.rs`, 11 unit tests + 5 seam tests in the
       store, still zero-dependency.
       Moved here from §7 the same day by `KIRRA-WM-TIER1-DONE-001`: core-crate
       work, listed at the tier that first *requires* it, since rule 1 below
