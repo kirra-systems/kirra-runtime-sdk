@@ -96,6 +96,17 @@ CREATE TABLE IF NOT EXISTS subject_summary (
 
 CREATE INDEX IF NOT EXISTS idx_subject_summary_last
     ON subject_summary (last_observed_ms);
+
+-- The SAME checkpoint table `PROJECTIONS_V1` declares, repeated because either
+-- projection may be folded without the other and each must be able to install
+-- what it needs. `IF NOT EXISTS` makes the duplication idempotent rather than a
+-- conflict, and the table is keyed by projection name so the two checkpoints
+-- coexist as separate rows.
+CREATE TABLE IF NOT EXISTS projection_checkpoint (
+    name         TEXT    PRIMARY KEY,
+    generation   INTEGER NOT NULL,
+    state_digest TEXT    NOT NULL
+);
 "#;
 
 /// One event's contribution to a subject's summary.
