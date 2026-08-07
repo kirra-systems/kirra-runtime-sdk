@@ -2,6 +2,13 @@
 
 **KIRRA-WM-Q1-BASELINE-001** · recorded 2026-08-06
 
+> **Reading order.** This document is a series of **dated measurements**, each
+> standing as taken. Statements below about the trigger *not* having fired were
+> true when written and are **not** revised — see
+> [THE TRIGGER HAS FIRED — 2026-08-07](#the-trigger-has-fired--2026-08-07) at the
+> end for current state. A pointer, not an edit: a baseline you revise is not a
+> baseline, but one a reader can misquote as current is not much better.
+
 ## This is NOT the Q1 disposition, and must not be read as one
 
 [ADR-0040](../adr/0040-world-model-ownership-and-boundary.md)'s open question 1
@@ -550,6 +557,41 @@ pure, and collapsing the store into it would place `rusqlite`, `serde_json`,
 anything measured here and is untouched by it. The measurement is a second
 support for retention, not its only one — and had the number come out the other
 way, the two would have been in tension rather than the number simply winning.
+
+## THE TRIGGER HAS FIRED — 2026-08-07
+
+Appended after the fact, and deliberately not folded into the measurement above.
+
+`KIRRA-WM-TIER1-DONE-001` was adopted on 2026-08-07: **Tier 1 is done.** Both
+Tier 1 boxes are ticked and both residues were relocated to the tiers that own
+them. So the precondition this measurement was careful to say had *not* been
+met is now met — on **both** of the trigger's clauses, not only the substantive
+one, since ticking the boxes satisfies the proxy outright.
+
+**Nothing above is revised.** The measurement stands exactly as taken, including
+its own statement that the trigger had not fired, which was true when written.
+Editing it to read as though it were taken *at* the moment of firing would
+destroy the one property that makes it evidence: it was recorded and merged
+(`ed0a82e5`) **before** the criterion that fired the trigger existed, so it
+cannot have been shaped to suit it.
+
+That ordering is worth stating plainly, because the reverse is the ordinary
+failure: a measurement taken after a decision is due, by the person who wants a
+particular answer, is a justification wearing a measurement's clothes.
+
+**What this measurement puts in front of the ruling.** The two outcomes
+ADR-0040 pre-authorized, and which one the evidence selects:
+
+| Outcome | Selected? |
+|---|---|
+| The seam carries real consumption → **retained** | **yes** — 10 constructor sites, 29 variant references, 26 distinct core paths, 12 public API bindings |
+| The seam is still near-empty → **collapse it** | no — and the figures are a *lower bound*, per the monotonicity argument above |
+
+**Q1's disposition is still a separate act, and is not taken here.** The
+adopting ruling says so in its own words. What has changed is only that the
+question is now ripe, on evidence that predates the ripeness.
+
+---
 
 ## Provenance
 
