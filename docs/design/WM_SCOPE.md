@@ -568,6 +568,8 @@ is **self-releasing and already released** (ADR-0042 Decision 5, recorded
       no-bare-values rule demands every answer carry a `ProvenanceHandle`, and
       Tier 4's `Explain` needs derivation edges to be real structure. Recorded as
       relocated, not resolved — it is still core-crate work.
+      **Since DONE, 2026-08-07** — see §6. Recorded as a pointer rather than by
+      editing the note above, which is a dated record of the move.
 - [x] **Relationship model** (§8) — **DONE 2026-08-06**,
       `crates/kirra-world/src/relationship.rs`, 20 tests, still zero-dependency.
       **All ten §8 record fields**, all 15 predicates across the four groups.
@@ -731,12 +733,47 @@ Eight verbs in §14.2; about five exist in partial form.
 
 - [ ] `Resolve` · [ ] `Related` (bounded graph) · [ ] `WhatIsAt` ·
       [ ] `Capabilities` · [ ] `Freshness`
-- [ ] **`evidence_digest` / `prev_hash` as core types** — moved here from §7 on
-      2026-08-07 by `KIRRA-WM-TIER1-DONE-001`. **Core-crate work, listed at the
-      tier that first requires it**, not reclassified as query work: rule 1 below
-      demands every answer carry a `ProvenanceHandle`, and a handle over two bare
-      hex strings is the thing that rule exists to prevent. Tier 4's `Explain`
-      needs the same edges as real structure.
+- [x] **`evidence_digest` / `prev_hash` as core types** — **DONE 2026-08-07**,
+      `crates/kirra-world/src/evidence.rs`, 11 unit tests + 5 seam tests in the
+      store, still zero-dependency.
+      Moved here from §7 the same day by `KIRRA-WM-TIER1-DONE-001`: core-crate
+      work, listed at the tier that first *requires* it, since rule 1 below
+      demands every answer carry a `ProvenanceHandle` and a handle over two bare
+      hex strings is what that rule exists to prevent.
+      **`EvidenceDigest` admits 64 lower-case hex characters, verbatim.** The
+      case rule is the load-bearing one and looks like pedantry until you see
+      why: `verify_chain` compares digests as **strings**, so an upper-case value
+      is the same *hash* and a different *string*, and a constructor that
+      helpfully lower-cased would report intact chains as broken depending on
+      which side normalized. Same "validate, never normalize" discipline as
+      `reference.rs`, for the same reason — the stored bytes are the evidence,
+      and a constructor that improves them is corrupting them. `UppercaseHex` is
+      a distinct error from `NonHexCharacter` because *"well-formed, wrong case"*
+      and *"not a digest"* send an investigator to different questions.
+      **`PrevHash` is an ENUM, not a digest**, because the first record has no
+      predecessor: its previous-hash position holds `kirra-world:genesis`, which
+      is not a hash and is not hex. A single digest type there would force either
+      widening the invariant or **fabricating a digest for genesis** — a
+      synthetic value in a hash-chained evidence log, which is much the worse.
+      `parse` never falls back to `Genesis` on a corrupt link, since a truncated
+      chain whose first surviving row claimed to be the beginning would verify as
+      a complete one.
+      **The genesis sentinel now has ONE definition.** It was a literal in both
+      the core and the store; the store re-exports the core's constant, because
+      the value is inside the hashed bytes of every first record and two
+      definitions of a frozen constant are two chances to drift.
+      **Seam-tested against the real producer** (`kirra-world-store/tests/
+      chain_identity_types.rs`): a digest the store actually emitted is
+      admissible, every head along a growing chain is admissible and distinct,
+      and stored digests really are lower case — so the case rule is tied to a
+      producer rather than to an opinion. A type whose admission rule disagreed
+      with the thing it types would refuse genuine evidence while looking like a
+      tightening.
+      **Still open:** the store's own chain path and `ProjectedClaim.chain_digest`
+      remain `String`. This types the *concept*, not yet every position that
+      holds one — the same staging the trust axes had, core first and the read
+      path after. `WorldAnswer::provenance()` returning `EvidenceDigest` is the
+      next hop and waits on #1388.
 
 Three rules matter more than the verb count:
 

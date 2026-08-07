@@ -121,6 +121,7 @@
 #![warn(missing_docs)]
 
 pub mod entity;
+pub mod evidence;
 pub mod kind;
 pub mod observation;
 pub mod reference;
