@@ -239,16 +239,40 @@ fn the_schema_refuses_a_rejected_axis_under_confirmed_status() {
     let mut s = open("check-teeth");
     let a = axes(Corroboration::Contradicted(2), Adjudication::Rejected);
 
+    assert_eq!(s.count().expect("count"), 0, "empty to begin with");
+
     let out = append(&mut s, 1, "cup-1", None, Some(&a), ClaimStatus::Confirmed);
+
+    // Refused BY THE CHECK, not merely "some error happened". A bare
+    // `is_err()` would pass on a transient IO fault and prove nothing about
+    // the constraint -- which is the same vacuity the anchor test above
+    // exists to rule out, so this file should not tolerate it here.
+    let err = out.expect_err("claim_status must not drift from the axis it stands for");
     assert!(
-        out.is_err(),
-        "claim_status must not be able to drift from the axis it stands for"
+        matches!(err, kirra_world_store::StoreError::Sqlite(_)),
+        "expected the storage layer's constraint refusal, got {err:?}"
     );
+    assert!(
+        format!("{err:?}").contains("CHECK"),
+        "expected a CHECK constraint violation, got {err:?}"
+    );
+
+    // Refused AND not partially written. An evidence log that keeps a row it
+    // said it rejected is worse than one that never refused: the chain would
+    // carry a record no rule admits.
+    assert_eq!(
+        s.count().expect("count"),
+        0,
+        "a refused append must leave nothing behind"
+    );
+    s.verify_chain()
+        .expect("the chain is intact after a refusal");
 
     // The legal filing of the same axis still works, so the refusal above is
     // about the disagreement and not about rejected claims being unwritable.
     append(&mut s, 2, "cup-1", None, Some(&a), ClaimStatus::Candidate)
         .expect("a rejected claim is storable under candidate status");
+    assert_eq!(s.count().expect("count"), 1, "and the legal one did land");
 }
 
 // ---------------------------------------------------------------------------
