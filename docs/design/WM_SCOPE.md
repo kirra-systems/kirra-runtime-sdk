@@ -430,9 +430,35 @@ is **self-releasing and already released** (ADR-0042 Decision 5, recorded
       guard rather than around it. That
       follows §6.2 over §6.1's field table, which **contradict each other**; the
       tension is recorded in the module as an open question rather than resolved.
+      **`first_observed` / `last_observed` / `provenance_head` DONE 2026-08-07**,
+      `crates/kirra-world-store/src/entity_projection.rs` + the store's
+      `fold_subject_summary`, 10 unit + 9 integration tests.
+      **They are a PROJECTION, not a table** — `WM2_EVENT_SCHEMA.md` §7 rules
+      `entities_projection` a rebuildable view that "follows from the fold, not
+      from this table", so no new DDL entered the ratified schema surface and no
+      version bump was involved. Derived by folding the event log, which is what
+      stops them drifting from the evidence — the same argument that leaves
+      validity without a column. Installed lazily like `PROJECTIONS_V1`, because
+      creating projection tables at `open` would move D-20's `log_only_bytes`
+      and invalidate the comparison the retention horizons rest on.
+      Ages on `txn_time_ms` (same choice, same reason, as the retention driver);
+      `provenance_head` is a **chain digest**, so a subject's summary can be
+      *cited* rather than merely read; the head follows **generation**, not time,
+      because generation is unique and a time tie-break would not be reproducible.
+      **Keyed on `subject`, not on an entity id — a recorded limit, not an
+      oversight.** `SubjectRef` distinguishes `Entity` / `Candidate` / `Frame` /
+      `Unbound`; storage flattens all four into one `subject TEXT NOT NULL` with
+      no discriminant, so the fold cannot restrict itself to resolved entities
+      and the module is named `subject_summary` for what it actually computes.
+      Same shape as the `writer_class`-vs-`origin` finding. Carrying the
+      discriminant touches `subject`, which is inside the hashed bytes, so it
+      needs the append-only-when-present treatment the trust axes got — its own
+      slice.
       **Still open:** identity *adjudication* — candidate clustering, merge/split
-      events — is Tier 2. `entity_id` generation, `first_observed`/
-      `last_observed` and `provenance_head` need the store (ULID, hashing).
+      events — is Tier 2. **`entity_id` generation belongs there too**, not here:
+      minting an id is deciding that something is a distinct thing, which is
+      adjudication, whereas the three fields above are arithmetic over evidence
+      that already exists. This list previously grouped it with them.
 - [ ] **Observation model** (§7) — **pure half DONE 2026-08-06**,
       `crates/kirra-world/src/observation.rs`, 17 tests, still zero-dependency.
       Delivered: `Confidence`/`ConfidenceBasis` (§7.3), `SourceClass` + its

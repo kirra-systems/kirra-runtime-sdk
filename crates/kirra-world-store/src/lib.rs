@@ -87,9 +87,14 @@ pub mod projection;
 pub mod retention_driver;
 pub mod retention_sweeper;
 pub mod schema;
+pub mod subject_projection;
 
 pub use compaction::{Citation, CompactionOutcome, DegradedSummary, Resolution, TemporalAnswer};
 pub use projection::{ProjectedClaim, CURRENT_PROJECTION};
+pub use subject_projection::{
+    subject_fold_all, subject_fold_step, ProjectedSubject, SubjectObservation,
+    SUBJECT_SUMMARY_PROJECTION,
+};
 
 // The domain core's types, re-exported so a caller of this crate needs only one
 // import to build an event. These are no longer placeholders and no longer
@@ -2396,4 +2401,280 @@ impl WorldStore {
         let rows = stmt.query_map(params![since_ms], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+}
+
+// ---------------------------------------------------------------------------
+// The per-subject summary projection (§6's first_observed / last_observed /
+// provenance_head)
+// ---------------------------------------------------------------------------
+
+impl WorldStore {
+    /// Install the subject-summary DDL. Lazy, for the D-20 reason in
+    /// [`subject_projection`]'s module docs.
+    fn ensure_subject_summary(&self) -> Result<(), StoreError> {
+        self.conn
+            .execute_batch(subject_projection::SUBJECT_PROJECTION_V1)?;
+        Ok(())
+    }
+
+    /// Whether the subject-summary table has been installed.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the catalogue cannot be read.
+    pub fn has_subject_summary(&self) -> Result<bool, StoreError> {
+        let n: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='subject_summary'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(n.is_some())
+    }
+
+    /// How far the subject-summary fold has consumed.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the checkpoint cannot be read.
+    pub fn subject_summary_generation(&self) -> Result<i64, StoreError> {
+        if !self.has_subject_summary()? {
+            return Ok(0);
+        }
+        let g: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT generation FROM projection_checkpoint WHERE name = ?1",
+                params![subject_projection::SUBJECT_SUMMARY_PROJECTION],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(g.unwrap_or(0))
+    }
+
+    /// Fold new events into the subject summary. Returns the generation reached.
+    ///
+    /// **Confirmed-only**, following [`crate::projection`]'s precedent rather
+    /// than diverging from it. A candidate is a proposal, not an observation,
+    /// and two projections disagreeing about what counts would be a trap: a
+    /// reader comparing `world_current` against this summary would find
+    /// subjects in one and not the other for reasons neither table states.
+    ///
+    /// A subject known *only* from candidates therefore has no row here, which
+    /// is the honest answer — nothing confirmed has been observed about it —
+    /// and [`WorldStore::candidates`] is how you ask the other question.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any storage failure.
+    pub fn fold_subject_summary(&mut self) -> Result<i64, StoreError> {
+        self.ensure_subject_summary()?;
+        let from = self.subject_summary_generation()?;
+        self.fold_subject_range(from)
+    }
+
+    /// Discard the subject summary and rebuild it from generation 0.
+    ///
+    /// The result must equal an incremental fold. That is ADR-0041's stated
+    /// purity property, and
+    /// [`WorldStore::subject_summary_state_digest`] is how it is checked rather
+    /// than assumed.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any storage failure.
+    pub fn rebuild_subject_summary(&mut self) -> Result<i64, StoreError> {
+        self.ensure_subject_summary()?;
+        self.conn.execute("DELETE FROM subject_summary", [])?;
+        self.conn.execute(
+            "DELETE FROM projection_checkpoint WHERE name = ?1",
+            params![subject_projection::SUBJECT_SUMMARY_PROJECTION],
+        )?;
+        self.fold_subject_range(0)
+    }
+
+    fn fold_subject_range(&mut self, from_generation: i64) -> Result<i64, StoreError> {
+        let tx = self.conn.transaction()?;
+        let mut head = from_generation;
+        {
+            let mut stmt = tx.prepare(
+                "SELECT subject, txn_time_ms, generation, event_id, chain_digest
+                 FROM world_events
+                 WHERE generation > ?1 AND claim_status = 'confirmed'
+                 ORDER BY generation ASC",
+            )?;
+            let mut rows = stmt.query(params![from_generation])?;
+
+            // The upsert IS the fold step, expressed in SQL — the bounds are a
+            // min and a max taken independently of which event is the head, and
+            // the head advances only on a greater generation. It must stay in
+            // lock-step with `subject_fold_step`; `the_sql_upsert_computes_what_the_pure_fold_computes`
+            // walks a real log through both and compares.
+            let mut upsert = tx.prepare(
+                "INSERT INTO subject_summary (
+                    subject, first_observed_ms, last_observed_ms, provenance_head,
+                    observation_count, last_generation, last_event_id
+                 ) VALUES (?1,?2,?2,?3,1,?4,?5)
+                 ON CONFLICT (subject) DO UPDATE SET
+                    observation_count = subject_summary.observation_count + 1,
+                    first_observed_ms = MIN(subject_summary.first_observed_ms, excluded.first_observed_ms),
+                    last_observed_ms  = MAX(subject_summary.last_observed_ms,  excluded.last_observed_ms),
+                    provenance_head = CASE
+                        WHEN excluded.last_generation > subject_summary.last_generation
+                        THEN excluded.provenance_head ELSE subject_summary.provenance_head END,
+                    last_event_id = CASE
+                        WHEN excluded.last_generation > subject_summary.last_generation
+                        THEN excluded.last_event_id ELSE subject_summary.last_event_id END,
+                    last_generation = MAX(subject_summary.last_generation, excluded.last_generation)",
+            )?;
+
+            while let Some(r) = rows.next()? {
+                let subject: String = r.get(0)?;
+                let txn_time_ms: i64 = r.get(1)?;
+                let generation: i64 = r.get(2)?;
+                let event_id: String = r.get(3)?;
+                let chain_digest: String = r.get(4)?;
+                head = head.max(generation);
+                upsert.execute(params![
+                    subject,
+                    txn_time_ms,
+                    chain_digest,
+                    generation,
+                    event_id
+                ])?;
+            }
+        }
+
+        // Advance past every event CONSIDERED, not merely every event adopted —
+        // a batch of candidates adopts nothing, and a checkpoint that stayed
+        // put would re-scan them on every fold forever. Same reasoning as
+        // `fold_range`.
+        let considered: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(generation), ?1) FROM world_events",
+            params![from_generation],
+            |r| r.get(0),
+        )?;
+        head = head.max(considered);
+
+        tx.execute(
+            "INSERT INTO projection_checkpoint (name, generation, state_digest)
+             VALUES (?1, ?2, '')
+             ON CONFLICT (name) DO UPDATE SET generation = excluded.generation",
+            params![subject_projection::SUBJECT_SUMMARY_PROJECTION, head],
+        )?;
+        let digest = subject_summary_digest_of(&tx)?;
+        tx.execute(
+            "UPDATE projection_checkpoint SET state_digest = ?1 WHERE name = ?2",
+            params![digest, subject_projection::SUBJECT_SUMMARY_PROJECTION],
+        )?;
+        tx.commit()?;
+        Ok(head)
+    }
+
+    /// One subject's summary, or `None` if nothing confirmed names it.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any storage failure.
+    pub fn subject_summary(
+        &self,
+        subject: &str,
+    ) -> Result<Option<subject_projection::ProjectedSubject>, StoreError> {
+        if !self.has_subject_summary()? {
+            return Ok(None);
+        }
+        let row = self
+            .conn
+            .query_row(
+                "SELECT subject, first_observed_ms, last_observed_ms, provenance_head,
+                        observation_count, last_generation, last_event_id
+                 FROM subject_summary WHERE subject = ?1",
+                params![subject],
+                |r| {
+                    Ok(subject_projection::ProjectedSubject {
+                        subject: r.get(0)?,
+                        first_observed_ms: r.get(1)?,
+                        last_observed_ms: r.get(2)?,
+                        provenance_head: r.get(3)?,
+                        observation_count: r.get(4)?,
+                        last_generation: r.get(5)?,
+                        last_event_id: r.get(6)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Every subject summary, ordered by subject.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any storage failure.
+    pub fn subject_summaries(
+        &self,
+    ) -> Result<Vec<subject_projection::ProjectedSubject>, StoreError> {
+        if !self.has_subject_summary()? {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT subject, first_observed_ms, last_observed_ms, provenance_head,
+                    observation_count, last_generation, last_event_id
+             FROM subject_summary ORDER BY subject ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(subject_projection::ProjectedSubject {
+                subject: r.get(0)?,
+                first_observed_ms: r.get(1)?,
+                last_observed_ms: r.get(2)?,
+                provenance_head: r.get(3)?,
+                observation_count: r.get(4)?,
+                last_generation: r.get(5)?,
+                last_event_id: r.get(6)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// A digest over the whole subject summary, for the
+    /// rebuild-equals-incremental assertion.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any storage failure.
+    pub fn subject_summary_state_digest(&self) -> Result<String, StoreError> {
+        subject_summary_digest_of(&self.conn)
+    }
+}
+
+/// Digest of the subject summary, taken in subject order so it is stable.
+fn subject_summary_digest_of(conn: &Connection) -> Result<String, StoreError> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut stmt = conn.prepare(
+        "SELECT subject, first_observed_ms, last_observed_ms, provenance_head,
+                observation_count, last_generation, last_event_id
+         FROM subject_summary ORDER BY subject ASC",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        let subject: String = r.get(0)?;
+        let first: i64 = r.get(1)?;
+        let last: i64 = r.get(2)?;
+        let head: String = r.get(3)?;
+        let count: i64 = r.get(4)?;
+        let generation: i64 = r.get(5)?;
+        let event_id: String = r.get(6)?;
+        hasher.update(
+            format!("{subject}\u{1f}{first}\u{1f}{last}\u{1f}{head}\u{1f}{count}\u{1f}{generation}\u{1f}{event_id}\u{1e}")
+                .as_bytes(),
+        );
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
