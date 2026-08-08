@@ -930,13 +930,28 @@ does not describe is how a residue disappears.
       the store's SQLite spelling leaking up into the domain core.
       **One consequence is deliberately not stated** — see the open question
       below.
-- [ ] **`entity_id` minting** — moved here from §6 on 2026-08-07 by
-      `KIRRA-WM-TIER1-DONE-001`. It was always described as belonging here
-      (*"minting an id is deciding that something is a distinct thing, which is
-      adjudication"*) while being listed under Tier 1, which is what held that
-      tier's box open on Tier 2 work. Listed rather than deleted: §6's residue
-      was a real work item, and a residue that disappears when a box is ticked
-      is the failure the ruling's own second constraint names.
+- [x] **`entity_id` minting** — **DONE 2026-08-08**,
+      `WorldStore::mint_entity_id` + the `entity_id_mint` ledger (schema v4),
+      6 integration tests.
+      Moved here from §6 on 2026-08-07 by `KIRRA-WM-TIER1-DONE-001`. It was
+      always described as belonging here (*"minting an id is deciding that
+      something is a distinct thing, which is adjudication"*) while being listed
+      under Tier 1, which is what held that tier's box open on Tier 2 work.
+      Listed rather than deleted: §6's residue was a real work item, and a
+      residue that disappears when a box is ticked is the failure the ruling's
+      own second constraint names.
+      §6.1 asks for ids that are *"stable, opaque, monotonic. Never reused, never
+      encodes semantics."* Stable and opaque are properties of the **type**; the
+      other two are properties of the **generator**, which is why they need
+      durable state and could not live in the zero-dependency core. Monotonicity
+      takes its floor from the durable high-water rather than the clock, so an
+      NTP step or a VM restore cannot regress an id — tested by moving the clock
+      backwards and across a reopen. Never-reuse is the ledger's `PRIMARY KEY`,
+      demonstrated by writing a minted id twice and finding the constraint fire,
+      rather than described.
+      **This box was left unticked when the work merged (2026-08-08) and was
+      caught on re-reading, not by a gate.** Prose cannot fail CI, which is why
+      it is the thing that goes stale.
 
 **RULED 2026-08-08 — `KIRRA-WM-CANDIDATE-ID-001`**
 ([proposal](WM_CANDIDATE_ID_PROPOSAL.md)): a candidate's identifier **may not
