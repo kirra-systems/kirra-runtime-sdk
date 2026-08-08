@@ -1294,12 +1294,8 @@ impl WorldStore {
     fn ensure_entity_projection(&self) -> Result<(), StoreError> {
         self.conn
             .execute_batch(entity_projection::ENTITY_PROJECTION_V1)?;
-        self.conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS projection_checkpoint (
-                 name       TEXT PRIMARY KEY,
-                 generation INTEGER NOT NULL
-             );",
-        )?;
+        self.conn
+            .execute_batch(projection::PROJECTION_CHECKPOINT_V1)?;
         Ok(())
     }
 
@@ -1447,10 +1443,22 @@ impl WorldStore {
                 ])?;
             }
 
+            // The digest is written WITH the generation, from the accumulator
+            // that produced it. A checkpoint recording only how far a fold got
+            // cannot tell a resumed fold whether the state it is resuming into
+            // is the state that fold left -- which is the divergence
+            // rebuild-equals-incremental exists to detect.
             tx.execute(
-                "INSERT INTO projection_checkpoint (name, generation) VALUES (?1, ?2)
-                 ON CONFLICT(name) DO UPDATE SET generation = excluded.generation",
-                params![entity_projection::ENTITY_PROJECTION, head],
+                "INSERT INTO projection_checkpoint (name, generation, state_digest)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(name) DO UPDATE SET
+                     generation = excluded.generation,
+                     state_digest = excluded.state_digest",
+                params![
+                    entity_projection::ENTITY_PROJECTION,
+                    head,
+                    entity_projection::state_digest_of(&acc)
+                ],
             )?;
         }
         tx.commit()?;
@@ -1554,23 +1562,9 @@ impl WorldStore {
     ///
     /// As [`WorldStore::load_entity_projection`].
     pub fn entity_projection_state_digest(&self) -> Result<String, StoreError> {
-        let rows = self.load_entity_projection()?;
-        let mut buf = String::new();
-        for (id, e) in &rows {
-            buf.push_str(id);
-            buf.push('\u{1f}');
-            buf.push_str(entity_projection::lifecycle_token(&e.lifecycle));
-            buf.push('\u{1f}');
-            buf.push_str(
-                entity_projection::redirect_json(&e.lifecycle)
-                    .as_deref()
-                    .unwrap_or(""),
-            );
-            buf.push('\u{1f}');
-            buf.push_str(if e.is_contradicted() { "1" } else { "0" });
-            buf.push('\u{1e}');
-        }
-        Ok(sha256_hex(buf.as_bytes()))
+        Ok(entity_projection::state_digest_of(
+            &self.load_entity_projection()?,
+        ))
     }
 
     /// Recompute the chain from genesis and compare against what is stored.
@@ -2173,6 +2167,8 @@ impl WorldStore {
             }
         }
         self.conn.execute_batch(projection::PROJECTIONS_V1)?;
+        self.conn
+            .execute_batch(projection::PROJECTION_CHECKPOINT_V1)?;
         Ok(())
     }
 

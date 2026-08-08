@@ -442,3 +442,34 @@ fn a_corrupt_projection_refuses_before_any_resolution_happens() {
     );
     cleanup(&path);
 }
+
+/// **Both folds share `projection_checkpoint`, and must agree about its shape.**
+///
+/// `projection::PROJECTIONS_V1` creates it with a NOT NULL `state_digest`.
+/// Every test above folds only the entity projection, so this table was always
+/// created by the entity fold's own DDL — which means no test could have caught
+/// a disagreement. This one folds BOTH in one store, in both orders.
+#[test]
+fn the_two_folds_share_one_checkpoint_table() {
+    for entity_first in [true, false] {
+        let path = tmp(if entity_first { "share-e" } else { "share-w" });
+        let mut s = WorldStore::open(&path).expect("open");
+        seed(&mut s, &scenario());
+
+        if entity_first {
+            s.fold_entity_projection().expect("entity fold first");
+            s.fold().expect("world_current fold second");
+        } else {
+            s.fold().expect("world_current fold first");
+            s.fold_entity_projection().expect("entity fold second");
+        }
+
+        assert_eq!(
+            s.entity_projection_generation().expect("checkpoint"),
+            6,
+            "entity_first={entity_first}: the entity checkpoint survived the other fold"
+        );
+        assert!(s.projection_generation().expect("checkpoint") > 0);
+        cleanup(&path);
+    }
+}

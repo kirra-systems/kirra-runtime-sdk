@@ -101,7 +101,10 @@ CREATE TABLE IF NOT EXISTS entities_projection (
     -- The entity this one was split out of, for `split`.
     origin          TEXT,
     contradicted    INTEGER NOT NULL DEFAULT 0,
-    -- The refused transition, as `from -> attempted @ generation`.
+    -- The refused transition, as JSON:
+    --   {"held":..,"attempted":..,"generation":..}
+    -- Structured, not a rendered sentence: a reload must return what the fold
+    -- recorded rather than a placeholder. See `contradiction_json`.
     contradiction   TEXT
 );
 "#;
@@ -494,6 +497,52 @@ mod tests {
         );
     }
 
+    /// **The digest distinguishes contradiction payloads, not just the flag.**
+    ///
+    /// Two projections that refuse the same entities but name different
+    /// generations must not compare equal: the generation is what an operator
+    /// uses to find the disagreeing event, so an invariant check blind to it
+    /// would pass while pointing two stores at different history.
+    #[test]
+    fn the_digest_covers_the_contradiction_payload() {
+        let base = fold_all([(1, &merge(&["a"], "b")), (2, &merge(&["a"], "c"))]);
+        // Same entities, same lifecycles, same contradicted-ness -- only the
+        // recorded generation differs.
+        let mut shifted = base.clone();
+        shifted.get_mut("a").expect("a").contradiction = Some(Contradiction {
+            held: LifecycleState::Merged,
+            attempted: LifecycleState::Merged,
+            generation: 99,
+        });
+
+        assert_ne!(
+            state_digest_of(&base),
+            state_digest_of(&shifted),
+            "a differing contradiction generation must change the digest"
+        );
+        // Non-vacuous: identical input digests identically.
+        assert_eq!(state_digest_of(&base), state_digest_of(&base.clone()));
+    }
+
+    /// And it distinguishes a split's ORIGIN, which is otherwise invisible —
+    /// `redirect_json` is `None` for `Split`, so a digest over redirect alone
+    /// would rate two products of different parents equal.
+    #[test]
+    fn the_digest_covers_a_split_origin() {
+        let mut a = BTreeMap::new();
+        a.insert(
+            "x".to_owned(),
+            ProjectedEntity {
+                entity: eid("x"),
+                lifecycle: Lifecycle::Split { from: eid("p1") },
+                contradiction: None,
+            },
+        );
+        let mut b = a.clone();
+        b.get_mut("x").expect("x").lifecycle = Lifecycle::Split { from: eid("p2") };
+        assert_ne!(state_digest_of(&a), state_digest_of(&b));
+    }
+
     // -- Determinism ---------------------------------------------------
 
     /// **Rebuild-from-zero equals incremental** — `WM_SCOPE` §0a's Knowledge
@@ -834,4 +883,38 @@ impl kirra_world::resolution::AdjudicationGraph for IdentityView {
             .get(id.as_str())
             .is_some_and(ProjectedEntity::is_contradicted)
     }
+}
+
+/// A digest over a projection accumulator, in key order.
+///
+/// Takes the accumulator rather than reading the table, so the value written
+/// into the checkpoint is the one the fold actually produced.
+///
+/// **The contradiction payload is included, not just the flag.** Digesting only
+/// *whether* an entity is contradicted would let two projections that refuse
+/// the same entities but name different generations compare equal — and the
+/// generation is the field an operator uses to find the disagreeing event, so
+/// the invariant check would pass while pointing two stores at different
+/// history.
+#[must_use]
+pub fn state_digest_of(rows: &BTreeMap<String, ProjectedEntity>) -> String {
+    let mut buf = String::new();
+    for (id, e) in rows {
+        buf.push_str(id);
+        buf.push('\u{1f}');
+        buf.push_str(lifecycle_token(&e.lifecycle));
+        buf.push('\u{1f}');
+        buf.push_str(redirect_json(&e.lifecycle).as_deref().unwrap_or(""));
+        buf.push('\u{1f}');
+        buf.push_str(origin_of(&e.lifecycle).map_or("", EntityId::as_str));
+        buf.push('\u{1f}');
+        buf.push_str(
+            &e.contradiction
+                .as_ref()
+                .map(contradiction_json)
+                .unwrap_or_default(),
+        );
+        buf.push('\u{1e}');
+    }
+    crate::sha256_hex(buf.as_bytes())
 }
