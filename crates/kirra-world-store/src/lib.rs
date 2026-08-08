@@ -3376,16 +3376,25 @@ impl WorldStore {
         let retained = self.subject_summaries()?;
         let all_citations = self.summaries()?;
 
+        // Grouped once, not rescanned per subject: each citation belongs to
+        // exactly one subject, and BOTH tables grow without bound over a
+        // store's life, so a per-subject scan would be quadratic in precisely
+        // the dimension that accumulates.
+        let mut citations_by_subject: std::collections::BTreeMap<&str, Vec<DegradedSummary>> =
+            std::collections::BTreeMap::new();
+        for c in &all_citations {
+            citations_by_subject
+                .entry(c.subject.as_str())
+                .or_default()
+                .push(c.clone());
+        }
+
         let coverage_for = |subject: &str| -> SummaryCoverage {
-            let mine: Vec<_> = all_citations
-                .iter()
-                .filter(|c| c.subject == subject)
-                .cloned()
-                .collect();
-            if mine.is_empty() {
-                SummaryCoverage::Complete
-            } else {
-                SummaryCoverage::Degraded { summaries: mine }
+            match citations_by_subject.get(subject) {
+                None => SummaryCoverage::Complete,
+                Some(mine) => SummaryCoverage::Degraded {
+                    summaries: mine.clone(),
+                },
             }
         };
 

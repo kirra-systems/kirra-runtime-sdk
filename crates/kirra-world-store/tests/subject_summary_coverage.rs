@@ -10,9 +10,7 @@
 //! * a projection head is refused, so a rebuild still reproduces the fold;
 //! * removed content stays **attestable** through `range_digest`.
 
-use kirra_world_store::{
-    ClaimStatus, EventId, NewEvent, ObservationId, WorldStore, WriterClass,
-};
+use kirra_world_store::{ClaimStatus, EventId, NewEvent, ObservationId, WorldStore, WriterClass};
 
 /// Owned ids for one event. [`NewEvent`] borrows its references, so they need a
 /// home that outlives it — and the two are separate types now, which is what
