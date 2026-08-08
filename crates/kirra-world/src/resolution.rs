@@ -150,6 +150,35 @@ pub enum RefusalReason {
         /// The successor it names, which is missing.
         to: EntityId,
     },
+    /// A [`Lifecycle::Superseded`] carries **no** successors.
+    ///
+    /// [`Lifecycle::Superseded`]: crate::entity::Lifecycle::Superseded
+    ///
+    /// The type's own documentation says `by` is *"never empty and never one"*,
+    /// and through `SplitEntity::partition` it cannot be — but `Lifecycle` is a
+    /// plain public enum, so `Superseded { by: Vec::new() }` is constructible,
+    /// and a store decoding a corrupt row can produce one. **Prose held the
+    /// invariant; the type did not.**
+    ///
+    /// Refused rather than resolved because it is *unanswerable*: the id was
+    /// superseded, so it is not itself, and it names nothing it became. Without
+    /// this arm the walk finds no successors, collects no answers, and reports
+    /// `Unknown` — "no such entity" about an id that **exists**, which is the
+    /// exact confusion [`Self::DanglingRedirect`] was introduced to prevent.
+    ///
+    /// # Why a ONE-element list is not refused here
+    ///
+    /// A single-successor supersession violates the same documented invariant,
+    /// but it is unambiguously *answerable*: it resolves to that successor, and
+    /// refusing would discard a correct answer to the question asked. The
+    /// asymmetry is deliberate — this module answers identity questions from
+    /// recorded history and is not the schema validator. Rejecting a malformed
+    /// row belongs at the decoding boundary, fail-closed, where the store can
+    /// refuse it before it is ever walked.
+    EmptySupersession {
+        /// The entity whose supersession names nothing.
+        at: EntityId,
+    },
 }
 
 /// The graph of recorded judgements, as far as resolution needs it.
@@ -200,8 +229,13 @@ pub fn resolve<G: AdjudicationGraph>(graph: &G, id: &EntityId) -> ResolutionOutc
     match walk.expand(id, None) {
         Err(reason) => ResolutionOutcome::Refused(reason),
         Ok(()) => match walk.answers.len() {
-            // Only reachable when the queried id is itself absent: every other
-            // path either yields an answer, or refuses.
+            // Reachable ONLY when the queried id is itself absent. That was
+            // asserted here before it was true: an empty `Superseded` also
+            // collected no answers and fell through to `Unknown`, reporting
+            // "no such entity" about an id the graph had. It is now refused as
+            // `EmptySupersession`, which is what restores this claim —
+            // `unknown_is_reachable_only_when_the_id_is_genuinely_absent`
+            // walks every state to keep it true.
             0 => ResolutionOutcome::Unknown,
             1 => ResolutionOutcome::Located {
                 entity: walk.answers.remove(0),
@@ -253,6 +287,13 @@ impl<G: AdjudicationGraph> Walk<'_, G> {
 
         let successors: Vec<EntityId> = match &lifecycle {
             Lifecycle::Merged { into } => vec![into.clone()],
+            // An empty list is refused rather than walked: with no successors
+            // the walk would collect no answers and the id would report as
+            // `Unknown` despite existing. See `RefusalReason::EmptySupersession`
+            // for why a ONE-element list is answered instead.
+            Lifecycle::Superseded { by } if by.is_empty() => {
+                return Err(RefusalReason::EmptySupersession { at: id.clone() });
+            }
             Lifecycle::Superseded { by } => by.clone(),
             // Every other state is an answer. See `resolve`'s docs for why
             // `Retired` is among them.
@@ -565,6 +606,104 @@ mod tests {
                 limit: MAX_REDIRECT_EDGES,
             }),
             "a one-level fan-out wider than the budget must refuse on the budget"
+        );
+    }
+
+    /// **An existing id must never report as absent.**
+    ///
+    /// A `Superseded` naming nothing was resolving to `Unknown` — "no such
+    /// entity" about an id the graph had — which is exactly what
+    /// `DanglingRedirect` exists to prevent one hop later. It reached `Unknown`
+    /// by collecting no answers, so nothing in the walk had to be wrong for the
+    /// outcome to be.
+    ///
+    /// The type says `by` is never empty and `SplitEntity::partition` enforces
+    /// that, but `Lifecycle` is a plain public enum: the value below compiles,
+    /// and a store decoding a corrupt row can produce it.
+    #[test]
+    fn a_supersession_that_names_nothing_is_refused_not_reported_absent() {
+        let g = graph(&[("a", Lifecycle::Superseded { by: Vec::new() })]);
+        assert_eq!(
+            resolve(&g, &eid("a")),
+            ResolutionOutcome::Refused(RefusalReason::EmptySupersession { at: eid("a") })
+        );
+    }
+
+    /// The same, reached through a redirect rather than at the root — the arm
+    /// must not depend on where in the walk the malformed row turns up.
+    #[test]
+    fn an_empty_supersession_is_refused_deeper_in_the_walk_too() {
+        let g = graph(&[
+            ("a", merged("b")),
+            ("b", Lifecycle::Superseded { by: Vec::new() }),
+        ]);
+        assert_eq!(
+            resolve(&g, &eid("a")),
+            ResolutionOutcome::Refused(RefusalReason::EmptySupersession { at: eid("b") })
+        );
+    }
+
+    /// **A one-element supersession is answered, not refused**, and that is a
+    /// decision rather than an oversight — see `RefusalReason::EmptySupersession`.
+    ///
+    /// It breaks the same documented invariant as the empty case, but unlike it
+    /// the question has an unambiguous answer, and refusing would discard a
+    /// correct one. Rejecting the malformed row belongs at the decoding
+    /// boundary, not in the walk.
+    #[test]
+    fn a_one_element_supersession_still_answers() {
+        let g = graph(&[("a", superseded(&["b"])), ("b", Lifecycle::Established)]);
+        assert_eq!(
+            resolve(&g, &eid("a")),
+            ResolutionOutcome::Located {
+                entity: eid("b"),
+                hops: 1,
+            }
+        );
+    }
+
+    /// **`Unknown` means absent, and nothing else.**
+    ///
+    /// `resolve` claims `Unknown` is reachable only when the queried id is not
+    /// in the graph. That claim was already in the code as a comment while
+    /// being false, so it is asserted here rather than asserted in prose: every
+    /// lifecycle state, including the malformed ones, is queried, and none of
+    /// them may answer `Unknown`.
+    #[test]
+    fn unknown_is_reachable_only_when_the_id_is_genuinely_absent() {
+        let every_state = [
+            Lifecycle::Provisional,
+            Lifecycle::Established,
+            Lifecycle::Dormant,
+            Lifecycle::Retired,
+            Lifecycle::Merged { into: eid("z") },
+            Lifecycle::Split { from: eid("z") },
+            Lifecycle::Superseded { by: vec![eid("z")] },
+            Lifecycle::Superseded {
+                by: vec![eid("z"), eid("z2")],
+            },
+            // The malformed one that used to answer `Unknown`.
+            Lifecycle::Superseded { by: Vec::new() },
+        ];
+
+        for state in every_state {
+            let g = Graph(vec![
+                (eid("a"), state.clone()),
+                (eid("z"), Lifecycle::Established),
+                (eid("z2"), Lifecycle::Dormant),
+            ]);
+            assert_ne!(
+                resolve(&g, &eid("a")),
+                ResolutionOutcome::Unknown,
+                "an id the graph HAS reported as absent, in state {state:?}"
+            );
+        }
+
+        // ...and the one case that must: genuinely not there.
+        assert_eq!(
+            resolve(&Graph(Vec::new()), &eid("a")),
+            ResolutionOutcome::Unknown,
+            "the assertions above would hold vacuously if nothing answered Unknown"
         );
     }
 

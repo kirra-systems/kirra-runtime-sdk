@@ -718,7 +718,7 @@ does not describe is how a residue disappears.
 
 - [x] **Entity resolution, the *reading* half — resolving an identifier through
       the adjudication graph** — **DONE 2026-08-08**,
-      `crates/kirra-world/src/resolution.rs`, 18 unit tests, still
+      `crates/kirra-world/src/resolution.rs`, 22 unit tests, still
       zero-dependency.
       Fills the `ResolutionOutcome` placeholder the crate has carried since it
       was scaffolded, in the shape that placeholder argued for: **not
@@ -740,9 +740,17 @@ does not describe is how a residue disappears.
       (distinct from `Unknown` — the queried id exists, its history is broken),
       and a traversal budget — bounding **total edges, not depth**, so a wide
       partition spends it as a long chain does; the constant is named for the
-      check rather than the other way round. Five negative controls fire,
-      including conflating gray with black and treating `Retired` as a
-      non-answer.
+      check rather than the other way round. A fourth refusal covers an **empty
+      supersession**: `Lifecycle` is a plain public enum, so
+      `Superseded { by: vec![] }` is constructible and a corrupt decoded row can
+      carry it, and without the arm such an id reported `Unknown` — "no such
+      entity" about an id the graph HAS, the same confusion `DanglingRedirect`
+      exists to prevent one hop later. Prose held that invariant and the type did
+      not. A one-element supersession is deliberately *answered* rather than
+      refused: it breaks the same documented rule but has an unambiguous answer,
+      and rejecting a malformed row belongs at the decoding boundary. Six
+      negative controls fire, including conflating gray with black, treating
+      `Retired` as a non-answer, and removing the empty-supersession refusal.
       **Pure, and not yet wired to the store** — same standing as
       `adjudication`: it walks judgements, nothing persists them.
 - [ ] Entity resolution, the *matching* half — **candidate clustering**, deciding
