@@ -752,7 +752,58 @@ does not describe is how a residue disappears.
       negative controls fire, including conflating gray with black, treating
       `Retired` as a non-answer, and removing the empty-supersession refusal.
       **Pure, and not yet wired to the store** — same standing as
-      `adjudication`: it walks judgements, nothing persists them.
+      `adjudication`: it walks judgements, nothing persists them. (Sub-slice 3
+      below closes that.)
+- [x] **Adjudication events persist as evidence rows** — **DONE 2026-08-08**,
+      `crates/kirra-world-store/src/adjudication_record.rs` plus the
+      `WorldStore::append_adjudication` door, 15 integration tests. The schema slice `KIRRA-WM-SPLIT-SURVIVAL-001` named as unblocked
+      and did not build. Sub-slice 1 of 3.
+      **No new table, and that is the finding rather than a shortcut.** Three
+      sources agree that adjudications are `world_events` rows and that entity
+      lifecycle is a *projection* over them: ADR-0041 fixes `world_events` as
+      *"the only writable table"* and lists `entities_projection` as DERIVED;
+      §6.3 says *"identity is a projection like everything else"*; and the
+      **ratified v1 baseline already anticipated it** — `retention_class` has
+      carried `'adjudication'` in its closed vocabulary since the beginning and
+      `compaction::is_protected` holds for it, so such a row is never compacted,
+      which is exactly what §6.3's *"resolvable forever"* needs.
+      Naming the **predicate**, not `compaction::PROTECTED_CLASSES`: the two are
+      not the same thing, and the difference is easy to state wrongly (this
+      section did, and review caught it). `is_protected` is
+      `retention_class != "raw"` — everything except raw is protected — and the
+      constant is the enumeration OQ2 ruled, kept as documentation and not
+      consulted by the compaction path, so editing it would change nothing. The
+      guarantee is asserted end-to-end rather than by token comparison: an
+      adjudication row makes its own window **refuse to compact** when asked of
+      the real planner, with an ordinary raw row in the same test proving the
+      refusal is the retention class talking and not an empty window.
+      **ADR-0041's provisional list also names `identity_adjudications`,
+      unannotated, among the derived tables** — read as a second *writable*
+      table it contradicts the "only writable table" parenthetical three lines
+      above it. The projection reading is stated explicitly in the module rather
+      than left to pass as obvious, since the two readings build different
+      systems.
+      **The decoder never assembles a verb field by field.** It goes back
+      through `MergeEntities::new` / `SplitEntity::partition` / `subtract` /
+      `ForgetEntity::new` / `AssertIdentity::new`, so every refusal those make is
+      a refusal at the storage boundary *structurally*, rather than by a parallel
+      list of checks that could drift. This is where the cardinality check
+      `resolution` deliberately declined now lives: a stored partition naming
+      fewer than two destinations is refused here, so the row never becomes a
+      `Lifecycle::Superseded` for the resolver to meet.
+      An unknown verb or split shape is **refused, never degraded** — the
+      opposite of `ObservationKind`, and deliberately: degrading a
+      *classification* costs a consumer nothing, degrading a *judgement* would
+      drop a redirect and leave a merged-away id resolving to itself. The
+      justification rides the `provenance` column rather than a second copy in
+      the payload. Five negative controls fire, including dropping `shape` from
+      the encoding (a partition would round-trip as a subtraction, undoing the
+      split ruling at the storage layer) and setting a compactable retention
+      class.
+- [ ] **`entities_projection`** — the deterministic reducer folding adjudication
+      rows into lifecycles. Sub-slice 2 of 3.
+- [ ] **`AdjudicationGraph for WorldStore`** — makes `resolution::resolve` live
+      against real data. Small once the projection exists. Sub-slice 3 of 3.
 - [ ] Entity resolution, the *matching* half — **candidate clustering**, deciding
       that two observations are about the same thing. Marked *pure* by §6.3.
       Still open, and still the thing `Corroboration(n)` waits on (§4): the axis
