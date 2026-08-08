@@ -148,6 +148,12 @@ CREATE TABLE IF NOT EXISTS compaction_summaries (
     CHECK (event_count > 0),
     CHECK (last_valid_from_ms >= first_valid_from_ms)
 );
+
+-- The PRIMARY KEY leads with `lo_generation`, so a lookup BY SUBJECT -- which
+-- is how `SummaryCoverage` is computed for every summary read -- cannot use it
+-- and would scan the whole table once per subject.
+CREATE INDEX IF NOT EXISTS idx_compaction_summaries_subject
+    ON compaction_summaries (subject);
 "#;
 
 /// The per-key summary retained when a span is compacted.

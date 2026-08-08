@@ -78,9 +78,20 @@ thrown away**, and that is the question that actually governs the design.
 |---|---|---|
 | **Evidence** | Immutable, hash-chained, **never deleted** — compaction *cites*, it does not erase | Incident reconstruction stays possible |
 | **Admission** | The **only** write door; writer class, confidence basis and frame requirement are all decided here | A rule with no other place to live has one |
-| **Knowledge** | Rebuild-from-zero **==** incremental; **no projection-only fact** | Every belief traces to evidence |
+| **Knowledge** | Rebuild-from-zero **==** incremental **given the evidence retained**; **no projection-only fact** | Every belief traces to evidence |
 | **Access** | Rebuildable from the tier below — **losing an index loses performance, never truth** | The test for "is this an index or a projection?" |
 | **Answer** | Every answer carries provenance; a **degraded answer says so** | `Explain` is possible at all |
+
+**"Given the evidence retained" is a clarification, not a relaxation.** Compaction
+is the one operation that changes the evidence set, so a rebuild after one is not
+folding the same log. What the invariant forbids is compaction quietly turning
+missing history into apparently complete knowledge — so where evidence has been
+removed, **the difference is reported rather than absorbed**. `SummaryCoverage`
+is that report for `subject_summary`, whose aggregates are a MIN and a COUNT over
+all contributing events and therefore depend on the whole log rather than on a
+head. Contrast `world_current`, where removing a head makes an answer *wrong*
+rather than *coarser* — which is why that one is protected outright
+(`ProjectionHeadInRange`) and this one is surfaced instead.
 
 That fourth row is the discriminator worth keeping. A flat component list puts
 spatial index, temporal index and identity resolution side by side — but two of
