@@ -1016,7 +1016,7 @@ mod tests {
     // -- Validation --------------------------------------------------------
 
     #[test]
-    fn empty_identifiers_are_refused() {
+    fn an_empty_alias_name_is_refused() {
         // `EntityId` moved to `crate::reference` on 2026-08-08 and now reports
         // `ReferenceError`; its own emptiness/length/control-character cases are
         // covered there. What this test still owns is the *alias* half.

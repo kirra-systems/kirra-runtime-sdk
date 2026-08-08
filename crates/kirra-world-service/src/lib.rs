@@ -56,10 +56,20 @@ mod tests {
         assert_eq!(id.as_str(), "e-1");
 
         // And it is the SAME type the domain model uses, not a look-alike.
-        // The path is `reference` since 2026-08-08 — the type moved there so
-        // `observation::SubjectRef` could carry it without an entity <->
-        // observation module cycle. What this guard pins is unchanged: the
-        // crate-root name resolves to the constructible domain type.
+        //
+        // The right-hand side is the DECLARATION SITE (`reference`, since
+        // 2026-08-08 — the type moved there so `observation::SubjectRef` could
+        // carry it without an entity <-> observation module cycle), and that is
+        // deliberate rather than incidental.
+        //
+        // `EntityId` here travels `kirra_world` (crate root) -> `kirra_world_store`
+        // -> this crate: the store re-exports the ROOT name, not the module
+        // path. So the left side already carries whatever the root resolves to,
+        // and comparing it against the declaration is what proves the root has
+        // not been shadowed by a placeholder again. Asserting against
+        // `kirra_world::EntityId` instead would put the root on BOTH sides and
+        // make the check tautological — a root regression would compare a
+        // placeholder to itself.
         assert_eq!(id, kirra_world::reference::EntityId::new("e-1").unwrap());
     }
 }
