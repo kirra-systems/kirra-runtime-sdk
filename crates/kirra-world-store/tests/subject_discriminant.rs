@@ -80,9 +80,15 @@ fn ev<'a>(id: &'a Ids, subject: &'a str, subject_ref: Option<&'a SubjectRef>) ->
 
 /// Each storable kind survives a write and a full rehash.
 ///
-/// Walked over all three rather than one, because `verify_chain` rebuilds the
-/// row from its columns — a kind that failed to re-admit would break the chain,
-/// and a kind that re-admitted as a *different* one would not.
+/// Walked over **every** storable kind rather than a sample, because
+/// `verify_chain` rebuilds the row from its columns — a kind that failed to
+/// re-admit would break the chain, and a kind that re-admitted as a *different*
+/// one would not.
+///
+/// That is two kinds, not three: `KIRRA-WM-CANDIDATE-ID-001` removed `candidate`
+/// from the stored vocabulary. Phrased as "every storable kind" rather than a
+/// number so it cannot go stale again the way it just did — the earlier wording
+/// said "all three" and survived the narrowing that made it false.
 #[test]
 fn every_storable_kind_survives_a_write_and_a_rehash() {
     let path = tmp("kinds");
