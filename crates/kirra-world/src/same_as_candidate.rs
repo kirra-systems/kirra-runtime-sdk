@@ -511,6 +511,42 @@ mod tests {
 
     // -- canonicalisation ---------------------------------------------------
 
+    /// **Symmetry permits canonical representation and symmetric lookup; it
+    /// does not manufacture additional evidence.**
+    ///
+    /// Both halves matter and they pull in opposite directions, which is why
+    /// they are pinned together. One asserted `same_as(B, A)` must be
+    /// discoverable under the `(A, B)` spelling — that is the lookup half. But
+    /// the record set must still hold exactly **one** candidate: no
+    /// auto-generated reverse row, because nobody asserted it.
+    /// `KIRRA-WM-TRANSITIVITY-001` bars manufacturing evidence, and a
+    /// synthesized reverse is manufactured evidence one step short of a closure.
+    #[test]
+    fn symmetry_permits_lookup_but_manufactures_no_reverse_row() {
+        // Asserted once, in the (B, A) spelling.
+        let asserted = vec![candidate("robot-b", "robot-a", OBS_A)];
+
+        // Lookup half: discoverable under either spelling.
+        let ab = CandidatePair::new(ent("robot-a"), ent("robot-b")).expect("distinct");
+        let ba = CandidatePair::new(ent("robot-b"), ent("robot-a")).expect("distinct");
+        assert_eq!(ab, ba, "the two spellings are one relation");
+        assert!(
+            proposed_relations(&asserted).contains(&ab),
+            "findable as (A,B)"
+        );
+        assert!(
+            proposed_relations(&asserted).contains(&ba),
+            "findable as (B,A)"
+        );
+
+        // Evidence half: still exactly one candidate, citing exactly what the
+        // producer cited. Nothing in this module returns candidates it was not
+        // given, so a reverse row has no way to come into existence.
+        assert_eq!(asserted.len(), 1, "no reverse candidate was synthesized");
+        assert_eq!(proposed_relations(&asserted).len(), 1);
+        assert_eq!(asserted[0].support(), &[obs(OBS_A)]);
+    }
+
     /// `(a, b)` and `(b, a)` are the same relation, because `same_as` is
     /// symmetric. Without this, emitting both spellings would read as two
     /// relations and defeat per-relation counting.
