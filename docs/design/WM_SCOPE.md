@@ -707,7 +707,59 @@ for Tier 2; it is not driven by anything yet.
 
 ## 5. Tier 2 — Identity adjudication
 
-- [ ] Entity resolution — matching incoming observations to existing entities
+Entity resolution was **one box** here until 2026-08-08, reading *"matching
+incoming observations to existing entities"*. It is two halves, and that wording
+named only one of them — §6.3's pipeline marks the difference itself
+(`candidate clustering (pure) ──► identity assertion (recorded Event)`), and the
+redirect half is the one §6.3 attaches its cost note to: *"identity queries need
+an indirection through the merge graph, and the merge graph grows."* Splitting
+the box rather than part-ticking it, because ticking a box for work its own text
+does not describe is how a residue disappears.
+
+- [x] **Entity resolution, the *reading* half — resolving an identifier through
+      the adjudication graph** — **DONE 2026-08-08**,
+      `crates/kirra-world/src/resolution.rs`, 22 unit tests, still
+      zero-dependency.
+      Fills the `ResolutionOutcome` placeholder the crate has carried since it
+      was scaffolded, in the shape that placeholder argued for: **not
+      `Option<T>`**, because `None` collapses *we looked and it is not there*,
+      *we could not look* and *we looked and are not sure* into one value. Those
+      are `Unknown` / `Refused(reason)` / `Ambiguous`, alongside `Located` —
+      §14.2's `WhereIs -> Located | Unknown | Ambiguous`, with §14.4's
+      outcome-versus-error line drawn so that a self-contradicting graph is an
+      *outcome* a caller must handle rather than an exception to unwrap.
+      `Ambiguous` exists **because of** `KIRRA-WM-SPLIT-SURVIVAL-001`: a merged
+      id redirects to one thing and a partitioned id to *N*, and this is the call
+      site the ruling said a widened `Merged { into }` would have hidden.
+      Gray/black walk (the house idiom, `kirra_safety_authority::dag`) so a
+      **diamond is not a cycle** — a partition whose successors both merge into
+      one entity reconverges to `Located`, and a resolver conflating the two sets
+      would report that legitimate history as corrupt. Three refusals, each for a
+      failure **no constructor can prevent**: a redirect cycle (two individually
+      valid merge events, neither able to see the other), a dangling redirect
+      (distinct from `Unknown` — the queried id exists, its history is broken),
+      and a traversal budget — bounding **total edges, not depth**, so a wide
+      partition spends it as a long chain does; the constant is named for the
+      check rather than the other way round. A fourth refusal covers an **empty
+      supersession**: `Lifecycle` is a plain public enum, so
+      `Superseded { by: vec![] }` is constructible and a corrupt decoded row can
+      carry it, and without the arm such an id reported `Unknown` — "no such
+      entity" about an id the graph HAS, the same confusion `DanglingRedirect`
+      exists to prevent one hop later. Prose held that invariant and the type did
+      not. A one-element supersession is deliberately *answered* rather than
+      refused: it breaks the same documented rule but has an unambiguous answer,
+      and rejecting a malformed row belongs at the decoding boundary. Six
+      negative controls fire, including conflating gray with black, treating
+      `Retired` as a non-answer, and removing the empty-supersession refusal.
+      **Pure, and not yet wired to the store** — same standing as
+      `adjudication`: it walks judgements, nothing persists them.
+- [ ] Entity resolution, the *matching* half — **candidate clustering**, deciding
+      that two observations are about the same thing. Marked *pure* by §6.3.
+      Still open, and still the thing `Corroboration(n)` waits on (§4): the axis
+      and its fold are implemented, and nothing populates the count because no
+      matcher exists. `KIRRA-WM-CANDIDATE-ID-001` constrains rather than supplies
+      it — a candidate's identifier may not enter the hashed evidence record, so
+      candidate membership has to be projected, not frozen.
 - [x] **`MergeEntities` / `SplitEntity` / `ForgetEntity` as recorded events** —
       **DONE 2026-08-07**, `crates/kirra-world/src/adjudication.rs`, 24 unit
       tests, still zero-dependency.

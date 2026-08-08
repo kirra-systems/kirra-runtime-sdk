@@ -8,7 +8,7 @@
 //!
 //! # What this crate contains, and what it still does not
 //!
-//! **Real** — nine modules, pure functions over pure data, still zero
+//! **Real** — ten modules, pure functions over pure data, still zero
 //! dependencies. (It read *seven* until 2026-08-07, having missed `evidence`
 //! when that landed; a hand-maintained count drifts the moment someone adds a
 //! module without rereading the paragraph above it, which is what happened.)
@@ -44,14 +44,19 @@
 //!   split and forget as *recorded events* rather than destructive edits. The
 //!   verb an identity model needs and a lifecycle field cannot supply, since a
 //!   state says what an entity is now and never why or on what evidence.
+//! * [`mod@resolution`] (§6.3, §14.2) — following those recorded judgements:
+//!   what an identifier *is now*, after every merge and split against it. The
+//!   half of `WM_SCOPE.md`'s entity-resolution box that walks history; candidate
+//!   clustering, the half that matches observations to entities, is not here.
 //!
-//! **Still absent:** storage, API and queries — plus the parts of §6/§7 that
-//! genuinely need a dependency (ULID *generation*, content hashing, frames,
-//! maps), which belong to the store. Note the split that settled: the core owns
-//! the **type** and what makes a value admissible; the layer with a clock and a
-//! hash **mints** the value. Five types below are still **unconstructible
-//! placeholders**, each with a private unit field, so no logic can accrete
-//! around a name before the model that gives it meaning exists.
+//! **Still absent:** storage, API and the rest of the query verbs — plus the
+//! parts of §6/§7 that genuinely need a dependency (ULID *generation*, content
+//! hashing, frames, maps), which belong to the store. Note the split that
+//! settled: the core owns the **type** and what makes a value admissible; the
+//! layer with a clock and a hash **mints** the value. Four types below are still
+//! **unconstructible placeholders**, each with a private unit field, so no logic
+//! can accrete around a name before the model that gives it meaning exists.
+//! (It was five until `ResolutionOutcome` was filled on 2026-08-08.)
 //!
 //! The governing decision is the safety-assurance scope ruling
 //! ([ADR-0042](../../../docs/adr/0042-world-model-terminology-and-safety-boundary-scope.md)
@@ -140,6 +145,7 @@ pub mod kind;
 pub mod observation;
 pub mod reference;
 pub mod relationship;
+pub mod resolution;
 pub mod retention;
 pub mod trust;
 
@@ -308,12 +314,25 @@ pub use trust::TrustAxes;
 // Query results
 // ---------------------------------------------------------------------------
 
-/// The outcome of asking Kirra World a question.
+/// The outcome of asking Kirra World what an identifier is now.
 ///
-/// PLACEHOLDER, and deliberately **not** `Option<T>`. ADR-0040 records why:
-/// `Option::None` collapses "we looked and it is not there", "we could not
-/// look", and "we looked and are not sure" into one value — three answers a
-/// caller must treat differently, and the distinction is unrecoverable once
-/// lost.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ResolutionOutcome(());
+/// **No longer a placeholder** — the real type is
+/// [`resolution::ResolutionOutcome`], re-exported rather than redeclared,
+/// following the shape [`EntityId`] and [`TrustAxes`] already use.
+///
+/// It took the shape the placeholder argued for. The note here read: *deliberately
+/// **not** `Option<T>` — `Option::None` collapses "we looked and it is not there",
+/// "we could not look", and "we looked and are not sure" into one value, three
+/// answers a caller must treat differently, and the distinction is unrecoverable
+/// once lost.* Those are now three of its four variants (`Unknown`, `Refused`,
+/// `Ambiguous`), alongside the answer itself.
+///
+/// Scope, since the name is broader than what exists: this resolves an
+/// **identifier through the adjudication graph**, which is §14.2's
+/// `WhereIs -> Located | Unknown | Ambiguous`. The other query verbs in that
+/// section do not share it yet, and whether they should is theirs to decide when
+/// they are built.
+pub use resolution::ResolutionOutcome;
+
+/// Why a resolution refused to answer. See [`mod@resolution`].
+pub use resolution::RefusalReason;
