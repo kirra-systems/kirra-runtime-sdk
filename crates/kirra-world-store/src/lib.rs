@@ -82,6 +82,7 @@ use std::path::Path;
 use kirra_world::retention::RetentionError;
 use rusqlite::{params, Connection, OptionalExtension};
 
+pub mod adjudication_record;
 pub mod compaction;
 pub mod projection;
 pub mod retention_driver;
