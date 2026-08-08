@@ -101,8 +101,9 @@
 //! actuator path, no release token. Pure data and pure functions, zero
 //! dependencies, same as the rest of this crate.
 
-use crate::entity::{EntityId, Lifecycle};
+use crate::entity::Lifecycle;
 use crate::observation::DomainInstant;
+use crate::reference::EntityId;
 use crate::reference::ObservationId;
 
 // ---------------------------------------------------------------------------

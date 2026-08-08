@@ -149,8 +149,8 @@ pub mod trust;
 
 /// Stable identity of a thing the world contains.
 ///
-/// **No longer a placeholder** — the real type is [`entity::EntityId`], and this
-/// is a re-export of it rather than a second type sharing its name.
+/// **No longer a placeholder** — the real type is [`reference::EntityId`], and
+/// this is a re-export of it rather than a second type sharing its name.
 ///
 /// # Why this is a re-export and not a struct
 ///
@@ -170,9 +170,17 @@ pub mod trust;
 /// ADR-0040's constraint on whatever this became still holds and is now the
 /// real type's to keep: identity adjudication is **revisable** — merge and split
 /// are recorded events, not destructive edits — so it cannot be a bare opaque
-/// key that loses its own history. `entity::EntityId` is opaque by construction;
-/// the *history* half is entity resolution, `WM_SCOPE.md` Tier 2.
-pub use entity::EntityId;
+/// key that loses its own history. `reference::EntityId` is opaque by
+/// construction; the *history* half is entity resolution, `WM_SCOPE.md` Tier 2.
+///
+/// **It moved out of `entity` on 2026-08-08.** `entity` imports `observation`,
+/// so an `EntityId` declared there could not be carried by
+/// [`observation::SubjectRef`] without making the two modules mutually
+/// dependent. `reference` is a leaf; both depend on it and neither on the
+/// other. The move also put the type on the shared `reference_newtype!`
+/// validation, so it now refuses over-long and control-character ids like every
+/// other reference — see [`reference::EntityId`].
+pub use reference::EntityId;
 
 /// Identity of a single recorded observation.
 ///
