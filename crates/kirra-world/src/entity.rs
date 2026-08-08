@@ -372,6 +372,8 @@ pub enum LifecycleState {
     Merged,
     /// Produced by splitting another entity. A live state.
     Split,
+    /// Partitioned into several successors. Terminal, but still resolvable.
+    Superseded,
 }
 
 /// An entity's lifecycle — §6.1.
@@ -394,6 +396,38 @@ pub enum Lifecycle {
         /// The entity this one is now an alias for.
         into: EntityId,
     },
+    /// **Partitioned into several successors — terminal, and still
+    /// resolvable.**
+    ///
+    /// `KIRRA-WM-SPLIT-SURVIVAL-001`, adopted 2026-08-08. The blueprint settles
+    /// survivorship for *merge* — *"both original IDs remain resolvable forever
+    /// and answer with a redirect"* — and says nothing for split. This is the
+    /// supplied reading: a partitioned source is superseded exactly as a merged
+    /// one is, and answers with a redirect to **all** of its successors.
+    ///
+    /// # Why not `Merged { into }` carrying a list
+    ///
+    /// The two answer different questions. `Merged` says *"this turned out to
+    /// be part of that"* and redirects to one thing; this says *"this turned
+    /// out to be several things"* and cannot. Collapsing them would make the
+    /// distinction invisible at the call site — see [`Entity::superseded_by`],
+    /// deliberately a sibling of [`Entity::redirects_to`] rather than a
+    /// widening of it.
+    ///
+    /// # Why not `Retired`
+    ///
+    /// `Retired` is what `ForgetEntity` produces and means an operator retired
+    /// this. Overloading it would make "an operator retired this" and "this
+    /// turned out to be several things" the same state, losing the *why* —
+    /// which is the entire reason this module records events rather than
+    /// editing lifecycle fields.
+    Superseded {
+        /// The successors this entity turned out to be.
+        ///
+        /// Never empty and never one: a partition into fewer than two is not a
+        /// partition, which `SplitEntity::partition` refuses at construction.
+        by: Vec<EntityId>,
+    },
     /// **Produced by splitting another entity.** A *live* state carrying its
     /// origin, not a terminal one.
     Split {
@@ -413,13 +447,24 @@ impl Lifecycle {
             Self::Retired => LifecycleState::Retired,
             Self::Merged { .. } => LifecycleState::Merged,
             Self::Split { .. } => LifecycleState::Split,
+            Self::Superseded { .. } => LifecycleState::Superseded,
         }
     }
 
     /// Whether this state admits any further transition.
+    ///
+    /// This is the *second* place terminality is encoded — [`Self::advance_to`]
+    /// is the first, and it is the one that enforces. They are kept in lock-step
+    /// by `is_terminal_agrees_with_what_advance_to_actually_refuses`, which walks
+    /// every state against every state rather than trusting the two lists to be
+    /// edited together: adding `Superseded` to `advance_to` and forgetting it
+    /// here is exactly the drift that test exists to catch.
     #[must_use]
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Retired | Self::Merged { .. })
+        matches!(
+            self,
+            Self::Retired | Self::Merged { .. } | Self::Superseded { .. }
+        )
     }
 
     /// Move to a new lifecycle state.
@@ -440,9 +485,13 @@ impl Lifecycle {
     ///   marks an entity *produced by* a split. It therefore behaves like
     ///   `Established`.
     ///
-    /// Recorded as an open question: **is `Split(from)` a live origin marker or
-    /// a terminal marker on the entity that was split?** The two readings differ
-    /// in whether the *original* survives a split.
+    /// The question of what happens to the entity that *was* split was recorded
+    /// here as open, and is now settled by `KIRRA-WM-SPLIT-SURVIVAL-001`: the
+    /// source does not take `Split` at all. It takes [`Lifecycle::Superseded`],
+    /// which is **terminal** and carries a redirect to every successor — so a
+    /// partitioned original survives as a resolvable pointer, exactly as a merged
+    /// one does, and `Split(from)` is left unambiguously a live origin marker on
+    /// the products.
     ///
     /// # Errors
     ///
@@ -453,7 +502,10 @@ impl Lifecycle {
 
         let permitted = match from {
             // Terminal states admit nothing.
-            LifecycleState::Retired | LifecycleState::Merged => false,
+            // `Superseded` joins the terminal states: a partitioned entity is
+            // as finished as a merged one, and admitting a transition out would
+            // lose the redirect that makes it resolvable forever.
+            LifecycleState::Retired | LifecycleState::Merged | LifecycleState::Superseded => false,
             LifecycleState::Provisional => matches!(
                 to,
                 LifecycleState::Established
@@ -461,6 +513,7 @@ impl Lifecycle {
                     | LifecycleState::Retired
                     | LifecycleState::Merged
                     | LifecycleState::Split
+                    | LifecycleState::Superseded
             ),
             LifecycleState::Established | LifecycleState::Split => matches!(
                 to,
@@ -468,6 +521,7 @@ impl Lifecycle {
                     | LifecycleState::Retired
                     | LifecycleState::Merged
                     | LifecycleState::Split
+                    | LifecycleState::Superseded
             ),
             LifecycleState::Dormant => matches!(
                 to,
@@ -475,6 +529,7 @@ impl Lifecycle {
                     | LifecycleState::Retired
                     | LifecycleState::Merged
                     | LifecycleState::Split
+                    | LifecycleState::Superseded
             ),
         };
 
@@ -633,6 +688,25 @@ impl Entity {
         match &self.lifecycle {
             Lifecycle::Merged { into } => Some(into),
             _ => None,
+        }
+    }
+
+    /// The successors a **partitioned** entity turned out to be.
+    ///
+    /// A sibling of [`Self::redirects_to`] rather than a widening of it, and
+    /// that is the ruling's point rather than a style choice. One accessor
+    /// returning a slice for both would make *"redirects to one thing"* and
+    /// *"was several things"* indistinguishable at the call site — and a caller
+    /// taking the first element would silently pick one successor out of N and
+    /// call it the answer.
+    ///
+    /// Empty for every other state, [`Lifecycle::Merged`] included: a merged
+    /// entity redirects, it was not partitioned.
+    #[must_use]
+    pub fn superseded_by(&self) -> &[EntityId] {
+        match &self.lifecycle {
+            Lifecycle::Superseded { by } => by,
+            _ => &[],
         }
     }
 }
@@ -989,6 +1063,51 @@ mod tests {
             .is_err());
     }
 
+    /// **The two places that encode terminality must agree.**
+    ///
+    /// `is_terminal` is a claim; `advance_to` is the enforcement. Nothing but
+    /// this test ties them together, and they have already drifted once —
+    /// `Superseded` was added to `advance_to`'s terminal arm and not to
+    /// `is_terminal`, so for one commit the type reported a partitioned source
+    /// as still-live while refusing every move it could make.
+    ///
+    /// So this does not assert a list. It walks every state against every state
+    /// and derives terminality from behaviour: a state is terminal iff
+    /// `advance_to` refuses *all* of them.
+    #[test]
+    fn is_terminal_agrees_with_what_advance_to_actually_refuses() {
+        let all = [
+            Lifecycle::Provisional,
+            Lifecycle::Established,
+            Lifecycle::Dormant,
+            Lifecycle::Retired,
+            Lifecycle::Merged { into: eid("e-9") },
+            Lifecycle::Split { from: eid("e-0") },
+            Lifecycle::Superseded {
+                by: vec![eid("e-1"), eid("e-2")],
+            },
+        ];
+        // Every LifecycleState is represented, so "refuses all of them" is a
+        // statement about the whole state space and not a sampled subset.
+        let mut covered: Vec<LifecycleState> = all.iter().map(Lifecycle::state).collect();
+        covered.sort_by_key(|s| format!("{s:?}"));
+        covered.dedup();
+        assert_eq!(covered.len(), all.len(), "one variant per LifecycleState");
+
+        for from in &all {
+            let refuses_everything = all.iter().all(|to| from.advance_to(to.clone()).is_err());
+            assert_eq!(
+                from.is_terminal(),
+                refuses_everything,
+                "is_terminal() disagrees with advance_to() for {:?}: claims {}, \
+                 behaves {}",
+                from.state(),
+                from.is_terminal(),
+                refuses_everything
+            );
+        }
+    }
+
     #[test]
     fn a_split_entity_is_live_not_terminal() {
         let l = Lifecycle::Split { from: eid("e-0") };
@@ -1011,6 +1130,29 @@ mod tests {
     fn an_unmerged_entity_redirects_nowhere() {
         let e = Entity::provisional(eid("e-1"), res_conf());
         assert_eq!(e.redirects_to(), None);
+    }
+
+    /// A superseded entity answers with **all** its successors, and does not
+    /// pretend to redirect to one.
+    ///
+    /// The accessor split §5 item 1 insisted on: a caller that took
+    /// `redirects_to` would get `None` here rather than one arbitrary successor
+    /// presented as the answer.
+    #[test]
+    fn a_superseded_entity_names_every_successor_and_redirects_to_none() {
+        let e = Entity::provisional(eid("pallet"), res_conf())
+            .advance_to(Lifecycle::Superseded {
+                by: vec![eid("b1"), eid("b2")],
+            })
+            .expect("partition supersedes");
+
+        assert_eq!(e.superseded_by(), &[eid("b1"), eid("b2")]);
+        assert_eq!(
+            e.redirects_to(),
+            None,
+            "it was several things -- there is no single redirect, and offering \
+             one would silently pick a successor"
+        );
     }
 
     // -- Validation --------------------------------------------------------

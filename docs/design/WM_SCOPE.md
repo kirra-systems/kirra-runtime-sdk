@@ -807,13 +807,22 @@ count.
 This has to be ruled before `SplitEntity` can be persisted — a store needs a
 row for the source, and "undecided" is not a column value.
 
+**RULED 2026-08-08 — §5 adopted.** `Lifecycle::Superseded { by }` is the
+terminal, still-resolvable state for a partitioned source; `SplitEntity` now has
+`partition` and `subtract` constructors, so the **subtraction** shape that was
+unrepresentable (both spellings refused) is expressible; `unresolved_consequence`
+is deleted. This does **not** authorize persisting `SplitEntity` — that is still
+the schema slice, and the adjudication verbs remain domain-only.
+
 **Written up for a ruling on 2026-08-07**:
 [`WM_SPLIT_SOURCE_PROPOSAL.md`](WM_SPLIT_SOURCE_PROPOSAL.md)
 (`KIRRA-WM-SPLIT-SURVIVAL-001`). Drafting it turned up something the summary
-above got wrong: **the constructor had already chosen.** `SplitEntity::new`
-refuses both spellings of a surviving original — `into = [piece]` by
-`SplitTooNarrow`, and `into = [source, piece]` by `SplitIntoSelf` — so the
-"deliberately undecided" claim held in the prose and not in the type. The
+above got wrong: **the constructor had already chosen.** The sole constructor at
+the time — `SplitEntity::new`, since renamed to `partition` and joined by
+`subtract`, so do not go looking for it — refused both spellings of a surviving
+original: `into = [piece]` by `SplitTooNarrow`, and `into = [source, piece]` by
+`SplitIntoSelf`. The "deliberately undecided" claim held in the prose and not in
+the type. The
 proposal also finds that the two readings answer *different questions*, and
 recommends admitting partition and subtraction as distinct shapes rather than
 picking one.

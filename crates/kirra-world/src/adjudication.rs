@@ -59,41 +59,40 @@
 //! model cannot drift apart — every transition it names is one
 //! [`Lifecycle::advance_to`] permits.
 //!
-//! **A split's consequence for the entity that was split is not stated, because
-//! it is not decided.** `entity.rs` records the open question in as many words:
-//! *"is `Split(from)` a live origin marker or a terminal marker on the entity
-//! that was split? The two readings differ in whether the original survives a
-//! split."* Rather than pick one silently, the undecided entity is reported by
-//! [`IdentityAdjudication::unresolved_consequence`], so a caller that ignores it
-//! is making a choice it can be held to instead of reading a list that quietly
-//! omitted an entity.
+//! # What became of a split's source — **ruled**
 //!
-//! ## …but the CONSTRUCTOR is not neutral, and saying so is the point
+//! `entity.rs` carried this open for a while: *"is `Split(from)` a live origin
+//! marker or a terminal marker on the entity that was split? The two readings
+//! differ in whether the original survives a split."*
 //!
-//! The paragraph above is true of `resulting_lifecycles` and **false as a claim
-//! about this module**. [`SplitEntity::new`] has already taken a position:
-//! `SplitTooNarrow` (fewer than two destinations) and `SplitIntoSelf` together
-//! refuse **both spellings of a surviving original** —
-//! `into = [piece]` and `into = [source, piece]`. So the ordinary subtraction
-//! case, where the source survives as one of the pieces (you believed one
-//! pallet; there is a pallet with a box on it), is **unrepresentable here**.
+//! **`KIRRA-WM-SPLIT-SURVIVAL-001`, adopted 2026-08-08**, answers it by
+//! admitting that the two readings answer *different questions*:
 //!
-//! What this type actually models is the **partition** shape: a source that was
-//! never a coherent thing, replaced by two or more successors that are not it.
-//! For that shape both refusals are right.
+//! * [`SplitEntity::partition`] — the source **was** its successors. It is
+//!   [`Lifecycle::Superseded`]: terminal, still resolvable, redirecting to all
+//!   of them.
+//! * [`SplitEntity::subtract`] — pieces were carved off a source that
+//!   **survives**. It takes no transition, because nothing moved.
 //!
-//! Recorded rather than quietly corrected because an open question the
-//! implementation has already closed is worse than one still open — the next
-//! reader takes the constraint as considered. Written up for a ruling as
-//! **`KIRRA-WM-SPLIT-SURVIVAL-001`**
-//! (`docs/design/WM_SPLIT_SOURCE_PROPOSAL.md`), which finds that the two
-//! readings answer *different questions* and recommends admitting partition and
-//! subtraction as distinct shapes with separate constructors.
+//! ## The finding that produced the ruling, kept because it is the useful part
 //!
-//! Until that is ruled, treat the scope as: **partition only**.
-//! [`IdentityAdjudication::unresolved_consequence`] stays because it is honest
-//! about the lifecycle; it is expected to be deleted when the ruling supplies a
-//! state for a partitioned source.
+//! The module used to say the source's fate was "not stated, because it is not
+//! decided". That was true of `resulting_lifecycles` and **false as a claim
+//! about this module**: the constructor had already chosen. `SplitTooNarrow`
+//! (fewer than two destinations) and `SplitIntoSelf` together refused **both
+//! spellings of a surviving original** — `into = [piece]` and
+//! `into = [source, piece]` — so the ordinary subtraction case (you believed one
+//! pallet; there is a pallet with a box on it) was *unrepresentable*, while the
+//! prose claimed neutrality.
+//!
+//! An open question the implementation has quietly closed is worse than one
+//! still open, because the next reader takes the constraint as considered. That
+//! is what `subtract` fixes, and the record of it stays here rather than
+//! disappearing when the box was ticked.
+//!
+//! `unresolved_consequence` is **gone**. It was honest while the question was
+//! open and became the hiding place the proposal predicted the moment a real
+//! answer existed.
 //!
 //! # ADR-0042 condition (1)
 //!
@@ -432,39 +431,76 @@ impl MergeEntities {
     }
 }
 
+/// Which **shape** of split an event records.
+///
+/// `KIRRA-WM-SPLIT-SURVIVAL-001` §5, adopted 2026-08-08: *"partition and
+/// subtraction are separate constructors with separate rules rather than one
+/// constructor with a flag. A flag invites a caller to pass the wrong one; two
+/// constructors make the wrong call not compile."*
+///
+/// So this type is what an event **reports**, read back off a constructed
+/// value. It is not an argument any constructor takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SplitShape {
+    /// The source **was** these successors, and is superseded by them.
+    ///
+    /// "You believed there was one thing; it was really these N." The source
+    /// stops corresponding to anything and answers with a redirect to all of
+    /// them — [`crate::entity::Lifecycle::Superseded`].
+    Partition,
+    /// Pieces were **separated out** of a source that survives.
+    ///
+    /// "You believed there was one pallet; there is a pallet with a box on it."
+    /// The pallet did not stop existing. This is the shape
+    /// `KIRRA-WM-SPLIT-SURVIVAL-001` §1 found was *unrepresentable*: both
+    /// spellings of a surviving original were refused, by `SplitTooNarrow` and
+    /// by `SplitIntoSelf`.
+    Subtraction,
+}
+
 /// **`SplitEntity(from, into[], Evidence)`** — §14.1.
 ///
-/// One entity is judged to have been several things. Each destination becomes
-/// [`Lifecycle::Split`] carrying its origin.
+/// One entity is judged to have been several things, or to have had pieces
+/// carved off it. Each destination becomes [`Lifecycle::Split`] carrying its
+/// origin; what happens to the SOURCE depends on the shape.
 ///
-/// **Scope: partition only.** The constructor's refusals make a *surviving*
-/// original unrepresentable, so this models a source that was never a coherent
-/// thing rather than one that a piece was carved off. That is a position on the
-/// open question, taken by the rules rather than argued for; see the module docs
-/// and `KIRRA-WM-SPLIT-SURVIVAL-001`.
+/// **Both shapes are now representable.** This type modelled partition only
+/// until 2026-08-08, and said so — but the neutrality was in the prose and not
+/// in the type: `SplitTooNarrow` and `SplitIntoSelf` between them refused both
+/// spellings of a surviving original. `KIRRA-WM-SPLIT-SURVIVAL-001` §1 recorded
+/// that finding and §5 supplied the fix — two constructors, [`Self::partition`]
+/// and [`Self::subtract`], with separate rules.
 ///
-/// **The source's own LIFECYCLE is deliberately not stated** — see
-/// [`IdentityAdjudication::unresolved_consequence`]. Note the two are different
-/// claims: no lifecycle is asserted for the source, *and* the constructor has
-/// nonetheless ruled out its survival.
+/// The source's fate is no longer open: a partition supersedes it
+/// ([`crate::entity::Lifecycle::Superseded`]), a subtraction leaves it live.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitEntity {
     source: EntityId,
+    shape: SplitShape,
     into: Vec<EntityId>,
     justification: Justification,
     at: DomainInstant,
 }
 
 impl SplitEntity {
-    /// Adjudicate that `source` was really the entities in `into`.
+    /// **Partition** — `source` was really the entities in `into`.
+    ///
+    /// The source is superseded by them and answers with a redirect to all;
+    /// see [`crate::entity::Lifecycle::Superseded`].
+    ///
+    /// This is what `SplitEntity::new` was, renamed rather than reinterpreted:
+    /// its rules already implemented partition and only prose claimed
+    /// neutrality (`KIRRA-WM-SPLIT-SURVIVAL-001` §1).
     ///
     /// # Errors
     ///
-    /// [`AdjudicationError::SplitTooNarrow`] with fewer than two destinations;
+    /// [`AdjudicationError::SplitTooNarrow`] with fewer than two destinations —
+    /// a partition into one is not a partition;
     /// [`AdjudicationError::DuplicateDestination`] naming a repeated
     /// destination; [`AdjudicationError::SplitIntoSelf`] if the source is also a
-    /// destination.
-    pub fn new(
+    /// destination, which would be the surviving-original spelling that belongs
+    /// to [`Self::subtract`].
+    pub fn partition(
         source: EntityId,
         into: impl IntoIterator<Item = EntityId>,
         justification: Justification,
@@ -474,6 +510,54 @@ impl SplitEntity {
         if into.len() < 2 {
             return Err(AdjudicationError::SplitTooNarrow { found: into.len() });
         }
+        Self::build(source, SplitShape::Partition, into, justification, at)
+    }
+
+    /// **Subtraction** — pieces were separated out of a source that survives.
+    ///
+    /// The shape §1 found unrepresentable: `into = [piece]` was refused by
+    /// `SplitTooNarrow` and `into = [source, piece]` by `SplitIntoSelf`, so
+    /// both spellings of a surviving original were impossible.
+    ///
+    /// The source is **not** named in `separated` and takes no lifecycle
+    /// consequence — it survives with its identity intact, which is the whole
+    /// difference from a partition.
+    ///
+    /// # Errors
+    ///
+    /// [`AdjudicationError::SplitTooNarrow`] with no pieces at all — separating
+    /// nothing is not a subtraction;
+    /// [`AdjudicationError::DuplicateDestination`] naming a repeated piece;
+    /// [`AdjudicationError::SplitIntoSelf`] if the source is listed among the
+    /// pieces, which would say it was separated from itself.
+    pub fn subtract(
+        source: EntityId,
+        separated: impl IntoIterator<Item = EntityId>,
+        justification: Justification,
+        at: DomainInstant,
+    ) -> Result<Self, AdjudicationError> {
+        let separated: Vec<EntityId> = separated.into_iter().collect();
+        if separated.is_empty() {
+            return Err(AdjudicationError::SplitTooNarrow { found: 0 });
+        }
+        Self::build(
+            source,
+            SplitShape::Subtraction,
+            separated,
+            justification,
+            at,
+        )
+    }
+
+    /// The rules both shapes share: no duplicates, and the source is never one
+    /// of its own destinations.
+    fn build(
+        source: EntityId,
+        shape: SplitShape,
+        into: Vec<EntityId>,
+        justification: Justification,
+        at: DomainInstant,
+    ) -> Result<Self, AdjudicationError> {
         if let Some(dup) = first_duplicate(&into) {
             return Err(AdjudicationError::DuplicateDestination {
                 entity: dup.clone(),
@@ -484,10 +568,17 @@ impl SplitEntity {
         }
         Ok(Self {
             source,
+            shape,
             into,
             justification,
             at,
         })
+    }
+
+    /// Which shape of split this is.
+    #[must_use]
+    pub fn shape(&self) -> SplitShape {
+        self.shape
     }
 
     /// The entity being split.
@@ -496,7 +587,13 @@ impl SplitEntity {
         &self.source
     }
 
-    /// The entities it turned out to be. At least two.
+    /// The entities it turned out to be — or, under
+    /// [`SplitShape::Subtraction`], the ones separated *off* it.
+    ///
+    /// **The cardinality depends on the shape**, so read [`Self::shape`] before
+    /// relying on it: a [`SplitShape::Partition`] has at least two (fewer is not
+    /// a partition), a `Subtraction` at least one. Neither is ever empty, and
+    /// neither ever names the source.
     #[must_use]
     pub fn destinations(&self) -> &[EntityId] {
         &self.into
@@ -711,11 +808,20 @@ impl IdentityAdjudication {
     /// Every transition named here is one [`Lifecycle::advance_to`] permits from
     /// a live state, which is what stops the event model and the state model
     /// drifting apart: a consequence this function invents that the lifecycle
-    /// algebra rejects is a contradiction, and there is a test that walks all
-    /// three verbs against `advance_to` to catch exactly that.
+    /// algebra rejects is a contradiction, and there is a test that walks every
+    /// verb — and both split shapes — against `advance_to` to catch exactly
+    /// that.
     ///
-    /// **Not exhaustive by design.** A split's source is missing, because its
-    /// fate is unruled — [`Self::unresolved_consequence`] names it.
+    /// **Exhaustive since `KIRRA-WM-SPLIT-SURVIVAL-001` (2026-08-08).** It was
+    /// not: a split's source was missing because its fate was unruled, and
+    /// `unresolved_consequence` named the gap. Every verb now states every
+    /// consequence it has — which for two of them is *none*, and that is a
+    /// statement rather than an omission:
+    ///
+    /// * [`AssertIdentity`] creates, and creation is not a transition.
+    /// * A [`SplitShape::Subtraction`] source survives, so nothing moved.
+    ///
+    /// The two are different claims and the docs at each arm say which.
     #[must_use]
     pub fn resulting_lifecycles(&self) -> Vec<(EntityId, Lifecycle)> {
         match self {
@@ -746,51 +852,38 @@ impl IdentityAdjudication {
                     )
                 })
                 .collect(),
-            Self::Split(s) => s
-                .destinations()
-                .iter()
-                .map(|d| {
-                    (
-                        d.clone(),
-                        Lifecycle::Split {
-                            from: s.source().clone(),
+            Self::Split(s) => {
+                let mut out: Vec<(EntityId, Lifecycle)> = s
+                    .destinations()
+                    .iter()
+                    .map(|d| {
+                        (
+                            d.clone(),
+                            Lifecycle::Split {
+                                from: s.source().clone(),
+                            },
+                        )
+                    })
+                    .collect();
+                // The SOURCE's fate, which this function refused to state until
+                // KIRRA-WM-SPLIT-SURVIVAL-001 supplied one.
+                //
+                // A partition supersedes it: it was those successors and stops
+                // corresponding to anything, answering with a redirect to all
+                // of them. A subtraction leaves it ALIVE and unchanged, so
+                // there is no transition to state -- the same "no entry"
+                // meaning as `Assert`, and for the same reason: nothing moved.
+                if s.shape() == SplitShape::Partition {
+                    out.push((
+                        s.source().clone(),
+                        Lifecycle::Superseded {
+                            by: s.destinations().to_vec(),
                         },
-                    )
-                })
-                .collect(),
+                    ));
+                }
+                out
+            }
             Self::Forget(f) => vec![(f.entity().clone(), Lifecycle::Retired)],
-        }
-    }
-
-    /// The entity whose lifecycle consequence this adjudication **cannot**
-    /// state, if there is one.
-    ///
-    /// Only a split has one: the entity that was split. `entity.rs` records the
-    /// question — *"is `Split(from)` a live origin marker or a terminal marker
-    /// on the entity that was split?"* — and the two readings disagree about
-    /// whether the original survives, which is not a detail. Picking one here
-    /// would bury a ruling inside a helper function.
-    ///
-    /// Returning it rather than omitting it means a caller that does not handle
-    /// the source is visibly declining to, instead of consuming a list that
-    /// silently dropped an entity.
-    ///
-    /// **Narrower than it looks.** This says no *lifecycle* is asserted for the
-    /// source; it does not mean the module is neutral on whether the source
-    /// survives. [`SplitEntity::new`] already forbids survival. Expected to be
-    /// deleted once `KIRRA-WM-SPLIT-SURVIVAL-001` supplies a state for a
-    /// partitioned source.
-    #[must_use]
-    pub fn unresolved_consequence(&self) -> Option<&EntityId> {
-        match self {
-            // An assertion has NO unresolved consequence, which is a different
-            // thing from the empty `resulting_lifecycles` above. There, the
-            // empty vec says "creation is not a transition". Here, `None` says
-            // "nothing about this event is left undecided" -- and it is true,
-            // whereas `Split` genuinely leaves its source's fate open pending
-            // KIRRA-WM-SPLIT-SURVIVAL-001.
-            Self::Assert(_) | Self::Merge(_) | Self::Forget(_) => None,
-            Self::Split(s) => Some(s.source()),
         }
     }
 }
@@ -934,7 +1027,7 @@ mod tests {
 
     #[test]
     fn a_split_marks_every_piece_with_its_origin() {
-        let s = SplitEntity::new(eid("pallet"), [eid("box-1"), eid("box-2")], just(), T0)
+        let s = SplitEntity::partition(eid("pallet"), [eid("box-1"), eid("box-2")], just(), T0)
             .expect("valid");
         let adj = IdentityAdjudication::Split(s);
 
@@ -953,6 +1046,15 @@ mod tests {
                         from: eid("pallet")
                     }
                 ),
+                // ...and the SOURCE, since KIRRA-WM-SPLIT-SURVIVAL-001. A
+                // partition supersedes it; before the ruling this list stopped
+                // at the pieces and the source's fate was unstated.
+                (
+                    eid("pallet"),
+                    Lifecycle::Superseded {
+                        by: vec![eid("box-1"), eid("box-2")]
+                    }
+                ),
             ]
         );
     }
@@ -960,7 +1062,7 @@ mod tests {
     #[test]
     fn a_split_into_one_is_refused_because_it_is_not_a_split() {
         assert_eq!(
-            SplitEntity::new(eid("pallet"), [eid("box-1")], just(), T0).expect_err("refused"),
+            SplitEntity::partition(eid("pallet"), [eid("box-1")], just(), T0).expect_err("refused"),
             AdjudicationError::SplitTooNarrow { found: 1 }
         );
     }
@@ -968,7 +1070,7 @@ mod tests {
     #[test]
     fn a_split_into_nothing_is_refused_because_that_would_be_destruction() {
         assert_eq!(
-            SplitEntity::new(eid("pallet"), [], just(), T0).expect_err("refused"),
+            SplitEntity::partition(eid("pallet"), [], just(), T0).expect_err("refused"),
             AdjudicationError::SplitTooNarrow { found: 0 },
             "erasure is a Redact with its own ADR, and this module cannot express it"
         );
@@ -976,7 +1078,7 @@ mod tests {
 
     #[test]
     fn a_split_naming_its_own_source_as_a_piece_is_refused() {
-        let err = SplitEntity::new(eid("pallet"), [eid("box-1"), eid("pallet")], just(), T0)
+        let err = SplitEntity::partition(eid("pallet"), [eid("box-1"), eid("pallet")], just(), T0)
             .expect_err("refused");
         assert_eq!(
             err,
@@ -989,7 +1091,8 @@ mod tests {
     #[test]
     fn a_destination_listed_twice_is_refused() {
         assert_eq!(
-            SplitEntity::new(eid("pallet"), [eid("b"), eid("b")], just(), T0).expect_err("refused"),
+            SplitEntity::partition(eid("pallet"), [eid("b"), eid("b")], just(), T0)
+                .expect_err("refused"),
             AdjudicationError::DuplicateDestination { entity: eid("b") }
         );
     }
@@ -1010,7 +1113,7 @@ mod tests {
         // You believed one pallet. There is a pallet with a box on it. The
         // pallet did not stop existing.
         let carve_off_a_piece =
-            SplitEntity::new(eid("pallet"), [eid("box")], just(), T0).expect_err("refused");
+            SplitEntity::partition(eid("pallet"), [eid("box")], just(), T0).expect_err("refused");
         assert_eq!(
             carve_off_a_piece,
             AdjudicationError::SplitTooNarrow { found: 1 },
@@ -1018,7 +1121,7 @@ mod tests {
         );
 
         let name_the_survivor =
-            SplitEntity::new(eid("pallet"), [eid("pallet"), eid("box")], just(), T0)
+            SplitEntity::partition(eid("pallet"), [eid("pallet"), eid("box")], just(), T0)
                 .expect_err("refused");
         assert_eq!(
             name_the_survivor,
@@ -1038,27 +1141,90 @@ mod tests {
     /// split, which would make it evidence of nothing.
     #[test]
     fn the_partition_shape_of_the_same_split_is_admitted() {
-        SplitEntity::new(eid("pallet"), [eid("pallet-deck"), eid("box")], just(), T0)
+        SplitEntity::partition(eid("pallet"), [eid("pallet-deck"), eid("box")], just(), T0)
             .expect("two successors, neither of them the source");
     }
 
     /// **The undecided consequence is reported, not omitted.**
+    /// **A partition supersedes its source**, and says so.
+    ///
+    /// This test replaces `a_split_does_not_pretend_to_know_what_became_of_the
+    /// _source`, which asserted the opposite: that no consequence was stated
+    /// and `unresolved_consequence` named the gap. That was the honest answer
+    /// while the question was open. `KIRRA-WM-SPLIT-SURVIVAL-001` closed it, so
+    /// the placeholder became the hiding place §5 item 3 predicted and was
+    /// deleted with it.
+    ///
+    /// Recorded rather than silently rewritten: a reader comparing against the
+    /// proposal should find the old test's disappearance explained here.
     #[test]
-    fn a_split_does_not_pretend_to_know_what_became_of_the_source() {
-        let s = SplitEntity::new(eid("pallet"), [eid("b1"), eid("b2")], just(), T0).expect("valid");
+    fn a_partition_supersedes_its_source() {
+        let s = SplitEntity::partition(eid("pallet"), [eid("b1"), eid("b2")], just(), T0)
+            .expect("valid");
+        let adj = IdentityAdjudication::Split(s);
+
+        let fate = adj
+            .resulting_lifecycles()
+            .into_iter()
+            .find(|(id, _)| id == &eid("pallet"))
+            .map(|(_, l)| l)
+            .expect("the source's fate is stated now");
+        assert_eq!(
+            fate,
+            Lifecycle::Superseded {
+                by: vec![eid("b1"), eid("b2")]
+            },
+            "superseded BY its successors -- all of them, not one"
+        );
+    }
+
+    /// **A subtraction leaves its source alive**, which is the shape that was
+    /// unrepresentable before the ruling.
+    ///
+    /// Both spellings were refused: `into = [piece]` by `SplitTooNarrow` and
+    /// `into = [source, piece]` by `SplitIntoSelf`. Now it has its own
+    /// constructor, and the source takes NO transition — it did not move.
+    #[test]
+    fn a_subtraction_leaves_its_source_alive() {
+        let s = SplitEntity::subtract(eid("pallet"), [eid("box-1")], just(), T0)
+            .expect("one piece is a valid subtraction");
+        assert_eq!(s.shape(), SplitShape::Subtraction);
         let adj = IdentityAdjudication::Split(s);
 
         assert!(
             !adj.resulting_lifecycles()
                 .iter()
                 .any(|(id, _)| id == &eid("pallet")),
-            "no fabricated transition for the entity that was split"
+            "a surviving source takes no transition, because nothing moved"
         );
         assert_eq!(
-            adj.unresolved_consequence(),
-            Some(&eid("pallet")),
-            "and it is NAMED, so a caller ignoring it is choosing to"
+            adj.resulting_lifecycles().len(),
+            1,
+            "only the separated piece has a consequence"
         );
+    }
+
+    /// The source is still never one of its own destinations, in either shape.
+    #[test]
+    fn neither_shape_admits_the_source_among_its_destinations() {
+        for r in [
+            SplitEntity::partition(eid("p"), [eid("p"), eid("b")], just(), T0),
+            SplitEntity::subtract(eid("p"), [eid("p")], just(), T0),
+        ] {
+            assert!(
+                matches!(r, Err(AdjudicationError::SplitIntoSelf { .. })),
+                "a source separated from itself is not a split"
+            );
+        }
+        // ...and a partition still needs two, while a subtraction needs one.
+        assert!(matches!(
+            SplitEntity::partition(eid("p"), [eid("b")], just(), T0),
+            Err(AdjudicationError::SplitTooNarrow { found: 1 })
+        ));
+        assert!(matches!(
+            SplitEntity::subtract(eid("p"), [], just(), T0),
+            Err(AdjudicationError::SplitTooNarrow { found: 0 })
+        ));
     }
 
     #[test]
@@ -1072,8 +1238,12 @@ mod tests {
             just(),
             T0,
         ));
-        assert_eq!(m.unresolved_consequence(), None);
-        assert_eq!(f.unresolved_consequence(), None);
+        // `unresolved_consequence` is gone -- KIRRA-WM-SPLIT-SURVIVAL-001 §5
+        // item 3. What it asserted for these two is now structural: every verb
+        // states every consequence it has, so there is no "undecided" accessor
+        // left to return None from.
+        assert!(!m.resulting_lifecycles().is_empty());
+        assert!(!f.resulting_lifecycles().is_empty());
     }
 
     // -- Forget ---------------------------------------------------------
@@ -1127,14 +1297,25 @@ mod tests {
     ///
     /// Walked from every live state, because an adjudication does not get to
     /// choose what state it finds an entity in.
+    ///
+    /// **Every verb is in `cases`, and both split shapes are** — including
+    /// `Assert`, which states no consequence at all and so contributes nothing
+    /// to the count. That is the point of listing it: if it ever grows one, it
+    /// is checked here the moment it does rather than the day someone remembers
+    /// to add it to this list.
     #[test]
     fn every_stated_consequence_is_a_transition_the_lifecycle_permits() {
         let cases = [
+            IdentityAdjudication::Assert(AssertIdentity::new(eid("new"), just(), T0)),
             IdentityAdjudication::Merge(
                 MergeEntities::new([eid("a"), eid("b")], eid("keep"), just(), T0).expect("valid"),
             ),
             IdentityAdjudication::Split(
-                SplitEntity::new(eid("p"), [eid("b1"), eid("b2")], just(), T0).expect("valid"),
+                SplitEntity::partition(eid("p"), [eid("b1"), eid("b2")], just(), T0)
+                    .expect("valid"),
+            ),
+            IdentityAdjudication::Split(
+                SplitEntity::subtract(eid("s"), [eid("off")], just(), T0).expect("valid"),
             ),
             IdentityAdjudication::Forget(ForgetEntity::new(
                 eid("gone"),
@@ -1169,8 +1350,10 @@ mod tests {
         }
         assert_eq!(
             checked,
-            5 * live.len(),
-            "2 merge sources + 2 split pieces + 1 retirement, each from every live state"
+            7 * live.len(),
+            "2 merge sources + 2 partition pieces + 1 SUPERSEDED SOURCE + 1 \
+             subtracted piece + 1 retirement, each from every live state. \
+             Assert contributes 0 -- it creates rather than transitions."
         );
     }
 
@@ -1219,11 +1402,6 @@ mod tests {
             "never empty, whichever verb it is"
         );
         assert_eq!(adj.at(), T0);
-        assert_eq!(
-            adj.unresolved_consequence(),
-            None,
-            "nothing about an assertion is left undecided"
-        );
     }
 
     /// The lifecycle algebra's terminal states are still terminal — the
@@ -1232,6 +1410,40 @@ mod tests {
     /// Without this, `every_stated_consequence_is_a_transition_the_lifecycle_permits`
     /// would pass just as happily against an `advance_to` that permitted
     /// everything, which would make it evidence of nothing.
+    /// **`Superseded` is terminal**, and this is its non-vacuity anchor.
+    ///
+    /// `KIRRA-WM-SPLIT-SURVIVAL-001` §8 constraint 2: *"No new `Lifecycle`
+    /// state without a negative control. The existing terminality tests pass
+    /// against an `advance_to` that permits everything; any new terminal state
+    /// needs the same anchor before it is claimed to be terminal."*
+    ///
+    /// Without this,
+    /// `every_stated_consequence_is_a_transition_the_lifecycle_permits` would
+    /// be satisfied by an `advance_to` that permitted every move, and the claim
+    /// that a partitioned source is finished would rest on the doc comment.
+    #[test]
+    fn a_superseded_entity_cannot_be_adjudicated_again() {
+        let superseded = Lifecycle::Superseded {
+            by: vec![eid("b1"), eid("b2")],
+        };
+        for next in [
+            Lifecycle::Established,
+            Lifecycle::Dormant,
+            Lifecycle::Retired,
+            Lifecycle::Merged { into: eid("other") },
+            Lifecycle::Split { from: eid("x") },
+            Lifecycle::Superseded {
+                by: vec![eid("c1"), eid("c2")],
+            },
+        ] {
+            assert!(
+                superseded.advance_to(next.clone()).is_err(),
+                "a partitioned entity is finished; {next:?} would lose the redirect \
+                 to its successors"
+            );
+        }
+    }
+
     #[test]
     fn an_already_merged_entity_cannot_be_adjudicated_again() {
         let merged = Lifecycle::Merged { into: eid("keep") };
@@ -1276,7 +1488,7 @@ mod tests {
                 MergeEntities::new([eid("a")], eid("keep"), just(), T0).expect("valid"),
             ),
             IdentityAdjudication::Split(
-                SplitEntity::new(eid("p"), [eid("b1"), eid("b2")], just(), at(T0_MS + 1))
+                SplitEntity::partition(eid("p"), [eid("b1"), eid("b2")], just(), at(T0_MS + 1))
                     .expect("valid"),
             ),
             IdentityAdjudication::Forget(ForgetEntity::new(
