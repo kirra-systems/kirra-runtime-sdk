@@ -911,31 +911,45 @@ does not describe is how a residue disappears.
       `Corroboration(n)`.** SD-2 already refuses `llm_candidate` + `confirmed` at
       the write door; this is the same boundary extended to `derivation`.
 
+      **`Corroboration(n)` is NOT 2a's to drive.** The axis folds *confirmed*
+      `same_as`, so its first driver is promotion (2b) or an operator-declared
+      confirmation — never the matcher. An earlier note in this session said
+      building 2a "gives `Corroboration(n)` its first driver"; that contradicted
+      the bar above and is withdrawn. A matcher score must not become trust
+      corroboration, quietly or otherwise.
+
 - [ ] **2b — Adjudication / promotion.** The deterministic, auditable step that
-      turns a confirmed `same_as` into identity. **Blocked on the transitivity
-      ruling** — promotion is where a closure would first be computed, so
-      building it first means a fold decides transitivity implicitly, which
-      `KIRRA-WM-CLUSTERING-001` §6 constraint 4 forbids ("ruled before it is
-      computed, not discovered by a fold that already does it").
+      turns a confirmed `same_as` into identity, and the **only** boundary at
+      which a relation may affect canonical identity.
+      **Unblocked: transitivity was ruled 2026-08-08**
+      (`KIRRA-WM-TRANSITIVITY-001`). Evidence is pairwise and never transitively
+      closed; a confirmed `same_as(A,C)` is never synthesized from an
+      `A=B`, `B=C` chain. Promotion accepts / rejects / marks ambiguous **per
+      relation**.
 
 - [ ] **2c — Deterministic resolution over promoted identity.** Rebuild-from-log
       must stay exact: the same log yields the same identity, with no dependence
       on matcher output, tie-break order or wall-clock. The existing
       `resolution::resolve` invariants are the floor, not a new standard.
+      Per `KIRRA-WM-TRANSITIVITY-001` rule 4, traversal of accepted merges
+      **preserves the path and its provenance**, and a contradictory promoted
+      graph resolves to `Ambiguous` / `Refused` rather than being repaired.
+      **Union-find is disqualified as the representation** — merging is its only
+      operation, so it cannot express "contradictory" and would decide an
+      adjudication question at read time. `resolve`'s existing refusal of a
+      redirect cycle is the precedent.
 
-- [ ] **2d — Historical / as-of resolution** — *scope decision required, see
-      below.* `resolve` is **current-state only** today.
-
-      The honest options are (a) amend this tier's definition to say identity
-      resolution is current-only and move as-of to a later tier, or (b) build
-      `resolve_at` / `identity_view_at` now. **Worth knowing before choosing:
-      the bitemporal substrate already exists** — `kirra-world-store` ships
-      `current` / `as_of` / `history` / `candidates` / `changed_since` (#1353) —
-      so (b) is composing an as-of read with existing resolution, not building
-      bitemporality. Given the incident-reconstruction goal, identity is not
-      fully mature without it; whether that blocks *Tier 2* is a definition
-      question, and the answer must be written down either way rather than left
-      to the reader to infer from a passing `resolve`.
+- [ ] **2d — Historical / as-of resolution.** `resolve` is **current-state only**
+      today. **RULED 2026-08-08: as-of identity resolution stays INSIDE Tier 2
+      and gets built** — the tier is not redefined to avoid it.
+      `resolve_at(...)` / `IdentityView::at(...)` **composes an as-of
+      evidence/projection view with the existing resolver**; it does not
+      introduce a second resolution algorithm, and it does not build
+      bitemporality, because the substrate already ships in `kirra-world-store`
+      (`current` / `as_of` / `history` / `candidates` / `changed_since`, #1353).
+      §6.3 makes historical identity part of the intended semantics, and the
+      incident-reconstruction goal is not served by a resolver that can only
+      answer "who is this *now*" — reconstruction asks who it was *then*.
 - [x] **`MergeEntities` / `SplitEntity` / `ForgetEntity` as recorded events** —
       **DONE 2026-08-07**, `crates/kirra-world/src/adjudication.rs`, 24 unit
       tests, still zero-dependency.

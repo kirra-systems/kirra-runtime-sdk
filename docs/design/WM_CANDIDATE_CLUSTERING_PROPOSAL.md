@@ -21,7 +21,9 @@
 > been a narrower ruling is a matcher barred entirely, and that is not what was
 > chosen.
 >
-> **Still unruled, and now the gating question — see §6.4:** *transitivity*.
+> **Transitivity: also RULED 2026-08-08** — `KIRRA-WM-TRANSITIVITY-001`, §4.4.
+> *Evidence is pairwise and never transitively closed; only promoted identity is
+> traversed transitively.* 2b is unblocked.
 
 | | |
 |---|---|
@@ -30,7 +32,7 @@
 | **Blocked by** | Nothing. Every dependency it had is now merged |
 | **Constrained by** | `KIRRA-WM-CANDIDATE-ID-001` (2026-08-08); ADR-0040 writer classes; §9's four axes |
 | **Related** | `KIRRA-WM-SPLIT-SURVIVAL-001`, `KIRRA-WM-CANDIDATE-ID-001` |
-| **Next ruling** | **Transitivity** — required *before* promotion is built, not after |
+| **Also ruled** | `KIRRA-WM-TRANSITIVITY-001` (§4.4) — evidence pairwise, resolution transitive |
 
 ---
 
@@ -233,11 +235,64 @@ Stated so adoption is not mistaken for completion:
   match tracks with. That is the matcher, and it stays open.
 - **What confirms a `same_as` candidate** is unruled. Operator confirmation is
   the obvious first answer and may be the only one for a while.
-- **Transitivity is unruled.** If `a same_as b` and `b same_as c`, is `a same_as
-  c`? Union-find says yes; evidence says only that two producers each made one
-  claim. This matters because a wrong transitive closure merges two real
-  entities, and §6.3 makes merges *revisable but recorded*. It should be ruled
-  before any fold computes closures.
+- ~~**Transitivity is unruled.**~~ **RULED 2026-08-08 —
+  `KIRRA-WM-TRANSITIVITY-001`, §4.4 below.** If `a same_as b` and `b same_as c`,
+  is `a same_as c`? Union-find says yes; evidence says only that two producers
+  each made one claim. A wrong transitive closure merges two real entities, and
+  §6.3 makes merges *revisable but recorded*, so it was ruled before any fold
+  could compute one.
+
+### 4.4 `KIRRA-WM-TRANSITIVITY-001` — evidence is pairwise; resolution is transitive
+
+> **`same_as` evidence is pairwise and is NOT transitively closed at the
+> evidence/candidate layer. Transitivity applies only to promoted identity state
+> after adjudication.** A derived `A = C` may be *resolved* through an accepted
+> `A = B`, `B = C` chain, but Kirra must never synthesize a new confirmed
+> `same_as(A, C)` evidence record merely because the chain exists.
+
+**Why the line falls here.** Two independent local claims must not silently
+manufacture a third evidentiary one. Nobody asserted `A = C`; a closure that
+records it as though somebody did is a fabricated observation, and it is
+indistinguishable downstream from a real one — the same laundering-inference-
+into-evidence failure §2 names for thresholds, arriving by a different route.
+Resolution can be transitive; evidence cannot. If `A` resolves to `C` through
+`B`, provenance should expose the **accepted chain**, not pretend to a direct
+assertion.
+
+```
+  candidate / evidence layer
+      A same_as B          (pairwise, from a producer)
+      B same_as C          (pairwise, from a producer)
+            │
+            │   ✗ NO automatic closure — A same_as C is never minted here
+            ↓
+  adjudication
+            │   accept / reject / ambiguous, per relation
+            ↓
+  promoted identity graph
+            │
+            └── resolution MAY traverse accepted merges transitively,
+                carrying the path
+```
+
+**The four rules this ruling adds:**
+
+1. **Candidate matchers emit pairwise candidate relations only.** No closure, no
+   clusters-as-sets, no `CandidateId` standing in for a merged group.
+2. **Candidate relations never participate in closure or in confirmed folds.**
+   They are inputs to adjudication and to nothing else.
+3. **Promotion is the only boundary** at which a relation may affect canonical
+   identity.
+4. **Transitive resolution over promoted merges must preserve the path and its
+   provenance**, and must fail to `Ambiguous` / `Refused` when the promoted
+   graph is contradictory — **never** "repair" it with union-find. A resolver
+   that silently picks a representative is deciding an adjudication question at
+   read time, which is rule 3 violated from the other side.
+
+Rule 4 is the one most likely to be lost to a convenient data structure: union-
+find is the obvious implementation and it *cannot* express "contradictory", because
+merging is its only operation. The precedent already exists in-tree —
+`resolution::resolve` refuses a redirect cycle rather than collapsing it.
 
 ---
 
