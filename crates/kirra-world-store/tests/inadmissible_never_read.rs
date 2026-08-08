@@ -96,6 +96,7 @@ fn append(
         map_id: None,
         kind: "observation",
         subject,
+        subject_ref: None,
         predicate: Some("colour"),
         object: Some("red"),
         payload: r#"{"n":1}"#,

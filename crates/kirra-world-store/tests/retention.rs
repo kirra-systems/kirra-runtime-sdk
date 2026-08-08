@@ -68,6 +68,7 @@ fn ev<'a>(id: &'a Ids, subject: &'a str, valid_from_ms: i64) -> NewEvent<'a> {
         map_id: None,
         kind: "observation",
         subject,
+        subject_ref: None,
         predicate: Some("position"),
         object: None,
         payload: r#"{"n":1}"#,

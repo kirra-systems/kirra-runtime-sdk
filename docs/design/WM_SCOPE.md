@@ -753,6 +753,20 @@ for Tier 2; it is not driven by anything yet.
       was a real work item, and a residue that disappears when a box is ticked
       is the failure the ruling's own second constraint names.
 
+**RULED 2026-08-08 — `KIRRA-WM-CANDIDATE-ID-001`**
+([proposal](WM_CANDIDATE_ID_PROPOSAL.md)): a candidate's identifier **may not
+enter the hashed evidence record**. The blueprint marks candidate clustering
+*pure* and identity assertion the *recorded event*, so a candidate id is derived
+from other rows in the same store; freezing one into an append-only row records a
+derivation a later clustering run cannot correct, and nothing detects the
+disagreement. The store's subject discriminant therefore admits `entity` and
+`frame` only, narrowed before release. `CandidateId` is deferred to entity
+resolution, where it would be a projection key rather than an evidence value.
+
+This is a **constraint on the first box above, not a completed part of it** —
+entity resolution still has to say how candidate membership is projected, and the
+ruling narrows the options rather than supplying one.
+
 Merge and split are *events, never destructive edits*. This is what makes an
 `EntityId` revisable, and it is precisely what a store built on a bare opaque
 key can never retrofit — the key would have already lost its own history.

@@ -74,6 +74,7 @@ fn fully_populated<'a>(r: &'a Refs, provenance: &'a [&'a str]) -> NewEvent<'a> {
         map_id: Some(&r.map),
         kind: "spatial",
         subject: "cup-1",
+        subject_ref: None,
         predicate: Some("located_in"),
         object: Some("room-3"),
         payload: r#"{"x":1.5,"y":-2.0}"#,

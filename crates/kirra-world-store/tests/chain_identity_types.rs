@@ -47,6 +47,7 @@ fn seed(store: &mut WorldStore, n: i64) {
             map_id: None,
             kind: "observation",
             subject: "cup-1",
+            subject_ref: None,
             predicate: Some("colour"),
             object: Some("red"),
             payload: r#"{"n":1}"#,

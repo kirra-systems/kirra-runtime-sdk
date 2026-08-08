@@ -101,6 +101,7 @@ pub use subject_projection::{
 // merely "so the dependency edge is real": [`NewEvent`] is built out of them, so
 // the edge now carries traffic. That is the measurement ADR-0040's open
 // question 1 defers its revisit to — see `docs/design/WM_Q1_SEAM_BASELINE.md`.
+pub use kirra_world::observation::{SubjectRef, SubjectRefError};
 pub use kirra_world::trust::{
     trust_grade, validity_at, Adjudication, Corroboration, Origin, TrustAxes, TrustGrade, Validity,
     ValidityWindow,
@@ -193,6 +194,41 @@ pub enum StoreError {
     LlmCannotConfirm,
     /// SD-4, refused early for the same reason.
     SpatialClaimNeedsFrame,
+    /// A [`SubjectRef::Unbound`] was offered as a label.
+    ///
+    /// `Unbound` carries no id and `subject` is `NOT NULL`, so labelling such a
+    /// row would mean hashing a discriminant that says "nothing named this"
+    /// alongside a `subject` value that names something. Refused rather than
+    /// silently dropped to `None`: an unbound observation may still be
+    /// recorded, it just may not be *labelled* — and a caller who asked for a
+    /// label should learn it did not get one.
+    UnboundSubjectNotStorable,
+    /// A [`SubjectRef::Candidate`] was offered as a label.
+    ///
+    /// Refused by ruling `KIRRA-WM-CANDIDATE-ID-001` (2026-08-08), not by
+    /// oversight. Candidate clustering is specified as a **pure** step, so a
+    /// candidate id is the output of a computation over other rows in this
+    /// store. Admitting it here would freeze that derivation inside hashed,
+    /// append-only bytes, where a later clustering run cannot correct it and
+    /// nothing detects the disagreement.
+    ///
+    /// A candidate observation is still *recordable* — it is simply not
+    /// *labelled*, and its membership belongs in a projection. Refused rather
+    /// than silently written as `None`, for the same reason as `Unbound`: a
+    /// caller who asked for a label should learn it did not get one.
+    CandidateSubjectNotStorable,
+    /// The subject reference names a different id than `subject`.
+    ///
+    /// The two are separate fields, so this is enforced rather than
+    /// structurally impossible (see [`NewEvent::subject_ref`]). Refused,
+    /// because both values enter the hashed bytes and nothing afterwards could
+    /// say which of the two was meant.
+    SubjectRefDisagreesWithSubject {
+        /// The id the reference names.
+        reference: String,
+        /// The value in the `subject` column.
+        subject: String,
+    },
     /// The database is stamped with a schema version this binary does not
     /// know. Refused rather than opened hopefully — an older binary writing
     /// into a newer store produces rows missing columns it never heard of,
@@ -278,6 +314,25 @@ impl std::fmt::Display for StoreError {
                 f,
                 "a spatial claim requires frame_id (ADR-0042 Decision 2; \
                  KIRRA-WM2-SCHEMA-001 SD-4)"
+            ),
+            Self::UnboundSubjectNotStorable => write!(
+                f,
+                "an unbound subject cannot be labelled: it carries no id, and \
+                 world_events.subject is NOT NULL \
+                 (schema::SCHEMA_V3_MIGRATION)"
+            ),
+            Self::CandidateSubjectNotStorable => write!(
+                f,
+                "a candidate subject cannot be labelled: candidate clustering \
+                 is a pure step, so its id is derived rather than observed and \
+                 must not enter hashed evidence \
+                 (KIRRA-WM-CANDIDATE-ID-001)"
+            ),
+            Self::SubjectRefDisagreesWithSubject { reference, subject } => write!(
+                f,
+                "subject_ref names {reference:?} but subject is {subject:?}; \
+                 both would enter the hashed bytes and nothing could say which \
+                 was meant"
             ),
             Self::SchemaFromTheFuture { found, supported } => write!(
                 f,
@@ -417,6 +472,25 @@ pub struct NewEvent<'a> {
     pub kind: &'a str,
     /// Claim subject.
     pub subject: &'a str,
+    /// **Which of `SubjectRef`'s four cases [`Self::subject`] is**, when the
+    /// caller knows.
+    ///
+    /// `None` means unlabelled, and an unlabelled row is written *and hashed*
+    /// exactly as it was before this column existed — byte for byte. That is
+    /// the same append-only-when-present shape the v2 trust axes use, for the
+    /// same reason: emitting the key as `null` would change the bytes of every
+    /// row ever written and fail `verify_chain` on every existing store.
+    ///
+    /// Carried as the whole [`SubjectRef`] rather than a bare token so
+    /// [`WorldStore::append`] can check the reference's id against `subject`
+    /// and refuse a disagreement. The two are still separate fields, so that
+    /// check is *enforced* rather than structurally impossible — making it
+    /// impossible means `subject` becoming a `SubjectRef`, which needs the
+    /// column to be nullable first (see [`schema::SCHEMA_V3_MIGRATION`]).
+    ///
+    /// [`SubjectRef::Unbound`] is refused: it carries no id, and this column
+    /// is `NOT NULL`.
+    pub subject_ref: Option<&'a SubjectRef>,
     /// Claim predicate.
     pub predicate: Option<&'a str>,
     /// Claim object.
@@ -606,6 +680,21 @@ pub fn canonical_event_json(e: &NewEvent<'_>) -> String {
     }
 
     // Closing brace last, so the appended fields sit inside the object.
+    // The subject discriminant, appended LAST and only when present.
+    //
+    // Same rule as the axes above, and the ordering between them is fixed
+    // rather than incidental: a labelled row emits the axis keys and then this
+    // one, always. Two orderings of the same fields are two different byte
+    // strings and therefore two different digests, so "append newest last" is
+    // a rule the next field has to follow too.
+    //
+    // The value is the KIND alone. The id is already `subject`, and hashing it
+    // twice would let the two disagree in the stored bytes with nothing to say
+    // which was meant.
+    if let Some(r) = e.subject_ref {
+        out.push_str(&format!(",\"subject_kind\":{}", json_str(r.as_str())));
+    }
+
     out.push('}');
     out
 }
@@ -655,6 +744,51 @@ const COL_ORIGIN: usize = 21;
 const COL_CORROBORATION: usize = 22;
 const COL_CORROBORATION_N: usize = 23;
 const COL_ADJUDICATION: usize = 24;
+/// Column index of the v3 subject-discriminant column, in the same two
+/// `SELECT`s and for the same reason.
+const COL_SUBJECT_KIND: usize = 25;
+
+/// Rebuild the subject reference from its column and the row's `subject`.
+///
+/// One helper for both rebuild sites rather than the logic written twice.
+///
+/// # The second site is the dangerous one, and NOT for the obvious reason
+///
+/// `summarize_range` rehashes a range to produce a compaction citation's range
+/// digest. The first rationale written here was that skipping the column would
+/// "compute a citation over different bytes than the rows it cites, and the
+/// break would surface after a compaction". **A negative control disproved
+/// that**: patching this site alone fails no test at all.
+///
+/// The reason is worse than the one it replaces. The range digest is computed
+/// **before the rows are deleted** and is never re-derived — it cannot be, the
+/// rows are gone. So a version that skipped the column here would not produce a
+/// detectable break; it would silently record a digest of bytes that were never
+/// written, in the one artifact that outlives the evidence it summarizes.
+///
+/// That makes this site *unverifiable by test* rather than merely easy to miss,
+/// which is exactly why the two call sites share one function instead of
+/// trusting a reviewer to notice the second.
+///
+/// Fail-closed, like `axes_from_row`: a token the vocabulary does not contain
+/// means the row was edited around the `CHECK`, and reconstructing a plausible
+/// value from it would launder the edit into a chain that verifies.
+fn subject_ref_from_row(
+    generation: i64,
+    r: &rusqlite::Row<'_>,
+    subject: &str,
+) -> Result<Option<SubjectRef>, StoreError> {
+    let kind: Option<String> = r.get(COL_SUBJECT_KIND)?;
+    let Some(kind) = kind else {
+        return Ok(None);
+    };
+    SubjectRef::from_stored_parts(&kind, Some(subject))
+        .map(Some)
+        .map_err(|e| StoreError::CorruptRow {
+            generation,
+            detail: format!("subject_kind: {e}"),
+        })
+}
 
 /// Rebuild the stored trust axes from a row, or refuse the row.
 ///
@@ -751,6 +885,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 pub fn schema_digest() -> String {
     let mut effective = String::from(schema::SCHEMA_V1);
     effective.push_str(schema::SCHEMA_V2_MIGRATION);
+    effective.push_str(schema::SCHEMA_V3_MIGRATION);
     sha256_hex(effective.as_bytes())
 }
 
@@ -802,6 +937,7 @@ impl WorldStore {
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch(schema::SCHEMA_V1)?;
             tx.execute_batch(schema::SCHEMA_V2_MIGRATION)?;
+            tx.execute_batch(schema::SCHEMA_V3_MIGRATION)?;
             tx.execute(
                 "INSERT INTO world_store_meta (key, value) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION.to_string()],
@@ -883,6 +1019,14 @@ impl WorldStore {
 
         if from < 2 {
             tx.execute_batch(schema::SCHEMA_V2_MIGRATION)?;
+        }
+        // Separate `if`, not an `else`: a v1 store needs BOTH steps in one
+        // transaction, and chaining them as alternatives would migrate it to v2
+        // while stamping it v3 -- a store whose version claims columns it does
+        // not have, which is the exact shape `SchemaFromTheFuture` exists to
+        // catch on the next open and would then be self-inflicted.
+        if from < 3 {
+            tx.execute_batch(schema::SCHEMA_V3_MIGRATION)?;
         }
 
         // Digest before version, inside the transaction. The order no longer
@@ -971,6 +1115,24 @@ impl WorldStore {
         if e.kind == "spatial" && e.frame_id.is_none() {
             return Err(StoreError::SpatialClaimNeedsFrame);
         }
+        // The label must agree with the value it labels. Checked here rather
+        // than by a `CHECK`, because SQLite cannot compare a column against a
+        // caller's intent -- the row it would see is already self-consistent.
+        if let Some(r) = e.subject_ref {
+            if matches!(r, SubjectRef::Candidate(_)) {
+                return Err(StoreError::CandidateSubjectNotStorable);
+            }
+            match r.id() {
+                None => return Err(StoreError::UnboundSubjectNotStorable),
+                Some(id) if id != e.subject => {
+                    return Err(StoreError::SubjectRefDisagreesWithSubject {
+                        reference: id.to_owned(),
+                        subject: e.subject.to_owned(),
+                    })
+                }
+                Some(_) => {}
+            }
+        }
 
         let axes = e.trust.map(|t| corroboration_columns(t.corroboration()));
 
@@ -990,9 +1152,9 @@ impl WorldStore {
                 valid_to_ms, source, source_version, writer_class, claim_status,
                 provenance, frame_id, map_id, kind, subject, predicate, object,
                 payload, payload_schema, payload_digest, retention_class, chain_digest,
-                origin, corroboration, corroboration_n, adjudication
+                origin, corroboration, corroboration_n, adjudication, subject_kind
              ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-                       ?23,?24,?25,?26)",
+                       ?23,?24,?25,?26,?27)",
             params![
                 generation,
                 e.event_id.as_str(),
@@ -1020,6 +1182,12 @@ impl WorldStore {
                 axes.map(|(c, _)| c),
                 axes.and_then(|(_, n)| n),
                 e.trust.map(|t| adjudication_token(t.adjudication_stored())),
+                // Written EXACTLY when the canonical form emits it. That
+                // coupling is what makes an orphan impossible -- a column
+                // stored but not hashed would be editable in place without
+                // breaking the chain, which is the review finding the v2 axes
+                // recorded and the one property this design exists to deny.
+                e.subject_ref.map(SubjectRef::as_str),
             ],
         )?;
         Ok(generation)
@@ -1038,7 +1206,8 @@ impl WorldStore {
                     valid_to_ms, source, source_version, writer_class, claim_status,
                     provenance, frame_id, map_id, kind, subject, predicate, object,
                     payload, payload_schema, retention_class, chain_digest,
-                    origin, corroboration, corroboration_n, adjudication
+                    origin, corroboration, corroboration_n, adjudication,
+                    subject_kind
              FROM world_events ORDER BY generation ASC",
         )?;
         let mut rows = stmt.query([])?;
@@ -1144,6 +1313,7 @@ impl WorldStore {
             // `axes_from_row` refuses it rather than reconstructing whichever
             // part survived.
             let trust = axes_from_row(generation, r)?;
+            let subject_ref = subject_ref_from_row(generation, r, &subject)?;
 
             let rebuilt = NewEvent {
                 event_id: &event_id,
@@ -1160,6 +1330,7 @@ impl WorldStore {
                 map_id: map_id.as_ref(),
                 kind: &kind,
                 subject: &subject,
+                subject_ref: subject_ref.as_ref(),
                 predicate: predicate.as_deref(),
                 object: object.as_deref(),
                 payload: &payload,
@@ -1474,6 +1645,11 @@ impl WorldStore {
             "payload",
             "retention_class",
             "chain_digest",
+            // v3. Added so the discriminant's own tamper-evidence can be
+            // asserted rather than argued: setting this on a row written
+            // without it must break the chain, which is what proves the column
+            // cannot be stored-but-unhashed.
+            "subject_kind",
         ];
         if !TAMPERABLE.contains(&column) {
             return Err(StoreError::CorruptRow {
@@ -2414,7 +2590,8 @@ impl WorldStore {
                     valid_to_ms, source, source_version, writer_class, claim_status,
                     provenance, frame_id, map_id, kind, subject, predicate, object,
                     payload, payload_schema, retention_class, chain_digest,
-                    origin, corroboration, corroboration_n, adjudication
+                    origin, corroboration, corroboration_n, adjudication,
+                    subject_kind
              FROM world_events WHERE generation BETWEEN ?1 AND ?2
              ORDER BY generation ASC",
         )?;
@@ -2474,6 +2651,7 @@ impl WorldStore {
             // `axes_from_row` refuses it rather than reconstructing whichever
             // part survived.
             let trust = axes_from_row(generation, r)?;
+            let subject_ref = subject_ref_from_row(generation, r, &subject)?;
 
             let rebuilt = NewEvent {
                 event_id: &event_id,
@@ -2490,6 +2668,7 @@ impl WorldStore {
                 map_id: map_id.as_ref(),
                 kind: &kind,
                 subject: &subject,
+                subject_ref: subject_ref.as_ref(),
                 predicate: predicate.as_deref(),
                 object: object.as_deref(),
                 payload: &payload,

@@ -246,6 +246,13 @@ fn growth(
                 map_id: map_id.as_ref(),
                 kind: e.kind,
                 subject: &e.subject,
+                // Unlabelled, and that is the measurement-preserving choice.
+                // This instrument measures schema growth against a recorded
+                // baseline, so its generated stream must stay byte-identical to
+                // what it produced before `subject_kind` existed. A label would
+                // add a canonical-form key and change every digest it emits,
+                // making the instrument report its own change as growth.
+                subject_ref: None,
                 predicate: e.predicate.as_deref(),
                 object: e.object.as_deref(),
                 payload: &e.payload,

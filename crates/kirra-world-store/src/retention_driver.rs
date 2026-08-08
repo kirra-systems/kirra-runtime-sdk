@@ -330,6 +330,7 @@ mod tests {
             map_id: None,
             kind: "observation",
             subject,
+            subject_ref: None,
             predicate: Some("at"),
             object: Some("bench"),
             payload: r#"{"n":1}"#,

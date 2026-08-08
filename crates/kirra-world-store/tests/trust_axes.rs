@@ -60,6 +60,7 @@ fn ev<'a>(id: &'a Ids, trust: Option<&'a TrustAxes>) -> NewEvent<'a> {
         map_id: None,
         kind: "observation",
         subject: "cup-1",
+        subject_ref: None,
         predicate: Some("colour"),
         object: Some("red"),
         payload: r#"{"n":1}"#,
