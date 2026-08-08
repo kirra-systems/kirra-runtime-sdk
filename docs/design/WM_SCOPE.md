@@ -918,6 +918,14 @@ does not describe is how a residue disappears.
       the bar above and is withdrawn. A matcher score must not become trust
       corroboration, quietly or otherwise.
 
+      **The seam, fixed by `KIRRA-WM-PROMOTION-001` before this box is coded:**
+      a promotion cites candidates by `ObservationId` through `Justification`,
+      and `KIRRA-WM-CANDIDATE-ID-001` keeps a candidate's identifier out of the
+      hashed record — so a cluster **cannot** be cited, only a candidate
+      observation can. **2a therefore emits candidates as observations**, not as
+      in-memory cluster objects passed to an adjudicator. 2a needs to know
+      nothing else about how confirmation works.
+
 - [ ] **2b — Adjudication / promotion.** The deterministic, auditable step that
       turns a confirmed `same_as` into identity, and the **only** boundary at
       which a relation may affect canonical identity.
@@ -926,6 +934,14 @@ does not describe is how a residue disappears.
       closed; a confirmed `same_as(A,C)` is never synthesized from an
       `A=B`, `B=C` chain. Promotion accepts / rejects / marks ambiguous **per
       relation**.
+      **Promotion authority ruled 2026-08-08** (`KIRRA-WM-PROMOTION-001`):
+      a candidate never becomes confirmed because a matcher produced it or
+      because candidates agree — promotion requires an **explicitly authorized
+      adjudicator**, and v1 is **`WriterClass::Operator` only**, enforced at the
+      same write door as SD-2. Automated adjudicators each need their own ruling.
+      Rejection is a **separate append-only record** (not a deletion, and not a
+      reversal); reversing an actual promotion is existing `SplitEntity`;
+      `ForgetEntity` is erasure and is not a reversal mechanism.
 
 - [ ] **2c — Deterministic resolution over promoted identity.** Rebuild-from-log
       must stay exact: the same log yields the same identity, with no dependence

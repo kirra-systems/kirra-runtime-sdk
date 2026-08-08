@@ -233,8 +233,8 @@ Stated so adoption is not mistaken for completion:
 
 - **No similarity model is supplied.** A perception stack still has nothing to
   match tracks with. That is the matcher, and it stays open.
-- **What confirms a `same_as` candidate** is unruled. Operator confirmation is
-  the obvious first answer and may be the only one for a while.
+- ~~**What confirms a `same_as` candidate** is unruled.~~ **RULED 2026-08-08 —
+  `KIRRA-WM-PROMOTION-001`, §4.5 below.**
 - ~~**Transitivity is unruled.**~~ **RULED 2026-08-08 —
   `KIRRA-WM-TRANSITIVITY-001`, §4.4 below.** If `a same_as b` and `b same_as c`,
   is `a same_as c`? Union-find says yes; evidence says only that two producers
@@ -293,6 +293,84 @@ Rule 4 is the one most likely to be lost to a convenient data structure: union-
 find is the obvious implementation and it *cannot* express "contradictory", because
 merging is its only operation. The precedent already exists in-tree —
 `resolution::resolve` refuses a redirect cycle rather than collapsing it.
+
+### 4.5 `KIRRA-WM-PROMOTION-001` — promotion authority
+
+> **A `same_as` candidate does not become confirmed identity merely because a
+> matcher produced it, or because multiple candidates agree. Promotion requires
+> an explicitly authorized adjudicator.**
+
+Narrow by construction: this rules *who may promote*, not *how good the matching
+is*. Matching quality is a 2a concern and is deliberately untouched here.
+
+```
+  matcher / derivation producer
+          ↓
+  pairwise same_as candidate
+          ↓
+     ✗ no trust-grade effect · ✗ no transitive closure · ✗ no confirmed identity
+          ↓
+  authorized adjudicator
+          ↓
+  promotion record
+          ↓
+  confirmed same_as evidence
+          ↓
+  Corroboration(n)
+          ↓
+  deterministic identity resolution
+```
+
+**1 — Who may promote.** **v1: `WriterClass::Operator` only.** Enforced where
+SD-2 already lives: the write door refuses `writer_class = derivation` with
+`claim_status = confirmed` on a `same_as`, exactly as it refuses
+`llm_candidate + confirmed` today. Automated adjudicators are **not** authorized
+and each requires its own ruling — "conservative v1" is the claim, so the
+document must not leave a gap an implementer could read as permission.
+
+> **Assumption of use, stated because the ruling cannot enforce it.**
+> `writer_class` is *declared by the writer*. "Operator only" is therefore
+> exactly as strong as the authentication on the write path, and no stronger. The
+> store enforces *what class may confirm*, never *who holds that credential*. A
+> deployment that lets an automated agent write as `operator` has bypassed this
+> ruling without violating a single line of it.
+
+**2 — What promotion records.** The existing adjudication shape, not a parallel
+vocabulary: a promotion cites the **candidate observations** by `ObservationId`
+through `Justification` (already non-empty and duplicate-refusing at
+construction), plus the adjudicator's `source` + `writer_class` and the decision
+time, and yields the confirmed `same_as`.
+
+*Consequence for 2a, and the reason to rule this before building it:*
+`KIRRA-WM-CANDIDATE-ID-001` keeps a candidate's identifier out of the hashed
+record, and `Justification` cites `ObservationId`s — so **a cluster cannot be
+cited, only a candidate observation can.** 2a must therefore emit candidates
+*as observations*, not as in-memory cluster objects handed to an adjudicator.
+That is the seam, and it is fixed now rather than discovered after 2a has an API.
+
+**3 — Reversal, which is three distinct things and not one.**
+
+| | Mechanism |
+|---|---|
+| **Rejection** — the adjudicator declines to promote | **New, separate.** Nothing was promoted, so this is not a reversal at all. It needs its own record so that "we looked and said no" is distinguishable from "nobody has looked yet", and so a rejected candidate is not re-adjudicated forever. |
+| **Reversal of a promotion** — it was promoted and is now wrong | **Existing `SplitEntity`.** No new verb. |
+| **Erasure** | **`ForgetEntity`**, which is *not* a reversal mechanism and must not be used as one. |
+
+Rejection is an **append-only record, never a deletion of the candidate.** A
+candidate is evidence; deleting it to represent a judgement about it destroys the
+thing the judgement was about.
+
+**4 — What `Corroboration(n)` counts. Confirmed `same_as` evidence records —
+NOT matcher votes.** Counting votes would let one matcher run N times, or N
+matchers with correlated features, manufacture corroboration; that is the §2
+laundering failure with extra steps. Every increment must trace to an
+adjudication.
+
+> **Counted per distinct *relation*, not per record.** If an adjudicator promotes
+> three candidate observations about the same `(A, B)` pair, that is **one**
+> corroborated relation, not three — otherwise re-adjudication inflates trust.
+> A rejected candidate never contributes and never decrements; it simply is not
+> confirmed.
 
 ---
 
