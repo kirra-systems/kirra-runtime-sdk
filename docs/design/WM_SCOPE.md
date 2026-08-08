@@ -870,6 +870,29 @@ does not describe is how a residue disappears.
       matcher exists. `KIRRA-WM-CANDIDATE-ID-001` constrains rather than supplies
       it — a candidate's identifier may not enter the hashed evidence record, so
       candidate membership has to be projected, not frozen.
+
+      **Written up for a ruling on 2026-08-08**:
+      [`WM_CANDIDATE_CLUSTERING_PROPOSAL.md`](WM_CANDIDATE_CLUSTERING_PROPOSAL.md)
+      (`KIRRA-WM-CLUSTERING-001`). Drafting it turned up why this box is unlike
+      the rest of Tier 2: **the blueprint specifies candidate clustering in one
+      word and a parenthetical** — the §6.3 diagram and one roadmap row, with no
+      definition of matching, no features, no thresholds, no output type. The
+      other Tier 2 questions were recoverable by reading carefully; this one is
+      not, so building a matcher would mean inventing a similarity model and
+      calling it a reading.
+      The proposal recommends splitting the box: rule the **contract** (a cluster
+      is a proposal and never evidence; its id is a projection key; purity is
+      rebuild-from-log; every co-reference judgement names its source) and land
+      **declared co-reference** as the first driver of `Corroboration(n)` — using
+      the finding that the model already expresses "these two are the same
+      thing" as an `ObservationKind::Relationship` claim with a `same_as`
+      predicate, which inherits source, confidence, provenance, the chain and
+      SD-2 for free. A similarity matcher is then *relocated* rather than
+      forbidden: it becomes a `derivation`-class producer of `candidate`
+      `same_as` claims, admitted through the same door and visible as inferred,
+      instead of reaching into a trust axis directly. Deliberately left open:
+      the similarity model itself, what confirms a `same_as` candidate, and
+      **transitivity**.
 - [x] **`MergeEntities` / `SplitEntity` / `ForgetEntity` as recorded events** —
       **DONE 2026-08-07**, `crates/kirra-world/src/adjudication.rs`, 24 unit
       tests, still zero-dependency.
@@ -907,13 +930,28 @@ does not describe is how a residue disappears.
       the store's SQLite spelling leaking up into the domain core.
       **One consequence is deliberately not stated** — see the open question
       below.
-- [ ] **`entity_id` minting** — moved here from §6 on 2026-08-07 by
-      `KIRRA-WM-TIER1-DONE-001`. It was always described as belonging here
-      (*"minting an id is deciding that something is a distinct thing, which is
-      adjudication"*) while being listed under Tier 1, which is what held that
-      tier's box open on Tier 2 work. Listed rather than deleted: §6's residue
-      was a real work item, and a residue that disappears when a box is ticked
-      is the failure the ruling's own second constraint names.
+- [x] **`entity_id` minting** — **DONE 2026-08-08**,
+      `WorldStore::mint_entity_id` + the `entity_id_mint` ledger (schema v4),
+      6 integration tests.
+      Moved here from §6 on 2026-08-07 by `KIRRA-WM-TIER1-DONE-001`. It was
+      always described as belonging here (*"minting an id is deciding that
+      something is a distinct thing, which is adjudication"*) while being listed
+      under Tier 1, which is what held that tier's box open on Tier 2 work.
+      Listed rather than deleted: §6's residue was a real work item, and a
+      residue that disappears when a box is ticked is the failure the ruling's
+      own second constraint names.
+      §6.1 asks for ids that are *"stable, opaque, monotonic. Never reused, never
+      encodes semantics."* Stable and opaque are properties of the **type**; the
+      other two are properties of the **generator**, which is why they need
+      durable state and could not live in the zero-dependency core. Monotonicity
+      takes its floor from the durable high-water rather than the clock, so an
+      NTP step or a VM restore cannot regress an id — tested by moving the clock
+      backwards and across a reopen. Never-reuse is the ledger's `PRIMARY KEY`,
+      demonstrated by writing a minted id twice and finding the constraint fire,
+      rather than described.
+      **This box was left unticked when the work merged (2026-08-08) and was
+      caught on re-reading, not by a gate.** Prose cannot fail CI, which is why
+      it is the thing that goes stale.
 
 **RULED 2026-08-08 — `KIRRA-WM-CANDIDATE-ID-001`**
 ([proposal](WM_CANDIDATE_ID_PROPOSAL.md)): a candidate's identifier **may not
