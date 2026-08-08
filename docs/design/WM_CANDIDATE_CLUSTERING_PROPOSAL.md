@@ -1,15 +1,36 @@
-# What "candidate clustering" is — a ruling request
+# What "candidate clustering" is — RULED
 
-**KIRRA-WM-CLUSTERING-001** · drafted 2026-08-08 · **status: PROPOSED — not a
-ruling, not an authorization**
+**KIRRA-WM-CLUSTERING-001** · drafted 2026-08-08 · **RULED 2026-08-08** ·
+**status: ADOPTED — §4 is now binding**
+
+> ## The ruling
+>
+> **Clustering may PROPOSE co-reference. It may never CONFIRM identity.**
+>
+> A heuristic or learned matcher is authorized as a *candidate producer*.
+> Confirmed identity continues to arrive only through explicit adjudication over
+> recorded evidence. The trust boundary the four-axis model exists to protect is
+> unchanged: no threshold, score or model output may become an identity fact
+> without passing a deterministic, auditable promotion step.
+>
+> This adopts §4 as written — both halves. The choice was framed as *"deterministic
+> reading of explicit `same_as` evidence only"* **versus** *"a matcher that
+> proposes but cannot confirm"*, and those are not alternatives: §4.2 makes
+> `same_as` the carrier, and a matcher is simply one `derivation`-class producer
+> writing through it. Ruling the second **includes** the first. What would have
+> been a narrower ruling is a matcher barred entirely, and that is not what was
+> chosen.
+>
+> **Still unruled, and now the gating question — see §6.4:** *transitivity*.
 
 | | |
 |---|---|
 | **Asks** | What candidate clustering *is*, before anything is built to do it |
-| **Blocks** | `WM_SCOPE.md` §5's last open box; `Corroboration(n)`, which has no driver |
+| **Blocks** | ~~`WM_SCOPE.md` §5's last open box~~ — split into four (§5) |
 | **Blocked by** | Nothing. Every dependency it had is now merged |
 | **Constrained by** | `KIRRA-WM-CANDIDATE-ID-001` (2026-08-08); ADR-0040 writer classes; §9's four axes |
 | **Related** | `KIRRA-WM-SPLIT-SURVIVAL-001`, `KIRRA-WM-CANDIDATE-ID-001` |
+| **Next ruling** | **Transitivity** — required *before* promotion is built, not after |
 
 ---
 

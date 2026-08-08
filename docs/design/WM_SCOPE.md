@@ -893,6 +893,49 @@ does not describe is how a residue disappears.
       instead of reaching into a trust axis directly. Deliberately left open:
       the similarity model itself, what confirms a `same_as` candidate, and
       **transitivity**.
+
+      **RULED 2026-08-08 — adopted.** *Clustering may PROPOSE co-reference; it
+      may never CONFIRM identity.* A heuristic or learned matcher is authorized
+      as a candidate producer; confirmed identity still arrives only through
+      explicit adjudication over recorded evidence. **This box is therefore
+      retired and replaced by the four below** — one vague box is exactly how a
+      matcher gets mistaken for identity truth, which is the failure the ruling
+      exists to prevent.
+
+- [ ] **2a — Candidate generation / matching.** A `derivation`-class producer
+      emitting `candidate` `same_as` claims: the two subjects, the similarity or
+      evidence that prompted it, the source and its model/rule **version**, and
+      confidence provenance. It writes through the same door as every other
+      producer (§4.2) and is visible as inferred.
+      **It may not write `claim_status = confirmed`, and may not touch
+      `Corroboration(n)`.** SD-2 already refuses `llm_candidate` + `confirmed` at
+      the write door; this is the same boundary extended to `derivation`.
+
+- [ ] **2b — Adjudication / promotion.** The deterministic, auditable step that
+      turns a confirmed `same_as` into identity. **Blocked on the transitivity
+      ruling** — promotion is where a closure would first be computed, so
+      building it first means a fold decides transitivity implicitly, which
+      `KIRRA-WM-CLUSTERING-001` §6 constraint 4 forbids ("ruled before it is
+      computed, not discovered by a fold that already does it").
+
+- [ ] **2c — Deterministic resolution over promoted identity.** Rebuild-from-log
+      must stay exact: the same log yields the same identity, with no dependence
+      on matcher output, tie-break order or wall-clock. The existing
+      `resolution::resolve` invariants are the floor, not a new standard.
+
+- [ ] **2d — Historical / as-of resolution** — *scope decision required, see
+      below.* `resolve` is **current-state only** today.
+
+      The honest options are (a) amend this tier's definition to say identity
+      resolution is current-only and move as-of to a later tier, or (b) build
+      `resolve_at` / `identity_view_at` now. **Worth knowing before choosing:
+      the bitemporal substrate already exists** — `kirra-world-store` ships
+      `current` / `as_of` / `history` / `candidates` / `changed_since` (#1353) —
+      so (b) is composing an as-of read with existing resolution, not building
+      bitemporality. Given the incident-reconstruction goal, identity is not
+      fully mature without it; whether that blocks *Tier 2* is a definition
+      question, and the answer must be written down either way rather than left
+      to the reader to infer from a passing `resolve`.
 - [x] **`MergeEntities` / `SplitEntity` / `ForgetEntity` as recorded events** —
       **DONE 2026-08-07**, `crates/kirra-world/src/adjudication.rs`, 24 unit
       tests, still zero-dependency.
