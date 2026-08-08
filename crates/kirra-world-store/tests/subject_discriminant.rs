@@ -90,7 +90,6 @@ fn every_storable_kind_survives_a_write_and_a_rehash() {
 
     let cases = [
         SubjectRef::Entity("cup-1".into()),
-        SubjectRef::Candidate("cand-1".into()),
         SubjectRef::Frame("base_link".into()),
     ];
     for (n, r) in cases.iter().enumerate() {
@@ -100,7 +99,7 @@ fn every_storable_kind_survives_a_write_and_a_rehash() {
     }
 
     s.verify_chain().expect("labelled rows verify");
-    assert_eq!(s.count().unwrap(), 3);
+    assert_eq!(s.count().unwrap(), 2);
     let _ = std::fs::remove_file(&path);
 }
 
@@ -157,17 +156,27 @@ fn labelling_a_row_after_the_fact_breaks_the_chain() {
 
 /// ...and so does **changing** one.
 ///
-/// Stated separately from the test above because the two are different edits.
-/// Adding a label to an unlabelled row and promoting a candidate to an entity
-/// are the two ways this column could be abused, and only the second one
-/// changes a value that was already hashed.
+/// Stated separately from the test above because the two are different edits:
+/// adding a label to an unlabelled row, and altering one that was already
+/// hashed.
+///
+/// **This test used to promote a candidate to an entity**, which was the
+/// sharpest version of the attack — silently upgrading something
+/// unadjudicated into a resolved entity. `KIRRA-WM-CANDIDATE-ID-001` removed
+/// `candidate` from the stored vocabulary, so that edit can no longer be
+/// staged: there is no such row to tamper with. Recorded rather than quietly
+/// rewritten, because the ruling narrowed what this file is able to prove, and
+/// a reader comparing it against the PR that introduced it should find out why
+/// here rather than from a diff.
+///
+/// A frame relabelled as an entity is the surviving form of the same edit.
 #[test]
-fn promoting_a_candidate_to_an_entity_breaks_the_chain() {
+fn relabelling_a_frame_as_an_entity_breaks_the_chain() {
     let path = tmp("relabel-change");
     let mut s = WorldStore::open(&path).expect("open");
-    let r = SubjectRef::Candidate("cand-1".into());
-    s.append(&ev(&ids("a"), "cand-1", Some(&r)))
-        .expect("labelled candidate");
+    let r = SubjectRef::Frame("base_link".into());
+    s.append(&ev(&ids("a"), "base_link", Some(&r)))
+        .expect("labelled frame");
     s.verify_chain().expect("clean before tamper");
 
     s.tamper_for_test(1, "subject_kind", Some("entity"))
@@ -176,10 +185,37 @@ fn promoting_a_candidate_to_an_entity_breaks_the_chain() {
     match s.verify_chain() {
         Err(StoreError::ChainBroken { generation }) => assert_eq!(generation, 1),
         other => panic!(
-            "silently promoting a candidate to a resolved entity is the exact \
+            "silently changing what kind of thing a row is about is the exact \
              failure the discriminant exists to prevent, got {other:?}"
         ),
     }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A candidate subject is refused, and the refusal names the ruling.
+///
+/// `KIRRA-WM-CANDIDATE-ID-001`: candidate clustering is a **pure** step, so a
+/// candidate id is derived from other rows in this store rather than observed.
+/// Freezing it into append-only hashed bytes would record a derivation that a
+/// later clustering run cannot correct and nothing detects.
+#[test]
+fn a_candidate_subject_is_not_storable() {
+    let path = tmp("candidate");
+    let mut s = WorldStore::open(&path).expect("open");
+    let r = SubjectRef::Candidate("cand-1".into());
+    let err = s
+        .append(&ev(&ids("a"), "cand-1", Some(&r)))
+        .expect_err("refused");
+    assert!(matches!(err, StoreError::CandidateSubjectNotStorable));
+    assert_eq!(s.count().unwrap(), 0, "a refused append writes nothing");
+
+    // The SAME observation is recordable unlabelled -- the ruling removes the
+    // label, not the evidence. Asserted so the refusal cannot be read as
+    // "observations about candidates cannot be stored", which would be a much
+    // larger claim than the one that was adopted.
+    s.append(&ev(&ids("a"), "cand-1", None))
+        .expect("the observation itself is still recordable");
+    s.verify_chain().expect("verifies");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -216,7 +252,7 @@ fn the_vocabulary_is_closed_against_raw_sql() {
     let mut s = WorldStore::open(&path).expect("open");
     s.append(&ev(&ids("a"), "cup-1", None)).expect("append");
 
-    for rejected in ["unbound", "Entity", "", "nonsense"] {
+    for rejected in ["candidate", "unbound", "Entity", "", "nonsense"] {
         assert!(
             s.tamper_for_test(1, "subject_kind", Some(rejected))
                 .is_err(),

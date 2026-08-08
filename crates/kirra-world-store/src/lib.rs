@@ -203,6 +203,20 @@ pub enum StoreError {
     /// recorded, it just may not be *labelled* — and a caller who asked for a
     /// label should learn it did not get one.
     UnboundSubjectNotStorable,
+    /// A [`SubjectRef::Candidate`] was offered as a label.
+    ///
+    /// Refused by ruling `KIRRA-WM-CANDIDATE-ID-001` (2026-08-08), not by
+    /// oversight. Candidate clustering is specified as a **pure** step, so a
+    /// candidate id is the output of a computation over other rows in this
+    /// store. Admitting it here would freeze that derivation inside hashed,
+    /// append-only bytes, where a later clustering run cannot correct it and
+    /// nothing detects the disagreement.
+    ///
+    /// A candidate observation is still *recordable* — it is simply not
+    /// *labelled*, and its membership belongs in a projection. Refused rather
+    /// than silently written as `None`, for the same reason as `Unbound`: a
+    /// caller who asked for a label should learn it did not get one.
+    CandidateSubjectNotStorable,
     /// The subject reference names a different id than `subject`.
     ///
     /// The two are separate fields, so this is enforced rather than
@@ -306,6 +320,13 @@ impl std::fmt::Display for StoreError {
                 "an unbound subject cannot be labelled: it carries no id, and \
                  world_events.subject is NOT NULL \
                  (schema::SCHEMA_V3_MIGRATION)"
+            ),
+            Self::CandidateSubjectNotStorable => write!(
+                f,
+                "a candidate subject cannot be labelled: candidate clustering \
+                 is a pure step, so its id is derived rather than observed and \
+                 must not enter hashed evidence \
+                 (KIRRA-WM-CANDIDATE-ID-001)"
             ),
             Self::SubjectRefDisagreesWithSubject { reference, subject } => write!(
                 f,
@@ -1098,6 +1119,9 @@ impl WorldStore {
         // than by a `CHECK`, because SQLite cannot compare a column against a
         // caller's intent -- the row it would see is already self-consistent.
         if let Some(r) = e.subject_ref {
+            if matches!(r, SubjectRef::Candidate(_)) {
+                return Err(StoreError::CandidateSubjectNotStorable);
+            }
             match r.id() {
                 None => return Err(StoreError::UnboundSubjectNotStorable),
                 Some(id) if id != e.subject => {

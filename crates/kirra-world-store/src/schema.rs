@@ -256,8 +256,24 @@ CREATE INDEX idx_events_adjudication ON world_events (adjudication, generation);
 /// out of step with. The property is nonetheless asserted rather than argued —
 /// setting `subject_kind` on a row that was written without one breaks the
 /// chain, and there is a test that does precisely that.
+/// **Two tokens, where [`kirra_world::observation::SubjectRef`] has four.**
+/// `unbound` is absent because it carries no id and `subject` is `NOT NULL`.
+/// `candidate` is absent by ruling — `KIRRA-WM-CANDIDATE-ID-001`, adopted
+/// 2026-08-08 (`docs/design/WM_CANDIDATE_ID_PROPOSAL.md`).
+///
+/// The blueprint marks candidate clustering **pure** and identity assertion the
+/// **recorded event** (§6). A candidate id is therefore the output of a
+/// re-runnable computation over other rows in this same store, and putting one
+/// inside an append-only row freezes a derivation no later run can correct: the
+/// stored label and what a re-run would say can disagree, with the chain
+/// vouching for the frozen one. Derived values belong in the projection tables,
+/// which are rebuilt by folding the log.
+///
+/// This is narrower than what shipped in the first draft of the column, which
+/// admitted `candidate`. It was narrowed **before release** deliberately — the
+/// token would otherwise sit inside digests that cannot be recomputed away.
 pub const SCHEMA_V3_MIGRATION: &str = r#"
 ALTER TABLE world_events ADD COLUMN subject_kind TEXT
     CHECK (subject_kind IS NULL OR subject_kind IN
-        ('entity','candidate','frame'));
+        ('entity','frame'));
 "#;
