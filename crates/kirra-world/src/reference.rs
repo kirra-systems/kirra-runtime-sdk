@@ -269,6 +269,46 @@ reference_newtype! {
 }
 
 reference_newtype! {
+    /// A resolved entity's identifier — §6.1.
+    ///
+    /// §6.1: *"Stable, opaque, monotonic. Never reused, never encodes
+    /// semantics."*
+    ///
+    /// **Opaque is enforced by construction, not by convention** — the inner
+    /// value is private and there is no parsing accessor, so no consumer can
+    /// come to depend on structure inside an id. Monotonicity and never-reuse
+    /// are properties of the *generator*, which lives in the store; this type
+    /// cannot enforce them and does not claim to.
+    ///
+    /// # Why it lives here rather than in [`crate::entity`]
+    ///
+    /// It was declared in `entity.rs` until 2026-08-08, hand-written, and
+    /// validated only against emptiness. Two problems, one move.
+    ///
+    /// **A cycle.** `entity` already imports `observation`, so
+    /// [`crate::observation::SubjectRef`] carrying an `EntityId` from `entity`
+    /// would have made the two modules mutually dependent. This module imports
+    /// no sibling — it is a leaf — so both can depend on it and neither on the
+    /// other. That also keeps `SubjectRef::Unbound`'s claim TRUE rather than
+    /// merely convenient: the observation model still does not depend on the
+    /// entity *taxonomy* — not `Entity`, not `Lifecycle`, not adjudication —
+    /// only on an opaque identifier that names one.
+    ///
+    /// **Two admission standards for one hashed column.** The hand-written
+    /// constructor refused empty ids and nothing else, while every reference
+    /// here also refuses over-long values and ASCII control characters — for a
+    /// reason that applies at least as strongly to entity ids, since they land
+    /// in the same canonically-hashed JSON and the same audit exports. See
+    /// [`ReferenceError::ControlCharacter`]. Sharing the macro makes the two
+    /// arms of `SubjectRef` validate alike instead of only appearing to.
+    ///
+    /// `EntityId::new` is therefore **stricter than it was**: an id over
+    /// [`MAX_REFERENCE_LEN`] bytes or containing a control character is now
+    /// refused where it previously passed.
+    EntityId, "entity reference"
+}
+
+reference_newtype! {
     /// Which map a spatial claim is relative to.
     ///
     /// See [`FrameId`] — same boundary, same prohibition. If Kirra World and

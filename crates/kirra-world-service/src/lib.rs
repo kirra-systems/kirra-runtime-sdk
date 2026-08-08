@@ -56,6 +56,10 @@ mod tests {
         assert_eq!(id.as_str(), "e-1");
 
         // And it is the SAME type the domain model uses, not a look-alike.
-        assert_eq!(id, kirra_world::entity::EntityId::new("e-1").unwrap());
+        // The path is `reference` since 2026-08-08 — the type moved there so
+        // `observation::SubjectRef` could carry it without an entity <->
+        // observation module cycle. What this guard pins is unchanged: the
+        // crate-root name resolves to the constructible domain type.
+        assert_eq!(id, kirra_world::reference::EntityId::new("e-1").unwrap());
     }
 }

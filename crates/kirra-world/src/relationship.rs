@@ -47,8 +47,8 @@
 //! [`Symmetry::Unspecified`] for everything else rather than guessing — see its
 //! docs for the specific candidates, recorded as an open question.
 
-use crate::entity::EntityId;
 use crate::observation::{Confidence, DomainInstant, SourceClass, TimeError, ValidInterval};
+use crate::reference::EntityId;
 
 // ---------------------------------------------------------------------------
 // Predicates — §8's four groups

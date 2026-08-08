@@ -50,6 +50,7 @@
 //! [`EntityId`] here is an opaque validated wrapper, not a generator.
 
 use crate::observation::{Confidence, SourceClass};
+use crate::reference::EntityId;
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -58,8 +59,6 @@ use crate::observation::{Confidence, SourceClass};
 /// Why an entity value could not be built.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EntityError {
-    /// An id was empty or whitespace.
-    EmptyEntityId,
     /// An alias name was empty or whitespace.
     EmptyAliasName,
     /// The lifecycle transition is not permitted — see [`Lifecycle::advance_to`].
@@ -69,40 +68,6 @@ pub enum EntityError {
         /// The state moved to.
         to: LifecycleState,
     },
-}
-
-/// A stable, opaque entity identifier.
-///
-/// §6.1: *"Stable, opaque, monotonic. Never reused, never encodes semantics."*
-///
-/// **Opaque is enforced by construction, not by convention** — the inner value
-/// is private and there is no parsing accessor, so no consumer can come to
-/// depend on structure inside an id. Monotonicity and never-reuse are properties
-/// of the *generator*, which lives in the store; this type cannot enforce them
-/// and does not claim to.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct EntityId(String);
-
-impl EntityId {
-    /// Wrap an identifier.
-    ///
-    /// # Errors
-    ///
-    /// [`EntityError::EmptyEntityId`] if empty or whitespace.
-    pub fn new(id: impl Into<String>) -> Result<Self, EntityError> {
-        let id = id.into();
-        if id.trim().is_empty() {
-            return Err(EntityError::EmptyEntityId);
-        }
-        Ok(Self(id))
-    }
-
-    /// The identifier as text. Deliberately the only accessor — callers may
-    /// compare and display, not decompose.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1052,7 +1017,9 @@ mod tests {
 
     #[test]
     fn empty_identifiers_are_refused() {
-        assert_eq!(EntityId::new("  "), Err(EntityError::EmptyEntityId));
+        // `EntityId` moved to `crate::reference` on 2026-08-08 and now reports
+        // `ReferenceError`; its own emptiness/length/control-character cases are
+        // covered there. What this test still owns is the *alias* half.
         assert_eq!(
             Alias::new("", SourceClass::Operator),
             Err(EntityError::EmptyAliasName)
