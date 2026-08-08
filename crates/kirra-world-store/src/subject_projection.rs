@@ -211,10 +211,12 @@ CREATE TABLE IF NOT EXISTS subject_summary (
 CREATE INDEX IF NOT EXISTS idx_subject_summary_last
     ON subject_summary (last_observed_ms);
 
--- Resolved entities are the row set entity resolution matches against, so the
--- one query this projection now exists to answer should not be a table scan.
-CREATE INDEX IF NOT EXISTS idx_subject_summary_kind
-    ON subject_summary (subject_kind, subject);
+-- No index on (subject_kind, subject): the PRIMARY KEY already creates one.
+-- SQLite builds an implicit index for a non-INTEGER primary key, and
+-- `WHERE subject_kind = 'entity'` uses it as a leftmost-prefix scan. A second
+-- index over the same columns in the same order would add write amplification
+-- and pages for no plan the optimizer could not already reach. Raised in review
+-- on #1398, after this file shipped one.
 
 -- The SAME checkpoint table `PROJECTIONS_V1` declares, repeated because either
 -- projection may be folded without the other and each must be able to install

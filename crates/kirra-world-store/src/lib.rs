@@ -2731,10 +2731,21 @@ impl WorldStore {
         // successful fold. Asserted by
         // `an_old_shape_projection_is_rebuilt_from_zero_not_resumed`.
         if self.has_subject_summary()? && !self.subject_summary_has_kind()? {
-            self.conn.execute_batch(
-                "DROP TABLE IF EXISTS subject_summary;
-                 DELETE FROM projection_checkpoint WHERE name = 'subject_summary';",
+            // ONE transaction, because `execute_batch` is NOT one: SQLite
+            // autocommits each statement, so a crash between the DROP and the
+            // DELETE leaves the table gone and the checkpoint advanced -- and
+            // the next fold then rebuilds an empty table and resumes from a
+            // non-zero generation, silently omitting everything below it.
+            //
+            // That is the exact failure the comment above describes, and this
+            // code had it. Raised in review on #1398.
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute("DROP TABLE IF EXISTS subject_summary", [])?;
+            tx.execute(
+                "DELETE FROM projection_checkpoint WHERE name = ?1",
+                params![subject_projection::SUBJECT_SUMMARY_PROJECTION],
             )?;
+            tx.commit()?;
         }
         self.conn
             .execute_batch(subject_projection::SUBJECT_PROJECTION_V1)?;
@@ -3016,7 +3027,12 @@ impl WorldStore {
         Ok(out)
     }
 
-    /// Every subject summary, ordered by subject.
+    /// Every subject summary, ordered by `(subject_kind, subject)`.
+    ///
+    /// Not by subject alone — one string can now name more than one thing, so
+    /// the kind is the leading sort term. Stated because a caller relying on
+    /// the old contract would see rows for the same subject separated by every
+    /// other subject of the earlier kind.
     ///
     /// # Errors
     ///

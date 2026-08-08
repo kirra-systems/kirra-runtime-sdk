@@ -29,12 +29,24 @@ fn tmp(name: &str) -> std::path::PathBuf {
         name,
         std::process::id()
     ));
+    clean(&p);
+    p
+}
+
+/// Remove the database AND its WAL sidecars.
+///
+/// `synchronous=FULL` in WAL mode leaves `-wal` and `-shm` beside the main file,
+/// so removing only the `.sqlite` leaks two files per test — and worse, a
+/// surviving `-wal` beside a recreated database of the same name is a recovery
+/// source, which can make a later run see rows it never wrote. The same helper
+/// and the same reasoning as `subject_summary.rs`; this file shipped without it
+/// and it was raised in review on #1398.
+fn clean(p: &std::path::Path) {
     for suffix in ["", "-wal", "-shm"] {
         let mut q = p.as_os_str().to_os_string();
         q.push(suffix);
         let _ = std::fs::remove_file(std::path::PathBuf::from(q));
     }
-    p
 }
 
 struct Ids {
@@ -119,7 +131,7 @@ fn resolved_entities_excludes_frames_and_unlabelled_subjects() {
     // fold that silently omitted rows would under-report, and under-reporting
     // is indistinguishable from "never observed".
     assert_eq!(s.subject_summaries().expect("all").len(), 3);
-    let _ = std::fs::remove_file(&path);
+    clean(&path);
 }
 
 /// **An entity and a frame with the same id string are two rows.**
@@ -164,7 +176,7 @@ fn one_id_string_under_two_kinds_is_two_summaries() {
     let resolved = s.resolved_entities().expect("read");
     assert_eq!(resolved.len(), 1);
     assert_eq!(resolved[0].subject_kind, SummaryKind::Entity);
-    let _ = std::fs::remove_file(&path);
+    clean(&path);
 }
 
 /// Unlabelled subjects still fold into ONE row per subject.
@@ -201,7 +213,7 @@ fn unlabelled_subjects_still_fold_into_one_row() {
     assert_eq!(all[0].subject_kind, SummaryKind::Unlabelled);
     assert_eq!(all[0].first_observed_ms, T0);
     assert_eq!(all[0].last_observed_ms, T0 + 2);
-    let _ = std::fs::remove_file(&path);
+    clean(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -266,7 +278,7 @@ fn an_old_shape_projection_is_rebuilt_from_zero_not_resumed() {
         all[0].observation_count, 3,
         "every event was re-scanned; a resumed fold would have found none"
     );
-    let _ = std::fs::remove_file(&path);
+    clean(&path);
 }
 
 /// The evidence `CHECK` refuses a kind token outside its vocabulary.
@@ -305,5 +317,5 @@ fn the_evidence_check_refuses_an_unreadable_kind_token() {
     // refusal is a refusal rather than damage.
     s.fold_subject_summary().expect("fold still works");
     assert_eq!(s.subject_summaries().expect("read").len(), 1);
-    let _ = std::fs::remove_file(&path);
+    clean(&path);
 }
