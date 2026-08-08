@@ -1491,7 +1491,12 @@ jobs:
         # deleted, or baselined with a justification — the forcing function
         # the DD review asked for after finding six unwired "DONE" cores.
         # See ci/check_orphan_cores.py + ci/orphan_cores_baseline.json.
-        run: python3 ci/check_orphan_cores.py
+        run: |
+          # The gate's own tests first: a guard that is never run against a
+          # fixture is only exercised by the tree it happens to be pointed at,
+          # where a false NEGATIVE looks exactly like success.
+          python3 ci/test_orphan_cores.py
+          python3 ci/check_orphan_cores.py
       - name: Re-export shim ratchet (ADR-0035 shim deprecation, #1029)
         # The de-monolith left thin `pub use <lean-crate>` re-export shims in src/
         # for path back-compat. #1029 requires treating them as a DEPRECATION with
