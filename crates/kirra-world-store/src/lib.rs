@@ -92,8 +92,8 @@ pub mod subject_projection;
 pub use compaction::{Citation, CompactionOutcome, DegradedSummary, Resolution, TemporalAnswer};
 pub use projection::{ProjectedClaim, CURRENT_PROJECTION};
 pub use subject_projection::{
-    subject_fold_all, subject_fold_step, ProjectedSubject, SubjectObservation,
-    SUBJECT_SUMMARY_PROJECTION,
+    subject_fold_all, subject_fold_step, ProjectedSubject, SubjectKey, SubjectObservation,
+    SummaryKind, SummaryKindError, SUBJECT_SUMMARY_PROJECTION,
 };
 
 // The domain core's types, re-exported so a caller of this crate needs only one
@@ -2713,9 +2713,46 @@ impl WorldStore {
     /// Install the subject-summary DDL. Lazy, for the D-20 reason in
     /// [`subject_projection`]'s module docs.
     fn ensure_subject_summary(&self) -> Result<(), StoreError> {
+        // A store written before `subject_kind` has a `subject_summary` whose
+        // DDL this batch will NOT correct: every statement is
+        // `CREATE ... IF NOT EXISTS`, so an existing table of the old shape is
+        // left exactly as it is and the first insert fails on a column that is
+        // not there.
+        //
+        // Dropped and rebuilt rather than migrated, because a projection IS a
+        // cache -- rebuildable from the event log by definition, which is the
+        // whole argument for it not being ratified schema. Migrating it would
+        // be inventing values for a column the old rows never had.
+        //
+        // The CHECKPOINT has to go with it. Dropping the table while leaving
+        // `projection_checkpoint` at generation N would make the next fold
+        // resume from N into an empty table and produce a projection missing
+        // everything below N -- a silent under-report that looks like a
+        // successful fold. Asserted by
+        // `an_old_shape_projection_is_rebuilt_from_zero_not_resumed`.
+        if self.has_subject_summary()? && !self.subject_summary_has_kind()? {
+            self.conn.execute_batch(
+                "DROP TABLE IF EXISTS subject_summary;
+                 DELETE FROM projection_checkpoint WHERE name = 'subject_summary';",
+            )?;
+        }
         self.conn
             .execute_batch(subject_projection::SUBJECT_PROJECTION_V1)?;
         Ok(())
+    }
+
+    /// Whether the installed `subject_summary` carries the `subject_kind`
+    /// column — i.e. whether it predates the resolved-entity projection.
+    fn subject_summary_has_kind(&self) -> Result<bool, StoreError> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(subject_summary)")?;
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            let name: String = r.get(1)?;
+            if name == "subject_kind" {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Whether the subject-summary table has been installed.
@@ -2801,7 +2838,7 @@ impl WorldStore {
         let mut head = from_generation;
         {
             let mut stmt = tx.prepare(
-                "SELECT subject, txn_time_ms, generation, event_id, chain_digest
+                "SELECT subject, txn_time_ms, generation, event_id, chain_digest, subject_kind
                  FROM world_events
                  WHERE generation > ?1 AND claim_status = 'confirmed'
                  ORDER BY generation ASC",
@@ -2815,10 +2852,10 @@ impl WorldStore {
             // walks a real log through both and compares.
             let mut upsert = tx.prepare(
                 "INSERT INTO subject_summary (
-                    subject, first_observed_ms, last_observed_ms, provenance_head,
+                    subject_kind, subject, first_observed_ms, last_observed_ms, provenance_head,
                     observation_count, last_generation, last_event_id
-                 ) VALUES (?1,?2,?2,?3,1,?4,?5)
-                 ON CONFLICT (subject) DO UPDATE SET
+                 ) VALUES (?6,?1,?2,?2,?3,1,?4,?5)
+                 ON CONFLICT (subject_kind, subject) DO UPDATE SET
                     observation_count = subject_summary.observation_count + 1,
                     first_observed_ms = MIN(subject_summary.first_observed_ms, excluded.first_observed_ms),
                     last_observed_ms  = MAX(subject_summary.last_observed_ms,  excluded.last_observed_ms),
@@ -2837,13 +2874,24 @@ impl WorldStore {
                 let generation: i64 = r.get(2)?;
                 let event_id: String = r.get(3)?;
                 let chain_digest: String = r.get(4)?;
+                let stored_kind: Option<String> = r.get(5)?;
+                // Resolved HERE, at the boundary, so an unreadable token is a
+                // reported error rather than a row the fold has already
+                // classified as something.
+                let kind =
+                    subject_projection::SummaryKind::from_event_column(stored_kind.as_deref())
+                        .map_err(|e| StoreError::CorruptRow {
+                            generation,
+                            detail: e.to_string(),
+                        })?;
                 head = head.max(generation);
                 upsert.execute(params![
                     subject,
                     txn_time_ms,
                     chain_digest,
                     generation,
-                    event_id
+                    event_id,
+                    kind.as_str()
                 ])?;
             }
         }
@@ -2879,8 +2927,16 @@ impl WorldStore {
     /// # Errors
     ///
     /// [`StoreError::Sqlite`] on any storage failure.
+    /// **Takes the kind as well as the subject**, since 2026-08-08.
+    ///
+    /// A subject string no longer identifies a row: an entity and a frame may
+    /// share one. Keeping the old one-argument signature would have left this
+    /// returning whichever of the two SQLite happened to yield first — a silent
+    /// wrong answer, not an error — so the argument is required rather than
+    /// defaulted.
     pub fn subject_summary(
         &self,
+        kind: subject_projection::SummaryKind,
         subject: &str,
     ) -> Result<Option<subject_projection::ProjectedSubject>, StoreError> {
         if !self.has_subject_summary()? {
@@ -2889,24 +2945,75 @@ impl WorldStore {
         let row = self
             .conn
             .query_row(
-                "SELECT subject, first_observed_ms, last_observed_ms, provenance_head,
+                "SELECT subject_kind, subject, first_observed_ms, last_observed_ms, provenance_head,
                         observation_count, last_generation, last_event_id
-                 FROM subject_summary WHERE subject = ?1",
-                params![subject],
-                |r| {
-                    Ok(subject_projection::ProjectedSubject {
-                        subject: r.get(0)?,
-                        first_observed_ms: r.get(1)?,
-                        last_observed_ms: r.get(2)?,
-                        provenance_head: r.get(3)?,
-                        observation_count: r.get(4)?,
-                        last_generation: r.get(5)?,
-                        last_event_id: r.get(6)?,
-                    })
-                },
+                 FROM subject_summary WHERE subject_kind = ?1 AND subject = ?2",
+                params![kind.as_str(), subject],
+                map_projected_subject,
             )
             .optional()?;
         Ok(row)
+    }
+
+    /// Every summary for one subject string, across kinds.
+    ///
+    /// The honest answer to "what do you know about this string" now that one
+    /// string can name more than one thing.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any storage failure;
+    /// [`StoreError::CorruptRow`] if a stored kind token cannot be read.
+    pub fn subject_summaries_for(
+        &self,
+        subject: &str,
+    ) -> Result<Vec<subject_projection::ProjectedSubject>, StoreError> {
+        self.subject_summary_query(
+            "WHERE subject = ?1 ORDER BY subject_kind ASC",
+            params![subject],
+        )
+    }
+
+    /// Every **resolved entity** this store has summarised.
+    ///
+    /// The query this projection was rebuilt to answer, and what entity
+    /// resolution matches an incoming observation against. Candidates cannot
+    /// appear here: `KIRRA-WM-CANDIDATE-ID-001` keeps them out of the evidence
+    /// entirely, so they are not merely filtered — there is nothing to filter.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any storage failure;
+    /// [`StoreError::CorruptRow`] if a stored kind token cannot be read.
+    pub fn resolved_entities(
+        &self,
+    ) -> Result<Vec<subject_projection::ProjectedSubject>, StoreError> {
+        self.subject_summary_query(
+            "WHERE subject_kind = 'entity' ORDER BY subject ASC",
+            params![],
+        )
+    }
+
+    fn subject_summary_query(
+        &self,
+        tail: &str,
+        args: &[&dyn rusqlite::ToSql],
+    ) -> Result<Vec<subject_projection::ProjectedSubject>, StoreError> {
+        if !self.has_subject_summary()? {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT subject_kind, subject, first_observed_ms, last_observed_ms, provenance_head,
+                    observation_count, last_generation, last_event_id
+             FROM subject_summary {tail}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(args, map_projected_subject)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     /// Every subject summary, ordered by subject.
@@ -2920,27 +3027,7 @@ impl WorldStore {
         if !self.has_subject_summary()? {
             return Ok(Vec::new());
         }
-        let mut stmt = self.conn.prepare(
-            "SELECT subject, first_observed_ms, last_observed_ms, provenance_head,
-                    observation_count, last_generation, last_event_id
-             FROM subject_summary ORDER BY subject ASC",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(subject_projection::ProjectedSubject {
-                subject: r.get(0)?,
-                first_observed_ms: r.get(1)?,
-                last_observed_ms: r.get(2)?,
-                provenance_head: r.get(3)?,
-                observation_count: r.get(4)?,
-                last_generation: r.get(5)?,
-                last_event_id: r.get(6)?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        self.subject_summary_query("ORDER BY subject_kind ASC, subject ASC", params![])
     }
 
     /// A digest over the whole subject summary, for the
@@ -2954,26 +3041,54 @@ impl WorldStore {
     }
 }
 
-/// Digest of the subject summary, taken in subject order so it is stable.
+/// One `subject_summary` row.
+///
+/// A stored kind outside the vocabulary is a **corrupt row**, not a row to be
+/// read as `Unlabelled`: the `CHECK` makes it unwritable through this crate, so
+/// finding one means the file was edited underneath it.
+fn map_projected_subject(
+    r: &rusqlite::Row<'_>,
+) -> rusqlite::Result<subject_projection::ProjectedSubject> {
+    let token: String = r.get(0)?;
+    let kind = subject_projection::SummaryKind::from_projection_column(&token).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    Ok(subject_projection::ProjectedSubject {
+        subject_kind: kind,
+        subject: r.get(1)?,
+        first_observed_ms: r.get(2)?,
+        last_observed_ms: r.get(3)?,
+        provenance_head: r.get(4)?,
+        observation_count: r.get(5)?,
+        last_generation: r.get(6)?,
+        last_event_id: r.get(7)?,
+    })
+}
+
+/// Digest of the subject summary, taken in key order so it is stable.
 fn subject_summary_digest_of(conn: &Connection) -> Result<String, StoreError> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     let mut stmt = conn.prepare(
-        "SELECT subject, first_observed_ms, last_observed_ms, provenance_head,
+        "SELECT subject_kind, subject, first_observed_ms, last_observed_ms, provenance_head,
                 observation_count, last_generation, last_event_id
-         FROM subject_summary ORDER BY subject ASC",
+         FROM subject_summary ORDER BY subject_kind ASC, subject ASC",
     )?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        let subject: String = r.get(0)?;
-        let first: i64 = r.get(1)?;
-        let last: i64 = r.get(2)?;
-        let head: String = r.get(3)?;
-        let count: i64 = r.get(4)?;
-        let generation: i64 = r.get(5)?;
-        let event_id: String = r.get(6)?;
+        // The KIND is inside the digest. Two rows differing only by kind are
+        // different rows, and a digest blind to that would call a projection
+        // where `base_link` is a frame equal to one where it is an entity.
+        let kind: String = r.get(0)?;
+        let subject: String = r.get(1)?;
+        let first: i64 = r.get(2)?;
+        let last: i64 = r.get(3)?;
+        let head: String = r.get(4)?;
+        let count: i64 = r.get(5)?;
+        let generation: i64 = r.get(6)?;
+        let event_id: String = r.get(7)?;
         hasher.update(
-            format!("{subject}\u{1f}{first}\u{1f}{last}\u{1f}{head}\u{1f}{count}\u{1f}{generation}\u{1f}{event_id}\u{1e}")
+            format!("{kind}\u{1f}{subject}\u{1f}{first}\u{1f}{last}\u{1f}{head}\u{1f}{count}\u{1f}{generation}\u{1f}{event_id}\u{1e}")
                 .as_bytes(),
         );
     }

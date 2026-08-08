@@ -7,7 +7,7 @@
 
 use kirra_world_store::{
     subject_fold_all, ClaimStatus, EventId, NewEvent, ObservationId, SubjectObservation,
-    WorldStore, WriterClass,
+    SummaryKind, WorldStore, WriterClass,
 };
 
 fn tmp(name: &str) -> std::path::PathBuf {
@@ -103,7 +103,10 @@ fn the_three_fields_are_folded_from_the_log() {
     }
     s.fold_subject_summary().expect("fold");
 
-    let got = s.subject_summary("cup-1").expect("read").expect("present");
+    let got = s
+        .subject_summary(SummaryKind::Unlabelled, "cup-1")
+        .expect("read")
+        .expect("present");
     assert_eq!(got.first_observed_ms, 100);
     assert_eq!(got.last_observed_ms, 700);
     assert_eq!(got.observation_count, 3);
@@ -148,6 +151,7 @@ fn the_sql_upsert_computes_what_the_pure_fold_computes() {
     let observations: Vec<SubjectObservation> = rows
         .iter()
         .map(|(n, subject, txn)| SubjectObservation {
+            subject_kind: None,
             subject: (*subject).to_string(),
             txn_time_ms: *txn,
             generation: *n,
@@ -158,11 +162,13 @@ fn the_sql_upsert_computes_what_the_pure_fold_computes() {
                 .map_or_else(String::new, |p| p.provenance_head.clone()),
         })
         .collect();
-    let pure = subject_fold_all(&observations);
+    let pure = subject_fold_all(&observations).expect("every kind readable");
 
     assert_eq!(stored.len(), pure.len(), "same subjects");
     for p in &stored {
-        let expected = pure.get(&p.subject).expect("subject in the pure fold");
+        let expected = pure
+            .get(&(p.subject_kind, p.subject.clone()))
+            .expect("subject in the pure fold");
         assert_eq!(p.first_observed_ms, expected.first_observed_ms, "{p:?}");
         assert_eq!(p.last_observed_ms, expected.last_observed_ms, "{p:?}");
         assert_eq!(p.observation_count, expected.observation_count, "{p:?}");
@@ -197,7 +203,10 @@ fn the_head_follows_generation_through_the_store_too() {
         .expect("c");
     s.fold_subject_summary().expect("fold");
 
-    let got = s.subject_summary("cup-1").expect("read").expect("present");
+    let got = s
+        .subject_summary(SummaryKind::Unlabelled, "cup-1")
+        .expect("read")
+        .expect("present");
     assert_eq!(got.last_generation, 3, "the head is the newest generation");
     assert_eq!(got.last_event_id, "evt-3");
     assert_eq!(
@@ -223,14 +232,19 @@ fn candidates_do_not_contribute() {
         .expect("candidate-only subject");
     s.fold_subject_summary().expect("fold");
 
-    let cup = s.subject_summary("cup-1").expect("read").expect("present");
+    let cup = s
+        .subject_summary(SummaryKind::Unlabelled, "cup-1")
+        .expect("read")
+        .expect("present");
     assert_eq!(
         cup.observation_count, 1,
         "the candidate must not count toward the summary"
     );
     assert_eq!(cup.last_observed_ms, 100);
     assert!(
-        s.subject_summary("ghost-1").expect("read").is_none(),
+        s.subject_summary(SummaryKind::Unlabelled, "ghost-1")
+            .expect("read")
+            .is_none(),
         "a candidate-only subject has no confirmed observation to summarise"
     );
     clean(&path);
@@ -306,7 +320,7 @@ fn a_second_fold_with_no_new_events_is_a_no_op() {
 
     assert_eq!(first, second, "re-folding must not double-count");
     assert_eq!(
-        s.subject_summary("cup-1")
+        s.subject_summary(SummaryKind::Unlabelled, "cup-1")
             .expect("read")
             .expect("present")
             .observation_count,
