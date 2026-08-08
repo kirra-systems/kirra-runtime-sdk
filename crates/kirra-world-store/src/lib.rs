@@ -1878,6 +1878,7 @@ impl WorldStore {
         now_ms: i64,
     ) -> Result<(), StoreError> {
         self.conn.execute_batch(compaction::COMPACTION_V1)?;
+        compaction::ensure_subject_kind_column(&self.conn)?;
         self.conn.execute(
             "INSERT INTO compaction_citations (
                 lo_generation, hi_generation, event_count, range_digest,
@@ -2604,6 +2605,7 @@ impl WorldStore {
             return Err(StoreError::EmptyRange { lo, hi });
         }
         self.conn.execute_batch(compaction::COMPACTION_V1)?;
+        compaction::ensure_subject_kind_column(&self.conn)?;
 
         // --- refusal 1: protected classes ---------------------------------
         let protected: Option<(i64, String)> = self
@@ -2697,8 +2699,8 @@ impl WorldStore {
                 "INSERT INTO compaction_summaries (
                     lo_generation, subject, predicate_key, predicate, event_count,
                     first_valid_from_ms, last_valid_from_ms, first_txn_time_ms,
-                    last_object, last_payload
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    last_object, last_payload, subject_kind
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                 params![
                     s.lo_generation,
                     s.subject,
@@ -2710,6 +2712,7 @@ impl WorldStore {
                     s.first_txn_time_ms,
                     s.last_object,
                     s.last_payload,
+                    s.subject_kind,
                 ],
             )?;
         }
@@ -2760,7 +2763,8 @@ impl WorldStore {
     /// [`DegradedSummary`] for both.
     fn build_summaries(&self, lo: i64, hi: i64) -> Result<Vec<DegradedSummary>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT subject, predicate, object, payload, valid_from_ms, txn_time_ms, generation
+            "SELECT subject, predicate, object, payload, valid_from_ms, txn_time_ms, generation,
+                    subject_kind
              FROM world_events
              WHERE generation BETWEEN ?1 AND ?2 AND claim_status = 'confirmed'
              ORDER BY generation ASC",
@@ -2780,6 +2784,10 @@ impl WorldStore {
             let valid_from_ms: i64 = r.get(4)?;
             let txn_time_ms: i64 = r.get(5)?;
             let generation: i64 = r.get(6)?;
+            // The event's own discriminant, carried into the summary so a
+            // cited-only subject can be attributed to the right class instead
+            // of guessed at. NULL on a v1/v2 row, which is honest.
+            let subject_kind: Option<String> = r.get(7)?;
 
             let key = (subject.clone(), predicate.clone().unwrap_or_default());
             match acc.get_mut(&key) {
@@ -2799,6 +2807,7 @@ impl WorldStore {
                         key,
                         (
                             DegradedSummary {
+                                subject_kind: subject_kind.clone(),
                                 lo_generation: lo,
                                 subject,
                                 predicate,
@@ -2830,7 +2839,7 @@ impl WorldStore {
         }
         let sql = "SELECT lo_generation, subject, predicate, event_count,
                           first_valid_from_ms, last_valid_from_ms, first_txn_time_ms,
-                          last_object, last_payload
+                          last_object, last_payload, subject_kind
                    FROM compaction_summaries
                    WHERE (?1 IS NULL OR subject = ?1)
                    ORDER BY lo_generation ASC, subject ASC, predicate_key ASC";
@@ -2846,6 +2855,7 @@ impl WorldStore {
                 first_txn_time_ms: r.get(6)?,
                 last_object: r.get(7)?,
                 last_payload: r.get(8)?,
+                subject_kind: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -3376,25 +3386,43 @@ impl WorldStore {
         let retained = self.subject_summaries()?;
         let all_citations = self.summaries()?;
 
-        // Grouped once, not rescanned per subject: each citation belongs to
-        // exactly one subject, and BOTH tables grow without bound over a
-        // store's life, so a per-subject scan would be quadratic in precisely
-        // the dimension that accumulates.
-        let mut citations_by_subject: std::collections::BTreeMap<&str, Vec<DegradedSummary>> =
+        // Attribution is by (kind, subject), not subject alone -- step 2.
+        //
+        // A citation written before `subject_kind` existed carries `None`, and
+        // that matches ANY kind rather than none: "not recorded" cannot be used
+        // to exclude, only to fail to distinguish. So a pre-migration citation
+        // still degrades the right subject, it just cannot separate an `entity`
+        // row from an `unlabelled` one sharing a subject string. Post-migration
+        // citations can, which is the whole point of the column.
+        //
+        // Grouped by subject ALONE, and the kind filter runs INSIDE the group:
+        // a `None` kind must stay reachable from every kind's lookup, so it
+        // cannot be filed under any one kind's bucket. Grouping once matters
+        // because both tables accumulate for the life of a store, so the
+        // per-subject rescan this replaces was quadratic in exactly the
+        // dimension that never stops rising.
+        let mut citations_by_subject: std::collections::BTreeMap<&str, Vec<&DegradedSummary>> =
             std::collections::BTreeMap::new();
         for c in &all_citations {
             citations_by_subject
                 .entry(c.subject.as_str())
                 .or_default()
-                .push(c.clone());
+                .push(c);
         }
 
-        let coverage_for = |subject: &str| -> SummaryCoverage {
-            match citations_by_subject.get(subject) {
-                None => SummaryCoverage::Complete,
-                Some(mine) => SummaryCoverage::Degraded {
-                    summaries: mine.clone(),
-                },
+        let coverage_for = |kind: SummaryKind, subject: &str| -> SummaryCoverage {
+            let Some(group) = citations_by_subject.get(subject) else {
+                return SummaryCoverage::Complete;
+            };
+            let mine: Vec<_> = group
+                .iter()
+                .filter(|c| c.subject_kind.as_deref().is_none_or(|k| k == kind.as_str()))
+                .map(|c| (*c).clone())
+                .collect();
+            if mine.is_empty() {
+                SummaryCoverage::Complete
+            } else {
+                SummaryCoverage::Degraded { summaries: mine }
             }
         };
 
@@ -3403,7 +3431,7 @@ impl WorldStore {
             .map(|r| SubjectSummaryAnswer {
                 subject_kind: r.subject_kind,
                 subject: r.subject.clone(),
-                coverage: coverage_for(&r.subject),
+                coverage: coverage_for(r.subject_kind, &r.subject),
                 retained: Some(r),
             })
             .collect();
@@ -3412,20 +3440,31 @@ impl WorldStore {
         // here rather than a guess -- see the FIXME on `SubjectSummaryAnswer`:
         // citations record no discriminant, so claiming `Entity` would be
         // inventing one.
-        let known: std::collections::BTreeSet<&str> =
-            out.iter().map(|a| a.subject.as_str()).collect();
-        let mut cited_only: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let known: std::collections::BTreeSet<(SummaryKind, &str)> = out
+            .iter()
+            .map(|a| (a.subject_kind, a.subject.as_str()))
+            .collect();
+        let mut cited_only: std::collections::BTreeSet<(SummaryKind, &str)> =
+            std::collections::BTreeSet::new();
         for c in &all_citations {
-            if !known.contains(c.subject.as_str()) {
-                cited_only.insert(c.subject.as_str());
+            // The RECORDED kind when there is one. `Unlabelled` is the fallback
+            // for a pre-migration citation only -- and it is a guess there,
+            // which is why the column exists.
+            let kind = c
+                .subject_kind
+                .as_deref()
+                .and_then(|k| SummaryKind::from_projection_column(k).ok())
+                .unwrap_or(SummaryKind::Unlabelled);
+            if !known.contains(&(kind, c.subject.as_str())) {
+                cited_only.insert((kind, c.subject.as_str()));
             }
         }
-        for subject in cited_only {
+        for (kind, subject) in cited_only {
             out.push(SubjectSummaryAnswer {
-                subject_kind: SummaryKind::Unlabelled,
+                subject_kind: kind,
                 subject: subject.to_owned(),
                 retained: None,
-                coverage: coverage_for(subject),
+                coverage: coverage_for(kind, subject),
             });
         }
         out.sort_by(|a, b| a.subject.cmp(&b.subject));
