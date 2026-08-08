@@ -84,6 +84,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub mod adjudication_record;
 pub mod compaction;
+pub mod entity_projection;
 pub mod projection;
 pub mod retention_driver;
 pub mod retention_sweeper;
@@ -204,6 +205,16 @@ pub enum StoreError {
     /// recorded, it just may not be *labelled* — and a caller who asked for a
     /// label should learn it did not get one.
     UnboundSubjectNotStorable,
+    /// A stored entity-projection row could not be read back faithfully.
+    ///
+    /// **Refused, never repaired.** The columns are written only by the fold,
+    /// so a row that disagrees with itself means the file was edited underneath
+    /// the store — and a projection is rebuildable, so the recovery is
+    /// `rebuild_entity_projection`, not a guess.
+    CorruptEntityProjectionRow {
+        /// Which row, and how it disagreed.
+        detail: String,
+    },
     /// A [`SubjectRef::Candidate`] was offered as a label.
     ///
     /// Refused by ruling `KIRRA-WM-CANDIDATE-ID-001` (2026-08-08), not by
@@ -312,6 +323,9 @@ impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Sqlite(e) => write!(f, "sqlite: {e}"),
+            Self::CorruptEntityProjectionRow { detail } => {
+                write!(f, "corrupt entities_projection row: {detail}")
+            }
             Self::LlmCannotConfirm => write!(
                 f,
                 "writer_class=llm_candidate may not write claim_status=confirmed \
@@ -1270,6 +1284,289 @@ impl WorldStore {
         })
     }
 
+    /// Install the entity projection's DDL, lazily.
+    ///
+    /// **First fold, never `open`.** ADR-0041 D-20's `log_only_bytes` is the
+    /// on-disk size of a store holding only the event log; adding this table's
+    /// root pages at `open` would move that figure for every store, including
+    /// one that never projects, and invalidate the D-2 comparison the retention
+    /// horizons rest on.
+    fn ensure_entity_projection(&self) -> Result<(), StoreError> {
+        self.conn
+            .execute_batch(entity_projection::ENTITY_PROJECTION_V1)?;
+        self.conn
+            .execute_batch(projection::PROJECTION_CHECKPOINT_V1)?;
+        Ok(())
+    }
+
+    /// Whether the entity projection has ever been folded.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the catalogue cannot be read.
+    pub fn has_entity_projection(&self) -> Result<bool, StoreError> {
+        let n: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='entities_projection'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(n.is_some())
+    }
+
+    /// How far the entity fold has consumed.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the checkpoint cannot be read.
+    pub fn entity_projection_generation(&self) -> Result<i64, StoreError> {
+        if !self.has_entity_projection()? {
+            return Ok(0);
+        }
+        let g: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT generation FROM projection_checkpoint WHERE name = ?1",
+                params![entity_projection::ENTITY_PROJECTION],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(g.unwrap_or(0))
+    }
+
+    /// Fold new adjudication rows into the entity projection.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on storage failure, or
+    /// [`StoreError::CorruptEntityProjectionRow`] / the decode error if a
+    /// stored row cannot be read back faithfully. **Fail-closed**: a fold that
+    /// cannot read its own prior state does not start over from empty, because
+    /// that would silently drop every entity below the checkpoint.
+    pub fn fold_entity_projection(&mut self) -> Result<i64, StoreError> {
+        self.ensure_entity_projection()?;
+        let from = self.entity_projection_generation()?;
+        self.fold_entity_range(from)
+    }
+
+    /// Discard the entity projection and rebuild it from generation 0.
+    ///
+    /// The result must equal an incremental fold — ADR-0041's stated purity
+    /// property, checked by [`WorldStore::entity_projection_state_digest`]
+    /// rather than assumed.
+    ///
+    /// # Errors
+    ///
+    /// As [`WorldStore::fold_entity_projection`].
+    pub fn rebuild_entity_projection(&mut self) -> Result<i64, StoreError> {
+        self.ensure_entity_projection()?;
+        // The checkpoint is cleared for tidiness, NOT because leaving it would
+        // corrupt the rebuild: `fold_entity_range(0)` is passed its start
+        // explicitly and never consults the checkpoint, so a stale one is
+        // overwritten at the end either way. Said plainly because the
+        // neighbouring `subject_summary` path carries a comment about exactly
+        // that hazard -- which is real THERE, where the drop happens inside
+        // `ensure` and the next fold resumes from the checkpoint. Copying the
+        // reasoning across without checking it applied would have credited this
+        // line with preventing something it does not; the negative control
+        // (removing this DELETE) leaves every test green.
+        self.conn.execute("DELETE FROM entities_projection", [])?;
+        self.conn.execute(
+            "DELETE FROM projection_checkpoint WHERE name = ?1",
+            params![entity_projection::ENTITY_PROJECTION],
+        )?;
+        self.fold_entity_range(0)
+    }
+
+    fn fold_entity_range(&mut self, from_generation: i64) -> Result<i64, StoreError> {
+        // The accumulator is seeded from the STORED rows, not from empty: the
+        // reducer needs the prior lifecycle to decide whether an adjudication
+        // is a legal transition or a contradiction, and an incremental fold
+        // that started empty would call every first transition a creation.
+        let mut acc = self.load_entity_projection()?;
+
+        let tx = self.conn.transaction()?;
+        let mut head = from_generation;
+        {
+            let mut stmt = tx.prepare(
+                "SELECT generation, payload, payload_schema, provenance
+                 FROM world_events
+                 WHERE generation > ?1 AND claim_status = 'confirmed' AND kind = ?2
+                 ORDER BY generation ASC",
+            )?;
+            let mut rows = stmt.query(params![
+                from_generation,
+                adjudication_record::ADJUDICATION_KIND
+            ])?;
+            while let Some(r) = rows.next()? {
+                let generation: i64 = r.get(0)?;
+                let payload: String = r.get(1)?;
+                let payload_schema: i64 = r.get(2)?;
+                let provenance: String = r.get(3)?;
+                let cited: Vec<String> = serde_json::from_str(&provenance).map_err(|e| {
+                    StoreError::CorruptEntityProjectionRow {
+                        detail: format!("provenance is not a JSON array: {e}"),
+                    }
+                })?;
+                let adjudication =
+                    adjudication_record::decode_adjudication(&payload, payload_schema, &cited)
+                        .map_err(|e| StoreError::CorruptEntityProjectionRow {
+                            detail: format!("generation {generation}: {e}"),
+                        })?;
+                entity_projection::fold_adjudication(&mut acc, &adjudication, generation);
+                head = generation;
+            }
+
+            let mut upsert = tx.prepare(
+                "INSERT INTO entities_projection
+                     (entity_id, lifecycle, redirect, origin, contradicted, contradiction)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(entity_id) DO UPDATE SET
+                     lifecycle = excluded.lifecycle,
+                     redirect = excluded.redirect,
+                     origin = excluded.origin,
+                     contradicted = excluded.contradicted,
+                     contradiction = excluded.contradiction",
+            )?;
+            for e in acc.values() {
+                upsert.execute(params![
+                    e.entity.as_str(),
+                    entity_projection::lifecycle_token(&e.lifecycle),
+                    entity_projection::redirect_json(&e.lifecycle),
+                    entity_projection::origin_of(&e.lifecycle).map(EntityId::as_str),
+                    i64::from(e.is_contradicted()),
+                    e.contradiction
+                        .as_ref()
+                        .map(entity_projection::contradiction_json),
+                ])?;
+            }
+
+            // The digest is written WITH the generation, from the accumulator
+            // that produced it. A checkpoint recording only how far a fold got
+            // cannot tell a resumed fold whether the state it is resuming into
+            // is the state that fold left -- which is the divergence
+            // rebuild-equals-incremental exists to detect.
+            tx.execute(
+                "INSERT INTO projection_checkpoint (name, generation, state_digest)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(name) DO UPDATE SET
+                     generation = excluded.generation,
+                     state_digest = excluded.state_digest",
+                params![
+                    entity_projection::ENTITY_PROJECTION,
+                    head,
+                    entity_projection::state_digest_of(&acc)
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(head)
+    }
+
+    /// Every projected entity, keyed by id.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::CorruptEntityProjectionRow`] if a stored row cannot be
+    /// read back faithfully.
+    pub fn load_entity_projection(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, entity_projection::ProjectedEntity>, StoreError>
+    {
+        if !self.has_entity_projection()? {
+            return Ok(std::collections::BTreeMap::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT entity_id, lifecycle, redirect, origin, contradicted, contradiction
+             FROM entities_projection ORDER BY entity_id ASC",
+        )?;
+        let mut out = std::collections::BTreeMap::new();
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            let id: String = r.get(0)?;
+            let token: String = r.get(1)?;
+            let redirect: Option<String> = r.get(2)?;
+            let origin: Option<String> = r.get(3)?;
+            let contradicted: i64 = r.get(4)?;
+            let detail: Option<String> = r.get(5)?;
+            let contradiction = match (contradicted != 0, detail.as_deref()) {
+                (false, _) => None,
+                (true, Some(raw)) => Some(
+                    entity_projection::contradiction_from_json(raw).map_err(|e| {
+                        StoreError::CorruptEntityProjectionRow {
+                            detail: format!("{id}: {e}"),
+                        }
+                    })?,
+                ),
+                // Flagged contradicted with nothing recorded: the fold always
+                // writes both, so this is a row edited underneath the store.
+                (true, None) => {
+                    return Err(StoreError::CorruptEntityProjectionRow {
+                        detail: format!("{id}: contradicted with no contradiction recorded"),
+                    })
+                }
+            };
+            let lifecycle = entity_projection::lifecycle_from_columns(
+                &token,
+                redirect.as_deref(),
+                origin.as_deref(),
+            )
+            .map_err(|e| StoreError::CorruptEntityProjectionRow {
+                detail: format!("{id}: {e}"),
+            })?;
+            let entity =
+                EntityId::new(&id).map_err(|e| StoreError::CorruptEntityProjectionRow {
+                    detail: format!("{id}: inadmissible entity id: {e:?}"),
+                })?;
+            out.insert(
+                id,
+                entity_projection::ProjectedEntity {
+                    entity,
+                    lifecycle,
+                    // Read back structurally. An earlier draft stored a
+                    // rendered sentence and rebuilt a placeholder here, which
+                    // would have pointed an operator at generation 0 for every
+                    // contradiction -- an invented value wearing a real field's
+                    // name.
+                    contradiction,
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    /// **A snapshot of the entity projection, resolvable in place.**
+    ///
+    /// The read side of identity: pass it to
+    /// `kirra_world::resolution::resolve` to follow every redirect recorded
+    /// against an id.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::CorruptEntityProjectionRow`] if any row cannot be read
+    /// back faithfully. **The refusal happens here, once**, rather than during
+    /// the walk — see [`entity_projection::IdentityView`] for why resolving
+    /// over a per-query reader would turn a read failure into "no such entity".
+    pub fn identity_view(&self) -> Result<entity_projection::IdentityView, StoreError> {
+        Ok(entity_projection::IdentityView::new(
+            self.load_entity_projection()?,
+            self.entity_projection_generation()?,
+        ))
+    }
+
+    /// A digest over the entity projection, in key order.
+    ///
+    /// # Errors
+    ///
+    /// As [`WorldStore::load_entity_projection`].
+    pub fn entity_projection_state_digest(&self) -> Result<String, StoreError> {
+        Ok(entity_projection::state_digest_of(
+            &self.load_entity_projection()?,
+        ))
+    }
+
     /// Recompute the chain from genesis and compare against what is stored.
     ///
     /// This is what makes SD-2 structural: an edit to `writer_class` or
@@ -1870,6 +2167,8 @@ impl WorldStore {
             }
         }
         self.conn.execute_batch(projection::PROJECTIONS_V1)?;
+        self.conn
+            .execute_batch(projection::PROJECTION_CHECKPOINT_V1)?;
         Ok(())
     }
 

@@ -179,6 +179,26 @@ pub enum RefusalReason {
         /// The entity whose supersession names nothing.
         at: EntityId,
     },
+    /// **The recorded history for this entity contradicts itself.**
+    ///
+    /// Two individually valid adjudications disagreed in aggregate — `a` merged
+    /// into `b`, then `a` merged into `c` by another operator — so no
+    /// constructor could refuse either, and the projection that folded them
+    /// declined to pick a winner.
+    ///
+    /// A sibling of [`Self::RedirectCycle`] rather than a different kind of
+    /// thing: a cycle *is* one instance of this fault, caught by the walk
+    /// instead of by the fold. Both are answered per query rather than by
+    /// refusing to resolve anything, which is what keeps the damage
+    /// proportional to the contradiction.
+    ///
+    /// Reported for an entity reached **through** a redirect as much as for one
+    /// queried directly: an answer that routed through a contradicted identity
+    /// is not trustworthy just because the question named something else.
+    ContradictoryHistory {
+        /// The entity whose history disagrees with itself.
+        at: EntityId,
+    },
 }
 
 /// The graph of recorded judgements, as far as resolution needs it.
@@ -191,7 +211,31 @@ pub enum RefusalReason {
 pub trait AdjudicationGraph {
     /// The lifecycle recorded for an id, or `None` if the graph has no such
     /// entity.
+    ///
+    /// # `None` means ABSENT, never "could not look"
+    ///
+    /// There is no error channel here, and that is a constraint on
+    /// implementors rather than an oversight: an implementation backed by
+    /// storage must **not** turn a read failure into `None`, because that
+    /// reports an existing id as no-such-entity — the precise confusion
+    /// [`RefusalReason::DanglingRedirect`] and
+    /// [`RefusalReason::EmptySupersession`] exist to prevent, reintroduced one
+    /// layer down.
+    ///
+    /// The way to honour that is to do the fallible work *before* resolving:
+    /// load the state, fail closed there, and implement this over what was
+    /// loaded. `kirra_world_store::IdentityView` is that shape.
     fn lifecycle_of(&self, id: &EntityId) -> Option<Lifecycle>;
+
+    /// Whether this entity's recorded history contradicts itself.
+    ///
+    /// Defaulted to `false` so a graph with no notion of contradiction — a
+    /// test fixture, an in-memory map — is unaffected. A projection that folds
+    /// adjudications overrides it; see
+    /// [`RefusalReason::ContradictoryHistory`].
+    fn is_contradicted(&self, _id: &EntityId) -> bool {
+        false
+    }
 }
 
 /// **Resolve an identifier through every redirect recorded against it.**
@@ -273,6 +317,14 @@ impl<G: AdjudicationGraph> Walk<'_, G> {
         }
         if self.black.contains(id) {
             return Ok(());
+        }
+
+        // Checked before the lifecycle is read, and before any answer is
+        // collected: a contradicted entity has a lifecycle -- the projection
+        // keeps what it held -- so trusting it here would answer `Located` from
+        // a state the fold has already declared untrustworthy.
+        if self.graph.is_contradicted(id) {
+            return Err(RefusalReason::ContradictoryHistory { at: id.clone() });
         }
 
         let Some(lifecycle) = self.graph.lifecycle_of(id) else {
@@ -731,6 +783,75 @@ mod tests {
             ResolutionOutcome::Located {
                 entity: eid(&format!("e{MAX_REDIRECT_EDGES}")),
                 hops: MAX_REDIRECT_EDGES,
+            }
+        );
+    }
+
+    // -- Contradiction -------------------------------------------------
+
+    /// A graph that reports contradictions, for the two tests below.
+    struct Contradicting(Graph, Vec<EntityId>);
+
+    impl AdjudicationGraph for Contradicting {
+        fn lifecycle_of(&self, id: &EntityId) -> Option<Lifecycle> {
+            self.0.lifecycle_of(id)
+        }
+        fn is_contradicted(&self, id: &EntityId) -> bool {
+            self.1.contains(id)
+        }
+    }
+
+    /// **A contradicted entity refuses rather than answering from a state the
+    /// fold declined to trust.**
+    ///
+    /// The projection keeps the lifecycle it held when the contradiction
+    /// arrived, so `lifecycle_of` returns something perfectly well-formed here.
+    /// Answering `Located` from it would launder a disagreement into a
+    /// confident answer.
+    #[test]
+    fn a_contradicted_entity_refuses_instead_of_answering() {
+        let g = Contradicting(
+            graph(&[("a", merged("b")), ("b", Lifecycle::Established)]),
+            vec![eid("a")],
+        );
+        assert_eq!(
+            resolve(&g, &eid("a")),
+            ResolutionOutcome::Refused(RefusalReason::ContradictoryHistory { at: eid("a") })
+        );
+    }
+
+    /// **And it refuses for a question that merely routes through it.**
+    ///
+    /// `z` is not contradicted; `a` is, and `z` redirects to it. An answer that
+    /// travelled through a contradicted identity is not trustworthy because the
+    /// question named something else.
+    #[test]
+    fn a_redirect_through_a_contradicted_entity_also_refuses() {
+        let g = Contradicting(
+            graph(&[
+                ("z", merged("a")),
+                ("a", merged("b")),
+                ("b", Lifecycle::Established),
+            ]),
+            vec![eid("a")],
+        );
+        assert_eq!(
+            resolve(&g, &eid("z")),
+            ResolutionOutcome::Refused(RefusalReason::ContradictoryHistory { at: eid("a") }),
+            "the refusal names the contradicted entity, not the one asked about"
+        );
+    }
+
+    /// The default is `false`, so every graph that does not model
+    /// contradiction is byte-identical in behaviour.
+    #[test]
+    fn a_graph_without_contradictions_is_unaffected() {
+        let g = graph(&[("a", merged("b")), ("b", Lifecycle::Established)]);
+        assert_eq!(
+            resolve(&g, &eid("a")),
+            ResolutionOutcome::Located {
+                entity: eid("b"),
+                hops: 1,
             }
         );
     }

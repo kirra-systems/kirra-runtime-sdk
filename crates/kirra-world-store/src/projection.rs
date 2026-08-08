@@ -103,6 +103,17 @@ CREATE INDEX IF NOT EXISTS idx_current_object  ON world_current (object);
 -- How far the fold has consumed, so an incremental fold is possible at all.
 -- `state_digest` is what makes rebuild-equals-incremental checkable rather
 -- than merely believed.
+"#;
+
+/// **The checkpoint table, shared by every projection.**
+///
+/// Its own constant rather than a block inside [`PROJECTIONS_V1`], because more
+/// than one fold installs it and they must agree about its shape. They did not:
+/// the entity fold shipped a two-column `CREATE TABLE IF NOT EXISTS` of its own,
+/// which is a no-op when this three-column table already exists — and *wins*
+/// when it does not, so whichever fold ran second failed on the missing
+/// `state_digest`. One definition makes that disagreement unrepresentable.
+pub const PROJECTION_CHECKPOINT_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS projection_checkpoint (
     name         TEXT    PRIMARY KEY,
     generation   INTEGER NOT NULL,
