@@ -16,8 +16,17 @@
 //!    to deny.
 
 use kirra_world_store::{
-    ClaimStatus, EventId, NewEvent, ObservationId, StoreError, SubjectRef, WorldStore, WriterClass,
+    ClaimStatus, EntityId, EventId, FrameId, NewEvent, ObservationId, StoreError, SubjectRef,
+    WorldStore, WriterClass,
 };
+
+fn eid(v: &str) -> EntityId {
+    EntityId::new(v).expect("test entity id")
+}
+
+fn fid(v: &str) -> FrameId {
+    FrameId::new(v).expect("test frame id")
+}
 
 const T0: i64 = 1_700_000_000_000;
 
@@ -95,12 +104,15 @@ fn every_storable_kind_survives_a_write_and_a_rehash() {
     let mut s = WorldStore::open(&path).expect("open");
 
     let cases = [
-        SubjectRef::Entity("cup-1".into()),
-        SubjectRef::Frame("base_link".into()),
+        SubjectRef::Entity(eid("cup-1")),
+        SubjectRef::Frame(fid("base_link")),
     ];
     for (n, r) in cases.iter().enumerate() {
         let id = ids(&format!("k{n}"));
-        let subject = r.id().expect("storable kinds carry an id").to_owned();
+        let subject = r
+            .stored_id()
+            .expect("storable kinds carry an id")
+            .to_owned();
         s.append(&ev(&id, &subject, Some(r))).expect("append");
     }
 
@@ -118,7 +130,7 @@ fn every_storable_kind_survives_a_write_and_a_rehash() {
 fn a_chain_may_mix_labelled_and_unlabelled_rows() {
     let path = tmp("mixed");
     let mut s = WorldStore::open(&path).expect("open");
-    let r = SubjectRef::Entity("cup-1".into());
+    let r = SubjectRef::Entity(eid("cup-1"));
 
     s.append(&ev(&ids("a"), "cup-1", None)).expect("unlabelled");
     s.append(&ev(&ids("b"), "cup-1", Some(&r)))
@@ -180,7 +192,7 @@ fn labelling_a_row_after_the_fact_breaks_the_chain() {
 fn relabelling_a_frame_as_an_entity_breaks_the_chain() {
     let path = tmp("relabel-change");
     let mut s = WorldStore::open(&path).expect("open");
-    let r = SubjectRef::Frame("base_link".into());
+    let r = SubjectRef::Frame(fid("base_link"));
     s.append(&ev(&ids("a"), "base_link", Some(&r)))
         .expect("labelled frame");
     s.verify_chain().expect("clean before tamper");
@@ -230,7 +242,7 @@ fn a_candidate_subject_is_not_storable() {
 fn stripping_a_label_breaks_the_chain() {
     let path = tmp("relabel-strip");
     let mut s = WorldStore::open(&path).expect("open");
-    let r = SubjectRef::Entity("cup-1".into());
+    let r = SubjectRef::Entity(eid("cup-1"));
     s.append(&ev(&ids("a"), "cup-1", Some(&r))).expect("append");
     s.verify_chain().expect("clean before tamper");
 
@@ -298,7 +310,7 @@ fn an_unbound_subject_cannot_be_labelled() {
 fn a_label_that_names_a_different_id_is_refused() {
     let path = tmp("mismatch");
     let mut s = WorldStore::open(&path).expect("open");
-    let r = SubjectRef::Entity("cup-2".into());
+    let r = SubjectRef::Entity(eid("cup-2"));
     let err = s
         .append(&ev(&ids("a"), "cup-1", Some(&r)))
         .expect_err("refused");
@@ -313,7 +325,7 @@ fn a_label_that_names_a_different_id_is_refused() {
 
     // The agreeing form of the same write is admitted, so the refusal is about
     // the disagreement and not about labelling being broken.
-    let ok = SubjectRef::Entity("cup-1".into());
+    let ok = SubjectRef::Entity(eid("cup-1"));
     s.append(&ev(&ids("a"), "cup-1", Some(&ok)))
         .expect("agreeing label");
     s.verify_chain().expect("verifies");
@@ -339,7 +351,7 @@ fn a_label_that_names_a_different_id_is_refused() {
 fn a_labelled_row_survives_compactions_rehash() {
     let path = tmp("compact");
     let mut s = WorldStore::open(&path).expect("open");
-    let r = SubjectRef::Entity("cup-1".into());
+    let r = SubjectRef::Entity(eid("cup-1"));
     for n in 0..4 {
         let id = ids(&format!("c{n}"));
         let labelled = if n % 2 == 0 { Some(&r) } else { None };

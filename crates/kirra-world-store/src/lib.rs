@@ -1122,7 +1122,11 @@ impl WorldStore {
             if matches!(r, SubjectRef::Candidate(_)) {
                 return Err(StoreError::CandidateSubjectNotStorable);
             }
-            match r.id() {
+            // `stored_id`, not the typed accessors: this comparison is the
+            // storage projection by definition -- the `subject` column is a
+            // string and the kind travels beside it in `subject_kind`. A caller
+            // making an identity decision would use `entity()` instead.
+            match r.stored_id() {
                 None => return Err(StoreError::UnboundSubjectNotStorable),
                 Some(id) if id != e.subject => {
                     return Err(StoreError::SubjectRefDisagreesWithSubject {
