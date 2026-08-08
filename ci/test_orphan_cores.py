@@ -30,14 +30,17 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 def load_gate():
-    """Import the gate without running `main`."""
-    src = open(REPO / "ci" / "check_orphan_cores.py", encoding="utf-8").read()
-    src = src.replace('if __name__ == "__main__":', "if False:")
-    spec = importlib.util.spec_from_loader("orphan_gate", loader=None)
+    """Import the gate as a module, which does not run `main`.
+
+    The gate guards its entry point with `if __name__ == "__main__":`, and an
+    imported module's `__name__` is its module name — so a plain import cannot
+    reach `main`. Nothing needs to be rewritten to prevent it.
+    """
+    path = REPO / "ci" / "check_orphan_cores.py"
+    spec = importlib.util.spec_from_file_location("orphan_gate", path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules["orphan_gate"] = mod
-    mod.__dict__["__file__"] = str(REPO / "ci" / "check_orphan_cores.py")
-    exec(compile(src, "check_orphan_cores.py", "exec"), mod.__dict__)
+    spec.loader.exec_module(mod)
     return mod
 
 
@@ -58,16 +61,14 @@ def build(root: Path, crates: dict[str, dict[str, str]]) -> None:
 
 
 def orphans(root: Path) -> set[str]:
-    """Run the real gate over a fixture tree."""
+    """Run the real gate over a fixture tree.
+
+    Calls the gate's own composition rather than reassembling it here, so a
+    wiring mistake inside `find_orphans` — dropping the ambiguity set, say —
+    fails these tests instead of slipping past a private copy of the loop.
+    """
     G.REPO = root
-    mods = G.declared_pub_mods()
-    files = G.consumer_files()
-    ambiguous = G.ambiguous_item_names(mods)
-    return {
-        f"{crate}::{name}"
-        for crate, name, lib in mods
-        if not G.is_consumed(crate, name, lib, files, ambiguous)
-    }
+    return set(G.find_orphans())
 
 
 def case(name: str, crates: dict, expected: set[str]) -> bool:

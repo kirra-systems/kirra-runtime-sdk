@@ -208,19 +208,31 @@ def is_consumed(
     return False
 
 
+def find_orphans() -> list[str]:
+    """Every declared pure core with no non-test consumer, as `crate::module`.
+
+    The whole gate, composed. `main` adds only the baseline comparison and the
+    reporting, so this is the seam the tests drive — a test that reassembled
+    these calls itself would pass even if this composition dropped one of them,
+    which is the shape of the hole the gate had in the first place.
+    """
+    files = consumer_files()
+    mods = declared_pub_mods()
+    ambiguous = ambiguous_item_names(mods)
+    return [
+        f"{crate}::{name}"
+        for crate, name, lib_rs in mods
+        if not is_consumed(crate, name, lib_rs, files, ambiguous)
+    ]
+
+
 def main() -> int:
     baseline = {}
     if BASELINE_PATH.exists():
         baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
     allow = baseline.get("allowed_orphans", {})
 
-    files = consumer_files()
-    orphans = []
-    mods = declared_pub_mods()
-    ambiguous = ambiguous_item_names(mods)
-    for crate, name, lib_rs in mods:
-        if not is_consumed(crate, name, lib_rs, files, ambiguous):
-            orphans.append(f"{crate}::{name}")
+    orphans = find_orphans()
 
     new = [o for o in orphans if o not in allow]
     healed = [o for o in allow if o not in orphans]
