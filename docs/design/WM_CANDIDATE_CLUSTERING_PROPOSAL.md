@@ -194,7 +194,7 @@ That means it inherits, for free and unforgeably:
 | A derived matcher is visible as derived | `writer_class = derivation` |
 
 So Reading A is **not forbidden by this proposal** — it is *relocated*. A
-similarity matcher becomes a producer of `Derivation`-class `same_as`
+similarity matcher becomes a producer of `WriterClass::Derivation` `same_as`
 observations with `claim_status = candidate`, and its output is admitted through
 the same door as everything else, visible as inferred, and refusable. What it
 may not do is reach into `Corroboration(n)` directly.
