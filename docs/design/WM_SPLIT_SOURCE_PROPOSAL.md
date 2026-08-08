@@ -1,7 +1,39 @@
 # What becomes of an entity that was split — a ruling request
 
-**KIRRA-WM-SPLIT-SURVIVAL-001** · drafted 2026-08-07 · **status: PROPOSED — not
-a ruling and not an authorization**
+**KIRRA-WM-SPLIT-SURVIVAL-001** · drafted 2026-08-07 · **status: RULED —
+§5 adopted 2026-08-08**
+
+> **RULED — 2026-08-08 by Justin Looney, World Model owner.** §5 is adopted in
+> full: `Lifecycle::Superseded { by }` is a terminal, still-resolvable state for
+> a partitioned source; `SplitEntity` gains shape-specific constructors
+> (`partition` / `subtract`); and `unresolved_consequence` is deleted now that a
+> real answer exists.
+>
+> **§1's finding is not deleted by this ruling** (constraint 1). The record
+> stands that the constructor had ALREADY chosen — `SplitTooNarrow` and
+> `SplitIntoSelf` between them refused both spellings of a surviving original,
+> so the neutrality lived in the prose and not in the type. That is what
+> `subtract` now fixes, and the old test that pinned the undecided behaviour is
+> named in its replacement rather than silently dropped.
+>
+> **Constraint 2 honoured.** The new terminal state has its own negative control
+> — `a_superseded_entity_cannot_be_adjudicated_again` walks every other state as
+> a target and finds each refused. Without it, the seam test would be satisfied
+> by an `advance_to` that permitted everything, and terminality would rest on a
+> doc comment.
+>
+> **The accessor is a sibling, not a widening.** `superseded_by` returns every
+> successor; `redirects_to` returns `None` for a superseded entity. §5 item 1's
+> reason is the ruling's whole point: one accessor for both would let a caller
+> take the first element and present one successor out of N as the answer.
+>
+> **Deferred, exactly as §6 said**: this does NOT authorize persisting
+> `SplitEntity` (that needs the schema slice), does not authorize entity
+> resolution, and does not settle whether `Split { from }` should be renamed for
+> symmetry — a breaking change to a Tier 1 type that deserves its own decision.
+>
+> **One approver.** Recorded by the same person holding every role, as with every
+> other World Model ruling.
 
 > Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508
 > SIL 3 requirements. Independent third-party assessment has not yet been

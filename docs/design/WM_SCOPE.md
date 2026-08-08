@@ -807,6 +807,13 @@ count.
 This has to be ruled before `SplitEntity` can be persisted — a store needs a
 row for the source, and "undecided" is not a column value.
 
+**RULED 2026-08-08 — §5 adopted.** `Lifecycle::Superseded { by }` is the
+terminal, still-resolvable state for a partitioned source; `SplitEntity` now has
+`partition` and `subtract` constructors, so the **subtraction** shape that was
+unrepresentable (both spellings refused) is expressible; `unresolved_consequence`
+is deleted. This does **not** authorize persisting `SplitEntity` — that is still
+the schema slice, and the adjudication verbs remain domain-only.
+
 **Written up for a ruling on 2026-08-07**:
 [`WM_SPLIT_SOURCE_PROPOSAL.md`](WM_SPLIT_SOURCE_PROPOSAL.md)
 (`KIRRA-WM-SPLIT-SURVIVAL-001`). Drafting it turned up something the summary
