@@ -17,12 +17,12 @@ use kirra_world::adjudication::{
 };
 use kirra_world::observation::{ClockDomain, DomainInstant};
 use kirra_world::reference::{EntityId, EventId, ObservationId};
+use kirra_world_store::adjudication_record::AdjudicationRow;
 use kirra_world_store::adjudication_record::{
     adjudication_provenance, adjudication_subject, decode_adjudication, encode_adjudication,
-    AdjudicationDecodeError, ADJUDICATION_KIND, ADJUDICATION_PAYLOAD_SCHEMA,
-    ADJUDICATION_RETENTION_CLASS,
+    AdjudicationDecodeError, ADJUDICATION_PAYLOAD_SCHEMA, ADJUDICATION_RETENTION_CLASS,
 };
-use kirra_world_store::{ClaimStatus, NewEvent, WorldStore, WriterClass};
+use kirra_world_store::{ClaimStatus, NewEvent, StoreError, WorldStore, WriterClass};
 
 const T0: i64 = 1_700_000_000_000;
 
@@ -42,6 +42,21 @@ fn at() -> DomainInstant {
     DomainInstant {
         ms: 1_700_000_000_000,
         domain: ClockDomain::System,
+    }
+}
+
+/// Remove the database **and its WAL sidecars**.
+///
+/// `WorldStore` opens in WAL mode, so `-wal` and `-shm` outlive the `.sqlite`
+/// file. Removing only the main file leaves them in the temp dir, where they
+/// clutter a CI runner and — worse locally — a rerun can find a stale sidecar
+/// beside a fresh database. `tmp()` already clears all three going in; this is
+/// the same job on the way out.
+fn cleanup(path: &std::path::Path) {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut q = path.as_os_str().to_os_string();
+        q.push(suffix);
+        let _ = std::fs::remove_file(std::path::PathBuf::from(q));
     }
 }
 
@@ -111,32 +126,19 @@ fn every_verb_round_trips_through_a_real_row() {
         let observation_id = oid(&format!("obs-src-{i}"));
         let payload = encode_adjudication(&adj);
         let provenance = adjudication_provenance(&adj);
-        let prov_refs: Vec<&str> = provenance.iter().map(String::as_str).collect();
-        let subject = adjudication_subject(&adj).as_str().to_owned();
 
-        s.append(&NewEvent {
-            event_id: &event_id,
-            observation_id: &observation_id,
-            txn_time_ms: T0 + i as i64,
-            valid_from_ms: T0 + i as i64,
-            valid_to_ms: None,
-            source: "operator-console",
-            source_version: "1.0.0",
-            writer_class: WriterClass::Operator,
-            claim_status: ClaimStatus::Confirmed,
-            provenance: &prov_refs,
-            frame_id: None,
-            map_id: None,
-            kind: ADJUDICATION_KIND,
-            subject: &subject,
-            subject_ref: None,
-            predicate: None,
-            object: None,
-            payload: &payload,
-            payload_schema: ADJUDICATION_PAYLOAD_SCHEMA,
-            retention_class: ADJUDICATION_RETENTION_CLASS,
-            trust: None,
-        })
+        s.append_adjudication(
+            &AdjudicationRow {
+                event_id: &event_id,
+                observation_id: &observation_id,
+                txn_time_ms: T0 + i as i64,
+                valid_from_ms: T0 + i as i64,
+                source: "operator-console",
+                source_version: "1.0.0",
+                writer_class: WriterClass::Operator,
+            },
+            &adj,
+        )
         .unwrap_or_else(|e| panic!("{name}: append refused: {e:?}"));
 
         let back = decode_adjudication(&payload, ADJUDICATION_PAYLOAD_SCHEMA, &provenance)
@@ -146,7 +148,7 @@ fn every_verb_round_trips_through_a_real_row() {
 
     s.verify_chain()
         .expect("the chain must still verify after adjudication rows");
-    let _ = std::fs::remove_file(&path);
+    cleanup(&path);
 }
 
 /// The justification rides `provenance`, and is what comes back.
@@ -355,12 +357,136 @@ fn structural_damage_is_refused_with_a_reason() {
 ///
 /// §6.3 requires a merged id to stay resolvable *forever*, and the only thing
 /// keeping an adjudication row out of a compaction window is its retention
-/// class. Asserted here rather than trusted, because the constant and the
-/// protected list are declared in different modules.
+/// class. Asserted rather than trusted, because the constant this module writes
+/// and the compaction *policy predicate* that honours it live in different
+/// modules with nothing tying them together.
+///
+/// Note what the predicate actually is: `is_protected` is
+/// `retention_class != "raw"`, so everything except raw is protected and
+/// `PROTECTED_CLASSES` is an enumeration kept as documentation, not the rule.
+/// This asserts the predicate; `an_adjudication_row_makes_its_window_uncompactable`
+/// asserts the behaviour it is supposed to buy.
 #[test]
 fn the_adjudication_retention_class_is_protected_from_compaction() {
     assert!(
         kirra_world_store::compaction::is_protected(ADJUDICATION_RETENTION_CLASS),
         "an adjudication row must never be compactable"
     );
+}
+
+/// **An LLM cannot author an adjudication**, and not because this module says
+/// so.
+///
+/// `append_adjudication` writes `ClaimStatus::Confirmed` unconditionally — a
+/// judgement is not a candidate — and `append`'s existing SD-2 rule refuses an
+/// `LlmCandidate` writing `Confirmed`. The exclusion is therefore structural:
+/// it falls out of a rule that predates this slice, with no new check to
+/// remember. Asserted because a later "make claim_status a parameter" would
+/// quietly reopen it.
+#[test]
+fn an_llm_cannot_author_an_adjudication() {
+    let path = tmp("llm");
+    let mut s = WorldStore::open(&path).expect("open");
+    let event_id = EventId::new("ev-llm").expect("event id");
+    let observation_id = oid("obs-llm");
+    let adj = IdentityAdjudication::Merge(
+        MergeEntities::new([eid("a"), eid("b")], eid("keep"), just(), at()).expect("merge"),
+    );
+
+    let err = s
+        .append_adjudication(
+            &AdjudicationRow {
+                event_id: &event_id,
+                observation_id: &observation_id,
+                txn_time_ms: T0,
+                valid_from_ms: T0,
+                source: "some-llm",
+                source_version: "1.0.0",
+                writer_class: WriterClass::LlmCandidate,
+            },
+            &adj,
+        )
+        .expect_err("an LLM must not be able to record a judgement");
+    assert!(
+        matches!(err, StoreError::LlmCannotConfirm),
+        "expected the pre-existing SD-2 refusal, got {err:?}"
+    );
+    cleanup(&path);
+}
+
+/// **The door derives what the caller must not get wrong — proved by
+/// behaviour, not by reading a column back.**
+///
+/// Chiefly `retention_class`. A hand-assembled row that set it to `"raw"` would
+/// be compactable, and compaction would delete the redirect §6.3 promises to
+/// keep forever. So rather than string-compare the stored token, this asks the
+/// compaction planner: an adjudication row must make its own window
+/// **refuse to compact**, which is the guarantee the token exists to buy.
+#[test]
+fn an_adjudication_row_makes_its_window_uncompactable() {
+    let path = tmp("uncompactable");
+    let mut s = WorldStore::open(&path).expect("open");
+    let event_id = EventId::new("ev-stamp").expect("event id");
+    let observation_id = oid("obs-stamp");
+    let adj = IdentityAdjudication::Assert(AssertIdentity::new(eid("e-1"), just(), at()));
+
+    let generation = s
+        .append_adjudication(
+            &AdjudicationRow {
+                event_id: &event_id,
+                observation_id: &observation_id,
+                txn_time_ms: T0,
+                valid_from_ms: T0,
+                source: "operator-console",
+                source_version: "1.0.0",
+                writer_class: WriterClass::Operator,
+            },
+            &adj,
+        )
+        .expect("append");
+
+    assert_eq!(
+        s.largest_compactable_prefix(generation, generation)
+            .expect("plan"),
+        None,
+        "a window holding an adjudication must refuse to compact -- otherwise \
+         the redirect that keeps a merged id resolvable can be deleted"
+    );
+
+    // Non-vacuous: the same planner DOES accept an ordinary row, so the `None`
+    // above is the retention class talking and not an empty or malformed window.
+    let raw_id = EventId::new("ev-raw").expect("event id");
+    let raw_obs = oid("obs-raw");
+    let raw_gen = s
+        .append(&NewEvent {
+            event_id: &raw_id,
+            observation_id: &raw_obs,
+            txn_time_ms: T0 + 1,
+            valid_from_ms: T0 + 1,
+            valid_to_ms: None,
+            source: "sensor",
+            source_version: "1.0.0",
+            writer_class: WriterClass::Sensor,
+            claim_status: ClaimStatus::Confirmed,
+            provenance: &[],
+            frame_id: None,
+            map_id: None,
+            kind: "observation",
+            subject: "thing",
+            subject_ref: None,
+            predicate: None,
+            object: None,
+            payload: "{}",
+            payload_schema: 1,
+            retention_class: "raw",
+            trust: None,
+        })
+        .expect("append raw");
+    assert_eq!(
+        s.largest_compactable_prefix(raw_gen, raw_gen)
+            .expect("plan"),
+        Some(raw_gen),
+        "an ordinary raw row must be compactable, or the assertion above proves nothing"
+    );
+    cleanup(&path);
 }

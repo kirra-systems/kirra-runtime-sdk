@@ -22,10 +22,19 @@
 //!    projection like everything else."*
 //! 2. **The ratified v1 schema already anticipated it.**
 //!    `world_events.retention_class` has carried `'adjudication'` in its closed
-//!    vocabulary since the baseline, and [`crate::compaction::PROTECTED_CLASSES`]
-//!    includes it — so an adjudication row is never compacted. That is precisely
-//!    what §6.3's *"resolvable forever"* requires, built before there was
-//!    anything to put in it.
+//!    vocabulary since the baseline, and [`crate::compaction::is_protected`]
+//!    holds for it — so an adjudication row is never compacted. That is
+//!    precisely what §6.3's *"resolvable forever"* requires, built before there
+//!    was anything to put in it.
+//!
+//!    Naming the *predicate* rather than [`crate::compaction::PROTECTED_CLASSES`],
+//!    because the two are not the same thing and the difference is easy to
+//!    state wrongly: `is_protected` is `retention_class != "raw"`, so
+//!    **everything except raw is protected** and the constant is the
+//!    enumeration OQ2 ruled, kept as documentation. Editing that array would
+//!    not change what compacts. This module's guarantee rests on the predicate,
+//!    and the test that proves it asks the compaction *planner* rather than
+//!    comparing a token.
 //! 3. **The chain.** The hash chain lives on `world_events`. A second evidence
 //!    table would need its own chain or would be unchained, and an unchained
 //!    adjudication is exactly the editable-history failure §6.3 exists to
@@ -55,6 +64,8 @@ use kirra_world::adjudication::{
 use kirra_world::observation::{ClockDomain, DomainInstant};
 use kirra_world::reference::{EntityId, ObservationId};
 
+use crate::WriterClass;
+
 /// The `world_events.kind` token every adjudication row carries.
 ///
 /// One kind for all four verbs, with the verb inside the payload, rather than
@@ -66,10 +77,15 @@ pub const ADJUDICATION_KIND: &str = "identity_adjudication";
 
 /// The `world_events.retention_class` every adjudication row carries.
 ///
-/// Not a choice this module gets to make: [`crate::compaction::PROTECTED_CLASSES`]
-/// keys "never compact this" off exactly this token, and §6.3 requires a merged
-/// id to stay resolvable forever. A row written under any other class is
-/// compactable, which would delete the redirect.
+/// Not a choice this module gets to make. §6.3 requires a merged id to stay
+/// resolvable forever, and [`crate::compaction::is_protected`] is what delivers
+/// that — it holds for every class except `"raw"`, so writing a row as `"raw"`
+/// is the one spelling that makes it compactable and deletes the redirect.
+///
+/// Note the predicate is the *mechanism*, not
+/// [`crate::compaction::PROTECTED_CLASSES`]: that constant enumerates what OQ2
+/// ruled and is not consulted by the compaction path, so editing it changes
+/// nothing.
 pub const ADJUDICATION_RETENTION_CLASS: &str = "adjudication";
 
 /// Version of the payload encoding below.
@@ -440,4 +456,40 @@ pub fn decode_adjudication(
             token: other.to_owned(),
         }),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The door
+// ---------------------------------------------------------------------------
+
+/// The row-level facts a caller supplies when recording an adjudication.
+///
+/// Everything an adjudication *determines* is absent: `kind`, `subject`,
+/// `payload`, `payload_schema`, `provenance` and `retention_class` are derived
+/// by [`WorldStore::append_adjudication`], not passed in. That is the point of
+/// the type — assembling a `NewEvent` by hand means twenty fields to get right,
+/// and getting `retention_class` wrong silently makes the row compactable,
+/// which deletes the redirect §6.3 promises to keep forever.
+#[derive(Debug, Clone, Copy)]
+pub struct AdjudicationRow<'a> {
+    /// Identity of this record.
+    pub event_id: &'a kirra_world::reference::EventId,
+    /// Identity of the observation this record is of.
+    pub observation_id: &'a kirra_world::reference::ObservationId,
+    /// When the store learned the judgement.
+    pub txn_time_ms: i64,
+    /// When the judgement began holding.
+    pub valid_from_ms: i64,
+    /// Who recorded it.
+    pub source: &'a str,
+    /// Their version.
+    pub source_version: &'a str,
+    /// **Not free choice between all four classes in practice.**
+    ///
+    /// An adjudication is written [`ClaimStatus::Confirmed`] (see
+    /// [`WorldStore::append_adjudication`]), and `append`'s existing SD-2 check
+    /// refuses an [`WriterClass::LlmCandidate`] writing `Confirmed`. So **an
+    /// LLM cannot author an adjudication at all**, enforced by the rule that
+    /// already exists rather than by a new one bolted on here.
+    pub writer_class: WriterClass,
 }

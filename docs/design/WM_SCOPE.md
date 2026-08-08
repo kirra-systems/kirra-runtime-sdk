@@ -755,8 +755,8 @@ does not describe is how a residue disappears.
       `adjudication`: it walks judgements, nothing persists them. (Sub-slice 3
       below closes that.)
 - [x] **Adjudication events persist as evidence rows** — **DONE 2026-08-08**,
-      `crates/kirra-world-store/src/adjudication_record.rs`, 13 integration
-      tests. The schema slice `KIRRA-WM-SPLIT-SURVIVAL-001` named as unblocked
+      `crates/kirra-world-store/src/adjudication_record.rs` plus the
+      `WorldStore::append_adjudication` door, 15 integration tests. The schema slice `KIRRA-WM-SPLIT-SURVIVAL-001` named as unblocked
       and did not build. Sub-slice 1 of 3.
       **No new table, and that is the finding rather than a shortcut.** Three
       sources agree that adjudications are `world_events` rows and that entity
@@ -765,10 +765,18 @@ does not describe is how a residue disappears.
       §6.3 says *"identity is a projection like everything else"*; and the
       **ratified v1 baseline already anticipated it** — `retention_class` has
       carried `'adjudication'` in its closed vocabulary since the beginning and
-      `compaction::PROTECTED_CLASSES` includes it, so such a row is never
-      compacted, which is exactly what §6.3's *"resolvable forever"* needs. That
-      protection is asserted by test, not assumed, because the constant and the
-      protected list live in different modules.
+      `compaction::is_protected` holds for it, so such a row is never compacted,
+      which is exactly what §6.3's *"resolvable forever"* needs.
+      Naming the **predicate**, not `compaction::PROTECTED_CLASSES`: the two are
+      not the same thing, and the difference is easy to state wrongly (this
+      section did, and review caught it). `is_protected` is
+      `retention_class != "raw"` — everything except raw is protected — and the
+      constant is the enumeration OQ2 ruled, kept as documentation and not
+      consulted by the compaction path, so editing it would change nothing. The
+      guarantee is asserted end-to-end rather than by token comparison: an
+      adjudication row makes its own window **refuse to compact** when asked of
+      the real planner, with an ordinary raw row in the same test proving the
+      refusal is the retention class talking and not an empty window.
       **ADR-0041's provisional list also names `identity_adjudications`,
       unannotated, among the derived tables** — read as a second *writable*
       table it contradicts the "only writable table" parenthetical three lines

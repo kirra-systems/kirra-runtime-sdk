@@ -1216,6 +1216,60 @@ impl WorldStore {
         Ok(generation)
     }
 
+    /// **Record an identity adjudication.** The single door for §14.3's
+    /// `EntityMerged` / `EntitySplit` / `EntityRetired` / `EntityEstablished`.
+    ///
+    /// `claim_status` is always [`ClaimStatus::Confirmed`] and is not a
+    /// parameter: §6.3's pipeline makes candidate clustering the *pure* step and
+    /// identity assertion the *recorded event*, so a judgement is by definition
+    /// not a candidate. A candidate merge *suggestion* is a different thing that
+    /// would need its own ruling, not a flag here — and hardcoding this is what
+    /// makes the LLM exclusion structural, since `append` already refuses an
+    /// `LlmCandidate` writing `Confirmed`.
+    ///
+    /// `frame_id` and `map_id` are `None`: an adjudication is a claim about
+    /// identity, not about space, so `kind` is never `"spatial"` and SD-4 does
+    /// not apply.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`WorldStore::append`] refuses — notably
+    /// [`StoreError::LlmCannotConfirm`] for the case above.
+    pub fn append_adjudication(
+        &mut self,
+        row: &adjudication_record::AdjudicationRow<'_>,
+        adjudication: &kirra_world::adjudication::IdentityAdjudication,
+    ) -> Result<i64, StoreError> {
+        let payload = adjudication_record::encode_adjudication(adjudication);
+        let provenance = adjudication_record::adjudication_provenance(adjudication);
+        let prov: Vec<&str> = provenance.iter().map(String::as_str).collect();
+        let subject = adjudication_record::adjudication_subject(adjudication).as_str();
+
+        self.append(&NewEvent {
+            event_id: row.event_id,
+            observation_id: row.observation_id,
+            txn_time_ms: row.txn_time_ms,
+            valid_from_ms: row.valid_from_ms,
+            valid_to_ms: None,
+            source: row.source,
+            source_version: row.source_version,
+            writer_class: row.writer_class,
+            claim_status: ClaimStatus::Confirmed,
+            provenance: &prov,
+            frame_id: None,
+            map_id: None,
+            kind: adjudication_record::ADJUDICATION_KIND,
+            subject,
+            subject_ref: None,
+            predicate: None,
+            object: None,
+            payload: &payload,
+            payload_schema: adjudication_record::ADJUDICATION_PAYLOAD_SCHEMA,
+            retention_class: adjudication_record::ADJUDICATION_RETENTION_CLASS,
+            trust: None,
+        })
+    }
+
     /// Recompute the chain from genesis and compare against what is stored.
     ///
     /// This is what makes SD-2 structural: an edit to `writer_class` or
