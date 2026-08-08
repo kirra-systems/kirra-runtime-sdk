@@ -144,6 +144,14 @@ CREATE TABLE IF NOT EXISTS compaction_summaries (
     last_object         TEXT,
     last_payload        TEXT    NOT NULL,
 
+    -- The v3 subject discriminant. NULLABLE, and that is not laziness: this
+    -- table predates `KIRRA-WM-CANDIDATE-ID-001`, so rows written by an older
+    -- build genuinely have no recorded kind. NULL says "not recorded"; a
+    -- default would invent one, and `SummaryKind::Unlabelled` is a real class
+    -- that would then be indistinguishable from "we never knew".
+    subject_kind        TEXT
+        CHECK (subject_kind IS NULL OR subject_kind IN ('entity','frame','unlabelled')),
+
     PRIMARY KEY (lo_generation, subject, predicate_key),
     CHECK (event_count > 0),
     CHECK (last_valid_from_ms >= first_valid_from_ms)
@@ -155,6 +163,36 @@ CREATE TABLE IF NOT EXISTS compaction_summaries (
 CREATE INDEX IF NOT EXISTS idx_compaction_summaries_subject
     ON compaction_summaries (subject);
 "#;
+
+/// Add `subject_kind` to a `compaction_summaries` that predates it.
+///
+/// **`COMPACTION_V1` alone cannot do this.** It is `CREATE TABLE IF NOT
+/// EXISTS`, so on a store that has already compacted, the new column in the
+/// DDL is a no-op and the next insert naming it fails — the same shape as the
+/// `projection_checkpoint` disagreement that broke a fold earlier in this
+/// tree's history.
+///
+/// Dropping and recreating is **not** available: `compaction_summaries` is the
+/// evidence standing in for evidence that no longer exists, so recreating it
+/// empty would destroy the only record of what was compacted. So: an additive
+/// `ALTER`, applied only when the column is absent, leaving existing rows NULL.
+pub fn ensure_subject_kind_column(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(compaction_summaries)")?;
+    let mut rows = stmt.query([])?;
+    let mut present = false;
+    let mut table_exists = false;
+    while let Some(r) = rows.next()? {
+        table_exists = true;
+        let name: String = r.get(1)?;
+        if name == "subject_kind" {
+            present = true;
+        }
+    }
+    if table_exists && !present {
+        conn.execute_batch("ALTER TABLE compaction_summaries ADD COLUMN subject_kind TEXT")?;
+    }
+    Ok(())
+}
 
 /// The per-key summary retained when a span is compacted.
 ///
@@ -203,6 +241,12 @@ CREATE INDEX IF NOT EXISTS idx_compaction_summaries_subject
 pub struct DegradedSummary {
     /// The citation this summary belongs to.
     pub lo_generation: i64,
+    /// Which subject class this was, when the compaction recorded one.
+    ///
+    /// `None` for a span compacted by a build that predates the v3
+    /// discriminant — "not recorded", which is distinct from
+    /// `SummaryKind::Unlabelled`, a real class an event can genuinely be.
+    pub subject_kind: Option<String>,
     /// Claim subject.
     pub subject: String,
     /// Claim predicate, `None` for predicate-less claims.

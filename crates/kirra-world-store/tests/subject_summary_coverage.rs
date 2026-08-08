@@ -78,6 +78,7 @@ fn ev<'a>(id: &'a Ids, subject: &'a str, valid_from_ms: i64) -> NewEvent<'a> {
 
 /// 12 raw events across 3 subjects, so heads sit at the END of the log and
 /// generations 1..=6 are safely compactable.
+use kirra_world::observation::SubjectRef;
 use kirra_world_store::subject_projection::{SummaryCoverage, SummaryKind};
 
 /// The population every case below shares.
@@ -282,28 +283,78 @@ fn a_predicate_less_event_is_covered() {
     clean(&p);
 }
 
-/// **Step 2 cannot be forgotten.** `compaction_summaries` records no
-/// `subject_kind`, so a subject known only by citation is reported
-/// `Unlabelled` — honest, but a guess. This pins the current behaviour so that
-/// adding the column is a deliberate change with a failing test, not a silent
-/// improvement nobody notices.
+/// **Step 2, proven: a cited-only subject keeps its recorded kind.**
+///
+/// `compaction_summaries` now carries `subject_kind`, so a subject whose every
+/// event was compacted is attributed to the class it actually had rather than
+/// guessed at.
+///
+/// The predecessor of this test asserted the guess (`Unlabelled`) so that
+/// adding the column would fail it. It did not fail — because the fixture's
+/// `ev()` helper leaves `subject_ref: None`, so every event was genuinely
+/// unlabelled and the assertion held for the wrong reason. **The pin was blind
+/// to the change it existed to catch.** This version labels the subject, which
+/// is what makes the recorded kind observable at all.
 #[test]
-fn fixme_step2_a_cited_only_subject_has_no_recorded_kind() {
+fn a_cited_only_subject_keeps_its_recorded_kind() {
     let p = tmp("kindgap");
     let mut s = WorldStore::open(&p).expect("open");
-    seed_mixed(&mut s);
+
+    // A LABELLED entity whose every event lands inside the compacted window.
+    let entity =
+        SubjectRef::Entity(kirra_world::reference::EntityId::new("robot-7").expect("entity id"));
+    for i in 1..=2i64 {
+        let id = ids(&format!("k{i}"));
+        let mut n = ev(&id, "robot-7", T0 + i * 100);
+        n.subject_ref = Some(&entity);
+        s.append(&n).expect("append labelled");
+    }
+    for i in 3..=4i64 {
+        s.append(&ev(&ids(&format!("o{i}")), "other", T0 + i * 100))
+            .expect("append");
+    }
+
     s.fold_subject_summary().expect("fold");
-    s.compact_range(1, 3, T0 + 90_000).expect("compact");
+    s.compact_range(1, 2, T0 + 90_000)
+        .expect("compact exactly robot-7's evidence");
     s.rebuild_subject_summary().expect("rebuild");
 
     let all = s.subject_summaries_with_coverage().expect("read");
-    let a = answer(&all, "window-only");
+    let a = answer(&all, "robot-7");
+    assert!(a.retained.is_none(), "nothing of robot-7 survives");
     assert_eq!(
         a.subject_kind,
-        SummaryKind::Unlabelled,
-        "FIXME step 2: citations record no discriminant, so this is a guess. \
-         When `subject_kind` lands on `compaction_summaries`, this assertion \
-         should fail and be replaced by the real kind."
+        SummaryKind::Entity,
+        "the recorded kind must survive into the citation, not fall back to a guess"
     );
+    assert_eq!(a.reconciled_observation_count(), 2);
+    assert_eq!(a.reconciled_first_observed_ms(), Some(T0 + 100));
+    clean(&p);
+}
+
+/// A citation written **before** the column existed carries no kind, and must
+/// still degrade its subject rather than being excluded.
+///
+/// "Not recorded" cannot be used to exclude, only to fail to distinguish — so a
+/// NULL-kind citation matches any kind. Simulated by nulling the column, which
+/// is exactly the state a pre-migration store is in.
+#[test]
+fn a_pre_migration_citation_still_degrades_its_subject() {
+    let p = tmp("premigration");
+    let mut s = WorldStore::open(&p).expect("open");
+    seed_mixed(&mut s);
+    s.fold_subject_summary().expect("fold");
+    s.compact_range(1, 5, T0 + 90_000).expect("compact");
+    s.raw_execute_for_test("UPDATE compaction_summaries SET subject_kind = NULL")
+        .expect("simulate a pre-migration store");
+    s.rebuild_subject_summary().expect("rebuild");
+
+    let all = s.subject_summaries_with_coverage().expect("read");
+    let a = answer(&all, "partly");
+    assert!(
+        a.coverage.is_degraded(),
+        "a kindless citation must still degrade, or an old store silently reads as complete"
+    );
+    assert_eq!(a.reconciled_observation_count(), 4);
     clean(&p);
 }
