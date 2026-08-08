@@ -84,6 +84,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub mod adjudication_record;
 pub mod compaction;
+pub mod entity_projection;
 pub mod projection;
 pub mod retention_driver;
 pub mod retention_sweeper;
