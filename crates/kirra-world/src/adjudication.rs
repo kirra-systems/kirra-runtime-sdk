@@ -515,6 +515,85 @@ impl SplitEntity {
     }
 }
 
+/// **An identity was asserted** — a new entity is a distinct thing.
+///
+/// The fourth verb, added 2026-08-08. The blueprint's identity pipeline names
+/// three steps and annotates two of them:
+///
+/// ```text
+/// observations ──► candidate clustering ──► identity assertion ──► entity
+///                        (pure)              (recorded Event)
+/// ```
+///
+/// The *recorded event* it names is this one, and until now it did not exist:
+/// the module had `Merge`, `Split` and `Forget` — three verbs that all **revise**
+/// an identity — and nothing for the act of first deciding there is one.
+/// `WM_SCOPE.md` §5 puts minting at Tier 2 on exactly that reading: *"minting an
+/// id is deciding that something is a distinct thing, which is adjudication"*.
+///
+/// # This records the judgement; it does not generate the id
+///
+/// The `EntityId` arrives already minted. Generation lives in the store —
+/// `WM_SCOPE.md` §4: *"the core owns the type and the layer with a clock mints
+/// the value"* — because a monotonic, never-reused id needs a clock and durable
+/// state, and this crate has no dependencies by ratification criterion.
+///
+/// The split is not merely mechanical. A minted id that no `AssertIdentity`
+/// records is an id with no justification behind it, which is the failure the
+/// other three verbs each carry a [`Justification`] to prevent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssertIdentity {
+    entity: EntityId,
+    justification: Justification,
+    at: DomainInstant,
+}
+
+impl AssertIdentity {
+    /// Record that an identity was asserted.
+    ///
+    /// # Why there is no refusal here, stated rather than left to be noticed
+    ///
+    /// The other three constructors refuse a self-redirect, a too-narrow split,
+    /// duplicates. This one refuses nothing beyond what its own field types
+    /// already do: [`Justification`] is non-empty and duplicate-free by
+    /// construction, and [`EntityId`] is validated by
+    /// [`crate::reference`].
+    ///
+    /// That is a real difference, not an oversight. Those refusals are all
+    /// *relational* — they compare an entity against others named in the same
+    /// event. An assertion names ONE entity and nothing to be inconsistent
+    /// with. The one check worth wanting — that this id was never asserted
+    /// before — is not answerable here: it is a question about every other
+    /// event in the log, which is the store's to answer and is enforced there
+    /// by the mint's never-reuse guarantee.
+    #[must_use]
+    pub fn new(entity: EntityId, justification: Justification, at: DomainInstant) -> Self {
+        Self {
+            entity,
+            justification,
+            at,
+        }
+    }
+
+    /// The entity being asserted into existence.
+    #[must_use]
+    pub fn entity(&self) -> &EntityId {
+        &self.entity
+    }
+
+    /// The observations that justify the judgement.
+    #[must_use]
+    pub fn justification(&self) -> &Justification {
+        &self.justification
+    }
+
+    /// When the assertion was made.
+    #[must_use]
+    pub fn at(&self) -> DomainInstant {
+        self.at
+    }
+}
+
 /// **`ForgetEntity(EntityId, Reason)`** — §14.1.
 ///
 /// *"'forget this place' is an operator-facing lifecycle transition to `Retired`
@@ -594,6 +673,8 @@ impl ForgetEntity {
 /// way to change identity should be a blueprint change first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityAdjudication {
+    /// A new entity was asserted to be a distinct thing.
+    Assert(AssertIdentity),
     /// Several entities were one.
     Merge(MergeEntities),
     /// One entity was several.
@@ -607,6 +688,7 @@ impl IdentityAdjudication {
     #[must_use]
     pub fn at(&self) -> DomainInstant {
         match self {
+            Self::Assert(a) => a.at(),
             Self::Merge(m) => m.at(),
             Self::Split(s) => s.at(),
             Self::Forget(f) => f.at(),
@@ -617,6 +699,7 @@ impl IdentityAdjudication {
     #[must_use]
     pub fn justification(&self) -> &Justification {
         match self {
+            Self::Assert(a) => a.justification(),
             Self::Merge(m) => m.justification(),
             Self::Split(s) => s.justification(),
             Self::Forget(f) => f.justification(),
@@ -636,6 +719,21 @@ impl IdentityAdjudication {
     #[must_use]
     pub fn resulting_lifecycles(&self) -> Vec<(EntityId, Lifecycle)> {
         match self {
+            // **No lifecycle consequence, and that is not an omission.**
+            //
+            // Every entry this function returns is walked through
+            // `Lifecycle::advance_to` from every live state by
+            // `every_stated_consequence_is_a_transition_the_lifecycle_permits`.
+            // An assertion CREATES an entity: there is no prior state, so there
+            // is no transition. Its initial state comes from
+            // `Entity::provisional`, which is a constructor rather than a move.
+            //
+            // Stating `Provisional` here would be a lie the seam test correctly
+            // catches -- an established entity cannot go back to provisional,
+            // and `an_assertion_states_no_transition_because_it_creates` proves
+            // that refusal is what makes the empty vec necessary rather than
+            // convenient.
+            Self::Assert(_) => Vec::new(),
             Self::Merge(m) => m
                 .sources()
                 .iter()
@@ -685,7 +783,13 @@ impl IdentityAdjudication {
     #[must_use]
     pub fn unresolved_consequence(&self) -> Option<&EntityId> {
         match self {
-            Self::Merge(_) | Self::Forget(_) => None,
+            // An assertion has NO unresolved consequence, which is a different
+            // thing from the empty `resulting_lifecycles` above. There, the
+            // empty vec says "creation is not a transition". Here, `None` says
+            // "nothing about this event is left undecided" -- and it is true,
+            // whereas `Split` genuinely leaves its source's fate open pending
+            // KIRRA-WM-SPLIT-SURVIVAL-001.
+            Self::Assert(_) | Self::Merge(_) | Self::Forget(_) => None,
             Self::Split(s) => Some(s.source()),
         }
     }
@@ -1067,6 +1171,58 @@ mod tests {
             checked,
             5 * live.len(),
             "2 merge sources + 2 split pieces + 1 retirement, each from every live state"
+        );
+    }
+
+    /// An assertion states **no** transition, because it creates.
+    ///
+    /// The non-obvious half: this is not a gap left open like `SplitEntity`'s
+    /// source. `Provisional` is where a new entity starts, and it is reached by
+    /// `Entity::provisional` — a constructor — not by moving from somewhere.
+    ///
+    /// Proved rather than asserted: `Provisional` is *unreachable* as a
+    /// transition target from every live state, so stating it as a consequence
+    /// would make `every_stated_consequence_is_a_transition_the_lifecycle_permits`
+    /// fail. The empty vec is the only honest answer, and the walk below is why.
+    #[test]
+    fn an_assertion_states_no_transition_because_it_creates() {
+        let adj = IdentityAdjudication::Assert(AssertIdentity::new(eid("new-1"), just(), T0));
+        assert!(
+            adj.resulting_lifecycles().is_empty(),
+            "creation is not a transition"
+        );
+
+        // ...and here is why it cannot state `Provisional`.
+        for from in [
+            Lifecycle::Provisional,
+            Lifecycle::Established,
+            Lifecycle::Dormant,
+        ] {
+            assert!(
+                from.clone().advance_to(Lifecycle::Provisional).is_err(),
+                "{from:?} -> Provisional must be refused, or the empty vec above \
+                 would be a choice rather than a necessity"
+            );
+        }
+    }
+
+    /// The fourth verb carries a justification like the other three.
+    ///
+    /// Uniform on purpose: a minted id with nothing recorded behind it is an id
+    /// whose existence no one can account for, which is the failure the whole
+    /// module exists to prevent.
+    #[test]
+    fn an_assertion_rests_on_evidence_like_every_other_verb() {
+        let adj = IdentityAdjudication::Assert(AssertIdentity::new(eid("new-1"), just(), T0));
+        assert!(
+            !adj.justification().observations().is_empty(),
+            "never empty, whichever verb it is"
+        );
+        assert_eq!(adj.at(), T0);
+        assert_eq!(
+            adj.unresolved_consequence(),
+            None,
+            "nothing about an assertion is left undecided"
         );
     }
 
