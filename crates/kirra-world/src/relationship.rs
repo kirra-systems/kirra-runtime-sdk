@@ -65,6 +65,13 @@ pub enum PredicateGroup {
     Assignment,
     /// Ordering and causality.
     Temporal,
+    /// **Co-reference** — that two references denote the same entity.
+    ///
+    /// Not one of §8's four families. Added by `KIRRA-WM-CLUSTERING-001`
+    /// (2026-08-08), which ruled that co-reference is carried as a
+    /// `Relationship` claim rather than as new machinery, so that it inherits
+    /// source, confidence, provenance, the hash chain and SD-2 for free.
+    Identity,
 }
 
 /// A typed, directed relation — §8's predicate table.
@@ -104,6 +111,18 @@ pub enum Predicate {
     /// system events; **never** for inferred physical causation — which
     /// [`Relationship::new`] enforces.
     CausedBy,
+    /// **Subject and object denote the same entity.**
+    ///
+    /// Not from §8's table — ruled in by `KIRRA-WM-CLUSTERING-001`, which made
+    /// co-reference a carried claim rather than new machinery.
+    ///
+    /// **A `same_as` claim is not identity.** `KIRRA-WM-PROMOTION-001`: a
+    /// candidate becomes confirmed identity only through an authorized
+    /// adjudicator, never because a matcher produced it or because candidates
+    /// agree. And `KIRRA-WM-TRANSITIVITY-001`: `same_as` evidence is **pairwise
+    /// and never transitively closed** — `a same_as b` with `b same_as c` does
+    /// not yield a `same_as(a, c)` record, at any claim status.
+    SameAs,
 }
 
 /// What a predicate implies about its reverse direction.
@@ -133,6 +152,7 @@ impl Predicate {
                 PredicateGroup::Assignment
             }
             Self::Preceded | Self::CausedBy => PredicateGroup::Temporal,
+            Self::SameAs => PredicateGroup::Identity,
         }
     }
 
@@ -155,6 +175,7 @@ impl Predicate {
             Self::OperatedBy => "operated_by",
             Self::Preceded => "preceded",
             Self::CausedBy => "caused_by",
+            Self::SameAs => "same_as",
         }
     }
 
@@ -186,6 +207,16 @@ impl Predicate {
         match self {
             Self::Contains => Symmetry::Inverse(Self::Inside),
             Self::Inside => Symmetry::Inverse(Self::Contains),
+            // Symmetry here is DEFINITIONAL, not inferred: "denotes the same
+            // entity as" reads identically in both directions, so this is not
+            // the module deriving a relation algebra the blueprint withheld.
+            //
+            // It licenses CANONICALISATION and LOOKUP only. It does NOT license
+            // minting a reverse `same_as(b, a)` evidence record —
+            // KIRRA-WM-TRANSITIVITY-001 forbids manufacturing evidence nobody
+            // asserted, and a synthesized reverse row is that, one step short of
+            // a closure.
+            Self::SameAs => Symmetry::Symmetric,
             _ => Symmetry::Unspecified,
         }
     }
