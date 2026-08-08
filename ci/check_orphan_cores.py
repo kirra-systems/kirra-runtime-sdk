@@ -138,7 +138,42 @@ def module_pub_items(lib_rs: Path, mod_name: str) -> set[str]:
     return items
 
 
-def is_consumed(crate: str, mod_name: str, lib_rs: Path, files: list[Path]) -> bool:
+def ambiguous_item_names(mods: list[tuple[str, str, Path]]) -> set[str]:
+    """Item names exported by MORE THAN ONE scanned module.
+
+    The length floor above stops *ubiquitous* names faking consumption; it does
+    nothing about *colliding* ones, and that was a real hole rather than a
+    theoretical one. `kirra_world_store::entity_projection` exports `fold_all`;
+    so does its sibling `projection`. The item scan then matched `fold_all` in
+    `projection.rs` and pronounced `entity_projection` consumed — while it was
+    still entirely unwired, which is the exact condition this gate exists to
+    catch. It had correctly flagged `adjudication_record` an hour earlier in the
+    identical state, so the guard was not weak in general, only blind to a name
+    it could not attribute.
+
+    A name owned by two modules carries no information about WHICH of them a
+    reference consumes, so it is evidence for neither. Excluding it leaves the
+    heuristic doing its job for every unambiguous name and falls back to
+    path-based detection where it cannot tell — which reports an orphan rather
+    than hiding one, the correct direction for a fail-closed guard.
+    """
+    seen: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for crate, name, lib_rs in mods:
+        for item in module_pub_items(lib_rs, name):
+            owner = f"{crate}::{name}"
+            if seen.setdefault(item, owner) != owner:
+                ambiguous.add(item)
+    return ambiguous
+
+
+def is_consumed(
+    crate: str,
+    mod_name: str,
+    lib_rs: Path,
+    files: list[Path],
+    ambiguous: set[str] | None = None,
+) -> bool:
     # The module's own files never count. The declaring lib.rs DOES count —
     # sibling code there (a gate runner calling into the module) is real
     # consumption; only its re-export/comment lines are skipped below.
@@ -147,7 +182,8 @@ def is_consumed(crate: str, mod_name: str, lib_rs: Path, files: list[Path]) -> b
     use_re = re.compile(rf"^\s*(?:pub\s+)?use\s+[\w:{{}}, ]*\b{mod_name}\b")
     path_re = re.compile(rf"\b{mod_name}::")
     qualified_re = re.compile(rf"\b{crate}::{mod_name}\b")
-    items = module_pub_items(lib_rs, mod_name)
+    # A name two modules both export cannot say which one is consumed.
+    items = module_pub_items(lib_rs, mod_name) - (ambiguous or set())
     item_re = (
         re.compile(r"\b(" + "|".join(re.escape(i) for i in sorted(items)) + r")\b")
         if items
@@ -180,8 +216,10 @@ def main() -> int:
 
     files = consumer_files()
     orphans = []
-    for crate, name, lib_rs in declared_pub_mods():
-        if not is_consumed(crate, name, lib_rs, files):
+    mods = declared_pub_mods()
+    ambiguous = ambiguous_item_names(mods)
+    for crate, name, lib_rs in mods:
+        if not is_consumed(crate, name, lib_rs, files, ambiguous):
             orphans.append(f"{crate}::{name}")
 
     new = [o for o in orphans if o not in allow]
