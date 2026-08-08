@@ -587,7 +587,13 @@ impl SplitEntity {
         &self.source
     }
 
-    /// The entities it turned out to be. At least two.
+    /// The entities it turned out to be — or, under
+    /// [`SplitShape::Subtraction`], the ones separated *off* it.
+    ///
+    /// **The cardinality depends on the shape**, so read [`Self::shape`] before
+    /// relying on it: a [`SplitShape::Partition`] has at least two (fewer is not
+    /// a partition), a `Subtraction` at least one. Neither is ever empty, and
+    /// neither ever names the source.
     #[must_use]
     pub fn destinations(&self) -> &[EntityId] {
         &self.into
@@ -802,8 +808,9 @@ impl IdentityAdjudication {
     /// Every transition named here is one [`Lifecycle::advance_to`] permits from
     /// a live state, which is what stops the event model and the state model
     /// drifting apart: a consequence this function invents that the lifecycle
-    /// algebra rejects is a contradiction, and there is a test that walks all
-    /// three verbs against `advance_to` to catch exactly that.
+    /// algebra rejects is a contradiction, and there is a test that walks every
+    /// verb — and both split shapes — against `advance_to` to catch exactly
+    /// that.
     ///
     /// **Exhaustive since `KIRRA-WM-SPLIT-SURVIVAL-001` (2026-08-08).** It was
     /// not: a split's source was missing because its fate was unruled, and
@@ -1290,15 +1297,25 @@ mod tests {
     ///
     /// Walked from every live state, because an adjudication does not get to
     /// choose what state it finds an entity in.
+    ///
+    /// **Every verb is in `cases`, and both split shapes are** — including
+    /// `Assert`, which states no consequence at all and so contributes nothing
+    /// to the count. That is the point of listing it: if it ever grows one, it
+    /// is checked here the moment it does rather than the day someone remembers
+    /// to add it to this list.
     #[test]
     fn every_stated_consequence_is_a_transition_the_lifecycle_permits() {
         let cases = [
+            IdentityAdjudication::Assert(AssertIdentity::new(eid("new"), just(), T0)),
             IdentityAdjudication::Merge(
                 MergeEntities::new([eid("a"), eid("b")], eid("keep"), just(), T0).expect("valid"),
             ),
             IdentityAdjudication::Split(
                 SplitEntity::partition(eid("p"), [eid("b1"), eid("b2")], just(), T0)
                     .expect("valid"),
+            ),
+            IdentityAdjudication::Split(
+                SplitEntity::subtract(eid("s"), [eid("off")], just(), T0).expect("valid"),
             ),
             IdentityAdjudication::Forget(ForgetEntity::new(
                 eid("gone"),
@@ -1333,9 +1350,10 @@ mod tests {
         }
         assert_eq!(
             checked,
-            6 * live.len(),
-            "2 merge sources + 2 split pieces + 1 SUPERSEDED SOURCE + 1 retirement, \
-             each from every live state"
+            7 * live.len(),
+            "2 merge sources + 2 partition pieces + 1 SUPERSEDED SOURCE + 1 \
+             subtracted piece + 1 retirement, each from every live state. \
+             Assert contributes 0 -- it creates rather than transitions."
         );
     }
 

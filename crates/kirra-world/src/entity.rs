@@ -452,9 +452,19 @@ impl Lifecycle {
     }
 
     /// Whether this state admits any further transition.
+    ///
+    /// This is the *second* place terminality is encoded — [`Self::advance_to`]
+    /// is the first, and it is the one that enforces. They are kept in lock-step
+    /// by `is_terminal_agrees_with_what_advance_to_actually_refuses`, which walks
+    /// every state against every state rather than trusting the two lists to be
+    /// edited together: adding `Superseded` to `advance_to` and forgetting it
+    /// here is exactly the drift that test exists to catch.
     #[must_use]
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Retired | Self::Merged { .. })
+        matches!(
+            self,
+            Self::Retired | Self::Merged { .. } | Self::Superseded { .. }
+        )
     }
 
     /// Move to a new lifecycle state.
@@ -475,9 +485,13 @@ impl Lifecycle {
     ///   marks an entity *produced by* a split. It therefore behaves like
     ///   `Established`.
     ///
-    /// Recorded as an open question: **is `Split(from)` a live origin marker or
-    /// a terminal marker on the entity that was split?** The two readings differ
-    /// in whether the *original* survives a split.
+    /// The question of what happens to the entity that *was* split was recorded
+    /// here as open, and is now settled by `KIRRA-WM-SPLIT-SURVIVAL-001`: the
+    /// source does not take `Split` at all. It takes [`Lifecycle::Superseded`],
+    /// which is **terminal** and carries a redirect to every successor — so a
+    /// partitioned original survives as a resolvable pointer, exactly as a merged
+    /// one does, and `Split(from)` is left unambiguously a live origin marker on
+    /// the products.
     ///
     /// # Errors
     ///
@@ -1047,6 +1061,51 @@ mod tests {
         assert!(Lifecycle::Merged { into: eid("e-2") }
             .advance_to(Lifecycle::Established)
             .is_err());
+    }
+
+    /// **The two places that encode terminality must agree.**
+    ///
+    /// `is_terminal` is a claim; `advance_to` is the enforcement. Nothing but
+    /// this test ties them together, and they have already drifted once —
+    /// `Superseded` was added to `advance_to`'s terminal arm and not to
+    /// `is_terminal`, so for one commit the type reported a partitioned source
+    /// as still-live while refusing every move it could make.
+    ///
+    /// So this does not assert a list. It walks every state against every state
+    /// and derives terminality from behaviour: a state is terminal iff
+    /// `advance_to` refuses *all* of them.
+    #[test]
+    fn is_terminal_agrees_with_what_advance_to_actually_refuses() {
+        let all = [
+            Lifecycle::Provisional,
+            Lifecycle::Established,
+            Lifecycle::Dormant,
+            Lifecycle::Retired,
+            Lifecycle::Merged { into: eid("e-9") },
+            Lifecycle::Split { from: eid("e-0") },
+            Lifecycle::Superseded {
+                by: vec![eid("e-1"), eid("e-2")],
+            },
+        ];
+        // Every LifecycleState is represented, so "refuses all of them" is a
+        // statement about the whole state space and not a sampled subset.
+        let mut covered: Vec<LifecycleState> = all.iter().map(Lifecycle::state).collect();
+        covered.sort_by_key(|s| format!("{s:?}"));
+        covered.dedup();
+        assert_eq!(covered.len(), all.len(), "one variant per LifecycleState");
+
+        for from in &all {
+            let refuses_everything = all.iter().all(|to| from.advance_to(to.clone()).is_err());
+            assert_eq!(
+                from.is_terminal(),
+                refuses_everything,
+                "is_terminal() disagrees with advance_to() for {:?}: claims {}, \
+                 behaves {}",
+                from.state(),
+                from.is_terminal(),
+                refuses_everything
+            );
+        }
     }
 
     #[test]
