@@ -1,7 +1,33 @@
 # What a candidate is identified by — a ruling request
 
-**KIRRA-WM-CANDIDATE-ID-001** · drafted 2026-08-08 · **status: PROPOSED — not
-a ruling and not an authorization**
+**KIRRA-WM-CANDIDATE-ID-001** · drafted 2026-08-08 · **status: RULED —
+§6 adopted 2026-08-08**
+
+> **RULED — 2026-08-08 by Justin Looney, World Model owner.** §6 is adopted: the
+> derived value stays out of the evidence, and the stored vocabulary was narrowed
+> to `entity`/`frame` **before release**, in the same pull request that introduced
+> the column.
+>
+> **§1's finding is not deleted by this ruling** (constraint 1). The record stands
+> that a pure computation's output was placed inside canonically-hashed bytes,
+> that the justification written for it never mentioned purity, and that it was
+> removed before shipping rather than never having been there.
+>
+> **What the ruling cost, recorded because it was predicted.** Constraint 3 said
+> an observation about a candidate would store `unbound`. It does. It also cost a
+> test: `promoting_a_candidate_to_an_entity_breaks_the_chain` was the sharpest
+> tamper case in the suite — silently upgrading something unadjudicated into a
+> resolved entity — and that edit can no longer be staged, because no such row can
+> exist. The surviving form relabels a frame. Named in the test file rather than
+> quietly rewritten.
+>
+> **Deferred, not settled**: `CandidateId`, and whether candidate membership as a
+> projection needs its own key. Both belong to entity resolution. If storing
+> `unbound` proves unacceptable in practice, that is evidence for reading A and
+> reopens this ruling.
+>
+> **One approver.** Recorded by the same person holding every role, as with every
+> other World Model ruling.
 
 > Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508
 > SIL 3 requirements. Independent third-party assessment has not yet been
