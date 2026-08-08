@@ -580,3 +580,147 @@ mod tests {
         assert!(subject_fold_all(&[]).expect("readable kinds").is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Coverage — S-1, the compaction/aggregate boundary
+// ---------------------------------------------------------------------------
+
+/// **Whether a materialised summary is complete with respect to retained
+/// history.**
+///
+/// Distinct from [`crate::compaction::Resolution`] on purpose, though they share
+/// the degraded vocabulary. `Resolution` answers *"was the range I queried
+/// intact?"*; this answers *"is this aggregate still backed by every event that
+/// built it?"* Two different questions about the same fact, and reusing one type
+/// would make `Resolution::Full` read as a claim about a query nobody made.
+///
+/// # Why this is computed at read time and never stored
+///
+/// The same call [`crate::WorldStore`] already makes for validity: a derived
+/// conclusion that can go stale does not get a column. A fold cannot know about
+/// a compaction that happens after it, so a stored flag would be wrong the
+/// moment anyone compacted without re-folding — and the whole failure this type
+/// exists to fix is a summary that looks complete and is not.
+///
+/// # The defect this makes visible
+///
+/// `subject_summary`'s aggregates are a MIN and a COUNT over **every**
+/// contributing event, so its dependency set is the whole log rather than a
+/// head. Compaction may therefore remove evidence it depends on, and before
+/// this type existed a rebuild silently produced different knowledge:
+/// `first_observed_ms` moved forward to the oldest *surviving* event, and
+/// `observation_count` fell. Worse, a subject whose every event was compacted
+/// **disappeared entirely** from a rebuilt summary — the store went from having
+/// observed it to never having heard of it, with the evidence sitting in
+/// `compaction_summaries` the whole time.
+///
+/// Nothing about those numbers was wrong; they were *coarser*, and presented as
+/// though they were not. That is the difference from a `world_current` head,
+/// whose removal makes an answer WRONG rather than coarser — and why head
+/// protection is the right fix there and not here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SummaryCoverage {
+    /// Every event that contributed is still in the log.
+    Complete,
+    /// Contributing evidence was compacted away.
+    ///
+    /// The retained aggregates alongside are over **surviving evidence only**;
+    /// these summaries stand for the rest. `event_count` and `first_txn_time_ms`
+    /// across them are what a caller adds back to recover the original figures
+    /// — the reconciliation identity `assert_reconciles` checks.
+    Degraded {
+        /// Per-`(subject, predicate)` summaries retained when the span went.
+        summaries: Vec<crate::compaction::DegradedSummary>,
+    },
+}
+
+impl SummaryCoverage {
+    /// Whether any contributing evidence has been compacted.
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        matches!(self, Self::Degraded { .. })
+    }
+
+    /// Observations accounted for by citations rather than by surviving rows.
+    ///
+    /// Zero when [`Self::Complete`]. Added to a retained `observation_count`,
+    /// this recovers the pre-compaction total.
+    #[must_use]
+    pub fn compacted_observations(&self) -> i64 {
+        match self {
+            Self::Complete => 0,
+            Self::Degraded { summaries } => summaries.iter().map(|s| s.event_count).sum(),
+        }
+    }
+
+    /// The earliest transaction time held by a citation, if any.
+    ///
+    /// The time basis matches `subject_summary.first_observed_ms`, which the
+    /// fold takes from `txn_time_ms` — so `min` of this and a retained
+    /// `first_observed_ms` recovers the pre-compaction value.
+    #[must_use]
+    pub fn earliest_compacted_txn_ms(&self) -> Option<i64> {
+        match self {
+            Self::Complete => None,
+            Self::Degraded { summaries } => summaries.iter().map(|s| s.first_txn_time_ms).min(),
+        }
+    }
+}
+
+/// One subject's summary **and** how complete it is.
+///
+/// # Why `retained` is an `Option`
+///
+/// A subject whose every contributing event was compacted has **no retained
+/// aggregates at all**. Returning a [`ProjectedSubject`] for one would mean
+/// inventing a `first_observed_ms`, a `provenance_head` and a `last_event_id`
+/// from rows that no longer exist — and a citation cannot supply the last two,
+/// because the events they identify are gone. `None` says that plainly.
+///
+/// It is still **returned**, which is the point: before this, such a subject
+/// silently vanished from a rebuilt summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubjectSummaryAnswer {
+    /// Which of the three subject classes this is.
+    ///
+    /// **FIXME (step 2, `subject_kind` on `compaction_summaries`):** for a
+    /// subject known only by citation this is a best guess, because
+    /// `compaction_summaries` predates the v3 discriminant and records no kind.
+    /// An `entity` row and an `unlabelled` row sharing a subject string are
+    /// therefore indistinguishable in citations, and coverage for one may be
+    /// attributed to the other. Adding the column is step 2 and retires this.
+    pub subject_kind: SummaryKind,
+    /// The subject itself.
+    pub subject: String,
+    /// The fold's aggregates over surviving evidence, or `None` when every
+    /// contributing event was compacted.
+    pub retained: Option<ProjectedSubject>,
+    /// Whether those aggregates are backed by all the evidence that built them.
+    pub coverage: SummaryCoverage,
+}
+
+impl SubjectSummaryAnswer {
+    /// Observations over surviving rows **plus** those citations account for.
+    ///
+    /// The figure the fold would have produced before any compaction — and the
+    /// left-hand side of the reconciliation identity this PR's regression test
+    /// asserts. Step 2 makes `observation_count` equal this directly.
+    #[must_use]
+    pub fn reconciled_observation_count(&self) -> i64 {
+        self.retained.as_ref().map_or(0, |r| r.observation_count)
+            + self.coverage.compacted_observations()
+    }
+
+    /// The earliest transaction time across surviving rows and citations.
+    #[must_use]
+    pub fn reconciled_first_observed_ms(&self) -> Option<i64> {
+        match (
+            self.retained.as_ref().map(|r| r.first_observed_ms),
+            self.coverage.earliest_compacted_txn_ms(),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, b) => b,
+        }
+    }
+}

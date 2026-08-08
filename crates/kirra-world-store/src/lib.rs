@@ -3357,6 +3357,72 @@ impl WorldStore {
         )
     }
 
+    /// **Every summarised subject, with how complete each one is.**
+    ///
+    /// The union of two sources, and the union is the point: rows the fold
+    /// retained, **plus** subjects known only through compaction citations.
+    /// Before this, a subject whose every event had been compacted simply
+    /// vanished from a rebuilt summary — the store went from having observed it
+    /// to never having heard of it.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any read failure.
+    pub fn subject_summaries_with_coverage(
+        &self,
+    ) -> Result<Vec<subject_projection::SubjectSummaryAnswer>, StoreError> {
+        use subject_projection::{SubjectSummaryAnswer, SummaryCoverage, SummaryKind};
+
+        let retained = self.subject_summaries()?;
+        let all_citations = self.summaries()?;
+
+        let coverage_for = |subject: &str| -> SummaryCoverage {
+            let mine: Vec<_> = all_citations
+                .iter()
+                .filter(|c| c.subject == subject)
+                .cloned()
+                .collect();
+            if mine.is_empty() {
+                SummaryCoverage::Complete
+            } else {
+                SummaryCoverage::Degraded { summaries: mine }
+            }
+        };
+
+        let mut out: Vec<SubjectSummaryAnswer> = retained
+            .into_iter()
+            .map(|r| SubjectSummaryAnswer {
+                subject_kind: r.subject_kind,
+                subject: r.subject.clone(),
+                coverage: coverage_for(&r.subject),
+                retained: Some(r),
+            })
+            .collect();
+
+        // Subjects with NO retained row at all. `Unlabelled` is the honest kind
+        // here rather than a guess -- see the FIXME on `SubjectSummaryAnswer`:
+        // citations record no discriminant, so claiming `Entity` would be
+        // inventing one.
+        let known: std::collections::BTreeSet<&str> =
+            out.iter().map(|a| a.subject.as_str()).collect();
+        let mut cited_only: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for c in &all_citations {
+            if !known.contains(c.subject.as_str()) {
+                cited_only.insert(c.subject.as_str());
+            }
+        }
+        for subject in cited_only {
+            out.push(SubjectSummaryAnswer {
+                subject_kind: SummaryKind::Unlabelled,
+                subject: subject.to_owned(),
+                retained: None,
+                coverage: coverage_for(subject),
+            });
+        }
+        out.sort_by(|a, b| a.subject.cmp(&b.subject));
+        Ok(out)
+    }
+
     /// Every **resolved entity** this store has summarised.
     ///
     /// The query this projection was rebuilt to answer, and what entity
