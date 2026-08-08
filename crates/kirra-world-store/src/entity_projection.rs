@@ -759,3 +759,79 @@ pub fn contradiction_from_json(raw: &str) -> Result<Contradiction, EntityRowErro
             .ok_or(EntityRowError::MalformedContradiction)?,
     })
 }
+
+/// **A loaded snapshot of the entity projection, resolvable in place.**
+///
+/// The bridge that makes `kirra_world::resolution::resolve` live against a real
+/// store — sub-slice 3 of the schema slice.
+///
+/// # Why a loaded view and not a `WorldStore` impl
+///
+/// [`AdjudicationGraph::lifecycle_of`] returns `Option<Lifecycle>` and has **no
+/// error channel**. Implementing it directly on `WorldStore` would mean every query
+/// doing I/O that can fail, with nowhere to report the failure — so a read
+/// error would become `None`, and `None` means *"the graph has no such
+/// entity"*. That reports an existing id as absent: exactly the bug
+/// `EmptySupersession` was added to fix in the resolver, reintroduced one layer
+/// down where the resolver cannot see it.
+///
+/// So the fallible work happens **once, at load**, and returns a `Result`:
+/// [`crate::WorldStore::identity_view`] refuses a corrupt projection rather
+/// than resolving over a partial one. What is left is a pure map, and the
+/// trait's contract is honoured by construction rather than by remembering to.
+///
+/// A snapshot also means a resolution walk sees ONE state of the world
+/// throughout — a per-query reader could observe a fold landing mid-walk and
+/// answer from two different generations at once.
+pub struct IdentityView {
+    rows: BTreeMap<String, ProjectedEntity>,
+    generation: i64,
+}
+
+impl IdentityView {
+    /// Build a view over already-loaded rows.
+    #[must_use]
+    pub fn new(rows: BTreeMap<String, ProjectedEntity>, generation: i64) -> Self {
+        Self { rows, generation }
+    }
+
+    /// The fold generation this snapshot was taken at.
+    ///
+    /// Carried so an answer can say *which* state of the world it came from —
+    /// §6.3's *"a query at a past instant resolves identity as it was
+    /// adjudicated then"* needs the instant to be nameable.
+    #[must_use]
+    pub fn generation(&self) -> i64 {
+        self.generation
+    }
+
+    /// How many entities the snapshot holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Whether the snapshot is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// One entity's projected state.
+    #[must_use]
+    pub fn get(&self, id: &EntityId) -> Option<&ProjectedEntity> {
+        self.rows.get(id.as_str())
+    }
+}
+
+impl kirra_world::resolution::AdjudicationGraph for IdentityView {
+    fn lifecycle_of(&self, id: &EntityId) -> Option<Lifecycle> {
+        self.rows.get(id.as_str()).map(|e| e.lifecycle.clone())
+    }
+
+    fn is_contradicted(&self, id: &EntityId) -> bool {
+        self.rows
+            .get(id.as_str())
+            .is_some_and(ProjectedEntity::is_contradicted)
+    }
+}

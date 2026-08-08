@@ -829,8 +829,28 @@ does not describe is how a residue disappears.
       Rebuild-from-zero equals incremental (`WM_SCOPE` §0a) is asserted against
       a real store with genuinely interleaved append-and-fold, and a corrupt row
       is refused rather than repaired, with a rebuild proven to recover.
-- [ ] **`AdjudicationGraph for WorldStore`** — makes `resolution::resolve` live
-      against real data. Small now that the projection exists. Sub-slice 3 of 3.
+- [x] **Resolution against a real store** — **DONE 2026-08-08**,
+      `entity_projection::IdentityView` + `WorldStore::identity_view`. Sub-slice
+      3 of 3; the schema slice is complete and `resolution::resolve` is now live
+      against recorded evidence rather than a test fixture.
+      **Not an `AdjudicationGraph` impl on `WorldStore`, and that is the
+      finding.** `lifecycle_of` returns `Option<Lifecycle>` with **no error
+      channel**, so a per-query storage reader would have to turn a read failure
+      into `None` — and `None` means *"the graph has no such entity"*. That
+      reports an existing id as absent: precisely the bug `EmptySupersession`
+      was added to fix, reintroduced one layer down where the resolver cannot
+      see it. The fallible work therefore happens **once, at load**:
+      `identity_view()` returns a `Result` and refuses a corrupt projection
+      rather than resolving over a partial one. The trait's contract is honoured
+      by construction. A snapshot also means one walk sees ONE state of the
+      world, where a per-query reader could observe a fold landing mid-walk and
+      answer from two generations at once.
+      `RefusalReason::ContradictoryHistory` closes the loop from sub-slice 2: a
+      contradicted entity refuses **per query**, including for a question that
+      merely routes *through* it, since an answer that travelled through a
+      contradicted identity is not trustworthy because the question named
+      something else. The `is_contradicted` seam is a defaulted trait method, so
+      every graph that does not model contradiction is behaviourally unchanged.
 
 - [ ] Entity resolution, the *matching* half — **candidate clustering**, deciding
       that two observations are about the same thing. Marked *pure* by §6.3.

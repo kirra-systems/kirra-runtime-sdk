@@ -335,3 +335,110 @@ fn ordinary_observations_do_not_enter_the_entity_projection() {
     let _ = entity_projection::ENTITY_PROJECTION;
     cleanup(&path);
 }
+
+// -- Sub-slice 3: resolution against a real store -------------------------
+
+use kirra_world::resolution::{resolve, RefusalReason, ResolutionOutcome};
+
+/// **`resolve` answers from a real log.** The point of the whole slice.
+///
+/// `a` was merged into `b`, and `b` was then partitioned into `b1`/`b2`. So the
+/// merged-away id still answers — §6.3's promise — and answers with what its
+/// successor turned out to be rather than with a dead id.
+#[test]
+fn resolution_follows_a_real_logs_redirects() {
+    let path = tmp("resolve");
+    let mut s = WorldStore::open(&path).expect("open");
+    // Drop the contradiction from the scenario: this test is about the walk.
+    let events: Vec<IdentityAdjudication> = scenario().into_iter().take(5).collect();
+    seed(&mut s, &events);
+    s.fold_entity_projection().expect("fold");
+
+    let view = s.identity_view().expect("view");
+    assert_eq!(view.generation(), 5, "the snapshot names its own instant");
+
+    // b1 is Retired, b2 is a live split product -> b is ambiguous between them,
+    // and `a` inherits that by redirecting into b.
+    assert_eq!(
+        resolve(&view, &eid("a")),
+        ResolutionOutcome::Ambiguous {
+            successors: vec![eid("b1"), eid("b2")]
+        },
+        "a merged-away id resolves through its successor's partition"
+    );
+    assert_eq!(
+        resolve(&view, &eid("b2")),
+        ResolutionOutcome::Located {
+            entity: eid("b2"),
+            hops: 0,
+        }
+    );
+    cleanup(&path);
+}
+
+/// An id the log never mentions is `Unknown`, not refused.
+#[test]
+fn an_unmentioned_id_resolves_to_unknown() {
+    let path = tmp("resolve-unknown");
+    let mut s = WorldStore::open(&path).expect("open");
+    seed(&mut s, &[merge(&["a"], "b")]);
+    s.fold_entity_projection().expect("fold");
+
+    let view = s.identity_view().expect("view");
+    assert_eq!(resolve(&view, &eid("nobody")), ResolutionOutcome::Unknown);
+    cleanup(&path);
+}
+
+/// **The end-to-end contradiction path**, from two valid events in the log to a
+/// per-query refusal.
+///
+/// This is the design decision of sub-slice 2 observed from the outside: the
+/// contradicted entity refuses, and an unrelated one still answers.
+#[test]
+fn a_contradicted_entity_refuses_and_the_rest_still_resolve() {
+    let path = tmp("resolve-contradiction");
+    let mut s = WorldStore::open(&path).expect("open");
+    seed(&mut s, &scenario());
+    s.fold_entity_projection().expect("fold");
+
+    let view = s.identity_view().expect("view");
+    assert_eq!(
+        resolve(&view, &eid("a")),
+        ResolutionOutcome::Refused(RefusalReason::ContradictoryHistory { at: eid("a") }),
+        "two individually valid merges of `a` make its identity unanswerable"
+    );
+    assert!(
+        matches!(
+            resolve(&view, &eid("b2")),
+            ResolutionOutcome::Located { .. }
+        ),
+        "the damage stays proportional -- unrelated entities still answer"
+    );
+    cleanup(&path);
+}
+
+/// **A corrupt projection refuses at LOAD, not during the walk.**
+///
+/// The trait has no error channel, so a per-query reader would have to turn a
+/// read failure into `None` — reporting an existing id as absent. Doing the
+/// fallible work once, at load, is what makes that unreachable.
+#[test]
+fn a_corrupt_projection_refuses_before_any_resolution_happens() {
+    let path = tmp("resolve-corrupt");
+    let mut s = WorldStore::open(&path).expect("open");
+    seed(&mut s, &scenario());
+    s.fold_entity_projection().expect("fold");
+    s.raw_execute_for_test(
+        "UPDATE entities_projection SET redirect = NULL WHERE lifecycle = 'merged'",
+    )
+    .expect("tamper");
+
+    assert!(
+        matches!(
+            s.identity_view(),
+            Err(StoreError::CorruptEntityProjectionRow { .. })
+        ),
+        "the view must refuse to exist rather than resolve over a partial one"
+    );
+    cleanup(&path);
+}

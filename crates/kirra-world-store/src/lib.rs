@@ -1529,6 +1529,25 @@ impl WorldStore {
         Ok(out)
     }
 
+    /// **A snapshot of the entity projection, resolvable in place.**
+    ///
+    /// The read side of identity: pass it to
+    /// `kirra_world::resolution::resolve` to follow every redirect recorded
+    /// against an id.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::CorruptEntityProjectionRow`] if any row cannot be read
+    /// back faithfully. **The refusal happens here, once**, rather than during
+    /// the walk — see [`entity_projection::IdentityView`] for why resolving
+    /// over a per-query reader would turn a read failure into "no such entity".
+    pub fn identity_view(&self) -> Result<entity_projection::IdentityView, StoreError> {
+        Ok(entity_projection::IdentityView::new(
+            self.load_entity_projection()?,
+            self.entity_projection_generation()?,
+        ))
+    }
+
     /// A digest over the entity projection, in key order.
     ///
     /// # Errors
