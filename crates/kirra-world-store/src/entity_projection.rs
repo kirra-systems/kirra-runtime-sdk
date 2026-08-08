@@ -552,3 +552,210 @@ mod tests {
         );
     }
 }
+
+/// The `projection_checkpoint` name this fold advances.
+///
+/// Its own checkpoint, not `world_current`'s: the two folds consume different
+/// row sets and advance independently, and sharing a cursor would make one
+/// fold's progress silently skip the other's input.
+pub const ENTITY_PROJECTION: &str = "entities_projection";
+
+/// Rebuild a [`Lifecycle`] from its three stored columns.
+///
+/// **Fail-closed.** Every mismatch is a corrupt row rather than a value to
+/// repair: the columns are only ever written by [`fold_adjudication`], so a
+/// `merged` row with no redirect means the file was edited underneath the
+/// store, and inventing a target would be fabricating a redirect §6.3 says is
+/// resolvable forever.
+///
+/// # Errors
+///
+/// [`EntityRowError`] naming which column disagreed with which token.
+pub fn lifecycle_from_columns(
+    token: &str,
+    redirect: Option<&str>,
+    origin: Option<&str>,
+) -> Result<Lifecycle, EntityRowError> {
+    let ids = |r: Option<&str>| -> Result<Vec<EntityId>, EntityRowError> {
+        let raw = r.ok_or(EntityRowError::MissingRedirect)?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(raw).map_err(|_| EntityRowError::MalformedRedirect)?;
+        let arr = parsed.as_array().ok_or(EntityRowError::MalformedRedirect)?;
+        arr.iter()
+            .map(|v| {
+                v.as_str()
+                    .ok_or(EntityRowError::MalformedRedirect)
+                    .and_then(|s| EntityId::new(s).map_err(|_| EntityRowError::MalformedRedirect))
+            })
+            .collect()
+    };
+    match token {
+        "provisional" => Ok(Lifecycle::Provisional),
+        "established" => Ok(Lifecycle::Established),
+        "dormant" => Ok(Lifecycle::Dormant),
+        "retired" => Ok(Lifecycle::Retired),
+        "merged" => {
+            let v = ids(redirect)?;
+            match v.len() {
+                // Exactly one. A merge redirects to ONE thing -- that is the
+                // whole distinction `Superseded` exists to keep visible.
+                1 => Ok(Lifecycle::Merged {
+                    into: v.into_iter().next().expect("len checked"),
+                }),
+                n => Err(EntityRowError::WrongRedirectArity {
+                    token: "merged",
+                    found: n,
+                }),
+            }
+        }
+        "superseded" => {
+            let v = ids(redirect)?;
+            if v.is_empty() {
+                // The case `resolution` refuses outright: a supersession naming
+                // nothing is unanswerable, and reading it back would recreate
+                // the row that made an existing id report as absent.
+                return Err(EntityRowError::WrongRedirectArity {
+                    token: "superseded",
+                    found: 0,
+                });
+            }
+            Ok(Lifecycle::Superseded { by: v })
+        }
+        "split" => {
+            let from = origin.ok_or(EntityRowError::MissingOrigin)?;
+            Ok(Lifecycle::Split {
+                from: EntityId::new(from).map_err(|_| EntityRowError::MalformedOrigin)?,
+            })
+        }
+        _ => Err(EntityRowError::UnknownLifecycle {
+            token: token.to_owned(),
+        }),
+    }
+}
+
+/// Why a stored projection row could not be read back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntityRowError {
+    /// The lifecycle token is not one of the seven.
+    UnknownLifecycle {
+        /// The token found.
+        token: String,
+    },
+    /// A redirecting state carried no redirect.
+    MissingRedirect,
+    /// The redirect column is not a JSON array of admissible ids.
+    MalformedRedirect,
+    /// The redirect arity disagrees with the state.
+    WrongRedirectArity {
+        /// Which state.
+        token: &'static str,
+        /// How many ids were found.
+        found: usize,
+    },
+    /// A `split` row carried no origin.
+    MissingOrigin,
+    /// The origin is not an admissible entity id.
+    MalformedOrigin,
+    /// The contradiction column is not what the fold writes.
+    MalformedContradiction,
+}
+
+impl core::fmt::Display for EntityRowError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::UnknownLifecycle { token } => write!(f, "unknown lifecycle token `{token}`"),
+            Self::MissingRedirect => write!(f, "a redirecting lifecycle carried no redirect"),
+            Self::MalformedRedirect => write!(f, "the redirect column is not a JSON id array"),
+            Self::WrongRedirectArity { token, found } => {
+                write!(f, "`{token}` cannot carry {found} successors")
+            }
+            Self::MissingOrigin => write!(f, "a split row carried no origin"),
+            Self::MalformedOrigin => write!(f, "the origin is not an admissible entity id"),
+            Self::MalformedContradiction => {
+                write!(f, "the contradiction column is not what the fold writes")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EntityRowError {}
+
+/// The origin of a `Split`, for the `origin` column.
+#[must_use]
+pub fn origin_of(l: &Lifecycle) -> Option<&EntityId> {
+    match l {
+        Lifecycle::Split { from } => Some(from),
+        _ => None,
+    }
+}
+
+/// The stored token for a [`LifecycleState`].
+#[must_use]
+pub fn state_token(s: LifecycleState) -> &'static str {
+    match s {
+        LifecycleState::Provisional => "provisional",
+        LifecycleState::Established => "established",
+        LifecycleState::Dormant => "dormant",
+        LifecycleState::Retired => "retired",
+        LifecycleState::Merged => "merged",
+        LifecycleState::Split => "split",
+        LifecycleState::Superseded => "superseded",
+    }
+}
+
+fn state_from_token(t: &str) -> Option<LifecycleState> {
+    Some(match t {
+        "provisional" => LifecycleState::Provisional,
+        "established" => LifecycleState::Established,
+        "dormant" => LifecycleState::Dormant,
+        "retired" => LifecycleState::Retired,
+        "merged" => LifecycleState::Merged,
+        "split" => LifecycleState::Split,
+        "superseded" => LifecycleState::Superseded,
+        _ => return None,
+    })
+}
+
+/// A contradiction as stored JSON.
+///
+/// Structured rather than a rendered sentence, so a reload returns what the
+/// fold recorded instead of a placeholder. An operator-facing sentence can be
+/// rendered from this; the reverse cannot be done without inventing the fields.
+#[must_use]
+pub fn contradiction_json(c: &Contradiction) -> String {
+    serde_json::json!({
+        "held": state_token(c.held),
+        "attempted": state_token(c.attempted),
+        "generation": c.generation,
+    })
+    .to_string()
+}
+
+/// Read a stored contradiction back.
+///
+/// # Errors
+///
+/// [`EntityRowError::MalformedContradiction`] on anything the fold would not
+/// have written — refused rather than defaulted, because a contradiction with
+/// invented fields points an operator at the wrong event.
+pub fn contradiction_from_json(raw: &str) -> Result<Contradiction, EntityRowError> {
+    let v: serde_json::Value =
+        serde_json::from_str(raw).map_err(|_| EntityRowError::MalformedContradiction)?;
+    let o = v
+        .as_object()
+        .ok_or(EntityRowError::MalformedContradiction)?;
+    let tok = |k: &str| -> Result<LifecycleState, EntityRowError> {
+        o.get(k)
+            .and_then(serde_json::Value::as_str)
+            .and_then(state_from_token)
+            .ok_or(EntityRowError::MalformedContradiction)
+    };
+    Ok(Contradiction {
+        held: tok("held")?,
+        attempted: tok("attempted")?,
+        generation: o
+            .get("generation")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or(EntityRowError::MalformedContradiction)?,
+    })
+}

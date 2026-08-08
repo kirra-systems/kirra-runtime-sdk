@@ -800,10 +800,38 @@ does not describe is how a residue disappears.
       the encoding (a partition would round-trip as a subtraction, undoing the
       split ruling at the storage layer) and setting a compactable retention
       class.
-- [ ] **`entities_projection`** — the deterministic reducer folding adjudication
-      rows into lifecycles. Sub-slice 2 of 3.
+- [x] **`entities_projection`** — **DONE 2026-08-08**,
+      `crates/kirra-world-store/src/entity_projection.rs` + the fold wiring on
+      `WorldStore`, 11 unit + 7 integration tests. Sub-slice 2 of 3.
+      **No migration and no schema bump**: `WM2_EVENT_SCHEMA.md` §7 rules
+      `entities_projection` a rebuildable view that *"follows from the fold, not
+      from this table"* — named in the ratified document as deliberately outside
+      the schema surface. The DDL installs on the **first fold, never at
+      `open`**, because ADR-0041 D-20's `log_only_bytes` is the size of a
+      log-only store and adding root pages at `open` would move that figure for
+      every store, invalidating the D-2 comparison the retention horizons rest
+      on.
+      The reducer does not restate what a verb means — it applies
+      `resulting_lifecycles`, already walked against `advance_to` by the
+      adjudication seam test, so there is only one implementation to drift.
+      **Contradiction poisons the ENTITY, not the fold.** Two individually valid
+      events can disagree in aggregate and no constructor can refuse either.
+      Failing the fold is not fail-closed but fail-bricked — one bad pair stops
+      identity answers for every entity, and since the log is append-only a
+      rebuild replays it and wedges again. Skipping produces a projection that
+      disagrees with the log while looking healthy. So the entity is poisoned,
+      the projection picks NO winner, and everything else folds — matching the
+      precedent `resolution` set for a redirect cycle, which is one instance of
+      the same fault. Poison is sticky and keeps the FIRST contradiction, for
+      diagnostic stability. **Stated as a real limitation: no sequence of
+      today's four verbs clears a contradiction** — resolution needs a fifth
+      verb and its own ruling.
+      Rebuild-from-zero equals incremental (`WM_SCOPE` §0a) is asserted against
+      a real store with genuinely interleaved append-and-fold, and a corrupt row
+      is refused rather than repaired, with a rebuild proven to recover.
 - [ ] **`AdjudicationGraph for WorldStore`** — makes `resolution::resolve` live
-      against real data. Small once the projection exists. Sub-slice 3 of 3.
+      against real data. Small now that the projection exists. Sub-slice 3 of 3.
+
 - [ ] Entity resolution, the *matching* half — **candidate clustering**, deciding
       that two observations are about the same thing. Marked *pure* by §6.3.
       Still open, and still the thing `Corroboration(n)` waits on (§4): the axis
