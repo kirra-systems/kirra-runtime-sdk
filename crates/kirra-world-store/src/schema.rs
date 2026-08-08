@@ -103,7 +103,14 @@ pub const CHAIN_ALGORITHM: &str = "kirra-audit-hash/compute_record_hash_v2";
 
 /// Schema version stamped into `world_store_meta`.
 ///
-/// Bumped to **2** by the trust-axes migration below.
+/// The history, because this is the constant a reader reaches for when
+/// diagnosing a schema mismatch and a stale note here sends them the wrong way:
+///
+/// | version | migration | ruling |
+/// |---|---|---|
+/// | 1 | the ratified baseline | `KIRRA-WM2-SCHEMA-001` |
+/// | 2 | the four orthogonal trust axes, additive | 2026-08-07 |
+/// | 3 | the `subject_kind` discriminant | `KIRRA-WM-CANDIDATE-ID-001` |
 pub const SCHEMA_VERSION: i64 = 3;
 
 /// **v2 — the four orthogonal trust axes, added additively.**
