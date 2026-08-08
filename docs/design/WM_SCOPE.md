@@ -870,6 +870,29 @@ does not describe is how a residue disappears.
       matcher exists. `KIRRA-WM-CANDIDATE-ID-001` constrains rather than supplies
       it — a candidate's identifier may not enter the hashed evidence record, so
       candidate membership has to be projected, not frozen.
+
+      **Written up for a ruling on 2026-08-08**:
+      [`WM_CANDIDATE_CLUSTERING_PROPOSAL.md`](WM_CANDIDATE_CLUSTERING_PROPOSAL.md)
+      (`KIRRA-WM-CLUSTERING-001`). Drafting it turned up why this box is unlike
+      the rest of Tier 2: **the blueprint specifies candidate clustering in one
+      word and a parenthetical** — the §6.3 diagram and one roadmap row, with no
+      definition of matching, no features, no thresholds, no output type. The
+      other Tier 2 questions were recoverable by reading carefully; this one is
+      not, so building a matcher would mean inventing a similarity model and
+      calling it a reading.
+      The proposal recommends splitting the box: rule the **contract** (a cluster
+      is a proposal and never evidence; its id is a projection key; purity is
+      rebuild-from-log; every co-reference judgement names its source) and land
+      **declared co-reference** as the first driver of `Corroboration(n)` — using
+      the finding that the model already expresses "these two are the same
+      thing" as an `ObservationKind::Relationship` claim with a `same_as`
+      predicate, which inherits source, confidence, provenance, the chain and
+      SD-2 for free. A similarity matcher is then *relocated* rather than
+      forbidden: it becomes a `derivation`-class producer of `candidate`
+      `same_as` claims, admitted through the same door and visible as inferred,
+      instead of reaching into a trust axis directly. Deliberately left open:
+      the similarity model itself, what confirms a `same_as` candidate, and
+      **transitivity**.
 - [x] **`MergeEntities` / `SplitEntity` / `ForgetEntity` as recorded events** —
       **DONE 2026-08-07**, `crates/kirra-world/src/adjudication.rs`, 24 unit
       tests, still zero-dependency.
