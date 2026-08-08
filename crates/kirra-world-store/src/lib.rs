@@ -229,6 +229,12 @@ pub enum StoreError {
         /// The value in the `subject` column.
         subject: String,
     },
+    /// The 80-bit random component could not be incremented further.
+    ///
+    /// Reached only after 2^80 ids inside one millisecond. Recorded as a
+    /// refusal rather than wrapped, because wrapping would hand out an id that
+    /// was already minted — the one thing the mint exists to prevent.
+    EntityIdSpaceExhausted,
     /// The database is stamped with a schema version this binary does not
     /// know. Refused rather than opened hopefully — an older binary writing
     /// into a newer store produces rows missing columns it never heard of,
@@ -333,6 +339,11 @@ impl std::fmt::Display for StoreError {
                 "subject_ref names {reference:?} but subject is {subject:?}; \
                  both would enter the hashed bytes and nothing could say which \
                  was meant"
+            ),
+            Self::EntityIdSpaceExhausted => write!(
+                f,
+                "the entity-id space is exhausted for this millisecond; \
+                 refused rather than wrapped, because wrapping would reuse an id"
             ),
             Self::SchemaFromTheFuture { found, supported } => write!(
                 f,
@@ -886,6 +897,7 @@ pub fn schema_digest() -> String {
     let mut effective = String::from(schema::SCHEMA_V1);
     effective.push_str(schema::SCHEMA_V2_MIGRATION);
     effective.push_str(schema::SCHEMA_V3_MIGRATION);
+    effective.push_str(schema::SCHEMA_V4_MIGRATION);
     sha256_hex(effective.as_bytes())
 }
 
@@ -938,6 +950,7 @@ impl WorldStore {
             tx.execute_batch(schema::SCHEMA_V1)?;
             tx.execute_batch(schema::SCHEMA_V2_MIGRATION)?;
             tx.execute_batch(schema::SCHEMA_V3_MIGRATION)?;
+            tx.execute_batch(schema::SCHEMA_V4_MIGRATION)?;
             tx.execute(
                 "INSERT INTO world_store_meta (key, value) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION.to_string()],
@@ -1027,6 +1040,11 @@ impl WorldStore {
         // catch on the next open and would then be self-inflicted.
         if from < 3 {
             tx.execute_batch(schema::SCHEMA_V3_MIGRATION)?;
+        }
+        // Same shape again, and the same reason: separate `if`, so a v1 store
+        // takes every step in one transaction rather than skipping to the last.
+        if from < 4 {
+            tx.execute_batch(schema::SCHEMA_V4_MIGRATION)?;
         }
 
         // Digest before version, inside the transaction. The order no longer
@@ -3046,6 +3064,105 @@ impl WorldStore {
         self.subject_summary_query("ORDER BY subject_kind ASC, subject ASC", params![])
     }
 
+    /// **Mint a new `EntityId`** — `WM_SCOPE.md` §5.
+    ///
+    /// §6.1 requires an id to be *"stable, opaque, monotonic. Never reused,
+    /// never encodes semantics."* The type guarantees stable and opaque; this
+    /// guarantees the other two, and it needs durable state to do so — which is
+    /// why generation lives here and not in the zero-dependency core.
+    ///
+    /// # Monotonic across the clock, not merely within it
+    ///
+    /// A ULID is lexicographically ordered by its timestamp, so `>` on the
+    /// string is the monotonic check. The candidate built from `now_ms` is used
+    /// only if it exceeds every id already minted; otherwise the previous id is
+    /// **incremented** (the ULID spec's own monotonic rule, which bumps the
+    /// random component).
+    ///
+    /// That second branch is not an edge case to be waved at. Two ids minted in
+    /// the same millisecond hit it every time, and so does a clock that goes
+    /// backwards — an NTP step, a VM restore. Deriving the next id from the
+    /// durable high-water rather than from the clock alone is what makes
+    /// monotonicity a property of the *store* instead of a property of the
+    /// caller's clock being well-behaved.
+    ///
+    /// # The `<=` boundary is untested, and cannot practically be
+    ///
+    /// A control weakening `<=` to `<` fails **no test**. The two differ only on
+    /// exact equality between the candidate and the high-water, which needs an
+    /// 80-bit random collision — not reachable without forcing the RNG.
+    ///
+    /// Recorded rather than covered, because the honest reason it is still `<=`
+    /// is not "a test says so". On equality, `<` would hand back an id already
+    /// in the ledger, and the `PRIMARY KEY` below would refuse the `INSERT`. So
+    /// the weaker form fails *closed*, and `<=` turns an astronomically rare
+    /// hard error into a correct increment. That is a cheap improvement over an
+    /// already-safe failure, not a guard the design rests on.
+    ///
+    /// # Never reused is enforced by the schema, not by this function
+    ///
+    /// The `INSERT` into `entity_id_mint` is what makes reuse impossible: the
+    /// `PRIMARY KEY` refuses a second write of the same id, so a generator bug
+    /// surfaces as a constraint failure rather than two entities quietly
+    /// sharing an identity. The ledger is never swept — see
+    /// [`schema::SCHEMA_V4_MIGRATION`] for why it is not a projection.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any storage failure;
+    /// [`StoreError::EntityIdSpaceExhausted`] if the random component cannot be
+    /// incremented further within one millisecond (2^80 ids — recorded as a
+    /// refusal rather than a wrap, because wrapping would reuse).
+    pub fn mint_entity_id(&mut self, now_ms: i64) -> Result<EntityId, StoreError> {
+        use std::str::FromStr;
+        let tx = self.conn.transaction()?;
+        let highest: Option<String> = tx
+            .query_row("SELECT MAX(entity_id) FROM entity_id_mint", [], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten();
+
+        let stamp = u64::try_from(now_ms).unwrap_or(0);
+        let candidate = ulid::Ulid::from_parts(stamp, rand_component());
+        let next = match highest
+            .as_deref()
+            .and_then(|h| ulid::Ulid::from_str(h).ok())
+        {
+            Some(last) if candidate <= last => {
+                last.increment().ok_or(StoreError::EntityIdSpaceExhausted)?
+            }
+            _ => candidate,
+        };
+
+        let id = next.to_string();
+        tx.execute(
+            "INSERT INTO entity_id_mint (entity_id, minted_at_ms) VALUES (?1, ?2)",
+            params![id, now_ms],
+        )?;
+        tx.commit()?;
+        // Constructed through the same validator every other caller uses, so a
+        // minted id is admissible by exactly the rule a stored one must pass.
+        EntityId::new(id).map_err(|e| StoreError::CorruptRow {
+            generation: 0,
+            detail: format!("minted an inadmissible entity id: {e}"),
+        })
+    }
+
+    /// How many ids this store has ever minted.
+    ///
+    /// The ledger's size, not the live entity count: a retired or merged entity
+    /// keeps its row, because that is what never-reuse means.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any storage failure.
+    pub fn minted_entity_id_count(&self) -> Result<i64, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM entity_id_mint", [], |r| r.get(0))?)
+    }
+
     /// A digest over the whole subject summary, for the
     /// rebuild-equals-incremental assertion.
     ///
@@ -3109,4 +3226,19 @@ fn subject_summary_digest_of(conn: &Connection) -> Result<String, StoreError> {
         );
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+/// 80 bits of randomness for a ULID's non-timestamp half.
+///
+/// `ulid`'s own generator reads the system clock; this store takes `now_ms`
+/// from the caller instead, so only the random half is needed here — the same
+/// reason every time-dependent function in this crate is passed its clock
+/// rather than reading one.
+fn rand_component() -> u128 {
+    use rand::RngCore;
+    let mut buf = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut buf);
+    // The top 48 bits are the ULID's timestamp; mask them off so only the
+    // 80-bit random field is populated.
+    u128::from_be_bytes(buf) & ((1u128 << 80) - 1)
 }

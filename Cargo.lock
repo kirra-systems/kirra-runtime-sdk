@@ -2618,9 +2618,11 @@ dependencies = [
  "kirra-audit-hash",
  "kirra-world",
  "kirra-world-store",
+ "rand 0.8.7",
  "rusqlite",
  "serde_json",
  "sha2 0.10.9",
+ "ulid",
 ]
 
 [[package]]
@@ -5217,6 +5219,16 @@ dependencies = [
  "rand 0.8.7",
  "serde",
  "spin 0.10.0",
+]
+
+[[package]]
+name = "ulid"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
+dependencies = [
+ "rand 0.9.4",
+ "web-time",
 ]
 
 [[package]]

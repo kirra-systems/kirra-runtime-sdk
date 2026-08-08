@@ -111,7 +111,8 @@ pub const CHAIN_ALGORITHM: &str = "kirra-audit-hash/compute_record_hash_v2";
 /// | 1 | the ratified baseline | `KIRRA-WM2-SCHEMA-001` |
 /// | 2 | the four orthogonal trust axes, additive | 2026-08-07 |
 /// | 3 | the `subject_kind` discriminant | `KIRRA-WM-CANDIDATE-ID-001` |
-pub const SCHEMA_VERSION: i64 = 3;
+/// | 4 | the `entity_id_mint` ledger | `WM_SCOPE.md` §5 |
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// **v2 — the four orthogonal trust axes, added additively.**
 ///
@@ -283,4 +284,31 @@ pub const SCHEMA_V3_MIGRATION: &str = r#"
 ALTER TABLE world_events ADD COLUMN subject_kind TEXT
     CHECK (subject_kind IS NULL OR subject_kind IN
         ('entity','frame'));
+"#;
+
+/// **v4 — the entity-id mint ledger.**
+///
+/// `WM_SCOPE.md` §5's `entity_id` minting, and §6.1's constraint on what an id
+/// must be: *"Stable, opaque, monotonic. Never reused, never encodes
+/// semantics."* The first two are properties of the TYPE
+/// ([`kirra_world::reference::EntityId`]); the last two are properties of the
+/// **generator**, and a generator cannot promise them without durable state.
+///
+/// # Why this is a table and not a projection
+///
+/// A projection is rebuildable by folding the log, and that is exactly what
+/// never-reuse must NOT depend on. Retention can compact old events away; if
+/// the set of minted ids were derived from surviving events, a compacted id
+/// would become mintable again. This ledger is the one place that remembers an
+/// id was used, and it is never swept.
+///
+/// The `PRIMARY KEY` is the never-reuse guarantee itself rather than a check
+/// the mint performs — a second `INSERT` of the same id is refused by SQLite,
+/// so a generator bug surfaces as a constraint failure instead of a silently
+/// duplicated identity.
+pub const SCHEMA_V4_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS entity_id_mint (
+    entity_id    TEXT    PRIMARY KEY,
+    minted_at_ms INTEGER NOT NULL
+);
 "#;
