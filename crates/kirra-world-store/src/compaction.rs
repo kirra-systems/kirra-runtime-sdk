@@ -176,6 +176,17 @@ CREATE INDEX IF NOT EXISTS idx_compaction_summaries_subject
 /// evidence standing in for evidence that no longer exists, so recreating it
 /// empty would destroy the only record of what was compacted. So: an additive
 /// `ALTER`, applied only when the column is absent, leaving existing rows NULL.
+///
+/// The `ALTER` carries the **same `CHECK`** as [`COMPACTION_V1`], and that is
+/// load-bearing rather than cosmetic. Without it the two paths into this schema
+/// disagree: a store created fresh enforces the kind vocabulary, while one
+/// migrated here accepts any string — so a bad writer is caught on some
+/// deployments and silently corrupts attribution on exactly the older ones this
+/// function exists to serve. A divergence between the CREATE path and the ALTER
+/// path is the same failure this function was written to fix, and it would be
+/// perverse to reintroduce it one line further down. SQLite permits a column
+/// `CHECK` in `ADD COLUMN` and enforces it on subsequent writes; existing rows
+/// are not re-validated, which is correct here because they are all NULL.
 pub fn ensure_subject_kind_column(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare("PRAGMA table_info(compaction_summaries)")?;
     let mut rows = stmt.query([])?;
@@ -189,7 +200,10 @@ pub fn ensure_subject_kind_column(conn: &rusqlite::Connection) -> rusqlite::Resu
         }
     }
     if table_exists && !present {
-        conn.execute_batch("ALTER TABLE compaction_summaries ADD COLUMN subject_kind TEXT")?;
+        conn.execute_batch(
+            "ALTER TABLE compaction_summaries ADD COLUMN subject_kind TEXT \
+             CHECK (subject_kind IS NULL OR subject_kind IN ('entity','frame','unlabelled'))",
+        )?;
     }
     Ok(())
 }
@@ -422,5 +436,83 @@ mod tests {
             is_protected("RAW"),
             "case matters; only exact `raw` is open"
         );
+    }
+
+    /// The pre-`subject_kind` table, as an older build would have left it.
+    fn legacy_table(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            "CREATE TABLE compaction_summaries (
+                 lo_generation       INTEGER NOT NULL,
+                 subject             TEXT    NOT NULL,
+                 predicate_key       TEXT    NOT NULL,
+                 predicate           TEXT,
+                 event_count         INTEGER NOT NULL,
+                 first_valid_from_ms INTEGER NOT NULL,
+                 last_valid_from_ms  INTEGER NOT NULL,
+                 first_txn_time_ms   INTEGER NOT NULL,
+                 last_object         TEXT,
+                 last_payload        TEXT    NOT NULL,
+                 PRIMARY KEY (lo_generation, subject, predicate_key)
+             )",
+        )
+        .unwrap();
+    }
+
+    fn insert_kind(
+        conn: &rusqlite::Connection,
+        subject: &str,
+        kind: Option<&str>,
+    ) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO compaction_summaries
+                 (lo_generation, subject, predicate_key, event_count,
+                  first_valid_from_ms, last_valid_from_ms, first_txn_time_ms,
+                  last_payload, subject_kind)
+             VALUES (1, ?1, '', 1, 0, 0, 0, '{}', ?2)",
+            rusqlite::params![subject, kind],
+        )
+    }
+
+    /// A table that reached `subject_kind` via the migration must enforce the
+    /// SAME vocabulary as one created fresh.
+    ///
+    /// Without the `CHECK` on the `ALTER`, the two paths into this schema
+    /// disagree — fresh stores reject a bad kind, migrated ones accept it — so
+    /// a bad writer silently corrupts attribution on exactly the older stores
+    /// the migration exists to serve. That is a divergence between the CREATE
+    /// path and the ALTER path, which is the failure the migration was written
+    /// to fix in the first place.
+    #[test]
+    fn a_migrated_table_enforces_the_same_kind_vocabulary_as_a_fresh_one() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        legacy_table(&conn);
+        ensure_subject_kind_column(&conn).unwrap();
+
+        // NULL is "not recorded" and must stay legal — that distinction is the
+        // whole reason the column is nullable.
+        insert_kind(&conn, "s-null", None).expect("NULL must remain accepted");
+        for ok in ["entity", "frame", "unlabelled"] {
+            insert_kind(&conn, &format!("s-{ok}"), Some(ok))
+                .unwrap_or_else(|e| panic!("{ok} must be accepted: {e}"));
+        }
+
+        let err = insert_kind(&conn, "s-bad", Some("candidate"))
+            .expect_err("an out-of-vocabulary kind must be REFUSED after migration");
+        assert!(
+            format!("{err}").contains("CHECK"),
+            "expected a CHECK-constraint violation, got: {err}"
+        );
+    }
+
+    /// The migration is idempotent, and re-running it does not drop the CHECK.
+    #[test]
+    fn re_running_the_migration_keeps_the_constraint() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        legacy_table(&conn);
+        ensure_subject_kind_column(&conn).unwrap();
+        ensure_subject_kind_column(&conn).unwrap();
+
+        insert_kind(&conn, "s-bad", Some("candidate"))
+            .expect_err("the constraint must survive a second migration pass");
     }
 }
