@@ -242,7 +242,7 @@ not the same as ruling the two concepts never converge.
 | `id()` returns `Option<&str>` for all three | `observation.rs:439-444` |
 | `Entity::provisional` takes an `EntityId` | `entity.rs:613` |
 | `Lifecycle::Provisional` is *"newly created, not yet corroborated"* | `entity.rs:415-416` |
-| No `CandidateId` exists anywhere | grep across all `*.rs` and `*.md` — zero hits |
+| No `CandidateId` type exists in code | `grep -rnE '(struct\|enum\|type) +CandidateId' --include=*.rs crates/` — zero hits. **Narrowed after review**: the first wording claimed zero hits across all `*.rs` and `*.md`, which was true when run and self-falsifying the moment this document was written. An appendix claim that stops being re-runnable is worse than a narrower one |
 | Nothing constructs `SubjectRef::Candidate` outside its own module and tests | grep across `crates/` |
 | `NewEvent`'s newtype hardening postdates `observation.rs` | `WM_SCOPE.md` §4 — reference.rs Strand A dated 2026-08-07, observation.rs 2026-08-06 |
 | Merge's redirect is settled in the blueprint | `WORLD_MODEL_ARCHITECTURE.md:342-344` |
