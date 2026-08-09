@@ -39,6 +39,7 @@ fn build_state(posture: FleetPosture) -> Arc<ServiceState> {
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap: kirra_core::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
+        posture_cache_ttl_ms: kirra_verifier::posture_cache::POSTURE_CACHE_TTL_MS,
         last_actuator_verdict: kirra_verifier::posture_cache::empty_last_verdict_cell(),
     })
 }
@@ -60,6 +61,7 @@ fn build_state_empty_cache() -> Arc<ServiceState> {
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap: kirra_core::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
+        posture_cache_ttl_ms: kirra_verifier::posture_cache::POSTURE_CACHE_TTL_MS,
         last_actuator_verdict: kirra_verifier::posture_cache::empty_last_verdict_cell(),
     })
 }

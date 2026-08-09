@@ -1170,6 +1170,7 @@ mod actuator_middleware_tests {
         Arc::new(ServiceState {
             app,
             posture_cache,
+            posture_cache_ttl_ms: crate::posture_cache::POSTURE_CACHE_TTL_MS,
             started_at_ms: posture_now_ms(),
             audit_verifying_key: None,
             fabric_router: Arc::new(FabricRouter::new()),
