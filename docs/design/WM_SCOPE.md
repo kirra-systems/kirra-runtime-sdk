@@ -1147,6 +1147,84 @@ picking one.
 
 ---
 
+## 5.5. Tier 2.5 — The first sanctioned consumer
+
+Numbered 5.5 rather than inserted as §6 because every cross-reference in this
+document names a section by number; renumbering to make room would silently
+break them all.
+
+**This milestone adds no features.** Its output is a placement decision, a seam,
+and a list of contracts that broke — and that is the point. §9 already argues
+for wiring a consumer *before* Tier 3, on the grounds that a real caller is what
+falsifies the contracts. The 2026-08-07 attempt proved the argument twice over
+(Tier 3's rule 1 against `ProjectedClaim`; the emergent
+`inadmissible_never_read` guarantee) from a consumer that never shipped. What it
+also proved is that the advice is not actionable as written.
+
+### The gap this closes
+
+Fence B refused the attempted consumer, correctly, and the refusal exposed
+something the tier plan does not provide for:
+
+> **There is no sanctioned place for semantic world knowledge to become
+> operational behaviour.**
+
+That is an architectural gap, not a task. Until it has a named home, every
+future consumer rediscovers it after writing the same code.
+
+### What the workspace already answers
+
+`kirra-world-service` is **the only crate that depends on `kirra-world*` and
+implements no `CorridorSource`** — its entire dependency list is `kirra-world`
+and `kirra-world-store`. It is outside every barred set: not a safety-closure
+member, not a corridor producer, nothing transitive to drag in. The host
+question is therefore already answered by construction.
+
+**Hosting is not consuming, and this is the trap.** Nothing depends on
+`kirra-world-service` today except workspace membership, so it carries the same
+*built for nobody* problem one level up. A service crate is a transport surface;
+this milestone needs something that turns world knowledge into behaviour.
+
+### Two consumers, proving different things
+
+Stated explicitly because the natural first choice proves the *weaker* of the
+two properties:
+
+* **A typed Rust caller** — falsifies the **contracts**. This is what §9's
+  argument is actually about: `ProjectedClaim`'s defect was that public fields
+  let a caller reach `.payload` with no validity, trust or handle. That class of
+  defect is a *type* problem.
+* **An operational caller** — falsifies the **seam**. The Rabbit Channel A path
+  is the candidate: pure speech, zero actuation authority by existing design,
+  and `rabbit_ask.py` is grounded Q&A with no grounding source today.
+
+**If only one is built, it must be the typed one.** An HTTP/JSON consumer cannot
+falsify a Rust answer boundary — serialization hides exactly the misuse the
+boundary exists to prevent, so a Python caller would report success against a
+contract it never tested.
+
+### Goals
+
+- [ ] **Name the non-authoritative host** for world knowledge, and record why it
+      is outside the checker's closure rather than merely believed to be.
+- [ ] **Define the one-way seam** from Kirra World into operational software.
+- [ ] **Prove the consumer cannot influence the checker — mechanically.** The
+      acceptance criterion is that
+      `ci/check_kirra_world_bidirectional_fence.py` passes **with the new
+      dependency edge present**, not an argument in a document.
+- [ ] **Exercise the Tier 3 contracts with a real caller** (the typed one).
+- [ ] **Capture every contract that breaks** before the API is expanded.
+
+### What goal 3 buys beyond itself
+
+The fence has so far only ever been observed **refusing**. A fence that only
+refuses is indistinguishable from one that refuses everything, so its acceptances
+carry no information yet. This milestone is the first evidence it can say *yes*
+to a legitimate route — the same non-vacuity discipline this document applies to
+tests, applied to the fence.
+
+---
+
 ## 6. Tier 3 — The query engine
 
 Eight verbs in §14.2; about five exist in partial form.
@@ -1508,10 +1586,18 @@ current**, **never supply geometry**.
 **Wire a small consumer EARLY — before Tier 3, not after.**
 
 Everything built so far is built for nobody: no planner, perception or LLM crate
-depends on `kirra-world*`, and the service crate is deliberately empty. The
-"no bare values" rule and the shape of the trust axes are exactly the decisions
-a real caller will falsify, and discovering that across eight verbs costs far
-more than discovering it against one.
+depends on `kirra-world*`, and **nothing depends on the service crate** either.
+The "no bare values" rule and the shape of the trust axes are exactly the
+decisions a real caller will falsify, and discovering that across eight verbs
+costs far more than discovering it against one.
+
+*Corrected 2026-08-09.* The sentence above read *"and the service crate is
+deliberately empty"*, which is no longer true and would send the next reader
+looking for an empty crate: `kirra-world-service` carries a 393-line
+`read_view.rs` with 580 lines of tests. The claim that survives is the one that
+matters, and it is about **callers, not contents** — the crate has none, so it
+reproduces the built-for-nobody problem one level up rather than solving it.
+See §5.5.
 
 There are **no callers today**, so the breaking change is free *now* and never
 again.
