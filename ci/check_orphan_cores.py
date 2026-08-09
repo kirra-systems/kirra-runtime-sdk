@@ -179,11 +179,15 @@ def module_pub_items(lib_rs: Path, mod_name: str) -> set[str]:
     every re-export shape (renamed, glob, multi-line) at once; the length
     floor keeps ubiquitous short names (`Pose`…) from faking consumption.
     """
-    items: set[str] = set()
-    for f in module_own_paths(lib_rs, mod_name):
-        if f.exists():
-            items.update(free_pub_items(strip_noncode(f.read_text(encoding="utf-8"))))
-    return items
+    key = (lib_rs, mod_name)
+    hit = _PUB_ITEMS.get(key)
+    if hit is None:
+        hit = set()
+        for f in module_own_paths(lib_rs, mod_name):
+            if f.exists():
+                hit.update(free_pub_items("\n".join(stripped_lines(f.resolve()))))
+        _PUB_ITEMS[key] = hit
+    return hit
 
 
 def ambiguous_item_names(mods: list[tuple[str, str, Path]]) -> set[str]:
@@ -290,32 +294,72 @@ def strip_noncode(text: str) -> str:
     return "".join(out)
 
 
+_SHAPE_AFTER = re.compile(r"\s*(?:::|\(|\{|<)")
+_SHAPE_BEFORE = re.compile(r"(?:->|[:&<,=])\s*$")
+
+
 def code_reference_re(items: set[str]) -> re.Pattern[str] | None:
-    """Match an item name only where it is used **as code**.
+    """A cheap finder for the item names; shape is judged by [`is_code_shaped`].
 
-    The bare-identifier scan this replaces could not tell `Corroboration` the
-    type from "corroboration" the English word, so any sufficiently ordinary
-    accessor name — `version`, `producer`, `support`, `high` — was satisfied by
-    unrelated prose somewhere in a 150-file tree.
-
-    A reference counts when it wears a syntactic marker that prose does not:
-    a path (`Item::`), a call or tuple-struct (`Item(`), a struct literal
-    (`Item {`), a method call (`.item(`), or a type position (`: Item`,
-    `-> Item`, `<Item`, `&Item`, `, Item`).
-
-    Anything else is treated as NOT consumption. That direction is deliberate:
-    a missed real reference reports an orphan that is not one, which is visible
-    and arguable, while a false match hides an unwired core — the exact defect
-    this gate exists to catch, and the one it shipped with twice.
+    Deliberately the same simple alternation the bare-identifier scan used, and
+    NOT one pattern carrying the code-shape rules inline. Embedding the shapes
+    repeats the whole alternation once per shape, which tripled the pattern and
+    made the gate ~2.8x slower across ~180 modules x 429 files. Finding first
+    and judging second costs the same as the old scan, because hits are rare.
     """
     if not items:
         return None
-    alt = "|".join(re.escape(i) for i in sorted(items))
-    return re.compile(
-        rf"(?:\b(?:{alt})\s*(?:::|\(|\{{|<))"  # Item::  Item(  Item {{  Item<
-        rf"|(?:\.\s*(?:{alt})\s*\()"  # .item(
-        rf"|(?:(?:->|:|&|<|,|=)\s*(?:{alt})\b)"  # type / binding position
-    )
+    return re.compile(r"\b(" + "|".join(re.escape(i) for i in sorted(items)) + r")\b")
+
+
+def is_code_shaped(line: str, start: int, end: int) -> bool:
+    """Whether the identifier at `line[start:end]` is *used as code*.
+
+    The bare-identifier scan could not tell `Corroboration` the type from
+    "corroboration" the English word, so any ordinary accessor name — `version`,
+    `producer`, `support`, `high` — was satisfied by unrelated prose or an error
+    message somewhere in the tree.
+
+    A reference counts when it wears a syntactic marker prose does not: a path
+    (`Item::`), a call or tuple-struct (`Item(`), a struct literal (`Item {`),
+    a generic (`Item<`), a method call (`.item(`), or a type/binding position
+    (`: Item`, `-> Item`, `&Item`, `<Item`, `, Item`, `= Item`).
+
+    Anything else is NOT consumption. That direction is deliberate: a missed
+    real reference reports an orphan that is not one — visible and arguable —
+    while a false match hides an unwired core, the defect this gate exists to
+    catch and has shipped with twice.
+    """
+    # `.item(` is covered by the AFTER rule: the `(` matches regardless of the
+    # leading dot, so no separate method-call branch is needed. One was written
+    # here and was dead code -- reachable only when the AFTER rule had already
+    # failed, in which case it returns False anyway.
+    if _SHAPE_AFTER.match(line, end):
+        return True
+    return bool(_SHAPE_BEFORE.search(line[:start]))
+
+
+_STRIPPED: dict[Path, list[str]] = {}
+#: Per-module free-item cache; scanned once by `ambiguous_item_names` and again
+#: by `is_consumed`, for every module.
+_PUB_ITEMS: dict[tuple[Path, str], set[str]] = {}
+
+
+def stripped_lines(path: Path) -> list[str]:
+    """`strip_noncode` of a file, split once and memoised for this run.
+
+    The LINES are cached, not the string: `splitlines()` in the per-module loop
+    is the same O(modules x files) cost as the stripping was, and caching only
+    the string left the gate ~2.8x slower than before this change.
+    """
+    hit = _STRIPPED.get(path)
+    if hit is None:
+        try:
+            hit = strip_noncode(path.read_text(encoding="utf-8")).splitlines()
+        except OSError:
+            hit = []
+        _STRIPPED[path] = hit
+    return hit
 
 
 def is_consumed(
@@ -339,21 +383,19 @@ def is_consumed(
     for f in files:
         if f in own:
             continue
-        try:
-            text = f.read_text(encoding="utf-8")
-        except OSError:
-            continue
         # Comments and string literals are blanked BEFORE any matching: a name
         # in prose or an error message is not a caller.
-        for line in strip_noncode(text).splitlines():
+        for line in stripped_lines(f):
             if REEXPORT_RE.match(line):
                 continue  # re-exports label the shelf
             if qualified_re.search(line) or path_re.search(line):
                 return True
             if use_re.match(line) and not REEXPORT_RE.match(line):
                 return True
-            if item_re and item_re.search(line):
-                return True
+            if item_re:
+                for m in item_re.finditer(line):
+                    if is_code_shaped(line, m.start(1), m.end(1)):
+                        return True
     return False
 
 
@@ -365,6 +407,8 @@ def find_orphans() -> list[str]:
     these calls itself would pass even if this composition dropped one of them,
     which is the shape of the hole the gate had in the first place.
     """
+    _STRIPPED.clear()
+    _PUB_ITEMS.clear()  # a fresh run may point at a different tree (the fixtures do)
     files = consumer_files()
     mods = declared_pub_mods()
     ambiguous = ambiguous_item_names(mods)
