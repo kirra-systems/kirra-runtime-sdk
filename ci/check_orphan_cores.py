@@ -279,8 +279,18 @@ def strip_noncode(text: str) -> str:
             i += 1
             while i < n:
                 if text[i] == "\\":
-                    out.append("  ")
-                    i += 2
+                    # Blank the backslash, then the escaped char SEPARATELY --
+                    # emitting two spaces swallows a newline when the escape is
+                    # a Rust line continuation (`"abc \` newline `def"`), which
+                    # merges the next source line onto this one. Line-anchored
+                    # rules like `^\s*use` then cannot match, and the module
+                    # reads as an orphan. Same class as the URL bug above: the
+                    # stripper eating real code.
+                    out.append(" ")
+                    i += 1
+                    if i < n:
+                        out.append("\n" if text[i] == "\n" else " ")
+                        i += 1
                     continue
                 if text[i] == '"':
                     out.append(" ")

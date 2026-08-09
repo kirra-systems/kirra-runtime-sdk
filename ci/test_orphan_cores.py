@@ -125,6 +125,32 @@ def real_tree_regression() -> bool:
     return ok
 
 
+def strip_preserves_line_structure() -> bool:
+    """`strip_noncode` must keep one output line per input line.
+
+    Asserted DIRECTLY rather than through a crate fixture, and that distinction
+    is the point. The escaped-character branch used to blank a backslash and the
+    character after it as two spaces, which swallows the newline of a Rust line
+    continuation (`"abc \\` newline `def"`) and merges the next source line onto
+    this one.
+
+    An end-to-end fixture for it is VACUOUS: the only line-anchored rule is
+    `use_re`, and the un-anchored `path_re` matches the same reference on the
+    merged line, so the verdict never changes. A test that passes with and
+    without the fix proves nothing, so it is not written that way. What is real
+    is that the function documents "newlines are preserved" and did not do it —
+    a latent trap for the next line-anchored rule added without a backstop.
+    """
+    src = 'let s = "abc \\\n        def";\nuse crate::beta::WidgetThing;\n'
+    got = len(G.strip_noncode(src).splitlines())
+    want = len(src.splitlines())
+    ok = got == want
+    print(f"  {'PASS' if ok else 'FAIL'}  strip_noncode preserves line structure")
+    if not ok:
+        print(f"        expected {want} lines, got {got} — a continuation newline was swallowed")
+    return ok
+
+
 def main() -> int:
     results = []
 
@@ -294,6 +320,8 @@ def main() -> int:
             set(),
         )
     )
+
+    results.append(strip_preserves_line_structure())
 
     results.append(real_tree_regression())
 
