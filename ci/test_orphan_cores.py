@@ -67,8 +67,16 @@ def orphans(root: Path) -> set[str]:
     wiring mistake inside `find_orphans` — dropping the ambiguity set, say —
     fails these tests instead of slipping past a private copy of the loop.
     """
-    G.REPO = root
-    return set(G.find_orphans())
+    # Save/restore: the fixtures point the gate at a throwaway tree, and a temp
+    # dir that outlives the `with` block is a deleted one. Leaking it made the
+    # real-tree regression below scan nothing and report zero orphans — a
+    # green that meant "the harness lost the repo", not "nothing is orphaned".
+    real_repo = G.REPO
+    try:
+        G.REPO = root
+        return set(G.find_orphans())
+    finally:
+        G.REPO = real_repo
 
 
 def case(name: str, crates: dict, expected: set[str]) -> bool:
@@ -81,6 +89,65 @@ def case(name: str, crates: dict, expected: set[str]) -> bool:
     if not ok:
         print(f"        expected {sorted(expected)}")
         print(f"        got      {sorted(got)}")
+    return ok
+
+
+#: The module this gate was blind to, against the REAL tree.
+#:
+#: Tier 2 box 2a landed `kirra_world::same_as_candidate` deliberately unwired —
+#: 2b (adjudication/promotion) is its first consumer. Before the code-reference
+#: fix the gate called it CONSUMED, which is precisely the false negative it
+#: exists to prevent, so it makes an honest regression fixture: a real module,
+#: in the real repo, in the state the gate must be able to see.
+REAL_ORPHAN_FIXTURE = "kirra_world::same_as_candidate"
+
+
+def real_tree_regression() -> bool:
+    """The fixture runs against the real repo, not a synthetic crate.
+
+    **This test is expected to flip when 2b wires the module, and that is the
+    point.** A failure here means one of two things, and the message says which
+    to check first:
+
+    * 2b (or anything else) now consumes `same_as_candidate` — then this fixture
+      has done its job and should be repointed at whatever is currently unwired,
+      or retired with the synthetic cases above kept;
+    * the code-reference matching regressed and bare identifiers in prose are
+      being credited again — then the gate is back to hiding orphans.
+    """
+    orphans = set(G.find_orphans())
+    ok = REAL_ORPHAN_FIXTURE in orphans
+    print(f"  {'PASS' if ok else 'FAIL'}  the real unwired module is detected as an orphan")
+    if not ok:
+        print(f"        expected {REAL_ORPHAN_FIXTURE} among the reported orphans")
+        print("        if 2b now consumes it: repoint or retire this fixture (it worked)")
+        print("        if not: the code-reference matching has regressed")
+    return ok
+
+
+def strip_preserves_line_structure() -> bool:
+    """`strip_noncode` must keep one output line per input line.
+
+    Asserted DIRECTLY rather than through a crate fixture, and that distinction
+    is the point. The escaped-character branch used to blank a backslash and the
+    character after it as two spaces, which swallows the newline of a Rust line
+    continuation (`"abc \\` newline `def"`) and merges the next source line onto
+    this one.
+
+    An end-to-end fixture for it is VACUOUS: the only line-anchored rule is
+    `use_re`, and the un-anchored `path_re` matches the same reference on the
+    merged line, so the verdict never changes. A test that passes with and
+    without the fix proves nothing, so it is not written that way. What is real
+    is that the function documents "newlines are preserved" and did not do it —
+    a latent trap for the next line-anchored rule added without a backstop.
+    """
+    src = 'let s = "abc \\\n        def";\nuse crate::beta::WidgetThing;\n'
+    got = len(G.strip_noncode(src).splitlines())
+    want = len(src.splitlines())
+    ok = got == want
+    print(f"  {'PASS' if ok else 'FAIL'}  strip_noncode preserves line structure")
+    if not ok:
+        print(f"        expected {want} lines, got {got} — a continuation newline was swallowed")
     return ok
 
 
@@ -156,6 +223,107 @@ def main() -> int:
             {"alpha::beta"},
         )
     )
+
+    # -- code references, not bare identifiers in text ----------------------
+    #
+    # The second hole. `ambiguous_item_names` handled a name owned by two
+    # modules; it said nothing about a name owned by one module that is also an
+    # ordinary English word or a common local. `kirra_world::same_as_candidate`
+    # was pronounced consumed, while entirely unwired, by `"… high-water
+    # {high_water}"` in an unrelated error message.
+
+    results.append(
+        case(
+            "a name appearing only in a comment is not consumption",
+            {
+                "alpha": {
+                    "lib.rs": "pub mod beta;\npub fn go() { let _ = 1; }\n// WidgetThing is discussed here\n",
+                    "beta.rs": "pub struct WidgetThing;\n",
+                }
+            },
+            {"alpha::beta"},
+        )
+    )
+
+    # Commented-out code is the case that gives comment-stripping its own teeth:
+    # it is CODE-SHAPED, so the code-reference rule alone would credit it.
+    results.append(
+        case(
+            "a commented-out call is not consumption",
+            {
+                "alpha": {
+                    "lib.rs": "pub mod beta;\npub fn go() {\n    // WidgetThing::make();\n}\n",
+                    "beta.rs": "pub struct WidgetThing;\n",
+                }
+            },
+            {"alpha::beta"},
+        )
+    )
+
+    results.append(
+        case(
+            "a name appearing only in a string literal is not consumption",
+            {
+                "alpha": {
+                    "lib.rs": 'pub mod beta;\npub fn go() { let _ = "WidgetThing failed"; }\n',
+                    "beta.rs": "pub struct WidgetThing;\n",
+                }
+            },
+            {"alpha::beta"},
+        )
+    )
+
+    # ...and the tightening must not over-reach: a genuine code reference in
+    # any of the ordinary shapes still counts.
+    results.append(
+        case(
+            "a genuine code reference still counts as consumption",
+            {
+                "alpha": {
+                    "lib.rs": "pub mod beta;\npub fn go() { WidgetThing::make(); }\n",
+                    "beta.rs": "pub struct WidgetThing;\n",
+                }
+            },
+            set(),
+        )
+    )
+
+    # A method name is NOT an importable item. Treating `pub fn version` as one
+    # is what made an accessor collide with every unrelated local called
+    # `version` in the tree.
+    results.append(
+        case(
+            "an impl method name is not evidence the module is consumed",
+            {
+                "alpha": {
+                    "lib.rs": "pub mod beta;\npub fn go(x: u32) { let version = x; let _ = version; }\n",
+                    "beta.rs": "pub struct Widget;\nimpl Widget {\n    pub fn version(&self) -> u32 { 0 }\n}\n",
+                }
+            },
+            {"alpha::beta"},
+        )
+    )
+
+    # The stripper must not eat real code. Blanking `//` before strings
+    # destroys a string containing a URL and leaves its opening quote
+    # unmatched, after which a DOTALL string match swallows following lines —
+    # which briefly turned a module with a real caller into an orphan.
+    results.append(
+        case(
+            "a string containing // does not swallow the code after it",
+            {
+                "alpha": {
+                    "lib.rs": 'pub mod beta;\npub fn go() {\n    let _ = "https://example.com/x";\n    WidgetThing::make();\n}\n',
+                    "beta.rs": "pub struct WidgetThing;\n",
+                }
+            },
+            set(),
+        )
+    )
+
+    results.append(strip_preserves_line_structure())
+
+    results.append(real_tree_regression())
 
     print()
     if all(results):
