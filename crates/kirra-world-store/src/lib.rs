@@ -1650,7 +1650,7 @@ impl WorldStore {
         drop(rows);
         drop(stmt);
 
-        let resolution = self.identity_resolution_at(as_known_at_ms)?;
+        let resolution = self.identity_resolution_at()?;
         Ok(entity_projection::HistoricalIdentityView::new(
             entity_projection::IdentityView::new(acc, head),
             as_known_at_ms,
@@ -1679,8 +1679,7 @@ impl WorldStore {
         Ok(self.identity_view_at(as_known_at_ms)?.resolve_at(id))
     }
 
-    /// Whether compaction could have removed an adjudication recorded by
-    /// `as_known_at_ms`.
+    /// Whether compaction could have removed an adjudication.
     ///
     /// Derived from [`compaction::is_protected`] rather than assuming it: a
     /// citation is only ever written for a window the planner accepted, and the
@@ -1689,24 +1688,39 @@ impl WorldStore {
     /// still protected"* — and the moment that stops being true, every
     /// historical identity answer over a compacted store starts reporting
     /// `Degraded` on its own.
-    fn identity_resolution_at(&self, as_known_at_ms: i64) -> Result<Resolution, StoreError> {
+    fn identity_resolution_at(&self) -> Result<Resolution, StoreError> {
         if compaction::is_protected(adjudication_record::ADJUDICATION_RETENTION_CLASS) {
             return Ok(Resolution::Full);
         }
         // Unreachable while adjudications are protected. Kept as the honest
         // other half rather than an `unreachable!()`: if the class is ever
-        // demoted, a compacted span below the cut could have held an
-        // adjudication and the answer must say so instead of panicking.
+        // demoted, a compacted span could have held an adjudication and the
+        // answer must say so instead of panicking.
+        //
+        // EVERY citation degrades, with no attempt to narrow by time. The first
+        // version filtered on `compacted_at_ms <= as_known_at_ms` and was
+        // FAIL-OPEN, which is why the reasoning is written out rather than left
+        // to the code: `compacted_at_ms` is the wall clock at which compaction
+        // RAN, and `as_known_at_ms` is the transaction-time instant being asked
+        // ABOUT. They are different axes, and comparing them gets the common
+        // case backwards -- a compaction that ran *later* than the queried
+        // instant is exactly the one that removes evidence about it. Adjudi-
+        // cations at txn_time 1000, queried at 1000, compacted at 5000: the
+        // filter excluded the citation and reported `Full` over evidence that
+        // was gone.
+        //
+        // Nothing better is available, either: the removed rows are the only
+        // record of their own transaction times, so a span cannot be shown
+        // irrelevant to a past instant after the fact. `Resolution`'s documented
+        // asymmetry is the whole budget here -- it may say `Degraded` where a
+        // full answer would have been identical, and may never say `Full` where
+        // something was lost.
         let citations = self.load_citations()?;
-        let spans: Vec<Citation> = citations
-            .into_values()
-            .filter(|c| c.compacted_at_ms <= as_known_at_ms)
-            .collect();
-        if spans.is_empty() {
+        if citations.is_empty() {
             return Ok(Resolution::Full);
         }
         Ok(Resolution::Degraded {
-            spans,
+            spans: citations.into_values().collect(),
             summaries: Vec::new(),
         })
     }

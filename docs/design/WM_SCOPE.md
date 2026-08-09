@@ -1001,7 +1001,13 @@ does not describe is how a residue disappears.
       a recorded citation is itself evidence its window held no adjudication. The
       derivation consults that predicate at runtime, so a future compaction mode
       that could remove a protected class makes identity answers degrade instead
-      of silently keeping their completeness claim.
+      of silently keeping their completeness claim. In that fallback **every
+      recorded citation degrades**, with no narrowing by time: `compacted_at_ms`
+      is when compaction RAN and `as_known_at_ms` is the instant asked ABOUT, so
+      a compaction running *after* the queried instant is exactly the one that
+      removes evidence bearing on it — and the removed rows are the only record
+      of their own transaction times, so a span cannot be shown irrelevant after
+      the fact.
       §6.3 makes historical identity part of the intended semantics, and the
       incident-reconstruction goal is not served by a resolver that can only
       answer "who is this *now*" — reconstruction asks who it was *then*.

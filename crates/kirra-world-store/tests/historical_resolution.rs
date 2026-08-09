@@ -683,7 +683,19 @@ fn compacting_raw_observations_does_not_degrade_a_historical_identity_answer() {
         &[assert_id("a"), assert_id("b"), merge(&["a"], "b")],
     );
 
-    let outcome = s.compact_range(1, 3, T0).expect("compact the raw prefix");
+    // Compaction runs at a wall clock LATER than the instant queried below.
+    //
+    // That ordering is the point, not an arbitrary number. `compacted_at_ms` is
+    // when compaction RAN; `as_known_at_ms` is the instant asked ABOUT. A
+    // compaction that ran after the queried instant is precisely the one that
+    // can remove evidence bearing on it, so this is the direction in which a
+    // time-narrowing degradation rule fails OPEN. Raised in review on #1413,
+    // where the first version filtered citations by
+    // `compacted_at_ms <= as_known_at_ms` and would have reported `Full` here
+    // over evidence that was gone.
+    let outcome = s
+        .compact_range(1, 3, T0 + 10_000)
+        .expect("compact the raw prefix");
     assert!(
         outcome.removed > 0,
         "nothing was compacted, so the assertion below would hold vacuously"
