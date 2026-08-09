@@ -1556,6 +1556,175 @@ impl WorldStore {
         ))
     }
 
+    /// **The identity graph as it stood at a past instant** — §6.3, Tier 2 2d.
+    ///
+    /// Folds the entity projection over only those adjudications recorded by
+    /// transaction time `as_known_at_ms`, and hands back a view
+    /// `kirra_world::resolution::resolve` walks exactly as it walks the current
+    /// one. See [`entity_projection::HistoricalIdentityView`] for why the cut is
+    /// on transaction time and not valid time.
+    ///
+    /// # Answered from the LOG, and folded from EMPTY
+    ///
+    /// Both halves matter and each has a wrong version that still compiles.
+    ///
+    /// The **log**, not `entities_projection`: the projection is a cache of one
+    /// point on the temporal surface — latest known — and every other point has
+    /// to be replayed. `WorldStore::as_of` carries the same note for claims;
+    /// identity is not an exception to it, because §6.3's whole argument is that
+    /// identity is a projection *like everything else*.
+    ///
+    /// From **empty**, not from the stored rows. [`WorldStore::fold_entity_range`]
+    /// seeds its accumulator from the stored projection, because an incremental
+    /// fold needs the prior lifecycle to tell a legal transition from a
+    /// contradiction. Seeding a *historical* fold that way would start it from
+    /// today's state and then apply an old prefix on top — every later merge
+    /// already present before the first historical event was read, which is the
+    /// exact failure this query exists to prevent, arriving through the one line
+    /// that looks like reuse.
+    ///
+    /// # Confirmed-only, so candidates cannot enter
+    ///
+    /// The `claim_status = 'confirmed'` predicate is inherited from the current
+    /// fold rather than restated as a new rule. `KIRRA-WM-CLUSTERING-001` holds
+    /// that clustering may propose co-reference and never confirm it, and
+    /// `KIRRA-WM-PROMOTION-001` that a candidate becomes identity only through
+    /// an authorized adjudicator; a candidate `same_as` observation is written
+    /// `claim_status = 'candidate'` and is therefore not selected here — at any
+    /// instant, past or present. The historical view cannot be the back door
+    /// into the confirmed graph that the write door refuses.
+    ///
+    /// # Why the resolution is derived and not hardcoded `Full`
+    ///
+    /// Adjudication rows carry `retention_class = 'adjudication'`, and
+    /// [`compaction::is_protected`] holds for every class except `"raw"`, so a
+    /// window containing one is refused whole. A recorded citation is therefore
+    /// *evidence* that its window held no adjudication — which is why this can
+    /// report `Full` over a compacted store without inspecting what was removed.
+    ///
+    /// That is a derivation from the protection predicate, not an assumption
+    /// about it: [`Self::identity_resolution_at`] consults `is_protected`
+    /// directly, so a future compaction mode that could remove a protected class
+    /// makes this degrade rather than silently keep claiming completeness.
+    ///
+    /// # Errors
+    ///
+    /// As [`WorldStore::identity_view`], plus
+    /// [`StoreError::CorruptEntityProjectionRow`] if a stored adjudication
+    /// cannot be decoded faithfully.
+    pub fn identity_view_at(
+        &self,
+        as_known_at_ms: i64,
+    ) -> Result<entity_projection::HistoricalIdentityView, StoreError> {
+        let mut acc = std::collections::BTreeMap::new();
+        let mut head: i64 = 0;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT generation, payload, payload_schema, provenance
+             FROM world_events
+             WHERE claim_status = 'confirmed' AND kind = ?1 AND txn_time_ms <= ?2
+             ORDER BY generation ASC",
+        )?;
+        let mut rows = stmt.query(params![
+            adjudication_record::ADJUDICATION_KIND,
+            as_known_at_ms
+        ])?;
+        while let Some(r) = rows.next()? {
+            let generation: i64 = r.get(0)?;
+            let payload: String = r.get(1)?;
+            let payload_schema: i64 = r.get(2)?;
+            let provenance: String = r.get(3)?;
+            let cited: Vec<String> = serde_json::from_str(&provenance).map_err(|e| {
+                StoreError::CorruptEntityProjectionRow {
+                    detail: format!("provenance is not a JSON array: {e}"),
+                }
+            })?;
+            let adjudication =
+                adjudication_record::decode_adjudication(&payload, payload_schema, &cited)
+                    .map_err(|e| StoreError::CorruptEntityProjectionRow {
+                        detail: format!("generation {generation}: {e}"),
+                    })?;
+            entity_projection::fold_adjudication(&mut acc, &adjudication, generation);
+            head = generation;
+        }
+        drop(rows);
+        drop(stmt);
+
+        let resolution = self.identity_resolution_at()?;
+        Ok(entity_projection::HistoricalIdentityView::new(
+            entity_projection::IdentityView::new(acc, head),
+            as_known_at_ms,
+            resolution,
+        ))
+    }
+
+    /// **Resolve an id as of a past instant.** The 2d verb, composed from the
+    /// two halves that already exist: restrict the graph, then run the one
+    /// resolver over it.
+    ///
+    /// A convenience over [`Self::identity_view_at`] followed by
+    /// [`entity_projection::HistoricalIdentityView::resolve_at`]. Resolving
+    /// several ids at one instant should build the view once and reuse it —
+    /// this re-folds per call, and a walk that spans two folds would be
+    /// answering from two states of the world.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::identity_view_at`].
+    pub fn resolve_at(
+        &self,
+        id: &kirra_world::reference::EntityId,
+        as_known_at_ms: i64,
+    ) -> Result<entity_projection::HistoricalAnswer, StoreError> {
+        Ok(self.identity_view_at(as_known_at_ms)?.resolve_at(id))
+    }
+
+    /// Whether compaction could have removed an adjudication.
+    ///
+    /// Derived from [`compaction::is_protected`] rather than assuming it: a
+    /// citation is only ever written for a window the planner accepted, and the
+    /// planner refuses a window whole if it holds a protected class. So the
+    /// question this answers is *"is the class an adjudication is written with
+    /// still protected"* — and the moment that stops being true, every
+    /// historical identity answer over a compacted store starts reporting
+    /// `Degraded` on its own.
+    fn identity_resolution_at(&self) -> Result<Resolution, StoreError> {
+        if compaction::is_protected(adjudication_record::ADJUDICATION_RETENTION_CLASS) {
+            return Ok(Resolution::Full);
+        }
+        // Unreachable while adjudications are protected. Kept as the honest
+        // other half rather than an `unreachable!()`: if the class is ever
+        // demoted, a compacted span could have held an adjudication and the
+        // answer must say so instead of panicking.
+        //
+        // EVERY citation degrades, with no attempt to narrow by time. The first
+        // version filtered on `compacted_at_ms <= as_known_at_ms` and was
+        // FAIL-OPEN, which is why the reasoning is written out rather than left
+        // to the code: `compacted_at_ms` is the wall clock at which compaction
+        // RAN, and `as_known_at_ms` is the transaction-time instant being asked
+        // ABOUT. They are different axes, and comparing them gets the common
+        // case backwards -- a compaction that ran *later* than the queried
+        // instant is exactly the one that removes evidence about it. Adjudi-
+        // cations at txn_time 1000, queried at 1000, compacted at 5000: the
+        // filter excluded the citation and reported `Full` over evidence that
+        // was gone.
+        //
+        // Nothing better is available, either: the removed rows are the only
+        // record of their own transaction times, so a span cannot be shown
+        // irrelevant to a past instant after the fact. `Resolution`'s documented
+        // asymmetry is the whole budget here -- it may say `Degraded` where a
+        // full answer would have been identical, and may never say `Full` where
+        // something was lost.
+        let citations = self.load_citations()?;
+        if citations.is_empty() {
+            return Ok(Resolution::Full);
+        }
+        Ok(Resolution::Degraded {
+            spans: citations.into_values().collect(),
+            summaries: Vec::new(),
+        })
+    }
+
     /// A digest over the entity projection, in key order.
     ///
     /// # Errors
