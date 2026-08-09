@@ -92,36 +92,91 @@ def case(name: str, crates: dict, expected: set[str]) -> bool:
     return ok
 
 
-#: The module this gate was blind to, against the REAL tree.
+#: The module the gate was blind to, and the change that fixed it.
 #:
-#: Tier 2 box 2a landed `kirra_world::same_as_candidate` deliberately unwired —
-#: 2b (adjudication/promotion) is its first consumer. Before the code-reference
-#: fix the gate called it CONSUMED, which is precisely the false negative it
-#: exists to prevent, so it makes an honest regression fixture: a real module,
-#: in the real repo, in the state the gate must be able to see.
-REAL_ORPHAN_FIXTURE = "kirra_world::same_as_candidate"
+#: `kirra_world::same_as_candidate` (Tier 2 box 2a) landed deliberately unwired.
+#: Before the code-reference fix the gate called it CONSUMED — the exact false
+#: negative it exists to prevent — because its accessors (`version`, `high`,
+#: `pair`, `support`) matched unrelated locals and error strings elsewhere.
+#:
+#: Tier 2 box 2b (`same_as_adjudication`) is its first real consumer: it imports
+#: `CandidatePair` and `SameAsCandidate` and takes them in fn signatures, which
+#: is structural connectivity rather than textual coincidence.
+WIRED_MODULE = "kirra_world::same_as_candidate"
+WIRING_EVENT = "Tier 2 box 2b (kirra_world::same_as_adjudication)"
+
+#: The shape that fooled the gate, as a throwaway crate. Its module exports only
+#: ubiquitous ACCESSOR names, and the sibling file mentions them exactly the
+#: three ways that used to count as consumption: inside a string, as an impl
+#: accessor, and in commented-out code.
+BLIND_SPOT_SHAPE = {
+    "alpha": {
+        "lib.rs": (
+            "pub mod widget;\n"
+            "pub struct Other;\n"
+            "impl Other {\n"
+            "    pub fn version(&self) -> u32 { 0 }\n"
+            "}\n"
+            "pub fn go() {\n"
+            '    let _ = "high-water version support";\n'
+            "    // WidgetThing::make();\n"
+            "}\n"
+        ),
+        "widget.rs": (
+            "pub struct WidgetThing;\n"
+            "impl WidgetThing {\n"
+            "    pub fn version(&self) -> u32 { 0 }\n"
+            "    pub fn support(&self) -> u32 { 0 }\n"
+            "    pub fn high(&self) -> u32 { 0 }\n"
+            "}\n"
+        ),
+    }
+}
 
 
-def real_tree_regression() -> bool:
-    """The fixture runs against the real repo, not a synthetic crate.
+def historical_non_vacuity() -> bool:
+    """Both halves of the gate fix, asserted together and permanently.
 
-    **This test is expected to flip when 2b wires the module, and that is the
-    point.** A failure here means one of two things, and the message says which
-    to check first:
+    The reviewer's framing, and it is better than retiring the fixture once the
+    real module got wired: a repaired gate should keep PROVING it catches the
+    class it was blind to, not just that today's tree happens to be clean.
 
-    * 2b (or anything else) now consumes `same_as_candidate` — then this fixture
-      has done its job and should be repointed at whatever is currently unwired,
-      or retired with the synthetic cases above kept;
-    * the code-reference matching regressed and bare identifiers in prose are
-      being credited again — then the gate is back to hiding orphans.
+    So this asserts two things at once:
+
+    * **the class is still caught** — a synthetic module whose only apparent
+      consumers are its accessor names in a string, an impl accessor and a
+      commented-out call is STILL reported as an orphan. If this half stops
+      failing, the gate has regressed to textual matching, whatever the real
+      tree looks like.
+    * **the real module is now consumed** — `same_as_candidate` is no longer an
+      orphan, because 2b imports its types and takes them in signatures. If this
+      half breaks, something unwired 2b or the matching became too strict.
+
+    Keeping both is what turns a one-time repair into durable evidence: the
+    first half cannot be satisfied by an accident of the tree, and the second
+    records WHY the status changed rather than leaving a deleted fixture behind.
     """
-    orphans = set(G.find_orphans())
-    ok = REAL_ORPHAN_FIXTURE in orphans
-    print(f"  {'PASS' if ok else 'FAIL'}  the real unwired module is detected as an orphan")
-    if not ok:
-        print(f"        expected {REAL_ORPHAN_FIXTURE} among the reported orphans")
-        print("        if 2b now consumes it: repoint or retire this fixture (it worked)")
-        print("        if not: the code-reference matching has regressed")
+    ok = True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        build(root, BLIND_SPOT_SHAPE)
+        got = orphans(root)
+    caught = got == {"alpha::widget"}
+    print(f"  {'PASS' if caught else 'FAIL'}  the gate still catches the blind-spot shape")
+    if not caught:
+        print(f"        expected {{'alpha::widget'}}, got {sorted(got)}")
+        print("        the gate has regressed to crediting names in text")
+    ok &= caught
+
+    live = set(G.find_orphans())
+    wired = WIRED_MODULE not in live
+    print(f"  {'PASS' if wired else 'FAIL'}  {WIRED_MODULE} is consumed, not orphaned")
+    if not wired:
+        print(f"        {WIRED_MODULE} is reported as an orphan again")
+        print(f"        it was wired by {WIRING_EVENT}; check that consumer still imports it")
+    ok &= wired
+
     return ok
 
 
@@ -323,7 +378,7 @@ def main() -> int:
 
     results.append(strip_preserves_line_structure())
 
-    results.append(real_tree_regression())
+    results.append(historical_non_vacuity())
 
     print()
     if all(results):
