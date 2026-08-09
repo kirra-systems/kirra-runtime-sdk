@@ -446,6 +446,7 @@ mod g7_transport_security_router_tests {
         Arc::new(ServiceState {
             app: Arc::new(app),
             posture_cache,
+            posture_cache_ttl_ms: kirra_verifier::posture_cache::POSTURE_CACHE_TTL_MS,
             started_at_ms: now_ms(),
             audit_verifying_key: None,
             fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),

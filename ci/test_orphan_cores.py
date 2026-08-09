@@ -67,8 +67,16 @@ def orphans(root: Path) -> set[str]:
     wiring mistake inside `find_orphans` — dropping the ambiguity set, say —
     fails these tests instead of slipping past a private copy of the loop.
     """
-    G.REPO = root
-    return set(G.find_orphans())
+    # Save/restore: the fixtures point the gate at a throwaway tree, and a temp
+    # dir that outlives the `with` block is a deleted one. Leaking it made the
+    # real-tree regression below scan nothing and report zero orphans — a
+    # green that meant "the harness lost the repo", not "nothing is orphaned".
+    real_repo = G.REPO
+    try:
+        G.REPO = root
+        return set(G.find_orphans())
+    finally:
+        G.REPO = real_repo
 
 
 def case(name: str, crates: dict, expected: set[str]) -> bool:
@@ -81,6 +89,120 @@ def case(name: str, crates: dict, expected: set[str]) -> bool:
     if not ok:
         print(f"        expected {sorted(expected)}")
         print(f"        got      {sorted(got)}")
+    return ok
+
+
+#: The module the gate was blind to, and the change that fixed it.
+#:
+#: `kirra_world::same_as_candidate` (Tier 2 box 2a) landed deliberately unwired.
+#: Before the code-reference fix the gate called it CONSUMED — the exact false
+#: negative it exists to prevent — because its accessors (`version`, `high`,
+#: `pair`, `support`) matched unrelated locals and error strings elsewhere.
+#:
+#: Tier 2 box 2b (`same_as_adjudication`) is its first real consumer: it imports
+#: `CandidatePair` and `SameAsCandidate` and takes them in fn signatures, which
+#: is structural connectivity rather than textual coincidence.
+WIRED_MODULE = "kirra_world::same_as_candidate"
+WIRING_EVENT = "Tier 2 box 2b (kirra_world::same_as_adjudication)"
+
+#: The shape that fooled the gate, as a throwaway crate. Its module exports only
+#: ubiquitous ACCESSOR names, and the sibling file mentions them exactly the
+#: three ways that used to count as consumption: inside a string, as an impl
+#: accessor, and in commented-out code.
+BLIND_SPOT_SHAPE = {
+    "alpha": {
+        "lib.rs": (
+            "pub mod widget;\n"
+            "pub struct Other;\n"
+            "impl Other {\n"
+            "    pub fn version(&self) -> u32 { 0 }\n"
+            "}\n"
+            "pub fn go() {\n"
+            '    let _ = "high-water version support";\n'
+            "    // WidgetThing::make();\n"
+            "}\n"
+        ),
+        "widget.rs": (
+            "pub struct WidgetThing;\n"
+            "impl WidgetThing {\n"
+            "    pub fn version(&self) -> u32 { 0 }\n"
+            "    pub fn support(&self) -> u32 { 0 }\n"
+            "    pub fn high(&self) -> u32 { 0 }\n"
+            "}\n"
+        ),
+    }
+}
+
+
+def historical_non_vacuity() -> bool:
+    """Both halves of the gate fix, asserted together and permanently.
+
+    The reviewer's framing, and it is better than retiring the fixture once the
+    real module got wired: a repaired gate should keep PROVING it catches the
+    class it was blind to, not just that today's tree happens to be clean.
+
+    So this asserts two things at once:
+
+    * **the class is still caught** — a synthetic module whose only apparent
+      consumers are its accessor names in a string, an impl accessor and a
+      commented-out call is STILL reported as an orphan. If this half stops
+      failing, the gate has regressed to textual matching, whatever the real
+      tree looks like.
+    * **the real module is now consumed** — `same_as_candidate` is no longer an
+      orphan, because 2b imports its types and takes them in signatures. If this
+      half breaks, something unwired 2b or the matching became too strict.
+
+    Keeping both is what turns a one-time repair into durable evidence: the
+    first half cannot be satisfied by an accident of the tree, and the second
+    records WHY the status changed rather than leaving a deleted fixture behind.
+    """
+    ok = True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        build(root, BLIND_SPOT_SHAPE)
+        got = orphans(root)
+    caught = got == {"alpha::widget"}
+    print(f"  {'PASS' if caught else 'FAIL'}  the gate still catches the blind-spot shape")
+    if not caught:
+        print(f"        expected {{'alpha::widget'}}, got {sorted(got)}")
+        print("        the gate has regressed to crediting names in text")
+    ok &= caught
+
+    live = set(G.find_orphans())
+    wired = WIRED_MODULE not in live
+    print(f"  {'PASS' if wired else 'FAIL'}  {WIRED_MODULE} is consumed, not orphaned")
+    if not wired:
+        print(f"        {WIRED_MODULE} is reported as an orphan again")
+        print(f"        it was wired by {WIRING_EVENT}; check that consumer still imports it")
+    ok &= wired
+
+    return ok
+
+
+def strip_preserves_line_structure() -> bool:
+    """`strip_noncode` must keep one output line per input line.
+
+    Asserted DIRECTLY rather than through a crate fixture, and that distinction
+    is the point. The escaped-character branch used to blank a backslash and the
+    character after it as two spaces, which swallows the newline of a Rust line
+    continuation (`"abc \\` newline `def"`) and merges the next source line onto
+    this one.
+
+    An end-to-end fixture for it is VACUOUS: the only line-anchored rule is
+    `use_re`, and the un-anchored `path_re` matches the same reference on the
+    merged line, so the verdict never changes. A test that passes with and
+    without the fix proves nothing, so it is not written that way. What is real
+    is that the function documents "newlines are preserved" and did not do it —
+    a latent trap for the next line-anchored rule added without a backstop.
+    """
+    src = 'let s = "abc \\\n        def";\nuse crate::beta::WidgetThing;\n'
+    got = len(G.strip_noncode(src).splitlines())
+    want = len(src.splitlines())
+    ok = got == want
+    print(f"  {'PASS' if ok else 'FAIL'}  strip_noncode preserves line structure")
+    if not ok:
+        print(f"        expected {want} lines, got {got} — a continuation newline was swallowed")
     return ok
 
 
@@ -156,6 +278,107 @@ def main() -> int:
             {"alpha::beta"},
         )
     )
+
+    # -- code references, not bare identifiers in text ----------------------
+    #
+    # The second hole. `ambiguous_item_names` handled a name owned by two
+    # modules; it said nothing about a name owned by one module that is also an
+    # ordinary English word or a common local. `kirra_world::same_as_candidate`
+    # was pronounced consumed, while entirely unwired, by `"… high-water
+    # {high_water}"` in an unrelated error message.
+
+    results.append(
+        case(
+            "a name appearing only in a comment is not consumption",
+            {
+                "alpha": {
+                    "lib.rs": "pub mod beta;\npub fn go() { let _ = 1; }\n// WidgetThing is discussed here\n",
+                    "beta.rs": "pub struct WidgetThing;\n",
+                }
+            },
+            {"alpha::beta"},
+        )
+    )
+
+    # Commented-out code is the case that gives comment-stripping its own teeth:
+    # it is CODE-SHAPED, so the code-reference rule alone would credit it.
+    results.append(
+        case(
+            "a commented-out call is not consumption",
+            {
+                "alpha": {
+                    "lib.rs": "pub mod beta;\npub fn go() {\n    // WidgetThing::make();\n}\n",
+                    "beta.rs": "pub struct WidgetThing;\n",
+                }
+            },
+            {"alpha::beta"},
+        )
+    )
+
+    results.append(
+        case(
+            "a name appearing only in a string literal is not consumption",
+            {
+                "alpha": {
+                    "lib.rs": 'pub mod beta;\npub fn go() { let _ = "WidgetThing failed"; }\n',
+                    "beta.rs": "pub struct WidgetThing;\n",
+                }
+            },
+            {"alpha::beta"},
+        )
+    )
+
+    # ...and the tightening must not over-reach: a genuine code reference in
+    # any of the ordinary shapes still counts.
+    results.append(
+        case(
+            "a genuine code reference still counts as consumption",
+            {
+                "alpha": {
+                    "lib.rs": "pub mod beta;\npub fn go() { WidgetThing::make(); }\n",
+                    "beta.rs": "pub struct WidgetThing;\n",
+                }
+            },
+            set(),
+        )
+    )
+
+    # A method name is NOT an importable item. Treating `pub fn version` as one
+    # is what made an accessor collide with every unrelated local called
+    # `version` in the tree.
+    results.append(
+        case(
+            "an impl method name is not evidence the module is consumed",
+            {
+                "alpha": {
+                    "lib.rs": "pub mod beta;\npub fn go(x: u32) { let version = x; let _ = version; }\n",
+                    "beta.rs": "pub struct Widget;\nimpl Widget {\n    pub fn version(&self) -> u32 { 0 }\n}\n",
+                }
+            },
+            {"alpha::beta"},
+        )
+    )
+
+    # The stripper must not eat real code. Blanking `//` before strings
+    # destroys a string containing a URL and leaves its opening quote
+    # unmatched, after which a DOTALL string match swallows following lines —
+    # which briefly turned a module with a real caller into an orphan.
+    results.append(
+        case(
+            "a string containing // does not swallow the code after it",
+            {
+                "alpha": {
+                    "lib.rs": 'pub mod beta;\npub fn go() {\n    let _ = "https://example.com/x";\n    WidgetThing::make();\n}\n',
+                    "beta.rs": "pub struct WidgetThing;\n",
+                }
+            },
+            set(),
+        )
+    )
+
+    results.append(strip_preserves_line_structure())
+
+    results.append(historical_non_vacuity())
 
     print()
     if all(results):

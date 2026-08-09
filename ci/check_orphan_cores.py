@@ -57,6 +57,7 @@ CONSUMER_GLOBS = [
 # Trees that never count as consumers: test suites and verification harnesses.
 NON_CONSUMER_MARKERS = (
     "/tests/",
+    "/tests.rs",  # a `mod tests` in its own file is still a test tree
     "/fuzz/",
     "/verification/",
     "/kirra-loom-models/",
@@ -122,6 +123,53 @@ PUB_ITEM_RE = re.compile(
 )
 
 
+_IMPL_START = re.compile(r"^\s*(?:unsafe\s+)?impl\b")
+
+
+def free_pub_items(text: str) -> set[str]:
+    """The `pub` items a consumer could **import**, excluding `impl` members.
+
+    Associated items are reached through a value of their type, never imported
+    on their own, so a method name is not evidence that a module is consumed —
+    but it *is* very often an ordinary local-variable name. Treating
+    `pub fn version`, `pub fn high`, `pub fn pair`, `pub fn support` as
+    importable items is what let `kirra_world::same_as_candidate` read as
+    consumed while nothing referenced it: a `json!({ "v": version })` elsewhere
+    in the tree matched an accessor it has no relationship to.
+
+    Keeping only free items means the scan looks for `SameAsCandidate` and
+    `proposed_relations` — names a caller would actually have to write.
+    """
+    items: set[str] = set()
+    depth = 0
+    # [depth_at_impl, entered_body]. The `entered` flag is load-bearing: an
+    # `impl<B, S> ControlLoop<B, S>` with a `where` clause opens its brace three
+    # lines later, so a naive "pop when depth <= depth_at_impl" pops the impl
+    # before its body starts and every method inside is then read as a free
+    # item. That is how `state`, `tick` and `with_clock` stayed in the item set
+    # and kept `parko_core::control_loop` looking consumed.
+    impl_stack: list[list] = []
+    for line in text.splitlines():
+        if _IMPL_START.match(line):
+            impl_stack.append([depth, False])
+        if not impl_stack:
+            m = PUB_ITEM_RE.match(line)
+            if m:
+                items.add(m.group(1))
+        depth += line.count("{") - line.count("}")
+        while impl_stack:
+            at, entered = impl_stack[-1]
+            if not entered:
+                if depth > at:
+                    impl_stack[-1][1] = True
+                break
+            if depth <= at:
+                impl_stack.pop()
+            else:
+                break
+    return items
+
+
 def module_pub_items(lib_rs: Path, mod_name: str) -> set[str]:
     """The module's own top-level `pub` item identifiers (len ≥ 4).
 
@@ -131,11 +179,15 @@ def module_pub_items(lib_rs: Path, mod_name: str) -> set[str]:
     every re-export shape (renamed, glob, multi-line) at once; the length
     floor keeps ubiquitous short names (`Pose`…) from faking consumption.
     """
-    items: set[str] = set()
-    for f in module_own_paths(lib_rs, mod_name):
-        if f.exists():
-            items.update(PUB_ITEM_RE.findall(f.read_text(encoding="utf-8")))
-    return items
+    key = (lib_rs, mod_name)
+    hit = _PUB_ITEMS.get(key)
+    if hit is None:
+        hit = set()
+        for f in module_own_paths(lib_rs, mod_name):
+            if f.exists():
+                hit.update(free_pub_items("\n".join(stripped_lines(f.resolve()))))
+        _PUB_ITEMS[key] = hit
+    return hit
 
 
 def ambiguous_item_names(mods: list[tuple[str, str, Path]]) -> set[str]:
@@ -167,6 +219,159 @@ def ambiguous_item_names(mods: list[tuple[str, str, Path]]) -> set[str]:
     return ambiguous
 
 
+def strip_noncode(text: str) -> str:
+    """Blank out comments and string literals, preserving line structure.
+
+    A name inside a comment or a string is **prose, not consumption**, and the
+    difference is not cosmetic: scanning raw text credited
+    `kirra_world::same_as_candidate` as consumed on the strength of
+    `"… high-water {high_water}"` — an accessor called `high` matching inside an
+    error message about something unrelated.
+
+    # Why this is one left-to-right pass and not a few regex substitutions
+
+    Because the obvious version is wrong, and wrong in the direction that eats
+    real code. Blanking `//` comments before string literals destroys the inside
+    of any string that contains `//` — a URL — and leaves its opening quote
+    unmatched. A subsequent `DOTALL` string pattern then pairs that stray quote
+    with one many lines later and blanks everything between, including genuine
+    references. That silently turned `kirra_verifier::audit_shipper` — a module
+    with a real caller — into an orphan.
+
+    Comments and strings can only be recognised by scanning in order, because
+    each can contain the other's opening token. Newlines are preserved so
+    line-oriented rules (`use` at line start) still work, and removed spans
+    become spaces so nothing on either side is joined into a new token.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        two = text[i : i + 2]
+        if two == "//":
+            while i < n and text[i] != "\n":
+                out.append(" ")
+                i += 1
+        elif two == "/*":
+            depth = 1  # Rust block comments nest
+            out.append("  ")
+            i += 2
+            while i < n and depth:
+                if text[i : i + 2] == "/*":
+                    depth += 1
+                    out.append("  ")
+                    i += 2
+                elif text[i : i + 2] == "*/":
+                    depth -= 1
+                    out.append("  ")
+                    i += 2
+                else:
+                    out.append("\n" if text[i] == "\n" else " ")
+                    i += 1
+        elif c == "r" and (m := re.match(r'r(#*)"', text[i:])):
+            close = '"' + m.group(1)
+            end = text.find(close, i + m.end())
+            end = n if end == -1 else end + len(close)
+            out.extend("\n" if ch == "\n" else " " for ch in text[i:end])
+            i = end
+        elif c == '"':
+            out.append(" ")
+            i += 1
+            while i < n:
+                if text[i] == "\\":
+                    # Blank the backslash, then the escaped char SEPARATELY --
+                    # emitting two spaces swallows a newline when the escape is
+                    # a Rust line continuation (`"abc \` newline `def"`), which
+                    # merges the next source line onto this one. Line-anchored
+                    # rules like `^\s*use` then cannot match, and the module
+                    # reads as an orphan. Same class as the URL bug above: the
+                    # stripper eating real code.
+                    out.append(" ")
+                    i += 1
+                    if i < n:
+                        out.append("\n" if text[i] == "\n" else " ")
+                        i += 1
+                    continue
+                if text[i] == '"':
+                    out.append(" ")
+                    i += 1
+                    break
+                out.append("\n" if text[i] == "\n" else " ")
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+_SHAPE_AFTER = re.compile(r"\s*(?:::|\(|\{|<)")
+_SHAPE_BEFORE = re.compile(r"(?:->|[:&<,=])\s*$")
+
+
+def code_reference_re(items: set[str]) -> re.Pattern[str] | None:
+    """A cheap finder for the item names; shape is judged by [`is_code_shaped`].
+
+    Deliberately the same simple alternation the bare-identifier scan used, and
+    NOT one pattern carrying the code-shape rules inline. Embedding the shapes
+    repeats the whole alternation once per shape, which tripled the pattern and
+    made the gate ~2.8x slower across ~180 modules x 429 files. Finding first
+    and judging second costs the same as the old scan, because hits are rare.
+    """
+    if not items:
+        return None
+    return re.compile(r"\b(" + "|".join(re.escape(i) for i in sorted(items)) + r")\b")
+
+
+def is_code_shaped(line: str, start: int, end: int) -> bool:
+    """Whether the identifier at `line[start:end]` is *used as code*.
+
+    The bare-identifier scan could not tell `Corroboration` the type from
+    "corroboration" the English word, so any ordinary accessor name — `version`,
+    `producer`, `support`, `high` — was satisfied by unrelated prose or an error
+    message somewhere in the tree.
+
+    A reference counts when it wears a syntactic marker prose does not: a path
+    (`Item::`), a call or tuple-struct (`Item(`), a struct literal (`Item {`),
+    a generic (`Item<`), a method call (`.item(`), or a type/binding position
+    (`: Item`, `-> Item`, `&Item`, `<Item`, `, Item`, `= Item`).
+
+    Anything else is NOT consumption. That direction is deliberate: a missed
+    real reference reports an orphan that is not one — visible and arguable —
+    while a false match hides an unwired core, the defect this gate exists to
+    catch and has shipped with twice.
+    """
+    # `.item(` is covered by the AFTER rule: the `(` matches regardless of the
+    # leading dot, so no separate method-call branch is needed. One was written
+    # here and was dead code -- reachable only when the AFTER rule had already
+    # failed, in which case it returns False anyway.
+    if _SHAPE_AFTER.match(line, end):
+        return True
+    return bool(_SHAPE_BEFORE.search(line[:start]))
+
+
+_STRIPPED: dict[Path, list[str]] = {}
+#: Per-module free-item cache; scanned once by `ambiguous_item_names` and again
+#: by `is_consumed`, for every module.
+_PUB_ITEMS: dict[tuple[Path, str], set[str]] = {}
+
+
+def stripped_lines(path: Path) -> list[str]:
+    """`strip_noncode` of a file, split once and memoised for this run.
+
+    The LINES are cached, not the string: `splitlines()` in the per-module loop
+    is the same O(modules x files) cost as the stripping was, and caching only
+    the string left the gate ~2.8x slower than before this change.
+    """
+    hit = _STRIPPED.get(path)
+    if hit is None:
+        try:
+            hit = strip_noncode(path.read_text(encoding="utf-8")).splitlines()
+        except OSError:
+            hit = []
+        _STRIPPED[path] = hit
+    return hit
+
+
 def is_consumed(
     crate: str,
     mod_name: str,
@@ -184,27 +389,23 @@ def is_consumed(
     qualified_re = re.compile(rf"\b{crate}::{mod_name}\b")
     # A name two modules both export cannot say which one is consumed.
     items = module_pub_items(lib_rs, mod_name) - (ambiguous or set())
-    item_re = (
-        re.compile(r"\b(" + "|".join(re.escape(i) for i in sorted(items)) + r")\b")
-        if items
-        else None
-    )
+    item_re = code_reference_re(items)
     for f in files:
         if f in own:
             continue
-        try:
-            text = f.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        for line in text.splitlines():
-            if REEXPORT_RE.match(line) or line.lstrip().startswith("//"):
-                continue  # re-exports label the shelf; comments aren't code
+        # Comments and string literals are blanked BEFORE any matching: a name
+        # in prose or an error message is not a caller.
+        for line in stripped_lines(f):
+            if REEXPORT_RE.match(line):
+                continue  # re-exports label the shelf
             if qualified_re.search(line) or path_re.search(line):
                 return True
             if use_re.match(line) and not REEXPORT_RE.match(line):
                 return True
-            if item_re and item_re.search(line):
-                return True
+            if item_re:
+                for m in item_re.finditer(line):
+                    if is_code_shaped(line, m.start(1), m.end(1)):
+                        return True
     return False
 
 
@@ -216,6 +417,8 @@ def find_orphans() -> list[str]:
     these calls itself would pass even if this composition dropped one of them,
     which is the shape of the hole the gate had in the first place.
     """
+    _STRIPPED.clear()
+    _PUB_ITEMS.clear()  # a fresh run may point at a different tree (the fixtures do)
     files = consumer_files()
     mods = declared_pub_mods()
     ambiguous = ambiguous_item_names(mods)

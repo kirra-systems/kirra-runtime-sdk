@@ -21,17 +21,46 @@ use kirra_persistence::VerifierStore;
 use kirra_verifier::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
 
+/// A service whose posture entry is stamped `age_ms` in the PAST, with the
+/// gate's staleness window set to `ttl_ms`.
+///
+/// Both are explicit because the pair is the whole point: the same entry reads
+/// fresh or stale purely by which side of `ttl_ms` its age falls, and no wall
+/// clock is involved.
+fn svc_with_posture_age(age_ms: u64, ttl_ms: u64) -> Arc<ServiceState> {
+    Arc::new(aged_service(age_ms).with_posture_cache_ttl_ms(ttl_ms))
+}
+
+/// Staleness window for the audit tests.
+///
+/// These assert the mandatory-AUDIT path, not TTL expiry, so they take a window
+/// no CI load can age them out of. With the production 5 s constant they were
+/// silently depending on under five seconds of wall clock elapsing between
+/// building the service and issuing the request -- and under
+/// `cargo test --workspace` they lost that race, read the entry stale, and got
+/// LockedOut instead of the Nominal they assert.
+///
+/// The TTL boundary itself is pinned separately and from both sides by
+/// `posture_ttl_boundary_decides_fresh_versus_lockedout`, so widening it here
+/// removes a timing dependency without leaving the property untested.
+const AUDIT_TEST_POSTURE_TTL_MS: u64 = 3_600_000;
+
 fn svc() -> Arc<ServiceState> {
+    Arc::new(aged_service(0).with_posture_cache_ttl_ms(AUDIT_TEST_POSTURE_TTL_MS))
+}
+
+fn aged_service(age_ms: u64) -> ServiceState {
     let store = VerifierStore::new(":memory:").expect("in-memory store");
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
     // Fresh Nominal posture so the gate admits the command (we test the
     // AUDIT mechanism, not the posture gate).
-    let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
-        CachedFleetPosture::new(FleetPosture::Nominal),
-    )));
-    Arc::new(ServiceState {
+    let mut entry = CachedFleetPosture::new(FleetPosture::Nominal);
+    entry.generated_at_ms = entry.generated_at_ms.saturating_sub(age_ms);
+    let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(entry)));
+    ServiceState {
         app,
         posture_cache,
+        posture_cache_ttl_ms: kirra_verifier::posture_cache::POSTURE_CACHE_TTL_MS,
         started_at_ms: now_ms(),
         audit_verifying_key: None,
         fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
@@ -43,7 +72,7 @@ fn svc() -> Arc<ServiceState> {
         perception_cap: kirra_core::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
         last_actuator_verdict: kirra_verifier::posture_cache::empty_last_verdict_cell(),
-    })
+    }
 }
 
 /// CROB control message (function 0x05 Direct_Operate + Group 12) to `dest`.
@@ -131,6 +160,45 @@ async fn test_dnp3_broadcast_always_audited() {
 // old `INDUSTRIAL_REPLAY_STORE_POISONED` fail-closed reason, which is gone with
 // the bare mutex). These tests pin the new recovery behavior: a broadcast/
 // unicast control still evaluates after a transient poison.
+/// **The staleness boundary, pinned from both sides.**
+///
+/// One cache entry, one `generated_at_ms`, one age. The ONLY difference between
+/// these two assertions is which side of the age the gate's TTL falls on — so
+/// this pins the safety property itself rather than a timing coincidence, and
+/// it does so with no sleep and no wall clock.
+///
+/// The gate must fail CLOSED when the entry is older than the window: a posture
+/// that can no longer be vouched for is not "probably still Nominal", it is
+/// LockedOut. That is the behaviour the DNP3 poison tests were accidentally
+/// depending on the absence of.
+#[tokio::test]
+async fn posture_ttl_boundary_decides_fresh_versus_lockedout() {
+    const AGE_MS: u64 = 10_000;
+
+    // TTL comfortably ABOVE the entry's age -> fresh -> the command evaluates.
+    let fresh = svc_with_posture_age(AGE_MS, AGE_MS * 2);
+    let (status, v) = post(fresh, control_msg(DNP3_BROADCAST_ADDRESS)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        v["allowed"], true,
+        "an entry younger than the TTL is fresh and the gate admits"
+    );
+    assert_eq!(v["posture_at_evaluation"], "Nominal");
+
+    // TTL BELOW the same entry's age -> stale -> fail closed.
+    let stale = svc_with_posture_age(AGE_MS, AGE_MS / 2);
+    let (status, v) = post(stale, control_msg(DNP3_BROADCAST_ADDRESS)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        v["allowed"], false,
+        "an entry older than the TTL is stale and the gate must fail CLOSED"
+    );
+    assert_eq!(
+        v["posture_at_evaluation"], "LockedOut",
+        "stale posture resolves to LockedOut, not to a remembered Nominal"
+    );
+}
+
 #[tokio::test]
 async fn test_store_recovers_after_poison_broadcast_still_evaluates() {
     let svc = svc();

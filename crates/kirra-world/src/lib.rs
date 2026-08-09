@@ -147,6 +147,8 @@ pub mod reference;
 pub mod relationship;
 pub mod resolution;
 pub mod retention;
+pub mod same_as_adjudication;
+pub mod same_as_candidate;
 pub mod trust;
 
 // ---------------------------------------------------------------------------
